@@ -8,6 +8,15 @@ use std::{
 
 const LOCK: &str = "orr.packages.lock.json";
 
+fn fixture_dir() -> tempfile::TempDir {
+    // Resolve only the trusted system-temp root before creating fixture content.
+    // macOS /var may be a symlink; production must still reject input aliases.
+    let root = std::env::temp_dir();
+    #[cfg(unix)]
+    let root = fs::canonicalize(root).unwrap();
+    tempfile::tempdir_in(root).unwrap()
+}
+
 fn source(root: &Path, name: &str, dependencies: &[(&str, &str)]) -> PathBuf {
     let path = root.join(name);
     fs::create_dir(&path).unwrap();
@@ -52,9 +61,22 @@ fn files(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
 
 #[test]
 fn checked_remove_preserves_sources_cached_objects_and_supports_restore() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = fixture_dir();
     let art = source(dir.path(), "art", &[]);
     let p = project(dir.path());
+    #[cfg(unix)]
+    {
+        let before = files(p.root());
+        let alias = dir.path().join("project-alias");
+        std::os::unix::fs::symlink(p.root(), &alias).unwrap();
+        let error = Project::open(&alias, Runtime::content_only())
+            .err()
+            .expect("project symlink must remain rejected");
+        assert!(error.to_string().contains("symlink rejected"));
+        assert_eq!(files(p.root()), before);
+        assert_eq!(fs::read_link(&alias).unwrap(), p.root());
+        fs::remove_file(&alias).unwrap();
+    }
     let old = p.install(&[art]).unwrap();
     let before = files(dir.path());
     let preview = p.preview_remove("art").unwrap();
@@ -77,7 +99,7 @@ fn checked_remove_preserves_sources_cached_objects_and_supports_restore() {
 
 #[test]
 fn checked_remove_preserves_shared_dependency_and_other_direct_root() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = fixture_dir();
     let shared = source(dir.path(), "shared", &[]);
     let a = source(dir.path(), "a", &[("shared", "1.0.0")]);
     let b = source(dir.path(), "b", &[("shared", "1.0.0")]);
@@ -98,7 +120,7 @@ fn checked_remove_preserves_shared_dependency_and_other_direct_root() {
 
 #[test]
 fn checked_remove_direct_selection_can_remain_transitively_active() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = fixture_dir();
     let shared = source(dir.path(), "shared", &[]);
     let a = source(dir.path(), "a", &[("shared", "1.0.0")]);
     let p = project(dir.path());
@@ -119,7 +141,7 @@ fn checked_remove_direct_selection_can_remain_transitively_active() {
 
 #[test]
 fn checked_remove_rejects_stale_and_unapproved_locks_before_callback() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = fixture_dir();
     let a = source(dir.path(), "a", &[]);
     let b = source(dir.path(), "b", &[]);
     let p = project(dir.path());
@@ -142,7 +164,7 @@ fn checked_remove_rejects_stale_and_unapproved_locks_before_callback() {
 
 #[test]
 fn checked_remove_callback_failure_is_atomic_and_writer_guard_is_held() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = fixture_dir();
     let a = source(dir.path(), "a", &[]);
     let p = project(dir.path());
     p.install(&[a]).unwrap();
@@ -174,7 +196,7 @@ fn checked_remove_callback_failure_is_atomic_and_writer_guard_is_held() {
 
 #[test]
 fn checked_remove_preserves_existing_writer_and_active_authority() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = fixture_dir();
     let a = source(dir.path(), "a", &[]);
     let p = project(dir.path());
     p.install(&[a]).unwrap();
@@ -195,7 +217,7 @@ fn checked_remove_preserves_existing_writer_and_active_authority() {
 
 #[test]
 fn checked_remove_rejects_corrupt_content_even_when_deactivating_it() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = fixture_dir();
     let a = source(dir.path(), "a", &[]);
     let p = project(dir.path());
     p.install(&[a]).unwrap();
@@ -219,7 +241,7 @@ fn checked_remove_rejects_corrupt_content_even_when_deactivating_it() {
 
 #[test]
 fn checked_remove_deactivates_orphaned_dependencies_without_deleting_objects() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = fixture_dir();
     let shared = source(dir.path(), "shared", &[]);
     let a = source(dir.path(), "a", &[("shared", "1.0.0")]);
     let p = project(dir.path());
