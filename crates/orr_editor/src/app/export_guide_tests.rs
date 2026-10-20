@@ -133,7 +133,7 @@ fn actual_app_dirty_edit_does_not_open_export_guide_or_save() {
 }
 #[cfg(feature = "collect-dodge")]
 #[test]
-fn collect_route_is_cli_only_not_an_editor_feature_claim() {
+fn cli_profile_route_is_not_an_editor_feature_claim() {
     let route = export_guide::route(EditorGame::CollectDodge);
     assert!(route.settings.is_none());
     assert!(route
@@ -258,7 +258,10 @@ fn actual_app_play_does_not_allow_opening_export_settings_or_switch_tabs() {
     h.get_by_label("Export guide").click();
     h.run_steps(3);
     assert_eq!(h.state().editor.mode(), Mode::Play);
-    assert!(h.get_by_label("Open export settings").is_disabled());
+    assert!(h
+        .get_by_label("Open export settings")
+        .accesskit_node()
+        .is_disabled());
     assert!(!h.state().mesh_export.open);
     assert_eq!(h.state().ui.bottom_tab, BottomTab::ExportGuide);
     assert_no_window_actions(&h);
