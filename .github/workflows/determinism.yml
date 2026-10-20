@@ -1046,6 +1046,37 @@ jobs:
         run: cargo clippy --locked -p orr_sample --features project,input-actions,game-ui --all-targets -- -D warnings
       - name: Strict saved-project editor Clippy
         run: cargo clippy --locked -p orr_editor --features sprites --all-targets -- -D warnings
+      - name: Required popup-free unsaved close CPU acceptance
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        shell: bash
+        timeout-minutes: 45
+        env:
+          ORR_UNSAVED_CLOSE_EVIDENCE: ${{ runner.temp }}/unsaved-close-cpu-${{ github.run_id }}-${{ github.run_attempt }}
+          CARGO_BUILD_JOBS: '2'
+        run: python -B tools/unsaved_close_gate.py cpu
+      - name: Retain unsaved close CPU evidence
+        if: always() && runner.os == 'Linux' && runner.arch == 'X64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsaved-close-cpu-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/unsaved-close-cpu-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
+      - name: Required unsaved close production cfg and strict Clippy
+        shell: bash
+        timeout-minutes: 45
+        env:
+          ORR_UNSAVED_CLOSE_EVIDENCE: ${{ runner.temp }}/unsaved-close-cfg-${{ github.run_id }}-${{ github.run_attempt }}
+          CARGO_BUILD_JOBS: '2'
+        run: python -B tools/unsaved_close_gate.py cfg
+      - name: Retain unsaved close production cfg evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsaved-close-cfg-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/unsaved-close-cfg-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
       # Real Kira PCM tests stay device-free. Native CPAL is opt-in and gets
       # compile coverage; opening a physical device is not a CI success claim.
       - run: cargo test -p orr_audio --release

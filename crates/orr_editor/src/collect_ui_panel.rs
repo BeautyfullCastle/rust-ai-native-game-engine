@@ -94,6 +94,11 @@ impl Panel {
         &self.document
     }
 
+    /// Accepted UI edits are independent of the scene's save state.
+    pub fn dirty(&self) -> bool {
+        self.document != self.saved
+    }
+
     pub fn apply_document(&mut self, candidate: Document) -> Result<(), String> {
         // Validate the entire candidate before changing the live document/history.
         CollectUi::validate_font(&self.font, &candidate)?;

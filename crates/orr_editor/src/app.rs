@@ -19,6 +19,13 @@ use crate::inspector::{show_component, InspEvent};
 use crate::model::{EntityRow, Target};
 use crate::viewport::{self, GpuViewport};
 
+#[path = "app/close_review.rs"]
+mod close_review;
+
+#[cfg(all(test, feature = "sprites"))]
+#[path = "app/unsaved_close_tests.rs"]
+mod unsaved_close_tests;
+
 #[cfg(feature = "terrain")]
 #[path = "app/terrain_ramp.rs"]
 mod terrain_ramp;
@@ -114,6 +121,8 @@ pub enum BottomTab {
     History,
     /// What AI agents do through ERP: a read-only activity feed.
     Agent,
+    /// Explicitly opened, read-only inventory of retained authoring work.
+    UnsavedWork,
 }
 
 /// A path prompt (no native file dialog in the MVP).
@@ -157,6 +166,8 @@ struct BodyDrag {
 /// Screen state of the window that is not part of the document.
 #[derive(Default)]
 pub struct UiState {
+    /// Advisory close review; dismissal never grants permission to exit later.
+    close_review: close_review::State,
     /// Bottom panel tab.
     pub bottom_tab: BottomTab,
     /// Hierarchy filter text.
@@ -899,14 +910,15 @@ impl EditorApp {
 
 impl eframe::App for EditorApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        self.with_close_review(ui, Self::editor_ui);
+    }
+}
+
+impl EditorApp {
+    fn editor_ui(&mut self, ui: &mut Ui) {
         let started = Instant::now();
         let ctx = ui.ctx().clone();
         self.frames += 1;
-        #[cfg(feature = "tilemap")]
-        if self.tilemap.as_ref().is_some_and(|panel| panel.dirty()) && ctx.input(|input| input.viewport().close_requested()) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.editor.error("Save tilemap or Undo its edits before closing; Scene Save does not save tiles");
-        }
 
         // Disarm before ingesting a late claim/update; focus returning is not intent.
         let keyboard_viewport = if self.editor.game().is_room() { "room_keyboard_viewport" } else { "arena_keyboard_viewport" };
@@ -1646,6 +1658,7 @@ impl EditorApp {
     fn status_bar(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+            self.close_review_status(ui);
             let status = match self.editor.status() {
                 Some(Message { text, error: true }) => RichText::new(text).color(ui.visuals().error_fg_color),
                 Some(Message { text, error: false }) => RichText::new(text),
@@ -2567,6 +2580,7 @@ impl EditorApp {
             ui.selectable_value(&mut self.ui.bottom_tab, BottomTab::Timeline, "Timeline");
             ui.selectable_value(&mut self.ui.bottom_tab, BottomTab::History, "History");
             ui.selectable_value(&mut self.ui.bottom_tab, BottomTab::Agent, "Agent");
+            ui.selectable_value(&mut self.ui.bottom_tab, BottomTab::UnsavedWork, "Unsaved work details");
             let unseen = self.editor.feed().unseen();
             if unseen > 0 && self.ui.bottom_tab != BottomTab::Agent {
                 // Badge: what agents did since the tab was last shown (reads excluded).
@@ -2576,6 +2590,7 @@ impl EditorApp {
         });
         ui.separator();
         match self.ui.bottom_tab {
+            BottomTab::UnsavedWork => self.show_close_review(ui),
             BottomTab::Timeline => self.timeline(ui),
             BottomTab::History => self.history(ui),
             BottomTab::Agent => {
