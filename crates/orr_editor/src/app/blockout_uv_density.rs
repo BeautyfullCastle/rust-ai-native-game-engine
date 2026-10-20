@@ -10,7 +10,46 @@ use crate::{
     model_bindings::Document,
     model_panel::ModelPanel,
 };
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
+
+// Called only after Bindings::project_root has checked the original path.
+// Recheck real directories before normalizing spelling for the recipe comparison;
+// this is static validation, not a race-proof filesystem identity guarantee.
+fn canonical_admitted_root(root: &Path) -> Result<PathBuf, String> {
+    let absolute = if root.is_absolute() {
+        root.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| error.to_string())?
+            .join(root)
+    };
+    if !absolute.is_absolute() {
+        return Err("Admitted project root has an unresolved drive-relative prefix".into());
+    }
+    let mut current = PathBuf::new();
+    let mut components = absolute.components().peekable();
+    while let Some(component) = components.next() {
+        current.push(component);
+        if matches!(component, Component::Prefix(_))
+            && components.peek() == Some(&Component::RootDir)
+        {
+            continue;
+        }
+        let metadata = std::fs::symlink_metadata(&current).map_err(|error| error.to_string())?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err("Admitted project root must contain only real directories".into());
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+            if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Err("Admitted project root must not contain reparse points".into());
+            }
+        }
+    }
+    absolute.canonicalize().map_err(|error| error.to_string())
+}
 
 #[derive(Clone, Debug, PartialEq)]
 struct Context {
@@ -52,7 +91,9 @@ impl Context {
             .document
             .as_ref()
             .ok_or("New or open a box recipe first")?;
-        if root != doc.root() {
+        // Preserve the lexical root in Context to pin alias changes between
+        // Calculate and Stage; normalize only this already-validated comparison.
+        if canonical_admitted_root(&root)? != doc.root() {
             return Err("Recipe and model bindings must share the admitted project root".into());
         }
         Ok(Self {
@@ -223,8 +264,41 @@ mod tests {
     use std::fs;
 
     fn fixture() -> (tempfile::TempDir, Editor, ModelPanel) {
+        fixture_with_root(false)
+    }
+
+    fn fixture_with_root(canonical: bool) -> (tempfile::TempDir, Editor, ModelPanel) {
         let temp = tempfile::tempdir().unwrap();
-        let scene = temp.path().join("yard.scene.yaml");
+        let root = if canonical {
+            temp.path().canonicalize().unwrap()
+        } else {
+            temp.path().to_path_buf()
+        };
+        #[cfg(windows)]
+        let root = if canonical {
+            root
+        } else {
+            // Intentionally exercise ordinary drive spelling even if TEMP itself
+            // uses a verbatim prefix. Do not strip UNC or device prefixes.
+            let canonical_root = root.canonicalize().unwrap();
+            let mut components = canonical_root.components();
+            let drive = match components.next() {
+                Some(Component::Prefix(prefix)) => match prefix.kind() {
+                    std::path::Prefix::Disk(drive) | std::path::Prefix::VerbatimDisk(drive) => {
+                        drive
+                    }
+                    other => panic!("local drive fixture required, got {other:?}"),
+                },
+                other => panic!("local drive fixture required, got {other:?}"),
+            };
+            assert_eq!(components.next(), Some(Component::RootDir));
+            let mut ordinary = PathBuf::from(format!("{}:\\", char::from(drive)));
+            for component in components {
+                ordinary.push(component.as_os_str());
+            }
+            ordinary
+        };
+        let scene = root.join("yard.scene.yaml");
         fs::write(
             &scene,
             include_str!("../../../../scenes/yard3d_authoring.scene.yaml"),
@@ -241,73 +315,103 @@ mod tests {
         let mut models = ModelPanel::default();
         models.bindings = Some(
             Bindings::create(
-                temp.path().join("yard.models.json"),
+                root.join("yard.models.json"),
                 "yard.scene.yaml".into(),
                 ".".into(),
             )
             .unwrap(),
         );
-        models.blockout.document =
-            Some(Blockout::create(temp.path(), "box.blockout.json").unwrap());
+        models.blockout.document = Some(Blockout::create(&root, "box.blockout.json").unwrap());
+        let context = Context::admitted(&editor, &models).unwrap();
+        assert_eq!(
+            context.root,
+            models.bindings.as_ref().unwrap().project_root().unwrap()
+        );
+        assert_eq!(
+            canonical_admitted_root(&context.root).unwrap(),
+            models.blockout.document.as_ref().unwrap().root()
+        );
+        #[cfg(windows)]
+        if !canonical {
+            assert_ne!(
+                context.root,
+                models.blockout.document.as_ref().unwrap().root()
+            );
+        }
         (temp, editor, models)
     }
 
     #[test]
     fn staging_changes_only_selected_draft_scale_and_no_history_or_files() {
-        let (temp, editor, mut models) = fixture();
-        models
-            .blockout
-            .document
-            .as_mut()
-            .unwrap()
-            .move_face(Face::PosY, 1.0)
-            .unwrap();
-        models
-            .blockout
-            .document
-            .as_mut()
-            .unwrap()
-            .move_face(Face::PosZ, 2.0)
-            .unwrap();
-        models.blockout.uv = FaceUv {
-            offset: [0.125, -0.25],
-            scale: [0.5, 0.75],
-            quarter_turn: 3,
-        };
-        let context = Context::admitted(&editor, &models).unwrap();
-        let history = models.blockout.document.as_ref().unwrap().history_len();
-        let mut panel = Panel::default();
-        panel.calculate(&editor, &models);
-        assert!(panel.error.is_none(), "{:?}", panel.error);
-        assert_eq!(models.blockout.uv, context.draft);
-        panel.stage(&editor, &mut models);
-        assert!(panel.error.is_none(), "{:?}", panel.error);
-        assert_eq!(
-            models.blockout.uv,
-            FaceUv {
-                scale: [2.0, 3.0],
-                ..context.draft
-            }
-        );
-        assert_eq!(
-            models.blockout.document.as_ref().unwrap().recipe(),
-            &context.recipe
-        );
-        assert_eq!(
-            models.blockout.document.as_ref().unwrap().history_len(),
-            history
-        );
-        assert_eq!(
-            models.bindings.as_ref().unwrap().document(),
-            &context.bindings
-        );
-        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
+        for canonical in [false, true] {
+            let (temp, editor, mut models) = fixture_with_root(canonical);
+            models
+                .blockout
+                .document
+                .as_mut()
+                .unwrap()
+                .move_face(Face::PosY, 1.0)
+                .unwrap();
+            models
+                .blockout
+                .document
+                .as_mut()
+                .unwrap()
+                .move_face(Face::PosZ, 2.0)
+                .unwrap();
+            models.blockout.uv = FaceUv {
+                offset: [0.125, -0.25],
+                scale: [0.5, 0.75],
+                quarter_turn: 3,
+            };
+            let context = Context::admitted(&editor, &models).unwrap();
+            let history = models.blockout.document.as_ref().unwrap().history_len();
+            let mut panel = Panel::default();
+            panel.calculate(&editor, &models);
+            assert!(panel.error.is_none(), "{:?}", panel.error);
+            assert_eq!(models.blockout.uv, context.draft);
+            panel.stage(&editor, &mut models);
+            assert!(panel.error.is_none(), "{:?}", panel.error);
+            assert_eq!(
+                models.blockout.uv,
+                FaceUv {
+                    scale: [2.0, 3.0],
+                    ..context.draft
+                }
+            );
+            assert_eq!(
+                models.blockout.document.as_ref().unwrap().recipe(),
+                &context.recipe
+            );
+            assert_eq!(
+                models.blockout.document.as_ref().unwrap().history_len(),
+                history
+            );
+            assert_eq!(
+                models.bindings.as_ref().unwrap().document(),
+                &context.bindings
+            );
+            assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
+        }
     }
 
     #[test]
     fn all_context_fields_and_every_draft_uv_component_are_pinned() {
         let (_temp, editor, models) = fixture();
         let original = Context::admitted(&editor, &models).unwrap();
+        assert_eq!(
+            canonical_admitted_root(Path::new(".")).unwrap(),
+            std::env::current_dir().unwrap().canonicalize().unwrap()
+        );
+        assert!(canonical_admitted_root(
+            &models
+                .bindings
+                .as_ref()
+                .unwrap()
+                .base()
+                .join("yard.scene.yaml")
+        )
+        .is_err());
         let calculation = Calculation::calculate(original.clone(), "1").unwrap();
         let mut variants = Vec::new();
         macro_rules! changed {
@@ -356,6 +460,8 @@ mod tests {
         let (_temp, editor, mut models) = fixture();
         let mut panel = Panel::default();
         panel.calculate(&editor, &models);
+        assert!(panel.error.is_none(), "{:?}", panel.error);
+        assert!(panel.calculation.is_some());
         models.blockout.uv.offset[1] = 0.25;
         let before = Context::admitted(&editor, &models).unwrap();
         panel.stage(&editor, &mut models);
@@ -373,10 +479,11 @@ mod tests {
         let (_temp, editor, mut models) = fixture();
         let before = Context::admitted(&editor, &models).unwrap();
         for text in ["", "x", "NaN", "inf", "0", "-1", "0.00001", "1e30"] {
-            let mut panel = Panel {
-                units: text.into(),
-                ..Panel::default()
-            };
+            let mut panel = Panel::default();
+            panel.calculate(&editor, &models);
+            assert!(panel.error.is_none(), "{:?}", panel.error);
+            assert!(panel.calculation.is_some());
+            panel.units = text.into();
             panel.calculate(&editor, &models);
             assert!(panel.error.is_some(), "accepted {text}");
             assert!(panel.calculation.is_none());
@@ -387,16 +494,22 @@ mod tests {
 
     #[test]
     fn stage_rechecks_admission_selection_root_and_open_document() {
-        let (_temp, mut editor, mut models) = fixture();
+        fn ready(panel: &mut Panel, editor: &Editor, models: &ModelPanel) {
+            Context::admitted(editor, models).unwrap();
+            panel.calculate(editor, models);
+            assert!(panel.error.is_none(), "{:?}", panel.error);
+            assert!(panel.calculation.is_some());
+        }
+        let (temp, mut editor, mut models) = fixture();
         let mut panel = Panel::default();
-        panel.calculate(&editor, &models);
+        ready(&mut panel, &editor, &models);
         let draft = models.blockout.uv;
         editor.select(None);
         panel.stage(&editor, &mut models);
         assert!(panel.error.is_some());
         assert_eq!(models.blockout.uv, draft);
         editor.select(Some(Target::Guid(Guid::parse("e_00000003").unwrap())));
-        panel.calculate(&editor, &models);
+        ready(&mut panel, &editor, &models);
         assert!(editor.start_play());
         for _ in 0..8 {
             editor.sync();
@@ -408,11 +521,65 @@ mod tests {
         for _ in 0..8 {
             editor.sync();
         }
+
+        ready(&mut panel, &editor, &models);
+        let original = models.blockout.document.take().unwrap();
         let other = tempfile::tempdir().unwrap();
         models.blockout.document =
             Some(Blockout::create(other.path(), "box.blockout.json").unwrap());
-        assert!(Context::admitted(&editor, &models).is_err());
-        models.blockout.document = None;
-        assert!(Context::admitted(&editor, &models).is_err());
+        panel.stage(&editor, &mut models);
+        assert!(panel
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("must share the admitted project root"));
+        assert_eq!(models.blockout.uv, draft);
+        models.blockout.document = Some(original);
+
+        ready(&mut panel, &editor, &models);
+        let original = models.blockout.document.take().unwrap();
+        panel.stage(&editor, &mut models);
+        assert!(panel
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("New or open a box recipe"));
+        assert_eq!(models.blockout.uv, draft);
+        models.blockout.document = Some(original);
+
+        #[cfg(any(unix, windows))]
+        {
+            ready(&mut panel, &editor, &models);
+            let aliases = tempfile::tempdir().unwrap();
+            let alias = aliases.path().join("root-alias");
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(temp.path(), &alias).unwrap();
+            #[cfg(windows)]
+            {
+                let output = std::process::Command::new("cmd")
+                    .args(["/C", "mklink", "/J"])
+                    .arg(&alias)
+                    .arg(temp.path())
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "could not create test junction: {:?}",
+                    output
+                );
+            }
+            assert!(canonical_admitted_root(&alias).is_err());
+            let original_path = models.bindings.as_ref().unwrap().path.clone();
+            models.bindings.as_mut().unwrap().path = alias.join("yard.models.json");
+            panel.stage(&editor, &mut models);
+            assert!(panel.error.is_some());
+            assert_eq!(models.blockout.uv, draft);
+            models.bindings.as_mut().unwrap().path = original_path;
+            #[cfg(windows)]
+            fs::remove_dir(&alias).unwrap();
+            #[cfg(unix)]
+            fs::remove_file(&alias).unwrap();
+            ready(&mut panel, &editor, &models);
+        }
     }
 }
