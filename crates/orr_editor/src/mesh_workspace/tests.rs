@@ -1,4 +1,6 @@
-use super::{checked_scene_path, prepare, Intent, SIDECAR_SUFFIX};
+#[cfg(windows)]
+use super::checked_scene_path;
+use super::{prepare, Intent, SIDECAR_SUFFIX};
 use crate::game::EditorGame;
 use orr_edit::{Op, Origin};
 use orr_fp::{fp, FP};

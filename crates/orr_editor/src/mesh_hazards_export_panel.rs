@@ -82,6 +82,9 @@ impl Panel {
                 let output_label = ui.label("New output directory (must not exist)");
                 ui.text_edit_singleline(&mut self.output).labelled_by(output_label.id);
                 ui.checkbox(&mut self.trusted_runtime, "I trust this self-built, QA-tested hazard player");
+                if self.runtime.trim().is_empty() { ui.label("Required: choose a trusted hazard player executable."); }
+                if self.output.trim().is_empty() { ui.label("Required: enter a new output directory."); }
+                if !self.trusted_runtime { ui.label("Required: explicitly confirm runtime trust; format checks do not establish trust."); }
                 let enabled = eligible(editor, blocked, self.trusted_runtime) && !self.runtime.trim().is_empty() && !self.output.trim().is_empty();
                 if ui.add_enabled(enabled, egui::Button::new("Export hazard game")).clicked() { self.export(editor, blocked); }
             });

@@ -1112,6 +1112,21 @@ jobs:
           path: ${{ runner.temp }}/editor-work-status-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: error
           retention-days: 7
+      - name: Required export guide CPU route and App acceptance
+        shell: bash
+        timeout-minutes: 45
+        env:
+          ORR_EXPORT_GUIDE_EVIDENCE: ${{ runner.temp }}/editor-export-guide-${{ github.run_id }}-${{ github.run_attempt }}
+          CARGO_BUILD_JOBS: '2'
+        run: python -B tools/editor_export_guide_gate.py
+      - name: Retain export guide CPU evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: editor-export-guide-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/editor-export-guide-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
       # Real Kira PCM tests stay device-free. Native CPAL is opt-in and gets
       # compile coverage; opening a physical device is not a CI success claim.
       - run: cargo test -p orr_audio --release
