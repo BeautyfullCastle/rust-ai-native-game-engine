@@ -11,7 +11,7 @@ import static_model_assemble_gate as gate
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 def workflow_contract(text):
-    assert text.startswith("name: Static model assemble\non:\n  push:\n    branches: [main, su/engine-correctness-hardening]\n    tags: ['**']\n  pull_request:\npermissions:\n")
+    assert text.startswith("name: Static model assemble\non:\n  pull_request:\n    branches: [main, su/engine-correctness-hardening]\n    types: [ready_for_review]\n  workflow_dispatch:\npermissions:\n")
     assert 'permissions:\n  contents: read\n' in text
     assert text.count('      matrix:\n') == 1
     rows = re.findall(r'          - \{mode: (\w+), os: ([\w.-]+)\}', text)
@@ -40,15 +40,15 @@ class Fixtures(unittest.TestCase):
 
     def test_workflow_negative_mutations(self):
         original=(ROOT/'.github/workflows/static-model-assemble.yml').read_text()
-        # Trigger changes must preserve every PR and tag while avoiding feature-push duplicates.
-        trigger_filters = "    branches: [main, su/engine-correctness-hardening]\n    tags: ['**']\n"
+        # Only explicit integration readiness or dispatch may start expensive CI.
+        trigger_filters = "    branches: [main, su/engine-correctness-hardening]\n    types: [ready_for_review]\n"
         for old, new in [
             (trigger_filters, ''),
             ('branches: [main, su/engine-correctness-hardening]', "branches: ['**']"),
             ('branches: [main, su/engine-correctness-hardening]', 'branches: [main]'),
             ('branches: [main, su/engine-correctness-hardening]', 'branches: [su/engine-correctness-hardening]'),
-            ("    tags: ['**']\n", ''),
-            ("tags: ['**']", "tags: ['v*']"),
+            ("    types: [ready_for_review]\n", ''),
+            ('types: [ready_for_review]', 'types: [opened, synchronize]'),
             ('  pull_request:\n', ''),
             ('  pull_request:\n', '  pull_request:\n    branches: [main]\n'),
             ('  pull_request:\n', '  pull_request:\n    paths: [src/**]\n'),
