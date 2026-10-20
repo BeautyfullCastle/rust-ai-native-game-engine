@@ -7,20 +7,30 @@ with `orr_editor --project PATH`. Existing-project Attach and external atlas
 imports are not supported by this version.
 
 The starter supplies one installed atlas and an empty 16 by 12 grid. In Tile
-background, enable Tile tool, select a static region thumbnail, then click or
-drag over cells in the matching Edit viewport. Erase clears cells. Repeating the
-same cell value does not create undo entries. Undo tile and Redo tile have a
-separate, bounded 128-edit history. This is not the scene document's Undo.
+background, enable Tile tool and select a static region thumbnail. Paint (the
+default mode) changes cells by clicking or dragging in the matching Edit
+viewport. Fill changes the four-connected area matching the clicked cell's
+exact value with one click. Diagonals are not connected. Choose Erase to clear
+the painted cell or filled area; empty cells and region ID zero remain distinct.
+Fill runs only on the initial unobstructed viewport press, never repeatedly
+while holding or dragging. Changing Paint/Fill mode ends an active stroke.
+
+A complete fill is one Undo tile / Redo tile entry in the separate, bounded
+128-edit history, not the scene document's Undo. Filling with the same value is
+a no-op and preserves redo and the saved marker. Traversal is iterative and
+bounded by the admitted grid's 4096 cells. The complete candidate is validated
+against the installed atlas and the combined tile/actor budget before committing;
+a failure leaves the document, history and saved marker unchanged.
 
 Save tilemap writes the complete sidecar. Close and reopen the full project to
 verify the saved presentation, then Play. Unsaved tiles must be saved or undone
 before Play or closing. Scene Save does not save tile data; scene Open and Save
 As do not retarget the installed tilemap. The app refuses those operations while
 the map is installed. Proposal preview, replay, disconnected hosts and mismatched
-scene identity cannot paint. While enabled, the tile tool reserves viewport
+scene identity cannot paint or fill. While enabled, the tile tool reserves viewport
 pointer input, including when an edit is refused, rather than moving actors.
-A paint gesture must start inside the unobstructed viewport. Pressing elsewhere
-and dragging in does not paint. Palette buttons expose Static region N labels.
+A paint or fill gesture must start inside the unobstructed viewport. Pressing elsewhere
+and dragging in does not paint. Palette buttons expose Static region N labels; mode buttons expose Paint and Fill labels.
 
 This visual layer replaces the runtime Arena floor presentation only. Empty and
 transparent texels show the normal clear background. Tiles do not create actors,
@@ -45,7 +55,9 @@ Failures preserve the existing file, document, history and saved marker. This is
 one sidecar transaction, not a scene/manifest transaction, a hostile-filesystem
 sandbox, or a guarantee against power-loss directory-entry loss.
 
-## Verification scope (2026-10-20)
+## Original paint verification scope (2026-10-20)
+
+The following records the pre-fill baseline, not acceptance of the Fill addition.
 
 Local Linux validation passed 29 CPU cases (25 directly related and four existing
 creator regressions), three software Vulkan cases on SwiftShader Device
@@ -72,3 +84,34 @@ with 17 pure-Python gate tests. Hosted validation requires llvmpipe; local
 SwiftShader is not that result. Native OS input, Windows, hosted required CI,
 shared development integration and main reflection are separate, unverified
 stages. See [issue #258](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/258).
+
+## Fill local verification scope (2026-10-20)
+
+Local Linux validation passed 34 CPU cases: the 25 existing gate cases, five new
+Fill cases (three pure-candidate and two panel/history cases), and four retained
+creator regressions. Four software Vulkan cases passed on SwiftShader Device
+(Subzero): the three existing cases and the actual EditorApp Fill sequence.
+That sequence covers outside-origin refusal, one-shot held/drag behavior,
+grouped Undo/Redo, Save, fresh reopen and Play with literal saved-cell checks.
+
+The Fill evidence contains ten captures and 43 artifacts. The saved-runtime and
+wrong-region runtime captures each pass an independent original-texel oracle
+checking 10,752 pixels; the wrong-region control has 37 visibly differing pixels.
+Actual Frame-byte parity is checked for authoring and the App/saved-runtime Play
+consumers, including the wrong-region control. Whole-app screenshots are visual
+evidence, not a substitute for those pixel and Frame assertions.
+
+Strict Clippy passed for the selected production editor library with tilemap
+and project-create enabled. This is not editor `cfg(test)` or full-workspace
+Clippy acceptance. The selected editor library also compiled with
+`--no-default-features`; this Fill validation did not rerun feature-disabled CLI
+or runtime refusal tests. Two original App-test compile errors and a pre-launch
+collector-name collision are retained in the validation history, not erased by
+the successful retry.
+
+The existing tilemap gate now specifies CPU30/GPU4 and passes 25 pure-Python
+validator tests, without changing a workflow or creating a new job. Local
+SwiftShader results are not hosted required-CI results: that gate requires
+llvmpipe. Native OS input, Windows and exported-player behavior remain outside
+this acceptance; export remains unsupported. See
+[issue #261](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/261).
