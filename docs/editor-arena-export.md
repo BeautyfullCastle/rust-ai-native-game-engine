@@ -93,7 +93,13 @@ method calls, then clicks the actual export widgets. It preserves source bytes, 
 with sources hidden and its bundle read-only. A separate isolated consumer opens
 that bundle through the production admission/compositor/UI modules, clicks real
 egui Play/Menu/Continue/Restart buttons, and captures title, HUD and menu pixels.
-Its absent-overlay control must fail the same visible-HUD assertion. The distinct
+A cloned-frame transparent-text control retains identical production HUD/widget geometry and
+must fail the same label-region text-difference assertion. Panel backgrounds and
+borders alone cannot pass; PNG hashes, region bounds and both layouts are retained
+for independent recomputation. This proves visible text presence, not OCR or
+coverage of every Korean glyph. A separate bundle-font oracle checks five distinct
+Korean glyph masks against retained before/after images; it does not substitute
+for the actual preset text assertion. The absent-overlay capture is also kept. The distinct
 same-length, parser/corpus-valid metadata mutation test checks installation byte
 identity; it is deliberately not presented as a visible font change.
 

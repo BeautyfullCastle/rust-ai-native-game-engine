@@ -16,9 +16,13 @@ use std::{
     process::Command,
     time::{Duration, Instant},
 };
+#[allow(dead_code)]
 #[path = "common/arena_export.rs"]
 mod evidence;
-use evidence::{digest, field, git, inventory, png, recorded};
+use evidence::{digest, field, git, inventory, png};
+#[path = "common/arena_ui_evidence.rs"]
+mod ui_evidence;
+use ui_evidence::{consumer_command, recorded, recorded_status, ConsumerPaths};
 #[test]
 #[ignore = "requires ORR_ARENA_UI_EXPORT_RUNTIME, bubblewrap source hiding and a working capture adapter"]
 fn actual_widget_saved_korean_ui_exports_relocates_and_runs() {
@@ -112,16 +116,24 @@ fn actual_widget_saved_korean_ui_exports_relocates_and_runs() {
     .canonicalize()
     .unwrap();
     assert_ne!(digest(&plain_runtime), runtime_hash);
-    let reject = Command::new(&plain_runtime)
-        .arg("--project")
-        .arg(&project)
-        .args(["--headless", "--ticks", "0"])
-        .output()
-        .unwrap();
-    fs::write(root.join("project-only.stdout.txt"), &reject.stdout).unwrap();
-    fs::write(root.join("project-only.stderr.txt"), &reject.stderr).unwrap();
-    assert!(!reject.status.success());
-    assert!(String::from_utf8_lossy(&reject.stderr).contains("UI"));
+    let reject_stdout = recorded_status(
+        &root,
+        "project-only",
+        Command::new(&plain_runtime)
+            .current_dir(&root)
+            .arg("--project")
+            .arg(&project)
+            .args(["--headless", "--ticks", "0"]),
+        1,
+    );
+    let unsupported_ui = "error: saved project declares UI but this host does not support it";
+    assert!(reject_stdout.is_empty());
+    assert_eq!(
+        fs::read_to_string(root.join("project-only.stderr.txt"))
+            .unwrap()
+            .trim(),
+        unsupported_ui
+    );
     let rejected_output = root.join("project-only-rejected");
     let rejection =
         orr_sample::project_export::export(&orr_sample::project_export::ExportOptions {
@@ -134,13 +146,17 @@ fn actual_widget_saved_korean_ui_exports_relocates_and_runs() {
         })
         .unwrap_err();
     fs::write(root.join("project-only-export-rejection.txt"), &rejection).unwrap();
+    assert_eq!(
+        rejection.trim(),
+        format!("trusted runtime smoke failed (exit status: 1): {unsupported_ui}")
+    );
     assert!(!rejected_output.exists());
     assert_eq!(
         inventory(&project),
         before_rejection,
         "failed runtime/export must preserve source"
     );
-    fs::write(root.join("project-only-runtime.json"), serde_json::to_vec_pretty(&serde_json::json!({"path":plain_runtime,"sha256":digest(&plain_runtime),"status":reject.status.code(),"stdout":"project-only.stdout.txt","stderr":"project-only.stderr.txt","export_error":rejection,"published":false})).unwrap()).unwrap();
+    fs::write(root.join("project-only-runtime.json"), serde_json::to_vec_pretty(&serde_json::json!({"path":plain_runtime,"sha256":digest(&plain_runtime),"status":1,"stdout":"project-only.stdout.txt","stderr":"project-only.stderr.txt","export_error":rejection,"published":false})).unwrap()).unwrap();
     let source_scene = fs::read(&scene).unwrap();
     let source_files = inventory(&project);
     fs::write(
@@ -279,7 +295,7 @@ fn actual_widget_saved_korean_ui_exports_relocates_and_runs() {
         "terminal_joined_success":true,"source_hidden":true,"bundle_read_only":true,"source_preserved":true,
         "source_files":source_files,"source_files_before":source_files,"source_files_after":inventory(&project),"bundle_files":inventory(&bundle),
         "captures":[{"path":"initial.png","width":512,"height":512,"sha256":digest(&initial)},{"path":"moved.png","width":512,"height":512,"sha256":digest(&moved)}],
-        "commands":["source-move-fire","isolated-proof","relocated-fire-1","relocated-fire-2","relocated-move","capture-initial","capture-moved"]});
+        "commands":["project-only","source-move-fire","isolated-proof","relocated-fire-1","relocated-fire-2","relocated-move","capture-initial","capture-moved"]});
     // Launch the production-module UI consumer from outside the hidden source.
     let consumer = root.join("ui-consumer");
     fs::copy(&producer, &consumer).unwrap();
@@ -287,19 +303,26 @@ fn actual_widget_saved_korean_ui_exports_relocates_and_runs() {
     let consumed = recorded(
         &root,
         "isolated-ui-controls",
-        isolated()
-            .arg("--")
-            .arg(&consumer)
-            .args([
-                "--ignored",
-                "--exact",
-                "relocated_ui_production_consumer",
-                "--nocapture",
-            ])
-            .env("ORR_UI_CONSUMER_BUNDLE", &bundle)
-            .env("ORR_UI_CONSUMER_EVIDENCE", &root),
+        consumer_command(
+            &mut isolated(),
+            ConsumerPaths {
+                repository: &repo,
+                project: &project,
+                runtime: &runtime,
+                producer: &producer,
+                bundle: &bundle,
+                evidence: &root,
+            },
+            &consumer,
+            "relocated_ui_production_consumer",
+        ),
     );
+    assert!(consumed.contains("consumer-source-hidden=true consumer-runtime-hidden=true consumer-producer-hidden=true consumer-bundle-read-only=true"));
     assert!(consumed.contains("UI controls and visible negative passed"));
+    receipt["commands"]
+        .as_array_mut()
+        .unwrap()
+        .push("isolated-ui-controls".into());
     let app_producer = PathBuf::from(
         std::env::var_os("ORR_ARENA_UI_APP_TEST_PRODUCER")
             .expect("fresh pinned sample libtest producer required"),
@@ -323,19 +346,21 @@ fn actual_widget_saved_korean_ui_exports_relocates_and_runs() {
     let restarted = recorded(
         &root,
         "isolated-app-restart",
-        app_command
-            .arg("--")
-            .arg(&app_consumer)
-            .args([
-                "--ignored",
-                "--exact",
-                "app::project_ui_tests::relocated_bundle_real_widgets_restart_original_scene",
-                "--nocapture",
-            ])
-            .env("ORR_UI_CONSUMER_BUNDLE", &bundle)
-            .env("ORR_UI_CONSUMER_EVIDENCE", &root)
-            .env("ORR_UI_CONSUMER_SOURCE_PROJECT", &project),
+        consumer_command(
+            &mut app_command,
+            ConsumerPaths {
+                repository: &repo,
+                project: &project,
+                runtime: &runtime,
+                producer: &app_producer,
+                bundle: &bundle,
+                evidence: &root,
+            },
+            &app_consumer,
+            "app::project_ui_tests::relocated_bundle_real_widgets_restart_original_scene",
+        ),
     );
+    assert!(restarted.contains("consumer-source-hidden=true consumer-runtime-hidden=true consumer-producer-hidden=true consumer-bundle-read-only=true"));
     assert!(
         restarted.contains("Relocated App real-widget Restart restored original scene and replay")
     );
@@ -361,6 +386,9 @@ fn actual_widget_saved_korean_ui_exports_relocates_and_runs() {
     }
     for name in [
         "ui-negative-no-overlay.png",
+        "ui-negative-no-text.png",
+        "ui-glyphs-before.png",
+        "ui-glyphs-after.png",
         "ui-title.png",
         "ui-playing.png",
         "ui-menu.png",
@@ -374,10 +402,6 @@ fn actual_widget_saved_korean_ui_exports_relocates_and_runs() {
             .unwrap()
             .push(serde_json::json!({"path":name,"width":512,"height":512,"sha256":digest(&path)}));
     }
-    receipt["commands"]
-        .as_array_mut()
-        .unwrap()
-        .push("isolated-ui-controls".into());
     assert_eq!(
         inventory(&project),
         source_files,
@@ -390,7 +414,7 @@ fn actual_widget_saved_korean_ui_exports_relocates_and_runs() {
     );
     // This receipt is separate from #279; module execution is not OS-window input.
     fs::write(root.join("ui-acceptance.json"), serde_json::to_vec_pretty(&serde_json::json!({
-        "source_head":source_head,"source_tree":source_tree,"font_closure":true,"actual_app_dispatch":true,"controls_consumer":"production modules, headless software GPU; not OS-window input", "independent_no_ui_runtime_sha256":digest(&plain_runtime),"consumer_sha256":digest(&consumer),"app_consumer_sha256":app_producer_hash,"actual_app_restart":true,"visible_negative":"no UI overlay, identical scene", "byte_identity_fixture":"separate parser/corpus-valid same-length metadata mutation unit test"
+        "source_head":source_head,"source_tree":source_tree,"font_closure":true,"actual_app_dispatch":true,"controls_consumer":"production modules, headless software GPU; not OS-window input", "independent_no_ui_runtime_sha256":digest(&plain_runtime),"consumer_sha256":digest(&consumer),"app_consumer_sha256":app_producer_hash,"actual_app_restart":true,"visible_negative":"transparent text only; identical production HUD geometry, text-region differential", "text_oracle":"ui-text-oracle.json", "byte_identity_fixture":"separate parser/corpus-valid same-length metadata mutation unit test"
     })).unwrap()).unwrap();
     fs::write(
         root.join("receipt.json"),

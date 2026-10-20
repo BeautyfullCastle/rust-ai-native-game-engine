@@ -91,29 +91,70 @@ fn write_png(path: &Path, bytes: &[u8]) {
         .write_image_data(bytes)
         .unwrap();
 }
-fn visible_preset(base: &[u8], with_ui: &[u8]) -> bool {
-    // Fixed top HUD area before the right-side Menu control. Both the background
-    // and bright glyph pixels must differ, so identical/no-UI images fail.
+fn text_pixels(no_text: &[u8], with_text: &[u8], region: [usize; 4]) -> (usize, usize) {
     let mut changed = 0;
     let mut bright = 0;
-    for y in 0..48 {
-        for x in 0..320 {
+    for y in region[1]..region[3] {
+        for x in region[0]..region[2] {
             let i = (y * 512 + x) * 4;
-            if base[i..i + 4] != with_ui[i..i + 4] {
+            if no_text[i..i + 4] != with_text[i..i + 4] {
                 changed += 1;
-                if with_ui[i..i + 3].iter().all(|v| *v > 100) {
+                if with_text[i..i + 3].iter().all(|v| *v > 100) {
                     bright += 1;
                 }
             }
         }
     }
+    (changed, bright)
+}
+fn visible_preset(no_text: &[u8], with_text: &[u8], region: [usize; 4]) -> bool {
+    let (changed, bright) = text_pixels(no_text, with_text, region);
     changed > 100 && bright > 30
+}
+// Suppress only the actual production HUD label's glyph color in a cloned
+// frame. The TextShape override wins over explicit RichText colors while
+// retaining the very same galley, positions, backgrounds, borders and controls.
+fn suppress_hud_text(shape: &mut egui::Shape, bounds: &mut Option<Rect>) -> usize {
+    match shape {
+        egui::Shape::Text(text) if text.galley.job.text.starts_with("오러리 투기장 |") => {
+            let mut count = 0;
+            let mut rect = Rect::NOTHING;
+            'title: for row in &text.galley.rows {
+                for glyph in &row.glyphs {
+                    if glyph.chr == '|' {
+                        break 'title;
+                    }
+                    if ('\u{ac00}'..='\u{d7a3}').contains(&glyph.chr) {
+                        rect = rect.union(
+                            glyph
+                                .logical_rect()
+                                .translate(row.pos.to_vec2() + text.pos.to_vec2()),
+                        );
+                        count += 1;
+                    }
+                }
+            }
+            assert_eq!(
+                count, 6,
+                "actual HUD title's six Korean glyph layout entries"
+            );
+            *bounds = Some(rect.expand(1.0));
+            text.override_text_color = Some(egui::Color32::TRANSPARENT);
+            1
+        }
+        egui::Shape::Vec(shapes) => shapes
+            .iter_mut()
+            .map(|shape| suppress_hud_text(shape, bounds))
+            .sum(),
+        _ => 0,
+    }
 }
 pub fn consume(bundle: &Path, evidence: &Path) {
     let project = bundle.join("project");
     let prepared = PreparedRuntime::open(&project).unwrap();
     let (seed, mut presentation, font) = prepared.into_launch_parts();
     let font = font.expect("bundle's admitted saved Korean preset");
+    let admitted_font = font.font.clone();
     let mut ui = GameUi::from_font(font.font, true).unwrap();
     let bridge = seed.bridge().unwrap();
     let snapshot = bridge.snapshot().unwrap();
@@ -141,6 +182,14 @@ pub fn consume(bundle: &Path, evidence: &Path) {
         .unwrap();
     let no_ui = target.read_rgba8();
     write_png(&evidence.join("ui-negative-no-overlay.png"), &no_ui);
+    korean_glyph_masks(
+        &gpu,
+        &mut compositor,
+        &target,
+        &presentation,
+        admitted_font,
+        evidence,
+    );
     let mut overlay = GpuOverlay::new(&gpu, format);
     let mut pending = PendingOverlay::default();
     let mut time = 0.0;
@@ -167,15 +216,62 @@ pub fn consume(bundle: &Path, evidence: &Path) {
     assert_ne!(title, no_ui);
     click(&mut ui, &mut pending, &mut time, Action::Play, hud);
     assert_eq!(ui.screen(), Screen::Playing);
+    time += 0.5;
+    let (playing_frame, action) = ui.show(
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(512.0, 512.0))),
+            time: Some(time),
+            ..Default::default()
+        },
+        hud,
+    );
+    assert!(action.is_none());
+    let playing_buttons = ui.buttons.clone();
+    let mut control_frame = playing_frame.clone();
+    let mut title_bounds = None;
+    let suppressed: usize = control_frame
+        .shapes
+        .iter_mut()
+        .map(|clipped| suppress_hud_text(&mut clipped.shape, &mut title_bounds))
+        .sum();
+    assert_eq!(suppressed, 1);
+    let bounds = title_bounds.expect("production Korean HUD text shape");
+    let region = [
+        (bounds.min.x.floor().max(0.0) as usize).min(512),
+        (bounds.min.y.floor().max(0.0) as usize).min(512),
+        (bounds.max.x.ceil().max(0.0) as usize).min(512),
+        (bounds.max.y.ceil().max(0.0) as usize).min(512),
+    ];
+    assert!(region[2] > region[0] && region[3] > region[1]);
+    pending.push(playing_frame).unwrap();
     let playing = capture("ui-playing.png", &ui, &mut pending);
+    // No UI layout is rerun: this is the same frame with only the matched
+    // label's glyph color overridden, independently of label style defaults.
+    let no_text_buttons = ui.buttons.clone();
+    assert_eq!(no_text_buttons, playing_buttons);
+    pending.push(control_frame).unwrap();
+    let no_text = capture("ui-negative-no-text.png", &ui, &mut pending);
     assert!(
-        visible_preset(&no_ui, &playing),
-        "Korean HUD must visibly affect captured scene"
+        visible_preset(&no_text, &playing, region),
+        "production Korean title region must differ from identical-geometry textless control"
     );
     assert!(
-        !visible_preset(&no_ui, &no_ui),
-        "same scene with absent UI must fail the exact visible-preset assertion"
+        !visible_preset(&no_text, &no_text, region),
+        "the same text oracle must reject its missing-text control"
     );
+    let rectangles = |buttons: &[(Action, egui::Rect)]| {
+        buttons.iter().map(|(action, rect)| serde_json::json!({"action":format!("{action:?}"),"min":[rect.min.x,rect.min.y],"max":[rect.max.x,rect.max.y]})).collect::<Vec<_>>()
+    };
+    let (changed, bright) = text_pixels(&no_text, &playing, region);
+    fs::write(evidence.join("ui-text-oracle.json"), serde_json::to_vec_pretty(&serde_json::json!({
+        "positive":"ui-playing.png","control":"ui-negative-no-text.png","no_overlay":"ui-negative-no-overlay.png",
+        "positive_sha256":super::evidence::digest(&evidence.join("ui-playing.png")),"control_sha256":super::evidence::digest(&evidence.join("ui-negative-no-text.png")),"no_overlay_sha256":super::evidence::digest(&evidence.join("ui-negative-no-overlay.png")),
+        "width":512,"height":512,"region_xyxy":region,"changed_pixels":changed,"bright_different_pixels":bright,
+        "minimum_changed_exclusive":100,"minimum_bright_exclusive":30,"bright_channel_threshold_exclusive":100,
+        "positive_buttons":rectangles(&playing_buttons),"control_buttons":rectangles(&no_text_buttons),"matching_layout":true,"control_method":"clone exact output and override only production HUD TextShape glyph color", "suppressed_text_shapes":suppressed,"region_text":"오러리 투기장",
+        "control_against_itself":false,"control_text_color_rgba":[0,0,0,0],
+        "claim":"visible text presence only, not OCR or every Korean glyph coverage; parser/corpus and installation byte identity are separate"
+    })).unwrap()).unwrap();
     click(&mut ui, &mut pending, &mut time, Action::Menu, hud);
     assert_eq!(ui.screen(), Screen::Menu);
     let menu = capture("ui-menu.png", &ui, &mut pending);
@@ -183,15 +279,97 @@ pub fn consume(bundle: &Path, evidence: &Path) {
     click(&mut ui, &mut pending, &mut time, Action::Continue, hud);
     assert_eq!(ui.screen(), Screen::Playing);
     let continued = capture("ui-continued.png", &ui, &mut pending);
-    assert!(visible_preset(&no_ui, &continued));
+    assert!(visible_preset(&no_text, &continued, region));
     click(&mut ui, &mut pending, &mut time, Action::Menu, hud);
     click(&mut ui, &mut pending, &mut time, Action::Restart, hud);
     assert_eq!(ui.screen(), Screen::Playing);
     let restarted = capture("ui-restart-action.png", &ui, &mut pending);
-    assert!(visible_preset(&no_ui, &restarted));
+    assert!(visible_preset(&no_text, &restarted, region));
     // App::dispatch_ui_action owns simulation restart and is private. This
     // consumer proves button dispatch + UI, not that separate bridge-reset route.
     println!(
         "UI controls and visible negative passed; Restart button/UI only, not App bridge reset"
     );
+}
+
+fn korean_glyph_masks(
+    gpu: &Wgpu,
+    compositor: &mut ProjectCompositor,
+    target: &OffscreenTarget,
+    presentation: &orr_sample::project_runtime::ProjectPresentation,
+    font: Vec<u8>,
+    evidence: &Path,
+) {
+    // Separate font-glyph oracle, not a claim about the preset's layout. Every
+    // font byte comes from the relocated admitted bundle, never a test include.
+    let glyph_ui = GameUi::from_font(font, true).unwrap();
+    compositor
+        .draw(
+            target.render_view(),
+            (512, 512),
+            presentation.shapes(),
+            presentation.sprites(),
+            &presentation.camera,
+        )
+        .unwrap();
+    let before = target.read_rgba8();
+    write_png(&evidence.join("ui-glyphs-before.png"), &before);
+    let mut widths = Vec::new();
+    let output = glyph_ui.context.run_ui(
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(512.0, 512.0))),
+            ..Default::default()
+        },
+        |root| {
+            let painter = root.ctx().layer_painter(egui::LayerId::background());
+            for (i, text) in ["오", "러", "리", "메", "뉴"].iter().enumerate() {
+                let rect = painter.text(
+                    egui::pos2(10.0 + i as f32 * 42.0, 100.0),
+                    egui::Align2::LEFT_TOP,
+                    text,
+                    egui::FontId::proportional(30.0),
+                    egui::Color32::WHITE,
+                );
+                widths.push(rect.width());
+            }
+        },
+    );
+    assert!(widths.iter().all(|width| *width > 10.0));
+    let mut overlay = GpuOverlay::new(gpu, TextureFormat::Rgba8UnormSrgb);
+    overlay
+        .paint(
+            gpu,
+            target.render_view(),
+            (512, 512),
+            &glyph_ui.context,
+            output,
+        )
+        .unwrap();
+    let after = target.read_rgba8();
+    write_png(&evidence.join("ui-glyphs-after.png"), &after);
+    let masks: Vec<Vec<bool>> = (0..5)
+        .map(|i| {
+            (0..40)
+                .flat_map(|y| (0..40).map(move |x| (x, y)))
+                .map(|(x, y)| {
+                    let offset = ((100 + y) * 512 + 10 + i * 42 + x) * 4;
+                    before[offset..offset + 4] != after[offset..offset + 4]
+                })
+                .collect()
+        })
+        .collect();
+    let counts: Vec<_> = masks
+        .iter()
+        .map(|mask| mask.iter().filter(|value| **value).count())
+        .collect();
+    assert!(counts.iter().all(|count| *count > 40));
+    assert!(
+        masks.windows(2).all(|pair| pair[0] != pair[1]),
+        "distinct Korean masks, not repeated tofu"
+    );
+    let outside = (300 * 512 + 300) * 4;
+    assert_eq!(before[outside..outside + 4], after[outside..outside + 4]);
+    fs::write(evidence.join("ui-glyph-oracle.json"),serde_json::to_vec_pretty(&serde_json::json!({
+        "before":"ui-glyphs-before.png","after":"ui-glyphs-after.png","before_sha256":super::evidence::digest(&evidence.join("ui-glyphs-before.png")),"after_sha256":super::evidence::digest(&evidence.join("ui-glyphs-after.png")),"width":512,"height":512,"glyphs":["오","러","리","메","뉴"],"regions_xywh":(0..5).map(|i| [10+i*42,100,40,40]).collect::<Vec<_>>(),"changed_pixels":counts,"minimum_changed_exclusive":40,"adjacent_masks_distinct":true,"unchanged_pixel_xy":[300,300],"font_source":"relocated bundle admission","claim":"five distinct glyph masks, separate from actual preset text oracle"
+    })).unwrap()).unwrap();
 }
