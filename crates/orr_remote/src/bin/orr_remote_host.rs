@@ -130,7 +130,7 @@ fn parse_args() -> Result<Args, String> {
             other => return Err(format!("unknown flag '{other}'")),
         }
     }
-    if !matches!(a.game.as_str(), "physics" | "arena") && !(cfg!(feature = "terrain-physics") && a.game == "terrain-yard3d") {
+    if !(matches!(a.game.as_str(), "physics" | "arena") || cfg!(feature = "terrain-physics") && a.game == "terrain-yard3d") {
         return Err("--game must be physics or arena, or terrain-yard3d with the terrain-physics feature".into());
     }
     if a.game == "terrain-yard3d" && (a.join.connect.is_some() || a.tick_rate != 60) {
