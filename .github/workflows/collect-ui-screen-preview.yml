@@ -69,17 +69,18 @@ jobs:
                            if line.startswith("collect_ui_preview::tests::") and line.endswith(": test")]
           if len(compiled_core) != 18 or set(compiled_core) != core_names:
               raise RuntimeError("Compiled core preview inventory differs from the 18 mandatory cases")
-          for name in sorted(core_names):
-              output = h["run_logged"](
-                  base + [name, "--", "--exact", "--format=pretty", "--color=never", "--test-threads=1"],
-                  evidence / (name.replace("::", "-") + ".log")).replace("\r\n", "\n")
-              summaries = h["SUMMARY"].findall(output)
-              if (len(summaries) != 1 or tuple(map(int, summaries[0][:4])) != (1, 0, 0, 0)
-                      or h["CASE"].findall(output) != [(name, "ok")]):
-                  raise RuntimeError("Mandatory exact preview case did not pass: " + name)
+          output = h["run_logged"](
+              base + ["collect_ui_preview::tests::", "--", "--skip", "app::collect_ui_preview::",
+                      "--format=pretty", "--color=never", "--test-threads=1"],
+              evidence / "core-preview-batch.log").replace("\r\n", "\n")
+          summaries = h["SUMMARY"].findall(output)
+          cases = h["CASE"].findall(output)
+          if (len(summaries) != 1 or tuple(map(int, summaries[0][:4])) != (18, 0, 0, 0)
+                  or len(cases) != 18 or set(cases) != {(name, "ok") for name in core_names}):
+              raise RuntimeError("Mandatory exact 18-case preview batch did not pass")
           for package, suite, count in (
               ("orr_editor", "collect_ui_panel::tests", 5 if os.name == "nt" else 6),
-              ("orr_sample", "collect_ui::tests", 12),
+              ("orr_sample", "collect_ui::tests", 14),
               ("orr_sample", "collect_app::tests", 11),
           ):
               output = h["run_logged"](
@@ -87,6 +88,15 @@ jobs:
                    "--lib", suite + "::", "--", "--format=pretty", "--color=never", "--test-threads=1"],
                   evidence / (package + "-" + suite.replace("::", "-") + ".log"))
               h["validate_tests"](output, suite, count)
+          name = "reparent_contract_cpu_batch"
+          output = h["run_logged"](
+              ["cargo", "test", "--locked", "-p", "orr_editor", "--no-default-features", "--features", "collect-ui",
+               "--test", "collect_ui_reparent", "--", "--format=pretty", "--color=never", "--test-threads=1"],
+              evidence / "reparent-candidate-cpu.log").replace("\r\n", "\n")
+          summaries = h["SUMMARY"].findall(output)
+          if (len(summaries) != 1 or tuple(map(int, summaries[0][:4])) != (1, 0, 0, 0)
+                  or h["CASE"].findall(output) != [(name, "ok")]):
+              raise RuntimeError("Expected exact reparent candidate contract batch")
           name = "app::collect_ui_preview::tests::actual_editor_preview_controls_preserve_host_and_scene_epoch"
           output = h["run_logged"](
               ["cargo", "test", "--locked", "-p", "orr_editor", "--no-default-features", "--features", "collect-ui",
@@ -175,6 +185,66 @@ jobs:
                   raw = (captures / filename).read_bytes()
                   if raw[:8] != b"\x89PNG\r\n\x1a\n" or raw[12:16] != b"IHDR" or struct.unpack(">II", raw[16:24]) != expected:
                       raise RuntimeError("Missing or wrong-sized preview screenshot: " + filename)
+          # Reparent extends this existing Linux GPU step, not the job matrix.
+          import hashlib
+          def validate_reparent(output, captures):
+              summaries = h["SUMMARY"].findall(output)
+              if (len(summaries) != 1 or tuple(map(int, summaries[0][:4])) != (1, 0, 0, 0)
+                      or h["CASE"].findall(output) != [(reparent_test, "ok")]
+                      or "skip" in output.lower()):
+                  raise RuntimeError("Expected one executed reparent GPU case without skips")
+              def unique(pairs):
+                  result = {}
+                  for key, value in pairs:
+                      if key in result:
+                          raise RuntimeError("Duplicate receipt key")
+                      result[key] = value
+                  return result
+              receipt_path = captures / "reparent-acceptance.json"
+              receipt = json.loads(receipt_path.read_text(), object_pairs_hook=unique)
+              for key, value in (("schema", 1), ("production_preview_pixel_parity_cases", 4)):
+                  if type(receipt.get(key)) is not int or receipt[key] != value:
+                      raise RuntimeError("Unexpected reparent census: " + key)
+              if receipt.get("window_pixels") != [1800, 1200]:
+                  raise RuntimeError("Unexpected reparent window dimensions")
+              for flag in ("actual_editor_app", "software_vulkan", "stage_cancel_apply_undo_save_reopen",
+                           "saved_production_collect_ui_play", "same_parent_no_history", "new_parent_clipping_visible",
+                           "selection_document_focus_escape_viewport_screen_mode_close_title_x_epoch_play_panel_cancel",
+                           "saved_authored_play_button_click"):
+                  if receipt.get(flag) is not True:
+                      raise RuntimeError("Missing reparent predicate: " + flag)
+              if (receipt.get("native_os_window") is not False or receipt.get("separate_runtime_process") is not False
+                      or receipt.get("redo") != "not integrated; PR182 prerequisite"):
+                  raise RuntimeError("Reparent evidence must preserve acceptance limitations")
+              adapter = receipt.get("adapter")
+              if not isinstance(adapter, str) or "llvmpipe" not in adapter.lower() or "Cpu" not in adapter or "Vulkan" not in adapter:
+                  raise RuntimeError("Explicit llvmpipe CPU Vulkan reparent evidence required")
+              expected = {name + "-" + suffix + ".png": size
+                          for name in ("reparent-initial", "reparent-staged-clipping", "reparent-cancelled", "reparent-saved-reopened")
+                          for suffix, size in (("canvas", (640, 360)), ("editor", (1800, 1200)))}
+              if {path.name for path in captures.glob("*.png")} != set(expected):
+                  raise RuntimeError("Unexpected reparent screenshot inventory")
+              hashes = {}
+              for filename, size in expected.items():
+                  raw = (captures / filename).read_bytes()
+                  if raw[:8] != b"\x89PNG\r\n\x1a\n" or raw[12:16] != b"IHDR" or struct.unpack(">II", raw[16:24]) != size:
+                      raise RuntimeError("Missing or wrong-sized reparent screenshot: " + filename)
+                  hashes[filename] = hashlib.sha256(raw).hexdigest()
+              hashes[receipt_path.name] = hashlib.sha256(receipt_path.read_bytes()).hexdigest()
+              return hashes
+          captures = evidence / "reparent-software-gpu"
+          captures.mkdir(exist_ok=False)
+          os.environ["ORR_COLLECT_UI_REPARENT_EVIDENCE"] = str(captures)
+          reparent_test = "app::collect_ui_preview::tests::reparent_tests::actual_editor_reparent_stage_cancel_apply_undo_save_reopen_play"
+          output = h["run_logged"](
+              ["cargo", "test", "--locked", "-p", "orr_editor", "--no-default-features", "--features", "collect-ui,project-create",
+               "--lib", reparent_test, "--", "--ignored", "--exact", "--format=pretty", "--color=never", "--test-threads=1"],
+              evidence / "actual-reparent-gpu.log").replace("\r\n", "\n")
+          hashes = validate_reparent(output, captures)
+          manifest = captures / "verified-sha256.json"
+          manifest.write_text(json.dumps(hashes, sort_keys=True, indent=2) + "\n")
+          if json.loads(manifest.read_text()) != validate_reparent(output, captures):
+              raise RuntimeError("Reparent artifact hash verification failed")
       - name: Retain exact counts, production parity captures and full controls
         if: always()
         uses: actions/upload-artifact@v4

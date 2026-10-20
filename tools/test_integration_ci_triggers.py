@@ -200,6 +200,95 @@ class IntegrationTriggers(unittest.TestCase):
             (root/'receipt.json').write_text('{"schema":1,"schema":1}')
             with self.assertRaises(RuntimeError): validate(output, root, 'a'*64)
 
+    def reparent_validator(self):
+        import hashlib
+        import json
+        import runpy
+        import struct
+        text = (ROOT / '.github/workflows/collect-ui-screen-preview.yml').read_text()
+        check(text)
+        for selector in ('("orr_sample", "collect_ui::tests", 14)', '"--test", "collect_ui_reparent"',
+                         '"--skip", "app::collect_ui_preview::"', '"--features", "collect-ui,project-create"',
+                         '"--lib", reparent_test, "--", "--ignored", "--exact"',
+                         'os.environ["ORR_COLLECT_UI_REPARENT_EVIDENCE"]',
+                         'json.loads(manifest.read_text()) != validate_reparent(output, captures)'):
+            self.assertIn(selector, text)
+        blocks = re.findall(r'        shell: python \{0\}\n        run: \|\n((?:          .*\n|\n)+)', text)
+        parsed = [ast.parse(textwrap.dedent(block)) for block in blocks]
+        selected = [node for tree in parsed for node in tree.body if
+                    isinstance(node, ast.FunctionDef) and node.name == 'validate_reparent' or
+                    isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+                    and node.targets[0].id == 'reparent_test']
+        env = dict(hashlib=hashlib, json=json, struct=struct,
+                   h=runpy.run_path(str(ROOT / 'tools/check-authoring-controls.py')))
+        exec(compile(ast.Module(body=selected, type_ignores=[]), '<reparent-receipt>', 'exec'), env)
+        return env
+
+    def test_reparent_gpu_receipt_fails_closed(self):
+        import copy
+        import json
+        import tempfile
+        env = self.reparent_validator()
+        test, validate = env['reparent_test'], env['validate_reparent']
+        output = (f'running 1 test\ntest {test} ... ok\n'
+                  'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n')
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for name in ('reparent-initial','reparent-staged-clipping','reparent-cancelled','reparent-saved-reopened'):
+                for suffix, size in (('canvas',(640,360)),('editor',(1800,1200))):
+                    # Synthetic header fixture only, not GPU success evidence.
+                    (root/f'{name}-{suffix}.png').write_bytes(b'\x89PNG\r\n\x1a\n'+b'\0\0\0\rIHDR'+b''.join(v.to_bytes(4,'big') for v in size))
+            receipt = dict(schema=1, production_preview_pixel_parity_cases=4, window_pixels=[1800,1200],
+                           native_os_window=False, separate_runtime_process=False,
+                           redo='not integrated; PR182 prerequisite', adapter='llvmpipe Cpu Vulkan')
+            for flag in ('actual_editor_app','software_vulkan','stage_cancel_apply_undo_save_reopen',
+                         'saved_production_collect_ui_play','same_parent_no_history','new_parent_clipping_visible',
+                         'selection_document_focus_escape_viewport_screen_mode_close_title_x_epoch_play_panel_cancel',
+                         'saved_authored_play_button_click'):
+                receipt[flag] = True
+            path = root/'reparent-acceptance.json'
+            path.write_text(json.dumps(receipt))
+            hashes = validate(output,root)
+            self.assertEqual(len(hashes),9)
+            for key, value in [('schema',True),('production_preview_pixel_parity_cases',3),('native_os_window',True),
+                               ('separate_runtime_process',True),('adapter','SwiftShader Cpu Vulkan'),('window_pixels',[1,1]),
+                               ('saved_authored_play_button_click',False),('redo','implemented')]:
+                bad = copy.deepcopy(receipt); bad[key]=value; path.write_text(json.dumps(bad))
+                with self.subTest(key=key), self.assertRaises(RuntimeError): validate(output,root)
+            missing = copy.deepcopy(receipt); del missing['software_vulkan']; path.write_text(json.dumps(missing))
+            with self.assertRaises(RuntimeError): validate(output,root)
+            path.write_text(json.dumps(receipt))
+            for bad in (output.replace('1 passed','0 passed'),output.replace(test,'other'),output+'SKIP\n',output+output):
+                with self.assertRaises(RuntimeError): validate(bad,root)
+            extra=root/'extra.png';extra.write_bytes(b'bad')
+            with self.assertRaises(RuntimeError): validate(output,root)
+            extra.unlink()
+            capture=root/'reparent-initial-canvas.png';raw=capture.read_bytes();capture.write_bytes(b'bad')
+            with self.assertRaises(RuntimeError): validate(output,root)
+            capture.unlink()
+            with self.assertRaises(RuntimeError): validate(output,root)
+            capture.write_bytes(raw[:16]+(1).to_bytes(4,'big')+raw[20:])
+            with self.assertRaises(RuntimeError): validate(output,root)
+            capture.write_bytes(raw+b'changed')
+            self.assertNotEqual(hashes,validate(output,root))
+            path.write_text('{"schema":1,"schema":1}')
+            with self.assertRaises(RuntimeError): validate(output,root)
+
+    def test_core_preview_batch_exact_census(self):
+        import runpy
+        text = (ROOT / '.github/workflows/collect-ui-screen-preview.yml').read_text()
+        block = re.findall(r'        shell: python \{0\}\n        run: \|\n((?:          .*\n|\n)+)', text)[0]
+        nodes = ast.parse(textwrap.dedent(block)).body
+        core = next(n for n in nodes if isinstance(n,ast.Assign) and isinstance(n.targets[0],ast.Name) and n.targets[0].id=='core_names')
+        start = next(i for i,n in enumerate(nodes) if isinstance(n,ast.Assign) and isinstance(n.targets[0],ast.Name) and n.targets[0].id=='summaries')
+        program=compile(ast.Module(body=[core]+nodes[start:start+3],type_ignores=[]),'<core-census>','exec')
+        env={'h':runpy.run_path(str(ROOT/'tools/check-authoring-controls.py'))}
+        names=ast.literal_eval(core.value)
+        good=''.join(f'test {name} ... ok\n' for name in sorted(names))+'test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n'
+        exec(program,dict(env,output=good))
+        for bad in (good.replace('18 passed','17 passed'),good.replace(' ... ok',' ... ignored',1),good.replace(sorted(names)[0],sorted(names)[1]),good+good):
+            with self.assertRaises(RuntimeError): exec(program,dict(env,output=bad))
+
     def test_reject_automatic_or_incomplete_triggers(self):
         for bad in [
             TRIGGER.replace('ready_for_review', 'opened, synchronize'),
