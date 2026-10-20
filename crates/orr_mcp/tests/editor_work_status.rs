@@ -482,6 +482,13 @@ fn hostile_success_payloads_fail_locally_without_echoing_private_data_or_retryin
         value["assessment"]["state"] = json!("none_observed");
         invalid.push(value);
     }
+    for (mut value, wrong_owner) in [
+        (canonical.clone(), "host"),
+        (observation("not_paired", "indeterminate"), "paired_host"),
+    ] {
+        value["host_scene"]["owner"] = json!(wrong_owner);
+        invalid.push(value);
+    }
     for field in ["dirty", "in_tx"] {
         let mut value = canonical.clone();
         value["host_scene"][field] = json!(true);

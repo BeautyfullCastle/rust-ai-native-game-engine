@@ -952,7 +952,12 @@ pub fn validate_response(value: &J) -> bool {
         return false;
     };
     if host["authority"] != "erp_host"
-        || !matches!(host["owner"].as_str(), Some("paired_host" | "host"))
+        || host["owner"]
+            != if availability == Availability::NotPaired {
+                "host"
+            } else {
+                "paired_host"
+            }
         || !host["dirty"].is_boolean()
         || !host["in_tx"].is_boolean()
         || !decimal_u64(&host["preview_revision"], false)
@@ -2054,6 +2059,13 @@ mod tests {
         let stale = at(Some(&service), later(now, 1_001));
         assert_eq!(stale["assessment"]["state"], "indeterminate");
         assert_eq!(stale["assessment"]["blockers"], json!([]));
+        for (mut inconsistent, wrong_owner) in [
+            (at(None, now), "paired_host"),
+            (at(Some(&service), now), "host"),
+        ] {
+            inconsistent["host_scene"]["owner"] = json!(wrong_owner);
+            assert!(!validate_response(&inconsistent));
+        }
         let mut hostile = stale;
         hostile["assessment"]["state"] = json!("known_blockers");
         hostile["assessment"]["blockers"] = json!(["tilemap"]);
