@@ -99,30 +99,45 @@ fn arm_diagnostic(h: &Harness<'_, EditorApp>, label: &str, phase: &str) -> serde
     let a = h.state();
     serde_json::json!({"phase":phase,"label":label,"mode":format!("{:?}",a.editor.mode()),"authoring_active":a.terrain.authoring_active(&a.editor),"rows_coherent":a.editor.yard_rows_coherent(),"can_mutate":a.editor.can_mutate(),"scene_load_epoch":a.editor.scene_load_epoch(),"host_epoch":a.editor.sim().epoch,"scene_path":a.editor.path(),"document_scene":a.terrain.document.scene(),"scene_matches":a.terrain.scene_matches(&a.editor),"read_only":a.terrain.document.read_only(),"focused":h.ctx.input(|input|input.focused),"snapshot":a.editor.snapshot().map(|snapshot|serde_json::json!({"tick":snapshot.predicted().tick(),"checksum":format!("{:016x}",snapshot.predicted().checksum()),"has_timeline":snapshot.timeline().is_some()})),"status":a.terrain_ramp.status,"endpoints":a.terrain_ramp.endpoints,"selected_vertex":a.terrain.selected_vertex,"selected_cell":a.terrain.selected_cell,"terrain_mode":format!("{:?}",a.terrain.selection_mode),"terrain_error":a.terrain.error(),"log":a.editor.log().iter().map(|m|serde_json::json!({"error":m.error,"text":m.text})).collect::<Vec<_>>()})
 }
-fn wait_for_stopped_terrain(h: &mut Harness<'_, EditorApp>) {
+fn wait_for_view_transition(
+    h: &mut Harness<'_, EditorApp>,
+    previous_generation: u64,
+    scene: &Path,
+    mode: Mode,
+    require_terrain: bool,
+) {
+    // Identical scene bytes can satisfy checksum/row coherence before the new
+    // view incarnation arrives. Observe its actual recovery, not frame counts
+    // or elapsed time. Fence each preceding transition independently so an old
+    // queued reset cannot satisfy the next transition in this isolated fixture.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    eprintln!(
-        "ramp-stop {}",
-        arm_diagnostic(h, "post-Stop", "before-readiness")
-    );
     loop {
+        // Do not run application frames here: while visiting the other scene,
+        // TerrainPanel synchronization would re-associate the clean document.
         h.state_mut().editor.sync();
-        h.run_steps(1);
         let app = h.state();
-        let ready = app.editor.mode() == Mode::Edit
+        let generation = app.editor.view_recovery_generation();
+        let ready = generation > previous_generation
+            && app.editor.path().as_deref() == Some(scene)
+            && app.editor.mode() == mode
             && app
                 .editor
                 .snapshot()
-                .is_some_and(|s| s.timeline().is_none())
-            && app.terrain.authoring_active(&app.editor);
+                .is_some_and(|snapshot| snapshot.timeline().is_some() == (mode == Mode::Play))
+            && app.editor.yard_rows_coherent()
+            && (!require_terrain || app.terrain.authoring_active(&app.editor));
         if ready {
-            eprintln!("ramp-stop {}", arm_diagnostic(h, "post-Stop", "ready"));
+            eprintln!(
+                "ramp-view-ready generation={generation} previous={previous_generation} mode={mode:?} scene={}",
+                scene.display()
+            );
             return;
         }
         assert!(
             app.editor.down().is_none() && std::time::Instant::now() < deadline,
-            "coherent Edit terrain did not become ready after Stop: {}",
-            arm_diagnostic(h, "post-Stop", "refused")
+            "view transition did not become ready: expected generation > {previous_generation}, scene {}, mode {mode:?}; observed generation {generation}: {}",
+            scene.display(),
+            arm_diagnostic(h, "view-transition", "refused")
         );
     }
 }
@@ -162,6 +177,7 @@ fn app_context_refusals_preserve_document_history_and_original_files() {
     let mut h = Harness::builder()
         .with_size([1440.0, 1100.0])
         .build_eframe(move |_| EditorApp::new(editor, None));
+    wait_for_view_transition(&mut h, 0, &scene, Mode::Edit, false);
     attach(&mut h, &scene);
     let original = bytes(&h);
     let history = h.state().editor.history().clone();
@@ -244,6 +260,7 @@ fn app_context_refusals_preserve_document_history_and_original_files() {
         .unwrap();
     prepare(&mut h);
     let old_epoch = h.state().editor.scene_load_epoch();
+    let before_reload = h.state().editor.view_recovery_generation();
     assert!(h.state_mut().editor.open_path(&scene));
     h.state_mut().editor.sync();
     assert_ne!(
@@ -253,19 +270,23 @@ fn app_context_refusals_preserve_document_history_and_original_files() {
     );
     assert!(h.state_mut().terrain_ramp_apply().is_err());
     assert_eq!(bytes(&h), original);
+    wait_for_view_transition(&mut h, before_reload, &scene, Mode::Edit, true);
     prepare(&mut h);
     assert!(h.state_mut().editor.select_named("box_left"));
     assert!(h.state_mut().terrain_ramp_apply().is_err());
     assert_eq!(bytes(&h), original);
     h.state_mut().editor.select(None);
     prepare(&mut h);
+    let before_play = h.state().editor.view_recovery_generation();
     h.state_mut().editor.play();
     h.state_mut().editor.sync();
     assert_eq!(h.state().editor.mode(), Mode::Play);
     assert!(h.state_mut().terrain_ramp_apply().is_err());
     assert_eq!(bytes(&h), original);
+    wait_for_view_transition(&mut h, before_play, &scene, Mode::Play, false);
+    let before_stop = h.state().editor.view_recovery_generation();
     h.state_mut().editor.stop();
-    wait_for_stopped_terrain(&mut h);
+    wait_for_view_transition(&mut h, before_stop, &scene, Mode::Edit, true);
     prepare(&mut h);
     let other_scene = root.path().join("other.scene.yaml");
     std::fs::write(
@@ -273,12 +294,16 @@ fn app_context_refusals_preserve_document_history_and_original_files() {
         include_str!("../../../../scenes/yard3d_authoring.scene.yaml"),
     )
     .unwrap();
+    let before_other = h.state().editor.view_recovery_generation();
     assert!(h.state_mut().editor.open_path(&other_scene));
     h.state_mut().editor.sync();
     assert!(h.state_mut().terrain_ramp_apply().is_err());
     assert_eq!(bytes(&h), original);
+    wait_for_view_transition(&mut h, before_other, &other_scene, Mode::Edit, false);
+    let before_original = h.state().editor.view_recovery_generation();
     assert!(h.state_mut().editor.open_path(&scene));
     h.state_mut().editor.sync();
+    wait_for_view_transition(&mut h, before_original, &scene, Mode::Edit, true);
     prepare(&mut h);
     h.state_mut().terrain_ramp_apply().unwrap();
     let ramp = bytes(&h);
