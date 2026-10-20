@@ -256,6 +256,8 @@ pub struct Editor {
     stopped: Option<Stopped>,
     // the newest frame
     snapshot: Option<Snapshot>,
+    #[cfg(all(test, feature = "terrain"))]
+    view_recovery_generation: u64,
     bodies: Vec<Drawable>,
     checksum: u64,
     snap_entities: u32,
@@ -391,6 +393,8 @@ impl Editor {
             server_now_ms: 0,
             stopped: None,
             snapshot: None,
+            #[cfg(all(test, feature = "terrain"))]
+            view_recovery_generation: 0,
             bodies: Vec::new(),
             checksum: 0,
             snap_entities: 0,
@@ -1379,6 +1383,10 @@ impl Editor {
         let ViewUpdate { snapshot, events, resync } = update;
         let disconnected = resync.as_ref().is_some_and(|r| r.disconnected);
         if let Some(reset) = &resync {
+            #[cfg(all(test, feature = "terrain"))]
+            {
+                self.view_recovery_generation = reset.generation;
+            }
             // The editor draws the current predicted pose directly and owns no
             // interpolator or speculative VFX handles. Rebuild that complete
             // presentation baseline even when its sequence has not changed.
@@ -2159,6 +2167,13 @@ impl Editor {
 
     /// The current authoritative 3D snapshot mapped to presentation data.
     pub fn yard_frame(&self) -> &crate::viewport3d::YardFrame { &self.yard_frame }
+
+    /// Presentation recovery token for isolated fixture transition barriers, not
+    /// an acknowledgement or correlation ID for an ERP request.
+    #[cfg(all(test, feature = "terrain"))]
+    pub(crate) fn view_recovery_generation(&self) -> u64 {
+        self.view_recovery_generation
+    }
 
     /// The asynchronously queried GUID map must describe this presentation
     /// generation. Edit rebakes recycle handles, so checksum equality is also
