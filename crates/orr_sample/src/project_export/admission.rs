@@ -199,6 +199,7 @@ impl ProjectSnapshot {
             .entry
             .clone()
             .ok_or("export requires an authored game entry")?;
+        if entry.tilemap.is_some() { return Err("tilemap projects are not supported by export yet".into()); }
         // list performs the existing package validation/resolution without
         // reading object assets. Only that authoritative closure is enumerated.
         let lock = project

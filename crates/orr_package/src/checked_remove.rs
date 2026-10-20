@@ -20,6 +20,7 @@ impl Project {
         approved: &Lock,
         before_publish: impl FnOnce() -> std::result::Result<(), String>,
     ) -> Result<Lock> {
+        self.require_mutable_presentation()?;
         let _guard = self.writer()?;
         let previous = self.verify()?;
         if &previous != expected {
@@ -30,6 +31,7 @@ impl Project {
             return fail("candidate package lock differs from preflighted removal");
         }
         before_publish().map_err(Error)?;
+        self.require_mutable_presentation()?;
         self.publish(&candidate)?;
         Ok(candidate)
     }

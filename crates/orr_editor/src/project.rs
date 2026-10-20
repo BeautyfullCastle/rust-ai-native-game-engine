@@ -27,9 +27,18 @@ pub struct PreparedProject {
     scene: PreparedArenaScene,
     sprites: Option<PreparedSprites>,
     ui: Option<orr_sample::project::PreparedUi>,
+    #[cfg(feature = "tilemap")]
+    tilemap: Option<crate::tilemap_panel::TilemapPanel>,
+    #[cfg(feature = "tilemap")]
+    tilemap_asset: Option<(orr_sample::project_sprites::AssetKey, Asset)>,
 }
 impl PreparedProject {
     pub fn open(root: impl AsRef<Path>) -> Result<Self, String> {
+        #[cfg(feature = "tilemap")]
+        let before = {
+            let project = orr_package::Project::open(root.as_ref(), sprite_bindings::compiled_runtime()).map_err(|error| error.to_string())?;
+            (project.root().to_path_buf(), project_files_stamp(project.root())?)
+        };
         // This application's own opt-in is authoritative, even if another
         // dependency happens to unify orr_sample/game-ui into the build.
         let support = if cfg!(feature = "project-ui") {
@@ -37,18 +46,30 @@ impl PreparedProject {
         } else {
             orr_sample::project::UiSupport::Unsupported
         };
-        let prepared = orr_sample::project::PreparedProject::open_with_ui(
+        let prepared = orr_sample::project::PreparedProject::open_with_capabilities(
             root,
             sprite_bindings::compiled_runtime(),
             support,
+            if cfg!(feature = "tilemap") { orr_sample::project::TilemapSupport::Supported } else { orr_sample::project::TilemapSupport::Unsupported },
         )?;
-        let (root, scene, sprites, ui) = prepared.into_parts();
+        let parts = prepared.into_presentation_parts();
+        #[cfg(feature = "tilemap")]
+        let tilemap = parts.tilemap.map(|tilemap| crate::tilemap_panel::TilemapPanel::prepare(&parts.root, parts.scene.path(), tilemap)).transpose()?;
+        #[cfg(feature = "tilemap")]
+        if before.0 != parts.root || before.1 != project_files_stamp(&parts.root)? {
+            return Err("project manifest or active lock changed during editor tilemap admission".into());
+        }
+        let (root, scene, sprites, ui) = (parts.root, parts.scene, parts.sprites, parts.ui);
         let sprites = sprites.map(|s| (Bindings::from_document(s.path, s.document), s.assets));
         Ok(Self {
             root,
             scene,
             sprites,
             ui,
+            #[cfg(feature = "tilemap")]
+            tilemap,
+            #[cfg(feature = "tilemap")]
+            tilemap_asset: parts.tilemap_asset,
         })
     }
     pub fn ui(&self) -> Option<&orr_sample::project::PreparedUi> {
@@ -71,13 +92,25 @@ impl PreparedProject {
     }
 
     /// Restore decoded assets only after the caller connected the admitted host.
-    /// There are no fallible reads or partial texture-cache changes in this step.
+    /// Rechecks the live host identity/targets before installing presentation.
+    /// GPU installation can fail; errors propagate without publishing or deleting files.
     pub fn into_app(
         self,
-        editor: Editor,
+        mut editor: Editor,
         render_state: Option<egui_wgpu::RenderState>,
         ctx: &egui::Context,
-    ) -> EditorApp {
+    ) -> Result<EditorApp, String> {
+        #[cfg(feature = "tilemap")]
+        if self.tilemap.is_some() {
+            if !editor.admitted_tilemap_scene_matches(&self.scene) {
+                return Err("tilemap presentation host was replaced, loaded or saved after admission; reopen complete project".into());
+            }
+            validate_tilemap_host(&mut editor, self.scene.path(), self.sprites.as_ref().map(|(bindings, _)| bindings.document()))?;
+        }
+        #[cfg(not(feature = "tilemap"))]
+        let _ = &mut editor;
+        #[cfg(feature = "tilemap")]
+        let tilemap_render_state = render_state.clone();
         let mut app = EditorApp::new(editor, render_state);
         #[cfg(feature = "project-ui")]
         if let Some(ui) = self.ui {
@@ -86,8 +119,51 @@ impl PreparedProject {
         if let Some((bindings, assets)) = self.sprites {
             app.sprites.install_prepared(ctx, bindings, assets);
         }
-        app
+        #[cfg(feature = "tilemap")]
+        if let Some(mut panel) = self.tilemap {
+            panel.install_editor_identity(&app.editor)?;
+            app.sprites.install_tilemap_asset(ctx, self.tilemap_asset);
+            panel.install_renderer(tilemap_render_state.as_ref(), &app.sprites)?;
+            app.tilemap = Some(panel);
+        }
+        Ok(app)
     }
+}
+
+/// Validate only presentation-sensitive current scene targets before Scene Save.
+#[cfg(feature = "tilemap")]
+pub(crate) fn validate_tilemap_host(
+    editor: &mut Editor, expected_scene: &Path,
+    sprites: Option<&orr_sample::project_sprites::Document>,
+) -> Result<(), String> {
+    if editor.game() != crate::game::EditorGame::Arena || !editor.spec().is_local() {
+        return Err("tilemap requires its admitted local Arena host".into());
+    }
+    let state = editor.host_call("sim.state", serde_json::json!({}))?;
+    let path = state.get("scene_path").and_then(serde_json::Value::as_str).ok_or("tilemap host has no saved scene path")?;
+    if std::fs::canonicalize(path).map_err(|error| error.to_string())? != expected_scene {
+        return Err("tilemap host scene differs from admitted project".into());
+    }
+    let answer = editor.host_call("scene.save", serde_json::json!({"write": false, "source": "doc"}))?;
+    let text = answer.get("text").and_then(serde_json::Value::as_str).ok_or("host did not return authored scene text")?;
+    if text.len() as u64 > orr_sample::project::MAX_SCENE_BYTES { return Err("authored scene exceeds saved-project limit".into()); }
+    let scene = orr_reflect::Scene::parse(text, &orr_sample::project::arena_types()).map_err(|error| error.to_string())?;
+    if scene.entities.len() > orr_sample::project::MAX_SCENE_ENTITIES { return Err("authored scene exceeds saved-project entity limit".into()); }
+    if let Some(sprites) = sprites { orr_sample::project::validate_arena_sprite_targets(&scene, sprites)?; }
+    Ok(())
+}
+
+#[cfg(feature = "tilemap")]
+fn project_files_stamp(root: &Path) -> Result<[Option<Vec<u8>>; 2], String> {
+    let read = |name: &str| -> Result<Option<Vec<u8>>, String> {
+        let path = root.join(name);
+        match std::fs::symlink_metadata(&path) {
+            Ok(_) => orr_sample::project::read_regular(&path, 1024 * 1024).map(Some),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.to_string()),
+        }
+    };
+    Ok([read("orr.project.json")?, read("orr.packages.lock.json")?])
 }
 
 /// Install an already-admitted Collect presentation without rereading project files.

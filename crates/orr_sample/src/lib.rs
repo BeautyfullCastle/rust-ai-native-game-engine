@@ -42,6 +42,8 @@ pub mod game_ui;
 #[cfg(feature = "game-ui")]
 pub mod game_ui_gpu;
 
+#[cfg(feature = "tilemap")]
+pub mod project_tilemap;
 #[cfg(feature = "project")]
 pub mod project_sprites;
 #[cfg(feature = "project")]

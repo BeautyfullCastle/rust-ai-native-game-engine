@@ -29,6 +29,7 @@ pub struct SpritePanel {
     pub source: Source,
     pub scale: f32,
     loaded: BTreeMap<(String, String), Loaded>,
+    tilemap_pinned: bool,
     error: Option<String>,
     #[cfg(all(feature = "image-reimport", target_os = "linux", target_arch = "x86_64"))]
     pub replacement_image: String,
@@ -50,6 +51,7 @@ impl Default for SpritePanel {
             source: Source::Region(0),
             scale: 0.05,
             loaded: BTreeMap::new(),
+            tilemap_pinned: false,
             error: None,
             #[cfg(all(feature = "image-reimport", target_os = "linux", target_arch = "x86_64"))]
             replacement_image: String::new(),
@@ -61,6 +63,30 @@ impl Default for SpritePanel {
     }
 }
 impl SpritePanel {
+    fn require_unpinned(&self) -> Result<(), String> {
+        if self.tilemap_pinned {
+            return Err("tilemap owns the shared atlas set; reopen the complete project instead of changing sprite bindings/assets".into());
+        }
+        Ok(())
+    }
+    /// Read-only access to the single admitted egui texture cache.
+    #[cfg(feature = "tilemap")]
+    pub(crate) fn tilemap_asset(&self, key: &orr_sample::project_sprites::AssetKey) -> Option<(&Asset, egui::TextureId)> {
+        self.loaded.get(key).map(|loaded| (&loaded.asset, loaded.texture.id()))
+    }
+    /// Startup only: install a missing already-admitted asset before pinning.
+    #[cfg(feature = "tilemap")]
+    pub(crate) fn install_tilemap_asset(&mut self, ctx: &egui::Context, asset: Option<(orr_sample::project_sprites::AssetKey, Asset)>) {
+        if let Some((key, asset)) = asset {
+            if !self.loaded.contains_key(&key) { self.cache_asset(ctx, key, asset); }
+        }
+        self.tilemap_pinned = true;
+    }
+    #[cfg(feature = "tilemap")]
+    pub(crate) fn tilemap_assets(&self) -> BTreeMap<orr_sample::project_sprites::AssetKey, Asset> {
+        self.loaded.iter().map(|(key, loaded)| (key.clone(), loaded.asset.clone())).collect()
+    }
+
     pub fn scene_matches(&self, editor: &Editor) -> bool {
         self.bindings.as_ref().is_some_and(|b| {
             editor
@@ -71,6 +97,7 @@ impl SpritePanel {
         })
     }
     fn load(&mut self, ctx: &egui::Context, package: &str, document: &str) -> Result<(), String> {
+        self.require_unpinned()?;
         let key = (package.to_string(), document.to_string());
         if self.loaded.contains_key(&key) {
             return Ok(());
@@ -108,6 +135,7 @@ impl SpritePanel {
     }
     /// Failed open/reload retains the last good document and atlas textures.
     pub fn open(&mut self, ctx: &egui::Context, path: PathBuf) -> Result<(), String> {
+        self.require_unpinned()?;
         if self.bindings.as_ref().is_some_and(Bindings::dirty) {
             return Err(
                 "save or explicitly discard the current bindings before opening another sidecar"
@@ -136,6 +164,7 @@ impl SpritePanel {
         self.error = None;
     }
     pub fn create(&mut self, path: PathBuf, scene: String, project: String) -> Result<(), String> {
+        self.require_unpinned()?;
         if self.bindings.is_some() {
             return Err("close the current bindings before creating another sidecar".into());
         }
@@ -181,6 +210,7 @@ impl SpritePanel {
     }
     #[cfg(all(feature = "image-reimport", target_os = "linux", target_arch = "x86_64"))]
     pub fn reimport_image(&mut self, ctx: &egui::Context, editor: &Editor) -> Result<(), String> {
+        self.require_unpinned()?;
         if !self.editable(editor) || editor.is_dirty() || editor.sim().in_tx
             || editor.screenshot_waiting_for().is_some() || !editor.has_local_screenshot_owner() {
             return Err("image reimport requires a clean settled local scene in Edit".into());
@@ -214,6 +244,7 @@ impl SpritePanel {
         Ok(())
     }
     pub fn reload(&mut self, ctx: &egui::Context) -> Result<(), String> {
+        self.require_unpinned()?;
         let bindings = self.bindings.as_ref().ok_or("open a view sidecar first")?;
         let assets = Self::load_assets(bindings)?;
         self.replace_assets(ctx, assets);
@@ -221,6 +252,7 @@ impl SpritePanel {
     }
     /// Restore authoring history only if every restored asset is still valid.
     pub fn undo(&mut self, ctx: &egui::Context) -> Result<(), String> {
+        self.require_unpinned()?;
         let bindings = self.bindings.as_mut().ok_or("open a view sidecar first")?;
         let before = bindings.document().clone();
         bindings.undo();
@@ -234,6 +266,7 @@ impl SpritePanel {
         Ok(())
     }
     pub fn redo(&mut self, ctx: &egui::Context) -> Result<(), String> {
+        self.require_unpinned()?;
         let bindings = self.bindings.as_mut().ok_or("open a view sidecar first")?;
         let before = bindings.document().clone();
         bindings.redo();
@@ -265,6 +298,7 @@ impl SpritePanel {
     }
     /// Verify the currently installed bytes before committing an assignment.
     pub fn assign(&mut self, ctx: &egui::Context, editor: &Editor) -> Result<(), String> {
+        self.require_unpinned()?;
         if !self.editable(editor) {
             return Err("sprite assignment requires the matching settled scene in Edit".into());
         }
@@ -375,6 +409,10 @@ impl SpritePanel {
             self.preview_playing = false;
         }
         ui.collapsing("Sprite bindings (view only)", |ui| {
+            if self.tilemap_pinned {
+                ui.weak("Tilemap shares these admitted atlases. Sprite Load/Assign/Remove/Close, history, reload and image reimport are unavailable until a whole-project reopen.");
+                return;
+            }
             ui.weak("Separate sidecar save and undo. Scene Save does not save bindings. Picking uses existing collider shapes.");
             if self.bindings.is_none() {
                 ui.label("Local sidecar path"); ui.text_edit_singleline(&mut self.path);

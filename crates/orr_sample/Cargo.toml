@@ -11,6 +11,8 @@ default-run = "arena"
 workspace = true
 
 [features]
+# Optional finite visual-only Arena background authoring.
+tilemap = ["project", "dep:orr_tilemap"]
 # Bounded CPU-only authored particle documents; no optional renderer integration.
 particle-preset = ["dep:serde", "dep:serde_json", "orr_view/particles"]
 # Explicit material dressing of the existing playable pickup preview.
@@ -42,6 +44,7 @@ audio-native = ["audio", "orr_audio/native"]
 sprites = ["dep:orr_sprite", "dep:orr_package", "orr_render/sprites"]
 
 [dependencies]
+orr_tilemap = { path = "../orr_tilemap", optional = true }
 orr_model = { path = "../orr_model", optional = true }
 orr_model_bindings = { path = "../orr_model_bindings", optional = true }
 semver = { version = "1", optional = true }
