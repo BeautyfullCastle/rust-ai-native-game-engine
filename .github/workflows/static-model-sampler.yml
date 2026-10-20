@@ -35,6 +35,12 @@ jobs:
           ORR_STATIC_SAMPLER_EVIDENCE: ${{ runner.temp }}/orr-static-sampler-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
         shell: bash
         run: python -B tools/static_model_sampler_gate.py '${{ matrix.mode }}'
+      - name: Required grouped planar UV acceptance
+        if: matrix.mode == 'ui'
+        shell: bash
+        run: |
+          export ORR_STATIC_PLANAR_UV_EVIDENCE="$RUNNER_TEMP/orr-static-sampler-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}/planar-uv"
+          python -B tools/static_model_planar_uv_gate.py
       - name: Retain evidence and failures
         if: always()
         uses: actions/upload-artifact@v4
