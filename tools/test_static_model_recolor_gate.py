@@ -54,8 +54,14 @@ class GateFixtures(unittest.TestCase):
         path.write_text('other')
         with self.assertRaises(AssertionError): gate.source_fence()
         path.write_text('first'); gate.source_fence()
-        path.chmod(0o700)
-        with self.assertRaises(AssertionError): gate.source_fence()
+        original_mode = path.stat().st_mode
+        try:
+            # Windows chmod exposes readonly, not POSIX execute-bit changes.
+            path.chmod(original_mode & ~0o222)
+            with self.assertRaises(AssertionError): gate.source_fence()
+        finally:
+            path.chmod(original_mode)
+        gate.source_fence()
 
     def test_untracked_ignored_and_symlink_source_rejected(self):
         (self.root / 'source.rs').write_text('source')

@@ -144,6 +144,13 @@ fn checked_path(path: &Path, allow_missing_leaf: bool) -> Result<PathBuf, String
             return Err("parent traversal is not allowed".into());
         }
         checked.push(part.as_os_str());
+        // A prefix alone is not the rooted Windows volume. The following
+        // RootDir iteration inspects the full root before any descendants.
+        if matches!(part, Component::Prefix(_))
+            && matches!(parts.get(index + 1), Some(Component::RootDir))
+        {
+            continue;
+        }
         match fs::symlink_metadata(&checked) {
             Ok(meta) => {
                 if meta.file_type().is_symlink() {

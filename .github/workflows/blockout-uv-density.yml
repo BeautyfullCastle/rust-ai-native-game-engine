@@ -50,6 +50,13 @@ jobs:
                    "--lib", suite + "::", "--", "--format=pretty", "--color=never", "--test-threads=1"],
                   evidence / (suite.replace("::", "-") + ".log"))
               helpers["validate_tests"](output, suite, count)
+          if os.name == "nt":
+              suite = "blockout::windows_path_tests"
+              output = helpers["run_logged"](
+                  ["cargo", "test", "--locked", "-p", "orr_editor", "--features", "models",
+                   "--lib", suite + "::", "--", "--format=pretty", "--color=never", "--test-threads=1"],
+                  evidence / "blockout-windows-root-paths.log")
+              helpers["validate_tests"](output, suite, 1)
           output = helpers["run_logged"](
               ["cargo", "test", "--locked", "-p", "orr_editor", "--features", "models", "--test", "blockout_uv_density",
                "--", "--format=pretty", "--color=never", "--test-threads=1"], evidence / "uv-density-math.log")

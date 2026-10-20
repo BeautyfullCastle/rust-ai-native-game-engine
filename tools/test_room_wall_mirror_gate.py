@@ -212,19 +212,19 @@ class MirrorGateTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes((ROOT / name).read_bytes())
         workflow = self.repo / '.github/workflows/room-wall-mirror.yml'
-        original = (ROOT / '.github/workflows/room-wall-mirror.yml').read_text()
-        workflow.write_text(original)
+        original = (ROOT / '.github/workflows/room-wall-mirror.yml').read_bytes()
+        workflow.write_bytes(original)
         gate.workflow_contract()
         for before, after in [('os: windows-latest', 'os: ubuntu-22.04'),
                               ('mode: gpu', 'mode: cpu'), ('if: always()', 'if: success()'),
                               ('if-no-files-found: error', 'if-no-files-found: warn'),
                               ('python -B tools/room_wall_mirror_gate.py', 'echo skipped')]:
-            workflow.write_text(original.replace(before, after))
+            workflow.write_bytes(original.replace(before.encode(), after.encode()))
             with self.subTest(before=before), self.assertRaises(AssertionError):
                 gate.workflow_contract()
-        workflow.write_text(original)
+        workflow.write_bytes(original)
         old = self.repo / 'tools/check-room-wall-group-rotation.py'
-        old.write_text(old.read_text().replace('17)', '16)'))
+        old.write_bytes(old.read_bytes().replace(b'17)', b'16)'))
         with self.assertRaises(AssertionError):
             gate.workflow_contract()
 

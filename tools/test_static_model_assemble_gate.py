@@ -71,7 +71,15 @@ class Fixtures(unittest.TestCase):
             root=pathlib.Path(root); p=root/'a';p.write_bytes(b'a')
             with mock.patch.object(gate,'source_root',root):
                 first=gate.snapshot(); p.write_bytes(b'b'); self.assertNotEqual(first,gate.snapshot())
-                p.write_bytes(b'a'); p.chmod(0o700); self.assertNotEqual(first,gate.snapshot())
+                p.write_bytes(b'a')
+                original_mode = p.stat().st_mode
+                try:
+                    # Windows chmod exposes readonly, not POSIX execute-bit changes.
+                    p.chmod(original_mode & ~0o222)
+                    self.assertNotEqual(first,gate.snapshot())
+                finally:
+                    p.chmod(original_mode)
+                self.assertEqual(first,gate.snapshot())
                 (root/'extra').write_bytes(b'x'); self.assertNotEqual(set(first),set(gate.snapshot()))
 
     def test_source_fence_detects_mutation(self):

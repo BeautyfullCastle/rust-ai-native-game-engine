@@ -103,7 +103,7 @@ class CaptureGateTests(unittest.TestCase):
 
     def test_gpu_runs_ignored_capture_before_required_main_editor_gpu(self):
         with tempfile.TemporaryDirectory() as directory:
-            evidence = Path(directory); calls = []
+            evidence = Path(directory).resolve(); calls = []
             def run(base, name, folder, label, ignored=False):
                 calls.append((name, ignored))
                 self.assertTrue(ignored)
