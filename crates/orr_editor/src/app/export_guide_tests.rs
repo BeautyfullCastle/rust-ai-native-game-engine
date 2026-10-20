@@ -247,13 +247,54 @@ fn actual_app_hazard_guide_opens_only_hazard_settings_and_explains_inputs() {
 #[cfg(feature = "mesh-export")]
 #[test]
 fn actual_app_play_does_not_allow_opening_export_settings_or_switch_tabs() {
+    use orr_edit::{Op, Origin};
+    use orr_fp::{fp, FP};
+    use orr_navigation::{mesh::StaticMeshGraph, AgentProfile};
+    use orr_remote::mesh_navigation::{mesh_doc_from_yaml, AgentSpec, MeshScenePin, PIN_NAME};
+
     let dir = Directory::new();
     let scene = dir.0.join("mesh.scene.yaml");
-    fs::write(
-        &scene,
-        include_bytes!("../../../../scenes/mesh_navigation_blank.scene.yaml"),
+    let graph = StaticMeshGraph::bake(
+        &[
+            [FP::ZERO, FP::ZERO, FP::ZERO],
+            [fp!(2), FP::ZERO, FP::ZERO],
+            [FP::ZERO, FP::ZERO, fp!(2)],
+            [fp!(2), FP::ZERO, fp!(2)],
+        ],
+        &[[0, 2, 3], [0, 3, 1]],
+        AgentProfile::default(),
     )
     .unwrap();
+    let pin = MeshScenePin::new(
+        &graph,
+        AgentSpec {
+            start: [fp!(0.25), FP::ZERO, fp!(0.25)],
+            goal: [fp!(1.75), FP::ZERO, fp!(1.75)],
+            max_vertical: FP::ZERO,
+            distance_per_tick: fp!(0.25),
+        },
+    )
+    .unwrap();
+    let mut document = mesh_doc_from_yaml(include_str!(
+        "../../../../scenes/mesh_navigation_blank.scene.yaml"
+    ))
+    .unwrap();
+    let value = document
+        .types()
+        .get(PIN_NAME)
+        .unwrap()
+        .read(orr_reflect::bytemuck::bytes_of(&pin));
+    document
+        .apply(
+            Op::SetSingletonField {
+                singleton: PIN_NAME.into(),
+                path: String::new(),
+                value,
+            },
+            Origin::User,
+        )
+        .unwrap();
+    fs::write(&scene, document.save_yaml()).unwrap();
     let mut h = harness(Editor::open_game(&scene, EditorGame::MeshNavigation).unwrap());
     assert!(h.state_mut().editor.start_play());
     h.state_mut().editor.sync();
