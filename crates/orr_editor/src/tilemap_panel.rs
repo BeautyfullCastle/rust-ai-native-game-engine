@@ -3,7 +3,7 @@
 use crate::{
     editor::Editor, game::EditorGame, model::Mode, sprite_panel::SpritePanel, viewport::GpuViewport,
 };
-use orr_render::{Camera, RenderList, orr_rhi::Wgpu};
+use orr_render::{orr_rhi::Wgpu, Camera, RenderList};
 use orr_sample::{
     project_compositor::ProjectCompositor, project_sprites::AssetKey,
     project_tilemap::PreparedTilemap,
@@ -14,6 +14,7 @@ use std::{
     path::{Path, PathBuf},
 };
 mod fill;
+mod resize;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ToolMode {
@@ -143,6 +144,8 @@ pub struct TilemapPanel {
     mode: ToolMode,
     painting: bool,
     selected: Option<u32>,
+    draft_width: String,
+    draft_height: String,
     error: Option<String>,
     compositor: Option<ProjectCompositor<Wgpu>>,
 }
@@ -206,6 +209,8 @@ impl TilemapPanel {
                 sidecar,
                 actors,
             },
+            draft_width: prepared.document.document().width.to_string(),
+            draft_height: prepared.document.document().height.to_string(),
             history: History::new(prepared.document)?,
             editor_epoch: None,
             tool: false,
@@ -342,6 +347,63 @@ impl TilemapPanel {
         Self::budget(&next, Self::actor_count(sprites))?;
         Ok(self.history.commit(next))
     }
+    fn sync_dimensions(&mut self) {
+        self.draft_width = self.history.current.document().width.to_string();
+        self.draft_height = self.history.current.document().height.to_string();
+        self.painting = false;
+    }
+    fn undo(&mut self) {
+        self.history.undo();
+        self.sync_dimensions();
+    }
+    fn redo(&mut self) {
+        self.history.redo();
+        self.sync_dimensions();
+    }
+    /// Explicit apply only: editing a draft never mutates the document.
+    fn resize(&mut self, editor: &Editor, sprites: &SpritePanel) -> Result<bool, String> {
+        self.painting = false;
+        if !self.editable(editor) {
+            return Err("tilemap Resize requires the matching editable Arena project".into());
+        }
+        let dimension = |text: &str| -> Result<u32, String> {
+            if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+                return Err("Width and Height must be whole numbers from 1 to 64".into());
+            }
+            text.parse()
+                .map_err(|_| "Width and Height must be whole numbers from 1 to 64".into())
+        };
+        let width = dimension(&self.draft_width)?;
+        let height = dimension(&self.draft_height)?;
+        let (asset, _) = sprites
+            .tilemap_asset(&self.key())
+            .ok_or("shared atlas missing")?;
+        let next = resize::candidate(&self.history.current, width, height, &asset.document)?;
+        Self::budget(&next, Self::actor_count(sprites))?;
+        let changed = self.history.commit(next);
+        self.sync_dimensions();
+        Ok(changed)
+    }
+    #[cfg(test)]
+    pub(crate) fn history_snapshot(
+        &self,
+    ) -> (
+        ValidatedDocument,
+        Vec<u8>,
+        Vec<ValidatedDocument>,
+        Vec<ValidatedDocument>,
+    ) {
+        (
+            self.history.current.clone(),
+            self.history.saved.clone(),
+            self.history.undo.clone(),
+            self.history.redo.clone(),
+        )
+    }
+    #[cfg(test)]
+    pub(crate) fn test_error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
     fn check_stamp(&self) -> Result<(), String> {
         if root_identity(&self.stamp.root)? != self.stamp.root_identity {
             return Err("project root was replaced; reopen the project".into());
@@ -438,7 +500,7 @@ impl TilemapPanel {
                     )
                     .clicked()
                 {
-                    self.history.undo();
+                    self.undo();
                 }
                 if ui
                     .add_enabled(
@@ -447,12 +509,23 @@ impl TilemapPanel {
                     )
                     .clicked()
                 {
-                    self.history.redo();
+                    self.redo();
                 }
                 if ui.button("Save tilemap").clicked() {
                     self.error = self.save(editor, sprites).err();
                 }
                 ui.selectable_value(&mut self.selected, None, "Erase");
+            });
+            ui.horizontal(|ui| {
+                let width = ui.label("Width");
+                ui.add(egui::TextEdit::singleline(&mut self.draft_width).desired_width(38.0))
+                    .labelled_by(width.id);
+                let height = ui.label("Height");
+                ui.add(egui::TextEdit::singleline(&mut self.draft_height).desired_width(38.0))
+                    .labelled_by(height.id);
+                if ui.button("Resize").clicked() {
+                    self.error = self.resize(editor, sprites).err();
+                }
             });
             if let Some((asset, texture)) = sprites.tilemap_asset(&self.key()) {
                 let size = self.history.current.document().tile_size;
@@ -488,7 +561,7 @@ impl TilemapPanel {
             }
         });
         if !editable {
-            ui.label("Paint, Fill and Save require matching Edit viewport, without proposal, replay or disconnected host.");
+            ui.label("Paint, Fill, Resize and Save require matching Edit viewport, without proposal, replay or disconnected host.");
         }
         if let Some(error) = &self.error {
             ui.colored_label(egui::Color32::RED, error);
@@ -699,12 +772,10 @@ mod fill_history_tests {
         let (asset, _) = sprites.tilemap_asset(&panel.key()).unwrap();
         panel.history = History::new(large.validate(&asset.document).unwrap()).unwrap();
         let before = snapshot(&panel);
-        assert!(
-            panel
-                .change(seed, Some(10), &sprites)
-                .unwrap_err()
-                .contains("4096")
-        );
+        assert!(panel
+            .change(seed, Some(10), &sprites)
+            .unwrap_err()
+            .contains("4096"));
         assert_eq!(snapshot(&panel), before);
     }
 
@@ -766,5 +837,141 @@ mod fill_history_tests {
         assert_eq!(changed, 6);
         assert!(history.commit(erased));
         assert!(!history.dirty());
+    }
+}
+
+#[cfg(all(test, feature = "project-create", target_os = "linux"))]
+mod resize_history_tests {
+    use super::*;
+    use orr_sample::project::{PreparedProject, TilemapSupport, UiSupport};
+
+    fn fixture() -> (tempfile::TempDir, TilemapPanel, SpritePanel, Editor) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("resize-panel");
+        orr_sample::project_create::create_tilemap(&orr_sample::project_create::CreateOptions {
+            output: root.clone(),
+            template: "arena-tilemap-2d-v1".into(),
+            seed: "resize-panel".into(),
+        })
+        .unwrap();
+        let admitted = crate::project::PreparedProject::open(&root).unwrap();
+        let mut editor = Editor::start(&admitted.host_spec()).unwrap();
+        editor.sync();
+        let parts = PreparedProject::open_with_capabilities(
+            &root,
+            crate::sprite_bindings::compiled_runtime(),
+            UiSupport::Unsupported,
+            TilemapSupport::Supported,
+        )
+        .unwrap()
+        .into_presentation_parts();
+        let mut panel =
+            TilemapPanel::prepare(&parts.root, parts.scene.path(), parts.tilemap.unwrap()).unwrap();
+        let mut sprites = SpritePanel::default();
+        let ctx = egui::Context::default();
+        if let Some(prepared) = parts.sprites {
+            sprites.install_prepared(
+                &ctx,
+                crate::sprite_bindings::Bindings::from_document(prepared.path, prepared.document),
+                prepared.assets,
+            );
+        }
+        sprites.install_tilemap_asset(&ctx, parts.tilemap_asset);
+        panel.install_editor_identity(&editor).unwrap();
+        assert!(panel.editable(&editor));
+        (temp, panel, sprites, editor)
+    }
+    fn draft(panel: &mut TilemapPanel, width: &str, height: &str) {
+        panel.draft_width = width.into();
+        panel.draft_height = height.into();
+    }
+    #[test]
+    fn installed_resize_dispatch_grouped_history_noop_and_crop_are_atomic() {
+        let (_temp, mut panel, sprites, editor) = fixture();
+        let initial = panel.history_snapshot();
+        let file = std::fs::read(&panel.path).unwrap();
+        draft(&mut panel, "17", "13");
+        // Drafting is not applying, and a resize ends a pending paint stroke.
+        assert_eq!(panel.history_snapshot(), initial);
+        panel.painting = true;
+        assert!(panel.resize(&editor, &sprites).unwrap());
+        assert!(!panel.painting);
+        assert_eq!(panel.history.undo.len(), 1);
+        assert_eq!(panel.document().document().cells, vec![None; 221]);
+        let grown = panel.document().clone();
+        panel.undo();
+        assert_eq!(panel.document(), &initial.0);
+        assert_eq!((&*panel.draft_width, &*panel.draft_height), ("16", "12"));
+        assert!(!panel.dirty());
+        let undone = panel.history_snapshot();
+        assert!(!panel.resize(&editor, &sprites).unwrap());
+        assert_eq!(panel.history_snapshot(), undone);
+        panel.redo();
+        assert_eq!(panel.document(), &grown);
+        assert_eq!((&*panel.draft_width, &*panel.draft_height), ("17", "13"));
+        let outside = CellCoord {
+            column: 16,
+            row: 12,
+        };
+        assert!(panel.change(outside, Some(10), &sprites).unwrap());
+        let occupied = panel.history_snapshot();
+        draft(&mut panel, "16", "12");
+        assert!(panel.resize(&editor, &sprites).is_err());
+        assert_eq!(panel.history_snapshot(), occupied);
+        assert!(panel.change(outside, None, &sprites).unwrap());
+        assert!(panel.resize(&editor, &sprites).unwrap());
+        assert_eq!(panel.document(), &initial.0);
+        assert_eq!(panel.history.saved, initial.1);
+        assert!(!panel.dirty());
+        assert_eq!(std::fs::read(&panel.path).unwrap(), file);
+    }
+    #[test]
+    fn installed_resize_rejects_invalid_guard_atlas_and_budget_without_commit() {
+        let (_temp, mut panel, sprites, editor) = fixture();
+        let initial = panel.history_snapshot();
+        for (width, height) in [
+            ("", "12"),
+            ("1.5", "12"),
+            ("-1", "12"),
+            ("0", "12"),
+            ("65", "12"),
+            ("16", "0"),
+            ("16", "65"),
+            ("4294967296", "12"),
+        ] {
+            draft(&mut panel, width, height);
+            assert!(panel.resize(&editor, &sprites).is_err());
+            assert_eq!(panel.history_snapshot(), initial);
+        }
+        draft(&mut panel, "17", "13");
+        let epoch = panel.editor_epoch.take();
+        assert!(panel
+            .resize(&editor, &sprites)
+            .unwrap_err()
+            .contains("editable"));
+        assert_eq!(panel.history_snapshot(), initial);
+        panel.editor_epoch = epoch;
+        assert!(panel
+            .resize(&editor, &SpritePanel::default())
+            .unwrap_err()
+            .contains("atlas"));
+        assert_eq!(panel.history_snapshot(), initial);
+
+        // Resize retains occupied count, but must still enforce the combined
+        // budget even for same-size candidates and an unexpectedly full input.
+        assert!(TilemapPanel::actor_count(&sprites) > 0);
+        let (asset, _) = sprites.tilemap_asset(&panel.key()).unwrap();
+        let mut large = panel.document().document().clone();
+        large.width = 64;
+        large.height = 64;
+        large.cells = vec![Some(10); 4096];
+        panel.history = History::new(large.validate(&asset.document).unwrap()).unwrap();
+        draft(&mut panel, "64", "64");
+        let full = panel.history_snapshot();
+        assert!(panel
+            .resize(&editor, &sprites)
+            .unwrap_err()
+            .contains("4096"));
+        assert_eq!(panel.history_snapshot(), full);
     }
 }
