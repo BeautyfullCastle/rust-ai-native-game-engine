@@ -516,8 +516,10 @@ fn actual_cli_installed_room_assign_undo_redo_save_reopen_hidden_sources_and_fra
         "same actual viewport dimensions"
     );
     let changed = on_pixels
-        .chunks_exact(4)
-        .zip(off_pixels.chunks_exact(4))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(off_pixels.as_chunks::<4>().0.iter())
         .filter(|(a, b)| a != b)
         .count();
     assert!(
