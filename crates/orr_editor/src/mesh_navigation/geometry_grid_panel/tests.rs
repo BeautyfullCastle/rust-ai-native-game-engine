@@ -77,11 +77,13 @@ fn confirmation_and_current_mesh_are_required_before_staging() {
 
 #[test]
 fn acknowledge_clears_form_dirty_state_and_replacement_confirmation() {
-    let mut panel = Panel::default();
-    panel.width = "16".into();
-    panel.dirty = true;
-    panel.replace_confirmed = true;
-    panel.error = Some("previous grid error".into());
+    let mut panel = Panel {
+        width: "16".into(),
+        dirty: true,
+        replace_confirmed: true,
+        error: Some("previous grid error".into()),
+        ..Default::default()
+    };
     panel.acknowledge();
     assert!(!panel.dirty());
     assert!(!panel.replace_confirmed);
@@ -183,8 +185,10 @@ fn stale_mesh_disables_palette_without_changing_manual_draft() {
         panel: Panel,
     }
 
-    let mut panel = Panel::default();
-    panel.excluded_cells = "2,0".into();
+    let panel = Panel {
+        excluded_cells: "2,0".into(),
+        ..Default::default()
+    };
     let mut harness = Harness::builder()
         .with_size(egui::vec2(700.0, 800.0))
         .build_ui_state(
@@ -209,8 +213,10 @@ fn invalid_manual_exclusions_hide_palette_without_repairing_the_text() {
         panel: Panel,
     }
 
-    let mut panel = Panel::default();
-    panel.excluded_cells = "0,,1".into();
+    let panel = Panel {
+        excluded_cells: "0,,1".into(),
+        ..Default::default()
+    };
     let mut harness = Harness::builder()
         .with_size(egui::vec2(700.0, 800.0))
         .build_ui_state(
@@ -238,9 +244,11 @@ fn maximum_grid_palette_fits_the_fixed_inspector_and_toggles_cell_48() {
         panel: Panel,
     }
 
-    let mut panel = Panel::default();
-    panel.columns = "7".into();
-    panel.rows = "7".into();
+    let panel = Panel {
+        columns: "7".into(),
+        rows: "7".into(),
+        ..Default::default()
+    };
     let mut harness = Harness::builder()
         .with_size(egui::vec2(700.0, 900.0))
         .build_ui_state(

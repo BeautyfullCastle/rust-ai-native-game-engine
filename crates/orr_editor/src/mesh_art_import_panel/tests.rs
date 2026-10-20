@@ -65,9 +65,11 @@ fn current_worker_failure_is_visible_and_releases_the_busy_guard() {
         })
         .unwrap();
     drop(sender);
-    let mut panel = Panel::default();
-    panel.input_generation = 9;
-    panel.pending = Some(receiver);
+    let mut panel = Panel {
+        input_generation: 9,
+        pending: Some(receiver),
+        ..Default::default()
+    };
 
     assert!(panel.busy());
     assert!(panel
@@ -94,8 +96,10 @@ fn stale_worker_failure_is_reported_as_prior_context() {
         })
         .unwrap();
     drop(sender);
-    let mut panel = Panel::default();
-    panel.pending = Some(receiver);
+    let mut panel = Panel {
+        pending: Some(receiver),
+        ..Default::default()
+    };
 
     assert!(panel
         .poll(

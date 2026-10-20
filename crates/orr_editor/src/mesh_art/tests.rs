@@ -705,10 +705,10 @@ fn decoded_work_budget_rejects_oversized_geometry() {
     let snapshot =
         Snapshot::from_package(&source_package, "model.glb", "LICENSE.txt", revision()).unwrap();
     let mut source = snapshot.model.source().clone();
-    let vertex = source.primitives[0].vertices[0].clone();
+    let vertex = source.primitives[0].vertices[0];
     source.primitives[0]
         .vertices
-        .resize_with(super::MAX_WORK_VERTICES + 1, || vertex.clone());
+        .resize_with(super::MAX_WORK_VERTICES + 1, || vertex);
     assert!(super::validate_source_budget(&source).is_err());
 }
 

@@ -54,16 +54,18 @@ fn document(target: [f32; 3], yaw: f32) -> Document {
 
 #[test]
 fn camera_form_parses_degrees_and_validates_projection_before_application() {
-    let mut panel = Panel::default();
-    panel.target = ["1.25".into(), "2".into(), "-3".into()];
-    panel.yaw_degrees = "90".into();
-    panel.pitch_degrees = "-20".into();
-    panel.distance = "15".into();
-    panel.fov_y_degrees = "65".into();
-    panel.near = "0.2".into();
-    panel.far = "800".into();
-    panel.projection = ProjectionMode::Orthographic;
-    panel.half_height = "12".into();
+    let mut panel = Panel {
+        target: ["1.25".into(), "2".into(), "-3".into()],
+        yaw_degrees: "90".into(),
+        pitch_degrees: "-20".into(),
+        distance: "15".into(),
+        fov_y_degrees: "65".into(),
+        near: "0.2".into(),
+        far: "800".into(),
+        projection: ProjectionMode::Orthographic,
+        half_height: "12".into(),
+        ..Default::default()
+    };
     let document = panel.parse_form(Path::new("scene.yaml"), [7; 32]).unwrap();
     assert_eq!(document.target, [1.25, 2.0, -3.0]);
     assert!((document.yaw.to_degrees() - 90.0).abs() < 1.0e-5);
@@ -83,9 +85,11 @@ fn camera_form_parses_degrees_and_validates_projection_before_application() {
 
 #[test]
 fn follow_form_is_applied_only_as_a_validated_offset() {
-    let mut panel = Panel::default();
-    panel.follow_agent = true;
-    panel.follow_offset = ["1.5".into(), "2".into(), "-3".into()];
+    let mut panel = Panel {
+        follow_agent: true,
+        follow_offset: ["1.5".into(), "2".into(), "-3".into()],
+        ..Default::default()
+    };
     let document = panel.parse_form(Path::new("scene.yaml"), [7; 32]).unwrap();
     assert_eq!(document.follow_offset, Some([1.5, 2.0, -3.0]));
 

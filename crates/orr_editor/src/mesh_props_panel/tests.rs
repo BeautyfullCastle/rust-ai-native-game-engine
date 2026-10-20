@@ -72,9 +72,11 @@ fn prop_grid_stamps_twelve_instances_atomically_as_one_history_entry() {
         .with_tint([0.75, 0.6, 0.85, 1.0])
         .unwrap();
     let identity = original.props[0].art.render_identity();
-    let mut panel = Panel::default();
-    panel.graph_revision = Some(GRAPH_REVISION);
-    panel.scene = Some(Path::new("mesh.scene.yaml").to_path_buf());
+    let mut panel = Panel {
+        graph_revision: Some(GRAPH_REVISION),
+        scene: Some(Path::new("mesh.scene.yaml").to_path_buf()),
+        ..Default::default()
+    };
     panel.reset_history(original.clone(), Some(0));
     panel.selected = Some(1);
     panel.copy_selection_fields();
@@ -123,9 +125,11 @@ fn prop_grid_rejects_invalid_capacity_spacing_and_drafts_without_mutating_docume
     );
     assert!(super::stamp_prop_grid(&original, 1, 2, 1, 1, [1.5; 2], GRAPH_REVISION).is_err());
     assert!(super::stamp_prop_grid(&original, 99, 2, 4, 3, [1.5; 2], GRAPH_REVISION).is_err());
-    let mut panel = Panel::default();
-    panel.graph_revision = Some(GRAPH_REVISION);
-    panel.scene = Some(Path::new("mesh.scene.yaml").to_path_buf());
+    let mut panel = Panel {
+        graph_revision: Some(GRAPH_REVISION),
+        scene: Some(Path::new("mesh.scene.yaml").to_path_buf()),
+        ..Default::default()
+    };
     panel.reset_history(original, Some(0));
     panel.selected = Some(1);
     panel.copy_selection_fields();
@@ -168,8 +172,10 @@ fn loaded_prefab_is_only_a_candidate_until_explicit_add_and_history_preserves_it
         .unwrap();
     let source_bytes = source.encode_embedded("mesh.scene.yaml").unwrap();
     let template = crate::mesh_prop_prefab::Template::capture("Reusable", &source).unwrap();
-    let mut panel = Panel::default();
-    panel.graph_revision = Some(GRAPH_REVISION);
+    let mut panel = Panel {
+        graph_revision: Some(GRAPH_REVISION),
+        ..Default::default()
+    };
     panel.stage_prefab(template).unwrap();
     assert!(panel.document.props.is_empty());
     assert_eq!(panel.history.len(), 1);
@@ -203,8 +209,10 @@ fn loaded_prefab_is_only_a_candidate_until_explicit_add_and_history_preserves_it
 
 #[test]
 fn prefab_discard_restores_applied_fields_and_graph_mismatch_is_rejected() {
-    let mut panel = Panel::default();
-    panel.graph_revision = Some(GRAPH_REVISION);
+    let mut panel = Panel {
+        graph_revision: Some(GRAPH_REVISION),
+        ..Default::default()
+    };
     panel.reset_history(document(1), Some(0));
     panel.selected = Some(1);
     panel.copy_selection_fields();
@@ -226,8 +234,10 @@ fn prefab_discard_restores_applied_fields_and_graph_mismatch_is_rejected() {
 fn updating_from_prefab_keeps_prop_identity_and_clears_pending_candidate() {
     let source = snapshot().with_transform([4.0, 1.0, 2.0], 1.25).unwrap();
     let template = crate::mesh_prop_prefab::Template::capture("Updated", &source).unwrap();
-    let mut panel = Panel::default();
-    panel.graph_revision = Some(GRAPH_REVISION);
+    let mut panel = Panel {
+        graph_revision: Some(GRAPH_REVISION),
+        ..Default::default()
+    };
     panel.reset_history(document(1), Some(0));
     panel.selected = Some(1);
     panel.copy_selection_fields();
@@ -281,9 +291,11 @@ fn prop_names_are_trimmed_bounded_and_printable() {
 
 #[test]
 fn workspace_save_detects_unapplied_prop_fields_and_candidate_only_drafts() {
-    let mut panel = Panel::default();
-    panel.document = document(1);
-    panel.selected = Some(1);
+    let mut panel = Panel {
+        document: document(1),
+        selected: Some(1),
+        ..Default::default()
+    };
     panel.copy_selection_fields();
     panel.scene = Some(Path::new("mesh.scene.yaml").to_path_buf());
     let document = panel.document.clone();
@@ -300,23 +312,27 @@ fn workspace_save_detects_unapplied_prop_fields_and_candidate_only_drafts() {
     panel.candidate = Some(same_candidate);
     assert!(!panel.unapplied_form_dirty());
 
-    let mut candidate_only = Panel::default();
-    candidate_only.candidate = Some(snapshot());
+    let candidate_only = Panel {
+        candidate: Some(snapshot()),
+        ..Default::default()
+    };
     assert!(candidate_only.unapplied_form_dirty());
 
     for angles in [[17.0, 31.0, 53.0], [0.0, 90.0, 0.0], [0.0, -90.0, 0.0]] {
         let rotated_art = snapshot()
             .with_rotation(crate::mesh_rotation::from_degrees(angles).unwrap())
             .unwrap();
-        let mut rotated_panel = Panel::default();
-        rotated_panel.document = Document {
-            props: vec![Prop {
-                id: 1,
-                name: "Rotated prop".into(),
-                art: rotated_art.clone(),
-            }],
+        let mut rotated_panel = Panel {
+            document: Document {
+                props: vec![Prop {
+                    id: 1,
+                    name: "Rotated prop".into(),
+                    art: rotated_art.clone(),
+                }],
+            },
+            selected: Some(1),
+            ..Default::default()
         };
-        rotated_panel.selected = Some(1);
         rotated_panel.copy_selection_fields();
         let document = rotated_panel.document.clone();
         rotated_panel.reset_history(document, Some(0));
@@ -516,10 +532,12 @@ fn staged_material_overrides_apply_to_added_prop_and_survive_history() {
 
 #[test]
 fn staged_material_overrides_update_selected_prop_as_one_history_entry() {
-    let mut panel = Panel::default();
-    panel.document = document(1);
-    panel.graph_revision = Some(GRAPH_REVISION);
-    panel.selected = Some(1);
+    let mut panel = Panel {
+        document: document(1),
+        graph_revision: Some(GRAPH_REVISION),
+        selected: Some(1),
+        ..Default::default()
+    };
     panel.copy_selection_fields();
     let initial = panel.document.clone();
     panel.reset_history(initial, Some(0));
@@ -545,10 +563,12 @@ fn staged_material_overrides_update_selected_prop_as_one_history_entry() {
 
 #[test]
 fn changed_material_slot_draft_blocks_workspace_save_until_prop_update() {
-    let mut panel = Panel::default();
-    panel.document = document(1);
-    panel.graph_revision = Some(GRAPH_REVISION);
-    panel.selected = Some(1);
+    let mut panel = Panel {
+        document: document(1),
+        graph_revision: Some(GRAPH_REVISION),
+        selected: Some(1),
+        ..Default::default()
+    };
     panel.copy_selection_fields();
     panel.scene = Some(Path::new("mesh.scene.yaml").to_path_buf());
     let initial = panel.document.clone();
@@ -573,22 +593,24 @@ fn prop_selection_clears_candidate_and_rebinds_material_slots_to_selected_arc() 
         first_snapshot.source_model_arc(),
         second_snapshot.source_model_arc()
     ));
-    let mut panel = Panel::default();
-    panel.document = Document {
-        props: vec![
-            Prop {
-                id: 1,
-                name: "First prop".into(),
-                art: first_snapshot,
-            },
-            Prop {
-                id: 2,
-                name: "Second prop".into(),
-                art: second_snapshot,
-            },
-        ],
+    let mut panel = Panel {
+        document: Document {
+            props: vec![
+                Prop {
+                    id: 1,
+                    name: "First prop".into(),
+                    art: first_snapshot,
+                },
+                Prop {
+                    id: 2,
+                    name: "Second prop".into(),
+                    art: second_snapshot,
+                },
+            ],
+        },
+        selected: Some(1),
+        ..Default::default()
     };
-    panel.selected = Some(1);
     panel.copy_selection_fields();
     panel.candidate = Some(snapshot());
 
@@ -601,22 +623,24 @@ fn prop_selection_clears_candidate_and_rebinds_material_slots_to_selected_arc() 
 
 #[test]
 fn prop_undo_and_redo_clear_candidates_before_rebinding_material_slots() {
-    let mut panel = Panel::default();
-    panel.document = Document {
-        props: vec![
-            Prop {
-                id: 1,
-                name: "First prop".into(),
-                art: snapshot(),
-            },
-            Prop {
-                id: 2,
-                name: "Second prop".into(),
-                art: snapshot(),
-            },
-        ],
+    let mut panel = Panel {
+        document: Document {
+            props: vec![
+                Prop {
+                    id: 1,
+                    name: "First prop".into(),
+                    art: snapshot(),
+                },
+                Prop {
+                    id: 2,
+                    name: "Second prop".into(),
+                    art: snapshot(),
+                },
+            ],
+        },
+        selected: Some(2),
+        ..Default::default()
     };
-    panel.selected = Some(2);
     panel.copy_selection_fields();
     let initial = panel.document.clone();
     panel.reset_history(initial, Some(0));
@@ -642,9 +666,11 @@ fn prop_undo_and_redo_clear_candidates_before_rebinding_material_slots() {
 
 #[test]
 fn duplicating_prop_clears_candidate_before_rebinding_material_slots() {
-    let mut panel = Panel::default();
-    panel.document = document(1);
-    panel.selected = Some(1);
+    let mut panel = Panel {
+        document: document(1),
+        selected: Some(1),
+        ..Default::default()
+    };
     panel.copy_selection_fields();
     panel.graph_revision = Some(GRAPH_REVISION);
     panel.candidate = Some(snapshot());
