@@ -289,7 +289,10 @@ fn every_status_is_success_and_preserves_the_erp_payload_in_all_versions() {
         initialize(&mut server, version);
         let mut fixed_text = None;
         for expected in &cases {
-            let result = call(&mut server, TOOL, json!({}));
+            let max_age = expected["observation"]["max_age_ms"]
+                .as_u64()
+                .unwrap_or(1000);
+            let result = call(&mut server, TOOL, json!({"max_age_ms":max_age}));
             assert_eq!(result["isError"], false, "{result}");
             assert_eq!(
                 &result["structuredContent"], expected,
@@ -414,6 +417,7 @@ fn hostile_success_payloads_fail_locally_without_echoing_private_data_or_retryin
         ("/observation/ui_frame", json!("18446744073709551616")),
         ("/observation/max_age_ms", json!(5001)),
         ("/observation/age_ms", json!(-1)),
+        ("/observation/age_ms", json!(5001)),
         ("/observation/binding_scope", json!(PRIVATE)),
         ("/observation/reconnect_policy", json!(PRIVATE)),
     ] {
@@ -473,7 +477,9 @@ fn hostile_success_payloads_fail_locally_without_echoing_private_data_or_retryin
 fn valid_age_bounds_are_forwarded_once_without_extra_work() {
     for version in VERSIONS {
         for age in [1, 1000, 5000] {
-            let expected = observation("ready", "none_observed");
+            let mut expected = observation("ready", "none_observed");
+            expected["observation"]["max_age_ms"] = json!(age);
+            expected["observation"]["age_ms"] = json!(0);
             let (bridge, calls, connects) = scripted(vec![(METHOD, Reply::Ok(expected.clone()))]);
             let mut server = McpServer::new(bridge, ToolGroups::ALL);
             initialize(&mut server, version);
@@ -895,5 +901,31 @@ fn genuine_erp_method_not_found_is_preserved_as_an_old_host_error() {
         );
         assert_eq!(calls.borrow().len(), 1);
         assert_eq!(connects.get(), 1);
+    }
+}
+
+#[test]
+fn reported_freshness_bound_must_match_this_call_not_a_looser_remote_default() {
+    for version in VERSIONS {
+        for (arguments, reported) in [
+            (json!({"max_age_ms":1}), 5000),
+            (json!({}), 5000),
+            (json!({"max_age_ms":5000}), 1000),
+        ] {
+            let mut mismatched = observation("ready", "none_observed");
+            mismatched["observation"]["max_age_ms"] = json!(reported);
+            mismatched["observation"]["age_ms"] = json!(0);
+            assert!(
+                work_status::validate_response(&mismatched),
+                "shape valid, wrong request context"
+            );
+            let (bridge, calls, _) = scripted(vec![(METHOD, Reply::Ok(mismatched))]);
+            let mut server = McpServer::new(bridge, ToolGroups::ALL);
+            initialize(&mut server, version);
+            let result = call(&mut server, TOOL, arguments);
+            assert_text_failure(&result);
+            assert_eq!(calls.borrow().len(), 1);
+            assert!(!text(&result).contains("5000"));
+        }
     }
 }

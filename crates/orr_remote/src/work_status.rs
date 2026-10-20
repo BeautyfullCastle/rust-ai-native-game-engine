@@ -1010,6 +1010,14 @@ pub fn validate_response(value: &J) -> bool {
             return false;
         }
         fresh = availability != Availability::Stale;
+        // Millisecond truncation permits stale age == max_age, but never a
+        // fresh claim beyond the advertised bound. Shape validation above
+        // guarantees both fields are u64 for a present observation.
+        if fresh
+            && root["observation"]["age_ms"].as_u64() > root["observation"]["max_age_ms"].as_u64()
+        {
+            return false;
+        }
         let mut all_known = true;
         for (row, id) in domains.iter().zip(DomainId::ALL) {
             let Some(record) = validate_domain(row, id) else {
@@ -2038,5 +2046,22 @@ mod tests {
         // A fixed but internally contradictory claim is rejected using the
         // same assessment classifier as the canonical response renderer.
         assert!(!validate_response(&malformed));
+    }
+    #[test]
+    fn response_validation_rejects_false_freshness_but_allows_stale_truncation() {
+        let now = Instant::now();
+        let (service, mut owner) = WorkStatusService::pair();
+        assert!(owner.publish_at(clean(), now));
+        let mut fresh = at(Some(&service), now);
+        fresh["observation"]["age_ms"] = json!(1001);
+        assert!(!validate_response(&fresh));
+        fresh["observation"]["age_ms"] = json!(1000);
+        assert!(validate_response(&fresh));
+        let mut stale = at(Some(&service), later(now, 1001));
+        stale["observation"]["age_ms"] = json!(1000);
+        assert!(
+            validate_response(&stale),
+            "stale duration may truncate to the same integer bound"
+        );
     }
 }

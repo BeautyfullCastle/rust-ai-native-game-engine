@@ -433,12 +433,14 @@ fn s(v: &J) -> &str {
 
 fn editor_work_status(b: &mut Bridge, arguments: &Map<String, J>) -> Result<Out, DetailedFail> {
     let params = J::Object(arguments.clone());
-    orr_remote::work_status::parse_max_age(&params)
+    let requested_max_age = orr_remote::work_status::parse_max_age(&params)
         .map_err(|_| DetailedFail::new("editor work status expects only max_age_ms, an integer from 1 to 5000"))?;
     let status = b.call_detailed("editor.work_status", params)?;
     // The connected host is not trusted to return arbitrary nested data under
     // this method name. Reject unbounded or non-contract facts without echoing.
-    if !orr_remote::work_status::validate_response(&status) {
+    if !orr_remote::work_status::validate_response(&status)
+        || status["observation"]["max_age_ms"].as_u64().is_some_and(|reported| reported != requested_max_age)
+    {
         return Err(DetailedFail::new("editor work status returned an invalid or oversized observation"));
     }
     // Keep all observation limits visible in both negotiated success formats.

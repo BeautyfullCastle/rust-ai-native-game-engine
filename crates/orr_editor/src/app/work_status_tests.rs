@@ -195,8 +195,8 @@ fn actual_app_work_status_one_event_callback_and_early_return_publish() {
     // The same production final wrapper runs even when its draw callback exits.
     let app = h.state_mut();
     let ctx = egui::Context::default();
-    let _ = ctx.run(egui::RawInput::default(), |ctx| {
-        egui::CentralPanel::default().show(ctx, |ui| app.with_close_review(ui, |_, _| {}));
+    let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        app.with_close_review(ui, |_, _| {});
     });
     let final_status = app
         .editor
