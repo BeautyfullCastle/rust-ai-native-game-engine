@@ -7,11 +7,10 @@ name: determinism
 # integer-only simulation.
 
 on:
-  push:
-    branches: [main]
   pull_request:
+    branches: [main, su/engine-correctness-hardening]
+    types: [ready_for_review]
   workflow_dispatch:
-
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -5419,7 +5418,7 @@ jobs:
     # runs must build and actually execute in Chromium: transport, rollback,
     # native/wasm checksums and GPU canvas pixels are mandatory below.
     name: wasm32-unknown-unknown (browser runtime)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
