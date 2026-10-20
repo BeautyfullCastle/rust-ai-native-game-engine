@@ -620,8 +620,10 @@ fn actual_viewport_ramp_navigation_save_reopen_play_and_stale_refusal() {
         h.state_mut().terrain.document.apply(&edits).unwrap();
         let negative = capture(&mut h, &evidence, name);
         let changed = after
-            .chunks_exact(4)
-            .zip(negative.chunks_exact(4))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(negative.as_chunks::<4>().0.iter())
             .filter(|(a, b)| a[..3].iter().zip(&b[..3]).any(|(x, y)| x.abs_diff(*y) > 12))
             .count();
         assert!(
