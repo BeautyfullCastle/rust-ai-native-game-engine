@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Issues258/261/263 bounded, exact-inventory CPU + hosted llvmpipe acceptance.
+"""Issues258/261/263/284 bounded, exact-inventory CPU + hosted llvmpipe acceptance.
 
 Run CPU then GPU on the same checked-out head/target directory. No retries,
 no hidden refreshes, no success substitution after an original failure.
@@ -18,7 +18,6 @@ import zlib
 FEATURES = 'tilemap,project-create'
 CONSUMER = ['project_tilemap::tests::' + n for n in ('cache_reuse_budget_and_failure_are_transactional', 'cache_hit_still_checks_lock_tamper_and_installer_authority')]
 PACKAGE = ['tests::' + n for n in ('tilemap_declaration_and_all_lock_writers_fail_closed', 'tilemap_added_inside_checked_callback_cannot_publish')]
-CPU_COUNT = 35
 CORE = ['tests::' + n for n in (
     'strict_json_and_resource_bounds', 'structural_bounds_and_finite_world_arithmetic',
     'region_validation_and_failure_preserving_edits', 'asymmetric_literal_world_and_uv_oracle')]
@@ -58,6 +57,27 @@ PANEL += ['tilemap_panel::tests::installed::' + n for n in (
     'installed_png_and_sprite_document_tamper_refuse_save_with_unchanged_lock',
     'changed_actor_sidecar_refuses_save_and_epoch_pin_is_not_implicitly_refreshed',
     'scene_read_limit_matches_four_mebibyte_admission', 'sidecar_symlink_save_is_refused')]
+
+RECTANGLE = ['tilemap_panel::rectangle::tests::' + n for n in (
+    'asymmetric_literal_oracle_normalizes_all_corner_orders_and_preserves_metadata',
+    'single_cells_rows_and_columns_preserve_empty_versus_region_zero',
+    'whole_maximum_grid_paint_and_erase_are_bounded_and_immutable',
+    'invalid_original_endpoints_and_regions_reject_without_mutation',
+    'noops_still_validate_supplied_atlas_and_untouched_cells',
+    'grouped_history_noop_saved_redo_and_budget_failures_are_atomic')]
+RECTANGLE += ['tilemap_panel::rectangle::installed_gestures::' + n for n in (
+    'installed_rectangle_pointer_gesture_commits_once_with_captured_selection',
+    'installed_rectangle_escape_and_focus_loss_cancel_without_history_changes',
+    'installed_rectangle_invalid_release_cancels_and_preserves_redo',
+    'installed_rectangle_source_stamp_change_cancels_without_overwriting_history',
+    'installed_rectangle_transient_focus_loss_cancels_even_when_focus_returns',
+    'installed_rectangle_coalesced_button_positions_do_not_follow_later_moves',
+    'installed_rectangle_scene_byte_change_rejects_release_without_history_changes')]
+CPU_COUNT = 35 + len(RECTANGLE)
+# Keep the inherited 35 mandatory cases, then add rather than replace coverage.
+_BASE_CPU = CONSUMER + PACKAGE + CORE + ADMISSION + PANEL + FILL + RESIZE + [RECORDING, CREATOR]
+if len(_BASE_CPU) != 35 or len(set(_BASE_CPU + RECTANGLE)) != CPU_COUNT:
+    raise RuntimeError('Mandatory CPU inventory count, uniqueness or disjointness changed')
 
 
 def sha(path):
@@ -216,6 +236,8 @@ def source_fence(root):
         'tools/tilemap_authoring_gate.py', 'tools/test_tilemap_authoring_gate.py',
         'crates/orr_editor/src/app/tilemap_fill_tests.rs',
         'crates/orr_editor/src/app/tilemap_resize_tests.rs',
+        'crates/orr_editor/src/app/tilemap_rectangle_tests.rs',
+        'crates/orr_editor/src/tilemap_panel/rectangle.rs',
         'crates/orr_editor/src/tilemap_panel/resize.rs',
         'crates/orr_editor/src/tilemap_panel/fill.rs')}
     # Includes original acceptance test dependencies, candidate validation,
@@ -514,6 +536,230 @@ def validate_resize(directory, evidence, identities, load_capture=capture, expec
         files[str(path.relative_to(evidence))] = hashlib.sha256(data).hexdigest()
     return files
 
+RECTANGLE_EDITOR = 'app::tilemap_rectangle_tests::actual_cli_rectangle_save_reopen_play_literal_cells'
+RECTANGLE_BEFORE = [10, None, 20, None, 11, None, 20,
+    None, 20, None, 10, None, 20, None,
+    20, None, 11, None, 20, None, 10,
+    None, 10, None, 20, None, 11, None]
+RECTANGLE_PAINTED = [10, None, 20, None, 11, None, 20,
+    None, 11, 11, 11, 11, 20, None,
+    20, 11, 11, 11, 11, None, 10,
+    None, 10, None, 20, None, 11, None]
+RECTANGLE_CELLS = [10, None, 20, None, 11, None, 20,
+    None, 11, None, None, 11, 20, None,
+    20, 11, None, None, 11, None, 10,
+    None, 10, None, 20, None, 11, None]
+RECTANGLE_WRONG = [10, None, 20, None, 11, 11, None,
+    None, 11, 11, None, None, 11, None,
+    20, None, 11, None, 20, None, 10,
+    None, 10, None, 20, None, 11, None]
+RECTANGLE_EXTRA = [*RECTANGLE_CELLS[:-1], 11]
+RECTANGLE_APP_PHASES = ['before', 'outside-origin', 'outside-cell-origin', 'preview',
+    'escape-cancelled', 'focus-cancelled', 'outside-release', 'obstructed-release',
+    'mode-cancelled', 'tool-cancelled', 'source-invalidated', 'scene-bytes-invalidated',
+    'play-cancelled', 'play-stopped', 'stale-scene-epoch', 'fresh-authoring',
+    'rectangle-painted', 'paint-undo', 'noop-preserves-redo', 'paint-redo',
+    'reverse-painted', 'rectangle-erased', 'erase-undo', 'erase-redo', 'saved',
+    'saved-noop', 'saved-undo-noop', 'saved-redo', 'fresh-reopen', 'play']
+RECTANGLE_PHASES = RECTANGLE_APP_PHASES + ['runtime-saved', 'runtime-wrong-stride', 'runtime-extra-cell']
+RECTANGLE_PLAY_PHASES = ['play-cancelled', 'play', 'runtime-saved', 'runtime-wrong-stride', 'runtime-extra-cell']
+
+
+def rectangle_literal(name):
+    if name in ('rectangle-painted', 'paint-redo', 'reverse-painted', 'erase-undo', 'saved-undo-noop'):
+        return RECTANGLE_PAINTED
+    if name in ('rectangle-erased', 'erase-redo', 'saved', 'saved-noop', 'saved-redo', 'fresh-reopen', 'play'):
+        return RECTANGLE_CELLS
+    return RECTANGLE_BEFORE
+
+
+def rectangle_history(name):
+    if name in ('paint-undo', 'noop-preserves-redo'):
+        return (0, 1, False)
+    if name in ('rectangle-painted', 'paint-redo', 'reverse-painted'):
+        return (1, 0, True)
+    if name in ('rectangle-erased', 'erase-redo'):
+        return (2, 0, True)
+    if name in ('erase-undo', 'saved-undo-noop'):
+        return (1, 1, True)
+    if name in ('saved', 'saved-noop', 'saved-redo'):
+        return (2, 0, False)
+    return (0, 0, False)
+
+
+RECTANGLE_IDENTITIES = {'creator_fnv1a64', 'test_source_fnv1a64', 'panel_source_fnv1a64',
+    'panel_rectangle_source_fnv1a64', 'core_source_fnv1a64', 'source_rgba_fnv1a64'}
+RECTANGLE_FRAME_SCOPE = ('authoring unchanged; actual App Play and saved runtime tick 1; '
+    'wrong-stride, extra-cell and presentation-free authoritative Frame bytes equal')
+
+
+def validate_rectangle(directory, evidence, identities, load_capture=capture, expected_adapter='llvmpipe'):
+    """Artifact integrity audit only; Rust owns decoded Frame/pixel/literal assertions.
+
+    A nondefault adapter is an explicit local audit, never the hosted main route.
+    """
+    def require(condition, message):
+        if not condition:
+            raise RuntimeError('Rectangle ' + message)
+    def keys(value, expected, message):
+        require(type(value) is dict and set(value) == set(expected), message + ' keys')
+    def cells(value, expected):
+        return (type(value) is list and len(value) == len(expected) and
+            all((a is None if b is None else type(a) is int and a == b)
+                for a, b in zip(value, expected)))
+    require(type(expected_adapter) is str and bool(expected_adapter.strip()), 'empty adapter identity')
+    require(set(identities) == RECTANGLE_IDENTITIES, 'source identity census')
+    receipt = evidence_json(directory / 'receipt.json')
+    partial = evidence_json(directory / 'partial-receipt.json')
+    keys(receipt, RECTANGLE_IDENTITIES | {'completed', 'captures', 'literal_before', 'literal_extra_cell',
+        'literal_painted', 'literal_cells', 'literal_wrong_stride', 'oracle_pixels_per_runtime_capture',
+        'wrong_stride_visible_pixels', 'extra_cell_visible_pixels', 'preview_visible_pixels', 'preview_pixel_rect', 'frame_parity', 'presentation_free_frame_fnv1a64',
+        'fixture_file_bindings', 'native_os_input', 'export', 'windows'}, 'final receipt')
+    require(receipt['completed'] is True and all(receipt[k] is False
+        for k in ('native_os_input', 'export', 'windows')), 'incomplete or overclaimed scope')
+    for field, expected in [('literal_before', RECTANGLE_BEFORE), ('literal_extra_cell', RECTANGLE_EXTRA),
+            ('literal_painted', RECTANGLE_PAINTED), ('literal_cells', RECTANGLE_CELLS),
+            ('literal_wrong_stride', RECTANGLE_WRONG)]:
+        require(cells(receipt[field], expected), 'literal cell contract: ' + field)
+    require(type(receipt['oracle_pixels_per_runtime_capture']) is int and
+        receipt['oracle_pixels_per_runtime_capture'] == 7168, 'oracle count')
+    require(type(receipt['wrong_stride_visible_pixels']) is int and
+        8 <= receipt['wrong_stride_visible_pixels'] <= 256, 'wrong-stride verdict')
+    require(type(receipt['extra_cell_visible_pixels']) is int and
+        8 <= receipt['extra_cell_visible_pixels'] <= 256, 'extra-cell verdict')
+    require(type(receipt['preview_visible_pixels']) is int and
+        8 <= receipt['preview_visible_pixels'] <= 1800 * 2000, 'preview verdict')
+    require(receipt['frame_parity'] == RECTANGLE_FRAME_SCOPE, 'Frame scope')
+    for field, data in identities.items():
+        require(receipt[field] == fnv1a64(data), 'source/creator fingerprint mismatch: ' + field)
+    bindings = receipt['fixture_file_bindings']
+    require(type(bindings) is list and bool(bindings), 'fixture provenance missing')
+    paths = []
+    for binding in bindings:
+        keys(binding, {'path', 'bytes', 'fnv1a64'}, 'fixture binding')
+        name = binding['path']
+        require(type(name) is str and name and '\\' not in name and
+            not Path(name).is_absolute() and all(p not in ('', '.', '..') for p in name.split('/')),
+            'fixture provenance path')
+        require(type(binding['bytes']) is int and 0 <= binding['bytes'] <= 64 * 1024**2 and
+            type(binding['fnv1a64']) is str and re.fullmatch('[0-9a-f]{16}', binding['fnv1a64']),
+            'fixture provenance fingerprint')
+        paths.append(name)
+    require(paths == sorted(set(paths)) and 'arena.tilemap.json' in paths and 'orr.project.json' in paths,
+            'fixture provenance census/order')
+    rows = receipt['captures']
+    require(type(rows) is list and all(type(r) is dict for r in rows) and
+        [r.get('name') for r in rows] == RECTANGLE_PHASES, 'capture census/order')
+    expected_partial = json.loads(json.dumps(rows))
+    expected_partial[-1]['pixel_verdict_pending'] = True
+    expected_partial[-1].pop('oracle_pixels_checked', None)
+    require(json.dumps(partial, sort_keys=True) == json.dumps(
+        {'completed': False, 'captures': expected_partial, 'native_os_input': False}, sort_keys=True),
+            'partial capture history')
+    expected_files = {'receipt.json', 'partial-receipt.json', 'creator.log',
+        'saved.tilemap.json', 'wrong-stride.tilemap.json', 'extra-cell.tilemap.json', 'presentation-free.frame', 'preview-baseline-app.png'}
+    frames, pixels, checksums, histories, preview_pixels = {}, {}, {}, {}, None
+    common = {'name', 'files', 'scope', 'size', 'rgba_fnv1a64', 'frame_fnv1a64', 'tick', 'checksum'}
+    for row in rows:
+        name = row['name']
+        app = name in RECTANGLE_APP_PHASES
+        keys(row, common | ({'frame_source', 'adapter', 'backend', 'device_type', 'cells', 'dimensions', 'history'}
+            if app else {'pixel_verdict_pending', 'oracle_pixels_checked'}), 'capture ' + name)
+        suffixes = ['.rgba', '.png', '.frame'] + (['-app.png'] if app else [])
+        require(row['files'] == [name + suffix for suffix in suffixes], 'file manifest')
+        expected_files.update(row['files'])
+        size = row['size']
+        require(type(size) is list and len(size) == 2 and
+            all(type(n) is int and 1 <= n <= 4096 for n in size), 'capture dimensions')
+        rgba = evidence_bytes(directory / (name + '.rgba'))
+        require(len(rgba) == size[0] * size[1] * 4 and fnv1a64(rgba) == row['rgba_fnv1a64'],
+                'raw RGBA fingerprint/size')
+        evidence_bytes(directory / (name + '.png'))
+        require(load_capture(directory / (name + '.png'), tuple(size))[1] == rgba, 'PNG/raw RGBA mismatch')
+        frame = evidence_bytes(directory / (name + '.frame'))
+        require(fnv1a64(frame) == row['frame_fnv1a64'], 'Frame fingerprint')
+        tick = 1 if name in RECTANGLE_PLAY_PHASES else 0
+        require(type(row['tick']) is int and row['tick'] == tick and
+            type(row['checksum']) is int and 0 <= row['checksum'] < 2**64, 'Frame identity')
+        if app:
+            require(row['scope'] == 'actual App viewport; authoring grid, no pixel verdict', 'App scope')
+            require(type(row['adapter']) is str and expected_adapter.lower() in row['adapter'].lower()
+                and row['backend'] == 'Vulkan' and row['device_type'] == 'Cpu',
+                'hosted llvmpipe required; local SwiftShader is not equivalent')
+            require(row['frame_source'] == 'watch.subscribe source=view matched to predicted tick/checksum',
+                'actual authoritative Frame source')
+            require(cells(row['cells'], rectangle_literal(name)) and cells(row['dimensions'], [7, 4]),
+                'App literal grid/dimensions')
+            evidence_bytes(directory / (name + '-app.png'))
+            app_pixels = load_capture(directory / (name + '-app.png'), (1800, 2000))[1]
+            if name == 'preview':
+                preview_pixels = app_pixels
+            history = row['history']
+            keys(history, {'undo', 'redo', 'dirty', 'saved_fnv1a64'}, 'history')
+            require(type(history['undo']) is int and type(history['redo']) is int and
+                type(history['dirty']) is bool and type(history['saved_fnv1a64']) is str and
+                re.fullmatch('[0-9a-f]{16}', history['saved_fnv1a64']), 'history types')
+            require((history['undo'], history['redo'], history['dirty']) == rectangle_history(name),
+                'history transaction/noop/cancellation')
+            histories[name] = history['saved_fnv1a64']
+        else:
+            require(row['scope'] == 'actual saved PreparedRuntime PlayHost production compositor', 'runtime scope')
+            require(size == [224, 224] and row['pixel_verdict_pending'] is False and
+                type(row['oracle_pixels_checked']) is int and row['oracle_pixels_checked'] == 7168,
+                'runtime pixel oracle incomplete')
+        frames[name], pixels[name], checksums[name] = frame, rgba, row['checksum']
+    for group in ([n for n in RECTANGLE_APP_PHASES if n not in RECTANGLE_PLAY_PHASES], RECTANGLE_PLAY_PHASES):
+        require(all(frames[n] == frames[group[0]] and checksums[n] == checksums[group[0]] for n in group),
+                'actual Frame byte/checksum parity mismatch')
+    saved_phases = ['saved', 'saved-noop', 'saved-undo-noop', 'saved-redo', 'fresh-reopen', 'play']
+    for group in ([n for n in RECTANGLE_APP_PHASES if n not in saved_phases], saved_phases):
+        require(all(histories[n] == histories[group[0]] for n in group), 'saved marker changed without Save')
+    require(histories['before'] != histories['saved'], 'Save must update saved marker')
+    require(histories['saved'] == fnv1a64(evidence_bytes(directory / 'saved.tilemap.json')),
+        'saved marker must match retained saved bytes')
+    rect = receipt['preview_pixel_rect']
+    require(type(rect) is list and len(rect) == 4 and all(type(n) is int for n in rect) and
+        0 <= rect[0] < rect[2] <= 1800 and 0 <= rect[1] < rect[3] <= 2000, 'preview region')
+    evidence_bytes(directory / 'preview-baseline-app.png')
+    baseline_pixels = load_capture(directory / 'preview-baseline-app.png', (1800, 2000))[1]
+    require(len(baseline_pixels) == len(preview_pixels) == 1800 * 2000 * 4, 'preview image size')
+    changed = sum(any(abs(baseline_pixels[i+c] - preview_pixels[i+c]) > 3 for c in range(4))
+        for y in range(rect[1], rect[3]) for x in range(rect[0], rect[2]) for i in [(y * 1800 + x) * 4])
+    require(changed == receipt['preview_visible_pixels'], 'retained preview pixel verdict')
+    bare = evidence_bytes(directory / 'presentation-free.frame')
+    require(fnv1a64(bare) == receipt['presentation_free_frame_fnv1a64'] and bare == frames['play'],
+            'presentation-free Frame parity')
+    for name, field, xs, ys in [
+            ('runtime-wrong-stride', 'wrong_stride_visible_pixels', range(136, 152), range(48, 64)),
+            ('runtime-extra-cell', 'extra_cell_visible_pixels', range(152, 168), range(96, 112))]:
+        good, wrong = pixels['runtime-saved'], pixels[name]
+        changed = sum(any(abs(good[i+c] - wrong[i+c]) > 3 for c in range(4))
+            for y in ys for x in xs for i in [(y * 224 + x) * 4])
+        require(changed == receipt[field], 'retained ' + name + ' pixel verdict')
+    for filename, literal in [('saved.tilemap.json', RECTANGLE_CELLS),
+            ('wrong-stride.tilemap.json', RECTANGLE_WRONG), ('extra-cell.tilemap.json', RECTANGLE_EXTRA)]:
+        doc = evidence_json(directory / filename)
+        keys(doc, {'version', 'sprite', 'width', 'height', 'tile_size', 'origin', 'units_per_pixel', 'cells'},
+             'retained map')
+        require(type(doc['version']) is int and doc['version'] == 1 and
+            type(doc['width']) is int and doc['width'] == 7 and
+            type(doc['height']) is int and doc['height'] == 4 and cells(doc['cells'], literal) and
+            cells(doc['tile_size'], [16, 16]) and doc['origin'] == [-56., 144.] and
+            type(doc['units_per_pixel']) in (int, float) and doc['units_per_pixel'] == 1.0 and
+            doc['sprite'] == {'package': 'sample-sprites', 'document': 'sprites.json'}, 'retained literal map/metadata')
+    require({p.name for p in directory.iterdir()} == expected_files, 'retained artifact census')
+    files = {}
+    for name in sorted(expected_files):
+        path = directory / name
+        if name == 'creator.log':
+            require(path.is_file() and not path.is_symlink() and path.stat().st_size <= 64 * 1024**2,
+                    'missing creator log')
+            data = path.read_bytes()
+        else:
+            data = evidence_bytes(path)
+        files[str(path.relative_to(evidence))] = hashlib.sha256(data).hexdigest()
+    return files
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -608,6 +854,8 @@ def main():
         inventory('editor', bins['orr_editor'], 'app::tilemap_tests::', [EDITOR], [EDITOR])
         inventory('fill', bins['orr_editor'], 'tilemap_panel::fill', FILL, [])
         inventory('resize', bins['orr_editor'], 'tilemap_panel::resize', RESIZE, [])
+        inventory('rectangle', bins['orr_editor'], 'tilemap_panel::rectangle', RECTANGLE, [])
+        inventory('rectangle-editor', bins['orr_editor'], 'app::tilemap_rectangle_tests::', [RECTANGLE_EDITOR], [RECTANGLE_EDITOR])
         inventory('resize-editor', bins['orr_editor'], 'app::tilemap_resize_tests::', [RESIZE_EDITOR], [RESIZE_EDITOR])
         inventory('fill-editor', bins['orr_editor'], 'app::tilemap_fill_tests::', [FILL_EDITOR], [FILL_EDITOR])
         inventory('creator', bins['orr_sample'], 'project_create::tilemap::tests::', [CREATOR], [])
@@ -620,6 +868,7 @@ def main():
             ('panel', 'orr_editor', 'tilemap_panel::tests::', PANEL, False),
             ('fill', 'orr_editor', 'tilemap_panel::fill', FILL, False),
             ('resize', 'orr_editor', 'tilemap_panel::resize', RESIZE, False),
+            ('rectangle', 'orr_editor', 'tilemap_panel::rectangle', RECTANGLE, False),
             ('creator', 'orr_sample', CREATOR, [CREATOR], True),
         ]:
             fenced_cases(label, bins[target_name], selector, expected, exact=exact)
@@ -643,9 +892,9 @@ def main():
     if not icd.is_file():
         raise RuntimeError('Hosted Mesa lavapipe ICD is required')
     os.environ.update(VK_ICD_FILENAMES=str(icd), WGPU_BACKEND='vulkan', ORR_REQUIRE_GPU='1', ORR_NEW_ARENA_BIN=bins['creator'])
-    runtime, editor, fill, resize = phase / 'runtime', phase / 'editor', phase / 'fill', phase / 'resize'
-    runtime.mkdir(); editor.mkdir(); fill.mkdir(); resize.mkdir()
-    os.environ.update(ORR_TILEMAP_RUNTIME_EVIDENCE=str(runtime), ORR_TILEMAP_EDITOR_EVIDENCE=str(editor), ORR_TILEMAP_FILL_EVIDENCE=str(fill), ORR_TILEMAP_RESIZE_EVIDENCE=str(resize))
+    runtime, editor, fill, resize, rectangle = (phase / name for name in ('runtime', 'editor', 'fill', 'resize', 'rectangle'))
+    runtime.mkdir(); editor.mkdir(); fill.mkdir(); resize.mkdir(); rectangle.mkdir()
+    os.environ.update(ORR_TILEMAP_RUNTIME_EVIDENCE=str(runtime), ORR_TILEMAP_EDITOR_EVIDENCE=str(editor), ORR_TILEMAP_FILL_EVIDENCE=str(fill), ORR_TILEMAP_RESIZE_EVIDENCE=str(resize), ORR_TILEMAP_RECTANGLE_EVIDENCE=str(rectangle))
     output = fenced_cases('compositor', bins['project_tilemap_compositor'], COMPOSITOR, [COMPOSITOR], exact=True)
     adapter_lines = re.findall(r'^tile background GPU: (.+)$', output, re.M)
     if len(adapter_lines) != 1 or 'llvmpipe' not in adapter_lines[0].lower():
@@ -656,6 +905,8 @@ def main():
     fenced_cases('fill-editor', bins['orr_editor'], FILL_EDITOR, [FILL_EDITOR], ignored=True, exact=True)
 
     fenced_cases('resize-editor', bins['orr_editor'], RESIZE_EDITOR, [RESIZE_EDITOR], ignored=True, exact=True)
+
+    fenced_cases('rectangle-editor', bins['orr_editor'], RECTANGLE_EDITOR, [RECTANGLE_EDITOR], ignored=True, exact=True)
 
     files = validate_receipts(runtime, editor, evidence, records['creator']['sha256'],
                               sha(root / 'assets/sprite_demo/lantern_keeper.rgba'))
@@ -672,7 +923,11 @@ def main():
     resize_identities['test_source_fnv1a64'] = (root / 'crates/orr_editor/src/app/tilemap_resize_tests.rs').read_bytes()
     resize_identities['panel_resize_source_fnv1a64'] = (root / 'crates/orr_editor/src/tilemap_panel/resize.rs').read_bytes()
     files.update(validate_resize(resize, evidence, resize_identities))
-    (phase / 'verified.json').write_text(json.dumps({'gpu_tests_passed': 5, 'capture_sha256': files,
+    rectangle_identities = {k: v for k, v in identities.items() if k != 'panel_fill_source_fnv1a64'}
+    rectangle_identities['test_source_fnv1a64'] = (root / 'crates/orr_editor/src/app/tilemap_rectangle_tests.rs').read_bytes()
+    rectangle_identities['panel_rectangle_source_fnv1a64'] = (root / 'crates/orr_editor/src/tilemap_panel/rectangle.rs').read_bytes()
+    files.update(validate_rectangle(rectangle, evidence, rectangle_identities))
+    (phase / 'verified.json').write_text(json.dumps({'gpu_tests_passed': 6, 'capture_sha256': files,
         'scope': 'Linux hosted llvmpipe; no native OS input, exported player, or Windows GPU claim'}, indent=2))
 
 

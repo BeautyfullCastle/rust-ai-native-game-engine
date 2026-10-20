@@ -79,7 +79,7 @@ class GateTests(unittest.TestCase):
         self.assertTrue(all(name.startswith('tilemap_panel::fill') for name in gate.FILL))
         self.assertTrue(set(gate.FILL).isdisjoint(gate.PANEL))
         self.assertEqual(gate.CPU_COUNT, sum(map(len, [gate.CONSUMER, gate.PACKAGE,
-            gate.CORE, gate.ADMISSION, gate.PANEL, gate.FILL, gate.RESIZE])) + 2)
+            gate.CORE, gate.ADMISSION, gate.PANEL, gate.FILL, gate.RESIZE, gate.RECTANGLE])) + 2)
         self.assertEqual(gate.fnv1a64(b'hello'), 'a430d84680aabd0b')
         self.assertNotEqual(gate.fnv1a64(b'hello'), hashlib.sha256(b'hello').hexdigest())
 
@@ -88,7 +88,73 @@ class GateTests(unittest.TestCase):
         self.assertEqual(len(set(gate.RESIZE)), 5)
         self.assertTrue(all(n.startswith('tilemap_panel::resize') for n in gate.RESIZE))
         self.assertTrue(set(gate.RESIZE).isdisjoint(gate.PANEL + gate.FILL))
-        self.assertEqual(gate.CPU_COUNT - len(gate.RESIZE), 30)
+        self.assertEqual(gate.CPU_COUNT - len(gate.RECTANGLE) - len(gate.RESIZE), 30)
+
+    def test_rectangle_inventory_is_additive_exact_and_not_ignored(self):
+        self.assertEqual(len(gate.RECTANGLE), 13)
+        self.assertEqual(gate.CPU_COUNT - len(gate.RECTANGLE), 35)
+        self.assertEqual(len(set(gate.RECTANGLE)), len(gate.RECTANGLE))
+        self.assertTrue(all(n.startswith('tilemap_panel::rectangle::') for n in gate.RECTANGLE))
+        self.assertTrue(set(gate.RECTANGLE).isdisjoint(gate._BASE_CPU))
+        output = ''.join(n + ': test\n' for n in gate.RECTANGLE)
+        gate.validate_inventory(output, gate.RECTANGLE)
+        gate.validate_inventory('', [])
+        for missing in (output.splitlines()[0] + '\n', ''):
+            with self.assertRaises(RuntimeError): gate.validate_inventory(missing, gate.RECTANGLE)
+        with self.assertRaises(RuntimeError): gate.validate_inventory(output, [])
+        singleton = gate.RECTANGLE_EDITOR + ': test\n'
+        gate.validate_inventory(singleton, [gate.RECTANGLE_EDITOR])
+        with self.assertRaises(RuntimeError): gate.validate_inventory('', [gate.RECTANGLE_EDITOR])
+        with self.assertRaises(RuntimeError): gate.validate_inventory(singleton * 2, [gate.RECTANGLE_EDITOR])
+        # Exercise the exact named rectangle producer, not an anonymous pass count.
+        good = ('running 1 test\ntest ' + gate.RECTANGLE_EDITOR + ' ... ok\n'
+            'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1s\n')
+        gate.validate_cases(good, [gate.RECTANGLE_EDITOR])
+        for bad in (good.replace(' ... ok', ' ... ignored'),
+                    good.replace('1 passed', '0 passed'), good.replace(gate.RECTANGLE_EDITOR, 'other')):
+            with self.assertRaises(RuntimeError): gate.validate_cases(bad, [gate.RECTANGLE_EDITOR])
+
+    def test_frozen_producer_and_source_fences_fail_before_or_after_execution(self):
+        import ast
+        tree = ast.parse(Path(gate.__file__).read_text())
+        main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'main')
+        fence = next(n for n in main.body if isinstance(n, ast.FunctionDef) and n.name == 'fenced_cases')
+        code = compile(ast.Module(body=[fence], type_ignores=[]), '<actual gate fence>', 'exec')
+        binary = self.root / 'producer'; binary.write_bytes(b'fresh-native-producer')
+        manifest = self.root / 'manifest.json'
+        manifest.write_text(json.dumps({'orr_editor': {'path': str(binary), 'sha256': gate.sha(binary)}}))
+        sources = {'source': 'fresh'}
+        ns = {'Path': Path, 'root': self.root, 'initial_sources': dict(sources),
+            'source_fence': lambda _: dict(sources), 'manifest': manifest,
+            'evidence_json': gate.evidence_json, 'sha': gate.sha}
+        calls = []
+        def cases(*args, **kwargs):
+            calls.append(args)
+            return 'passed'
+        ns['cases'] = cases
+        exec(code, ns)
+        run = lambda: ns['fenced_cases']('rectangle', str(binary), gate.RECTANGLE_EDITOR, [gate.RECTANGLE_EDITOR])
+        self.assertEqual(run(), 'passed')
+        self.assertEqual(len(calls), 1)
+        binary.write_bytes(b'stale producer')
+        with self.assertRaisesRegex(RuntimeError, 'before execution'): run()
+        self.assertEqual(len(calls), 1)
+        binary.write_bytes(b'fresh-native-producer')
+        sources['source'] = 'forged source'
+        with self.assertRaisesRegex(RuntimeError, 'before test execution'): run()
+        self.assertEqual(len(calls), 1)
+        sources['source'] = 'fresh'
+        def mutate_binary(*_args, **_kwargs):
+            binary.write_bytes(b'changed during test')
+            return 'passed'
+        ns['cases'] = mutate_binary
+        with self.assertRaisesRegex(RuntimeError, 'during execution'): run()
+        binary.write_bytes(b'fresh-native-producer')
+        def mutate_source(*_args, **_kwargs):
+            sources['source'] = 'changed during test'
+            return 'passed'
+        ns['cases'] = mutate_source
+        with self.assertRaisesRegex(RuntimeError, 'during test execution'): run()
 
     def test_scoped_source_fence_detects_changes_and_new_sources(self):
         root = self.root / 'source'; root.mkdir()
@@ -101,6 +167,8 @@ class GateTests(unittest.TestCase):
                      'tools/test_tilemap_authoring_gate.py',
                      'crates/orr_editor/src/app/tilemap_fill_tests.rs',
                      'crates/orr_editor/src/app/tilemap_resize_tests.rs',
+                     'crates/orr_editor/src/app/tilemap_rectangle_tests.rs',
+                     'crates/orr_editor/src/tilemap_panel/rectangle.rs',
                      'crates/orr_editor/src/tilemap_panel/resize.rs',
                      'crates/orr_editor/src/tilemap_panel/fill.rs'):
             path = root / name; path.parent.mkdir(parents=True, exist_ok=True)
@@ -535,6 +603,245 @@ class ResizeReceiptTests(unittest.TestCase):
         main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'main')
         calls = [n for n in ast.walk(main) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
                  and n.func.id == 'validate_resize']
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls[0].args), 3)
+        self.assertEqual(calls[0].keywords, [])
+
+
+class RectangleReceiptTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='rectangle-gate-fixture-')
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.rectangle = self.root / 'rectangle'; self.rectangle.mkdir()
+        self.identities = {k: k.encode() for k in gate.RECTANGLE_IDENTITIES}
+        self.rows = []
+        for name in gate.RECTANGLE_PHASES:
+            app = name in gate.RECTANGLE_APP_PHASES
+            tick = int(name in gate.RECTANGLE_PLAY_PHASES)
+            size = [1, 1] if app else [224, 224]
+            rgba = bytearray(size[0] * size[1] * 4)
+            if name == 'runtime-wrong-stride':
+                for x in range(136, 144): rgba[(48 * 224 + x) * 4] = 255
+            if name == 'runtime-extra-cell':
+                for x in range(152, 160): rgba[(96 * 224 + x) * 4] = 255
+            frame = b'actual-frame-one' if tick else b'actual-frame-zero'
+            row = {'name': name, 'size': size, 'files': [name + x for x in
+                (['.rgba', '.png', '.frame', '-app.png'] if app else ['.rgba', '.png', '.frame'])],
+                'rgba_fnv1a64': gate.fnv1a64(rgba), 'frame_fnv1a64': gate.fnv1a64(frame),
+                'tick': tick, 'checksum': 100 + tick}
+            (self.rectangle / (name + '.rgba')).write_bytes(rgba)
+            (self.rectangle / (name + '.png')).write_bytes(png_bytes(rgba, tuple(size)))
+            (self.rectangle / (name + '.frame')).write_bytes(frame)
+            if app:
+                literal, dims = gate.rectangle_literal(name), [7, 4]
+                undo, redo, dirty = gate.rectangle_history(name)
+                row['history'] = {'undo': undo, 'redo': redo, 'dirty': dirty, 'saved_fnv1a64': '1' * 16}
+                row.update(scope='actual App viewport; authoring grid, no pixel verdict',
+                    adapter='llvmpipe (LLVM)', backend='Vulkan', device_type='Cpu',
+                    frame_source='watch.subscribe source=view matched to predicted tick/checksum',
+                    cells=copy.deepcopy(literal), dimensions=dims)
+                (self.rectangle / (name + '-app.png')).write_bytes(b'app-png-fixture')
+            else:
+                row.update(scope='actual saved PreparedRuntime PlayHost production compositor',
+                    pixel_verdict_pending=False, oracle_pixels_checked=7168)
+            self.rows.append(row)
+        (self.rectangle / 'presentation-free.frame').write_bytes(b'actual-frame-one')
+        self.receipt = {'completed': True, 'captures': self.rows,
+            'literal_before': gate.RECTANGLE_BEFORE, 'literal_extra_cell': gate.RECTANGLE_EXTRA,
+            'literal_painted': gate.RECTANGLE_PAINTED, 'literal_cells': gate.RECTANGLE_CELLS,
+            'literal_wrong_stride': gate.RECTANGLE_WRONG,
+            'oracle_pixels_per_runtime_capture': 7168, 'wrong_stride_visible_pixels': 8,
+            'extra_cell_visible_pixels': 8, 'preview_visible_pixels': 8, 'preview_pixel_rect': [0, 0, 8, 1],
+            'frame_parity': gate.RECTANGLE_FRAME_SCOPE,
+            'presentation_free_frame_fnv1a64': gate.fnv1a64(b'actual-frame-one'),
+            'fixture_file_bindings': [{'path': n, 'bytes': 1, 'fnv1a64': gate.fnv1a64(b'x')}
+                for n in ['arena.tilemap.json', 'orr.project.json']],
+            'native_os_input': False, 'export': False, 'windows': False}
+        self.receipt.update({k: gate.fnv1a64(v) for k, v in self.identities.items()})
+        for filename, literal in [('saved.tilemap.json', gate.RECTANGLE_CELLS),
+                ('wrong-stride.tilemap.json', gate.RECTANGLE_WRONG), ('extra-cell.tilemap.json', gate.RECTANGLE_EXTRA)]:
+            (self.rectangle / filename).write_text(json.dumps({'version': 1,
+                'sprite': {'package': 'sample-sprites', 'document': 'sprites.json'},
+                'width': 7, 'height': 4, 'tile_size': [16, 16], 'origin': [-56., 144.],
+                'units_per_pixel': 1., 'cells': literal}))
+        (self.rectangle / 'creator.log').write_bytes(b'')
+        (self.rectangle / 'preview-baseline-app.png').write_bytes(b'baseline-app-png-fixture')
+        final_hash = gate.fnv1a64((self.rectangle / 'saved.tilemap.json').read_bytes())
+        for row in self.rows:
+            if row['name'] in ('saved', 'saved-noop', 'saved-undo-noop', 'saved-redo', 'fresh-reopen', 'play'):
+                row['history']['saved_fnv1a64'] = final_hash
+        self.app_pixels = bytes(1800 * 2000 * 4)
+        self.preview_pixels = bytes([255, 0, 0, 0]) * 8 + self.app_pixels[32:]
+
+    def write(self):
+        (self.rectangle / 'receipt.json').write_text(json.dumps(self.receipt))
+        partial = copy.deepcopy(self.rows)
+        partial[-1]['pixel_verdict_pending'] = True
+        partial[-1].pop('oracle_pixels_checked', None)
+        (self.rectangle / 'partial-receipt.json').write_text(json.dumps(
+            {'completed': False, 'captures': partial, 'native_os_input': False}))
+
+    def check(self, adapter='llvmpipe', rewrite=True):
+        if rewrite: self.write()
+        def loader(path, size):
+            if path.name.endswith('-app.png'):
+                self.assertEqual(size, (1800, 2000))
+                return 'fixture', self.preview_pixels if path.name == 'preview-app.png' else self.app_pixels
+            return gate.capture(path, size)
+        return gate.validate_rectangle(self.rectangle, self.root, self.identities, loader, adapter)
+
+    def test_exact_one_hundred_thirty_seven_retained_hashes(self):
+        hashes = self.check()
+        self.assertEqual(len(hashes), 137)
+        self.assertEqual(set(hashes), {'rectangle/' + p.name for p in self.rectangle.iterdir()})
+        for name, digest in hashes.items():
+            self.assertEqual(digest, hashlib.sha256((self.root / name).read_bytes()).hexdigest())
+
+    def test_every_receipt_and_row_key_is_required_and_extras_rejected(self):
+        for item in [self.receipt, self.rows[0], self.rows[-1]]:
+            for key in list(item):
+                old = item.pop(key)
+                with self.subTest(key=key), self.assertRaises(RuntimeError): self.check()
+                item[key] = old
+            item['surprise'] = True
+            with self.assertRaises(RuntimeError): self.check()
+            del item['surprise']
+
+    def test_literals_dimensions_crop_noop_and_provenance_fail_closed(self):
+        for row in self.rows[:len(gate.RECTANGLE_APP_PHASES)]:
+            old = row['dimensions']; row['dimensions'] = [5, 99]
+            with self.subTest(name=row['name']), self.assertRaisesRegex(RuntimeError, 'literal grid'): self.check()
+            row['dimensions'] = old
+            old = row['cells']; row['cells'] = old[::-1]
+            with self.subTest(name=row['name']), self.assertRaises(RuntimeError): self.check()
+            row['cells'] = old
+        old = self.rows[0]['cells']; self.rows[0]['cells'] = [10, None, 20, 11, 20, False]
+        with self.assertRaises(RuntimeError): self.check()
+        self.rows[0]['cells'] = old
+        for key in gate.RECTANGLE_IDENTITIES:
+            old = self.receipt[key]; self.receipt[key] = '0' * 16
+            with self.subTest(key=key), self.assertRaisesRegex(RuntimeError, 'fingerprint'): self.check()
+            self.receipt[key] = old
+        self.identities.pop('creator_fnv1a64')
+        with self.assertRaisesRegex(RuntimeError, 'identity census'): self.check()
+
+    def test_scope_runtime_pending_census_and_types_fail_closed(self):
+        for key, value in [('completed', False), ('windows', True), ('export', True),
+                           ('native_os_input', True), ('oracle_pixels_per_runtime_capture', 0),
+                           ('wrong_stride_visible_pixels', True), ('extra_cell_visible_pixels', True),
+                           ('preview_visible_pixels', True), ('frame_parity', 'predicted')]:
+            old = self.receipt[key]; self.receipt[key] = value
+            with self.subTest(key=key), self.assertRaises(RuntimeError): self.check()
+            self.receipt[key] = old
+        for key, value in [('tick', True), ('checksum', False), ('pixel_verdict_pending', True),
+                           ('oracle_pixels_checked', 0), ('size', [224, 223])]:
+            old = self.rows[-1][key]; self.rows[-1][key] = value
+            with self.subTest(key=key), self.assertRaises(RuntimeError): self.check()
+            self.rows[-1][key] = old
+        self.rows.reverse()
+        with self.assertRaisesRegex(RuntimeError, 'census'): self.check()
+        self.rows.reverse()
+        (self.rectangle / 'unexpected').write_bytes(b'x')
+        with self.assertRaisesRegex(RuntimeError, 'census'): self.check()
+
+    def test_saved_metadata_and_strict_json_rejected(self):
+        path = self.rectangle / 'saved.tilemap.json'
+        original = path.read_text(); doc = json.loads(original)
+        for key, value in [('width', 5), ('height', True), ('origin', [0, 0]), ('tile_size', [True, 16]),
+                ('version', True), ('units_per_pixel', True), ('sprite', {'package': 'other', 'document': 'sprites.json'}),
+                ('cells', gate.RECTANGLE_WRONG), ('extra', 'forbidden')]:
+            altered = dict(doc); altered[key] = value; path.write_text(json.dumps(altered))
+            for row in self.rows:
+                if row['name'] in ('saved', 'saved-noop', 'saved-undo-noop', 'saved-redo', 'fresh-reopen', 'play'):
+                    row['history']['saved_fnv1a64'] = gate.fnv1a64(path.read_bytes())
+            with self.subTest(key=key), self.assertRaises(RuntimeError): self.check()
+        path.write_text(original[:-1] + ',"version":1}')
+        for row in self.rows:
+            if row['name'] in ('saved', 'saved-noop', 'saved-undo-noop', 'saved-redo', 'fresh-reopen', 'play'):
+                row['history']['saved_fnv1a64'] = gate.fnv1a64(path.read_bytes())
+        with self.assertRaisesRegex(RuntimeError, 'Duplicate'): self.check()
+
+    def test_partial_and_fixture_binding_manifest_rejected(self):
+        self.write()
+        path = self.rectangle / 'partial-receipt.json'
+        partial = json.loads(path.read_text())
+        for bad in (True, 0):
+            partial['completed'] = bad
+            path.write_text(json.dumps(partial))
+            with self.assertRaisesRegex(RuntimeError, 'partial'): self.check(rewrite=False)
+        original = copy.deepcopy(self.receipt['fixture_file_bindings'])
+        for bad in [[], original + original[:1], list(reversed(original)),
+                    [{'path': '../escape', 'bytes': 1, 'fnv1a64': '0'*16}],
+                    [{'path': 'arena.tilemap.json', 'bytes': True, 'fnv1a64': '0'*16}]]:
+            self.receipt['fixture_file_bindings'] = bad
+            with self.subTest(bad=bad), self.assertRaises(RuntimeError): self.check()
+
+    def test_frame_png_and_visible_wrong_stride_tampering_rejected(self):
+        path = self.rectangle / 'outside-origin.frame'; old = path.read_bytes()
+        path.write_bytes(b'changed-frame'); self.rows[1]['frame_fnv1a64'] = gate.fnv1a64(path.read_bytes())
+        with self.assertRaisesRegex(RuntimeError, 'parity'): self.check()
+        path.write_bytes(old); self.rows[1]['frame_fnv1a64'] = gate.fnv1a64(old)
+        path = self.rectangle / 'saved.png'; old = path.read_bytes()
+        path.write_bytes(png_bytes(bytes([1, 2, 3, 4]), (1, 1)))
+        with self.assertRaisesRegex(RuntimeError, 'PNG/raw'): self.check()
+        path.write_bytes(old)
+        self.receipt['wrong_stride_visible_pixels'] = 9
+        with self.assertRaisesRegex(RuntimeError, 'pixel verdict'): self.check()
+        self.receipt['wrong_stride_visible_pixels'] = 8
+        (self.rectangle / 'presentation-free.frame').write_bytes(b'not-authoritative')
+        self.receipt['presentation_free_frame_fnv1a64'] = gate.fnv1a64(b'not-authoritative')
+        with self.assertRaisesRegex(RuntimeError, 'presentation-free'): self.check()
+
+    def test_history_preview_and_both_flat_negative_controls_rejected(self):
+        for name in ('preview', 'escape-cancelled', 'rectangle-painted', 'noop-preserves-redo',
+                     'saved-noop', 'saved-undo-noop', 'fresh-reopen'):
+            row = next(r for r in self.rows if r['name'] == name)
+            history = row['history']
+            for key, bad in [('undo', history['undo'] + 1), ('redo', True),
+                             ('dirty', not history['dirty']), ('saved_fnv1a64', 'f' * 16)]:
+                original = history[key]; history[key] = bad
+                with self.subTest(name=name, key=key), self.assertRaises(RuntimeError): self.check()
+                history[key] = original
+        original = self.preview_pixels; self.preview_pixels = self.app_pixels
+        with self.assertRaisesRegex(RuntimeError, 'preview pixel verdict'): self.check()
+        self.preview_pixels = original
+        for bad in (True, 0, 7, 1800 * 2000 + 1):
+            self.receipt['preview_visible_pixels'] = bad
+            with self.subTest(bad=bad), self.assertRaises(RuntimeError): self.check()
+        self.receipt['preview_visible_pixels'] = 8
+        for bad in ([True, 0, 8, 1], [0, 0, 1801, 1], [0, 0, 0, 1]):
+            self.receipt['preview_pixel_rect'] = bad
+            with self.assertRaises(RuntimeError): self.check()
+        self.receipt['preview_pixel_rect'] = [0, 0, 8, 1]
+        for name in ('runtime-wrong-stride', 'runtime-extra-cell'):
+            path = self.rectangle / (name + '.rgba'); original = path.read_bytes()
+            flat = bytes(len(original)); path.write_bytes(flat)
+            (self.rectangle / (name + '.png')).write_bytes(png_bytes(flat, (224, 224)))
+            row = next(r for r in self.rows if r['name'] == name)
+            row['rgba_fnv1a64'] = gate.fnv1a64(flat)
+            with self.subTest(name=name), self.assertRaisesRegex(RuntimeError, 'pixel verdict'): self.check()
+            path.write_bytes(original)
+            (self.rectangle / (name + '.png')).write_bytes(png_bytes(original, (224, 224)))
+            row['rgba_fnv1a64'] = gate.fnv1a64(original)
+
+    def test_regular_files_required(self):
+        path = self.rectangle / 'before-app.png'; old = path.read_bytes(); path.unlink()
+        with self.assertRaises(RuntimeError): self.check()
+        target = self.root / 'elsewhere'; target.write_bytes(old); path.symlink_to(target)
+        with self.assertRaises(RuntimeError): self.check()
+
+    def test_local_adapter_audit_never_replaces_hosted_default(self):
+        for row in self.rows[:len(gate.RECTANGLE_APP_PHASES)]: row['adapter'] = 'SwiftShader Device (Subzero)'
+        with self.assertRaisesRegex(RuntimeError, 'llvmpipe'): self.check()
+        self.assertEqual(len(self.check(adapter='SwiftShader')), 137)
+        with self.assertRaisesRegex(RuntimeError, 'empty adapter'): self.check(adapter='')
+        # Main has no argument/environment escape hatch for hosted acceptance.
+        import ast
+        tree = ast.parse(Path(gate.__file__).read_text())
+        main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'main')
+        calls = [n for n in ast.walk(main) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                 and n.func.id == 'validate_rectangle']
         self.assertEqual(len(calls), 1)
         self.assertEqual(len(calls[0].args), 3)
         self.assertEqual(calls[0].keywords, [])
