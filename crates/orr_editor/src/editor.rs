@@ -587,6 +587,32 @@ impl Editor {
             })
     }
 
+    /// This reports only reviewed editor ERP operations. Ordinary pending reads
+    /// do not become mutations. A disconnect may have lost an acknowledgement,
+    /// even after the existing recovery path cleared pending/gesture state.
+    pub(crate) fn work_status_operations(&self) -> orr_remote::work_status::Operations {
+        use orr_remote::work_status::Operations;
+        if self.down.is_some() || self.batch_uncertain {
+            Operations::OutcomeUncertain
+        } else if self.gesture.busy() || self.input_phase() != input::Phase::Off
+            || self.pending.values().any(|pending| matches!(pending.kind, Pend::Input(..) | Pend::Gesture(..))) {
+            Operations::PendingMutation
+        } else {
+            Operations::Idle
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retire_work_status_owner_for_test(&mut self) {
+        self.backend.work_status_owner = None;
+    }
+
+    pub(crate) fn publish_work_status(&mut self, snapshot: orr_remote::work_status::EditorSnapshot) {
+        if let Some(owner) = &mut self.backend.work_status_owner {
+            owner.publish(snapshot);
+        }
+    }
+
     /// Takes the next editor-owned screenshot request from the local host.
     pub(crate) fn take_screenshot_request(&self) -> Option<CaptureRequest> {
         self.backend.screenshot_owner.as_ref()?.take_request()
@@ -1296,6 +1322,27 @@ impl Editor {
         self.dirty.state = true;
     }
 
+    /// A completed direct world mutation is known before rate-limited history
+    /// notifications arrive. Never infer semantic dirtiness from refresh flags:
+    /// sync/read refresh, no-op replies and Play mutations are not scene edits.
+    fn mark_acknowledged_edit(&mut self, response: &J) {
+        if self.sim.mode == Mode::Edit && response.get("changed").and_then(J::as_bool) == Some(true) {
+            self.history.dirty = true;
+        }
+        self.mark_edited();
+    }
+
+    /// Transactions become accepted authoring only at their final commit.
+    /// Missing history is not evidence of a clean document: leave the known
+    /// state intact and schedule the existing authoritative cache refresh.
+    fn mark_committed_edit(&mut self, response: &J) {
+        if let Some(history) = response.get("history").filter(|history| history.get("dirty").and_then(J::as_bool).is_some()) {
+            self.history = History::from_json(history);
+            self.sim.dirty = self.history.dirty;
+        }
+        self.mark_edited();
+    }
+
     fn connection_lost(&mut self, err: &str) {
         if self.down.is_some() {
             return;
@@ -1968,7 +2015,7 @@ impl Editor {
                     self.connection_lost("selection move acknowledgement was malformed; outcome uncertain, reconnect before editing");
                     return false;
                 };
-                if changed { self.mark_edited(); }
+                if changed { self.mark_acknowledged_edit(&result); }
                 changed
             }
             Err(error) => {
@@ -2020,10 +2067,7 @@ impl Editor {
             Ok(r) => {
                 let changed = r.get("changed").and_then(J::as_bool).unwrap_or(false);
                 if changed {
-                    if self.sim.mode == Mode::Edit {
-                        self.history.dirty = true;
-                    }
-                    self.mark_edited();
+                    self.mark_acknowledged_edit(&r);
                 }
                 changed
             }
@@ -2132,8 +2176,8 @@ impl Editor {
             return false;
         };
         match self.call("world.insert", json!({"entity": t.param(), "component": component})) {
-            Ok(_) => {
-                self.mark_edited();
+            Ok(r) => {
+                self.mark_acknowledged_edit(&r);
                 true
             }
             Err(e) => {
@@ -2150,8 +2194,8 @@ impl Editor {
             return false;
         };
         match self.call("world.remove", json!({"entity": t.param(), "component": component})) {
-            Ok(_) => {
-                self.mark_edited();
+            Ok(r) => {
+                self.mark_acknowledged_edit(&r);
                 true
             }
             Err(e) => {
@@ -2320,7 +2364,7 @@ impl Editor {
             "orr_physics3d::Collider":{"shape":if self.game().is_terrain() { json!({"kind":"sphere","radius":0.5}) } else { json!({"kind":"box","half_extents":[0.5,0.5,0.5]}) }}
         }});
         match self.call("world.spawn",params) {
-            Ok(r)=>{ let t=r.get("guid").and_then(J::as_str).and_then(Target::parse); self.mark_edited();self.select(t);self.inspect=None;self.dirty.inspect=true;true }
+            Ok(r)=>{ let t=r.get("guid").and_then(J::as_str).and_then(Target::parse); self.mark_acknowledged_edit(&r);self.select(t);self.inspect=None;self.dirty.inspect=true;true }
             Err(e)=>{self.error(format!("spawn Yard body: {e}"));false}
         }
     }
@@ -2337,9 +2381,9 @@ impl Editor {
         let result=(||{
             self.call("world.patch",json!({"entity":target.param(),"component":"orr_physics3d::Body","path":"pos","value":value_to_json(&Value::Vec3(pos))}))?;
             self.call("world.patch",json!({"entity":target.param(),"component":"orr_physics3d::Body","path":"rot","value":value_to_json(&rot)}))?;
-            self.call("tx.commit",J::Null)?;Ok::<_,String>(())
+            self.call("tx.commit",J::Null)
         })();
-        match result {Ok(())=>{self.mark_edited();true},Err(e)=>{let _=self.call("tx.rollback",J::Null);self.error(e);self.mark_changed();false}}
+        match result {Ok(committed)=>{self.mark_committed_edit(&committed);true},Err(e)=>{let _=self.call("tx.rollback",J::Null);self.error(e);self.mark_changed();false}}
     }
 
     /// Spawns a dynamic circle body at `at` (world units) and selects it.
@@ -2363,7 +2407,7 @@ impl Editor {
         match self.call("world.spawn", params) {
             Ok(r) => {
                 let t = r.get("guid").and_then(J::as_str).or_else(|| r.get("handle").and_then(J::as_str)).and_then(Target::parse);
-                self.mark_edited();
+                self.mark_acknowledged_edit(&r);
                 // The new entity is not in the hierarchy yet: keep the selection through the next refresh.
                 self.select(t);
                 self.inspect = None;
@@ -2476,12 +2520,17 @@ impl Editor {
                 return false;
             }
         };
-        if let Err(e) = self.call("tx.commit", J::Null) {
-            let _ = self.call("tx.rollback", J::Null);
-            self.error(format!("cannot finish Arena player creation: {e}"));
-            return false;
-        }
-        self.mark_edited();
+        let committed = match self.call("tx.commit", J::Null) {
+            Ok(result) => result,
+            Err(e) => {
+                let _ = self.call("tx.rollback", J::Null);
+                self.error(format!("cannot finish Arena player creation: {e}"));
+                return false;
+            }
+        };
+        // Only the final transaction acknowledgement establishes accepted
+        // document history; intermediate spawn/patch replies are not commits.
+        self.mark_committed_edit(&committed);
         self.select(Some(target));
         self.inspect = None;
         self.dirty.inspect = true;
@@ -2506,10 +2555,10 @@ impl Editor {
             return false;
         };
         match self.call("world.despawn", json!({"entity": t.param()})) {
-            Ok(_) => {
+            Ok(r) => {
                 self.select(None);
                 self.inspect = None;
-                self.mark_edited();
+                self.mark_acknowledged_edit(&r);
                 true
             }
             Err(e) => {
@@ -3290,3 +3339,24 @@ mod room_camera_capture_coherence_tests {
 #[cfg(feature = "models")]
 #[path = "editor/frame_selection.rs"]
 mod frame_selection;
+
+#[cfg(test)]
+mod work_status_operation_tests {
+    use super::*;
+    use orr_remote::work_status::Operations;
+
+    #[test]
+    fn work_status_ordinary_reads_are_idle_but_lost_mutations_are_uncertain() {
+        let mut editor = Editor::open(&default_scene_path()).unwrap();
+        editor.sync();
+        editor.pending.insert(u64::MAX, Pending {kind:Pend::Clients,posted_at:Instant::now()});
+        assert_eq!(editor.work_status_operations(), Operations::Idle);
+        editor.pending.remove(&u64::MAX);
+        editor.begin_edit("status pending mutation");
+        assert_eq!(editor.work_status_operations(), Operations::PendingMutation);
+        editor.connection_lost("test-only lost acknowledgement");
+        assert!(editor.pending.is_empty());
+        assert!(!editor.gesture.busy());
+        assert_eq!(editor.work_status_operations(), Operations::OutcomeUncertain);
+    }
+}

@@ -351,7 +351,7 @@ fn tool_groups_switch_tools_on_and_off() {
     m.initialize();
     let list = m.request("tools/list", json!({}));
     let names: Vec<&str> = list["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, vec!["scene_overview", "get_entity", "get_schema", "verify_proposal"]);
+    assert_eq!(names, vec!["editor_work_status", "scene_overview", "get_entity", "get_schema", "verify_proposal"]);
     // A tool of a group that is off is unknown.
     assert_eq!(m.request_raw("tools/call", json!({"name": "propose_changes", "arguments": {"ops": []}}))["error"]["code"], -32602);
     assert_eq!(m.call_tool("scene_overview", json!({"limit": 1}))["isError"], false);

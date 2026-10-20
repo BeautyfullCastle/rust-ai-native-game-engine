@@ -601,21 +601,52 @@ impl PreviewWindow {
     }
 }
 impl EditorApp {
-    /// A project switch must not discard accepted unsaved UI or staged gestures.
-    /// This is read-only: cancellation and failure retain the document and undo.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "project-create"))]
-    pub(super) fn collect_ui_project_switch_guard(&self) -> Result<(), String> {
+    /// Read-only inventory of unfinished or unapplied preview authoring.
+    /// This does not discard a gesture, apply it, or inspect the filesystem.
+    pub(super) fn collect_ui_staged_authoring(&self) -> bool {
         let preview = &self.collect_ui_preview;
-        if preview.pointer_down
+        preview.pointer_down
             || preview.position.state.is_dragging()
             || preview.position.state.is_ready()
             || preview.resize.state.is_dragging()
             || preview.resize.state.is_ready()
             || preview.alignment.state.is_ready()
             || preview.reparent.is_ready()
-        {
+    }
+
+    #[cfg(test)]
+    pub(super) fn stage_close_test_position(&mut self) {
+        // Seed the existing production draft state without requiring a GPU.
+        // Actual pointer/visual acceptance remains in the preview's GPU tests.
+        let document = self.collect_ui.as_ref().unwrap().document().clone();
+        let scene = self.editor.path().unwrap();
+        let canvas = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 360.0));
+        let context = self.collect_ui_preview.position_context(
+            &scene, self.editor.scene_load_epoch(), canvas,
+        );
+        let preview = &mut self.collect_ui_preview;
+        preview.state.open().unwrap();
+        preview.canvas = Some(canvas);
+        preview.position.moving = true;
+        preview.position.state.begin(context.clone(), &document, "title", [0.0, 0.0]).unwrap();
+        preview.position.state.finish([8.0, 8.0]).unwrap();
+        let candidate = preview.position.state.candidate(&context, &document).unwrap();
+        preview.state.stage_document(&candidate).unwrap();
+    }
+
+    #[cfg(test)]
+    pub(super) fn close_test_position_document(&self) -> Option<orr_sample::authored_ui::Document> {
+        self.collect_ui_preview.position.state.document().cloned()
+    }
+
+    /// A project switch must not discard accepted unsaved UI or staged gestures.
+    /// This is read-only: cancellation and failure retain the document and undo.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "project-create"))]
+    pub(super) fn collect_ui_project_switch_guard(&self) -> Result<(), String> {
+        if self.collect_ui_staged_authoring() {
             return Err("Apply or cancel the staged Collect UI gesture before changing projects".into());
         }
+        let preview = &self.collect_ui_preview;
         let Some(panel) = self.collect_ui.as_ref() else {
             return if preview.state.admitted_path().is_some() {
                 Err("Collect UI admission has no authoring panel; reopen the current project".into())

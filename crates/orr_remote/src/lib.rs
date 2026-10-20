@@ -82,6 +82,7 @@ pub mod screenshot;
 mod server;
 mod viewstream;
 pub mod wire;
+pub mod work_status;
 #[cfg(feature = "sample-host")]
 pub mod yard3d;
 

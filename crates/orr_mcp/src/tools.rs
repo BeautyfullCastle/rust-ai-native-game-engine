@@ -128,6 +128,15 @@ pub fn find(name: &str) -> Option<&'static ToolDef> {
 
 static TOOLS: &[ToolDef] = &[
     ToolDef {
+        name: "editor_work_status",
+        group: "scene",
+        title: "Editor work status",
+        description: "Observe this ERP host's paired main editor without UI interaction. Only Phys, Arena and Collect paired editors are currently supported. Reports host scene and last published editor-local work as non-atomic observations. Dirty, unavailable, stale or incomplete reports are successful status results, not save/close actions. none_observed is not permission to close, a save receipt or a guarantee against loss. Tool listing does not imply an editor is paired. Poll only while needed, at most twice per second; discard prior observations after reconnect.",
+        read_only: true,
+        needs: "read",
+        schema: || obj(json!({"max_age_ms": {"type": "integer", "minimum": 1, "maximum": 5000, "default": 1000, "description": "Maximum age of the completed editor snapshot; does not wait or request a refresh"}}), &[]),
+    },
+    ToolDef {
         name: "scene_overview",
         group: "scene",
         title: "Scene overview",
@@ -393,6 +402,7 @@ pub fn run(bridge: &mut Bridge, name: &str, arguments: &Map<String, J>) -> Resul
 pub(crate) fn run_detailed(bridge: &mut Bridge, name: &str, arguments: &Map<String, J>) -> Result<Out, DetailedFail> {
     let a = Args(arguments);
     match name {
+        "editor_work_status" => editor_work_status(bridge, arguments),
         "scene_overview" => scene_overview(bridge, &a),
         "get_entity" => get_entity(bridge, &a),
         "get_schema" => get_schema(bridge, &a),
@@ -419,6 +429,25 @@ fn text_out(text: String, structured: J) -> Result<Out, DetailedFail> {
 
 fn s(v: &J) -> &str {
     v.as_str().unwrap_or("")
+}
+
+fn editor_work_status(b: &mut Bridge, arguments: &Map<String, J>) -> Result<Out, DetailedFail> {
+    let params = J::Object(arguments.clone());
+    let requested_max_age = orr_remote::work_status::parse_max_age(&params)
+        .map_err(|_| DetailedFail::new("editor work status expects only max_age_ms, an integer from 1 to 5000"))?;
+    let status = b.call_detailed("editor.work_status", params)?;
+    // The connected host is not trusted to return arbitrary nested data under
+    // this method name. Reject unbounded or non-contract facts without echoing.
+    if !orr_remote::work_status::validate_response(&status)
+        || status["observation"]["max_age_ms"].as_u64().is_some_and(|reported| reported != requested_max_age)
+    {
+        return Err(DetailedFail::new("editor work status returned an invalid or oversized observation"));
+    }
+    // Keep all observation limits visible in both negotiated success formats.
+    text_out(
+        "Editor work status retrieved. Host and editor-local observations are non-atomic. Read availability, coverage and assessment below; none_observed is not permission to close or a save receipt.\n".to_string() + &status.to_string(),
+        status,
+    )
 }
 
 fn scene_overview(b: &mut Bridge, a: &Args<'_>) -> Result<Out, DetailedFail> {

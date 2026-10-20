@@ -52,9 +52,29 @@ pub fn configure(limits: &mut HostLimits, path: Option<PathBuf>) {
 pub fn spawn_host(
     text: String,
     path: Option<PathBuf>,
-    mut cfg: ServerConfig,
+    cfg: ServerConfig,
 ) -> Result<LocalHost, String> {
-    LocalHost::spawn_configured::<CollectDodgeV1>(
+    spawn_host_impl(text, path, cfg, None)
+}
+
+/// Same admitted Collect host, with the editor observation channel installed
+/// before readiness. Existing managed input setup remains unchanged.
+pub fn spawn_host_with_editor_work_status(
+    text: String,
+    path: Option<PathBuf>,
+    cfg: ServerConfig,
+    service: crate::work_status::WorkStatusService,
+) -> Result<LocalHost, String> {
+    spawn_host_impl(text, path, cfg, Some(service))
+}
+
+fn spawn_host_impl(
+    text: String,
+    path: Option<PathBuf>,
+    mut cfg: ServerConfig,
+    service: Option<crate::work_status::WorkStatusService>,
+) -> Result<LocalHost, String> {
+    LocalHost::spawn_configured_with_editor_work_status::<CollectDodgeV1>(
         move || {
             let doc = document(&text)?;
             configure(&mut cfg.limits, path);
@@ -64,5 +84,6 @@ pub fn spawn_host(
             server.set_structured_input::<CollectDodgeV1>("CollectInput", 1, |_, _| Vec::new());
             server.enable_managed_input();
         },
+        service,
     )
 }

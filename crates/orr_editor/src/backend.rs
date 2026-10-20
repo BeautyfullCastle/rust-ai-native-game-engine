@@ -17,7 +17,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use orr_remote::sample::{spawn_arena_host, spawn_phys_host};
+use orr_remote::sample::{spawn_arena_host_with_editor_work_status, spawn_phys_host_with_editor_work_status};
 use orr_remote::{Auth, Caps, ErpClient, LocalHost, RemoteConfig, RemoteIdentity, ScreenshotOwner, ScreenshotService, ServerConfig, ViewDeliveryMode, USER_CLIENT};
 use crate::game::{EditorGame, EditorStream};
 use serde_json::{json, Value as J};
@@ -169,6 +169,8 @@ pub struct Backend {
     pub(crate) managed_input: bool,
     /// The app-framebuffer capture endpoint, present only for an editor-owned local host.
     pub(crate) screenshot_owner: Option<ScreenshotOwner>,
+    /// Sole publisher of this host-paired main editor observation. Never cloned.
+    pub(crate) work_status_owner: Option<orr_remote::work_status::WorkStatusOwner>,
 }
 
 /// `ws://host:port` plus the path and query a dev-mode host needs to know
@@ -230,7 +232,7 @@ impl Backend {
                 rc.view_delivery = delivery(game, false);
                 rc.expected_identity = Some(identity.clone());
                 let bridge = EditorStream::connect(game, rc).map_err(|e| format!("frame stream of {url}: {e}"))?;
-                Ok(Backend { spec: spec.clone(), erp, bridge, host: None, own_client, url: Some(url.clone()), game, identity, managed_input, screenshot_owner: None })
+                Ok(Backend { spec: spec.clone(), erp, bridge, host: None, own_client, url: Some(url.clone()), game, identity, managed_input, screenshot_owner: None, work_status_owner: None })
             }
         }
     }
@@ -257,11 +259,17 @@ impl Backend {
         cfg.limits.max_step_per_call = 20_000;
         let (screenshot_service, screenshot_owner) = ScreenshotService::pair();
         cfg.screenshot = Some(screenshot_service);
+        let mut work_status_owner = None;
+        let mut status_service = || {
+            let (service, owner) = orr_remote::work_status::WorkStatusService::pair();
+            work_status_owner = Some(owner);
+            service
+        };
         let host = match selected_game {
-            EditorGame::PhysGame => spawn_phys_host(text, Some(scene.to_path_buf()), cfg)?,
-            EditorGame::Arena => spawn_arena_host(text, Some(scene.to_path_buf()), cfg)?,
+            EditorGame::PhysGame => spawn_phys_host_with_editor_work_status(text, Some(scene.to_path_buf()), cfg, status_service())?,
+            EditorGame::Arena => spawn_arena_host_with_editor_work_status(text, Some(scene.to_path_buf()), cfg, status_service())?,
             #[cfg(feature = "collect-dodge")]
-            EditorGame::CollectDodge => orr_remote::collect_dodge::spawn_host(text, Some(scene.to_path_buf()), cfg)?,
+            EditorGame::CollectDodge => orr_remote::collect_dodge::spawn_host_with_editor_work_status(text, Some(scene.to_path_buf()), cfg, status_service())?,
             #[cfg(feature = "room-project")]
             EditorGame::RoomEscape => orr_remote::room_escape::spawn_host(text,Some(scene.to_path_buf()),cfg)?,
             EditorGame::Yard3D => orr_remote::yard3d::spawn_yard3d_scene_host(scene.to_path_buf(), cfg)?,
@@ -288,7 +296,7 @@ impl Backend {
         rc.expected_identity = Some(identity.clone());
         let bridge = EditorStream::connect_transport(game, Box::new(link("frames")?), rc)?;
         let url = host.url().map(str::to_string);
-        Ok(Backend { spec: spec.clone(), erp, bridge, host: Some(host), own_client, url, game, identity, managed_input, screenshot_owner: Some(screenshot_owner) })
+        Ok(Backend { spec: spec.clone(), erp, bridge, host: Some(host), own_client, url, game, identity, managed_input, screenshot_owner: Some(screenshot_owner), work_status_owner })
     }
 
     /// Another frame stream, for what the viewport previews (`proposal:p3`).

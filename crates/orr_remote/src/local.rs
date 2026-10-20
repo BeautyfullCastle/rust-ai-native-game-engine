@@ -63,6 +63,16 @@ impl LocalHost {
         setup: impl FnOnce() -> Result<(EditorDoc, ServerConfig), String> + Send + 'static,
         configure: impl FnOnce(&mut ErpServer) + Send + 'static,
     ) -> Result<LocalHost, String> {
+        Self::spawn_configured_with_editor_work_status::<G>(setup, configure, None)
+    }
+
+    /// Installs the one typed editor observation channel before publishing the
+    /// connector. This does not add an extension dispatcher or a listener.
+    pub(crate) fn spawn_configured_with_editor_work_status<G: Game + 'static>(
+        setup: impl FnOnce() -> Result<(EditorDoc, ServerConfig), String> + Send + 'static,
+        configure: impl FnOnce(&mut ErpServer) + Send + 'static,
+        work_status: Option<crate::work_status::WorkStatusService>,
+    ) -> Result<LocalHost, String> {
         let stop = Arc::new(AtomicBool::new(false));
         let reason = Arc::new(Mutex::new(None::<String>));
         let (ready_tx, ready_rx) = channel::<Result<(LocalConnector, Option<String>), String>>();
@@ -86,6 +96,7 @@ impl LocalHost {
                         }
                     };
                     configure(&mut server);
+                    server.install_editor_work_status(work_status);
                     let url = server.is_listening().then(|| server.url());
                     let _ = ready_tx.send(Ok((server.connector(), url)));
                     let mut host = Host::<G>::new(doc, server);
