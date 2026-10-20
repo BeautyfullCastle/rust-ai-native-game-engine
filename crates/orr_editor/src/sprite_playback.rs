@@ -77,10 +77,10 @@ impl SpritePlayback {
     pub fn suspend_follow(&mut self) {
         if !self.session_active
             || !self.scene_matches
-            || !self
+            || self
                 .document
                 .as_ref()
-                .is_some_and(|document| document.camera_follow.is_some())
+                .is_none_or(|document| document.camera_follow.is_none())
         {
             return;
         }

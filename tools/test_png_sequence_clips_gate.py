@@ -56,6 +56,7 @@ class GateFixtures(unittest.TestCase):
         for names in (gate.CPU_TESTS, gate.SAMPLE_TESTS, gate.EDITOR_TESTS):
             self.assertEqual(len(names), len(set(names)))
         self.assertIn("crates/orr_sample/examples/png_sequence_package/clips.rs", gate.FEATURE_PATHS)
+        self.assertIn("crates/orr_sample/examples/png_sequence_package/offline_io.rs", gate.FEATURE_PATHS)
         self.assertIn("crates/orr_editor/tests/png_sequence_clips_ui.rs", gate.FEATURE_PATHS)
         self.assertEqual(len(gate.sample_inventory()), 675)
         self.assertEqual(len(gate.EDITOR_CAPTURES), 5)

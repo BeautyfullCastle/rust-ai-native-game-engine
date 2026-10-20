@@ -41,6 +41,39 @@ def check_room_usage_selectors(text):
         ast.parse(textwrap.dedent(block))
 
 
+def check_grid_selectors(text):
+    required = (
+        "examples = ('png_sequence_package', 'png_grid_package')",
+        "expected = {'png_sequence_package': 20, 'png_sprite_package': 16, 'png_grid_package': 11}",
+        "'--features', 'project-create', *test_selectors",
+        "os.environ['ORR_PNG_GRID_PACKAGE_BIN']",
+        "'--features', 'sprites', '--test', 'png_grid_package_consumer'",
+        "'--ignored', '--exact', consumer",
+        "helpers['CASE'].findall(output) != [(consumer, 'ok')]",
+        "'--test', 'png_sequence_package_gpu'",
+        "'--test', 'png_sequence_canvas_gpu'",
+    )
+    # The refusal message is dynamically assembled for both examples.
+    for selector in required:
+        assert selector in text, selector
+    assert "example + ' requires Linux and --features project-create'" in text
+    assert text.count('  png-sequence-package:\n') == 1
+    for block in re.findall(r'        shell: python \{0\}\n        run: \|\n((?:          .*\n|\n)+)', text):
+        ast.parse(textwrap.dedent(block))
+
+
+def grid_validator(text):
+    block = re.search(r'        shell: python \{0\}\n        run: \|\n((?:          .*\n|\n)+)', text).group(1)
+    nodes = ast.parse(textwrap.dedent(block)).body
+    start = next(i for i, node in enumerate(nodes) if isinstance(node, ast.Assign)
+                 and isinstance(node.targets[0], ast.Name) and node.targets[0].id == 'expected')
+    end = next(i for i in range(start, len(nodes)) if isinstance(nodes[i], ast.For))
+    # Run only the real batch census, never Cargo or other workflow side effects.
+    kept = [node for node in nodes[start:end + 1] if not (isinstance(node, ast.Assign)
+            and isinstance(node.targets[0], ast.Name) and node.targets[0].id in ('test_selectors', 'output'))]
+    return compile(ast.Module(body=kept, type_ignores=[]), '<grid-census>', 'exec')
+
+
 class IntegrationTriggers(unittest.TestCase):
     def test_all_build_test_workflows(self):
         paths = list((ROOT / '.github/workflows').glob('*.yml'))
@@ -65,6 +98,107 @@ class IntegrationTriggers(unittest.TestCase):
         ):
             with self.subTest(selector=before), self.assertRaises(AssertionError):
                 check_room_usage_selectors(text.replace(before, after))
+
+    def test_grid_keeps_existing_batch_and_mandatory_consumer(self):
+        text = (ROOT / '.github/workflows/png-sequence-package.yml').read_text()
+        check_grid_selectors(text)
+        for before, after in (
+            ("'png_grid_package': 11", "'png_grid_package': 0"),
+            ("'--ignored', '--exact', consumer", "'--exact', consumer"),
+            ("os.environ['ORR_PNG_GRID_PACKAGE_BIN']", "os.environ['WRONG_BIN']"),
+            ("'--test', 'png_sequence_canvas_gpu'", "'--test', 'unrelated'"),
+        ):
+            with self.subTest(selector=before), self.assertRaises(AssertionError):
+                check_grid_selectors(text.replace(before, after))
+
+    def test_grid_batch_census_rejects_missing_failed_or_zero_tests(self):
+        import runpy
+        helpers = runpy.run_path(str(ROOT / 'tools/check-authoring-controls.py'))
+        text = (ROOT / '.github/workflows/png-sequence-package.yml').read_text()
+        program = grid_validator(text)
+        def harness(name, count):
+            return (f'     Running unittests examples/{name}.rs (target/debug/examples/{name}-hash)\n'
+                    f'\nrunning {count} tests\n' + ''.join(f'test case_{i} ... ok\n' for i in range(count))
+                    + f'test result: ok. {count} passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n')
+        parts = [harness(name, count) for name, count in (
+            ('png_grid_package', 11), ('png_sequence_package', 20), ('png_sprite_package', 16))]
+        good = ''.join(parts)
+        exec(program, {'output': good, 'helpers': helpers, 're': re})
+        for bad in (''.join(parts[1:]), good.replace('running 11 tests', 'running 0 tests'),
+                    good.replace('test case_0 ... ok', 'test case_0 ... FAILED', 1),
+                    good + parts[0], good.replace('examples/png_grid_package.rs', 'examples/unrelated.rs')):
+            with self.subTest(output=bad[:80]), self.assertRaises(RuntimeError):
+                exec(program, {'output': bad, 'helpers': helpers, 're': re})
+
+    def grid_gpu_validator(self):
+        import hashlib
+        import json
+        import runpy
+        text = (ROOT / '.github/workflows/png-sequence-package.yml').read_text()
+        step = text.split('      - name: Required grid installed pixels and authoritative parity\n')[1].split('      - name: Retain logs')[0]
+        self.assertIn("ORR_REQUIRE_GPU: '1'", step)
+        self.assertIn("WGPU_BACKEND: vulkan", step)
+        self.assertIn("'--test', 'png_grid_package_gpu', '--', '--ignored', '--exact', test", step)
+        self.assertIn("os.environ['ORR_GRID_PIXEL_EVIDENCE']", step)
+        self.assertIn("os.environ['ORR_PNG_GRID_PACKAGE_BIN']", step)
+        self.assertIn("require(digest(binary) == producer_hash", step)
+        block = step.split('        run: |\n')[1]
+        nodes = ast.parse(textwrap.dedent(block)).body
+        selected = [node for node in nodes if isinstance(node, ast.FunctionDef) or
+                    (isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+                     and node.targets[0].id in ('test', 'marker'))]
+        env = {'hashlib': hashlib, 'json': json, 're': re,
+               'helpers': runpy.run_path(str(ROOT / 'tools/check-authoring-controls.py'))}
+        exec(compile(ast.Module(body=selected, type_ignores=[]), '<grid-gpu-receipt>', 'exec'), env)
+        return env
+
+    def test_grid_gpu_receipt_and_log_fail_closed(self):
+        import copy
+        import hashlib
+        import json
+        import tempfile
+        env = self.grid_gpu_validator()
+        test, marker, validate = env['test'], env['marker'], env['validate_grid']
+        output = (f'running 1 test\ntest {test} ... {marker}\nok\n'
+                  'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n')
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            captures = []
+            for tick, cell, wrong in [(0,0,False),(5,0,False),(6,1,False),(11,1,False),(12,0,False),(13,2,False),(18,2,False),(19,3,False),(24,3,False),(25,3,False),(26,0,False),(19,2,True)]:
+                name = f"grid-{'wrong-order' if wrong else 'good'}-tick-{tick}.png"
+                # Only a digest/header validator fixture, not a GPU readback.
+                data = b'\x89PNG\r\n\x1a\n' + b'\0\0\0\rIHDR' + (64).to_bytes(4, 'big') * 2 + bytes([tick])
+                (root / name).write_bytes(data)
+                captures.append(dict(file=name, tick=tick, cell=cell, wrong_order=wrong, sha256=hashlib.sha256(data).hexdigest()))
+            receipt = dict(schema=1, test=test, capture_count=12, parity_checks=54, source_hidden=True,
+                           installed_bytes_preserved=True, backend='Vulkan', adapter='fixture software adapter',
+                           device_type='Cpu', is_software=True, producer_sha256='a'*64, source_png_sha256='b'*64, captures=captures)
+            (root / 'partial-receipt.json').write_text('{}')
+            for name in ('grid-good-cli.log', 'grid-wrong-order-cli.log'):
+                (root / name).write_text('synthetic CLI log fixture\n')
+            def write(value):
+                (root / 'receipt.json').write_text(json.dumps(value))
+            write(receipt)
+            accepted = validate(output, root, 'a'*64)
+            self.assertEqual(len(accepted['captures']), 12)
+            self.assertEqual(accepted['receipt_sha256'], hashlib.sha256((root/'receipt.json').read_bytes()).hexdigest())
+            for key, value in [('capture_count',11),('parity_checks',53),('source_hidden',False),('installed_bytes_preserved',False),('backend','Gl'),('adapter',''),('device_type',None),('is_software',1),('producer_sha256','c'*64),('source_png_sha256','bad')]:
+                bad = copy.deepcopy(receipt); bad[key] = value; write(bad)
+                with self.subTest(field=key), self.assertRaises(RuntimeError): validate(output, root, 'a'*64)
+            for field, value in [('file','../escape.png'),('tick',True),('cell',3),('wrong_order',1),('sha256','d'*64)]:
+                bad=copy.deepcopy(receipt);bad['captures'][0][field]=value;write(bad)
+                with self.subTest(capture=field), self.assertRaises(RuntimeError): validate(output, root, 'a'*64)
+            write(receipt)
+            for badlog in (output.replace('running 1 test','running 0 tests'), output.replace(marker,''), output+'\nSKIP\n', output.replace(test,'other'), output.replace('1 passed','0 passed'), output+marker):
+                with self.assertRaises(RuntimeError): validate(badlog, root, 'a'*64)
+            extra=root/'extra.png';extra.write_bytes(b'bad')
+            with self.assertRaises(RuntimeError): validate(output, root, 'a'*64)
+            extra.unlink()
+            first=root/captures[0]['file'];original=first.read_bytes();first.write_bytes(b'changed')
+            with self.assertRaises(RuntimeError): validate(output, root, 'a'*64)
+            first.write_bytes(original)
+            (root/'receipt.json').write_text('{"schema":1,"schema":1}')
+            with self.assertRaises(RuntimeError): validate(output, root, 'a'*64)
 
     def test_reject_automatic_or_incomplete_triggers(self):
         for bad in [
