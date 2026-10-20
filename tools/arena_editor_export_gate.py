@@ -44,12 +44,69 @@ LEGACY_COUNTS = {"export-unit":25, "authored-ui":73, "player-settings":111,
 FIXTURE_COUNT = 20
 
 
+# #282 additions are separate: immutable #279 name sets and fixture APIs remain.
+UI_SAMPLE_BASE = tuple("project_export::editor_arena::tests::" + n for n in (
+    "ui_constructor_bounds_closed_descriptor_font_length_and_digest",
+    "ui_constructor_uses_exact_package_name_and_portable_asset_grammar",
+    "extra_ui_assertion_rejects_before_runtime_stage_and_smoke"))
+UI_SAMPLE = tuple("project_export::editor_arena::tests::" + n for n in (
+    "ui_constructor_accepts_parser_and_corpus_valid_font_above_scene_bound",
+    "exact_ui_assertion_exports_full_closure_without_expanding_inventory",
+    "ui_assertion_presence_descriptor_bytes_and_shape_reject_before_runtime",
+    "ui_snapshot_requires_selected_package_asset_role_nonempty_length_and_hash",
+    "ui_assertion_keeps_selected_asset_and_whole_active_lock_admission",
+    "ui_font_snapshot_is_staged_exactly_and_rechecked_before_publication"))
+UI_EDITOR = (
+    "app::arena_export::tests::installed_saved_ui_dispatches_and_mismatches_stop_before_worker_start",
+    "editor::arena_export::tests::saved_ui_requires_exact_loaded_font_and_retains_whole_lock_verification")
+UI_IDENTITY = tuple("project_ui::tests::" + n for n in (
+    "arena_installation_identity_is_exact_and_public_metadata_cannot_launder_it",
+    "arena_installation_empty_oversized_and_wrong_document_have_no_identity",
+    "arena_installation_valid_font_above_scene_bound_remains_supported"))
+UI_APP = "app::project_ui_tests::relocated_bundle_real_widgets_restart_original_scene"
+# Explicit (passed, ignored, exporter count, App ignored) per actual feature profile.
+UI_CENSUS = {
+    "export-unit": (50, 0, 25, False), "authored-ui": (98, 1, 25, True),
+    "player-settings": (136, 1, 25, True), "new-arena": (83, 0, 19, False),
+    "collect-authored": (87, 0, 19, False), "progress-disabled": (87, 0, 19, False),
+    "progress": (113, 2, 19, False), "progress-joint": (200, 4, 25, True),
+    "progress-pinned": (113, 2, 19, False), "collect-creator": (132, 2, 19, False),
+    "collect-ui": (187, 4, 25, True), "collect-ui-creator": (208, 4, 25, True),
+    "image-reimport": (198, 5, 25, True),
+}
+
+
+def profile_census(profile, path, ignored_path):
+    passed, ignored_count, exporters, app = UI_CENSUS[profile]
+    names = inventory(Path(path).read_text())
+    ignored = inventory(Path(ignored_path).read_text())
+    expected = SAMPLE + UI_SAMPLE_BASE + (UI_SAMPLE if exporters == 25 else ())
+    assert len(names) == passed + ignored_count and len(ignored) == ignored_count
+    assert set(ignored) <= set(names)
+    assert sorted(n for n in names if n.startswith("project_export::editor_arena::tests::")) == sorted(expected)
+    assert not set(expected) & set(ignored)
+    assert (UI_APP in names) is app and (UI_APP in ignored) is app
+    return {"profile": profile, "passed_expected": passed, "ignored_expected": ignored_count,
+            "executed": False, "qualification": "exact inventory only; mandatory execution is separate"}
+
+
+def producer_source_fence():
+    if not runner.report.get("ui_profile"):
+        return
+    for item in runner.report["producers"].values():
+        for path in (Path(item["producer"]["executable"]), runner.evidence / item["file"]):
+            assert path.is_file() and path == path.resolve() and not path.is_symlink() and os.access(path, os.X_OK)
+            assert path.stat().st_size == item["bytes"] and runner.digest(path) == item["sha256"]
+
+
 def run(label, command, seconds=1200):
+    producer_source_fence()
     fence.source_fence()
     runner.fence()
     output = runner.run(label, command, seconds=seconds)
     runner.fence()
     fence.source_fence()
+    producer_source_fence()
     return output
 
 
@@ -148,7 +205,7 @@ def selected(label, binary, names, total):
     runner.record()
 
 
-def library(label, package, requested, features, names, supported=True):
+def library(label, package, requested, features, names, supported=True, identity_names=()):
     select_target(label, package, package, "lib", features)
     command = ["cargo", "test", "--locked", "--release", "-p", package, "--no-default-features"]
     if requested:
@@ -159,11 +216,17 @@ def library(label, package, requested, features, names, supported=True):
     ignored = inventory(run(label + "-full-ignored", [binary, "--ignored", "--list"]))
     arena = [n for n in all_names if n.startswith(("app::arena_export::tests::", "editor::arena_export::tests::", "project_export::editor_arena::tests::"))]
     assert sorted(arena) == sorted(names) and not set(names) & set(ignored), "exact Arena inventory"
+    if package == "orr_sample":
+        assert ignored == ([UI_APP] if {"project", "game-ui"} <= set(features) else [])
+    actual_identity = [n for n in all_names if n.startswith("project_ui::tests::arena_installation_")]
+    assert sorted(actual_identity) == sorted(identity_names) and not set(identity_names) & set(ignored)
     selected(label, binary, names if names else guide.DEFAULT, len(all_names))
+    if identity_names:
+        selected(label + "-ui-identity", binary, identity_names, len(all_names))
     return binary, all_names
 
 
-def cpu():
+def cpu(ui=False):
     supported = sys.platform == "linux" and platform.machine() == "x86_64"
     library("default", "orr_editor", "", [], [])
     library("sprites", "orr_editor", "sprites", ["sprites"], [])
@@ -171,19 +234,39 @@ def cpu():
     library("baseline", "orr_editor", baseline, ["arena-project-export", "project-create", "sprites"], BASELINE if supported else [])
     if supported:
         library("extended", "orr_editor", baseline + ",project-ui,tilemap,mesh-mission,package-manager,collect-ui",
-            ["arena-project-export", "project-create", "project-ui", "tilemap", "mesh-mission", "mesh-navigation", "models", "sprites", "package-manager", "room-project", "collect-ui", "collect-dodge"], APP + EDITOR + NEW_APP)
-        library("sample", "orr_sample", "project-export", ["project-export", "project", "sprites"], SAMPLE)
+            ["arena-project-export", "project-create", "project-ui", "tilemap", "mesh-mission", "mesh-navigation", "models", "sprites", "package-manager", "room-project", "collect-ui", "collect-dodge"], APP + EDITOR + NEW_APP + (UI_EDITOR if ui else ()), identity_names=UI_IDENTITY if ui else ())
+        library("sample", "orr_sample", "project-export", ["project-export", "project", "sprites"], SAMPLE + (UI_SAMPLE_BASE if ui else ()))
         binary, names = library("close", "orr_editor", baseline + ",collect-ui,tilemap",
             ["arena-project-export", "project-create", "collect-ui", "collect-dodge", "project-ui", "sprites", "tilemap"],
-            BASELINE + tuple(n for n in EXTENDED_ONLY if "loaded_" in n) + (NEW_APP[1],))
+            BASELINE + tuple(n for n in EXTENDED_ONLY if "loaded_" in n) + (NEW_APP[1],) + (UI_EDITOR if ui else ()), identity_names=UI_IDENTITY if ui else ())
         close.inventory(run("close-inventory", [binary, close.PREFIX, "--list"]), close.NAMES)
         selected("close-interaction", binary, close.NAMES, len(names))
+        if ui:
+            library("sample-ui", "orr_sample", "project-export,game-ui", ["project-export", "project", "sprites", "game-ui", "input-actions"], SAMPLE + UI_SAMPLE_BASE + UI_SAMPLE)
+            library("ui-only", "orr_editor", "project-ui", ["project-ui", "sprites"], [])
+            library("minimal-ui", "orr_editor", baseline + ",project-ui", ["arena-project-export", "project-create", "project-ui", "sprites"], BASELINE + (EXTENDED_ONLY[1],) + UI_EDITOR, identity_names=UI_IDENTITY)
+            library("export-only", "orr_editor", "arena-project-export", ["arena-project-export", "sprites"], BASELINE)
+            import arena_editor_ui_export_gate as ui_gate
+            features = ["arena-project-export", "project-create", "project-ui", "sprites"]
+            select_target("ui-cpu-harness", "orr_editor", "arena_editor_ui_export", "test", features)
+            harness = producer(run("ui-cpu-build", ["cargo", "test", "--locked", "--release", "-p", "orr_editor", "--no-default-features", "--features", baseline + ",project-ui", "--test", "arena_editor_ui_export", "--no-run", "--message-format=json"]), "ui-cpu-harness", "orr_editor", "arena_editor_ui_export", "test", features)
+            close.inventory(run("ui-cpu-full-list", [harness, "--list"]), [ui_gate.NATIVE, ui_gate.MODULE, ui_gate.REGRESSION])
+            close.inventory(run("ui-cpu-full-ignored", [harness, "--ignored", "--list"]), [ui_gate.NATIVE, ui_gate.MODULE])
+            selected("ui-cpu-regression", harness, [ui_gate.REGRESSION], 3)
     else:
         select_target("unsupported-integration", "orr_editor", "arena_editor_export", "test", ["arena-project-export", "project-create", "sprites"])
         binary = producer(run("unsupported-build", ["cargo", "test", "--locked", "--release", "-p", "orr_editor", "--no-default-features", "--features", baseline, "--test", "arena_editor_export", "--no-run", "--message-format=json"]),
             "unsupported-integration", "orr_editor", "arena_editor_export", "test", ["arena-project-export", "project-create", "sprites"])
         close.inventory(run("unsupported-list", [binary, "--list"]), [])
         close.inventory(run("unsupported-ignored", [binary, "--ignored", "--list"]), [])
+        if ui:
+            library("unsupported-ui-only", "orr_editor", "project-ui", ["project-ui", "sprites"], [])
+            library("unsupported-minimal-ui", "orr_editor", baseline + ",project-ui", ["arena-project-export", "project-create", "project-ui", "sprites"], [])
+            features = ["arena-project-export", "project-create", "project-ui", "sprites"]
+            select_target("unsupported-ui-integration", "orr_editor", "arena_editor_ui_export", "test", features)
+            harness = producer(run("unsupported-ui-build", ["cargo", "test", "--locked", "--release", "-p", "orr_editor", "--no-default-features", "--features", baseline + ",project-ui", "--test", "arena_editor_ui_export", "--no-run", "--message-format=json"]), "unsupported-ui-integration", "orr_editor", "arena_editor_ui_export", "test", features)
+            close.inventory(run("unsupported-ui-list", [harness, "--list"]), [])
+            close.inventory(run("unsupported-ui-ignored", [harness, "--ignored", "--list"]), [])
     run("strict-default", ["cargo", "clippy", "--locked", "-p", "orr_editor", "--no-default-features", "--all-targets", "--", "-D", "warnings"])
     run("strict-enabled", ["cargo", "clippy", "--locked", "-p", "orr_editor", "-p", "orr_sample", "--no-default-features", "--features", "orr_editor/arena-project-export,orr_editor/project-create,orr_editor/project-ui,orr_editor/tilemap,orr_editor/mesh-mission,orr_editor/package-manager,orr_editor/collect-ui", "--all-targets", "--", "-D", "warnings"])
 
@@ -398,8 +481,15 @@ def structural_proof():
     assert hashlib.sha256(text[text.index(marker):].encode()).hexdigest() == "4ad19d9dd79bac4ce4c339f25ec13cf7e4d292e595bb2fefe89b0fdd6fbe7824"
     source = (runner.repo / "crates/orr_sample/src/project_export/editor_arena.rs").read_text()
     suffix = source[source.index(marker):]
-    assert "#[ignore" not in suffix and "#[cfg" not in suffix[len("#[cfg(test)]"):]
-    assert sorted(re.findall(r"#\[test\]\s*fn (\w+)", suffix)) == sorted(n.split("::")[-1] for n in SAMPLE)
+    assert "#[ignore" not in suffix
+    has_ui = "fn ui_constructor_bounds_closed_descriptor_font_length_and_digest" in suffix
+    expected = SAMPLE + (UI_SAMPLE_BASE + UI_SAMPLE if has_ui else ())
+    assert sorted(re.findall(r"#\[test\]\s*fn (\w+)", suffix)) == sorted(n.split("::")[-1] for n in expected)
+    conditional = re.findall(r'#\[cfg\(feature = "game-ui"\)\]\s*(?:#\[test\]\s*)?fn (\w+)', suffix)
+    assert sorted(conditional) == sorted([n.split("::")[-1] for n in UI_SAMPLE] + ["capture_ui", "install_ui"]) if has_ui else not conditional
+    # No unknown cfg may hide a listed case or change the expected feature contract.
+    remaining = suffix[len("#[cfg(test)]"):].replace('#[cfg(feature = "game-ui")]', '')
+    assert "#[cfg" not in remaining
     library = (runner.repo / "crates/orr_sample/src/lib.rs").read_text()
     assert '#[cfg(all(feature = "project-export", target_os = "linux", target_arch = "x86_64"))]\npub mod project_export;' in library
     return {"kind":"structural-source-and-cfg-only", "baseline":LEGACY_BASE,
@@ -409,7 +499,31 @@ def structural_proof():
         "qualification":"All old sample files unchanged except exporter implementation; old test module bytes unchanged. Hosted exact inventories and original runs remain mandatory."}
 
 
+def ui_structural_proof():
+    structural_proof()
+    sample = (runner.repo / "crates/orr_sample/src/project_export/editor_arena.rs").read_text()
+    assert all("fn " + name.split("::")[-1] + "(" in sample for name in UI_SAMPLE_BASE + UI_SAMPLE)
+    for folder, name in zip(("app", "editor"), UI_EDITOR):
+        source = (runner.repo / f"crates/orr_editor/src/{folder}/arena_export_tests.rs").read_text()
+        assert '#[cfg(feature = "project-ui")]\n#[test]\nfn ' + name.split("::")[-1] + "(" in source
+    source = (runner.repo / "crates/orr_editor/src/project_ui.rs").read_text()
+    assert '#[cfg(all(\n    test,\n    feature = "arena-project-export",\n    target_os = "linux",\n    target_arch = "x86_64"\n))]\nmod tests {' in source
+    suffix = source[source.index("mod tests {"):]
+    assert "#[ignore" not in suffix and "#[cfg" not in suffix
+    assert sorted(re.findall(r"#\[test\]\s*fn (\w+)", suffix)) == sorted(name.split("::")[-1] for name in UI_IDENTITY)
+    source = (runner.repo / "crates/orr_sample/src/app.rs").read_text()
+    assert '#[cfg(all(test, feature = "project", feature = "game-ui"))]\n#[path = "app_project_ui_tests.rs"]\nmod project_ui_tests;' in source
+    source = (runner.repo / "crates/orr_sample/src/app_project_ui_tests.rs").read_text()
+    assert '#[cfg(all(target_os = "linux", target_arch = "x86_64"))]\n#[test]\n#[ignore = "requires explicitly supplied source-hidden read-only exported bundle"]\nfn ' + UI_APP.split("::")[-1] + "(" in source
+    return {"kind":"structural-source-and-cfg-only", "executed":False,
+            "sample_unconditional":UI_SAMPLE_BASE,"sample_game_ui":UI_SAMPLE,
+            "editor_both_features":UI_EDITOR+UI_IDENTITY,"app_ignored":UI_APP}
+
+
 def main():
+    if len(sys.argv) == 5 and sys.argv[1] == "profile-census":
+        profile_census(*sys.argv[2:])
+        return
     if len(sys.argv) in (4, 5, 7) and sys.argv[1] == "census":
         census(sys.argv[2], int(sys.argv[3]), *sys.argv[4:])
         return
@@ -436,7 +550,17 @@ def main():
         runner.record()
         output = run("independent-fixtures", [sys.executable, "-B", str(root / "tools/test_arena_editor_export_gate.py")])
         assert output.rstrip().endswith(f"ARENA_EXPORT_GATE_FIXTURES: {FIXTURE_COUNT} passed; 0 failed; 0 skipped")
-        {"cpu":cpu, "native":native}[sys.argv[1]]()
+        if sys.argv[1] == "cpu":
+            assert "ui_constructor_bounds_closed_descriptor_font_length_and_digest" in (root / "crates/orr_sample/src/project_export/editor_arena.rs").read_text(), "mandatory #282 source profile missing"
+            runner.report["ui_census_proof"] = ui_structural_proof()
+            import arena_editor_ui_export_gate as ui_gate
+            checked = run("independent-ui-fixtures", [sys.executable, "-B", str(root / "tools/test_arena_editor_ui_export_gate.py")])
+            assert checked.rstrip().endswith(f"ARENA_UI_EXPORT_GATE_FIXTURES: {ui_gate.FIXTURE_COUNT} passed; 0 failed; 0 skipped")
+            runner.report["ui_profile"] = True
+            cpu(ui=True)
+            producer_source_fence()
+        else:
+            native()
         fence.source_fence()
     except BaseException as failure:
         error = failure
