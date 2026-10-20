@@ -47,6 +47,47 @@ class GateFixtures(unittest.TestCase):
             gate.mode=mode;gate.runner.report['coverage']={k:('PASSED' if k=={'cpu':'model','gpu':'gpu'}[mode] else 'NOT RUN') for k in ('model','gpu')};gate.check_coverage()
             gate.runner.report['coverage']={'model':'PASSED','gpu':'PASSED'}
             with self.assertRaises(AssertionError):gate.check_coverage()
+    def test_regression_cli_uses_exact_fresh_assemble_producer(self):
+        with mock.patch.object(gate, 'run', return_value='producer-json') as run, \
+                mock.patch.object(gate, 'pin', return_value='/retained/assemble') as pin, \
+                mock.patch.dict(gate.os.environ, {'ORR_STATIC_MODEL_ASSEMBLE_BIN': '/stale'}):
+            self.assertEqual(gate.build_regression_cli(), '/retained/assemble')
+            run.assert_called_once_with('build-assemble-cli', [
+                'cargo', 'build', '--locked', '--release', '-p', 'orr_model',
+                '--no-default-features', '--features', 'animation,import',
+                '--example', 'static_model_assemble', '--message-format=json'])
+            pin.assert_called_once_with('producer-json', 'assemble-cli', 'orr_model',
+                                        'static_model_assemble', 'example', ['animation', 'import'])
+            self.assertEqual(gate.os.environ['ORR_STATIC_MODEL_ASSEMBLE_BIN'], '/retained/assemble')
+    def test_regression_cli_pin_failure_cannot_publish_environment(self):
+        with mock.patch.object(gate, 'run', return_value='invalid-producer'), \
+                mock.patch.object(gate, 'pin', side_effect=AssertionError('not fresh')), \
+                mock.patch.dict(gate.os.environ, {'ORR_STATIC_MODEL_ASSEMBLE_BIN': '/stale'}):
+            with self.assertRaises(AssertionError):
+                gate.build_regression_cli()
+            self.assertEqual(gate.os.environ['ORR_STATIC_MODEL_ASSEMBLE_BIN'], '/stale')
+    def test_full_regressions_require_assemble_without_narrowing(self):
+        events = []
+        def run(label, command, **kwargs):
+            events.append(label)
+            if label == 'feature-off-exit2':
+                return 'requires --features animation,import'
+            if label == 'actual-help':
+                return 'Usage: animation_pose_bake'
+            if label == 'model-full-regressions':
+                self.assertEqual(events[-2], 'assemble-ready')
+                self.assertEqual(command, ['cargo', 'test', '--locked', '--release', '-p',
+                    'orr_model', '--no-default-features', '--features', 'animation,import',
+                    '--tests', '--', '--test-threads=1'])
+            return ''
+        gate.runner.report['coverage'] = {}
+        with mock.patch.object(gate, 'run', side_effect=run), \
+                mock.patch.object(gate, 'pin', return_value='/retained/test'), \
+                mock.patch.object(gate, 'build_cli', return_value='/retained/pose'), \
+                mock.patch.object(gate, 'test'), mock.patch.object(gate.runner, 'record'), \
+                mock.patch.object(gate, 'build_regression_cli', side_effect=lambda: events.append('assemble-ready')):
+            gate.model()
+        self.assertIn('model-full-regressions', events)
     def test_platform_test_census_retains_socket(self):
         linux=gate.model_tests('linux');windows=gate.model_tests('win32')
         self.assertEqual(len(linux),25);self.assertEqual(len(windows),22)

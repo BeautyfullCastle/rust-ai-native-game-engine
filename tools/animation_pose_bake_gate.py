@@ -35,7 +35,7 @@ FEATURE_PATHS = (
 INFRA_PATHS = ('Cargo.toml', 'Cargo.lock', 'tools/static_model_extract_gate.py',
                'tools/test_static_model_extract_gate.py')
 GPU_TEST = 'fresh_cli_pose_bake_matches_independent_gpu_oracle'
-FIXTURE_COUNT = 9
+FIXTURE_COUNT = 12
 source_root = None
 frozen = None
 mode = None
@@ -185,6 +185,18 @@ def build_cli():
     return binary
 
 
+def build_regression_cli():
+    # --tests also runs the mandatory assemble actual-CLI regression. Build and
+    # retain its own source-bound executable, never reuse the pose CLI or PATH.
+    output = run('build-assemble-cli', ['cargo', 'build', *cargo_flags(),
+                                      '--features', 'animation,import', '--example',
+                                      'static_model_assemble', '--message-format=json'])
+    binary = pin(output, 'assemble-cli', 'orr_model', 'static_model_assemble',
+                 'example', ['animation', 'import'])
+    os.environ['ORR_STATIC_MODEL_ASSEMBLE_BIN'] = binary
+    return binary
+
+
 def model_tests(platform):
     assert platform in {'linux', 'darwin', 'win32'}
     names = ['weighted_skin_hierarchy_inverse_bind_and_rigid_model_space_oracle', 'f64_time_bounds_precede_f32_rounding_and_clip_index_is_exact', 'recipe_accepts_exact_object_whitespace_and_16kib_boundary', 'recipe_rejects_missing_duplicate_unknown_null_and_positional_aliases', 'logical_paths_reject_nonportable_unnormalized_suffixes_and_aliases', 'logical_paths_accept_240_byte_boundary', 'source_resolves_once_no_historical_dependencies_and_errors_propagate', 'provenance_binds_exact_bytes_and_roundtrip_is_deterministic', 'cli_publishes_once_without_overwrite_and_preserves_all_inputs', 'cli_help_and_three_unique_pairs_are_bounded', 'cli_bad_arguments_fail_without_output_or_staging', 'cli_portable_output_names_and_package_store_rejection', 'cli_missing_nonregular_and_oversized_inputs_leave_no_output', 'cli_resolver_is_anchored_to_recipe_parent', 'cli_parent_traversal_preserves_raw_spelling_and_never_publishes', 'step_boundaries_late_early_single_tracks_and_zero_duration', 'full_source_admission_rejects_unused_invalid_assets_and_unknown_fields', 'recipe_wrong_types_versions_and_positive_underflow_reject', 'singular_and_mirrored_weighted_samples_fail_without_rest_pose_fallback', 'baked_static_local_position_bounds_are_stricter_than_animation_bounds', 'combined_recipe_and_source_input_budget_is_enforced']
@@ -211,6 +223,7 @@ def model():
     test('model', binary, model_tests(sys.platform))
     # Full original model regression suites remain mandatory, including Unix
     # socket refusal fixtures; restricted local execution is not a waiver.
+    build_regression_cli()
     run('model-full-regressions', ['cargo', 'test', *flags, '--features', 'animation,import', '--tests', '--', '--test-threads=1'])
     run('strict-model-import', ['cargo', 'clippy', *flags, '--features', 'animation,import',
                                '--lib', '--example', 'animation_pose_bake', '--test',
