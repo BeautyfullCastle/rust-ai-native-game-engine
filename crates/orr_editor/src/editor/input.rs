@@ -492,11 +492,15 @@ mod mesh_hazards_control_tests {
     }
 
     fn wait(editor: &mut Editor, predicate: impl Fn(&Editor) -> bool) {
+        wait_for(editor, "managed input state", predicate);
+    }
+
+    fn wait_for(editor: &mut Editor, stage: &str, predicate: impl Fn(&Editor) -> bool) {
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
             editor.sync();
             if predicate(editor) { break; }
-            assert!(Instant::now() < deadline, "managed hazard input state timed out: phase={:?} can={} hint={} log={:?}", editor.input_phase(), editor.can_take_control(), editor.input_hint(), editor.log().iter().map(|m| &m.text).collect::<Vec<_>>());
+            assert!(Instant::now() < deadline, "managed hazard input state timed out: stage={stage} tick/lost={:?} phase={:?} can={} hint={} log={:?}", editor.snapshot().map(|snapshot| { let frame = snapshot.predicted(); (frame.tick(), hazards::from_view(frame).map(|view| view.map(|view| view.run.lost))) }), editor.input_phase(), editor.can_take_control(), editor.input_hint(), editor.log().iter().map(|m| &m.text).collect::<Vec<_>>());
             std::thread::sleep(Duration::from_millis(5));
         }
     }
@@ -562,18 +566,37 @@ mod mesh_hazards_control_tests {
     fn hazard_loss_releases_an_active_managed_grant() {
         let (_directory, mut editor) = fixture();
         let view = mesh_from_view(editor.snapshot().unwrap().predicted()).unwrap();
+        let original_goal = view.agent.spec.goal;
+        // Admit a stationary initial route so host scheduling cannot reach the
+        // hazard before the managed grant is observed. Motion starts only below.
+        let mut pin = view.pin;
+        pin.goal = pin.start;
+        let types = hazards::hazards_types();
+        let value = types.get(orr_remote::mesh_navigation::PIN_NAME).unwrap()
+            .read(orr_reflect::bytemuck::bytes_of(&pin));
+        editor.host_call("world.singleton.patch", serde_json::json!({
+            "name": orr_remote::mesh_navigation::PIN_NAME,
+            "value": orr_remote::json::value_to_json(&value),
+        })).unwrap();
+        editor.sync();
+        let stationary = mesh_from_view(editor.snapshot().unwrap().predicted()).unwrap();
+        assert_eq!(stationary.pin.goal, stationary.pin.start);
+        assert_eq!(stationary.agent.position, view.agent.position);
         let mut config = hazards::MeshHazards {
             enabled: 1, count: 1, graph_revision: view.graph.revision(), ..Default::default()
         };
-        config.spheres[0] = hazards::HazardSphere { center: view.agent.spec.goal, radius: FP::from_raw(FP::SCALE / 4) };
-        editor.host_call("world.singleton.patch", hazards::patch_request(&config, &view).unwrap()).unwrap();
+        config.spheres[0] = hazards::HazardSphere { center: original_goal, radius: FP::from_raw(FP::SCALE / 4) };
+        editor.host_call("world.singleton.patch", hazards::patch_request(&config, &stationary).unwrap()).unwrap();
         editor.sync();
         editor.play();
-        wait(&mut editor, Editor::can_take_control);
+        wait_for(&mut editor, "stationary Play ready", Editor::can_take_control);
         assert!(editor.set_mesh_play_input_enabled(true));
-        wait(&mut editor, |editor| editor.input_phase() == Phase::Active);
-        wait(&mut editor, |editor| hazards::from_view(editor.snapshot().unwrap().predicted()).unwrap().is_some_and(|view| view.run.lost == 1));
-        wait(&mut editor, |editor| editor.input_phase() == Phase::Off && !editor.input_cleanup_pending());
+        wait_for(&mut editor, "stationary managed grant Active", |editor| editor.input_phase() == Phase::Active);
+        assert!(editor.mesh_gameplay_input_open());
+        assert_eq!(mesh_from_view(editor.snapshot().unwrap().predicted()).unwrap().agent.position, stationary.agent.position);
+        assert!(editor.queue_mesh_play_goal(original_goal).is_ok());
+        wait_for(&mut editor, "queued goal reaches hazard", |editor| hazards::from_view(editor.snapshot().unwrap().predicted()).unwrap().is_some_and(|view| view.run.lost == 1));
+        wait_for(&mut editor, "terminal managed grant released", |editor| editor.input_phase() == Phase::Off && !editor.input_cleanup_pending());
         assert!(!editor.mesh_play_input_enabled());
         assert!(editor.queue_mesh_play_goal(view.agent.spec.start).is_err());
     }
