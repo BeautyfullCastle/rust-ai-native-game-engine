@@ -710,13 +710,13 @@ impl<B: Bridge<Arena>> ApplicationHandler for App<B> {
                     }
                 }
             }
-            WindowEvent::Focused(focused) => {
+            WindowEvent::Focused(false) => {
                 #[cfg(feature = "input-actions")]
-                self.controls.set_focused(focused);
-                if !focused {
-                    self.keys = Keys::default();
-                }
+                self.controls.set_focused(false);
+                self.keys = Keys::default();
             }
+            #[cfg(feature = "input-actions")]
+            WindowEvent::Focused(true) => self.controls.set_focused(true),
             #[cfg(feature = "input-actions")]
             WindowEvent::MouseInput { state, button, .. } => {
                 if let Some(button) = crate::arena_input::mouse(button) {
