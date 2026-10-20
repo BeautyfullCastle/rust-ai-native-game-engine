@@ -34,7 +34,7 @@ struct RootPin {
 impl RootPin {
     fn new(parent: &Path) -> Result<Self, String> {
         let path = checked_directory(parent)?;
-        let directory = File::open(&path).map_err(|e| e.to_string())?;
+        let directory = open_directory(&path)?;
         Ok(Self { path, directory })
     }
     fn recheck(&self, parent: &Path) -> Result<(), String> {
@@ -46,6 +46,31 @@ impl RootPin {
         }
         Ok(())
     }
+}
+
+#[cfg(windows)]
+fn open_directory(path: &Path) -> Result<File, String> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+    // Windows requires backup semantics to open a directory handle. Do not
+    // follow a reparse point introduced after checked_directory admitted it.
+    let directory = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(|error| error.to_string())?;
+    let metadata = directory.metadata().map_err(|error| error.to_string())?;
+    if !metadata.is_dir() || metadata.file_attributes() & 0x0400 != 0 {
+        return Err("UI document root must be a regular non-reparse directory".into());
+    }
+    Ok(directory)
+}
+#[cfg(not(windows))]
+fn open_directory(path: &Path) -> Result<File, String> {
+    File::open(path).map_err(|error| error.to_string())
 }
 
 #[cfg(unix)]
@@ -460,6 +485,8 @@ mod tests {
         let font = prepared.font.clone();
         let original = prepared.document.clone();
         let panel = Panel::new(prepared);
+        assert!(panel.root.is_ok(), "{:?}", panel.error);
+        assert!(panel.error.is_none(), "{:?}", panel.error);
         let mut installed = false;
         let installed_font = font.clone();
         let mut h = Harness::builder()
@@ -551,6 +578,8 @@ mod tests {
         let (_dir, prepared) = fixture();
         let path = prepared.path.clone();
         let mut panel = Panel::new(prepared.clone());
+        assert!(panel.root.is_ok(), "{:?}", panel.error);
+        assert!(panel.error.is_none(), "{:?}", panel.error);
         let mut edited = panel.document().clone();
         if let Kind::Label { text, .. } = &mut edited.nodes[0].kind {
             *text = "New title".into();
