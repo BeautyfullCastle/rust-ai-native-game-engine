@@ -77,6 +77,69 @@ class Fixtures(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 gate.exact_model_result(valid, 'real', names)
 
+    def test_assemble_regression_cli_is_fresh_and_identity_pinned(self):
+        flags = ['--locked', '--release', '-p', 'orr_model', '--no-default-features']
+        with mock.patch.dict(os.environ, {'ORR_STATIC_MODEL_ASSEMBLE_BIN': 'stale'}):
+            with mock.patch.object(gate, 'run', return_value='producer') as run, \
+                    mock.patch.object(gate, 'pin', return_value='/fresh/assemble') as pin:
+                self.assertEqual(gate.prepare_assemble_regression_cli(flags), '/fresh/assemble')
+                run.assert_called_once_with('build-assemble-regression-cli',
+                    ['cargo', 'build', *flags, '--features', 'import', '--example',
+                     'static_model_assemble', '--message-format=json'])
+                pin.assert_called_once_with('producer', 'assemble-regression-cli',
+                    'orr_model', 'static_model_assemble', 'example', ['import'])
+                self.assertEqual(os.environ['ORR_STATIC_MODEL_ASSEMBLE_BIN'], '/fresh/assemble')
+            with mock.patch.object(gate, 'run', side_effect=AssertionError('build failed')), \
+                    mock.patch.object(gate, 'pin') as pin, self.assertRaises(AssertionError):
+                gate.prepare_assemble_regression_cli(flags)
+            pin.assert_not_called()
+            os.environ['ORR_STATIC_MODEL_ASSEMBLE_BIN'] = 'unchanged'
+            with mock.patch.object(gate, 'run', return_value='producer'), \
+                    mock.patch.object(gate, 'pin', side_effect=AssertionError('wrong identity')), \
+                    self.assertRaises(AssertionError):
+                gate.prepare_assemble_regression_cli(flags)
+            self.assertEqual(os.environ['ORR_STATIC_MODEL_ASSEMBLE_BIN'], 'unchanged')
+
+    def test_model_requires_assemble_pin_before_full_regressions(self):
+        for fail_pin in (False, True):
+            events = []
+            def run(label, command, **kwargs):
+                events.append(label)
+                if label == 'model-full-regressions':
+                    self.assertEqual(os.environ['ORR_STATIC_MODEL_ASSEMBLE_BIN'], '/fresh/assemble')
+                    self.assertIn('--tests', command)
+                return 'requires --features import Usage: static_model_sampler'
+            def pin(output, label, *args):
+                events.append('pin-' + label)
+                if label == 'assemble-regression-cli':
+                    if fail_pin:
+                        raise AssertionError('wrong assemble producer')
+                    return '/fresh/assemble'
+                return '/fresh/other'
+            with mock.patch.dict(os.environ, {'ORR_STATIC_MODEL_ASSEMBLE_BIN': 'stale'}), \
+                    mock.patch.object(gate, 'run', side_effect=run), \
+                    mock.patch.object(gate, 'pin', side_effect=pin), \
+                    mock.patch.object(gate, 'build_cli', return_value='/fresh/sampler'), \
+                    mock.patch.object(gate, 'exact_model_result') as exact, \
+                    mock.patch.object(gate.runner, 'inventory'), \
+                    mock.patch.object(gate.runner, 'record'), \
+                    mock.patch.object(gate.runner, 'report', {'coverage': {'model': 'NOT RUN'}}):
+                if fail_pin:
+                    with self.assertRaises(AssertionError):
+                        gate.model()
+                    self.assertNotIn('model-full-regressions', events)
+                    self.assertEqual(gate.runner.report['coverage']['model'], 'NOT RUN')
+                    self.assertEqual(os.environ['ORR_STATIC_MODEL_ASSEMBLE_BIN'], 'stale')
+                else:
+                    gate.model()
+                    self.assertLess(events.index('pin-assemble-regression-cli'),
+                                    events.index('model-full-regressions'))
+                    self.assertEqual(exact.call_count, len(gate.model_tests(sys.platform)) + 1)
+                    self.assertIn('model-real-cli', events)
+                    self.assertIn('strict-model-import', events)
+                    self.assertIn('strict-model-default', events)
+                    self.assertEqual(gate.runner.report['coverage']['model'], 'PASSED')
+
     def test_exact_current_rust_census(self):
         source=(ROOT/'crates/orr_model/tests/static_model_sampler.rs').read_text()
         declarations=re.findall(r'#\[test\](?:\n#\[ignore[^\n]*\])?\nfn (\w+)\(',source)
