@@ -8,18 +8,92 @@ pub struct Hud {
     pub best: String,
 }
 
-#[derive(Clone)]
-struct Placed {
+/// One node’s production layout, in document draw order.
+#[derive(Clone, Debug)]
+pub struct LayoutEntry {
     index: usize,
     rect: egui::Rect,
     clip: egui::Rect,
+}
+
+impl LayoutEntry {
+    /// Index into the source document's nodes, not the filtered result vector.
+    pub fn index(&self) -> usize {
+        self.index
+    }
+
+    pub fn rect(&self) -> egui::Rect {
+        self.rect
+    }
+
+    /// Inherited viewport/ancestor clip before intersection with this node.
+    pub fn clip(&self) -> egui::Rect {
+        self.clip
+    }
+}
+
+/// Query the renderer's logical-pixel layout without creating a UI or font atlas.
+///
+/// Only this query path validates the document and requires a finite viewport
+/// with strictly positive, finite dimensions. Results retain document draw order.
+pub fn layout_document(
+    document: &Document,
+    screen: Screen,
+    viewport: egui::Rect,
+) -> Result<Vec<LayoutEntry>, String> {
+    document.validate()?;
+    if !viewport.min.x.is_finite()
+        || !viewport.min.y.is_finite()
+        || !viewport.max.x.is_finite()
+        || !viewport.max.y.is_finite()
+        || !viewport.width().is_finite()
+        || !viewport.height().is_finite()
+        || !viewport.is_positive()
+    {
+        return Err("Collect UI layout viewport must be finite with positive dimensions".into());
+    }
+    let mut placed = Vec::new();
+    append_layout(document, screen, viewport, &mut placed);
+    Ok(placed)
+}
+
+fn append_layout(
+    document: &Document,
+    screen: Screen,
+    viewport: egui::Rect,
+    placed: &mut Vec<LayoutEntry>,
+) {
+    for (index, node) in document.nodes.iter().enumerate() {
+        if node.screen != screen {
+            continue;
+        }
+        let (bounds, clip) = if let Some(parent) = &node.parent {
+            let Some(placed) = placed
+                .iter()
+                .find(|placed| document.nodes[placed.index].id == *parent)
+            else {
+                continue;
+            };
+            (placed.rect, placed.clip.intersect(placed.rect))
+        } else {
+            (viewport, viewport)
+        };
+        let size = egui::vec2(f32::from(node.size[0]), f32::from(node.size[1]));
+        let min = bounds.min
+            + egui::vec2(
+                bounds.width() * f32::from(node.anchor[0]) / 1000.0 + f32::from(node.offset[0]),
+                bounds.height() * f32::from(node.anchor[1]) / 1000.0 + f32::from(node.offset[1]),
+            );
+        let rect = egui::Rect::from_min_size(min, size);
+        placed.push(LayoutEntry { index, rect, clip });
+    }
 }
 
 pub struct CollectUi {
     pub context: egui::Context,
     document: Document,
     screen: Screen,
-    placed: Vec<Placed>,
+    placed: Vec<LayoutEntry>,
     pressed: Option<String>,
     pointer_layout_stale: bool,
     viewport: Option<egui::Rect>,
@@ -144,32 +218,7 @@ impl CollectUi {
 
     fn layout(&mut self, viewport: egui::Rect) {
         self.placed.clear();
-        for (index, node) in self.document.nodes.iter().enumerate() {
-            if node.screen != self.screen {
-                continue;
-            }
-            let (bounds, clip) = if let Some(parent) = &node.parent {
-                let Some(placed) = self
-                    .placed
-                    .iter()
-                    .find(|placed| self.document.nodes[placed.index].id == *parent)
-                else {
-                    continue;
-                };
-                (placed.rect, placed.clip.intersect(placed.rect))
-            } else {
-                (viewport, viewport)
-            };
-            let size = egui::vec2(f32::from(node.size[0]), f32::from(node.size[1]));
-            let min = bounds.min
-                + egui::vec2(
-                    bounds.width() * f32::from(node.anchor[0]) / 1000.0 + f32::from(node.offset[0]),
-                    bounds.height() * f32::from(node.anchor[1]) / 1000.0
-                        + f32::from(node.offset[1]),
-                );
-            let rect = egui::Rect::from_min_size(min, size);
-            self.placed.push(Placed { index, rect, clip });
-        }
+        append_layout(&self.document, self.screen, viewport, &mut self.placed);
     }
 
     fn hit_button(&self, point: egui::Pos2) -> Option<usize> {
@@ -408,6 +457,104 @@ mod tests {
             offset,
             size: [100, 40],
         }
+    }
+
+    #[test]
+    fn layout_document_matches_rendered_frame_order_geometry_and_clips() {
+        let mut root = node("root", Action::Play, [-10, -20]);
+        root.kind = Kind::Container;
+        root.anchor = [250, 250];
+        root.size = [160, 120];
+        let mut nested = node("nested", Action::Play, [-30, -10]);
+        nested.kind = Kind::Container;
+        nested.parent = Some("root".into());
+        nested.anchor = [500, 500];
+        nested.size = [100, 90];
+        let mut other_screen = node("other", Action::Quit, [0, 0]);
+        other_screen.screen = Screen::Menu;
+        let sibling = node("sibling", Action::Menu, [2, 3]);
+        let mut child = node("child", Action::Play, [-15, -12]);
+        child.parent = Some("nested".into());
+        child.anchor = [1000, 500];
+        let document = Document {
+            schema: 1,
+            // A root sibling interleaves the nested container and its child.
+            nodes: vec![root, nested, other_screen, sibling, child],
+        };
+        let mut ui = CollectUi::new(document, font()).unwrap();
+        for viewport in [
+            egui::Rect::from_min_size(egui::pos2(17.0, 23.0), egui::vec2(400.0, 300.0)),
+            egui::Rect::from_min_size(egui::pos2(-21.0, 11.0), egui::vec2(181.0, 127.0)),
+        ] {
+            let mut raw = input(vec![]);
+            raw.screen_rect = Some(viewport);
+            frame(&mut ui, raw, 0);
+            let entries = layout_document(ui.document(), ui.screen(), viewport).unwrap();
+            assert_eq!(
+                entries.iter().map(LayoutEntry::index).collect::<Vec<_>>(),
+                [0, 1, 3, 4]
+            );
+            assert_eq!(entries.len(), ui.placed.len());
+            for (entry, rendered) in entries.iter().zip(&ui.placed) {
+                assert_eq!(entry.index(), rendered.index);
+                assert_eq!(entry.rect(), rendered.rect);
+                assert_eq!(entry.clip(), rendered.clip);
+            }
+            assert_eq!(entries[0].clip(), viewport);
+            assert_eq!(entries[1].clip(), viewport.intersect(entries[0].rect()));
+            assert_eq!(entries[2].clip(), viewport);
+            assert_eq!(
+                entries[3].clip(),
+                entries[1].clip().intersect(entries[1].rect())
+            );
+            assert!(entries[3].rect().max.x > entries[3].clip().max.x);
+        }
+        // Querying another screen returns its original document index only.
+        let viewport = ui.viewport.unwrap();
+        ui.apply(Action::Menu);
+        let mut raw = input(vec![]);
+        raw.screen_rect = Some(viewport);
+        frame(&mut ui, raw, 0);
+        let entries = layout_document(ui.document(), Screen::Menu, viewport).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].index(), 2);
+        assert_eq!(entries[0].rect(), ui.placed[0].rect);
+        assert_eq!(entries[0].clip(), ui.placed[0].clip);
+    }
+
+    #[test]
+    fn layout_document_rejects_invalid_document_and_viewport() {
+        let document = Document {
+            schema: 1,
+            nodes: vec![node("valid", Action::Play, [0, 0])],
+        };
+        let valid_viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(100.0, 100.0));
+        let mut invalid = document.clone();
+        invalid.nodes[0].parent = Some("missing".into());
+        assert_eq!(
+            layout_document(&invalid, Screen::Title, valid_viewport).unwrap_err(),
+            invalid.validate().unwrap_err()
+        );
+        for (min, max) in [
+            ([0.0, 0.0], [0.0, 100.0]),
+            ([0.0, 0.0], [100.0, 0.0]),
+            ([10.0, 0.0], [0.0, 100.0]),
+            ([0.0, 10.0], [100.0, 0.0]),
+            ([f32::NAN, 0.0], [100.0, 100.0]),
+            ([0.0, f32::NEG_INFINITY], [100.0, 100.0]),
+            ([0.0, 0.0], [f32::INFINITY, 100.0]),
+            ([-f32::MAX, 0.0], [f32::MAX, 100.0]),
+        ] {
+            let viewport = egui::Rect::from_min_max(min.into(), max.into());
+            assert!(layout_document(&document, Screen::Title, viewport).is_err());
+        }
+        let empty = Document {
+            schema: 1,
+            nodes: vec![],
+        };
+        assert!(layout_document(&empty, Screen::Title, valid_viewport)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

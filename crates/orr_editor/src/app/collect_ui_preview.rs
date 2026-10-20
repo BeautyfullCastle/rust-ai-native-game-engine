@@ -3,6 +3,7 @@
 use super::collect_ui_alignment::{AlignmentControls, Command as AlignmentCommand};
 use super::collect_ui_position::{Command, PositionControls};
 use super::collect_ui_resize::{Command as ResizeCommand, ResizeControls};
+use super::collect_ui_reparent::{Command as ReparentCommand, ReparentControls};
 use super::EditorApp;
 use crate::collect_ui_position::Context;
 use crate::collect_ui_preview::{Frame, State, MAX_SCORE};
@@ -181,6 +182,7 @@ pub(super) struct PreviewWindow {
     position: PositionControls,
     resize: ResizeControls,
     alignment: AlignmentControls,
+    reparent: ReparentControls,
 }
 impl PreviewWindow {
     fn release_gpu(&mut self) {
@@ -194,6 +196,7 @@ impl PreviewWindow {
         self.resize.cancel(&mut self.state, "Size edit cancelled");
         self.alignment
             .cancel(&mut self.state, "Alignment cancelled");
+        self.reparent.cancel(&mut self.state, "Reparent cancelled");
         self.state.close();
         self.release_gpu();
     }
@@ -202,7 +205,7 @@ impl PreviewWindow {
         ui: &mut egui::Ui,
         document: &orr_sample::authored_ui::Document,
         editable: bool,
-    ) -> (bool, Command, ResizeCommand, AlignmentCommand) {
+    ) -> (bool, Command, ResizeCommand, AlignmentCommand, ReparentCommand) {
         let mut settings = self.state.settings().clone();
         ui.horizontal_wrapped(|ui| {
             ui.label("Screen");
@@ -256,6 +259,7 @@ impl PreviewWindow {
                 &mut self.state,
                 "Preview settings changed; alignment cancelled",
             );
+            self.reparent.cancel(&mut self.state, "Preview settings changed; reparent cancelled");
             self.error = self.state.set_settings(settings).err();
             self.pointer_down = false;
         }
@@ -278,6 +282,7 @@ impl PreviewWindow {
         let was_moving = self.position.moving;
         let was_resizing = self.resize.resizing;
         let was_aligning = self.alignment.aligning;
+        let was_reparenting = self.reparent.reparenting;
         let command = self
             .position
             .show(ui, document, self.state.settings().screen, editable);
@@ -287,13 +292,18 @@ impl PreviewWindow {
         let alignment_command =
             self.alignment
                 .show(ui, document, self.state.settings().screen, editable);
+        let reparent_command = self.reparent.show(ui, document, self.state.settings().screen, editable);
         if self.position.moving && !was_moving {
+            self.reparent.reparenting = false;
+            self.reparent.cancel(&mut self.state, "Switched to Move mode");
             self.alignment.aligning = false;
             self.alignment
                 .cancel(&mut self.state, "Switched to Move mode");
             self.resize.resizing = false;
             self.resize.cancel(&mut self.state, "Switched to Move mode");
         } else if self.resize.resizing && !was_resizing {
+            self.reparent.reparenting = false;
+            self.reparent.cancel(&mut self.state, "Switched to Resize mode");
             self.alignment.aligning = false;
             self.alignment
                 .cancel(&mut self.state, "Switched to Resize mode");
@@ -302,6 +312,8 @@ impl PreviewWindow {
                 .cancel(&mut self.state, "Switched to Resize mode");
         }
         if self.alignment.aligning && !was_aligning {
+            self.reparent.reparenting = false;
+            self.reparent.cancel(&mut self.state, "Switched to Align mode");
             self.position.moving = false;
             self.resize.resizing = false;
             self.position
@@ -309,11 +321,20 @@ impl PreviewWindow {
             self.resize
                 .cancel(&mut self.state, "Switched to Align mode");
         }
+        if self.reparent.reparenting && !was_reparenting {
+            self.position.moving = false;
+            self.resize.resizing = false;
+            self.alignment.aligning = false;
+            self.position.cancel(&mut self.state, "Switched to Reparent mode");
+            self.resize.cancel(&mut self.state, "Switched to Reparent mode");
+            self.alignment.cancel(&mut self.state, "Switched to Reparent mode");
+        }
         (
             ui.button("Close screen preview").clicked(),
             command,
             resize_command,
             alignment_command,
+            reparent_command,
         )
     }
     fn input(
@@ -327,7 +348,7 @@ impl PreviewWindow {
             focused: ctx.input(|input| input.focused),
             ..Default::default()
         };
-        if self.position.moving || self.resize.resizing || self.alignment.aligning {
+        if self.position.moving || self.resize.resizing || self.alignment.aligning || self.reparent.reparenting {
             // Moving never forwards authored button presses or releases.
             self.pointer_down = false;
             self.canvas = Some(rect);
@@ -456,7 +477,8 @@ impl PreviewWindow {
                 let command;
                 let resize_command;
                 let alignment_command;
-                (close, command, resize_command, alignment_command) = self.controls(ui, panel.document(), editable);
+                let reparent_command;
+                (close, command, resize_command, alignment_command, reparent_command) = self.controls(ui, panel.document(), editable);
                 if close {
                     return;
                 }
@@ -472,6 +494,7 @@ impl PreviewWindow {
                 let context = self.position_context(&scene, epoch, rect);
                 self.position
                     .validate(&context, panel.document(), editable, &mut self.state);
+                self.reparent.validate(&context, panel.document(), editable, &mut self.state);
                 let resize_context = self.resize_context(&scene, epoch, rect);
                 self.resize.validate(&resize_context, panel.document(), editable, &mut self.state);
                 let alignment_context = self.alignment_context(&scene, epoch, rect);
@@ -490,7 +513,14 @@ impl PreviewWindow {
                     );
                     self.resize.cancel(&mut self.state, "Size edit cancelled after layout or focus change");
                     self.alignment.cancel(&mut self.state, "Alignment cancelled after layout or focus change");
+                    self.reparent.cancel(&mut self.state, "Reparent cancelled after layout or focus change");
                 } else {
+                    match reparent_command {
+                        ReparentCommand::Stage if editable && self.reparent.reparenting => self.reparent.stage(&context, panel.document(), &mut self.state),
+                        ReparentCommand::Apply if editable => self.reparent.apply(&context, panel, &mut self.state),
+                        ReparentCommand::Cancel => self.reparent.cancel(&mut self.state, "Reparent cancelled; accepted document restored"),
+                        _ => {}
+                    }
                     match alignment_command {
                         AlignmentCommand::Stage(mode) if editable && self.alignment.aligning => self.alignment.stage(mode, &alignment_context, panel.document(), &mut self.state),
                         AlignmentCommand::StageDistribution(axis) if editable && self.alignment.aligning => self.alignment.stage_distribution(axis, &alignment_context, panel.document(), &mut self.state),
@@ -564,6 +594,7 @@ impl PreviewWindow {
             self.resize.cancel(&mut self.state, "Size edit cancelled");
             self.alignment
                 .cancel(&mut self.state, "Alignment cancelled");
+            self.reparent.cancel(&mut self.state, "Reparent cancelled");
             self.state.close();
             ctx.request_repaint();
         }
@@ -581,6 +612,7 @@ impl EditorApp {
             || preview.resize.state.is_dragging()
             || preview.resize.state.is_ready()
             || preview.alignment.state.is_ready()
+            || preview.reparent.is_ready()
         {
             return Err("Apply or cancel the staged Collect UI gesture before changing projects".into());
         }
@@ -645,6 +677,7 @@ impl EditorApp {
                 canvas,
             );
             let preview = &mut self.collect_ui_preview;
+            preview.reparent.validate(&context, panel.document(), !self.editor.is_playing_mode(), &mut preview.state);
             preview.alignment.validate(
                 &alignment_context,
                 panel.document(),
@@ -665,6 +698,7 @@ impl EditorApp {
             );
         } else {
             let preview = &mut self.collect_ui_preview;
+            preview.reparent.cancel(&mut preview.state, "Reparent unavailable");
             preview
                 .alignment
                 .cancel(&mut preview.state, "Alignment unavailable");

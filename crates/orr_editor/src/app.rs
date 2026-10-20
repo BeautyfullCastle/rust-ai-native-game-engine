@@ -60,6 +60,9 @@ mod selection_outline;
 #[path = "app/collect_ui_preview.rs"]
 mod collect_ui_preview;
 #[cfg(feature = "collect-ui")]
+#[path = "app/collect_ui_reparent.rs"]
+mod collect_ui_reparent;
+#[cfg(feature = "collect-ui")]
 #[path = "app/collect_ui_position.rs"]
 mod collect_ui_position;
 #[cfg(feature = "collect-ui")]
