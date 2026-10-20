@@ -144,11 +144,12 @@ class Prerequisites(unittest.TestCase):
                     with mock.patch.object(native.sys,'platform','darwin'), \
                             mock.patch.object(native.subprocess,'Popen',side_effect=launch), \
                             mock.patch.object(native.os,'killpg',create=True) as kill, \
+                            mock.patch.object(native.signal,'SIGKILL',9,create=True), \
                             mock.patch.object(gate,'LOG_CAP',1 if code=='output-cap' else gate.LOG_CAP):
                         if code==0:self.assertEqual(native.run('mac',['command']).strip(),'ready')
                         else:
                             with self.assertRaises(AssertionError):native.run('mac',['command'],seconds=0 if code=='timeout' else 5)
-                    kill.assert_called_once_with(123,native.signal.SIGKILL)
+                    kill.assert_called_once_with(123,9)
                     process.poll.assert_not_called()
                     process.wait.assert_called_once_with(timeout=10)
                     process.stdin.close.assert_called_once()
