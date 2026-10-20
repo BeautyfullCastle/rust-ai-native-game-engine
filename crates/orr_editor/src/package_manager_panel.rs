@@ -1996,7 +1996,7 @@ mod update_tests {
 
     impl Fixture {
         fn new() -> Self {
-            let temp = tempfile::tempdir().unwrap();
+            let temp = tempfile::tempdir_in(fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
             let root = temp.path().join("room");
             let old_source = temp.path().join("v1");
             let source = temp.path().join("v2");
@@ -2085,6 +2085,7 @@ mod update_tests {
                 ..Panel::default()
             };
             panel.update_preview = Some(self.preview());
+            assert_eq!(panel.root.as_deref(), Some(panel.update_preview.as_ref().unwrap().plan.root()));
             panel
         }
 
