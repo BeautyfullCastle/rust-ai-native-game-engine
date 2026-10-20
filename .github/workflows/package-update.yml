@@ -1,9 +1,9 @@
 name: Checked package update
 on:
-  push:
-    branches: [main, su/engine-correctness-hardening]
-    tags: ['**']
   pull_request:
+    branches: [main, su/engine-correctness-hardening]
+    types: [ready_for_review]
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:

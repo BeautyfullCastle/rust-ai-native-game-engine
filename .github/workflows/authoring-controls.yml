@@ -1,8 +1,8 @@
 name: Authoring recorded controls and package search
 on:
   pull_request:
-  push:
-    branches: [su/engine-correctness-hardening]
+    branches: [main, su/engine-correctness-hardening]
+    types: [ready_for_review]
   workflow_dispatch:
 permissions:
   contents: read

@@ -7,11 +7,10 @@ name: determinism
 # integer-only simulation.
 
 on:
-  push:
-    branches: [main]
   pull_request:
+    branches: [main, su/engine-correctness-hardening]
+    types: [ready_for_review]
   workflow_dispatch:
-
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1

@@ -2508,7 +2508,7 @@ impl EditorApp {
         };
         let start_allowed = self.playback_start_blocker().is_none();
         ui.horizontal(|ui| {
-            if !(self.editor.down().is_none()) { ui.disable(); }
+            if self.editor.down().is_some() { ui.disable(); }
             if ui.button("\u{23EE}").on_hover_text("Rewind to the first tick").clicked() {
                 self.editor.seek(tl.first_tick);
             }

@@ -1,11 +1,10 @@
 name: arena-agent-trials
 
 on:
-  push:
-    branches: [main, su/engine-correctness-hardening]
   pull_request:
+    branches: [main, su/engine-correctness-hardening]
+    types: [ready_for_review]
   workflow_dispatch:
-
 permissions:
   contents: read
 

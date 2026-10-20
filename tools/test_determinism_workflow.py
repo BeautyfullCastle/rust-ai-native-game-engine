@@ -10,7 +10,6 @@ GitHub Actions scheduler or native Windows/macOS shells and toolchains.
 """
 
 import hashlib
-import itertools
 import json
 import os
 import re
@@ -636,25 +635,84 @@ class DeterminismWorkflowTests(unittest.TestCase):
         env.update(results)
         return subprocess.run(
             ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", self.step["run"]],
-            env=env, capture_output=True, text=True, check=False,
+            env=env, capture_output=True, text=True, check=False, timeout=10,
         )
 
     def test_gate_bash_syntax(self):
         result = subprocess.run(["bash", "-n"], input=self.step["run"], capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def assert_independent_gate_contract(self, script):
+        # This exact prefix is the proof obligation for reducing the Cartesian
+        # test domain. Each iteration reads only its own input, compares only
+        # with success, and monotonically ORs failure into a fresh accumulator.
+        # No cross-input dependency, early exit, or later reset is permitted.
+        # Thus all 6**7 inputs are covered by seven independent six-state
+        # equivalence classes, not by assuming sampled combinations generalize.
+        prefix = """failed=0
+for result_var in NATIVE_RESULT WASM32_RESULT ANDROID_ARM64_RESULT BROWSER_RESULT SAMPLE_BUILD_RESULT LINKED_PREFABS_RESULT ROOM_RESULT; do
+  result="${!result_var}"
+  echo "$result_var=$result"
+  if [[ "$result" != "success" ]]; then
+    echo "::error::$result_var must be success, got '$result'"
+    failed=1
+  fi
+done
+if [[ "$failed" != "0" ]]; then
+  exit 1
+fi
+"""
+        self.assertTrue(script.startswith(prefix), "gate independence contract changed; review equivalence proof")
+        suffix = script[len(prefix):].strip().splitlines()
+        self.assertTrue(suffix, "gate success output is missing")
+        # Echo-only literal success text cannot alter status or depend on an
+        # input. Disallow substitutions/escapes, shell operators and new code.
+        for line in suffix:
+            self.assertRegex(line, r'^echo "[^"\\$`]*"$', "nonliteral gate success suffix")
+
     def test_only_all_success_passes(self):
-        # 279936 combinations across all seven jobs include all four GitHub result
-        # states, empty results, and an unknown state: allow success, rather
-        # than denylisting.
-        states = ("success", "failure", "cancelled", "skipped", "", "unknown")
-        for values in itertools.product(states, repeat=len(RESULTS)):
-            results = dict(zip(RESULTS, values))
+        self.assert_independent_gate_contract(self.step["run"])
+        states = ("failure", "cancelled", "skipped", "", "unknown")
+        names = tuple(RESULTS)
+        success = {name: "success" for name in names}
+        cases = [success]
+        # Execute every member of every independent input equivalence class.
+        cases.extend({**success, name: state} for name in names for state in states)
+        # Supplement the proof with both orderings of mixed failures and all-
+        # failure vectors, checking that one bad lane cannot rescue another.
+        for index, first in enumerate(names):
+            for second in names[index + 1:]:
+                cases.extend(({**success, first: "failure", second: "unknown"},
+                              {**success, first: "unknown", second: "failure"}))
+        cases.extend({name: state for name in names} for state in states)
+        self.assertEqual(len(cases), 83)
+        for results in cases:
             with self.subTest(results=results):
                 result = self.run_gate(results)
-                self.assertEqual(result.returncode == 0, all(value == "success" for value in values), result.stdout + result.stderr)
+                self.assertEqual(result.returncode == 0, all(value == "success" for value in results.values()),
+                                 result.stdout + result.stderr)
                 for name, value in results.items():
                     self.assertIn(f"{name}={value}", result.stdout)
+
+    def test_gate_equivalence_contract_rejects_mutations(self):
+        script = self.step["run"]
+        for label, mutated in (
+            ("false success", script.replace("exit 1", "exit 0")),
+            ("inverted predicate", script.replace('!= "success"', '== "success"')),
+            ("cross-input dependency", script.replace('result="${!result_var}"', 'result="$NATIVE_RESULT"')),
+            ("failure reset", script.replace("failed=1", "failed=0")),
+            ("early exit", script.replace("failed=1", "exit 1")),
+            ("missing output", script.replace('echo "$result_var=$result"', ":")),
+            ("extra control flow", script + "\nexit 1\n"),
+            ("suffix expansion", script + '\necho "$(exit 1)"\n'),
+            ("suffix backticks", script + '\necho "`exit 1`"\n'),
+            ("suffix escape", script + '\necho "\\c"\n'),
+            ("suffix operator", script + '\necho "ok"; false\n'),
+        ):
+            with self.subTest(mutation=label):
+                self.assertNotEqual(mutated, script)
+                with self.assertRaises(AssertionError):
+                    self.assert_independent_gate_contract(mutated)
 
     def test_sample_failure_skip_cancel_or_missing_cannot_pass(self):
         # Even when every checksum target passes, a non-success/missing sample
