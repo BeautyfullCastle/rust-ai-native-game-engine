@@ -347,6 +347,8 @@ pub struct EditorApp {
     last_title: String,
     #[cfg(feature = "sprites")]
     pub sprites: crate::sprite_panel::SpritePanel,
+    #[cfg(feature = "tilemap")]
+    pub tilemap: Option<crate::tilemap_panel::TilemapPanel>,
     #[cfg(feature = "project-ui")]
     pub project_ui: Option<crate::project_ui::Preview>,
     #[cfg(feature="collect-ui")]
@@ -367,7 +369,7 @@ impl EditorApp {
     /// An app on `editor`. `render_state` is eframe's wgpu state (None without
     /// a GPU: the viewport then shows a notice, everything else works).
     pub fn new(editor: Editor, render_state: Option<egui_wgpu::RenderState>) -> Self {
-        Self { editor, #[cfg(feature="mesh-export")] mesh_player_session: mesh_player_session::State::default(), #[cfg(feature="mesh-mission")] mesh_game_creator: crate::mesh_game_creator::Panel::default(), #[cfg(feature="mesh-export")] mesh_recorded_playback: mesh_recorded_playback::State::default(), #[cfg(feature="mesh-export")] mesh_player_input_allowed: true, #[cfg(feature="mesh-navigation")] mesh_play_controls: crate::mesh_play_controls::Panel::default(), #[cfg(all(any(windows,target_os="linux"),target_arch="x86_64",feature="room-authoring"))] room_wall_stamps: crate::room_wall_stamp_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_lighting: crate::mesh_lighting_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_hud: crate::mesh_hud_panel::Panel::default(), #[cfg(feature="mesh-mission")] mesh_mission: crate::mesh_mission_panel::Panel::default(), #[cfg(feature="mesh-hazards")] mesh_hazards: crate::mesh_hazards_panel::Panel::default(), #[cfg(feature="mesh-hazards")] mesh_hazard_pointer_owned: false, #[cfg(all(windows,target_arch="x86_64",feature="mesh-navigation"))] mesh_copy: crate::mesh_workspace::copy_panel::Panel::default(), #[cfg(feature="mesh-animated-models")] mesh_animation: crate::mesh_animation_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_camera: crate::mesh_camera_panel::Panel::default(), #[cfg(feature="mesh-export")] mesh_export: crate::mesh_export_panel::Panel::default(), #[cfg(feature="mesh-hazards-export")] mesh_hazards_export: crate::mesh_hazards_export_panel::Panel::default(), #[cfg(feature="package-manager")] package_manager: crate::package_manager_panel::Panel::default(), #[cfg(feature="package-manager")] package_model_preview: package_model_preview::PreviewWindow::default(), #[cfg(feature="room-authoring")] room_authoring: crate::room_authoring_panel::Panel::default(), #[cfg(feature="room-authoring")] room_wall_pointer_owned: false, #[cfg(feature="room-authoring")] room_actor_pointer_owned: false, #[cfg(feature="room-authoring")] room_wall_placement_pointer_owned: false, #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))] windows_projects: crate::windows_project_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-export"))] windows_export: crate::windows_export_panel::Panel::default(), #[cfg(feature="room-project")] room_camera: None, #[cfg(feature="room-project")] room_camera_capture: room_camera_capture::Capture::default(), #[cfg(feature="linked-prefabs")] linked_prefabs: crate::linked_prefab_panel::Panel::default(), #[cfg(feature="collect-ui")] collect_ui: None, #[cfg(feature="collect-ui")] collect_ui_preview: collect_ui_preview::PreviewWindow::default(), #[cfg(feature="project-ui")] project_ui: None, #[cfg(feature="navigation")] navigation: crate::navigation_panel::NavigationPanel::default(), #[cfg(feature="mesh-navigation")] mesh_navigation: crate::mesh_navigation::Panel::default(), #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), #[cfg(feature="models")] blockout_uv_density: blockout_uv_density::Panel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
+        Self { editor, #[cfg(feature="tilemap")] tilemap: None, #[cfg(feature="mesh-export")] mesh_player_session: mesh_player_session::State::default(), #[cfg(feature="mesh-mission")] mesh_game_creator: crate::mesh_game_creator::Panel::default(), #[cfg(feature="mesh-export")] mesh_recorded_playback: mesh_recorded_playback::State::default(), #[cfg(feature="mesh-export")] mesh_player_input_allowed: true, #[cfg(feature="mesh-navigation")] mesh_play_controls: crate::mesh_play_controls::Panel::default(), #[cfg(all(any(windows,target_os="linux"),target_arch="x86_64",feature="room-authoring"))] room_wall_stamps: crate::room_wall_stamp_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_lighting: crate::mesh_lighting_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_hud: crate::mesh_hud_panel::Panel::default(), #[cfg(feature="mesh-mission")] mesh_mission: crate::mesh_mission_panel::Panel::default(), #[cfg(feature="mesh-hazards")] mesh_hazards: crate::mesh_hazards_panel::Panel::default(), #[cfg(feature="mesh-hazards")] mesh_hazard_pointer_owned: false, #[cfg(all(windows,target_arch="x86_64",feature="mesh-navigation"))] mesh_copy: crate::mesh_workspace::copy_panel::Panel::default(), #[cfg(feature="mesh-animated-models")] mesh_animation: crate::mesh_animation_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_camera: crate::mesh_camera_panel::Panel::default(), #[cfg(feature="mesh-export")] mesh_export: crate::mesh_export_panel::Panel::default(), #[cfg(feature="mesh-hazards-export")] mesh_hazards_export: crate::mesh_hazards_export_panel::Panel::default(), #[cfg(feature="package-manager")] package_manager: crate::package_manager_panel::Panel::default(), #[cfg(feature="package-manager")] package_model_preview: package_model_preview::PreviewWindow::default(), #[cfg(feature="room-authoring")] room_authoring: crate::room_authoring_panel::Panel::default(), #[cfg(feature="room-authoring")] room_wall_pointer_owned: false, #[cfg(feature="room-authoring")] room_actor_pointer_owned: false, #[cfg(feature="room-authoring")] room_wall_placement_pointer_owned: false, #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))] windows_projects: crate::windows_project_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-export"))] windows_export: crate::windows_export_panel::Panel::default(), #[cfg(feature="room-project")] room_camera: None, #[cfg(feature="room-project")] room_camera_capture: room_camera_capture::Capture::default(), #[cfg(feature="linked-prefabs")] linked_prefabs: crate::linked_prefab_panel::Panel::default(), #[cfg(feature="collect-ui")] collect_ui: None, #[cfg(feature="collect-ui")] collect_ui_preview: collect_ui_preview::PreviewWindow::default(), #[cfg(feature="project-ui")] project_ui: None, #[cfg(feature="navigation")] navigation: crate::navigation_panel::NavigationPanel::default(), #[cfg(feature="mesh-navigation")] mesh_navigation: crate::mesh_navigation::Panel::default(), #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), #[cfg(feature="models")] blockout_uv_density: blockout_uv_density::Panel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
     }
 
     #[cfg(feature="package-manager")]
@@ -890,6 +892,11 @@ impl eframe::App for EditorApp {
         let started = Instant::now();
         let ctx = ui.ctx().clone();
         self.frames += 1;
+        #[cfg(feature = "tilemap")]
+        if self.tilemap.as_ref().is_some_and(|panel| panel.dirty()) && ctx.input(|input| input.viewport().close_requested()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.editor.error("Save tilemap or Undo its edits before closing; Scene Save does not save tiles");
+        }
 
         // Disarm before ingesting a late claim/update; focus returning is not intent.
         let keyboard_viewport = if self.editor.game().is_room() { "room_keyboard_viewport" } else { "arena_keyboard_viewport" };
@@ -1293,6 +1300,8 @@ impl EditorApp {
     // Modal pointer capture does not block accessibility actions. Check both widget
     // availability and the action entry point before starting or advancing playback.
     fn playback_start_blocker(&self) -> Option<String> {
+        #[cfg(feature = "tilemap")]
+        if self.tilemap.as_ref().is_some_and(|panel| panel.dirty()) { return Some("Save tilemap or Undo its edits before Play or Step".into()); }
         #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "project-create", feature = "collect-ui"))]
         if self.collect_project_dialog_open() { return Some("Finish or cancel the Collect project dialog before Play or Step".into()); }
         if self.package_removal_pending() { return Some("Wait for package selection change completion before Play or Step".into()); }
@@ -1317,7 +1326,28 @@ impl EditorApp {
         if self.playback_start_blocker().is_none() { self.editor.step(1); }
     }
 
+    fn restart_from_ui(&mut self) {
+        #[cfg(feature = "tilemap")]
+        if self.tilemap.is_some() {
+            self.editor.error("Tilemap host/cache identity is pinned; save tiles and reopen the complete project instead of Restart/Reconnect");
+            return;
+        }
+        self.editor.restart();
+    }
+
     fn save(&mut self) {
+        #[cfg(feature = "tilemap")]
+        if let Some(panel) = &self.tilemap {
+            if !panel.scene_matches(&self.editor) {
+                self.editor.error("Tilemap host identity changed; reopen the complete project before Scene Save");
+                return;
+            }
+            let scene = self.editor.path();
+            let result = scene.ok_or_else(|| "tilemap requires its saved scene path".to_owned()).and_then(|path|
+                crate::project::validate_tilemap_host(&mut self.editor, &path, self.sprites.bindings.as_ref().map(|bindings| bindings.document())));
+            if let Err(error) = result { self.editor.error(error); return; }
+        }
+
         #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "project-create", feature = "collect-ui"))]
         if self.collect_project_dialog_open() { return; }
         if self.package_removal_pending() { self.editor.error("Wait for package selection change completion before saving"); return; }
@@ -1544,7 +1574,7 @@ impl EditorApp {
                     self.ui.take_control = true;
                 }
                 if ui.add_enabled(phase != Phase::Off, egui::Button::new("Release control")).clicked() { self.editor.release_control(); }
-                if self.editor.input_cleanup_pending() && ui.button("Reconnect control").clicked() { self.editor.restart(); }
+                if self.editor.input_cleanup_pending() && ui.button("Reconnect control").clicked() { self.restart_from_ui(); }
                 #[cfg(all(feature = "collect-ui", feature = "collect-input-map-editor"))]
                 let mapped_collect_hint = self.editor.game().is_collect().then(|| format!("Active · {}", self.ui.collect_controls.hint()));
                 #[cfg(not(all(feature = "collect-ui", feature = "collect-input-map-editor")))]
@@ -1579,7 +1609,7 @@ impl EditorApp {
             ui.colored_label(ui.visuals().error_fg_color, RichText::new(&down.reason).strong());
             let label = if down.local { LBL_RESTART } else { LBL_RECONNECT };
             if ui.button(label).clicked() {
-                self.editor.restart();
+                self.restart_from_ui();
             }
             ui.weak(if down.local {
                 "Restart opens the scene file again in a new simulation host: edits that were not saved are lost."
@@ -1714,6 +1744,8 @@ impl EditorApp {
         self.irradiance.show_with_models(ui,&self.editor,&self.models);
         #[cfg(feature = "sprites")]
         self.sprites.show(ui, &self.editor);
+        #[cfg(feature = "tilemap")]
+        if let Some(panel) = &mut self.tilemap { panel.show(ui, &self.editor, &self.sprites); }
         #[cfg(feature = "project-ui")]
         if let Some(preview) = &self.project_ui { preview.show(ui); }
         #[cfg(feature="collect-ui")]
@@ -2393,11 +2425,16 @@ impl EditorApp {
             }
         }
 
+        #[cfg(feature = "tilemap")]
+        let tile_pointer_owned = self.tilemap.as_mut().is_some_and(|panel| panel.paint_viewport(ui, &self.editor, &self.sprites, rect, px));
+        #[cfg(not(feature = "tilemap"))]
+        let tile_pointer_owned = false;
+        if tile_pointer_owned && self.ui.body_drag.take().is_some() { self.editor.cancel_edit(); }
         // While a proposal is previewed the viewport is read-only (the frame on screen is not the document's).
         let previewing = self.editor.previewing().map(str::to_string);
         let live = self.editor.down().is_none();
         // Select and move bodies with the primary button.
-        if self.editor.can_mutate() && previewing.is_none() && self.editor.selected_guids().len() <= 1
+        if !tile_pointer_owned && self.editor.can_mutate() && previewing.is_none() && self.editor.selected_guids().len() <= 1
             && !ui.input(|i| i.modifiers.ctrl || i.modifiers.command) && resp.drag_started_by(PointerButton::Primary) {
             if let Some(origin) = ui.input(|i| i.pointer.press_origin()) {
                 let world = self.editor.camera.screen_to_world(to_px(origin), px);
@@ -2425,7 +2462,7 @@ impl EditorApp {
         if resp.drag_stopped() && self.ui.body_drag.take().is_some() {
             self.editor.end_edit();
         }
-        if live && previewing.is_none() && resp.clicked_by(PointerButton::Primary) {
+        if !tile_pointer_owned && live && previewing.is_none() && resp.clicked_by(PointerButton::Primary) {
             if let Some(at) = resp.interact_pointer_pos() {
                 let world = self.editor.camera.screen_to_world(to_px(at), px);
                 let hit = self.editor.pick(world);
@@ -2442,8 +2479,17 @@ impl EditorApp {
         match &self.render_state {
             Some(rs) => {
                 let gpu = self.gpu.get_or_insert_with(|| GpuViewport::new(rs, px));
-                let tex = gpu.render(px, &list, &self.editor.camera);
-                ui.painter().image(tex, rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+                #[cfg(feature = "tilemap")]
+                let rendered = match self.tilemap.as_mut().filter(|panel| panel.scene_matches(&self.editor)) {
+                    Some(panel) => panel.render(gpu, px, &list, &self.editor.camera, self.sprites.bindings.as_ref().map_or(0, |bindings| bindings.document().bindings.len()), &self.editor),
+                    None => Ok(gpu.render(px, &list, &self.editor.camera)),
+                };
+                #[cfg(not(feature = "tilemap"))]
+                let rendered: Result<egui::TextureId, String> = Ok(gpu.render(px, &list, &self.editor.camera));
+                match rendered {
+                    Ok(tex) => { ui.painter().image(tex, rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE); },
+                    Err(error) => { self.editor.error(&error); ui.painter().rect_filled(rect, 0.0, Color32::BLACK); },
+                }
             }
             None => {
                 ui.painter().rect_filled(rect, 0.0, Color32::from_rgb(10, 10, 16));
@@ -2452,6 +2498,8 @@ impl EditorApp {
         }
         #[cfg(feature = "sprites")]
         self.sprites.paint(ui, &self.editor, rect, px);
+        #[cfg(feature = "tilemap")]
+        if let Some(panel) = &self.tilemap { panel.paint_grid(ui, &self.editor, rect, px); }
         if !live {
             ui.painter().rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 120));
         }
@@ -2609,6 +2657,12 @@ impl EditorApp {
             });
         });
         if accept && !dialog.text.trim().is_empty() {
+            #[cfg(feature = "tilemap")]
+            if self.tilemap.is_some() {
+                self.editor.error("Tilemap scene identity is fixed; reopen a complete project instead of scene Open/Save As");
+                self.ui.dialog = Some(dialog);
+                return;
+            }
             if self.hazard_export_busy() {
                 self.editor.error("Wait for hazard export completion before saving or opening a scene");
                 self.ui.dialog = Some(dialog);
@@ -3223,3 +3277,7 @@ mod mesh_keyboard_play_tests;
 #[cfg(feature = "mesh-hazards-export")]
 #[path = "app/mesh_hazards_player.rs"]
 pub(crate) mod mesh_hazards_player;
+
+#[cfg(all(test, feature = "tilemap", feature = "project-create", target_os = "linux"))]
+#[path = "app/tilemap_tests.rs"]
+mod tilemap_tests;

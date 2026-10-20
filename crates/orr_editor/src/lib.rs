@@ -259,3 +259,6 @@ mod mesh_hazards_export_panel;
 
 #[cfg(feature = "room-project")]
 pub(crate) mod room_camera_capture;
+
+#[cfg(feature = "tilemap")]
+pub mod tilemap_panel;

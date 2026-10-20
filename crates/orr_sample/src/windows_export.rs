@@ -181,6 +181,7 @@ fn export_auto_profile_with(
         .entry
         .as_ref()
         .ok_or("export requires an authored game entry")?;
+        if entry.tilemap.is_some() { return Err("tilemap projects are not supported by export yet".into()); }
     let profile = profile_for_game(entry.game)?;
     let expected_game = entry.game;
     manifest_file.recheck()?;

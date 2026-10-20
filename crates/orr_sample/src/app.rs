@@ -410,8 +410,9 @@ impl<B: Bridge<Arena>> App<B> {
                     let project = self.project.as_ref().expect("project renderer");
                     #[cfg(feature = "game-ui")]
                     let result = if let (Some(window_ui), Some(ui)) = (&mut gfx.ui, &self.ui) {
-                        renderer.render_with_overlay(
+                        renderer.render_with_background_and_overlay(
                             project.shapes(),
+                            project.background(),
                             project.sprites(),
                             &project.camera,
                             |rhi, view, size| {
@@ -425,11 +426,20 @@ impl<B: Bridge<Arena>> App<B> {
                             },
                         )
                     } else {
-                        renderer.render(project.shapes(), project.sprites(), &project.camera)
+                        renderer.render_with_background(
+                            project.shapes(),
+                            project.background(),
+                            project.sprites(),
+                            &project.camera,
+                        )
                     };
                     #[cfg(not(feature = "game-ui"))]
-                    let result =
-                        renderer.render(project.shapes(), project.sprites(), &project.camera);
+                    let result = renderer.render_with_background(
+                        project.shapes(),
+                        project.background(),
+                        project.sprites(),
+                        &project.camera,
+                    );
                     if let Err(error) = result {
                         self.error = Some(error);
                         event_loop.exit();

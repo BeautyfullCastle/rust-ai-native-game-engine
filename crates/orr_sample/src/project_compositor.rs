@@ -10,8 +10,8 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use crate::project_sprites::{Asset, AssetKey};
 use orr_render::{
-    orr_rhi::{Acquire, Rhi, TextureFormat, Wgpu, WgpuOptions},
     Camera, RenderList, Renderer, SpriteDrawList, SpriteInstance, SpriteRenderer,
+    orr_rhi::{Acquire, Rhi, TextureFormat, Wgpu, WgpuOptions},
 };
 use winit::window::Window;
 
@@ -118,6 +118,154 @@ impl<R: Rhi> ProjectCompositor<R> {
             start = end;
         }
         Ok(())
+    }
+
+    /// Compose a static background before shapes and globally ordered actors.
+    ///
+    /// An empty background uses the original draw path unchanged. Otherwise the
+    /// first background run owns the only clear, shapes and every later run
+    /// load the target. A single-atlas background adds exactly one pass and one
+    /// submission; no clear-only pass or new shader is needed.
+    ///
+    /// Callers must admit the combined asset set (at most eight distinct keys)
+    /// and the combined instance budget before constructing their draw vectors.
+    /// This method repeats frame validation before allocating run lists or
+    /// performing GPU writes, so an invalid late actor cannot paint half a frame.
+    pub fn draw_with_background(
+        &mut self,
+        view: &R::TextureView,
+        size: (u32, u32),
+        shapes: &RenderList,
+        background: &[SpriteDraw],
+        actors: &[SpriteDraw],
+        camera: &Camera,
+    ) -> Result<(), String> {
+        if background.is_empty() {
+            return self.draw(view, size, shapes, actors, camera);
+        }
+        let count = background
+            .len()
+            .checked_add(actors.len())
+            .ok_or("project sprite count overflow")?;
+        if count > MAX_PROJECT_SPRITES {
+            return Err(format!(
+                "project sprite count {count} exceeds {MAX_PROJECT_SPRITES}"
+            ));
+        }
+        if self.sprites.len() > 8 {
+            return Err("combined project assets exceed 8 sprite documents".into());
+        }
+        validate_camera(camera)?;
+        for (index, sprite) in background.iter().chain(actors).enumerate() {
+            let renderer = self.sprites.get(&sprite.asset).ok_or_else(|| {
+                format!(
+                    "project sprite {index} references unknown asset {:?}",
+                    sprite.asset
+                )
+            })?;
+            validate_instance(index, sprite.instance, renderer.document())?;
+            if index < background.len()
+                && (sprite.instance.flip_x
+                    || sprite.instance.flip_y
+                    || sprite.instance.rotation != 0.0)
+            {
+                return Err(format!("background sprite {index} must not flip or rotate"));
+            }
+        }
+
+        // Shapes are submitted after the background. Reject non-finite shape
+        // or line payloads now rather than letting them poison a partial frame.
+        for (index, shape) in shapes.shapes.iter().enumerate() {
+            if !shape
+                .center
+                .iter()
+                .chain(shape.half_size.iter())
+                .chain(shape.color.iter())
+                .all(|value| value.is_finite())
+                || !shape.rot.is_finite()
+            {
+                return Err(format!("non-finite project shape {index}"));
+            }
+        }
+        for (index, line) in shapes.lines.iter().enumerate() {
+            if !line
+                .a
+                .iter()
+                .chain(line.b.iter())
+                .chain(line.color.iter())
+                .all(|value| value.is_finite())
+                || !line.width.is_finite()
+            {
+                return Err(format!("non-finite project line {index}"));
+            }
+        }
+
+        self.draw_validated_runs(view, size, background, camera, true)?;
+        let previous_clear = self.shapes.clear;
+        self.shapes.clear = None;
+        self.shapes.draw(view, size, shapes, camera);
+        self.shapes.clear = previous_clear;
+        self.draw_validated_runs(view, size, actors, camera, false)
+    }
+
+    /// Draws already-validated contiguous atlas runs without regrouping them.
+    fn draw_validated_runs(
+        &mut self,
+        view: &R::TextureView,
+        size: (u32, u32),
+        sprites: &[SpriteDraw],
+        camera: &Camera,
+        clear_first: bool,
+    ) -> Result<(), String> {
+        let mut start = 0;
+        while start < sprites.len() {
+            let asset = &sprites[start].asset;
+            let mut end = start + 1;
+            while end < sprites.len() && sprites[end].asset == *asset {
+                end += 1;
+            }
+            let mut list = SpriteDrawList::default();
+            for (run_index, draw) in sprites[start..end].iter().enumerate() {
+                let mut instance = draw.instance;
+                instance.flip_x = false;
+                instance.flip_y = false;
+                instance.order = run_index as i32;
+                list.push(instance);
+            }
+            let renderer = self
+                .sprites
+                .get_mut(asset)
+                .expect("all project assets were validated before drawing");
+            let previous_clear = renderer.clear;
+            renderer.clear = if clear_first && start == 0 {
+                Some(orr_render::DEFAULT_CLEAR)
+            } else {
+                None
+            };
+            // Restore before propagating an error: a later ordinary draw must
+            // never inherit a background clear from a failed composed frame.
+            let result = renderer.draw(view, size, &list, camera);
+            renderer.clear = previous_clear;
+            result.map_err(|error| format!("project sprite run {start}..{end}: {error}"))?;
+            start = end;
+        }
+        Ok(())
+    }
+
+    /// Overlay after the complete background/shapes/actor composition.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_with_background_and_overlay(
+        &mut self,
+        view: &R::TextureView,
+        size: (u32, u32),
+        shapes: &RenderList,
+        background: &[SpriteDraw],
+        actors: &[SpriteDraw],
+        camera: &Camera,
+        overlay: impl FnOnce(&R, &R::TextureView, (u32, u32)) -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.draw_with_background(view, size, shapes, background, actors, camera)?;
+        overlay(self.shapes.rhi(), view, size)
     }
 
     /// Paint a presentation overlay on the same target after all ordered runs.
@@ -256,6 +404,45 @@ impl ProjectWindow {
         let view = self.rhi.frame_view(&frame);
         self.compositor
             .draw_with_overlay(view, self.size, shapes, sprites, camera, overlay)?;
+        self.rhi.present(frame);
+        Ok(())
+    }
+
+    /// Present a composed static background while preserving the ordinary path.
+    pub fn render_with_background(
+        &mut self,
+        shapes: &RenderList,
+        background: &[SpriteDraw],
+        actors: &[SpriteDraw],
+        camera: &Camera,
+    ) -> Result<(), String> {
+        self.render_with_background_and_overlay(
+            shapes,
+            background,
+            actors,
+            camera,
+            |_, _, _| Ok(()),
+        )
+    }
+
+    pub fn render_with_background_and_overlay(
+        &mut self,
+        shapes: &RenderList,
+        background: &[SpriteDraw],
+        actors: &[SpriteDraw],
+        camera: &Camera,
+        overlay: impl FnOnce(&Wgpu, &<Wgpu as Rhi>::TextureView, (u32, u32)) -> Result<(), String>,
+    ) -> Result<(), String> {
+        if background.is_empty() {
+            return self.render_with_overlay(shapes, actors, camera, overlay);
+        }
+        let Acquire::Frame(frame) = self.rhi.acquire_frame(&mut self.surface) else {
+            return Ok(());
+        };
+        let view = self.rhi.frame_view(&frame);
+        self.compositor.draw_with_background_and_overlay(
+            view, self.size, shapes, background, actors, camera, overlay,
+        )?;
         self.rhi.present(frame);
         Ok(())
     }

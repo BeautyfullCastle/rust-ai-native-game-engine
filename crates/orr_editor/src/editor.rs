@@ -232,8 +232,12 @@ pub struct Editor {
     navigation_blocker: Option<String>,
     #[cfg(feature = "mesh-navigation")]
     mesh_navigation_blocker: Option<String>,
-    #[cfg(any(feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
+    #[cfg(any(feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
     scene_load_epoch: u64,
+    #[cfg(feature = "tilemap")]
+    tilemap_start_scene: Option<(crate::project::PreparedArenaScene, u64)>,
+    #[cfg(feature = "tilemap")]
+    tilemap_save_guard: Option<(PathBuf, Option<orr_sample::project_sprites::Document>)>,
     status: Option<Message>,
     log: Vec<Message>,
     // caches of host answers
@@ -278,7 +282,7 @@ pub struct Editor {
     script_owner: BTreeMap<String, String>,
 }
 
-#[cfg(any(feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
+#[cfg(any(feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
 fn next_scene_load_epoch() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -305,6 +309,11 @@ impl Editor {
     pub fn start(spec: &HostSpec) -> Result<Self, String> {
         let backend = Backend::connect(spec)?;
         let mut e = Self::on_backend(backend)?;
+        #[cfg(feature = "tilemap")]
+        if let HostSpec::PreparedArena { scene, .. } = spec {
+            e.tilemap_start_scene = Some((scene.clone(), e.scene_load_epoch));
+            e.tilemap_save_guard = scene.tilemap_save_guard().map(|guard| (scene.path().to_path_buf(), guard.sprites.clone()));
+        }
         let local = spec.is_local();
         if local {
             e.info("ready");
@@ -360,8 +369,12 @@ impl Editor {
             navigation_blocker: None,
             #[cfg(feature = "mesh-navigation")]
             mesh_navigation_blocker: None,
-            #[cfg(any(feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
+            #[cfg(any(feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
             scene_load_epoch: next_scene_load_epoch(),
+            #[cfg(feature = "tilemap")]
+            tilemap_start_scene: None,
+            #[cfg(feature = "tilemap")]
+            tilemap_save_guard: None,
             status: None,
             log: Vec::new(),
             sim: SimState::default(),
@@ -986,6 +999,26 @@ impl Editor {
 
     /// Runs a method and waits for the answer. `Err` carries the host's message.
     fn call(&mut self, method: &str, params: J) -> Result<J, String> {
+        #[cfg(feature = "tilemap")]
+        if let Some((scene, targets)) = self.tilemap_save_guard.as_ref().filter(|_| method == "scene.load" || (method == "scene.save" && params.get("write").and_then(J::as_bool) == Some(true))).cloned() {
+            if method == "scene.load" {
+                return Err("tilemap project scene is pinned; reopen the complete project instead of scene.load".into());
+            }
+            if method == "scene.save" && params.get("write").and_then(J::as_bool) == Some(true) {
+                if params.get("source").and_then(J::as_str).is_some_and(|source| source != "doc") {
+                    return Err("tilemap projects only save the authored document, not a Play frame".into());
+                }
+                if let Some(path) = params.get("path").and_then(J::as_str) {
+                    // Atomic scene save replaces the requested directory entry, not
+                    // its symlink target. Only the admitted destination itself is safe.
+                    if std::path::Path::new(path) != scene.as_path()
+                        || std::fs::canonicalize(path).ok().as_deref() != Some(scene.as_path()) {
+                        return Err("tilemap scene Save As is unsupported; reopen a complete project".into());
+                    }
+                }
+                crate::project::validate_tilemap_host(self, &scene, targets.as_ref())?;
+            }
+        }
         if let Some(d) = &self.down {
             return Err(d.reason.clone());
         }
@@ -1805,7 +1838,7 @@ impl Editor {
         };
         match self.call("scene.load", if self.game().has_pinned_scene() { json!({"text": text}) } else { json!({"text": text, "path": path.display().to_string()}) }) {
             Ok(r) => {
-                #[cfg(any(feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
+                #[cfg(any(feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
                 { self.scene_load_epoch = next_scene_load_epoch(); }
                 self.clear_room_camera();
                 self.select(None);
@@ -1853,6 +1886,8 @@ impl Editor {
                 let written = r.get("written").and_then(J::as_str).unwrap_or_default().to_string();
                 #[cfg(feature="room-project")]
                 if self.room_camera_scene.as_ref().is_some_and(|path| path != Path::new(&written)) { self.clear_room_camera(); }
+                #[cfg(feature = "tilemap")]
+                { self.tilemap_start_scene = None; }
                 self.sim.scene_path = Some(written.clone());
                 if !written.is_empty() {
                     self.backend.spec.set_local_scene_path(PathBuf::from(&written));
@@ -2064,7 +2099,14 @@ impl Editor {
     /// hatch for tools and tests (the editor's own actions have methods of
     /// their own). `Err` carries the host's message.
     pub fn host_call(&mut self, method: &str, params: J) -> Result<J, String> {
-        self.call(method, params)
+        #[cfg(feature = "tilemap")]
+        let changed_source = method == "scene.load" || (method == "scene.save" && params.get("write").and_then(J::as_bool) == Some(true));
+        let result = self.call(method, params);
+        #[cfg(feature = "tilemap")]
+        if method == "scene.load" && result.is_ok() { self.scene_load_epoch = next_scene_load_epoch(); }
+        #[cfg(feature = "tilemap")]
+        if changed_source && result.is_ok() { self.tilemap_start_scene = None; }
+        result
     }
 
     /// Parses text as a value of the field `path` of type `type_name` (a
@@ -2139,8 +2181,14 @@ impl Editor {
     pub(crate) fn mesh_navigation_mark_edited(&mut self) { self.mark_edited(); }
     #[cfg(feature = "mesh-navigation")]
     pub fn set_mesh_navigation_blocker(&mut self, blocker: Option<String>) { self.mesh_navigation_blocker = blocker; }
-    #[cfg(any(feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
+    #[cfg(any(feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
     pub(crate) fn scene_load_epoch(&self) -> u64 { self.scene_load_epoch }
+    #[cfg(feature = "tilemap")]
+    pub(crate) fn admitted_tilemap_scene_matches(&self, expected: &crate::project::PreparedArenaScene) -> bool {
+        self.tilemap_start_scene.as_ref().is_some_and(|(scene, epoch)|
+            *epoch == self.scene_load_epoch && scene.path() == expected.path() && scene.text() == expected.text())
+    }
+
 
     #[cfg(feature="room-project")]
     pub fn install_room_camera(&mut self, document: orr_sample::room_camera::Document) -> Result<(),String> {
@@ -2819,6 +2867,11 @@ impl Editor {
     /// (edits that were not saved are lost), a remote one is connected to afresh.
     /// On failure the editor stays down and says why.
     pub fn restart(&mut self) -> bool {
+        #[cfg(feature = "tilemap")]
+        if self.tilemap_save_guard.is_some() {
+            self.error("tilemap project host is pinned; save tiles and reopen the complete project instead of restarting");
+            return false;
+        }
         let was_uncertain = self.batch_uncertain;
         self.release_control();
         let spec = self.backend.spec.clone();
