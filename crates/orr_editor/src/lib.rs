@@ -107,6 +107,8 @@ pub mod terrain_document;
 pub mod terrain_panel;
 #[cfg(feature = "terrain")]
 pub mod terrain_pick;
+#[cfg(feature = "terrain")]
+pub mod terrain_ramp;
 
 #[cfg(feature = "terrain-physics")]
 pub mod terrain_physics;
