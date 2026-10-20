@@ -593,8 +593,105 @@ RECTANGLE_FRAME_SCOPE = ('authoring unchanged; actual App Play and saved runtime
     'wrong-stride, extra-cell and presentation-free authoritative Frame bytes equal')
 
 
+def rectangle_runtime_pixels(rgba, source, literal, name):
+    """Independent literal oracle: fixed 64x16 atlas and actor-free 7x4 envelope.
+
+    Inputs come from the source fence, not receipt hashes or production placement.
+    The original sprite geometry is fixed: 10=(0,0), 11=(16,0), 20=(32,0),
+    all 16x16. Linear alpha compositing and sRGB conversion match the declared
+    production target, with the frozen per-channel tolerance of three.
+    """
+    if type(source) is not bytes or len(source) != 64 * 16 * 4:
+        raise RuntimeError('Rectangle source atlas must be exactly 64x16 RGBA8')
+    def linear(value):
+        value /= 255.
+        return value / 12.92 if value <= .04045 else ((value + .055) / 1.055) ** 2.4
+    def srgb(value):
+        value = value * 12.92 if value <= .0031308 else 1.055 * value ** (1 / 2.4) - .055
+        return int(value * 255 + .5)
+    for row in range(4):
+        for column in range(7):
+            region = literal[row * 7 + column]
+            for y in range(16):
+                for x in range(16):
+                    expected = [.02, .02, .035]
+                    if region is not None:
+                        offset = (y * 64 + {10: 0, 11: 16, 20: 32}[region] + x) * 4
+                        alpha = source[offset + 3] / 255.
+                        expected = [linear(source[offset + c]) * alpha + expected[c] * (1 - alpha)
+                            for c in range(3)]
+                    expected = [*(srgb(v) for v in expected), 255]
+                    offset = ((48 + row * 16 + y) * 224 + 56 + column * 16 + x) * 4
+                    if any(abs(rgba[offset + c] - expected[c]) > 3 for c in range(4)):
+                        raise RuntimeError(f'Rectangle {name} literal pixel oracle mismatch at cell '
+                            f'({column},{row}) texel ({x},{y})')
+
+
+def rectangle_frame_identity(data, tick, checksum):
+    """Bounded ORRFv2 structure and stored identity, not full registry semantics.
+
+    Rust Frame::from_bytes owns registry matching, allocator/store/list semantic
+    invariants and XXH3 recomputation. Here even consistently rehashed junk must
+    not pass as a Frame, nor can row tick/checksum disagree with serialized bytes.
+    """
+    def require(condition):
+        if not condition:
+            raise RuntimeError('Rectangle ORRFv2 Frame structure/tick/checksum mismatch')
+    require(len(data) >= 48 and data[:4] == b'ORRF' and struct.unpack_from('<I', data, 4)[0] == 2)
+    require(struct.unpack_from('<Q', data, 8)[0] == tick and struct.unpack_from('<Q', data, len(data) - 8)[0] == checksum)
+    position, end = 16, len(data) - 8
+    def take(size):
+        nonlocal position
+        require(0 <= size <= end - position)
+        result = data[position:position + size]
+        position += size
+        return result
+    def u32():
+        return struct.unpack('<I', take(4))[0]
+    schemas = []
+    for _ in range(3):
+        count = u32()
+        require(count <= (end - position) // 8)
+        sizes = []
+        for _ in range(count):
+            name = take(u32())
+            require(bool(name))
+            try:
+                name.decode('utf-8')
+            except UnicodeDecodeError:
+                require(False)
+            sizes.append(u32())
+        schemas.append(sizes)
+    live, slots = u32(), u32()
+    require(live <= slots)
+    take(slots * 4)  # Entity versions.
+    flags = take(slots)
+    require(all(flag in (0, 1) for flag in flags) and sum(flags) == live)
+    free = u32()
+    require(free == slots - live)
+    take(free * 4)
+    for size in schemas[0]:
+        count = u32()
+        require(count <= live)
+        take(count * (8 + size))  # Entity(index, version) plus component bytes.
+    for size in schemas[1]:
+        take(size)
+    for size in schemas[2]:
+        slots = u32()
+        require(slots <= (end - position) // 9)
+        for _ in range(slots):
+            take(4)
+            require(take(1)[0] in (0, 1))
+            take(u32() * size)
+        take(u32() * 4)
+    require(position == end)
+
+
 def validate_rectangle(directory, evidence, identities, load_capture=capture, expected_adapter='llvmpipe'):
-    """Artifact integrity audit only; Rust owns decoded Frame/pixel/literal assertions.
+    """Independent literal-pixel oracle plus artifact and structural Frame audit.
+
+    Rust owns full Frame decoding and admitted-project file-byte verification;
+    fixture_file_bindings here is a syntax/provenance census, not byte closure.
 
     A nondefault adapter is an explicit local audit, never the hosted main route.
     """
@@ -609,6 +706,9 @@ def validate_rectangle(directory, evidence, identities, load_capture=capture, ex
                 for a, b in zip(value, expected)))
     require(type(expected_adapter) is str and bool(expected_adapter.strip()), 'empty adapter identity')
     require(set(identities) == RECTANGLE_IDENTITIES, 'source identity census')
+    source = identities['source_rgba_fnv1a64']
+    if type(source) is not bytes or len(source) != 64 * 16 * 4:
+        raise RuntimeError('Rectangle source atlas must be exactly 64x16 RGBA8')
     receipt = evidence_json(directory / 'receipt.json')
     partial = evidence_json(directory / 'partial-receipt.json')
     keys(receipt, RECTANGLE_IDENTITIES | {'completed', 'captures', 'literal_before', 'literal_extra_cell',
@@ -681,6 +781,7 @@ def validate_rectangle(directory, evidence, identities, load_capture=capture, ex
         tick = 1 if name in RECTANGLE_PLAY_PHASES else 0
         require(type(row['tick']) is int and row['tick'] == tick and
             type(row['checksum']) is int and 0 <= row['checksum'] < 2**64, 'Frame identity')
+        rectangle_frame_identity(frame, row['tick'], row['checksum'])
         if app:
             require(row['scope'] == 'actual App viewport; authoring grid, no pixel verdict', 'App scope')
             require(type(row['adapter']) is str and expected_adapter.lower() in row['adapter'].lower()
@@ -707,6 +808,10 @@ def validate_rectangle(directory, evidence, identities, load_capture=capture, ex
             require(size == [224, 224] and row['pixel_verdict_pending'] is False and
                 type(row['oracle_pixels_checked']) is int and row['oracle_pixels_checked'] == 7168,
                 'runtime pixel oracle incomplete')
+        if not app:
+            literal = {'runtime-saved': RECTANGLE_CELLS, 'runtime-wrong-stride': RECTANGLE_WRONG,
+                'runtime-extra-cell': RECTANGLE_EXTRA}[name]
+            rectangle_runtime_pixels(rgba, source, literal, name)
         frames[name], pixels[name], checksums[name] = frame, rgba, row['checksum']
     for group in ([n for n in RECTANGLE_APP_PHASES if n not in RECTANGLE_PLAY_PHASES], RECTANGLE_PLAY_PHASES):
         require(all(frames[n] == frames[group[0]] and checksums[n] == checksums[group[0]] for n in group),

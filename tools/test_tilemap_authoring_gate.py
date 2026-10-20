@@ -615,21 +615,47 @@ class RectangleReceiptTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.rectangle = self.root / 'rectangle'; self.rectangle.mkdir()
         self.identities = {k: k.encode() for k in gate.RECTANGLE_IDENTITIES}
+        # An independently specified opaque RGB atlas. Literal expected pixels
+        # below do not call the gate's oracle to manufacture their own answer.
+        colors = [(255, 0, 0, 255), (0, 255, 0, 255), (0, 0, 255, 255), (255, 255, 0, 255)]
+        self.identities['source_rgba_fnv1a64'] = b''.join(bytes(c) * 16 for c in colors) * 16
+        # Retained ORRFv2 tick-0/tick-1 codec vectors from prior resize evidence.
+        # These are test input only, never evidence of executing this candidate.
+        self.frames = [bytes.fromhex(h) for h in (
+            '4f5252460200000000000000000000000300000008000000506f736974696f6e1000000009000000506c61796572546167040000000600000042756c'
+            '6c65741800000002000000110000006f72725f73696d3a3a4672616d65526e67100000000500000053636f7265200000000000000002000000020000'
+            '00000000000000000001010000000002000000000000000000000001000000000000000000c4ffffffffff000000000000000000003c000000000000'
+            '000000000000000200000000000000000000000100000000000000000000000100000000000000905c1cdd9b03c4d501000000000000000000000000'
+            '000000000000000000000000000000000000000000000000000000cfef724ace8fd800',
+            '4f5252460200000001000000000000000300000008000000506f736974696f6e1000000009000000506c61796572546167040000000600000042756c'
+            '6c65741800000002000000110000006f72725f73696d3a3a4672616d65526e67100000000500000053636f7265200000000000000002000000020000'
+            '00000000000000000001010000000002000000000000000000000001000000000000000000c4ffffffffff000000000000000000003c000000000000'
+            '000000000000000200000000000000000000000100000000000000000000000100000000000000905c1cdd9b03c4d501000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000005d69728046871e5b',
+        )]
         self.rows = []
         for name in gate.RECTANGLE_PHASES:
             app = name in gate.RECTANGLE_APP_PHASES
             tick = int(name in gate.RECTANGLE_PLAY_PHASES)
             size = [1, 1] if app else [224, 224]
             rgba = bytearray(size[0] * size[1] * 4)
-            if name == 'runtime-wrong-stride':
-                for x in range(136, 144): rgba[(48 * 224 + x) * 4] = 255
-            if name == 'runtime-extra-cell':
-                for x in range(152, 160): rgba[(96 * 224 + x) * 4] = 255
-            frame = b'actual-frame-one' if tick else b'actual-frame-zero'
+            if not app:
+                literal = {'runtime-saved': gate.RECTANGLE_CELLS,
+                    'runtime-wrong-stride': gate.RECTANGLE_WRONG,
+                    'runtime-extra-cell': gate.RECTANGLE_EXTRA}[name]
+                palette = {None: bytes((39, 39, 53, 255)),
+                    10: bytes((255, 0, 0, 255)), 11: bytes((0, 255, 0, 255)), 20: bytes((0, 0, 255, 255))}
+                for row_index in range(4):
+                    for column in range(7):
+                        color = palette[literal[row_index * 7 + column]]
+                        for y in range(48 + row_index * 16, 64 + row_index * 16):
+                            offset = (y * 224 + 56 + column * 16) * 4
+                            rgba[offset:offset + 64] = color * 16
+            frame = self.frames[tick]
             row = {'name': name, 'size': size, 'files': [name + x for x in
                 (['.rgba', '.png', '.frame', '-app.png'] if app else ['.rgba', '.png', '.frame'])],
                 'rgba_fnv1a64': gate.fnv1a64(rgba), 'frame_fnv1a64': gate.fnv1a64(frame),
-                'tick': tick, 'checksum': 100 + tick}
+                'tick': tick, 'checksum': struct.unpack_from('<Q', frame, len(frame) - 8)[0]}
             (self.rectangle / (name + '.rgba')).write_bytes(rgba)
             (self.rectangle / (name + '.png')).write_bytes(png_bytes(rgba, tuple(size)))
             (self.rectangle / (name + '.frame')).write_bytes(frame)
@@ -646,15 +672,15 @@ class RectangleReceiptTests(unittest.TestCase):
                 row.update(scope='actual saved PreparedRuntime PlayHost production compositor',
                     pixel_verdict_pending=False, oracle_pixels_checked=7168)
             self.rows.append(row)
-        (self.rectangle / 'presentation-free.frame').write_bytes(b'actual-frame-one')
+        (self.rectangle / 'presentation-free.frame').write_bytes(self.frames[1])
         self.receipt = {'completed': True, 'captures': self.rows,
             'literal_before': gate.RECTANGLE_BEFORE, 'literal_extra_cell': gate.RECTANGLE_EXTRA,
             'literal_painted': gate.RECTANGLE_PAINTED, 'literal_cells': gate.RECTANGLE_CELLS,
             'literal_wrong_stride': gate.RECTANGLE_WRONG,
-            'oracle_pixels_per_runtime_capture': 7168, 'wrong_stride_visible_pixels': 8,
-            'extra_cell_visible_pixels': 8, 'preview_visible_pixels': 8, 'preview_pixel_rect': [0, 0, 8, 1],
+            'oracle_pixels_per_runtime_capture': 7168, 'wrong_stride_visible_pixels': 256,
+            'extra_cell_visible_pixels': 256, 'preview_visible_pixels': 8, 'preview_pixel_rect': [0, 0, 8, 1],
             'frame_parity': gate.RECTANGLE_FRAME_SCOPE,
-            'presentation_free_frame_fnv1a64': gate.fnv1a64(b'actual-frame-one'),
+            'presentation_free_frame_fnv1a64': gate.fnv1a64(self.frames[1]),
             'fixture_file_bindings': [{'path': n, 'bytes': 1, 'fnv1a64': gate.fnv1a64(b'x')}
                 for n in ['arena.tilemap.json', 'orr.project.json']],
             'native_os_input': False, 'export': False, 'windows': False}
@@ -780,7 +806,7 @@ class RectangleReceiptTests(unittest.TestCase):
     def test_frame_png_and_visible_wrong_stride_tampering_rejected(self):
         path = self.rectangle / 'outside-origin.frame'; old = path.read_bytes()
         path.write_bytes(b'changed-frame'); self.rows[1]['frame_fnv1a64'] = gate.fnv1a64(path.read_bytes())
-        with self.assertRaisesRegex(RuntimeError, 'parity'): self.check()
+        with self.assertRaisesRegex(RuntimeError, 'Frame|parity'): self.check()
         path.write_bytes(old); self.rows[1]['frame_fnv1a64'] = gate.fnv1a64(old)
         path = self.rectangle / 'saved.png'; old = path.read_bytes()
         path.write_bytes(png_bytes(bytes([1, 2, 3, 4]), (1, 1)))
@@ -788,10 +814,76 @@ class RectangleReceiptTests(unittest.TestCase):
         path.write_bytes(old)
         self.receipt['wrong_stride_visible_pixels'] = 9
         with self.assertRaisesRegex(RuntimeError, 'pixel verdict'): self.check()
-        self.receipt['wrong_stride_visible_pixels'] = 8
+        self.receipt['wrong_stride_visible_pixels'] = 256
         (self.rectangle / 'presentation-free.frame').write_bytes(b'not-authoritative')
         self.receipt['presentation_free_frame_fnv1a64'] = gate.fnv1a64(b'not-authoritative')
         with self.assertRaisesRegex(RuntimeError, 'presentation-free'): self.check()
+
+    def test_runtime_oracle_alpha_edges_source_bounds_and_tolerance(self):
+        source = bytes((255, 0, 0, 128)) * (64 * 16)
+        rgba = bytearray(224 * 224 * 4)
+        for y in range(48, 112):
+            for x in range(56, 168):
+                offset = (y * 224 + x) * 4
+                rgba[offset:offset + 4] = bytes((190, 25, 36, 255))
+        gate.rectangle_runtime_pixels(rgba, source, [10] * 28, 'alpha fixture')
+        for x, y in ((56, 48), (167, 48), (56, 111), (167, 111), (100, 80)):
+            i = (y * 224 + x) * 4
+            original = rgba[i]
+            rgba[i] += 3
+            gate.rectangle_runtime_pixels(rgba, source, [10] * 28, 'tolerance fixture')
+            rgba[i] += 1
+            with self.assertRaisesRegex(RuntimeError, 'literal pixel oracle'):
+                gate.rectangle_runtime_pixels(rgba, source, [10] * 28, 'tampered fixture')
+            rgba[i] = original
+        for bad in (b'', source[:-1], source + b'x'):
+            with self.assertRaisesRegex(RuntimeError, 'source atlas'):
+                gate.rectangle_runtime_pixels(rgba, bad, [10] * 28, 'bad atlas')
+        # Alpha zero must expose the fixed clear color, not source RGB.
+        source = bytes((255, 0, 0, 0)) * (64 * 16)
+        for y in range(48, 112):
+            for x in range(56, 168):
+                offset = (y * 224 + x) * 4
+                rgba[offset:offset + 4] = bytes((39, 39, 53, 255))
+        gate.rectangle_runtime_pixels(rgba, source, [10] * 28, 'transparent fixture')
+
+    def test_orrfv2_structure_tick_and_checksum_trailer_are_bound(self):
+        frame = self.frames[0]
+        checksum = struct.unpack_from('<Q', frame, len(frame) - 8)[0]
+        gate.rectangle_frame_identity(frame, 0, checksum)
+        invalid = [b'actual-frame-zero', frame[:12], frame[:-1], frame + b'extra',
+            b'FAKE' + frame[4:], frame[:4] + struct.pack('<I', 1) + frame[8:],
+            frame[:8] + struct.pack('<Q', 1) + frame[16:],
+            frame[:-8] + struct.pack('<Q', checksum + 1),
+            frame[:16] + struct.pack('<I', 2**32 - 1) + frame[20:]]
+        for bad in invalid:
+            with self.subTest(data=bad), self.assertRaisesRegex(RuntimeError, 'ORRFv2'):
+                gate.rectangle_frame_identity(bad, 0, checksum)
+        with self.assertRaisesRegex(RuntimeError, 'ORRFv2'):
+            gate.rectangle_frame_identity(frame, 1, checksum)
+        with self.assertRaisesRegex(RuntimeError, 'ORRFv2'):
+            gate.rectangle_frame_identity(frame, 0, checksum + 1)
+        # Consistent FNV forgery cannot make arbitrary text a retained Frame.
+        path = self.rectangle / 'before.frame'
+        path.write_bytes(b'forged arbitrary frame bytes')
+        self.rows[0]['frame_fnv1a64'] = gate.fnv1a64(path.read_bytes())
+        with self.assertRaisesRegex(RuntimeError, 'ORRFv2'):
+            self.check()
+
+    def test_consistent_unrelated_runtime_pixel_forgery_rejected(self):
+        # This pixel is inside the full literal oracle but outside both probes.
+        # Rehash all three captures consistently; counts and Frame stay valid.
+        for name in ('runtime-saved', 'runtime-wrong-stride', 'runtime-extra-cell'):
+            path = self.rectangle / (name + '.rgba')
+            rgba = bytearray(path.read_bytes())
+            i = (48 * 224 + 56) * 4
+            rgba[i:i + 4] = bytes((255, 0, 255, 0))
+            path.write_bytes(rgba)
+            (self.rectangle / (name + '.png')).write_bytes(png_bytes(rgba, (224, 224)))
+            row = next(r for r in self.rows if r['name'] == name)
+            row['rgba_fnv1a64'] = gate.fnv1a64(rgba)
+        with self.assertRaisesRegex(RuntimeError, 'literal pixel oracle'):
+            self.check()
 
     def test_history_preview_and_both_flat_negative_controls_rejected(self):
         for name in ('preview', 'escape-cancelled', 'rectangle-painted', 'noop-preserves-redo',
@@ -820,7 +912,7 @@ class RectangleReceiptTests(unittest.TestCase):
             (self.rectangle / (name + '.png')).write_bytes(png_bytes(flat, (224, 224)))
             row = next(r for r in self.rows if r['name'] == name)
             row['rgba_fnv1a64'] = gate.fnv1a64(flat)
-            with self.subTest(name=name), self.assertRaisesRegex(RuntimeError, 'pixel verdict'): self.check()
+            with self.subTest(name=name), self.assertRaisesRegex(RuntimeError, 'literal pixel oracle'): self.check()
             path.write_bytes(original)
             (self.rectangle / (name + '.png')).write_bytes(png_bytes(original, (224, 224)))
             row['rgba_fnv1a64'] = gate.fnv1a64(original)
