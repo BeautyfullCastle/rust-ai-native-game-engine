@@ -44,6 +44,13 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Validate fresh assemble CLI prerequisite guards
+        run: python -B tools/test_assemble_cli_prerequisites.py
+      - name: Prepare fresh assemble CLI for native workspace regressions
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python -B tools/native_assemble_cli_prerequisite.py prepare --evidence "${{ runner.temp }}/native-assemble-${{ github.run_id }}-${{ github.run_attempt }}"
+
       - name: Simulation float-type guard
         # Type declarations (including arithmetic-free POD fields) are checked
         # separately from float arithmetic. Keep view/test/bench float use out
@@ -94,6 +101,18 @@ jobs:
         run: cargo test --workspace --release --timings --exclude orr_sample --exclude orr_editor --exclude orr_web_gpu
         env:
           ORR_REQUIRE_C_COMPILER: ${{ runner.os == 'Linux' && '1' || '0' }}
+
+      - name: Verify native assemble CLI and source identity after workspace tests
+        if: always()
+        run: python -B tools/native_assemble_cli_prerequisite.py verify --evidence "${{ runner.temp }}/native-assemble-${{ github.run_id }}-${{ github.run_attempt }}"
+      - name: Retain native assemble CLI prerequisite and failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-assemble-${{ matrix.name }}
+          path: ${{ runner.temp }}/native-assemble-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Upload native release build timings
         if: ${{ always() }}

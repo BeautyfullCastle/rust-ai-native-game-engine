@@ -36,7 +36,7 @@ INFRA_PATHS = ('Cargo.toml', 'Cargo.lock', 'tools/static_model_extract_gate.py',
 BINDINGS_TEST = 'installed_static_color_variants_keep_distinct_bindings_and_source_geometry'
 GPU_TEST = 'static_color_variants_match_independent_gpu_oracle'
 UI_TEST = 'installed_recolor_variants_preview_read_only_and_reopen_identity'
-FIXTURE_COUNT = 15
+FIXTURE_COUNT = 17
 source_root = None
 frozen = None
 mode = None
@@ -186,6 +186,17 @@ def build_cli():
     return binary
 
 
+def build_assemble_regression_cli():
+    build = run('build-assemble-regression-cli', [
+        'cargo', 'build', '--locked', '--release', '-p', 'orr_model',
+        '--no-default-features', '--features', 'import', '--example',
+        'static_model_assemble', '--message-format=json'])
+    binary = pin(build, 'assemble-regression-cli', 'orr_model',
+                 'static_model_assemble', 'example', ['import'])
+    os.environ['ORR_STATIC_MODEL_ASSEMBLE_BIN'] = binary
+    return binary
+
+
 def model_tests(platform):
     assert platform in {"linux", "darwin", "win32"}
     names = 'exact_recipe_path_and_model_table_budgets strict_recipe_types_duplicates_shapes_and_f64_bounds portable_paths_and_identity_reject_before_resolution full_source_admission_used_slot_and_bounded_resolution replacement_preserves_every_unowned_float_bit_including_signed_zero provenance_exact_bytes_distinct_ids_same_rgb_and_nested_variants rgb_endpoints_and_rounding_are_admitted_after_f64_validation cli_publishes_once_without_overwrite_and_preserves_all_inputs cli_help_and_three_unique_pairs_are_bounded cli_bad_arguments_fail_without_output_or_staging cli_portable_output_names_and_package_store_rejection cli_missing_nonregular_and_oversized_inputs_leave_no_output cli_resolver_is_anchored_to_recipe_parent cli_parent_traversal_preserves_raw_spelling_and_never_publishes'.split()
@@ -212,6 +223,7 @@ def model():
     test('model', binary, model_tests(sys.platform))
     # Full original model regression suites remain mandatory, including Unix
     # socket refusal fixtures; restricted local execution is not a waiver.
+    build_assemble_regression_cli()
     run('model-full-regressions', ['cargo', 'test', *flags, '--features', 'import', '--tests', '--', '--test-threads=1'])
     run('strict-model-import', ['cargo', 'clippy', *flags, '--features', 'import',
                                '--lib', '--example', 'static_model_recolor', '--test',

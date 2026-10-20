@@ -624,6 +624,17 @@ cli_nonregular_socket_input_rejects_without_opening_or_publication'''.split()
         expected.remove('cli_nonregular_socket_input_rejects_without_opening_or_publication')
     return expected
 
+def build_assemble_regression_cli():
+    build = run('build-assemble-regression-cli', [
+        'cargo', 'build', '--locked', '--release', '-p', 'orr_model',
+        '--no-default-features', '--features', 'import', '--example',
+        'static_model_assemble', '--message-format=json'])
+    binary = pin(build, 'assemble-regression-cli', 'orr_model',
+                 'static_model_assemble', 'example', ['import'])
+    os.environ['ORR_STATIC_MODEL_ASSEMBLE_BIN'] = binary
+    return binary
+
+
 def cpu():
     global frozen
     failure = None
@@ -640,6 +651,10 @@ def cpu():
         build = run('build-model-test', ['cargo', 'test', *model, '--features', 'import', *target, '--no-run', '--message-format=json'])
         binary = pin(build, 'model-test', 'orr_model', 'static_model_extract', 'test', ['import'])
         test('model', binary, expected)
+        checked = run('assemble-prerequisite-fixtures', [sys.executable, '-B',
+            str(repo / 'tools/test_assemble_cli_prerequisites.py')])
+        assert checked.rstrip().endswith('ASSEMBLE_CLI_PREREQUISITES: 11 passed; 0 failed; 0 skipped')
+        build_assemble_regression_cli()
         run('model-import-regressions', ['cargo', 'test', *model, '--features', 'import'])
         run('strict-model-import', ['cargo', 'clippy', *model, '--features', 'import', '--all-targets', '--', '-D', 'warnings'])
         run('default-model-check', ['cargo', 'check', '--locked', '--release', '-p', 'orr_model', '--all-targets'])

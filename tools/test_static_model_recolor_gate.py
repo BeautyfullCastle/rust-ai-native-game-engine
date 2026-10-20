@@ -26,6 +26,24 @@ class GateFixtures(unittest.TestCase):
         gate.runner.report = {}
         gate.runner.evidence = self.root
 
+    def test_assemble_prerequisite_exact_producer_and_environment(self):
+        with mock.patch.object(gate, 'run', return_value='json') as run, \
+                mock.patch.object(gate, 'pin', return_value='/retained/assemble') as pin, \
+                mock.patch.dict(os.environ, {'ORR_STATIC_MODEL_ASSEMBLE_BIN': '/stale'}):
+            self.assertEqual(gate.build_assemble_regression_cli(), '/retained/assemble')
+            self.assertEqual(run.call_args.args[1], ['cargo', 'build', '--locked', '--release',
+                '-p', 'orr_model', '--no-default-features', '--features', 'import',
+                '--example', 'static_model_assemble', '--message-format=json'])
+            pin.assert_called_once_with('json', 'assemble-regression-cli', 'orr_model',
+                                        'static_model_assemble', 'example', ['import'])
+            self.assertEqual(os.environ['ORR_STATIC_MODEL_ASSEMBLE_BIN'], '/retained/assemble')
+    def test_assemble_prerequisite_failure_aborts_without_rebinding(self):
+        with mock.patch.object(gate, 'run', return_value='json'), \
+                mock.patch.object(gate, 'pin', side_effect=AssertionError('not fresh')), \
+                mock.patch.dict(os.environ, {'ORR_STATIC_MODEL_ASSEMBLE_BIN': '/stale'}):
+            with self.assertRaises(AssertionError): gate.build_assemble_regression_cli()
+            self.assertEqual(os.environ['ORR_STATIC_MODEL_ASSEMBLE_BIN'], '/stale')
+
     def tearDown(self):
         gate.source_root, gate.frozen, gate.mode, gate.runner.report, gate.runner.evidence = self.saved
         self.temp.cleanup()
