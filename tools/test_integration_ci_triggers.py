@@ -78,6 +78,12 @@ class IntegrationTriggers(unittest.TestCase):
     def test_all_build_test_workflows(self):
         paths = list((ROOT / '.github/workflows').glob('*.yml'))
         self.assertEqual(len(paths), 47)
+        # The historical development backport covered these five workflows.
+        # Keep its named inventory within the complete authoring stack.
+        self.assertTrue({
+            'arena-agent-trials.yml', 'blockout-authoring.yml', 'determinism.yml',
+            'input-map-authoring.yml', 'ui-subtree-duplicate.yml',
+        }.issubset({path.name for path in paths}))
         for path in paths:
             with self.subTest(workflow=path.name):
                 check(path.read_text())

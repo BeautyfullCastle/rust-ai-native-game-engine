@@ -42,3 +42,26 @@ change is implied by publishing this patch. Newly restored unpublished workflows
 must adopt the same policy before publishing their feature branches.
 
 Reference: [GitHub workflow events](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows).
+
+## Historical branch scopes and combined candidate
+
+The development backport started from commit
+`87d54e185c7425abc7eb94a4ac85532241f871a3`. Its scheduling change covered only
+`arena-agent-trials.yml`, `blockout-authoring.yml`, `determinism.yml`,
+`input-map-authoring.yml`, and `ui-subtree-duplicate.yml`, the five workflows
+present in that snapshot. That backport did not import or accept the additional
+workflows and production dependencies from the separately published 47-workflow
+feature stack in PR #253. Its scheduling patch preserved job bodies, matrices,
+commands, permissions, artifacts and required gates.
+
+This combined candidate retains the authoring stack's complete 47-workflow
+policy and expanded regression assertions. It also incorporates the subsequent
+browser-runner fix from the backport branch: the existing mandatory browser job
+uses `ubuntu-24.04` instead of the moving `ubuntu-latest` label. No browser checks
+or required aggregate gates are removed. This local combination alone is not
+evidence of hosted acceptance or authorization to merge main or PR1.
+
+Derive the complete required job inventory from the frozen combined source:
+47 workflows does not mean 47 jobs. Expand every matrix and include required
+aggregates. Local trigger fixtures do not replace hosted acceptance. Future
+integrations must preserve this policy for newly added workflows.
