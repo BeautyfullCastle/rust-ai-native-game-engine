@@ -12,9 +12,29 @@ import unittest
 FEATURES = "mesh-export,mesh-mission,package-manager,mesh-animated-models"
 SUITES = (
     ("app::mesh_recorded_playback::tests", 13),
-    ("package_manager_panel::tests", 6),
+    ("package_manager_panel::tests", 13),
     ("mesh_navigation::mesh_model::tests", 2),
     ("mesh_navigation::geometry_import::tests", 10),
+)
+# This feature closure excludes room-animated-models and its additional panel case.
+# Keep identities pinned: a same-count replacement must not hide lost coverage.
+PANEL_CASES = frozenset(
+    "package_manager_panel::tests::" + name
+    for name in (
+        "fresh_verification_discards_real_removal_receipt_and_restoration_preview",
+        "matching_add_failure_invalidates_cached_state",
+        "model_browser_widgets_filter_clear_and_select_without_changing_lock",
+        "model_filter_matches_all_terms_across_package_and_path",
+        "model_filter_resets_only_on_project_change_and_never_authorizes_stale_requests",
+        "mutating_removal_freezes_editor_input_through_completion_frame",
+        "preview_kind_requires_its_declared_capability_and_animation_feature",
+        "project_change_clears_removal_selection",
+        "removal_dispatch_requires_idle_verified_direct_selection",
+        "restoration_dispatch_requires_successful_receipt_and_explicit_preview",
+        "stale_add_completion_invalidates_cached_state_for_success_and_failure",
+        "stale_removal_completion_never_installs_prior_project_inventory",
+        "typed_model_request_preserves_kind_and_requires_current_identity",
+    )
 )
 SUMMARY = re.compile(
     r"^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; "
@@ -38,6 +58,15 @@ def validate_tests(output, suite, expected):
         raise ValueError(f"{suite}: missing or duplicate individual test results")
     if any(not name.startswith(suite + "::") or status != "ok" for name, status in cases):
         raise ValueError(f"{suite}: unexpected test name or non-passing result")
+
+
+def validate_authoring_suite(output, suite, expected):
+    """Apply the feature-specific census without changing shared validator callers."""
+    validate_tests(output, suite, expected)
+    if suite == "package_manager_panel::tests":
+        names = {name for name, _ in CASE.findall(output.replace("\r\n", "\n"))}
+        if expected != len(PANEL_CASES) or names != PANEL_CASES:
+            raise ValueError(f"{suite}: unexpected authoring panel test inventory")
 
 
 def run_logged(command, path):
@@ -82,7 +111,7 @@ def check():
              suite + "::", "--", "--format=pretty", "--color=never", "--test-threads=1"], path
         )
         try:
-            validate_tests(output, suite, expected)
+            validate_authoring_suite(output, suite, expected)
         except ValueError as error:
             with path.open("a", encoding="utf-8") as log:
                 log.write(f"\nEvidence validation failed: {error}\n")
@@ -98,6 +127,35 @@ class ValidatorTests(unittest.TestCase):
         return (f"running {count} tests\n{cases}\n"
                 f"test result: ok. {count} passed; 0 failed; 0 ignored; "
                 "0 measured; 47 filtered out; finished in 0.01s\n")
+
+    def panel_output(self):
+        cases = "".join(f"test {name} ... ok\n" for name in sorted(PANEL_CASES))
+        return (f"running 13 tests\n{cases}\n"
+                "test result: ok. 13 passed; 0 failed; 0 ignored; "
+                "0 measured; 693 filtered out; finished in 0.65s\n")
+
+    def test_authoring_panel_exact_inventory(self):
+        suite = "package_manager_panel::tests"
+        self.assertIn((suite, len(PANEL_CASES)), SUITES)
+        for output in (self.panel_output(), self.panel_output().replace("\n", "\r\n")):
+            validate_authoring_suite(output, suite, 13)
+
+    def test_authoring_panel_rejects_wrong_duplicate_skipped_and_count(self):
+        first, second = sorted(PANEL_CASES)[:2]
+        output = self.panel_output()
+        for invalid in (
+            output.replace(first, "package_manager_panel::tests::unexpected_replacement"),
+            output.replace(first, second),
+            output.replace("... ok", "... ignored", 1),
+            output.replace("13 passed", "12 passed"),
+            output.replace("running 13", "running 12"),
+            output.replace(f"test {first} ... ok\n", ""),
+            output.replace("0 ignored", "1 ignored"),
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                validate_authoring_suite(invalid, "package_manager_panel::tests", 13)
+        with self.assertRaises(ValueError):
+            validate_authoring_suite(output, "package_manager_panel::tests", 6)
 
     def test_valid_and_windows_newlines(self):
         for output in (self.output(), self.output().replace("\n", "\r\n")):

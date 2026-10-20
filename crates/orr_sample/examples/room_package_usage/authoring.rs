@@ -48,7 +48,9 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Option<Req
     let mut project = None;
     let mut package = None;
     let mut digest = None;
-    for pair in args.chunks_exact(2) {
+    // The exact six-argument check above guarantees three complete pairs.
+    // Keep this shared helper compatible with orr_sample's Rust 1.85 MSRV.
+    for pair in args.chunks(2) {
         if pair[1].is_empty() {
             return Err("empty option value".into());
         }
