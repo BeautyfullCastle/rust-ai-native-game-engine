@@ -8,10 +8,7 @@
 ))]
 #![allow(clippy::disallowed_types, clippy::float_arithmetic)]
 use egui::{accesskit::Role, Key, Modifiers};
-use egui_kittest::{
-    kittest::{NodeT, Queryable},
-    Harness,
-};
+use egui_kittest::{kittest::Queryable, Harness};
 use orr_editor::{editor::Owner, Editor, EditorApp};
 use sha2::{Digest, Sha256};
 use std::{
@@ -107,7 +104,10 @@ fn actual_widget_generated_edited_project_relocates_and_runs_with_sprites() {
     h.get_by_label("Arena export").click();
     h.run_steps(3);
     let output = root.join("exported");
-    let hash = format!("{:x}", Sha256::digest(fs::read(&runtime).unwrap()));
+    let hash = Sha256::digest(fs::read(&runtime).unwrap())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
     field(&mut h, "Project path", project.to_str().unwrap());
     field(&mut h, "New output path", output.to_str().unwrap());
     field(&mut h, "Runtime path", runtime.to_str().unwrap());

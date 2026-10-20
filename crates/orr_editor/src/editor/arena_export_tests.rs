@@ -38,7 +38,7 @@ fn saved_source_inventory_and_equal_contents_reload_epoch() {
     assert_ne!(epoch, editor.scene_load_epoch());
 }
 #[test]
-fn dirty_gesture_control_uncertain_and_transaction_refused() {
+fn cached_dirty_uncertain_and_transaction_flags_refused() {
     let (dir, mut editor, sprites) = fixture();
     editor.batch_uncertain = true;
     assert!(editor.arena_export_source(dir.path(), &sprites).is_err());
@@ -98,7 +98,7 @@ fn raw_scene_changes_are_pinned_and_semantic_changes_refused() {
     assert!(editor.arena_export_source(dir.path(), &sprites).is_err());
 }
 #[test]
-fn bounded_reader_refuses_symlinks_and_fifo_without_opening_them() {
+fn bounded_reader_refuses_symlinks_and_over_limit_files() {
     use std::os::unix::fs::symlink;
     let dir = tempfile::tempdir().unwrap();
     let original = dir.path().join("original");
@@ -158,6 +158,24 @@ fn referenced_cached_pixels_documents_and_missing_cache_are_checked() {
         admitted.assets.clone(),
     );
     editor.arena_export_source(&root, &panel).unwrap();
+    let mut assets = admitted.assets.clone();
+    let asset = assets.values_mut().next().unwrap();
+    let mut doc: J = serde_json::from_str(&asset.document.to_json().unwrap()).unwrap();
+    doc["atlas"]["image"] = json!("different-cached-image.png");
+    asset.document =
+        orr_sprite::SpriteDocument::from_json(&serde_json::to_string(&doc).unwrap()).unwrap();
+    panel.install_prepared(
+        &ctx,
+        crate::sprite_bindings::Bindings::from_document(
+            admitted.path.clone(),
+            admitted.document.clone(),
+        ),
+        assets,
+    );
+    assert!(editor
+        .arena_export_source(&root, &panel)
+        .unwrap_err()
+        .contains("document or pixels differ"));
 }
 #[test]
 fn stale_cached_clean_state_does_not_hide_host_transaction_proposal_or_play() {

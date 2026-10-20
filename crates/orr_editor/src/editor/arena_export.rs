@@ -175,7 +175,13 @@ impl Editor {
             }
             let digest = bytes
                 .map(|b| {
-                    ArenaSourceDigest::new(b.len() as u64, format!("{:x}", Sha256::digest(&b)))
+                    ArenaSourceDigest::new(
+                        b.len() as u64,
+                        Sha256::digest(&b)
+                            .iter()
+                            .map(|byte| format!("{byte:02x}"))
+                            .collect(),
+                    )
                 })
                 .transpose()?;
             inventory.push(ArenaSourceFile::new(name, digest)?);

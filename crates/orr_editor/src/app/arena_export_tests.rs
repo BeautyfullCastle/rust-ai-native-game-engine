@@ -120,8 +120,8 @@ fn outer_early_return_poll_and_normal_teardown_join() {
     let until = Instant::now() + Duration::from_secs(10);
     while app.arena_export.busy() {
         assert!(Instant::now() < until);
-        let _ = ctx.run(Default::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| app.with_close_review(ui, |_, _| {}));
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            app.with_close_review(ui, |_, _| {});
         });
         thread::sleep(Duration::from_millis(1));
     }
@@ -141,7 +141,7 @@ fn outer_early_return_poll_and_normal_teardown_join() {
     let _ = handle;
 }
 #[test]
-fn panic_and_disconnect_are_terminal_but_require_destination_inspection() {
+fn panic_after_result_requires_destination_inspection() {
     let (dir, mut app) = fixture();
     let release = synthetic_job(&mut app, dir.path());
     release.send(()).unwrap();
@@ -154,7 +154,7 @@ fn panic_and_disconnect_are_terminal_but_require_destination_inspection() {
     assert!(app.arena_export.uncertain_output.is_some());
 }
 #[test]
-fn screenshot_mode_and_path_dialog_refuse_without_source_mutation() {
+fn screenshot_mode_refuses_without_source_mutation() {
     let (dir, mut app) = fixture();
     let bytes = fs::read(dir.path().join("arena.scene.yaml")).unwrap();
     let history = app.editor.history().clone();
@@ -318,7 +318,7 @@ fn path_dialog_refuses_and_completion_retains_pre_reload_identity() {
     assert!(!app.arena_export.status.contains("other.scene.yaml"));
 }
 #[test]
-fn same_frame_dispatch_root_close_vetoes_and_escape_is_not_override() {
+fn same_frame_owned_worker_root_close_vetoes() {
     let (dir, mut app) = fixture();
     let ctx = egui::Context::default();
     let mut release = None;
@@ -329,11 +329,9 @@ fn same_frame_dispatch_root_close_vetoes_and_escape_is_not_override() {
         .or_default()
         .events
         .push(egui::ViewportEvent::Close);
-    let output = ctx.run(input, |ctx| {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            app.with_close_review(ui, |app, _| {
-                release = Some(synthetic_job(app, dir.path()));
-            })
+    let output = ctx.run_ui(input, |ui| {
+        app.with_close_review(ui, |app, _| {
+            release = Some(synthetic_job(app, dir.path()));
         });
     });
     assert!(output.viewport_output[&egui::ViewportId::ROOT]
@@ -346,7 +344,6 @@ fn same_frame_dispatch_root_close_vetoes_and_escape_is_not_override() {
 }
 #[test]
 fn actual_widget_runtime_hash_changes_clear_trust_and_inspection_does_not_retry() {
-    use egui_kittest::kittest::NodeT;
     let (dir, mut app) = fixture();
     options(&mut app, dir.path());
     app.ui.bottom_tab = crate::app::BottomTab::ArenaExport;
@@ -383,6 +380,15 @@ fn active_arena_job_refuses_mesh_whole_app_replacement() {
     let (dir, mut app) = fixture();
     let release = synthetic_job(&mut app, dir.path());
     assert!(app.mesh_workspace_blocker().is_some());
+    assert!(!app.switch_mesh_workspace(
+        &dir.path().join("missing.scene.yaml"),
+        crate::mesh_workspace::Intent::Open
+    ));
+    assert!(!app.switch_mesh_workspace(
+        &dir.path().join("new.scene.yaml"),
+        crate::mesh_workspace::Intent::Create
+    ));
+    assert!(!dir.path().join("new.scene.yaml").exists());
     assert!(app.editor.mesh_workspace_source_stamp().is_err());
     assert!(app.arena_export.busy());
     release.send(()).unwrap();
@@ -479,4 +485,43 @@ fn loaded_tilemap_is_refused_independently_of_saved_manifest() {
         .unwrap_err()
         .contains("Loaded tilemap"));
     assert!(app.tilemap.is_some());
+}
+#[test]
+fn actual_escape_does_not_cancel_worker_or_bypass_next_close() {
+    let (dir, mut app) = fixture();
+    let release = synthetic_job(&mut app, dir.path());
+    let mut h = egui_kittest::Harness::builder()
+        .with_size([1500.0, 1000.0])
+        .renderer(egui_kittest::LazyRenderer::Uninitialized {
+            textures_delta: Default::default(),
+            builder: None,
+        })
+        .build_eframe(move |_| app);
+    h.run_steps(2);
+    let tab = h.state().ui.bottom_tab;
+    h.key_press(egui::Key::Escape);
+    h.run_steps(1);
+    assert!(h.state().arena_export.busy());
+    assert_eq!(h.state().ui.bottom_tab, tab);
+    assert!(crate::app::unsaved_close_tests::request_root_close(&mut h));
+    release.send(()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while h.state().arena_export.busy() {
+        assert!(Instant::now() < deadline);
+        h.run_steps(1);
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+#[cfg(feature = "mesh-mission")]
+#[test]
+fn active_arena_job_refuses_mesh_creation_replacement() {
+    let (dir, mut app) = fixture();
+    let release = synthetic_job(&mut app, dir.path());
+    let path = dir.path().join("new-mesh.scene.yaml");
+    assert!(!app.create_mesh_game(&path, &crate::mesh_workspace::mission::Settings::default()));
+    assert!(!path.exists());
+    assert_eq!(app.editor.game(), EditorGame::Arena);
+    assert!(app.arena_export.busy());
+    release.send(()).unwrap();
+    reap(&mut app);
 }
