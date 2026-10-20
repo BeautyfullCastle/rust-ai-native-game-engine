@@ -3,6 +3,7 @@
 import ast
 import json
 import sys
+import subprocess
 import os
 import pathlib
 import tempfile
@@ -65,6 +66,10 @@ class Prerequisites(unittest.TestCase):
     def test_environment_rejects_newline_carriage_return_and_nul(self):
         for bad in ['evil\nNAME=value', 'evil\rNAME=value', 'evil\0name']:
             with self.assertRaises((AssertionError, ValueError)): native.environment_lines(bad)
+        rejected = subprocess.run([sys.executable, '-B', '-O', native.__file__, '--help'],
+                                  capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn('nonoptimized Python required', rejected.stderr)
 
     def test_native_prepare_then_verify_unique_labels_and_jobs(self):
         identity = ('a'*40, 'b'*40, {'source': {'sha256': 'c'*64}})

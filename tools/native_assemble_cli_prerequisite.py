@@ -144,7 +144,8 @@ def verify(root, evidence):
 
 
 def main():
-    assert __debug__ and not sys.flags.optimize, 'nonoptimized Python required'
+    if not __debug__ or sys.flags.optimize:
+        raise SystemExit('nonoptimized Python required')
     parser = argparse.ArgumentParser()
     parser.add_argument('mode', choices=['prepare', 'verify'])
     parser.add_argument('--evidence', required=True)
