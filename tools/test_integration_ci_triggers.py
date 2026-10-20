@@ -41,6 +41,39 @@ def check_room_usage_selectors(text):
         ast.parse(textwrap.dedent(block))
 
 
+def check_grid_selectors(text):
+    required = (
+        "examples = ('png_sequence_package', 'png_grid_package')",
+        "expected = {'png_sequence_package': 20, 'png_sprite_package': 16, 'png_grid_package': 11}",
+        "'--features', 'project-create', *test_selectors",
+        "os.environ['ORR_PNG_GRID_PACKAGE_BIN']",
+        "'--features', 'sprites', '--test', 'png_grid_package_consumer'",
+        "'--ignored', '--exact', consumer",
+        "helpers['CASE'].findall(output) != [(consumer, 'ok')]",
+        "'--test', 'png_sequence_package_gpu'",
+        "'--test', 'png_sequence_canvas_gpu'",
+    )
+    # The refusal message is dynamically assembled for both examples.
+    for selector in required:
+        assert selector in text, selector
+    assert "example + ' requires Linux and --features project-create'" in text
+    assert text.count('  png-sequence-package:\n') == 1
+    for block in re.findall(r'        shell: python \{0\}\n        run: \|\n((?:          .*\n|\n)+)', text):
+        ast.parse(textwrap.dedent(block))
+
+
+def grid_validator(text):
+    block = re.search(r'        shell: python \{0\}\n        run: \|\n((?:          .*\n|\n)+)', text).group(1)
+    nodes = ast.parse(textwrap.dedent(block)).body
+    start = next(i for i, node in enumerate(nodes) if isinstance(node, ast.Assign)
+                 and isinstance(node.targets[0], ast.Name) and node.targets[0].id == 'expected')
+    end = next(i for i in range(start, len(nodes)) if isinstance(nodes[i], ast.For))
+    # Run only the real batch census, never Cargo or other workflow side effects.
+    kept = [node for node in nodes[start:end + 1] if not (isinstance(node, ast.Assign)
+            and isinstance(node.targets[0], ast.Name) and node.targets[0].id in ('test_selectors', 'output'))]
+    return compile(ast.Module(body=kept, type_ignores=[]), '<grid-census>', 'exec')
+
+
 class IntegrationTriggers(unittest.TestCase):
     def test_all_build_test_workflows(self):
         paths = list((ROOT / '.github/workflows').glob('*.yml'))
@@ -65,6 +98,37 @@ class IntegrationTriggers(unittest.TestCase):
         ):
             with self.subTest(selector=before), self.assertRaises(AssertionError):
                 check_room_usage_selectors(text.replace(before, after))
+
+    def test_grid_keeps_existing_batch_and_mandatory_consumer(self):
+        text = (ROOT / '.github/workflows/png-sequence-package.yml').read_text()
+        check_grid_selectors(text)
+        for before, after in (
+            ("'png_grid_package': 11", "'png_grid_package': 0"),
+            ("'--ignored', '--exact', consumer", "'--exact', consumer"),
+            ("os.environ['ORR_PNG_GRID_PACKAGE_BIN']", "os.environ['WRONG_BIN']"),
+            ("'--test', 'png_sequence_canvas_gpu'", "'--test', 'unrelated'"),
+        ):
+            with self.subTest(selector=before), self.assertRaises(AssertionError):
+                check_grid_selectors(text.replace(before, after))
+
+    def test_grid_batch_census_rejects_missing_failed_or_zero_tests(self):
+        import runpy
+        helpers = runpy.run_path(str(ROOT / 'tools/check-authoring-controls.py'))
+        text = (ROOT / '.github/workflows/png-sequence-package.yml').read_text()
+        program = grid_validator(text)
+        def harness(name, count):
+            return (f'     Running unittests examples/{name}.rs (target/debug/examples/{name}-hash)\n'
+                    f'\nrunning {count} tests\n' + ''.join(f'test case_{i} ... ok\n' for i in range(count))
+                    + f'test result: ok. {count} passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n')
+        parts = [harness(name, count) for name, count in (
+            ('png_grid_package', 11), ('png_sequence_package', 20), ('png_sprite_package', 16))]
+        good = ''.join(parts)
+        exec(program, {'output': good, 'helpers': helpers, 're': re})
+        for bad in (''.join(parts[1:]), good.replace('running 11 tests', 'running 0 tests'),
+                    good.replace('test case_0 ... ok', 'test case_0 ... FAILED', 1),
+                    good + parts[0], good.replace('examples/png_grid_package.rs', 'examples/unrelated.rs')):
+            with self.subTest(output=bad[:80]), self.assertRaises(RuntimeError):
+                exec(program, {'output': bad, 'helpers': helpers, 're': re})
 
     def test_reject_automatic_or_incomplete_triggers(self):
         for bad in [

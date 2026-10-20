@@ -53,6 +53,7 @@ FIXTURE_COUNT = 24
 FEATURE_PATHS = (
     "crates/orr_sample/examples/png_sequence_package.rs",
     "crates/orr_sample/examples/png_sequence_package/authoring.rs",
+    "crates/orr_sample/examples/png_sequence_package/offline_io.rs",
     "crates/orr_sample/examples/png_sequence_package/clips.rs",
     "crates/orr_sample/examples/png_sequence_package/tests.rs",
     "crates/orr_sample/tests/png_sequence_clips.rs",

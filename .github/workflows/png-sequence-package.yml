@@ -36,25 +36,44 @@ jobs:
           evidence = Path(os.environ['ORR_SEQUENCE_EVIDENCE'])
           evidence.mkdir(parents=True, exist_ok=False)
           helpers['run_logged'](['python', 'tools/check-png-canvas-receipt.py', '--self-test'], evidence / 'receipt-validator-self-tests.log')
-          binary = Path('target/debug/examples/png_sequence_package').resolve()
-          helpers['run_logged'](['cargo', 'build', '--locked', '-p', 'orr_sample', '--example', 'png_sequence_package'], evidence / 'default-build.log')
-          absent = evidence / 'must-not-exist'
-          for label, args in [('help', ['--help']), ('inputs', ['--recipe', str(evidence / 'missing.json'), '--out', str(absent)])]:
-              result = subprocess.run([str(binary), *args], capture_output=True, text=True, timeout=10)
-              (evidence / ('disabled-' + label + '.log')).write_text(result.stdout + result.stderr + '\nexit=' + str(result.returncode))
-              if result.returncode != 1 or result.stdout or result.stderr.strip() != 'png_sequence_package requires Linux and --features project-create' or absent.exists():
-                  raise RuntimeError('Default example did not refuse before I/O')
-          helpers['run_logged'](['rustfmt', '--edition', '2021', '--check', 'crates/orr_sample/examples/png_sequence_package.rs', 'crates/orr_sample/tests/png_sequence_package_gpu.rs', 'crates/orr_sample/tests/png_sequence_canvas_gpu.rs'], evidence / 'format.log')
-          for example, count in [('png_sequence_package', 20), ('png_sprite_package', 16)]:
-              output = helpers['run_logged'](['cargo', 'test', '--locked', '-p', 'orr_sample', '--features', 'project-create', '--example', example, '--', '--format=pretty', '--color=never'], evidence / (example + '-tests.log')).replace('\r\n', '\n')
-              summaries = helpers['SUMMARY'].findall(output)
-              cases = helpers['CASE'].findall(output)
+          examples = ('png_sequence_package', 'png_grid_package')
+          selectors = [arg for example in examples for arg in ('--example', example)]
+          helpers['run_logged'](['cargo', 'build', '--locked', '-p', 'orr_sample', *selectors], evidence / 'default-build.log')
+          for example in examples:
+              binary = Path('target/debug/examples/' + example).resolve()
+              absent = evidence / ('must-not-exist-' + example)
+              for label, args in [('help', ['--help']), ('inputs', ['--recipe', str(evidence / 'missing.json'), '--out', str(absent)])]:
+                  result = subprocess.run([str(binary), *args], capture_output=True, text=True, timeout=10)
+                  (evidence / (example + '-disabled-' + label + '.log')).write_text(result.stdout + result.stderr + '\nexit=' + str(result.returncode))
+                  if result.returncode != 1 or result.stdout or result.stderr.strip() != example + ' requires Linux and --features project-create' or absent.exists():
+                      raise RuntimeError('Default example did not refuse before I/O')
+          helpers['run_logged'](['rustfmt', '--edition', '2021', '--check', 'crates/orr_sample/examples/png_sequence_package.rs', 'crates/orr_sample/examples/png_grid_package.rs', 'crates/orr_sample/tests/png_grid_package.rs', 'crates/orr_editor/tests/png_grid_package_consumer.rs', 'crates/orr_sample/tests/png_sequence_package_gpu.rs', 'crates/orr_sample/tests/png_sequence_canvas_gpu.rs'], evidence / 'format.log')
+          expected = {'png_sequence_package': 20, 'png_sprite_package': 16, 'png_grid_package': 11}
+          test_selectors = [arg for example in expected for arg in ('--example', example)]
+          output = helpers['run_logged'](['cargo', 'test', '--locked', '-p', 'orr_sample', '--features', 'project-create', *test_selectors, '--', '--format=pretty', '--color=never'], evidence / 'example-batch-tests.log').replace('\r\n', '\n')
+          blocks = re.split(r'(?m)^\s*Running unittests examples/(\w+)\.rs \([^\n]+\)\n', output)
+          if len(blocks) != 1 + 2 * len(expected) or set(blocks[1::2]) != set(expected):
+              raise RuntimeError('Missing or unexpected example harness')
+          for example, block in zip(blocks[1::2], blocks[2::2]):
+              count = expected[example]
+              summaries = helpers['SUMMARY'].findall(block)
+              cases = helpers['CASE'].findall(block)
               if (len(summaries) != 1 or tuple(map(int, summaries[0][:5])) != (count, 0, 0, 0, 0)
-                  or re.findall(r'^running (\d+) tests?$', output, re.M) != [str(count)]
+                  or re.findall(r'^running (\d+) tests?$', block, re.M) != [str(count)]
                   or len(cases) != count or len({name for name, _ in cases}) != count or any(status != 'ok' for _, status in cases)):
                   raise RuntimeError('Exact-count CPU acceptance failed')
-          helpers['run_logged'](['cargo', 'clippy', '--locked', '-p', 'orr_sample', '--features', 'project-create', '--example', 'png_sequence_package', '--test', 'png_sequence_package_gpu', '--test', 'png_sequence_canvas_gpu', '--', '-D', 'warnings'], evidence / 'clippy.log')
-          helpers['run_logged'](['cargo', 'build', '--locked', '-p', 'orr_sample', '--features', 'project-create', '--example', 'png_sequence_package'], evidence / 'cli-build.log')
+          helpers['run_logged'](['cargo', 'clippy', '--locked', '-p', 'orr_sample', '--features', 'project-create', *selectors, '--test', 'png_sequence_package_gpu', '--test', 'png_sequence_canvas_gpu', '--', '-D', 'warnings'], evidence / 'clippy.log')
+          helpers['run_logged'](['cargo', 'clippy', '--locked', '-p', 'orr_editor', '--features', 'sprites', '--test', 'png_grid_package_consumer', '--', '-D', 'warnings'], evidence / 'grid-consumer-clippy.log')
+          helpers['run_logged'](['cargo', 'build', '--locked', '-p', 'orr_sample', '--features', 'project-create', *selectors], evidence / 'cli-build.log')
+          os.environ['ORR_PNG_GRID_PACKAGE_BIN'] = str(Path('target/debug/examples/png_grid_package').resolve())
+          consumer = 'grid_cli_install_editor_save_reopen_and_locomotion'
+          output = helpers['run_logged'](['cargo', 'test', '--locked', '-p', 'orr_editor', '--features', 'sprites', '--test', 'png_grid_package_consumer', '--', '--ignored', '--exact', consumer, '--format=pretty', '--color=never', '--test-threads=1'], evidence / 'grid-editor-consumer.log').replace('\r\n', '\n')
+          summaries = helpers['SUMMARY'].findall(output)
+          if (len(summaries) != 1 or tuple(map(int, summaries[0][:5])) != (1, 0, 0, 0, 0)
+              or re.findall(r'^running (\d+) tests?$', output, re.M) != ['1']
+              or helpers['CASE'].findall(output) != [(consumer, 'ok')]
+              or re.search(r'\bSKIP\b', output)):
+              raise RuntimeError('Required grid editor consumer skipped or incomplete')
       - name: Install software Vulkan
         shell: bash
         run: |
