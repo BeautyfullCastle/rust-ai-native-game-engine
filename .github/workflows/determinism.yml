@@ -1070,6 +1070,23 @@ jobs:
       # they really run instead of skipping. Linux only.
       - if: runner.os == 'Linux'
         run: sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers
+      - name: Grouped terrain ramp CPU and actual App software Vulkan acceptance
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        shell: bash
+        timeout-minutes: 60
+        env:
+          TERRAIN_RAMP_EVIDENCE: ${{ runner.temp }}/terrain-ramp-${{ github.run_id }}-${{ github.run_attempt }}
+          CARGO_BUILD_JOBS: '2'
+          CARGO_PROFILE_RELEASE_DEBUG: '0'
+        run: python -B tools/terrain_ramp_gate.py
+      - name: Retain terrain ramp original failures Frames receipts and captures
+        if: always() && runner.os == 'Linux' && runner.arch == 'X64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: terrain-ramp-linux-x64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/terrain-ramp-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
       - name: Required tilemap compositor saved runtime and actual editor acceptance
         if: runner.os == 'Linux'
         shell: bash
