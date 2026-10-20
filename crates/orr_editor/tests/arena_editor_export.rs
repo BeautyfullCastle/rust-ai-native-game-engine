@@ -34,29 +34,53 @@ fn digest(path: &Path) -> String {
         .collect()
 }
 fn recorded(root: &Path, stage: &str, command: &mut Command) -> String {
-    let output = command
-        .output()
-        .expect("launch recorded acceptance command");
     let stdout_file = format!("{stage}.stdout.txt");
     let stderr_file = format!("{stage}.stderr.txt");
-    fs::write(root.join(&stdout_file), &output.stdout).unwrap();
-    fs::write(root.join(&stderr_file), &output.stderr).unwrap();
-    let record = serde_json::json!({"stage":stage,"program":command.get_program().to_string_lossy(),"args":command.get_args().map(|s|s.to_string_lossy().into_owned()).collect::<Vec<_>>(),"cwd":command.get_current_dir().map(|p|p.display().to_string()),"status":output.status.code(),"stdout_file":stdout_file,"stderr_file":stderr_file});
-    writeln!(
-        fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(root.join("commands.jsonl"))
-            .unwrap(),
-        "{record}"
-    )
-    .unwrap();
+    let stdout = fs::File::create(root.join(&stdout_file)).unwrap();
+    let stderr = fs::File::create(root.join(&stderr_file)).unwrap();
+    // Direct file descriptors retain child output even if the outer gate times out.
+    command.stdout(stdout.try_clone().unwrap());
+    command.stderr(stderr.try_clone().unwrap());
+    let mut record = serde_json::json!({"stage":stage,"program":command.get_program().to_string_lossy(),"args":command.get_args().map(|s|s.to_string_lossy().into_owned()).collect::<Vec<_>>(),"cwd":command.get_current_dir().map(|p|p.display().to_string()),"status":null,"stdout_file":stdout_file,"stderr_file":stderr_file});
+    let state_path = root.join(format!("{stage}.command-state.json"));
+    let persist_state = |state: &str, record: &serde_json::Value, error: Option<String>| {
+        let mut state_record = record.clone();
+        state_record["state"] = state.into();
+        state_record["error"] = error.into();
+        let temporary = state_path.with_extension("json.tmp");
+        let mut file = fs::File::create(&temporary).unwrap();
+        writeln!(file, "{state_record}").unwrap();
+        file.sync_all().unwrap();
+        fs::rename(temporary, &state_path).unwrap();
+        fs::File::open(root).unwrap().sync_all().unwrap();
+    };
+    // This is durable before spawn, separate from the completed-record gate schema.
+    persist_state("started", &record, None);
+    let mut child = command.spawn().unwrap_or_else(|error| {
+        persist_state("spawn_failed", &record, Some(error.to_string()));
+        panic!("launch recorded acceptance command {stage}: {error}");
+    });
+    let status = child.wait().unwrap_or_else(|error| {
+        persist_state("wait_failed", &record, Some(error.to_string()));
+        panic!("wait for recorded acceptance command {stage}: {error}");
+    });
+    stdout.sync_all().unwrap();
+    stderr.sync_all().unwrap();
+    record["status"] = status.code().into();
+    persist_state("completed", &record, None);
+    let mut log = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(root.join("commands.jsonl"))
+        .unwrap();
+    writeln!(log, "{record}").unwrap();
+    log.sync_all().unwrap();
     assert!(
-        output.status.success(),
-        "{stage}: {}",
-        String::from_utf8_lossy(&output.stderr)
+        status.success(),
+        "{stage}: {status}: {}",
+        String::from_utf8_lossy(&fs::read(root.join(&stderr_file)).unwrap())
     );
-    String::from_utf8(output.stdout).unwrap()
+    String::from_utf8(fs::read(root.join(&stdout_file)).unwrap()).unwrap()
 }
 fn inventory(root: &Path) -> Vec<serde_json::Value> {
     fn visit(root: &Path, path: &Path, out: &mut Vec<serde_json::Value>) {
