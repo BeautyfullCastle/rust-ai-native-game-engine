@@ -56,7 +56,7 @@ def workflow_section(text, header, indent):
 def room_workflow_steps(workflow):
     """The supported CI shape is deliberately strict; changed gates need review."""
     trigger = workflow_section(workflow, 'on:', 0)
-    assert trigger == 'on:\n  push:\n    branches: [main]\n  pull_request:\n  workflow_dispatch:\n', 'workflow triggers'
+    assert trigger == 'on:\n  pull_request:\n    branches: [main, su/engine-correctness-hardening]\n    types: [ready_for_review]\n  workflow_dispatch:\n', 'workflow triggers'
     jobs = workflow_section(workflow, 'jobs:', 0)
     sample = workflow_section(jobs, '  sample-build:', 2)
     assert sample.count('    steps:\n') == 1, 'sample-build steps'
