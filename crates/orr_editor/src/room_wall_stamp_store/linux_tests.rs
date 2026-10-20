@@ -134,7 +134,13 @@ fn malformed_oversized_directory_and_fifo_rejected() {
 
 #[test]
 fn unix_socket_is_rejected() {
-    let dir = tempfile::tempdir().unwrap();
+    // CI evidence TMPDIR can exceed sockaddr_un.sun_path even before the
+    // filename is added. Keep a private randomized directory with RAII cleanup
+    // under Linux's short temporary root; never mutate process-global TMPDIR.
+    let dir = tempfile::Builder::new()
+        .prefix("orr-sock-")
+        .tempdir_in("/tmp")
+        .unwrap();
     let path = path(dir.path());
     let _socket = UnixListener::bind(&path).expect("mandatory Unix socket fixture; no skip");
     assert!(load(&path).is_err());
