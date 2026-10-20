@@ -202,6 +202,10 @@ class Tests(unittest.TestCase):
         root,r=self.receipt();path=root/'commands.jsonl';rows=[json.loads(line) for line in path.read_text().splitlines()]
         for index,mutate in [(1,lambda a:a[:14]),(1,lambda a:[x.replace('touch "$4/.write-probe"','true') for x in a]),(2,lambda a:a+['--bind','/tmp',str(root/'bundle')]),(3,lambda a:[x.replace('right,fire','idle') for x in a]),(6,lambda a:a[:-1]+['/tmp/wrong.png'])]:
             bad=copy.deepcopy(rows);bad[index]['args']=mutate(bad[index]['args']);path.write_text(''.join(json.dumps(c)+'\n' for c in bad))
+            # Keep duplicate durable records internally consistent so rejection
+            # specifically exercises the executed argv/probe contract.
+            for command in bad:
+                (root/(command['stage']+'.command-state.json')).write_text(json.dumps(dict(command,state='completed',error=None)))
             with self.assertRaises(AssertionError):gate.verify_receipt(root)
 
     def test_simulation_checksums_repeat_fire_and_movement_required(self):
