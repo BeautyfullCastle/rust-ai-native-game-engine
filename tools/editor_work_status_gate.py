@@ -44,7 +44,8 @@ INVENTORIES = {'mailbox': ['work_status::tests::absence_before_publication_and_d
              'work_status::tests::response_validation_rejects_extra_nested_metadata_before_forwarding',
              'work_status::tests::response_validation_rejects_arbitrary_strings_arrays_and_wrong_types',
              'work_status::tests::response_validation_rejects_malformed_counters_checksums_and_observations',
-             'work_status::tests::response_validation_rejects_false_freshness_but_allows_stale_truncation'],
+             'work_status::tests::response_validation_rejects_false_freshness_but_allows_stale_truncation',
+             'work_status::tests::response_validation_rejects_semantically_contradictory_assessments'],
  'host': ['editor_work_status_preserves_exhaustive_config_and_old_entrypoints',
           'editor_work_status_denies_nonread_caps_before_params_or_unpaired_state',
           'paired::editor_work_status_owner_lifecycle_and_discovery_are_not_permission',
@@ -81,7 +82,10 @@ INVENTORIES = {'mailbox': ['work_status::tests::absence_before_publication_and_d
          'app::work_status_tests::actual_app_work_status_restart_changes_binding_and_requires_new_publication',
          'app::work_status_tests::actual_app_work_status_unknown_features_are_not_silently_clean',
          'app::work_status_tests::actual_app_work_status_sprite_sidecar_survives_scene_save_and_blocked_closes',
-         'app::work_status_tests::actual_app_work_status_collect_document_and_preview_are_independent'],
+         'app::work_status_tests::actual_app_work_status_collect_document_and_preview_are_independent',
+         'app::work_status_tests::actual_app_work_status_observation_never_invokes_close_only_predicates',
+         'app::work_status_tests::actual_app_work_status_missing_file_close_observations_remain_historical',
+         'app::work_status_tests::actual_app_work_status_loaded_tilemap_is_unknown_without_frame_serialization'],
  'operations': ['editor::work_status_operation_tests::work_status_ordinary_reads_are_idle_but_lost_mutations_are_uncertain']}
 
 

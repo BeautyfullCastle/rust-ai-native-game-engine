@@ -1,16 +1,73 @@
 //! One typed retained-authoring inventory for passive UI and machine observation.
-//! No paths, document titles, filesystem probes or English-label parsing.
+//! Passive observation never probes paths or serializes full documents.
+//! Only an explicit close request retains the legacy disk-aware checks.
 use super::{close_review::Item, EditorApp};
 use orr_remote::work_status::{DomainId, DomainRecord, EditorSnapshot};
 
+#[derive(Clone, Copy)]
+pub(super) enum Inspection {
+    Observation,
+    CloseRequest,
+}
+
+#[cfg(any(
+    feature = "sprites",
+    feature = "models",
+    feature = "animated-models",
+    feature = "irradiance-probes",
+    feature = "tilemap",
+    test
+))]
+fn loaded_unknown(domain_id: DomainId) -> DomainRecord {
+    DomainRecord {
+        domain_id,
+        presence: orr_remote::work_status::Presence::Loaded,
+        work_state: orr_remote::work_status::WorkState::Unknown,
+    }
+}
+
+impl Inspection {
+    // The lazy branches ensure passive observation cannot run a disk-aware predicate.
+    #[cfg(any(
+        feature = "sprites",
+        feature = "models",
+        feature = "animated-models",
+        feature = "irradiance-probes",
+        test
+    ))]
+    pub(super) fn sidecar(
+        self,
+        id: DomainId,
+        memory: impl FnOnce() -> bool,
+        close: impl FnOnce() -> bool,
+    ) -> DomainRecord {
+        match self {
+            Self::Observation => {
+                if memory() {
+                    DomainRecord::observed(id, true)
+                } else {
+                    loaded_unknown(id)
+                }
+            }
+            Self::CloseRequest => DomainRecord::observed(id, close()),
+        }
+    }
+}
+
 impl EditorApp {
-    pub(super) fn work_status_domains(&self) -> Vec<DomainRecord> {
+    pub(super) fn work_status_domains(&self, inspection: Inspection) -> Vec<DomainRecord> {
+        // Builds without any disk-aware sidecar feature still share this signature.
+        let _ = inspection;
         vec![
             {
                 #[cfg(feature = "sprites")]
                 {
-                    match self.sprites.bindings.as_ref().map(|v| v.dirty()) {
-                        Some(blocked) => DomainRecord::observed(DomainId::SpriteBindings, blocked),
+                    match self.sprites.bindings.as_ref() {
+                        Some(value) => inspection.sidecar(
+                            DomainId::SpriteBindings,
+                            || value.memory_dirty(),
+                            || value.dirty(),
+                        ),
                         None => DomainRecord::not_loaded(DomainId::SpriteBindings),
                     }
                 }
@@ -22,8 +79,13 @@ impl EditorApp {
             {
                 #[cfg(feature = "tilemap")]
                 {
-                    match self.tilemap.as_ref().map(|v| v.dirty()) {
-                        Some(blocked) => DomainRecord::observed(DomainId::Tilemap, blocked),
+                    match self.tilemap.as_ref() {
+                        Some(value) => match inspection {
+                            Inspection::Observation => loaded_unknown(DomainId::Tilemap),
+                            Inspection::CloseRequest => {
+                                DomainRecord::observed(DomainId::Tilemap, value.dirty())
+                            }
+                        },
                         None => DomainRecord::not_loaded(DomainId::Tilemap),
                     }
                 }
@@ -69,8 +131,12 @@ impl EditorApp {
             {
                 #[cfg(feature = "models")]
                 {
-                    match self.models.bindings.as_ref().map(|v| v.dirty()) {
-                        Some(blocked) => DomainRecord::observed(DomainId::ModelBindings, blocked),
+                    match self.models.bindings.as_ref() {
+                        Some(value) => inspection.sidecar(
+                            DomainId::ModelBindings,
+                            || value.memory_dirty(),
+                            || value.dirty(),
+                        ),
                         None => DomainRecord::not_loaded(DomainId::ModelBindings),
                     }
                 }
@@ -82,10 +148,12 @@ impl EditorApp {
             {
                 #[cfg(feature = "animated-models")]
                 {
-                    match self.animated_models.bindings.as_ref().map(|v| v.dirty()) {
-                        Some(blocked) => {
-                            DomainRecord::observed(DomainId::AnimationBindings, blocked)
-                        }
+                    match self.animated_models.bindings.as_ref() {
+                        Some(value) => inspection.sidecar(
+                            DomainId::AnimationBindings,
+                            || value.memory_dirty(),
+                            || value.dirty(),
+                        ),
                         None => DomainRecord::not_loaded(DomainId::AnimationBindings),
                     }
                 }
@@ -115,10 +183,12 @@ impl EditorApp {
             {
                 #[cfg(feature = "irradiance-probes")]
                 {
-                    match self.irradiance.bindings.as_ref().map(|v| v.dirty()) {
-                        Some(blocked) => {
-                            DomainRecord::observed(DomainId::IrradianceBindings, blocked)
-                        }
+                    match self.irradiance.bindings.as_ref() {
+                        Some(value) => inspection.sidecar(
+                            DomainId::IrradianceBindings,
+                            || value.memory_dirty(),
+                            || value.dirty(),
+                        ),
                         None => DomainRecord::not_loaded(DomainId::IrradianceBindings),
                     }
                 }
@@ -269,5 +339,9 @@ pub(super) fn close_item(id: DomainId) -> Item {
         DomainId::MeshHazards => ("Mesh hazards · unapplied or unfinished", "Finish or cancel hazard picking and apply or resolve hazard fields in Mesh hazards, then save the scene."),
         DomainId::MeshAnimation => ("Mesh animation · unsaved or unapplied", "Resolve the loaded candidate and staged fields with Apply mesh animation, then Save mesh animation."),
     };
-    Item { name, action }
+    Item {
+        name,
+        action,
+        last_close: false,
+    }
 }

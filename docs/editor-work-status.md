@@ -26,6 +26,23 @@ predicate can be `clean`. `domain_revision` is null because a universal reviewed
 revision does not exist. Combined predicates remain combined rather than
 inventing separate dirty/staged flags.
 
+Continuous publication and the details tab use only path-free in-memory
+predicates. Sprite, Model, Animation and Irradiance bindings report a positive
+memory difference as unsaved; a negative result is `loaded` / `unknown`, even
+after Save or Undo, because these existing owners cannot uniformly prove a saved
+baseline without a filesystem check. A newly created equal-memory document is
+therefore not fabricated clean. Loaded Tilemaps are also `loaded` / `unknown` in
+v1 rather than re-encoding the full document every callback. These unknowns make
+coverage incomplete. Unknown is lack of observation, not dirty, clean or an error.
+
+The single typed inventory has explicit Observation and CloseRequest modes.
+Only an explicit close request runs the unchanged legacy disk-aware sidecar and
+serialized Tilemap checks, preserving missing-file close protection. The details
+tab may retain a bounded row labeled **Last close observation**; it is historical,
+not rechecked and never forwarded as a current API fact or used to decide a later
+close. Clear close status clears those historical rows; a later explicit close
+re-evaluates its own policy. This API is not a persisted-file-integrity check.
+
 Compiled Mesh panels currently expose combined blockers but not reviewed
 retained-document presence. A positive predicate is reported with its combined
 state; a false predicate is `unknown`, not invented clean/not-loaded. Therefore
@@ -50,7 +67,8 @@ accepts at most 32 input records, canonicalizes the 16 unique domain IDs, and
 bounds the serialized response to 16 KiB. Malformed, missing, duplicated or
 inconsistent records are incomplete, never empty clean. MCP additionally validates
 the complete bounded success schema before forwarding it; a non-contract success
-is a fixed local tool error with no raw payload.
+is a fixed local tool error with no raw payload. Validation also rejects enum-valid
+but contradictory assessment states, blocker lists and lifecycle/operation reasons.
 
 `host_scene` is read together on the ERP host thread at request handling, including
 in Play: it is the scene document, not a Play-frame checksum. `editor_local` is the
@@ -62,7 +80,10 @@ preview revisions are never freshness or persistent identity proofs.
 
 The sole non-clone owner publishes after every completed normal App callback,
 including early returns and same-callback widget edits. Reading never refreshes
-age or sequence. Try-lock contention returns `busy`; an absent publisher returns
+age or sequence. `age_ms` and the requested freshness bound are evaluated when
+ERP samples the mailbox, not at client receipt after transport delay; this is not
+a live-state lease or permission for a later mutation or close.
+Try-lock contention returns `busy`; an absent publisher returns
 `owner_absent`; no first frame returns `not_ready`; an old frame returns `stale`.
 Stopped/minimized UIs may stay stale indefinitely. Owner/backend replacement gets
 a new binding; counters do not wrap. IDs are process-local live-host-connection
@@ -77,8 +98,8 @@ second; existing server admission and per-poll bounds still apply.
   stale, absent or incomplete; that limitation is still reported.
 - `none_observed`: fresh, complete declared inventory, current host clean and not
   in a transaction, and reviewed idle editor operations. This means only that the
-  component observations contain no listed blocker. It is not a save receipt,
-  exit consent or a guarantee against data loss.
+  component observations contain no listed blocker. It is not persisted-file
+  integrity, a save receipt, exit consent or a guarantee against data loss.
 - `indeterminate`: no fresh positive blocker and unavailable/stale/incomplete data,
   unknown presence, pending mutation or uncertain outcome. Stale local blockers
   are last-observed data, never promoted to current blockers.

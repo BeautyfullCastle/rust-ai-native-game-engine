@@ -1074,11 +1074,76 @@ pub fn validate_response(value: &J) -> bool {
     {
         return false;
     }
-    let allowed_reasons = Reason::ALL.map(Reason::as_str);
-    if !unique_allowed_strings(&assessment["reasons"], &allowed_reasons, MAX_REASONS) {
+    if !validate_reasons(
+        &assessment["reasons"],
+        availability,
+        observed,
+        complete,
+        operation,
+    ) {
         return false;
     }
     serde_json::to_writer(SizeLimit(0), value).is_ok()
+}
+
+fn validate_reasons(
+    value: &J,
+    availability: Availability,
+    observed: bool,
+    complete: bool,
+    operation: Operations,
+) -> bool {
+    let allowed_reasons = Reason::ALL.map(Reason::as_str);
+    if !unique_allowed_strings(value, &allowed_reasons, MAX_REASONS) {
+        return false;
+    }
+    let Some(reasons) = value.as_array() else {
+        return false;
+    };
+    if !observed {
+        let [reason] = reasons.as_slice() else {
+            return false;
+        };
+        return match availability {
+            Availability::NotPaired => reason == Reason::NotPaired.as_str(),
+            Availability::NotReady => reason == Reason::NotReady.as_str(),
+            Availability::OwnerAbsent => reason == Reason::OwnerAbsent.as_str(),
+            Availability::Busy => reason == Reason::Busy.as_str(),
+            Availability::Incomplete => [
+                Reason::CounterExhausted,
+                Reason::MailboxPoisoned,
+                Reason::ResponseLimitExceeded,
+            ]
+            .into_iter()
+            .any(|expected| reason == expected.as_str()),
+            Availability::Ready | Availability::Stale => false,
+        };
+    }
+    let has = |reason: Reason| reasons.iter().any(|value| value == reason.as_str());
+    // Normalized unknown rows do not retain individual defect provenance, but
+    // defects must explain incomplete coverage and cannot qualify complete data.
+    let defect_count = [
+        Reason::MissingDomain,
+        Reason::DuplicateDomain,
+        Reason::UnsupportedDomain,
+        Reason::InvalidDomainRecord,
+        Reason::DomainLimitExceeded,
+    ]
+    .into_iter()
+    .filter(|reason| has(*reason))
+    .count();
+    let stale = availability == Availability::Stale;
+    has(Reason::Stale) == stale
+        && has(Reason::Incomplete) != complete
+        && (defect_count != 0) != complete
+        && operation.reason().is_none_or(has)
+        // Counting the required reasons excludes unrelated lifecycle/operation
+        // reasons, and requires none_observed to have no limiting reasons.
+        && reasons.len()
+            == usize::from(stale)
+                + usize::from(!complete)
+                + usize::from(operation.reason().is_some())
+                + defect_count
 }
 
 fn exact_keys<'a>(value: &'a J, keys: &[&str]) -> Option<&'a serde_json::Map<String, J>> {
@@ -1820,16 +1885,31 @@ mod tests {
                     MAX_AGE_MS,
                     now
                 )));
-                for reason in Reason::ALL {
+                for (availability, reason) in [
+                    (Availability::NotPaired, Reason::NotPaired),
+                    (Availability::NotReady, Reason::NotReady),
+                    (Availability::OwnerAbsent, Reason::OwnerAbsent),
+                    (Availability::Busy, Reason::Busy),
+                    (Availability::Incomplete, Reason::CounterExhausted),
+                    (Availability::Incomplete, Reason::MailboxPoisoned),
+                    (Availability::Incomplete, Reason::ResponseLimitExceeded),
+                ] {
                     let value = render(
-                        Observation::absent(Availability::Incomplete, reason),
+                        Observation::absent(availability, reason),
                         host,
-                        true,
+                        availability != Availability::NotPaired,
                         1,
                     );
                     assert!(validate_response(&value));
                 }
             }
+        }
+        for operations in Operations::ALL {
+            let mut input = clean();
+            input.operations = operations;
+            assert!(owner.publish_at(input, now));
+            assert!(validate_response(&at(Some(&service), now)));
+            assert!(validate_response(&at(Some(&service), later(now, 1_001))));
         }
         // All four non-overflow defects can coexist. Their stale/operation
         // reasons must still fit the strict response validator's finite bound.
@@ -1853,6 +1933,175 @@ mod tests {
             MAX_REASONS
         );
         assert!(validate_response(&stale));
+        assert!(owner.publish_at(
+            EditorSnapshot {
+                domains: vec![DomainRecord::not_loaded(DomainId::Tilemap); MAX_DOMAIN_RECORDS + 1],
+                operations: Operations::Idle,
+            },
+            now,
+        ));
+        assert!(validate_response(&at(Some(&service), now)));
+    }
+
+    #[test]
+    fn response_validation_rejects_semantically_contradictory_assessments() {
+        let now = Instant::now();
+        let (service, mut owner) = WorkStatusService::pair();
+        let mut limited = vec![
+            ("not_paired", at(None, now)),
+            ("not_ready", at(Some(&service), now)),
+        ];
+        assert!(owner.publish_at(clean(), now));
+        let ready = at(Some(&service), now);
+        assert_eq!(ready["assessment"]["state"], "none_observed");
+        assert_eq!(ready["assessment"]["reasons"], json!([]));
+        for reason in Reason::ALL {
+            let mut hostile = ready.clone();
+            hostile["assessment"]["reasons"] = json!([reason.as_str()]);
+            assert!(!validate_response(&hostile), "ready + {}", reason.as_str());
+        }
+        for (name, record) in [
+            (
+                "loaded_unknown",
+                DomainRecord {
+                    domain_id: DomainId::SpriteBindings,
+                    presence: Presence::Loaded,
+                    work_state: WorkState::Unknown,
+                },
+            ),
+            (
+                "unknown_presence",
+                DomainRecord::unknown(DomainId::SpriteBindings),
+            ),
+        ] {
+            let mut input = clean();
+            input.domains[0] = record;
+            assert!(owner.publish_at(input, now));
+            limited.push((name, at(Some(&service), now)));
+        }
+        let mut incomplete = clean();
+        incomplete.domains.pop();
+        assert!(owner.publish_at(incomplete, now));
+        limited.push(("incomplete", at(Some(&service), now)));
+        for operations in [
+            Operations::PendingMutation,
+            Operations::OutcomeUncertain,
+            Operations::Unknown,
+        ] {
+            let mut input = clean();
+            input.operations = operations;
+            assert!(owner.publish_at(input, now));
+            limited.push((operations.as_str(), at(Some(&service), now)));
+        }
+        assert!(owner.publish_at(clean(), now));
+        limited.push(("stale", at(Some(&service), later(now, 1_001))));
+        for (name, dirty, in_tx) in [("host_dirty", true, false), ("host_tx", false, true)] {
+            limited.push((
+                name,
+                response_at(
+                    Some(&service),
+                    HostScene {
+                        dirty,
+                        in_tx,
+                        ..host()
+                    },
+                    DEFAULT_MAX_AGE_MS,
+                    now,
+                ),
+            ));
+        }
+        let (absent_service, absent_owner) = WorkStatusService::pair();
+        drop(absent_owner);
+        limited.push(("owner_absent", at(Some(&absent_service), now)));
+        for (name, canonical) in limited {
+            assert!(validate_response(&canonical), "{name}");
+            let mut hostile = canonical.clone();
+            hostile["assessment"]["state"] = json!("none_observed");
+            assert!(!validate_response(&hostile), "{name} as none_observed");
+            hostile["assessment"]["blockers"] = json!([]);
+            hostile["assessment"]["reasons"] = json!([]);
+            assert!(
+                !validate_response(&hostile),
+                "{name} as empty none_observed"
+            );
+            // Omitting any required lifecycle, coverage, or operation reason
+            // cannot make otherwise valid limited observations acceptable.
+            for index in 0..canonical["assessment"]["reasons"].as_array().unwrap().len() {
+                let mut hostile = canonical.clone();
+                hostile["assessment"]["reasons"]
+                    .as_array_mut()
+                    .unwrap()
+                    .remove(index);
+                assert!(
+                    !validate_response(&hostile),
+                    "{name} without reason {index}"
+                );
+            }
+            let mut hostile = canonical;
+            hostile["assessment"]["reasons"] = json!(["local_owner_absent", "outcome_uncertain"]);
+            assert!(
+                !validate_response(&hostile),
+                "{name} with unrelated reasons"
+            );
+        }
+        assert!(owner.publish_at(
+            EditorSnapshot {
+                domains: vec![DomainRecord::observed(DomainId::Tilemap, true)],
+                operations: Operations::OutcomeUncertain,
+            },
+            now,
+        ));
+        let stale = at(Some(&service), later(now, 1_001));
+        assert_eq!(stale["assessment"]["state"], "indeterminate");
+        assert_eq!(stale["assessment"]["blockers"], json!([]));
+        let mut hostile = stale;
+        hostile["assessment"]["state"] = json!("known_blockers");
+        hostile["assessment"]["blockers"] = json!(["tilemap"]);
+        assert!(!validate_response(&hostile), "stale local-only blocker");
+        for (dirty, in_tx, expected) in [
+            (true, false, vec!["host_scene_unsaved"]),
+            (false, true, vec!["host_scene_transaction"]),
+            (
+                true,
+                true,
+                vec!["host_scene_unsaved", "host_scene_transaction"],
+            ),
+        ] {
+            let canonical = response_at(
+                Some(&service),
+                HostScene {
+                    dirty,
+                    in_tx,
+                    ..host()
+                },
+                DEFAULT_MAX_AGE_MS,
+                later(now, 1_001),
+            );
+            assert_eq!(canonical["assessment"]["state"], "known_blockers");
+            assert_eq!(canonical["assessment"]["blockers"], json!(expected));
+            assert_eq!(
+                canonical["assessment"]["reasons"],
+                json!([
+                    "local_stale",
+                    "local_incomplete",
+                    "missing_domain",
+                    "outcome_uncertain"
+                ])
+            );
+            assert!(validate_response(&canonical));
+            let mut hostile = canonical.clone();
+            hostile["assessment"]["blockers"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!("tilemap"));
+            assert!(!validate_response(&hostile));
+            let mut hostile = canonical;
+            hostile["assessment"]["reasons"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!("local_owner_absent"));
+            assert!(!validate_response(&hostile));
+        }
     }
 
     #[test]

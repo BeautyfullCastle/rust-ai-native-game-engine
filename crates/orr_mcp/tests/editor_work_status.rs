@@ -260,6 +260,12 @@ fn every_status_is_success_and_preserves_the_erp_payload_in_all_versions() {
             cases.push(observation(availability, "indeterminate"));
         }
         cases.push(observation("incomplete", "known_blockers"));
+        let mut host_positive_stale = observation("stale", "indeterminate");
+        host_positive_stale["host_scene"]["dirty"] = json!(true);
+        host_positive_stale["assessment"]["state"] = json!("known_blockers");
+        host_positive_stale["assessment"]["blockers"] = json!(["host_scene_unsaved"]);
+        assert!(work_status::validate_response(&host_positive_stale));
+        cases.push(host_positive_stale);
         for operations in [
             Operations::PendingMutation,
             Operations::OutcomeUncertain,
@@ -425,6 +431,66 @@ fn hostile_success_payloads_fail_locally_without_echoing_private_data_or_retryin
         *value.pointer_mut(pointer).unwrap() = bad;
         invalid.push(value);
     }
+    // Enum-valid but semantically contradictory success must also fail closed.
+    for reason in [
+        "local_owner_absent",
+        "outcome_uncertain",
+        "local_incomplete",
+        "local_stale",
+        "pending_mutation",
+        "missing_domain",
+    ] {
+        let mut value = canonical.clone();
+        value["assessment"]["reasons"] = json!([reason]);
+        invalid.push(value);
+    }
+    for availability in [
+        "not_ready",
+        "stale",
+        "owner_absent",
+        "not_paired",
+        "busy",
+        "incomplete",
+    ] {
+        let mut value = observation(availability, "indeterminate");
+        value["assessment"]["state"] = json!("none_observed");
+        invalid.push(value);
+    }
+    for operation in [
+        Operations::Idle,
+        Operations::PendingMutation,
+        Operations::OutcomeUncertain,
+    ] {
+        let (service, mut owner) = WorkStatusService::pair();
+        let mut domains: Vec<_> = DomainId::ALL
+            .into_iter()
+            .map(DomainRecord::disabled)
+            .collect();
+        if operation == Operations::Idle {
+            domains[0] = DomainRecord {
+                domain_id: DomainId::SpriteBindings,
+                presence: work_status::Presence::Loaded,
+                work_state: work_status::WorkState::Unknown,
+            };
+        }
+        assert!(owner.publish(EditorSnapshot {
+            domains,
+            operations: operation
+        }));
+        let mut value = work_status::response(Some(&service), clean_host(), 1000);
+        assert!(work_status::validate_response(&value));
+        value["assessment"]["state"] = json!("none_observed");
+        invalid.push(value);
+    }
+    for field in ["dirty", "in_tx"] {
+        let mut value = canonical.clone();
+        value["host_scene"][field] = json!(true);
+        invalid.push(value);
+    }
+    let mut stale_local_only = observation("stale", "indeterminate");
+    stale_local_only["assessment"]["state"] = json!("known_blockers");
+    stale_local_only["assessment"]["blockers"] = json!(["sprite_bindings"]);
+    invalid.push(stale_local_only);
     let mut oversized = canonical.clone();
     oversized["assessment"]["reasons"] = json!(vec!["local_stale"; 2000]);
     assert!(oversized.to_string().len() > 16 * 1024);

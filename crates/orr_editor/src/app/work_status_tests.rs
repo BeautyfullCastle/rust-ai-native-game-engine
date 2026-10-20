@@ -292,8 +292,9 @@ fn actual_app_work_status_sprite_sidecar_survives_scene_save_and_blocked_closes(
     h.run_steps(1);
     assert_eq!(
         row(&status(&mut h), "sprite_bindings")["work_state"],
-        "clean"
+        "unknown"
     );
+    assert_eq!(status(&mut h)["availability"], "incomplete");
 }
 
 #[cfg(feature = "collect-ui")]
@@ -380,6 +381,142 @@ fn actual_app_work_status_collect_document_and_preview_are_independent() {
     assert_eq!(fs::read(&ui_path).unwrap(), before);
     assert!(!h.state().ui.close_review.blocked);
     assert_no_window_actions(&h);
+}
+
+#[test]
+fn actual_app_work_status_observation_never_invokes_close_only_predicates() {
+    use super::work_status::Inspection;
+    use orr_remote::work_status::{Presence, WorkState};
+    for memory in [false, true] {
+        let observed = Inspection::Observation.sidecar(
+            DomainId::SpriteBindings,
+            || memory,
+            || panic!("passive observation must never probe the filesystem"),
+        );
+        assert_eq!(observed.presence, Presence::Loaded);
+        assert_eq!(
+            observed.work_state,
+            if memory {
+                WorkState::Unsaved
+            } else {
+                WorkState::Unknown
+            }
+        );
+    }
+    for blocked in [false, true] {
+        let closing = Inspection::CloseRequest.sidecar(
+            DomainId::SpriteBindings,
+            || panic!("explicit close preserves the original complete predicate"),
+            || blocked,
+        );
+        assert_eq!(closing.is_blocker(), blocked);
+    }
+}
+
+#[cfg(feature = "sprites")]
+#[test]
+fn actual_app_work_status_missing_file_close_observations_remain_historical() {
+    let dir = Directory::new();
+    let scene = dir.scene();
+    let mut h = harness(Editor::open(&scene).unwrap());
+    let path = dir.0.join("SECRET-retained-bindings.json");
+    h.state_mut()
+        .sprites
+        .create(
+            path.clone(),
+            scene.file_name().unwrap().to_str().unwrap().into(),
+            ".".into(),
+        )
+        .unwrap();
+    h.run_steps(1);
+    // Existing constructors use equal current/saved memory even before Save.
+    assert_eq!(
+        row(&status(&mut h), "sprite_bindings")["work_state"],
+        "unknown"
+    );
+    assert!(super::unsaved_close_tests::request_root_close(&mut h));
+    assert!(h
+        .state()
+        .close_review_items()
+        .iter()
+        .any(|item| item.last_close));
+    h.state_mut()
+        .sprites
+        .bindings
+        .as_mut()
+        .unwrap()
+        .save()
+        .unwrap();
+    let bytes = fs::read(&path).unwrap();
+    h.run_steps(1);
+    assert_eq!(status(&mut h)["availability"], "incomplete");
+    assert!(!super::unsaved_close_tests::request_root_close(&mut h));
+    assert!(h.state().close_review_items().is_empty());
+    fs::remove_file(&path).unwrap();
+    h.state_mut().ui.bottom_tab = BottomTab::UnsavedWork;
+    h.run_steps(2);
+    assert_no_window_actions(&h);
+    let unknown = status(&mut h);
+    assert_eq!(row(&unknown, "sprite_bindings")["presence"], "loaded");
+    assert_eq!(row(&unknown, "sprite_bindings")["work_state"], "unknown");
+    assert_eq!(unknown["assessment"]["state"], "indeterminate");
+    assert!(super::unsaved_close_tests::request_root_close(&mut h));
+    assert!(h
+        .state()
+        .close_review_items()
+        .iter()
+        .all(|item| item.last_close));
+    // A close result is not published as a new positive machine observation.
+    assert_eq!(status(&mut h)["assessment"]["state"], "indeterminate");
+    h.run_steps(2);
+    h.get_by_label("Clear close status").click();
+    h.run_steps(2);
+    assert!(h.state().close_review_items().is_empty());
+    assert!(!h.state().ui.close_review.blocked);
+    assert_eq!(status(&mut h)["assessment"]["state"], "indeterminate");
+    assert!(super::unsaved_close_tests::request_root_close(&mut h));
+    fs::write(&path, bytes).unwrap();
+    assert!(!super::unsaved_close_tests::request_root_close(&mut h));
+    assert!(h.state().close_review_items().is_empty());
+}
+
+#[cfg(all(feature = "tilemap", feature = "project-create", target_os = "linux"))]
+#[test]
+fn actual_app_work_status_loaded_tilemap_is_unknown_without_frame_serialization() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("tiles");
+    orr_sample::project_create::create_tilemap(&orr_sample::project_create::CreateOptions {
+        output: root.clone(),
+        template: "arena-tilemap-2d-v1".into(),
+        seed: "work-status".into(),
+    })
+    .unwrap();
+    let project = crate::project::PreparedProject::open(&root).unwrap();
+    let mut h = Harness::builder()
+        .with_size([1500.0, 1300.0])
+        .renderer(egui_kittest::LazyRenderer::Uninitialized {
+            textures_delta: Default::default(),
+            builder: None,
+        })
+        .build_eframe(move |cc| {
+            let mut editor = Editor::start(&project.host_spec()).unwrap();
+            editor.sync();
+            project.into_app(editor, None, &cc.egui_ctx).unwrap()
+        });
+    h.run_steps(3);
+    assert!(!h.state().tilemap.as_ref().unwrap().dirty());
+    let before = h.state().tilemap.as_ref().unwrap().history_snapshot();
+    let report = status(&mut h);
+    assert_eq!(row(&report, "tilemap")["presence"], "loaded");
+    assert_eq!(row(&report, "tilemap")["work_state"], "unknown");
+    assert_eq!(report["availability"], "incomplete");
+    assert_eq!(report["assessment"]["state"], "indeterminate");
+    assert!(!super::unsaved_close_tests::request_root_close(&mut h));
+    assert_eq!(
+        h.state().tilemap.as_ref().unwrap().history_snapshot(),
+        before
+    );
+    assert_eq!(row(&status(&mut h), "tilemap")["work_state"], "unknown");
 }
 
 struct McpProcess {

@@ -1,16 +1,20 @@
 //! Passive, popup-free protection for the authoring app's native root close.
 //! No save, discard, exit consent, worker cancellation or player lifecycle lives here.
-use super::{BottomTab, EditorApp};
+use super::{work_status::Inspection, BottomTab, EditorApp};
 use egui::{Ui, ViewportCommand, ViewportId};
+use orr_remote::work_status::DomainId;
 
 #[derive(Default)]
 pub(super) struct State {
     pub(super) blocked: bool,
+    // Bounded fixed-domain historical observations, never used to authorize close.
+    last_close_only: Vec<DomainId>,
 }
 
 pub(super) struct Item {
     pub(super) name: &'static str,
     pub(super) action: &'static str,
+    pub(super) last_close: bool,
 }
 
 impl EditorApp {
@@ -23,9 +27,25 @@ impl EditorApp {
             input.raw.viewport_id == ViewportId::ROOT && input.viewport().close_requested()
         });
         draw(self, ui);
-        self.publish_work_status(self.work_status_domains());
+        let observed = self.work_status_domains(Inspection::Observation);
+        self.publish_work_status(observed.clone());
         if root_close {
-            self.ui.close_review.blocked = !self.close_review_items().is_empty();
+            // These legacy disk-aware/serialized predicates run only for a real
+            // explicit close request, never for continuous UI/status publication.
+            let closing = self.work_status_domains(Inspection::CloseRequest);
+            self.ui.close_review.last_close_only = closing
+                .iter()
+                .filter(|row| {
+                    row.is_blocker()
+                        && !observed.iter().any(|current| {
+                            current.domain_id == row.domain_id && current.is_blocker()
+                        })
+                })
+                .map(|row| row.domain_id)
+                .collect();
+            self.ui.close_review.blocked = (self.editor.spec().is_local()
+                && self.editor.is_dirty())
+                || closing.iter().any(|row| row.is_blocker());
             if self.ui.close_review.blocked {
                 ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             }
@@ -52,20 +72,34 @@ impl EditorApp {
         }
     }
 
-    /// Inspect retained documents, not only the current game's visible panels.
-    /// These predicates distinguish saved documents from unapplied/unfinished
-    /// authoring. Routine pending host reads are not a close veto.
+    /// Path-free in-memory positives plus explicitly marked last-close rows.
+    /// The latter are historical UI details, not current API facts or close vetoes.
     pub(super) fn close_review_items(&self) -> Vec<Item> {
         let mut items = Vec::new();
         if self.editor.spec().is_local() && self.editor.is_dirty() {
             items.push(Item {
                 name: "Scene · unsaved",
                 action: "Use File → Save / Save As, or the scene's Undo controls.",
+                last_close: false,
             });
         }
-        items.extend(self.work_status_domains().into_iter()
-            .filter(|record| record.is_blocker())
-            .map(|record| super::work_status::close_item(record.domain_id)));
+        let observed = self.work_status_domains(Inspection::Observation);
+        items.extend(
+            observed
+                .iter()
+                .filter(|record| record.is_blocker())
+                .map(|record| super::work_status::close_item(record.domain_id)),
+        );
+        for id in &self.ui.close_review.last_close_only {
+            if !observed
+                .iter()
+                .any(|row| row.domain_id == *id && row.is_blocker())
+            {
+                let mut item = super::work_status::close_item(*id);
+                item.last_close = true;
+                items.push(item);
+            }
+        }
         items
     }
 
@@ -76,18 +110,25 @@ impl EditorApp {
             ui.label("The last close was blocked. Work was retained; normal editing and agent commands continue.");
             if ui.button("Clear close status").clicked() {
                 self.ui.close_review.blocked = false;
+                self.ui.close_review.last_close_only.clear();
             }
         }
         let items = self.close_review_items();
         egui::ScrollArea::vertical().show(ui, |ui| {
             if items.is_empty() {
-                ui.label("No listed unsaved or unapplied work remains. Close the window again when ready.");
+                ui.label("No positive in-memory blocker is listed. Unobserved domains may still block an explicit close request.");
             }
             for item in items {
-                ui.strong(item.name);
+                if item.last_close {
+                    ui.strong(format!("Last close observation: {}", item.name));
+                    ui.weak("Historical only; not rechecked and not an API current-state fact.");
+                } else {
+                    ui.strong(item.name);
+                }
                 ui.label(item.action);
                 ui.add_space(6.0);
             }
+            ui.weak("Unknown is lack of observation, not clean or dirty. This list does not probe files or serialize Tilemaps. Only an explicit close request runs the legacy additional checks.");
             ui.weak("This list never saves, applies, discards or closes anything. Scene Save does not save independent documents.");
         });
     }
