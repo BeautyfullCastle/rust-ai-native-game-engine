@@ -32,6 +32,8 @@ EXTENDED_ONLY = tuple("app::arena_export::tests::" + n for n in (
 NEW_APP = tuple("app::arena_export::tests::" + n for n in ("actual_package_verification_worker_blocks_arena_export_without_cancellation", "active_arena_job_retains_app_through_disabled_collect_replacement_menu"))
 BASELINE = tuple(n for n in APP + EDITOR if n not in EXTENDED_ONLY)
 NATIVE = "actual_widget_generated_edited_project_relocates_and_runs_with_sprites"
+HIDE_SCRIPT = 'test ! -e "$1" && test ! -e "$2" && test ! -e "$3" || exit 91; shift 3; exec "$@"'
+PROBE_SCRIPT = 'test ! -e "$1" && test ! -e "$2" && test ! -e "$3" || exit 91; if touch "$4/.write-probe" 2>/dev/null; then rm -f "$4/.write-probe"; exit 92; fi; printf \'source-hidden=true bundle-read-only=true write-denied=true\\n\''
 STAGES = ("source-move-fire", "isolated-proof", "relocated-fire-1", "relocated-fire-2", "relocated-move", "capture-initial", "capture-moved")
 LEGACY_BASE = "20ff934"
 # Existing mandatory counts, before precisely sixteen nonignored additions.
@@ -39,7 +41,7 @@ LEGACY_COUNTS = {"export-unit":25, "authored-ui":73, "player-settings":111,
  "new-arena":64, "collect-authored":68, "progress-disabled":68,
  "progress":94, "progress-joint":175, "progress-pinned":96,
  "collect-creator":113, "collect-ui":162, "collect-ui-creator":183}
-FIXTURE_COUNT = 12
+FIXTURE_COUNT = 16
 
 
 def run(label, command, seconds=1200):
@@ -180,6 +182,51 @@ def read_json(path):
     return json.loads(path.read_text(), object_pairs_hook=unique)
 
 
+def simulation_output(output):
+    lines = output.splitlines()
+    assert len(lines) >= 4
+    initial = re.fullmatch(r"project initial checksum: (0x[0-9a-f]{16})", lines[0])
+    final = re.fullmatch(r"project tick: (0|3) checksum: (0x[0-9a-f]{16})", lines[1])
+    assert initial and final, "actual production checksum records required"
+    entities = [line for line in lines[2:] if line.startswith("project entity:")]
+    assert len(entities) == len(set(entities)) == 2
+    for line in entities:
+        assert re.fullmatch(r"project entity: [A-Za-z0-9_-]+ handle:[0-9]+v[0-9]+ position:-?[0-9]+,-?[0-9]+", line)
+    remaining = [line for line in lines[2:] if not line.startswith("project entity:")]
+    assert not remaining or (len(remaining) == 1 and remaining[0].startswith("project capture adapter:"))
+    assert final[1] == ("0" if initial[1] == final[2] else "3")
+    return initial[1], final[2]
+
+
+def sprite_oracle(project, pixels):
+    """Decode the installed asset selected by the saved binding, not a boolean."""
+    manifest = read_json(project / "orr.project.json")
+    entry = manifest["entry"]
+    assert entry["game"] == "arena" and entry["sprites"] == "arena.sprites.json"
+    bindings = read_json(project / entry["sprites"])["bindings"]
+    assert bindings and {b["package"] for b in bindings.values()} == {"sample-sprites"}
+    assert {b["document"] for b in bindings.values()} == {"sprites.json"}
+    lock = read_json(project / "orr.packages.lock.json")
+    package = lock["packages"]["sample-sprites"]
+    digest = package["digest"]
+    assert re.fullmatch(r"[0-9a-f]{64}", digest)
+    installed = project / ".orr/packages/objects" / digest
+    document = read_json(installed / "sprites.json")
+    atlas = document["atlas"]
+    assert atlas["image"] == "lantern_keeper.png" and (atlas["width"], atlas["height"]) == (64, 16)
+    for name in ("sprites.json", "lantern_keeper.png", "lantern_keeper.rgba", "LICENSE.txt"):
+        file = installed / name
+        assert file.is_file() and not file.is_symlink() and runner.digest(file) == package["files"][name]
+    rgba = fence.png_pixels(installed / atlas["image"], 64, 16)
+    assert rgba == (installed / "lantern_keeper.rgba").read_bytes()
+    palette = {rgba[i:i+4] for i in range(0, len(rgba), 4)
+        if rgba[i+3] == 255 and (abs(rgba[i]-rgba[i+1]) > 20 or abs(rgba[i+1]-rgba[i+2]) > 20)}
+    assert palette, "installed sprite has no qualifying texels"
+    from collections import Counter
+    actual = Counter(pixels[i:i+4] for i in range(0, len(pixels), 4))
+    assert any(sum(count for q,count in actual.items() if all(abs(a-b)<=3 for a,b in zip(p,q))) > 20 for p in palette), "installed sprite texels absent from production capture"
+
+
 def verify_receipt(root):
     receipt = read_json(root / "receipt.json")
     assert receipt["schema"] == 1
@@ -222,6 +269,8 @@ def verify_receipt(root):
     assert [c["stage"] for c in commands] == list(STAGES) == receipt["commands"]
     for cmd in commands:
         assert type(cmd["status"]) is int and cmd["status"] == 0
+        state = read_json(root / (cmd["stage"] + ".command-state.json"))
+        assert state == dict(cmd, state="completed", error=None), "completed durable child receipt required"
         assert isinstance(cmd["program"], str) and cmd["program"] and isinstance(cmd["args"], list) and cmd["cwd"]
         for stream in ("stdout", "stderr"):
             assert cmd[stream + "_file"] == cmd["stage"] + "." + stream + ".txt"
@@ -231,14 +280,29 @@ def verify_receipt(root):
     assert first["program"] == receipt["runtime"]["path"]
     assert first["args"] == ["--project", str(root / "project"), "--headless", "--ticks", "3", "--hold", "right,fire"]
     assert all(cmd["cwd"] == str(root) for cmd in commands)
-    for cmd in commands[1:]:
-        assert cmd["program"] == "bwrap"
-        args = cmd["args"]
-        assert args[:3] == ["--ro-bind", "/", "/"]
-        for flag, path in (("--ro-bind", str(root / "bundle")), ("--tmpfs", str(runner.repo)), ("--tmpfs", str(root / "project")), ("--tmpfs", str(Path(receipt["runtime"]["path"]).parent))):
-            assert any(args[i:i+2] == [flag, path] for i in range(len(args)-1)), (flag, path)
+    runtime = Path(receipt["runtime"]["path"])
+    mounts = ["--ro-bind", "/", "/", "--bind", str(root), str(root),
+        "--ro-bind", str(root / "bundle"), str(root / "bundle"), "--tmpfs", str(runner.repo),
+        "--tmpfs", str(root / "project"), "--tmpfs", str(runtime.parent)]
+    hidden = [str(runner.repo / "Cargo.toml"), str(root / "project/orr.project.json"), str(runtime)]
+    probe = mounts + ["--", "/bin/sh", "-c", PROBE_SCRIPT, "sh"] + hidden + [str(root / "bundle")]
+    assert commands[1]["program"] == "bwrap" and commands[1]["args"] == probe
+    for cmd, ticks, hold, capture in zip(commands[2:], ("3", "3", "3", "0", "3"),
+            ("right,fire", "right,fire", "right", "idle", "right"), (None, None, None, "initial.png", "moved.png")):
+        expected = mounts + ["--", "/bin/sh", "-c", HIDE_SCRIPT, "sh"] + hidden + [str(root / "bundle/run-arena"), "--headless", "--ticks", ticks, "--hold", hold]
+        if capture is not None:
+            expected += ["--capture", str(root / capture)]
+        assert cmd["program"] == "bwrap" and cmd["args"] == expected, "exact executed namespace/launcher command"
     proof = (root / "isolated-proof.stdout.txt").read_text()
-    assert "source-hidden=true" in proof and "write-denied=true" in proof
+    assert proof == "source-hidden=true bundle-read-only=true write-denied=true\n"
+    assert not (root / "bundle/.write-probe").exists()
+    outputs = {stage:(root / (stage + ".stdout.txt")).read_text() for stage in STAGES if stage != "isolated-proof"}
+    parsed = {stage:simulation_output(value) for stage,value in outputs.items()}
+    assert outputs["source-move-fire"] == outputs["relocated-fire-1"] == outputs["relocated-fire-2"]
+    assert parsed["relocated-move"][1] != parsed["source-move-fire"][1], "fire must change final checksum"
+    assert {entry[0] for entry in parsed.values()} == {manifest["payload"]["initial_checksum"]}
+    assert parsed["capture-initial"][1] == parsed["capture-initial"][0]
+    assert parsed["capture-moved"] == parsed["relocated-move"]
     captures = receipt["captures"]
     assert [c["path"] for c in captures] == ["initial.png", "moved.png"]
     pixels = []
@@ -252,6 +316,7 @@ def verify_receipt(root):
         assert len(adapter) == 1 and re.search(r"llvmpipe|lavapipe", adapter[0], re.I)
         assert re.search(r"software\s*:\s*true", adapter[0], re.I) and not re.search("swiftshader", stdout, re.I)
     assert pixels[0] != pixels[1], "movement capture must differ"
+    sprite_oracle(root / "project", pixels[0])
     runner.report["acceptance_receipt"] = receipt
     runner.record()
 
