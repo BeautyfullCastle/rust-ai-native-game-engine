@@ -2105,7 +2105,7 @@ impl ErpServer {
                 continue;
             };
             // A proposal/scene preview is not the live simulation's event source.
-            if !d.identity.is_some_and(|identity| identity.0 == 1) {
+            if d.identity.is_none_or(|identity| identity.0 != 1) {
                 continue;
             }
             d.advance(events.len());
