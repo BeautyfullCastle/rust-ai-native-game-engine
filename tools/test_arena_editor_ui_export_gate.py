@@ -358,6 +358,33 @@ class Tests(unittest.TestCase):
 
 
 
+    def test_real_rust_raw_export_error_terminal_newline_passes(self):
+        root,_=self.fixture()
+        (root/'project-only-export-rejection.txt').write_text(gate.EXPORT_DIAGNOSTIC+'\n')
+        receipt=gate.read(root/'project-only-runtime.json')
+        receipt['export_error']=gate.EXPORT_DIAGNOSTIC+'\n'
+        write(root/'project-only-runtime.json',receipt)
+        gate.verify_receipt(root)
+
+    def test_raw_export_error_normalization_is_exact_and_exit_one(self):
+        root,r=self.fixture()
+        path=root/'project-only-runtime.json';original=gate.read(path)
+        for value in ['wrong diagnostic',gate.EXPORT_DIAGNOSTIC+'\nextra output',
+                      ' '+gate.EXPORT_DIAGNOSTIC,gate.EXPORT_DIAGNOSTIC+' ',
+                      gate.EXPORT_DIAGNOSTIC+'\n\n',gate.EXPORT_DIAGNOSTIC+'\t',gate.EXPORT_DIAGNOSTIC+'\r\n']:
+            bad=dict(original,export_error=value);write(path,bad)
+            (root/'project-only-export-rejection.txt').write_text(value)
+            with self.assertRaises(AssertionError):gate.verify_commands(root,r)
+        (root/'project-only-export-rejection.txt').write_text(gate.EXPORT_DIAGNOSTIC+'\n')
+        # Individually permitted spellings must still match the retained raw file.
+        write(path,original)
+        with self.assertRaises(AssertionError):gate.verify_commands(root,r)
+        for status in [0,2,None,True,-9]:
+            write(path,dict(original,export_error=gate.EXPORT_DIAGNOSTIC+'\n',status=status))
+            with self.assertRaises(AssertionError):gate.verify_commands(root,r)
+
+
+
 if __name__ == '__main__':
     result=unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(Tests))
     assert result.wasSuccessful() and result.testsRun == gate.FIXTURE_COUNT and not result.skipped

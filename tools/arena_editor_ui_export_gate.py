@@ -32,7 +32,7 @@ SPECS = (
     ('app-harness', 'orr_sample', 'orr_sample', 'lib', 'project,game-ui', ['game-ui','input-actions','project','sprites']),
 )
 CAPTURES = ('initial.png','moved.png','ui-negative-no-overlay.png','ui-negative-no-text.png','ui-glyphs-before.png','ui-glyphs-after.png','ui-title.png','ui-playing.png','ui-menu.png','ui-continued.png','ui-restart-action.png')
-FIXTURE_COUNT = 25  # Set to exact independent fixture census below, never native passes.
+FIXTURE_COUNT = 27  # Set to exact independent fixture census below, never native passes.
 
 
 def producer_fence():
@@ -114,9 +114,10 @@ def read(path):
     return legacy.read_json(path)
 
 
-def text(path):
+def text(path, raw_newlines=False):
     assert path.is_file() and not path.is_symlink() and path.stat().st_size <= 8*1024**2
-    return path.read_text()
+    with path.open(encoding="utf-8", newline="" if raw_newlines else None) as stream:
+        return stream.read()
 
 
 def mounts(root, app=False):
@@ -177,9 +178,14 @@ def verify_commands(root, receipt):
             path = root/row[stream+'_file']; text(path)
             assert runner.digest(path) == row[stream+'_sha256']
     assert text(root/'project-only.stdout.txt') == ''
-    assert text(root/'project-only.stderr.txt').strip() == DIAGNOSTIC
-    assert text(root/'project-only-export-rejection.txt').strip() == EXPORT_DIAGNOSTIC
-    assert read(root/'project-only-runtime.json') == dict(bound('project-runtime'),status=1,stdout='project-only.stdout.txt',stderr='project-only.stderr.txt',export_error=EXPORT_DIAGNOSTIC,published=False)
+    # Rust's raw smoke error preserves the runtime's single eprintln newline.
+    # Permit only that terminal LF, never generic whitespace or extra output.
+    assert text(root/'project-only.stderr.txt', raw_newlines=True) in (DIAGNOSTIC, DIAGNOSTIC + '\n')
+    export_error = text(root/'project-only-export-rejection.txt', raw_newlines=True)
+    assert export_error in (EXPORT_DIAGNOSTIC, EXPORT_DIAGNOSTIC + '\n')
+    negative = read(root/'project-only-runtime.json')
+    assert negative == dict(bound('project-runtime'),status=1,stdout='project-only.stdout.txt',stderr='project-only.stderr.txt',export_error=export_error,published=False)
+    assert type(negative['status']) is int and negative['published'] is False
     assert not (root/'project-only-rejected').exists()
     assert text(root/'isolated-proof.stdout.txt') == 'source-hidden=true bundle-read-only=true write-denied=true\n'
     assert not (root/'bundle/.write-probe').exists() and not (root/'bundle/.ui-consumer-write-probe').exists()
