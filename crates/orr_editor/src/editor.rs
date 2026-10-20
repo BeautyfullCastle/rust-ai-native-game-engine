@@ -587,6 +587,32 @@ impl Editor {
             })
     }
 
+    /// This reports only reviewed editor ERP operations. Ordinary pending reads
+    /// do not become mutations. A disconnect may have lost an acknowledgement,
+    /// even after the existing recovery path cleared pending/gesture state.
+    pub(crate) fn work_status_operations(&self) -> orr_remote::work_status::Operations {
+        use orr_remote::work_status::Operations;
+        if self.down.is_some() || self.batch_uncertain {
+            Operations::OutcomeUncertain
+        } else if self.gesture.busy() || self.input_phase() != input::Phase::Off
+            || self.pending.values().any(|pending| matches!(pending.kind, Pend::Input(..) | Pend::Gesture(..))) {
+            Operations::PendingMutation
+        } else {
+            Operations::Idle
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retire_work_status_owner_for_test(&mut self) {
+        self.backend.work_status_owner = None;
+    }
+
+    pub(crate) fn publish_work_status(&mut self, snapshot: orr_remote::work_status::EditorSnapshot) {
+        if let Some(owner) = &mut self.backend.work_status_owner {
+            owner.publish(snapshot);
+        }
+    }
+
     /// Takes the next editor-owned screenshot request from the local host.
     pub(crate) fn take_screenshot_request(&self) -> Option<CaptureRequest> {
         self.backend.screenshot_owner.as_ref()?.take_request()
@@ -3313,3 +3339,24 @@ mod room_camera_capture_coherence_tests {
 #[cfg(feature = "models")]
 #[path = "editor/frame_selection.rs"]
 mod frame_selection;
+
+#[cfg(test)]
+mod work_status_operation_tests {
+    use super::*;
+    use orr_remote::work_status::Operations;
+
+    #[test]
+    fn work_status_ordinary_reads_are_idle_but_lost_mutations_are_uncertain() {
+        let mut editor = Editor::open(&default_scene_path()).unwrap();
+        editor.sync();
+        editor.pending.insert(u64::MAX, Pending {kind:Pend::Clients,posted_at:Instant::now()});
+        assert_eq!(editor.work_status_operations(), Operations::Idle);
+        editor.pending.remove(&u64::MAX);
+        editor.begin_edit("status pending mutation");
+        assert_eq!(editor.work_status_operations(), Operations::PendingMutation);
+        editor.connection_lost("test-only lost acknowledgement");
+        assert!(editor.pending.is_empty());
+        assert!(!editor.gesture.busy());
+        assert_eq!(editor.work_status_operations(), Operations::OutcomeUncertain);
+    }
+}

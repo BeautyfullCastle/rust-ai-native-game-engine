@@ -23,6 +23,7 @@ impl EditorApp {
             input.raw.viewport_id == ViewportId::ROOT && input.viewport().close_requested()
         });
         draw(self, ui);
+        self.publish_work_status(self.work_status_domains());
         if root_close {
             self.ui.close_review.blocked = !self.close_review_items().is_empty();
             if self.ui.close_review.blocked {
@@ -56,128 +57,20 @@ impl EditorApp {
     /// authoring. Routine pending host reads are not a close veto.
     pub(super) fn close_review_items(&self) -> Vec<Item> {
         let mut items = Vec::new();
-        let mut add = |condition, name, action| {
-            if condition {
-                items.push(Item { name, action });
-            }
-        };
-        if self.editor.spec().is_local() {
-            add(
-                self.editor.is_dirty(),
-                "Scene · unsaved",
-                "Use File → Save / Save As, or the scene's Undo controls.",
-            );
+        if self.editor.spec().is_local() && self.editor.is_dirty() {
+            items.push(Item {
+                name: "Scene · unsaved",
+                action: "Use File → Save / Save As, or the scene's Undo controls.",
+            });
         }
-        #[cfg(feature = "sprites")]
-        add(
-            self.sprites.bindings.as_ref().is_some_and(|bindings| bindings.dirty()),
-            "Sprite bindings · unsaved",
-            "Use Save bindings in Sprite bindings (view only). Scene Save does not save this sidecar.",
-        );
-        #[cfg(feature = "tilemap")]
-        add(
-            self.tilemap.as_ref().is_some_and(|panel| panel.dirty()),
-            "Tilemap · unsaved",
-            "Use Save tilemap or Undo tile. Scene Save does not save tiles.",
-        );
-        #[cfg(feature = "collect-ui")]
-        {
-            add(
-                self.collect_ui.as_ref().is_some_and(|panel| panel.dirty()),
-                "Collect UI document · unsaved",
-                "Use Save UI document in Collect UI document. Scene Save does not save this document.",
-            );
-            add(
-                self.collect_ui_staged_authoring(),
-                "Collect UI preview · unapplied or unfinished",
-                "Finish or cancel the gesture in the authored-screen preview. Apply accepted changes there, then Save UI document.",
-            );
-        }
-        #[cfg(feature = "models")]
-        add(
-            self.models
-                .bindings
-                .as_ref()
-                .is_some_and(|bindings| bindings.dirty()),
-            "Model bindings · unsaved",
-            "Use Save model bindings in the model inspector.",
-        );
-        #[cfg(feature = "animated-models")]
-        add(
-            self.animated_models
-                .bindings
-                .as_ref()
-                .is_some_and(|bindings| bindings.dirty()),
-            "Animation bindings · unsaved",
-            "Use Save animation bindings in Animation authoring.",
-        );
-        #[cfg(feature = "terrain")]
-        add(
-            self.terrain.document.dirty(),
-            "Terrain · unsaved",
-            "Use Save terrain or Terrain Undo in the terrain inspector.",
-        );
-        #[cfg(feature = "irradiance-probes")]
-        add(
-            self.irradiance
-                .bindings
-                .as_ref()
-                .is_some_and(|bindings| bindings.dirty()),
-            "Irradiance bindings · unsaved",
-            "Use Save irradiance in the irradiance inspector.",
-        );
-        #[cfg(feature = "room-project")]
-        add(
-            self.room_camera.as_ref().is_some_and(|panel| panel.dirty()),
-            "Room camera · unsaved or unapplied",
-            "Use Apply camera for staged fields, then Save camera; Undo camera edit is separate.",
-        );
-        #[cfg(feature = "mesh-navigation")]
-        {
-            add(
-                self.mesh_navigation.has_unplaced_draft(),
-                "Mesh geometry / art · unsaved, unapplied or unfinished",
-                "Finish geometry/vertex work and apply or resolve drafts in Static-mesh navigation. Save accepted scene and art changes with the existing workspace controls.",
-            );
-            add(
-                self.mesh_camera.dirty(),
-                "Mesh camera · unsaved or unapplied",
-                "Use Apply game camera for staged fields, then Save game camera.",
-            );
-            add(
-                self.mesh_lighting.dirty(),
-                "Mesh lighting · unsaved or unapplied",
-                "Use Apply game lighting for staged fields, then Save game lighting.",
-            );
-            add(
-                self.mesh_hud.dirty(),
-                "Mesh HUD · unsaved or unapplied",
-                "Use Apply game HUD for staged fields, then Save game HUD.",
-            );
-        }
-        #[cfg(feature = "mesh-mission")]
-        add(
-            self.mesh_mission_dirty(),
-            "Mesh mission · unapplied or unfinished",
-            "Finish or cancel point picking and apply or resolve mission fields in Mesh mission, then save the scene.",
-        );
-        #[cfg(feature = "mesh-hazards")]
-        add(
-            self.mesh_hazards_dirty(),
-            "Mesh hazards · unapplied or unfinished",
-            "Finish or cancel hazard picking and apply or resolve hazard fields in Mesh hazards, then save the scene.",
-        );
-        #[cfg(feature = "mesh-animated-models")]
-        add(
-            self.mesh_animation_dirty(),
-            "Mesh animation · unsaved or unapplied",
-            "Resolve the loaded candidate and staged fields with Apply mesh animation, then Save mesh animation.",
-        );
+        items.extend(self.work_status_domains().into_iter()
+            .filter(|record| record.is_blocker())
+            .map(|record| super::work_status::close_item(record.domain_id)));
         items
     }
 
     /// Details are embedded in an ordinary bottom tab, opened explicitly only.
-    /// This is UI/accessibility inventory, not a new ERP status or save API.
+    /// It projects the same typed predicates as the read-only status snapshot.
     pub(super) fn show_close_review(&mut self, ui: &mut Ui) {
         if self.ui.close_review.blocked {
             ui.label("The last close was blocked. Work was retained; normal editing and agent commands continue.");

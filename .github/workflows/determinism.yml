@@ -1077,6 +1077,22 @@ jobs:
           path: ${{ runner.temp }}/unsaved-close-cfg-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: error
           retention-days: 7
+      - name: Required read-only editor work status App ERP MCP acceptance
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        shell: bash
+        timeout-minutes: 45
+        env:
+          ORR_WORK_STATUS_EVIDENCE: ${{ runner.temp }}/editor-work-status-${{ github.run_id }}-${{ github.run_attempt }}
+          CARGO_BUILD_JOBS: '2'
+        run: python -B tools/editor_work_status_gate.py
+      - name: Retain editor work status evidence
+        if: always() && runner.os == 'Linux' && runner.arch == 'X64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: editor-work-status-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/editor-work-status-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
       # Real Kira PCM tests stay device-free. Native CPAL is opt-in and gets
       # compile coverage; opening a physical device is not a CI success claim.
       - run: cargo test -p orr_audio --release

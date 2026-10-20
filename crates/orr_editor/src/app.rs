@@ -21,6 +21,12 @@ use crate::viewport::{self, GpuViewport};
 
 #[path = "app/close_review.rs"]
 mod close_review;
+#[path = "app/work_status.rs"]
+mod work_status;
+
+#[cfg(test)]
+#[path = "app/work_status_tests.rs"]
+mod work_status_tests;
 
 #[cfg(all(test, feature = "sprites"))]
 #[path = "app/unsaved_close_tests.rs"]
