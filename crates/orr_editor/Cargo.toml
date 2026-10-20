@@ -115,7 +115,7 @@ required-features = ["input-map-editor"]
 
 [[bin]]
 name = "orr_mesh_hazards_player"
-path = "src/bin/orr_mesh_hazards_player.rs"
+path = "src/mesh_hazards_player/entry.rs"
 required-features = ["mesh-hazards-export"]
 test = false
 bench = false
