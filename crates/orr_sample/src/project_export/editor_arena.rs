@@ -17,6 +17,84 @@ const PACKAGE_LOCK: &str = "orr.packages.lock.json";
 const MAX_SOURCE_FILES: usize = 4;
 const MAX_SOURCE_BYTES: u64 = MAX_SCENE_BYTES + 3 * MAX_JSON_BYTES;
 const MAX_CANONICAL_PATH_BYTES: usize = 4096;
+const MAX_UI_FONT_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Exact descriptor and bytes handed to the caller's Arena UI installation.
+///
+/// This is bounded caller evidence, not authentication or deployment metadata.
+/// The exporter's admitted active-lock snapshot remains the authority for assets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArenaUiSource {
+    descriptor: orr_package::ProjectUi,
+    font_bytes: u64,
+    font_sha256: String,
+}
+impl ArenaUiSource {
+    pub fn new(
+        descriptor: orr_package::ProjectUi,
+        font_bytes: u64,
+        font_sha256: String,
+    ) -> Result<Self, String> {
+        let value = Self {
+            descriptor,
+            font_bytes,
+            font_sha256,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    pub fn descriptor(&self) -> &orr_package::ProjectUi {
+        &self.descriptor
+    }
+
+    pub fn font_bytes(&self) -> u64 {
+        self.font_bytes
+    }
+
+    pub fn font_sha256(&self) -> &str {
+        &self.font_sha256
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.descriptor.profile != orr_package::ProjectUiProfile::ArenaKoreanV1
+            || self.descriptor.document.is_some()
+        {
+            return Err("Arena export UI requires the document-free Arena Korean preset".into());
+        }
+        let package = &self.descriptor.font.package;
+        if package.is_empty()
+            || package.len() > 64
+            || !package.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"-_".contains(&byte)
+            })
+        {
+            return Err("Arena export UI font package must be a valid package name".into());
+        }
+        let asset = &self.descriptor.font.asset;
+        // Package assets have stricter total length/depth than their prefixed
+        // export paths; component grammar and DOS-name rejection are identical.
+        if asset.len() > 240 || asset.split('/').count() > 16 {
+            return Err("Arena export UI font asset exceeds its portable path bound".into());
+        }
+        validate_relative(asset)?;
+        // Fonts deliberately do not use ArenaSourceDigest's 4 MiB scene bound.
+        if !(1..=MAX_UI_FONT_BYTES).contains(&self.font_bytes) {
+            return Err("Arena export UI font must be 1 byte to 16 MiB".into());
+        }
+        if self.font_sha256.len() != 64
+            || !self
+                .font_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(
+                "Arena export UI font SHA256 must be 64 lowercase hexadecimal characters".into(),
+            );
+        }
+        Ok(())
+    }
+}
 
 /// Exact bytes of one saved authority file, not authentication of its contents.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,6 +183,7 @@ pub struct ArenaExportSource {
     canonical_scene: PathBuf,
     initial_checksum: u64,
     inventory: Vec<ArenaSourceFile>,
+    ui: Option<ArenaUiSource>,
 }
 impl ArenaExportSource {
     pub fn new(
@@ -116,6 +195,7 @@ impl ArenaExportSource {
             canonical_scene,
             initial_checksum,
             inventory,
+            ui: None,
         };
         value.validate()?;
         Ok(value)
@@ -131,6 +211,17 @@ impl ArenaExportSource {
 
     pub fn inventory(&self) -> &[ArenaSourceFile] {
         &self.inventory
+    }
+
+    /// Attach the exact loaded UI assertion without changing authority inventory.
+    pub fn with_ui(mut self, ui: ArenaUiSource) -> Result<Self, String> {
+        self.ui = Some(ui);
+        self.validate()?;
+        Ok(self)
+    }
+
+    pub fn ui(&self) -> Option<&ArenaUiSource> {
+        self.ui.as_ref()
     }
 
     fn validate(&self) -> Result<(), String> {
@@ -178,6 +269,9 @@ impl ArenaExportSource {
                 }
             }
         }
+        if let Some(ui) = &self.ui {
+            ui.validate()?;
+        }
         Ok(())
     }
 
@@ -186,12 +280,11 @@ impl ArenaExportSource {
         let entry = &project.entry;
         if entry.game != orr_package::ProjectGame::Arena
             || entry.tilemap.is_some()
-            || entry.ui.is_some()
             || entry.models.is_some()
             || entry.camera.is_some()
         {
             return Err(
-                "editor Arena export supports only Arena scene and sprites, without tilemap or UI"
+                "editor Arena export supports only Arena scene, sprites and the Korean UI preset, without tilemap, models or camera"
                     .into(),
             );
         }
@@ -243,6 +336,38 @@ impl ArenaExportSource {
         if !required.is_empty() {
             return Err("Arena export source inventory is missing a required entry".into());
         }
+        match (&entry.ui, &self.ui) {
+            (None, None) => {}
+            (Some(descriptor), Some(ui)) => {
+                if descriptor != ui.descriptor() {
+                    return Err("Arena export UI descriptor does not match admitted entry".into());
+                }
+                let digest = project
+                    .package_identities
+                    .get(&descriptor.font.package)
+                    .ok_or("Arena export UI font package is absent from admitted closure")?;
+                let relative = format!(".orr/packages/objects/{digest}/{}", descriptor.font.asset);
+                let font = project
+                    .files
+                    .iter()
+                    .find(|file| file.relative == relative)
+                    .ok_or("Arena export UI font asset is absent from admitted closure")?;
+                if font.role != "package_asset"
+                    || font.bytes.is_empty()
+                    || font.bytes.len() as u64 != ui.font_bytes()
+                    || font.sha256 != ui.font_sha256()
+                {
+                    return Err(
+                        "Arena export UI font bytes do not match admitted package asset".into(),
+                    );
+                }
+            }
+            _ => {
+                return Err(
+                    "editor export accepts only Arena UI with matching explicit installation evidence; UI presence does not match admitted entry".into(),
+                );
+            }
+        }
         Ok(())
     }
 }
@@ -278,6 +403,37 @@ mod tests {
 
     const SCENE: &str = "arena.scene.yaml";
     const SPRITES: &str = "arena.sprites.json";
+
+    fn ui_descriptor() -> orr_package::ProjectUi {
+        orr_package::ProjectUi {
+            profile: orr_package::ProjectUiProfile::ArenaKoreanV1,
+            font: orr_package::ProjectFont {
+                package: "korean-game-ui".into(),
+                asset: "OrreryKoreanUI.otf".into(),
+            },
+            document: None,
+        }
+    }
+
+    #[cfg(feature = "game-ui")]
+    fn capture_ui(snapshot: &ProjectSnapshot) -> ArenaUiSource {
+        let descriptor = snapshot.entry.ui.as_ref().unwrap();
+        let relative = format!(
+            ".orr/packages/objects/{}/{}",
+            snapshot.package_identities[&descriptor.font.package], descriptor.font.asset
+        );
+        let font = snapshot
+            .files
+            .iter()
+            .find(|file| file.relative == relative)
+            .unwrap();
+        ArenaUiSource::new(
+            descriptor.clone(),
+            font.bytes.len() as u64,
+            font.sha256.clone(),
+        )
+        .unwrap()
+    }
 
     struct Fixture {
         temp: tempfile::TempDir,
@@ -343,6 +499,32 @@ mod tests {
         fn capture(&self) -> ArenaExportSource {
             let snapshot = ProjectSnapshot::open(&self.options.project).unwrap();
             capture(&snapshot)
+        }
+
+        #[cfg(feature = "game-ui")]
+        fn install_ui(&self) {
+            let package = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../assets/game_ui_font")
+                .canonicalize()
+                .unwrap();
+            // Keep an unrelated active package as well as the selected font.
+            // Neither the empty sprite sidecar nor this UI references its assets.
+            let sprites = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../assets/sprite_demo")
+                .canonicalize()
+                .unwrap();
+            orr_package::Project::open_for_install(
+                &self.options.project,
+                orr_package::Runtime::content_only().engine_version,
+            )
+            .unwrap()
+            .install(&[package, sprites])
+            .unwrap();
+            let manifest_path = self.options.project.join(PROJECT_MANIFEST);
+            let mut manifest: serde_json::Value =
+                serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+            manifest["entry"]["ui"] = serde_json::to_value(ui_descriptor()).unwrap();
+            fs::write(manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
         }
 
         fn smoke(&self) -> Vec<u8> {
@@ -462,6 +644,417 @@ mod tests {
 
     fn digest(bytes: u64) -> ArenaSourceDigest {
         ArenaSourceDigest::new(bytes, "a".repeat(64)).unwrap()
+    }
+
+    #[test]
+    fn ui_constructor_bounds_closed_descriptor_font_length_and_digest() {
+        let descriptor = ui_descriptor();
+        let sha256 = "a".repeat(64);
+        for bytes in [1, MAX_SCENE_BYTES + 1, MAX_UI_FONT_BYTES] {
+            let source = ArenaUiSource::new(descriptor.clone(), bytes, sha256.clone()).unwrap();
+            assert_eq!(source.descriptor(), &descriptor);
+            assert_eq!(source.font_bytes(), bytes);
+            assert_eq!(source.font_sha256(), sha256);
+        }
+        for bytes in [0, MAX_UI_FONT_BYTES + 1, u64::MAX] {
+            assert!(ArenaUiSource::new(descriptor.clone(), bytes, sha256.clone()).is_err());
+        }
+        for hash in [
+            String::new(),
+            "a".repeat(63),
+            "a".repeat(65),
+            "A".repeat(64),
+            "g".repeat(64),
+        ] {
+            assert!(ArenaUiSource::new(descriptor.clone(), 1, hash).is_err());
+        }
+        let mut wrong_profile = descriptor.clone();
+        wrong_profile.profile = orr_package::ProjectUiProfile::CollectAuthoredV1;
+        assert!(ArenaUiSource::new(wrong_profile, 1, sha256.clone()).is_err());
+        for document in ["", "arena.ui.json"] {
+            let mut with_document = descriptor.clone();
+            with_document.document = Some(document.into());
+            assert!(ArenaUiSource::new(with_document, 1, sha256.clone()).is_err());
+        }
+        let fixture = Fixture::new(false, false);
+        let source = fixture.capture();
+        assert!(
+            source.ui().is_none(),
+            "legacy constructor has no UI authority"
+        );
+        let ui = ArenaUiSource::new(descriptor, 1, sha256).unwrap();
+        let with_ui = source.clone().with_ui(ui.clone()).unwrap();
+        assert_eq!(with_ui.ui(), Some(&ui));
+        assert_eq!(source.inventory(), with_ui.inventory());
+        assert_eq!(source.canonical_scene(), with_ui.canonical_scene());
+        assert_eq!(source.initial_checksum(), with_ui.initial_checksum());
+        let mut invalid = ui;
+        invalid.font_bytes = 0;
+        assert!(source.with_ui(invalid).is_err());
+    }
+
+    #[test]
+    fn ui_constructor_uses_exact_package_name_and_portable_asset_grammar() {
+        for package in ["a".into(), "a_0-9".into(), "z".repeat(64)] {
+            let mut descriptor = ui_descriptor();
+            descriptor.font.package = package;
+            assert!(ArenaUiSource::new(descriptor, 1, "0".repeat(64)).is_ok());
+        }
+        for package in [
+            "".into(),
+            "a".repeat(65),
+            "Font".into(),
+            "font.name".into(),
+            "font/name".into(),
+            "font name".into(),
+            "é".into(),
+        ] {
+            let mut descriptor = ui_descriptor();
+            descriptor.font.package = package;
+            assert!(ArenaUiSource::new(descriptor, 1, "0".repeat(64)).is_err());
+        }
+        for asset in [
+            "font.otf".into(),
+            ".font/a_B-1.OTF".into(),
+            "a".repeat(100),
+            ["a"; 16].join("/"),
+            ["a".repeat(100), "b".repeat(100), "c".repeat(38)].join("/"),
+            "COM10/LPTx.otf".into(),
+        ] {
+            let mut descriptor = ui_descriptor();
+            descriptor.font.asset = asset.clone();
+            assert!(
+                ArenaUiSource::new(descriptor, 1, "0".repeat(64)).is_ok(),
+                "{asset:?}"
+            );
+        }
+        for asset in [
+            "".into(),
+            ".".into(),
+            "..".into(),
+            "/font.otf".into(),
+            "../font.otf".into(),
+            "a/./font.otf".into(),
+            "a//font.otf".into(),
+            "a/font.otf/".into(),
+            "a\\font.otf".into(),
+            "C:font.otf".into(),
+            "한글.otf".into(),
+            "font\n.otf".into(),
+            "font .otf".into(),
+            "a/font.".into(),
+            "a".repeat(101),
+            ["a"; 17].join("/"),
+            ["a".repeat(100), "b".repeat(100), "c".repeat(39)].join("/"),
+        ] {
+            let mut descriptor = ui_descriptor();
+            descriptor.font.asset = asset.clone();
+            assert!(
+                ArenaUiSource::new(descriptor, 1, "0".repeat(64)).is_err(),
+                "{asset:?}"
+            );
+        }
+        let mut reserved = vec!["CON".into(), "PRN".into(), "AUX".into(), "NUL".into()];
+        for digit in 0..=9 {
+            reserved.push(format!("COM{digit}"));
+            reserved.push(format!("LPT{digit}"));
+        }
+        for stem in reserved {
+            for asset in [
+                stem.clone(),
+                format!("fonts/{}.otf", stem.to_ascii_lowercase()),
+            ] {
+                let mut descriptor = ui_descriptor();
+                descriptor.font.asset = asset.clone();
+                assert!(
+                    ArenaUiSource::new(descriptor, 1, "0".repeat(64)).is_err(),
+                    "{asset:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn extra_ui_assertion_rejects_before_runtime_stage_and_smoke() {
+        let mut fixture = Fixture::new(false, false);
+        let source = fixture
+            .capture()
+            .with_ui(ArenaUiSource::new(ui_descriptor(), 1, "a".repeat(64)).unwrap())
+            .unwrap();
+        fixture.reject_before_runtime(&source, "UI presence");
+    }
+
+    #[cfg(feature = "game-ui")]
+    #[test]
+    fn ui_constructor_accepts_parser_and_corpus_valid_font_above_scene_bound() {
+        let mut font =
+            include_bytes!("../../../../assets/game_ui_font/OrreryKoreanUI.otf").to_vec();
+        font.resize(MAX_SCENE_BYTES as usize + 1, 0);
+        crate::game_ui::GameUi::validate_font(&font).unwrap();
+        let source = ArenaUiSource::new(ui_descriptor(), font.len() as u64, hash(&font)).unwrap();
+        assert!(source.font_bytes() > MAX_SCENE_BYTES);
+        assert!(ArenaSourceDigest::new(source.font_bytes(), source.font_sha256().into()).is_err());
+    }
+
+    #[cfg(feature = "game-ui")]
+    #[test]
+    fn exact_ui_assertion_exports_full_closure_without_expanding_inventory() {
+        for sprites in [false, true] {
+            let fixture = Fixture::new(sprites, false);
+            fixture.install_ui();
+            let snapshot = ProjectSnapshot::open(&fixture.options.project).unwrap();
+            let source = capture(&snapshot).with_ui(capture_ui(&snapshot)).unwrap();
+            assert_eq!(source.inventory().len(), 3 + usize::from(sprites));
+            let smoke_calls = Cell::new(0);
+            let expected = fixture.smoke();
+            let report = fixture
+                .run(
+                    &source,
+                    |_| Ok(()),
+                    |_| {
+                        smoke_calls.set(smoke_calls.get() + 1);
+                        Ok(expected)
+                    },
+                )
+                .unwrap();
+            assert_eq!(smoke_calls.get(), 1);
+            assert_eq!(report.project_files, snapshot.files.len());
+            assert_eq!(report.manifest.payload.entry.ui, snapshot.entry.ui);
+            assert_eq!(
+                report.manifest.payload.packages,
+                snapshot.package_identities
+            );
+            for file in &snapshot.files {
+                assert_eq!(
+                    fs::read(report.output.join("project").join(&file.relative)).unwrap(),
+                    file.bytes
+                );
+                assert_eq!(
+                    fs::read(fixture.options.project.join(&file.relative)).unwrap(),
+                    file.bytes
+                );
+            }
+            let manifest = fs::read_to_string(report.output.join(MANIFEST_NAME)).unwrap();
+            assert!(!manifest.contains("font_sha256"));
+            assert!(!manifest.contains(source.canonical_scene().to_str().unwrap()));
+            fixture.no_stage();
+        }
+    }
+
+    #[cfg(feature = "game-ui")]
+    #[test]
+    fn ui_assertion_presence_descriptor_bytes_and_shape_reject_before_runtime() {
+        let mut fixture = Fixture::new(false, false);
+        fixture.install_ui();
+        let snapshot = ProjectSnapshot::open(&fixture.options.project).unwrap();
+        let legacy = capture(&snapshot);
+        fixture.reject_before_runtime(&legacy, "UI presence");
+        let original = legacy.with_ui(capture_ui(&snapshot)).unwrap();
+        for field in [
+            "package", "asset", "length", "hash", "zero", "profile", "document", "digest",
+        ] {
+            let mut source = original.clone();
+            let ui = source.ui.as_mut().unwrap();
+            let expected = match field {
+                "package" => {
+                    ui.descriptor.font.package = "other-font".into();
+                    "UI descriptor"
+                }
+                "asset" => {
+                    ui.descriptor.font.asset = "other.otf".into();
+                    "UI descriptor"
+                }
+                "length" => {
+                    ui.font_bytes += 1;
+                    "UI font bytes"
+                }
+                "hash" => {
+                    ui.font_sha256 = "0".repeat(64);
+                    "UI font bytes"
+                }
+                "zero" => {
+                    ui.font_bytes = 0;
+                    "1 byte to 16 MiB"
+                }
+                "profile" => {
+                    ui.descriptor.profile = orr_package::ProjectUiProfile::CollectAuthoredV1;
+                    "document-free"
+                }
+                "document" => {
+                    ui.descriptor.document = Some("arena.ui.json".into());
+                    "document-free"
+                }
+                "digest" => {
+                    ui.font_sha256 = "A".repeat(64);
+                    "lowercase hexadecimal"
+                }
+                _ => unreachable!(),
+            };
+            fixture.reject_before_runtime(&source, expected);
+        }
+    }
+
+    #[cfg(feature = "game-ui")]
+    #[test]
+    fn ui_snapshot_requires_selected_package_asset_role_nonempty_length_and_hash() {
+        let fixture = Fixture::new(false, false);
+        fixture.install_ui();
+        for mutation in [
+            "package",
+            "identity",
+            "missing",
+            "wrong-path",
+            "role",
+            "empty",
+            "length",
+            "hash",
+        ] {
+            let mut snapshot = ProjectSnapshot::open(&fixture.options.project).unwrap();
+            let source = capture(&snapshot).with_ui(capture_ui(&snapshot)).unwrap();
+            source.check_snapshot(&snapshot).unwrap();
+            let descriptor = source.ui().unwrap().descriptor();
+            let relative = format!(
+                ".orr/packages/objects/{}/{}",
+                snapshot.package_identities[&descriptor.font.package], descriptor.font.asset
+            );
+            let index = snapshot
+                .files
+                .iter()
+                .position(|file| file.relative == relative)
+                .unwrap();
+            match mutation {
+                "package" => {
+                    snapshot.package_identities.remove(&descriptor.font.package);
+                }
+                "identity" => {
+                    snapshot
+                        .package_identities
+                        .insert(descriptor.font.package.clone(), "0".repeat(64));
+                }
+                "missing" => {
+                    snapshot.files.remove(index);
+                }
+                "wrong-path" => {
+                    snapshot.files[index].relative.push_str(".other");
+                }
+                "role" => {
+                    snapshot.files[index].role = "package_manifest";
+                }
+                "empty" => {
+                    snapshot.files[index].bytes.clear();
+                }
+                "length" => {
+                    snapshot.files[index].bytes.push(0);
+                }
+                "hash" => {
+                    snapshot.files[index].sha256 = "0".repeat(64);
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                source
+                    .check_snapshot(&snapshot)
+                    .unwrap_err()
+                    .contains("Arena export UI font"),
+                "{mutation}"
+            );
+        }
+    }
+
+    #[cfg(feature = "game-ui")]
+    #[test]
+    fn ui_assertion_keeps_selected_asset_and_whole_active_lock_admission() {
+        for mutation in [
+            "missing-font",
+            "empty-font",
+            "corrupt-font",
+            "unrelated-package",
+        ] {
+            let mut fixture = Fixture::new(false, false);
+            fixture.install_ui();
+            let snapshot = ProjectSnapshot::open(&fixture.options.project).unwrap();
+            let source = capture(&snapshot).with_ui(capture_ui(&snapshot)).unwrap();
+            let ui = source.ui().unwrap();
+            let relative = if mutation == "unrelated-package" {
+                format!(
+                    ".orr/packages/objects/{}/LICENSE.txt",
+                    snapshot.package_identities["sample-sprites"]
+                )
+            } else {
+                format!(
+                    ".orr/packages/objects/{}/{}",
+                    snapshot.package_identities[&ui.descriptor().font.package],
+                    ui.descriptor().font.asset
+                )
+            };
+            let path = fixture.options.project.join(relative);
+            let error = match mutation {
+                "missing-font" => {
+                    fs::remove_file(path).unwrap();
+                    "OrreryKoreanUI.otf"
+                }
+                "empty-font" => {
+                    fs::write(path, []).unwrap();
+                    "installed content changed"
+                }
+                _ => {
+                    let mut changed = fs::read(&path).unwrap();
+                    changed[0] ^= 1;
+                    fs::write(path, changed).unwrap();
+                    "installed content changed"
+                }
+            };
+            fixture.reject_before_runtime(&source, error);
+        }
+    }
+
+    #[cfg(feature = "game-ui")]
+    #[test]
+    fn ui_font_snapshot_is_staged_exactly_and_rechecked_before_publication() {
+        let fixture = Fixture::new(false, false);
+        fixture.install_ui();
+        let snapshot = ProjectSnapshot::open(&fixture.options.project).unwrap();
+        let source = capture(&snapshot).with_ui(capture_ui(&snapshot)).unwrap();
+        let ui = source.ui().unwrap();
+        let relative = format!(
+            ".orr/packages/objects/{}/{}",
+            snapshot.package_identities[&ui.descriptor().font.package],
+            ui.descriptor().font.asset
+        );
+        let path = fixture.options.project.join(&relative);
+        let original = fs::read(&path).unwrap();
+        let mut changed = original.clone();
+        changed[0] ^= 1;
+        let expected = fixture.smoke();
+        let stage_checks = Cell::new(0);
+        let smoke_calls = Cell::new(0);
+        let error = fixture
+            .run(
+                &source,
+                |point| {
+                    if point == "admitted" {
+                        fs::write(&path, &changed).unwrap();
+                    } else if point == "before-validation" {
+                        assert_eq!(
+                            fs::read(fixture.stage().join("project").join(&relative)).unwrap(),
+                            original
+                        );
+                        stage_checks.set(stage_checks.get() + 1);
+                    }
+                    Ok(())
+                },
+                |_| {
+                    smoke_calls.set(smoke_calls.get() + 1);
+                    Ok(expected)
+                },
+            )
+            .unwrap_err();
+        assert!(error.contains("changed"), "{error}");
+        assert_eq!(stage_checks.get(), 1);
+        assert_eq!(smoke_calls.get(), 1);
+        assert_eq!(fs::read(path).unwrap(), changed);
+        assert!(!fixture.options.output.exists());
+        fixture.no_stage();
     }
 
     #[test]

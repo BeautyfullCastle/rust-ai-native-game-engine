@@ -26,7 +26,10 @@ fn fixture() -> (tempfile::TempDir, EditorApp) {
     (dir, app)
 }
 fn synthetic_job(app: &mut EditorApp, root: &std::path::Path) -> mpsc::SyncSender<()> {
-    let source = app.editor.arena_export_source(root, &app.sprites).unwrap();
+    let source = app
+        .editor
+        .arena_export_source(root, &app.sprites, None)
+        .unwrap();
     let options = ExportOptions {
         project: root.into(),
         runtime: root.join("unused"),
@@ -202,7 +205,7 @@ fn terminal_disconnected_without_result_is_uncertain_and_joined() {
     app.arena_export.uncertain_output = None;
     let source = app
         .editor
-        .arena_export_source(dir.path(), &app.sprites)
+        .arena_export_source(dir.path(), &app.sprites, None)
         .unwrap();
     let (sender, receiver) = mpsc::sync_channel(1);
     let handle = thread::spawn(move || drop(sender));
@@ -455,17 +458,20 @@ fn remote_capture_and_encoder_refuse_without_cancellation() {
 #[test]
 fn loaded_ui_is_refused_even_without_manifest_declaration() {
     let (_dir, mut app) = fixture();
-    app.project_ui = Some(crate::project_ui::Preview {
-        descriptor: orr_package::ProjectUi {
-            profile: orr_package::ProjectUiProfile::ArenaKoreanV1,
-            font: orr_package::ProjectFont {
-                package: "unused".into(),
-                asset: "font.ttf".into(),
+    app.project_ui = Some(crate::project_ui::Preview::install(
+        orr_sample::project::PreparedUi {
+            descriptor: orr_package::ProjectUi {
+                profile: orr_package::ProjectUiProfile::ArenaKoreanV1,
+                font: orr_package::ProjectFont {
+                    package: "unused".into(),
+                    asset: "font.ttf".into(),
+                },
+                document: None,
             },
-            document: None,
+            font: Vec::new(),
         },
-        font_bytes: 1,
-    });
+        &egui::Context::default(),
+    ));
     assert!(app
         .arena_export_dispatch()
         .unwrap_err()
@@ -595,4 +601,51 @@ fn active_arena_job_retains_app_through_disabled_collect_replacement_menu() {
     }
     release.send(()).unwrap();
     reap(h.state_mut());
+}
+
+#[cfg(feature = "project-ui")]
+#[test]
+fn installed_saved_ui_dispatches_and_mismatches_stop_before_worker_start() {
+    let (dir, mut app) = fixture();
+    options(&mut app, dir.path());
+    let installer = orr_package::Project::open_for_install(
+        dir.path(),
+        orr_package::Runtime::content_only().engine_version,
+    )
+    .unwrap();
+    installer
+        .install(&[std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/game_ui_font")
+            .canonicalize()
+            .unwrap()])
+        .unwrap();
+    let manifest = dir.path().join("orr.project.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    value["entry"]["ui"] = serde_json::json!({"profile":"arena-korean-v1","font":{"package":"korean-game-ui","asset":"OrreryKoreanUI.otf"}});
+    fs::write(&manifest, serde_json::to_vec(&value).unwrap()).unwrap();
+    let prepared = crate::project::PreparedProject::open(dir.path()).unwrap();
+    let ui = prepared.ui().unwrap().clone();
+    let ctx = egui::Context::default();
+    let no_spawn = |_: String, _: Box<dyn FnOnce() + Send>| -> std::io::Result<JoinHandle<()>> {
+        panic!("mismatch reached worker spawn")
+    };
+    assert!(app.arena_export_dispatch_with(no_spawn).is_err());
+    app.project_ui = Some(crate::project_ui::Preview::install(ui.clone(), &ctx));
+    app.project_ui.as_mut().unwrap().descriptor.font.package = "wrong-package".into();
+    assert!(app.arena_export_dispatch_with(no_spawn).is_err());
+    app.project_ui = Some(crate::project_ui::Preview::install(ui.clone(), &ctx));
+    app.project_ui.as_mut().unwrap().descriptor.font.asset = "wrong.otf".into();
+    assert!(app.arena_export_dispatch_with(no_spawn).is_err());
+    app.project_ui = Some(crate::project_ui::Preview::install(ui.clone(), &ctx));
+    let error = app
+        .arena_export_dispatch_with(|_, _| Err(std::io::Error::other("valid UI reached spawn")))
+        .unwrap_err();
+    assert!(error.contains("valid UI reached spawn"));
+    assert!(!app.arena_export.busy());
+    assert_eq!(app.arena_export.next_id, 0);
+    assert!(app.ui.dialog.is_none());
+    value["entry"].as_object_mut().unwrap().remove("ui");
+    fs::write(&manifest, serde_json::to_vec(&value).unwrap()).unwrap();
+    assert!(app.arena_export_dispatch_with(no_spawn).is_err());
 }

@@ -8,7 +8,7 @@ pub(crate) mod admission;
 mod editor_arena;
 pub(crate) mod profile;
 pub use editor_arena::{
-    export_arena_for_source, ArenaExportSource, ArenaSourceDigest, ArenaSourceFile,
+    export_arena_for_source, ArenaExportSource, ArenaSourceDigest, ArenaSourceFile, ArenaUiSource,
 };
 use profile::{Profile, Prepared};
 

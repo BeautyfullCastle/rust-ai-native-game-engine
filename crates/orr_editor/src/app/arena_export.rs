@@ -124,14 +124,18 @@ impl EditorApp {
         if self.tilemap.is_some() {
             return Err("Loaded tilemap is not supported by this export slice".into());
         }
-        #[cfg(feature = "project-ui")]
-        if self.project_ui.is_some() {
-            return Err("Loaded UI is not supported by this export slice".into());
-        }
         #[cfg(feature = "collect-ui")]
         if self.collect_ui.is_some() {
             return Err("Loaded UI is not supported by this export slice".into());
         }
+        #[cfg(feature = "project-ui")]
+        let installed_ui = self
+            .project_ui
+            .as_ref()
+            .map(crate::project_ui::Preview::arena_export_identity)
+            .transpose()?;
+        #[cfg(not(feature = "project-ui"))]
+        let installed_ui = None;
         let options = ExportOptions {
             project: PathBuf::from(&self.arena_export.project),
             runtime: PathBuf::from(&self.arena_export.runtime),
@@ -159,9 +163,9 @@ impl EditorApp {
         {
             return Err("Enter project, runtime and new output paths".into());
         }
-        let source = self
-            .editor
-            .arena_export_source(&options.project, &self.sprites)?;
+        let source =
+            self.editor
+                .arena_export_source(&options.project, &self.sprites, installed_ui)?;
         let id = self
             .arena_export
             .next_id
@@ -200,7 +204,7 @@ impl EditorApp {
         Ok(())
     }
     pub(super) fn show_arena_export(&mut self, ui: &mut egui::Ui) {
-        ui.label("Linux x86-64 · saved Arena scene + sprites only. Declared or loaded UI/tilemap is refused.");
+        ui.label("Linux x86-64 · saved Arena scene + sprites; matching saved Korean preset requires project-ui. Tilemaps and Collect UI are refused.");
         ui.label("Verification executes supplied code. SHA256 checks identity, not trust. Supply a matching, known trusted, already-built Arena player.");
         egui::Grid::new("arena_export_form").show(ui, |ui| {
             for (label, value) in [

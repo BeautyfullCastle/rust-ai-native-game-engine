@@ -19,7 +19,9 @@ fn fixture() -> (tempfile::TempDir, Editor, crate::sprite_panel::SpritePanel) {
 #[test]
 fn saved_source_inventory_and_equal_contents_reload_epoch() {
     let (dir, mut editor, sprites) = fixture();
-    let receipt = editor.arena_export_source(dir.path(), &sprites).unwrap();
+    let receipt = editor
+        .arena_export_source(dir.path(), &sprites, None)
+        .unwrap();
     assert_eq!(receipt.inventory().len(), 3);
     assert_eq!(receipt.initial_checksum(), editor.checksum());
     let epoch = editor.scene_load_epoch();
@@ -41,16 +43,24 @@ fn saved_source_inventory_and_equal_contents_reload_epoch() {
 fn cached_dirty_uncertain_and_transaction_flags_refused() {
     let (dir, mut editor, sprites) = fixture();
     editor.batch_uncertain = true;
-    assert!(editor.arena_export_source(dir.path(), &sprites).is_err());
+    assert!(editor
+        .arena_export_source(dir.path(), &sprites, None)
+        .is_err());
     editor.batch_uncertain = false;
     editor.history.in_tx = true;
-    assert!(editor.arena_export_source(dir.path(), &sprites).is_err());
+    assert!(editor
+        .arena_export_source(dir.path(), &sprites, None)
+        .is_err());
     editor.history.in_tx = false;
     editor.sim.in_tx = true;
-    assert!(editor.arena_export_source(dir.path(), &sprites).is_err());
+    assert!(editor
+        .arena_export_source(dir.path(), &sprites, None)
+        .is_err());
     editor.sim.in_tx = false;
     editor.sim.dirty = true;
-    assert!(editor.arena_export_source(dir.path(), &sprites).is_err());
+    assert!(editor
+        .arena_export_source(dir.path(), &sprites, None)
+        .is_err());
 }
 #[test]
 fn declared_ui_tilemap_unloaded_bindings_and_unrelated_loaded_bindings_refused() {
@@ -65,7 +75,9 @@ fn declared_ui_tilemap_unloaded_bindings_and_unrelated_loaded_bindings_refused()
         };
         fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
         assert!(
-            editor.arena_export_source(dir.path(), &sprites).is_err(),
+            editor
+                .arena_export_source(dir.path(), &sprites, None)
+                .is_err(),
             "{field}"
         );
     }
@@ -79,23 +91,29 @@ fn declared_ui_tilemap_unloaded_bindings_and_unrelated_loaded_bindings_refused()
         .unwrap(),
     );
     assert!(editor
-        .arena_export_source(dir.path(), &sprites)
+        .arena_export_source(dir.path(), &sprites, None)
         .unwrap_err()
         .contains("Declared and loaded"));
 }
 #[test]
 fn raw_scene_changes_are_pinned_and_semantic_changes_refused() {
     let (dir, mut editor, sprites) = fixture();
-    let first = editor.arena_export_source(dir.path(), &sprites).unwrap();
+    let first = editor
+        .arena_export_source(dir.path(), &sprites, None)
+        .unwrap();
     let scene = dir.path().join("arena.scene.yaml");
     let mut text = fs::read_to_string(&scene).unwrap();
     text.push('\n');
     fs::write(&scene, &text).unwrap();
-    let second = editor.arena_export_source(dir.path(), &sprites).unwrap();
+    let second = editor
+        .arena_export_source(dir.path(), &sprites, None)
+        .unwrap();
     assert_eq!(first.initial_checksum(), second.initial_checksum());
     assert_ne!(first, second);
     fs::write(scene, "schema: orr.scene/1\nentities: {}\nsingletons: {}\n").unwrap();
-    assert!(editor.arena_export_source(dir.path(), &sprites).is_err());
+    assert!(editor
+        .arena_export_source(dir.path(), &sprites, None)
+        .is_err());
 }
 #[test]
 fn bounded_reader_refuses_symlinks_and_over_limit_files() {
@@ -131,7 +149,7 @@ fn referenced_cached_pixels_documents_and_missing_cache_are_checked() {
         admitted.document.clone(),
     ));
     assert!(editor
-        .arena_export_source(&root, &panel)
+        .arena_export_source(&root, &panel, None)
         .unwrap_err()
         .contains("absent from the editor cache"));
     let ctx = egui::Context::default();
@@ -146,7 +164,7 @@ fn referenced_cached_pixels_documents_and_missing_cache_are_checked() {
         assets,
     );
     assert!(editor
-        .arena_export_source(&root, &panel)
+        .arena_export_source(&root, &panel, None)
         .unwrap_err()
         .contains("pixels differ"));
     panel.install_prepared(
@@ -157,7 +175,7 @@ fn referenced_cached_pixels_documents_and_missing_cache_are_checked() {
         ),
         admitted.assets.clone(),
     );
-    editor.arena_export_source(&root, &panel).unwrap();
+    editor.arena_export_source(&root, &panel, None).unwrap();
     let mut assets = admitted.assets.clone();
     let asset = assets.values_mut().next().unwrap();
     let mut doc: J = serde_json::from_str(&asset.document.to_json().unwrap()).unwrap();
@@ -173,7 +191,7 @@ fn referenced_cached_pixels_documents_and_missing_cache_are_checked() {
         assets,
     );
     assert!(editor
-        .arena_export_source(&root, &panel)
+        .arena_export_source(&root, &panel, None)
         .unwrap_err()
         .contains("document or pixels differ"));
 }
@@ -192,7 +210,9 @@ fn stale_cached_clean_state_does_not_hide_host_transaction_proposal_or_play() {
             .call("scene.save", json!({"write":false,"source":"doc"}))
             .unwrap();
         assert!(
-            editor.arena_export_source(dir.path(), &sprites).is_err(),
+            editor
+                .arena_export_source(dir.path(), &sprites, None)
+                .is_err(),
             "{operation}"
         );
         assert_eq!(
@@ -214,7 +234,9 @@ fn actual_managed_control_pending_gesture_and_listener_are_preserved_and_refused
         input::Phase::Releasing,
     ] {
         editor.input.phase = phase;
-        assert!(editor.arena_export_source(dir.path(), &sprites).is_err());
+        assert!(editor
+            .arena_export_source(dir.path(), &sprites, None)
+            .is_err());
         assert_eq!(editor.input.phase, phase);
     }
     editor.input.phase = input::Phase::Off;
@@ -229,27 +251,37 @@ fn actual_managed_control_pending_gesture_and_listener_are_preserved_and_refused
                 posted_at: Instant::now(),
             },
         );
-        assert!(editor.arena_export_source(dir.path(), &sprites).is_err());
+        assert!(editor
+            .arena_export_source(dir.path(), &sprites, None)
+            .is_err());
         assert!(editor.pending.contains_key(&u64::MAX));
         editor.pending.remove(&u64::MAX);
     }
     editor.backend.url = Some("ws://127.0.0.1:7777".into());
-    assert!(editor.arena_export_source(dir.path(), &sprites).is_err());
+    assert!(editor
+        .arena_export_source(dir.path(), &sprites, None)
+        .is_err());
     assert!(editor.erp_status().is_some());
     editor.backend.url = None;
     editor.begin_edit("unfinished source gesture");
     assert!(editor.in_gesture());
-    assert!(editor.arena_export_source(dir.path(), &sprites).is_err());
+    assert!(editor
+        .arena_export_source(dir.path(), &sprites, None)
+        .is_err());
     assert!(editor.in_gesture());
 }
 #[test]
 fn missing_frame_stale_checksum_and_clean_saved_unloaded_sprites_fail_closed() {
     let (dir, mut editor, sprites) = fixture();
     let snapshot = editor.snapshot.take();
-    assert!(editor.arena_export_source(dir.path(), &sprites).is_err());
+    assert!(editor
+        .arena_export_source(dir.path(), &sprites, None)
+        .is_err());
     editor.snapshot = snapshot;
     editor.checksum ^= 1;
-    assert!(editor.arena_export_source(dir.path(), &sprites).is_err());
+    assert!(editor
+        .arena_export_source(dir.path(), &sprites, None)
+        .is_err());
     editor.checksum ^= 1;
     fs::write(
         dir.path().join("view.json"),
@@ -258,7 +290,142 @@ fn missing_frame_stale_checksum_and_clean_saved_unloaded_sprites_fail_closed() {
     .unwrap();
     fs::write(dir.path().join("orr.project.json"),br#"{"schema":2,"engine":"*","entry":{"game":"arena","scene":"arena.scene.yaml","sprites":"view.json"}}"#).unwrap();
     assert!(editor
-        .arena_export_source(dir.path(), &sprites)
+        .arena_export_source(dir.path(), &sprites, None)
         .unwrap_err()
         .contains("Declared and loaded"));
+}
+
+#[cfg(feature = "project-ui")]
+#[test]
+fn saved_ui_requires_exact_loaded_font_and_retains_whole_lock_verification() {
+    let (dir, mut editor, sprites) = fixture();
+    let package = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/game_ui_font")
+        .canonicalize()
+        .unwrap();
+    let installer = orr_package::Project::open_for_install(
+        dir.path(),
+        orr_package::Runtime::content_only().engine_version,
+    )
+    .unwrap();
+    installer.install(&[package]).unwrap();
+    let manifest = dir.path().join("orr.project.json");
+    let mut value: J = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    value["entry"]["ui"] = json!({"profile":"arena-korean-v1","font":{"package":"korean-game-ui","asset":"OrreryKoreanUI.otf"}});
+    fs::write(&manifest, serde_json::to_vec(&value).unwrap()).unwrap();
+    let prepared = crate::project::PreparedProject::open(dir.path()).unwrap();
+    let ui = prepared.ui().unwrap().clone();
+    let ctx = egui::Context::default();
+    let original = crate::project_ui::Preview::install(ui.clone(), &ctx);
+    let source = editor
+        .arena_export_source(
+            dir.path(),
+            &sprites,
+            Some(original.arena_export_identity().unwrap()),
+        )
+        .unwrap();
+    assert_eq!(source.inventory().len(), 3);
+    assert!(source.ui().is_some());
+    assert!(editor
+        .arena_export_source(dir.path(), &sprites, None)
+        .is_err());
+    // The sfnt head checkSumAdjustment field is metadata. Mutating it preserves
+    // length, parser validity and every corpus glyph, but not installation bytes.
+    let mut changed = ui.clone();
+    let count = u16::from_be_bytes(changed.font[4..6].try_into().unwrap()) as usize;
+    let head = (0..count)
+        .map(|i| 12 + 16 * i)
+        .find(|&i| &changed.font[i..i + 4] == b"head")
+        .unwrap();
+    let offset = u32::from_be_bytes(changed.font[head + 8..head + 12].try_into().unwrap()) as usize;
+    changed.font[offset + 8] ^= 1;
+    assert_eq!(changed.font.len(), ui.font.len());
+    assert_ne!(changed.font, ui.font);
+    orr_sample::game_ui::GameUi::validate_font(&changed.font).unwrap();
+    let stale = crate::project_ui::Preview::install(changed.clone(), &ctx);
+    assert!(editor
+        .arena_export_source(
+            dir.path(),
+            &sprites,
+            Some(stale.arena_export_identity().unwrap())
+        )
+        .unwrap_err()
+        .contains("Saved UI differs"));
+    let restored = crate::project_ui::Preview::install(ui, &ctx);
+    editor
+        .arena_export_source(
+            dir.path(),
+            &sprites,
+            Some(restored.arena_export_identity().unwrap()),
+        )
+        .unwrap();
+    // Reinstall a valid changed package/lock without refreshing the loaded preview.
+    let changed_package = tempfile::tempdir().unwrap();
+    for entry in
+        fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/game_ui_font"))
+            .unwrap()
+    {
+        let entry = entry.unwrap();
+        if entry.file_type().unwrap().is_file() {
+            fs::copy(entry.path(), changed_package.path().join(entry.file_name())).unwrap();
+        }
+    }
+    fs::write(
+        changed_package.path().join("OrreryKoreanUI.otf"),
+        &changed.font,
+    )
+    .unwrap();
+    let package_manifest = changed_package.path().join("orr.package.json");
+    let mut metadata: J = serde_json::from_slice(&fs::read(&package_manifest).unwrap()).unwrap();
+    metadata["version"] = json!("1.0.1");
+    fs::write(package_manifest, serde_json::to_vec(&metadata).unwrap()).unwrap();
+    installer
+        .install(&[changed_package.path().to_path_buf()])
+        .unwrap();
+    assert!(editor
+        .arena_export_source(
+            dir.path(),
+            &sprites,
+            Some(restored.arena_export_identity().unwrap())
+        )
+        .unwrap_err()
+        .contains("Saved UI differs"));
+    let refreshed = crate::project_ui::Preview::install(
+        crate::project::PreparedProject::open(dir.path())
+            .unwrap()
+            .ui()
+            .unwrap()
+            .clone(),
+        &ctx,
+    );
+    editor
+        .arena_export_source(
+            dir.path(),
+            &sprites,
+            Some(refreshed.arena_export_identity().unwrap()),
+        )
+        .unwrap();
+    // A separate active, unreferenced package must still be verified in full.
+    installer
+        .install(&[Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/sprite_demo")
+            .canonicalize()
+            .unwrap()])
+        .unwrap();
+    // Unreferenced package license still belongs to the whole active closure.
+    let project =
+        orr_package::Project::open(dir.path(), crate::sprite_bindings::compiled_runtime()).unwrap();
+    let lock = project.verify().unwrap();
+    let license = dir.path().join(format!(
+        ".orr/packages/objects/{}/orr.package.json",
+        lock.packages["sample-sprites"].digest
+    ));
+    fs::write(license, b"corrupt unrelated declared asset").unwrap();
+    assert!(editor
+        .arena_export_source(
+            dir.path(),
+            &sprites,
+            Some(refreshed.arena_export_identity().unwrap())
+        )
+        .is_err());
 }

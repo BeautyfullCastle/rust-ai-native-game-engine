@@ -496,3 +496,93 @@ fn queued_menu_pointer_events_neutralize_bridge_before_ui_action() {
         .button(Button::Mouse { button: 0 }, true, false, false);
     assert_eq!(app.controls.keys(), Keys::default());
 }
+/// Invoked only by the editor UI acceptance gate after copying this producer
+/// outside the source tree and mounting the delivered bundle read-only.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+#[ignore = "requires explicitly supplied source-hidden read-only exported bundle"]
+fn relocated_bundle_real_widgets_restart_original_scene() {
+    use crate::arena_game::{Bullet, PlayerTag, Position};
+    let bundle = std::path::PathBuf::from(
+        std::env::var_os("ORR_UI_CONSUMER_BUNDLE").expect("relocated bundle required"),
+    );
+    let evidence = std::path::PathBuf::from(
+        std::env::var_os("ORR_UI_CONSUMER_EVIDENCE").expect("retained evidence directory required"),
+    );
+    let original = std::path::PathBuf::from(
+        std::env::var_os("ORR_UI_CONSUMER_SOURCE_PROJECT").expect("hidden source project required"),
+    );
+    assert!(!original.join("orr.project.json").exists());
+    assert!(!Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../Cargo.toml")
+        .exists());
+    let prepared = PreparedRuntime::open(bundle.join("project")).unwrap();
+    let initial = prepared.initial_frame().clone();
+    let initial_checksum = initial.checksum();
+    let initial_entities: Vec<_> = initial.entities().collect();
+    let initial_positions = initial.dense::<Position>().1.to_vec();
+    let initial_players = initial.dense::<PlayerTag>().1.to_vec();
+    let (seed, presentation, ui) = prepared.into_launch_parts();
+    let bridge = seed.bridge().unwrap();
+    let mut app = app(
+        bridge,
+        Box::new(move || seed.bridge()),
+        presentation,
+        ui.expect("bundle's admitted UI font").font,
+    );
+    click(&mut app, Action::Play);
+    let mut expected = None;
+    for _ in 0..2 {
+        let mut checksums = Vec::new();
+        for tick in 0..12 {
+            app.controls
+                .button(Button::Keyboard { key: Key::D }, tick < 6, false, false);
+            app.controls.button(
+                Button::Mouse { button: 0 },
+                tick == 2 || tick == 3,
+                false,
+                false,
+            );
+            app.publish_input_result().unwrap();
+            app.bridge.step_one();
+            let update = app.bridge.poll_view();
+            let snapshot = update.snapshot.as_ref().unwrap();
+            checksums.push(snapshot.predicted().checksum());
+            app.project
+                .as_mut()
+                .unwrap()
+                .update(Some(snapshot))
+                .unwrap();
+        }
+        assert_ne!(checksums.last(), Some(&initial_checksum));
+        if let Some(expected) = &expected {
+            assert_eq!(&checksums, expected);
+        } else {
+            expected = Some(checksums);
+        }
+        click(&mut app, Action::Menu);
+        let tick = app.bridge.snapshot().unwrap().tick();
+        app.bridge.step_one();
+        assert!(app.bridge.snapshot().unwrap().tick() > tick);
+        click(&mut app, Action::Continue);
+        click(&mut app, Action::Menu);
+        // click() sends pointer press/release and calls the exact private native
+        // dispatcher. No direct restart helper or UI state assignment occurs.
+        click(&mut app, Action::Restart);
+        let reset = app.bridge.snapshot().unwrap();
+        assert_eq!(reset.tick(), 0);
+        assert_eq!(reset.predicted().checksum(), initial_checksum);
+        assert_eq!(
+            reset.predicted().entities().collect::<Vec<_>>(),
+            initial_entities
+        );
+        assert_eq!(reset.predicted().dense::<Position>().1, initial_positions);
+        assert_eq!(reset.predicted().dense::<PlayerTag>().1, initial_players);
+        assert!(reset.predicted().dense::<Bullet>().1.is_empty());
+        assert_eq!(app.keys, Keys::default());
+        assert_eq!(app.sent_keys, Some(Keys::default()));
+        assert!(app.project.as_ref().unwrap().sprites().is_empty());
+    }
+    fs::write(evidence.join("app-restart-receipt.json"), serde_json::to_vec_pretty(&serde_json::json!({"bundle":bundle,"initial_checksum":format!("0x{initial_checksum:016x}"),"replayed_checksums":expected.unwrap(),"actual_widget_dispatch":true,"restart_tick":0,"original_entities_positions_players_restored":true,"coverage":"production App dispatcher via egui events, not OS-window input"})).unwrap()).unwrap();
+    println!("Relocated App real-widget Restart restored original scene and replay");
+}

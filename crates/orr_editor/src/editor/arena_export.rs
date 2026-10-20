@@ -1,6 +1,8 @@
 //! Explicit read-only Arena source receipt. This is not a lock or trust token.
 use super::*;
-use orr_sample::project_export::{ArenaExportSource, ArenaSourceDigest, ArenaSourceFile};
+use orr_sample::project_export::{
+    ArenaExportSource, ArenaSourceDigest, ArenaSourceFile, ArenaUiSource,
+};
 use sha2::{Digest, Sha256};
 use std::{fs, io::Read, path::Component};
 
@@ -37,6 +39,7 @@ impl Editor {
         &mut self,
         root: &Path,
         sprites: &crate::sprite_panel::SpritePanel,
+        installed_ui: Option<&ArenaUiSource>,
     ) -> Result<ArenaExportSource, String> {
         self.arena_export_idle()?;
         let generations = (
@@ -80,12 +83,13 @@ impl Editor {
             .as_ref()
             .ok_or("Project has no authored entry")?;
         if entry.game != orr_package::ProjectGame::Arena
-            || entry.ui.is_some()
             || entry.tilemap.is_some()
             || entry.models.is_some()
             || entry.camera.is_some()
         {
-            return Err("Editor Arena export supports scenes and sprites only; declared UI/tilemap or other presentation is refused".into());
+            return Err(
+                "Editor Arena export refuses tilemaps and other unsupported presentation".into(),
+            );
         }
         let mut files = vec![("orr.project.json".to_owned(), Some(manifest_bytes))];
         let lock = match fs::symlink_metadata(root.join("orr.packages.lock.json")) {
@@ -129,12 +133,37 @@ impl Editor {
         let prepared = orr_sample::project::PreparedProject::open_with_capabilities(
             &root,
             crate::sprite_bindings::compiled_runtime(),
-            orr_sample::project::UiSupport::Unsupported,
+            if cfg!(feature = "project-ui") {
+                orr_sample::project::UiSupport::Supported
+            } else {
+                orr_sample::project::UiSupport::Unsupported
+            },
             orr_sample::project::TilemapSupport::Unsupported,
         )?;
         if prepared.scene().path() != path || prepared.scene().scene() != &current {
             return Err("Project source changed during admission".into());
         }
+        let matched_ui = match (entry.ui.as_ref(), prepared.ui(), installed_ui) {
+            (None, None, None) => None,
+            (Some(declared), Some(admitted), Some(installed)) if cfg!(feature = "project-ui") => {
+                let fresh = ArenaUiSource::new(
+                    admitted.descriptor.clone(),
+                    admitted.font.len() as u64,
+                    format!("{:x}", Sha256::digest(&admitted.font)),
+                )?;
+                if declared != &admitted.descriptor || &fresh != installed {
+                    return Err(
+                        "Saved UI differs from loaded font installation; reopen explicitly".into(),
+                    );
+                }
+                Some(fresh)
+            }
+            _ => {
+                return Err(
+                    "Declared, admitted and loaded UI installation must match exactly".into(),
+                );
+            }
+        };
         match (prepared.sprites(), sprites.bindings.as_ref()) {
             (None, None) => {}
             (Some(admitted), Some(loaded)) => {
@@ -208,7 +237,11 @@ impl Editor {
         {
             return Err("Host/history/frame changed while capturing export source; retry explicitly after it settles".into());
         }
-        ArenaExportSource::new(path, checksum, inventory)
+        let source = ArenaExportSource::new(path, checksum, inventory)?;
+        match matched_ui {
+            Some(ui) => source.with_ui(ui),
+            None => Ok(source),
+        }
     }
 }
 
