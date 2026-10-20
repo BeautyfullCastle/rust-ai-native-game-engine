@@ -154,8 +154,10 @@ fn valid_release_stages_one_local_entry_without_writing_the_host() {
     }
     let target_pixel = target_pixel.expect("fixture should admit at least one snapped vertex move");
     let expected_position = expected_position.unwrap();
-    let mut state = State::default();
-    state.snap = "0.5".into();
+    let mut state = State {
+        snap: "0.5".into(),
+        ..Default::default()
+    };
     state.arm(&panel, &editor);
     assert!(state.armed);
     state.input(

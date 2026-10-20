@@ -28,9 +28,11 @@ fn click(position: [f32; 3]) -> ViewInput {
 }
 #[test]
 fn selected_center_only_and_exact_decimal_preserve_radius_and_other_spheres() {
-    let mut panel = Panel::default();
-    panel.enabled = true;
-    panel.count = "2".into();
+    let mut panel = Panel {
+        enabled: true,
+        count: "2".into(),
+        ..Default::default()
+    };
     panel.spheres[1] = ["1", "2", "3", "0.750000"].map(str::to_owned);
     let before = panel.spheres.clone();
     assert!(stage_position(&mut panel, 1, [fp!(0.5), fp!(-1), fp!(2.25)]).unwrap());
@@ -42,8 +44,10 @@ fn selected_center_only_and_exact_decimal_preserve_radius_and_other_spheres() {
 }
 #[test]
 fn invalid_index_and_bounds_preserve_every_draft_field() {
-    let mut panel = Panel::default();
-    panel.enabled = true;
+    let mut panel = Panel {
+        enabled: true,
+        ..Default::default()
+    };
     let before = panel.spheres.clone();
     assert!(stage_position(&mut panel, 1, [FP::ZERO; 3]).is_err());
     assert!(stage_position(&mut panel, 0, [fp!(257), FP::ZERO, FP::ZERO]).is_err());

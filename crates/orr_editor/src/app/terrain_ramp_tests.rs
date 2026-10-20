@@ -768,7 +768,11 @@ fn actual_viewport_ramp_navigation_save_reopen_play_and_stale_refusal() {
         let v = z;
         assert!((0..=65536).contains(&u) && (0..=65536).contains(&v));
         assert!(
-            if key % 2 == 0 { u <= v } else { v <= u },
+            if key.is_multiple_of(2) {
+                u <= v
+            } else {
+                v <= u
+            },
             "raw point must lie in its independent canonical triangle"
         );
         if let Some(previous) = previous_position {

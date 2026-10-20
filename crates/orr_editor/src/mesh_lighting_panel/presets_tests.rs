@@ -21,7 +21,9 @@ fn setup() -> (tempfile::TempDir, Editor, Panel) {
     (directory, editor, panel)
 }
 
-fn history(panel: &Panel) -> (Vec<(u64, Option<Document>)>, usize, u64, Option<u64>) {
+type HistorySnapshot = (Vec<(u64, Option<Document>)>, usize, u64, Option<u64>);
+
+fn history(panel: &Panel) -> HistorySnapshot {
     (
         panel
             .history

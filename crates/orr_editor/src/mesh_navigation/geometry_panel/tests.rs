@@ -14,8 +14,10 @@ fn geometry_fields_use_exact_bounded_fixed_point_and_unsigned_indices() {
 
 #[test]
 fn acknowledge_clears_draft_block_and_reset_restores_defaults() {
-    let mut panel = Panel::default();
-    panel.dirty = true;
+    let mut panel = Panel {
+        dirty: true,
+        ..Default::default()
+    };
     panel.acknowledge();
     assert!(!panel.dirty());
     panel.quad_rise = "invalid".into();

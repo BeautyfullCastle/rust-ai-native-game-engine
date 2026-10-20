@@ -99,8 +99,10 @@ fn history_is_bounded_and_saved_identity_tracks_the_selected_entry() {
     panel.saved_id = Some(panel.history[0].id);
     assert!(panel.history_is_dirty());
     for index in 0..(MAX_HISTORY + 4) {
-        let mut document = Document::default();
-        document.title = format!("HUD {index}");
+        let document = Document {
+            title: format!("HUD {index}"),
+            ..Default::default()
+        };
         panel.push_state(Some(document));
     }
     assert_eq!(panel.history.len(), MAX_HISTORY);
