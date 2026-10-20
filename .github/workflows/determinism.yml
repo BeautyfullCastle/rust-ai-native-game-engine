@@ -1058,10 +1058,31 @@ jobs:
       - if: runner.os == 'Linux'
         run: sudo apt-get update -q && sudo apt-get install -y -q libasound2-dev
       - run: cargo check -p orr_sample --features audio-native --all-targets
+      - name: Required tilemap CPU admission authoring and strict libraries
+        if: runner.os == 'Linux'
+        shell: bash
+        timeout-minutes: 60
+        run: |
+          set -euo pipefail
+          python -B tools/test_tilemap_authoring_gate.py -v
+          python -B tools/tilemap_authoring_gate.py cpu --evidence "${{ runner.temp }}/tilemap-authoring-${{ github.run_id }}-${{ github.run_attempt }}"
       # GPU readback pixel tests on a software Vulkan adapter (lavapipe), so
       # they really run instead of skipping. Linux only.
       - if: runner.os == 'Linux'
         run: sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers
+      - name: Required tilemap compositor saved runtime and actual editor acceptance
+        if: runner.os == 'Linux'
+        shell: bash
+        timeout-minutes: 30
+        run: python -B tools/tilemap_authoring_gate.py gpu --evidence "${{ runner.temp }}/tilemap-authoring-${{ github.run_id }}-${{ github.run_attempt }}"
+      - name: Retain tilemap inventories original failures receipts and captures
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tilemap-authoring-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/tilemap-authoring-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
       - name: Required static prop actual software GPU acceptance
         if: runner.os == 'Linux'
         shell: bash
@@ -2539,7 +2560,7 @@ jobs:
           selection=()
           check_count sample-library 68 cargo test --locked --release -p orr_sample --no-default-features --features collect-dodge,project-export --lib
           unset ORR_PACKAGE_FIFO_TEST_ROOT
-          check_count package 29 cargo test --locked --release -p orr_package --lib
+          check_count package 31 cargo test --locked --release -p orr_package --lib
           check_count editor-collect-library 4 cargo test --locked --release -p orr_editor --no-default-features --features collect-dodge --lib collect
           selection=(--skip collect_actual_editor_gpu_edit_save_play_reopen)
           check_count editor-collect-cpu 2 cargo test --locked --release -p orr_editor --no-default-features --features collect-dodge --test collect_dodge
@@ -2664,7 +2685,7 @@ jobs:
           }
 
           unset ORR_PACKAGE_FIFO_TEST_ROOT
-          check_library package 29 0 cargo test --locked --release -p orr_package --lib
+          check_library package 31 0 cargo test --locked --release -p orr_package --lib
           for name in \
             project_identity::tests::canonical_roundtrip \
             project_identity::tests::rejects_duplicate_unknown_missing_null_and_invalid_types \
@@ -3791,7 +3812,7 @@ jobs:
           check_result ui-library 162 3 cargo test --locked --release -p orr_sample --no-default-features --features collect-ui,collect-progress,collect-sprites,project-export --lib
           check_result editor-panel 6 0 cargo test --locked --release -p orr_editor --no-default-features --features collect-ui --lib collect_ui_panel
           unset ORR_PACKAGE_FIFO_TEST_ROOT
-          check_result package 29 0 cargo test --locked --release -p orr_package --lib
+          check_result package 31 0 cargo test --locked --release -p orr_package --lib
         env:
           ORR_COLLECT_UI_EVIDENCE: /tmp/orr-collect-ui-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Build and pin separate no-UI runtime UI tools and exact libtest
