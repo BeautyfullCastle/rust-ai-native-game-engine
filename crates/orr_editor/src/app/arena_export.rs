@@ -17,7 +17,8 @@ pub(super) struct State {
     trusted: bool,
     next_id: u64,
     job: Option<Job>,
-    status: String,
+    pub(super) status: String,
+    completed_successfully: bool,
     uncertain_output: Option<PathBuf>,
 }
 struct Job {
@@ -73,10 +74,13 @@ impl State {
             format!("{identity}: worker ended without a reliable result. Publication is uncertain. Inspect destination before any explicit retry; nothing was deleted.")
         } else {
             match job.result.take().expect("observed result") {
-                Ok(report) => format!("{identity}: exported to {} ({} project files). This result belongs to the captured source, not later edits. No game was launched after verification.",report.output.display(),report.project_files),
+                Ok(report) => {
+                    self.completed_successfully = true;
+                    format!("{identity}: exported to {} ({} project files). This result belongs to the captured source, not later edits. No game was launched after verification.",report.output.display(),report.project_files)
+                }
                 Err(error) => {
                     // An error can occur after publication. Never assume absence or erase output.
-                    self.uncertain_output=Some(job.options.output.clone());
+                    self.uncertain_output = Some(job.options.output.clone());
                     format!("{identity}: {error}. Inspect destination before retrying; no automatic retry or deletion.")
                 }
             }
@@ -91,12 +95,19 @@ impl EditorApp {
         }
     }
     fn arena_export_dispatch(&mut self) -> Result<(), String> {
+        self.arena_export_dispatch_with(|name, task| thread::Builder::new().name(name).spawn(task))
+    }
+    fn arena_export_dispatch_with(
+        &mut self,
+        spawn: impl FnOnce(String, Box<dyn FnOnce() + Send>) -> std::io::Result<JoinHandle<()>>,
+    ) -> Result<(), String> {
         if self.arena_export.busy() {
             return Err(
                 "An Arena export worker is still owned; wait for terminal and joined completion"
                     .into(),
             );
         }
+        self.arena_export.completed_successfully = false;
         if self.arena_export.uncertain_output.is_some() {
             return Err("Inspect the previous destination before explicit retry".into());
         }
@@ -159,16 +170,18 @@ impl EditorApp {
         let (sender, receiver) = mpsc::sync_channel(1);
         let worker_options = options.clone();
         let worker_source = source.clone();
-        let handle = thread::Builder::new()
-            .name(format!("arena-export-{id}"))
-            .spawn(move || {
+        let handle = spawn(
+            format!("arena-export-{id}"),
+            Box::new(move || {
                 let result = orr_sample::project_export::export_arena_for_source(
                     &worker_options,
                     &worker_source,
                 );
                 let _ = sender.send(result);
-            })
-            .map_err(|e| format!("Worker could not start; no export was run: {e}"))?;
+            }),
+        )
+        .map_err(|e| format!("Worker could not start; no export was run: {e}"))?;
+        self.arena_export.completed_successfully = false;
         self.arena_export.next_id = id;
         self.arena_export.status = format!(
             "Job {id} exporting captured {} at checksum 0x{:016x}. Later edits are not included.",
@@ -250,6 +263,9 @@ impl EditorApp {
                     }
                 }
             }
+        }
+        if self.arena_export.completed_successfully {
+            ui.label("Arena export completed and joined");
         }
         ui.label(&self.arena_export.status);
     }

@@ -20,6 +20,8 @@ impl Editor {
             || self.sim.in_tx
             || self.input_phase() != input::Phase::Off
             || self.input_cleanup_pending()
+            || !self.screenshot_queries.is_empty()
+            || !self.screenshot_validations.is_empty()
             || self.is_dirty()
             || self
                 .pending
@@ -136,7 +138,11 @@ impl Editor {
         match (prepared.sprites(), sprites.bindings.as_ref()) {
             (None, None) => {}
             (Some(admitted), Some(loaded)) => {
-                if loaded.memory_dirty()
+                if crate::sprite_bindings::resolve_project(
+                    loaded.base(),
+                    &loaded.document().project,
+                )? != root
+                    || loaded.memory_dirty()
                     || fs::canonicalize(&loaded.path).map_err(|e| e.to_string())? != admitted.path
                     || loaded.document() != &admitted.document
                     || !loaded.matches_scene(path.to_str().ok_or("Scene path must be UTF-8")?)

@@ -119,10 +119,13 @@ fn actual_widget_generated_edited_project_relocates_and_runs_with_sprites() {
     h.get_by_label("Export saved Arena").click();
     h.run_steps(2);
     let deadline = Instant::now() + Duration::from_secs(30);
-    while !output.join("run-arena").exists() {
+    while h
+        .query_by_label("Arena export completed and joined")
+        .is_none()
+    {
         assert!(
             Instant::now() < deadline,
-            "actual widget export did not publish"
+            "actual widget export did not report terminal joined success"
         );
         h.run_steps(1);
         std::thread::sleep(Duration::from_millis(10));

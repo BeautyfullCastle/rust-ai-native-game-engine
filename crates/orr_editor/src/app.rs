@@ -908,6 +908,11 @@ impl EditorApp {
 
     /// Asks for a screenshot of the window after some frames, then quits.
     pub fn with_screenshot(mut self, job: ScreenshotJob) -> Self {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
+        if self.arena_export.busy() {
+            self.arena_export.status = "Screenshot mode refused while an Arena export worker is owned; wait for terminal and joined completion.".into();
+            return self;
+        }
         self.shot = Some(job);
         self
     }

@@ -159,3 +159,88 @@ fn referenced_cached_pixels_documents_and_missing_cache_are_checked() {
     );
     editor.arena_export_source(&root, &panel).unwrap();
 }
+#[test]
+fn stale_cached_clean_state_does_not_hide_host_transaction_proposal_or_play() {
+    for operation in ["tx.begin", "proposal.begin", "sim.start"] {
+        let (dir, mut editor, sprites) = fixture();
+        editor
+            .backend
+            .erp
+            .call(operation, json!({"label":"source guard"}))
+            .unwrap();
+        let document = editor
+            .backend
+            .erp
+            .call("scene.save", json!({"write":false,"source":"doc"}))
+            .unwrap();
+        assert!(
+            editor.arena_export_source(dir.path(), &sprites).is_err(),
+            "{operation}"
+        );
+        assert_eq!(
+            editor
+                .backend
+                .erp
+                .call("scene.save", json!({"write":false,"source":"doc"}))
+                .unwrap(),
+            document
+        );
+    }
+}
+#[test]
+fn actual_managed_control_pending_gesture_and_listener_are_preserved_and_refused() {
+    let (dir, mut editor, sprites) = fixture();
+    for phase in [
+        input::Phase::Claiming,
+        input::Phase::Active,
+        input::Phase::Releasing,
+    ] {
+        editor.input.phase = phase;
+        assert!(editor.arena_export_source(dir.path(), &sprites).is_err());
+        assert_eq!(editor.input.phase, phase);
+    }
+    editor.input.phase = input::Phase::Off;
+    for kind in [
+        Pend::Input(0, input::Op::Release),
+        Pend::Gesture(0, gestures::Reply::Begin),
+    ] {
+        editor.pending.insert(
+            u64::MAX,
+            Pending {
+                kind,
+                posted_at: Instant::now(),
+            },
+        );
+        assert!(editor.arena_export_source(dir.path(), &sprites).is_err());
+        assert!(editor.pending.contains_key(&u64::MAX));
+        editor.pending.remove(&u64::MAX);
+    }
+    editor.backend.url = Some("ws://127.0.0.1:7777".into());
+    assert!(editor.arena_export_source(dir.path(), &sprites).is_err());
+    assert!(editor.erp_status().is_some());
+    editor.backend.url = None;
+    editor.begin_edit("unfinished source gesture");
+    assert!(editor.in_gesture());
+    assert!(editor.arena_export_source(dir.path(), &sprites).is_err());
+    assert!(editor.in_gesture());
+}
+#[test]
+fn missing_frame_stale_checksum_and_clean_saved_unloaded_sprites_fail_closed() {
+    let (dir, mut editor, sprites) = fixture();
+    let snapshot = editor.snapshot.take();
+    assert!(editor.arena_export_source(dir.path(), &sprites).is_err());
+    editor.snapshot = snapshot;
+    editor.checksum ^= 1;
+    assert!(editor.arena_export_source(dir.path(), &sprites).is_err());
+    editor.checksum ^= 1;
+    fs::write(
+        dir.path().join("view.json"),
+        br#"{"version":2,"scene":"arena.scene.yaml","project":".","bindings":{}}"#,
+    )
+    .unwrap();
+    fs::write(dir.path().join("orr.project.json"),br#"{"schema":2,"engine":"*","entry":{"game":"arena","scene":"arena.scene.yaml","sprites":"view.json"}}"#).unwrap();
+    assert!(editor
+        .arena_export_source(dir.path(), &sprites)
+        .unwrap_err()
+        .contains("Declared and loaded"));
+}

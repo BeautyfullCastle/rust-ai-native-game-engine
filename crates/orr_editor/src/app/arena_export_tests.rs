@@ -193,3 +193,290 @@ fn actual_tab_is_explicit_and_guidance_does_not_dispatch() {
     assert!(!h.state().arena_export.trusted);
     assert!(h.state().ui.dialog.is_none());
 }
+#[test]
+fn terminal_disconnected_without_result_is_uncertain_and_joined() {
+    let (dir, mut app) = fixture();
+    let release = synthetic_job(&mut app, dir.path());
+    release.send(()).unwrap();
+    reap(&mut app);
+    app.arena_export.uncertain_output = None;
+    let source = app
+        .editor
+        .arena_export_source(dir.path(), &app.sprites)
+        .unwrap();
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let handle = thread::spawn(move || drop(sender));
+    while !handle.is_finished() {
+        thread::yield_now();
+    }
+    app.arena_export.job = Some(Job {
+        id: 9,
+        source,
+        options: ExportOptions {
+            project: dir.path().into(),
+            runtime: dir.path().join("runtime"),
+            runtime_sha256: "a".repeat(64),
+            output: dir.path().join("out"),
+            trusted_runtime: true,
+            source_revision: None,
+        },
+        receiver,
+        handle: Some(handle),
+        result: None,
+        disconnected: false,
+    });
+    app.arena_export.poll();
+    assert!(!app.arena_export.busy());
+    assert!(app.arena_export.status.contains("uncertain"));
+    assert!(!app.arena_export.completed_successfully);
+}
+#[test]
+fn owned_job_destructor_waits_for_delayed_worker_release() {
+    let (dir, mut app) = fixture();
+    let release = synthetic_job(&mut app, dir.path());
+    let job = app.arena_export.job.take().unwrap();
+    let (done, finished) = mpsc::sync_channel(1);
+    let dropper = thread::spawn(move || {
+        drop(job);
+        done.send(()).unwrap();
+    });
+    assert!(
+        finished.recv_timeout(Duration::from_millis(30)).is_err(),
+        "Drop cannot complete while worker waits"
+    );
+    release.send(()).unwrap();
+    finished.recv_timeout(Duration::from_secs(10)).unwrap();
+    dropper.join().unwrap();
+}
+#[test]
+fn screenshot_builder_refuses_active_job_and_preserves_inactive_behavior() {
+    let (dir, mut app) = fixture();
+    let release = synthetic_job(&mut app, dir.path());
+    app = app.with_screenshot(crate::app::ScreenshotJob::new(
+        dir.path().join("shot.png"),
+        1,
+    ));
+    assert!(app.shot.is_none());
+    assert!(app.arena_export.busy());
+    assert!(app.arena_export.status.contains("refused"));
+    release.send(()).unwrap();
+    reap(&mut app);
+    app = app.with_screenshot(crate::app::ScreenshotJob::new(
+        dir.path().join("shot.png"),
+        1,
+    ));
+    assert!(app.shot.is_some());
+}
+fn options(app: &mut EditorApp, dir: &std::path::Path) {
+    app.arena_export.project = dir.display().to_string();
+    app.arena_export.runtime = dir.join("unused").display().to_string();
+    app.arena_export.hash = "a".repeat(64);
+    app.arena_export.output = dir.join("out").display().to_string();
+    app.arena_export.trusted = true;
+}
+#[test]
+fn spawn_failure_is_terminal_without_running_worker_or_publishing() {
+    let (dir, mut app) = fixture();
+    options(&mut app, dir.path());
+    let error = app
+        .arena_export_dispatch_with(|_, _task| Err(std::io::Error::other("injected spawn failure")))
+        .unwrap_err();
+    assert!(error.contains("no export was run"));
+    assert!(!app.arena_export.busy());
+    assert!(!dir.path().join("out").exists());
+    assert_eq!(app.arena_export.next_id, 0);
+}
+#[test]
+fn path_dialog_refuses_and_completion_retains_pre_reload_identity() {
+    let (dir, mut app) = fixture();
+    app.ui.dialog = Some(crate::app::Dialog {
+        kind: crate::app::DialogKind::Open,
+        text: "unchanged".into(),
+    });
+    assert!(app
+        .arena_export_dispatch()
+        .unwrap_err()
+        .contains("path dialogs"));
+    assert_eq!(app.ui.dialog.as_ref().unwrap().text, "unchanged");
+    app.ui.dialog = None;
+    let release = synthetic_job(&mut app, dir.path());
+    let captured = app
+        .arena_export
+        .job
+        .as_ref()
+        .unwrap()
+        .source
+        .canonical_scene()
+        .to_owned();
+    let other = dir.path().join("other.scene.yaml");
+    fs::copy(&captured, &other).unwrap();
+    assert!(app.editor.open_path(&other));
+    app.editor.sync();
+    release.send(()).unwrap();
+    reap(&mut app);
+    assert!(app.arena_export.status.contains(captured.to_str().unwrap()));
+    assert!(!app.arena_export.status.contains("other.scene.yaml"));
+}
+#[test]
+fn same_frame_dispatch_root_close_vetoes_and_escape_is_not_override() {
+    let (dir, mut app) = fixture();
+    let ctx = egui::Context::default();
+    let mut release = None;
+    let mut input = egui::RawInput::default();
+    input
+        .viewports
+        .entry(egui::ViewportId::ROOT)
+        .or_default()
+        .events
+        .push(egui::ViewportEvent::Close);
+    let output = ctx.run(input, |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            app.with_close_review(ui, |app, _| {
+                release = Some(synthetic_job(app, dir.path()));
+            })
+        });
+    });
+    assert!(output.viewport_output[&egui::ViewportId::ROOT]
+        .commands
+        .iter()
+        .any(|c| matches!(c, egui::ViewportCommand::CancelClose)));
+    assert!(app.arena_export.busy());
+    release.take().unwrap().send(()).unwrap();
+    reap(&mut app);
+}
+#[test]
+fn actual_widget_runtime_hash_changes_clear_trust_and_inspection_does_not_retry() {
+    use egui_kittest::kittest::NodeT;
+    let (dir, mut app) = fixture();
+    options(&mut app, dir.path());
+    app.ui.bottom_tab = crate::app::BottomTab::ArenaExport;
+    app.arena_export.uncertain_output = Some(dir.path().join("out"));
+    fs::create_dir(dir.path().join("out")).unwrap();
+    fs::write(dir.path().join("out/keep"), "preserve").unwrap();
+    let mut h = egui_kittest::Harness::builder()
+        .with_size([1500.0, 1000.0])
+        .renderer(egui_kittest::LazyRenderer::Uninitialized {
+            textures_delta: Default::default(),
+            builder: None,
+        })
+        .build_eframe(move |_| app);
+    h.run_steps(3);
+    for label in ["Runtime path", "Expected lowercase SHA256"] {
+        h.state_mut().arena_export.trusted = true;
+        h.get_by_role_and_label(egui::accesskit::Role::TextInput, label)
+            .type_text("x");
+        h.run_steps(2);
+        assert!(!h.state().arena_export.trusted);
+    }
+    h.get_by_label("Inspect previous destination").click();
+    h.run_steps(2);
+    assert!(h.state().arena_export.uncertain_output.is_none());
+    assert!(!h.state().arena_export.busy());
+    assert_eq!(
+        fs::read_to_string(dir.path().join("out/keep")).unwrap(),
+        "preserve"
+    );
+}
+#[cfg(feature = "mesh-navigation")]
+#[test]
+fn active_arena_job_refuses_mesh_whole_app_replacement() {
+    let (dir, mut app) = fixture();
+    let release = synthetic_job(&mut app, dir.path());
+    assert!(app.mesh_workspace_blocker().is_some());
+    assert!(app.editor.mesh_workspace_source_stamp().is_err());
+    assert!(app.arena_export.busy());
+    release.send(()).unwrap();
+    reap(&mut app);
+}
+#[test]
+fn remote_capture_and_encoder_refuse_without_cancellation() {
+    let (_dir, mut app) = fixture();
+    let state = app.editor.capture_view_state();
+    app.remote_capture = Some(crate::app::RemoteCapture {
+        request: orr_remote::CaptureRequest {
+            endpoint_id: 1,
+            serial: 1,
+            options: orr_remote::ScreenshotOptions {
+                max_width: 32,
+                max_height: 32,
+            },
+            requested: state,
+            deadline: Instant::now() + Duration::from_secs(5),
+        },
+        pass: None,
+        screenshot_requested: false,
+        image_received: false,
+        orphaned: false,
+    });
+    assert!(app.arena_export_dispatch().unwrap_err().contains("capture"));
+    assert!(app.remote_capture.is_some());
+    app.remote_capture = None;
+    app.encoder = Some(crate::app::EncoderWorker {
+        serial: 1,
+        pass: crate::app::CapturePass {
+            state,
+            frame_seq: 1,
+            ui_frame: 1,
+            framebuffer: crate::app::FramebufferInfo {
+                viewport: egui::ViewportId::ROOT,
+                logical_width: 1.0,
+                logical_height: 1.0,
+                pixels_per_point: 1.0,
+                width: 1,
+                height: 1,
+            },
+        },
+        handle: thread::spawn(|| Ok(Vec::new())),
+    });
+    assert!(app.arena_export_dispatch().unwrap_err().contains("capture"));
+    app.encoder.take().unwrap().handle.join().unwrap().unwrap();
+}
+#[cfg(feature = "project-ui")]
+#[test]
+fn loaded_ui_is_refused_even_without_manifest_declaration() {
+    let (_dir, mut app) = fixture();
+    app.project_ui = Some(crate::project_ui::Preview {
+        descriptor: orr_package::ProjectUi {
+            profile: orr_package::ProjectUiProfile::ArenaKoreanV1,
+            font: orr_package::ProjectFont {
+                package: "unused".into(),
+                asset: "font.ttf".into(),
+            },
+            document: None,
+        },
+        font_bytes: 1,
+    });
+    assert!(app
+        .arena_export_dispatch()
+        .unwrap_err()
+        .contains("Loaded UI"));
+    assert!(app.project_ui.is_some());
+}
+#[cfg(all(feature = "tilemap", feature = "project-create"))]
+#[test]
+fn loaded_tilemap_is_refused_independently_of_saved_manifest() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("tiles");
+    orr_sample::project_create::create_tilemap(&orr_sample::project_create::CreateOptions {
+        output: root.clone(),
+        template: "arena-tilemap-2d-v1".into(),
+        seed: "arena-export-refusal".into(),
+    })
+    .unwrap();
+    let prepared = crate::project::PreparedProject::open(&root).unwrap();
+    let mut editor = Editor::start(&prepared.host_spec()).unwrap();
+    editor.sync();
+    let mut app = prepared
+        .into_app(editor, None, &egui::Context::default())
+        .unwrap();
+    let path = root.join("orr.project.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    manifest["entry"].as_object_mut().unwrap().remove("tilemap");
+    fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    assert!(app
+        .arena_export_dispatch()
+        .unwrap_err()
+        .contains("Loaded tilemap"));
+    assert!(app.tilemap.is_some());
+}
