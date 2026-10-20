@@ -887,12 +887,24 @@ fn actual_cli_rectangle_save_reopen_play_literal_cells() {
     let play_cancelled = capture(&mut h, &evidence, "play-cancelled", &mut captures);
     assert_eq!(h.state().editor.mode(), Mode::Play);
     assert_eq!(play_cancelled.tick(), 1);
+    // This is the reachable record-mode PlaySession transition, not a
+    // fabricated replay Viewer or a disconnected-host state.
+    let timeline = h
+        .state()
+        .editor
+        .timeline()
+        .expect("actual PlaySession timeline");
+    assert!(timeline.mode != orr_bridge::PlayMode::Viewer);
     assert_eq!(
         h.state().tilemap.as_ref().unwrap().history_snapshot(),
         initial_history
     );
     assert_eq!(files(&root), source_files);
     click(&mut h, LBL_STOP);
+    assert!(
+        h.state().editor.timeline().is_none(),
+        "Stop leaves the PlaySession timeline"
+    );
     cancelled!("play-stopped");
 
     let end = begin(&mut h, (1, 1), (4, 2));

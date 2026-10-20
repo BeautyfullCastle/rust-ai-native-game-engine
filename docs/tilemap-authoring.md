@@ -205,3 +205,10 @@ manufacture a same-admission replay-viewer transition: attaching a viewer uses a
 different host/epoch and is already outside the admitted editable lifecycle.
 None of these new cases has been executed in the source-only implementation
 stage; counts are authored test inventory, not passing results.
+
+The Rectangle App case checks a real Play-session timeline becoming present and
+its removal on Stop. It does not execute a replay Viewer or disconnected-host
+transition. The mandatory legacy tilemap cases cover the epoch pin but do not
+supply those missing transitions; separate editor transport tests are not part
+of the tilemap gate census. The existing read-only/editability guards remain in
+production, without claiming those two scenarios were executed by this suite.
