@@ -71,8 +71,8 @@ UI_CENSUS = {
     "collect-authored": (87, 0, 19, False), "progress-disabled": (87, 0, 19, False),
     "progress": (113, 2, 19, False), "progress-joint": (200, 4, 25, True),
     "progress-pinned": (113, 2, 19, False), "collect-creator": (132, 2, 19, False),
-    "collect-ui": (187, 4, 25, True), "collect-ui-creator": (208, 4, 25, True),
-    "image-reimport": (198, 5, 25, True),
+    "collect-ui": (189, 4, 25, True), "collect-ui-creator": (210, 4, 25, True),
+    "image-reimport": (200, 5, 25, True),
 }
 
 

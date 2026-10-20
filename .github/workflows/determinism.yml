@@ -3864,6 +3864,8 @@ jobs:
               "collect_ui::tests::keyboard_activation_requires_unoccluded_button_center",
               "collect_ui::tests::korean_label_uses_measured_wrapped_galley_and_authored_clip",
               "collect_ui::tests::later_filled_container_blocks_covered_button_but_its_child_wins",
+              "collect_ui::tests::layout_document_matches_rendered_frame_order_geometry_and_clips",
+              "collect_ui::tests::layout_document_rejects_invalid_document_and_viewport",
               "collect_ui::tests::overlap_only_last_button_receives_release_and_drag_cannot_retarget",
               "collect_ui::tests::parent_relative_layout_and_clipping_apply_to_paint_and_hit_testing",
               "collect_ui::tests::real_pointer_events_dispatch_all_actions_and_screen_capture",
@@ -4075,7 +4077,7 @@ jobs:
           assert not re.search(r'SKIP:|negative skipped|without capture|direct relocated execution used|source-hiding acceptance not requested', text, re.I)
           PYRESULT
           }
-          check_result ui-library 187 4 cargo test --locked --release -p orr_sample --no-default-features --features collect-ui,collect-progress,collect-sprites,project-export --lib
+          check_result ui-library 189 4 cargo test --locked --release -p orr_sample --no-default-features --features collect-ui,collect-progress,collect-sprites,project-export --lib
           check_result editor-panel 6 0 cargo test --locked --release -p orr_editor --no-default-features --features collect-ui --lib collect_ui_panel
           unset ORR_PACKAGE_FIFO_TEST_ROOT
           check_result package 31 0 cargo test --locked --release -p orr_package --lib
@@ -4165,7 +4167,8 @@ jobs:
           assert names('pinned-library-list.txt') == sorted(expected['ui-library'])
           # The same UI producer already required 181 entries after #279 (not 165).
           # #282 adds nine ordinary tests and one separately executed ignored App hook.
-          assert len(names('pinned-library-list.txt')) == 191
+          # Include the two ordinary collect_ui layout_document tests.
+          assert len(names('pinned-library-list.txt')) == 193
           assert names('pinned-library-ignored.txt') == sorted(expected['ignored-library-hooks'])
           PYHOOKS
         env:
@@ -4338,6 +4341,8 @@ jobs:
               "collect_ui::tests::keyboard_activation_requires_unoccluded_button_center",
               "collect_ui::tests::korean_label_uses_measured_wrapped_galley_and_authored_clip",
               "collect_ui::tests::later_filled_container_blocks_covered_button_but_its_child_wins",
+              "collect_ui::tests::layout_document_matches_rendered_frame_order_geometry_and_clips",
+              "collect_ui::tests::layout_document_rejects_invalid_document_and_viewport",
               "collect_ui::tests::overlap_only_last_button_receives_release_and_drag_cannot_retarget",
               "collect_ui::tests::parent_relative_layout_and_clipping_apply_to_paint_and_hit_testing",
               "collect_ui::tests::real_pointer_events_dispatch_all_actions_and_screen_capture",
@@ -4581,6 +4586,8 @@ jobs:
               "collect_ui::tests::keyboard_activation_requires_unoccluded_button_center",
               "collect_ui::tests::korean_label_uses_measured_wrapped_galley_and_authored_clip",
               "collect_ui::tests::later_filled_container_blocks_covered_button_but_its_child_wins",
+              "collect_ui::tests::layout_document_matches_rendered_frame_order_geometry_and_clips",
+              "collect_ui::tests::layout_document_rejects_invalid_document_and_viewport",
               "collect_ui::tests::overlap_only_last_button_receives_release_and_drag_cannot_retarget",
               "collect_ui::tests::parent_relative_layout_and_clipping_apply_to_paint_and_hit_testing",
               "collect_ui::tests::real_pointer_events_dispatch_all_actions_and_screen_capture",
@@ -4700,7 +4707,7 @@ jobs:
           assert not re.search(r'SKIP:|negative skipped|without capture|direct relocated execution used|source-hiding acceptance not requested', text, re.I)
           PYRESULT
           }
-          check_result ui-creator-library 208 4 cargo test --locked --release -p orr_sample --no-default-features --features project-create,project-export,collect-ui,collect-sprites,collect-progress --lib
+          check_result ui-creator-library 210 4 cargo test --locked --release -p orr_sample --no-default-features --features project-create,project-export,collect-ui,collect-sprites,collect-progress --lib
           check_result ui-cli 6 0 cargo test --locked --release -p orr_sample --no-default-features --features project-create,project-export,collect-ui,collect-sprites,collect-progress --test new_arena_cli
           check_result non-ui-creator 19 0 cargo test --locked --release -p orr_sample --no-default-features --features project-create,collect-dodge --lib project_create
         env:
@@ -4787,7 +4794,7 @@ jobs:
           expected = json.loads((root / 'expected-inventories.json').read_text())
           def names(file): return sorted(re.findall(r'^([A-Za-z0-9_:]+): test$', (root/file).read_text(), re.M))
           assert names('pinned-library-list.txt') == sorted(expected['minimal-ui-progress-library'])
-          assert len(names('pinned-library-list.txt')) == 139
+          assert len(names('pinned-library-list.txt')) == 141
           assert names('pinned-library-ignored.txt') == sorted(expected['ignored-library-hooks'])
           PYHOOKS
         env:
@@ -5042,6 +5049,8 @@ jobs:
                 "collect_ui::tests::keyboard_activation_requires_unoccluded_button_center",
                 "collect_ui::tests::korean_label_uses_measured_wrapped_galley_and_authored_clip",
                 "collect_ui::tests::later_filled_container_blocks_covered_button_but_its_child_wins",
+                "collect_ui::tests::layout_document_matches_rendered_frame_order_geometry_and_clips",
+                "collect_ui::tests::layout_document_rejects_invalid_document_and_viewport",
                 "collect_ui::tests::overlap_only_last_button_receives_release_and_drag_cannot_retarget",
                 "collect_ui::tests::parent_relative_layout_and_clipping_apply_to_paint_and_hit_testing",
                 "collect_ui::tests::real_pointer_events_dispatch_all_actions_and_screen_capture",
@@ -5178,7 +5187,7 @@ jobs:
                 "game_progress::tests::concurrent_process_child",
                 "image_reimport::tests::reimport_real_pixels_export_relocates_with_sources_hidden_and_read_only"
               ],
-              "passed": 198,
+              "passed": 200,
               "ignored": 5,
               "children": 2,
               "features": [
@@ -5199,7 +5208,7 @@ jobs:
                   0
                 ],
                 [
-                  198,
+                  200,
                   0,
                   5
                 ]

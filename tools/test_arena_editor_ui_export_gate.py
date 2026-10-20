@@ -163,7 +163,7 @@ class Tests(unittest.TestCase):
     def test_exact_feature_profiles_and_legacy_inventories(self):
         self.assertEqual((len(gate.legacy.SAMPLE),len(gate.legacy.UI_SAMPLE_BASE),len(gate.legacy.UI_SAMPLE)),(16,3,6))
         self.assertEqual((len(gate.legacy.UI_EDITOR),len(gate.legacy.UI_IDENTITY)),(2,3))
-        self.assertEqual(gate.legacy.UI_CENSUS['image-reimport'],(198,5,25,True))
+        self.assertEqual(gate.legacy.UI_CENSUS['image-reimport'],(200,5,25,True))
         for label,package,target,kind,requested,features in gate.SPECS:
             self.assertEqual(len(features),len(set(features)))
         self.assertEqual(len({(s[1],s[2],s[3],tuple(s[5])) for s in gate.SPECS}),4)
