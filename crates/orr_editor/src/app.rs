@@ -23,6 +23,12 @@ use crate::viewport::{self, GpuViewport};
 mod close_review;
 #[path = "app/work_status.rs"]
 mod work_status;
+#[path = "app/export_guide.rs"]
+mod export_guide;
+
+#[cfg(test)]
+#[path = "app/export_guide_tests.rs"]
+mod export_guide_tests;
 
 #[cfg(test)]
 #[path = "app/work_status_tests.rs"]
@@ -129,6 +135,8 @@ pub enum BottomTab {
     Agent,
     /// Explicitly opened, read-only inventory of retained authoring work.
     UnsavedWork,
+    /// User-selected guidance to existing export routes, not an export permit.
+    ExportGuide,
 }
 
 /// A path prompt (no native file dialog in the MVP).
@@ -2587,6 +2595,7 @@ impl EditorApp {
             ui.selectable_value(&mut self.ui.bottom_tab, BottomTab::History, "History");
             ui.selectable_value(&mut self.ui.bottom_tab, BottomTab::Agent, "Agent");
             ui.selectable_value(&mut self.ui.bottom_tab, BottomTab::UnsavedWork, "Unsaved work details");
+            ui.selectable_value(&mut self.ui.bottom_tab, BottomTab::ExportGuide, "Export guide");
             let unseen = self.editor.feed().unseen();
             if unseen > 0 && self.ui.bottom_tab != BottomTab::Agent {
                 // Badge: what agents did since the tab was last shown (reads excluded).
@@ -2597,6 +2606,7 @@ impl EditorApp {
         ui.separator();
         match self.ui.bottom_tab {
             BottomTab::UnsavedWork => self.show_close_review(ui),
+            BottomTab::ExportGuide => self.show_export_guide(ui),
             BottomTab::Timeline => self.timeline(ui),
             BottomTab::History => self.history(ui),
             BottomTab::Agent => {

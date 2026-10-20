@@ -64,6 +64,9 @@ impl Panel {
                         &mut self.trusted_runtime,
                         "I trust this local mesh player executable",
                     );
+                    if self.runtime.trim().is_empty() { ui.label("Required: choose a trusted mesh player executable."); }
+                    if self.output.trim().is_empty() { ui.label("Required: enter a new output directory."); }
+                    if !self.trusted_runtime { ui.label("Required: explicitly confirm runtime trust; format checks do not establish trust."); }
                     let can_export = blocked.is_none()
                         && editor.game() == EditorGame::MeshNavigation
                         && editor.mode() == Mode::Edit
