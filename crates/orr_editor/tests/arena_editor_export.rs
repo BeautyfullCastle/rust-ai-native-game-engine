@@ -220,13 +220,11 @@ fn actual_widget_generated_edited_project_relocates_and_runs_with_sprites() {
     let expected = recorded(
         &root,
         "source-move-fire",
-        Command::new(&runtime).arg("--project").arg(&project).args([
-            "--headless",
-            "--ticks",
-            "3",
-            "--hold",
-            "right,fire",
-        ]),
+        Command::new(&runtime)
+            .current_dir(&root)
+            .arg("--project")
+            .arg(&project)
+            .args(["--headless", "--ticks", "3", "--hold", "right,fire"]),
     );
     let isolated = || {
         let mut cmd = Command::new("bwrap");
