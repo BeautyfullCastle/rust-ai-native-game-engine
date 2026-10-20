@@ -1421,3 +1421,6 @@ mod alignment_acceptance;
 
 #[path = "collect_ui_distribution_acceptance_tests.rs"]
 mod distribution_acceptance;
+
+#[path = "collect_ui_reparent_tests.rs"]
+mod reparent_tests;
