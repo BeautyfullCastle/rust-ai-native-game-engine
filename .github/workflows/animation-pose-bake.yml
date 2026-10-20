@@ -34,6 +34,19 @@ jobs:
           ORR_ANIMATION_POSE_BAKE_EVIDENCE: ${{ runner.temp }}/orr-animation-pose-bake-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
         shell: bash
         run: python -B tools/animation_pose_bake_gate.py '${{ matrix.mode }}'
+      - name: Grouped sequence CPU and software Vulkan consumers
+        if: matrix.mode == 'gpu' && runner.os == 'Linux' && runner.arch == 'X64'
+        env:
+          ORR_ANIMATION_SEQUENCE_EVIDENCE: ${{ runner.temp }}/orr-animation-sequence-${{ github.run_id }}-${{ github.run_attempt }}
+        shell: bash
+        run: python -B tools/animation_clip_sequence_gate.py
+      - name: Retain sequence receipts and original failures
+        if: always() && matrix.mode == 'gpu' && runner.os == 'Linux' && runner.arch == 'X64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: animation-sequence-linux-x64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/orr-animation-sequence-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
       - name: Retain evidence and failures
         if: always()
         uses: actions/upload-artifact@v4
