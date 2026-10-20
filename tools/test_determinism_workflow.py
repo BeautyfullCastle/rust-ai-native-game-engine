@@ -9,6 +9,7 @@ job results and library files. They do not run the Rust targets or emulate the
 GitHub Actions scheduler or native Windows/macOS shells and toolchains.
 """
 
+import copy
 import hashlib
 import json
 import os
@@ -496,7 +497,92 @@ class DeterminismWorkflowTests(unittest.TestCase):
                     "retention-days": 7,
                 })
                 build = next(step for step in steps if step.get("run") == command)
-                self.assertEqual(steps.index(upload), steps.index(build) + 1)
+                self.assert_release_timing_upload_position(job, steps, build, upload)
+
+    def assert_release_timing_upload_position(self, job, steps, build, upload):
+        build_index = steps.index(build)
+        if job == "native":
+            # Native CLI identity verification and its retained evidence must run
+            # after the workspace tests, even on failure, before timing upload.
+            evidence = "${{ runner.temp }}/native-assemble-${{ github.run_id }}-${{ github.run_attempt }}"
+            self.assertEqual(steps[build_index + 1:build_index + 3], [
+                {
+                    "name": "Verify native assemble CLI and source identity after workspace tests",
+                    "if": "always()",
+                    "run": f'python -B tools/native_assemble_cli_prerequisite.py verify --evidence "{evidence}"',
+                },
+                {
+                    "name": "Retain native assemble CLI prerequisite and failure evidence",
+                    "if": "always()",
+                    "uses": "actions/upload-artifact@v4",
+                    "with": {
+                        "name": "native-assemble-${{ matrix.name }}",
+                        "path": evidence,
+                        "if-no-files-found": "error",
+                        "retention-days": 7,
+                    },
+                },
+            ])
+            self.assertEqual(steps.index(upload), build_index + 3)
+        else:
+            self.assertEqual(steps.index(upload), build_index + 1)
+
+    def test_native_timing_rejects_missing_reordered_or_altered_prerequisites(self):
+        original = self.jobs["native"]["steps"]
+        build_index = next(i for i, step in enumerate(original) if step.get("run") == NATIVE_TEST)
+        mutations = []
+        for offset in (1, 2):
+            missing = copy.deepcopy(original)
+            del missing[build_index + offset]
+            mutations.append((f"missing prerequisite {offset}", missing))
+            prerequisite = original[build_index + offset]
+            # Cover every field, including nested artifact policy, and reject
+            # added soft-failure behavior as well as omitted/changed fields.
+            paths = [(key,) for key in prerequisite]
+            paths += [("with", key) for key in prerequisite.get("with", {})]
+            for path in paths:
+                for operation in ("remove", "alter"):
+                    changed = copy.deepcopy(original)
+                    target = changed[build_index + offset]
+                    for key in path[:-1]:
+                        target = target[key]
+                    if operation == "remove":
+                        del target[path[-1]]
+                    else:
+                        target[path[-1]] = "altered"
+                    mutations.append((f"{operation} prerequisite {offset} {path}", changed))
+            softened = copy.deepcopy(original)
+            softened[build_index + offset]["continue-on-error"] = True
+            mutations.append((f"soft-fail prerequisite {offset}", softened))
+        reordered = copy.deepcopy(original)
+        reordered[build_index + 1:build_index + 3] = reversed(reordered[build_index + 1:build_index + 3])
+        mutations.append(("reordered prerequisites", reordered))
+        for label, steps in mutations:
+            with self.subTest(mutation=label):
+                upload = next(step for step in steps if step == original[build_index + 3])
+                with self.assertRaises(AssertionError):
+                    self.assert_release_timing_upload_position("native", steps, steps[build_index], upload)
+
+    def test_release_timing_rejects_inserted_steps_and_detached_uploads(self):
+        for job, command, offset in (("native", NATIVE_TEST, 3), ("sample-build", SAMPLE_TEST, 1)):
+            original = self.jobs[job]["steps"]
+            build_index = next(i for i, step in enumerate(original) if step.get("run") == command)
+            # No arbitrary step is permitted anywhere between build and upload.
+            for position in range(1, offset + 1):
+                with self.subTest(job=job, inserted_after=position):
+                    steps = copy.deepcopy(original)
+                    upload = steps[build_index + offset]
+                    steps.insert(build_index + position, {"run": "echo unrelated"})
+                    with self.assertRaises(AssertionError):
+                        self.assert_release_timing_upload_position(job, steps, steps[build_index], upload)
+            for destination in (build_index, len(original) - 1):
+                with self.subTest(job=job, moved_to=destination):
+                    steps = copy.deepcopy(original)
+                    build = steps[build_index]
+                    upload = steps.pop(build_index + offset)
+                    steps.insert(destination, upload)
+                    with self.assertRaises(AssertionError):
+                        self.assert_release_timing_upload_position(job, steps, build, upload)
 
     def test_arena_native_window_smoke_requires_real_windows_and_uploads_evidence(self):
         steps = self.jobs["sample-build"]["steps"]
