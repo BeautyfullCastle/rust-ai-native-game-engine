@@ -3314,3 +3314,7 @@ pub(crate) mod mesh_hazards_player;
 #[cfg(all(test, feature = "tilemap", feature = "project-create", target_os = "linux"))]
 #[path = "app/tilemap_tests.rs"]
 mod tilemap_tests;
+
+#[cfg(all(test, feature = "tilemap", feature = "project-create", target_os = "linux"))]
+#[path = "app/tilemap_fill_tests.rs"]
+mod tilemap_fill_tests;
