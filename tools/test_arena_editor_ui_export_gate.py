@@ -17,7 +17,7 @@ import test_arena_editor_export_gate as old
 
 
 def write(path, obj):
-    path.write_text(json.dumps(obj,ensure_ascii=False))
+    path.write_text(json.dumps(obj,ensure_ascii=False), encoding="utf-8")
 
 
 def png(path, pixels, width=512, height=512):
@@ -69,8 +69,8 @@ class Tests(unittest.TestCase):
         write(project/'orr.packages.lock.json',lock)
         source_manifest = gate.read(project/'orr.project.json')
         source_manifest['entry']['scene'] = 'arena.scene.yaml'
-        (project/'arena.scene.yaml').write_text('fixture scene')
-        (project/'README.md').write_text('source-only documentation is preserved, not exported')
+        (project/'arena.scene.yaml').write_text('fixture scene', encoding="utf-8")
+        (project/'README.md').write_text('source-only documentation is preserved, not exported', encoding="utf-8")
         source_manifest['entry']['ui'] = {'profile':'arena-korean-v1','font':{'package':'korean-game-ui','asset':'OrreryKoreanUI.otf'}}
         write(project/'orr.project.json',source_manifest)
         bundle = root/'bundle'; shutil.rmtree(bundle); (bundle/'bin').mkdir(parents=True)
@@ -89,7 +89,7 @@ class Tests(unittest.TestCase):
             entry['role']=roles.get(entry['path'],'package_manifest' if entry['path'].endswith('/orr.package.json') else 'package_asset')
         manifest = {'schema':1,'payload':payload,'content_digest':hashlib.sha256(b'orrery.arena.export.content.v1\0'+json.dumps(payload,ensure_ascii=False,separators=(',',':')).encode()).hexdigest()}
         write(bundle/'orr.export.json',manifest)
-        (root/'terminal-joined-success.txt').write_text(f"Actual export widget reached terminal joined success for captured scene {root/'project/arena.scene.yaml'} at checksum {payload['initial_checksum']}\n")
+        (root/'terminal-joined-success.txt').write_text(f"Actual export widget reached terminal joined success for captured scene {root/'project/arena.scene.yaml'} at checksum {payload['initial_checksum']}\n", encoding="utf-8")
         r.update(source_files=gate.legacy.files(project),source_files_before=gate.legacy.files(project),source_files_after=gate.legacy.files(project),bundle_files=gate.legacy.files(bundle),commands=list(gate.STAGES))
         write(root/'source-files-before.json',r['source_files'])
         write(root/'producer-receipt.json',{key:r[key] for key in ('source_head','source_tree','runtime','test_producer')})
@@ -97,11 +97,11 @@ class Tests(unittest.TestCase):
         write(root/'app-consumer-producer.json',{'source_head':r['source_head'],'source_tree':r['source_tree'],'original':str(gate.producer_path('app-harness')),'copied':str(root/'app-ui-consumer'),'sha256':report['producers']['app-harness']['sha256'],'test':gate.APP})
         write(root/'app-restart-receipt.json',{'bundle':str(bundle),'initial_checksum':payload['initial_checksum'],'replayed_checksums':list(range(2,14)),
             'actual_widget_dispatch':True,'restart_tick':0,'original_entities_positions_players_restored':True})
-        (root/'project-only.stdout.txt').write_text(''); (root/'project-only.stderr.txt').write_text(gate.DIAGNOSTIC+'\n')
-        (root/'project-only-export-rejection.txt').write_text(gate.EXPORT_DIAGNOSTIC)
+        (root/'project-only.stdout.txt').write_text('', encoding="utf-8"); (root/'project-only.stderr.txt').write_text(gate.DIAGNOSTIC+'\n', encoding="utf-8")
+        (root/'project-only-export-rejection.txt').write_text(gate.EXPORT_DIAGNOSTIC, encoding="utf-8")
         write(root/'project-only-runtime.json',dict(gate.bound('project-runtime'),status=1,stdout='project-only.stdout.txt',stderr='project-only.stderr.txt',export_error=gate.EXPORT_DIAGNOSTIC,published=False))
         for stage,name in [('isolated-ui-controls',gate.MODULE),('isolated-app-restart',gate.APP)]:
-            (root/(stage+'.stdout.txt')).write_text(gate.CONSUMER_PROOF+summary(name,3 if name == gate.MODULE else 2)); (root/(stage+'.stderr.txt')).write_text('')
+            (root/(stage+'.stdout.txt')).write_text(gate.CONSUMER_PROOF+summary(name,3 if name == gate.MODULE else 2), encoding="utf-8"); (root/(stage+'.stderr.txt')).write_text('', encoding="utf-8")
         commands=[]
         for stage in gate.STAGES:
             program,args,environment,status = gate.expected_command(root,stage)
@@ -147,7 +147,7 @@ class Tests(unittest.TestCase):
         return root,r
 
     def commands(self,root,rows):
-        (root/'commands.jsonl').write_text(''.join(json.dumps(row)+'\n' for row in rows))
+        (root/'commands.jsonl').write_text(''.join(json.dumps(row)+'\n' for row in rows), encoding="utf-8")
         for row in rows: write(root/(row['stage']+'.command-state.json'),dict(row,state='completed',error=None))
 
     def mutate_json(self,path,key,values,check):
@@ -203,29 +203,29 @@ class Tests(unittest.TestCase):
         names=list(gate.legacy.SAMPLE+gate.legacy.UI_SAMPLE_BASE+gate.legacy.UI_SAMPLE)+( [gate.APP] )
         names += [f'legacy::case_{i}' for i in range(passed+count-len(names))]
         path,ignored=self.root/'list',self.root/'ignored'
-        path.write_text(self.old.list_text(names));ignored.write_text(self.old.list_text([gate.APP]))
+        path.write_text(self.old.list_text(names), encoding="utf-8");ignored.write_text(self.old.list_text([gate.APP]), encoding="utf-8")
         gate.legacy.profile_census(profile,path,ignored)
         for bad in [[],[gate.APP,names[0]],[names[0]]]:
-            ignored.write_text(self.old.list_text(bad))
+            ignored.write_text(self.old.list_text(bad), encoding="utf-8")
             with self.assertRaises(AssertionError):gate.legacy.profile_census(profile,path,ignored)
 
     def test_missing_explicit_child_execution_rejected(self):
         root,_=self.fixture()
         for stage in ['isolated-ui-controls','isolated-app-restart']:
-            path=root/(stage+'.stdout.txt');original=path.read_text()
-            rows=[json.loads(line) for line in (root/'commands.jsonl').read_text().splitlines()]
-            path.write_text(gate.CONSUMER_PROOF+'UI controls passed\n')
+            path=root/(stage+'.stdout.txt');original=path.read_text(encoding="utf-8")
+            rows=[json.loads(line) for line in (root/'commands.jsonl').read_text(encoding="utf-8").splitlines()]
+            path.write_text(gate.CONSUMER_PROOF+'UI controls passed\n', encoding="utf-8")
             for row in rows:
                 if row['stage'] == stage: row['stdout_sha256']=gate.runner.digest(path)
             self.commands(root,rows)
             with self.assertRaises((AssertionError,ValueError)):gate.verify_receipt(root)
-            path.write_text(original)
+            path.write_text(original, encoding="utf-8")
             for row in rows:
                 if row['stage'] == stage: row['stdout_sha256']=gate.runner.digest(path)
             self.commands(root,rows)
 
     def test_command_order_argv_environment_mounts_rejected(self):
-        root,r=self.fixture();rows=[json.loads(line) for line in (root/'commands.jsonl').read_text().splitlines()]
+        root,r=self.fixture();rows=[json.loads(line) for line in (root/'commands.jsonl').read_text(encoding="utf-8").splitlines()]
         changes=[(0,'args',[]),(1,'cwd','/tmp/elsewhere'),(2,'args',[]),(8,'environment',{}),(9,'gpu_environment',{}),(9,'program','sh')]
         for index,key,value in changes:
             bad=copy.deepcopy(rows);bad[index][key]=value;self.commands(root,bad)
@@ -240,13 +240,13 @@ class Tests(unittest.TestCase):
         with self.assertRaises(AssertionError):gate.verify_receipt(root)
 
     def test_negative_status_and_diagnostic_rejected(self):
-        root,r=self.fixture();rows=[json.loads(line) for line in (root/'commands.jsonl').read_text().splitlines()]
+        root,r=self.fixture();rows=[json.loads(line) for line in (root/'commands.jsonl').read_text(encoding="utf-8").splitlines()]
         for status in [0,2,None,True,-9]:
             bad=copy.deepcopy(rows);bad[0]['status']=status;self.commands(root,bad)
             with self.assertRaises(AssertionError):gate.verify_commands(root,r)
         self.commands(root,rows)
         for bad_text in ['','segfault',gate.DIAGNOSTIC+' extra']:
-            (root/'project-only.stderr.txt').write_text(bad_text)
+            (root/'project-only.stderr.txt').write_text(bad_text, encoding="utf-8")
             bad=copy.deepcopy(rows);bad[0]['stderr_sha256']=gate.runner.digest(root/'project-only.stderr.txt');self.commands(root,bad)
             with self.assertRaises(AssertionError):gate.verify_commands(root,r)
 
@@ -312,7 +312,7 @@ class Tests(unittest.TestCase):
         with mock.patch.dict(os.environ):
             gate.runner.initialize(gate.runner.repo,self.root/'phase','cpu')
             with self.assertRaises(AssertionError):gate.select_target(gate.SPECS[1])
-            (gate.runner.target_dir/'stale').write_text('old')
+            (gate.runner.target_dir/'stale').write_text('old', encoding="utf-8")
             with self.assertRaises(AssertionError):gate.select_target(gate.SPECS[0])
 
     def test_nonadjacent_repeated_masks_rejected(self):
@@ -360,7 +360,7 @@ class Tests(unittest.TestCase):
 
     def test_real_rust_raw_export_error_terminal_newline_passes(self):
         root,_=self.fixture()
-        (root/'project-only-export-rejection.txt').write_text(gate.EXPORT_DIAGNOSTIC+'\n')
+        (root/'project-only-export-rejection.txt').write_text(gate.EXPORT_DIAGNOSTIC+'\n', encoding="utf-8")
         receipt=gate.read(root/'project-only-runtime.json')
         receipt['export_error']=gate.EXPORT_DIAGNOSTIC+'\n'
         write(root/'project-only-runtime.json',receipt)
@@ -373,9 +373,9 @@ class Tests(unittest.TestCase):
                       ' '+gate.EXPORT_DIAGNOSTIC,gate.EXPORT_DIAGNOSTIC+' ',
                       gate.EXPORT_DIAGNOSTIC+'\n\n',gate.EXPORT_DIAGNOSTIC+'\t',gate.EXPORT_DIAGNOSTIC+'\r\n']:
             bad=dict(original,export_error=value);write(path,bad)
-            (root/'project-only-export-rejection.txt').write_text(value)
+            (root/'project-only-export-rejection.txt').write_text(value, encoding="utf-8")
             with self.assertRaises(AssertionError):gate.verify_commands(root,r)
-        (root/'project-only-export-rejection.txt').write_text(gate.EXPORT_DIAGNOSTIC+'\n')
+        (root/'project-only-export-rejection.txt').write_text(gate.EXPORT_DIAGNOSTIC+'\n', encoding="utf-8")
         # Individually permitted spellings must still match the retained raw file.
         write(path,original)
         with self.assertRaises(AssertionError):gate.verify_commands(root,r)

@@ -292,7 +292,7 @@ def read_json(path):
             assert k not in result, "duplicate JSON key"
             result[k] = v
         return result
-    return json.loads(path.read_text(), object_pairs_hook=unique)
+    return json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique)
 
 
 def simulation_output(output):
