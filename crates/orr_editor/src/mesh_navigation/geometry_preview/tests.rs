@@ -130,7 +130,7 @@ fn actual_face_signatures(source: &orr_model::ModelSource, material: u32) -> Vec
         .iter()
         .filter(|primitive| primitive.material == material)
     {
-        for indices in primitive.indices.chunks_exact(3) {
+        for indices in primitive.indices.as_chunks::<3>().0 {
             let points = [indices[0], indices[1], indices[2]]
                 .map(|index| primitive.vertices[index as usize].position);
             signatures.push(face_signature(points));

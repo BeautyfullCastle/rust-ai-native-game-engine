@@ -145,9 +145,11 @@ fn closed_blocked_stale_and_changed_requests_are_discarded() {
 
 #[test]
 fn disconnected_worker_is_reported_without_publishing() {
-    let mut panel = Panel::default();
-    panel.open = true;
-    panel.cancel_pending = true;
+    let mut panel = Panel {
+        open: true,
+        cancel_pending: true,
+        ..Default::default()
+    };
     let (sender, receiver) = mpsc::channel::<Completion>();
     panel.pending = Some(receiver);
     drop(sender);

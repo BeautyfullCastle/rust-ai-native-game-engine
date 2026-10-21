@@ -403,7 +403,7 @@ impl TilemapPanel {
         self.sync_dimensions();
         Ok(changed)
     }
-    #[cfg(test)]
+    #[cfg(all(test, feature = "project-create", target_os = "linux"))]
     pub(crate) fn history_snapshot(
         &self,
     ) -> (
@@ -419,7 +419,7 @@ impl TilemapPanel {
             self.history.redo.clone(),
         )
     }
-    #[cfg(test)]
+    #[cfg(all(test, feature = "project-create", target_os = "linux"))]
     pub(crate) fn test_error(&self) -> Option<&str> {
         self.error.as_deref()
     }

@@ -17,8 +17,9 @@ use orr_navigation::NavigationStatus;
 use orr_remote::mesh_navigation::{mesh_from_view, MeshScenePin};
 use orr_rhi::Rhi;
 use sha2::{Digest, Sha256};
+#[cfg(feature = "mesh-export")]
+use std::collections::BTreeSet;
 use std::{
-    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
     sync::Arc,
@@ -36,7 +37,9 @@ struct Fixture {
 }
 
 struct ExportFixture {
+    #[cfg(feature = "mesh-export")]
     output: PathBuf,
+    #[cfg(feature = "mesh-export")]
     runtime: PathBuf,
 }
 
@@ -84,7 +87,12 @@ impl Fixture {
                 assert!(output.parent().is_some_and(Path::is_dir));
                 assert!(!output.exists(), "mesh game output must be absent");
                 assert!(runtime.is_absolute() && runtime.is_file());
-                Some(ExportFixture { output, runtime })
+                Some(ExportFixture {
+                    #[cfg(feature = "mesh-export")]
+                    output,
+                    #[cfg(feature = "mesh-export")]
+                    runtime,
+                })
             }
             _ => panic!("optional export requires output and runtime paths"),
         };
