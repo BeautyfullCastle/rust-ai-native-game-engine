@@ -10,9 +10,7 @@ use orr_input::{Button, Key};
 use orr_reflect::Guid;
 use std::{fs, path::Path};
 
-#[path = "../tests/common/project.rs"]
-mod project_fixture;
-use project_fixture::ProjectFixture;
+use crate::project_fixture::ProjectFixture;
 
 pub(super) trait Steppable: Bridge<Arena> {
     fn step_one(&mut self);

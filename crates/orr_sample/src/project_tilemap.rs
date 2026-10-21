@@ -188,8 +188,7 @@ pub fn usage(root: &Path, runtime: orr_package::Runtime) -> Result<Option<Tilema
 }
 
 #[cfg(test)]
-#[path = "../tests/common/project.rs"]
-mod fixture;
+use crate::project_fixture as fixture;
 
 #[cfg(test)]
 mod tests {

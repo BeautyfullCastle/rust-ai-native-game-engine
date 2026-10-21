@@ -121,3 +121,11 @@ pub mod particle_demo;
 
 #[cfg(feature = "particle-preset")]
 pub mod particle_preset;
+
+// Shared by lib tests so fixture paths use one process-wide directory counter.
+#[cfg(all(
+    test,
+    any(feature = "tilemap", all(feature = "project", feature = "game-ui"))
+))]
+#[path = "../tests/common/project.rs"]
+mod project_fixture;
