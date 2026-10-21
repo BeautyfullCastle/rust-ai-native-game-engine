@@ -40,7 +40,9 @@ struct Fixture {
 }
 
 struct ExportFixture {
+    #[cfg(feature = "mesh-export")]
     runtime: PathBuf,
+    #[cfg(feature = "mesh-export")]
     output: PathBuf,
 }
 
@@ -103,7 +105,12 @@ impl Fixture {
                 assert!(output.parent().is_some_and(Path::is_dir));
                 assert!(!output.exists(), "mesh export output must be absent");
                 assert!(runtime.is_absolute() && runtime.is_file());
-                Some(ExportFixture { runtime, output })
+                Some(ExportFixture {
+                    #[cfg(feature = "mesh-export")]
+                    runtime,
+                    #[cfg(feature = "mesh-export")]
+                    output,
+                })
             }
             _ => panic!(
                 "optional export requires both ORR_MESH_AGENT_VIEW_EXPORT_OUTPUT and ORR_MESH_EXPORT_RUNTIME"
