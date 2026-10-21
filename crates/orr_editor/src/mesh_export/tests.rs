@@ -187,7 +187,6 @@ fn section_payload(bytes: &[u8], name: &[u8; 8]) -> usize {
     u32::from_le_bytes(bytes[header + 20..header + 24].try_into().unwrap()) as usize
 }
 
-#[cfg(feature = "mesh-animated-models")]
 fn test_runtime_with_all_presentations() -> Vec<u8> {
     let sections: [(&[u8; 8], &[u8]); 8] = [
         (b".orrmesh", b"ORR_MESH_PLAYER_V1"),

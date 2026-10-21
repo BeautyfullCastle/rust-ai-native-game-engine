@@ -276,19 +276,19 @@ pub(super) fn show(ui: &mut Ui, panel: &mut Panel, editor: &Editor) {
     panel.preview = state;
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "mesh-mission", feature = "mesh-animated-models"))]
 pub(super) fn request(panel: &mut Panel, editor: &Editor, clip: &str, tick: &str) {
     let mut state = std::mem::take(&mut panel.preview);
     state.request(panel, editor, clip, tick);
     panel.preview = state;
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "mesh-mission", feature = "mesh-animated-models"))]
 pub(super) fn has_preview(panel: &Panel) -> bool {
     panel.preview.accepted.is_some()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "mesh-mission", feature = "mesh-animated-models"))]
 pub(super) fn clear(panel: &mut Panel) {
     panel.preview.clear_accepted();
 }
