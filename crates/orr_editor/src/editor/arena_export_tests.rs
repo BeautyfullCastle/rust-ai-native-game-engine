@@ -379,6 +379,13 @@ fn saved_ui_requires_exact_loaded_font_and_retains_whole_lock_verification() {
     let mut metadata: J = serde_json::from_slice(&fs::read(&package_manifest).unwrap()).unwrap();
     metadata["version"] = json!("1.0.1");
     fs::write(package_manifest, serde_json::to_vec(&metadata).unwrap()).unwrap();
+    // The fixture changed entry.ui after the first install; open a fresh
+    // package operation without weakening manifest freshness validation.
+    let installer = orr_package::Project::open_for_install(
+        dir.path(),
+        orr_package::Runtime::content_only().engine_version,
+    )
+    .unwrap();
     installer
         .install(&[changed_package.path().to_path_buf()])
         .unwrap();

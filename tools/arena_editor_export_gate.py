@@ -501,19 +501,19 @@ def structural_proof():
 
 def ui_structural_proof():
     structural_proof()
-    sample = (runner.repo / "crates/orr_sample/src/project_export/editor_arena.rs").read_text()
+    sample = (runner.repo / "crates/orr_sample/src/project_export/editor_arena.rs").read_text(encoding="utf-8")
     assert all("fn " + name.split("::")[-1] + "(" in sample for name in UI_SAMPLE_BASE + UI_SAMPLE)
     for folder, name in zip(("app", "editor"), UI_EDITOR):
-        source = (runner.repo / f"crates/orr_editor/src/{folder}/arena_export_tests.rs").read_text()
+        source = (runner.repo / f"crates/orr_editor/src/{folder}/arena_export_tests.rs").read_text(encoding="utf-8")
         assert '#[cfg(feature = "project-ui")]\n#[test]\nfn ' + name.split("::")[-1] + "(" in source
-    source = (runner.repo / "crates/orr_editor/src/project_ui.rs").read_text()
+    source = (runner.repo / "crates/orr_editor/src/project_ui.rs").read_text(encoding="utf-8")
     assert '#[cfg(all(\n    test,\n    feature = "arena-project-export",\n    target_os = "linux",\n    target_arch = "x86_64"\n))]\nmod tests {' in source
     suffix = source[source.index("mod tests {"):]
     assert "#[ignore" not in suffix and "#[cfg" not in suffix
     assert sorted(re.findall(r"#\[test\]\s*fn (\w+)", suffix)) == sorted(name.split("::")[-1] for name in UI_IDENTITY)
-    source = (runner.repo / "crates/orr_sample/src/app.rs").read_text()
+    source = (runner.repo / "crates/orr_sample/src/app.rs").read_text(encoding="utf-8")
     assert '#[cfg(all(test, feature = "project", feature = "game-ui"))]\n#[path = "app_project_ui_tests.rs"]\nmod project_ui_tests;' in source
-    source = (runner.repo / "crates/orr_sample/src/app_project_ui_tests.rs").read_text()
+    source = (runner.repo / "crates/orr_sample/src/app_project_ui_tests.rs").read_text(encoding="utf-8")
     assert '#[cfg(all(target_os = "linux", target_arch = "x86_64"))]\n#[test]\n#[ignore = "requires explicitly supplied source-hidden read-only exported bundle"]\nfn ' + UI_APP.split("::")[-1] + "(" in source
     return {"kind":"structural-source-and-cfg-only", "executed":False,
             "sample_unconditional":UI_SAMPLE_BASE,"sample_game_ui":UI_SAMPLE,
