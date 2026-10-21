@@ -29,11 +29,13 @@ RESULTS = {
     "WASM32_RESULT": "${{ needs.wasm32.result }}",
     "ANDROID_ARM64_RESULT": "${{ needs['android-arm64'].result }}",
     "BROWSER_RESULT": "${{ needs['wasm32-browser'].result }}",
+    "SAMPLE_ARENA_CPU_RESULT": "${{ needs['sample-arena-cpu'].result }}",
+    "SAMPLE_PREFLIGHT_RESULT": "${{ needs['sample-fixture-preflight'].result }}",
     "SAMPLE_BUILD_RESULT": "${{ needs['sample-build'].result }}",
     "LINKED_PREFABS_RESULT": "${{ needs['sample-linked-prefabs'].result }}",
     "ROOM_RESULT": "${{ needs['sample-room'].result }}",
 }
-REQUIRED_JOBS = {"native", "wasm32", "android-arm64", "wasm32-browser", "sample-build", "sample-linked-prefabs", "sample-room", "static-model-authoring", "room-wall-authoring"}
+REQUIRED_JOBS = {"native", "wasm32", "android-arm64", "wasm32-browser", "sample-build", "sample-arena-cpu", "sample-fixture-preflight", "sample-linked-prefabs", "sample-room", "static-model-authoring", "room-wall-authoring"}
 NATIVE_TEST = "cargo test --workspace --release --timings --exclude orr_sample --exclude orr_editor --exclude orr_web_gpu"
 SAMPLE_TEST = "cargo test -p orr_sample -p orr_view -p orr_bridge -p orr_rhi -p orr_render -p orr_editor -p orr_web_gpu --release --timings"
 FFI_ARTIFACTS = {
@@ -290,6 +292,15 @@ class DeterminismWorkflowTests(unittest.TestCase):
         ])
         self.assertEqual(self.jobs["sample-build"]["strategy"]["matrix"]["os"], ["ubuntu-22.04", "windows-latest"])
         self.assertFalse(self.jobs["sample-build"]["strategy"]["fail-fast"])
+        for name in ("sample-fixture-preflight", "sample-arena-cpu"):
+            job = self.jobs[name]
+            self.assert_required(job)
+            self.assertEqual(job["runs-on"], "${{ matrix.os }}")
+            self.assertEqual(job["strategy"], {"fail-fast": False,
+                                             "matrix": {"os": ["ubuntu-22.04", "windows-latest"]}})
+        self.assertNotIn("needs", self.jobs["sample-fixture-preflight"])
+        for name in ("sample-build", "sample-arena-cpu"):
+            self.assertEqual(self.jobs[name]["needs"], ["sample-fixture-preflight"])
         self.assert_required_command(self.jobs["sample-build"], SAMPLE_TEST)
 
     def test_linked_prefab_lane_is_independent_and_mandatory(self):
@@ -733,10 +744,10 @@ class DeterminismWorkflowTests(unittest.TestCase):
         # test domain. Each iteration reads only its own input, compares only
         # with success, and monotonically ORs failure into a fresh accumulator.
         # No cross-input dependency, early exit, or later reset is permitted.
-        # Thus all 6**7 inputs are covered by seven independent six-state
+        # Thus all 6**9 inputs are covered by nine independent six-state
         # equivalence classes, not by assuming sampled combinations generalize.
         prefix = """failed=0
-for result_var in NATIVE_RESULT WASM32_RESULT ANDROID_ARM64_RESULT BROWSER_RESULT SAMPLE_BUILD_RESULT LINKED_PREFABS_RESULT ROOM_RESULT; do
+for result_var in NATIVE_RESULT WASM32_RESULT ANDROID_ARM64_RESULT BROWSER_RESULT SAMPLE_BUILD_RESULT SAMPLE_ARENA_CPU_RESULT SAMPLE_PREFLIGHT_RESULT LINKED_PREFABS_RESULT ROOM_RESULT; do
   result="${!result_var}"
   echo "$result_var=$result"
   if [[ "$result" != "success" ]]; then
@@ -771,7 +782,8 @@ fi
                 cases.extend(({**success, first: "failure", second: "unknown"},
                               {**success, first: "unknown", second: "failure"}))
         cases.extend({name: state for name in names} for state in states)
-        self.assertEqual(len(cases), 83)
+        # 1 all-success + 9*5 single failures + 2*C(9,2) mixed pairs + 5 all-failure.
+        self.assertEqual(len(cases), 123)
         for results in cases:
             with self.subTest(results=results):
                 result = self.run_gate(results)

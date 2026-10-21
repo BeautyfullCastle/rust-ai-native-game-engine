@@ -15,7 +15,7 @@ import zlib
 
 import static_model_retexture_gate as gate
 from test_room_project_gate import check_room_workflow
-from test_static_model_extract_gate import listing, passed, workflow_job
+from test_static_model_extract_gate import listing, passed, workflow_job, mutate_workflow_job
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 EXPECTED_TESTS = [
@@ -143,10 +143,13 @@ def workflow_contract(text):
     body = sample.split('    steps:\n', 1)[1]
     steps = list(re.finditer(r'^      - ', body, re.M))
     assert len(steps) > 1 and body[:steps[1].start()] == BYTECODE_SETUP, 'exact unconditional first setup step'
-    assert text.count(BYTECODE_SETUP) == 1, 'unique bytecode setup'
+    assert sample.count(BYTECODE_SETUP) == 1, 'unique bytecode setup in sample-build'
+    arena = workflow_job(text, 'sample-arena-cpu')
+    assert arena.count(BYTECODE_SETUP) == 1, 'unique bytecode setup in Arena CPU'
+    inherited_bytecode_contract(arena)
     inherited_bytecode_contract(sample)
     assert 'os: [ubuntu-22.04, windows-latest]' in header
-    assert 'needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs, sample-room, static-model-authoring, room-wall-authoring]' in aggregate
+    assert 'needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-arena-cpu, sample-fixture-preflight, sample-linked-prefabs, sample-room, static-model-authoring, room-wall-authoring]' in aggregate
     assert re.findall(r'^    if:[ \t]*(.*)$', aggregate, re.M) == ['${{ always() }}'], 'one failure-aware aggregate condition'
     prerequisites = {
         'gpu': "        run: sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers\n",
@@ -701,13 +704,17 @@ class RetextureGateTests(unittest.TestCase):
 
     def test_workflow_rejects_disabled_moved_or_unretained_modes(self):
         text = (ROOT / '.github/workflows/determinism.yml').read_text()
+        workflow_contract(text)
         for old, new in [('run: python -B tools/static_model_retexture_gate.py cpu', 'run: echo skipped'),
                          ('run: python -B tools/static_model_retexture_gate.py gpu', 'run: echo skipped'),
                          ('run: python -B tools/static_model_retexture_gate.py export', 'run: echo skipped'),
                          ('Retain static texture variant CPU and partial failure evidence', 'missing retention'),
                          ('os: [ubuntu-22.04, windows-latest]', 'os: [ubuntu-22.04]')]:
+            changed = (mutate_workflow_job(text, 'sample-build', old, new)
+                       if old.startswith('os:') else text.replace(old, new, 1))
+            self.assertNotEqual(changed, text)
             with self.subTest(old=old), self.assertRaises(AssertionError):
-                workflow_contract(text.replace(old, new, 1))
+                workflow_contract(changed)
         setup_mutations = {
             'missing': '',
             'duplicate': BYTECODE_SETUP * 2,
@@ -720,8 +727,10 @@ class RetextureGateTests(unittest.TestCase):
             'noop': BYTECODE_SETUP.split('        run:', 1)[0] + '        run: ":"\n',
         }
         for label, setup in setup_mutations.items():
-            with self.subTest(setup=label), self.assertRaises(AssertionError):
-                workflow_contract(text.replace(BYTECODE_SETUP, setup, 1))
+            for owner in ('sample-build', 'sample-arena-cpu'):
+                changed = mutate_workflow_job(text, owner, BYTECODE_SETUP, setup)
+                with self.subTest(job=owner, setup=label), self.assertRaises(AssertionError):
+                    workflow_contract(changed)
         sample = workflow_job(text, 'sample-build')
         for action in ('actions/checkout@v4', 'dtolnay/rust-toolchain@stable', 'Swatinem/rust-cache@v2'):
             anchor = '      - uses: ' + action + '\n'
@@ -775,7 +784,8 @@ class RetextureGateTests(unittest.TestCase):
 
     def test_workflow_preserves_required_room_and_aggregate(self):
         text = (ROOT / '.github/workflows/determinism.yml').read_text()
-        for old, new in [('needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs, sample-room, static-model-authoring, room-wall-authoring]', 'needs: [native]'),
+        workflow_contract(text)
+        for old, new in [('needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-arena-cpu, sample-fixture-preflight, sample-linked-prefabs, sample-room, static-model-authoring, room-wall-authoring]', 'needs: [native]'),
                          ('Required generated Room GPU and source-hidden production export', 'missing Room gate'),
                          ('  sample-room:\n', '  sample-room:\n    # static_model_retexture_gate.py forbidden\n'),
                          ('  sample-build:\n', '  sample-build:\n    if: false\n'),

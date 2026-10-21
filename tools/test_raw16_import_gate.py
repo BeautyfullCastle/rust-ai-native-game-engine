@@ -33,10 +33,10 @@ NATIVE_HEADER = '''  native:
           - os: ubuntu-24.04-arm
             name: ubuntu-24.04-arm64
 '''
-# Exact aggregate preserves the seven-result and eight-row authoring steps,
+# Exact aggregate preserves the nine-result and eight-row authoring steps,
 # and adds the independent four-row Room wall result. Pin all three steps and
 # dependency edges; actual Bash failure states are tested separately.
-AGGREGATE_SHA256 = '735c422dec31a6070eb5c8cb84120bd47d07183585db086b58677455450aff8c'
+AGGREGATE_SHA256 = '6d7102ae05de069e9644da065c89993cebc58a8b2228569d8c208e8d834ae90a'
 
 
 def listing(names):
@@ -339,6 +339,14 @@ class Raw16GateTests(unittest.TestCase):
             for changed in ('', upload.replace('always()', 'success()'), upload.replace('if-no-files-found: error', 'if-no-files-found: ignore')):
                 with self.subTest(phase=phase, upload=changed), self.assertRaises(AssertionError):
                     workflow_contract(workflow.replace(upload, changed, 1))
+        for lane, result in [('sample-arena-cpu', 'SAMPLE_ARENA_CPU_RESULT'),
+                             ('sample-fixture-preflight', 'SAMPLE_PREFLIGHT_RESULT')]:
+            for old, new in [(', ' + lane, ''),
+                             ("          " + result + ": ${{ needs['" + lane + "'].result }}\n", ''),
+                             (' ' + result + ' ', ' ')]:
+                self.assertIn(old, workflow)
+                with self.subTest(lane=lane, removed=old), self.assertRaises(AssertionError):
+                    workflow_contract(workflow.replace(old, new, 1))
         for old, new in [('ORR_RAW16_REQUIRE_SOFTWARE: "1"', 'ORR_RAW16_REQUIRE_SOFTWARE: "0"'),
                          ('needs: [native, wasm32', 'needs: [wasm32'),
                          (', sample-room, static-model-authoring, room-wall-authoring]', ', static-model-authoring, room-wall-authoring]'),

@@ -100,6 +100,16 @@ def workflow_job(text, name):
     end = peers[index + 1].start() if index + 1 < len(peers) else len(text)
     return text[peers[index].start():end]
 
+def mutate_workflow_job(text, name, old, new):
+    """Mutate one exact target within its YAML job, never an earlier sibling."""
+    job = workflow_job(text, name)
+    assert job.count(old) == 1, ('exact mutation target in job', name, old)
+    assert text.count(job) == 1, ('unique job block', name)
+    changed = job.replace(old, new, 1)
+    assert changed != job, ('mutation changes job', name)
+    return text.replace(job, changed, 1)
+
+
 def workflow_contract(text):
     sample = workflow_job(text, 'sample-build')
     room = workflow_job(text, 'sample-room')
@@ -150,8 +160,8 @@ def workflow_contract(text):
         'Required generated Room GPU and source-hidden production export',
     ]:
         assert text.count('      - name: ' + marker + '\n') == 1
-    assert 'needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs, sample-room, static-model-authoring, room-wall-authoring]' in text
-    assert '    if: \u0024{{ always() }}\n' in text
+    assert 'needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-arena-cpu, sample-fixture-preflight, sample-linked-prefabs, sample-room, static-model-authoring, room-wall-authoring]' in workflow_job(text, 'cross_platform_checksum_compare')
+    assert '    if: \u0024{{ always() }}\n' in workflow_job(text, 'cross_platform_checksum_compare')
 
 class StaticPropGateTests(unittest.TestCase):
     def setUp(self):
@@ -575,12 +585,13 @@ class StaticPropGateTests(unittest.TestCase):
 
     def test_workflow_rejects_disabled_or_unretained_modes(self):
         text = (ROOT / '.github/workflows/determinism.yml').read_text()
+        workflow_contract(text)
         for old, new in [
             ('run: python -B tools/static_model_extract_gate.py gpu', 'run: echo skipped'),
             ('run: python -B tools/static_model_extract_gate.py export', 'run: echo skipped'),
             ('Retain static prop CPU and partial failure evidence', 'missing retention'),
             ('os: [ubuntu-22.04, windows-latest]', 'os: [ubuntu-22.04]'),
-            ('needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs, sample-room, static-model-authoring, room-wall-authoring]', 'needs: [native]'),
+            ('needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-arena-cpu, sample-fixture-preflight, sample-linked-prefabs, sample-room, static-model-authoring, room-wall-authoring]', 'needs: [native]'),
             ("      - name: Provision repository-hidden authored runtime proof\n"
              "        if: runner.os == 'Linux'\n"
              "        run: sudo apt-get update -q && sudo apt-get install -y -q bubblewrap\n",
@@ -590,10 +601,16 @@ class StaticPropGateTests(unittest.TestCase):
             ("      - if: runner.os == 'Linux'\n        run: sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers\n",
              "      - if: runner.os == 'Linux'\n        run: echo Vulkan skipped\n"),
         ]:
-            self.assertEqual(text.count(old), 1, 'mutation must select one intended workflow target')
-            changed = text.replace(old, new, 1)
+            owner = 'cross_platform_checksum_compare' if old.startswith('needs:') else 'sample-build'
+            changed = mutate_workflow_job(text, owner, old, new)
             self.assertNotEqual(changed, text)
+            for sibling in ('sample-fixture-preflight', 'sample-arena-cpu', 'sample-room'):
+                self.assertEqual(workflow_job(changed, sibling), workflow_job(text, sibling))
             with self.subTest(old=old), self.assertRaises(AssertionError):
+                workflow_contract(changed)
+        for lane in ('sample-arena-cpu', 'sample-fixture-preflight'):
+            changed = mutate_workflow_job(text, 'cross_platform_checksum_compare', ', ' + lane, '')
+            with self.subTest(missing_dependency=lane), self.assertRaises(AssertionError):
                 workflow_contract(changed)
         first = text.index('      - name: Required static prop source-hidden Room export acceptance\n')
         last = text.index('      - name: Mandatory authored runtime compositor readback\n', first)

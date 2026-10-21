@@ -65,7 +65,7 @@ def room_workflow_steps(workflow):
                for line in body.splitlines() if line.strip() and not line.lstrip().startswith('#')), 'trailing job fields'
     header = '\n'.join(line for line in header.splitlines() if line.strip() and not line.lstrip().startswith('#'))
     assert header == '\n'.join([
-        '  sample-build:', '    name: sample build (${{ matrix.os }})',
+        '  sample-build:', '    needs: [sample-fixture-preflight]', '    name: sample build (${{ matrix.os }})',
         '    runs-on: ${{ matrix.os }}', '    strategy:', '      fail-fast: false',
         '      matrix:', '        os: [ubuntu-22.04, windows-latest]',
     ]), 'sample-build runner/trigger must remain mandatory'
@@ -434,6 +434,9 @@ class RoomProjectGateTests(unittest.TestCase):
         relocated = workflow.replace(job, '', 1).replace('jobs:\n', 'unrelated:\n' + job + '\njobs:\n', 1)
         with self.subTest(mutation='job outside jobs'), self.assertRaises(AssertionError):
             check_room_workflow(relocated)
+        changed = job.replace('os: [ubuntu-22.04, windows-latest]', 'os: [windows-latest]', 1)
+        with self.subTest(mutation='no Linux sample runner'), self.assertRaises(AssertionError):
+            check_room_workflow(workflow.replace(job, changed, 1))
         for label, old, new in [
             ('missing jobs section', 'jobs:\n', 'unrelated:\n'),
             ('missing PR trigger', '  pull_request:\n', ''),
@@ -441,7 +444,6 @@ class RoomProjectGateTests(unittest.TestCase):
             ('missing job', '  sample-build:\n', '  other-job:\n'),
             ('disabled job', '  sample-build:\n', '  sample-build:\n    if: false\n'),
             ('job allows failure', '  sample-build:\n', '  sample-build:\n    continue-on-error: true\n'),
-            ('no Linux runner', '        os: [ubuntu-22.04, windows-latest]', '        os: [windows-latest]'),
         ]:
             with self.subTest(mutation=label):
                 self.assertIn(old, workflow)
