@@ -97,8 +97,8 @@ class Tests(unittest.TestCase):
         write(root/'app-consumer-producer.json',{'source_head':r['source_head'],'source_tree':r['source_tree'],'original':str(gate.producer_path('app-harness')),'copied':str(root/'app-ui-consumer'),'sha256':report['producers']['app-harness']['sha256'],'test':gate.APP})
         write(root/'app-restart-receipt.json',{'bundle':str(bundle),'initial_checksum':payload['initial_checksum'],'replayed_checksums':list(range(2,14)),
             'actual_widget_dispatch':True,'restart_tick':0,'original_entities_positions_players_restored':True})
-        (root/'project-only.stdout.txt').write_text('', encoding="utf-8"); (root/'project-only.stderr.txt').write_text(gate.DIAGNOSTIC+'\n', encoding="utf-8")
-        (root/'project-only-export-rejection.txt').write_text(gate.EXPORT_DIAGNOSTIC, encoding="utf-8")
+        (root/'project-only.stdout.txt').write_text('', encoding="utf-8"); (root/'project-only.stderr.txt').write_text(gate.DIAGNOSTIC+'\n', encoding="utf-8", newline="")
+        (root/'project-only-export-rejection.txt').write_text(gate.EXPORT_DIAGNOSTIC, encoding="utf-8", newline="")
         write(root/'project-only-runtime.json',dict(gate.bound('project-runtime'),status=1,stdout='project-only.stdout.txt',stderr='project-only.stderr.txt',export_error=gate.EXPORT_DIAGNOSTIC,published=False))
         for stage,name in [('isolated-ui-controls',gate.MODULE),('isolated-app-restart',gate.APP)]:
             (root/(stage+'.stdout.txt')).write_text(gate.CONSUMER_PROOF+summary(name,3 if name == gate.MODULE else 2), encoding="utf-8"); (root/(stage+'.stderr.txt')).write_text('', encoding="utf-8")
@@ -246,7 +246,7 @@ class Tests(unittest.TestCase):
             with self.assertRaises(AssertionError):gate.verify_commands(root,r)
         self.commands(root,rows)
         for bad_text in ['','segfault',gate.DIAGNOSTIC+' extra']:
-            (root/'project-only.stderr.txt').write_text(bad_text, encoding="utf-8")
+            (root/'project-only.stderr.txt').write_text(bad_text, encoding="utf-8", newline="")
             bad=copy.deepcopy(rows);bad[0]['stderr_sha256']=gate.runner.digest(root/'project-only.stderr.txt');self.commands(root,bad)
             with self.assertRaises(AssertionError):gate.verify_commands(root,r)
 
@@ -360,7 +360,7 @@ class Tests(unittest.TestCase):
 
     def test_real_rust_raw_export_error_terminal_newline_passes(self):
         root,_=self.fixture()
-        (root/'project-only-export-rejection.txt').write_text(gate.EXPORT_DIAGNOSTIC+'\n', encoding="utf-8")
+        (root/'project-only-export-rejection.txt').write_text(gate.EXPORT_DIAGNOSTIC+'\n', encoding="utf-8", newline="")
         receipt=gate.read(root/'project-only-runtime.json')
         receipt['export_error']=gate.EXPORT_DIAGNOSTIC+'\n'
         write(root/'project-only-runtime.json',receipt)
@@ -373,9 +373,9 @@ class Tests(unittest.TestCase):
                       ' '+gate.EXPORT_DIAGNOSTIC,gate.EXPORT_DIAGNOSTIC+' ',
                       gate.EXPORT_DIAGNOSTIC+'\n\n',gate.EXPORT_DIAGNOSTIC+'\t',gate.EXPORT_DIAGNOSTIC+'\r\n']:
             bad=dict(original,export_error=value);write(path,bad)
-            (root/'project-only-export-rejection.txt').write_text(value, encoding="utf-8")
+            (root/'project-only-export-rejection.txt').write_text(value, encoding="utf-8", newline="")
             with self.assertRaises(AssertionError):gate.verify_commands(root,r)
-        (root/'project-only-export-rejection.txt').write_text(gate.EXPORT_DIAGNOSTIC+'\n', encoding="utf-8")
+        (root/'project-only-export-rejection.txt').write_text(gate.EXPORT_DIAGNOSTIC+'\n', encoding="utf-8", newline="")
         # Individually permitted spellings must still match the retained raw file.
         write(path,original)
         with self.assertRaises(AssertionError):gate.verify_commands(root,r)
