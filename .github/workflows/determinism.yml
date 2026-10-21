@@ -382,7 +382,80 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  sample-fixture-preflight:
+    name: sample fixture preflight (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Required fast Arena validator fixtures before compilation
+        shell: bash
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          python -B tools/test_sample_ci_identity.py
+          python -B tools/test_arena_editor_export_gate.py
+          python -B tools/test_arena_export_producer_fence.py
+          python -B tools/test_arena_editor_ui_export_gate.py
+
+  sample-arena-cpu:
+    # Independently rerunnable. No target directories or executable artifacts
+    # cross job boundaries; the gate still builds and pins every own producer.
+    name: sample Arena CPU (${{ matrix.os }})
+    needs: [sample-fixture-preflight]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    steps:
+      - name: Prevent Python bytecode in source checkout
+        shell: bash
+        run: printf '%s\n' 'PYTHONDONTWRITEBYTECODE=1' >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Bind Arena CPU checkout and execution identity
+        shell: bash
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python -B tools/sample_ci_identity.py begin "${{ runner.temp }}/arena-cpu-identity-${{ github.run_id }}-${{ github.run_attempt }}.json"
+      - name: Required Arena editor export CPU acceptance
+        shell: bash
+        timeout-minutes: 90
+        env:
+          ORR_ARENA_EXPORT_GATE_EVIDENCE: ${{ runner.temp }}/arena-editor-export-cpu-${{ github.run_id }}-${{ github.run_attempt }}
+          PYTHONDONTWRITEBYTECODE: '1'
+          CARGO_BUILD_JOBS: '2'
+        run: python -B tools/arena_editor_export_gate.py cpu
+      - name: Retain Arena editor export CPU evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arena-editor-export-cpu-${{ matrix.os }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/arena-editor-export-cpu-${{ github.run_id }}-${{ github.run_attempt }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+      - name: Require current successful Arena CPU producer receipt
+        shell: bash
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python -B tools/sample_ci_identity.py verify "${{ runner.temp }}/arena-cpu-identity-${{ github.run_id }}-${{ github.run_attempt }}.json" "${{ runner.temp }}/arena-editor-export-cpu-${{ github.run_id }}-${{ github.run_attempt }}/gate-receipt.json"
+      - name: Retain Arena CPU identity including partial failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arena-cpu-identity-${{ matrix.os }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/arena-cpu-identity-${{ github.run_id }}-${{ github.run_attempt }}.json
+          if-no-files-found: error
+          retention-days: 7
+
   sample-build:
+    needs: [sample-fixture-preflight]
     # View-layer demos, audio, and editor. Build and test on Linux and Windows,
     # plus required Linux software-GPU/window tests; separate from the sim jobs.
     name: sample build (${{ matrix.os }})
@@ -1154,23 +1227,6 @@ jobs:
       # #282 adds three unconditional exporter tests, six game-ui exporter tests,
       # and one ignored project+game-ui App consumer on Linux x86-64.
       # Explicit feature profiles keep ignored inventory separate from passed counts.
-      - name: Required Arena editor export CPU acceptance
-        shell: bash
-        timeout-minutes: 90
-        env:
-          ORR_ARENA_EXPORT_GATE_EVIDENCE: ${{ runner.temp }}/arena-editor-export-cpu-${{ github.run_id }}-${{ github.run_attempt }}
-          PYTHONDONTWRITEBYTECODE: '1'
-          CARGO_BUILD_JOBS: '2'
-        run: python -B tools/arena_editor_export_gate.py cpu
-      - name: Retain Arena editor export CPU evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: arena-editor-export-cpu-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/arena-editor-export-cpu-${{ github.run_id }}-${{ github.run_attempt }}
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 7
       # Real Kira PCM tests stay device-free. Native CPAL is opt-in and gets
       # compile coverage; opening a physical device is not a CI success claim.
       - run: cargo test -p orr_audio --release
@@ -6060,7 +6116,7 @@ jobs:
     name: cross-platform checksum comparison
     # Preserve this check name for existing branch protection. Every checksum
     # target, sample graphics/audio/editor matrix, linked-prefab and Room lanes must pass.
-    needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs, sample-room, static-model-authoring, room-wall-authoring]
+    needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-arena-cpu, sample-fixture-preflight, sample-linked-prefabs, sample-room, static-model-authoring, room-wall-authoring]
     # Without always(), a failed/skipped dependency skips this required check.
     if: ${{ always() }}
     runs-on: ubuntu-latest
@@ -6072,12 +6128,14 @@ jobs:
           WASM32_RESULT: ${{ needs.wasm32.result }}
           ANDROID_ARM64_RESULT: ${{ needs['android-arm64'].result }}
           BROWSER_RESULT: ${{ needs['wasm32-browser'].result }}
+          SAMPLE_ARENA_CPU_RESULT: ${{ needs['sample-arena-cpu'].result }}
+          SAMPLE_PREFLIGHT_RESULT: ${{ needs['sample-fixture-preflight'].result }}
           SAMPLE_BUILD_RESULT: ${{ needs['sample-build'].result }}
           LINKED_PREFABS_RESULT: ${{ needs['sample-linked-prefabs'].result }}
           ROOM_RESULT: ${{ needs['sample-room'].result }}
         run: |
           failed=0
-          for result_var in NATIVE_RESULT WASM32_RESULT ANDROID_ARM64_RESULT BROWSER_RESULT SAMPLE_BUILD_RESULT LINKED_PREFABS_RESULT ROOM_RESULT; do
+          for result_var in NATIVE_RESULT WASM32_RESULT ANDROID_ARM64_RESULT BROWSER_RESULT SAMPLE_BUILD_RESULT SAMPLE_ARENA_CPU_RESULT SAMPLE_PREFLIGHT_RESULT LINKED_PREFABS_RESULT ROOM_RESULT; do
             result="${!result_var}"
             echo "$result_var=$result"
             if [[ "$result" != "success" ]]; then
