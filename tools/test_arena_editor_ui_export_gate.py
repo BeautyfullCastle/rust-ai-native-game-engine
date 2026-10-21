@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import struct
 import tempfile
 import unittest
@@ -36,6 +37,20 @@ class Tests(unittest.TestCase):
         self.old = old.Tests('test_exact_source_names_and_cfg'); self.old.setUp()
         self.addCleanup(self.old.doCleanups)
         self.root = self.old.root
+        # These are synthetic Linux-profile validator fixtures, not host-native
+        # acceptance. Windows cannot realize POSIX modes through chmod.
+        self.fixture_modes = {}
+        actual_stat = Path.stat
+        def fixture_stat(path, *args, **kwargs):
+            actual = actual_stat(path, *args, **kwargs)
+            modeled = self.fixture_modes.get(path)
+            if modeled is None or stat.S_IMODE(actual.st_mode) != modeled[0]:
+                return actual  # Never conceal a real readonly/mode change.
+            fields = list(actual); fields[0] = stat.S_IFMT(actual.st_mode) | modeled[1]
+            return os.stat_result(fields, {key:getattr(actual,key) for key in dir(actual)
+                                          if key.startswith('st_') and key != 'st_mode'})
+        patch = mock.patch.object(Path, 'stat', fixture_stat)
+        patch.start(); self.addCleanup(patch.stop)
 
     def fixture(self):
         root,r = self.old.receipt()
@@ -84,6 +99,10 @@ class Tests(unittest.TestCase):
             'packages':{name:package['digest'] for name,package in lock['packages'].items()},
             'files':[dict(item,mode=0o755 if item['path'] in ('bin/arena','run-arena') else 0o644,role='fixture') for item in gate.legacy.files(bundle)],
             'runtime':{key:report['producers']['ui-runtime'][key] for key in ('sha256','bytes')},'initial_checksum':'0x0000000000000001'}
+        for entry in payload['files']:
+            path=bundle/entry['path'];actual_mode=stat.S_IMODE(path.stat().st_mode)
+            if actual_mode != entry['mode']:
+                self.fixture_modes[path]=(actual_mode,entry['mode'])
         roles={'bin/arena':'runtime','run-arena':'launcher','project/orr.project.json':'project_manifest','project/orr.packages.lock.json':'package_lock','project/arena.scene.yaml':'scene','project/arena.sprites.json':'sprite_sidecar'}
         for entry in payload['files']:
             entry['role']=roles.get(entry['path'],'package_manifest' if entry['path'].endswith('/orr.package.json') else 'package_asset')
@@ -281,6 +300,15 @@ class Tests(unittest.TestCase):
 
     def test_missing_font_license_and_closure_rejected(self):
         root,_=self.fixture();manifest=gate.read(root/'bundle/orr.export.json')
+        # Even on Windows, changing the readonly bit must break the exact closure.
+        runtime=root/'bundle/bin/arena';original_mode=stat.S_IMODE(runtime.stat().st_mode)
+        try:
+            runtime.chmod(stat.S_IREAD)
+            self.assertNotEqual(stat.S_IMODE(runtime.stat().st_mode),original_mode)
+            with self.assertRaises(AssertionError):gate.verify_receipt(root)
+        finally:
+            runtime.chmod(original_mode)
+        gate.verify_receipt(root)
         directory=root/'bundle/project/.orr/packages/objects'/manifest['payload']['packages']['korean-game-ui']
         for name in ['OrreryKoreanUI.otf','OFL.txt','COPYRIGHT.txt','font-manifest.json']:
             path=directory/name;original=path.read_bytes();path.write_bytes(b'corrupt')
