@@ -264,10 +264,10 @@ fn actual_widget_saved_korean_ui_exports_relocates_and_runs() {
     assert!(
         asset
             .rgba
-            .chunks_exact(4)
+            .as_chunks::<4>().0.iter()
             .filter(|p| p[3] == 255 && (p[0].abs_diff(p[1]) > 20 || p[1].abs_diff(p[2]) > 20))
             .any(|p| a
-                .chunks_exact(4)
+                .as_chunks::<4>().0.iter()
                 .filter(|q| q.iter().zip(p).all(|(x, y)| x.abs_diff(*y) <= 3))
                 .count()
                 > 20),

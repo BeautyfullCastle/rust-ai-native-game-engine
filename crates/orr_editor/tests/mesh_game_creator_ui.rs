@@ -345,8 +345,8 @@ fn viewport_pixels(harness: &Harness<'_, EditorApp>) -> ((u32, u32), Vec<u8>) {
 
 fn changed_pixel_count(left: &[u8], right: &[u8]) -> usize {
     assert_eq!(left.len(), right.len());
-    left.chunks_exact(4)
-        .zip(right.chunks_exact(4))
+    left.as_chunks::<4>().0.iter()
+        .zip(right.as_chunks::<4>().0.iter())
         .filter(|(left, right)| {
             left[..3]
                 .iter()

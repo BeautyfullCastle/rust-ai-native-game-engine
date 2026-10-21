@@ -131,7 +131,7 @@ fn capture(h: &mut Harness<'_, EditorApp>, root: &Path, name: &str) -> Vec<u8> {
     let (w, height) = h.state().ui.viewport_px;
     write(root, &format!("{name}.rgba"), &pixels);
     let mut ppm = format!("P6\n{w} {height}\n255\n").into_bytes();
-    for p in pixels.chunks_exact(4) {
+    for p in pixels.as_chunks::<4>().0 {
         ppm.extend_from_slice(&p[..3]);
     }
     write(root, &format!("{name}.ppm"), &ppm);
@@ -463,8 +463,8 @@ fn actual_cli_room_yard_widgets_save_reopen_play_and_authority_parity() {
         let last = capture(&mut h, &root, "transition-three-quarter");
         assert_eq!(first.len(), last.len());
         let changed = first
-            .chunks_exact(4)
-            .zip(last.chunks_exact(4))
+            .as_chunks::<4>().0.iter()
+            .zip(last.as_chunks::<4>().0.iter())
             .filter(|(a, b)| a != b)
             .count();
         assert!(changed > 20, "actual main viewport motion: {changed}");

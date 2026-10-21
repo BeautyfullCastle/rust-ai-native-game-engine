@@ -321,7 +321,7 @@ fn viewport_pixels(harness: &mut Harness<'_, EditorApp>, filename: &str) -> Vec<
     assert_eq!(pixels.len(), (target.0 * target.1 * 4) as usize);
     let background = &pixels[..3];
     let world_pixels = pixels
-        .chunks_exact(4)
+        .as_chunks::<4>().0.iter()
         .filter(|pixel| {
             pixel[..3]
                 .iter()
@@ -347,8 +347,8 @@ fn viewport_pixels(harness: &mut Harness<'_, EditorApp>, filename: &str) -> Vec<
 
 fn changed_pixel_count(left: &[u8], right: &[u8]) -> usize {
     assert_eq!(left.len(), right.len());
-    left.chunks_exact(4)
-        .zip(right.chunks_exact(4))
+    left.as_chunks::<4>().0.iter()
+        .zip(right.as_chunks::<4>().0.iter())
         .filter(|(left_pixel, right_pixel)| {
             left_pixel[..3]
                 .iter()

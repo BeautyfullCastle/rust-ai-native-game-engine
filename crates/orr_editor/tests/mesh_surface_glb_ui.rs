@@ -355,8 +355,8 @@ fn capture(harness: &mut Harness<'_, EditorApp>, root: &Path, name: &str) {
 }
 fn changed_pixels(left: &[u8], right: &[u8]) -> usize {
     assert_eq!(left.len(), right.len());
-    left.chunks_exact(4)
-        .zip(right.chunks_exact(4))
+    left.as_chunks::<4>().0.iter()
+        .zip(right.as_chunks::<4>().0.iter())
         .filter(|(a, b)| {
             a[..3]
                 .iter()
