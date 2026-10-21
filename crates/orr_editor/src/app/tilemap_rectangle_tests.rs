@@ -909,14 +909,34 @@ fn actual_cli_rectangle_save_reopen_play_literal_cells() {
 
     let end = begin(&mut h, (1, 1), (4, 2));
     let epoch = h.state().editor.scene_load_epoch();
-    // The real host scene-load route, with identical path and bytes, changes
-    // epoch. A stale pending rectangle cannot survive this identity transition.
-    assert!(h
+    assert_eq!(h.state().editor.mode(), Mode::Edit);
+    assert!(h.state().editor.previewing().is_none());
+    // Tilemap admission pins the complete project: raw scene open must remain
+    // rejected, even for identical path and bytes, without changing identity.
+    assert!(!h
         .state_mut()
         .editor
         .open_path(&root.join("arena.scene.yaml")));
-    drain(&mut h, 3);
+    assert_eq!(h.state().editor.scene_load_epoch(), epoch);
+    let refusal = h.state().editor.log().last().unwrap();
+    assert!(refusal.error && refusal.text.contains("tilemap project scene is pinned"));
+    // An embedding caller can replace the real host while retaining the App.
+    // Like the pinned-host admission test, use a real PreparedArena host rather
+    // than bypassing scene.load's guard or fabricating an epoch. The old panel
+    // and its pending rectangle must become stale despite identical scene bytes.
+    let prepared = crate::project::PreparedProject::open(&root).unwrap();
+    let mut replacement = Editor::start(&prepared.host_spec()).unwrap();
+    replacement.sync();
+    replacement.camera = h.state().editor.camera;
+    let replacement_epoch = replacement.scene_load_epoch();
+    assert!(!replacement.open_path(&root.join("arena.scene.yaml")));
+    assert_eq!(replacement.scene_load_epoch(), replacement_epoch);
+    let refusal = replacement.log().last().unwrap();
+    assert!(refusal.error && refusal.text.contains("tilemap project scene is pinned"));
+    h.state_mut().editor = replacement;
     assert_ne!(h.state().editor.scene_load_epoch(), epoch);
+    assert!(!h.state().tilemap.as_ref().unwrap().scene_matches(&h.state().editor));
+    drain(&mut h, 3);
     button(&mut h, end, false);
     cancelled!("stale-scene-epoch");
     drop(h);
