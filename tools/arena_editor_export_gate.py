@@ -42,6 +42,7 @@ LEGACY_COUNTS = {"export-unit":25, "authored-ui":73, "player-settings":111,
  "progress":94, "progress-joint":175, "progress-pinned":96,
  "collect-creator":113, "collect-ui":162, "collect-ui-creator":183}
 FIXTURE_COUNT = 20
+FENCE_FIXTURE_COUNT = 8
 
 
 # #282 additions are separate: immutable #279 name sets and fixture APIs remain.
@@ -90,24 +91,30 @@ def profile_census(profile, path, ignored_path):
             "executed": False, "qualification": "exact inventory only; mandatory execution is separate"}
 
 
-def producer_source_fence():
+def producer_source_fence(*, copies_checked_by_runner=False):
     if not runner.report.get("ui_profile"):
         return
     for item in runner.report["producers"].values():
         for path in (Path(item["producer"]["executable"]), runner.evidence / item["file"]):
             assert path.is_file() and path == path.resolve() and not path.is_symlink() and os.access(path, os.X_OK)
-            assert path.stat().st_size == item["bytes"] and runner.digest(path) == item["sha256"]
+            assert path.stat().st_size == item["bytes"]
+            # Only run() delegates copied bytes to runner.run's full pre/post
+            # fence. Originals and every standalone call still hash in full.
+            if not copies_checked_by_runner or path == Path(item["producer"]["executable"]):
+                assert runner.digest(path) == item["sha256"]
 
 
 def run(label, command, seconds=1200):
-    producer_source_fence()
+    producer_source_fence(copies_checked_by_runner=True)
     fence.source_fence()
-    runner.fence()
-    output = runner.run(label, command, seconds=seconds)
-    runner.fence()
-    fence.source_fence()
-    producer_source_fence()
-    return output
+    try:
+        # runner.run hashes ALL copied producers before launch and after owned
+        # child cleanup, including nonzero exits. Do not duplicate those reads.
+        return runner.run(label, command, seconds=seconds)
+    finally:
+        # Also retain original-byte and metadata checks on a failed command.
+        fence.source_fence()
+        producer_source_fence(copies_checked_by_runner=True)
 
 
 def select_target(label, package, target_name, kind, features):
@@ -550,6 +557,8 @@ def main():
         runner.record()
         output = run("independent-fixtures", [sys.executable, "-B", str(root / "tools/test_arena_editor_export_gate.py")])
         assert output.rstrip().endswith(f"ARENA_EXPORT_GATE_FIXTURES: {FIXTURE_COUNT} passed; 0 failed; 0 skipped")
+        checked = run("independent-fence-fixtures", [sys.executable, "-B", str(root / "tools/test_arena_export_producer_fence.py")])
+        assert checked.rstrip().endswith(f"ARENA_EXPORT_FENCE_FIXTURES: {FENCE_FIXTURE_COUNT} passed; 0 failed; 0 skipped")
         if sys.argv[1] == "cpu":
             assert "ui_constructor_bounds_closed_descriptor_font_length_and_digest" in (root / "crates/orr_sample/src/project_export/editor_arena.rs").read_text(), "mandatory #282 source profile missing"
             runner.report["ui_census_proof"] = ui_structural_proof()
