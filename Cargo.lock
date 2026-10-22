@@ -3575,6 +3575,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "orr_static_starter"
+version = "0.0.1"
+dependencies = [
+ "bytemuck",
+ "eframe",
+ "egui",
+ "egui_kittest",
+ "orr_bridge",
+ "orr_ecs",
+ "orr_edit",
+ "orr_editor",
+ "orr_fp",
+ "orr_input",
+ "orr_reflect",
+ "orr_remote",
+ "orr_render",
+ "orr_sample",
+ "orr_session",
+ "orr_sim",
+ "orr_view",
+ "png 0.18.1",
+ "rustix 1.1.5",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "winit",
+ "x11rb",
+]
+
+[[package]]
 name = "orr_terrain"
 version = "0.0.1"
 dependencies = [
@@ -3622,30 +3652,6 @@ dependencies = [
  "png 0.18.1",
  "serde_json",
  "tempfile",
-]
-
-[[package]]
-name = "orr_static_starter"
-version = "0.0.1"
-dependencies = [
- "bytemuck",
- "eframe",
- "egui",
- "egui_kittest",
- "orr_bridge",
- "orr_ecs",
- "orr_edit",
- "orr_editor",
- "orr_fp",
- "orr_reflect",
- "orr_remote",
- "orr_sample",
- "orr_session",
- "orr_sim",
- "orr_view",
- "serde_json",
- "tempfile",
- "winit",
 ]
 
 [[package]]

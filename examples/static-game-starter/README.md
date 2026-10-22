@@ -1,9 +1,11 @@
-# Stage-one static game starter
+# Static game starter
 
 Two genuine external games use one immutable `StaticGameRegistry`, the single
 `EditorGame::Registered` route and application-owned typed hosts/bridges. Adding
 a third game changes this application, not an engine game enum. No VM, dynamic
-library loader, discovery, generated art, tiles, model pipeline or packaging.
+library loader, discovery, generated art, tiles or model pipeline. The original
+headless/editor paths remain; concrete native players and one-target packaging
+are described below.
 
 From the repository root, using a supported Rust toolchain:
 
@@ -34,8 +36,8 @@ logic without a window: they do not establish rendered frames, keyboard focus,
 native GUI acceptance or packaged export. Those remain separate gates.
 
 All simulation uses fixed-point/integer state. Views receive owned snapshots and
-only read FrameView. Input arrives through the existing ERP managed-input path;
-this integration supplies no alternate input queue or simulation authority.
+only read FrameView. In editor play, input arrives through the existing ERP
+managed-input path; this integration supplies no alternate input queue or simulation authority.
 Host auth, listener, work-status and scene services are retained. Unknown game
 names fail closed. Admission rejects malformed runtime state; play debug edits
 are disabled. Restart resets gameplay, while host restart reloads the saved
@@ -79,3 +81,58 @@ It does not prove physical OS keyboard/focus delivery, a physical GPU, a native
 standalone player, source-hidden deployment, or packaged export. Local compilation
 and lint alone do not establish this acceptance; exact published-SHA hosted
 receipts must pass the independent validator.
+
+## Concrete native games and one-target bundles
+
+`delivery-player` and `switchboard-player` are separate concrete windowed game
+executables. They reuse the engine's `InProc` bridge, `PlaySession`, input map and
+window renderer; they do not host the editor or its UI. Build these without the
+package's default `editor` feature:
+
+```sh
+cargo run -p orr_static_starter --no-default-features --features standalone --bin delivery-player -- --scene examples/static-game-starter/scenes/delivery.scene.yaml
+cargo run -p orr_static_starter --no-default-features --features standalone --bin switchboard-player -- --scene examples/static-game-starter/scenes/switchboard.scene.yaml
+```
+
+Both start paused. Enter explicitly starts/resumes; WASD/arrows move/select and
+Space acts or restarts after a win. Escape or focus loss clears held input and
+pauses without secretly advancing the simulation. Focus regain never resumes.
+In live play, the first naturally consumed tick after explicit resume is neutral;
+a fresh, non-repeat key press after that boundary is needed. Replay viewing
+consumes the recorded inputs unchanged. Synthetic/repeated presses cannot
+re-arm controls. The window title reports pause/win/control instructions.
+
+`--record /absolute/new.orrp` saves the actual input recording on normal window
+close. `--replay /absolute/existing.orrp` opens a read-only viewer. These options
+are mutually exclusive. `--observe /absolute/new.ndjson` is a bounded, read-only
+post-presentation diagnostic stream, not an input/control interface. Output files
+must be new and outside the executable/bundle directory. Recordings are limited
+to 4 MiB and 36,000 ticks. Admission requires canonical current engine-writer v3
+ORRP, exact game/build/seed/rate/player/input layout, the admitted initial frame,
+finite typed inputs, and independently verified keyframes/checksums. No command
+or debug edits are accepted. Legacy/alternative ORRP encodings remain outside
+this starter's policy, without changing the engine's raw replay format. Full
+scene/input descriptors are bound by the admitted compiled game and bundle, not
+embedded or authenticated by raw ORRP alone.
+
+The Linux x86-64 `bundle` feature packages one already-trusted concrete runtime,
+one admitted scene, a fixed launcher and a deterministic receipt. The selected
+runtime must be compiled with `ORR_STATIC_STANDALONE_BUILD_SHA` set to the exact
+reviewed 40-hex source revision. `--provenance` fails when that stamp is absent or
+malformed; `--identity --scene PATH` queries full admission without a window.
+Inputs must be regular single-link files; copy a Cargo-produced hard-linked
+executable into a fresh staging path before packaging. The packager requires matching source stamp and executable SHA-256, then runs
+bounded identity/provenance checks before no-clobber publication. A supplied
+hash/stamp is a mix-up guard, not authentication of arbitrary executable code.
+
+```sh
+cargo run -p orr_static_starter --no-default-features --features bundle --bin bundle -- delivery --runtime /absolute/delivery-player --runtime-sha256 HEX64 --scene /absolute/delivery.scene.yaml --output /absolute/new-bundle --source-sha HEX40 --trusted-runtime
+/absolute/new-bundle/run-game --record /absolute/new-recording.orrp
+```
+
+This is one Linux x86-64 target, not a fully static or universal Linux export.
+The system ELF loader, glibc, display server and compatible graphics driver are
+runtime prerequisites. A relocated source-hidden launch and actual X11 input /
+framebuffer evidence are separate required native gates. CPU controller tests,
+compilation or identity queries alone do not establish successful presentation,
+source-hidden delivery, physical keyboard hardware or physical GPU acceptance.

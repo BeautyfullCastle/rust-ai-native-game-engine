@@ -5606,6 +5606,22 @@ jobs:
           path: ${{ runner.temp }}/static-game-native
           if-no-files-found: error
           retention-days: 7
+      # Separate concrete players, owned Xvfb/XTEST and presented XGetImage pixels.
+      # Mandatory bubblewrap isolation runs these same delivered bundle processes;
+      # missing display/isolation/software-Vulkan capabilities fail, never skip.
+      # Two independent 900-second compile caps plus bounded native/editor checks.
+      - name: Source-hidden standalone game acceptance
+        if: runner.os == 'Linux'
+        timeout-minutes: 40
+        run: python3 tools/static_game_standalone_gate.py --artifacts "$RUNNER_TEMP/static-game-standalone"
+      - name: Upload source-hidden standalone game evidence
+        if: ${{ always() && runner.os == 'Linux' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-game-standalone-${{ matrix.os }}
+          path: ${{ runner.temp }}/static-game-standalone
+          if-no-files-found: error
+          retention-days: 7
       - if: runner.os == 'Linux'
         run: xvfb-run -a -s "-screen 0 1280x720x24" cargo run -p orr_sample --release --bin physics3d -- --bodies 200 --frames 20 --size 640x360 --screenshot "$RUNNER_TEMP/physics3d.png"
       # The mobile / weak-GPU preset (no MSAA, 512 texel shadow map, 12-segment meshes) on the same adapter.
