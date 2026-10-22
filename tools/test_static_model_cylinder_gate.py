@@ -253,8 +253,8 @@ class Fixtures(unittest.TestCase):
             with self.assertRaises(AssertionError):gate.check_cylinder(r,m,'props/key.cylinder.json')
 
     def test_coverage_cannot_promote_unrun_rows(self):
-        keys=('model','bindings','gpu','ui')
-        for mode,passed in [('cpu',{'model','bindings'}),('gpu',{'gpu'}),('ui',{'ui'})]:
+        keys=('model','bindings','gpu','ui','cone_model','cone_ui')
+        for mode,passed in [('cpu',{'model','bindings','cone_model'}),('gpu',{'gpu'}),('ui',{'ui','cone_ui'})]:
             with mock.patch.object(gate,'mode',mode),mock.patch.object(gate.runner,'report',{'coverage':{key:'PASSED' if key in passed else 'NOT RUN' for key in keys}}):
                 gate.check_coverage();gate.runner.report['coverage'][next(key for key in keys if key not in passed)]='PASSED'
                 with self.assertRaises(AssertionError):gate.check_coverage()
