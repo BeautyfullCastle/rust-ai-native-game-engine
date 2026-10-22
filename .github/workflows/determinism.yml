@@ -8,7 +8,7 @@ name: determinism
 
 on:
   pull_request:
-    branches: [main, su/engine-correctness-hardening]
+    branches: [main, su/engine-correctness-hardening, su/authoring-development-integration-20261021]
     types: [ready_for_review]
   workflow_dispatch:
 env:
@@ -4077,7 +4077,9 @@ jobs:
               "tests::sha256_uses_canonical_lowercase_hex",
               "tests::staged_object_and_lock_publish_failures_preserve_active_state",
               "tests::symlinks_at_source_object_and_lock_are_rejected",
-              "tests::tamper_and_writer_failure_preserve_authority"
+              "tests::tamper_and_writer_failure_preserve_authority",
+              "tests::tilemap_added_inside_checked_callback_cannot_publish",
+              "tests::tilemap_declaration_and_all_lock_writers_fail_closed"
             ],
             "ignored-library-hooks": [
               "collect_app::input_runtime_tests::controls_acceptance_tests::authoring_app_saved_bytes_drive_production_keys",
@@ -5008,10 +5010,12 @@ jobs:
                 "tests::sha256_uses_canonical_lowercase_hex",
                 "tests::staged_object_and_lock_publish_failures_preserve_active_state",
                 "tests::symlinks_at_source_object_and_lock_are_rejected",
-                "tests::tamper_and_writer_failure_preserve_authority"
+                "tests::tamper_and_writer_failure_preserve_authority",
+                "tests::tilemap_added_inside_checked_callback_cannot_publish",
+                "tests::tilemap_declaration_and_all_lock_writers_fail_closed"
               ],
               "ignored_names": [],
-              "passed": 29,
+              "passed": 31,
               "ignored": 0,
               "children": 1,
               "features": [],
@@ -5022,7 +5026,7 @@ jobs:
                   0
                 ],
                 [
-                  29,
+                  31,
                   0,
                   0
                 ]
