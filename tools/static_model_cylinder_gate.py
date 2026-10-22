@@ -21,6 +21,7 @@ if not __debug__ or sys.flags.optimize or os.environ.get('PYTHONOPTIMIZE') not i
     raise SystemExit("static cylinder acceptance requires nonoptimized Python")
 
 import static_model_extract_gate as runner
+import static_model_cone_gate as cone
 
 FEATURE_PATHS = (
  'crates/orr_model/examples/static_model_cylinder.rs',
@@ -33,7 +34,7 @@ FEATURE_PATHS = (
  'tools/static_model_cylinder_gate.py',
  'tools/test_static_model_cylinder_gate.py',
  '.github/workflows/static-model-cylinder.yml',
-)
+) + cone.FEATURE_PATHS
 INFRA_PATHS = ('Cargo.toml','Cargo.lock','tools/static_model_extract_gate.py',
  'tools/test_static_model_extract_gate.py')
 CLI_TEST = 'actual_cli_publishes_validated_output_and_rejects_second_write'
@@ -93,7 +94,7 @@ def snapshot():
 
 
 def require_sources(value):
-    assert len(FEATURE_PATHS) == len(set(FEATURE_PATHS)) == 10
+    assert len(FEATURE_PATHS) == len(set(FEATURE_PATHS)) == 17
     required = set(FEATURE_PATHS + INFRA_PATHS)
     for package in ('orr_model', 'orr_model_bindings', 'orr_render', 'orr_editor'):
         required.add(f'crates/{package}/Cargo.toml')
@@ -127,7 +128,7 @@ def initialize(root, destination, phase):
     assert not destination.is_relative_to(source_root), 'evidence must be outside source'
     runner.initialize(source_root, destination, 'gpu' if phase == 'ui' else phase)
     runner.report['mode'] = phase
-    runner.report['coverage'] = {name: 'NOT RUN' for name in ('model', 'bindings', 'gpu', 'ui')}
+    runner.report['coverage'] = {name: 'NOT RUN' for name in ('model', 'bindings', 'gpu', 'ui', 'cone_model', 'cone_ui')}
     runner.report['local_model_only_cannot_certify_hosted_acceptance'] = True
     runner.report['legacy_acceptance'] = 'NOT RUN here; existing mandatory workflows remain required'
     runner.report['workflow_integration'] = 'PENDING current-source matrix contract check'
@@ -169,6 +170,7 @@ def begin():
     for file, marker in [
         ('test_static_model_extract_gate.py', 'STATIC_PROP_GATE_FIXTURES: 29 passed; 0 failed; 0 skipped'),
         ('test_static_model_cylinder_gate.py', f'STATIC_CYLINDER_GATE_FIXTURES: {FIXTURE_COUNT} passed; 0 failed; 0 skipped'),
+        ('test_static_model_cone_gate.py', f'STATIC_CONE_GATE_FIXTURES: {cone.FIXTURE_COUNT} passed; 0 failed; 0 skipped'),
     ]:
         output = run('checker-' + file[:-3], [sys.executable, '-B', str(source_root / 'tools' / file)])
         assert output.rstrip().endswith(marker), 'independent gate fixture census'
@@ -868,6 +870,7 @@ def cpu():
                            'static_model_cylinder', '--', '-D', 'warnings'])
     runner.report['coverage']['bindings'] = 'PASSED'
     runner.record()
+    cone.cpu(sys.modules[__name__])
 
 
 def gpu():
@@ -905,12 +908,13 @@ def ui():
     check_ui(captures)
     runner.report['coverage']['ui'] = 'PASSED'
     runner.record()
+    cone.ui(sys.modules[__name__])
 
 
 def check_coverage():
-    expected = {'cpu': {'model', 'bindings'}, 'gpu': {'gpu'}, 'ui': {'ui'}}[mode]
+    expected = {'cpu': {'model', 'bindings', 'cone_model'}, 'gpu': {'gpu'}, 'ui': {'ui', 'cone_ui'}}[mode]
     assert runner.report['coverage'] == {name: 'PASSED' if name in expected else 'NOT RUN'
-                                         for name in ('model', 'bindings', 'gpu', 'ui')}
+                                         for name in ('model', 'bindings', 'gpu', 'ui', 'cone_model', 'cone_ui')}
 
 
 def finish(error):
