@@ -243,6 +243,47 @@ class Tests(unittest.TestCase):
                 if row['stage'] == stage: row['stdout_sha256']=gate.runner.digest(path)
             self.commands(root,rows)
 
+    def test_consumer_producer_pins_single_thread_libtest(self):
+        source = (Path(__file__).resolve().parents[1] /
+                  'crates/orr_editor/tests/common/arena_ui_evidence.rs').read_text(encoding='utf-8')
+        self.assertIn('.arg(executable).args(["--ignored", "--exact", test, "--nocapture", "--test-threads=1"])', source)
+        root, _ = self.fixture()
+        for stage, name in [('isolated-ui-controls', gate.MODULE), ('isolated-app-restart', gate.APP)]:
+            args = gate.expected_command(root, stage)[1]
+            self.assertEqual(args[-5:], ['--ignored', '--exact', name, '--nocapture', '--test-threads=1'])
+
+    def test_consumer_missing_or_parallel_thread_flag_rejected(self):
+        root, receipt = self.fixture()
+        rows = [json.loads(line) for line in (root/'commands.jsonl').read_text(encoding='utf-8').splitlines()]
+        for stage in ['isolated-ui-controls', 'isolated-app-restart']:
+            for replacement in [[], ['--test-threads=2']]:
+                bad = copy.deepcopy(rows)
+                row = next(row for row in bad if row['stage'] == stage)
+                self.assertEqual(row['args'].pop(), '--test-threads=1')
+                row['args'].extend(replacement)
+                self.commands(root, bad)
+                with self.assertRaises(AssertionError):
+                    gate.verify_commands(root, receipt)
+        self.commands(root, rows)
+        gate.verify_commands(root, receipt)
+
+    def test_uncaptured_diagnostics_require_open_test_record(self):
+        cases = [(gate.MODULE, 3, 'UI controls and visible negative passed; Restart button/UI only, not App bridge reset'),
+                 (gate.APP, 49, 'Relocated App real-widget Restart restored original scene and replay')]
+        for name, total, diagnostic in cases:
+            clean = summary(name, total)
+            record = f'test {name} ... ok'
+            ordered = clean.replace(record, f'test {name} ... {diagnostic}\nok')
+            gate.guide.result(ordered, [name], total)
+            # Exact original CI ordering remains invalid; no stripping or whitelist.
+            for bad in [clean.replace(record, diagnostic+'\n'+record),
+                        clean.replace(record, record+'\n'+diagnostic),
+                        ordered.replace('\nok\n', '\n'),
+                        ordered.replace(diagnostic, 'test unexpected ... ok'),
+                        ordered.replace(diagnostic, 'SKIP: missing adapter')]:
+                with self.assertRaises(AssertionError):
+                    gate.guide.result(bad, [name], total)
+
     def test_command_order_argv_environment_mounts_rejected(self):
         root,r=self.fixture();rows=[json.loads(line) for line in (root/'commands.jsonl').read_text(encoding="utf-8").splitlines()]
         changes=[(0,'args',[]),(1,'cwd','/tmp/elsewhere'),(2,'args',[]),(8,'environment',{}),(9,'gpu_environment',{}),(9,'program','sh')]

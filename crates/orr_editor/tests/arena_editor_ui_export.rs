@@ -74,6 +74,16 @@ fn actual_widget_saved_korean_ui_exports_relocates_and_runs() {
         orr_reflect::Value::Fixed(orr_fp::FP::from_int(-54))
     ));
     editor.sync();
+    // The camera follows hero at screen center, beneath the title window.
+    // Put target above that opaque window so the unchanged sprite-texel oracle
+    // can observe installed artwork in the UI-composited production capture.
+    assert!(editor.select_named("target"));
+    assert!(editor.set_field(
+        &Owner::Component("Position".into()),
+        "pos.y",
+        orr_reflect::Value::Fixed(orr_fp::FP::from_int(120))
+    ));
+    editor.sync();
     assert!(editor.save());
     editor.sync();
     let checksum = editor.checksum();
@@ -255,9 +265,12 @@ fn actual_widget_saved_korean_ui_exports_relocates_and_runs() {
     let a = png(&initial);
     let b = png(&moved);
     assert_ne!(a, b, "production compositor reflects movement");
-    let prepared = orr_sample::project::PreparedProject::open(
+    // This fixture declares UI; admit and validate it rather than using the
+    // deliberately UI-unsupported compatibility entry point.
+    let prepared = orr_sample::project::PreparedProject::open_with_ui(
         &project,
         orr_sample::project_runtime::compiled_runtime(),
+        orr_sample::project::UiSupport::Supported,
     )
     .unwrap();
     let asset = prepared.sprites().unwrap().assets.values().next().unwrap();

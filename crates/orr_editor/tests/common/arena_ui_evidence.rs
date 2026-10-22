@@ -138,9 +138,11 @@ pub fn consumer_command<'a>(
     executable: &Path,
     test: &str,
 ) -> &'a mut Command {
+    // Single-thread libtest prints the test prefix before uncaptured diagnostics.
+    // The receipt validator intentionally rejects diagnostics outside a record.
     command.args(["--", "/bin/sh", "-c", "test ! -e \"$1/Cargo.toml\" && test ! -e \"$2/orr.project.json\" && test ! -e \"$3\" && test ! -e \"$4\" || exit 91; if touch \"$5/.ui-consumer-write-probe\" 2>/dev/null; then rm -f \"$5/.ui-consumer-write-probe\"; exit 92; fi; printf 'consumer-source-hidden=true consumer-runtime-hidden=true consumer-producer-hidden=true consumer-bundle-read-only=true\\n'; shift 5; exec \"$@\"", "sh"])
         .arg(paths.repository).arg(paths.project).arg(paths.runtime).arg(paths.producer).arg(paths.bundle)
-        .arg(executable).args(["--ignored", "--exact", test, "--nocapture"])
+        .arg(executable).args(["--ignored", "--exact", test, "--nocapture", "--test-threads=1"])
         .env(CONSUMER_ENV[0], paths.bundle).env(CONSUMER_ENV[1], paths.evidence)
         .env(CONSUMER_ENV[2], paths.project).env(CONSUMER_ENV[3], paths.repository)
         .env(CONSUMER_ENV[4], paths.runtime).env(CONSUMER_ENV[5], paths.producer)
