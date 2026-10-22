@@ -307,7 +307,11 @@ def clean_checkout(sha, cwd=None):
                 continue
             path = raw.decode()
             compiler_input = path.startswith(('crates/', 'examples/', '.cargo/'))
-            compiler_input |= path in ('Cargo.toml', 'Cargo.lock', 'build.rs')
+            # Rustup selects a compiler from either root toolchain filename. Also
+            # reject a new symlink occupying a reserved input-directory name.
+            compiler_input |= path in ('crates', 'examples', '.cargo', 'tools',
+                                       'Cargo.toml', 'Cargo.lock', 'build.rs',
+                                       'rust-toolchain', 'rust-toolchain.toml')
             compiler_input |= path.startswith('tools/') and '__pycache__/' not in path
             require(not compiler_input, 'untracked compiler/gate input '+path)
     return {'commit': sha, 'tree': tree, 'files': files}

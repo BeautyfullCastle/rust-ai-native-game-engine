@@ -234,6 +234,66 @@ class NativeGateTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 gate.clean_checkout(sha, directory)
 
+    def test_rustup_and_cargo_inputs_are_fenced_in_both_gates(self):
+        import static_game_standalone_gate as standalone_gate
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(['git', 'init', '-q', directory], check=True)
+            (root/'source.rs').write_text('reviewed source')
+            subprocess.run(['git', '-C', directory, 'add', 'source.rs'], check=True)
+            subprocess.run(['git', '-C', directory, '-c', 'user.name=fixture', '-c',
+                            'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture'], check=True)
+            sha = subprocess.check_output(['git', '-C', directory, 'rev-parse', 'HEAD'], text=True).strip()
+            artifact = root/'artifacts/run'
+            artifact.mkdir(parents=True)
+            (artifact/'receipt.json').write_text('{}')
+            # Compiler-like names outside the actual lookup/source roots are outputs.
+            (artifact/'rust-toolchain.toml').write_text('evidence, not a compiler input')
+            paths = ('rust-toolchain', 'rust-toolchain.toml', 'Cargo.toml', 'Cargo.lock',
+                     '.cargo/config', '.cargo/config.toml', 'examples/game/.cargo/config.toml',
+                     'crates/game/rust-toolchain.toml', 'examples/game/Cargo.toml')
+            for fence in (gate.clean_checkout, standalone_gate.clean_checkout):
+                fence(sha, directory)
+                for ignored in (False, True):
+                    for name in paths:
+                        with self.subTest(gate=fence.__module__, path=name, ignored=ignored):
+                            (root/'.git/info/exclude').write_text('/'+name+'\n' if ignored else '')
+                            path = root/name
+                            path.parent.mkdir(parents=True, exist_ok=True)
+                            value = {'rust-toolchain': 'nightly\n',
+                                     'rust-toolchain.toml': '[toolchain]\nchannel = \"nightly\"\n'}.get(
+                                         name, 'unreviewed compiler configuration')
+                            path.write_text(value)
+                            with self.assertRaisesRegex(ValueError, 'untracked compiler/gate input'):
+                                fence(sha, directory)
+                            path.unlink()
+                (root/'.git/info/exclude').write_text('')
+                # An untracked .cargo symlink is reported by Git without a slash.
+                link = root/'.cargo'
+                link.rmdir()
+                link.symlink_to(artifact, target_is_directory=True)
+                with self.assertRaisesRegex(ValueError, 'untracked compiler/gate input'):
+                    fence(sha, directory)
+                link.unlink()
+                fence(sha, directory)
+            # Reviewed root and nested configs are allowed; their bytes are fenced.
+            for name in ('rust-toolchain.toml', '.cargo/config.toml', 'examples/game/Cargo.toml'):
+                path = root/name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('reviewed configuration')
+            subprocess.run(['git', '-C', directory, 'add', '.'], check=True)
+            subprocess.run(['git', '-C', directory, '-c', 'user.name=fixture', '-c',
+                            'user.email=fixture@example.invalid', 'commit', '-qm', 'reviewed configs'], check=True)
+            sha = subprocess.check_output(['git', '-C', directory, 'rev-parse', 'HEAD'], text=True).strip()
+            for fence in (gate.clean_checkout, standalone_gate.clean_checkout):
+                fence(sha, directory)
+                for name in ('rust-toolchain.toml', '.cargo/config.toml', 'examples/game/Cargo.toml'):
+                    path = root/name
+                    path.write_text('modified configuration')
+                    with self.assertRaises(ValueError):
+                        fence(sha, directory)
+                    path.write_text('reviewed configuration')
+
     def test_early_failure_still_writes_attempt(self):
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(gate.os.environ, {}, clear=True):
             with self.assertRaises(ValueError):
