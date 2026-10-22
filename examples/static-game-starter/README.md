@@ -56,3 +56,26 @@ the player runs 60 idle ticks. Acceptance launches the actual headless player bi
 scene-only temporary working directory and compares nonzero win traces and idle
 checksums. The editor is exercised through its CPU library APIs, not launched as
 a native window by these tests. This proves working-directory relocation, not source-hidden packaging.
+
+## Required hosted native-window acceptance
+
+The separate `native-acceptance` feature selects the `native_window` integration
+test. The existing hosted Linux gate builds a SHA-bound test executable, checks
+its exact one-test inventory, and runs it under Xvfb with Mesa software Vulkan.
+Both delivery and switchboard must produce successful receipts and four actual
+EditorApp framebuffer PNGs (edit, won, neutral, reopened). Missing renderer,
+display, source/run provenance, either game, input-release acknowledgment or
+expected pixels is a failure, not a skipped success.
+
+The fixture clicks actual viewport/Play/Take-control controls and supplies queued
+egui raw key/focus events. Its non-rendering harness only locates toolbar widgets;
+all evidence PNGs come from native eframe screenshot events. It checks separate
+Escape/focus release, one neutral tick, Space restart, reopened identity and no
+automatic re-claim. Compiled source SHA, executable hash, exact admitted contracts,
+scene hashes, typed states and image hashes accompany the captures.
+
+This proves the native App path on a virtual X11 display using software Vulkan.
+It does not prove physical OS keyboard/focus delivery, a physical GPU, a native
+standalone player, source-hidden deployment, or packaged export. Local compilation
+and lint alone do not establish this acceptance; exact published-SHA hosted
+receipts must pass the independent validator.

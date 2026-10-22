@@ -25,4 +25,14 @@ orr_sample = { path = "../../crates/orr_sample" }
 orr_view = { path = "../../crates/orr_view" }
 
 [dev-dependencies]
+egui_kittest = { version = "0.36", features = ["eframe"] }
+winit = { version = "0.30.13", default-features = false }
 tempfile = "3"
+
+[features]
+native-acceptance = []
+
+[[test]]
+name = "native_window"
+path = "tests/native_window.rs"
+required-features = ["native-acceptance"]

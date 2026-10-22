@@ -5591,6 +5591,21 @@ jobs:
           path: ${{ runner.temp }}/arena-editor-native
           if-no-files-found: error
           retention-days: 7
+      # Both externally registered games must pass the actual App/framebuffer path.
+      # The runner rejects stale identities, zero/skipped tests, missing either game,
+      # wrong input contracts, stuck held input and independently invalid PNG pixels.
+      - name: Registered games native-window acceptance
+        if: runner.os == 'Linux'
+        timeout-minutes: 20
+        run: python3 tools/static_game_native_gate.py --artifacts "$RUNNER_TEMP/static-game-native"
+      - name: Upload registered games native-window evidence
+        if: ${{ always() && runner.os == 'Linux' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-game-native-${{ matrix.os }}
+          path: ${{ runner.temp }}/static-game-native
+          if-no-files-found: error
+          retention-days: 7
       - if: runner.os == 'Linux'
         run: xvfb-run -a -s "-screen 0 1280x720x24" cargo run -p orr_sample --release --bin physics3d -- --bodies 200 --frames 20 --size 640x360 --screenshot "$RUNNER_TEMP/physics3d.png"
       # The mobile / weak-GPU preset (no MSAA, 512 texel shadow map, 12-segment meshes) on the same adapter.
