@@ -255,9 +255,12 @@ fn actual_widget_saved_korean_ui_exports_relocates_and_runs() {
     let a = png(&initial);
     let b = png(&moved);
     assert_ne!(a, b, "production compositor reflects movement");
-    let prepared = orr_sample::project::PreparedProject::open(
+    // This fixture declares UI; admit and validate it rather than using the
+    // deliberately UI-unsupported compatibility entry point.
+    let prepared = orr_sample::project::PreparedProject::open_with_ui(
         &project,
         orr_sample::project_runtime::compiled_runtime(),
+        orr_sample::project::UiSupport::Supported,
     )
     .unwrap();
     let asset = prepared.sprites().unwrap().assets.values().next().unwrap();
