@@ -130,3 +130,6 @@ pub mod collect_dodge;
 
 #[cfg(feature = "room-project")]
 pub mod room_escape;
+
+mod static_host;
+pub use static_host::ExpectedInputDescriptor;

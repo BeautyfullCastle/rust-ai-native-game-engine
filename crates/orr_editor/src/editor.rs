@@ -303,6 +303,12 @@ impl Editor {
         Self::start(&HostSpec::local_game(path, game))
     }
 
+    /// Opens a statically registered game with no listener or default scene.
+    #[cfg(feature = "static-games")]
+    pub fn open_registered(path: &Path, game: crate::static_adapter::RegisteredGame) -> Result<Self, String> {
+        Self::open_game(path, EditorGame::Registered(game))
+    }
+
     /// An editor attached to the host at `url` (`ws://host:port`), for example an
     /// `orr_remote_host`.
     pub fn attach(url: &str, token: Option<&str>) -> Result<Self, String> {
@@ -344,6 +350,8 @@ impl Editor {
         feed.own.clone_from(&backend.own_client);
         let types = Arc::new(backend.game.types());
         let mut input = input::Input::new(backend.managed_input);
+        #[cfg(feature = "static-games")]
+        { input.registered = backend.game.registered(); }
         input.collect_dodge = backend.game.is_collect();
         input.room_escape = backend.game.is_room();
         #[cfg(feature = "mesh-navigation")]
@@ -960,6 +968,23 @@ impl Editor {
 
     /// Frames the camera on the scene box (`Scene` singleton), like the sample does.
     pub fn fit_camera(&mut self) {
+        #[cfg(feature = "static-games")]
+        if self.game().is_registered() {
+            // Static primitive games have no builtin Scene singleton or world size.
+            let mut low = [f32::INFINITY; 2];
+            let mut high = [f32::NEG_INFINITY; 2];
+            for body in &self.bodies {
+                let radius = body.outline.extent();
+                for axis in 0..2 {
+                    low[axis] = low[axis].min(body.pos[axis] - radius);
+                    high[axis] = high[axis].max(body.pos[axis] + radius);
+                }
+            }
+            self.camera = if self.bodies.is_empty() { Camera::new([0.0, 0.0], 1.0) }
+                else { Camera::new([(low[0] + high[0]) * 0.5, (low[1] + high[1]) * 0.5],
+                    ((high[0] - low[0]).max(high[1] - low[1]) * 0.6).max(1.0)) };
+            return;
+        }
         #[cfg(feature = "mesh-navigation")]
         if self.game().has_mesh_view() {
             if let Some(view) = self.snapshot.as_ref().and_then(|snapshot| {
@@ -1900,7 +1925,7 @@ impl Editor {
                 self.clear_room_camera();
                 self.select(None);
                 self.refit = true;
-                if self.game() == EditorGame::Arena || self.game().has_mesh_view() {
+                if self.game() == EditorGame::Arena || self.game().has_mesh_view() || self.game().is_registered() {
                     self.refit_checksum = r.get("checksum").and_then(orr_remote::wire::parse_checksum);
                 }
                 self.backend.spec.set_local_scene_path(path.to_path_buf());

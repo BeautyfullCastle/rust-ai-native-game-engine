@@ -266,6 +266,18 @@ impl Backend {
             service
         };
         let host = match selected_game {
+            #[cfg(feature = "static-games")]
+            EditorGame::Registered(game) => {
+                if listen.is_some() { return Err("registered startup does not support a listener".into()); }
+                cfg.limits.player_count = game.expected_input().max_players();
+                let host = game.spawn(crate::static_adapter::StaticHostRequest {
+                    scene_text: text, scene_path: scene.to_path_buf(), config: cfg,
+                    work_status: status_service(), neutral_value: game.neutral_value(),
+                    expected_input: game.expected_input(),
+                })?;
+                if host.url().is_some() { return Err("registered factory unexpectedly enabled a listener".into()); }
+                host
+            },
             EditorGame::PhysGame => spawn_phys_host_with_editor_work_status(text, Some(scene.to_path_buf()), cfg, status_service())?,
             EditorGame::Arena => spawn_arena_host_with_editor_work_status(text, Some(scene.to_path_buf()), cfg, status_service())?,
             #[cfg(feature = "collect-dodge")]
@@ -292,7 +304,7 @@ impl Backend {
         // In process a frame is a copy, not a message: let an edit show at once instead of
         // waiting out a 60 Hz cap (the window draws at most as often as it likes anyway).
         rc.max_fps = 240;
-        let (game, identity, own_client, managed_input) = discover(&mut erp)?;
+        let (game, identity, own_client, managed_input) = discover_selected(&mut erp, selected_game)?;
         rc.expected_identity = Some(identity.clone());
         let bridge = EditorStream::connect_transport(game, Box::new(link("frames")?), rc)?;
         let url = host.url().map(str::to_string);
@@ -345,6 +357,29 @@ impl Backend {
             .map(|_| ())
             .map_err(|e| format!("watch.subscribe: {e}"))
     }
+}
+
+// Local selection is an explicit validated handle, never a name-based fallback.
+fn discover_selected(erp: &mut ErpClient, selected: EditorGame) -> Result<(EditorGame, RemoteIdentity, String, bool), String> {
+    #[cfg(feature = "static-games")]
+    if let EditorGame::Registered(game) = selected {
+        let d = erp.call("rpc.discover", J::Null).map_err(|e| format!("rpc.discover: {e}"))?;
+        let expected = game.expected_identity();
+        if d["erp_version"].as_u64() != Some(1)
+            || d.pointer("/engine/game").and_then(J::as_str) != Some(expected.game.as_str())
+            || d.pointer("/engine/build_id").and_then(J::as_str) != Some(expected.build_id.as_str()) {
+            return Err("registered game/build identity mismatch".into());
+        }
+        let schema = erp.call("registry.schema", J::Null).map_err(|e| format!("registry.schema: {e}"))?;
+        if schema.get("schema") != Some(&expected.schema) { return Err("registered full reflection schema mismatch".into()); }
+        let input = erp.call("registry.input", J::Null).map_err(|e| format!("registry.input: {e}"))?;
+        game.expected_input().validate(&input)?;
+        let own = d.pointer("/you/client").and_then(J::as_str).unwrap_or(USER_CLIENT).to_string();
+        return Ok((selected, expected, own, true));
+    }
+    let result = discover(erp)?;
+    if result.0 != selected { return Err("selected local game does not match the host".into()); }
+    Ok(result)
 }
 
 // Discover before choosing a native frame decoder. Schema comparison includes

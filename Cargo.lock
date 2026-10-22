@@ -3625,6 +3625,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "orr_static_starter"
+version = "0.0.1"
+dependencies = [
+ "bytemuck",
+ "eframe",
+ "egui",
+ "orr_bridge",
+ "orr_ecs",
+ "orr_edit",
+ "orr_editor",
+ "orr_fp",
+ "orr_reflect",
+ "orr_remote",
+ "orr_sample",
+ "orr_session",
+ "orr_sim",
+ "orr_view",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "orr_testgame"
 version = "0.0.1"
 dependencies = [

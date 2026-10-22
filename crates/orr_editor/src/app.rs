@@ -1644,7 +1644,7 @@ impl EditorApp {
                 let mapped_collect_hint = self.editor.game().is_collect().then(|| format!("Active · {}", self.ui.collect_controls.hint()));
                 #[cfg(not(all(feature = "collect-ui", feature = "collect-input-map-editor")))]
                 let mapped_collect_hint: Option<String> = None;
-                ui.label(match phase { Phase::Off => self.editor.input_hint(), Phase::Claiming => "Claiming…", Phase::Active => if self.editor.game().is_room() { "Active · WASD/arrows · E interact · Escape releases" } else if self.editor.game().is_collect() { mapped_collect_hint.as_deref().unwrap_or("Active · WASD/arrows · press Space to restart · Escape releases") } else { "Active · WASD/arrows · hold Space to fire · Escape releases" }, Phase::Releasing => "Releasing…" });
+                ui.label(match phase { Phase::Off => self.editor.input_hint(), Phase::Claiming => "Claiming…", Phase::Active => if let Some(hint) = self.editor.game().registered_input_hint() { hint } else if self.editor.game().is_room() { "Active · WASD/arrows · E interact · Escape releases" } else if self.editor.game().is_collect() { mapped_collect_hint.as_deref().unwrap_or("Active · WASD/arrows · press Space to restart · Escape releases") } else { "Active · WASD/arrows · hold Space to fire · Escape releases" }, Phase::Releasing => "Releasing…" });
             });
             #[cfg(all(feature = "collect-ui", feature = "collect-input-map-editor"))]
             if self.editor.game().is_collect() {

@@ -1,0 +1,7 @@
+schema: orr.scene/1
+singletons:
+  Delivery: { goal: [4, 0], won: 0, action_held: 0 }
+entities:
+  e_00000001:
+    name: courier
+    Courier: { position: [0, 0] }

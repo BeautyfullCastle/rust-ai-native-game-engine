@@ -54,6 +54,8 @@ pub mod diagnostics;
 pub mod editor;
 pub mod inspector;
 pub mod game;
+#[cfg(feature = "static-games")]
+pub mod static_adapter;
 pub mod model;
 pub mod script;
 pub mod viewport;

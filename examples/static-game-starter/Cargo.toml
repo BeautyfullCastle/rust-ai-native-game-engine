@@ -1,0 +1,28 @@
+[package]
+name = "orr_static_starter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bytemuck = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["arbitrary_precision", "preserve_order"] }
+eframe = { version = "0.36", default-features = false, features = ["wgpu", "x11", "wayland", "default_fonts"] }
+egui = "0.36"
+orr_ecs = { path = "../../crates/orr_ecs" }
+orr_fp = { path = "../../crates/orr_fp" }
+orr_sim = { path = "../../crates/orr_sim" }
+orr_session = { path = "../../crates/orr_session" }
+orr_reflect = { path = "../../crates/orr_reflect" }
+orr_edit = { path = "../../crates/orr_edit" }
+orr_bridge = { path = "../../crates/orr_bridge" }
+orr_remote = { path = "../../crates/orr_remote" }
+orr_editor = { path = "../../crates/orr_editor", features = ["static-games"] }
+orr_sample = { path = "../../crates/orr_sample" }
+orr_view = { path = "../../crates/orr_view" }
+
+[dev-dependencies]
+tempfile = "3"
