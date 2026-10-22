@@ -74,6 +74,16 @@ fn actual_widget_saved_korean_ui_exports_relocates_and_runs() {
         orr_reflect::Value::Fixed(orr_fp::FP::from_int(-54))
     ));
     editor.sync();
+    // The camera follows hero at screen center, beneath the title window.
+    // Put target above that opaque window so the unchanged sprite-texel oracle
+    // can observe installed artwork in the UI-composited production capture.
+    assert!(editor.select_named("target"));
+    assert!(editor.set_field(
+        &Owner::Component("Position".into()),
+        "pos.y",
+        orr_reflect::Value::Fixed(orr_fp::FP::from_int(120))
+    ));
+    editor.sync();
     assert!(editor.save());
     editor.sync();
     let checksum = editor.checksum();
