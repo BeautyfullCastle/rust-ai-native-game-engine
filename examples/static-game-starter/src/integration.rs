@@ -133,3 +133,20 @@ mod editor {
 }
 #[cfg(feature = "editor")]
 pub use editor::{descriptors, registry};
+
+/// Optional companion for application-owned games using the shared typed hooks.
+/// The registry admits and freezes these samples; no game callback runs per frame.
+#[cfg(all(feature = "editor", feature = "static-game-actions"))]
+pub fn action_descriptor<G: crate::presentation::StandaloneGame>(
+) -> Option<orr_editor::static_adapter::StaticActionDescriptor> {
+    G::action_profile().map(
+        |profile| orr_editor::static_adapter::StaticActionDescriptor {
+            game_id: G::ID,
+            profile,
+            held: |held, types| {
+                crate::presentation::admit_action_sample::<G>(held, types)
+                    .map(|(_, value, _)| value)
+            },
+        },
+    )
+}

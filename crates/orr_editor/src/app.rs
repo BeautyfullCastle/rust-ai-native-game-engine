@@ -108,6 +108,10 @@ mod collect_ui_resize;
 #[path = "app/collect_controls.rs"]
 mod collect_controls;
 
+#[cfg(feature = "static-game-actions")]
+#[path = "app/static_actions.rs"]
+mod static_actions;
+
 #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "project-create", feature = "collect-ui"))]
 #[path = "app/collect_project.rs"]
 mod collect_project;
@@ -212,6 +216,8 @@ pub struct UiState {
     yard_transform_target: Option<Target>,
     yard_xyz: [String;3],
     yard_quat: [String;4],
+    #[cfg(feature = "static-game-actions")]
+    static_actions: static_actions::Router,
     input_player: u8,
     take_control: bool,
     #[cfg(all(feature = "collect-ui", feature = "collect-input-map-editor"))]
@@ -2444,7 +2450,26 @@ impl EditorApp {
                 });
             }
         }
-        if !mapped_collect {
+        #[cfg(feature = "static-game-actions")]
+        let mapped_static = self.editor.game().registered().is_some_and(|g| g.action_profile().is_some());
+        #[cfg(not(feature = "static-game-actions"))]
+        let mapped_static = false;
+        #[cfg(feature = "static-game-actions")]
+        {
+            let enabled = focused && self.editor.can_take_control();
+            let (keys, consumed, release) = ui.input(|i| self.ui.static_actions.route(
+                self.editor.game().registered(), self.editor.scene_load_epoch(), self.editor.static_action_intent(), enabled,
+                self.editor.input_phase(), &i.events));
+            if mapped_static {
+                self.editor.static_action_keys(enabled && !release, keys);
+                if release { resp.surrender_focus(); }
+                ui.input_mut(|i| {
+                    let mut index = 0;
+                    i.events.retain(|_| { let keep = !consumed.contains(&index); index += 1; keep });
+                });
+            }
+        }
+        if !mapped_collect && !mapped_static {
             let keys = ui.input(|i| crate::editor::input::Keys {
                 x: i8::from(i.key_down(Key::D) || i.key_down(Key::ArrowRight)) - i8::from(i.key_down(Key::A) || i.key_down(Key::ArrowLeft)),
                 y: i8::from(i.key_down(Key::W) || i.key_down(Key::ArrowUp)) - i8::from(i.key_down(Key::S) || i.key_down(Key::ArrowDown)),
@@ -2472,7 +2497,7 @@ impl EditorApp {
                 escape: collect_controlled, tab: collect_controlled,
             }));
         }
-        if !mapped_collect && focused && self.editor.input_phase() == crate::editor::input::Phase::Active {
+        if !mapped_collect && !mapped_static && focused && self.editor.input_phase() == crate::editor::input::Phase::Active {
             ui.input_mut(|i| i.events.retain(|event| !matches!(event, egui::Event::Key { key: Key::W | Key::A | Key::S | Key::D | Key::ArrowUp | Key::ArrowDown | Key::ArrowLeft | Key::ArrowRight | Key::Space, .. })));
         }
         let ppp = ui.ctx().pixels_per_point();

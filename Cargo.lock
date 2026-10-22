@@ -3155,6 +3155,7 @@ dependencies = [
 name = "orr_editor"
 version = "0.0.1"
 dependencies = [
+ "bytemuck",
  "eframe",
  "egui",
  "egui-wgpu",

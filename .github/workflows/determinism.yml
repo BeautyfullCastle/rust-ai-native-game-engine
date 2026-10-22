@@ -5628,6 +5628,65 @@ jobs:
       - if: runner.os == 'Linux'
         run: xvfb-run -a -s "-screen 0 1280x720x24" cargo run -p orr_sample --release --bin physics3d -- --low --bodies 200 --frames 20 --size 640x360 --screenshot "$RUNNER_TEMP/physics3d_low.png"
 
+  static-game-actions-native:
+    name: private four-action native (ubuntu-22.04)
+    # One required isolated Linux lane, never another matrix or production game.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 70
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      CARGO_TERM_COLOR: never
+      WGPU_BACKEND: vulkan
+      ORR_REQUIRE_GPU: "1"
+    steps:
+      - name: Initialize private action failure evidence
+        timeout-minutes: 1
+        run: |
+          mkdir -p "$RUNNER_TEMP/static-game-actions-native-job"
+          printf '%s\n' '{"status":"setup-started","native_acceptance":false}' > "$RUNNER_TEMP/static-game-actions-native-job/setup.json"
+      - uses: actions/checkout@v4
+        timeout-minutes: 2
+      - uses: dtolnay/rust-toolchain@stable
+        timeout-minutes: 3
+      - uses: Swatinem/rust-cache@v2
+        timeout-minutes: 4
+        with:
+          shared-key: private-four-action-native
+      - name: Install required native action capabilities
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          { sudo apt-get update -q
+            sudo apt-get install -y -q mesa-vulkan-drivers xvfb xauth libxkbcommon-x11-0 libasound2-dev pkg-config
+          } 2>&1 | tee "$RUNNER_TEMP/static-game-actions-native-job/setup-packages.log"
+      - name: Fetch exact locked registry inputs
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fetch --locked 2>&1 | tee "$RUNNER_TEMP/static-game-actions-native-job/registry-fetch.log"
+      # Hard step caps total 64 minutes, leaving 6 minutes job overhead.
+      # Gate retains two 900-second compile caps and 180/240-second native caps.
+      # Operational budget is unmeasured until hosted execution, not a runtime claim.
+      - name: Required private four-action native editor and player
+        timeout-minutes: 45
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$RUNNER_TEMP/static-game-actions-native-job"
+          trap 'status=$?; printf "{\"exit_code\":%s,\"native_acceptance_claim\":false}\n" "$status" > "$ROOT/process-exit.json"' EXIT
+          python3 -B tools/static_game_actions_native_gate.py --artifacts "$ROOT/acceptance" 2>&1 | tee "$ROOT/acceptance.log"
+      - name: Retain private action success or partial failure evidence
+        if: always()
+        timeout-minutes: 3
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-game-actions-native-ubuntu-22.04
+          path: ${{ runner.temp }}/static-game-actions-native-job
+          if-no-files-found: error
+          retention-days: 7
+
   generated-user-game-native:
     name: generated user game native (ubuntu-22.04)
     # One isolated mandatory lane, not a matrix. Existing engine gates remain.
@@ -6222,7 +6281,7 @@ jobs:
     name: cross-platform checksum comparison
     # Preserve this check name for existing branch protection. Every checksum
     # target, sample graphics/audio/editor matrix, linked-prefab and Room lanes must pass.
-    needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, generated-user-game-native, sample-arena-cpu, sample-fixture-preflight, sample-linked-prefabs, sample-room, static-model-authoring, room-wall-authoring]
+    needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, generated-user-game-native, static-game-actions-native, sample-arena-cpu, sample-fixture-preflight, sample-linked-prefabs, sample-room, static-model-authoring, room-wall-authoring]
     # Without always(), a failed/skipped dependency skips this required check.
     if: ${{ always() }}
     runs-on: ubuntu-latest
@@ -6238,11 +6297,12 @@ jobs:
           SAMPLE_PREFLIGHT_RESULT: ${{ needs['sample-fixture-preflight'].result }}
           SAMPLE_BUILD_RESULT: ${{ needs['sample-build'].result }}
           GENERATED_USER_NATIVE_RESULT: ${{ needs['generated-user-game-native'].result }}
+          PRIVATE_ACTION_NATIVE_RESULT: ${{ needs['static-game-actions-native'].result }}
           LINKED_PREFABS_RESULT: ${{ needs['sample-linked-prefabs'].result }}
           ROOM_RESULT: ${{ needs['sample-room'].result }}
         run: |
           failed=0
-          for result_var in NATIVE_RESULT WASM32_RESULT ANDROID_ARM64_RESULT BROWSER_RESULT SAMPLE_BUILD_RESULT SAMPLE_ARENA_CPU_RESULT SAMPLE_PREFLIGHT_RESULT LINKED_PREFABS_RESULT ROOM_RESULT GENERATED_USER_NATIVE_RESULT; do
+          for result_var in NATIVE_RESULT WASM32_RESULT ANDROID_ARM64_RESULT BROWSER_RESULT SAMPLE_BUILD_RESULT SAMPLE_ARENA_CPU_RESULT SAMPLE_PREFLIGHT_RESULT LINKED_PREFABS_RESULT ROOM_RESULT GENERATED_USER_NATIVE_RESULT PRIVATE_ACTION_NATIVE_RESULT; do
             result="${!result_var}"
             echo "$result_var=$result"
             if [[ "$result" != "success" ]]; then

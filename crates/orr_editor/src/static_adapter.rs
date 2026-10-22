@@ -19,6 +19,12 @@ use serde_json::Value as J;
 
 use crate::game::Drawable;
 
+#[cfg(feature = "static-game-actions")]
+#[path = "static_actions.rs"]
+pub(crate) mod actions;
+#[cfg(feature = "static-game-actions")]
+pub use actions::StaticActionDescriptor;
+
 /// Owned snapshots only. A borrowed frame must never be retained by an adapter.
 pub trait StaticFrameStream {
     fn poll_view(&mut self) -> ViewUpdate<()>;
@@ -97,7 +103,11 @@ struct Entry {
     types: TypeRegistry,
     identity: RemoteIdentity,
     input: ExpectedInputDescriptor,
+    #[cfg(feature = "static-game-actions")]
+    input_types: TypeRegistry,
     held: Vec<J>,
+    #[cfg(feature = "static-game-actions")]
+    actions: Option<actions::FrozenActions>,
 }
 
 /// At most 32 immutable registrations. No handles can be manufactured directly.
@@ -238,7 +248,11 @@ impl StaticGameRegistry {
                 types,
                 identity,
                 input: expected,
+                #[cfg(feature = "static-game-actions")]
+                input_types,
                 held,
+                #[cfg(feature = "static-game-actions")]
+                actions: None,
             });
         }
         Ok(Self { entries })
@@ -291,6 +305,10 @@ impl RegisteredGame {
         self.entry().input.clone()
     }
     pub fn neutral_value(self) -> J {
+        #[cfg(feature = "static-game-actions")]
+        if let Some(actions) = &self.entry().actions {
+            return actions.values[actions.profile.index(orr_input::HeldActions::default()).expect("neutral index")].clone();
+        }
         self.entry().held[8].clone()
     }
     pub fn input_hint(self) -> &'static str {
@@ -352,7 +370,7 @@ pub(crate) mod tests {
     fn no_draw(_: FrameView<'_>) -> Vec<Drawable> {
         Vec::new()
     }
-    fn descriptor(id: &'static str, alias: &'static str) -> StaticGameDescriptor {
+    pub(crate) fn descriptor(id: &'static str, alias: &'static str) -> StaticGameDescriptor {
         StaticGameDescriptor {
             game_id: id,
             local_alias: alias,

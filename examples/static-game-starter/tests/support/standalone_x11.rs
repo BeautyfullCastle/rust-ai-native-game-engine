@@ -269,6 +269,42 @@ impl Observer {
         self.connection.flush()?;
         Ok(())
     }
+    /// Deliver a real server-side mouse click inside the selected owned window.
+    #[allow(
+        dead_code,
+        reason = "Used only by the separate editor XTEST acceptance target"
+    )]
+    pub fn click(&self, window: Window, x: i16, y: i16) -> Result<()> {
+        let geometry = self.connection.get_geometry(window)?.reply()?;
+        if x < 0 || y < 0 || x as u16 >= geometry.width || y as u16 >= geometry.height {
+            return Err("click is outside the owned window".into());
+        }
+        let root = self.connection.setup().roots[self.screen].root;
+        let translated = self
+            .connection
+            .translate_coordinates(window, root, x, y)?
+            .reply()?;
+        if !translated.same_screen {
+            return Err("click crosses screens".into());
+        }
+        xtest::fake_input(
+            &self.connection,
+            MOTION_NOTIFY_EVENT,
+            0,
+            CURRENT_TIME,
+            root,
+            translated.dst_x,
+            translated.dst_y,
+            0,
+        )?
+        .check()?;
+        for kind in [BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT] {
+            xtest::fake_input(&self.connection, kind, 1, CURRENT_TIME, root, 0, 0, 0)?.check()?;
+        }
+        self.connection.flush()?;
+        self.connection.get_input_focus()?.reply()?;
+        Ok(())
+    }
     pub fn close(&self, window: Window) -> Result<()> {
         let protocols = self
             .connection

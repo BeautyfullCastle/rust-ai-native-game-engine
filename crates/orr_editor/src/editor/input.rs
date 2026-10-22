@@ -33,6 +33,10 @@ pub(super) struct Input {
     wanted: bool,
     player: u8,
     grant: Option<Grant>,
+    #[cfg(feature = "static-game-actions")]
+    latest_actions: orr_input::HeldActions,
+    #[cfg(feature = "static-game-actions")]
+    sent_actions: Option<orr_input::HeldActions>,
     latest: Keys,
     sent: Option<Keys>,
     #[cfg(feature = "mesh-navigation")]
@@ -58,6 +62,8 @@ impl Input {
         self.wanted = true;
         self.phase = Phase::Claiming;
         self.latest = Keys::default();
+        #[cfg(feature = "static-game-actions")]
+        { self.latest_actions = orr_input::HeldActions::default(); self.sent_actions = None; }
         self.sent = None;
         #[cfg(feature = "mesh-navigation")]
         { self.mesh_goal = None; self.mesh_neutral_pending = false; self.mesh_flight_goal = None; self.mesh_waiting_goal = None; self.mesh_checked_tick = None; }
@@ -66,6 +72,8 @@ impl Input {
         self.reset_collect_edges();
         self.wanted = false;
         self.latest = Keys::default();
+        #[cfg(feature = "static-game-actions")]
+        { self.latest_actions = orr_input::HeldActions::default(); self.sent_actions = None; }
         #[cfg(feature = "mesh-navigation")]
         { self.mesh_goal = None; self.mesh_neutral_pending = false; self.mesh_flight_goal = None; self.mesh_waiting_goal = None; self.mesh_checked_tick = None; }
         if self.phase != Phase::Off { self.phase = Phase::Releasing; }
@@ -119,6 +127,8 @@ impl Input {
         keys
     }
     fn off(&mut self) {
+        #[cfg(feature = "static-game-actions")]
+        { self.latest_actions = orr_input::HeldActions::default(); self.sent_actions = None; }
         self.reset_collect_edges();
         self.phase = Phase::Off; self.wanted = false; self.grant = None;
         self.flight = None; self.sent = None; self.last_ack = None;
@@ -130,6 +140,8 @@ impl Input {
             if now.duration_since(at) >= Duration::from_millis(2000) {
                 self.wanted = false;
                 self.latest = Keys::default();
+                #[cfg(feature = "static-game-actions")]
+                { self.latest_actions = orr_input::HeldActions::default(); self.sent_actions = None; }
                 #[cfg(feature = "mesh-navigation")]
                 { self.mesh_goal = None; self.mesh_neutral_pending = false; self.mesh_flight_goal = None; self.mesh_waiting_goal = None; self.mesh_checked_tick = None; }
                 if matches!(op, Op::Claim | Op::Release) {
@@ -151,11 +163,11 @@ impl Input {
             Phase::Active => {
                 if self.last_ack.is_some_and(|at| now.duration_since(at) >= Duration::from_millis(2000)) { self.off(); return None; }
                 #[cfg(feature = "mesh-navigation")]
-                if self.sent != Some(self.effective_keys()) || (self.mesh_navigation && (self.mesh_goal.is_some() || self.mesh_neutral_pending)) { Op::Value }
+                if self.value_changed() || (self.mesh_navigation && (self.mesh_goal.is_some() || self.mesh_neutral_pending)) { Op::Value }
                 else if self.last_ack.is_some_and(|at| now.duration_since(at) >= Duration::from_millis(500)) { Op::Renew }
                 else { return None; }
                 #[cfg(not(feature = "mesh-navigation"))]
-                if self.sent != Some(self.effective_keys()) { Op::Value }
+                if self.value_changed() { Op::Value }
                 else if self.last_ack.is_some_and(|at| now.duration_since(at) >= Duration::from_millis(500)) { Op::Renew }
                 else { return None; }
             }
@@ -202,7 +214,28 @@ impl Input {
         self.flight = Some((self.intent, op, now));
         Some((method, params, self.intent, op))
     }
+    fn value_changed(&self) -> bool {
+        #[cfg(feature = "static-game-actions")]
+        if self.registered.is_some_and(|game| game.action_profile().is_some()) {
+            return self.sent_actions != Some(self.latest_actions);
+        }
+        self.sent != Some(self.effective_keys())
+    }
+    #[cfg(feature = "static-game-actions")]
+    fn action_keys(&mut self, keys: orr_input::HeldActions) {
+        if !self.wanted { return; }
+        if self.registered.and_then(|game| game.action_profile()).is_none_or(|p| p.index(keys).is_none()) {
+            self.release(); return;
+        }
+        self.latest_actions = keys;
+    }
     fn legacy_value(&mut self) -> J {
+        #[cfg(feature = "static-game-actions")]
+        if let Some(game) = self.registered.filter(|game| game.action_profile().is_some()) {
+            let value = game.held_actions_value(self.latest_actions).expect("admitted action state");
+            self.sent_actions = Some(self.latest_actions);
+            return value;
+        }
         #[cfg(feature = "static-games")]
         if let Some(game) = self.registered {
             let keys = self.effective_keys();
@@ -224,6 +257,8 @@ impl Input {
         self.flight = None;
         if now.duration_since(sent_at) >= Duration::from_millis(2000) {
             self.wanted = false;
+            #[cfg(feature = "static-game-actions")]
+            { self.latest_actions = orr_input::HeldActions::default(); self.sent_actions = None; }
             if op != Op::Claim {
                 self.off();
                 return Some("Arena control: acknowledgement exceeded lease deadline; control is off".into());
@@ -254,6 +289,8 @@ impl Input {
 
 impl Editor {
     pub fn input_phase(&self) -> Phase { self.input.phase }
+    #[cfg(feature = "static-game-actions")]
+    pub(crate) fn static_action_intent(&self) -> u64 { self.input.intent }
     pub fn input_hint(&self) -> &'static str {
         if self.input_cleanup_pending() { "Off · cleanup reply pending; lease expiry is the fallback" }
         else if !self.input.enabled { "Off · compatible managed input unavailable" }
@@ -343,6 +380,12 @@ impl Editor {
         }
     }
     pub fn release_control(&mut self) { self.input.release(); self.pump_input(); }
+    #[cfg(feature = "static-game-actions")]
+    pub fn static_action_keys(&mut self, focused: bool, keys: orr_input::HeldActions) {
+        if !focused || !self.can_take_control() { self.input.release(); }
+        else { self.input.action_keys(keys); }
+        self.pump_input();
+    }
     pub fn arena_keys(&mut self, focused: bool, keys: Keys) {
         if !focused || !self.can_take_control() { self.input.release(); }
         else { self.input.keys(keys); }
@@ -662,5 +705,39 @@ mod registered_input_tests {
         let (_,_,intent,op)=input.next(now).unwrap();input.answer(intent,op,Ok(claim_ack()),now);
         input.keys(Keys{x:2,y:0,fire:false});assert_eq!(input.phase,Phase::Releasing);
         assert_eq!(input.next(now).unwrap().0,"sim.input_release");
+    }
+}
+
+#[cfg(all(test, feature="static-game-actions"))]
+mod static_action_input_tests {
+    use super::*;
+    use orr_input::HeldActions;
+    fn active()->(Input,Instant) {
+        let mut input=Input::new(true);
+        input.registered=Some(crate::static_adapter::actions::tests::game());
+        let now=Instant::now();input.claim(0);
+        let (_,_,intent,op)=input.next(now).unwrap();
+        input.answer(intent,op,Ok(json!({"player":0,"grant":"9","generation":"3","lease_ms":2000,"accepted_head_tick":0})),now);
+        (input,now)
+    }
+    #[test]
+    fn all_bits_use_existing_managed_envelope_and_release() {
+        let (mut input,now)=active();let keys=HeldActions{x:-1,y:1,actions:7};input.action_keys(keys);
+        let (method,params,_,_)=input.next(now).unwrap();assert_eq!(method,"sim.input_value");
+        assert_eq!(params["value"],crate::static_adapter::actions::tests::value(keys));
+        assert_eq!(params["grant"],"9");assert_eq!(params["sequence"],"1");
+        input.release();assert_eq!(input.latest_actions,HeldActions::default());
+        assert_eq!(input.next(now).unwrap().0,"sim.input_release");
+    }
+    #[test]
+    fn invalid_state_failure_and_timeout_disarm_every_bit() {
+        let (mut input,_)=active();input.action_keys(HeldActions{x:0,y:0,actions:8});
+        assert_eq!(input.phase,Phase::Releasing);assert_eq!(input.latest_actions,HeldActions::default());
+        let (mut input,now2)=active();input.action_keys(HeldActions{x:1,y:1,actions:7});
+        let (_,_,intent,op)=input.next(now2).unwrap();input.answer(intent,op,Ok(json!({})),now2);
+        assert_eq!(input.phase,Phase::Off);assert_eq!(input.latest_actions,HeldActions::default());
+        input.claim(0);assert_eq!(input.latest_actions,HeldActions::default());
+        input.next(now2);input.next(now2+Duration::from_millis(2001));
+        assert_eq!(input.latest_actions,HeldActions::default());
     }
 }

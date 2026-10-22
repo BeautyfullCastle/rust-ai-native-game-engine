@@ -44,11 +44,16 @@ tempfile = "3"
 [features]
 default = ["editor"]
 editor = ["dep:orr_editor", "dep:eframe", "dep:egui", "dep:orr_sample"]
+static-game-actions = ["dep:orr_input", "orr_editor?/static-game-actions"]
 standalone = ["dep:orr_render", "dep:winit", "dep:orr_input"]
 bundle = ["dep:sha2", "dep:tempfile"]
 native-acceptance = ["editor", "dep:egui_kittest", "dep:winit"]
 editor-trace-acceptance = ["editor", "dep:sha2"]
 standalone-native-acceptance = ["standalone", "bundle", "dep:x11rb", "dep:png"]
+
+# Acceptance-only, separate from original two-game native oracles.
+multi-action-standalone-acceptance = ["standalone", "static-game-actions", "dep:sha2", "dep:x11rb", "dep:png"]
+multi-action-editor-acceptance = ["editor", "static-game-actions", "dep:sha2", "dep:x11rb", "dep:png", "dep:winit", "dep:egui_kittest"]
 
 [[test]]
 name = "native_window"
@@ -99,3 +104,20 @@ required-features = ["standalone-native-acceptance"]
 name = "standalone_editor_trace"
 path = "tests/standalone_editor_trace.rs"
 required-features = ["editor-trace-acceptance"]
+
+[[bin]]
+name = "multi-action-fixture-player"
+path = "tests/support/multi_action_fixture_player.rs"
+required-features = ["multi-action-standalone-acceptance"]
+test = false
+bench = false
+
+[[test]]
+name = "multi_action_standalone_x11"
+path = "tests/multi_action_standalone_x11.rs"
+required-features = ["multi-action-standalone-acceptance"]
+
+[[test]]
+name = "multi_action_editor_x11"
+path = "tests/multi_action_editor_x11.rs"
+required-features = ["multi-action-editor-acceptance"]

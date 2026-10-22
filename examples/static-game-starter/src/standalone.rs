@@ -71,6 +71,11 @@ fn mapping() -> ActionMap {
 pub struct Controller<G: StandaloneGame> {
     bridge: InProc<G, PlayHost<G>>,
     input: Input,
+    #[cfg(feature = "static-game-actions")]
+    actions: Option<(
+        orr_input::HeldActionInput,
+        crate::presentation::FrozenActionInputs<G>,
+    )>,
     replay: Option<ReplayReader<G>>,
     focused: bool,
     neutral_pending: bool,
@@ -90,6 +95,16 @@ impl<G: StandaloneGame> Controller<G> {
             .map(ReplayReader::<G>::parse)
             .transpose()
             .map_err(|e| e.to_string())?;
+        #[cfg(feature = "static-game-actions")]
+        let actions = G::action_profile()
+            .map(|profile| {
+                let frozen = crate::presentation::FrozenActionInputs::<G>::admit(profile.clone())?;
+                let mut input = orr_input::HeldActionInput::new(profile);
+                input.set_focused(false);
+                input.set_blocked(true);
+                Ok::<_, String>((input, frozen))
+            })
+            .transpose()?;
         let mut input = Input::new(mapping())?;
         input.set_focused(false);
         input.set_blocked(true);
@@ -99,6 +114,8 @@ impl<G: StandaloneGame> Controller<G> {
                 BridgeConfig::default(),
             ),
             input,
+            #[cfg(feature = "static-game-actions")]
+            actions,
             replay,
             focused: false,
             neutral_pending: false,
@@ -126,6 +143,12 @@ impl<G: StandaloneGame> Controller<G> {
         if self.paused() || self.neutral_pending || !self.focused || self.replay.is_some() {
             G::Input::default()
         } else {
+            #[cfg(feature = "static-game-actions")]
+            if let Some((input, frozen)) = &self.actions {
+                return frozen
+                    .get(input.held())
+                    .expect("validated action resolver domain");
+            }
             G::held_input(HeldKeys {
                 x: self.input.axis("left", "right"),
                 y: self.input.axis("down", "up"),
@@ -143,6 +166,10 @@ impl<G: StandaloneGame> Controller<G> {
     }
     pub fn pause(&mut self) -> Result<(), String> {
         self.input.set_blocked(true);
+        #[cfg(feature = "static-game-actions")]
+        if let Some((input, _)) = &mut self.actions {
+            input.set_blocked(true);
+        }
         // Clear the coalesced held sample before pausing. Do not advance a hidden tick.
         if self.replay.is_none() {
             self.bridge
@@ -158,6 +185,10 @@ impl<G: StandaloneGame> Controller<G> {
     pub fn focus(&mut self, focused: bool) -> Result<(), String> {
         self.focused = focused;
         self.input.set_focused(focused);
+        #[cfg(feature = "static-game-actions")]
+        if let Some((input, _)) = &mut self.actions {
+            input.set_focused(focused);
+        }
         if !focused {
             self.pause()?;
         }
@@ -168,6 +199,10 @@ impl<G: StandaloneGame> Controller<G> {
             return Ok(());
         }
         self.input.set_blocked(true);
+        #[cfg(feature = "static-game-actions")]
+        if let Some((input, _)) = &mut self.actions {
+            input.set_blocked(true);
+        }
         self.neutral_pending = self.replay.is_none();
         self.resume_from_tick = self.snapshot().tick();
         self.neutral_consumed_tick = None;
@@ -190,6 +225,10 @@ impl<G: StandaloneGame> Controller<G> {
         synthetic: bool,
     ) -> Result<(), String> {
         if !down {
+            #[cfg(feature = "static-game-actions")]
+            if let Some((input, _)) = &mut self.actions {
+                input.key(key, false, repeat, false);
+            }
             self.input
                 .button(Button::Keyboard { key }, false, repeat, false);
             return self.publish_input();
@@ -201,6 +240,10 @@ impl<G: StandaloneGame> Controller<G> {
             Key::Enter => self.resume()?,
             Key::Escape => self.pause()?,
             _ => {
+                #[cfg(feature = "static-game-actions")]
+                if let Some((input, _)) = &mut self.actions {
+                    input.key(key, true, false, false);
+                }
                 self.input
                     .button(Button::Keyboard { key }, true, false, false);
                 self.publish_input()?;
@@ -240,6 +283,10 @@ impl<G: StandaloneGame> Controller<G> {
             self.neutral_pending = false;
             // A fresh physical press is required after the neutral boundary.
             self.input.set_blocked(false);
+            #[cfg(feature = "static-game-actions")]
+            if let Some((input, _)) = &mut self.actions {
+                input.set_blocked(false);
+            }
         }
         Ok(())
     }
@@ -441,6 +488,28 @@ fn fit_camera(items: &[orr_view::RenderItem]) -> Camera {
 fn key(code: KeyCode) -> Option<Key> {
     Some(match code {
         KeyCode::KeyA => Key::A,
+        KeyCode::KeyB => Key::B,
+        KeyCode::KeyC => Key::C,
+        KeyCode::KeyE => Key::E,
+        KeyCode::KeyF => Key::F,
+        KeyCode::KeyG => Key::G,
+        KeyCode::KeyH => Key::H,
+        KeyCode::KeyI => Key::I,
+        KeyCode::KeyJ => Key::J,
+        KeyCode::KeyK => Key::K,
+        KeyCode::KeyL => Key::L,
+        KeyCode::KeyM => Key::M,
+        KeyCode::KeyN => Key::N,
+        KeyCode::KeyO => Key::O,
+        KeyCode::KeyP => Key::P,
+        KeyCode::KeyQ => Key::Q,
+        KeyCode::KeyR => Key::R,
+        KeyCode::KeyT => Key::T,
+        KeyCode::KeyU => Key::U,
+        KeyCode::KeyV => Key::V,
+        KeyCode::KeyX => Key::X,
+        KeyCode::KeyY => Key::Y,
+        KeyCode::KeyZ => Key::Z,
         KeyCode::KeyD => Key::D,
         KeyCode::KeyW => Key::W,
         KeyCode::KeyS => Key::S,
@@ -449,6 +518,7 @@ fn key(code: KeyCode) -> Option<Key> {
         KeyCode::ArrowUp => Key::ArrowUp,
         KeyCode::ArrowDown => Key::ArrowDown,
         KeyCode::Space => Key::Space,
+        KeyCode::Tab => Key::Tab,
         KeyCode::Enter => Key::Enter,
         KeyCode::Escape => Key::Escape,
         _ => return None,
@@ -490,6 +560,12 @@ impl<G: StandaloneGame> Native<G> {
             "won: release then Space restarts"
         } else {
             "WASD/arrows move; Space acts; Escape pauses"
+        };
+        #[cfg(feature = "static-game-actions")]
+        let status = if self.controller.actions.is_some() && !self.controller.paused() {
+            "WASD/arrows move; custom action controls; Escape pauses"
+        } else {
+            status
         };
         gfx.window.set_title(&format!("{} | {status}", G::ID));
         if let Some(observer) = &mut self.observer {
