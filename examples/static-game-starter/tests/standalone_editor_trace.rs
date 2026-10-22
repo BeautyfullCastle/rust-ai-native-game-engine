@@ -1,6 +1,8 @@
 //! Required, artifact-driven CPU editor verification of the actual native traces.
 //! This does not open a GUI, inject keys, or establish native framebuffer proof.
 //! Gate separately with `editor-trace-acceptance = ["editor", "dep:sha2"]`.
+#[path = "support/acceptance_context.rs"]
+mod acceptance_context;
 use orr_bridge::FrameView;
 use orr_ecs::Component;
 use orr_editor::{backend::HostSpec, game::EditorGame, Editor};
@@ -323,6 +325,7 @@ fn verify_game<G: TraceGame>(
             && receipt["status"] == "passed"
             && receipt["alias"] == G::ALIAS
             && receipt["source_sha"] == source_sha
+            && receipt["acceptance_context_sha256"] == json!(acceptance_context::compiled_digest())
             && receipt["source_hidden"] == true
             && receipt["input_source"] == "XTEST"
             && receipt["scene_sha256"] == scene_hash
@@ -505,8 +508,9 @@ fn native_recordings_match_editor_route() -> Result<()> {
     )?;
     let source_sha =
         option_env!("ORR_STATIC_STANDALONE_BUILD_SHA").ok_or("missing compile-bound source SHA")?;
+    let context = acceptance_context::Context::load(env!("CARGO_MANIFEST_DIR"))?;
     require(
-        hex(source_sha, 40) && std::env::var("GITHUB_SHA")? == source_sha,
+        hex(source_sha, 40) && context.source_sha()? == source_sha,
         "editor compile/run source SHA mismatch",
     )?;
     let run_id = std::env::var("GITHUB_RUN_ID")?;
@@ -529,13 +533,14 @@ fn native_recordings_match_editor_route() -> Result<()> {
         Ok(_) => {
             return Err(
                 "editor verification receipt already exists; never overwrite prior evidence".into(),
-            )
+            );
         }
     }
     let mut evidence = Evidence::default();
     let (gate, _) = evidence.json(&root.join("gate.json"), MAX_JSON)?;
     require(
-        gate["schema"] == NATIVE_SCHEMA
+        gate["acceptance_context_sha256"] == json!(context.digest())
+            && gate["schema"] == NATIVE_SCHEMA
             && gate["provenance"]["source_sha"] == source_sha
             && gate["provenance"]["run_id"] == run_id
             && gate["provenance"]["run_attempt"] == run_attempt,
@@ -543,7 +548,8 @@ fn native_recordings_match_editor_route() -> Result<()> {
     )?;
     let (native, native_hash) = evidence.json(&root.join("result.json"), MAX_JSON)?;
     require(
-        native["schema"] == NATIVE_SCHEMA
+        native["acceptance_context_sha256"] == json!(context.digest())
+            && native["schema"] == NATIVE_SCHEMA
             && native["status"] == "passed"
             && native["source_sha"] == source_sha,
         "missing successful native result for this compile-bound source",
@@ -560,6 +566,7 @@ fn native_recordings_match_editor_route() -> Result<()> {
     evidence.unchanged()?;
     let receipt = json!({
         "schema": RECEIPT_SCHEMA, "status": "passed", "source_sha": source_sha,
+        "acceptance_context_sha256": context.digest(),
         "run_id": run_id, "run_attempt": run_attempt, "native_result_sha256": native_hash,
         "native_gui_proof": false, "physical_keyboard_proof": false,
         "scope": "CPU registered editor ERP integration against unchanged admitted native ORRP inputs, initial frame and every tick",

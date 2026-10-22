@@ -15,7 +15,7 @@ import sys
 import time
 import zlib
 
-from static_game_native_gate import clean_checkout, digest, json_file, require
+from static_game_native_gate import clean_checkout, digest, json_file, require, engine_context, CONTEXT_TESTS, context_test_output
 
 SCHEMA = 'orr.static-standalone-native/1'
 TEST = 'source_hidden_standalone_windows'
@@ -231,6 +231,7 @@ def validate(root, provenance):
                            str(Path(provenance['binaries'][alias+'-player']['path']).parent.parent),
                            str((directory/'authored.scene.yaml').resolve()),str((directory/'trusted runtime copy').resolve()),
                            str((directory/'relocated bundle with spaces').resolve())}
+        expected_hidden.update(provenance.get('hidden_source_roots', []))
         require(expected_hidden <= set(receipt['hidden_paths']), 'missing exact known source/target/toolchain/executable hiding')
 
         identity = bundle(directory, receipt, provenance['source_sha'], provenance['binaries'][alias+'-player']['sha256'])
@@ -293,12 +294,12 @@ def validate_editor(root, provenance):
     return {'games':list(GAMES),'same_native_trace':True,'editor_trace_sha256':digest(root/'editor-trace.json')}
 
 
-def command(args, root, name, env, timeout):
+def command(args, root, name, env, timeout, cwd=None):
     path = root/(name+'.log')
     started = time.monotonic()
     byte_count = 0
     with path.open('xb') as output, selectors.DefaultSelector() as selector:
-        process = subprocess.Popen(args, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+        process = subprocess.Popen(args, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
         selector.register(process.stdout, selectors.EVENT_READ)
         deadline = time.monotonic()+timeout
         def exited_unreaped():
@@ -346,7 +347,7 @@ def test_summary(text, passed, filtered):
     require(found == [('ok',str(passed),'0','0','0',str(filtered))], 'actual executed test counts')
 
 
-def run(root):
+def run(root, context=None, environment=None):
     root = root.resolve()
     root.mkdir(parents=True, exist_ok=True)
     require(not any(root.iterdir()), 'fresh evidence directory required')
@@ -355,24 +356,34 @@ def run(root):
         (root/'gate.json').write_text(json.dumps(receipt, indent=2)+'\n')
     save()
     try:
-        env = dict(os.environ)
+        env = dict(os.environ if environment is None else environment)
         sha = env.get('GITHUB_SHA','')
         require(re.fullmatch('[0-9a-f]{40}',sha) and all(env.get(k,'').isdecimal() for k in ('GITHUB_RUN_ID','GITHUB_RUN_ATTEMPT')), 'hosted provenance required')
-        source = clean_checkout(sha)
+        if context is None:
+            clean_checkout(sha)
+            require(not env.get('ORR_ACCEPTANCE_CONTEXT') and not env.get('ORR_ACCEPTANCE_CONTEXT_SHA256'), 'unexpected execution context')
+            context = engine_context(env)
+        context.environment(env)
+        if context.context_path:
+            receipt['acceptance_context_sha256'] = digest(context.context_path)
+        sha = context.source_sha
+        source = context.fence()
+        execute = lambda args, root, name, env, timeout: command(args, root, name, env, timeout, cwd=context.project_root)
         (root/'source-inventory.json').write_text(json.dumps(source,indent=2)+'\n')
         receipt.update(source_inventory_sha256=digest(root/'source-inventory.json'),source_tree=source['tree'])
         env.update(ORR_STATIC_STANDALONE_BUILD_SHA=sha,ORR_REQUIRE_STANDALONE_NATIVE='1',ORR_STANDALONE_ARTIFACT_DIR=str(root))
         env.pop('DISPLAY',None)
-        toolchain = command(['rustc','--print','sysroot'],root,'toolchain-root',env,15).strip()
+        toolchain = execute(['rustc','--print','sysroot'],root,'toolchain-root',env,15).strip()
         require(Path(toolchain).is_absolute() and Path(toolchain).is_dir(), 'toolchain identity')
         cargo_home = Path(env.get('CARGO_HOME',str(Path.home()/'.cargo'))).resolve()
         require(cargo_home.is_dir(), 'Cargo home identity')
         env.update(ORR_STANDALONE_TOOLCHAIN_ROOT=str(Path(toolchain).resolve()), ORR_STANDALONE_CARGO_HOME=str(cargo_home))
-        output = command([sys.executable,'-m','unittest','discover','-s','tools','-p','test_static_game_standalone_gate.py','-v'],root,'validator-tests',env,60)
+        output = execute([sys.executable,'-m','unittest','discover','-s',str(context.gate_root/'tools'),'-p','test_static_game_standalone_gate.py','-v'],root,'validator-tests',env,60)
         require(re.search(r'Ran [1-9][0-9]* tests? in ',output) and output.rstrip().endswith('OK'), 'validator tests not executed')
-        output = command(['cargo','test','--locked','--offline','--release','-j1','-p','orr_static_starter',
+        output = execute(['cargo','test','--locked','--offline','--release','-j1','-p',context.package_name,
             '--no-default-features','--features','standalone-native-acceptance','--test','standalone_x11','--no-run',
             '--message-format=json-render-diagnostics'],root,'compile',env,900)
+        receipt['library_producer'] = context.library_artifact(output)
         artifacts = {}
         for line in output.splitlines():
             try:
@@ -383,31 +394,38 @@ def run(root):
                 target = value['target']
                 if target['name'] in ('standalone_x11','delivery-player','switchboard-player','bundle'):
                     require(target['name'] not in artifacts, 'duplicate executable producer')
-                    path = Path(value['executable']).resolve()
+                    context.admit(value, target['name'], 'test' if target['name'] == 'standalone_x11' else 'bin')
+                    path = context.artifact_path(value['executable'])
                     artifacts[target['name']] = {'path':str(path),'sha256':digest(path),'source':target['src_path']}
         require(set(artifacts) == {'standalone_x11','delivery-player','switchboard-player','bundle'}, 'exact compiler executable producers required')
-        provenance = {'source_root':str(Path.cwd().resolve()),'toolchain_root':str(Path(toolchain).resolve()),'cargo_home':str(cargo_home),'source_sha':sha,'test_sha256':artifacts['standalone_x11']['sha256'],'binaries':artifacts,
+        provenance = {'source_root':str(context.project_root),'toolchain_root':str(Path(toolchain).resolve()),'cargo_home':str(cargo_home),'source_sha':sha,'test_sha256':artifacts['standalone_x11']['sha256'],'binaries':artifacts,
                       'run_id':env['GITHUB_RUN_ID'],'run_attempt':env['GITHUB_RUN_ATTEMPT']}
+        if context.hidden_roots:
+            provenance['hidden_source_roots'] = context.hidden_roots
         receipt['provenance'] = provenance
         save()
         executable = artifacts['standalone_x11']['path']
-        listing = command([executable,'--list'],root,'inventory',env,10)
+        listing = execute([executable,'--list'],root,'inventory',env,10)
         names = {line[:-6] for line in listing.splitlines() if line.endswith(': test')}
-        require(names == {TEST}|{'x11::tests::'+name for name in DECODERS}, 'exact actual test inventory')
-        output = command([executable,'x11::tests::','--test-threads=1','--nocapture'],root,'pixel-decoder-tests',env,30)
-        test_summary(output,4,1)
-        output = command([executable,TEST,'--exact','--test-threads=1','--nocapture'],root,'native',env,180)
-        test_summary(output,1,4)
+        require(names == {TEST}|{'x11::tests::'+name for name in DECODERS}|CONTEXT_TESTS and listing.rstrip().endswith('8 tests, 0 benchmarks'), 'exact actual test inventory')
+        output = execute([executable,'acceptance_context::tests::','--test-threads=1','--nocapture'],root,'context-tests',env,30)
+        context_test_output(output,5)
+        output = execute([executable,'x11::tests::','--test-threads=1','--nocapture'],root,'pixel-decoder-tests',env,30)
+        test_summary(output,4,4)
+        output = execute([executable,TEST,'--exact','--test-threads=1','--nocapture'],root,'native',env,180)
+        test_summary(output,1,7)
         require(re.search(r'(?m)^test '+TEST+r' \.\.\. ',output), 'required native test not executed')
         for producer in artifacts.values():
             require(digest(Path(producer['path'])) == producer['sha256'], 'producer changed during execution')
+        context.validate_binding(root, standalone=True)
         receipt['validation'] = validate(root,provenance)
         # A separate editor-only CPU verifier consumes these exact raw native
         # recordings. Never enable editor in the delivered player feature graph.
         env['ORR_REQUIRE_STANDALONE_EDITOR_TRACE'] = '1'
-        output = command(['cargo','test','--locked','--offline','--release','-j1','-p','orr_static_starter',
+        output = execute(['cargo','test','--locked','--offline','--release','-j1','-p',context.package_name,
             '--no-default-features','--features','editor-trace-acceptance','--test','standalone_editor_trace','--no-run',
             '--message-format=json-render-diagnostics'],root,'editor-compile',env,900)
+        receipt['editor_library_producer'] = context.library_artifact(output)
         editor_artifacts = []
         for line in output.splitlines():
             try:
@@ -415,22 +433,26 @@ def run(root):
             except json.JSONDecodeError:
                 continue
             if value.get('reason') == 'compiler-artifact' and value.get('executable') and value.get('target',{}).get('name') == 'standalone_editor_trace':
-                require(value['target']['kind'] == ['test'] and value['target']['src_path'].endswith('/examples/static-game-starter/tests/standalone_editor_trace.rs'), 'editor verifier producer')
-                editor_artifacts.append(Path(value['executable']).resolve())
+                context.admit(value, 'standalone_editor_trace', 'test')
+                editor_artifacts.append(context.artifact_path(value['executable']))
         require(len(editor_artifacts) == 1, 'exact editor verifier producer required')
         editor_executable = editor_artifacts[0]
         editor_hash = digest(editor_executable)
-        listing = command([str(editor_executable),'--list'],root,'editor-inventory',env,10)
-        require(listing.strip() == 'native_recordings_match_editor_route: test\n\n1 test, 0 benchmarks', 'exact editor verifier inventory')
-        output = command([str(editor_executable),'native_recordings_match_editor_route','--exact','--test-threads=1','--nocapture'],root,'editor-trace',env,180)
-        test_summary(output,1,0)
+        listing = execute([str(editor_executable),'--list'],root,'editor-inventory',env,10)
+        names = {line[:-6] for line in listing.splitlines() if line.endswith(': test')}
+        require(names == {'native_recordings_match_editor_route'}|CONTEXT_TESTS and listing.rstrip().endswith('4 tests, 0 benchmarks'), 'exact editor verifier inventory')
+        output = execute([str(editor_executable),'acceptance_context::tests::','--test-threads=1','--nocapture'],root,'editor-context-tests',env,30)
+        context_test_output(output,1)
+        output = execute([str(editor_executable),'native_recordings_match_editor_route','--exact','--test-threads=1','--nocapture'],root,'editor-trace',env,180)
+        test_summary(output,1,3)
         require(re.search(r'(?m)^test native_recordings_match_editor_route \.\.\. ',output), 'editor trace test did not execute')
         require(digest(editor_executable) == editor_hash, 'editor verifier changed during execution')
         receipt['editor_verifier'] = {'path':str(editor_executable),'sha256':editor_hash,'validation':validate_editor(root,provenance)}
         for producer in artifacts.values():
             require(digest(Path(producer['path'])) == producer['sha256'], 'editor verification rebuilt a delivered producer')
 
-        require(clean_checkout(sha) == source, 'reviewed tree changed during acceptance')
+        context.validate_binding(root, standalone=True)
+        require(context.fence() == source, 'reviewed tree changed during acceptance')
         receipt['status'] = 'passed'
     except Exception as error:
         receipt.update(status='failed',error=str(error))

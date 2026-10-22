@@ -1,4 +1,6 @@
 //! Required dev-only source-hidden native acceptance. Missing capabilities fail.
+#[path = "support/acceptance_context.rs"]
+mod acceptance_context;
 #[path = "support/standalone_x11.rs"]
 mod x11;
 use crate::x11::Deadline;
@@ -480,11 +482,12 @@ fn source_hidden_standalone_windows() -> Result<()> {
     }
     let source_sha =
         option_env!("ORR_STATIC_STANDALONE_BUILD_SHA").ok_or("missing compile-bound source SHA")?;
+    let context = acceptance_context::Context::load(env!("CARGO_MANIFEST_DIR"))?;
     if source_sha.len() != 40
         || !source_sha
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        || std::env::var("GITHUB_SHA")? != source_sha
+        || context.source_sha()? != source_sha
     {
         return Err("compile/run source mismatch".into());
     }
@@ -494,13 +497,11 @@ fn source_hidden_standalone_windows() -> Result<()> {
     fs::create_dir_all(&out)?;
     write_json(
         &out.join("attempt.json"),
-        &json!({"schema":SCHEMA,"status":"started","source_sha":source_sha}),
+        &json!({"schema":SCHEMA,"status":"started","source_sha":source_sha,"acceptance_context_sha256":context.digest()}),
     )?;
     let mut display = x11::OwnedDisplay::spawn(&out.join("xvfb.stderr"))?;
     let observer = display.connect()?;
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()?;
+
     let test_executable = std::env::current_exe()?.canonicalize()?;
     let mut receipts = Vec::new();
     use std::os::unix::fs::PermissionsExt;
@@ -520,11 +521,11 @@ fn source_hidden_standalone_windows() -> Result<()> {
         fs::create_dir(&directory)?;
         let scene = directory.join("authored.scene.yaml");
         let text = if alias == "delivery" {
-            "schema: orr.scene/1\nsingletons:\n  Delivery: { goal: [2, 2], won: 0, action_held: 0 }\nentities:\n  e_00000001:\n    name: courier\n    Courier: { position: [2, 2] }\n"
+            include_str!("fixtures/delivery.scene.yaml")
         } else {
-            "schema: orr.scene/1\nsingletons:\n  Board: { bits: 0, target: 1, solved: 0, moves: 0 }\nentities:\n  e_00000001:\n    name: cursor\n    Cursor: { position: [0, 0], selected: 0, held: 0 }\n"
+            include_str!("fixtures/switchboard.scene.yaml")
         };
-        fs::write(&scene, text)?;
+        context.write_scene(alias, text, &scene)?;
         let runtime = directory.join("trusted runtime copy");
         fs::copy(binary, &runtime)?;
         fs::set_permissions(&runtime, fs::Permissions::from_mode(0o755))?;
@@ -555,7 +556,6 @@ fn source_hidden_standalone_windows() -> Result<()> {
         let evidence = directory.join("execution");
         fs::create_dir(&evidence)?;
         let mut hidden = vec![
-            root.clone(),
             test_executable.clone(),
             PathBuf::from(binary).canonicalize()?,
             scene.canonicalize()?,
@@ -585,6 +585,7 @@ fn source_hidden_standalone_windows() -> Result<()> {
                 .canonicalize()?,
             );
         }
+        hidden.extend(context.hidden_roots()?);
         hidden.sort();
         hidden.dedup();
         let mut process = isolated(&bundle, &evidence, &display.name, &hidden)?;
@@ -664,7 +665,7 @@ fn source_hidden_standalone_windows() -> Result<()> {
         } else {
             verify_replay::<SwitchGame>(text, &evidence, &observations.values)?
         };
-        let receipt = json!({"schema":SCHEMA,"alias":alias,"source_sha":source_sha,"status":"passed",
+        let receipt = json!({"schema":SCHEMA,"alias":alias,"source_sha":source_sha,"acceptance_context_sha256":context.digest(),"status":"passed",
             "input_source":"XTEST","framebuffer_source":"XGetImage","physical_gpu":false,
             "source_hidden":true,"network_disabled":true,"pid_namespace":true,"hidden_paths":hidden,
             "process_id":pid,"window_id":window,"process_binding":binding,"mountinfo_sha256":hash(&evidence.join("mountinfo.txt"))?,"process_status_sha256":hash(&evidence.join("process-status.txt"))?,"test_executable_sha256":hash(&test_executable)?,
@@ -677,7 +678,7 @@ fn source_hidden_standalone_windows() -> Result<()> {
     }
     write_json(
         &out.join("result.json"),
-        &json!({"schema":SCHEMA,"status":"passed","source_sha":source_sha,"games":receipts}),
+        &json!({"schema":SCHEMA,"status":"passed","source_sha":source_sha,"acceptance_context_sha256":context.digest(),"games":receipts}),
     )?;
     Ok(())
 }

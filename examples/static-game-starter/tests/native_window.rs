@@ -1,5 +1,7 @@
 //! Actual native eframe framebuffer acceptance, selected only by native-acceptance.
 //! Injected egui events prove the App path, not physical OS keyboard delivery.
+#[path = "support/acceptance_context.rs"]
+mod acceptance_context;
 use eframe::App;
 use egui_kittest::{kittest::Queryable, Harness};
 use orr_editor::{
@@ -51,7 +53,7 @@ fn registered_games_native_window() {
     std::fs::create_dir_all(&out).unwrap();
     write_json(
         &out.join("attempt.json"),
-        &json!({"schema":SCHEMA,"status":"started","provenance":run_identity(),"required_games":["delivery","switchboard"]}),
+        &json!({"schema":SCHEMA,"status":"started","provenance":run_identity(),"acceptance_context_sha256":acceptance_context::compiled_digest(),"required_games":["delivery","switchboard"]}),
     );
     let outcome = std::panic::catch_unwind(|| {
         assert_eq!(
@@ -79,7 +81,10 @@ fn registered_games_native_window() {
         );
         assert_eq!(
             compiled,
-            std::env::var("GITHUB_SHA").unwrap(),
+            acceptance_context::Context::load(env!("CARGO_MANIFEST_DIR"))
+                .unwrap()
+                .source_sha()
+                .unwrap(),
             "stale native binary must not relabel itself with runtime SHA"
         );
         let mut contracts = serde_json::Map::new();
@@ -98,12 +103,12 @@ fn registered_games_native_window() {
         let contracts_hash = hash(&out.join("expected-contracts.json"));
         write_json(
             &out.join("attempt.json"),
-            &json!({"schema":SCHEMA,"status":"started","provenance":run_identity(),"required_games":["delivery","switchboard"],"expected_contracts_sha256":contracts_hash}),
+            &json!({"schema":SCHEMA,"status":"started","provenance":run_identity(),"acceptance_context_sha256":acceptance_context::compiled_digest(),"required_games":["delivery","switchboard"],"expected_contracts_sha256":contracts_hash}),
         );
         run_games(&out, contracts_hash.clone());
         write_json(
             &out.join("attempt.json"),
-            &json!({"schema":SCHEMA,"status":"passed","provenance":run_identity(),"required_games":["delivery","switchboard"],"expected_contracts_sha256":contracts_hash}),
+            &json!({"schema":SCHEMA,"status":"passed","provenance":run_identity(),"acceptance_context_sha256":acceptance_context::compiled_digest(),"required_games":["delivery","switchboard"],"expected_contracts_sha256":contracts_hash}),
         );
     });
     if let Err(error) = outcome {
@@ -135,6 +140,12 @@ fn prepare_game(alias: &'static str, out: &Path) -> Prepared {
     std::fs::create_dir_all(&directory).unwrap();
     let scene = directory.join("authored.scene.yaml");
     let text = if alias == "delivery" {
+        include_str!("fixtures/editor_delivery.scene.yaml")
+    } else {
+        include_str!("fixtures/editor_switchboard.scene.yaml")
+    };
+    // Preserve the original fixture relationship to the compiled user's game scenes.
+    let original = if alias == "delivery" {
         DeliveryGame::SCENE
             .replace("[0, 0]", "[2, 2]")
             .replace("[4, 0]", "[3, 3]")
@@ -144,7 +155,14 @@ fn prepare_game(alias: &'static str, out: &Path) -> Prepared {
             .replace("position: [0, 0]", "position: [2, 0]")
             .replace("selected: 0", "selected: 1")
     };
-    std::fs::write(&scene, text).unwrap();
+    assert_eq!(
+        text, original,
+        "canonical editor fixture drifted from original scenario"
+    );
+    acceptance_context::Context::load(env!("CARGO_MANIFEST_DIR"))
+        .unwrap()
+        .write_scene(&format!("editor_{alias}"), text, &scene)
+        .unwrap();
     let handle = registry().handle(alias).unwrap();
     let mut editor = Editor::open_registered(&scene, handle).unwrap();
     let actual_input = editor.host_call("registry.input", json!({})).unwrap();
@@ -211,7 +229,7 @@ fn run_games(out: &Path, contracts_hash: String) {
         let receipt=json!({"schema":SCHEMA,"game":alias,"source":"editor.app_framebuffer","input_source":"queued_egui_raw_input",
             "identity":{"game":identity.game,"build_id":identity.build_id,"schema":identity.schema},
             "input_contract":{"schema":input.schema(),"value_format":input.value_format(),"max_players":input.max_players()},
-            "expected_contracts_sha256":contracts_hash,"adapter":adapter,"scene":{"path":"authored.scene.yaml","sha256":hash(&scene)},"captures":[],"checks":{},"provenance":run_identity(),
+            "expected_contracts_sha256":contracts_hash,"adapter":adapter,"scene":{"path":"authored.scene.yaml","sha256":hash(&scene)},"captures":[],"checks":{},"provenance":run_identity(),"acceptance_context_sha256":acceptance_context::compiled_digest(),
             "boundaries":{"native_window":true,"physical_keyboard":false,"physical_gpu":false,"packaged_export":false}});
         write_json(&directory.join("native-receipt.json"),&receipt);
         proofs.push_back(Proof { app:EditorApp::new(editor,cc.wgpu_render_state.clone()),alias,directory,play,pause,take,

@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import signal
+import stat
 import struct
 import subprocess
 import sys
@@ -18,6 +19,10 @@ GAMES = {'delivery': ('StarterDelivery', '0x5354415254455201'),
          'switchboard': ('StarterSwitchboard', '0x5354415254455202')}
 PHASES = ['edit', 'won', 'neutral', 'reopened']
 TEST = 'registered_games_native_window'
+CONTEXT_TESTS = {'acceptance_context::tests::'+name for name in (
+    'distinct_user_identity_and_complete_roots_are_accepted',
+    'rejects_bad_provenance_roots_and_scene_escape',
+    'rejects_unbound_injected_omitted_and_modified_context')}
 MANAGED = {'version': 1, 'lease_ms': 2000, 'heartbeat_ms': 500}
 
 
@@ -245,15 +250,23 @@ def validate(root, provenance):
     return {'games': list(GAMES), 'captures': 8, 'status': 'passed'}
 
 
-def test_output(text):
+def test_output(text, filtered=0):
     require(not re.search(r'\bskip(?:ped)?\b', text, re.I), 'skip marker in native output')
     require(re.search(r'(?m)^test '+TEST+r' \.\.\. ', text), 'required test did not execute')
     summaries = re.findall(r'test result: (\w+)\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out', text)
-    require(summaries == [('ok', '1', '0', '0', '0', '0')], 'exactly one executed native test required')
+    require(summaries == [('ok', '1', '0', '0', '0', str(filtered))], 'exactly one executed native test required')
 
 
-def command(args, root, name, env, timeout):
-    process = subprocess.Popen(args, env=env, text=True, stdout=subprocess.PIPE,
+
+def context_test_output(text, filtered):
+    require(not re.search(r'\bskip(?:ped)?\b', text, re.I), 'context tests skipped')
+    names = set(re.findall(r'(?m)^test (acceptance_context::tests::[^ ]+) \.\.\. ok$', text))
+    require(names == CONTEXT_TESTS, 'exact context tests must execute')
+    summaries = re.findall(r'test result: (\w+)\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out', text)
+    require(summaries == [('ok','3','0','0','0',str(filtered))], 'exact context test result')
+
+def command(args, root, name, env, timeout, cwd=None):
+    process = subprocess.Popen(args, cwd=cwd, env=env, text=True, stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, start_new_session=True)
     timed_out = False
     try:
@@ -273,8 +286,10 @@ def command(args, root, name, env, timeout):
     return output
 
 
-def clean_checkout(sha, cwd=None):
-    directory = Path(cwd or '.')
+def clean_checkout(sha, cwd=None, *, complete=False, output_roots=()):
+    directory = Path(cwd or '.').resolve()
+    if complete:
+        reject_ancestor_config(directory)
     actual = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=directory, text=True).strip()
     require(actual == sha, 'checkout does not match hosted SHA')
     for args in (['git', 'diff', '--quiet', '--'], ['git', 'diff', '--cached', '--quiet', '--']):
@@ -293,6 +308,11 @@ def clean_checkout(sha, cwd=None):
         require(kind == 'blob' and mode in ('100644', '100755'), 'unsupported source link/submodule '+path)
         file = directory/path
         require(file.is_file() and not file.is_symlink(), 'missing/linked tracked source '+path)
+        for parent in file.parents:
+            if parent == directory:
+                break
+            require(not parent.is_symlink(), 'linked source directory '+str(parent))
+        require(bool(file.stat().st_mode & 0o111) == (mode == '100755'), 'tracked source mode differs '+path)
         data = file.read_bytes()
         actual_blob = hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
         require(actual_blob == object_id, 'tracked source bytes differ from reviewed tree '+path)
@@ -314,10 +334,112 @@ def clean_checkout(sha, cwd=None):
                                        'rust-toolchain', 'rust-toolchain.toml')
             compiler_input |= path.startswith('tools/') and '__pycache__/' not in path
             require(not compiler_input, 'untracked compiler/gate input '+path)
+    if complete:
+        expected = {entry['path'] for entry in files}
+        outputs = {Path(p).resolve() for p in output_roots}
+        for base, dirs, names in os.walk(directory, followlinks=False):
+            base = Path(base)
+            for name in list(dirs):
+                path = base/name
+                require(not path.is_symlink(), 'linked source directory '+str(path))
+                if path == directory/'.git' or path in outputs:
+                    dirs.remove(name)
+            for name in names:
+                path = base/name
+                require(path.relative_to(directory).as_posix() in expected, 'unknown source input '+str(path))
+                require(stat.S_ISREG(path.lstat().st_mode), 'nonregular source input '+str(path))
     return {'commit': sha, 'tree': tree, 'files': files}
 
 
-def run(root):
+
+def reject_ancestor_config(root):
+    for ancestor in Path(root).parents:
+        for name in ('.cargo/config', '.cargo/config.toml', 'rust-toolchain', 'rust-toolchain.toml'):
+            path = ancestor/name
+            require(not path.exists() and not path.is_symlink(), 'ancestor compiler configuration '+str(path))
+
+
+class ExecutionContext:
+    """Explicit Cargo producer admission, independent of the process working directory."""
+    def __init__(self, project_root, package_name, package_id, target_sources, source_sha,
+                 gate_root, gate_sha, fence=None, context_path=None, hidden_roots=(), target_root=None):
+        self.project_root = Path(project_root).resolve()
+        self.package_name, self.package_id = package_name, package_id
+        self.target_sources = target_sources
+        self.source_sha, self.gate_sha = source_sha, gate_sha
+        self.gate_root = Path(gate_root).resolve()
+        self.fence = fence or (lambda: clean_checkout(source_sha, self.project_root))
+        self.context_path = context_path
+        self.target_root = Path(target_root).resolve() if target_root else None
+        self.hidden_roots = [str(Path(p).resolve()) for p in hidden_roots]
+        if context_path:
+            self.hidden_roots.append(str(Path(context_path).resolve()))
+
+    def environment(self, env):
+        require(env.get('GITHUB_SHA') == self.gate_sha, 'hosted gate identity mismatch')
+        if self.context_path:
+            env['ORR_ACCEPTANCE_CONTEXT'] = str(self.context_path)
+            env['ORR_ACCEPTANCE_CONTEXT_SHA256'] = digest(self.context_path)
+        else:
+            require(not env.get('ORR_ACCEPTANCE_CONTEXT') and not env.get('ORR_ACCEPTANCE_CONTEXT_SHA256'), 'unexpected execution context')
+        return env
+
+    def admit(self, item, name, kind):
+        require(item.get('package_id') == self.package_id, 'wrong compiler package identity')
+        target = item.get('target', {})
+        expected = self.target_sources[name]
+        require(target.get('name') == name and target.get('kind') == [kind], 'wrong compiler target kind/name')
+        require(target.get('src_path') == str(expected), 'wrong exact compiler target source')
+        require(Path(expected).is_file() and not Path(expected).is_symlink(), 'missing/linked target source')
+
+    def artifact_path(self, value):
+        path = Path(value)
+        require(path.is_absolute() and path == path.resolve(), 'noncanonical/linked compiler artifact')
+        require(path.is_file() and not path.is_symlink(), 'missing/linked compiler artifact')
+        if self.target_root:
+            require(self.target_root in path.parents, 'compiler artifact outside dedicated target')
+        return path
+
+    def library_artifact(self, output):
+        artifacts = []
+        for line in output.splitlines():
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if value.get('reason') == 'compiler-artifact' and value.get('package_id') == self.package_id and value.get('target', {}).get('kind') == ['lib']:
+                self.admit(value, 'orr_static_starter', 'lib')
+                files = [self.artifact_path(p) for p in value.get('filenames', [])]
+                require(files and all(p.is_file() and not p.is_symlink() for p in files), 'missing library artifact files')
+                artifacts.append({'package_id': self.package_id, 'source': value['target']['src_path'],
+                                  'files': [{'path': str(p), 'sha256': digest(p)} for p in files]})
+        require(len(artifacts) == 1, 'exact generated/engine library producer required')
+        return artifacts[0]
+
+    def validate_binding(self, root, standalone=False):
+        if not self.context_path:
+            return
+        expected = digest(self.context_path)
+        paths = [root/'result.json', root/'editor-trace.json'] if standalone else [root/'attempt.json']
+        paths += [root/alias/('receipt.json' if standalone else 'native-receipt.json') for alias in GAMES]
+        for path in paths:
+            # The editor verifier is produced after the standalone native phase.
+            if standalone and path.name == 'editor-trace.json' and not path.exists():
+                continue
+            require(json_file(path).get('acceptance_context_sha256') == expected, 'receipt execution context binding')
+
+
+def engine_context(env):
+    sha = env.get('GITHUB_SHA', '')
+    root = Path.cwd().resolve()
+    metadata = json.loads(subprocess.check_output(['cargo', 'metadata', '--offline', '--locked', '--no-deps', '--format-version=1'], cwd=root, env=env, text=True))
+    packages = [p for p in metadata['packages'] if p['name'] == 'orr_static_starter']
+    require(len(packages) == 1, 'exact starter package required')
+    package = packages[0]
+    targets = {t['name']: Path(t['src_path']) for t in package['targets'] if t['name'] in ('native_window','standalone_x11','standalone_editor_trace','delivery-player','switchboard-player','orr_static_starter') or (t['name'] == 'bundle' and t['kind'] == ['bin'])}
+    return ExecutionContext(root, package['name'], package['id'], targets, sha, root, sha, target_root=metadata['target_directory'])
+
+def run(root, context=None, environment=None):
     root = root.resolve()
     root.mkdir(parents=True, exist_ok=True)
     require(not any(root.iterdir()), 'artifact directory must be fresh, never reuse stale evidence')
@@ -326,10 +448,19 @@ def run(root):
         (root/'gate.json').write_text(json.dumps(receipt, indent=2)+'\n')
     save()
     try:
-        env = dict(os.environ)
+        env = dict(os.environ if environment is None else environment)
         sha, run_id, attempt = (env.get(k, '') for k in ('GITHUB_SHA', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT'))
         require(re.fullmatch('[0-9a-f]{40}', sha) and run_id.isdecimal() and attempt.isdecimal(), 'hosted source/run identity required')
-        source = clean_checkout(sha)
+        if context is None:
+            clean_checkout(sha)
+            require(not env.get('ORR_ACCEPTANCE_CONTEXT') and not env.get('ORR_ACCEPTANCE_CONTEXT_SHA256'), 'unexpected execution context')
+            context = engine_context(env)
+        context.environment(env)
+        if context.context_path:
+            receipt['acceptance_context_sha256'] = digest(context.context_path)
+        sha = context.source_sha
+        source = context.fence()
+        execute = lambda args, root, name, env, timeout: command(args, root, name, env, timeout, cwd=context.project_root)
         source_path = root/'source-inventory.json'
         source_path.write_text(json.dumps(source, indent=2)+'\n')
         receipt['source_inventory_sha256'] = digest(source_path)
@@ -337,11 +468,12 @@ def run(root):
         save()
         env.update(ORR_STATIC_NATIVE_BUILD_SHA=sha, ORR_NATIVE_STATIC_GAME_ARTIFACT_DIR=str(root),
                    ORR_REQUIRE_NATIVE_EDITOR='1', ORR_REQUIRE_GPU='1', WGPU_BACKEND='vulkan')
-        command([sys.executable, '-m', 'unittest', 'discover', '-s', 'tools', '-p',
+        execute([sys.executable, '-m', 'unittest', 'discover', '-s', str(context.gate_root/'tools'), '-p',
                  'test_static_game_native_gate.py', '-v'], root, 'validator-tests', env, 120)
-        output = command(['cargo', 'test', '--locked', '--offline', '--release', '-j1', '-p', 'orr_static_starter',
+        output = execute(['cargo', 'test', '--locked', '--offline', '--release', '-j1', '-p', context.package_name,
                           '--features', 'native-acceptance', '--test', 'native_window', '--no-run',
                           '--message-format=json-render-diagnostics'], root, 'compile', env, 900)
+        receipt['library_producer'] = context.library_artifact(output)
         artifacts = []
         for line in output.splitlines():
             try:
@@ -351,23 +483,27 @@ def run(root):
             if item.get('reason') == 'compiler-artifact' and item.get('executable'):
                 target = item.get('target', {})
                 if target.get('name') == 'native_window' and target.get('kind') == ['test']:
-                    require(target.get('src_path', '').endswith('/examples/static-game-starter/tests/native_window.rs'), 'wrong native test target')
-                    artifacts.append(Path(item['executable']).resolve())
+                    context.admit(item, 'native_window', 'test')
+                    artifacts.append(context.artifact_path(item['executable']))
         require(len(artifacts) == 1, 'exactly one compiled native test binary required')
         executable = artifacts[0]
-        provenance = {'compiled_source_sha': sha, 'git_sha': sha, 'run_id': run_id,
+        provenance = {'compiled_source_sha': sha, 'git_sha': context.gate_sha, 'run_id': run_id,
                       'run_attempt': attempt, 'executable_sha256': digest(executable)}
         receipt['provenance'] = provenance
         receipt['executable'] = str(executable)
         save()
-        listing = command([str(executable), '--list'], root, 'inventory', env, 30)
-        require(listing.strip() == f'{TEST}: test\n\n1 test, 0 benchmarks', 'native inventory must contain exactly the selected test')
-        output = command(['xvfb-run', '-a', '-s', '-screen 0 1400x1000x24', str(executable),
+        listing = execute([str(executable), '--list'], root, 'inventory', env, 30)
+        names = {line[:-6] for line in listing.splitlines() if line.endswith(': test')}
+        require(names == {TEST}|CONTEXT_TESTS and listing.rstrip().endswith('4 tests, 0 benchmarks'), 'exact native and context test inventory')
+        helper_output = execute([str(executable), 'acceptance_context::tests::', '--test-threads=1', '--nocapture'], root, 'context-tests', env, 30)
+        context_test_output(helper_output, 1)
+        output = execute(['xvfb-run', '-a', '-s', '-screen 0 1400x1000x24', str(executable),
                           TEST, '--exact', '--test-threads=1', '--nocapture'], root, 'native', env, 180)
-        test_output(output)
+        test_output(output, 3)
         require(digest(executable) == provenance['executable_sha256'], 'test executable changed during execution')
         receipt['validation'] = validate(root, provenance)
-        require(clean_checkout(sha) == source, 'source tree changed during native execution')
+        context.validate_binding(root)
+        require(context.fence() == source, 'source tree changed during native execution')
         receipt['status'] = 'passed'
     except Exception as error:
         receipt['status'] = 'failed'
