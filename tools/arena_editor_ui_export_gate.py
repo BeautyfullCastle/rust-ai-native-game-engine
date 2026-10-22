@@ -32,7 +32,7 @@ SPECS = (
     ('app-harness', 'orr_sample', 'orr_sample', 'lib', 'project,game-ui', ['game-ui','input-actions','project','sprites']),
 )
 CAPTURES = ('initial.png','moved.png','ui-negative-no-overlay.png','ui-negative-no-text.png','ui-glyphs-before.png','ui-glyphs-after.png','ui-title.png','ui-playing.png','ui-menu.png','ui-continued.png','ui-restart-action.png')
-FIXTURE_COUNT = 27  # Set to exact independent fixture census below, never native passes.
+FIXTURE_COUNT = 30  # Set to exact independent fixture census below, never native passes.
 
 
 def producer_fence():
@@ -149,7 +149,7 @@ def expected_command(root, stage):
     if stage in ('isolated-ui-controls','isolated-app-restart'):
         app = stage == 'isolated-app-restart'
         label, copied, test = ('app-harness','app-ui-consumer',APP) if app else ('ui-harness','ui-consumer',MODULE)
-        args = mounts(root,app)+['--','/bin/sh','-c',CONSUMER_SCRIPT,'sh',str(runner.repo),str(root/'project'),str(runtime),str(producer_path(label)),str(root/'bundle'),str(root/copied),'--ignored','--exact',test,'--nocapture']
+        args = mounts(root,app)+['--','/bin/sh','-c',CONSUMER_SCRIPT,'sh',str(runner.repo),str(root/'project'),str(runtime),str(producer_path(label)),str(root/'bundle'),str(root/copied),'--ignored','--exact',test,'--nocapture','--test-threads=1']
         return 'bwrap', args, consumer_environment(root,label), 0
     assert stage in legacy.STAGES[2:]
     ticks = '0' if stage == 'capture-initial' else '3'
