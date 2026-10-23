@@ -205,6 +205,24 @@ class ValidatorTests(unittest.TestCase):
     def test_missing_first_consumed_tick(self):
         self.receipt_change(lambda v:v['focus_clear']['first_consumed'].update(tick=7))
         with self.assertRaises(ValueError):gate.validate(self.root,self.provenance)
+    def test_pre_regain_paused_receipt_rejected_even_with_valid_hashes(self):
+        # Reproduce the CI receipt race: genuine paused observations were selected
+        # before the player's focus-regain event, despite X server focus succeeding.
+        path = self.root/'delivery/execution/observations.ndjson'
+        observations = gate.stream(path)
+        receipt = gate.json_file(self.root/'delivery/receipt.json')
+        sequence = receipt['focus_clear']['no_auto_resume']['sequence']
+        for observation in observations:
+            if observation['sequence'] == sequence:
+                observation['focused'] = False
+        path.write_text(''.join(json.dumps(v)+'\n' for v in observations))
+        def change(value):
+            value['focus_clear']['no_auto_resume']['focused'] = False
+            value['observations_sha256'] = gate.digest(path)
+        self.receipt_change(change)
+        with self.assertRaisesRegex(ValueError, 'actual focus loss/regain boundary'):
+            gate.validate(self.root,self.provenance)
+
     def test_raw_replay_mutation(self):
         (self.root/'delivery/execution/record.orrp').write_bytes(b'JSON substitute')
         with self.assertRaises(ValueError):gate.validate(self.root,self.provenance)

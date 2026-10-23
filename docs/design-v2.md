@@ -27,7 +27,7 @@
 - 실패 분류: 요구/게임 로직, 작성·컴파일, 입력/뷰/전달, 결정론·재현, budget 초과, infrastructure 중단, 사람 개입, 미시작/미해결. 원인 태그와 실행 상태를 분리하여 중단 후 성공도 이력을 유지한다.
 - 함께 볼 값: 완료 wall time·빌드 대기, requests, token/비용(알 수 없으면 unknown), replay 일치율, 개입 횟수. 하나의 scripted/mock 성공률이나 CI 개수로 북극성을 대신하지 않는다.
 
-실제 모델 호출·업로드·비용은 별도 승인과 필요한 격리를 확보한 뒤 시작한다. 기존 same-account protocol은 OS sandbox가 아니다. CI는 raw evidence를 성공/실패 모두 artifact로 남긴다.
+실제 모델 호출·업로드·비용은 별도 승인과 필요한 격리를 확보한 뒤 시작한다. 기존 same-account protocol은 OS sandbox가 아니다. 로컬 실행의 raw evidence는 성공·실패·중단 모두 git 밖에 보존하고 정확한 소스와 연결한다. 기존 CI 증거는 유지한다.
 
 ## 4. 로직 작성 경로 결정
 
@@ -39,4 +39,6 @@
 
 ## 5. 전달 순서
 
-기존 후보 통합 → 정확 통합 head의 필수 CI/리뷰 → hardening 반영 → main 승격 → 게임 1개 end-to-end 전달 → 실제 모델 adapter/9회 기준선 순서다. 현재 사용자 지시는 hardening과 main 통합을 포함한다. 각 정확 통합 head의 필수 CI·리뷰와 hardware/UI 수용 조건은 유지하며 PR #1 병합을 자동으로 포함하지 않는다. main 통합 뒤에는 main에서 짧은 기능 브랜치를 만들고 검증된 변경을 자주 반영하며 장기 stack을 늘리지 않는다. 변경마다 관련 집중 검사, 통합 경계마다 필수 전체 검사를 수행하고 동일 tree의 광범위 감사·원시 증거 복제는 반복하지 않는다.
+기능 확장은 잠시 멈추고 기존 후보를 하나로 통합한다. 2026-10-23 사용자 지시로 GitHub CI workflow를 전부 제거하고, 정확한 통합 후보의 Linux 로컬 빌드·테스트와 독립 리뷰를 검증 계약으로 삼는다. `bash tools/check-linux-local.sh`와 변경 경로별 Linux 집중 검사를 실행하고 source tree·toolchain·명령·종료 상태·미검증 범위를 남긴다. 검증된 후보를 사용자 요청대로 hardening에 통합한 뒤 main으로 올리고 게임 1개 end-to-end 전달 → 실제 모델 adapter/9회 기준선으로 진행한다. 현재 명시적 요청은 hardening 다음 main 통합을 승인하며 PR #1 자체 병합은 포함하지 않는다. 검증이나 병합이 이미 완료되었다는 뜻은 아니다.
+
+이전 필수 hosted CI·Windows hardware/UI·교차 플랫폼 병합 게이트는 사용자에 의해 대체된 것이며 통과한 것이 아니다. Windows·macOS·Android·browser·hardware/GPU는 별도 실행 증거가 없으면 미검증이다. Linux 기본 테스트가 무시된 테스트, 선택적 기능, 실제 창/UI 또는 source-hidden 전달 전체를 증명하지 않는다. 기존 Rust/Python 테스트·보안/인증 제한·과거 실패 기록은 보존한다. 서버 측 required check가 남으면 별도 차단점으로 보고하고 보호 설정을 변경하거나 우회하지 않는다. 동일 소스·환경의 검증과 증거는 재사용하되 실제 변경 후 필요한 검사를 생략하지 않는다.

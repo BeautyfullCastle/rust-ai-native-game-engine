@@ -155,10 +155,12 @@ fn paused_proof(
     obs: &mut Observations,
     process: &mut OwnedProcess,
     before: &Value,
+    stable_since: &Value,
 ) -> Result<Value> {
     let seq = number(before, "sequence")?;
+    let stable_seq = number(stable_since, "sequence")?;
     let after = obs.until(process, |v| {
-        v["sequence"].as_u64().is_some_and(|s| s >= seq + 6)
+        v["sequence"].as_u64().is_some_and(|s| s >= stable_seq + 6)
     })?;
     for v in obs
         .values
@@ -166,6 +168,8 @@ fn paused_proof(
         .filter(|v| v["sequence"].as_u64().is_some_and(|s| s > seq))
     {
         if v["paused"] != true
+            || (v["sequence"].as_u64().is_some_and(|s| s >= stable_seq)
+                && v["focused"] != stable_since["focused"])
             || v["tick"] != before["tick"]
             || v["state"] != before["state"]
             || v["consumed"].as_array().is_none_or(|a| !a.is_empty())
@@ -238,10 +242,18 @@ fn clear_proof(
     }
     observer.key(RIGHT, false)?;
     observer.key(SPACE, false)?;
-    if focus_loss {
+    let stable_since = if focus_loss {
         observer.focus(window)?;
-    }
-    let no_auto = paused_proof(obs, process, &paused)?;
+        // XGetInputFocus confirms server focus, not the player's FocusIn receipt.
+        // Do not count queued pre-regain presentations as the stable focused window.
+        obs.until(process, |v| {
+            v["focused"] == true && v["sequence"].as_u64() > paused["sequence"].as_u64()
+        })?
+    } else {
+        paused.clone()
+    };
+    // Check the entire paused interval, including frames before FocusIn arrives.
+    let no_auto = paused_proof(obs, process, &paused, &stable_since)?;
     tap(observer, ENTER)?;
     let resumed = obs.until(process, |v| {
         v["paused"] == false
@@ -277,7 +289,7 @@ fn capture(
     phase: &str,
 ) -> Result<Value> {
     let paused = obs.until(process, |v| v["paused"] == true)?;
-    let before = paused_proof(obs, process, &paused)?;
+    let before = paused_proof(obs, process, &paused, &paused)?;
     let deadline = Deadline::after(LIMIT);
     let mut image = observer.capture(window)?;
     loop {
