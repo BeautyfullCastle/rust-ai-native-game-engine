@@ -163,6 +163,8 @@ class OrchestrationTests(unittest.TestCase):
             raise ValueError(name+' failed')
         if name == 'own-lock':
             (self.project/'Cargo.lock').write_text('# own lock\n'); output = ''
+        elif name == 'own-lock-fetch':
+            self.assertEqual(args, ['cargo', 'fetch', '--locked']); output = ''
         elif name.endswith('-metadata'):
             output = json.dumps(metadata(self.project, self.engine, self.target, args[args.index('--features')+1]))
         elif name.endswith('-compile'):
@@ -210,6 +212,18 @@ class OrchestrationTests(unittest.TestCase):
                 self.assertIn('--offline', args); self.assertIn('--locked', args); self.assertIn('--no-default-features', args)
                 self.assertEqual(env['ORR_STATIC_STANDALONE_BUILD_SHA'], 'b'*40)
                 self.assertNotEqual(env['ORR_STATIC_STANDALONE_BUILD_SHA'], env['GITHUB_SHA'])
+
+    def test_lock_fetch_failure_retains_logs_and_prevents_compilation(self):
+        self.fail_mode = 'own-lock-fetch'
+        with self.assertRaisesRegex(ValueError, 'own-lock-fetch failed'):
+            self.run_gate()
+        receipt = json.loads((self.artifacts/'gate.json').read_text())
+        self.assertEqual(receipt['status'], 'failed')
+        self.assertFalse(receipt['native_acceptance'])
+        self.assertNotIn('user_source_commit', receipt)
+        self.assertNotIn('portable_cpu_acceptance', receipt)
+        self.assertEqual([name for _, name, _, _ in self.calls], ['own-lock', 'own-lock-fetch'])
+        self.assertEqual((self.artifacts/'own-lock-fetch.log').read_text(), 'original compiler failure\n')
 
     def test_compiler_failure_preserves_partial_evidence(self):
         self.fail_mode = 'actions-compile'

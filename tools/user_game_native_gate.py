@@ -12,6 +12,7 @@ import re
 import subprocess
 import sys
 import tomllib
+import time
 
 sys.dont_write_bytecode = True
 import bootstrap_user_game as bootstrap
@@ -68,6 +69,31 @@ def build_environment(env, target):
     return result
 
 
+def prepare_own_lock(project, execute):
+    """Resolve this fresh workspace, then cache its exact lock before going offline.
+
+    An engine's locked fetch may legally cache yanked crates. It is not a
+    registry closure for a new workspace: offline resolution cannot choose an
+    uncached compatible replacement. Never seed from the engine lock or bypass
+    Cargo's yank/MSRV checks. The original 180-second preparation cap is shared
+    by resolution and fetch; all subsequent consumers remain locked/offline.
+    """
+    lock = project/'Cargo.lock'
+    require(not lock.exists() and not lock.is_symlink(), 'own lock must start absent')
+    deadline = time.monotonic() + 180
+    def run(args, name):
+        remaining = deadline - time.monotonic()
+        require(remaining > 0, 'own lock preparation timeout')
+        execute(args, name, remaining)
+    run(['cargo', 'generate-lockfile'], 'own-lock')
+    require(lock.is_file() and not lock.is_symlink(), 'own lock missing/linked')
+    lock_hash = editor.digest(lock)
+    run(['cargo', 'fetch', '--locked'], 'own-lock-fetch')
+    require(lock.is_file() and not lock.is_symlink(), 'own lock missing/linked after fetch')
+    require(editor.digest(lock) == lock_hash, 'own lock changed during fetch')
+    return lock_hash
+
+
 def overlay(project, gate):
     before = {p.relative_to(project).as_posix(): editor.digest(p) for p in project.rglob('*') if p.is_file()}
     records = []
@@ -110,7 +136,7 @@ def own_commit(project, env):
     require(not (project/'.git').exists(), 'generated project already has Git identity')
     git('init', '--quiet')
     git('add', '--all')
-    git('commit', '--quiet', '-m', 'Commit generated acceptance project and own offline lock')
+    git('commit', '--quiet', '-m', 'Commit generated acceptance project and own resolved lock')
     require(not git('remote'), 'generated project must have no remote')
     return git('rev-parse', 'HEAD')
 
@@ -157,9 +183,7 @@ def run(gate, engine, project, target, artifacts):
         receipt['overlay'] = overlay(project, gate)
         save()
         execute = lambda args,name,timeout: standalone.command(args,artifacts,name,env,timeout,cwd=project)
-        execute(['cargo','generate-lockfile','--offline'], 'own-lock', 180)
-        require((project/'Cargo.lock').is_file(), 'own offline lock missing')
-        lock_hash = editor.digest(project/'Cargo.lock')
+        lock_hash = prepare_own_lock(project, execute)
         user_sha = own_commit(project, env)
         require(user_sha not in (gate_sha, bootstrap.PINNED_COMMIT), 'user/engine/gate commit conflation')
         user_source = editor.clean_checkout(user_sha, project, complete=True)

@@ -67,7 +67,19 @@ cargo test --offline --locked --no-default-features --features standalone,bundle
 cargo test --offline --locked --test acceptance
 ```
 
-These commands are instructions for the later acceptance gate, not evidence that
+The hosted generated-user native and generated-action CPU acceptance gates have
+an explicit registry preparation phase, unlike the offline-first generated
+README. Each resolves its own fresh workspace with `cargo generate-lockfile`,
+then fetches that exact lock with `cargo fetch --locked`, sharing the original
+180-second preparation cap. An upstream engine lock may retain a yanked version
+that Cargo correctly refuses for a new workspace; prefetching only that engine
+lock is therefore not sufficient. No engine lock is copied and no yank or
+Rust-version check is overridden. The gates require a regular, newly created
+lockfile, reject changes during fetch, and commit/hash it as user-project source
+before all later locked/offline build and metadata steps. Preparation failures
+retain their original logs and cannot become native acceptance.
+
+These generated README commands are instructions, not evidence that
 this bootstrap ran them. Absolute engine paths mean moving the engine checkout
 requires intentionally updating the manifest and provenance. The generated
 workspace preserves the original release profile and clippy float warning.
