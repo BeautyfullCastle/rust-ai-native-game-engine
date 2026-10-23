@@ -173,11 +173,20 @@ class Raw16GateTests(unittest.TestCase):
             with self.subTest(text=changed), self.assertRaises(AssertionError):
                 gate.result(changed, gate.EDITOR)
         helper = ''.join(f'{name} (__main__.Raw16GateTests.{name}) ... ok\n' for name in gate.HELPER_TESTS)
-        helper += '\nRan 12 tests in 0.01s\n\nOK\n'
+        helper += '\nRan 13 tests in 0.01s\n\nOK\n'
         gate.helper_result(helper)
+        first_row = helper.splitlines(keepends=True)[0]
+        for changed in (helper.replace(first_row, '', 1),
+                        first_row + helper,
+                        'test_extra (__main__.Raw16GateTests.test_extra) ... ok\n' + helper,
+                        helper.replace(gate.HELPER_TESTS[0], 'test_wrong', 1),
+                        helper.replace('.' + gate.HELPER_TESTS[0] + ')', '.test_wrong)', 1),
+                        helper.replace('Ran 13 tests', 'Ran 12 tests')):
+            with self.subTest(helper_output=changed), self.assertRaises(AssertionError):
+                gate.helper_result(changed)
         for changed in (helper.replace(' ... ok', ' ... skipped', 1), helper.replace(' ... ok', ' ... FAIL', 1),
-                        helper.replace('Ran 12 tests', 'test_extra (__main__.Raw16GateTests) ... skipped\nRan 12 tests'),
-                        helper.replace('Ran 12 tests', 'Ran 0 tests'), helper + helper):
+                        helper.replace('Ran 13 tests', 'test_extra (__main__.Raw16GateTests) ... skipped\nRan 13 tests'),
+                        helper.replace('Ran 13 tests', 'Ran 0 tests'), helper + helper):
             with self.assertRaises(AssertionError):
                 gate.helper_result(changed)
 
