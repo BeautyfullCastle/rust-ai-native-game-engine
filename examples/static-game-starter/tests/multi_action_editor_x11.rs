@@ -274,6 +274,10 @@ impl App for Wrapper {
         self.app.editor.camera.center = [0.0, 0.0];
         self.app.editor.camera.half_extent = 6.0;
         self.app.ui(ui, frame);
+        // EditorApp publishes its document title during ui(). Keep this private
+        // acceptance window identifiable after that production update, without
+        // relaxing the observer's PID, mapped-window, or title checks.
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(TITLE.into()));
         self.sequence += 1;
         let observation = self.observation(&ctx);
         let mut f = fs::OpenOptions::new()
@@ -552,23 +556,25 @@ fn multi_action_editor_x11() -> Result<()> {
         .create_new(true)
         .write(true)
         .open(out.join("editor.stderr"))?;
-    let child = Command::new(std::env::current_exe()?)
-        .args(["--exact", "multi_action_editor_x11", "--nocapture"])
-        .env("ORR_MULTI_EDITOR_CHILD", &out)
-        .env("DISPLAY", &display.name)
-        .env("WGPU_BACKEND", "vulkan")
-        .env("WINIT_UNIX_BACKEND", "x11")
-        .env("LIBGL_ALWAYS_SOFTWARE", "1")
-        .env_remove("WAYLAND_DISPLAY")
-        .stdin(Stdio::null())
-        .stdout(stdout)
-        .stderr(stderr)
-        .spawn()?;
-    let process_id = child.id();
+    let child = OwnedChild(
+        Command::new(std::env::current_exe()?)
+            .args(["--exact", "multi_action_editor_x11", "--nocapture"])
+            .env("ORR_MULTI_EDITOR_CHILD", &out)
+            .env("DISPLAY", &display.name)
+            .env("WGPU_BACKEND", "vulkan")
+            .env("WINIT_UNIX_BACKEND", "x11")
+            .env("LIBGL_ALWAYS_SOFTWARE", "1")
+            .env_remove("WAYLAND_DISPLAY")
+            .stdin(Stdio::null())
+            .stdout(stdout)
+            .stderr(stderr)
+            .spawn()?,
+    );
+    let process_id = child.0.id();
     let window = observer.window(process_id, TITLE)?;
     let mut d = Driver {
         out: out.clone(),
-        child: OwnedChild(child),
+        child,
         x: observer,
         window,
         command: 0,
