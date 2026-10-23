@@ -5695,7 +5695,7 @@ jobs:
     name: generated user game actions CPU preview (ubuntu-22.04)
     # Explicit opt-in preview only. This does not establish native acceptance.
     runs-on: ubuntu-22.04
-    timeout-minutes: 95
+    timeout-minutes: 97
     env:
       PYTHONDONTWRITEBYTECODE: "1"
       CARGO_TERM_COLOR: never
@@ -5717,14 +5717,21 @@ jobs:
         with:
           python-version: "3.12"
           update-environment: false
+      # Observed 171s package transfer + index/configuration exceeded 180s.
+      # Keep this setup bounded; the CPU gate and evidence retention keep their budgets.
       - name: Install required CPU compilation dependencies
-        timeout-minutes: 3
+        timeout-minutes: 5
         shell: bash
         run: |
           set -euo pipefail
+          ROOT="$RUNNER_TEMP/generated-action-preview-job"
+          START=$SECONDS
+          trap 'status=$?; printf "{\"exit_code\":%s,\"elapsed_seconds\":%s,\"native_acceptance\":false}\n" "$status" "$((SECONDS - START))" > "$ROOT/setup-packages-status.json"' EXIT
           { sudo apt-get update -q
             sudo apt-get install -y -q libasound2-dev libudev-dev libxkbcommon-dev libwayland-dev pkg-config
-          } 2>&1 | tee "$RUNNER_TEMP/generated-action-preview-job/setup-packages.log"
+            pkg-config --exists alsa libudev xkbcommon wayland-client
+            pkg-config --modversion alsa libudev xkbcommon wayland-client
+          } 2>&1 | tee "$ROOT/setup-packages.log"
       - name: Prepare exact preview engine and locked registry inputs
         timeout-minutes: 2
         shell: bash
