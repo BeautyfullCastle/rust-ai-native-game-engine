@@ -28,6 +28,54 @@ class UserGateTests(unittest.TestCase):
     def fence(self):
         return native.clean_checkout(self.sha,self.project,complete=True)
 
+    def test_python_loader_environment_is_still_rejected(self):
+        home = self.root/'cargo-home'; home.mkdir()
+        clean = {'CARGO_HOME': str(home), 'PATH': '/usr/bin', 'GITHUB_SHA': 'a'*40}
+        original = dict(clean)
+        result = gate.build_environment(clean, self.root/'target')
+        self.assertEqual(clean, original)
+        self.assertEqual(result['PATH'], clean['PATH'])
+        self.assertNotIn('LD_LIBRARY_PATH', result)
+        for value in ('', '/injected/lib', '/opt/hostedtoolcache/Python/3.12.15/x64/lib',
+                      '/opt/hostedtoolcache/Python/3.12.15/x64/lib:/injected/lib',
+                      '/injected/lib:/opt/hostedtoolcache/Python/3.12.15/x64/lib'):
+            poisoned = dict(clean, LD_LIBRARY_PATH=value)
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'ambient compiler configuration LD_LIBRARY_PATH'):
+                gate.build_environment(poisoned, self.root/'target')
+            self.assertEqual(poisoned['LD_LIBRARY_PATH'], value)
+
+    def test_workflow_uses_python_output_without_mutating_compiler_environment(self):
+        text = (Path(__file__).resolve().parents[1]/'.github/workflows/determinism.yml').read_text()
+        def contract(value):
+            job = value.split('  generated-user-game-native:\n', 1)[1].split('  sample-room:\n', 1)[0]
+            setup = job.split('      - uses: actions/setup-python@v5\n', 1)[1].split('      - ', 1)[0]
+            self.assertEqual(setup, '        id: generated_python\n        timeout-minutes: 2\n        with:\n          python-version: "3.12"\n          update-environment: false\n')
+            launch = job.split('      - name: Required generated project native editor and delivered games\n', 1)[1].split('      - name:', 1)[0]
+            self.assertIn('        env:\n          ORR_ACCEPTANCE_PYTHON: ${{ steps.generated_python.outputs.python-path }}\n', launch)
+            self.assertIn('          "$ORR_ACCEPTANCE_PYTHON" -B -m unittest discover -s tools -p', launch)
+            self.assertIn('          "$ORR_ACCEPTANCE_PYTHON" -B tools/user_game_native_gate.py', launch)
+            self.assertEqual(launch.count('"$ORR_ACCEPTANCE_PYTHON"'), 2)
+            for forbidden in ('python3 -B', 'env -u', 'unset LD_', 'LD_LIBRARY_PATH:', 'LD_PRELOAD:'):
+                self.assertNotIn(forbidden, launch)
+        contract(text)
+        for old, new in (
+            ('update-environment: false', 'update-environment: true'),
+            ('          update-environment: false\n', ''),
+            ('id: generated_python', 'id: other_python'),
+            ('steps.generated_python.outputs.python-path', 'steps.other_python.outputs.python-path'),
+            ('"$ORR_ACCEPTANCE_PYTHON" -B -m unittest', 'python3 -B -m unittest'),
+            ('"$ORR_ACCEPTANCE_PYTHON" -B tools/user_game_native_gate.py', 'python3 -B tools/user_game_native_gate.py'),
+            ('          ROOT="$RUNNER_TEMP/generated-user-native-job"\n', '          unset LD_LIBRARY_PATH\n          ROOT="$RUNNER_TEMP/generated-user-native-job"\n'),
+        ):
+            # Restrict mutation to this job so sibling setup steps cannot satisfy it.
+            start = text.index('  generated-user-game-native:\n')
+            end = text.index('  sample-room:\n', start)
+            job = text[start:end]
+            self.assertIn(old, job)
+            changed = text[:start]+job.replace(old, new)+text[end:]
+            with self.subTest(old=old), self.assertRaises(AssertionError):
+                contract(changed)
+
     def test_clean_generated_root_with_spaces(self):
         value=self.fence()
         self.assertEqual(value['commit'],self.sha)
@@ -69,7 +117,7 @@ class UserGateTests(unittest.TestCase):
         with self.assertRaises(ValueError):gate.separate_roots(link,self.root/'evidence')
 
     def test_build_configuration_injection(self):
-        for key in ('RUSTC','RUSTC_WRAPPER','RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS','CARGO_BUILD_RUSTC','CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER','CARGO_PROFILE_RELEASE_OPT_LEVEL','CARGO_SOURCE_CRATES_IO_REPLACE_WITH','LD_PRELOAD','CARGO_TARGET_DIR'):
+        for key in ('RUSTC','RUSTC_WRAPPER','RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS','CARGO_BUILD_RUSTC','CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER','CARGO_PROFILE_RELEASE_OPT_LEVEL','CARGO_SOURCE_CRATES_IO_REPLACE_WITH','LD_PRELOAD','LD_LIBRARY_PATH','CARGO_TARGET_DIR'):
             with self.subTest(key=key),self.assertRaisesRegex(ValueError,'ambient'):gate.build_environment({key:'injected'},self.root/'target')
 
     def test_cargo_home_configuration(self):

@@ -35,8 +35,9 @@ NATIVE_HEADER = '''  native:
 '''
 # Exact aggregate preserves the nine-result and eight-row authoring steps,
 # and adds the independent four-row Room wall result. Pin all three steps and
-# dependency edges; actual Bash failure states are tested separately.
-AGGREGATE_SHA256 = '6d7102ae05de069e9644da065c89993cebc58a8b2228569d8c208e8d834ae90a'
+# dependency edges, including generated user-game and private action lanes in needs, result
+# binding and the fail-closed loop; actual Bash failure states are tested separately.
+AGGREGATE_SHA256 = 'e5bcdb49bc50ef54b20f907ea16069d5537cf87eb3d0d302b49e82dfe58339b8'
 
 
 def listing(names):
@@ -326,6 +327,22 @@ class Raw16GateTests(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     gate.directory_bytes(path)
 
+    def test_workflow_each_inherited_and_private_action_dependency_is_mandatory(self):
+        workflow = (ROOT / '.github/workflows/determinism.yml').read_text()
+        workflow_contract(workflow)
+        dependencies = ('native', 'wasm32', 'wasm32-browser', 'android-arm64',
+                        'sample-build', 'generated-user-game-native',
+                        'static-game-actions-native', 'sample-arena-cpu',
+                        'sample-fixture-preflight', 'sample-linked-prefabs',
+                        'sample-room', 'static-model-authoring', 'room-wall-authoring')
+        line = '    needs: [' + ', '.join(dependencies) + ']'
+        self.assertEqual(workflow.count(line), 1)
+        for missing in dependencies:
+            changed = workflow.replace(line, '    needs: [' + ', '.join(
+                name for name in dependencies if name != missing) + ']', 1)
+            with self.subTest(missing=missing), self.assertRaises(AssertionError):
+                workflow_contract(changed)
+
     def test_mandatory_workflow_and_preserved_gates(self):
         workflow = (ROOT / '.github/workflows/determinism.yml').read_text()
         workflow_contract(workflow)
@@ -355,7 +372,13 @@ class Raw16GateTests(unittest.TestCase):
                          ('      - name: Require every independent static authoring matrix row to pass\n', '      - name: Require every independent static authoring matrix row to pass\n        if: false\n'),
                          ('[[ \"$AUTHORING_RESULT\" != \"success\" ]]', '[[ \"$AUTHORING_RESULT\" == \"success\" ]]'),
                          ("          ROOM_RESULT: ${{ needs['sample-room'].result }}\n", ''),
-                         ('LINKED_PREFABS_RESULT ROOM_RESULT; do', 'LINKED_PREFABS_RESULT; do'),
+                         ('LINKED_PREFABS_RESULT ROOM_RESULT GENERATED_USER_NATIVE_RESULT PRIVATE_ACTION_NATIVE_RESULT; do', 'LINKED_PREFABS_RESULT GENERATED_USER_NATIVE_RESULT PRIVATE_ACTION_NATIVE_RESULT; do'),
+                         (', generated-user-game-native', ''),
+                         ("          GENERATED_USER_NATIVE_RESULT: ${{ needs['generated-user-game-native'].result }}\n", ''),
+                         ('ROOM_RESULT GENERATED_USER_NATIVE_RESULT PRIVATE_ACTION_NATIVE_RESULT; do', 'ROOM_RESULT PRIVATE_ACTION_NATIVE_RESULT; do'),
+                         (', static-game-actions-native', ''),
+                         ("          PRIVATE_ACTION_NATIVE_RESULT: ${{ needs['static-game-actions-native'].result }}\n", ''),
+                         (' GENERATED_USER_NATIVE_RESULT PRIVATE_ACTION_NATIVE_RESULT; do', ' GENERATED_USER_NATIVE_RESULT; do'),
                          ('  native:\n', '  native:\n    if: false\n'),
                          ('          - os: macos-latest\n', ''),
                          ('    runs-on: ${{ matrix.os }}\n', '    runs-on: ubuntu-latest\n'),

@@ -7,7 +7,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 TRIGGER = ('on:\n  pull_request:\n'
-           '    branches: [main, su/engine-correctness-hardening]\n'
+           '    branches: [main, su/engine-correctness-hardening, su/authoring-development-integration-20261021, su/static-game-starter-20261022]\n'
            '    types: [ready_for_review]\n'
            '  workflow_dispatch:\n')
 
@@ -295,11 +295,26 @@ class IntegrationTriggers(unittest.TestCase):
         for bad in (good.replace('18 passed','17 passed'),good.replace(' ... ok',' ... ignored',1),good.replace(sorted(names)[0],sorted(names)[1]),good+good):
             with self.assertRaises(RuntimeError): exec(program,dict(env,output=bad))
 
+    def test_stacked_base_branch_scope_is_exact(self):
+        branches = ('main', 'su/engine-correctness-hardening',
+                    'su/authoring-development-integration-20261021',
+                    'su/static-game-starter-20261022')
+        for branch in branches:
+            changed = TRIGGER.replace(', ' + branch, '', 1) if branch != 'main' else TRIGGER.replace('main, ', '', 1)
+            self.assertNotEqual(changed, TRIGGER)
+            with self.subTest(missing=branch), self.assertRaises(AssertionError):
+                check(changed)
+        for branch in ('su/unrelated', '*', '**', 'su/static-game-starter-other'):
+            changed = TRIGGER.replace('su/static-game-starter-20261022]', branch + ']')
+            with self.subTest(unrelated=branch), self.assertRaises(AssertionError):
+                check(changed)
+
     def test_reject_automatic_or_incomplete_triggers(self):
         for bad in [
             TRIGGER.replace('ready_for_review', 'opened, synchronize'),
             TRIGGER.replace('    types: [ready_for_review]\n', ''),
-            TRIGGER.replace('branches: [main, su/engine-correctness-hardening]', "branches: ['**']"),
+            TRIGGER.replace('branches: [main, su/engine-correctness-hardening, su/authoring-development-integration-20261021, su/static-game-starter-20261022]', "branches: ['**']"),
+            TRIGGER.replace('branches: [main, su/engine-correctness-hardening, su/authoring-development-integration-20261021, su/static-game-starter-20261022]', 'branches: [main, su/engine-correctness-hardening]'),
             TRIGGER.replace('  workflow_dispatch:\n', ''),
             TRIGGER + '  push:\n',
             TRIGGER + '  schedule:\n    - cron: "0 * * * *"\n',

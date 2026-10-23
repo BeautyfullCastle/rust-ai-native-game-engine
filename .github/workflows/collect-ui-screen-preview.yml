@@ -1,7 +1,7 @@
 name: Collect UI screen preview acceptance
 on:
   pull_request:
-    branches: [main, su/engine-correctness-hardening]
+    branches: [main, su/engine-correctness-hardening, su/authoring-development-integration-20261021, su/static-game-starter-20261022]
     types: [ready_for_review]
   workflow_dispatch:
 permissions:

@@ -8,7 +8,7 @@ name: determinism
 
 on:
   pull_request:
-    branches: [main, su/engine-correctness-hardening]
+    branches: [main, su/engine-correctness-hardening, su/authoring-development-integration-20261021, su/static-game-starter-20261022]
     types: [ready_for_review]
   workflow_dispatch:
 env:
@@ -4077,7 +4077,9 @@ jobs:
               "tests::sha256_uses_canonical_lowercase_hex",
               "tests::staged_object_and_lock_publish_failures_preserve_active_state",
               "tests::symlinks_at_source_object_and_lock_are_rejected",
-              "tests::tamper_and_writer_failure_preserve_authority"
+              "tests::tamper_and_writer_failure_preserve_authority",
+              "tests::tilemap_added_inside_checked_callback_cannot_publish",
+              "tests::tilemap_declaration_and_all_lock_writers_fail_closed"
             ],
             "ignored-library-hooks": [
               "collect_app::input_runtime_tests::controls_acceptance_tests::authoring_app_saved_bytes_drive_production_keys",
@@ -5008,10 +5010,12 @@ jobs:
                 "tests::sha256_uses_canonical_lowercase_hex",
                 "tests::staged_object_and_lock_publish_failures_preserve_active_state",
                 "tests::symlinks_at_source_object_and_lock_are_rejected",
-                "tests::tamper_and_writer_failure_preserve_authority"
+                "tests::tamper_and_writer_failure_preserve_authority",
+                "tests::tilemap_added_inside_checked_callback_cannot_publish",
+                "tests::tilemap_declaration_and_all_lock_writers_fail_closed"
               ],
               "ignored_names": [],
-              "passed": 29,
+              "passed": 31,
               "ignored": 0,
               "children": 1,
               "features": [],
@@ -5022,7 +5026,7 @@ jobs:
                   0
                 ],
                 [
-                  29,
+                  31,
                   0,
                   0
                 ]
@@ -5712,9 +5716,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         timeout-minutes: 3
       - uses: actions/setup-python@v5
+        id: generated_python
         timeout-minutes: 2
         with:
           python-version: "3.12"
+          update-environment: false
       - name: Install required native capabilities
         timeout-minutes: 4
         shell: bash
@@ -5741,12 +5747,14 @@ jobs:
       - name: Required generated project native editor and delivered games
         timeout-minutes: 70
         shell: bash
+        env:
+          ORR_ACCEPTANCE_PYTHON: ${{ steps.generated_python.outputs.python-path }}
         run: |
           set -euo pipefail
           ROOT="$RUNNER_TEMP/generated-user-native-job"
           trap 'status=$?; printf "{\"exit_code\":%s,\"native_acceptance_claim\":false}\n" "$status" > "$ROOT/process-exit.json"' EXIT
-          python3 -B -m unittest discover -s tools -p 'test_*game*gate.py' -v 2>&1 | tee "$ROOT/python-fixtures.log"
-          python3 -B tools/user_game_native_gate.py \
+          "$ORR_ACCEPTANCE_PYTHON" -B -m unittest discover -s tools -p 'test_*game*gate.py' -v 2>&1 | tee "$ROOT/python-fixtures.log"
+          "$ORR_ACCEPTANCE_PYTHON" -B tools/user_game_native_gate.py \
             --gate "$GITHUB_WORKSPACE" \
             --engine "$RUNNER_TEMP/generated-user-engine" \
             --project "$RUNNER_TEMP/generated user game" \
