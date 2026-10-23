@@ -16,13 +16,18 @@ use orr_reflect::{Guid, Scene, Value};
 use orr_sample::{room_game::{RoomActor, RoomConfig, RoomEscapeV1, RoomInput, RoomRun, EXIT, INTERACT, KEY, PLAYER}, room_project::{self, PreparedProject, PreparedScene, SEED}};
 use orr_sim::{Simulation, TickInputs};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, fs, io::Read, path::{Path, PathBuf}, process::{Command, Output}, time::{Duration, Instant}};
+use std::{collections::BTreeMap, fs, io::{Read, Write}, path::{Path, PathBuf}, process::{Command, Output}, time::{Duration, Instant}};
 
 const TEST: &str = "authored_box_widgets_six_face_gpu_and_source_hidden_room_export";
 const RECIPE: &str = "authored.blockout.json";
 const ASSET: &str = "box.model.json";
 const LOCAL_OFFSET: [f32; 3] = [0.0, 5.0, 0.0];
 const CAPTURE_SIZE: (u32,u32) = (892,962);
+// The integrated editor adds a visible Frame selected collider row before the
+// viewport. Reserve its expected 21 points without changing the pixel oracle.
+// This source-derived allowance must be confirmed by the retained layout probe.
+const FRAME_SELECTION_ROW_ALLOWANCE: f32 = 21.0;
+const WINDOW_SIZE: [f32; 2] = [1600.0, 1100.0 + FRAME_SELECTION_ROW_ALLOWANCE];
 const VIEWS: [(&str, f32, f32); 6] = [
     ("positive-x", std::f32::consts::FRAC_PI_2, 0.0),
     ("negative-x", -std::f32::consts::FRAC_PI_2, 0.0),
@@ -97,7 +102,7 @@ impl Fixture {
         let prepared = PreparedProject::open(&self.root).unwrap(); let (_,path,scene,models) = prepared.into_parts();
         let mut editor = Editor::start(&HostSpec::PreparedRoom { scene:path, text:scene.text().into(), listen:None, debug_hooks:false }).unwrap(); editor.sync();
         editor.select(Some(Target::Guid(self.guids[&PLAYER].clone())));
-        Harness::builder().with_size([1600.0,1100.0]).with_step_dt(1.0/60.0).wgpu().build_eframe(move |cc| { let mut app = EditorApp::new(editor,cc.wgpu_render_state.clone()); app.models.install_room(models).unwrap(); app })
+        Harness::builder().with_size(WINDOW_SIZE).with_step_dt(1.0/60.0).wgpu().build_eframe(move |cc| { let mut app = EditorApp::new(editor,cc.wgpu_render_state.clone()); app.models.install_room(models).unwrap(); app })
     }
     fn install_oracle(&self, model: &StaticModel) {
         let source = self.temp.path().join("independent model oracle"); fs::create_dir_all(&source).unwrap();
@@ -133,7 +138,7 @@ fn capture(h:&mut Harness<'_,EditorApp>,path:&Path)->Vec<u8> {
 // Inspector content legitimately changes its resizable width. Compare the
 // same real editor layout, never resized/cropped readbacks: close both authoring
 // sections through their actual widgets, and restore their prior state afterward.
-fn capture_layout(h:&mut Harness<'_,EditorApp>)->[bool;2] {
+fn capture_layout(h:&mut Harness<'_,EditorApp>, evidence:&Path)->[bool;2] {
     let open=[h.query_by_label("New box recipe").is_some(),h.query_by_label("Load model asset").is_some()];
     for (label,was_open) in ["Box blockout","Static model binding"].into_iter().zip(open) {if was_open {click(h,label);}}
     h.run_steps(20);settle(h);
@@ -148,7 +153,21 @@ fn capture_layout(h:&mut Harness<'_,EditorApp>)->[bool;2] {
         h.ctx.data_mut(|data|data.insert_persisted(id,state));
     }
     h.run_steps(20);settle(h);
-    assert_eq!(h.ctx.viewport_rect().size(),egui::vec2(1600.0,1100.0));
+    // Retain actual geometry before the fixed-size assertions, even on failure.
+    let rect = |r: egui::Rect| [r.min.x, r.min.y, r.max.x, r.max.y];
+    let toolbar = h.get_by_label("Frame selected collider").rect();
+    let panels = ["top", "status", "bottom", "inspector", "hierarchy"].map(|name| {
+        (name, egui::containers::panel::PanelState::load(&h.ctx,egui::Id::new(name)).map(|state| rect(state.outer_rect)))
+    });
+    let diagnostic = serde_json::json!({
+        "outer_rect": rect(h.ctx.viewport_rect()), "pixels_per_point": h.ctx.pixels_per_point(),
+        "toolbar_rect": rect(toolbar), "panels": panels,
+        "viewport_rect": h.state().ui.viewport_rect.map(rect), "viewport_px": h.state().ui.viewport_px,
+        "required_viewport_px": CAPTURE_SIZE, "source_hypothesis_toolbar_allowance": FRAME_SELECTION_ROW_ALLOWANCE,
+    });
+    let mut log = fs::OpenOptions::new().create(true).append(true).open(evidence.join("capture-layout.jsonl")).unwrap();
+    writeln!(log,"{diagnostic}").unwrap();
+    assert_eq!(h.ctx.viewport_rect().size(),egui::vec2(WINDOW_SIZE[0],WINDOW_SIZE[1]));
     for (name,width) in [("inspector",478.0),("hierarchy",230.0)] {
         assert_eq!(egui::containers::panel::PanelState::load(&h.ctx,egui::Id::new(name)).unwrap().outer_rect.width(),width,"canonical {name} width must remain fixed");
     }
@@ -160,13 +179,13 @@ fn restore_capture_layout(h:&mut Harness<'_,EditorApp>,open:[bool;2]) {
     h.run_steps(20);settle(h);
 }
 fn six_views(h:&mut Harness<'_,EditorApp>,directory:&Path,prefix:&str)->Vec<Vec<u8>> {
-    let open=capture_layout(h);
     fs::create_dir_all(directory).unwrap();
+    let open=capture_layout(h,directory);
     let pixels=VIEWS.into_iter().map(|(name,yaw,pitch)| { h.state_mut().editor.camera3d=orr_render::OrbitCamera::new([0.125,5.875,-0.1875],yaw,pitch,6.0); capture(h,&directory.join(format!("{prefix}-{name}.png"))) }).collect();
     restore_capture_layout(h,open);pixels
 }
 fn composed_positive_x(h:&mut Harness<'_,EditorApp>,path:&Path)->(Vec<u8>,(u32,u32),egui::Rect) {
-    let open=capture_layout(h);
+    let open=capture_layout(h,path.parent().expect("capture directory"));
     h.state_mut().editor.camera3d=orr_render::OrbitCamera::new([0.125,5.875,-0.1875],VIEWS[0].1,VIEWS[0].2,6.0); settle(h);
     let image=h.render().expect("native viewport texture must compose into real EditorApp output"); let size=(image.width(),image.height()); let rgba=image.into_raw(); save_png(path,size,&rgba); let rect=h.state().ui.viewport_rect.unwrap();
     restore_capture_layout(h,open);(rgba,size,rect)

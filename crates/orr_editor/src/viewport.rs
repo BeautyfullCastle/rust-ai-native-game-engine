@@ -270,6 +270,29 @@ impl ViewportGpu {
         self.target.render(&mut self.renderer, list, camera);
     }
 
+    /// Render optional background sprites into the same offscreen target before
+    /// the existing shape list. Actor sprites remain in the editor's existing
+    /// egui paint path; the caller admits their shared budget and assets first.
+    /// The compositor must use this viewport's device and target format.
+    #[cfg(feature = "sprites")]
+    pub fn render_composed(
+        &mut self,
+        size: (u32, u32),
+        list: &RenderList,
+        camera: &Camera,
+        compositor: &mut orr_sample::project_compositor::ProjectCompositor<Wgpu>,
+        background: &[orr_sample::project_compositor::SpriteDraw],
+    ) -> Result<(), String> {
+        if background.is_empty() {
+            self.render(size, list, camera);
+            return Ok(());
+        }
+        self.target.resize(size.0, size.1);
+        self.target.render_into(|_, view, size| {
+            compositor.draw_with_background(view, size, list, background, &[], camera)
+        })
+    }
+
     /// Waits for the GPU and reads the pixels back (RGBA8, sRGB encoded, top row first).
     pub fn read_rgba8(&self) -> Vec<u8> {
         self.target.read_rgba8()
@@ -314,6 +337,35 @@ impl GpuViewport {
             );
         }
         self.id
+    }
+
+    /// Optional composed background, with one final sample-view refresh rather
+    /// than one copy per sprite pass. GPU and egui atlas textures are separate
+    /// backend resources, even when they share admitted AssetKey/source bytes.
+    #[cfg(feature = "sprites")]
+    pub fn render_composed(
+        &mut self,
+        size: (u32, u32),
+        list: &RenderList,
+        camera: &Camera,
+        compositor: &mut orr_sample::project_compositor::ProjectCompositor<Wgpu>,
+        background: &[orr_sample::project_compositor::SpriteDraw],
+    ) -> Result<egui::TextureId, String> {
+        if background.is_empty() {
+            return Ok(self.render(size, list, camera));
+        }
+        self.gpu.render_composed(size, list, camera, compositor, background)?;
+        let generation = self.gpu.target().generation();
+        if generation != self.generation {
+            self.generation = generation;
+            self.state.renderer.write().update_egui_texture_from_wgpu_texture(
+                &self.state.device,
+                self.gpu.target().sample_view(),
+                egui_wgpu::wgpu::FilterMode::Linear,
+                self.id,
+            );
+        }
+        Ok(self.id)
     }
 
     /// The inner offscreen target (for readback in tests).

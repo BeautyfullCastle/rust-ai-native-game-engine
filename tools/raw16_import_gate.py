@@ -85,6 +85,7 @@ HELPER_TESTS = [
     'test_actual_cli_producer_fence', 'test_source_and_mode_fence',
     'test_software_adapter_required', 'test_png_integrity_and_bounds',
     'test_capture_census_and_controls', 'test_exclusive_evidence_and_budgets',
+    'test_workflow_each_inherited_and_private_action_dependency_is_mandatory',
     'test_mandatory_workflow_and_preserved_gates', 'test_bounded_process_receipts',
 ]
 
@@ -146,7 +147,7 @@ def helper_result(text):
     require(len(re.findall(r'^test_\w+ .* \.\.\. ', text, re.M)) == len(HELPER_TESTS), 'extra helper status')
     require(all(not suffix or name == suffix for name, suffix in rows), 'helper suffix')
     require(not re.search(r'(?im)(?:\.\.\. (?:skipped|FAIL|ERROR|expected failure|unexpected success)|^FAILED|^ERROR:|^FAIL:)', text), 'helper failure or skip')
-    require(re.findall(r'^Ran (\d+) tests in [0-9.]+s$', text, re.M) == ['12'] and text.rstrip().endswith('OK'), 'helper total')
+    require(re.findall(r'^Ran (\d+) tests in [0-9.]+s$', text, re.M) == ['13'] and text.rstrip().endswith('OK'), 'helper total')
 
 
 def dependency_tree(text):

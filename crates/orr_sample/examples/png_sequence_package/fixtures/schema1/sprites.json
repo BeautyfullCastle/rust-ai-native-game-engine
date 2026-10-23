@@ -1,0 +1,52 @@
+{
+  "format": "orr_sprite",
+  "version": 1,
+  "atlas": {
+    "image": "atlas.png",
+    "width": 4,
+    "height": 2
+  },
+  "regions": [
+    {
+      "id": 0,
+      "x": 0,
+      "y": 0,
+      "width": 2,
+      "height": 1
+    },
+    {
+      "id": 1,
+      "x": 2,
+      "y": 0,
+      "width": 2,
+      "height": 1
+    },
+    {
+      "id": 2,
+      "x": 0,
+      "y": 1,
+      "width": 2,
+      "height": 1
+    }
+  ],
+  "clips": [
+    {
+      "id": "run",
+      "mode": "loop",
+      "frames": [
+        {
+          "region": 0,
+          "duration_ms": 30
+        },
+        {
+          "region": 1,
+          "duration_ms": 70
+        },
+        {
+          "region": 2,
+          "duration_ms": 20
+        }
+      ]
+    }
+  ]
+}

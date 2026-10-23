@@ -9,6 +9,7 @@ job results and library files. They do not run the Rust targets or emulate the
 GitHub Actions scheduler or native Windows/macOS shells and toolchains.
 """
 
+import copy
 import hashlib
 import json
 import os
@@ -28,11 +29,16 @@ RESULTS = {
     "WASM32_RESULT": "${{ needs.wasm32.result }}",
     "ANDROID_ARM64_RESULT": "${{ needs['android-arm64'].result }}",
     "BROWSER_RESULT": "${{ needs['wasm32-browser'].result }}",
+    "SAMPLE_ARENA_CPU_RESULT": "${{ needs['sample-arena-cpu'].result }}",
+    "SAMPLE_PREFLIGHT_RESULT": "${{ needs['sample-fixture-preflight'].result }}",
     "SAMPLE_BUILD_RESULT": "${{ needs['sample-build'].result }}",
     "LINKED_PREFABS_RESULT": "${{ needs['sample-linked-prefabs'].result }}",
     "ROOM_RESULT": "${{ needs['sample-room'].result }}",
+    "GENERATED_USER_NATIVE_RESULT": "${{ needs['generated-user-game-native'].result }}",
+    "PRIVATE_ACTION_NATIVE_RESULT": "${{ needs['static-game-actions-native'].result }}",
+    "GENERATED_ACTION_CPU_RESULT": "${{ needs['generated-user-game-actions-cpu'].result }}",
 }
-REQUIRED_JOBS = {"native", "wasm32", "android-arm64", "wasm32-browser", "sample-build", "sample-linked-prefabs", "sample-room", "static-model-authoring", "room-wall-authoring"}
+REQUIRED_JOBS = {"native", "wasm32", "android-arm64", "wasm32-browser", "sample-build", "generated-user-game-native", "static-game-actions-native", "generated-user-game-actions-cpu", "sample-arena-cpu", "sample-fixture-preflight", "sample-linked-prefabs", "sample-room", "static-model-authoring", "room-wall-authoring"}
 NATIVE_TEST = "cargo test --workspace --release --timings --exclude orr_sample --exclude orr_editor --exclude orr_web_gpu"
 SAMPLE_TEST = "cargo test -p orr_sample -p orr_view -p orr_bridge -p orr_rhi -p orr_render -p orr_editor -p orr_web_gpu --release --timings"
 FFI_ARTIFACTS = {
@@ -289,6 +295,15 @@ class DeterminismWorkflowTests(unittest.TestCase):
         ])
         self.assertEqual(self.jobs["sample-build"]["strategy"]["matrix"]["os"], ["ubuntu-22.04", "windows-latest"])
         self.assertFalse(self.jobs["sample-build"]["strategy"]["fail-fast"])
+        for name in ("sample-fixture-preflight", "sample-arena-cpu"):
+            job = self.jobs[name]
+            self.assert_required(job)
+            self.assertEqual(job["runs-on"], "${{ matrix.os }}")
+            self.assertEqual(job["strategy"], {"fail-fast": False,
+                                             "matrix": {"os": ["ubuntu-22.04", "windows-latest"]}})
+        self.assertNotIn("needs", self.jobs["sample-fixture-preflight"])
+        for name in ("sample-build", "sample-arena-cpu"):
+            self.assertEqual(self.jobs[name]["needs"], ["sample-fixture-preflight"])
         self.assert_required_command(self.jobs["sample-build"], SAMPLE_TEST)
 
     def test_linked_prefab_lane_is_independent_and_mandatory(self):
@@ -496,7 +511,92 @@ class DeterminismWorkflowTests(unittest.TestCase):
                     "retention-days": 7,
                 })
                 build = next(step for step in steps if step.get("run") == command)
-                self.assertEqual(steps.index(upload), steps.index(build) + 1)
+                self.assert_release_timing_upload_position(job, steps, build, upload)
+
+    def assert_release_timing_upload_position(self, job, steps, build, upload):
+        build_index = steps.index(build)
+        if job == "native":
+            # Native CLI identity verification and its retained evidence must run
+            # after the workspace tests, even on failure, before timing upload.
+            evidence = "${{ runner.temp }}/native-assemble-${{ github.run_id }}-${{ github.run_attempt }}"
+            self.assertEqual(steps[build_index + 1:build_index + 3], [
+                {
+                    "name": "Verify native assemble CLI and source identity after workspace tests",
+                    "if": "always()",
+                    "run": f'python -B tools/native_assemble_cli_prerequisite.py verify --evidence "{evidence}"',
+                },
+                {
+                    "name": "Retain native assemble CLI prerequisite and failure evidence",
+                    "if": "always()",
+                    "uses": "actions/upload-artifact@v4",
+                    "with": {
+                        "name": "native-assemble-${{ matrix.name }}",
+                        "path": evidence,
+                        "if-no-files-found": "error",
+                        "retention-days": 7,
+                    },
+                },
+            ])
+            self.assertEqual(steps.index(upload), build_index + 3)
+        else:
+            self.assertEqual(steps.index(upload), build_index + 1)
+
+    def test_native_timing_rejects_missing_reordered_or_altered_prerequisites(self):
+        original = self.jobs["native"]["steps"]
+        build_index = next(i for i, step in enumerate(original) if step.get("run") == NATIVE_TEST)
+        mutations = []
+        for offset in (1, 2):
+            missing = copy.deepcopy(original)
+            del missing[build_index + offset]
+            mutations.append((f"missing prerequisite {offset}", missing))
+            prerequisite = original[build_index + offset]
+            # Cover every field, including nested artifact policy, and reject
+            # added soft-failure behavior as well as omitted/changed fields.
+            paths = [(key,) for key in prerequisite]
+            paths += [("with", key) for key in prerequisite.get("with", {})]
+            for path in paths:
+                for operation in ("remove", "alter"):
+                    changed = copy.deepcopy(original)
+                    target = changed[build_index + offset]
+                    for key in path[:-1]:
+                        target = target[key]
+                    if operation == "remove":
+                        del target[path[-1]]
+                    else:
+                        target[path[-1]] = "altered"
+                    mutations.append((f"{operation} prerequisite {offset} {path}", changed))
+            softened = copy.deepcopy(original)
+            softened[build_index + offset]["continue-on-error"] = True
+            mutations.append((f"soft-fail prerequisite {offset}", softened))
+        reordered = copy.deepcopy(original)
+        reordered[build_index + 1:build_index + 3] = reversed(reordered[build_index + 1:build_index + 3])
+        mutations.append(("reordered prerequisites", reordered))
+        for label, steps in mutations:
+            with self.subTest(mutation=label):
+                upload = next(step for step in steps if step == original[build_index + 3])
+                with self.assertRaises(AssertionError):
+                    self.assert_release_timing_upload_position("native", steps, steps[build_index], upload)
+
+    def test_release_timing_rejects_inserted_steps_and_detached_uploads(self):
+        for job, command, offset in (("native", NATIVE_TEST, 3), ("sample-build", SAMPLE_TEST, 1)):
+            original = self.jobs[job]["steps"]
+            build_index = next(i for i, step in enumerate(original) if step.get("run") == command)
+            # No arbitrary step is permitted anywhere between build and upload.
+            for position in range(1, offset + 1):
+                with self.subTest(job=job, inserted_after=position):
+                    steps = copy.deepcopy(original)
+                    upload = steps[build_index + offset]
+                    steps.insert(build_index + position, {"run": "echo unrelated"})
+                    with self.assertRaises(AssertionError):
+                        self.assert_release_timing_upload_position(job, steps, steps[build_index], upload)
+            for destination in (build_index, len(original) - 1):
+                with self.subTest(job=job, moved_to=destination):
+                    steps = copy.deepcopy(original)
+                    build = steps[build_index]
+                    upload = steps.pop(build_index + offset)
+                    steps.insert(destination, upload)
+                    with self.assertRaises(AssertionError):
+                        self.assert_release_timing_upload_position(job, steps, build, upload)
 
     def test_arena_native_window_smoke_requires_real_windows_and_uploads_evidence(self):
         steps = self.jobs["sample-build"]["steps"]
@@ -647,10 +747,10 @@ class DeterminismWorkflowTests(unittest.TestCase):
         # test domain. Each iteration reads only its own input, compares only
         # with success, and monotonically ORs failure into a fresh accumulator.
         # No cross-input dependency, early exit, or later reset is permitted.
-        # Thus all 6**7 inputs are covered by seven independent six-state
+        # Thus all 6**12 inputs are covered by twelve independent six-state
         # equivalence classes, not by assuming sampled combinations generalize.
         prefix = """failed=0
-for result_var in NATIVE_RESULT WASM32_RESULT ANDROID_ARM64_RESULT BROWSER_RESULT SAMPLE_BUILD_RESULT LINKED_PREFABS_RESULT ROOM_RESULT; do
+for result_var in NATIVE_RESULT WASM32_RESULT ANDROID_ARM64_RESULT BROWSER_RESULT SAMPLE_BUILD_RESULT SAMPLE_ARENA_CPU_RESULT SAMPLE_PREFLIGHT_RESULT LINKED_PREFABS_RESULT ROOM_RESULT GENERATED_USER_NATIVE_RESULT PRIVATE_ACTION_NATIVE_RESULT GENERATED_ACTION_CPU_RESULT; do
   result="${!result_var}"
   echo "$result_var=$result"
   if [[ "$result" != "success" ]]; then
@@ -685,7 +785,8 @@ fi
                 cases.extend(({**success, first: "failure", second: "unknown"},
                               {**success, first: "unknown", second: "failure"}))
         cases.extend({name: state for name in names} for state in states)
-        self.assertEqual(len(cases), 83)
+        # 1 all-success + 12*5 single failures + 2*C(12,2) mixed pairs + 5 all-failure.
+        self.assertEqual(len(cases), 198)
         for results in cases:
             with self.subTest(results=results):
                 result = self.run_gate(results)

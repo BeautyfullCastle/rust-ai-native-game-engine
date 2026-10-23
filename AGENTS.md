@@ -30,7 +30,50 @@ orr undo
 ## Working on the engine itself
 
 See `CLAUDE.md` (rules for the simulation crates: no floats, no `HashMap`, golden checksums) and
-`docs/design-v1.md`.
+`docs/design-v2.md` for current delivery priorities and `docs/design-v1.md` for
+the underlying architecture.
+
+## Integration-first delivery
+
+- Finish the existing reviewed development integration before opening more
+  long-lived feature stacks. Check actual ancestry and missing changes once;
+  resolve the affected conflicts rather than repeating broad repository audits.
+- Use one integration candidate from the explicitly approved development base.
+  The explicit integration request authorizes hardening then main after exact-
+  candidate Linux checks and review. It does not authorize merging PR #1 itself.
+- The 2026-10-23 user instruction replaces hosted CI and Windows hardware/GPU
+  merge gates with Linux-local build/tests and independent review of the exact
+  integration candidate. Run `bash tools/check-linux-local.sh` plus focused
+  Linux checks for changed paths. The local environment needs Rust 1.95+ with
+  rustfmt/Clippy, Python 3.11+, a C compiler, pkg-config and the applicable
+  audio/window-system development libraries. Record the exact source tree, toolchain,
+  commands, exit statuses and limitations. Repository-wide rustfmt is a separate
+  advisory style check: record failures without blocking build/test execution or
+  mass-formatting unrelated files. Build/test and Clippy failures still block.
+  A changed source needs its applicable
+  checks; prior-head success is not transferable.
+- All GitHub Actions workflows are removed by that instruction. Historical
+  workflow/check descriptions elsewhere describe previous coverage, not current
+  merge requirements. Never relabel retired, failed or unrun checks as passed.
+  Windows, macOS, Android, browser and hardware/GPU coverage is unverified unless
+  separately demonstrated; Linux build/test success does not prove those targets.
+- Do not remove Rust/Python tests, weaken security/authentication, hide failures,
+  or change branch protection/security settings to bypass stale required checks.
+  Report any surviving server-side required checks as a separate blocker.
+- Reuse verified checks for unchanged source and environment; rerun when relevant
+  inputs or failure evidence change. Do not repeat broad audits for a new receipt.
+- Keep generated logs, ZIPs and JSON evidence outside git, including failures and
+  interruptions. Preserve historical CI artifacts and immutable evidence links;
+  do not delete or rewrite them. Retain reproducible tests, small fixtures and
+  required source/contract manifests in source.
+- Feature documents: at most two rendered pages (target 800 words); include the
+  contract, usage, acceptance and only limitations that change a user's decision.
+  No repetitive defensive boilerplate. Keep `docs/progress.md` a one-to-two-page
+  current summary with blockers, next actions and evidence links, not a run log.
+  Apply this to new/edited summaries without deleting required contracts/tests.
+- Measure natural-language small-game zero-intervention completion as defined
+  in design v2. Keep real-model, mock and scripted results separate. Prioritize
+  a playable, reproducible delivered game over feature, PR or CI counts.
 
 ## Collaboration and authorization
 
@@ -43,11 +86,13 @@ publication on the agent's own branch, and requested cross-review within that
 scope. Continue that work without asking again for the same authorization.
 
 When the user has approved a specific PR's normal merge into the shared
-development branch, verify the target branch, exact head, required CI, review,
+development branch, verify the target branch, exact head, Linux-local verification, review,
 conflicts, and reservations, then perform that approved merge without repeating
 the approval request. Approval applies only to the specified PR and action.
-Main/PR1 merges, releases, destructive work, new credentials, and expanded access
-require separate explicit user authorization.
+The explicit integration request authorizes promotion from hardening to main
+after exact-candidate Linux checks and review. This does not claim either merge
+is complete or authorize PR #1 itself, releases, destructive work, credentials
+or expanded access.
 
 Check the actual user's instruction, target, and action when authorization is
 unclear. Follow the platform's supported approval procedure. Never bypass a

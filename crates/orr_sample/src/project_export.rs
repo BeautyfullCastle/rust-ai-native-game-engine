@@ -5,7 +5,11 @@
 //! attest its source/capabilities. The smoke only checks this project on this host.
 //! Inputs are read-only; this detects ordinary changes, not hostile filesystem races.
 pub(crate) mod admission;
+mod editor_arena;
 pub(crate) mod profile;
+pub use editor_arena::{
+    export_arena_for_source, ArenaExportSource, ArenaSourceDigest, ArenaSourceFile, ArenaUiSource,
+};
 use profile::{Profile, Prepared};
 
 use crate::project_publish::publish_no_replace;
@@ -130,6 +134,15 @@ fn export_with(
 fn export_profile_with(
     options: &ExportOptions,
     profile: Profile,
+    checkpoint: impl FnMut(&str) -> Result<(), String>,
+    smoke: impl FnOnce(&mut Command) -> Result<Vec<u8>, String>,
+) -> Result<ExportReport, String> {
+    export_profile_for_source_with(options, profile, None, checkpoint, smoke)
+}
+fn export_profile_for_source_with(
+    options: &ExportOptions,
+    profile: Profile,
+    expected_source: Option<&ArenaExportSource>,
     mut checkpoint: impl FnMut(&str) -> Result<(), String>,
     smoke: impl FnOnce(&mut Command) -> Result<Vec<u8>, String>,
 ) -> Result<ExportReport, String> {
@@ -159,6 +172,9 @@ fn export_profile_with(
         }
     }
     let project = match profile { #[cfg(feature="room-project")] Profile::Room => ProjectSnapshot::open_profile(&options.project,profile)?, Profile::Arena => ProjectSnapshot::open(&options.project)?, #[cfg(feature = "collect-dodge")] Profile::Collect => ProjectSnapshot::open_profile(&options.project, profile)? };
+    if let Some(expected) = expected_source {
+        expected.check_snapshot(&project)?;
+    }
     let runtime_path = check_path(&options.runtime, false)?;
     if fs::metadata(&runtime_path)
         .map_err(error)?

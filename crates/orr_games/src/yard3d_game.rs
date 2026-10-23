@@ -40,9 +40,10 @@ pub const SPAWN_CAPSULE: u32 = 8;
 /// need to be normalized). Shots start at `origin + dir`; a spawn appears 8
 /// units above the point where the ray meets the floor.
 #[repr(C)]
-#[derive(Clone, Copy, PartialEq, Eq, Default, Debug, Pod, Zeroable)]
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug, Pod, Zeroable, Reflect)]
 pub struct YardInput {
     pub buttons: u32,
+    #[reflect(skip)]
     pub _pad: u32,
     pub origin: [i32; 3],
     pub dir: [i32; 3],

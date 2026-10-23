@@ -82,6 +82,7 @@ pub mod screenshot;
 mod server;
 mod viewstream;
 pub mod wire;
+pub mod work_status;
 #[cfg(feature = "sample-host")]
 pub mod yard3d;
 
@@ -121,8 +122,14 @@ pub mod terrain_yard3d;
 #[cfg(feature = "navigation")]
 pub mod navigation_yard3d;
 
+#[cfg(feature = "mesh-navigation")]
+pub mod mesh_navigation;
+
 #[cfg(feature = "collect-dodge")]
 pub mod collect_dodge;
 
 #[cfg(feature = "room-project")]
 pub mod room_escape;
+
+mod static_host;
+pub use static_host::ExpectedInputDescriptor;

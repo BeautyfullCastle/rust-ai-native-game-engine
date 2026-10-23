@@ -1,0 +1,1 @@
+Original schema-2 baseline image fixture.

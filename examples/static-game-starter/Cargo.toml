@@ -1,0 +1,124 @@
+[package]
+name = "orr_static_starter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bytemuck = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["arbitrary_precision", "preserve_order"] }
+eframe = { optional = true, version = "0.36", default-features = false, features = ["wgpu", "x11", "wayland", "default_fonts"] }
+egui = { version = "0.36", optional = true }
+orr_ecs = { path = "../../crates/orr_ecs" }
+orr_fp = { path = "../../crates/orr_fp" }
+orr_sim = { path = "../../crates/orr_sim" }
+orr_session = { path = "../../crates/orr_session" }
+orr_reflect = { path = "../../crates/orr_reflect" }
+orr_edit = { path = "../../crates/orr_edit" }
+orr_bridge = { path = "../../crates/orr_bridge" }
+orr_remote = { path = "../../crates/orr_remote", default-features = false }
+orr_editor = { optional = true, path = "../../crates/orr_editor", features = ["static-games"] }
+orr_sample = { optional = true, path = "../../crates/orr_sample" }
+orr_view = { path = "../../crates/orr_view" }
+
+orr_render = { path = "../../crates/orr_render", optional = true }
+orr_input = { path = "../../crates/orr_input", optional = true }
+winit = { version = "0.30.13", default-features = false, features = ["x11", "wayland", "rwh_06"], optional = true }
+sha2 = { version = "0.11", optional = true }
+tempfile = { version = "3", optional = true }
+
+x11rb = { version = "0.13.2", features = ["xtest"], optional = true }
+png = { version = "0.18.1", optional = true }
+
+egui_kittest = { version = "0.36", features = ["eframe"], optional = true }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.5", features = ["fs", "process"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+default = ["editor"]
+editor = ["dep:orr_editor", "dep:eframe", "dep:egui", "dep:orr_sample"]
+static-game-actions = ["dep:orr_input", "orr_editor?/static-game-actions"]
+standalone = ["dep:orr_render", "dep:winit", "dep:orr_input"]
+bundle = ["dep:sha2", "dep:tempfile"]
+native-acceptance = ["editor", "dep:egui_kittest", "dep:winit"]
+editor-trace-acceptance = ["editor", "dep:sha2"]
+standalone-native-acceptance = ["standalone", "bundle", "dep:x11rb", "dep:png"]
+
+# Acceptance-only, separate from original two-game native oracles.
+multi-action-standalone-acceptance = ["standalone", "static-game-actions", "dep:sha2", "dep:x11rb", "dep:png"]
+multi-action-editor-acceptance = ["editor", "static-game-actions", "dep:sha2", "dep:x11rb", "dep:png", "dep:winit", "dep:egui_kittest"]
+
+[[test]]
+name = "native_window"
+path = "tests/native_window.rs"
+required-features = ["native-acceptance"]
+
+[[bin]]
+name = "editor"
+path = "src/bin/editor.rs"
+required-features = ["editor"]
+
+[[bin]]
+name = "delivery-player"
+path = "src/bin/delivery-player.rs"
+required-features = ["standalone"]
+
+[[bin]]
+name = "switchboard-player"
+path = "src/bin/switchboard-player.rs"
+required-features = ["standalone"]
+
+[[test]]
+name = "acceptance"
+path = "tests/acceptance.rs"
+required-features = ["editor"]
+
+[[test]]
+name = "standalone_contract"
+path = "tests/standalone_contract.rs"
+required-features = ["standalone"]
+
+[[bin]]
+name = "bundle"
+path = "src/bin/bundle.rs"
+required-features = ["bundle"]
+
+[[test]]
+name = "bundle"
+path = "tests/bundle.rs"
+required-features = ["bundle"]
+
+[[test]]
+name = "standalone_x11"
+path = "tests/standalone_x11.rs"
+required-features = ["standalone-native-acceptance"]
+
+[[test]]
+name = "standalone_editor_trace"
+path = "tests/standalone_editor_trace.rs"
+required-features = ["editor-trace-acceptance"]
+
+[[bin]]
+name = "multi-action-fixture-player"
+path = "tests/support/multi_action_fixture_player.rs"
+required-features = ["multi-action-standalone-acceptance"]
+# The shared fixture contains contract tests, so keep its bin harness enabled.
+test = true
+bench = false
+
+[[test]]
+name = "multi_action_standalone_x11"
+path = "tests/multi_action_standalone_x11.rs"
+required-features = ["multi-action-standalone-acceptance"]
+
+[[test]]
+name = "multi_action_editor_x11"
+path = "tests/multi_action_editor_x11.rs"
+required-features = ["multi-action-editor-acceptance"]

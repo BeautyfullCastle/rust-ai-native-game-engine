@@ -1,0 +1,600 @@
+#![cfg(all(
+    target_os = "linux",
+    target_arch = "x86_64",
+    feature = "room-authoring"
+))]
+#![allow(clippy::disallowed_types, clippy::float_arithmetic)]
+use egui::{accesskit::Role, Event, Modifiers};
+use egui_kittest::{
+    kittest::{NodeT, Queryable},
+    Harness,
+};
+use egui_wgpu::{wgpu, WgpuSetupCreateNew};
+use orr_editor::{
+    app::{LBL_PLAY, LBL_STOP},
+    Editor, EditorApp, HostSpec,
+};
+use orr_model_bindings::model_bindings::{self, Binding, Document, LocalTransform};
+use orr_sample::{
+    room_game::{RoomActor, RoomConfig, RoomEscapeV1, KEY, PLAYER},
+    room_project::{self, PreparedProject, PreparedScene, SEED},
+};
+use std::{
+    collections::BTreeSet,
+    fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::{Duration, Instant},
+};
+fn fixture(root: &Path) {
+    fs::create_dir(root).unwrap();
+    let sim = orr_sim::Simulation::<RoomEscapeV1>::new(RoomConfig, 60, SEED);
+    let text = orr_reflect::Scene::unbake(&room_project::types(), sim.frame(), None)
+        .unwrap()
+        .to_yaml();
+    fs::write(root.join("room.scene.yaml"), &text).unwrap();
+    fs::write(
+        root.join("room.camera.json"),
+        orr_sample::room_camera::Document::readable_default()
+            .to_bytes()
+            .unwrap(),
+    )
+    .unwrap();
+    fs::write(root.join("orr.project.json"),serde_json::to_vec(&serde_json::json!({"schema":2,"engine":"*","entry":{"game":"room-escape-v1","scene":"room.scene.yaml","models":"room.models.json","camera":"room.camera.json"}})).unwrap()).unwrap();
+    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/imported_scene_demo")
+        .canonicalize()
+        .unwrap();
+    orr_package::Project::open_for_install(
+        root,
+        orr_package::Runtime::content_only().engine_version,
+    )
+    .unwrap()
+    .install(&[source])
+    .unwrap();
+    let loaded =
+        model_bindings::load_asset(root, "sample-imported-scene", "foreground.glb").unwrap();
+    let binding = Binding::from_asset(
+        "sample-imported-scene".into(),
+        "foreground.glb".into(),
+        &loaded,
+        LocalTransform::default(),
+    )
+    .unwrap();
+    let scene = PreparedScene::parse(&text).unwrap();
+    let bindings = scene
+        .frame()
+        .entities()
+        .filter(|entity| {
+            scene
+                .frame()
+                .get::<RoomActor>(*entity)
+                .is_some_and(|actor| [PLAYER, KEY].contains(&actor.kind))
+        })
+        .map(|entity| {
+            (
+                scene.index().guid(entity).unwrap().to_string(),
+                binding.clone(),
+            )
+        })
+        .collect();
+    fs::write(
+        root.join("room.models.json"),
+        serde_json::to_vec(&Document {
+            version: 2,
+            scene: "room.scene.yaml".into(),
+            project: ".".into(),
+            bindings,
+        })
+        .unwrap(),
+    )
+    .unwrap();
+}
+fn harness(root: &Path) -> Harness<'static, EditorApp> {
+    let mut prepared = PreparedProject::open(root).unwrap();
+    let camera = prepared.take_camera().unwrap();
+    let (_, path, scene, models) = prepared.into_parts();
+    let mut editor = Editor::start(&HostSpec::PreparedRoom {
+        scene: path,
+        text: scene.text().into(),
+        listen: None,
+        debug_hooks: false,
+    })
+    .unwrap();
+    editor.sync();
+    editor.install_room_camera(camera.document.clone()).unwrap();
+    let mut setup = WgpuSetupCreateNew::without_display_handle();
+    setup.instance_descriptor.backends = wgpu::Backends::VULKAN;
+    setup.native_adapter_selector = Some(Arc::new(|adapters, _| {
+        adapters
+            .iter()
+            .find(|adapter| {
+                adapter.get_info().backend == wgpu::Backend::Vulkan
+                    && adapter.get_info().device_type == wgpu::DeviceType::Cpu
+            })
+            .cloned()
+            .ok_or_else(|| "software Vulkan required".into())
+    }));
+    Harness::builder()
+        .with_size([1600.0, 1150.0])
+        .with_step_dt(1.0 / 60.0)
+        .wgpu_setup(setup.into())
+        .build_eframe(move |cc| {
+            let mut app = EditorApp::new(editor, cc.wgpu_render_state.clone());
+            app.models.install_room(models).unwrap();
+            app.room_camera = Some(orr_editor::room_camera_panel::Panel::new(camera));
+            app
+        })
+}
+fn settle(h: &mut Harness<'_, EditorApp>) {
+    for _ in 0..3 {
+        h.state_mut().editor.sync();
+        h.run_steps(2);
+    }
+}
+fn click(h: &mut Harness<'_, EditorApp>, label: &str) {
+    h.get_by_role_and_label(Role::Button, label).scroll_to_me();
+    h.run_steps(20);
+    assert!(
+        !h.get_by_role_and_label(Role::Button, label)
+            .accesskit_node()
+            .is_disabled(),
+        "disabled {label}"
+    );
+    h.get_by_role_and_label(Role::Button, label)
+        .click_accesskit();
+    settle(h);
+}
+fn pixels(h: &mut Harness<'_, EditorApp>, dir: &Path, name: &str) -> Vec<u8> {
+    // Match render-target dimensions, not merely window dimensions: hierarchy
+    // widths grow with labels/history and otherwise differ in a fresh app.
+    let target = (900, 850);
+    for _ in 0..6 {
+        settle(h);
+        let actual = h.state().viewport3d_gpu().unwrap().gpu().target().size();
+        if actual == target {
+            break;
+        }
+        let window = h.ctx.viewport_rect().size();
+        let ratio = h.ctx.pixels_per_point();
+        h.set_size(egui::vec2(
+            window.x + (target.0 as f32 - actual.0 as f32) / ratio,
+            window.y + (target.1 as f32 - actual.1 as f32) / ratio,
+        ));
+    }
+    settle(h);
+    let viewport = h.state().viewport3d_gpu().unwrap();
+    let size = viewport.gpu().target().size();
+    assert_eq!(size, target, "stable GPU viewport dimensions");
+    let bytes = viewport.gpu().read_rgba8();
+    let image =
+        egui::ColorImage::from_rgba_unmultiplied([size.0 as usize, size.1 as usize], &bytes);
+    orr_editor::app::write_png(&dir.join(name), &image).unwrap();
+    bytes
+}
+fn shot(h: &mut Harness<'_, EditorApp>, dir: &Path, name: &str) {
+    let image = h.render().unwrap();
+    orr_editor::app::write_png(
+        &dir.join(name),
+        &egui::ColorImage::from_rgba_unmultiplied(
+            [image.width() as usize, image.height() as usize],
+            image.as_raw(),
+        ),
+    )
+    .unwrap();
+}
+fn menu_click(h: &mut Harness<'_, EditorApp>, menu: &str, item: &str) {
+    if h.query_by_label(item).is_none() {
+        h.get_by_label(menu).click();
+        h.run_steps(2);
+    }
+    h.get_by_label(item).click();
+    settle(h);
+}
+fn player_position(h: &Harness<'_, EditorApp>) -> [f32; 3] {
+    let frame = h.state().editor.snapshot().unwrap().predicted();
+    let entity = h
+        .state()
+        .editor
+        .rows()
+        .iter()
+        .map(|row| row.entity)
+        .find(|&e| frame.get::<RoomActor>(e).is_some_and(|a| a.kind == PLAYER))
+        .unwrap();
+    h.state()
+        .models
+        .placements(&h.state().editor)
+        .into_iter()
+        .find(|p| p.entity == entity)
+        .unwrap()
+        .instance
+        .translation
+}
+fn field(h: &mut Harness<'_, EditorApp>, label: &str, value: &str) {
+    h.get_by_role_and_label(Role::TextInput, label)
+        .scroll_to_me();
+    h.run_steps(10);
+    h.get_by_role_and_label(Role::TextInput, label).focus();
+    h.run_steps(2);
+    h.key_press_modifiers(Modifiers::COMMAND, egui::Key::A);
+    h.run_steps(2);
+    h.get_by_role_and_label(Role::TextInput, label)
+        .type_text(value);
+    settle(h);
+}
+fn component(
+    h: &mut Harness<'_, EditorApp>,
+    guid: &orr_reflect::Guid,
+    name: &str,
+) -> orr_reflect::Value {
+    h.state_mut()
+        .editor
+        .field_of(&orr_editor::Target::Guid(guid.clone()), name, "")
+        .unwrap()
+}
+
+fn named(h: &Harness<'_, EditorApp>, name: &str) -> BTreeSet<orr_reflect::Guid> {
+    h.state()
+        .editor
+        .rows()
+        .iter()
+        .filter(|row| row.name.as_deref() == Some(name))
+        .filter_map(|row| row.guid.clone())
+        .collect()
+}
+
+fn disabled(h: &Harness<'_, EditorApp>, label: &str) -> bool {
+    h.get_by_role_and_label(Role::Button, label)
+        .accesskit_node()
+        .is_disabled()
+}
+
+fn select_sources(h: &mut Harness<'_, EditorApp>, sources: &[(String, orr_reflect::Guid)]) {
+    click(h, "Read Room walls");
+    for (name, guid) in sources {
+        h.get_by_role_and_label(Role::CheckBox, &format!("{name} ({guid})"))
+            .scroll_to_me();
+        h.run_steps(20);
+        h.get_by_role_and_label(Role::CheckBox, &format!("{name} ({guid})"))
+            .click_accesskit();
+        settle(h);
+    }
+}
+
+// Real production input routing, rather than mutating physics or player position.
+fn drive_right(h: &mut Harness<'_, EditorApp>) -> ([f32; 3], [f32; 3]) {
+    click(h, LBL_PLAY);
+    click(h, "Take control");
+    let start = player_position(h);
+    h.event(Event::Key {
+        key: egui::Key::D,
+        physical_key: Some(egui::Key::D),
+        pressed: true,
+        repeat: false,
+        modifiers: Modifiers::NONE,
+    });
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        h.run_steps(2);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    h.event(Event::Key {
+        key: egui::Key::D,
+        physical_key: Some(egui::Key::D),
+        pressed: false,
+        repeat: false,
+        modifiers: Modifiers::NONE,
+    });
+    settle(h);
+    (start, player_position(h))
+}
+
+// Expected coordinates are deliberately tabulated independently of Template::placed.
+// Columns are the three source walls; rows are 0/90/180/270 degrees.
+const CENTERS: [[[&str; 2]; 3]; 4] = [
+    [["2", "6"], ["0", "7.5"], ["3", "9"]],
+    [["2", "0"], ["0.5", "-2"], ["-1", "1"]],
+    [["8", "0"], ["10", "-1.5"], ["7", "-3"]],
+    [["8", "6"], ["9.5", "8"], ["11", "5"]],
+];
+fn member_mut<'a>(value: &'a mut orr_reflect::Value, name: &str) -> &'a mut orr_reflect::Value {
+    use orr_reflect::Value;
+    match value {
+        Value::Struct(fields) | Value::Variant(_, fields) => {
+            &mut fields.iter_mut().find(|(key, _)| key == name).unwrap().1
+        }
+        _ => panic!("expected struct or variant"),
+    }
+}
+fn exact_geometry(
+    h: &mut Harness<'_, EditorApp>,
+    guid: &orr_reflect::Guid,
+    original: &[orr_reflect::Value; 3],
+    turns: usize,
+    wall: usize,
+) {
+    use orr_reflect::Value;
+    let mut expected = original.clone();
+    let Value::Vec3(position) = member_mut(&mut expected[1], "pos") else {
+        panic!("position")
+    };
+    position.x = CENTERS[turns][wall][0].parse().unwrap();
+    position.z = CENTERS[turns][wall][1].parse().unwrap();
+    if turns % 2 == 1 {
+        let shape = member_mut(&mut expected[2], "shape");
+        let Value::Vec3(half) = member_mut(shape, "half_extents") else {
+            panic!("extents")
+        };
+        std::mem::swap(&mut half.x, &mut half.z);
+    }
+    for (name, value) in [
+        "RoomEscapeV1::Actor",
+        "orr_physics3d::Body",
+        "orr_physics3d::Collider",
+    ]
+    .into_iter()
+    .zip(expected)
+    {
+        assert_eq!(
+            component(h, guid, name),
+            value,
+            "turns={turns}, wall={wall}, component={name}"
+        );
+    }
+}
+fn rotation(h: &mut Harness<'_, EditorApp>, degrees: &str) {
+    h.get_by_label(degrees).scroll_to_me();
+    h.run_steps(20);
+    h.get_by_label(degrees).click();
+    settle(h);
+}
+
+#[test]
+#[ignore = "requires software Vulkan and fresh ORR_ROOM_WALL_ROTATION_LINUX_DIR"]
+fn linux_room_wall_quarterturns_exact_geometry_history_reopen_and_collision() {
+    let evidence = PathBuf::from(
+        std::env::var_os("ORR_ROOM_WALL_ROTATION_LINUX_DIR").expect("fresh evidence directory"),
+    );
+    assert!(evidence.is_absolute() && !evidence.exists());
+    fs::create_dir(&evidence).unwrap();
+    let root = evidence.join("Rotated Room fixture");
+    fixture(&root);
+    let preserved = [
+        "room.models.json",
+        "room.camera.json",
+        "orr.project.json",
+        "orr.packages.lock.json",
+    ]
+    .map(|name| (name, fs::read(root.join(name)).unwrap()));
+    let stamp = evidence.join("asymmetric-three-walls.room-stamp.json");
+    let hidden = evidence.join("source-hidden.room-stamp.json");
+    let mut h = harness(&root);
+    settle(&mut h);
+    assert!(h.state().has_gpu());
+    let initial_rows = h.state().editor.rows().len();
+    menu_click(&mut h, "File", "Room level authoring…");
+    let mut sources = Vec::new();
+    for (name, x, z, hx, hz) in [
+        ("rotation_source_a", "-4", "4", "1", "0.15"),
+        ("rotation_source_b", "-6", "5.5", "0.375", "0.625"),
+        ("rotation_source_c", "-3", "7", "0.25", "0.75"),
+    ] {
+        for (label, value) in [
+            ("Room wall name", name),
+            ("Wall center X", x),
+            ("Wall center Z", z),
+            ("Wall half-width X", hx),
+            ("Wall half-depth Z", hz),
+        ] {
+            field(&mut h, label, value);
+        }
+        click(&mut h, "Create Room wall");
+        let guids = named(&h, name);
+        assert_eq!(guids.len(), 1);
+        sources.push((name.to_owned(), guids.into_iter().next().unwrap()));
+    }
+    h.state_mut().room_authoring.open = false;
+    settle(&mut h);
+    menu_click(&mut h, "File", "Save Ctrl+S");
+    let source_checksum = h.state().editor.checksum();
+    let source_scene = fs::read(root.join("room.scene.yaml")).unwrap();
+    let original: Vec<_> = sources
+        .iter()
+        .map(|(_, guid)| {
+            [
+                component(&mut h, guid, "RoomEscapeV1::Actor"),
+                component(&mut h, guid, "orr_physics3d::Body"),
+                component(&mut h, guid, "orr_physics3d::Collider"),
+            ]
+        })
+        .collect();
+    let baseline_pixels = pixels(&mut h, &evidence, "01-source-viewport.png");
+    menu_click(&mut h, "File", "Room wall groups…");
+    select_sources(&mut h, &sources);
+    click(&mut h, "Capture selected walls");
+    field(&mut h, "Room wall stamp file", &stamp.display().to_string());
+    click(&mut h, "Save Room wall stamp");
+    let stamp_bytes = fs::read(&stamp).unwrap();
+    click(&mut h, "Load Room wall stamp");
+    for (label, value) in [
+        ("Stamp pivot X", "-1"),
+        ("Stamp pivot Z", "1"),
+        ("Stamp offset X", "6"),
+        ("Stamp offset Z", "2"),
+    ] {
+        field(&mut h, label, value);
+    }
+    let base_entries = h.state().editor.history().entries.len();
+    let mut routes = Vec::new();
+    let mut final_guids = BTreeSet::new();
+    // Last placement is the 90-degree barrier; each other orientation is a
+    // gameplay negative control with exactly the same pivot and translation.
+    for turns in [0usize, 2, 3, 1] {
+        rotation(&mut h, ["0°", "90°", "180°", "270°"][turns]);
+        assert_eq!(h.state().editor.checksum(), source_checksum);
+        click(&mut h, "Instantiate Room wall stamp");
+        assert_eq!(h.state().editor.rows().len(), initial_rows + 6);
+        assert_eq!(h.state().editor.history().entries.len(), base_entries + 1);
+        let checksum = h.state().editor.checksum();
+        assert_ne!(checksum, source_checksum);
+        let mut instance_guids = BTreeSet::new();
+        for (wall, ((name, source), geometry)) in sources.iter().zip(&original).enumerate() {
+            let group = named(&h, name);
+            assert_eq!(group.len(), 2);
+            let guid = group.iter().find(|guid| *guid != source).unwrap();
+            assert!(instance_guids.insert(guid.clone()));
+            exact_geometry(&mut h, guid, geometry, turns, wall);
+            for (component_name, expected) in [
+                "RoomEscapeV1::Actor",
+                "orr_physics3d::Body",
+                "orr_physics3d::Collider",
+            ]
+            .into_iter()
+            .zip(geometry)
+            {
+                assert_eq!(&component(&mut h, source, component_name), expected);
+            }
+        }
+        click(&mut h, "Save Room wall stamp");
+        assert_eq!(
+            fs::read(&stamp).unwrap(),
+            stamp_bytes,
+            "placement never changes loaded template"
+        );
+        shot(
+            &mut h,
+            &evidence,
+            &format!("02-controls-{}-degrees.png", turns * 90),
+        );
+        let (start, end) = drive_right(&mut h);
+        if turns == 1 {
+            assert!(
+                end[0] > start[0] + 0.05 && end[0] < 1.7,
+                "90-degree collider must block: {start:?} -> {end:?}"
+            );
+        } else {
+            assert!(
+                end[0] > 2.5,
+                "wrong/unrotated control must pass barrier position: turns={turns} {end:?}"
+            );
+        }
+        routes.push(
+            serde_json::json!({"degrees":turns*90,"start":start,"end":end,"blocked":turns==1}),
+        );
+        shot(
+            &mut h,
+            &evidence,
+            &format!("03-gameplay-{}-degrees.png", turns * 90),
+        );
+        click(&mut h, LBL_STOP);
+        assert_eq!(h.state().editor.checksum(), checksum);
+        menu_click(&mut h, "Edit", "Undo Ctrl+Z");
+        assert_eq!(h.state().editor.checksum(), source_checksum);
+        assert_eq!(h.state().editor.rows().len(), initial_rows + 3);
+        // Invalid staging and a validly parsed but out-of-bounds transform must
+        // preserve the entire history, including this pending redo entry.
+        let undone = h.state().editor.history().clone();
+        field(&mut h, "Stamp pivot X", "bad-pivot");
+        assert!(disabled(&h, "Instantiate Room wall stamp"));
+        assert_eq!(h.state().editor.history(), &undone);
+        field(&mut h, "Stamp pivot X", "-1");
+        field(&mut h, "Stamp offset X", "30");
+        click(&mut h, "Instantiate Room wall stamp");
+        assert_eq!(h.state().editor.checksum(), source_checksum);
+        assert_eq!(h.state().editor.history(), &undone);
+        assert_eq!(
+            fs::read(root.join("room.scene.yaml")).unwrap(),
+            source_scene
+        );
+        field(&mut h, "Stamp offset X", "6");
+        menu_click(&mut h, "Edit", "Redo Ctrl+Y");
+        assert_eq!(h.state().editor.checksum(), checksum);
+        for (wall, ((name, source), geometry)) in sources.iter().zip(&original).enumerate() {
+            let group = named(&h, name);
+            assert_eq!(group.len(), 2);
+            let guid = group.iter().find(|guid| *guid != source).unwrap();
+            assert!(instance_guids.contains(guid), "redo preserves GUIDs");
+            exact_geometry(&mut h, guid, geometry, turns, wall);
+        }
+        if turns == 1 {
+            final_guids = instance_guids;
+        } else {
+            menu_click(&mut h, "Edit", "Undo Ctrl+Z");
+            assert_eq!(h.state().editor.checksum(), source_checksum);
+        }
+    }
+    fs::rename(&stamp, &hidden).unwrap();
+    assert_eq!(fs::read(&hidden).unwrap(), stamp_bytes);
+    menu_click(&mut h, "File", "Save Ctrl+S");
+    assert!(!h.state().editor.is_dirty());
+    let final_checksum = h.state().editor.checksum();
+    let saved_scene = fs::read(root.join("room.scene.yaml")).unwrap();
+    h.state_mut().editor.select(None);
+    let saved_pixels = pixels(&mut h, &evidence, "04-rotated-saved-viewport.png");
+    assert!(
+        saved_pixels != baseline_pixels,
+        "rotated geometry changes viewport"
+    );
+    drop(h);
+    let mut h = harness(&root);
+    settle(&mut h);
+    assert!(!stamp.exists());
+    assert_eq!(h.state().editor.checksum(), final_checksum);
+    assert_eq!(h.state().editor.rows().len(), initial_rows + 6);
+    assert_eq!(fs::read(root.join("room.scene.yaml")).unwrap(), saved_scene);
+    for (wall, ((name, source), geometry)) in sources.iter().zip(&original).enumerate() {
+        let group = named(&h, name);
+        assert_eq!(group.len(), 2);
+        let guid = group.iter().find(|guid| *guid != source).unwrap();
+        assert!(final_guids.contains(guid));
+        exact_geometry(&mut h, guid, geometry, 1, wall);
+    }
+    let reopened_pixels = pixels(&mut h, &evidence, "05-fresh-source-hidden-viewport.png");
+    assert!(
+        saved_pixels == reopened_pixels,
+        "fresh reopen preserves exact viewport pixels"
+    );
+    let (start, end) = drive_right(&mut h);
+    assert!(
+        end[0] > start[0] + 0.05 && end[0] < 1.7,
+        "fresh ordinary collider must still block: {end:?}"
+    );
+    shot(&mut h, &evidence, "06-fresh-source-hidden-gameplay.png");
+    click(&mut h, LBL_STOP);
+    assert_eq!(h.state().editor.checksum(), final_checksum);
+    for (name, bytes) in preserved {
+        assert_eq!(fs::read(root.join(name)).unwrap(), bytes);
+    }
+    let adapter = h
+        .state()
+        .viewport3d_gpu()
+        .unwrap()
+        .gpu()
+        .adapter_name()
+        .to_owned();
+    assert!(
+        adapter.to_lowercase().contains("llvmpipe"),
+        "software Vulkan: {adapter}"
+    );
+    use sha2::{Digest, Sha256};
+    let mut captures = Vec::new();
+    for entry in fs::read_dir(&evidence).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|value| value.to_str()) == Some("png") {
+            let bytes = fs::read(&path).unwrap();
+            captures.push(serde_json::json!({"name":path.file_name().unwrap().to_str().unwrap(),"bytes":bytes.len(),"sha256":Sha256::digest(&bytes).iter().map(|byte|format!("{byte:02x}")).collect::<String>()}));
+        }
+    }
+    captures.sort_by_key(|value| value["name"].as_str().unwrap().to_owned());
+    fs::write(evidence.join("acceptance.json"), serde_json::to_vec_pretty(&serde_json::json!({
+        "schema":1,"platform":"linux-x86_64","production_editor_app":true,"adapter":adapter,
+        "physical_os_input":false,"ui_input":"egui pointer/accessibility/keyboard events",
+        "fixture":"three asymmetric walls, negative coordinates, non-origin pivot (-1,1), offset (6,2)",
+        "exact_geometry_all_four_rotations":true,"actual_rotation_controls":true,
+        "fresh_guids_and_redo_identity":true,"one_atomic_history_entry":true,
+        "invalid_pivot_and_bounds_failure_preserve_redo":true,"loaded_template_bytes_unchanged":true,
+        "source_hidden_during_fresh_reopen":true,"reopen_pixels_equal":true,
+        "gameplay_controls":routes,"reopened_gameplay":{"start":start,"end":end},
+        "scene_checksum":format!("0x{final_checksum:016x}"),"captures":captures
+    })).unwrap()).unwrap();
+}

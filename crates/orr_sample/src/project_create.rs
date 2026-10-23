@@ -8,6 +8,11 @@ mod collect_template;
 #[cfg(feature = "room-project")]
 mod room_template;
 mod template;
+#[cfg(feature = "tilemap")]
+mod tilemap;
+#[cfg(feature = "tilemap")]
+pub use tilemap::create_tilemap;
+pub const TILEMAP_TEMPLATE: &str = "arena-tilemap-2d-v1";
 #[cfg(test)]
 mod tests;
 #[cfg(feature = "collect-ui")]
@@ -86,8 +91,19 @@ fn create_with(
 fn create_transaction(
     options: &CreateOptions,
     progress: Option<&orr_package::ProjectProgress>,
+    checkpoint: impl FnMut(&str, &Path) -> Result<(), String>,
+    publish: impl FnOnce(&Path, &Path) -> Result<(), String>,
+) -> Result<CreateReport, String> {
+    create_transaction_finalized(options, progress, checkpoint, publish, |_, _| Ok(()))
+}
+
+// Only in-crate closed templates may finalize an unpublished owned stage.
+fn create_transaction_finalized(
+    options: &CreateOptions,
+    progress: Option<&orr_package::ProjectProgress>,
     mut checkpoint: impl FnMut(&str, &Path) -> Result<(), String>,
     publish: impl FnOnce(&Path, &Path) -> Result<(), String>,
+    finalize: impl FnOnce(&Path, &mut BTreeMap<String, Vec<u8>>) -> Result<(), String>,
 ) -> Result<CreateReport, String> {
     let with_ui = options.template == COLLECT_UI_TEMPLATE;
     let with_room = options.template == ROOM_TEMPLATE;
@@ -294,6 +310,7 @@ fn create_transaction(
         checkpoint("room-models-written", transaction.path())?;
     }
     fs::remove_dir_all(&source_root).map_err(error)?;
+    finalize(&project_root, &mut expected)?;
     checkpoint("before-validation", transaction.path())?;
     verify_profile_stage(&project_root, &expected, with_ui)?;
     let initial_checksum = if progress.is_some() {

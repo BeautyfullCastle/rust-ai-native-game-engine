@@ -171,8 +171,13 @@ impl IrradianceBindings {
     pub fn revision(&self) -> u64 {
         self.revision
     }
+    /// Positive in-memory changes only. False does not prove a saved file exists.
+    /// Observation callers must not promote a negative result to known clean.
+    pub(crate) fn memory_dirty(&self) -> bool {
+        self.saved.as_ref() != Some(&self.document)
+    }
     pub fn dirty(&self) -> bool {
-        self.saved.as_ref() != Some(&self.document) || !self.path.exists()
+        self.memory_dirty() || !self.path.exists()
     }
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()

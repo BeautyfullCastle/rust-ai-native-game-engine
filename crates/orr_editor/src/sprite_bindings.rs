@@ -88,8 +88,13 @@ impl Bindings {
     pub fn document(&self) -> &Document {
         &self.document
     }
+    /// Positive in-memory changes only. False does not prove a saved file exists.
+    /// Observation callers must not promote a negative result to known clean.
+    pub(crate) fn memory_dirty(&self) -> bool {
+        self.document != self.saved
+    }
     pub fn dirty(&self) -> bool {
-        self.document != self.saved || !self.path.exists()
+        self.memory_dirty() || !self.path.exists()
     }
     pub fn base(&self) -> &Path {
         self.path

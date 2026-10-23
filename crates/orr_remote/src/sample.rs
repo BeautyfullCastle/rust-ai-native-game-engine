@@ -64,15 +64,24 @@ pub fn configure_phys(limits: &mut HostLimits, scene_path: Option<PathBuf>) {
 /// the game's settings ([`configure_phys`]). The scene's file name is
 /// `scene_path`; the editor's host also lets clients name files
 /// (`allow_scene_paths`).
-pub fn spawn_phys_host(text: String, scene_path: Option<PathBuf>, mut cfg: ServerConfig) -> Result<LocalHost, String> {
-    LocalHost::spawn::<PhysGame>(move || {
+pub fn spawn_phys_host(text: String, scene_path: Option<PathBuf>, cfg: ServerConfig) -> Result<LocalHost, String> {
+    spawn_phys_host_impl(text, scene_path, cfg, None)
+}
+
+/// Starts the same PhysGame host with a paired, read-only editor observation channel.
+pub fn spawn_phys_host_with_editor_work_status(text: String, scene_path: Option<PathBuf>, cfg: ServerConfig, service: crate::work_status::WorkStatusService) -> Result<LocalHost, String> {
+    spawn_phys_host_impl(text, scene_path, cfg, Some(service))
+}
+
+fn spawn_phys_host_impl(text: String, scene_path: Option<PathBuf>, mut cfg: ServerConfig, service: Option<crate::work_status::WorkStatusService>) -> Result<LocalHost, String> {
+    LocalHost::spawn_configured_with_editor_work_status::<PhysGame>(move || {
         let doc = phys_doc(&text).map_err(|e| match &scene_path {
             Some(p) => format!("{}: {e}", p.display()),
             None => e.to_string(),
         })?;
         configure_phys(&mut cfg.limits, scene_path);
         Ok((doc, cfg))
-    })
+    }, |_| {}, service)
 }
 
 /// A document of the deterministic Arena sample game from scene text.
@@ -96,8 +105,18 @@ pub fn configure_arena(limits: &mut HostLimits, scene_path: Option<PathBuf>) {
 /// Starts a local Arena host with the same structured held-input contract as
 /// the headless Arena host. Input derivation is installed after ERP startup
 /// and before the host is made ready to clients.
-pub fn spawn_arena_host(text: String, scene_path: Option<PathBuf>, mut cfg: ServerConfig) -> Result<LocalHost, String> {
-    LocalHost::spawn_configured::<Arena>(
+pub fn spawn_arena_host(text: String, scene_path: Option<PathBuf>, cfg: ServerConfig) -> Result<LocalHost, String> {
+    spawn_arena_host_impl(text, scene_path, cfg, None)
+}
+
+/// Starts the same Arena host with status installed after managed input and
+/// before the first connector can query it.
+pub fn spawn_arena_host_with_editor_work_status(text: String, scene_path: Option<PathBuf>, cfg: ServerConfig, service: crate::work_status::WorkStatusService) -> Result<LocalHost, String> {
+    spawn_arena_host_impl(text, scene_path, cfg, Some(service))
+}
+
+fn spawn_arena_host_impl(text: String, scene_path: Option<PathBuf>, mut cfg: ServerConfig, service: Option<crate::work_status::WorkStatusService>) -> Result<LocalHost, String> {
+    LocalHost::spawn_configured_with_editor_work_status::<Arena>(
         move || {
             let doc = arena_doc(&text).map_err(|e| match &scene_path {
                 Some(p) => format!("{}: {e}", p.display()),
@@ -112,6 +131,7 @@ pub fn spawn_arena_host(text: String, scene_path: Option<PathBuf>, mut cfg: Serv
             });
             server.enable_managed_input();
         },
+        service,
     )
 }
 

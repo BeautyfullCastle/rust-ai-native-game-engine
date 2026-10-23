@@ -113,7 +113,8 @@ fn main() {
         Box::new(move |cc| {
             #[cfg(feature = "sprites")]
             let mut app = match project {
-                Some(project) => project.into_app(editor, cc.wgpu_render_state.clone(), &cc.egui_ctx),
+                Some(project) => project.into_app(editor, cc.wgpu_render_state.clone(), &cc.egui_ctx)
+                    .map_err(Box::<dyn std::error::Error + Send + Sync>::from)?,
                 None => EditorApp::new(editor, cc.wgpu_render_state.clone()),
             };
             #[cfg(not(feature = "sprites"))]

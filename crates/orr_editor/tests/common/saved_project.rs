@@ -97,7 +97,7 @@ pub fn open_headless(root: &Path) -> Harness<'static, EditorApp> {
     Harness::builder()
         .with_size([1500.0, 1400.0])
         .with_step_dt(1.0 / 60.0)
-        .build_eframe(move |cc| prepared.into_app(editor, None, &cc.egui_ctx))
+        .build_eframe(move |cc| prepared.into_app(editor, None, &cc.egui_ctx).unwrap())
 }
 
 pub fn open_gpu(root: &Path) -> Harness<'static, EditorApp> {
@@ -113,7 +113,7 @@ pub fn open_gpu(root: &Path) -> Harness<'static, EditorApp> {
         })
         .wgpu()
         .build_eframe(move |cc| {
-            prepared.into_app(editor, cc.wgpu_render_state.clone(), &cc.egui_ctx)
+            prepared.into_app(editor, cc.wgpu_render_state.clone(), &cc.egui_ctx).unwrap()
         })
 }
 

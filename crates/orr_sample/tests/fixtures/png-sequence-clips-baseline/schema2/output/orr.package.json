@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "name": "registered-animation",
+  "version": "1.2.3",
+  "engine": "^0.0.1",
+  "capabilities": [
+    "sprite"
+  ],
+  "dependencies": {},
+  "files": [
+    "sprites.json",
+    "atlas.png",
+    "LICENSE.txt"
+  ]
+}

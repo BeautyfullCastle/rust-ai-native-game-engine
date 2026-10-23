@@ -75,6 +75,64 @@ impl Options {
         })
     }
 }
+/// Separate opt-in CLI keeps legacy `Options` and `Mode` source-compatible.
+#[cfg(feature = "particle-preset")]
+pub const PRESET_HELP: &str = "particle_demo --preset FILE [--headless] [--showcase]\nOr use --particles off|dust|sparks. Preset files control appearance only; genuine pickups supply position and identity.";
+#[cfg(feature = "particle-preset")]
+pub struct PresetOptions {
+    options: Options,
+    preset: Option<orr_view::particles::EmitterDesc>,
+}
+#[cfg(feature = "particle-preset")]
+impl PresetOptions {
+    /// Parse and fully validate the file before creating any simulation host or window.
+    pub fn parse(args: Vec<String>) -> Result<Self, String> {
+        let mut args = args.into_iter();
+        let mut legacy = Vec::new();
+        let mut path = None;
+        let mut has_builtin = false;
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--preset" if path.is_none() => {
+                    let value = args
+                        .next()
+                        .filter(|v| !v.is_empty() && !v.starts_with("--"))
+                        .ok_or_else(|| PRESET_HELP.to_string())?;
+                    path = Some(value);
+                }
+                "--preset" => return Err(PRESET_HELP.into()),
+                "--particles" => {
+                    has_builtin = true;
+                    legacy.push(arg);
+                }
+                _ => legacy.push(arg),
+            }
+        }
+        if path.is_some() && has_builtin {
+            return Err(PRESET_HELP.into());
+        }
+        if path.is_some() {
+            legacy.extend(["--particles".into(), "sparks".into()]);
+        }
+        let options = Options::parse(legacy)?;
+        let preset = path
+            .map(|path| {
+                crate::particle_preset::ParticlePreset::open(path)
+                    .and_then(|preset| preset.to_emitter(Vec3::ZERO, 0))
+                    .map_err(|e| e.to_string())
+            })
+            .transpose()?;
+        Ok(Self { options, preset })
+    }
+}
+/// Runs only a preset that passed bounded production-file admission during parsing.
+#[cfg(feature = "particle-preset")]
+pub fn run_with_preset(selected: PresetOptions) -> Result<(), String> {
+    let demo = selected
+        .preset
+        .map_or_else(|| Demo::new(selected.options.mode), Demo::with_preset);
+    run_demo(selected.options, SceneRoute::Procedural, demo)
+}
 const PICKUPS: [[i64; 2]; 2] = [[8, 0], [16, 6]];
 fn point(x: i64, y: i64) -> FPVec2 {
     FPVec2::new(FP(x << 16), FP(y << 16))
@@ -86,6 +144,8 @@ fn origin(ordinal: u32) -> Option<Vec3> {
 }
 struct Demo {
     mode: Mode,
+    #[cfg(feature = "particle-preset")]
+    custom: Option<orr_view::particles::EmitterDesc>,
     bridge: InProc<CollectDodgeV1, PlayHost<CollectDodgeV1>>,
     snapshot: Option<Snapshot>,
     particles: ParticlePool,
@@ -108,6 +168,8 @@ impl Demo {
         );
         let mut result = Self {
             mode,
+            #[cfg(feature = "particle-preset")]
+            custom: None,
             bridge,
             snapshot: None,
             particles: ParticlePool::new(),
@@ -119,6 +181,22 @@ impl Demo {
             .expect("initial bridge state");
         result
     }
+    // All fresh-session routes retain the selected presentation without retaining effects.
+    fn restart(&mut self) {
+        #[cfg(feature = "particle-preset")]
+        let custom = self.custom;
+        *self = Self::new(self.mode);
+        #[cfg(feature = "particle-preset")]
+        {
+            self.custom = custom;
+        }
+    }
+    #[cfg(feature = "particle-preset")]
+    fn with_preset(desc: orr_view::particles::EmitterDesc) -> Self {
+        let mut demo = Self::new(Mode::Sparks);
+        demo.custom = Some(desc);
+        demo
+    }
     fn update(&mut self, dt: Duration, input: CollectInput) -> Result<(), String> {
         let dt = dt.min(Duration::from_millis(250));
         self.bridge
@@ -128,6 +206,8 @@ impl Demo {
         // The exact same finite poll drives event reconciliation and scene extraction.
         let update = self.bridge.poll_view();
         let mode = self.mode;
+        #[cfg(feature = "particle-preset")]
+        let custom = self.custom;
         self.particles
             .reconcile(&update, |event| {
                 if event.kind != EVENT_COLLECTED {
@@ -135,6 +215,13 @@ impl Demo {
                 }
                 let position = origin(event.ordinal)?;
                 let seed = u64::from(event.ordinal) + 42;
+                #[cfg(feature = "particle-preset")]
+                if let Some(mut desc) = custom {
+                    // Files describe appearance only. Position and seed belong to the genuine event.
+                    desc.origin = position;
+                    desc.seed = seed;
+                    return Some(desc);
+                }
                 match mode {
                     Mode::Off => None,
                     Mode::Dust => Some(particle_presets::landing_dust(position, seed)),
@@ -195,7 +282,7 @@ impl Showcase {
             .map_or(0, |s| s.predicted().singleton::<CollectRun>().score)
     }
     fn restart(&mut self, demo: &mut Demo) {
-        *demo = Demo::new(demo.mode);
+        demo.restart();
         *self = Self::default();
     }
     fn update(&mut self, demo: &mut Demo, dt: Duration, focused: bool) -> Result<(), String> {
@@ -297,16 +384,29 @@ enum PreviewRenderer {
     Materials(Box<material_scene::MaterialScene<Wgpu>>),
 }
 impl PreviewRenderer {
-    fn new(gpu: &Wgpu, format: TextureFormat, mode: Mode, route: SceneRoute) -> Result<Self, String> {
+    fn new(
+        gpu: &Wgpu,
+        format: TextureFormat,
+        mode: Mode,
+        route: SceneRoute,
+    ) -> Result<Self, String> {
         match route {
-            SceneRoute::Procedural => DemoRenderer::new(gpu, format, mode)
-                .map(|r| Self::Procedural(Box::new(r))),
+            SceneRoute::Procedural => {
+                DemoRenderer::new(gpu, format, mode).map(|r| Self::Procedural(Box::new(r)))
+            }
             #[cfg(feature = "material-demo")]
-            SceneRoute::Materials(materials) => material_scene::MaterialScene::new(gpu, format, mode, materials)
-                .map(|r| Self::Materials(Box::new(r))),
+            SceneRoute::Materials(materials) => {
+                material_scene::MaterialScene::new(gpu, format, mode, materials)
+                    .map(|r| Self::Materials(Box::new(r)))
+            }
         }
     }
-    fn draw(&mut self, view: &<Wgpu as Rhi>::TextureView, size: (u32, u32), demo: &Demo) -> Result<(), String> {
+    fn draw(
+        &mut self,
+        view: &<Wgpu as Rhi>::TextureView,
+        size: (u32, u32),
+        demo: &Demo,
+    ) -> Result<(), String> {
         match self {
             Self::Procedural(r) => r.draw(view, size, demo),
             #[cfg(feature = "material-demo")]
@@ -398,7 +498,15 @@ impl App {
             #[cfg(feature = "material-demo")]
             SceneRoute::Materials(MaterialMode::Legacy) => "Material preview: legacy diffuse",
             #[cfg(feature = "material-demo")]
-            SceneRoute::Materials(MaterialMode::Showcase) => "Material preview: matte / coated / metal",
+            SceneRoute::Materials(MaterialMode::Showcase) => {
+                "Material preview: matte / coated / metal"
+            }
+        };
+        #[cfg(feature = "particle-preset")]
+        let label = if self.demo.custom.is_some() {
+            "Custom particle preset preview"
+        } else {
+            label
         };
         g.window.set_title(&format!(
             "{label} | {controls} | {score}/2 pickups | {:?} | {} particles",
@@ -429,7 +537,12 @@ impl ApplicationHandler for App {
                 true,
                 WgpuOptions::default(),
             )?;
-            let renderer = PreviewRenderer::new(&gpu, gpu.surface_format(&surface), self.demo.mode, self.route)?;
+            let renderer = PreviewRenderer::new(
+                &gpu,
+                gpu.surface_format(&surface),
+                self.demo.mode,
+                self.route,
+            )?;
             Ok(Graphics {
                 window,
                 gpu,
@@ -475,7 +588,7 @@ impl ApplicationHandler for App {
                             if let Some(showcase) = &mut self.showcase {
                                 showcase.restart(&mut self.demo);
                             } else {
-                                self.demo = Demo::new(self.demo.mode);
+                                self.demo.restart();
                             }
                             self.last = Instant::now();
                         }
@@ -503,7 +616,11 @@ pub fn run_with_materials(options: Options, materials: MaterialMode) -> Result<(
 }
 
 fn run_route(options: Options, route: SceneRoute) -> Result<(), String> {
-    let mut demo = Demo::new(options.mode);
+    let demo = Demo::new(options.mode);
+    run_demo(options, route, demo)
+}
+
+fn run_demo(options: Options, route: SceneRoute, mut demo: Demo) -> Result<(), String> {
     if options.headless {
         #[cfg(feature = "material-demo")]
         if let SceneRoute::Materials(_) = route {
@@ -556,3 +673,11 @@ mod tests;
 #[cfg(test)]
 #[path = "particle_showcase_tests.rs"]
 mod showcase_tests;
+
+#[cfg(all(test, feature = "particle-preset"))]
+#[path = "particle_preset_runtime_tests.rs"]
+mod preset_tests;
+
+#[cfg(all(test, feature = "particle-preset"))]
+#[path = "particle_timed_runtime_tests.rs"]
+mod timed_preset_tests;

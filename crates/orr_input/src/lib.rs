@@ -326,3 +326,8 @@ impl Input {
         sample
     }
 }
+
+mod held_actions;
+pub use held_actions::{
+    HeldActionInput, HeldActionProfile, HeldActions, MAX_HELD_ACTIONS, MAX_HELD_STATES,
+};

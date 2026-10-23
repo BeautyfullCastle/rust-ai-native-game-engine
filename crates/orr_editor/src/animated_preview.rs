@@ -13,7 +13,8 @@ use orr_model::animation::{AnimatedModel, AnimationPlayer, PlaybackMode, Playbac
 use orr_reflect::Guid;
 use orr_render::orr_rhi::{Rhi, TextureFormat, Wgpu};
 use orr_render::{
-    Camera3D, Lighting, OffscreenTarget, SkinnedInstance, SkinnedModelRenderer, SkinnedRenderError,
+    Camera3D, Lighting, OffscreenTarget, Projection, SkinnedInstance, SkinnedModelRenderer,
+    SkinnedRenderError,
 };
 
 /// Playback speeds match the persisted animated-binding format.
@@ -27,6 +28,125 @@ pub const MAX_PLAYBACK_SPEED: f32 = 4.0;
 const TARGET_FORMAT: TextureFormat = TextureFormat::Rgba8Unorm;
 const INITIAL_SIZE: (u32, u32) = (1, 1);
 const MAX_TARGET_SIZE: u32 = 8192;
+const MAX_MODEL_RADIUS: f32 = 1_000_000_000.0;
+const MAX_VIEW_OFFSET: f32 = 4.0;
+const MIN_ZOOM_FACTOR: f32 = 0.125;
+const MAX_ZOOM_FACTOR: f32 = 8.0;
+const MAX_PITCH: f32 = std::f32::consts::FRAC_PI_2 - 0.05;
+const ORBIT_RADIANS_PER_PIXEL: f32 = 0.01;
+const MAX_INPUT_DELTA: f32 = 1_000_000.0;
+
+/// View-only orbit camera controls for the animated preview.
+///
+/// Offsets are measured in model radii in the current camera's screen plane.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PreviewCamera {
+    angles: [f32; 2],
+    offset: [f32; 2],
+    zoom_factor: f32,
+    model_radius: f32,
+}
+
+impl Default for PreviewCamera {
+    fn default() -> Self {
+        Self {
+            angles: [0.0, 0.0],
+            offset: [0.0, 0.0],
+            zoom_factor: 1.0,
+            model_radius: 1.0,
+        }
+    }
+}
+
+impl PreviewCamera {
+    /// Orbits by a screen-space drag delta, in pixels.
+    pub fn orbit(&mut self, delta: [f32; 2]) -> bool {
+        if !delta.into_iter().all(f32::is_finite) || delta == [0.0, 0.0] {
+            return false;
+        }
+        let yaw_delta = delta[0].clamp(-MAX_INPUT_DELTA, MAX_INPUT_DELTA) * ORBIT_RADIANS_PER_PIXEL;
+        let pitch_delta =
+            delta[1].clamp(-MAX_INPUT_DELTA, MAX_INPUT_DELTA) * ORBIT_RADIANS_PER_PIXEL;
+        let yaw = (self.angles[0] - yaw_delta + std::f32::consts::PI)
+            .rem_euclid(std::f32::consts::TAU)
+            - std::f32::consts::PI;
+        let pitch = (self.angles[1] - pitch_delta).clamp(-MAX_PITCH, MAX_PITCH);
+        let angles = [yaw, pitch];
+        let changed = angles != self.angles;
+        self.angles = angles;
+        changed
+    }
+
+    /// Pans in screen pixels, normalized to model radius and viewport height.
+    pub fn pan(&mut self, delta: [f32; 2], viewport: [f32; 2]) -> bool {
+        if !delta.into_iter().all(f32::is_finite)
+            || !viewport.into_iter().all(f32::is_finite)
+            || viewport.into_iter().any(|dimension| dimension <= 0.0)
+        {
+            return false;
+        }
+        let delta_x = f64::from(delta[0].clamp(-MAX_INPUT_DELTA, MAX_INPUT_DELTA));
+        let delta_y = f64::from(delta[1].clamp(-MAX_INPUT_DELTA, MAX_INPUT_DELTA));
+        let height = f64::from(viewport[1]);
+        let aspect = f64::from(viewport[0]) / height;
+        let radius = f64::from(self.model_radius);
+        let half_height = (radius * 1.5 / aspect.min(1.0)).max(0.25) / f64::from(self.zoom_factor);
+        let scale = 2.0 * half_height / (height * radius);
+        let offset = [
+            (self.offset[0] as f64 - delta_x * scale)
+                .clamp(-(MAX_VIEW_OFFSET as f64), MAX_VIEW_OFFSET as f64) as f32,
+            (self.offset[1] as f64 + delta_y * scale)
+                .clamp(-(MAX_VIEW_OFFSET as f64), MAX_VIEW_OFFSET as f64) as f32,
+        ];
+        let changed = offset != self.offset;
+        self.offset = offset;
+        changed
+    }
+
+    /// Applies an orthographic zoom; positive scroll zooms in.
+    pub fn zoom(&mut self, scroll: f32) -> bool {
+        if !scroll.is_finite() {
+            return false;
+        }
+        let bounded_scroll = scroll.clamp(-32.0, 32.0);
+        let zoom_factor = (self.zoom_factor * (bounded_scroll * 0.15).exp())
+            .clamp(MIN_ZOOM_FACTOR, MAX_ZOOM_FACTOR);
+        let changed = zoom_factor != self.zoom_factor;
+        self.zoom_factor = zoom_factor;
+        changed
+    }
+
+    /// Restores the default view while retaining the current model scale.
+    pub fn reset(&mut self) -> bool {
+        let changed =
+            self.angles != [0.0, 0.0] || self.offset != [0.0, 0.0] || self.zoom_factor != 1.0;
+        self.angles = [0.0, 0.0];
+        self.offset = [0.0, 0.0];
+        self.zoom_factor = 1.0;
+        changed
+    }
+
+    /// Current yaw and pitch in radians.
+    pub fn angles(&self) -> [f32; 2] {
+        self.angles
+    }
+
+    /// Current screen-plane pan offset in model radii.
+    pub fn offset(&self) -> [f32; 2] {
+        self.offset
+    }
+
+    /// Current orthographic zoom multiplier.
+    pub fn zoom_factor(&self) -> f32 {
+        self.zoom_factor
+    }
+
+    fn set_model_radius(&mut self, radius: f32) {
+        if radius.is_finite() && radius > 0.0 {
+            self.model_radius = radius.clamp(0.125, MAX_MODEL_RADIUS);
+        }
+    }
+}
 
 struct BoundPlayer {
     model: Arc<AnimatedModel>,
@@ -246,6 +366,7 @@ pub struct AnimatedPreviewGpu {
     model: Option<Arc<AnimatedModel>>,
     center: [f32; 3],
     radius: f32,
+    camera: PreviewCamera,
 }
 
 impl AnimatedPreviewGpu {
@@ -261,6 +382,7 @@ impl AnimatedPreviewGpu {
             model: None,
             center: [0.0, 0.0, 0.0],
             radius: 1.0,
+            camera: PreviewCamera::default(),
         }
     }
 
@@ -285,8 +407,10 @@ impl AnimatedPreviewGpu {
             )?);
             self.model = Some(model.clone());
             (self.center, self.radius) = rest_frame(model);
+            self.camera.reset();
+            self.camera.set_model_radius(self.radius);
         }
-        let camera = fit_camera(self.center, self.radius, size);
+        let camera = fit_camera(self.center, self.radius, size, &self.camera);
         let lighting = Lighting {
             shadows: false,
             ..Lighting::default()
@@ -321,6 +445,16 @@ impl AnimatedPreviewGpu {
     /// The adapter name, useful in tests and diagnostics.
     pub fn adapter_name(&self) -> String {
         self.rhi.adapter_name()
+    }
+
+    /// Current view-only camera controls.
+    pub fn camera(&self) -> &PreviewCamera {
+        &self.camera
+    }
+
+    /// Mutable view-only camera controls.
+    pub fn camera_mut(&mut self) -> &mut PreviewCamera {
+        &mut self.camera
     }
 }
 
@@ -392,6 +526,16 @@ impl GpuAnimatedPreview {
     pub fn texture_id(&self) -> TextureId {
         self.id
     }
+
+    /// Current view-only camera controls.
+    pub fn camera(&self) -> &PreviewCamera {
+        self.gpu.camera()
+    }
+
+    /// Mutable view-only camera controls.
+    pub fn camera_mut(&mut self) -> &mut PreviewCamera {
+        self.gpu.camera_mut()
+    }
 }
 
 impl Drop for GpuAnimatedPreview {
@@ -425,15 +569,77 @@ fn rest_frame(model: &AnimatedModel) -> ([f32; 3], f32) {
     }
 }
 
-fn fit_camera(center: [f32; 3], radius: f32, size: (u32, u32)) -> Camera3D {
+fn fit_camera(
+    center: [f32; 3],
+    radius: f32,
+    size: (u32, u32),
+    controls: &PreviewCamera,
+) -> Camera3D {
     let aspect = size.0 as f32 / size.1 as f32;
     // Leave margin around the widest horizontal or vertical extent. The
     // orthographic view stays stable while the clip animates.
-    let half_height = (radius * 1.5 / aspect.min(1.0)).max(0.25);
-    let depth = (radius * 4.0).max(1.0);
-    Camera3D::orthographic(
-        [center[0], center[1], center[2] + depth],
-        center,
+    let half_height = (radius * 1.5 / aspect.min(1.0)).max(0.25) / controls.zoom_factor;
+    let [yaw, pitch] = controls.angles;
+    let (sin_yaw, cos_yaw) = yaw.sin_cos();
+    let (sin_pitch, cos_pitch) = pitch.sin_cos();
+    let direction = [sin_yaw * cos_pitch, sin_pitch, cos_yaw * cos_pitch];
+    let right = [cos_yaw, 0.0, -sin_yaw];
+    let up = [-sin_yaw * sin_pitch, cos_pitch, -cos_yaw * sin_pitch];
+    let target = std::array::from_fn(|axis| {
+        center[axis]
+            + (right[axis] * controls.offset[0] + up[axis] * controls.offset[1])
+                * controls.model_radius
+    });
+    let precision_depth =
+        target.iter().map(|value| value.abs()).fold(1.0, f32::max) * f32::EPSILON * 16.0;
+    let depth = (radius * 4.0).max(1.0).max(precision_depth);
+    let eye = std::array::from_fn(|axis| target[axis] + direction[axis] * depth);
+    let mut camera = Camera3D::orthographic(eye, target, half_height);
+    let extent = (camera.distance() + radius * 2.0 + precision_depth).max(500.0);
+    camera.projection = Projection::Orthographic {
         half_height,
-    )
+        near: -extent,
+        far: extent,
+    };
+    camera
+}
+
+#[cfg(test)]
+mod camera_tests {
+    use super::*;
+
+    #[test]
+    fn default_camera_preserves_the_existing_ordinary_fit() {
+        assert_eq!(
+            fit_camera([0.0; 3], 1.0, (128, 128), &PreviewCamera::default()),
+            Camera3D::orthographic([0.0, 0.0, 4.0], [0.0; 3], 1.5)
+        );
+    }
+
+    #[test]
+    fn fitted_large_coordinates_keep_a_finite_direction_and_cover_model_depth() {
+        let mut controls = PreviewCamera::default();
+        for radius in [0.125, 1_000_000_000.0] {
+            controls.set_model_radius(radius);
+            controls.orbit([20.0, 10.0]);
+            controls.pan([8.0, -5.0], [128.0, 128.0]);
+            let camera = fit_camera([1_000_000_000.0; 3], radius, (128, 128), &controls);
+            assert_ne!(camera.eye, camera.target);
+            let forward = camera.forward();
+            assert!(forward.into_iter().all(f32::is_finite));
+            assert!(forward.into_iter().map(|value| value * value).sum::<f32>() > 0.9);
+            let Projection::Orthographic {
+                half_height,
+                near,
+                far,
+            } = camera.projection
+            else {
+                panic!("animated preview remains orthographic");
+            };
+            assert!(half_height.is_finite() && half_height > 0.0);
+            assert!(near.is_finite() && far.is_finite() && near < far);
+            assert!(far >= camera.distance() + radius * 1.7);
+            controls.reset();
+        }
+    }
 }

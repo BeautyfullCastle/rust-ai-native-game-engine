@@ -33,10 +33,11 @@ NATIVE_HEADER = '''  native:
           - os: ubuntu-24.04-arm
             name: ubuntu-24.04-arm64
 '''
-# Exact aggregate preserves the seven-result and eight-row authoring steps,
+# Exact aggregate preserves the nine-result and eight-row authoring steps,
 # and adds the independent four-row Room wall result. Pin all three steps and
-# dependency edges; actual Bash failure states are tested separately.
-AGGREGATE_SHA256 = '735c422dec31a6070eb5c8cb84120bd47d07183585db086b58677455450aff8c'
+# dependency edges, including generated user-game and private action lanes in needs, result
+# binding and the fail-closed loop; actual Bash failure states are tested separately.
+AGGREGATE_SHA256 = '35eaffd9847d9332ac6cf0daf1808837934b23e82f51396e5ed7857bad9f9e38'
 
 
 def listing(names):
@@ -172,11 +173,20 @@ class Raw16GateTests(unittest.TestCase):
             with self.subTest(text=changed), self.assertRaises(AssertionError):
                 gate.result(changed, gate.EDITOR)
         helper = ''.join(f'{name} (__main__.Raw16GateTests.{name}) ... ok\n' for name in gate.HELPER_TESTS)
-        helper += '\nRan 12 tests in 0.01s\n\nOK\n'
+        helper += '\nRan 13 tests in 0.01s\n\nOK\n'
         gate.helper_result(helper)
+        first_row = helper.splitlines(keepends=True)[0]
+        for changed in (helper.replace(first_row, '', 1),
+                        first_row + helper,
+                        'test_extra (__main__.Raw16GateTests.test_extra) ... ok\n' + helper,
+                        helper.replace(gate.HELPER_TESTS[0], 'test_wrong', 1),
+                        helper.replace('.' + gate.HELPER_TESTS[0] + ')', '.test_wrong)', 1),
+                        helper.replace('Ran 13 tests', 'Ran 12 tests')):
+            with self.subTest(helper_output=changed), self.assertRaises(AssertionError):
+                gate.helper_result(changed)
         for changed in (helper.replace(' ... ok', ' ... skipped', 1), helper.replace(' ... ok', ' ... FAIL', 1),
-                        helper.replace('Ran 12 tests', 'test_extra (__main__.Raw16GateTests) ... skipped\nRan 12 tests'),
-                        helper.replace('Ran 12 tests', 'Ran 0 tests'), helper + helper):
+                        helper.replace('Ran 13 tests', 'test_extra (__main__.Raw16GateTests) ... skipped\nRan 13 tests'),
+                        helper.replace('Ran 13 tests', 'Ran 0 tests'), helper + helper):
             with self.assertRaises(AssertionError):
                 gate.helper_result(changed)
 
@@ -326,6 +336,22 @@ class Raw16GateTests(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     gate.directory_bytes(path)
 
+    def test_workflow_each_inherited_and_private_action_dependency_is_mandatory(self):
+        workflow = (ROOT / '.github/workflows/determinism.yml').read_text()
+        workflow_contract(workflow)
+        dependencies = ('native', 'wasm32', 'wasm32-browser', 'android-arm64',
+                        'sample-build', 'generated-user-game-native',
+                        'static-game-actions-native', 'generated-user-game-actions-cpu', 'sample-arena-cpu',
+                        'sample-fixture-preflight', 'sample-linked-prefabs',
+                        'sample-room', 'static-model-authoring', 'room-wall-authoring')
+        line = '    needs: [' + ', '.join(dependencies) + ']'
+        self.assertEqual(workflow.count(line), 1)
+        for missing in dependencies:
+            changed = workflow.replace(line, '    needs: [' + ', '.join(
+                name for name in dependencies if name != missing) + ']', 1)
+            with self.subTest(missing=missing), self.assertRaises(AssertionError):
+                workflow_contract(changed)
+
     def test_mandatory_workflow_and_preserved_gates(self):
         workflow = (ROOT / '.github/workflows/determinism.yml').read_text()
         workflow_contract(workflow)
@@ -339,6 +365,14 @@ class Raw16GateTests(unittest.TestCase):
             for changed in ('', upload.replace('always()', 'success()'), upload.replace('if-no-files-found: error', 'if-no-files-found: ignore')):
                 with self.subTest(phase=phase, upload=changed), self.assertRaises(AssertionError):
                     workflow_contract(workflow.replace(upload, changed, 1))
+        for lane, result in [('sample-arena-cpu', 'SAMPLE_ARENA_CPU_RESULT'),
+                             ('sample-fixture-preflight', 'SAMPLE_PREFLIGHT_RESULT')]:
+            for old, new in [(', ' + lane, ''),
+                             ("          " + result + ": ${{ needs['" + lane + "'].result }}\n", ''),
+                             (' ' + result + ' ', ' ')]:
+                self.assertIn(old, workflow)
+                with self.subTest(lane=lane, removed=old), self.assertRaises(AssertionError):
+                    workflow_contract(workflow.replace(old, new, 1))
         for old, new in [('ORR_RAW16_REQUIRE_SOFTWARE: "1"', 'ORR_RAW16_REQUIRE_SOFTWARE: "0"'),
                          ('needs: [native, wasm32', 'needs: [wasm32'),
                          (', sample-room, static-model-authoring, room-wall-authoring]', ', static-model-authoring, room-wall-authoring]'),
@@ -347,7 +381,16 @@ class Raw16GateTests(unittest.TestCase):
                          ('      - name: Require every independent static authoring matrix row to pass\n', '      - name: Require every independent static authoring matrix row to pass\n        if: false\n'),
                          ('[[ \"$AUTHORING_RESULT\" != \"success\" ]]', '[[ \"$AUTHORING_RESULT\" == \"success\" ]]'),
                          ("          ROOM_RESULT: ${{ needs['sample-room'].result }}\n", ''),
-                         ('LINKED_PREFABS_RESULT ROOM_RESULT; do', 'LINKED_PREFABS_RESULT; do'),
+                         ('LINKED_PREFABS_RESULT ROOM_RESULT GENERATED_USER_NATIVE_RESULT PRIVATE_ACTION_NATIVE_RESULT GENERATED_ACTION_CPU_RESULT; do', 'LINKED_PREFABS_RESULT GENERATED_USER_NATIVE_RESULT PRIVATE_ACTION_NATIVE_RESULT GENERATED_ACTION_CPU_RESULT; do'),
+                         (', generated-user-game-native', ''),
+                         ("          GENERATED_USER_NATIVE_RESULT: ${{ needs['generated-user-game-native'].result }}\n", ''),
+                         ('ROOM_RESULT GENERATED_USER_NATIVE_RESULT PRIVATE_ACTION_NATIVE_RESULT GENERATED_ACTION_CPU_RESULT; do', 'ROOM_RESULT PRIVATE_ACTION_NATIVE_RESULT GENERATED_ACTION_CPU_RESULT; do'),
+                         (', static-game-actions-native', ''),
+                         (', generated-user-game-actions-cpu', ''),
+                         ("          GENERATED_ACTION_CPU_RESULT: ${{ needs['generated-user-game-actions-cpu'].result }}\n", ''),
+                         (' GENERATED_ACTION_CPU_RESULT; do', '; do'),
+                         ("          PRIVATE_ACTION_NATIVE_RESULT: ${{ needs['static-game-actions-native'].result }}\n", ''),
+                         (' GENERATED_USER_NATIVE_RESULT PRIVATE_ACTION_NATIVE_RESULT GENERATED_ACTION_CPU_RESULT; do', ' GENERATED_USER_NATIVE_RESULT; do'),
                          ('  native:\n', '  native:\n    if: false\n'),
                          ('          - os: macos-latest\n', ''),
                          ('    runs-on: ${{ matrix.os }}\n', '    runs-on: ubuntu-latest\n'),

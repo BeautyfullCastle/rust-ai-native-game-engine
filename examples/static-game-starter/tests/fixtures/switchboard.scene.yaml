@@ -1,0 +1,7 @@
+schema: orr.scene/1
+singletons:
+  Board: { bits: 0, target: 1, solved: 0, moves: 0 }
+entities:
+  e_00000001:
+    name: cursor
+    Cursor: { position: [0, 0], selected: 0, held: 0 }

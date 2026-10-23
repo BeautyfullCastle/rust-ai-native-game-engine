@@ -42,6 +42,8 @@ pub mod game_ui;
 #[cfg(feature = "game-ui")]
 pub mod game_ui_gpu;
 
+#[cfg(feature = "tilemap")]
+pub mod project_tilemap;
 #[cfg(feature = "project")]
 pub mod project_sprites;
 #[cfg(feature = "project")]
@@ -55,6 +57,12 @@ pub mod project_compositor;
 
 #[cfg(all(feature = "project-export", target_os = "linux", target_arch = "x86_64"))]
 pub mod project_export;
+#[cfg(all(windows, target_arch = "x86_64", feature = "project-export"))]
+pub mod windows_export;
+#[cfg(all(windows, target_arch = "x86_64", feature = "project-create", feature = "room-project"))]
+pub mod windows_project;
+#[cfg(all(windows, target_arch = "x86_64", feature = "room-project", any(feature="project-create", all(test, feature="project-export"))))]
+extern crate self as orr_sample;
 
 #[cfg(feature = "player-settings")]
 pub mod player_settings;
@@ -110,3 +118,14 @@ pub mod room_app;
 
 #[cfg(feature = "particle-demo")]
 pub mod particle_demo;
+
+#[cfg(feature = "particle-preset")]
+pub mod particle_preset;
+
+// Shared by lib tests so fixture paths use one process-wide directory counter.
+#[cfg(all(
+    test,
+    any(feature = "tilemap", all(feature = "project", feature = "game-ui"))
+))]
+#[path = "../tests/common/project.rs"]
+mod project_fixture;

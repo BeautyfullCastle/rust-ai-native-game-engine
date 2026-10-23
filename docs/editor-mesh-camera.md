@@ -1,0 +1,15 @@
+# Mesh game camera
+
+The Mesh Navigation editor has an optional **Mesh game camera** panel. It stores a presentation camera separately from the scene and graph. A saved camera never changes the mesh graph, agent pin, simulation state, or physics; viewport orbit, pan, and zoom remain transient unless explicitly captured and applied.
+
+The sidecar is named by appending `.mesh-camera.json` to the complete scene filename. Its bounded JSON record binds the camera to that exact scene filename and admitted graph revision. The record stores target, yaw, pitch, distance, field of view, projection, near plane, and far plane; orthographic projection also stores half-height. A renamed scene or changed graph revision does not reuse an old camera record.
+
+Use **Capture viewport as game camera** to copy the current orbit pose into the form, then **Apply game camera** to update the in-memory presentation camera. For orthographic projection, capture preserves the current zoomed framing. Editing the form alone does not move the viewport. **Save game camera** writes the currently applied camera; **Undo game camera** and **Redo game camera** change only the panel's bounded local history. A dirty form or unsaved sidecar history blocks Play and export until applied and saved, undone, or explicitly discarded.
+
+Loading a matching saved camera applies it once for the current scene context, including when the editor first opens in Play. Ordinary viewport navigation does not repeatedly reinstall the saved pose. A new Play session starts from the authored camera rather than a transient editor navigation pose. **Reset viewport to game camera** explicitly reapplies the current saved or applied camera. **Remove game camera** changes the in-memory state first and only removes the sidecar after an explicit save.
+
+Invalid or stale sidecars fail closed. They are not silently overwritten or deleted. Reloading or discarding dirty state requires confirmation; removing an invalid sidecar additionally requires a digest-matched explicit confirmation. Sidecar operations bound file size and rely on optimistic digest checks within a trusted, stable local directory; they do not claim isolation from hostile concurrent filesystem mutation or power-loss durability.
+
+The camera document validates finite bounded values and projection matrices at representative viewport aspect ratios before application. This is a view-only camera preset, not a general scene camera entity or a physics/rendering guarantee for every possible viewport size.
+
+After saving the scene, art, props, and camera, use **Export mesh game…** with the separately built Windows Mesh Player. Export embeds the optional camera sidecar and its digest in the bundle; a camera-bearing bundle requires a player with the dedicated `.orrcam` capability section. A player without this capability is rejected before publication. Bundles without a camera retain the existing format and transient default view. The exported player admits the saved camera before starting Play and loads only the adjacent bundle, not the source project or model package.

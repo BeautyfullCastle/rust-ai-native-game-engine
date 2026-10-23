@@ -6,7 +6,7 @@ use crate::game::EditorGame;
 
 /// Usage text.
 pub const USAGE: &str = "\
-orr_editor [--game physics|arena|yard3d|terrain-yard3d|navigation-yard3d] [--scene <file>] [--select <name>] [--play-ticks <n>] [--script <file>]
+orr_editor [--game physics|arena|yard3d|terrain-yard3d|navigation-yard3d|mesh-navigation|mesh-hazards-v1] [--scene <file>] [--select <name>] [--play-ticks <n>] [--script <file>]
            [--screenshot <out.png> [--frames <n>] [--screenshot-settle]] [--size <WxH>]
            [--erp <addr>] [--erp-token <name:token:caps>]... [--erp-dev]
 orr_editor --project <directory> [--select <name>] [--play-ticks <n>] [--erp <addr>] [screenshot flags]
@@ -21,7 +21,7 @@ editor's ERP) that is already running.
   --project <dir>       open a saved Arena project, including its optional sprites
                         (requires the sprites feature); cannot be combined with
                         --scene, --game, --connect or --script
-  --game <name>         local game: physics (default), arena, yard3d or terrain-yard3d (terrain-physics feature) or navigation-yard3d (navigation feature); cannot be used with --connect
+  --game <name>         local game: physics (default), arena, yard3d, terrain-yard3d (terrain-physics), navigation-yard3d (navigation), mesh-navigation (mesh-navigation feature), or mesh-hazards-v1 (mesh-hazards feature); cannot be used with --connect
   --connect <url>       attach to a running host instead of starting one: the
                         editor then shows and edits THAT host's scene and play
                         session (with --token when it needs one; a dev-mode

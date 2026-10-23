@@ -365,7 +365,7 @@ impl Viewport3dGpu {
     }
 
     /// Compose scene-owned static geometry with entity models in the same depth/shadow pass.
-    #[cfg(feature = "terrain")]
+    #[cfg(any(feature = "terrain", feature = "mesh-navigation"))]
     #[allow(clippy::too_many_arguments)]
     pub fn render_scene(
         &mut self,
@@ -742,7 +742,7 @@ impl GpuViewport3d {
             settings, grid)?;
         Ok(self.publish_texture())
     }
-    #[cfg(feature = "terrain")]
+    #[cfg(any(feature = "terrain", feature = "mesh-navigation"))]
     #[allow(clippy::too_many_arguments)]
     pub fn render_scene(
         &mut self,

@@ -6,7 +6,12 @@ fn main() -> ExitCode {
         println!("{}", orr_sample::collect_app::HELP);
         return ExitCode::SUCCESS;
     }
-    match orr_sample::collect_app::Options::parse(args).and_then(orr_sample::collect_app::run) {
+    let result = if args.len() == 1 && args[0] == "--print-default-input-map" {
+        orr_sample::collect_app::print_default_input_map().map(|map| print!("{map}"))
+    } else {
+        orr_sample::collect_app::Options::parse(args).and_then(orr_sample::collect_app::run)
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("collect_dodge: {error}");

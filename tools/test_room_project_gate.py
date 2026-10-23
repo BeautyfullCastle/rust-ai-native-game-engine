@@ -56,7 +56,7 @@ def workflow_section(text, header, indent):
 def room_workflow_steps(workflow):
     """The supported CI shape is deliberately strict; changed gates need review."""
     trigger = workflow_section(workflow, 'on:', 0)
-    assert trigger == 'on:\n  pull_request:\n    branches: [main, su/engine-correctness-hardening]\n    types: [ready_for_review]\n  workflow_dispatch:\n', 'workflow triggers'
+    assert trigger == 'on:\n  pull_request:\n    branches: [main, su/engine-correctness-hardening, su/authoring-development-integration-20261021, su/static-game-starter-20261022]\n    types: [ready_for_review]\n  workflow_dispatch:\n', 'workflow triggers'
     jobs = workflow_section(workflow, 'jobs:', 0)
     sample = workflow_section(jobs, '  sample-build:', 2)
     assert sample.count('    steps:\n') == 1, 'sample-build steps'
@@ -65,7 +65,7 @@ def room_workflow_steps(workflow):
                for line in body.splitlines() if line.strip() and not line.lstrip().startswith('#')), 'trailing job fields'
     header = '\n'.join(line for line in header.splitlines() if line.strip() and not line.lstrip().startswith('#'))
     assert header == '\n'.join([
-        '  sample-build:', '    name: sample build (${{ matrix.os }})',
+        '  sample-build:', '    needs: [sample-fixture-preflight]', '    name: sample build (${{ matrix.os }})',
         '    runs-on: ${{ matrix.os }}', '    strategy:', '      fail-fast: false',
         '      matrix:', '        os: [ubuntu-22.04, windows-latest]',
     ]), 'sample-build runner/trigger must remain mandatory'
@@ -157,6 +157,39 @@ def unified_log(mode):
     return '\n'.join(pieces) + '\n'
 
 
+def room_view_source_tests(source, *, animated):
+    """Read the bounded Room test-attribute syntax, rejecting unknown cfg forms.
+
+    This is a source guard, not a Rust parser or evidence of test execution.
+    Keep the static inventory separate from the opt-in animated tests.
+    """
+    # Attribute blocks may contain blank lines and comments. Capture multiline
+    # attributes too so unsupported cfg syntax cannot disappear before #[test].
+    assert not re.search(r'/\*(?:(?!\*/).)*?/\*', source, re.S), 'unsupported nested block comment'
+    trivia = r'(?:\s|//[^\n]*(?:\n|$)|/\*.*?\*/)'
+    pattern = r'((?:^[ \t]*#\[[^\]]*\]' + trivia + r'*)+)fn\s+(\w+)\s*\('
+    rows = []
+    seen = 0
+    test_names = set()
+    for attributes, name in re.findall(pattern, source, re.M | re.S):
+        attributes = re.findall(r'#\[[^\]]*\]', attributes)
+        if '#[test]' not in attributes:
+            continue
+        seen += attributes.count('#[test]')
+        assert name not in test_names, ('duplicate Room test names', name)
+        test_names.add(name)
+        assert attributes.count('#[test]') == 1, ('duplicate test attribute', name)
+        allowed = {'#[test]', '#[cfg(feature = "room-animated-models")]'}
+        assert all(attribute in allowed for attribute in attributes), ('unsupported Room test attributes', name, attributes)
+        assert len(attributes) == len(set(attributes)), ('duplicate Room test attributes', name)
+        gated = '#[cfg(feature = "room-animated-models")]' in attributes
+        if animated or not gated:
+            rows.append(('room_view::tests::' + name, False))
+    assert seen == len(re.findall(r'#\[test\]', source)), 'unparsed Room test attributes'
+    assert len(rows) == len(set(rows)), 'duplicate Room test names'
+    return rows
+
+
 class RoomProjectGateTests(unittest.TestCase):
     def test_source_inventories_and_cfg_scopes(self):
         sources = [('room-simulation', 'orr_games/src/room_escape_game.rs', 'room_escape_game::tests::'),
@@ -169,8 +202,16 @@ class RoomProjectGateTests(unittest.TestCase):
                    ('editor-model-admission', 'orr_editor/tests/room_model_admission.rs', '')]
         for lane, path, prefix in sources:
             source = (ROOT / 'crates' / path).read_text()
-            names = [(prefix + name, '#[ignore' in attributes)
-                     for attributes, name in re.findall(r'#\[test\]\s*((?:#\[[^\n]*\]\s*)*)fn\s+(\w+)\s*\(', source)]
+            if lane == 'room-view-contracts':
+                names = room_view_source_tests(source, animated=False)
+                animated_names = room_view_source_tests(source, animated=True)
+                self.assertEqual(sorted(set(animated_names) - set(names)), [
+                    ('room_view::tests::animated_sampling_uses_fixed_room_ticks_and_once_loop_policies', False),
+                    ('room_view::tests::animated_world_matrix_composes_body_before_binding_local_transform', False),
+                ])
+            else:
+                names = [(prefix + name, '#[ignore' in attributes)
+                         for attributes, name in re.findall(r'#\[test\]\s*((?:#\[[^\n]*\]\s*)*)fn\s+(\w+)\s*\(', source)]
             self.assertEqual(INVENTORIES[lane]['names'], sorted(name for name, _ in names), lane)
             self.assertEqual(INVENTORIES[lane]['ignored_names'], sorted(name for name, ignored in names if ignored), lane)
         source = (ROOT / 'crates/orr_sample/tests/new_room_project.rs').read_text()
@@ -184,6 +225,36 @@ class RoomProjectGateTests(unittest.TestCase):
         self.assertEqual(INVENTORIES['camera-schema-unified']['harness_rows'], [
             {'package': 'orr_editor', 'names': [], 'summary': [0, 0, 0]},
             {'package': 'orr_sample', 'names': INVENTORIES['camera-schema']['names'], 'summary': [9, 0, 0]}])
+
+    def test_room_view_source_reader_keeps_feature_boundaries_and_fails_closed(self):
+        static = '#[test]\nfn static_case() {}\n'
+        cfg = '#[cfg(feature = "room-animated-models")]\n'
+        animated = cfg + '#[test]\nfn animated_case() {}\n'
+        for gated in (animated, '#[test]\n' + cfg + 'fn animated_case() {}\n',
+                      animated.replace(cfg, cfg + '\n// boundary comment\n/* comment */\n')):
+            self.assertEqual(room_view_source_tests(static + gated, animated=False),
+                             [('room_view::tests::static_case', False)])
+            self.assertEqual(room_view_source_tests(static + gated, animated=True), [
+                ('room_view::tests::static_case', False),
+                ('room_view::tests::animated_case', False),
+            ])
+        for invalid in (
+            animated.replace('room-animated-models', 'unknown-feature'),
+            animated.replace(cfg, '#[cfg(feature = "unknown-feature")]\n\n'),
+            animated.replace(cfg, '#[cfg(\nfeature = "unknown-feature"\n)]\n'),
+            animated.replace(cfg, '#[cfg(feature = "unknown-feature")]\n// comment\n'),
+            animated.replace(cfg, '#[cfg(feature = "unknown-feature")]\n/* comment */\n'),
+            animated.replace(cfg, cfg + '/* outer /* nested */ comment */\n'),
+            animated.replace(cfg, '#[cfg(not(feature = "room-animated-models"))]\n'),
+            animated.replace(cfg, '#[cfg(any(feature = "room-animated-models", test))]\n'),
+            animated.replace('#[test]', '#[test]\n#[ignore]'),
+            animated.replace('fn animated_case', 'async fn animated_case'),
+            animated.replace('#[test]', '#[test]\n#[test]'),
+            animated + animated,
+        ):
+            for enabled in (False, True):
+                with self.subTest(source=invalid, animated=enabled), self.assertRaises(AssertionError):
+                    room_view_source_tests(invalid, animated=enabled)
 
     def test_every_lane_requires_exact_lists_outcomes_and_complete_summaries(self):
         for lane, expected in INVENTORIES.items():
@@ -315,6 +386,8 @@ class RoomProjectGateTests(unittest.TestCase):
     def test_workflow_checks_reject_missing_disabled_or_nonpropagating_gates(self):
         workflow = (ROOT / '.github/workflows/determinism.yml').read_text()
         check_room_workflow(workflow)
+        with self.assertRaises(AssertionError):
+            check_room_workflow(workflow.replace(', su/authoring-development-integration-20261021', '', 1))
         steps = room_workflow_steps(workflow)
         contracts = steps[ROOM_CONTRACTS]
         command = 'if tools/check-room-project.sh contracts; then'
@@ -363,6 +436,9 @@ class RoomProjectGateTests(unittest.TestCase):
         relocated = workflow.replace(job, '', 1).replace('jobs:\n', 'unrelated:\n' + job + '\njobs:\n', 1)
         with self.subTest(mutation='job outside jobs'), self.assertRaises(AssertionError):
             check_room_workflow(relocated)
+        changed = job.replace('os: [ubuntu-22.04, windows-latest]', 'os: [windows-latest]', 1)
+        with self.subTest(mutation='no Linux sample runner'), self.assertRaises(AssertionError):
+            check_room_workflow(workflow.replace(job, changed, 1))
         for label, old, new in [
             ('missing jobs section', 'jobs:\n', 'unrelated:\n'),
             ('missing PR trigger', '  pull_request:\n', ''),
@@ -370,7 +446,6 @@ class RoomProjectGateTests(unittest.TestCase):
             ('missing job', '  sample-build:\n', '  other-job:\n'),
             ('disabled job', '  sample-build:\n', '  sample-build:\n    if: false\n'),
             ('job allows failure', '  sample-build:\n', '  sample-build:\n    continue-on-error: true\n'),
-            ('no Linux runner', '        os: [ubuntu-22.04, windows-latest]', '        os: [windows-latest]'),
         ]:
             with self.subTest(mutation=label):
                 self.assertIn(old, workflow)

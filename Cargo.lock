@@ -3155,6 +3155,7 @@ dependencies = [
 name = "orr_editor"
 version = "0.0.1"
 dependencies = [
+ "bytemuck",
  "eframe",
  "egui",
  "egui-wgpu",
@@ -3178,6 +3179,7 @@ dependencies = [
  "orr_sprite",
  "orr_terrain",
  "orr_terrain_view",
+ "orr_tilemap",
  "orr_view",
  "png 0.17.16",
  "serde",
@@ -3504,6 +3506,7 @@ dependencies = [
  "orr_sim",
  "orr_sprite",
  "orr_testgame",
+ "orr_tilemap",
  "orr_view",
  "orr_viewstream",
  "orr_web",
@@ -3573,6 +3576,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "orr_static_starter"
+version = "0.0.1"
+dependencies = [
+ "bytemuck",
+ "eframe",
+ "egui",
+ "egui_kittest",
+ "orr_bridge",
+ "orr_ecs",
+ "orr_edit",
+ "orr_editor",
+ "orr_fp",
+ "orr_input",
+ "orr_reflect",
+ "orr_remote",
+ "orr_render",
+ "orr_sample",
+ "orr_session",
+ "orr_sim",
+ "orr_view",
+ "png 0.18.1",
+ "rustix 1.1.5",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "winit",
+ "x11rb",
+]
+
+[[package]]
 name = "orr_terrain"
 version = "0.0.1"
 dependencies = [
@@ -3631,6 +3664,15 @@ dependencies = [
  "orr_fp",
  "orr_reflect",
  "orr_sim",
+]
+
+[[package]]
+name = "orr_tilemap"
+version = "0.0.1"
+dependencies = [
+ "orr_sprite",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

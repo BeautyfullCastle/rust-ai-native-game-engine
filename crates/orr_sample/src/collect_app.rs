@@ -1,10 +1,12 @@
 //! Standalone, local-only authored CollectDodgeV1 player.
+pub mod input_actions;
 use crate::project_compositor::ProjectWindow;
 use crate::{
     collect_game::{self as game, CollectDodgeV1, CollectInput},
     collect_project::PreparedProject,
     collect_view,
 };
+use input_actions::{CollectAction, CollectBindings};
 use orr_bridge::{Bridge, BridgeConfig, InProc, PlayHost, PlayerSlot};
 use orr_fp::FP;
 use orr_render::orr_rhi::Wgpu;
@@ -23,7 +25,18 @@ use winit::{
     window::{Window, WindowId},
 };
 
-pub const HELP: &str = "collect_dodge --project DIR [--headless --ticks 0..6000 [--hold right,up] [--capture NEW.png]]\nWindow: WASD/arrows move, Space restarts on a fresh press, Escape quits.\nHeadless directions: left,right,up,down,restart. Capture requires a software GPU adapter.";
+pub const HELP: &str = "collect_dodge --project DIR [--input-bindings FILE] [--headless --ticks 0..6000 [--hold right,up] [--capture NEW.png]]\ncollect_dodge --print-default-input-map\nWindow defaults: WASD/arrows move, Space restarts on a fresh press, Escape quits.\nInput maps require the input-actions feature and are window-only.\nHeadless directions are semantic: left,right,up,down,restart. Capture requires a software GPU adapter.";
+
+pub fn print_default_input_map() -> Result<String, String> {
+    #[cfg(feature = "input-actions")]
+    {
+        let mut bytes = Vec::new();
+        input_actions::default_map().save(&mut bytes)?;
+        String::from_utf8(bytes).map_err(|e| e.to_string())
+    }
+    #[cfg(not(feature = "input-actions"))]
+    Err("--print-default-input-map requires the input-actions feature".into())
+}
 #[derive(Debug)]
 pub struct Options {
     pub project: PathBuf,
@@ -31,11 +44,13 @@ pub struct Options {
     pub ticks: u32,
     pub held: CollectInput,
     pub capture: Option<PathBuf>,
+    pub input_bindings: Option<PathBuf>,
 }
 impl Options {
     pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Self, String> {
         let mut args = args.into_iter();
         let (mut project, mut ticks, mut hold, mut capture) = (None, None, None, None);
+        let mut input_bindings = None;
         let mut headless = false;
         let mut seen = BTreeSet::new();
         while let Some(arg) = args.next() {
@@ -45,6 +60,14 @@ impl Options {
             match arg.as_str() {
                 "--project" => {
                     project = Some(PathBuf::from(args.next().ok_or("--project requires DIR")?))
+                }
+                "--input-bindings" => {
+                    input_bindings = Some(PathBuf::from(
+                        args.next().ok_or("--input-bindings requires FILE")?,
+                    ));
+                }
+                "--print-default-input-map" => {
+                    return Err("--print-default-input-map must be used alone".into());
                 }
                 "--headless" => headless = true,
                 "--ticks" => {
@@ -68,6 +91,7 @@ impl Options {
                 _ => return Err(format!("unknown option: {arg}\n{HELP}")),
             }
         }
+        validate_input_options(headless, input_bindings.as_deref())?;
         if !headless && (ticks.is_some() || hold.is_some() || capture.is_some()) {
             return Err("--ticks, --hold and --capture require --headless".into());
         }
@@ -90,8 +114,30 @@ impl Options {
             ticks,
             held: hold.unwrap_or_default(),
             capture,
+            input_bindings,
         })
     }
+}
+fn validate_input_options(headless: bool, path: Option<&Path>) -> Result<(), String> {
+    if path.is_some() {
+        if !cfg!(feature = "input-actions") {
+            return Err("--input-bindings requires the input-actions feature".into());
+        }
+        if headless {
+            return Err(
+                "--input-bindings is window-only; headless --hold uses semantic directions".into(),
+            );
+        }
+    }
+    Ok(())
+}
+fn load_input_bindings(options: &Options) -> Result<CollectBindings, String> {
+    validate_input_options(options.headless, options.input_bindings.as_deref())?;
+    #[cfg(feature = "input-actions")]
+    if let Some(path) = &options.input_bindings {
+        return CollectBindings::load_file(path);
+    }
+    Ok(CollectBindings::default())
 }
 fn parse_hold(value: &str) -> Result<CollectInput, String> {
     let mut seen = BTreeSet::new();
@@ -141,6 +187,9 @@ fn bridge(project: &PreparedProject) -> Result<LocalBridge, String> {
     ))
 }
 pub fn run(options: Options) -> Result<(), String> {
+    // Validate the optional map before opening the project or creating a host,
+    // GPU or window. This also guards callers constructing Options directly.
+    let bindings = load_input_bindings(&options)?;
     // All package verification and scene admission precede any GPU/window work.
     let support = if cfg!(all(feature = "collect-progress", target_os = "linux")) {
         crate::collect_project::ProgressSupport::MetadataOnly
@@ -161,7 +210,7 @@ pub fn run(options: Options) -> Result<(), String> {
             options.capture.as_deref(),
         )
     } else {
-        run_window(project)
+        run_window_with_bindings(project, bindings)
     }
 }
 
@@ -170,6 +219,7 @@ pub fn run(options: Options) -> Result<(), String> {
 const MAX_PENDING_RESTARTS: u8 = 8;
 #[derive(Default)]
 struct Keys {
+    bindings: CollectBindings,
     pressed: BTreeSet<KeyCode>,
     blocked: BTreeSet<KeyCode>,
     focused: bool,
@@ -178,6 +228,30 @@ struct Keys {
     observed_tick: u64,
 }
 impl Keys {
+    fn with_bindings(bindings: CollectBindings) -> Self {
+        Self {
+            bindings,
+            ..Self::default()
+        }
+    }
+    // The native event handler and deterministic tests use the same policy.
+    // Quit keeps its prior system-control behavior: focused, non-synthetic key
+    // presses exit even during UI capture; repeats are harmless exit requests.
+    fn keyboard_event(
+        &mut self,
+        code: KeyCode,
+        down: bool,
+        repeat: bool,
+        synthetic: bool,
+        capture: bool,
+    ) -> bool {
+        let quit = self.bindings.action_for_key(code) == Some(CollectAction::Quit)
+            && down
+            && !synthetic
+            && self.focused;
+        self.captured_event(code, down, repeat, synthetic, capture);
+        quit
+    }
     #[cfg(feature = "collect-ui")]
     fn ui_action(&mut self, action: crate::authored_ui::Action) {
         // Navigation neutralizes movement without dropping an authorized edge.
@@ -225,7 +299,7 @@ impl Keys {
         if !repeat
             && !self.blocked.contains(&code)
             && self.pressed.insert(code)
-            && code == KeyCode::Space
+            && self.bindings.action_for_key(code) == Some(CollectAction::Restart)
         {
             self.pending_restarts = self
                 .pending_restarts
@@ -249,21 +323,15 @@ impl Keys {
         if !self.focused {
             return CollectInput::default();
         }
-        let any = |a, b| self.pressed.contains(&a) || self.pressed.contains(&b);
+        let held = |action| self.bindings.is_held(action, &self.pressed);
         CollectInput {
-            x: axis(
-                any(KeyCode::KeyA, KeyCode::ArrowLeft),
-                any(KeyCode::KeyD, KeyCode::ArrowRight),
-            ),
-            y: axis(
-                any(KeyCode::KeyS, KeyCode::ArrowDown),
-                any(KeyCode::KeyW, KeyCode::ArrowUp),
-            ),
+            x: axis(held(CollectAction::Left), held(CollectAction::Right)),
+            y: axis(held(CollectAction::Down), held(CollectAction::Up)),
             buttons: if if self.pending_restarts > 0 {
                 // Separate queued presses with a simulation-observed low sample.
                 !self.observed_restart_held
             } else {
-                self.pressed.contains(&KeyCode::Space)
+                held(CollectAction::Restart)
             } {
                 game::RESTART
             } else {
@@ -400,7 +468,8 @@ impl App {
                 self.fail(event_loop, error);
                 return;
             }
-            let title = collect_view::title(frame);
+            let title =
+                collect_view::title_with_controls(frame, &self.keys.bindings.controls_hint());
             #[cfg(all(feature = "collect-progress", target_os = "linux"))]
             let title = format!("{title} | {}", self.progress.status());
             window.set_title(&title);
@@ -530,9 +599,6 @@ impl ApplicationHandler for App {
             } => {
                 if let PhysicalKey::Code(code) = event.physical_key {
                     let down = event.state == ElementState::Pressed;
-                    if code == KeyCode::Escape && down && !is_synthetic && self.keys.focused {
-                        event_loop.exit();
-                    }
                     #[cfg(feature = "collect-ui")]
                     let capture = self.ui.as_ref().is_some_and(|ui| {
                         let mut pending = egui::RawInput::default();
@@ -554,8 +620,12 @@ impl ApplicationHandler for App {
                     });
                     #[cfg(not(feature = "collect-ui"))]
                     let capture = false;
-                    self.keys
-                        .captured_event(code, down, event.repeat, is_synthetic, capture);
+                    if self
+                        .keys
+                        .keyboard_event(code, down, event.repeat, is_synthetic, capture)
+                    {
+                        event_loop.exit();
+                    }
                 }
             }
             WindowEvent::RedrawRequested => self.frame(event_loop),
@@ -568,7 +638,7 @@ impl ApplicationHandler for App {
         }
     }
 }
-fn window_app(project: &PreparedProject) -> Result<App, String> {
+fn window_app(project: &PreparedProject, bindings: CollectBindings) -> Result<App, String> {
     #[cfg(not(all(feature = "collect-progress", target_os = "linux")))]
     let bridge = bridge(project)?;
     #[cfg(all(feature = "collect-progress", target_os = "linux"))]
@@ -587,7 +657,7 @@ fn window_app(project: &PreparedProject) -> Result<App, String> {
         progress,
         gfx: None,
         presentation: project.presentation(),
-        keys: Keys::default(),
+        keys: Keys::with_bindings(bindings),
         last: Instant::now(),
         error: None,
         #[cfg(feature = "collect-ui")]
@@ -602,7 +672,13 @@ fn window_app(project: &PreparedProject) -> Result<App, String> {
     })
 }
 pub fn run_window(project: PreparedProject) -> Result<(), String> {
-    let mut app = window_app(&project)?;
+    run_window_with_bindings(project, CollectBindings::default())
+}
+fn run_window_with_bindings(
+    project: PreparedProject,
+    bindings: CollectBindings,
+) -> Result<(), String> {
+    let mut app = window_app(&project, bindings)?;
     let event_loop = EventLoop::new().map_err(|e| e.to_string())?;
     event_loop.set_control_flow(ControlFlow::Poll);
     event_loop.run_app(&mut app).map_err(|e| e.to_string())?;
@@ -723,7 +799,7 @@ pub fn headless(
 pub(crate) fn exercise_window_progress(project: &PreparedProject, mode: &str) {
     // Exact production App constructor and persistence dispatch; no OS window
     // is claimed by this source-hidden test harness.
-    let mut app = window_app(project).unwrap();
+    let mut app = window_app(project, CollectBindings::default()).unwrap();
     if mode == "relaunch" {
         assert_eq!(app.progress.status(), "Best collected: 2");
         return;
@@ -877,6 +953,27 @@ mod tests {
             Some(egui::pos2(80.0, 40.0))
         );
         assert!(pointer_in_ui(point, 0.0).is_none());
+    }
+    #[test]
+    fn input_map_cli_admission_is_explicit() {
+        for bad in [
+            "--project demo --input-bindings",
+            "--project demo --input-bindings a --input-bindings b",
+            "--project demo --print-default-input-map",
+            "--project demo --headless --ticks 1 --input-bindings controls.json",
+        ] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
+        let result = parse("--project demo --input-bindings controls.json");
+        if cfg!(feature = "input-actions") {
+            assert_eq!(result.unwrap().input_bindings, Some("controls.json".into()));
+            assert!(print_default_input_map().unwrap().contains("restart"));
+        } else {
+            assert!(result.unwrap_err().contains("input-actions feature"));
+            assert!(print_default_input_map()
+                .unwrap_err()
+                .contains("input-actions feature"));
+        }
     }
     #[test]
     fn strict_cli() {
@@ -1066,3 +1163,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, feature = "input-actions"))]
+#[path = "collect_app/input_runtime_tests.rs"]
+mod input_runtime_tests;

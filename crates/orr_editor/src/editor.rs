@@ -53,6 +53,18 @@ use crate::backend::{Backend, HostSpec};
 use crate::diagnostics::{EditorDiagnostics, Telemetry};
 use crate::model::{ClientInfo, EntityRow, GuidSelection, History, ProposalDetail, ProposalInfo, SimState, Stopped, Target};
 pub use crate::model::Mode;
+#[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
+pub(crate) mod arena_export;
+#[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "collect-ui", feature = "project-create"))]
+pub(crate) mod collect_project;
+#[cfg(feature="room-authoring")]
+#[path="room_authoring.rs"]
+mod room_authoring;
+#[cfg(feature="room-authoring")]
+pub(crate) use room_authoring::RoomWall;
+#[cfg(all(test, windows, target_arch="x86_64", feature="windows-projects"))]
+#[path="editor/room_wall_tests.rs"]
+mod room_wall_tests;
 use crate::viewport::{self, Scene};
 
 /// Most entities one hierarchy refresh asks for.
@@ -185,6 +197,14 @@ struct Preview {
     rows: Vec<EntityRow>,
 }
 
+#[cfg(feature = "mesh-navigation")]
+struct MeshCamera {
+    document: crate::mesh_camera::Document,
+    scene: PathBuf,
+    epoch: u64,
+    graph_revision: [u8; 32],
+}
+
 /// See the module docs.
 pub struct Editor {
     backend: Backend,
@@ -199,6 +219,8 @@ pub struct Editor {
     /// The viewport camera (world units, y up).
     pub camera: Camera,
     pub camera3d: orr_render::OrbitCamera,
+    #[cfg(feature = "mesh-navigation")]
+    mesh_camera: Option<MeshCamera>,
     #[cfg(feature="room-project")]
     room_camera: Option<orr_sample::room_camera::Document>,
     #[cfg(feature="room-project")]
@@ -210,6 +232,14 @@ pub struct Editor {
     navigation_view: crate::navigation_view::NavigationView,
     #[cfg(feature = "navigation")]
     navigation_blocker: Option<String>,
+    #[cfg(feature = "mesh-navigation")]
+    mesh_navigation_blocker: Option<String>,
+    #[cfg(any(feature = "static-game-actions", feature = "arena-project-export", feature = "terrain", feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
+    scene_load_epoch: u64,
+    #[cfg(feature = "tilemap")]
+    tilemap_start_scene: Option<(crate::project::PreparedArenaScene, u64)>,
+    #[cfg(feature = "tilemap")]
+    tilemap_save_guard: Option<(PathBuf, Option<orr_sample::project_sprites::Document>)>,
     status: Option<Message>,
     log: Vec<Message>,
     // caches of host answers
@@ -228,6 +258,8 @@ pub struct Editor {
     stopped: Option<Stopped>,
     // the newest frame
     snapshot: Option<Snapshot>,
+    #[cfg(all(test, feature = "terrain"))]
+    view_recovery_generation: u64,
     bodies: Vec<Drawable>,
     checksum: u64,
     snap_entities: u32,
@@ -254,6 +286,12 @@ pub struct Editor {
     script_owner: BTreeMap<String, String>,
 }
 
+#[cfg(any(feature = "static-game-actions", feature = "arena-project-export", feature = "terrain", feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
+fn next_scene_load_epoch() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 impl Editor {
     /// An editor on a host thread of this process that loads `path`.
     pub fn open(path: &Path) -> Result<Self, String> {
@@ -263,6 +301,12 @@ impl Editor {
     /// An editor on a local host for the selected game that loads `path`.
     pub fn open_game(path: &Path, game: EditorGame) -> Result<Self, String> {
         Self::start(&HostSpec::local_game(path, game))
+    }
+
+    /// Opens a statically registered game with no listener or default scene.
+    #[cfg(feature = "static-games")]
+    pub fn open_registered(path: &Path, game: crate::static_adapter::RegisteredGame) -> Result<Self, String> {
+        Self::open_game(path, EditorGame::Registered(game))
     }
 
     /// An editor attached to the host at `url` (`ws://host:port`), for example an
@@ -275,6 +319,11 @@ impl Editor {
     pub fn start(spec: &HostSpec) -> Result<Self, String> {
         let backend = Backend::connect(spec)?;
         let mut e = Self::on_backend(backend)?;
+        #[cfg(feature = "tilemap")]
+        if let HostSpec::PreparedArena { scene, .. } = spec {
+            e.tilemap_start_scene = Some((scene.clone(), e.scene_load_epoch));
+            e.tilemap_save_guard = scene.tilemap_save_guard().map(|guard| (scene.path().to_path_buf(), guard.sprites.clone()));
+        }
         let local = spec.is_local();
         if local {
             e.info("ready");
@@ -301,8 +350,12 @@ impl Editor {
         feed.own.clone_from(&backend.own_client);
         let types = Arc::new(backend.game.types());
         let mut input = input::Input::new(backend.managed_input);
+        #[cfg(feature = "static-games")]
+        { input.registered = backend.game.registered(); }
         input.collect_dodge = backend.game.is_collect();
         input.room_escape = backend.game.is_room();
+        #[cfg(feature = "mesh-navigation")]
+        { input.mesh_navigation = backend.game.has_mesh_view(); }
         let mut e = Self {
             input,
             backend,
@@ -317,6 +370,8 @@ impl Editor {
             #[cfg(feature="room-project")] room_camera: None,
             #[cfg(feature="room-project")] room_camera_scene: None,
             camera3d: orr_render::OrbitCamera::new([0.0, 2.0, 0.0], 0.55, 0.5, 16.0),
+            #[cfg(feature = "mesh-navigation")]
+            mesh_camera: None,
             yard_frame: crate::viewport3d::YardFrame::default(),
             #[cfg(feature = "terrain-physics")]
             terrain_view: crate::terrain_physics::TerrainPhysicsView::default(),
@@ -324,6 +379,14 @@ impl Editor {
             navigation_view: crate::navigation_view::NavigationView::default(),
             #[cfg(feature = "navigation")]
             navigation_blocker: None,
+            #[cfg(feature = "mesh-navigation")]
+            mesh_navigation_blocker: None,
+            #[cfg(any(feature = "static-game-actions", feature = "arena-project-export", feature = "terrain", feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
+            scene_load_epoch: next_scene_load_epoch(),
+            #[cfg(feature = "tilemap")]
+            tilemap_start_scene: None,
+            #[cfg(feature = "tilemap")]
+            tilemap_save_guard: None,
             status: None,
             log: Vec::new(),
             sim: SimState::default(),
@@ -340,6 +403,8 @@ impl Editor {
             server_now_ms: 0,
             stopped: None,
             snapshot: None,
+            #[cfg(all(test, feature = "terrain"))]
+            view_recovery_generation: 0,
             bodies: Vec::new(),
             checksum: 0,
             snap_entities: 0,
@@ -510,6 +575,52 @@ impl Editor {
         }
         if self.preview.as_ref().is_some_and(|p| p.seq == 0 || p.rows_dirty) { return Some("proposal snapshot"); }
         None
+    }
+
+    /// Camera staging must survive periodic read-only inspector/client polling.
+    /// Mutation requests and uncertain authoring caches still fail closed.
+    #[cfg(feature = "room-project")]
+    pub(crate) fn room_camera_capture_coherent(&self) -> bool {
+        self.yard_rows_coherent()
+            && self.snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot.timeline().is_none() && snapshot.predicted().checksum() == self.sim.checksum
+            })
+            && self.checksum == self.sim.checksum
+            && !self.batch_uncertain && !self.gesture.busy()
+            && self.input_phase() == input::Phase::Off
+            && !self.dirty.rows && !self.dirty.state && !self.dirty.history
+            && !self.refit && self.refit_checksum.is_none()
+            && self.pending.values().all(|pending| match &pending.kind {
+                Pend::Input(..) | Pend::Gesture(..) => false,
+                Pend::Rows(..) | Pend::Inspect(..) | Pend::Singletons | Pend::History
+                | Pend::State(..) | Pend::Clients | Pend::Detail(..) | Pend::PreviewRows(..) => true,
+            })
+    }
+
+    /// This reports only reviewed editor ERP operations. Ordinary pending reads
+    /// do not become mutations. A disconnect may have lost an acknowledgement,
+    /// even after the existing recovery path cleared pending/gesture state.
+    pub(crate) fn work_status_operations(&self) -> orr_remote::work_status::Operations {
+        use orr_remote::work_status::Operations;
+        if self.down.is_some() || self.batch_uncertain {
+            Operations::OutcomeUncertain
+        } else if self.gesture.busy() || self.input_phase() != input::Phase::Off
+            || self.pending.values().any(|pending| matches!(pending.kind, Pend::Input(..) | Pend::Gesture(..))) {
+            Operations::PendingMutation
+        } else {
+            Operations::Idle
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retire_work_status_owner_for_test(&mut self) {
+        self.backend.work_status_owner = None;
+    }
+
+    pub(crate) fn publish_work_status(&mut self, snapshot: orr_remote::work_status::EditorSnapshot) {
+        if let Some(owner) = &mut self.backend.work_status_owner {
+            owner.publish(snapshot);
+        }
     }
 
     /// Takes the next editor-owned screenshot request from the local host.
@@ -857,6 +968,43 @@ impl Editor {
 
     /// Frames the camera on the scene box (`Scene` singleton), like the sample does.
     pub fn fit_camera(&mut self) {
+        #[cfg(feature = "static-games")]
+        if self.game().is_registered() {
+            // Static primitive games have no builtin Scene singleton or world size.
+            let mut low = [f32::INFINITY; 2];
+            let mut high = [f32::NEG_INFINITY; 2];
+            for body in &self.bodies {
+                let radius = body.outline.extent();
+                for axis in 0..2 {
+                    low[axis] = low[axis].min(body.pos[axis] - radius);
+                    high[axis] = high[axis].max(body.pos[axis] + radius);
+                }
+            }
+            self.camera = if self.bodies.is_empty() { Camera::new([0.0, 0.0], 1.0) }
+                else { Camera::new([(low[0] + high[0]) * 0.5, (low[1] + high[1]) * 0.5],
+                    ((high[0] - low[0]).max(high[1] - low[1]) * 0.6).max(1.0)) };
+            return;
+        }
+        #[cfg(feature = "mesh-navigation")]
+        if self.game().has_mesh_view() {
+            if let Some(view) = self.snapshot.as_ref().and_then(|snapshot| {
+                orr_remote::mesh_navigation::mesh_from_view(snapshot.predicted()).ok()
+            }) {
+                let mut low = [f32::INFINITY; 3];
+                let mut high = [f32::NEG_INFINITY; 3];
+                for point in view.graph.vertices().iter().copied().chain([view.agent.spec.start, view.agent.spec.goal]) {
+                    for axis in 0..3 {
+                        let value = point[axis].to_f32();
+                        low[axis] = low[axis].min(value);
+                        high[axis] = high[axis].max(value);
+                    }
+                }
+                let center = std::array::from_fn(|axis| (low[axis] + high[axis]) * 0.5);
+                let extent = (0..3).map(|axis| high[axis] - low[axis]).fold(0.0_f32, f32::max);
+                self.camera3d = orr_render::OrbitCamera::new(center, 0.55, 0.5, (extent * 1.8).max(2.0));
+            }
+            return;
+        }
         if self.game().is_room() {
             #[cfg(feature="room-project")] if self.has_room_camera() { self.reset_room_camera(); return; }
         }
@@ -908,6 +1056,26 @@ impl Editor {
 
     /// Runs a method and waits for the answer. `Err` carries the host's message.
     fn call(&mut self, method: &str, params: J) -> Result<J, String> {
+        #[cfg(feature = "tilemap")]
+        if let Some((scene, targets)) = self.tilemap_save_guard.as_ref().filter(|_| method == "scene.load" || (method == "scene.save" && params.get("write").and_then(J::as_bool) == Some(true))).cloned() {
+            if method == "scene.load" {
+                return Err("tilemap project scene is pinned; reopen the complete project instead of scene.load".into());
+            }
+            if method == "scene.save" && params.get("write").and_then(J::as_bool) == Some(true) {
+                if params.get("source").and_then(J::as_str).is_some_and(|source| source != "doc") {
+                    return Err("tilemap projects only save the authored document, not a Play frame".into());
+                }
+                if let Some(path) = params.get("path").and_then(J::as_str) {
+                    // Atomic scene save replaces the requested directory entry, not
+                    // its symlink target. Only the admitted destination itself is safe.
+                    if std::path::Path::new(path) != scene.as_path()
+                        || std::fs::canonicalize(path).ok().as_deref() != Some(scene.as_path()) {
+                        return Err("tilemap scene Save As is unsupported; reopen a complete project".into());
+                    }
+                }
+                crate::project::validate_tilemap_host(self, &scene, targets.as_ref())?;
+            }
+        }
         if let Some(d) = &self.down {
             return Err(d.reason.clone());
         }
@@ -1181,6 +1349,27 @@ impl Editor {
         self.dirty.state = true;
     }
 
+    /// A completed direct world mutation is known before rate-limited history
+    /// notifications arrive. Never infer semantic dirtiness from refresh flags:
+    /// sync/read refresh, no-op replies and Play mutations are not scene edits.
+    fn mark_acknowledged_edit(&mut self, response: &J) {
+        if self.sim.mode == Mode::Edit && response.get("changed").and_then(J::as_bool) == Some(true) {
+            self.history.dirty = true;
+        }
+        self.mark_edited();
+    }
+
+    /// Transactions become accepted authoring only at their final commit.
+    /// Missing history is not evidence of a clean document: leave the known
+    /// state intact and schedule the existing authoritative cache refresh.
+    fn mark_committed_edit(&mut self, response: &J) {
+        if let Some(history) = response.get("history").filter(|history| history.get("dirty").and_then(J::as_bool).is_some()) {
+            self.history = History::from_json(history);
+            self.sim.dirty = self.history.dirty;
+        }
+        self.mark_edited();
+    }
+
     fn connection_lost(&mut self, err: &str) {
         if self.down.is_some() {
             return;
@@ -1268,6 +1457,10 @@ impl Editor {
         let ViewUpdate { snapshot, events, resync } = update;
         let disconnected = resync.as_ref().is_some_and(|r| r.disconnected);
         if let Some(reset) = &resync {
+            #[cfg(all(test, feature = "terrain"))]
+            {
+                self.view_recovery_generation = reset.generation;
+            }
             // The editor draws the current predicted pose directly and owns no
             // interpolator or speculative VFX handles. Rebuild that complete
             // presentation baseline even when its sequence has not changed.
@@ -1310,7 +1503,11 @@ impl Editor {
         let frame = s.predicted();
         self.bodies = self.backend.game.drawables(frame);
         if self.game().is_3d() {
-            self.yard_frame = crate::viewport3d::YardFrame::extract(frame);
+            self.yard_frame = if self.game().has_mesh_view() {
+                crate::viewport3d::YardFrame::default()
+            } else {
+                crate::viewport3d::YardFrame::extract(frame)
+            };
             #[cfg(feature = "room-project")]
             if self.game().is_room() {
                 self.yard_frame.items = orr_sample::room_view::items(frame);
@@ -1349,7 +1546,7 @@ impl Editor {
         }
         if self.initial_camera_fit {
             self.initial_camera_fit = false;
-            if self.game().has_keyboard() { self.fit_camera(); }
+            if self.game().has_keyboard() || self.game().has_mesh_view() { self.fit_camera(); }
         }
     }
 
@@ -1519,6 +1716,79 @@ impl Editor {
         self.ingest();
     }
 
+    #[cfg(feature = "mesh-navigation")]
+    pub(crate) fn mesh_workspace_source_stamp(
+        &mut self,
+    ) -> Result<(EditorGame, PathBuf, u64), String> {
+        if !matches!(self.game(), EditorGame::PhysGame | EditorGame::MeshNavigation) {
+            return Err("Mesh workspace changes require a Physics or legacy MeshNavigation profile".into());
+        }
+        self.mesh_creation_source_stamp()
+    }
+
+    #[cfg(feature = "mesh-navigation")]
+    pub(crate) fn mesh_creation_source_stamp(&mut self) -> Result<(EditorGame, PathBuf, u64), String> {
+        let game = self.game();
+        if !(game == EditorGame::PhysGame || game.has_mesh_view())
+            || !self.spec().is_local()
+            || self.erp_status().is_some()
+            || !self.can_mutate()
+            || self.mode() != Mode::Edit
+            || self.previewing().is_some()
+            || self.gesture.busy()
+            || self.batch_uncertain
+            || self.history.in_tx
+            || self.sim.in_tx
+            || self
+                .pending
+                .values()
+                .any(|pending| matches!(pending.kind, Pend::Gesture(..) | Pend::Input(..)))
+        {
+            return Err(
+                "Mesh workspace changes require an idle local PhysGame or MeshNavigation editor in Edit mode without an ERP listener"
+                    .into(),
+            );
+        }
+        let state = self.call("sim.state", J::Null)?;
+        self.apply_state(&state);
+        if state.get("mode").and_then(J::as_str) != Some("edit")
+            || state.get("dirty").and_then(J::as_bool) != Some(false)
+            || state.get("in_tx").and_then(J::as_bool) != Some(false)
+        {
+            return Err(
+                "Save the scene and finish transactions before changing mesh workspaces".into(),
+            );
+        }
+        let proposals = self.call("proposal.list", J::Null)?;
+        if proposals
+            .get("proposals")
+            .and_then(J::as_array)
+            .is_none_or(|open| !open.is_empty())
+        {
+            return Err("Resolve open proposals before changing mesh workspaces".into());
+        }
+        let path = state
+            .get("scene_path")
+            .and_then(J::as_str)
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .ok_or("Save the current scene before changing mesh workspaces")?;
+        let checksum = state
+            .get("checksum")
+            .and_then(orr_remote::wire::parse_checksum)
+            .ok_or("Host did not return an authoritative scene checksum")?;
+        if self
+            .snapshot
+            .as_ref()
+            .is_none_or(|snapshot| snapshot.predicted().checksum() != checksum)
+        {
+            return Err(
+                "Wait for the current authoritative Frame before changing mesh workspaces".into(),
+            );
+        }
+        Ok((game, path, checksum))
+    }
+
     /// Waits (briefly) until the staged frame of the previewed proposal and its entities have arrived.
     fn wait_preview(&mut self) {
         let end = Instant::now() + Duration::from_secs(3);
@@ -1535,6 +1805,97 @@ impl Editor {
     }
 
     // ---- files ----
+
+    #[cfg(all(windows, target_arch = "x86_64", feature = "windows-export"))]
+    pub(crate) fn windows_export_scene(&mut self) -> Result<(PathBuf, u64), String> {
+        if !self.game().is_room() || !self.spec().is_local() || !self.can_mutate()
+            || self.mode() != Mode::Edit || self.previewing().is_some() || self.gesture.busy()
+            || self.batch_uncertain || self.history.in_tx || self.sim.in_tx
+            || self.pending.values().any(|pending| matches!(pending.kind, Pend::Gesture(..) | Pend::Input(..))) {
+            return Err("Export requires an idle local Room editor in Edit mode".into());
+        }
+        let state = self.call("sim.state", J::Null)?;
+        self.apply_state(&state);
+        if state.get("mode").and_then(J::as_str) != Some("edit")
+            || state.get("dirty").and_then(J::as_bool) != Some(false)
+            || state.get("in_tx").and_then(J::as_bool) != Some(false) {
+            return Err("Save the scene and finish transactions before exporting".into());
+        }
+        let proposals = self.call("proposal.list", J::Null)?;
+        if proposals.get("proposals").and_then(J::as_array).is_none_or(|open| !open.is_empty()) {
+            return Err("Resolve open proposals before exporting".into());
+        }
+        let path = state.get("scene_path").and_then(J::as_str).filter(|path| !path.is_empty())
+            .map(PathBuf::from).ok_or("Save the current scene before exporting")?;
+        let checksum = state.get("checksum").and_then(orr_remote::wire::parse_checksum)
+            .ok_or("Host did not return an authoritative scene checksum")?;
+        Ok((path, checksum))
+    }
+
+    #[cfg(all(windows, target_arch = "x86_64", feature = "windows-projects"))]
+    pub(crate) fn windows_project_source_stamp(&mut self) -> Result<(PathBuf, u64), String> {
+        if self.game().is_room() {
+            return self.windows_export_scene();
+        }
+        if self.game() != EditorGame::PhysGame || !self.spec().is_local()
+            || self.erp_status().is_some() || !self.can_mutate()
+            || self.mode() != Mode::Edit || self.previewing().is_some() || self.gesture.busy()
+            || self.batch_uncertain || self.history.in_tx || self.sim.in_tx
+            || self.pending.values().any(|pending| matches!(pending.kind, Pend::Gesture(..) | Pend::Input(..))) {
+            return Err("Project creation requires an idle local PhysGame editor in Edit mode without an ERP listener".into());
+        }
+        let state = self.call("sim.state", J::Null)?;
+        self.apply_state(&state);
+        if state.get("mode").and_then(J::as_str) != Some("edit")
+            || state.get("dirty").and_then(J::as_bool) != Some(false)
+            || state.get("in_tx").and_then(J::as_bool) != Some(false) {
+            return Err("Save the scene and finish transactions before creating a project".into());
+        }
+        let proposals = self.call("proposal.list", J::Null)?;
+        if proposals.get("proposals").and_then(J::as_array).is_none_or(|open| !open.is_empty()) {
+            return Err("Resolve open proposals before creating a project".into());
+        }
+        let path = state.get("scene_path").and_then(J::as_str).filter(|path| !path.is_empty())
+            .map(PathBuf::from).ok_or("Save the current scene before creating a project")?;
+        let checksum = state.get("checksum").and_then(orr_remote::wire::parse_checksum)
+            .ok_or("Host did not return an authoritative scene checksum")?;
+        Ok((path, checksum))
+    }
+
+    #[cfg(feature = "mesh-navigation")]
+    pub fn create_mesh_scene(&mut self, path: &Path) -> bool {
+        if !self.game().is_mesh_navigation() || !self.spec().is_local() || !self.can_mutate()
+            || self.mode() != Mode::Edit || self.previewing().is_some()
+            || self.gesture.busy() || self.batch_uncertain || self.history.in_tx || self.sim.in_tx
+            || self.pending.values().any(|pending| matches!(pending.kind, Pend::Gesture(..) | Pend::Input(..))) {
+            self.error("New mesh scenes require an idle local MeshNavigation editor in Edit mode");
+            return false;
+        }
+        let state = match self.call("sim.state", J::Null) {
+            Ok(state) => state,
+            Err(error) => { self.error(error); return false; }
+        };
+        self.apply_state(&state);
+        if state.get("mode").and_then(J::as_str) != Some("edit")
+            || state.get("dirty").and_then(J::as_bool) != Some(false)
+            || state.get("in_tx").and_then(J::as_bool) != Some(false) {
+            self.error("Save the current scene and finish transactions before creating a new mesh scene");
+            return false;
+        }
+        let proposals = match self.call("proposal.list", J::Null) {
+            Ok(proposals) => proposals,
+            Err(error) => { self.error(error); return false; }
+        };
+        if proposals.get("proposals").and_then(J::as_array).is_none_or(|open| !open.is_empty()) {
+            self.error("Resolve open proposals before creating a new mesh scene");
+            return false;
+        }
+        if let Err(error) = crate::mesh_scene::create(path) {
+            self.error(format!("cannot create {}: {error}", path.display()));
+            return false;
+        }
+        self.open_path(path)
+    }
 
     /// Replaces the document with a scene file. Refused in play mode.
     pub fn open_path(&mut self, path: &Path) -> bool {
@@ -1559,10 +1920,12 @@ impl Editor {
         };
         match self.call("scene.load", if self.game().has_pinned_scene() { json!({"text": text}) } else { json!({"text": text, "path": path.display().to_string()}) }) {
             Ok(r) => {
+                #[cfg(any(feature = "static-game-actions", feature = "arena-project-export", feature = "terrain", feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
+                { self.scene_load_epoch = next_scene_load_epoch(); }
                 self.clear_room_camera();
                 self.select(None);
                 self.refit = true;
-                if self.game() == EditorGame::Arena {
+                if self.game() == EditorGame::Arena || self.game().has_mesh_view() || self.game().is_registered() {
                     self.refit_checksum = r.get("checksum").and_then(orr_remote::wire::parse_checksum);
                 }
                 self.backend.spec.set_local_scene_path(path.to_path_buf());
@@ -1605,6 +1968,8 @@ impl Editor {
                 let written = r.get("written").and_then(J::as_str).unwrap_or_default().to_string();
                 #[cfg(feature="room-project")]
                 if self.room_camera_scene.as_ref().is_some_and(|path| path != Path::new(&written)) { self.clear_room_camera(); }
+                #[cfg(feature = "tilemap")]
+                { self.tilemap_start_scene = None; }
                 self.sim.scene_path = Some(written.clone());
                 if !written.is_empty() {
                     self.backend.spec.set_local_scene_path(PathBuf::from(&written));
@@ -1677,7 +2042,7 @@ impl Editor {
                     self.connection_lost("selection move acknowledgement was malformed; outcome uncertain, reconnect before editing");
                     return false;
                 };
-                if changed { self.mark_edited(); }
+                if changed { self.mark_acknowledged_edit(&result); }
                 changed
             }
             Err(error) => {
@@ -1729,10 +2094,7 @@ impl Editor {
             Ok(r) => {
                 let changed = r.get("changed").and_then(J::as_bool).unwrap_or(false);
                 if changed {
-                    if self.sim.mode == Mode::Edit {
-                        self.history.dirty = true;
-                    }
-                    self.mark_edited();
+                    self.mark_acknowledged_edit(&r);
                 }
                 changed
             }
@@ -1816,7 +2178,14 @@ impl Editor {
     /// hatch for tools and tests (the editor's own actions have methods of
     /// their own). `Err` carries the host's message.
     pub fn host_call(&mut self, method: &str, params: J) -> Result<J, String> {
-        self.call(method, params)
+        #[cfg(feature = "tilemap")]
+        let changed_source = method == "scene.load" || (method == "scene.save" && params.get("write").and_then(J::as_bool) == Some(true));
+        let result = self.call(method, params);
+        #[cfg(any(feature = "static-game-actions", feature = "arena-project-export", feature = "terrain", feature = "tilemap"))]
+        if method == "scene.load" && result.is_ok() { self.scene_load_epoch = next_scene_load_epoch(); }
+        #[cfg(feature = "tilemap")]
+        if changed_source && result.is_ok() { self.tilemap_start_scene = None; }
+        result
     }
 
     /// Parses text as a value of the field `path` of type `type_name` (a
@@ -1834,8 +2203,8 @@ impl Editor {
             return false;
         };
         match self.call("world.insert", json!({"entity": t.param(), "component": component})) {
-            Ok(_) => {
-                self.mark_edited();
+            Ok(r) => {
+                self.mark_acknowledged_edit(&r);
                 true
             }
             Err(e) => {
@@ -1852,8 +2221,8 @@ impl Editor {
             return false;
         };
         match self.call("world.remove", json!({"entity": t.param(), "component": component})) {
-            Ok(_) => {
-                self.mark_edited();
+            Ok(r) => {
+                self.mark_acknowledged_edit(&r);
                 true
             }
             Err(e) => {
@@ -1869,6 +2238,13 @@ impl Editor {
 
     /// The current authoritative 3D snapshot mapped to presentation data.
     pub fn yard_frame(&self) -> &crate::viewport3d::YardFrame { &self.yard_frame }
+
+    /// Presentation recovery token for isolated fixture transition barriers, not
+    /// an acknowledgement or correlation ID for an ERP request.
+    #[cfg(all(test, feature = "terrain"))]
+    pub(crate) fn view_recovery_generation(&self) -> u64 {
+        self.view_recovery_generation
+    }
 
     /// The asynchronously queried GUID map must describe this presentation
     /// generation. Edit rebakes recycle handles, so checksum equality is also
@@ -1887,6 +2263,19 @@ impl Editor {
     #[cfg(feature = "navigation")]
     pub fn set_navigation_blocker(&mut self, blocker: Option<String>) { self.navigation_blocker = blocker; }
 
+    #[cfg(feature = "mesh-navigation")]
+    pub(crate) fn mesh_navigation_mark_edited(&mut self) { self.mark_edited(); }
+    #[cfg(feature = "mesh-navigation")]
+    pub fn set_mesh_navigation_blocker(&mut self, blocker: Option<String>) { self.mesh_navigation_blocker = blocker; }
+    #[cfg(any(feature = "static-game-actions", feature = "arena-project-export", feature = "terrain", feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
+    pub(crate) fn scene_load_epoch(&self) -> u64 { self.scene_load_epoch }
+    #[cfg(feature = "tilemap")]
+    pub(crate) fn admitted_tilemap_scene_matches(&self, expected: &crate::project::PreparedArenaScene) -> bool {
+        self.tilemap_start_scene.as_ref().is_some_and(|(scene, epoch)|
+            *epoch == self.scene_load_epoch && scene.path() == expected.path() && scene.text() == expected.text())
+    }
+
+
     #[cfg(feature="room-project")]
     pub fn install_room_camera(&mut self, document: orr_sample::room_camera::Document) -> Result<(),String> {
         document.validate()?;
@@ -1896,6 +2285,40 @@ impl Editor {
         self.room_camera = Some(document);
         self.room_camera_scene = self.path();
         Ok(())
+    }
+    #[cfg(feature = "mesh-navigation")]
+    pub(crate) fn install_mesh_camera(&mut self, document: crate::mesh_camera::Document) -> Result<(), String> {
+        if !self.game().has_mesh_view() || !self.spec().is_local() {
+            return Err("game camera requires a local MeshNavigation scene".into());
+        }
+        let scene = self.path().ok_or("the mesh scene has no local path")?;
+        let snapshot = self.snapshot().ok_or("wait for an admitted mesh Frame")?;
+        let view = orr_remote::mesh_navigation::mesh_from_view(snapshot.predicted())?;
+        let graph_revision = view.graph.revision();
+        let orbit = document.orbit();
+        for size in [(1, 16384), (16384, 1), (800, 600)] {
+            document.camera(&orbit, size)?;
+        }
+        self.camera3d = orbit;
+        self.mesh_camera = Some(MeshCamera { document, scene, epoch: self.scene_load_epoch(), graph_revision });
+        self.initial_camera_fit = false;
+        self.refit = false;
+        self.refit_checksum = None;
+        Ok(())
+    }
+    #[cfg(feature = "mesh-navigation")]
+    pub(crate) fn has_mesh_camera(&self) -> bool {
+        let Some(camera) = self.mesh_camera.as_ref() else { return false; };
+        self.game().has_mesh_view() && self.spec().is_local()
+            && self.path().as_ref() == Some(&camera.scene) && self.scene_load_epoch() == camera.epoch
+            && self.snapshot().and_then(|snapshot| orr_remote::mesh_navigation::mesh_from_view(snapshot.predicted()).ok())
+                .is_some_and(|view| view.graph.revision() == camera.graph_revision)
+    }
+    #[cfg(feature = "mesh-navigation")]
+    pub(crate) fn clear_mesh_camera(&mut self) {
+        if self.mesh_camera.take().is_some() && self.game().has_mesh_view() {
+            self.fit_camera();
+        }
     }
     pub fn has_room_camera(&self) -> bool {
         #[cfg(feature="room-project")]
@@ -1907,25 +2330,39 @@ impl Editor {
     pub fn presentation_camera3d(&self, size:(u32,u32)) -> Result<orr_render::Camera3D,String> {
         #[cfg(feature="room-project")]
         if self.has_room_camera() { return self.room_camera.as_ref().unwrap().camera(&self.camera3d,size); }
+        #[cfg(feature = "mesh-navigation")]
+        if self.has_mesh_camera() {
+            let snapshot = self.snapshot().ok_or("Mesh game camera requires an authoritative Frame")?;
+            let view = orr_remote::mesh_navigation::mesh_from_view(snapshot.predicted())?;
+            return self.mesh_camera.as_ref().unwrap().document.camera_for_view(&self.camera3d, size, &view);
+        }
         let _ = size;
         Ok(self.camera3d.camera())
     }
     pub fn orbit3d(&mut self, delta:[f32;2]) {
         #[cfg(feature="room-project")]
         if self.has_room_camera() { self.room_camera.as_ref().unwrap().orbit_delta(&mut self.camera3d,delta); return; }
+        #[cfg(feature = "mesh-navigation")]
+        if self.has_mesh_camera() { self.mesh_camera.as_ref().unwrap().document.orbit_delta(&mut self.camera3d, delta); return; }
         self.camera3d.orbit(delta);
     }
     pub fn pan3d(&mut self, delta:[f32;2],size:(u32,u32)) {
         #[cfg(feature="room-project")]
         if self.has_room_camera() { self.room_camera.as_ref().unwrap().pan(&mut self.camera3d,delta,size); return; }
+        #[cfg(feature = "mesh-navigation")]
+        if self.has_mesh_camera() { self.mesh_camera.as_ref().unwrap().document.pan(&mut self.camera3d, delta, size); return; }
         self.camera3d.pan(delta,size);
     }
     pub fn zoom3d(&mut self, delta:f32) {
         #[cfg(feature="room-project")]
         if self.has_room_camera() { self.room_camera.as_ref().unwrap().zoom(&mut self.camera3d,delta); return; }
+        #[cfg(feature = "mesh-navigation")]
+        if self.has_mesh_camera() { self.mesh_camera.as_ref().unwrap().document.zoom(&mut self.camera3d, delta); return; }
         self.camera3d.zoom(delta);
     }
     fn clear_room_camera(&mut self) {
+        #[cfg(feature = "mesh-navigation")]
+        self.clear_mesh_camera();
         #[cfg(feature="room-project")]
         if self.room_camera.take().is_some() {
             self.room_camera_scene = None;
@@ -1945,7 +2382,7 @@ impl Editor {
 
     /// Creates a persisted Yard3D box, or a sphere in the admitted terrain game.
     pub fn spawn_yard_body(&mut self, pos: orr_fp::FPVec3) -> bool {
-        if self.game().is_navigation() { self.error("Point navigation scenes do not support physics bodies or colliders"); return false; }
+        if self.game().is_navigation() || self.game().has_mesh_view() { self.error("Point navigation scenes do not support physics bodies or colliders"); return false; }
         if !self.game().is_3d() || self.mode()!=Mode::Edit || !self.can_mutate() || self.previewing().is_some() {
             self.error("Yard bodies require editable Yard3D scene mode"); return false;
         }
@@ -1954,7 +2391,7 @@ impl Editor {
             "orr_physics3d::Collider":{"shape":if self.game().is_terrain() { json!({"kind":"sphere","radius":0.5}) } else { json!({"kind":"box","half_extents":[0.5,0.5,0.5]}) }}
         }});
         match self.call("world.spawn",params) {
-            Ok(r)=>{ let t=r.get("guid").and_then(J::as_str).and_then(Target::parse); self.mark_edited();self.select(t);self.inspect=None;self.dirty.inspect=true;true }
+            Ok(r)=>{ let t=r.get("guid").and_then(J::as_str).and_then(Target::parse); self.mark_acknowledged_edit(&r);self.select(t);self.inspect=None;self.dirty.inspect=true;true }
             Err(e)=>{self.error(format!("spawn Yard body: {e}"));false}
         }
     }
@@ -1971,9 +2408,9 @@ impl Editor {
         let result=(||{
             self.call("world.patch",json!({"entity":target.param(),"component":"orr_physics3d::Body","path":"pos","value":value_to_json(&Value::Vec3(pos))}))?;
             self.call("world.patch",json!({"entity":target.param(),"component":"orr_physics3d::Body","path":"rot","value":value_to_json(&rot)}))?;
-            self.call("tx.commit",J::Null)?;Ok::<_,String>(())
+            self.call("tx.commit",J::Null)
         })();
-        match result {Ok(())=>{self.mark_edited();true},Err(e)=>{let _=self.call("tx.rollback",J::Null);self.error(e);self.mark_changed();false}}
+        match result {Ok(committed)=>{self.mark_committed_edit(&committed);true},Err(e)=>{let _=self.call("tx.rollback",J::Null);self.error(e);self.mark_changed();false}}
     }
 
     /// Spawns a dynamic circle body at `at` (world units) and selects it.
@@ -1997,7 +2434,7 @@ impl Editor {
         match self.call("world.spawn", params) {
             Ok(r) => {
                 let t = r.get("guid").and_then(J::as_str).or_else(|| r.get("handle").and_then(J::as_str)).and_then(Target::parse);
-                self.mark_edited();
+                self.mark_acknowledged_edit(&r);
                 // The new entity is not in the hierarchy yet: keep the selection through the next refresh.
                 self.select(t);
                 self.inspect = None;
@@ -2110,12 +2547,17 @@ impl Editor {
                 return false;
             }
         };
-        if let Err(e) = self.call("tx.commit", J::Null) {
-            let _ = self.call("tx.rollback", J::Null);
-            self.error(format!("cannot finish Arena player creation: {e}"));
-            return false;
-        }
-        self.mark_edited();
+        let committed = match self.call("tx.commit", J::Null) {
+            Ok(result) => result,
+            Err(e) => {
+                let _ = self.call("tx.rollback", J::Null);
+                self.error(format!("cannot finish Arena player creation: {e}"));
+                return false;
+            }
+        };
+        // Only the final transaction acknowledgement establishes accepted
+        // document history; intermediate spawn/patch replies are not commits.
+        self.mark_committed_edit(&committed);
         self.select(Some(target));
         self.inspect = None;
         self.dirty.inspect = true;
@@ -2131,15 +2573,19 @@ impl Editor {
 
     /// Deletes the selected entity. Refusals (something still points at it) are reported.
     pub fn delete_selected(&mut self) -> bool {
+        if self.game().is_room() {
+            self.error("Use Room level authoring to remove a wall with admission and model-binding checks; required Room actors cannot be deleted here");
+            return false;
+        }
         let Some(t) = self.selection.clone() else {
             self.error("nothing selected");
             return false;
         };
         match self.call("world.despawn", json!({"entity": t.param()})) {
-            Ok(_) => {
+            Ok(r) => {
                 self.select(None);
                 self.inspect = None;
-                self.mark_edited();
+                self.mark_acknowledged_edit(&r);
                 true
             }
             Err(e) => {
@@ -2374,6 +2820,19 @@ impl Editor {
     /// Starts a play session from the scene, paused at tick 0. Does nothing
     /// if one already runs.
     pub fn start_play(&mut self) -> bool {
+        #[cfg(feature = "mesh-navigation")]
+        if self.game().has_mesh_view() && self.sim.mode != Mode::Play {
+            let blocker = self.mesh_navigation_blocker.clone().or_else(|| {
+                if !self.proposals().is_empty() {
+                    return Some("Resolve open proposals before Play".into());
+                }
+                match self.snapshot.as_ref() {
+                    Some(snapshot) => orr_remote::mesh_navigation::mesh_from_view(snapshot.predicted()).err(),
+                    None => Some("Wait for an admitted mesh agent before Play".into()),
+                }
+            });
+            if let Some(error) = blocker { self.error(error); return false; }
+        }
         #[cfg(feature = "navigation")]
         if self.game().is_navigation() && self.sim.mode != Mode::Play {
             let blocker = self.navigation_blocker.clone().or_else(|| {
@@ -2393,6 +2852,8 @@ impl Editor {
         match self.call("sim.start", json!({})) {
             Ok(r) => {
                 self.apply_state(&r);
+                #[cfg(feature = "mesh-navigation")]
+                if self.has_mesh_camera() { self.camera3d = self.mesh_camera.as_ref().unwrap().document.orbit(); }
                 self.mark_changed();
                 self.info("play started");
                 true
@@ -2497,6 +2958,11 @@ impl Editor {
     /// (edits that were not saved are lost), a remote one is connected to afresh.
     /// On failure the editor stays down and says why.
     pub fn restart(&mut self) -> bool {
+        #[cfg(feature = "tilemap")]
+        if self.tilemap_save_guard.is_some() {
+            self.error("tilemap project host is pinned; save tiles and reopen the complete project instead of restarting");
+            return false;
+        }
         let was_uncertain = self.batch_uncertain;
         self.release_control();
         let spec = self.backend.spec.clone();
@@ -2636,6 +3102,10 @@ mod gesture_tests;
 mod input_tests;
 #[cfg(test)]
 mod multi_selection_tests;
+
+#[cfg(all(test, windows, target_arch = "x86_64", feature = "windows-projects"))]
+#[path = "editor/windows_project_stamp_tests.rs"]
+mod windows_project_stamp_tests;
 
 #[cfg(test)]
 mod tick_state_refresh_tests {
@@ -2851,5 +3321,69 @@ mod screenshot_poll_tests {
         let busy = agent.call_err("view.screenshot", json!({"target":"app_framebuffer"}));
         assert_eq!(busy.kind(), Some("view_busy"));
         deliver_screenshot(&mut harness, ticket);
+    }
+}
+
+#[cfg(all(test, feature = "room-project"))]
+mod room_camera_capture_coherence_tests {
+    use super::*;
+    #[test]
+    fn staged_capture_survives_read_polls_but_rejects_mutations() {
+        let mut editor = Editor::open(&default_scene_path()).unwrap();
+        editor.sync();
+        assert!(editor.room_camera_capture_coherent());
+        let context = crate::room_camera_capture::Context {
+            scene: default_scene_path(), epoch: editor.scene_load_epoch(),
+            checksum: editor.checksum(), applied: orr_sample::room_camera::Document::readable_default(),
+        };
+        let mut staged = crate::room_camera_capture::State::default();
+        staged.stage(context.clone(), &editor.camera3d).unwrap();
+        for kind in [Pend::Clients, Pend::State(editor.state_generation), Pend::History, Pend::Singletons] {
+            editor.pending.insert(u64::MAX, Pending { kind, posted_at: Instant::now() });
+            assert!(editor.room_camera_capture_coherent());
+            staged.sync(editor.room_camera_capture_coherent().then_some(&context));
+            assert!(staged.busy());
+        }
+        for kind in [Pend::Input(0, input::Op::Value), Pend::Gesture(0, gestures::Reply::Begin)] {
+            editor.pending.insert(u64::MAX, Pending { kind, posted_at: Instant::now() });
+            assert!(!editor.room_camera_capture_coherent());
+            staged.sync(editor.room_camera_capture_coherent().then_some(&context));
+            assert!(!staged.busy());
+            staged.stage(context.clone(), &editor.camera3d).unwrap();
+        }
+        editor.pending.remove(&u64::MAX);
+        editor.batch_uncertain = true;
+        assert!(!editor.room_camera_capture_coherent());
+        editor.batch_uncertain = false;
+        editor.input.phase = input::Phase::Active;
+        assert!(!editor.room_camera_capture_coherent());
+        editor.input.phase = input::Phase::Off;
+        editor.sim.checksum ^= 1;
+        assert!(!editor.room_camera_capture_coherent());
+    }
+}
+
+#[cfg(feature = "models")]
+#[path = "editor/frame_selection.rs"]
+mod frame_selection;
+
+#[cfg(test)]
+mod work_status_operation_tests {
+    use super::*;
+    use orr_remote::work_status::Operations;
+
+    #[test]
+    fn work_status_ordinary_reads_are_idle_but_lost_mutations_are_uncertain() {
+        let mut editor = Editor::open(&default_scene_path()).unwrap();
+        editor.sync();
+        editor.pending.insert(u64::MAX, Pending {kind:Pend::Clients,posted_at:Instant::now()});
+        assert_eq!(editor.work_status_operations(), Operations::Idle);
+        editor.pending.remove(&u64::MAX);
+        editor.begin_edit("status pending mutation");
+        assert_eq!(editor.work_status_operations(), Operations::PendingMutation);
+        editor.connection_lost("test-only lost acknowledgement");
+        assert!(editor.pending.is_empty());
+        assert!(!editor.gesture.busy());
+        assert_eq!(editor.work_status_operations(), Operations::OutcomeUncertain);
     }
 }

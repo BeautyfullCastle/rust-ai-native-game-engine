@@ -25,7 +25,12 @@ pub struct PreparedArenaScene {
     path: PathBuf,
     text: Arc<str>,
     scene: Arc<Scene>,
+    #[cfg(feature = "tilemap")]
+    tilemap_save_guard: Option<TilemapSceneGuard>,
 }
+#[cfg(feature = "tilemap")]
+#[derive(Clone, Debug)]
+pub struct TilemapSceneGuard { pub sprites: Option<Document> }
 impl PreparedArenaScene {
     pub fn path(&self) -> &Path {
         &self.path
@@ -36,6 +41,8 @@ impl PreparedArenaScene {
     pub fn scene(&self) -> &Scene {
         &self.scene
     }
+    #[cfg(feature = "tilemap")]
+    pub fn tilemap_save_guard(&self) -> Option<&TilemapSceneGuard> { self.tilemap_save_guard.as_ref() }
 }
 #[derive(Clone)]
 pub struct PreparedSprites {
@@ -59,11 +66,30 @@ pub struct PreparedUi {
     pub font: Vec<u8>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TilemapSupport { Unsupported, Supported }
+
+/// Entire admitted presentation. No tile payload is silently discarded.
+pub struct PreparedProjectParts {
+    pub root: PathBuf,
+    pub scene: PreparedArenaScene,
+    pub sprites: Option<PreparedSprites>,
+    pub ui: Option<PreparedUi>,
+    #[cfg(feature = "tilemap")]
+    pub tilemap: Option<crate::project_tilemap::PreparedTilemap>,
+    #[cfg(feature = "tilemap")]
+    pub tilemap_asset: Option<(AssetKey, Asset)>,
+}
+
 pub struct PreparedProject {
     root: PathBuf,
     scene: PreparedArenaScene,
     sprites: Option<PreparedSprites>,
     ui: Option<PreparedUi>,
+    #[cfg(feature = "tilemap")]
+    tilemap: Option<crate::project_tilemap::PreparedTilemap>,
+    #[cfg(feature = "tilemap")]
+    tilemap_asset: Option<(AssetKey, Asset)>,
 }
 impl PreparedProject {
     /// Validate the entire active lock using the caller's real compiled inventory.
@@ -77,6 +103,13 @@ impl PreparedProject {
         root: impl AsRef<Path>,
         runtime: orr_package::Runtime,
         ui_support: UiSupport,
+    ) -> Result<Self, String> {
+        Self::open_with_capabilities(root, runtime, ui_support, TilemapSupport::Unsupported)
+    }
+
+    pub fn open_with_capabilities(
+        root: impl AsRef<Path>, runtime: orr_package::Runtime,
+        ui_support: UiSupport, tilemap_support: TilemapSupport,
     ) -> Result<Self, String> {
         let project = orr_package::Project::open(root.as_ref(), runtime)
             .map_err(|e| format!("project: {e}"))?;
@@ -92,6 +125,9 @@ impl PreparedProject {
             .ok_or("saved project requires schema 2 with an entry; schema 1 is metadata-only")?;
         if manifest.schema != 2 || entry.game != orr_package::ProjectGame::Arena {
             return Err("saved project entry must be schema 2 and game arena".into());
+        }
+        if entry.tilemap.is_some() && (tilemap_support == TilemapSupport::Unsupported || !cfg!(feature = "tilemap")) {
+            return Err("saved project declares tilemap but this host does not support it".into());
         }
         // This check intentionally follows full active-lock verification but precedes
         // scene, sidecar, and font decoding, so unsupported hosts fail closed early.
@@ -134,15 +170,29 @@ impl PreparedProject {
                 )
             })
             .transpose()?;
+        #[cfg(feature = "tilemap")]
+        let (tilemap, tilemap_asset) = if let Some(relative) = &entry.tilemap {
+            let empty = BTreeMap::new();
+            let assets = sprites.as_ref().map_or(&empty, |sprites| &sprites.assets);
+            let count = sprites.as_ref().map_or(0, |sprites| sprites.document.bindings.len());
+            let (tilemap, asset) = crate::project_tilemap::prepare(&project, &lock, &root, relative, assets, count)?;
+            (Some(tilemap), asset)
+        } else { (None, None) };
         Ok(Self {
             root,
             scene: PreparedArenaScene {
                 path: scene_path,
                 text: text.into(),
                 scene: Arc::new(scene),
+                #[cfg(feature = "tilemap")]
+                tilemap_save_guard: tilemap.as_ref().map(|_| TilemapSceneGuard { sprites: sprites.as_ref().map(|sprites| sprites.document.clone()) }),
             },
             sprites,
             ui,
+            #[cfg(feature = "tilemap")]
+            tilemap,
+            #[cfg(feature = "tilemap")]
+            tilemap_asset,
         })
     }
 
@@ -158,15 +208,17 @@ impl PreparedProject {
     pub fn ui(&self) -> Option<&PreparedUi> {
         self.ui.as_ref()
     }
-    pub fn into_parts(
-        self,
-    ) -> (
-        PathBuf,
-        PreparedArenaScene,
-        Option<PreparedSprites>,
-        Option<PreparedUi>,
-    ) {
-        (self.root, self.scene, self.sprites, self.ui)
+    #[cfg(feature = "tilemap")]
+    pub fn tilemap(&self) -> Option<&crate::project_tilemap::PreparedTilemap> { self.tilemap.as_ref() }
+    pub fn into_presentation_parts(self) -> PreparedProjectParts {
+        PreparedProjectParts { root: self.root, scene: self.scene, sprites: self.sprites, ui: self.ui,
+            #[cfg(feature = "tilemap")] tilemap: self.tilemap,
+            #[cfg(feature = "tilemap")] tilemap_asset: self.tilemap_asset }
+    }
+    pub fn into_parts(self) -> Result<(PathBuf, PreparedArenaScene, Option<PreparedSprites>, Option<PreparedUi>), String> {
+        #[cfg(feature = "tilemap")]
+        if self.tilemap.is_some() { return Err("tilemap requires into_presentation_parts".into()); }
+        Ok((self.root, self.scene, self.sprites, self.ui))
     }
 }
 
@@ -476,10 +528,18 @@ mod ui_admission_tests {
 
         manager.remove("korean-game-ui").unwrap();
         assert_eq!(prepared.ui().unwrap().font, expected_font);
-        let (_, _, sprites, ui) = prepared.into_parts();
+        let (_, _, sprites, ui) = prepared.into_parts().unwrap();
         assert!(sprites.is_some());
         assert_eq!(ui.unwrap().font, expected_font);
     }
+}
+
+/// Recheck saved Arena presentation targets against a current authored document.
+/// This performs no filesystem or host writes and does not require all scene edits to stop.
+pub fn validate_arena_sprite_targets(scene: &Scene, document: &Document) -> Result<(), String> {
+    for guid in document.bindings.keys() { validate_target(scene, guid, "sprite binding")?; }
+    if let Some(guid) = &document.camera_follow { validate_target(scene, guid, "camera follow")?; }
+    Ok(())
 }
 
 fn validate_target(scene: &Scene, guid: &str, role: &str) -> Result<(), String> {
@@ -566,7 +626,7 @@ fn resolve_inside(
     Ok(canonical)
 }
 
-pub(crate) fn read_regular(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
+pub fn read_regular(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
     // Do not open a FIFO/device merely to inspect its descriptor afterward.
     let before = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
     if before.file_type().is_symlink() || !before.is_file() || before.len() > limit {

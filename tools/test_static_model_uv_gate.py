@@ -15,7 +15,7 @@ import zlib
 
 import static_model_uv_gate as gate
 from test_room_project_gate import check_room_workflow
-from test_static_model_extract_gate import listing, passed, workflow_job
+from test_static_model_extract_gate import listing, passed, workflow_job, mutate_workflow_job
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 EXPECTED_TESTS = [
@@ -57,6 +57,89 @@ AUTHORING_AGGREGATE_STEP = '      - name: Require every independent static autho
 
 ROOM_WALL_AGGREGATE_STEP = '      - name: Require every independent Room wall authoring matrix row to pass\n        if: always()\n        shell: bash\n        env:\n          ROOM_WALL_RESULT: ${{ needs[\'room-wall-authoring\'].result }}\n        run: |\n          echo "ROOM_WALL_RESULT=$ROOM_WALL_RESULT"\n          if [[ "$ROOM_WALL_RESULT" != "success" ]]; then\n            echo "::error::ROOM_WALL_RESULT must be success, got \'$ROOM_WALL_RESULT\'"\n            exit 1\n          fi\n          echo "All four independent Room wall authoring routes passed."\n'
 
+# These independently owned Arena steps repeat the inherited value without
+# changing it. Pin complete executable blocks: this is not a general exemption
+# for same-value overrides on the protected static-model producers. Unsupported
+# YAML/shell spellings fail closed and require an explicit contract review.
+ARENA_BYTECODE_STEPS = (
+    ("Required Arena editor export CPU acceptance", "arena_editor_export_gate.py cpu",
+     "ORR_ARENA_EXPORT_GATE_EVIDENCE", "${{ runner.temp }}/arena-editor-export-cpu-", ""),
+    ("Required Arena editor export native acceptance", "arena_editor_export_gate.py native",
+     "ORR_ARENA_EXPORT_GATE_EVIDENCE", "/tmp/orr-arena-editor-export-",
+     "        if: runner.os == 'Linux' && runner.arch == 'X64'\n"),
+    ("Required Arena editor UI export native acceptance", "arena_editor_ui_export_gate.py native",
+     "ORR_ARENA_UI_EXPORT_GATE_EVIDENCE", "/tmp/orr-arena-editor-ui-export-",
+     "        if: runner.os == 'Linux' && runner.arch == 'X64'\n"),
+)
+
+
+def arena_bytecode_step(title, command, evidence_key, evidence_prefix, condition):
+    return (f"      - name: {title}\n" + condition +
+            "        shell: bash\n        timeout-minutes: 90\n        env:\n" +
+            f"          {evidence_key}: {evidence_prefix}" +
+            "${{ github.run_id }}-${{ github.run_attempt }}\n" +
+            "          PYTHONDONTWRITEBYTECODE: '1'\n" +
+            "          CARGO_BUILD_JOBS: '2'\n" +
+            f"        run: python -B tools/{command}\n")
+
+
+def inherited_bytecode_contract(sample):
+    header, body = sample.split('    steps:\n', 1)
+    assert 'PYTHONDONTWRITEBYTECODE' not in header, 'no job override of inherited setup'
+    steps = re.split(r'(?=^      - )', body, flags=re.M)
+    assert steps.pop(0) == ''
+    assert steps.pop(0) == BYTECODE_SETUP, 'exact unconditional inherited setup'
+    allowed = {arena_bytecode_step(*entry) for entry in ARENA_BYTECODE_STEPS}
+    seen = set()
+    for step in steps:
+        if 'PYTHONDONTWRITEBYTECODE' not in step:
+            continue
+        # Comments separating the next step are not part of this command.
+        lines = step.splitlines(keepends=True)
+        while lines and (not lines[-1].strip() or lines[-1].lstrip().startswith('#')):
+            lines.pop()
+        executable = ''.join(lines)
+        assert executable in allowed, 'inherited setting must not be overridden later'
+        assert executable not in seen, 'duplicate Arena bytecode exception'
+        seen.add(executable)
+
+
+def check_bytecode_boundary_fixtures(test, text, contract):
+    # Each independently owned command is checked, not just the first occurrence.
+    for entry in ARENA_BYTECODE_STEPS:
+        block = arena_bytecode_step(*entry)
+        test.assertEqual(text.count(block), 1)
+        unrelated = "      - name: Unrelated command boundary\n        run: echo unrelated\n"
+        for side in ('before', 'after'):
+            changed = unrelated + block if side == 'before' else block + unrelated
+            with test.subTest(arena_command=entry[1], unrelated=side):
+                contract(text.replace(block, changed, 1))
+        mutations = {
+            'empty': block.replace("PYTHONDONTWRITEBYTECODE: '1'", "PYTHONDONTWRITEBYTECODE: ''"),
+            'disabled': block.replace("PYTHONDONTWRITEBYTECODE: '1'", "PYTHONDONTWRITEBYTECODE: '0'"),
+            'dynamic': block.replace("PYTHONDONTWRITEBYTECODE: '1'", "PYTHONDONTWRITEBYTECODE: ${{ env.BYTECODE }}"),
+            'duplicate key': block.replace("          PYTHONDONTWRITEBYTECODE: '1'\n", "          PYTHONDONTWRITEBYTECODE: '1'\n" * 2),
+            'renamed step': block.replace(entry[0], 'Unrelated acceptance'),
+            'lookalike command': block.replace(entry[1], entry[1] + '-lookalike'),
+            'additional command': block.replace(entry[1], entry[1] + '; echo extra'),
+            'shell reassignment': block.replace('run: python', 'run: PYTHONDONTWRITEBYTECODE=0 python'),
+            'shell unset': block.replace('run: python', 'run: env -u PYTHONDONTWRITEBYTECODE python'),
+            'multiline command': block.replace('run: python', 'run: |\n          unset PYTHONDONTWRITEBYTECODE\n          python'),
+            'not step env': block.replace('        env:\n', '        with:\n'),
+            'duplicate step': block + block,
+        }
+        for label, changed in mutations.items():
+            with test.subTest(arena_command=entry[1], mutation=label), test.assertRaises(AssertionError):
+                contract(text.replace(block, changed, 1))
+        # A following unrelated step cannot borrow the prior step's exemption.
+        for command in ('unset PYTHONDONTWRITEBYTECODE',
+                        "echo 'PYTHONDONTWRITEBYTECODE=0' >> \"$GITHUB_ENV\"",
+                        'PYTHONDONTWRITEBYTECODE=1 python -B unrelated.py'):
+            extra = unrelated.replace('echo unrelated', command)
+            with test.subTest(arena_command=entry[1], following=command), test.assertRaises(AssertionError):
+                contract(text.replace(block, block + extra, 1))
+
+
 def workflow_contract(text):
     # Reuse the protected checker unchanged: its exact sample header is part
     # of the Room/RAW16 contract, even though this setup belongs to sample-build.
@@ -71,10 +154,13 @@ def workflow_contract(text):
     body = sample.split('    steps:\n', 1)[1]
     steps = list(re.finditer(r'^      - ', body, re.M))
     assert len(steps) > 1 and body[:steps[1].start()] == BYTECODE_SETUP, 'exact unconditional first setup step'
-    assert text.count(BYTECODE_SETUP) == 1, 'unique bytecode setup'
-    assert sample.count('PYTHONDONTWRITEBYTECODE') == 1, 'inherited setting must not be overridden later'
+    assert sample.count(BYTECODE_SETUP) == 1, 'unique bytecode setup in sample-build'
+    arena = workflow_job(text, 'sample-arena-cpu')
+    assert arena.count(BYTECODE_SETUP) == 1, 'unique bytecode setup in Arena CPU'
+    inherited_bytecode_contract(arena)
+    inherited_bytecode_contract(sample)
     assert 'os: [ubuntu-22.04, windows-latest]' in header
-    assert 'needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs, sample-room, static-model-authoring, room-wall-authoring]' in aggregate
+    assert 'needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, generated-user-game-native, static-game-actions-native, generated-user-game-actions-cpu, sample-arena-cpu, sample-fixture-preflight, sample-linked-prefabs, sample-room, static-model-authoring, room-wall-authoring]' in aggregate
     assert re.findall(r'^    if:[ \t]*(.*)$', aggregate, re.M) == ['${{ always() }}'], 'one failure-aware aggregate condition'
     authoring = workflow_job(text, 'static-model-authoring')
     assert authoring == AUTHORING_JOB, 'exact independent eight-row authoring matrix'
@@ -811,7 +897,9 @@ class UvGateTests(unittest.TestCase):
                 gate.strict_json(path)
 
     def test_workflow_required_modes_and_retention(self):
-        workflow_contract((ROOT / '.github/workflows/determinism.yml').read_text())
+        text = (ROOT / '.github/workflows/determinism.yml').read_text()
+        workflow_contract(text)
+        check_bytecode_boundary_fixtures(self, text, workflow_contract)
         for value, dont_write in ((None, False), (None, True), ('', True), ('0', True), ('true', True)):
             with self.subTest(inherited=value, dont_write_bytecode=dont_write), mock.patch.dict(os.environ, {}, clear=False), \
                     mock.patch.object(sys, 'dont_write_bytecode', dont_write), \
@@ -842,6 +930,7 @@ class UvGateTests(unittest.TestCase):
 
     def test_workflow_rejects_disabled_moved_or_unretained_modes(self):
         text = (ROOT / '.github/workflows/determinism.yml').read_text()
+        workflow_contract(text)
         matrix = workflow_job(text, 'static-model-authoring')
         mutations = [
             ('  static-model-authoring:\n', '  static-model-authoring:\n    if: false\n'),
@@ -901,8 +990,10 @@ class UvGateTests(unittest.TestCase):
             'noop': BYTECODE_SETUP.split('        run:', 1)[0] + '        run: ":"\n',
         }
         for label, setup in setup_mutations.items():
-            with self.subTest(setup=label), self.assertRaises(AssertionError):
-                workflow_contract(text.replace(BYTECODE_SETUP, setup, 1))
+            for owner in ('sample-build', 'sample-arena-cpu'):
+                changed = mutate_workflow_job(text, owner, BYTECODE_SETUP, setup)
+                with self.subTest(job=owner, setup=label), self.assertRaises(AssertionError):
+                    workflow_contract(changed)
         sample = workflow_job(text, 'sample-build')
         for action in ('actions/checkout@v4', 'dtolnay/rust-toolchain@stable', 'Swatinem/rust-cache@v2'):
             anchor = '      - uses: ' + action + '\n'
@@ -922,7 +1013,9 @@ class UvGateTests(unittest.TestCase):
 
     def test_workflow_preserves_required_room_and_aggregate(self):
         text = (ROOT / '.github/workflows/determinism.yml').read_text()
-        for old, new in [('needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs, sample-room, static-model-authoring, room-wall-authoring]', 'needs: [native]'),
+        workflow_contract(text)
+        for old, new in [('needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, generated-user-game-native, static-game-actions-native, generated-user-game-actions-cpu, sample-arena-cpu, sample-fixture-preflight, sample-linked-prefabs, sample-room, static-model-authoring, room-wall-authoring]', 'needs: [native]'),
+                         (', generated-user-game-native', ''),
                          ('Required generated Room GPU and source-hidden production export', 'missing Room gate'),
                          ('  sample-room:\n', '  sample-room:\n    # static_model_uv_gate.py forbidden\n'),
                          ('  sample-build:\n', '  sample-build:\n    if: false\n'),

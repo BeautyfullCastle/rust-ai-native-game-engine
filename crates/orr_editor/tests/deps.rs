@@ -151,3 +151,23 @@ fn saved_projects_reuse_optional_sprite_packages_without_new_core_dependencies()
     let package = std::fs::read_to_string(root.join("../orr_package/Cargo.toml")).unwrap();
     assert!(dependencies(&package).iter().all(|dependency| !dependency.starts_with("orr_")), "package metadata must stay independent of engine, simulation and renderer crates");
 }
+
+#[test]
+fn mesh_editor_is_opt_in_without_forcing_terrain_or_simulation_dependencies() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    let feature = manifest.lines().find(|line| line.starts_with("mesh-navigation =")).unwrap();
+    assert!(manifest.contains("default = []"));
+    for required in ["\"models\"", "\"orr_remote/mesh-navigation\"", "\"dep:orr_navigation\""] {
+        assert!(feature.contains(required));
+    }
+    for excluded in ["\"navigation\"", "\"terrain\"", "terrain-physics", "animated-models", "irradiance-probes"] {
+        assert!(!feature.contains(excluded));
+    }
+    let library = std::fs::read_to_string(root.join("src/lib.rs")).unwrap();
+    assert!(library.contains("#[cfg(feature = \"mesh-navigation\")]\npub mod mesh_navigation;"));
+    for name in ["orr_fp", "orr_ecs", "orr_sim", "orr_session", "orr_physics3d"] {
+        let manifest = std::fs::read_to_string(root.join(format!("../{name}/Cargo.toml"))).unwrap();
+        assert!(!dependencies(&manifest).iter().any(|dependency| dependency.starts_with("orr_navigation")));
+    }
+}
