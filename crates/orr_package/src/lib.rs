@@ -7,6 +7,8 @@ pub use explanation::PackageExplanation;
 mod project_identity;
 pub use project_identity::{format_game_id, ProgressProfile, ProjectProgress};
 mod cached_revision;
+mod checked_remove;
+mod restore_removed;
 mod verification;
 pub use verification::PackageVerification;
 
@@ -142,6 +144,9 @@ pub enum ProjectGame {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectEntry {
+    /// Optional finite Arena background tilemap. Null is not omission.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present_sprites")]
+    pub tilemap: Option<String>,
     /// Optional Room-only presentation camera document.
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present_sprites")]
     pub camera: Option<String>,
@@ -233,6 +238,14 @@ impl ProjectManifest {
             (1, None) => {}
             (2 | 3, Some(entry)) => {
                 portable(&entry.scene)?;
+                if let Some(tilemap) = &entry.tilemap {
+                    portable(tilemap)?;
+                    if self.schema != 2 || entry.game != ProjectGame::Arena
+                        || tilemap.contains('/') || tilemap.starts_with('.')
+                        || [Some("orr.project.json"), Some("orr.packages.lock.json"), Some(entry.scene.as_str()), entry.sprites.as_deref(), entry.models.as_deref(), entry.camera.as_deref(), entry.ui.as_ref().and_then(|ui| ui.document.as_deref())]
+                            .into_iter().flatten().any(|path| path.eq_ignore_ascii_case(tilemap))
+                    { return fail("tilemap requires a distinct root-level schema-2 Arena sidecar"); }
+                }
                 if let Some(sprites) = &entry.sprites {
                     portable(sprites)?;
                     if sprites.eq_ignore_ascii_case(&entry.scene) {
@@ -460,6 +473,7 @@ impl Project {
         approved: Option<&Lock>,
         before_publish: impl FnOnce() -> std::result::Result<(), String>,
     ) -> Result<Lock> {
+        self.require_mutable_presentation()?;
         if sources.is_empty() || sources.len() + candidates.len() > MAX_PACKAGES {
             return fail("supply 1..128 local package directories");
         }
@@ -479,6 +493,7 @@ impl Project {
             }
         }
         before_publish().map_err(Error)?;
+        self.require_mutable_presentation()?;
         self.publish(&lock)?;
         Ok(lock)
     }
@@ -569,11 +584,30 @@ impl Project {
     /// Remove a direct selection. A required transitive package remains active.
     /// Stored objects and all source files are retained.
     pub fn remove(&self, name: &str) -> Result<Lock> {
+        self.require_mutable_presentation()?;
         let _guard = self.writer()?;
         let old = self.verify()?;
         let lock = self.prepare_remove(old, name)?;
+        self.require_mutable_presentation()?;
         self.publish(&lock)?;
         Ok(lock)
+    }
+    /// Tilemap v1 cannot prove arbitrary package changes preserve all references.
+    /// Re-read rather than trusting an old Project handle's manifest snapshot.
+    fn require_mutable_presentation(&self) -> Result<()> {
+        let path = self.root.join("orr.project.json");
+        let current = match fs::symlink_metadata(&path) {
+            Ok(_) => Some(json::<ProjectManifest>(&path)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.into()),
+        };
+        if current != self.manifest {
+            return fail("project manifest changed since package operation opened; reopen project");
+        }
+        if current.as_ref().and_then(|manifest| manifest.entry.as_ref()).is_some_and(|entry| entry.tilemap.is_some()) {
+            return fail("tilemap projects do not support package installation, removal, revision changes or image reimport yet");
+        }
+        Ok(())
     }
     fn writer(&self) -> Result<Writer> {
         let dir = self.root.join(".orr/packages");
@@ -818,6 +852,7 @@ fn resolve(
         version: &str,
         available: &BTreeMap<String, LockedPackage>,
         active: &mut BTreeSet<String>,
+        path: &mut Vec<String>,
         output: &mut BTreeMap<String, LockedPackage>,
     ) -> Result<()> {
         let p = available
@@ -830,7 +865,17 @@ fn resolve(
             ));
         }
         if active.contains(name) {
-            return fail(format!("dependency cycle: {name}"));
+            // The DFS path contains exactly the active ancestors. Report only
+            // the closed cycle, not the selecting prefix that led into it.
+            // All path entries already passed exact-version admission above.
+            let cycle = path
+                .iter()
+                .skip_while(|node| node.as_str() != name)
+                .map(|node| format!("{node}@{}", available[node].manifest.version))
+                .chain(std::iter::once(format!("{name}@{version}")))
+                .collect::<Vec<_>>()
+                .join(" -> ");
+            return fail(format!("dependency cycle: {cycle}"));
         }
         if output.contains_key(name) {
             return Ok(());
@@ -839,17 +884,27 @@ fn resolve(
             return fail("package graph limit exceeded");
         }
         active.insert(name.to_string());
+        path.push(name.to_string());
         for (dep, version) in &p.manifest.dependencies {
-            visit(dep, version, available, active, output)?;
+            visit(dep, version, available, active, path, output)?;
         }
+        path.pop();
         active.remove(name);
         output.insert(name.to_string(), p.clone());
         Ok(())
     }
     let mut output = BTreeMap::new();
     let mut active = BTreeSet::new();
+    let mut path = Vec::new();
     for (name, version) in direct {
-        visit(name, version, available, &mut active, &mut output)?;
+        visit(
+            name,
+            version,
+            available,
+            &mut active,
+            &mut path,
+            &mut output,
+        )?;
     }
     Ok(output)
 }
@@ -1171,6 +1226,51 @@ mod tests {
         f(&mut m);
         fs::write(path.join(MANIFEST), serde_json::to_vec(&m).unwrap()).unwrap();
     }
+    #[test]
+    fn tilemap_declaration_and_all_lock_writers_fail_closed() {
+        let tmp = fixture_dir();
+        let src = source(tmp.path(), "tile-art", &[]);
+        let root = tmp.path().join("project");
+        fs::create_dir(&root).unwrap();
+        let stale = Project::open(&root, Runtime::content_only()).unwrap();
+        let lock = stale.install(std::slice::from_ref(&src)).unwrap();
+        let original_lock = fs::read(root.join(LOCK)).unwrap();
+        let declaration = br#"{"schema":2,"engine":"*","entry":{"game":"arena","scene":"a.yaml","tilemap":"a.tiles.json"}}"#;
+        fs::write(root.join("orr.project.json"), declaration).unwrap();
+        assert!(stale.remove("tile-art").unwrap_err().to_string().contains("manifest changed"));
+        let project = Project::open(&root, Runtime::content_only()).unwrap();
+        for result in [
+            project.install(std::slice::from_ref(&src)),
+            project.remove("tile-art"),
+            project.remove_checked("tile-art", &lock, &lock, || Ok(())),
+            project.install_checked(std::slice::from_ref(&src), &lock, &lock, || Ok(())),
+            project.restore_cached("tile-art", &lock.packages["tile-art"].digest),
+        ] {
+            assert!(result.unwrap_err().to_string().contains("tilemap projects"));
+            assert_eq!(fs::read(root.join(LOCK)).unwrap(), original_lock);
+        }
+        for value in ["null", "\"a.yaml\"", "\".orr/map.json\"", "\"nested/map.json\"", "\"orr.project.json\""] {
+            let text = format!(r#"{{"schema":2,"engine":"*","entry":{{"game":"arena","scene":"a.yaml","tilemap":{value}}}}}"#);
+            fs::write(root.join("orr.project.json"), text).unwrap();
+            assert!(Project::open(&root, Runtime::content_only()).is_err());
+        }
+    }
+
+    #[test]
+    fn tilemap_added_inside_checked_callback_cannot_publish() {
+        let tmp = fixture_dir();
+        let src = source(tmp.path(), "tile-art", &[]);
+        let root = tmp.path().join("project");
+        fs::create_dir(&root).unwrap();
+        let project = Project::open(&root, Runtime::content_only()).unwrap();
+        let preview = project.preview_install(std::slice::from_ref(&src)).unwrap();
+        let result = project.install_checked(&[src], &preview.previous, &preview.candidate, || {
+            fs::write(root.join("orr.project.json"), br#"{"schema":2,"engine":"*","entry":{"game":"arena","scene":"a.yaml","tilemap":"a.tiles.json"}}"#).map_err(|e| e.to_string())
+        });
+        assert!(result.unwrap_err().to_string().contains("manifest changed"));
+        assert!(!root.join(LOCK).exists());
+    }
+
     #[test]
     fn install_load_remove_reinstall_identity_and_source_isolation() {
         let tmp = fixture_dir();

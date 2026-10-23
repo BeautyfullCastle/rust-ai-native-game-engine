@@ -254,7 +254,7 @@ impl ClientSession for YardClientSession {
         let bridge = self.handle.bridge.lock().unwrap();
         let slot = bridge.local_slot().0;
         let m = self.handle.metrics.as_ref().map(|m| m.status());
-        let playing = !snap.timeline().is_some_and(|timeline| !timeline.playing);
+        let playing = snap.timeline().is_none_or(|timeline| timeline.playing);
         json!({
             "mode":"client", "state":if playing { "playing" } else { "paused" }, "playing":playing,
             "slot":slot, "player_count":PLAYERS,

@@ -208,6 +208,9 @@ fn baseline_verification_and_the_last_play_recording() {
 #[test]
 fn tool_errors_are_results_with_is_error_and_the_engine_message() {
     let host = TestHost::start();
+    let mut erp = host.erp("claude-tok");
+    let before = erp.call("scene.save", json!({})).unwrap();
+    let history = erp.call("history.list", J::Null).unwrap();
     let mut limited = McpChild::against(&host, "limited-tok", &[]);
     limited.initialize();
     let body = guid_from_overview(&mut limited, "body_02");
@@ -221,7 +224,8 @@ fn tool_errors_are_results_with_is_error_and_the_engine_message() {
     assert_eq!(a["isError"], true);
     let at = McpChild::text(&a);
     assert!(at.contains("approve") && at.contains("permission_denied"), "{at}");
-    assert!(a.get("structuredContent").is_none());
+    assert_eq!(structured(&a), &json!({"error":{"origin":"erp", "code":orr_remote::PERMISSION_DENIED, "data":{"kind":"permission_denied"}}}));
+    assert_eq!(a["content"][1], json!({"type":"text", "text":structured(&a).to_string()}));
     // No sim_control either.
     assert_eq!(limited.call_tool("sim_run", json!({"action": "start"}))["isError"], true);
 
@@ -230,6 +234,7 @@ fn tool_errors_are_results_with_is_error_and_the_engine_message() {
     assert_eq!(bad["isError"], true);
     let bt = McpChild::text(&bad);
     assert!(bt.contains("e_deadbeef") && bt.contains("Nothing was staged"), "{bt}");
+    assert_eq!(structured(&bad), &json!({"error":{"origin":"erp", "code":orr_remote::NOT_FOUND, "data":{"kind":"unknown_entity"}}}));
     let list = McpChild::text(&limited.call_tool("list_proposals", json!({})));
     assert!(list.contains("1 open proposal") && list.contains("p1") && !list.contains("p2"), "{list}");
 
@@ -253,6 +258,8 @@ fn tool_errors_are_results_with_is_error_and_the_engine_message() {
     // The connection still works after all those errors.
     assert_eq!(limited.call_tool("history", json!({}))["isError"], false);
     limited.assert_stdout_is_only_json_rpc();
+    assert_eq!(erp.call("scene.save", json!({})).unwrap(), before);
+    assert_eq!(erp.call("history.list", J::Null).unwrap(), history);
 }
 
 #[test]
@@ -344,7 +351,7 @@ fn tool_groups_switch_tools_on_and_off() {
     m.initialize();
     let list = m.request("tools/list", json!({}));
     let names: Vec<&str> = list["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, vec!["scene_overview", "get_entity", "get_schema", "verify_proposal"]);
+    assert_eq!(names, vec!["editor_work_status", "scene_overview", "get_entity", "get_schema", "verify_proposal"]);
     // A tool of a group that is off is unknown.
     assert_eq!(m.request_raw("tools/call", json!({"name": "propose_changes", "arguments": {"ops": []}}))["error"]["code"], -32602);
     assert_eq!(m.call_tool("scene_overview", json!({"limit": 1}))["isError"], false);
@@ -449,6 +456,7 @@ fn guarded_accept_forwards_verification_state_and_never_falls_back_to_manual_acc
     let refused = m.call_tool("accept_proposal", json!({"proposal_id": "p1", "verified_state": structured(&report)["verified_state"]}));
     assert_eq!(refused["isError"], true);
     assert!(McpChild::text(&refused).contains("stale_verification"));
+    assert_eq!(structured(&refused), &json!({"error":{"origin":"erp", "code":orr_remote::CONFLICT, "data":{"kind":"stale_verification"}}}));
     assert_eq!(erp.call("scene.save", json!({})).unwrap()["text"], before);
     assert_eq!(erp.call("proposal.list", J::Null).unwrap()["proposals"].as_array().unwrap().len(), 1);
     let null_state = m.call_tool("accept_proposal", json!({"proposal_id": "p1", "verified_state": null}));
@@ -537,4 +545,42 @@ fn arena_input_scores_and_verifies_recorded_play() {
     assert_eq!(erp.call("scene.save", json!({})).unwrap()["text"], before);
     assert!(structured(&m.call_tool("history", json!({})))["entries"].as_array().unwrap().is_empty());
     m.assert_stdout_is_only_json_rpc();
+}
+
+#[test]
+fn real_verification_admission_error_preserves_only_safe_kind_and_code() {
+    let host = TestHost::start();
+    let mut erp = host.erp("claude-tok");
+    let before = erp.call("scene.save", json!({})).unwrap();
+    let history = erp.call("history.list", J::Null).unwrap();
+    let mut m = McpChild::against(&host, "claude-tok", &[]);
+    m.initialize();
+    let result = m.call_tool("verify_proposal", json!({"inputs":{"kind":"idle", "ticks":6001}}));
+    assert_eq!(result["isError"], true);
+    assert_eq!(structured(&result), &json!({"error":{"origin":"erp", "code":orr_remote::LIMIT_EXCEEDED, "data":{"kind":"verify_limit"}}}));
+    assert_eq!(result["content"][1], json!({"type":"text", "text":structured(&result).to_string()}));
+    assert_eq!(erp.call("scene.save", json!({})).unwrap(), before);
+    assert_eq!(erp.call("history.list", J::Null).unwrap(), history);
+    m.assert_stdout_is_only_json_rpc();
+}
+
+#[test]
+fn startup_and_invalid_scheme_diagnostics_redact_endpoint_credentials() {
+    for (url, status) in [
+        ("ws://user:password@127.0.0.1:1/known-token?token=query-secret#fragment-secret", 0),
+        ("http://user:password@127.0.0.1:1/known-token?token=query-secret#fragment-secret", 2),
+    ] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_orr_mcp"))
+            .args(["--erp", url, "--token", "known-token"])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(status));
+        assert!(output.stdout.is_empty());
+        let text = String::from_utf8_lossy(&output.stderr);
+        assert!(text.contains("127.0.0.1:1/"), "preserve the nonsecret endpoint: {text}");
+        for private in ["user:password", "password", "known-token", "query-secret", "fragment-secret"] {
+            assert!(!text.contains(private), "credential leaked: {text}");
+        }
+    }
 }

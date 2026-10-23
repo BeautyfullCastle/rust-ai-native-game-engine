@@ -45,6 +45,7 @@ pub struct McpServer {
     bridge: Bridge,
     groups: ToolGroups,
     initialized: bool,
+    structured_errors: bool,
     /// Log each request (method and outcome) to stderr.
     pub verbose: bool,
 }
@@ -56,7 +57,7 @@ fn error_response(id: J, code: i64, message: &str) -> J {
 impl McpServer {
     /// A server that offers the tools of `groups` and reaches the engine through `bridge`.
     pub fn new(bridge: Bridge, groups: ToolGroups) -> McpServer {
-        McpServer { bridge, groups, initialized: false, verbose: false }
+        McpServer { bridge, groups, initialized: false, structured_errors: false, verbose: false }
     }
 
     /// The tool groups that are on.
@@ -155,6 +156,7 @@ impl McpServer {
         // Answer with the client's revision if we speak it, else with ours (the client may then disconnect).
         let version = if requested == PROTOCOL_VERSION || ALSO_SUPPORTED.contains(&requested) { requested } else { PROTOCOL_VERSION };
         self.initialized = true;
+        self.structured_errors = version == PROTOCOL_VERSION;
         Ok(json!({
             "protocolVersion": version,
             "capabilities": {
@@ -175,12 +177,21 @@ impl McpServer {
             Some(_) => return Err((INVALID_PARAMS, "'arguments' must be an object".into())),
         };
         let def = tools::find(name).filter(|t| self.groups.has(t.group)).ok_or_else(|| (INVALID_PARAMS, format!("unknown tool: {name}")))?;
-        Ok(match tools::run(&mut self.bridge, def.name, args) {
+        Ok(match tools::run_detailed(&mut self.bridge, def.name, args) {
             Ok(out) => {
                 let structured = if out.structured.is_object() { out.structured } else { json!({"value": out.structured}) };
                 json!({"content": [{"type": "text", "text": out.text}], "structuredContent": structured, "isError": false})
             }
-            Err(fail) => json!({"content": [{"type": "text", "text": fail.0}], "isError": true}),
+            Err(fail) => {
+                let structured = self.structured_errors.then(|| fail.structured()).flatten();
+                let mut content = vec![json!({"type": "text", "text": fail.legacy.0})];
+                if let Some(structured) = structured {
+                    content.push(json!({"type": "text", "text": structured.to_string()}));
+                    json!({"content": content, "structuredContent": structured, "isError": true})
+                } else {
+                    json!({"content": content, "isError": true})
+                }
+            }
         })
     }
 

@@ -1,6 +1,6 @@
 //! Create one offline, versioned Arena starter with an explicit authoring seed.
 use std::{collections::BTreeMap, ffi::OsString, path::PathBuf};
-const HELP: &str = "Usage: orr_new_arena --output ABSOLUTE_NEW_DIR --template arena-2d-v1 --seed KEY\n\nCreates one sprite-only two-player Arena starter on Linux. The parent must exist;\nall existing destinations are rejected. KEY is 1..128 ASCII letters, digits,\ndots, underscores or hyphens. Same seed/template/tool reproduces project bytes;\nchoose a different seed for fresh authored GUIDs. Runtime identity and shared\nplayer preferences do not change. No downloads, scripts or builds are executed.\n\nWith collect-dodge enabled: --template collect-dodge-2d-v1 --seed KEY --game-id UUID\nrequires an explicit canonical lowercase UUIDv4 for the new game.\nWith collect-ui enabled, collect-dodge-ui-2d-v1 also installs the authored UI and Korean font.\nA reused UUID shares high-score identity; the seed does not create or change game identity.\n\nWith room-project enabled: --template room-escape-3d-v1 --seed KEY creates a closed static-model RoomEscapeV1 starter. No --game-id or progress/save identity is accepted.";
+const HELP: &str = "Usage: orr_new_arena --output ABSOLUTE_NEW_DIR --template arena-2d-v1 --seed KEY\n\nCreates one sprite-only two-player Arena starter on Linux. The parent must exist;\nall existing destinations are rejected. KEY is 1..128 ASCII letters, digits,\ndots, underscores or hyphens. Same seed/template/tool reproduces project bytes;\nchoose a different seed for fresh authored GUIDs. Runtime identity and shared\nplayer preferences do not change. No downloads, scripts or builds are executed.\n\nWith collect-dodge enabled: --template collect-dodge-2d-v1 --seed KEY --game-id UUID\nrequires an explicit canonical lowercase UUIDv4 for the new game.\nWith collect-ui enabled, collect-dodge-ui-2d-v1 also installs the authored UI and Korean font.\nA reused UUID shares high-score identity; the seed does not create or change game identity.\n\nWith room-project enabled: --template room-escape-3d-v1 --seed KEY creates a closed static-model RoomEscapeV1 starter. No --game-id or progress/save identity is accepted.\n\nWith tilemap enabled: --template arena-tilemap-2d-v1 creates a closed installed-atlas Arena background map for tilemap-enabled editor paint/erase/Undo/Save/reopen/Play. Linux creation only. Existing-project Attach, export and package changes are unsupported.";
 fn main() {
     if let Err((code, error)) = run() {
         eprintln!("error: {error}");
@@ -43,6 +43,12 @@ fn run() -> Result<(), (i32, String)> {
                 let _ = game_id;
                 Err("CollectDodge template requires collect-dodge feature".into())
             }
+        } else if options.template == orr_sample::project_create::TILEMAP_TEMPLATE {
+            if args.contains_key("--game-id") { return Err((2, "--game-id is only valid for CollectDodge".into())); }
+            #[cfg(feature = "tilemap")]
+            { orr_sample::project_create::create_tilemap(&options) }
+            #[cfg(not(feature = "tilemap"))]
+            { Err("Arena tilemap template requires tilemap feature".into()) }
         } else {
             if args.contains_key("--game-id") {
                 return Err((2, "--game-id is only valid for CollectDodge".into()));

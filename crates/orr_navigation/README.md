@@ -1,9 +1,16 @@
-# Bounded terrain navigation (partial #103)
+# Bounded point-agent navigation (partial #103)
 
 `orr_navigation` is optional, GPU-free fixed-point code. It does not change any
 engine default or add a simulation/game dependency. This slice is a canonical
 heightfield triangle graph with deterministic corridor planning and an explicitly
 snapshotted movement helper. It is not a general navmesh.
+
+The independent `mesh::StaticMeshGraph` module also bakes explicitly supplied
+static triangles, including ramps, bridges and disconnected overlapping floors.
+Its canonical asset can be saved, loaded, planned and sampled by absolute route
+distance without a terrain dependency. See
+[the static-mesh workflow](../../docs/static-mesh-navigation.md) for its distinct
+limits, format and executable example. The terrain contracts below are unchanged.
 
 ## Supported agents and numerical domain
 

@@ -1,5 +1,5 @@
-//! GPU-free, bounded point-agent navigation on the canonical terrain triangles.
-//! This is a heightfield triangle graph, not a clearance-aware navmesh or funnel.
+//! GPU-free, bounded point-agent navigation on terrain or explicit static triangles.
+//! These are triangle graphs, not clearance-aware navmeshes or funnels.
 //! See the crate README for the numerical, ownership and movement contracts.
 #![deny(clippy::float_arithmetic)]
 #![deny(clippy::disallowed_types)]
@@ -11,6 +11,7 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
 use std::fmt;
 
+pub mod mesh;
 mod state;
 pub use state::NavigatorSnapshot;
 

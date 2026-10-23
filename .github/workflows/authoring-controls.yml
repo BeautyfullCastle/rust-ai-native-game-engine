@@ -1,0 +1,42 @@
+name: Authoring recorded controls and package search
+on:
+  pull_request:
+    branches: [main, su/engine-correctness-hardening, su/authoring-development-integration-20261021, su/static-game-starter-20261022]
+    types: [ready_for_review]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  authoring-controls:
+    # Additive CPU coverage; existing acceptance/security CI remains mandatory.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test the exact-count evidence validator
+        run: python tools/check-authoring-controls.py --self-test
+      - name: Focused CPU tests, production lint and feature boundaries
+        run: python tools/check-authoring-controls.py
+      - name: Preserve command and test evidence, including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: authoring-controls-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/authoring-controls-evidence/*.log
+          if-no-files-found: warn
+          retention-days: 7

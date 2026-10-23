@@ -436,6 +436,14 @@ impl TerrainPanel {
     }
 
     pub fn show(&mut self, ui: &mut Ui, editor: &Editor) {
+        self.show_with_scroll(ui, editor, false);
+    }
+    /// Reuse the same controls inside the editor's shared authoring scroller.
+    /// Standalone callers keep the bounded inner scroller through `show`.
+    pub(crate) fn show_in_parent_scroll(&mut self, ui: &mut Ui, editor: &Editor) {
+        self.show_with_scroll(ui, editor, true);
+    }
+    fn show_with_scroll(&mut self, ui: &mut Ui, editor: &Editor, parent_scrolled: bool) {
         #[cfg(feature = "terrain-physics")]
         if editor.game().is_terrain() {
             ui.collapsing("Terrain collision", |ui| {
@@ -456,55 +464,60 @@ impl TerrainPanel {
         }
         self.sync_for_editor(editor);
         ui.collapsing("Terrain authoring", |ui| {
-            let height = ui.available_height().clamp(120.0, 420.0);
-            egui::ScrollArea::vertical()
-                .id_salt("terrain-authoring-scroll")
-                .max_height(height)
-                .show(ui, |ui| {
-                    ui.weak("Presentation only · terrain Save/Undo are separate from the scene");
-                    let context = Self::require_context(editor);
-                    if let Err(reason) = &context {
-                        ui.label(reason);
-                    }
-                    ui.add_enabled_ui(context.is_ok(), |ui| {
-                        text_field(ui, "Terrain scene-relative path", &mut self.local_path);
-                        ui.collapsing("New terrain settings", |ui| {
-                            text_field(ui, "Terrain asset ID", &mut self.asset_id);
-                            index_field(ui, "Terrain width", &mut self.dimensions[0]);
-                            index_field(ui, "Terrain depth", &mut self.dimensions[1]);
-                            text_field(ui, "Terrain origin X", &mut self.origin[0]);
-                            text_field(ui, "Terrain origin Z", &mut self.origin[1]);
-                            text_field(ui, "Terrain spacing", &mut self.spacing);
-                            text_field(ui, "Terrain initial height", &mut self.initial_height);
-                            ui.weak(format!(
-                                "Dimensions: 2–{} vertices per side",
-                                orr_terrain::MAX_SIDE
-                            ));
-                        });
-                        ui.horizontal(|ui| {
-                            if ui.button("Create terrain").clicked() {
-                                let _ = self.create_for_editor(editor);
-                            }
-                            if ui.button("Open terrain").clicked() {
-                                let _ = self.open_for_editor(editor);
-                            }
-                        });
-                        ui.collapsing("Installed terrain package", |ui| {
-                            text_field(ui, "Terrain project root", &mut self.project);
-                            text_field(ui, "Terrain package name", &mut self.package);
-                            text_field(ui, "Terrain asset path in package", &mut self.asset);
-                            if ui.button("Open verified terrain package").clicked() {
-                                let _ = self.open_package_for_editor(editor);
-                            }
-                        });
-                        if self.document.terrain().is_some() {
-                            self.show_attached(ui, editor);
+            let mut content = |ui: &mut Ui| {
+                ui.weak("Presentation only · terrain Save/Undo are separate from the scene");
+                let context = Self::require_context(editor);
+                if let Err(reason) = &context {
+                    ui.label(reason);
+                }
+                ui.add_enabled_ui(context.is_ok(), |ui| {
+                    text_field(ui, "Terrain scene-relative path", &mut self.local_path);
+                    ui.collapsing("New terrain settings", |ui| {
+                        text_field(ui, "Terrain asset ID", &mut self.asset_id);
+                        index_field(ui, "Terrain width", &mut self.dimensions[0]);
+                        index_field(ui, "Terrain depth", &mut self.dimensions[1]);
+                        text_field(ui, "Terrain origin X", &mut self.origin[0]);
+                        text_field(ui, "Terrain origin Z", &mut self.origin[1]);
+                        text_field(ui, "Terrain spacing", &mut self.spacing);
+                        text_field(ui, "Terrain initial height", &mut self.initial_height);
+                        ui.weak(format!(
+                            "Dimensions: 2–{} vertices per side",
+                            orr_terrain::MAX_SIDE
+                        ));
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button("Create terrain").clicked() {
+                            let _ = self.create_for_editor(editor);
+                        }
+                        if ui.button("Open terrain").clicked() {
+                            let _ = self.open_for_editor(editor);
                         }
                     });
-                    if let Some(error) = &self.error {
-                        ui.colored_label(egui::Color32::RED, error);
+                    ui.collapsing("Installed terrain package", |ui| {
+                        text_field(ui, "Terrain project root", &mut self.project);
+                        text_field(ui, "Terrain package name", &mut self.package);
+                        text_field(ui, "Terrain asset path in package", &mut self.asset);
+                        if ui.button("Open verified terrain package").clicked() {
+                            let _ = self.open_package_for_editor(editor);
+                        }
+                    });
+                    if self.document.terrain().is_some() {
+                        self.show_attached(ui, editor);
                     }
                 });
+                if let Some(error) = &self.error {
+                    ui.colored_label(egui::Color32::RED, error);
+                }
+            };
+            if parent_scrolled {
+                content(ui);
+            } else {
+                let height = ui.available_height().clamp(120.0, 420.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("terrain-authoring-scroll")
+                    .max_height(height)
+                    .show(ui, content);
+            }
         });
     }
     fn show_attached(&mut self, ui: &mut Ui, editor: &Editor) {

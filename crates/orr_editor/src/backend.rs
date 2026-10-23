@@ -17,7 +17,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use orr_remote::sample::{spawn_arena_host, spawn_phys_host};
+use orr_remote::sample::{spawn_arena_host_with_editor_work_status, spawn_phys_host_with_editor_work_status};
 use orr_remote::{Auth, Caps, ErpClient, LocalHost, RemoteConfig, RemoteIdentity, ScreenshotOwner, ScreenshotService, ServerConfig, ViewDeliveryMode, USER_CLIENT};
 use crate::game::{EditorGame, EditorStream};
 use serde_json::{json, Value as J};
@@ -169,6 +169,8 @@ pub struct Backend {
     pub(crate) managed_input: bool,
     /// The app-framebuffer capture endpoint, present only for an editor-owned local host.
     pub(crate) screenshot_owner: Option<ScreenshotOwner>,
+    /// Sole publisher of this host-paired main editor observation. Never cloned.
+    pub(crate) work_status_owner: Option<orr_remote::work_status::WorkStatusOwner>,
 }
 
 /// `ws://host:port` plus the path and query a dev-mode host needs to know
@@ -230,7 +232,7 @@ impl Backend {
                 rc.view_delivery = delivery(game, false);
                 rc.expected_identity = Some(identity.clone());
                 let bridge = EditorStream::connect(game, rc).map_err(|e| format!("frame stream of {url}: {e}"))?;
-                Ok(Backend { spec: spec.clone(), erp, bridge, host: None, own_client, url: Some(url.clone()), game, identity, managed_input, screenshot_owner: None })
+                Ok(Backend { spec: spec.clone(), erp, bridge, host: None, own_client, url: Some(url.clone()), game, identity, managed_input, screenshot_owner: None, work_status_owner: None })
             }
         }
     }
@@ -257,11 +259,29 @@ impl Backend {
         cfg.limits.max_step_per_call = 20_000;
         let (screenshot_service, screenshot_owner) = ScreenshotService::pair();
         cfg.screenshot = Some(screenshot_service);
+        let mut work_status_owner = None;
+        let mut status_service = || {
+            let (service, owner) = orr_remote::work_status::WorkStatusService::pair();
+            work_status_owner = Some(owner);
+            service
+        };
         let host = match selected_game {
-            EditorGame::PhysGame => spawn_phys_host(text, Some(scene.to_path_buf()), cfg)?,
-            EditorGame::Arena => spawn_arena_host(text, Some(scene.to_path_buf()), cfg)?,
+            #[cfg(feature = "static-games")]
+            EditorGame::Registered(game) => {
+                if listen.is_some() { return Err("registered startup does not support a listener".into()); }
+                cfg.limits.player_count = game.expected_input().max_players();
+                let host = game.spawn(crate::static_adapter::StaticHostRequest {
+                    scene_text: text, scene_path: scene.to_path_buf(), config: cfg,
+                    work_status: status_service(), neutral_value: game.neutral_value(),
+                    expected_input: game.expected_input(),
+                })?;
+                if host.url().is_some() { return Err("registered factory unexpectedly enabled a listener".into()); }
+                host
+            },
+            EditorGame::PhysGame => spawn_phys_host_with_editor_work_status(text, Some(scene.to_path_buf()), cfg, status_service())?,
+            EditorGame::Arena => spawn_arena_host_with_editor_work_status(text, Some(scene.to_path_buf()), cfg, status_service())?,
             #[cfg(feature = "collect-dodge")]
-            EditorGame::CollectDodge => orr_remote::collect_dodge::spawn_host(text, Some(scene.to_path_buf()), cfg)?,
+            EditorGame::CollectDodge => orr_remote::collect_dodge::spawn_host_with_editor_work_status(text, Some(scene.to_path_buf()), cfg, status_service())?,
             #[cfg(feature = "room-project")]
             EditorGame::RoomEscape => orr_remote::room_escape::spawn_host(text,Some(scene.to_path_buf()),cfg)?,
             EditorGame::Yard3D => orr_remote::yard3d::spawn_yard3d_scene_host(scene.to_path_buf(), cfg)?,
@@ -269,6 +289,10 @@ impl Backend {
             EditorGame::TerrainYard3D => orr_remote::terrain_yard3d::spawn_terrain_yard3d_scene_host(scene.to_path_buf(), cfg)?,
             #[cfg(feature = "navigation")]
             EditorGame::NavigationYard3D => orr_remote::navigation_yard3d::spawn_navigation_yard3d_scene_host(scene.to_path_buf(), cfg)?,
+            #[cfg(feature = "mesh-navigation")]
+            EditorGame::MeshNavigation => orr_remote::mesh_navigation::spawn_mesh_navigation_scene_host(scene.to_path_buf(), cfg)?,
+            #[cfg(feature = "mesh-hazards")]
+            EditorGame::MeshHazardsV1 => orr_remote::mesh_navigation::hazards::spawn_mesh_hazards_scene_host(scene.to_path_buf(), cfg)?,
         };
         let connector = host.connector();
         let link = |what: &str| connector.connect(USER_CLIENT, Caps::ALL).map_err(|e| format!("{what}: {e}"));
@@ -280,11 +304,11 @@ impl Backend {
         // In process a frame is a copy, not a message: let an edit show at once instead of
         // waiting out a 60 Hz cap (the window draws at most as often as it likes anyway).
         rc.max_fps = 240;
-        let (game, identity, own_client, managed_input) = discover(&mut erp)?;
+        let (game, identity, own_client, managed_input) = discover_selected(&mut erp, selected_game)?;
         rc.expected_identity = Some(identity.clone());
         let bridge = EditorStream::connect_transport(game, Box::new(link("frames")?), rc)?;
         let url = host.url().map(str::to_string);
-        Ok(Backend { spec: spec.clone(), erp, bridge, host: Some(host), own_client, url, game, identity, managed_input, screenshot_owner: Some(screenshot_owner) })
+        Ok(Backend { spec: spec.clone(), erp, bridge, host: Some(host), own_client, url, game, identity, managed_input, screenshot_owner: Some(screenshot_owner), work_status_owner })
     }
 
     /// Another frame stream, for what the viewport previews (`proposal:p3`).
@@ -335,6 +359,29 @@ impl Backend {
     }
 }
 
+// Local selection is an explicit validated handle, never a name-based fallback.
+fn discover_selected(erp: &mut ErpClient, selected: EditorGame) -> Result<(EditorGame, RemoteIdentity, String, bool), String> {
+    #[cfg(feature = "static-games")]
+    if let EditorGame::Registered(game) = selected {
+        let d = erp.call("rpc.discover", J::Null).map_err(|e| format!("rpc.discover: {e}"))?;
+        let expected = game.expected_identity();
+        if d["erp_version"].as_u64() != Some(1)
+            || d.pointer("/engine/game").and_then(J::as_str) != Some(expected.game.as_str())
+            || d.pointer("/engine/build_id").and_then(J::as_str) != Some(expected.build_id.as_str()) {
+            return Err("registered game/build identity mismatch".into());
+        }
+        let schema = erp.call("registry.schema", J::Null).map_err(|e| format!("registry.schema: {e}"))?;
+        if schema.get("schema") != Some(&expected.schema) { return Err("registered full reflection schema mismatch".into()); }
+        let input = erp.call("registry.input", J::Null).map_err(|e| format!("registry.input: {e}"))?;
+        game.expected_input().validate(&input)?;
+        let own = d.pointer("/you/client").and_then(J::as_str).unwrap_or(USER_CLIENT).to_string();
+        return Ok((selected, expected, own, true));
+    }
+    let result = discover(erp)?;
+    if result.0 != selected { return Err("selected local game does not match the host".into()); }
+    Ok(result)
+}
+
 // Discover before choosing a native frame decoder. Schema comparison includes
 // fields, ranges and descriptors, not just type names. The stream repeats the
 // identity check on its own connection before subscribing. This checks game and
@@ -355,7 +402,8 @@ fn discover(erp: &mut ErpClient) -> Result<(EditorGame, RemoteIdentity, String, 
         return Err(format!("{name} reflected schema mismatch: host descriptors differ from this editor"));
     }
     let own_client = d.pointer("/you/client").and_then(J::as_str).unwrap_or(USER_CLIENT).to_string();
-    let input = if game.has_keyboard() { erp.call("registry.input", J::Null).ok() } else { None };
+    let supports_input = game.has_keyboard() || game.has_mesh_view();
+    let input = if supports_input { erp.call("registry.input", J::Null).ok() } else { None };
     let mut input_types = orr_reflect::TypeRegistry::new();
     input_types.register_component::<orr_sample::arena_game::ArenaInput>("ArenaInput");
     let expected_input: J = serde_json::from_str(&input_types.type_json_schema("ArenaInput").expect("registered input")).expect("valid reflected schema");
@@ -371,7 +419,13 @@ fn discover(erp: &mut ErpClient) -> Result<(EditorGame, RemoteIdentity, String, 
         types.register_component::<orr_sample::room_game::RoomInput>("RoomInput");
         serde_json::from_str(&types.type_json_schema("RoomInput").expect("registered room input")).expect("reflected room JSON schema")
     } else { expected_input };
-    let managed_input = game.has_keyboard() && input.as_ref().is_some_and(|v| v["schema"] == expected_input) && input.as_ref().and_then(|v| v.get("managed_held")).is_some_and(|v| v["version"] == 1 && v["lease_ms"] == 2000 && v["heartbeat_ms"] == 500);
+    #[cfg(feature = "mesh-navigation")]
+    let expected_input = if game.has_mesh_view() {
+        let mut types = orr_reflect::TypeRegistry::new();
+        types.register_component::<orr_sample::yard3d_game::YardInput>("MeshGoalInput");
+        serde_json::from_str(&types.type_json_schema("MeshGoalInput").expect("registered mesh input")).expect("reflected mesh JSON schema")
+    } else { expected_input };
+    let managed_input = supports_input && input.as_ref().is_some_and(|v| v["schema"] == expected_input) && input.as_ref().and_then(|v| v.get("managed_held")).is_some_and(|v| v["version"] == 1 && v["lease_ms"] == 2000 && v["heartbeat_ms"] == 500);
     Ok((game, RemoteIdentity { game: name.to_string(), build_id, schema }, own_client, managed_input))
 }
 
@@ -400,5 +454,38 @@ mod linked_unified_tests {
         let result = backend.erp.call("registry.schema", J::Null).unwrap();
         assert_eq!(result["schema"]["properties"]["schema"]["const"], "orr.scene/1");
         assert!(result["schema"]["properties"].get("prefabs").is_none());
+    }
+}
+
+#[cfg(all(test, feature = "mesh-hazards"))]
+mod mesh_hazards_profile_tests {
+    use super::*;
+    use orr_remote::mesh_navigation::hazards::{MeshHazardRun, MeshHazards, HAZARDS_NAME};
+
+    #[test]
+    fn explicit_hazards_profile_uses_distinct_schema_and_typed_stream() {
+        let directory = tempfile::tempdir().unwrap();
+        let scene = directory.path().join("blank.scene.yaml");
+        std::fs::write(&scene, "schema: orr.scene/1\nsingletons: {}\nentities: {}\n").unwrap();
+        let mut backend = Backend::connect(&HostSpec::local_game(&scene, EditorGame::MeshHazardsV1)).unwrap();
+        assert_eq!(backend.game, EditorGame::MeshHazardsV1);
+        assert_eq!(backend.identity.game, "MeshHazardsV1");
+        assert!(backend.managed_input);
+        assert!(matches!(backend.bridge, EditorStream::MeshHazards(_)));
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let snapshot = loop {
+            backend.bridge.poll_view();
+            if let Some(snapshot) = backend.bridge.snapshot() { break snapshot; }
+            assert!(std::time::Instant::now() < deadline, "hazard typed snapshot missing");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(*snapshot.predicted().singleton::<MeshHazards>(), MeshHazards::default());
+        assert_eq!(*snapshot.predicted().singleton::<MeshHazardRun>(), MeshHazardRun::default());
+        assert!(backend.game.types().get(HAZARDS_NAME).is_some());
+        drop(backend);
+        let legacy = Backend::connect(&HostSpec::local_game(&scene, EditorGame::MeshNavigation)).unwrap();
+        assert_eq!(legacy.identity.game, "MeshNavigation");
+        assert!(matches!(legacy.bridge, EditorStream::MeshNavigation(_)));
+        assert!(legacy.game.types().get(HAZARDS_NAME).is_none());
     }
 }

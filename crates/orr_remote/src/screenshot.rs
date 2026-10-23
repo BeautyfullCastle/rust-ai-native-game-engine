@@ -249,7 +249,7 @@ impl ScreenshotOwner {
         if !state.service_alive || !state.owner_alive {
             return Err(CaptureError::Unavailable);
         }
-        if !state.pending.as_ref().is_some_and(|pending| pending.request.serial == serial) {
+        if state.pending.as_ref().is_none_or(|pending| pending.request.serial != serial) {
             return Err(CaptureError::Stale);
         }
         if state.capture.is_some() || state.encoder.is_some() {
@@ -274,7 +274,7 @@ impl ScreenshotOwner {
         if !state.service_alive || !state.owner_alive {
             return Err(CaptureError::Unavailable);
         }
-        if !state.pending.as_ref().is_some_and(|pending| pending.request.serial == serial) {
+        if state.pending.as_ref().is_none_or(|pending| pending.request.serial != serial) {
             return Err(CaptureError::Stale);
         }
         if state.capture != Some(serial) {

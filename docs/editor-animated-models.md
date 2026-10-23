@@ -63,6 +63,9 @@ files are also accepted. Import format limits remain those of `orr_model`.
    output encoding and needs no alternate texture view formats. Play, Pause, Stop and the time slider affect only that entity's
    transient player. Other bindings maintain independent players. Stop restores
    rest pose; seeking after Stop selects the assigned clip in a paused state.
+   Drag on the image to orbit, right- or middle-drag to pan, and use the wheel to
+   zoom. **Reset preview camera** restores the fit. These controls are transient
+   preview state; they do not change the scene, binding sidecar or host camera.
 7. Use **Undo animation binding** / **Redo animation binding** as needed, then
    **Save animation bindings**. Save the Arena scene separately if it changed.
    These are separate atomic file writes, not a joint atomic transaction.
@@ -70,9 +73,11 @@ files are also accepted. Import format limits remain those of `orr_model`.
    are not saved. A dirty close requires explicit discard confirmation; cancelling
    it leaves the document and history intact.
 
-The preview uses a fixed camera and diffuse skinning material support. There is
-no 3D placement, collider creation, gameplay animation/root motion, skinned shadow
-pass, PBR extension, retargeting, animation graph, or export in this slice.
+The preview camera resets when a different animated model is loaded and is
+preserved across target resizes. The preview uses diffuse skinning material
+support. There is no 3D placement, collider creation, gameplay animation/root
+motion, skinned shadow pass, PBR extension, retargeting, animation graph, or
+export in this slice.
 
 ## Identity, failures, and limits
 
@@ -98,8 +103,10 @@ pass, PBR extension, retargeting, animation graph, or export in this slice.
 ## Focused validation commands
 
 ```sh
-cargo test --release -p orr_editor --features animated-models --test animated_bindings --test animated_panel
+cargo test --release -p orr_editor --features animated-models --test animated_bindings --test animated_panel --test animated_camera_ui
 ORR_REQUIRE_GPU=1 cargo test --release -p orr_editor --features animated-models --test animated_preview -- --test-threads=1
+ORR_REQUIRE_GPU=1 cargo test --release -p orr_editor --features animated-models,sprites --test animated_camera -- --test-threads=1
+ORR_REQUIRE_GPU=1 cargo test --release -p orr_editor --features animated-models,sprites --test animated_camera_ui production_animated_camera_gestures_are_isolated_from_host_and_sidecar -- --ignored --exact --test-threads=1
 cargo test --release -p orr_editor --features animated-models,sprites --lib --test deps
 cargo clippy --release -p orr_editor --all-targets --features animated-models,sprites -- -D warnings
 ```

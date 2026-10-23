@@ -8,7 +8,7 @@ name: determinism
 
 on:
   pull_request:
-    branches: [main, su/engine-correctness-hardening]
+    branches: [main, su/engine-correctness-hardening, su/authoring-development-integration-20261021, su/static-game-starter-20261022]
     types: [ready_for_review]
   workflow_dispatch:
 env:
@@ -43,6 +43,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Validate fresh assemble CLI prerequisite guards
+        run: python -B tools/test_assemble_cli_prerequisites.py
+      - name: Prepare fresh assemble CLI for native workspace regressions
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python -B tools/native_assemble_cli_prerequisite.py prepare --evidence "${{ runner.temp }}/native-assemble-${{ github.run_id }}-${{ github.run_attempt }}"
 
       - name: Simulation float-type guard
         # Type declarations (including arithmetic-free POD fields) are checked
@@ -94,6 +101,18 @@ jobs:
         run: cargo test --workspace --release --timings --exclude orr_sample --exclude orr_editor --exclude orr_web_gpu
         env:
           ORR_REQUIRE_C_COMPILER: ${{ runner.os == 'Linux' && '1' || '0' }}
+
+      - name: Verify native assemble CLI and source identity after workspace tests
+        if: always()
+        run: python -B tools/native_assemble_cli_prerequisite.py verify --evidence "${{ runner.temp }}/native-assemble-${{ github.run_id }}-${{ github.run_attempt }}"
+      - name: Retain native assemble CLI prerequisite and failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-assemble-${{ matrix.name }}
+          path: ${{ runner.temp }}/native-assemble-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Upload native release build timings
         if: ${{ always() }}
@@ -363,7 +382,80 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  sample-fixture-preflight:
+    name: sample fixture preflight (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Required fast Arena validator fixtures before compilation
+        shell: bash
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          python -B tools/test_sample_ci_identity.py
+          python -B tools/test_arena_editor_export_gate.py
+          python -B tools/test_arena_export_producer_fence.py
+          python -B tools/test_arena_editor_ui_export_gate.py
+
+  sample-arena-cpu:
+    # Independently rerunnable. No target directories or executable artifacts
+    # cross job boundaries; the gate still builds and pins every own producer.
+    name: sample Arena CPU (${{ matrix.os }})
+    needs: [sample-fixture-preflight]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    steps:
+      - name: Prevent Python bytecode in source checkout
+        shell: bash
+        run: printf '%s\n' 'PYTHONDONTWRITEBYTECODE=1' >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Bind Arena CPU checkout and execution identity
+        shell: bash
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python -B tools/sample_ci_identity.py begin "${{ runner.temp }}/arena-cpu-identity-${{ github.run_id }}-${{ github.run_attempt }}.json"
+      - name: Required Arena editor export CPU acceptance
+        shell: bash
+        timeout-minutes: 90
+        env:
+          ORR_ARENA_EXPORT_GATE_EVIDENCE: ${{ runner.temp }}/arena-editor-export-cpu-${{ github.run_id }}-${{ github.run_attempt }}
+          PYTHONDONTWRITEBYTECODE: '1'
+          CARGO_BUILD_JOBS: '2'
+        run: python -B tools/arena_editor_export_gate.py cpu
+      - name: Retain Arena editor export CPU evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arena-editor-export-cpu-${{ matrix.os }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/arena-editor-export-cpu-${{ github.run_id }}-${{ github.run_attempt }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+      - name: Require current successful Arena CPU producer receipt
+        shell: bash
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python -B tools/sample_ci_identity.py verify "${{ runner.temp }}/arena-cpu-identity-${{ github.run_id }}-${{ github.run_attempt }}.json" "${{ runner.temp }}/arena-editor-export-cpu-${{ github.run_id }}-${{ github.run_attempt }}/gate-receipt.json"
+      - name: Retain Arena CPU identity including partial failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arena-cpu-identity-${{ matrix.os }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/arena-cpu-identity-${{ github.run_id }}-${{ github.run_attempt }}.json
+          if-no-files-found: error
+          retention-days: 7
+
   sample-build:
+    needs: [sample-fixture-preflight]
     # View-layer demos, audio, and editor. Build and test on Linux and Windows,
     # plus required Linux software-GPU/window tests; separate from the sim jobs.
     name: sample build (${{ matrix.os }})
@@ -431,6 +523,10 @@ jobs:
           evidence = pathlib.Path(os.environ['ORR_CLIP_EXTRACT_EVIDENCE'])
           evidence.mkdir(parents=True, exist_ok=False)
           paths = ['Cargo.lock', 'Cargo.toml', 'tools/raw16_import_gate.py',
+                   '.github/workflows/determinism.yml', 'tools/test_animation_clip_extract_gate.py',
+                   'crates/orr_model/examples/static_model_assemble.rs',
+                   'crates/orr_model/examples/static_model_assemble/authoring.rs',
+                   'crates/orr_model/tests/static_model_assemble.rs',
                    'crates/orr_model/Cargo.toml', 'crates/orr_render/Cargo.toml', 'crates/orr_model/examples/animation_clip_extract.rs',
                    'crates/orr_model/examples/animation_clip_extract/authoring.rs',
                    'crates/orr_model/tests/animation_clip_extract.rs',
@@ -469,10 +565,14 @@ jobs:
                   record()
           def inventory(output):
               return re.findall(r'^([A-Za-z0-9_:]+): test$', output, re.M)
-          def executable(output, label, package, kind, features, limit):
+          def executable(output, label, package, kind, features, limit, target_name='animation_clip_extract'):
+              assert target_name in {'animation_clip_extract', 'static_model_assemble'}
+              if target_name == 'static_model_assemble':
+                  assert package == 'orr_model' and kind == 'example'
+                  assert set(features) == {'animation', 'default', 'import'}
               artifacts = [json.loads(line) for line in output.splitlines() if line.startswith('{')]
               producers = [a for a in artifacts if a.get('reason') == 'compiler-artifact'
-                           and a.get('target', {}).get('name') == 'animation_clip_extract' and a.get('executable')]
+                           and a.get('target', {}).get('name') == target_name and a.get('executable')]
               assert len(producers) == 1, producers
               producer = producers[0]
               target = producer['target']
@@ -485,7 +585,7 @@ jobs:
               if os.name == 'nt': package_path = package_path.lstrip('/')
               assert pathlib.Path(package_path).resolve() == crate.resolve()
               assert target['kind'] == [kind] and target['crate_types'] == ['bin']
-              source = crate / ('examples' if kind == 'example' else 'tests') / 'animation_clip_extract.rs'
+              source = crate / ('examples' if kind == 'example' else 'tests') / (target_name + '.rs')
               assert pathlib.Path(target['src_path']).resolve() == source.resolve()
               assert producer['profile']['test'] is (kind == 'test') and producer['profile']['opt_level'] == '3'
               assert set(producer['features']) == set(features), producer['features']
@@ -500,6 +600,15 @@ jobs:
                                'bytes': copy.stat().st_size, 'max_bytes': limit}
               record()
               return str(copy)
+          def build_regression_cli():
+              build = run('assemble-regression-build', ['cargo', 'build', *base,
+                          '--features', 'animation,import', '--example',
+                          'static_model_assemble', '--message-format=json'])
+              binary = executable(build, 'assemble-regression-cli', 'orr_model', 'example',
+                                  ['animation', 'default', 'import'], 64 * 1024**2,
+                                  target_name='static_model_assemble')
+              os.environ['ORR_STATIC_MODEL_ASSEMBLE_BIN'] = binary
+              return binary
           expected = '''actual_demo_appends_one_clip_preserves_originals_and_cooks_reloads
           semantic_json_indices_metadata_and_complete_binary_prefix_are_preserved
           linear_translation_scale_and_shortest_arc_rotation_have_analytic_values
@@ -537,12 +646,16 @@ jobs:
           base = ['--locked', '--release', '-p', 'orr_model']
           focused = ['cargo', 'test', *base, '--features', 'animation,import', '--test', 'animation_clip_extract']
           try:
+              checked = run('assemble-prerequisite-fixtures', [sys.executable, '-B',
+                            str(repo / 'tools/test_animation_clip_extract_gate.py')])
+              assert checked.rstrip().endswith('CLIP_EXTRACT_PREREQUISITES: 8 passed; 0 failed; 0 skipped')
               assert sorted(inventory(run('inventory', [*focused, '--', '--list']))) == sorted(expected)
               assert inventory(run('ignored-inventory', [*focused, '--', '--ignored', '--list'])) == []
               output = run('focused', [*focused, '--', '--test-threads=1'])
               assert re.search(r'test result: ok\. ' + str(len(expected)) + r' passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;', output)
               for name in expected:
                   assert re.search(r'^test ' + re.escape(name) + r' \.\.\. ', output, re.M), name
+              build_regression_cli()
               run('model-regressions', ['cargo', 'test', *base, '--features', 'animation,import'])
               run('strict-model', ['cargo', 'clippy', *base, '--features', 'animation,import', '--all-targets', '--', '-D', 'warnings'])
               run('default-check', ['cargo', 'check', *base, '--all-targets'])
@@ -1046,6 +1159,74 @@ jobs:
         run: cargo clippy --locked -p orr_sample --features project,input-actions,game-ui --all-targets -- -D warnings
       - name: Strict saved-project editor Clippy
         run: cargo clippy --locked -p orr_editor --features sprites --all-targets -- -D warnings
+      - name: Required popup-free unsaved close CPU acceptance
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        shell: bash
+        timeout-minutes: 45
+        env:
+          ORR_UNSAVED_CLOSE_EVIDENCE: ${{ runner.temp }}/unsaved-close-cpu-${{ github.run_id }}-${{ github.run_attempt }}
+          CARGO_BUILD_JOBS: '2'
+        run: python -B tools/unsaved_close_gate.py cpu
+      - name: Retain unsaved close CPU evidence
+        if: always() && runner.os == 'Linux' && runner.arch == 'X64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsaved-close-cpu-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/unsaved-close-cpu-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
+      - name: Required unsaved close production cfg and strict Clippy
+        shell: bash
+        timeout-minutes: 45
+        env:
+          ORR_UNSAVED_CLOSE_EVIDENCE: ${{ runner.temp }}/unsaved-close-cfg-${{ github.run_id }}-${{ github.run_attempt }}
+          CARGO_BUILD_JOBS: '2'
+        run: python -B tools/unsaved_close_gate.py cfg
+      - name: Retain unsaved close production cfg evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsaved-close-cfg-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/unsaved-close-cfg-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
+      - name: Required read-only editor work status App ERP MCP acceptance
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        shell: bash
+        timeout-minutes: 45
+        env:
+          ORR_WORK_STATUS_EVIDENCE: ${{ runner.temp }}/editor-work-status-${{ github.run_id }}-${{ github.run_attempt }}
+          CARGO_BUILD_JOBS: '2'
+        run: python -B tools/editor_work_status_gate.py
+      - name: Retain editor work status evidence
+        if: always() && runner.os == 'Linux' && runner.arch == 'X64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: editor-work-status-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/editor-work-status-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
+      - name: Required export guide CPU route and App acceptance
+        shell: bash
+        timeout-minutes: 45
+        env:
+          ORR_EXPORT_GUIDE_EVIDENCE: ${{ runner.temp }}/editor-export-guide-${{ github.run_id }}-${{ github.run_attempt }}
+          CARGO_BUILD_JOBS: '2'
+        run: python -B tools/editor_export_guide_gate.py
+      - name: Retain export guide CPU evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: editor-export-guide-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/editor-export-guide-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
+      # #279: sixteen unconditional sample tests extend only Linux project-export
+      # censuses below. Original counts live in LEGACY_COUNTS; structural proof
+      # is not an old/new execution claim. Every original test/run remains.
+      # #282 adds three unconditional exporter tests, six game-ui exporter tests,
+      # and one ignored project+game-ui App consumer on Linux x86-64.
+      # Explicit feature profiles keep ignored inventory separate from passed counts.
       # Real Kira PCM tests stay device-free. Native CPAL is opt-in and gets
       # compile coverage; opening a physical device is not a CI success claim.
       - run: cargo test -p orr_audio --release
@@ -1058,10 +1239,48 @@ jobs:
       - if: runner.os == 'Linux'
         run: sudo apt-get update -q && sudo apt-get install -y -q libasound2-dev
       - run: cargo check -p orr_sample --features audio-native --all-targets
+      - name: Required tilemap CPU admission authoring and strict libraries
+        if: runner.os == 'Linux'
+        shell: bash
+        timeout-minutes: 60
+        run: |
+          set -euo pipefail
+          python -B tools/test_tilemap_authoring_gate.py -v
+          python -B tools/tilemap_authoring_gate.py cpu --evidence "${{ runner.temp }}/tilemap-authoring-${{ github.run_id }}-${{ github.run_attempt }}"
       # GPU readback pixel tests on a software Vulkan adapter (lavapipe), so
       # they really run instead of skipping. Linux only.
       - if: runner.os == 'Linux'
         run: sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers
+      - name: Grouped terrain ramp CPU and actual App software Vulkan acceptance
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        shell: bash
+        timeout-minutes: 60
+        env:
+          TERRAIN_RAMP_EVIDENCE: ${{ runner.temp }}/terrain-ramp-${{ github.run_id }}-${{ github.run_attempt }}
+          CARGO_BUILD_JOBS: '2'
+          CARGO_PROFILE_RELEASE_DEBUG: '0'
+        run: python -B tools/terrain_ramp_gate.py
+      - name: Retain terrain ramp original failures Frames receipts and captures
+        if: always() && runner.os == 'Linux' && runner.arch == 'X64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: terrain-ramp-linux-x64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/terrain-ramp-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
+      - name: Required tilemap compositor saved runtime and actual editor acceptance
+        if: runner.os == 'Linux'
+        shell: bash
+        timeout-minutes: 30
+        run: python -B tools/tilemap_authoring_gate.py gpu --evidence "${{ runner.temp }}/tilemap-authoring-${{ github.run_id }}-${{ github.run_attempt }}"
+      - name: Retain tilemap inventories original failures receipts and captures
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tilemap-authoring-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/tilemap-authoring-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
       - name: Required static prop actual software GPU acceptance
         if: runner.os == 'Linux'
         shell: bash
@@ -2220,9 +2439,11 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --locked --release -p orr_sample --features project-export,input-actions,game-ui --lib project_export:: -- --list > "$RUNNER_TEMP/export-unit-list.txt"
-          test "$(grep -cE '^project_export::[[:alnum:]_:]+: test$' "$RUNNER_TEMP/export-unit-list.txt")" -eq 25
+          test "$(grep -cE '^project_export::[[:alnum:]_:]+: test$' "$RUNNER_TEMP/export-unit-list.txt")" -eq 50
+          cargo test --locked --release -p orr_sample --features project-export,input-actions,game-ui --lib project_export:: -- --ignored --list > "$RUNNER_TEMP/export-unit-ignored.txt"
+          python -B tools/arena_editor_export_gate.py profile-census export-unit "$RUNNER_TEMP/export-unit-list.txt" "$RUNNER_TEMP/export-unit-ignored.txt"
           cargo test --locked --release -p orr_sample --features project-export,input-actions,game-ui --lib project_export:: -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/export-unit-tests.log"
-          grep -F 'test result: ok. 25 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/export-unit-tests.log"
+          grep -F 'test result: ok. 50 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/export-unit-tests.log"
           if grep -E 'SKIP|source-hiding acceptance not requested' "$RUNNER_TEMP/export-unit-tests.log"; then
             echo '::error::A required export unit path was skipped'
             exit 1
@@ -2296,9 +2517,11 @@ jobs:
           test -x "$ORR_PROJECT_ONLY_RUNTIME"
           mkdir -p "$ORR_PROJECT_UI_CAPTURE_DIR"
           cargo test --locked --release -p orr_sample --features project-export,input-actions,game-ui --lib -- --list > "$RUNNER_TEMP/authored-ui-library-list.txt"
-          test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/authored-ui-library-list.txt")" -eq 73
+          test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/authored-ui-library-list.txt")" -eq 99
+          cargo test --locked --release -p orr_sample --features project-export,input-actions,game-ui --lib -- --ignored --list > "$RUNNER_TEMP/authored-ui-library-ignored.txt"
+          python -B tools/arena_editor_export_gate.py profile-census authored-ui "$RUNNER_TEMP/authored-ui-library-list.txt" "$RUNNER_TEMP/authored-ui-library-ignored.txt"
           cargo test --locked --release -p orr_sample --features project-export,input-actions,game-ui --lib -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/authored-ui-library.log"
-          grep -F 'test result: ok. 73 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/authored-ui-library.log"
+          grep -F 'test result: ok. 98 passed; 0 failed; 1 ignored;' "$RUNNER_TEMP/authored-ui-library.log"
           if grep -Ei 'SKIP:|negative skipped|without capture|direct relocated execution used|source-hiding acceptance not requested' "$RUNNER_TEMP/authored-ui-library.log"; then exit 1; fi
           for specification in project_restart_seed:3 project_ui_boundaries:1 project_ui_compositor:1 project_ui_export:3 project_cli:5; do
             target=${specification%:*}
@@ -2373,7 +2596,9 @@ jobs:
           bwrap --ro-bind / / -- /bin/true
           mkdir -p "$ORR_PLAYER_SETTINGS_CAPTURE_DIR"
           cargo test --locked --release -p orr_sample --features player-settings,project-export --lib -- --list > "$RUNNER_TEMP/player-settings-library-list.txt"
-          test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/player-settings-library-list.txt")" -eq 111
+          test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/player-settings-library-list.txt")" -eq 137
+          cargo test --locked --release -p orr_sample --features player-settings,project-export --lib -- --ignored --list > "$RUNNER_TEMP/player-settings-library-ignored.txt"
+          python -B tools/arena_editor_export_gate.py profile-census player-settings "$RUNNER_TEMP/player-settings-library-list.txt" "$RUNNER_TEMP/player-settings-library-ignored.txt"
           test "$(grep -cE '^player_settings::tests::[[:alnum:]_]+: test$' "$RUNNER_TEMP/player-settings-library-list.txt")" -eq 31
           grep -Fx 'player_settings::tests::commit_releases_lock_before_unrelated_pre_exec_child_exits: test' "$RUNNER_TEMP/player-settings-library-list.txt"
           grep -Fx 'player_settings::tests::failed_commits_release_lock_before_unrelated_pre_exec_child_exits: test' "$RUNNER_TEMP/player-settings-library-list.txt"
@@ -2381,7 +2606,7 @@ jobs:
           grep -Fx 'app::player_settings_tests::persisted_widgets_mouse_fire_restart_match_inproc_threaded_and_effective_inputs: test' "$RUNNER_TEMP/player-settings-library-list.txt"
           grep -Fx 'app::player_settings_tests::saved_mouse_binding_never_leaks_queued_apply_click_or_stale_dpi_layout: test' "$RUNNER_TEMP/player-settings-library-list.txt"
           cargo test --locked --release -p orr_sample --features player-settings,project-export --lib -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/player-settings-library.log"
-          grep -F 'test result: ok. 111 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/player-settings-library.log"
+          grep -F 'test result: ok. 136 passed; 0 failed; 1 ignored;' "$RUNNER_TEMP/player-settings-library.log"
           if grep -Ei 'SKIP:|negative skipped|without capture|direct relocated execution used|source-hiding acceptance not requested|without source hiding|source_hiding=false|software GPU unavailable' "$RUNNER_TEMP/player-settings-library.log"; then exit 1; fi
           for specification in player_settings_cli:6 player_settings_lifecycle:3 player_settings_ui:1; do
             target=${specification%:*}
@@ -2436,10 +2661,12 @@ jobs:
           test "$(uname -m)" = x86_64
           test "$(id -u)" -ne 0
           cargo test --locked --release -p orr_sample --no-default-features --features project-create,project-export --lib -- --list > "$RUNNER_TEMP/new-arena-library-list.txt"
-          test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/new-arena-library-list.txt")" -eq 64
+          test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/new-arena-library-list.txt")" -eq 83
+          cargo test --locked --release -p orr_sample --no-default-features --features project-create,project-export --lib -- --ignored --list > "$RUNNER_TEMP/new-arena-library-ignored.txt"
+          python -B tools/arena_editor_export_gate.py profile-census new-arena "$RUNNER_TEMP/new-arena-library-list.txt" "$RUNNER_TEMP/new-arena-library-ignored.txt"
           test "$(grep -cE '^project_create::tests::[[:alnum:]_]+: test$' "$RUNNER_TEMP/new-arena-library-list.txt")" -eq 14
           cargo test --locked --release -p orr_sample --no-default-features --features project-create,project-export --lib -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/new-arena-library.log"
-          grep -F 'test result: ok. 64 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/new-arena-library.log"
+          grep -F 'test result: ok. 83 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/new-arena-library.log"
           cargo test --locked --release -p orr_sample --no-default-features --features project-create --test new_arena_cli -- --list > "$RUNNER_TEMP/new-arena-cli-list.txt"
           test "$(grep -cE '^[[:alnum:]_]+: test$' "$RUNNER_TEMP/new-arena-cli-list.txt")" -eq 6
           cargo test --locked --release -p orr_sample --no-default-features --features project-create --test new_arena_cli -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/new-arena-cli.log"
@@ -2512,6 +2739,43 @@ jobs:
       - name: Strict generator export settings and editor feature Clippy
         if: runner.os == 'Linux'
         run: cargo clippy --locked -p orr_sample -p orr_editor --no-default-features --features orr_sample/project-create,orr_sample/project-export,orr_sample/player-settings,orr_sample/input-actions,orr_sample/game-ui,orr_editor/project-ui --all-targets -- -D warnings
+      - name: Required Arena editor export native acceptance
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        shell: bash
+        timeout-minutes: 90
+        env:
+          ORR_ARENA_EXPORT_GATE_EVIDENCE: /tmp/orr-arena-editor-export-${{ github.run_id }}-${{ github.run_attempt }}
+          PYTHONDONTWRITEBYTECODE: '1'
+          CARGO_BUILD_JOBS: '2'
+        run: python -B tools/arena_editor_export_gate.py native
+      - name: Retain Arena editor export native evidence
+        if: always() && runner.os == 'Linux' && runner.arch == 'X64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: arena-editor-export-native-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/orr-arena-editor-export-${{ github.run_id }}-${{ github.run_attempt }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+      # #282 is additive: the original #279 native acceptance above remains mandatory.
+      - name: Required Arena editor UI export native acceptance
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        shell: bash
+        timeout-minutes: 90
+        env:
+          ORR_ARENA_UI_EXPORT_GATE_EVIDENCE: /tmp/orr-arena-editor-ui-export-${{ github.run_id }}-${{ github.run_attempt }}
+          PYTHONDONTWRITEBYTECODE: '1'
+          CARGO_BUILD_JOBS: '2'
+        run: python -B tools/arena_editor_ui_export_gate.py native
+      - name: Retain Arena editor UI export native evidence
+        if: always() && runner.os == 'Linux' && runner.arch == 'X64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: arena-editor-ui-export-native-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/orr-arena-editor-ui-export-${{ github.run_id }}-${{ github.run_attempt }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
       - name: Required authored Collect CPU and admission counts
         if: runner.os == 'Linux'
         shell: bash
@@ -2521,6 +2785,10 @@ jobs:
             local label=$1 expected=$2
             shift 2
             "$@" -- --list "${selection[@]}" > "$RUNNER_TEMP/collect-authored-$label-list.txt"
+            if [ "$label" = sample-library ]; then
+              "$@" -- --ignored --list "${selection[@]}" > "$RUNNER_TEMP/collect-authored-$label-ignored.txt"
+              python -B tools/arena_editor_export_gate.py profile-census collect-authored "$RUNNER_TEMP/collect-authored-$label-list.txt" "$RUNNER_TEMP/collect-authored-$label-ignored.txt"
+            fi
             test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/collect-authored-$label-list.txt")" -eq "$expected"
             "$@" -- --test-threads=1 --nocapture "${selection[@]}" 2>&1 | tee "$RUNNER_TEMP/collect-authored-$label.log"
             python3 - "$expected" "$RUNNER_TEMP/collect-authored-$label.log" "$label" <<'PYCOUNTS'
@@ -2537,9 +2805,9 @@ jobs:
           PYCOUNTS
           }
           selection=()
-          check_count sample-library 63 cargo test --locked --release -p orr_sample --no-default-features --features collect-dodge,project-export --lib
+          check_count sample-library 87 cargo test --locked --release -p orr_sample --no-default-features --features collect-dodge,project-export --lib
           unset ORR_PACKAGE_FIFO_TEST_ROOT
-          check_count package 29 cargo test --locked --release -p orr_package --lib
+          check_count package 31 cargo test --locked --release -p orr_package --lib
           check_count editor-collect-library 4 cargo test --locked --release -p orr_editor --no-default-features --features collect-dodge --lib collect
           selection=(--skip collect_actual_editor_gpu_edit_save_play_reopen)
           check_count editor-collect-cpu 2 cargo test --locked --release -p orr_editor --no-default-features --features collect-dodge --test collect_dodge
@@ -2634,13 +2902,27 @@ jobs:
             "$@" -- --list > "$RUNNER_TEMP/collect-progress-$label-list.txt"
             test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/collect-progress-$label-list.txt")" -eq "$((passed + ignored))"
             "$@" -- --ignored --list > "$RUNNER_TEMP/collect-progress-$label-ignored.txt"
-            python3 - "$ignored" "$RUNNER_TEMP/collect-progress-$label-ignored.txt" <<'PYHOOKS'
+            case "$label" in
+              disabled-library) profile=progress-disabled ;;
+              library) profile=progress ;;
+              joint-library) profile=progress-joint ;;
+              *) profile= ;;
+            esac
+            if [ -n "$profile" ]; then
+              python -B tools/arena_editor_export_gate.py profile-census "$profile" "$RUNNER_TEMP/collect-progress-$label-list.txt" "$RUNNER_TEMP/collect-progress-$label-ignored.txt"
+            fi
+            python3 - "$ignored" "$RUNNER_TEMP/collect-progress-$label-ignored.txt" "$label" <<'PYHOOKS'
           import pathlib, re, sys
           names = re.findall(r'^([A-Za-z0-9_:]+): test$', pathlib.Path(sys.argv[2]).read_text(), re.M)
           expected = [] if int(sys.argv[1]) == 0 else [
               'collect_progress::tests::isolated_window_progress_child',
               'game_progress::tests::concurrent_process_child',
           ]
+          if sys.argv[3] == 'joint-library':
+              # The saved-map consumer runs explicitly in editor-collect-controls.yml.
+              expected.insert(0, 'collect_app::input_runtime_tests::controls_acceptance_tests::authoring_app_saved_bytes_drive_production_keys')
+              expected.insert(0, 'app::project_ui_tests::relocated_bundle_real_widgets_restart_original_scene')
+          assert len(expected) == int(sys.argv[1])
           assert sorted(names) == sorted(expected), names
           PYHOOKS
             # Keep the ordinary parallel harness: the reviewed lock fix addresses this execution mode.
@@ -2660,7 +2942,7 @@ jobs:
           }
 
           unset ORR_PACKAGE_FIFO_TEST_ROOT
-          check_library package 29 0 cargo test --locked --release -p orr_package --lib
+          check_library package 31 0 cargo test --locked --release -p orr_package --lib
           for name in \
             project_identity::tests::canonical_roundtrip \
             project_identity::tests::rejects_duplicate_unknown_missing_null_and_invalid_types \
@@ -2672,7 +2954,7 @@ jobs:
           done
 
           # Positive feature-disabled regression; do not treat an absent cfg target as evidence.
-          check_library disabled-library 63 0 cargo test --locked --release -p orr_sample --no-default-features --features collect-dodge,project-export --lib
+          check_library disabled-library 87 0 cargo test --locked --release -p orr_sample --no-default-features --features collect-dodge,project-export --lib
           cargo test --locked --release -p orr_sample --no-default-features --features collect-dodge,project-export --test collect_project_export -- --ignored --list > "$RUNNER_TEMP/collect-progress-disabled-export-ignored.txt"
           python3 - "$RUNNER_TEMP/collect-progress-disabled-export-ignored.txt" <<'PYDISABLED'
           import pathlib, re, sys
@@ -2680,8 +2962,8 @@ jobs:
           assert sorted(names) == ['collect_real_export_cpu_workflow', 'collect_real_export_gpu_workflow'], names
           PYDISABLED
 
-          check_library library 89 2 cargo test --locked --release -p orr_sample --no-default-features --features collect-progress,project-export --lib
-          check_library joint-library 150 2 cargo test --locked --release -p orr_sample --no-default-features --features collect-progress,project-export,player-settings --lib
+          check_library library 113 2 cargo test --locked --release -p orr_sample --no-default-features --features collect-progress,project-export --lib
+          check_library joint-library 200 4 cargo test --locked --release -p orr_sample --no-default-features --features collect-progress,project-export,player-settings --lib
           name=game_progress::tests::stable_nonblocking_lock_and_reread_before_merge
           cargo test --locked --release -p orr_sample --no-default-features --features collect-progress,project-export --lib "$name" -- --exact --list > "$RUNNER_TEMP/collect-progress-barrier-list.txt"
           test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/collect-progress-barrier-list.txt")" -eq 1
@@ -2755,8 +3037,9 @@ jobs:
           PYPIN
           sha256sum --check "$RUNNER_TEMP/collect-progress-tools.sha256"
           "$RUNNER_TEMP/collect-progress-tools/progress-test-harness" --list > "$RUNNER_TEMP/collect-progress-pinned-library-list.txt"
-          test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/collect-progress-pinned-library-list.txt")" -eq 91
+          test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/collect-progress-pinned-library-list.txt")" -eq 115
           "$RUNNER_TEMP/collect-progress-tools/progress-test-harness" --ignored --list > "$RUNNER_TEMP/collect-progress-pinned-library-ignored.txt"
+          python -B tools/arena_editor_export_gate.py profile-census progress-pinned "$RUNNER_TEMP/collect-progress-pinned-library-list.txt" "$RUNNER_TEMP/collect-progress-pinned-library-ignored.txt"
           test "$(grep -cE '^[[:alnum:]_:]+: test$' "$RUNNER_TEMP/collect-progress-pinned-library-ignored.txt")" -eq 2
           grep -Fx 'collect_progress::tests::isolated_window_progress_child: test' "$RUNNER_TEMP/collect-progress-pinned-library-ignored.txt"
           grep -Fx 'game_progress::tests::concurrent_process_child: test' "$RUNNER_TEMP/collect-progress-pinned-library-ignored.txt"
@@ -3112,10 +3395,15 @@ jobs:
             "combined-library": [
               "arena_audio::tests::audio_modes_are_explicit_and_off_never_needs_a_device",
               "arena_audio::tests::missing_native_feature_is_reported_and_required_fails",
+              "collect_app::input_actions::tests::default_hints_preserve_existing_window_text",
+              "collect_app::input_actions::tests::default_physical_bindings_preserve_existing_controls",
+              "collect_app::input_actions::tests::held_bindings_are_ored_without_mutating_physical_state",
+              "collect_app::input_actions::tests::unbound_physical_keys_do_not_gain_semantic_actions",
               "collect_app::tests::captured_fresh_restart_is_rejected_but_prior_authorized_edge_survives",
               "collect_app::tests::consecutive_quick_taps_require_observed_neutral",
               "collect_app::tests::focus_loss_cancels_pending_and_regain_requires_fresh_press",
               "collect_app::tests::focus_requires_fresh_press_and_aliases_are_independent",
+              "collect_app::tests::input_map_cli_admission_is_explicit",
               "collect_app::tests::restart_queue_is_bounded_and_repeat_does_not_enqueue",
               "collect_app::tests::restart_taps_reach_real_bridge_only_after_simulation_ticks",
               "collect_app::tests::strict_cli",
@@ -3219,15 +3507,39 @@ jobs:
               "yard3d_stream::tests::discontinuity_collapses_previous_pose_and_keeps_wire_flags",
               "yard3d_stream::tests::yard_schema_has_real_input_offsets_and_four_byte_command",
               "yard3d_view::tests::bake_classification_uses_body_kind_and_exact_same_frame_mesh",
-              "yard3d_view::tests::input_ray_round_trips_through_the_integer_encoding"
+              "yard3d_view::tests::input_ray_round_trips_through_the_integer_encoding",
+              "project_export::editor_arena::tests::constructors_bound_hash_bytes_paths_count_and_presence",
+              "project_export::editor_arena::tests::constructors_reject_duplicates_collisions_and_total_overflow_bound",
+              "project_export::editor_arena::tests::exact_complete_inventory_exports_with_and_without_sprites_or_lock",
+              "project_export::editor_arena::tests::canonical_scene_and_initial_checksum_are_independent_requirements",
+              "project_export::editor_arena::tests::unchanged_checksum_does_not_hide_different_raw_scene_bytes",
+              "project_export::editor_arena::tests::raw_manifest_lock_and_sprite_changes_reject_before_runtime_or_stage",
+              "project_export::editor_arena::tests::missing_extra_and_wrong_presence_inventory_reject_before_runtime",
+              "project_export::editor_arena::tests::lock_appearance_and_disappearance_are_not_equal_to_empty_lock",
+              "project_export::editor_arena::tests::byte_lengths_are_compared_as_well_as_digests",
+              "project_export::editor_arena::tests::expected_source_is_revalidated_at_transaction_boundary",
+              "project_export::editor_arena::tests::source_shape_rejects_other_games_and_all_unsupported_entries",
+              "project_export::editor_arena::tests::declared_unsupported_shapes_fail_before_runtime_or_staging",
+              "project_export::editor_arena::tests::source_pin_preserves_trust_hash_and_elf_requirements",
+              "project_export::editor_arena::tests::same_snapshot_stages_pinned_bytes_then_final_recheck_rejects_changes",
+              "project_export::editor_arena::tests::exact_source_retains_transaction_failpoints_and_previous_output",
+              "project_export::editor_arena::tests::exact_source_does_not_bypass_whole_active_lock_asset_validation",
+              "project_export::editor_arena::tests::ui_constructor_bounds_closed_descriptor_font_length_and_digest",
+              "project_export::editor_arena::tests::ui_constructor_uses_exact_package_name_and_portable_asset_grammar",
+              "project_export::editor_arena::tests::extra_ui_assertion_rejects_before_runtime_stage_and_smoke"
             ],
             "minimal-progress-library": [
               "arena_audio::tests::audio_modes_are_explicit_and_off_never_needs_a_device",
               "arena_audio::tests::missing_native_feature_is_reported_and_required_fails",
+              "collect_app::input_actions::tests::default_hints_preserve_existing_window_text",
+              "collect_app::input_actions::tests::default_physical_bindings_preserve_existing_controls",
+              "collect_app::input_actions::tests::held_bindings_are_ored_without_mutating_physical_state",
+              "collect_app::input_actions::tests::unbound_physical_keys_do_not_gain_semantic_actions",
               "collect_app::tests::captured_fresh_restart_is_rejected_but_prior_authorized_edge_survives",
               "collect_app::tests::consecutive_quick_taps_require_observed_neutral",
               "collect_app::tests::focus_loss_cancels_pending_and_regain_requires_fresh_press",
               "collect_app::tests::focus_requires_fresh_press_and_aliases_are_independent",
+              "collect_app::tests::input_map_cli_admission_is_explicit",
               "collect_app::tests::restart_queue_is_bounded_and_repeat_does_not_enqueue",
               "collect_app::tests::restart_taps_reach_real_bridge_only_after_simulation_ticks",
               "collect_app::tests::strict_cli",
@@ -3303,6 +3615,15 @@ jobs:
             shift 3
             "$@" -- --list > "$ROOT/$label-list.txt"
             "$@" -- --ignored --list > "$ROOT/$label-ignored.txt"
+            case "$label" in
+              combined-library) profile=collect-creator ;;
+              ui-library) profile=collect-ui ;;
+              ui-creator-library) profile=collect-ui-creator ;;
+              *) profile= ;;
+            esac
+            if [ -n "$profile" ]; then
+              python -B tools/arena_editor_export_gate.py profile-census "$profile" "$ROOT/$label-list.txt" "$ROOT/$label-ignored.txt"
+            fi
             python3 - "$ROOT" "$label" "$passed" "$ignored" <<'PYLIST'
           import json, pathlib, re, sys
           root = pathlib.Path(sys.argv[1]); label = sys.argv[2]
@@ -3332,7 +3653,7 @@ jobs:
           check_result creator 19 0 cargo test --locked --release -p orr_sample --no-default-features --features project-create,collect-dodge --lib project_create
           check_result collect-cli 6 0 cargo test --locked --release -p orr_sample --no-default-features --features project-create,collect-dodge --test new_arena_cli
           check_result arena-cli 6 0 cargo test --locked --release -p orr_sample --no-default-features --features project-create --test new_arena_cli
-          check_result combined-library 108 2 cargo test --locked --release -p orr_sample --no-default-features --features project-create,project-export,collect-progress,collect-sprites --lib
+          check_result combined-library 132 2 cargo test --locked --release -p orr_sample --no-default-features --features project-create,project-export,collect-progress,collect-sprites --lib
         env:
           ORR_NEW_COLLECT_EVIDENCE: /tmp/orr-new-collect-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Build and pin exact Collect creator runtime exporter and progress harness
@@ -3414,7 +3735,7 @@ jobs:
           expected = json.loads((root / 'expected-inventories.json').read_text())
           def names(file): return sorted(re.findall(r'^([A-Za-z0-9_:]+): test$', (root/file).read_text(), re.M))
           assert names('pinned-library-list.txt') == expected['minimal-progress-library']
-          assert len(names('pinned-library-list.txt')) == 64
+          assert len(names('pinned-library-list.txt')) == 69
           assert names('pinned-library-ignored.txt') == expected['ignored-library-hooks']
           PYHOOKS
         env:
@@ -3541,10 +3862,36 @@ jobs:
               "authored_ui::tests::rejects_invalid_ids_and_text",
               "authored_ui::tests::rejects_size_version_syntax_and_trailing_data",
               "authored_ui::tests::rejects_unknown_fields_variants_and_expressions",
+              "collect_app::input_actions::tests::action_maps::action_order_is_irrelevant_and_multiple_restart_bindings_are_ored",
+              "collect_app::input_actions::tests::action_maps::all_shared_keyboard_identities_have_distinct_physical_keys_and_hints",
+              "collect_app::input_actions::tests::action_maps::default_map_roundtrips_existing_format_and_matches_featureless_defaults",
+              "collect_app::input_actions::tests::action_maps::duplicate_bindings_within_and_across_actions_are_rejected",
+              "collect_app::input_actions::tests::action_maps::empty_actions_remain_explicitly_unbound",
+              "collect_app::input_actions::tests::action_maps::file_loading_rejects_direct_symlinks_and_preexisting_special_files",
+              "collect_app::input_actions::tests::action_maps::file_loading_retains_shared_byte_boundary_and_rejects_non_files",
+              "collect_app::input_actions::tests::action_maps::malformed_json_unknown_fields_and_unsupported_keys_fail_closed",
+              "collect_app::input_actions::tests::action_maps::missing_extra_unknown_and_duplicate_actions_are_rejected",
+              "collect_app::input_actions::tests::action_maps::remapping_replaces_all_defaults_and_generates_truthful_hints",
+              "collect_app::input_actions::tests::action_maps::shared_version_action_and_binding_limits_are_preserved",
+              "collect_app::input_actions::tests::action_maps::unsupported_devices_are_rejected_not_dropped",
+              "collect_app::input_actions::tests::default_hints_preserve_existing_window_text",
+              "collect_app::input_actions::tests::default_physical_bindings_preserve_existing_controls",
+              "collect_app::input_actions::tests::held_bindings_are_ored_without_mutating_physical_state",
+              "collect_app::input_actions::tests::unbound_physical_keys_do_not_gain_semantic_actions",
+              "collect_app::input_runtime_tests::controls_acceptance_tests::authoring_app_saved_bytes_drive_production_keys",
+              "collect_app::input_runtime_tests::invalid_map_is_rejected_before_project_open_and_direct_headless_options_are_guarded",
+              "collect_app::input_runtime_tests::map_reload_reproduces_production_bridge_trace_without_writing_map",
+              "collect_app::input_runtime_tests::remapped_aliases_are_independent_and_opposing_axes_cancel",
+              "collect_app::input_runtime_tests::remapped_focus_synthetic_capture_and_quit_keep_existing_policy",
+              "collect_app::input_runtime_tests::remapped_keys_match_default_collect_win_restart_and_quit_bridge_trace",
+              "collect_app::input_runtime_tests::remapped_old_keys_are_inert_in_production_policy_and_bridge",
+              "collect_app::input_runtime_tests::remapped_queue_cap_repeat_subtick_and_neutral_ack_use_real_bridge",
+              "collect_app::input_runtime_tests::remapped_restart_aliases_retain_queued_edges_and_held_state_after_ack",
               "collect_app::tests::captured_fresh_restart_is_rejected_but_prior_authorized_edge_survives",
               "collect_app::tests::consecutive_quick_taps_require_observed_neutral",
               "collect_app::tests::focus_loss_cancels_pending_and_regain_requires_fresh_press",
               "collect_app::tests::focus_requires_fresh_press_and_aliases_are_independent",
+              "collect_app::tests::input_map_cli_admission_is_explicit",
               "collect_app::tests::pointer_capture_recomputes_physical_point_for_dpi_and_zoom",
               "collect_app::tests::restart_queue_is_bounded_and_repeat_does_not_enqueue",
               "collect_app::tests::restart_taps_reach_real_bridge_only_after_simulation_ticks",
@@ -3573,6 +3920,8 @@ jobs:
               "collect_ui::tests::keyboard_activation_requires_unoccluded_button_center",
               "collect_ui::tests::korean_label_uses_measured_wrapped_galley_and_authored_clip",
               "collect_ui::tests::later_filled_container_blocks_covered_button_but_its_child_wins",
+              "collect_ui::tests::layout_document_matches_rendered_frame_order_geometry_and_clips",
+              "collect_ui::tests::layout_document_rejects_invalid_document_and_viewport",
               "collect_ui::tests::overlap_only_last_button_receives_release_and_drag_cannot_retarget",
               "collect_ui::tests::parent_relative_layout_and_clipping_apply_to_paint_and_hit_testing",
               "collect_ui::tests::real_pointer_events_dispatch_all_actions_and_screen_capture",
@@ -3663,7 +4012,33 @@ jobs:
               "yard3d_stream::tests::discontinuity_collapses_previous_pose_and_keeps_wire_flags",
               "yard3d_stream::tests::yard_schema_has_real_input_offsets_and_four_byte_command",
               "yard3d_view::tests::bake_classification_uses_body_kind_and_exact_same_frame_mesh",
-              "yard3d_view::tests::input_ray_round_trips_through_the_integer_encoding"
+              "yard3d_view::tests::input_ray_round_trips_through_the_integer_encoding",
+              "project_export::editor_arena::tests::constructors_bound_hash_bytes_paths_count_and_presence",
+              "project_export::editor_arena::tests::constructors_reject_duplicates_collisions_and_total_overflow_bound",
+              "project_export::editor_arena::tests::exact_complete_inventory_exports_with_and_without_sprites_or_lock",
+              "project_export::editor_arena::tests::canonical_scene_and_initial_checksum_are_independent_requirements",
+              "project_export::editor_arena::tests::unchanged_checksum_does_not_hide_different_raw_scene_bytes",
+              "project_export::editor_arena::tests::raw_manifest_lock_and_sprite_changes_reject_before_runtime_or_stage",
+              "project_export::editor_arena::tests::missing_extra_and_wrong_presence_inventory_reject_before_runtime",
+              "project_export::editor_arena::tests::lock_appearance_and_disappearance_are_not_equal_to_empty_lock",
+              "project_export::editor_arena::tests::byte_lengths_are_compared_as_well_as_digests",
+              "project_export::editor_arena::tests::expected_source_is_revalidated_at_transaction_boundary",
+              "project_export::editor_arena::tests::source_shape_rejects_other_games_and_all_unsupported_entries",
+              "project_export::editor_arena::tests::declared_unsupported_shapes_fail_before_runtime_or_staging",
+              "project_export::editor_arena::tests::source_pin_preserves_trust_hash_and_elf_requirements",
+              "project_export::editor_arena::tests::same_snapshot_stages_pinned_bytes_then_final_recheck_rejects_changes",
+              "project_export::editor_arena::tests::exact_source_retains_transaction_failpoints_and_previous_output",
+              "project_export::editor_arena::tests::exact_source_does_not_bypass_whole_active_lock_asset_validation",
+              "project_export::editor_arena::tests::ui_constructor_bounds_closed_descriptor_font_length_and_digest",
+              "project_export::editor_arena::tests::ui_constructor_uses_exact_package_name_and_portable_asset_grammar",
+              "project_export::editor_arena::tests::extra_ui_assertion_rejects_before_runtime_stage_and_smoke",
+              "project_export::editor_arena::tests::ui_constructor_accepts_parser_and_corpus_valid_font_above_scene_bound",
+              "project_export::editor_arena::tests::exact_ui_assertion_exports_full_closure_without_expanding_inventory",
+              "project_export::editor_arena::tests::ui_assertion_presence_descriptor_bytes_and_shape_reject_before_runtime",
+              "project_export::editor_arena::tests::ui_snapshot_requires_selected_package_asset_role_nonempty_length_and_hash",
+              "project_export::editor_arena::tests::ui_assertion_keeps_selected_asset_and_whole_active_lock_admission",
+              "project_export::editor_arena::tests::ui_font_snapshot_is_staged_exactly_and_rechecked_before_publication",
+              "app::project_ui_tests::relocated_bundle_real_widgets_restart_original_scene"
             ],
             "editor-panel": [
               "collect_ui_panel::tests::headless_widgets_edit_undo_save_reopen_and_share_runtime_document",
@@ -3702,11 +4077,15 @@ jobs:
               "tests::sha256_uses_canonical_lowercase_hex",
               "tests::staged_object_and_lock_publish_failures_preserve_active_state",
               "tests::symlinks_at_source_object_and_lock_are_rejected",
-              "tests::tamper_and_writer_failure_preserve_authority"
+              "tests::tamper_and_writer_failure_preserve_authority",
+              "tests::tilemap_added_inside_checked_callback_cannot_publish",
+              "tests::tilemap_declaration_and_all_lock_writers_fail_closed"
             ],
             "ignored-library-hooks": [
+              "collect_app::input_runtime_tests::controls_acceptance_tests::authoring_app_saved_bytes_drive_production_keys",
               "collect_progress::tests::isolated_window_progress_child",
-              "game_progress::tests::concurrent_process_child"
+              "game_progress::tests::concurrent_process_child",
+              "app::project_ui_tests::relocated_bundle_real_widgets_restart_original_scene"
             ],
             "ui-export-workflow": [
               "collect_authored_ui_export_gpu_workflow"
@@ -3718,6 +4097,15 @@ jobs:
             shift 3
             "$@" -- --list > "$ROOT/$label-list.txt"
             "$@" -- --ignored --list > "$ROOT/$label-ignored.txt"
+            case "$label" in
+              combined-library) profile=collect-creator ;;
+              ui-library) profile=collect-ui ;;
+              ui-creator-library) profile=collect-ui-creator ;;
+              *) profile= ;;
+            esac
+            if [ -n "$profile" ]; then
+              python -B tools/arena_editor_export_gate.py profile-census "$profile" "$ROOT/$label-list.txt" "$ROOT/$label-ignored.txt"
+            fi
             python3 - "$ROOT" "$label" "$passed" "$ignored" <<'PYLIST'
           import json, pathlib, re, sys
           root = pathlib.Path(sys.argv[1]); label = sys.argv[2]
@@ -3728,7 +4116,7 @@ jobs:
           ignored = names(root / f'{label}-ignored.txt')
           assert actual == sorted(expected[label]), (label, actual)
           assert len(actual) == int(sys.argv[3]) + int(sys.argv[4])
-          assert ignored == (expected['ignored-library-hooks'] if int(sys.argv[4]) else []), ignored
+          assert ignored == (sorted(expected['ignored-library-hooks']) if int(sys.argv[4]) else []), ignored
           PYLIST
             "$@" -- --nocapture 2>&1 | tee "$ROOT/$label.log"
             python3 - "$passed" "$ignored" "$ROOT/$label.log" "$label" <<'PYRESULT'
@@ -3747,10 +4135,10 @@ jobs:
           assert not re.search(r'SKIP:|negative skipped|without capture|direct relocated execution used|source-hiding acceptance not requested', text, re.I)
           PYRESULT
           }
-          check_result ui-library 137 2 cargo test --locked --release -p orr_sample --no-default-features --features collect-ui,collect-progress,collect-sprites,project-export --lib
+          check_result ui-library 189 4 cargo test --locked --release -p orr_sample --no-default-features --features collect-ui,collect-progress,collect-sprites,project-export --lib
           check_result editor-panel 6 0 cargo test --locked --release -p orr_editor --no-default-features --features collect-ui --lib collect_ui_panel
           unset ORR_PACKAGE_FIFO_TEST_ROOT
-          check_result package 29 0 cargo test --locked --release -p orr_package --lib
+          check_result package 31 0 cargo test --locked --release -p orr_package --lib
         env:
           ORR_COLLECT_UI_EVIDENCE: /tmp/orr-collect-ui-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Build and pin separate no-UI runtime UI tools and exact libtest
@@ -3834,9 +4222,12 @@ jobs:
           root = pathlib.Path(sys.argv[1])
           expected = json.loads((root / 'expected-inventories.json').read_text())
           def names(file): return sorted(re.findall(r'^([A-Za-z0-9_:]+): test$', (root/file).read_text(), re.M))
-          assert names('pinned-library-list.txt') == expected['ui-library']
-          assert len(names('pinned-library-list.txt')) == 139
-          assert names('pinned-library-ignored.txt') == expected['ignored-library-hooks']
+          assert names('pinned-library-list.txt') == sorted(expected['ui-library'])
+          # The same UI producer already required 181 entries after #279 (not 165).
+          # #282 adds nine ordinary tests and one separately executed ignored App hook.
+          # Include the two ordinary collect_ui layout_document tests.
+          assert len(names('pinned-library-list.txt')) == 193
+          assert names('pinned-library-ignored.txt') == sorted(expected['ignored-library-hooks'])
           PYHOOKS
         env:
           ORR_COLLECT_UI_EVIDENCE: /tmp/orr-collect-ui-${{ github.run_id }}-${{ github.run_attempt }}
@@ -3950,10 +4341,36 @@ jobs:
               "authored_ui::tests::rejects_invalid_ids_and_text",
               "authored_ui::tests::rejects_size_version_syntax_and_trailing_data",
               "authored_ui::tests::rejects_unknown_fields_variants_and_expressions",
+              "collect_app::input_actions::tests::action_maps::action_order_is_irrelevant_and_multiple_restart_bindings_are_ored",
+              "collect_app::input_actions::tests::action_maps::all_shared_keyboard_identities_have_distinct_physical_keys_and_hints",
+              "collect_app::input_actions::tests::action_maps::default_map_roundtrips_existing_format_and_matches_featureless_defaults",
+              "collect_app::input_actions::tests::action_maps::duplicate_bindings_within_and_across_actions_are_rejected",
+              "collect_app::input_actions::tests::action_maps::empty_actions_remain_explicitly_unbound",
+              "collect_app::input_actions::tests::action_maps::file_loading_rejects_direct_symlinks_and_preexisting_special_files",
+              "collect_app::input_actions::tests::action_maps::file_loading_retains_shared_byte_boundary_and_rejects_non_files",
+              "collect_app::input_actions::tests::action_maps::malformed_json_unknown_fields_and_unsupported_keys_fail_closed",
+              "collect_app::input_actions::tests::action_maps::missing_extra_unknown_and_duplicate_actions_are_rejected",
+              "collect_app::input_actions::tests::action_maps::remapping_replaces_all_defaults_and_generates_truthful_hints",
+              "collect_app::input_actions::tests::action_maps::shared_version_action_and_binding_limits_are_preserved",
+              "collect_app::input_actions::tests::action_maps::unsupported_devices_are_rejected_not_dropped",
+              "collect_app::input_actions::tests::default_hints_preserve_existing_window_text",
+              "collect_app::input_actions::tests::default_physical_bindings_preserve_existing_controls",
+              "collect_app::input_actions::tests::held_bindings_are_ored_without_mutating_physical_state",
+              "collect_app::input_actions::tests::unbound_physical_keys_do_not_gain_semantic_actions",
+              "collect_app::input_runtime_tests::controls_acceptance_tests::authoring_app_saved_bytes_drive_production_keys",
+              "collect_app::input_runtime_tests::invalid_map_is_rejected_before_project_open_and_direct_headless_options_are_guarded",
+              "collect_app::input_runtime_tests::map_reload_reproduces_production_bridge_trace_without_writing_map",
+              "collect_app::input_runtime_tests::remapped_aliases_are_independent_and_opposing_axes_cancel",
+              "collect_app::input_runtime_tests::remapped_focus_synthetic_capture_and_quit_keep_existing_policy",
+              "collect_app::input_runtime_tests::remapped_keys_match_default_collect_win_restart_and_quit_bridge_trace",
+              "collect_app::input_runtime_tests::remapped_old_keys_are_inert_in_production_policy_and_bridge",
+              "collect_app::input_runtime_tests::remapped_queue_cap_repeat_subtick_and_neutral_ack_use_real_bridge",
+              "collect_app::input_runtime_tests::remapped_restart_aliases_retain_queued_edges_and_held_state_after_ack",
               "collect_app::tests::captured_fresh_restart_is_rejected_but_prior_authorized_edge_survives",
               "collect_app::tests::consecutive_quick_taps_require_observed_neutral",
               "collect_app::tests::focus_loss_cancels_pending_and_regain_requires_fresh_press",
               "collect_app::tests::focus_requires_fresh_press_and_aliases_are_independent",
+              "collect_app::tests::input_map_cli_admission_is_explicit",
               "collect_app::tests::pointer_capture_recomputes_physical_point_for_dpi_and_zoom",
               "collect_app::tests::restart_queue_is_bounded_and_repeat_does_not_enqueue",
               "collect_app::tests::restart_taps_reach_real_bridge_only_after_simulation_ticks",
@@ -3982,6 +4399,8 @@ jobs:
               "collect_ui::tests::keyboard_activation_requires_unoccluded_button_center",
               "collect_ui::tests::korean_label_uses_measured_wrapped_galley_and_authored_clip",
               "collect_ui::tests::later_filled_container_blocks_covered_button_but_its_child_wins",
+              "collect_ui::tests::layout_document_matches_rendered_frame_order_geometry_and_clips",
+              "collect_ui::tests::layout_document_rejects_invalid_document_and_viewport",
               "collect_ui::tests::overlap_only_last_button_receives_release_and_drag_cannot_retarget",
               "collect_ui::tests::parent_relative_layout_and_clipping_apply_to_paint_and_hit_testing",
               "collect_ui::tests::real_pointer_events_dispatch_all_actions_and_screen_capture",
@@ -4093,7 +4512,33 @@ jobs:
               "yard3d_stream::tests::discontinuity_collapses_previous_pose_and_keeps_wire_flags",
               "yard3d_stream::tests::yard_schema_has_real_input_offsets_and_four_byte_command",
               "yard3d_view::tests::bake_classification_uses_body_kind_and_exact_same_frame_mesh",
-              "yard3d_view::tests::input_ray_round_trips_through_the_integer_encoding"
+              "yard3d_view::tests::input_ray_round_trips_through_the_integer_encoding",
+              "project_export::editor_arena::tests::constructors_bound_hash_bytes_paths_count_and_presence",
+              "project_export::editor_arena::tests::constructors_reject_duplicates_collisions_and_total_overflow_bound",
+              "project_export::editor_arena::tests::exact_complete_inventory_exports_with_and_without_sprites_or_lock",
+              "project_export::editor_arena::tests::canonical_scene_and_initial_checksum_are_independent_requirements",
+              "project_export::editor_arena::tests::unchanged_checksum_does_not_hide_different_raw_scene_bytes",
+              "project_export::editor_arena::tests::raw_manifest_lock_and_sprite_changes_reject_before_runtime_or_stage",
+              "project_export::editor_arena::tests::missing_extra_and_wrong_presence_inventory_reject_before_runtime",
+              "project_export::editor_arena::tests::lock_appearance_and_disappearance_are_not_equal_to_empty_lock",
+              "project_export::editor_arena::tests::byte_lengths_are_compared_as_well_as_digests",
+              "project_export::editor_arena::tests::expected_source_is_revalidated_at_transaction_boundary",
+              "project_export::editor_arena::tests::source_shape_rejects_other_games_and_all_unsupported_entries",
+              "project_export::editor_arena::tests::declared_unsupported_shapes_fail_before_runtime_or_staging",
+              "project_export::editor_arena::tests::source_pin_preserves_trust_hash_and_elf_requirements",
+              "project_export::editor_arena::tests::same_snapshot_stages_pinned_bytes_then_final_recheck_rejects_changes",
+              "project_export::editor_arena::tests::exact_source_retains_transaction_failpoints_and_previous_output",
+              "project_export::editor_arena::tests::exact_source_does_not_bypass_whole_active_lock_asset_validation",
+              "project_export::editor_arena::tests::ui_constructor_bounds_closed_descriptor_font_length_and_digest",
+              "project_export::editor_arena::tests::ui_constructor_uses_exact_package_name_and_portable_asset_grammar",
+              "project_export::editor_arena::tests::extra_ui_assertion_rejects_before_runtime_stage_and_smoke",
+              "project_export::editor_arena::tests::ui_constructor_accepts_parser_and_corpus_valid_font_above_scene_bound",
+              "project_export::editor_arena::tests::exact_ui_assertion_exports_full_closure_without_expanding_inventory",
+              "project_export::editor_arena::tests::ui_assertion_presence_descriptor_bytes_and_shape_reject_before_runtime",
+              "project_export::editor_arena::tests::ui_snapshot_requires_selected_package_asset_role_nonempty_length_and_hash",
+              "project_export::editor_arena::tests::ui_assertion_keeps_selected_asset_and_whole_active_lock_admission",
+              "project_export::editor_arena::tests::ui_font_snapshot_is_staged_exactly_and_rechecked_before_publication",
+              "app::project_ui_tests::relocated_bundle_real_widgets_restart_original_scene"
             ],
             "ui-cli": [
               "actual_cli_and_public_api_generate_identical_loadable_projects",
@@ -4141,10 +4586,36 @@ jobs:
               "authored_ui::tests::rejects_invalid_ids_and_text",
               "authored_ui::tests::rejects_size_version_syntax_and_trailing_data",
               "authored_ui::tests::rejects_unknown_fields_variants_and_expressions",
+              "collect_app::input_actions::tests::action_maps::action_order_is_irrelevant_and_multiple_restart_bindings_are_ored",
+              "collect_app::input_actions::tests::action_maps::all_shared_keyboard_identities_have_distinct_physical_keys_and_hints",
+              "collect_app::input_actions::tests::action_maps::default_map_roundtrips_existing_format_and_matches_featureless_defaults",
+              "collect_app::input_actions::tests::action_maps::duplicate_bindings_within_and_across_actions_are_rejected",
+              "collect_app::input_actions::tests::action_maps::empty_actions_remain_explicitly_unbound",
+              "collect_app::input_actions::tests::action_maps::file_loading_rejects_direct_symlinks_and_preexisting_special_files",
+              "collect_app::input_actions::tests::action_maps::file_loading_retains_shared_byte_boundary_and_rejects_non_files",
+              "collect_app::input_actions::tests::action_maps::malformed_json_unknown_fields_and_unsupported_keys_fail_closed",
+              "collect_app::input_actions::tests::action_maps::missing_extra_unknown_and_duplicate_actions_are_rejected",
+              "collect_app::input_actions::tests::action_maps::remapping_replaces_all_defaults_and_generates_truthful_hints",
+              "collect_app::input_actions::tests::action_maps::shared_version_action_and_binding_limits_are_preserved",
+              "collect_app::input_actions::tests::action_maps::unsupported_devices_are_rejected_not_dropped",
+              "collect_app::input_actions::tests::default_hints_preserve_existing_window_text",
+              "collect_app::input_actions::tests::default_physical_bindings_preserve_existing_controls",
+              "collect_app::input_actions::tests::held_bindings_are_ored_without_mutating_physical_state",
+              "collect_app::input_actions::tests::unbound_physical_keys_do_not_gain_semantic_actions",
+              "collect_app::input_runtime_tests::controls_acceptance_tests::authoring_app_saved_bytes_drive_production_keys",
+              "collect_app::input_runtime_tests::invalid_map_is_rejected_before_project_open_and_direct_headless_options_are_guarded",
+              "collect_app::input_runtime_tests::map_reload_reproduces_production_bridge_trace_without_writing_map",
+              "collect_app::input_runtime_tests::remapped_aliases_are_independent_and_opposing_axes_cancel",
+              "collect_app::input_runtime_tests::remapped_focus_synthetic_capture_and_quit_keep_existing_policy",
+              "collect_app::input_runtime_tests::remapped_keys_match_default_collect_win_restart_and_quit_bridge_trace",
+              "collect_app::input_runtime_tests::remapped_old_keys_are_inert_in_production_policy_and_bridge",
+              "collect_app::input_runtime_tests::remapped_queue_cap_repeat_subtick_and_neutral_ack_use_real_bridge",
+              "collect_app::input_runtime_tests::remapped_restart_aliases_retain_queued_edges_and_held_state_after_ack",
               "collect_app::tests::captured_fresh_restart_is_rejected_but_prior_authorized_edge_survives",
               "collect_app::tests::consecutive_quick_taps_require_observed_neutral",
               "collect_app::tests::focus_loss_cancels_pending_and_regain_requires_fresh_press",
               "collect_app::tests::focus_requires_fresh_press_and_aliases_are_independent",
+              "collect_app::tests::input_map_cli_admission_is_explicit",
               "collect_app::tests::pointer_capture_recomputes_physical_point_for_dpi_and_zoom",
               "collect_app::tests::restart_queue_is_bounded_and_repeat_does_not_enqueue",
               "collect_app::tests::restart_taps_reach_real_bridge_only_after_simulation_ticks",
@@ -4173,6 +4644,8 @@ jobs:
               "collect_ui::tests::keyboard_activation_requires_unoccluded_button_center",
               "collect_ui::tests::korean_label_uses_measured_wrapped_galley_and_authored_clip",
               "collect_ui::tests::later_filled_container_blocks_covered_button_but_its_child_wins",
+              "collect_ui::tests::layout_document_matches_rendered_frame_order_geometry_and_clips",
+              "collect_ui::tests::layout_document_rejects_invalid_document_and_viewport",
               "collect_ui::tests::overlap_only_last_button_receives_release_and_drag_cannot_retarget",
               "collect_ui::tests::parent_relative_layout_and_clipping_apply_to_paint_and_hit_testing",
               "collect_ui::tests::real_pointer_events_dispatch_all_actions_and_screen_capture",
@@ -4236,11 +4709,14 @@ jobs:
               "yard3d_stream::tests::discontinuity_collapses_previous_pose_and_keeps_wire_flags",
               "yard3d_stream::tests::yard_schema_has_real_input_offsets_and_four_byte_command",
               "yard3d_view::tests::bake_classification_uses_body_kind_and_exact_same_frame_mesh",
-              "yard3d_view::tests::input_ray_round_trips_through_the_integer_encoding"
+              "yard3d_view::tests::input_ray_round_trips_through_the_integer_encoding",
+              "app::project_ui_tests::relocated_bundle_real_widgets_restart_original_scene"
             ],
             "ignored-library-hooks": [
+              "collect_app::input_runtime_tests::controls_acceptance_tests::authoring_app_saved_bytes_drive_production_keys",
               "collect_progress::tests::isolated_window_progress_child",
-              "game_progress::tests::concurrent_process_child"
+              "game_progress::tests::concurrent_process_child",
+              "app::project_ui_tests::relocated_bundle_real_widgets_restart_original_scene"
             ],
             "generated-workflows": [
               "generated_collect_ui_cpu_workflow",
@@ -4254,6 +4730,15 @@ jobs:
             shift 3
             "$@" -- --list > "$ROOT/$label-list.txt"
             "$@" -- --ignored --list > "$ROOT/$label-ignored.txt"
+            case "$label" in
+              combined-library) profile=collect-creator ;;
+              ui-library) profile=collect-ui ;;
+              ui-creator-library) profile=collect-ui-creator ;;
+              *) profile= ;;
+            esac
+            if [ -n "$profile" ]; then
+              python -B tools/arena_editor_export_gate.py profile-census "$profile" "$ROOT/$label-list.txt" "$ROOT/$label-ignored.txt"
+            fi
             python3 - "$ROOT" "$label" "$passed" "$ignored" <<'PYLIST'
           import json, pathlib, re, sys
           root = pathlib.Path(sys.argv[1]); label = sys.argv[2]
@@ -4264,7 +4749,7 @@ jobs:
           ignored = names(root / f'{label}-ignored.txt')
           assert actual == sorted(expected[label]), (label, actual)
           assert len(actual) == int(sys.argv[3]) + int(sys.argv[4])
-          assert ignored == (expected['ignored-library-hooks'] if int(sys.argv[4]) else []), ignored
+          assert ignored == (sorted(expected['ignored-library-hooks']) if int(sys.argv[4]) else []), ignored
           PYLIST
             "$@" -- --nocapture 2>&1 | tee "$ROOT/$label.log"
             python3 - "$passed" "$ignored" "$ROOT/$label.log" "$label" <<'PYRESULT'
@@ -4280,7 +4765,7 @@ jobs:
           assert not re.search(r'SKIP:|negative skipped|without capture|direct relocated execution used|source-hiding acceptance not requested', text, re.I)
           PYRESULT
           }
-          check_result ui-creator-library 158 2 cargo test --locked --release -p orr_sample --no-default-features --features project-create,project-export,collect-ui,collect-sprites,collect-progress --lib
+          check_result ui-creator-library 210 4 cargo test --locked --release -p orr_sample --no-default-features --features project-create,project-export,collect-ui,collect-sprites,collect-progress --lib
           check_result ui-cli 6 0 cargo test --locked --release -p orr_sample --no-default-features --features project-create,project-export,collect-ui,collect-sprites,collect-progress --test new_arena_cli
           check_result non-ui-creator 19 0 cargo test --locked --release -p orr_sample --no-default-features --features project-create,collect-dodge --lib project_create
         env:
@@ -4366,9 +4851,9 @@ jobs:
           root = pathlib.Path(sys.argv[1])
           expected = json.loads((root / 'expected-inventories.json').read_text())
           def names(file): return sorted(re.findall(r'^([A-Za-z0-9_:]+): test$', (root/file).read_text(), re.M))
-          assert names('pinned-library-list.txt') == expected['minimal-ui-progress-library']
-          assert len(names('pinned-library-list.txt')) == 112
-          assert names('pinned-library-ignored.txt') == expected['ignored-library-hooks']
+          assert names('pinned-library-list.txt') == sorted(expected['minimal-ui-progress-library'])
+          assert len(names('pinned-library-list.txt')) == 141
+          assert names('pinned-library-ignored.txt') == sorted(expected['ignored-library-hooks'])
           PYHOOKS
         env:
           ORR_NEW_COLLECT_UI_EVIDENCE: /tmp/orr-new-collect-ui-${{ github.run_id }}-${{ github.run_attempt }}
@@ -4525,10 +5010,12 @@ jobs:
                 "tests::sha256_uses_canonical_lowercase_hex",
                 "tests::staged_object_and_lock_publish_failures_preserve_active_state",
                 "tests::symlinks_at_source_object_and_lock_are_rejected",
-                "tests::tamper_and_writer_failure_preserve_authority"
+                "tests::tamper_and_writer_failure_preserve_authority",
+                "tests::tilemap_added_inside_checked_callback_cannot_publish",
+                "tests::tilemap_declaration_and_all_lock_writers_fail_closed"
               ],
               "ignored_names": [],
-              "passed": 29,
+              "passed": 31,
               "ignored": 0,
               "children": 1,
               "features": [],
@@ -4539,7 +5026,7 @@ jobs:
                   0
                 ],
                 [
-                  29,
+                  31,
                   0,
                   0
                 ]
@@ -4551,6 +5038,7 @@ jobs:
                 "app::project_ui_tests::authored_widgets_restart_inproc_from_admitted_frame_and_replay_identically",
                 "app::project_ui_tests::authored_widgets_restart_threaded_without_old_input_or_view_mailboxes",
                 "app::project_ui_tests::queued_menu_pointer_events_neutralize_bridge_before_ui_action",
+                "app::project_ui_tests::relocated_bundle_real_widgets_restart_original_scene",
                 "arena_audio::tests::audio_modes_are_explicit_and_off_never_needs_a_device",
                 "arena_audio::tests::missing_native_feature_is_reported_and_required_fails",
                 "arena_input::menu_tests::explicit_pause_never_synthesizes_remapped_system_action",
@@ -4563,10 +5051,36 @@ jobs:
                 "authored_ui::tests::rejects_invalid_ids_and_text",
                 "authored_ui::tests::rejects_size_version_syntax_and_trailing_data",
                 "authored_ui::tests::rejects_unknown_fields_variants_and_expressions",
+                "collect_app::input_actions::tests::action_maps::action_order_is_irrelevant_and_multiple_restart_bindings_are_ored",
+                "collect_app::input_actions::tests::action_maps::all_shared_keyboard_identities_have_distinct_physical_keys_and_hints",
+                "collect_app::input_actions::tests::action_maps::default_map_roundtrips_existing_format_and_matches_featureless_defaults",
+                "collect_app::input_actions::tests::action_maps::duplicate_bindings_within_and_across_actions_are_rejected",
+                "collect_app::input_actions::tests::action_maps::empty_actions_remain_explicitly_unbound",
+                "collect_app::input_actions::tests::action_maps::file_loading_rejects_direct_symlinks_and_preexisting_special_files",
+                "collect_app::input_actions::tests::action_maps::file_loading_retains_shared_byte_boundary_and_rejects_non_files",
+                "collect_app::input_actions::tests::action_maps::malformed_json_unknown_fields_and_unsupported_keys_fail_closed",
+                "collect_app::input_actions::tests::action_maps::missing_extra_unknown_and_duplicate_actions_are_rejected",
+                "collect_app::input_actions::tests::action_maps::remapping_replaces_all_defaults_and_generates_truthful_hints",
+                "collect_app::input_actions::tests::action_maps::shared_version_action_and_binding_limits_are_preserved",
+                "collect_app::input_actions::tests::action_maps::unsupported_devices_are_rejected_not_dropped",
+                "collect_app::input_actions::tests::default_hints_preserve_existing_window_text",
+                "collect_app::input_actions::tests::default_physical_bindings_preserve_existing_controls",
+                "collect_app::input_actions::tests::held_bindings_are_ored_without_mutating_physical_state",
+                "collect_app::input_actions::tests::unbound_physical_keys_do_not_gain_semantic_actions",
+                "collect_app::input_runtime_tests::controls_acceptance_tests::authoring_app_saved_bytes_drive_production_keys",
+                "collect_app::input_runtime_tests::invalid_map_is_rejected_before_project_open_and_direct_headless_options_are_guarded",
+                "collect_app::input_runtime_tests::map_reload_reproduces_production_bridge_trace_without_writing_map",
+                "collect_app::input_runtime_tests::remapped_aliases_are_independent_and_opposing_axes_cancel",
+                "collect_app::input_runtime_tests::remapped_focus_synthetic_capture_and_quit_keep_existing_policy",
+                "collect_app::input_runtime_tests::remapped_keys_match_default_collect_win_restart_and_quit_bridge_trace",
+                "collect_app::input_runtime_tests::remapped_old_keys_are_inert_in_production_policy_and_bridge",
+                "collect_app::input_runtime_tests::remapped_queue_cap_repeat_subtick_and_neutral_ack_use_real_bridge",
+                "collect_app::input_runtime_tests::remapped_restart_aliases_retain_queued_edges_and_held_state_after_ack",
                 "collect_app::tests::captured_fresh_restart_is_rejected_but_prior_authorized_edge_survives",
                 "collect_app::tests::consecutive_quick_taps_require_observed_neutral",
                 "collect_app::tests::focus_loss_cancels_pending_and_regain_requires_fresh_press",
                 "collect_app::tests::focus_requires_fresh_press_and_aliases_are_independent",
+                "collect_app::tests::input_map_cli_admission_is_explicit",
                 "collect_app::tests::pointer_capture_recomputes_physical_point_for_dpi_and_zoom",
                 "collect_app::tests::restart_queue_is_bounded_and_repeat_does_not_enqueue",
                 "collect_app::tests::restart_taps_reach_real_bridge_only_after_simulation_ticks",
@@ -4595,6 +5109,8 @@ jobs:
                 "collect_ui::tests::keyboard_activation_requires_unoccluded_button_center",
                 "collect_ui::tests::korean_label_uses_measured_wrapped_galley_and_authored_clip",
                 "collect_ui::tests::later_filled_container_blocks_covered_button_but_its_child_wins",
+                "collect_ui::tests::layout_document_matches_rendered_frame_order_geometry_and_clips",
+                "collect_ui::tests::layout_document_rejects_invalid_document_and_viewport",
                 "collect_ui::tests::overlap_only_last_button_receives_release_and_drag_cannot_retarget",
                 "collect_ui::tests::parent_relative_layout_and_clipping_apply_to_paint_and_hit_testing",
                 "collect_ui::tests::real_pointer_events_dispatch_all_actions_and_screen_capture",
@@ -4663,6 +5179,31 @@ jobs:
                 "project_export::admission::tests::recheck_hashes_bytes_even_when_identity_matches",
                 "project_export::admission::tests::sparse_bounds_are_rejected_without_reading_payloads",
                 "project_export::admission::tests::symlinks_in_files_or_ancestors_are_rejected",
+                "project_export::editor_arena::tests::byte_lengths_are_compared_as_well_as_digests",
+                "project_export::editor_arena::tests::canonical_scene_and_initial_checksum_are_independent_requirements",
+                "project_export::editor_arena::tests::constructors_bound_hash_bytes_paths_count_and_presence",
+                "project_export::editor_arena::tests::constructors_reject_duplicates_collisions_and_total_overflow_bound",
+                "project_export::editor_arena::tests::declared_unsupported_shapes_fail_before_runtime_or_staging",
+                "project_export::editor_arena::tests::exact_complete_inventory_exports_with_and_without_sprites_or_lock",
+                "project_export::editor_arena::tests::exact_source_does_not_bypass_whole_active_lock_asset_validation",
+                "project_export::editor_arena::tests::exact_source_retains_transaction_failpoints_and_previous_output",
+                "project_export::editor_arena::tests::exact_ui_assertion_exports_full_closure_without_expanding_inventory",
+                "project_export::editor_arena::tests::expected_source_is_revalidated_at_transaction_boundary",
+                "project_export::editor_arena::tests::extra_ui_assertion_rejects_before_runtime_stage_and_smoke",
+                "project_export::editor_arena::tests::lock_appearance_and_disappearance_are_not_equal_to_empty_lock",
+                "project_export::editor_arena::tests::missing_extra_and_wrong_presence_inventory_reject_before_runtime",
+                "project_export::editor_arena::tests::raw_manifest_lock_and_sprite_changes_reject_before_runtime_or_stage",
+                "project_export::editor_arena::tests::same_snapshot_stages_pinned_bytes_then_final_recheck_rejects_changes",
+                "project_export::editor_arena::tests::source_pin_preserves_trust_hash_and_elf_requirements",
+                "project_export::editor_arena::tests::source_shape_rejects_other_games_and_all_unsupported_entries",
+                "project_export::editor_arena::tests::ui_assertion_keeps_selected_asset_and_whole_active_lock_admission",
+                "project_export::editor_arena::tests::ui_assertion_presence_descriptor_bytes_and_shape_reject_before_runtime",
+                "project_export::editor_arena::tests::ui_constructor_accepts_parser_and_corpus_valid_font_above_scene_bound",
+                "project_export::editor_arena::tests::ui_constructor_bounds_closed_descriptor_font_length_and_digest",
+                "project_export::editor_arena::tests::ui_constructor_uses_exact_package_name_and_portable_asset_grammar",
+                "project_export::editor_arena::tests::ui_font_snapshot_is_staged_exactly_and_rechecked_before_publication",
+                "project_export::editor_arena::tests::ui_snapshot_requires_selected_package_asset_role_nonempty_length_and_hash",
+                "project_export::editor_arena::tests::unchanged_checksum_does_not_hide_different_raw_scene_bytes",
                 "project_export::tests::bounded_child_helper",
                 "project_export::tests::collect_profile_is_explicit_and_preserves_closed_transaction",
                 "project_export::tests::collect_profile_rejects_arena_before_smoke",
@@ -4700,12 +5241,14 @@ jobs:
                 "yard3d_view::tests::input_ray_round_trips_through_the_integer_encoding"
               ],
               "ignored_names": [
+                "app::project_ui_tests::relocated_bundle_real_widgets_restart_original_scene",
+                "collect_app::input_runtime_tests::controls_acceptance_tests::authoring_app_saved_bytes_drive_production_keys",
                 "collect_progress::tests::isolated_window_progress_child",
                 "game_progress::tests::concurrent_process_child",
                 "image_reimport::tests::reimport_real_pixels_export_relocates_with_sources_hidden_and_read_only"
               ],
-              "passed": 148,
-              "ignored": 3,
+              "passed": 200,
+              "ignored": 5,
               "children": 2,
               "features": [
                 "image-reimport",
@@ -4725,9 +5268,9 @@ jobs:
                   0
                 ],
                 [
-                  148,
+                  200,
                   0,
-                  3
+                  5
                 ]
               ]
             },
@@ -4829,6 +5372,9 @@ jobs:
             shift
             "$@" -- --list > "$ROOT/$lane-list.txt"
             "$@" -- --ignored --list > "$ROOT/$lane-ignored.txt"
+            if [ "$lane" = sample-cpu ]; then
+              python -B tools/arena_editor_export_gate.py profile-census image-reimport "$ROOT/$lane-list.txt" "$ROOT/$lane-ignored.txt"
+            fi
             python3 "$ROOT/check-results.py" "$ROOT" "$lane" list
             "$@" -- --nocapture 2>&1 | tee "$ROOT/$lane.log"
             python3 "$ROOT/check-results.py" "$ROOT" "$lane" result
@@ -5049,11 +5595,260 @@ jobs:
           path: ${{ runner.temp }}/arena-editor-native
           if-no-files-found: error
           retention-days: 7
+      # Both externally registered games must pass the actual App/framebuffer path.
+      # The runner rejects stale identities, zero/skipped tests, missing either game,
+      # wrong input contracts, stuck held input and independently invalid PNG pixels.
+      - name: Registered games native-window acceptance
+        if: runner.os == 'Linux'
+        timeout-minutes: 20
+        run: python3 tools/static_game_native_gate.py --artifacts "$RUNNER_TEMP/static-game-native"
+      - name: Upload registered games native-window evidence
+        if: ${{ always() && runner.os == 'Linux' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-game-native-${{ matrix.os }}
+          path: ${{ runner.temp }}/static-game-native
+          if-no-files-found: error
+          retention-days: 7
+      # Separate concrete players, owned Xvfb/XTEST and presented XGetImage pixels.
+      # Mandatory bubblewrap isolation runs these same delivered bundle processes;
+      # missing display/isolation/software-Vulkan capabilities fail, never skip.
+      # Two independent 900-second compile caps plus bounded native/editor checks.
+      - name: Source-hidden standalone game acceptance
+        if: runner.os == 'Linux'
+        timeout-minutes: 40
+        run: python3 tools/static_game_standalone_gate.py --artifacts "$RUNNER_TEMP/static-game-standalone"
+      - name: Upload source-hidden standalone game evidence
+        if: ${{ always() && runner.os == 'Linux' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-game-standalone-${{ matrix.os }}
+          path: ${{ runner.temp }}/static-game-standalone
+          if-no-files-found: error
+          retention-days: 7
       - if: runner.os == 'Linux'
         run: xvfb-run -a -s "-screen 0 1280x720x24" cargo run -p orr_sample --release --bin physics3d -- --bodies 200 --frames 20 --size 640x360 --screenshot "$RUNNER_TEMP/physics3d.png"
       # The mobile / weak-GPU preset (no MSAA, 512 texel shadow map, 12-segment meshes) on the same adapter.
       - if: runner.os == 'Linux'
         run: xvfb-run -a -s "-screen 0 1280x720x24" cargo run -p orr_sample --release --bin physics3d -- --low --bodies 200 --frames 20 --size 640x360 --screenshot "$RUNNER_TEMP/physics3d_low.png"
+
+  static-game-actions-native:
+    name: private four-action native (ubuntu-22.04)
+    # One required isolated Linux lane, never another matrix or production game.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 70
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      CARGO_TERM_COLOR: never
+      WGPU_BACKEND: vulkan
+      ORR_REQUIRE_GPU: "1"
+    steps:
+      - name: Initialize private action failure evidence
+        timeout-minutes: 1
+        run: |
+          mkdir -p "$RUNNER_TEMP/static-game-actions-native-job"
+          printf '%s\n' '{"status":"setup-started","native_acceptance":false}' > "$RUNNER_TEMP/static-game-actions-native-job/setup.json"
+      - uses: actions/checkout@v4
+        timeout-minutes: 2
+      - uses: dtolnay/rust-toolchain@stable
+        timeout-minutes: 3
+      - uses: Swatinem/rust-cache@v2
+        timeout-minutes: 4
+        with:
+          shared-key: private-four-action-native
+      - name: Install required native action capabilities
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          { sudo apt-get update -q
+            sudo apt-get install -y -q mesa-vulkan-drivers xvfb xauth libxkbcommon-x11-0 libasound2-dev pkg-config
+          } 2>&1 | tee "$RUNNER_TEMP/static-game-actions-native-job/setup-packages.log"
+      - name: Fetch exact locked registry inputs
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fetch --locked 2>&1 | tee "$RUNNER_TEMP/static-game-actions-native-job/registry-fetch.log"
+      # Hard step caps total 64 minutes, leaving 6 minutes job overhead.
+      # Gate retains two 900-second compile caps and 180/240-second native caps.
+      # Operational budget is unmeasured until hosted execution, not a runtime claim.
+      - name: Required private four-action native editor and player
+        timeout-minutes: 45
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$RUNNER_TEMP/static-game-actions-native-job"
+          trap 'status=$?; printf "{\"exit_code\":%s,\"native_acceptance_claim\":false}\n" "$status" > "$ROOT/process-exit.json"' EXIT
+          python3 -B tools/static_game_actions_native_gate.py --artifacts "$ROOT/acceptance" 2>&1 | tee "$ROOT/acceptance.log"
+      - name: Retain private action success or partial failure evidence
+        if: always()
+        timeout-minutes: 3
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-game-actions-native-ubuntu-22.04
+          path: ${{ runner.temp }}/static-game-actions-native-job
+          if-no-files-found: error
+          retention-days: 7
+
+  generated-user-game-actions-cpu:
+    name: generated user game actions CPU preview (ubuntu-22.04)
+    # Explicit opt-in preview only. This does not establish native acceptance.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 97
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      CARGO_TERM_COLOR: never
+    steps:
+      - name: Initialize preview failure evidence
+        timeout-minutes: 1
+        run: |
+          mkdir -p "$RUNNER_TEMP/generated-action-preview-job"
+          printf '%s\n' '{"status":"setup-started","native_acceptance":false}' > "$RUNNER_TEMP/generated-action-preview-job/setup.json"
+      - uses: actions/checkout@v4
+        timeout-minutes: 1
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        timeout-minutes: 2
+      - uses: actions/setup-python@v5
+        id: action_preview_python
+        timeout-minutes: 1
+        with:
+          python-version: "3.12"
+          update-environment: false
+      # Observed 171s package transfer + index/configuration exceeded 180s.
+      # Keep this setup bounded; the CPU gate and evidence retention keep their budgets.
+      - name: Install required CPU compilation dependencies
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$RUNNER_TEMP/generated-action-preview-job"
+          START=$SECONDS
+          trap 'status=$?; printf "{\"exit_code\":%s,\"elapsed_seconds\":%s,\"native_acceptance\":false}\n" "$status" "$((SECONDS - START))" > "$ROOT/setup-packages-status.json"' EXIT
+          { sudo apt-get update -q
+            sudo apt-get install -y -q libasound2-dev libudev-dev libxkbcommon-dev libwayland-dev pkg-config
+            pkg-config --exists alsa libudev xkbcommon wayland-client
+            pkg-config --modversion alsa libudev xkbcommon wayland-client
+          } 2>&1 | tee "$ROOT/setup-packages.log"
+      - name: Prepare exact preview engine and locked registry inputs
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$RUNNER_TEMP/generated-action-preview-job"
+          PIN=6f97ac85a80aabda26679b482d182c9365bff92e
+          test "$(git rev-parse "$PIN^{tree}")" = cd7cc2a03990a8778a99e60a82c3cfbb425c4d87
+          mkdir "$RUNNER_TEMP/generated-action-preview-engine"
+          git archive "$PIN" | tar -x -C "$RUNNER_TEMP/generated-action-preview-engine"
+          (cd "$RUNNER_TEMP/generated-action-preview-engine" && cargo fetch --locked) 2>&1 | tee "$ROOT/registry-fetch.log"
+          printf '%s\n' '{"status":"setup-complete","native_acceptance":false}' > "$ROOT/setup.json"
+      - name: Required generated preview portable action contracts
+        timeout-minutes: 80
+        shell: bash
+        env:
+          ORR_ACCEPTANCE_PYTHON: ${{ steps.action_preview_python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          ROOT="$RUNNER_TEMP/generated-action-preview-job"
+          trap 'status=$?; printf "{\"exit_code\":%s,\"native_acceptance_claim\":false}\n" "$status" > "$ROOT/process-exit.json"' EXIT
+          "$ORR_ACCEPTANCE_PYTHON" -B -m unittest discover -s tools -p 'test_bootstrap*.py' -v 2>&1 | tee "$ROOT/bootstrap-fixtures.log"
+          "$ORR_ACCEPTANCE_PYTHON" -B -m unittest discover -s tools -p 'test_user_game_action_preview_gate.py' -v 2>&1 | tee "$ROOT/gate-fixtures.log"
+          "$ORR_ACCEPTANCE_PYTHON" -B tools/user_game_action_preview_gate.py \
+            --gate "$GITHUB_WORKSPACE" \
+            --engine "$RUNNER_TEMP/generated-action-preview-engine" \
+            --project "$RUNNER_TEMP/generated action preview" \
+            --target "$RUNNER_TEMP/generated-action-preview-target" \
+            --artifacts "$RUNNER_TEMP/generated-action-preview-job/acceptance" 2>&1 | tee "$ROOT/acceptance.log"
+      - name: Retain preview success or partial failure evidence
+        if: always()
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-user-game-actions-cpu-ubuntu-22.04
+          path: ${{ runner.temp }}/generated-action-preview-job
+          if-no-files-found: error
+          retention-days: 7
+
+  generated-user-game-native:
+    name: generated user game native (ubuntu-22.04)
+    # One isolated mandatory lane, not a matrix. Existing engine gates remain.
+    # Same unprivileged bubblewrap-compatible runner as sample-build; migrate
+    # before the documented 2027-04-17 Ubuntu 22.04 removal.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      CARGO_TERM_COLOR: never
+      WGPU_BACKEND: vulkan
+      ORR_REQUIRE_GPU: "1"
+    steps:
+      - name: Initialize failure evidence
+        timeout-minutes: 1
+        run: |
+          mkdir -p "$RUNNER_TEMP/generated-user-native-job"
+          printf '%s\n' '{"status":"setup-started","native_acceptance":false}' > "$RUNNER_TEMP/generated-user-native-job/setup.json"
+      - uses: actions/checkout@v4
+        timeout-minutes: 2
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        timeout-minutes: 3
+      - uses: actions/setup-python@v5
+        id: generated_python
+        timeout-minutes: 2
+        with:
+          python-version: "3.12"
+          update-environment: false
+      - name: Install required native capabilities
+        timeout-minutes: 4
+        shell: bash
+        run: |
+          set -euo pipefail
+          { sudo apt-get update -q
+            sudo apt-get install -y -q mesa-vulkan-drivers bubblewrap xvfb xauth libxkbcommon-x11-0 libasound2-dev pkg-config
+          } 2>&1 | tee "$RUNNER_TEMP/generated-user-native-job/setup-packages.log"
+      - name: Prepare exact pinned engine and registry inputs
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$RUNNER_TEMP/generated-user-native-job"
+          PIN=27e53b356b25aa505995f3e8b322093948ef9db0
+          test "$(git rev-parse "$PIN^{tree}")" = 59158bede83603d7cb272ce7a101b4178956c598
+          mkdir "$RUNNER_TEMP/generated-user-engine"
+          git archive "$PIN" | tar -x -C "$RUNNER_TEMP/generated-user-engine"
+          cargo fetch --locked 2>&1 | tee "$ROOT/registry-fetch.log"
+          printf '%s\n' '{"status":"setup-complete","native_acceptance":false}' > "$ROOT/setup.json"
+      # Sum of original child command caps is 64m05s, plus bounded termination
+      # tails and source checks. 70m is an operational acceptance cap, not a
+      # measured runtime guarantee. Setup caps total 15m; upload cap is 5m.
+      - name: Required generated project native editor and delivered games
+        timeout-minutes: 70
+        shell: bash
+        env:
+          ORR_ACCEPTANCE_PYTHON: ${{ steps.generated_python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          ROOT="$RUNNER_TEMP/generated-user-native-job"
+          trap 'status=$?; printf "{\"exit_code\":%s,\"native_acceptance_claim\":false}\n" "$status" > "$ROOT/process-exit.json"' EXIT
+          "$ORR_ACCEPTANCE_PYTHON" -B -m unittest discover -s tools -p 'test_*game*gate.py' -v 2>&1 | tee "$ROOT/python-fixtures.log"
+          "$ORR_ACCEPTANCE_PYTHON" -B tools/user_game_native_gate.py \
+            --gate "$GITHUB_WORKSPACE" \
+            --engine "$RUNNER_TEMP/generated-user-engine" \
+            --project "$RUNNER_TEMP/generated user game" \
+            --target "$RUNNER_TEMP/generated-user-target" \
+            --artifacts "$ROOT/acceptance" 2>&1 | tee "$ROOT/acceptance.log"
+      - name: Retain generated project success or partial failure evidence
+        if: always()
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-user-game-native-ubuntu-22.04
+          path: ${{ runner.temp }}/generated-user-native-job
+          if-no-files-found: error
+          retention-days: 7
 
   sample-room:
     # Keep Room contracts, pinned producers and GPU consumers together, while
@@ -5574,7 +6369,7 @@ jobs:
     name: cross-platform checksum comparison
     # Preserve this check name for existing branch protection. Every checksum
     # target, sample graphics/audio/editor matrix, linked-prefab and Room lanes must pass.
-    needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, sample-linked-prefabs, sample-room, static-model-authoring, room-wall-authoring]
+    needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, generated-user-game-native, static-game-actions-native, generated-user-game-actions-cpu, sample-arena-cpu, sample-fixture-preflight, sample-linked-prefabs, sample-room, static-model-authoring, room-wall-authoring]
     # Without always(), a failed/skipped dependency skips this required check.
     if: ${{ always() }}
     runs-on: ubuntu-latest
@@ -5586,12 +6381,17 @@ jobs:
           WASM32_RESULT: ${{ needs.wasm32.result }}
           ANDROID_ARM64_RESULT: ${{ needs['android-arm64'].result }}
           BROWSER_RESULT: ${{ needs['wasm32-browser'].result }}
+          SAMPLE_ARENA_CPU_RESULT: ${{ needs['sample-arena-cpu'].result }}
+          SAMPLE_PREFLIGHT_RESULT: ${{ needs['sample-fixture-preflight'].result }}
           SAMPLE_BUILD_RESULT: ${{ needs['sample-build'].result }}
+          GENERATED_USER_NATIVE_RESULT: ${{ needs['generated-user-game-native'].result }}
+          PRIVATE_ACTION_NATIVE_RESULT: ${{ needs['static-game-actions-native'].result }}
+          GENERATED_ACTION_CPU_RESULT: ${{ needs['generated-user-game-actions-cpu'].result }}
           LINKED_PREFABS_RESULT: ${{ needs['sample-linked-prefabs'].result }}
           ROOM_RESULT: ${{ needs['sample-room'].result }}
         run: |
           failed=0
-          for result_var in NATIVE_RESULT WASM32_RESULT ANDROID_ARM64_RESULT BROWSER_RESULT SAMPLE_BUILD_RESULT LINKED_PREFABS_RESULT ROOM_RESULT; do
+          for result_var in NATIVE_RESULT WASM32_RESULT ANDROID_ARM64_RESULT BROWSER_RESULT SAMPLE_BUILD_RESULT SAMPLE_ARENA_CPU_RESULT SAMPLE_PREFLIGHT_RESULT LINKED_PREFABS_RESULT ROOM_RESULT GENERATED_USER_NATIVE_RESULT PRIVATE_ACTION_NATIVE_RESULT GENERATED_ACTION_CPU_RESULT; do
             result="${!result_var}"
             echo "$result_var=$result"
             if [[ "$result" != "success" ]]; then

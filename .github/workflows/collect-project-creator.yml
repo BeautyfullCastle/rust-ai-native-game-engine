@@ -1,0 +1,55 @@
+name: Collect project creator
+on:
+  pull_request:
+    branches: [main, su/engine-correctness-hardening, su/authoring-development-integration-20261021, su/static-game-starter-20261022]
+    types: [ready_for_review]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  acceptance:
+    name: Collect project creator (${{ matrix.mode }})
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [cpu, gpu]
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_RELEASE_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install explicit software Vulkan and source-hiding dependencies
+        if: matrix.mode == 'gpu'
+        run: sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers libvulkan1 libxkbcommon-dev bubblewrap
+      - name: Run current-source fail-closed acceptance
+        env:
+          ORR_COLLECT_CREATOR_GATE_EVIDENCE: ${{ runner.temp }}/collect-project-creator-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
+        run: python -B tools/collect_project_creator_gate.py '${{ matrix.mode }}'
+      - name: Retain exact executable, original failures, receipts and full editor captures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: collect-project-creator-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/collect-project-creator-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
+          include-hidden-files: true
+          if-no-files-found: error
+  required:
+    name: Collect project creator required
+    if: always()
+    needs: acceptance
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          ACCEPTANCE: ${{ needs.acceptance.result }}
+        run: test "$ACCEPTANCE" = success

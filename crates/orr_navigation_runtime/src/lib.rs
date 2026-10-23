@@ -2,6 +2,10 @@
 #![deny(clippy::float_arithmetic)]
 #![deny(clippy::disallowed_types)]
 
+#[cfg(feature = "mesh-hazards")]
+pub mod hazards;
+pub mod mesh;
+
 use bytemuck::{Pod, Zeroable};
 use orr_ecs::{ComponentRegistryBuilder, Entity, Frame, FrameList};
 use orr_fp::FP;

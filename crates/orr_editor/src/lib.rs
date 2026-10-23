@@ -54,6 +54,8 @@ pub mod diagnostics;
 pub mod editor;
 pub mod inspector;
 pub mod game;
+#[cfg(feature = "static-games")]
+pub mod static_adapter;
 pub mod model;
 pub mod script;
 pub mod viewport;
@@ -88,6 +90,8 @@ pub mod model_panel;
 pub mod blockout;
 #[cfg(feature = "models")]
 pub mod blockout_panel;
+#[cfg(feature = "models")]
+pub mod blockout_uv_density;
 
 #[cfg(feature = "animated-models")]
 pub mod yard_animation;
@@ -105,6 +109,8 @@ pub mod terrain_document;
 pub mod terrain_panel;
 #[cfg(feature = "terrain")]
 pub mod terrain_pick;
+#[cfg(feature = "terrain")]
+pub mod terrain_ramp;
 
 #[cfg(feature = "terrain-physics")]
 pub mod terrain_physics;
@@ -115,14 +121,148 @@ pub mod navigation_panel;
 #[cfg(feature = "navigation")]
 pub mod navigation_view;
 
+#[cfg(feature = "mesh-navigation")]
+pub mod mesh_navigation;
+#[cfg(feature = "mesh-navigation")]
+pub(crate) mod mesh_context;
+#[cfg(feature = "mesh-hazards")]
+pub(crate) mod mesh_hazards_panel;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_play_controls;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_art;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_art_import;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_art_import_panel;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_surface_package_panel;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_art_panel;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_props;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_prop_prefab;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_prop_prefab_store;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_prop_prefab_panel;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_props_panel;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_prop_view;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_agent_view;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_rotation;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_facing;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_camera;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_material;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_material_slots;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_material_slots_panel;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_surface;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_camera_store;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_camera_panel;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_lighting;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_lighting_store;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_lighting_preset;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_lighting_panel;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_hud;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_hud_store;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_hud_panel;
+#[cfg(feature = "mesh-mission")]
+mod mesh_mission_panel;
+#[cfg(feature = "mesh-mission")]
+mod mesh_mission_overlay;
+#[cfg(feature = "mesh-mission")]
+mod mesh_game_creator;
+#[cfg(feature = "mesh-hazards")]
+mod mesh_hazards_creator;
+#[cfg(feature = "mesh-navigation")]
+mod mesh_animation_store;
+#[cfg(feature = "mesh-animated-models")]
+mod mesh_animation;
+#[cfg(feature = "mesh-animated-models")]
+mod mesh_animation_panel;
+#[cfg(feature="mesh-navigation")]
+mod mesh_scene;
+#[cfg(feature="mesh-navigation")]
+mod mesh_workspace;
+#[cfg(feature="mesh-export")]
+mod mesh_export;
+#[cfg(feature="mesh-export")]
+mod mesh_export_panel;
+#[cfg(feature="mesh-export")]
+pub mod mesh_player;
+#[cfg(all(windows, target_arch = "x86_64", feature="windows-export"))]
+pub mod windows_export_panel;
+#[cfg(all(windows, target_arch = "x86_64", feature="windows-projects"))]
+pub mod windows_project_panel;
+#[cfg(feature="room-authoring")]
+pub mod room_authoring_panel;
+#[cfg(all(feature="room-authoring", any(test, all(any(windows, target_os="linux"), target_arch="x86_64"))))]
+mod room_wall_stamp;
+#[cfg(all(any(windows,target_os="linux"),target_arch="x86_64",feature="room-authoring"))]
+mod room_wall_stamp_store;
+#[cfg(all(any(windows,target_os="linux"),target_arch="x86_64",feature="room-authoring"))]
+mod room_wall_stamp_panel;
+#[cfg(feature="package-manager")]
+pub mod package_manager;
+#[cfg(feature = "package-manager")]
+mod model_package_import;
+#[cfg(feature = "package-manager")]
+mod model_package_import_panel;
+#[cfg(feature="package-manager")]
+pub mod package_manager_panel;
+#[cfg(feature = "package-manager")]
+mod package_model_preview;
+
 #[cfg(feature = "project-ui")]
 pub mod project_ui;
 
 #[cfg(feature="collect-ui")]
 pub mod collect_ui_panel;
+#[cfg(feature="collect-ui")]
+pub mod collect_ui_preview;
+#[cfg(feature = "collect-ui")]
+pub mod collect_ui_position;
+#[cfg(feature = "collect-ui")]
+pub mod collect_ui_resize;
+#[cfg(feature = "collect-ui")]
+pub mod collect_ui_alignment;
+#[cfg(feature = "collect-ui")]
+pub mod collect_ui_reparent;
 
 #[cfg(feature = "linked-prefabs")]
 pub mod linked_prefab_panel;
 
 #[cfg(feature="room-project")]
 pub mod room_camera_panel;
+
+#[cfg(feature = "mesh-hazards-export")]
+pub mod mesh_hazards_player;
+#[cfg(feature = "mesh-hazards-export")]
+mod mesh_hazards_export;
+#[cfg(feature = "mesh-hazards-export")]
+mod mesh_hazards_export_panel;
+
+#[cfg(feature = "room-project")]
+pub(crate) mod room_camera_capture;
+
+#[cfg(feature = "tilemap")]
+pub mod tilemap_panel;

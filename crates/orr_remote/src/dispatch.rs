@@ -23,6 +23,10 @@ use crate::proposals::{self, GameHooks};
 use crate::viewstream::ViewStreamHook;
 use crate::wire::{checksum_text, debug_error_name, debug_from_json};
 
+#[cfg(feature = "mesh-mission")]
+#[path = "dispatch/geometry_mission.rs"]
+mod geometry_mission;
+
 /// The host's model an ERP request runs against. It borrows the host's
 /// state, so any host loop (`Host`, or a test) can embed the server. A
 /// person's edits (client `user`) made on the same `doc` share its undo
@@ -154,7 +158,7 @@ fn own_tx<G: Game>(t: &ErpTarget<'_, G>, ctx: &CallCtx<'_>) -> Result<(), RpcErr
 fn is_world_mutation(method: &str) -> bool {
     matches!(
         method,
-        "world.patch" | "world.patch_batch" | "world.insert" | "world.remove" | "world.spawn" | "world.despawn" | "world.singleton.patch"
+        "world.patch" | "world.patch_batch" | "world.insert" | "world.remove" | "world.spawn" | "world.despawn" | "world.singleton.patch" | "mesh.geometry.reproject"
     )
 }
 
@@ -232,14 +236,16 @@ pub(crate) fn call<G: Game>(
         "world.query" => world_query(t, &p),
         "world.get" => world_get(t, &p),
         "world.singleton.get" => singleton_get(t, &p),
-        "world.patch" => world_patch(t, &p, origin),
+        "world.patch" => world_patch(t, ctx, &p, origin),
         "world.patch_batch" => world_patch_batch(t, lim, ctx, &p, origin),
-        "world.insert" => world_insert(t, &p, origin),
-        "world.remove" => world_remove(t, &p, origin),
-        "world.spawn" => world_spawn(t, &p, origin),
-        "world.despawn" => world_despawn(t, &p, origin),
-        "world.rename" => world_rename(t, &p, origin),
-        "world.singleton.patch" => singleton_patch(t, &p, origin),
+        #[cfg(feature = "mesh-mission")]
+        "mesh.geometry.reproject" => geometry_mission::call(t, lim, ctx, &p, origin),
+        "world.insert" => world_insert(t, ctx, &p, origin),
+        "world.remove" => world_remove(t, ctx, &p, origin),
+        "world.spawn" => world_spawn(t, ctx, &p, origin),
+        "world.despawn" => world_despawn(t, ctx, &p, origin),
+        "world.rename" => world_rename(t, ctx, &p, origin),
+        "world.singleton.patch" => singleton_patch(t, ctx, &p, origin),
         "tx.begin" => {
             require_edit_mode(t, "tx.begin")?;
             t.doc.begin_tx(p.opt_str("label")?.unwrap_or("agent edit"), origin)?;
@@ -617,7 +623,8 @@ fn singleton_get<G: Game>(t: &ErpTarget<'_, G>, p: &P<'_>) -> Result<J, RpcError
 
 // ---- world edits ----
 
-fn world_patch<G: Game>(t: &mut ErpTarget<'_, G>, p: &P<'_>, origin: Origin) -> Result<J, RpcError> {
+fn world_patch<G: Game>(t: &mut ErpTarget<'_, G>, ctx: &CallCtx<'_>, p: &P<'_>, origin: Origin) -> Result<J, RpcError> {
+    own_tx(t, ctx)?;
     let target = p.target()?;
     let component = p.str("component")?;
     let path = p.opt_str("path")?.unwrap_or("");
@@ -809,7 +816,8 @@ pub(crate) fn overlay(base: &Value, patch: &Value) -> Value {
     }
 }
 
-fn world_insert<G: Game>(t: &mut ErpTarget<'_, G>, p: &P<'_>, origin: Origin) -> Result<J, RpcError> {
+fn world_insert<G: Game>(t: &mut ErpTarget<'_, G>, ctx: &CallCtx<'_>, p: &P<'_>, origin: Origin) -> Result<J, RpcError> {
+    own_tx(t, ctx)?;
     let target = p.target()?;
     let component = p.str("component")?;
     let ti = component_type(&view(t), component)?;
@@ -827,7 +835,8 @@ fn world_insert<G: Game>(t: &mut ErpTarget<'_, G>, p: &P<'_>, origin: Origin) ->
     Ok(edited(t, true))
 }
 
-fn world_remove<G: Game>(t: &mut ErpTarget<'_, G>, p: &P<'_>, origin: Origin) -> Result<J, RpcError> {
+fn world_remove<G: Game>(t: &mut ErpTarget<'_, G>, ctx: &CallCtx<'_>, p: &P<'_>, origin: Origin) -> Result<J, RpcError> {
+    own_tx(t, ctx)?;
     let target = p.target()?;
     let component = p.str("component")?;
     component_type(&view(t), component)?;
@@ -841,7 +850,8 @@ fn world_remove<G: Game>(t: &mut ErpTarget<'_, G>, p: &P<'_>, origin: Origin) ->
     Ok(edited(t, true))
 }
 
-fn world_spawn<G: Game>(t: &mut ErpTarget<'_, G>, p: &P<'_>, origin: Origin) -> Result<J, RpcError> {
+fn world_spawn<G: Game>(t: &mut ErpTarget<'_, G>, ctx: &CallCtx<'_>, p: &P<'_>, origin: Origin) -> Result<J, RpcError> {
+    own_tx(t, ctx)?;
     let mut comps: Vec<(String, Value)> = Vec::new();
     match p.raw("components") {
         None | Some(J::Null) => {}
@@ -873,7 +883,8 @@ fn world_spawn<G: Game>(t: &mut ErpTarget<'_, G>, p: &P<'_>, origin: Origin) -> 
     Ok(o)
 }
 
-fn world_despawn<G: Game>(t: &mut ErpTarget<'_, G>, p: &P<'_>, origin: Origin) -> Result<J, RpcError> {
+fn world_despawn<G: Game>(t: &mut ErpTarget<'_, G>, ctx: &CallCtx<'_>, p: &P<'_>, origin: Origin) -> Result<J, RpcError> {
+    own_tx(t, ctx)?;
     let target = p.target()?;
     match t.play.as_mut() {
         Some(pc) => pc.despawn(&target)?,
@@ -885,7 +896,8 @@ fn world_despawn<G: Game>(t: &mut ErpTarget<'_, G>, p: &P<'_>, origin: Origin) -
     Ok(edited(t, true))
 }
 
-fn world_rename<G: Game>(t: &mut ErpTarget<'_, G>, p: &P<'_>, origin: Origin) -> Result<J, RpcError> {
+fn world_rename<G: Game>(t: &mut ErpTarget<'_, G>, ctx: &CallCtx<'_>, p: &P<'_>, origin: Origin) -> Result<J, RpcError> {
+    own_tx(t, ctx)?;
     require_edit_mode(t, "world.rename")?;
     let target = p.target()?;
     let guid = edit_guid(t, &target)?;
@@ -898,7 +910,8 @@ fn world_rename<G: Game>(t: &mut ErpTarget<'_, G>, p: &P<'_>, origin: Origin) ->
     Ok(edited(t, changed))
 }
 
-fn singleton_patch<G: Game>(t: &mut ErpTarget<'_, G>, p: &P<'_>, origin: Origin) -> Result<J, RpcError> {
+fn singleton_patch<G: Game>(t: &mut ErpTarget<'_, G>, ctx: &CallCtx<'_>, p: &P<'_>, origin: Origin) -> Result<J, RpcError> {
+    own_tx(t, ctx)?;
     let name = p.str("name")?;
     let path = p.opt_str("path")?.unwrap_or("");
     let raw = p.req_raw("value")?;

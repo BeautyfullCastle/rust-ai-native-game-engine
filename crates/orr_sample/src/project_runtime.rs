@@ -94,7 +94,8 @@ impl PreparedRuntime {
         } else {
             UiSupport::Unsupported
         };
-        let project = PreparedProject::open_with_ui(root, compiled_runtime(), ui_support)?;
+        let tilemap_support = if cfg!(feature = "tilemap") { crate::project::TilemapSupport::Supported } else { crate::project::TilemapSupport::Unsupported };
+        let project = PreparedProject::open_with_capabilities(root, compiled_runtime(), ui_support, tilemap_support)?;
         let registry = Simulation::<Arena>::build_registry();
         let mut initial = Frame::new(registry);
         initial.set_singleton(FrameRng::new(SEED));
@@ -147,9 +148,14 @@ impl PreparedRuntime {
         ProjectPresentation,
         Option<crate::project::PreparedUi>,
     ) {
-        let (_, _, sprites, ui) = self.project.into_parts();
-        let (document, assets) =
-            sprites.map_or((None, BTreeMap::new()), |s| (Some(s.document), s.assets));
+        let parts = self.project.into_presentation_parts();
+        let ui = parts.ui;
+        let (document, mut assets) =
+            parts.sprites.map_or((None, BTreeMap::new()), |s| (Some(s.document), s.assets));
+        #[cfg(feature = "tilemap")]
+        if let Some((key, asset)) = parts.tilemap_asset { assets.insert(key, asset); }
+        #[cfg(not(feature = "tilemap"))]
+        let _ = &mut assets;
         (
             self.restart_seed,
             ProjectPresentation {
@@ -167,6 +173,12 @@ impl PreparedRuntime {
                 camera: Camera::new([0.0, 0.0], 240.0),
                 shapes: RenderList::new(),
                 sprites: Vec::new(),
+                #[cfg(feature = "tilemap")]
+                tilemap: parts.tilemap,
+                #[cfg(feature = "tilemap")]
+                background: Vec::new(),
+                #[cfg(feature = "tilemap")]
+                background_ready: false,
             },
             ui,
         )
@@ -190,6 +202,12 @@ pub struct ProjectPresentation {
     pub camera: Camera,
     shapes: RenderList,
     sprites: Vec<SpriteDraw>,
+    #[cfg(feature = "tilemap")]
+    tilemap: Option<crate::project_tilemap::PreparedTilemap>,
+    #[cfg(feature = "tilemap")]
+    background: Vec<SpriteDraw>,
+    #[cfg(feature = "tilemap")]
+    background_ready: bool,
 }
 impl ProjectPresentation {
     #[cfg(feature = "collect-dodge")]
@@ -211,6 +229,12 @@ impl ProjectPresentation {
             camera: Camera::new([0.0, 0.0], 270.0),
             shapes: RenderList::new(),
             sprites: Vec::new(),
+            #[cfg(feature = "tilemap")]
+            tilemap: None,
+            #[cfg(feature = "tilemap")]
+            background: Vec::new(),
+            #[cfg(feature = "tilemap")]
+            background_ready: false,
         }
     }
 
@@ -225,6 +249,12 @@ impl ProjectPresentation {
     }
     pub fn shapes(&self) -> &RenderList {
         &self.shapes
+    }
+    pub fn background(&self) -> &[SpriteDraw] {
+        #[cfg(feature = "tilemap")]
+        { &self.background }
+        #[cfg(not(feature = "tilemap"))]
+        { &[] }
     }
     pub fn sprites(&self) -> &[SpriteDraw] {
         &self.sprites
@@ -247,6 +277,11 @@ impl ProjectPresentation {
     pub fn update(&mut self, snapshot: Option<&Snapshot>) -> Result<(), String> {
         self.shapes.clear();
         self.sprites.clear();
+        #[cfg(feature = "tilemap")]
+        if !self.background_ready {
+            self.background = self.tilemap.as_ref().map(|map| crate::project_tilemap::draws(map, self.document.as_ref().map_or(0, |doc| doc.bindings.len()))).transpose()?.unwrap_or_default();
+            self.background_ready = true;
+        }
         let Some(snapshot) = snapshot else {
             self.sampler.reset();
             self.follow.stop();
@@ -296,7 +331,11 @@ impl ProjectPresentation {
         };
         #[cfg(not(feature = "collect-dodge"))]
         let floor = arena_floor();
-        let items: Vec<_> = std::iter::once(floor)
+        #[cfg(feature = "tilemap")]
+        let floor = if self.tilemap.is_some() { None } else { Some(floor) };
+        #[cfg(not(feature = "tilemap"))]
+        let floor = Some(floor);
+        let items: Vec<_> = floor.into_iter()
             .chain(bodies.iter().map(|b| RenderItem {
                 entity: b.entity,
                 transform: Transform2::new(Vec2::new(b.pos[0], b.pos[1]), b.angle + b.turn),

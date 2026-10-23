@@ -13,11 +13,29 @@ default-run = "orr_editor"
 workspace = true
 
 [features]
+# Explicit statically linked game adapters; no plugin discovery or code loading.
+static-games = []
+# Additive bounded custom-game controls; legacy static-games stays unchanged.
+static-game-actions = ["static-games", "dep:orr_input"]
+arena-project-export = ["sprites", "orr_sample/project-export", "dep:sha2"]
+# Optional finite visual-only Arena background authoring.
+tilemap = ["sprites", "orr_sample/tilemap", "dep:orr_tilemap"]
+# Default-off standalone particle preset authoring; existing eframe/egui only.
+particle-preset-editor = ["dep:tempfile", "orr_sample/particle-preset"]
+# Embedded presentation-only preview; does not enable demo or imported scenes.
+particle-preset-preview = ["particle-preset-editor", "orr_render/particles"]
 # Standalone optional Arena input-map authoring; no default runtime/UI wiring.
 input-map-editor = ["dep:orr_input", "dep:tempfile", "orr_sample/input-actions"]
+# Separate default-off standalone Collect authoring; reuses existing dependencies.
+collect-input-map-editor = ["dep:orr_input", "dep:tempfile", "orr_sample/collect-dodge", "orr_sample/input-actions"]
 # Optional new-project creator for explicit authoring and acceptance workflows.
 project-create = ["orr_sample/project-create"]
 room-project = ["models", "orr_remote/room-project", "orr_sample/room-project"]
+room-animated-models = ["room-project", "animated-models", "orr_sample/room-animated-models"]
+room-authoring = ["room-project"]
+package-manager = ["room-project"]
+windows-export = ["room-project", "orr_sample/project-export"]
+windows-projects = ["windows-export", "room-authoring", "package-manager", "orr_sample/project-create"]
 image-reimport = ["sprites", "orr_sample/image-reimport"]
 linked-prefabs = ["collect-dodge", "dep:tempfile", "orr_remote/linked-prefabs", "orr_sample/linked-prefabs", "orr_reflect/linked-prefabs"]
 collect-dodge = ["orr_remote/collect-dodge", "orr_sample/collect-dodge"]
@@ -25,6 +43,12 @@ collect-dodge = ["orr_remote/collect-dodge", "orr_sample/collect-dodge"]
 collect-ui = ["collect-dodge", "project-ui", "orr_sample/collect-ui"]
 project-ui = ["sprites", "orr_sample/game-ui"]
 navigation = ["terrain", "orr_remote/navigation", "dep:orr_navigation"]
+mesh-navigation = ["models", "orr_remote/mesh-navigation", "dep:orr_navigation"]
+mesh-mission = ["mesh-navigation", "orr_remote/mesh-mission"]
+mesh-hazards = ["mesh-mission", "orr_remote/mesh-hazards"]
+mesh-export = ["mesh-navigation"]
+mesh-hazards-export = ["mesh-hazards", "mesh-export"]
+mesh-animated-models = ["mesh-navigation", "animated-models"]
 terrain-physics = ["terrain", "orr_remote/terrain-physics"]
 default = []
 terrain = ["orr_model_bindings/terrain", "models", "dep:orr_terrain", "dep:orr_terrain_view"]
@@ -34,6 +58,7 @@ models = ["dep:orr_model_bindings", "dep:orr_model", "orr_render/imported-scene"
 animated-models = ["orr_model_bindings/animated-models", "models", "orr_model/animation", "orr_render/animation"]
 
 [dependencies]
+orr_tilemap = { path = "../orr_tilemap", optional = true }
 orr_input = { path = "../orr_input", optional = true }
 orr_model_bindings = { path = "../orr_model_bindings", optional = true }
 orr_navigation = { path = "../orr_navigation", optional = true }
@@ -65,6 +90,7 @@ egui-wgpu = "0.36"
 png = "0.17"
 
 [dev-dependencies]
+bytemuck = { version = "1", features = ["derive"] }
 # Test-only Arena hosts and replay viewers; never linked directly by editor code.
 orr_edit = { path = "../orr_edit" }
 orr_sim = { path = "../orr_sim" }
@@ -82,6 +108,30 @@ path = "src/main.rs"
 test = false
 
 [[bin]]
+name = "orr_mesh_player"
+path = "src/mesh_player/entry.rs"
+required-features = ["mesh-export"]
+test = false
+bench = false
+
+[[bin]]
 name = "orr_input_map"
 path = "src/bin/orr_input_map.rs"
 required-features = ["input-map-editor"]
+
+[[bin]]
+name = "orr_mesh_hazards_player"
+path = "src/mesh_hazards_player/entry.rs"
+required-features = ["mesh-hazards-export"]
+test = false
+bench = false
+
+[[bin]]
+name = "orr_collect_input_map"
+path = "src/bin/orr_collect_input_map.rs"
+required-features = ["collect-input-map-editor"]
+
+[[bin]]
+name = "orr_particle_preset"
+path = "src/bin/orr_particle_preset.rs"
+required-features = ["particle-preset-editor"]

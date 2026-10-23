@@ -1,0 +1,146 @@
+schema: orr.scene/1
+singletons:
+  RoomEscapeV1::Run: {}
+  orr_physics3d::PhysicsState:
+    config:
+      gravity: [0, -10, 0]
+      dt: 0.01666
+      baumgarte: 0.2
+      linear_slop: 0.01
+      contact_margin: 0.02
+      restitution_threshold: 1
+      max_correction_speed: 6
+      max_linear_speed: 500
+      max_angular_speed: 60
+      velocity_iterations: 1
+      substeps: 8
+      sleep_ticks: 30
+      sleep_linear_speed: 0.05
+      sleep_angular_speed: 0.05
+entities:
+  e_00000000:
+    RoomEscapeV1::Actor: { kind: 1, ordinal: 0 }
+    orr_physics3d::Body:
+      pos: [0, 0.5, 0]
+      rot: { kind: unit, x: 0, y: 0, z: 0, w: 1 }
+      vel: [0, 0, 0]
+      omega: [0, 0, 0]
+      inv_mass: 0
+      inv_inertia: [0, 0, 0]
+      linear_damping: 0
+      angular_damping: 0
+      kind: kinematic
+    orr_physics3d::Collider:
+      shape: { kind: sphere, radius: 0.4 }
+      restitution: 0
+      friction: 0.5
+      layer: 2
+      mask: 0
+  e_10b0f93f:
+    RoomEscapeV1::Actor: { kind: 2, ordinal: 0 }
+    orr_physics3d::Body:
+      pos: [1, 0.5, 0]
+      rot: { kind: unit, x: 0, y: 0, z: 0, w: 1 }
+      vel: [0, 0, 0]
+      omega: [0, 0, 0]
+      inv_mass: 0
+      inv_inertia: [0, 0, 0]
+      linear_damping: 0
+      angular_damping: 0
+      kind: static
+    orr_physics3d::Collider:
+      shape: { kind: sphere, radius: 0.2 }
+      restitution: 0
+      friction: 0.5
+      layer: 2
+      mask: 0
+  e_2161f27e:
+    RoomEscapeV1::Actor: { kind: 3, ordinal: 0 }
+    orr_physics3d::Body:
+      pos: [3, 0.5, 0]
+      rot: { kind: unit, x: 0, y: 0, z: 0, w: 1 }
+      vel: [0, 0, 0]
+      omega: [0, 0, 0]
+      inv_mass: 0
+      inv_inertia: [0, 0, 0]
+      linear_damping: 0
+      angular_damping: 0
+      kind: static
+    orr_physics3d::Collider:
+      shape: { kind: sphere, radius: 0.5 }
+      restitution: 0
+      friction: 0.5
+      layer: 2
+      mask: 0
+  e_37b3f044:
+    RoomEscapeV1::Actor: { kind: 4, ordinal: 0 }
+    orr_physics3d::Body:
+      pos: [0, 0.5, 5]
+      rot: { kind: unit, x: 0, y: 0, z: 0, w: 1 }
+      vel: [0, 0, 0]
+      omega: [0, 0, 0]
+      inv_mass: 0
+      inv_inertia: [0, 0, 0]
+      linear_damping: 0
+      angular_damping: 0
+      kind: static
+    orr_physics3d::Collider:
+      shape: { kind: box, half_extents: [5, 1, 0.25] }
+      restitution: 0
+      friction: 0.5
+      layer: 1
+      mask: 0
+  e_7c513f18:
+    RoomEscapeV1::Actor: { kind: 4, ordinal: 0 }
+    orr_physics3d::Body:
+      pos: [-5, 0.5, 0]
+      rot: { kind: unit, x: 0, y: 0, z: 0, w: 1 }
+      vel: [0, 0, 0]
+      omega: [0, 0, 0]
+      inv_mass: 0
+      inv_inertia: [0, 0, 0]
+      linear_damping: 0
+      angular_damping: 0
+      kind: static
+    orr_physics3d::Collider:
+      shape: { kind: box, half_extents: [0.25, 1, 5] }
+      restitution: 0
+      friction: 0.5
+      layer: 1
+      mask: 0
+  e_e728e3f8:
+    RoomEscapeV1::Actor: { kind: 4, ordinal: 0 }
+    orr_physics3d::Body:
+      pos: [0, 0.5, -5]
+      rot: { kind: unit, x: 0, y: 0, z: 0, w: 1 }
+      vel: [0, 0, 0]
+      omega: [0, 0, 0]
+      inv_mass: 0
+      inv_inertia: [0, 0, 0]
+      linear_damping: 0
+      angular_damping: 0
+      kind: static
+    orr_physics3d::Collider:
+      shape: { kind: box, half_extents: [5, 1, 0.25] }
+      restitution: 0
+      friction: 0.5
+      layer: 1
+      mask: 0
+  e_f39471fc:
+    RoomEscapeV1::Actor: { kind: 4, ordinal: 0 }
+    orr_physics3d::Body:
+      pos: [5, 0.5, 0]
+      rot: { kind: unit, x: 0, y: 0, z: 0, w: 1 }
+      vel: [0, 0, 0]
+      omega: [0, 0, 0]
+      inv_mass: 0
+      inv_inertia: [0, 0, 0]
+      linear_damping: 0
+      angular_damping: 0
+      kind: static
+    orr_physics3d::Collider:
+      shape: { kind: box, half_extents: [0.25, 1, 5] }
+      restitution: 0
+      friction: 0.5
+      layer: 1
+      mask: 0

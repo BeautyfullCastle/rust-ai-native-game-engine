@@ -35,7 +35,7 @@ use orr_sim::{EventKey, Game, SimEvent};
 use serde_json::{json, Value as J};
 
 use crate::activity::{self, ActivityEntry, ActivityKind, ClientInfo, DEFAULT_ACTIVITY_CAPACITY};
-use crate::caps::{Auth, Caps};
+use crate::caps::{Auth, Cap, Caps};
 use crate::codec::hex_encode;
 use crate::dispatch::{authorize, call, CallCtx, Effects, ErpTarget, HostLimits, TxChange};
 use crate::error::*;
@@ -645,6 +645,7 @@ pub struct ErpServer {
     structured_input: Option<Box<dyn std::any::Any + Send + Sync>>,
     managed_input: crate::input::ManagedHeld,
     pending_screenshot: Option<PendingScreenshot>,
+    editor_work_status: Option<crate::work_status::WorkStatusService>,
 }
 
 impl ErpServer {
@@ -733,7 +734,13 @@ impl ErpServer {
             structured_input: None,
             managed_input: crate::input::ManagedHeld::default(),
             pending_screenshot: None,
+            editor_work_status: None,
         })
+    }
+
+    /// A moved, sole-host observation service. Installed before LocalHost ready.
+    pub(crate) fn install_editor_work_status(&mut self, service: Option<crate::work_status::WorkStatusService>) {
+        self.editor_work_status = service;
     }
 
     /// Enables reflected held input for one game through `registry.input` and
@@ -1303,6 +1310,33 @@ impl ErpServer {
             return;
         };
         let (client, caps, tx) = (c.client.clone(), c.caps, c.tx.clone());
+        if method == "editor.work_status" {
+            // No activity params, frame-cache invalidation or authoring effects.
+            // Authorization precedes every owner/mailbox observation, even when
+            // unpaired or unavailable. Normal maintenance above still runs.
+            let result = authorize(method, caps, target.play.is_some(), params)
+                .and_then(|_| crate::work_status::parse_max_age(params))
+                .map(|max_age| crate::work_status::response(
+                    self.editor_work_status.as_ref(),
+                    crate::work_status::HostScene {
+                        dirty: target.doc.is_dirty(),
+                        in_tx: target.doc.in_tx(),
+                        preview_revision: target.doc.revision(),
+                        doc_checksum: target.doc.checksum(),
+                    },
+                    max_age,
+                ));
+            self.stats.requests += 1;
+            if result.is_err() { self.stats.errors += 1; }
+            if let Some(c) = self.conns.get_mut(&conn) { c.requests += 1; }
+            if let Some(id) = id {
+                tx.send_control_text(match result {
+                    Ok(value) => response_ok(&id, value),
+                    Err(error) => response_err(&id, &error),
+                });
+            }
+            return;
+        }
         if method == "view.screenshot" {
             self.screenshot_request(target, conn, id, caps, params);
             return;
@@ -1365,6 +1399,11 @@ impl ErpServer {
                     "sim.start" | "sim.stop" | "sim.pause" | "sim.seek" | "sim.branch"
                 ) {
                     self.managed_input.invalidate(target);
+                }
+                if method == "rpc.discover" && caps.has(Cap::Read) {
+                    if let Some(service) = &self.editor_work_status {
+                        result["engine"]["editor_work_status"] = service.discovery();
+                    }
                 }
                 if self.managed_input.enabled && input.is_some() {
                     match method {
@@ -2105,7 +2144,7 @@ impl ErpServer {
                 continue;
             };
             // A proposal/scene preview is not the live simulation's event source.
-            if !d.identity.is_some_and(|identity| identity.0 == 1) {
+            if d.identity.is_none_or(|identity| identity.0 != 1) {
                 continue;
             }
             d.advance(events.len());

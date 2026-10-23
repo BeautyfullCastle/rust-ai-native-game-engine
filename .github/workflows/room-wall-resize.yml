@@ -1,0 +1,133 @@
+name: Room wall two-corner resize acceptance
+on:
+  pull_request:
+    branches: [main, su/engine-correctness-hardening, su/authoring-development-integration-20261021, su/static-game-starter-20261022]
+    types: [ready_for_review]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  room-wall-resize:
+    # Additive optional-feature coverage; no existing mandatory gate is replaced.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      ORR_ROOM_WALL_RESIZE_EVIDENCE: ${{ github.workspace }}/target/room-wall-resize-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Exact-count guard self-tests
+        run: python tools/check-authoring-controls.py --self-test
+      - name: Focused CPU preview contracts and optional feature boundaries
+        shell: python {0}
+        run: |
+          import os
+          from pathlib import Path
+          import runpy
+
+          helpers = runpy.run_path("tools/check-authoring-controls.py")
+          evidence = Path(os.environ["ORR_ROOM_WALL_RESIZE_EVIDENCE"])
+          evidence.mkdir(parents=True, exist_ok=False)
+          # Shared actor/wall/stamp regressions remain required in their existing workflows.
+          for suite, count in (
+              ("room_authoring_panel::wall_placement::resize_tests", 8),
+              ("editor::room_authoring::room_wall_update_checked_tests", 4),
+          ):
+              output = helpers["run_logged"](
+                  ["cargo", "test", "--locked", "-p", "orr_editor", "--features", "room-authoring",
+                   "--lib", suite + "::", "--", "--format=pretty", "--color=never", "--test-threads=1"],
+                  evidence / (suite.replace("::", "-") + ".log"))
+              helpers["validate_tests"](output, suite, count)
+          for name, args in (
+              ("default-check", ["check", "--lib"]),
+              ("room-authoring-check", ["check", "--lib", "--features", "room-authoring"]),
+              ("minimal-check", ["check", "--lib", "--no-default-features", "--features", "room-authoring"]),
+              ("room-authoring-lint", ["clippy", "--lib", "--features", "room-authoring", "--", "-D", "warnings"]),
+              ("wall-resize-ui-lint", ["clippy", "--test", "room_wall_resize_ui", "--features", "room-authoring", "--", "-D", "warnings"]),
+          ):
+              helpers["run_logged"](["cargo", args[0], "--locked", "-p", "orr_editor", *args[1:]],
+                                    evidence / (name + ".log"))
+      - name: Install explicit Linux software Vulkan
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q 2>&1 | tee "$ORR_ROOM_WALL_RESIZE_EVIDENCE/vulkan-install.log"
+          sudo apt-get install -y -q mesa-vulkan-drivers libvulkan1 2>&1 | tee -a "$ORR_ROOM_WALL_RESIZE_EVIDENCE/vulkan-install.log"
+          mapfile -t drivers < <(find /usr/share/vulkan/icd.d -maxdepth 1 -name 'lvp_icd*.json' -type f)
+          test "${#drivers[@]}" -eq 1
+          runtime=$(mktemp -d "$RUNNER_TEMP/room-wall-resize-xdg.XXXXXXXX")
+          chmod 700 "$runtime"
+          {
+            echo "VK_DRIVER_FILES=${drivers[0]}"
+            echo "VK_ICD_FILENAMES=${drivers[0]}"
+            echo "XDG_RUNTIME_DIR=$runtime"
+          } >> "$GITHUB_ENV"
+          printf 'Software Vulkan ICD: %s\n' "${drivers[0]}" | tee "$ORR_ROOM_WALL_RESIZE_EVIDENCE/vulkan-driver.log"
+      - name: Explicit ignored production EditorApp Room wall two-corner resize acceptance
+        if: runner.os == 'Linux'
+        env:
+          WGPU_BACKEND: vulkan
+        shell: python {0}
+        run: |
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import runpy
+
+          helpers = runpy.run_path("tools/check-authoring-controls.py")
+          evidence = Path(os.environ["ORR_ROOM_WALL_RESIZE_EVIDENCE"])
+          capture = evidence / "wall-resize-ui"
+          if capture.exists():
+              raise RuntimeError("Wall resize acceptance requires an absent, fresh capture directory")
+          os.environ["ORR_ROOM_WALL_RESIZE_DIR"] = str(capture.resolve())
+          name = "selected_wall_two_corner_resize_preserves_identity_and_grows_collision"
+          output = helpers["run_logged"](
+              ["cargo", "test", "--locked", "-p", "orr_editor", "--features", "room-authoring",
+               "--test", "room_wall_resize_ui", name, "--", "--exact", "--ignored",
+               "--format=pretty", "--color=never", "--test-threads=1"], evidence / "wall-resize-ui.log")
+          summaries = helpers["SUMMARY"].findall(output)
+          if (len(summaries) != 1 or tuple(map(int, summaries[0][:4])) != (1, 0, 0, 0)
+                  or re.findall(r"^running (\d+) tests?$", output, re.M) != ["1"]
+                  or helpers["CASE"].findall(output) != [(name, "ok")]):
+              raise RuntimeError(f"{name}: expected exactly one executed passing ignored test")
+          receipt = json.loads((capture / "acceptance.json").read_text())
+          expected = {
+              "schema": 1, "production_editor_app": True, "software_gpu": True,
+              "physical_os_input": False, "preapply_frame_history_files_unchanged": True,
+              "escape_cancels": True, "identity_y_height_preserved": True,
+              "two_corner_staging_only": True, "grid_snapping": False,
+              "original_route_clear": True, "footprint_collision_grows": True,
+              "undo_redo_save_reopen": True, "play_collision": True,
+          }
+          if any(type(receipt.get(key)) is not type(value) or receipt.get(key) != value
+                 for key, value in expected.items()):
+              raise RuntimeError("Fresh Room wall two-corner resize receipt is incomplete or inconsistent")
+          if not isinstance(receipt.get("adapter"), str) or "llvmpipe" not in receipt["adapter"].lower():
+              raise RuntimeError("Expected actual llvmpipe software Vulkan viewport adapter")
+          for image in ("00-original-route-clear.png", "01-first-corner.png", "02-staged-only.png",
+                        "03-applied-wall.png", "04-reopened-wall.png", "05-play-collision.png"):
+              data = (capture / image).read_bytes()
+              if len(data) < 33 or data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR":
+                  raise RuntimeError(f"Missing or malformed fresh wall resize capture: {image}")
+      - name: Retain receipts, screenshots and failure logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: room-wall-resize-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.ORR_ROOM_WALL_RESIZE_EVIDENCE }}
+          if-no-files-found: error

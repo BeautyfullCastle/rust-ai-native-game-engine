@@ -1,5 +1,12 @@
 # Frame-owned point navigation
 
+The independent `mesh::MeshRuntime` adapter also owns an explicit static-triangle
+agent inside the Frame, with dependency pins, absolute-route cursor, stop/replan,
+save/restore and deterministic continuation. Its separate byte element type lets
+it coexist with the terrain adapter. See
+[the static-mesh runtime workflow](../../docs/static-mesh-runtime.md). The terrain
+adapter and its distance-budget contract below are unchanged.
+
 `orr_navigation_runtime` is an optional, deterministic adapter from the validated `orr_navigation` heightfield graph to an `orr_ecs::Frame`. It supports one point agent on terrain of at most 17 × 17 vertices and a route of at most 512 triangles. Radius, headroom, and maximum step height are zero. Slope is a nonnegative rise/run ratio; `distance_per_tick` is a nonnegative fixed-point 3D distance budget. It does not offer clearance-aware navmesh routing or a funnel.
 
 Register with `NavigationRuntime::register(builder)`. `admit(frame, terrain, graph, spec)` validates the terrain, canonical graph, profile, and complete route before changing the Frame. It spawns the one derived agent and stores canonical terrain bytes, graph bytes, and `NavigatorSnapshot` bytes in three `FrameList<u8>` values. The `RuntimeState` singleton holds those handles and the agent entity; `RuntimeAgent` holds the request. All authoritative route state is therefore in the Frame, including its checksum, clone, serialized snapshot, and rollback state. There is no external authoritative cache.

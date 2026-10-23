@@ -1,0 +1,11 @@
+# Mesh geometry authoring
+
+The optional `mesh-navigation` editor workflow authors a walkable static mesh from bounded, fixed-point quad forms. A staged quad, vertex move, or face removal changes only the local geometry draft. `Place mesh agent` validates and commits the graph together with the agent specification as one authoritative ERP history entry. Undo and redo therefore operate on the committed scene, not on intermediate form edits.
+
+Geometry operations use the current canonical vertex and face indices. Removing faces may leave unreferenced vertices in the graph's vertex array; those vertices do not define walkable triangles and remain serialized for graph identity.
+
+The editor validates geometry and route admission before placement. Invalid indices, degenerate faces, disconnected routes, and rejected submissions leave the current host scene and the last valid geometry draft intact. Reset the form after an invalid edit before placing or starting Play. Geometry editing is intended for a new or clean mesh authoring state: existing scene-bound art, props, camera, or animation sidecars must be explicitly removed and saved before changing graph revision, so the editor does not silently retarget or discard their bindings.
+
+The authored graph is embedded in the saved mesh scene and can be reopened in a fresh Physics editor session. Walkable triangles are navigation data only; this workflow does not create colliders, physical ramps, or a physics controller. The optional mesh-game export is a bare three-file bundle (scene, player executable, manifest) for this geometry-only scene. This does not claim native runtime execution or verify external model-package handling. GPU acceptance uses the actual editor viewport on a hardware Vulkan adapter; it does not synthesize physical operating-system input.
+
+The ignored Windows x64 acceptance test is `mesh_geometry_ui::ui_authors_walkable_geometry_then_reopens_and_plays`. It requires `ORR_MESH_GEOMETRY_ACCEPTANCE=1`, `ORR_REQUIRE_GPU=1`, `WGPU_BACKEND=vulkan`, and a fresh absolute `ORR_MESH_GEOMETRY_CAPTURE_DIR`. `ORR_MESH_GEOMETRY_OUTPUT` may select a new scene file; optional bundle export requires both `ORR_MESH_GEOMETRY_EXPORT_OUTPUT` and `ORR_MESH_EXPORT_RUNTIME`.

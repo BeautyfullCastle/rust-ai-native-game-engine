@@ -2,7 +2,7 @@
 use orr_ecs::Frame;
 use orr_fp::FrameRng;
 use orr_games::room_escape_game::{self as game, RoomEscapeV1};
-use orr_model_bindings::model_bindings::{Document, LoadedAsset, ModelKind};
+use orr_model_bindings::model_bindings::{Binding, Document, LoadedAsset, ModelKind};
 use orr_reflect::{Guid, Scene, SceneIndex, TypeRegistry};
 use orr_sim::Simulation;
 use std::{
@@ -19,6 +19,7 @@ pub const MAX_SCENE_BYTES: u64 = 256 * 1024;
 pub const MAX_MODEL_ASSETS: usize = 8;
 pub const MAX_MODEL_BINDINGS: usize = 68;
 pub const MAX_DECODED_MODEL_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_ANIMATION_WORK_PER_FRAME: usize = 1_000_000;
 
 pub fn types() -> TypeRegistry {
     let mut types = TypeRegistry::new();
@@ -118,6 +119,8 @@ pub fn validate_document(scene: &Scene) -> Result<(), String> {
 pub fn compiled_runtime() -> orr_package::Runtime {
     let mut runtime = orr_package::Runtime::content_only();
     runtime.capabilities.insert("models".into());
+    #[cfg(feature = "room-animated-models")]
+    runtime.capabilities.insert("animation".into());
     runtime
 }
 pub struct PreparedModels {
@@ -205,8 +208,14 @@ impl PreparedProject {
             if scene.index.entity(&guid).is_none() {
                 return Err("room model binding GUID is absent from scene".into());
             }
-            if binding.kind != ModelKind::Static || binding.animation.is_some() {
-                return Err("room v1 supports explicit static model bindings only".into());
+            if binding.kind == ModelKind::Animated {
+                #[cfg(not(feature = "room-animated-models"))]
+                return Err("Room v1 supports static model bindings only in this build".into());
+            }
+            if (binding.kind == ModelKind::Static && binding.animation.is_some())
+                || (binding.kind == ModelKind::Animated && binding.animation.is_none())
+            {
+                return Err("Room model kind and animation descriptor do not match".into());
             }
             let key = (binding.package.clone(), binding.asset.clone());
             if !assets.contains_key(&key) {
@@ -222,6 +231,18 @@ impl PreparedProject {
             binding.validate(assets.get(&key).expect("admitted model"))?;
         }
         validate_decoded_model_budget(assets.values())?;
+        let animation_bindings = document
+            .bindings
+            .values()
+            .map(|binding| {
+                let key = (binding.package.clone(), binding.asset.clone());
+                assets
+                    .get(&key)
+                    .map(|asset| (binding, asset))
+                    .ok_or_else(|| "Room model binding asset missing after admission".to_owned())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        validate_animation_workload(animation_bindings)?;
         let after = project
             .verify()
             .map_err(|e| format!("room final active lock: {e}"))?;
@@ -282,26 +303,116 @@ pub fn validate_decoded_model_budget<'a>(
         if identities.len() > MAX_MODEL_ASSETS {
             return Err("room model asset limit exceeded".into());
         }
-        let model = asset.static_model().ok_or("room requires static model")?;
-        let source = model.source();
         let mut size = 0usize;
-        for primitive in &source.primitives {
-            size = add_bytes(
-                size,
-                primitive.vertices.len(),
-                std::mem::size_of::<orr_model::Vertex>(),
-            )?;
-            size = add_bytes(size, primitive.indices.len(), std::mem::size_of::<u32>())?;
-            size = add_bytes(size, primitive.id.len(), 1)?;
+        match asset.kind() {
+            ModelKind::Static => {
+                let model = asset.static_model().ok_or("invalid static Room model")?;
+                let source = model.source();
+                for primitive in &source.primitives {
+                    size = add_bytes(
+                        size,
+                        primitive.vertices.len(),
+                        std::mem::size_of::<orr_model::Vertex>(),
+                    )?;
+                    size = add_bytes(size, primitive.indices.len(), std::mem::size_of::<u32>())?;
+                    size = add_bytes(size, primitive.id.len(), 1)?;
+                }
+                for dependency in &source.dependencies {
+                    size = add_bytes(size, 1, std::mem::size_of::<orr_model::Dependency>())?;
+                    size = add_bytes(size, dependency.uri.len(), 1)?;
+                    size = add_bytes(size, dependency.sha256.len(), 1)?;
+                }
+                size = add_bytes(
+                    size,
+                    source.materials.len(),
+                    std::mem::size_of::<orr_model::Material>(),
+                )?;
+                for image in &source.images {
+                    size = add_bytes(size, image.rgba8.len(), 1)?;
+                }
+            }
+            ModelKind::Animated => {
+                #[cfg(feature = "room-animated-models")]
+                {
+                    let model = asset
+                        .animated_model()
+                        .ok_or("invalid animated Room model")?;
+                    let source = model.source();
+                    for primitive in &source.primitives {
+                        size = add_bytes(
+                            size,
+                            primitive.vertices.len(),
+                            std::mem::size_of::<orr_model::animation::SkinnedVertex>(),
+                        )?;
+                        size =
+                            add_bytes(size, primitive.indices.len(), std::mem::size_of::<u32>())?;
+                        size = add_bytes(size, primitive.id.len(), 1)?;
+                    }
+                    for dependency in &source.dependencies {
+                        size = add_bytes(size, 1, std::mem::size_of::<orr_model::Dependency>())?;
+                        size = add_bytes(size, dependency.uri.len(), 1)?;
+                        size = add_bytes(size, dependency.sha256.len(), 1)?;
+                    }
+                    for node in &source.nodes {
+                        size = add_bytes(
+                            size,
+                            1,
+                            std::mem::size_of::<orr_model::animation::AnimatedNode>(),
+                        )?;
+                        size = add_bytes(size, node.name.len(), 1)?;
+                        size = add_bytes(size, node.children.len(), std::mem::size_of::<u32>())?;
+                    }
+                    for skin in &source.skins {
+                        size =
+                            add_bytes(size, 1, std::mem::size_of::<orr_model::animation::Skin>())?;
+                        size = add_bytes(size, skin.name.len(), 1)?;
+                        size = add_bytes(size, skin.joints.len(), std::mem::size_of::<u32>())?;
+                        size = add_bytes(
+                            size,
+                            skin.inverse_bind_matrices.len(),
+                            std::mem::size_of::<orr_model::animation::Matrix4>(),
+                        )?;
+                    }
+                    for clip in &source.clips {
+                        size = add_bytes(
+                            size,
+                            1,
+                            std::mem::size_of::<orr_model::animation::AnimationClip>(),
+                        )?;
+                        size = add_bytes(size, clip.name.len(), 1)?;
+                        for channel in &clip.channels {
+                            size = add_bytes(
+                                size,
+                                1,
+                                std::mem::size_of::<orr_model::animation::AnimationChannel>(),
+                            )?;
+                            size =
+                                add_bytes(size, channel.times.len(), std::mem::size_of::<f32>())?;
+                            let (value_count, value_stride) = match &channel.values {
+                                orr_model::animation::ChannelValues::Translation(values)
+                                | orr_model::animation::ChannelValues::Scale(values) => {
+                                    (values.len(), std::mem::size_of::<[f32; 3]>())
+                                }
+                                orr_model::animation::ChannelValues::Rotation(values) => {
+                                    (values.len(), std::mem::size_of::<[f32; 4]>())
+                                }
+                            };
+                            size = add_bytes(size, value_count, value_stride)?;
+                        }
+                    }
+                    size = add_bytes(
+                        size,
+                        source.materials.len(),
+                        std::mem::size_of::<orr_model::Material>(),
+                    )?;
+                    for image in &source.images {
+                        size = add_bytes(size, image.rgba8.len(), 1)?;
+                    }
+                }
+                #[cfg(not(feature = "room-animated-models"))]
+                return Err("Room v1 supports static model bindings only in this build".into());
+            }
         }
-        for image in &source.images {
-            size = add_bytes(size, image.rgba8.len(), 1)?;
-        }
-        size = add_bytes(
-            size,
-            source.materials.len(),
-            std::mem::size_of::<orr_model::Material>(),
-        )?;
         // Bounded metadata/containers also charged conservatively per asset.
         size = add_bytes(size, 1024 * 1024, 1)?;
         decoded = decoded
@@ -313,6 +424,69 @@ pub fn validate_decoded_model_budget<'a>(
     }
     Ok(())
 }
+
+/// Bound repeated per-instance skeletal sampling work for one presented frame.
+pub fn validate_animation_workload<'a>(
+    bindings: impl IntoIterator<Item = (&'a Binding, &'a LoadedAsset)>,
+) -> Result<(), String> {
+    #[cfg(feature = "room-animated-models")]
+    let mut work = 0usize;
+    for (binding, asset) in bindings {
+        if binding.kind != ModelKind::Animated {
+            continue;
+        }
+        #[cfg(feature = "room-animated-models")]
+        {
+            binding.validate(asset)?;
+            let model = asset
+                .animated_model()
+                .ok_or("Room animation binding does not reference an animated asset")?;
+            let source = model.source();
+            let animation = binding
+                .animation
+                .ok_or("Room animation binding has no selected clip")?;
+            let clip = source
+                .clips
+                .get(animation.clip_index as usize)
+                .ok_or("Room animation clip index is out of range")?;
+            let mut instance_work = source.nodes.len();
+            for primitive in &source.primitives {
+                instance_work = instance_work
+                    .checked_add(primitive.vertices.len())
+                    .ok_or("Room animation workload overflow")?;
+            }
+            for skin in &source.skins {
+                instance_work = instance_work
+                    .checked_add(skin.joints.len())
+                    .ok_or("Room animation workload overflow")?;
+            }
+            for channel in &clip.channels {
+                let search_work = if channel.times.len() < 2 {
+                    1
+                } else {
+                    (usize::BITS - (channel.times.len() - 1).leading_zeros()) as usize
+                };
+                instance_work = instance_work
+                    .checked_add(1)
+                    .and_then(|value| value.checked_add(search_work))
+                    .ok_or("Room animation workload overflow")?;
+            }
+            work = work
+                .checked_add(instance_work)
+                .ok_or("Room animation workload overflow")?;
+            if work > MAX_ANIMATION_WORK_PER_FRAME {
+                return Err("Room aggregate animation workload limit exceeded".into());
+            }
+        }
+        #[cfg(not(feature = "room-animated-models"))]
+        {
+            let _ = asset;
+            return Err("Room supports static model bindings only in this build".into());
+        }
+    }
+    Ok(())
+}
+
 fn add_bytes(total: usize, count: usize, stride: usize) -> Result<usize, String> {
     count
         .checked_mul(stride)

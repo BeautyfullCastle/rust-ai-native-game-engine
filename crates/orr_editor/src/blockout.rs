@@ -130,8 +130,15 @@ fn digest(bytes: &[u8]) -> String { Sha256::digest(bytes).iter().map(|b| format!
 
 fn no_links(path: &Path) -> Result<()> {
     let mut current = PathBuf::new();
-    for component in path.components() {
+    let mut components = path.components().peekable();
+    while let Some(component) = components.next() {
         current.push(component.as_os_str());
+        // A Windows prefix (C: or \\?\C:) is not the rooted volume yet.
+        // Inspect the complete root on the next iteration, never skip an ancestor.
+        if matches!(component, Component::Prefix(_))
+            && matches!(components.peek(), Some(Component::RootDir)) {
+            continue;
+        }
         let metadata = fs::symlink_metadata(&current).map_err(|e| e.to_string())?;
         if metadata.file_type().is_symlink() { return Err("Recipe paths may not contain symlinks".into()); }
     }
@@ -283,5 +290,33 @@ impl PreparedBake {
             Ok(())
         }).map_err(|e| e.to_string())?;
         Ok(self.result)
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_path_tests {
+    use super::*;
+
+    #[test]
+    fn drive_and_verbatim_roots_preserve_recipe_path_checks() {
+        let temporary = tempfile::tempdir().unwrap();
+        let canonical = temporary.path().canonicalize().unwrap();
+        for (index, directory) in [temporary.path(), canonical.as_path()].into_iter().enumerate() {
+            let root: PathBuf = directory.components().take(2).collect();
+            no_links(&root).unwrap();
+            no_links(directory).unwrap();
+            let relative = format!("root-{index}.blockout.json");
+            let mut document = Blockout::create(directory, &relative).unwrap();
+            document.save().unwrap();
+            let bytes = fs::read(document.path()).unwrap();
+            let mut reopened = Blockout::open(directory, &relative).unwrap();
+            reopened.save().unwrap();
+            assert_eq!(fs::read(reopened.path()).unwrap(), bytes);
+            assert!(Blockout::create(directory, &relative).is_err());
+            assert!(Blockout::create(directory, "../escape.blockout.json").is_err());
+            assert!(Blockout::create(directory, "missing/child.blockout.json").is_err());
+            assert!(Blockout::create(document.path(), "child.blockout.json").is_err());
+            assert!(Blockout::create(directory, &format!("{relative}/child.blockout.json")).is_err());
+        }
     }
 }

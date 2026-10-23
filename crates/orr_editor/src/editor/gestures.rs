@@ -74,7 +74,7 @@ impl Gestures {
 // Synchronous non-gesture mutations must not overtake a queued gesture or
 // inadvertently become part of its connection-owned transaction.
 pub(super) fn is_read(method: &str) -> bool {
-    matches!(method, "rpc.discover" | "registry.types" | "registry.schema" | "registry.input"
+    matches!(method, "editor.work_status" | "rpc.discover" | "registry.types" | "registry.schema" | "registry.input"
         | "world.query" | "world.get" | "world.singleton.get" | "history.list" | "sim.state"
         | "activity.list" | "proposal.list" | "proposal.get" | "proposal.preview")
 }

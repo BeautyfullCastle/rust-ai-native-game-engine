@@ -30,7 +30,38 @@ orr undo
 ## Working on the engine itself
 
 See `CLAUDE.md` (rules for the simulation crates: no floats, no `HashMap`, golden checksums) and
-`docs/design-v1.md`.
+`docs/design-v2.md` for current delivery priorities and `docs/design-v1.md` for
+the underlying architecture.
+
+## Integration-first delivery
+
+- Finish the existing reviewed development integration before opening more
+  long-lived feature stacks. Check actual ancestry and missing changes once;
+  resolve the affected conflicts rather than repeating broad repository audits.
+- After the user-requested hardening-to-main integration, use short-lived branches from
+  current main. Until then, name the approved development base explicitly.
+  The current user request authorizes hardening then main, only after their
+  required exact-head gates pass. It does not automatically merge PR #1.
+- Run focused checks for each change. At integration boundaries, require the
+  exact integration head's mandatory CI and independent review, including
+  applicable native, source-hidden and hardware/UI acceptance. A changed head
+  needs its applicable checks; prior-head success is not transferable. Do not
+  remove required tests, weaken security/authentication, or hide failures.
+- Reuse a verified review/check for unchanged source and environment; rerun when
+  the relevant inputs, integration result or failure evidence changes. Do not
+  repeat a broad audit merely to produce another receipt.
+- Keep generated logs, ZIPs and JSON run evidence in CI artifacts, including
+  failed/interrupted attempts, not new repository evidence dumps. Retain small
+  reproducible test fixtures and required source/contract manifests in source.
+  Preserve historical failures and link their immutable source or CI evidence.
+- Feature documents: at most two rendered pages (target 800 words); include the
+  contract, usage, acceptance and only limitations that change a user's decision.
+  No repetitive defensive boilerplate. Keep `docs/progress.md` a one-to-two-page
+  current summary with blockers, next actions and evidence links, not a run log.
+  Apply this to new/edited summaries without deleting required contracts/tests.
+- Measure natural-language small-game zero-intervention completion as defined
+  in design v2. Keep real-model, mock and scripted results separate. Prioritize
+  a playable, reproducible delivered game over feature, PR or CI counts.
 
 ## Collaboration and authorization
 
@@ -46,8 +77,9 @@ When the user has approved a specific PR's normal merge into the shared
 development branch, verify the target branch, exact head, required CI, review,
 conflicts, and reservations, then perform that approved merge without repeating
 the approval request. Approval applies only to the specified PR and action.
-Main/PR1 merges, releases, destructive work, new credentials, and expanded access
-require separate explicit user authorization.
+The current explicit integration request includes promotion from hardening to
+main after required checks and review. Do not infer PR #1 merge, releases,
+destructive work, new credentials, or expanded access from that promotion.
 
 Check the actual user's instruction, target, and action when authorization is
 unclear. Follow the platform's supported approval procedure. Never bypass a

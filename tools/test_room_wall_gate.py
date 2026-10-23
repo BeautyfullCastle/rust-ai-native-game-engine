@@ -813,6 +813,19 @@ class RoomWallSemanticTests(unittest.TestCase):
             previous = gate.workflow_job(text, 'cross_platform_checksum_compare')
             text = text.replace(previous, previous + gate.WORKFLOW_AGGREGATE_STEP)
         gate.workflow_contract(text)
+        for removed in (', generated-user-game-native',
+                        "          GENERATED_USER_NATIVE_RESULT: ${{ needs['generated-user-game-native'].result }}\n",
+                        ' GENERATED_USER_NATIVE_RESULT PRIVATE_ACTION_NATIVE_RESULT GENERATED_ACTION_CPU_RESULT; do',
+                        ', static-game-actions-native',
+                        ', generated-user-game-actions-cpu',
+                        "          GENERATED_ACTION_CPU_RESULT: ${{ needs['generated-user-game-actions-cpu'].result }}\n",
+                        ' GENERATED_ACTION_CPU_RESULT; do',
+                        "          PRIVATE_ACTION_NATIVE_RESULT: ${{ needs['static-game-actions-native'].result }}\n",
+                        ' PRIVATE_ACTION_NATIVE_RESULT GENERATED_ACTION_CPU_RESULT; do'):
+            replacement = '; do' if removed.endswith('; do') else ''
+            self.assertIn(removed, text)
+            with self.subTest(removed=removed), self.assertRaises(AssertionError):
+                gate.workflow_contract(text.replace(removed, replacement, 1))
         for original, changed in (('if-no-files-found: error', 'if-no-files-found: warn'),
                                    ('fail-fast: false', 'fail-fast: true'),
                                    ('unset PYTHONOPTIMIZE', 'echo skipped'),

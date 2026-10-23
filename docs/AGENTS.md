@@ -222,6 +222,7 @@ Tool groups on in this guide: scene, propose, verify, sim, history. (`orr_mcp --
 
 | Tool | Group | Needs | What it does |
 |---|---|---|---|
+| `editor_work_status` | scene | `read` | Observe this ERP host's paired main editor without UI interaction. |
 | `scene_overview` | scene | `read` | List the entities of the scene (GUID, display name, component types) and the singletons, with counts. |
 | `get_entity` | scene | `read` | Read the components of one entity: all of them, one component, or one field. |
 | `get_schema` | scene | `read` | The JSON Schema (draft 2020-12) of the scene format: every component and singleton type with its fields, ranges and docs. |

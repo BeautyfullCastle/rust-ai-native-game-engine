@@ -1,0 +1,241 @@
+{
+  "source": "0cdet1423.json, observed 2026-10-21 14:23 UTC",
+  "historical_snapshot_not_retry_authorization": true,
+  "job": {
+    "id": 119227889203,
+    "run_id": 39601803643,
+    "run_attempt": 1,
+    "head_sha": "0c405a60d68459e393993f2153de3a5848d34dbb",
+    "status": "completed",
+    "conclusion": "failure",
+    "name": "native (macos-latest-arm64)",
+    "steps": [
+      {
+        "name": "Set up job",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 1,
+        "started_at": "2026-10-21T12:44:08Z",
+        "completed_at": "2026-10-21T12:44:10Z"
+      },
+      {
+        "name": "Run actions/checkout@v4",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 2,
+        "started_at": "2026-10-21T12:44:10Z",
+        "completed_at": "2026-10-21T12:44:14Z"
+      },
+      {
+        "name": "Install Rust",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 3,
+        "started_at": "2026-10-21T12:44:14Z",
+        "completed_at": "2026-10-21T12:44:23Z"
+      },
+      {
+        "name": "Cache cargo registry & build",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 4,
+        "started_at": "2026-10-21T12:44:23Z",
+        "completed_at": "2026-10-21T12:44:45Z"
+      },
+      {
+        "name": "Run actions/setup-python@v5",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 5,
+        "started_at": "2026-10-21T12:44:45Z",
+        "completed_at": "2026-10-21T12:44:45Z"
+      },
+      {
+        "name": "Validate fresh assemble CLI prerequisite guards",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 6,
+        "started_at": "2026-10-21T12:44:45Z",
+        "completed_at": "2026-10-21T12:44:46Z"
+      },
+      {
+        "name": "Prepare fresh assemble CLI for native workspace regressions",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 7,
+        "started_at": "2026-10-21T12:44:46Z",
+        "completed_at": "2026-10-21T12:45:29Z"
+      },
+      {
+        "name": "Simulation float-type guard",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 8,
+        "started_at": "2026-10-21T12:45:29Z",
+        "completed_at": "2026-10-21T12:45:32Z"
+      },
+      {
+        "name": "Simulation POD regression fixtures",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 9,
+        "started_at": "2026-10-21T12:45:32Z",
+        "completed_at": "2026-10-21T12:45:35Z"
+      },
+      {
+        "name": "Asset core, cooker, and strict fixture gates",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 10,
+        "started_at": "2026-10-21T12:45:35Z",
+        "completed_at": "2026-10-21T12:46:23Z"
+      },
+      {
+        "name": "Reproduce checked-in cooked asset bytes",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 11,
+        "started_at": "2026-10-21T12:46:23Z",
+        "completed_at": "2026-10-21T12:46:31Z"
+      },
+      {
+        "name": "Strict asset crate clippy",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 12,
+        "started_at": "2026-10-21T12:46:31Z",
+        "completed_at": "2026-10-21T12:46:33Z"
+      },
+      {
+        "name": "cargo test --workspace --release",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 13,
+        "started_at": "2026-10-21T12:46:33Z",
+        "completed_at": "2026-10-21T13:42:52Z"
+      },
+      {
+        "name": "Verify native assemble CLI and source identity after workspace tests",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 14,
+        "started_at": "2026-10-21T13:42:52Z",
+        "completed_at": "2026-10-21T13:42:55Z"
+      },
+      {
+        "name": "Retain native assemble CLI prerequisite and failure evidence",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 15,
+        "started_at": "2026-10-21T13:42:55Z",
+        "completed_at": "2026-10-21T13:42:57Z"
+      },
+      {
+        "name": "Upload native release build timings",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 16,
+        "started_at": "2026-10-21T13:42:57Z",
+        "completed_at": "2026-10-21T13:42:58Z"
+      },
+      {
+        "name": "Required CollectDodge gameplay core and example",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 17,
+        "started_at": "2026-10-21T13:42:58Z",
+        "completed_at": "2026-10-21T13:43:16Z"
+      },
+      {
+        "name": "Required RoomEscapeV1 gameplay core",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 18,
+        "started_at": "2026-10-21T13:43:16Z",
+        "completed_at": "2026-10-21T13:43:23Z"
+      },
+      {
+        "name": "Upload RoomEscapeV1 native core evidence",
+        "status": "completed",
+        "conclusion": "failure",
+        "number": 19,
+        "started_at": "2026-10-21T13:43:23Z",
+        "completed_at": "2026-10-21T13:43:23Z"
+      },
+      {
+        "name": "Verify orr_ffi artifacts (cdylib + staticlib + import library)",
+        "status": "completed",
+        "conclusion": "skipped",
+        "number": 20,
+        "started_at": "2026-10-21T13:43:23Z",
+        "completed_at": "2026-10-21T13:43:23Z"
+      },
+      {
+        "name": "cargo clippy --workspace --all-targets",
+        "status": "completed",
+        "conclusion": "skipped",
+        "number": 21,
+        "started_at": "2026-10-21T13:43:23Z",
+        "completed_at": "2026-10-21T13:43:23Z"
+      },
+      {
+        "name": "Required RAW16 native inventories and strict feature boundary",
+        "status": "completed",
+        "conclusion": "skipped",
+        "number": 22,
+        "started_at": "2026-10-21T13:43:23Z",
+        "completed_at": "2026-10-21T13:43:23Z"
+      },
+      {
+        "name": "Retain RAW16 native and partial failure evidence",
+        "status": "completed",
+        "conclusion": "failure",
+        "number": 23,
+        "started_at": "2026-10-21T13:43:23Z",
+        "completed_at": "2026-10-21T13:43:24Z"
+      },
+      {
+        "name": "cargo build -p orr_sim --features hotpatch",
+        "status": "completed",
+        "conclusion": "skipped",
+        "number": 24,
+        "started_at": "2026-10-21T13:43:24Z",
+        "completed_at": "2026-10-21T13:43:24Z"
+      },
+      {
+        "name": "Post Run actions/setup-python@v5",
+        "status": "completed",
+        "conclusion": "skipped",
+        "number": 46,
+        "started_at": "2026-10-21T13:43:24Z",
+        "completed_at": "2026-10-21T13:43:24Z"
+      },
+      {
+        "name": "Post Cache cargo registry & build",
+        "status": "completed",
+        "conclusion": "skipped",
+        "number": 47,
+        "started_at": "2026-10-21T13:43:24Z",
+        "completed_at": "2026-10-21T13:43:24Z"
+      },
+      {
+        "name": "Post Run actions/checkout@v4",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 48,
+        "started_at": "2026-10-21T13:43:24Z",
+        "completed_at": "2026-10-21T13:43:24Z"
+      },
+      {
+        "name": "Complete job",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 49,
+        "started_at": "2026-10-21T13:43:24Z",
+        "completed_at": "2026-10-21T13:43:27Z"
+      }
+    ]
+  },
+  "other_jobs_running": true,
+  "failure": "CreateArtifact ENOTFOUND at 2026-10-21T13:43:23Z"
+}

@@ -1,0 +1,149 @@
+name: Collect UI position acceptance
+on:
+  pull_request:
+    branches: [main, su/engine-correctness-hardening, su/authoring-development-integration-20261021, su/static-game-starter-20261022]
+    types: [ready_for_review]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  collect-ui-position:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      ORR_COLLECT_POSITION_CI: ${{ github.workspace }}/target/collect-ui-position-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Exact-count guard self-tests
+        run: python tools/check-authoring-controls.py --self-test
+      - name: Focused position state and actual EditorApp controls
+        shell: python {0}
+        run: |
+          import os
+          from pathlib import Path
+          import runpy
+          h = runpy.run_path("tools/check-authoring-controls.py")
+          evidence = Path(os.environ["ORR_COLLECT_POSITION_CI"])
+          evidence.mkdir(parents=True, exist_ok=False)
+          # Existing preview/panel/runtime and original GPU gates remain required
+          # in collect-ui-screen-preview.yml; this workflow adds the position scope.
+          suite = "collect_ui_position::tests"
+          output = h["run_logged"](
+              ["cargo", "test", "--locked", "-p", "orr_editor", "--no-default-features", "--features", "collect-ui",
+               "--lib", suite + "::", "--", "--format=pretty", "--color=never", "--test-threads=1"],
+              evidence / "position-state.log")
+          h["validate_tests"](output, suite, 19)
+          name = "app::collect_ui_preview::tests::actual_editor_position_controls_keep_explicit_selection_separate"
+          output = h["run_logged"](
+              ["cargo", "test", "--locked", "-p", "orr_editor", "--no-default-features", "--features", "collect-ui",
+               "--lib", name, "--", "--exact", "--format=pretty", "--color=never", "--test-threads=1"],
+              evidence / "actual-position-controls-cpu.log").replace("\r\n", "\n")
+          summaries = h["SUMMARY"].findall(output)
+          if (len(summaries) != 1 or tuple(map(int, summaries[0][:4])) != (1, 0, 0, 0)
+                  or h["CASE"].findall(output) != [(name, "ok")]):
+              raise RuntimeError("Expected exactly one passing actual EditorApp position test")
+          for label, args in (
+              ("default-check", ["check", "--lib"]),
+              ("collect-ui-check", ["check", "--lib", "--features", "collect-ui"]),
+              ("collect-ui-strict", ["clippy", "--lib", "--features", "collect-ui", "--", "-D", "warnings"]),
+          ):
+              h["run_logged"](["cargo", args[0], "--locked", "-p", "orr_editor", "--no-default-features", *args[1:]], evidence / (label + ".log"))
+      - name: Install explicit Linux software Vulkan
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q 2>&1 | tee "$ORR_COLLECT_POSITION_CI/vulkan-install.log"
+          sudo apt-get install -y -q mesa-vulkan-drivers libvulkan1 2>&1 | tee -a "$ORR_COLLECT_POSITION_CI/vulkan-install.log"
+          mapfile -t drivers < <(find /usr/share/vulkan/icd.d -maxdepth 1 -name 'lvp_icd*.json' -type f)
+          test "${#drivers[@]}" -eq 1
+          runtime=$(mktemp -d "$RUNNER_TEMP/collect-preview-xdg.XXXXXXXX")
+          chmod 700 "$runtime"
+          {
+            echo "VK_DRIVER_FILES=${drivers[0]}"
+            echo "VK_ICD_FILENAMES=${drivers[0]}"
+            echo "XDG_RUNTIME_DIR=$runtime"
+          } >> "$GITHUB_ENV"
+          printf 'Software Vulkan ICD: %s\n' "${drivers[0]}" | tee "$ORR_COLLECT_POSITION_CI/vulkan-driver.log"
+      - name: Actual EditorApp position staging and production renderer parity
+        if: runner.os == 'Linux'
+        env:
+          WGPU_BACKEND: vulkan
+        shell: python {0}
+        run: |
+          import json
+          import os
+          from pathlib import Path
+          import runpy
+          import struct
+          h = runpy.run_path("tools/check-authoring-controls.py")
+          evidence = Path(os.environ["ORR_COLLECT_POSITION_CI"]).resolve()
+          captures = evidence / "software-gpu"
+          captures.mkdir(exist_ok=False)
+          os.environ["ORR_COLLECT_UI_POSITION_EVIDENCE"] = str(captures)
+          name = "app::collect_ui_preview::tests::actual_editor_position_gpu_stages_applies_and_cancels_offsets"
+          output = h["run_logged"](
+              ["cargo", "test", "--locked", "-p", "orr_editor", "--no-default-features", "--features", "collect-ui",
+               "--lib", name, "--", "--ignored", "--exact", "--format=pretty", "--color=never", "--test-threads=1"],
+              evidence / "actual-preview-gpu.log").replace("\r\n", "\n")
+          summaries = h["SUMMARY"].findall(output)
+          if (len(summaries) != 1 or tuple(map(int, summaries[0][:4])) != (1, 0, 0, 0)
+                  or h["CASE"].findall(output) != [(name, "ok")]):
+              raise RuntimeError("Expected one executed software GPU test with no skips")
+          receipt = json.loads((captures / "collect-ui-position-acceptance.json").read_text())
+          if (type(receipt.get("schema")) is not int or receipt["schema"] != 1
+                  or receipt.get("window_pixels") != [1800, 1200]
+                  or type(receipt.get("production_collect_ui_pixel_parity_cases")) is not int
+                  or receipt["production_collect_ui_pixel_parity_cases"] != 6):
+              raise RuntimeError("Unexpected preview receipt schema or parity inventory")
+          for flag in ("production_editor_app", "software_vulkan", "position_ghost_without_context_rebuild",
+                       "release_candidate_build_once", "staging_changes_pixels_only", "cancel_restores_exact_pixels",
+                       "apply_one_undo", "old_and_new_action_hit_locations", "parent_moves_descendants_without_rewriting_them",
+                       "escape_focus_screen_resize_close_stale_document_play_cancel", "host_unchanged_during_authoring",
+                       "save_reopen", "full_visible_controls"):
+              if receipt.get(flag) is not True:
+                  raise RuntimeError("Missing verified position predicate: " + flag)
+          if type(receipt.get("portrait_display_scale")) is not float or receipt["portrait_display_scale"] != 0.75:
+              raise RuntimeError("Expected explicit 75-percent portrait scaling proof")
+          if receipt.get("native_os_window") is not False:
+              raise RuntimeError("Software-GPU synthetic input must not claim native window acceptance")
+          adapter = receipt.get("adapter")
+          if not isinstance(adapter, str) or "llvmpipe" not in adapter.lower() or "Cpu" not in adapter or "Vulkan" not in adapter:
+              raise RuntimeError("Explicit llvmpipe CPU Vulkan evidence required")
+          for name, size in (
+              ("position-initial-title", (640, 360)),
+              ("position-staged-title", (640, 360)),
+              ("position-cancelled-title", (640, 360)),
+              ("position-applied-title", (640, 360)),
+              ("position-portrait-container", (360, 640)),
+              ("position-saved-reopened", (360, 640)),
+          ):
+              for suffix, expected in (("canvas", size), ("editor", (1800, 1200))):
+                  filename = name + "-" + suffix + ".png"
+                  raw = (captures / filename).read_bytes()
+                  if raw[:8] != b"\x89PNG\r\n\x1a\n" or raw[12:16] != b"IHDR" or struct.unpack(">II", raw[16:24]) != expected:
+                      raise RuntimeError("Missing or wrong-sized preview screenshot: " + filename)
+          raw = (captures / "position-drag-ghost-editor.png").read_bytes()
+          if raw[:8] != b"\x89PNG\r\n\x1a\n" or raw[12:16] != b"IHDR" or struct.unpack(">II", raw[16:24]) != (1800, 1200):
+              raise RuntimeError("Missing full-editor drag-ghost capture")
+      - name: Retain exact counts, production parity captures and full controls
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: collect-ui-position-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.ORR_COLLECT_POSITION_CI }}
+          if-no-files-found: error
