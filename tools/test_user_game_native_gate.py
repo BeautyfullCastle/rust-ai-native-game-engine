@@ -1,5 +1,8 @@
 """Synthetic source/provenance negatives, NOT native acceptance evidence."""
 import json
+import ast
+import inspect
+import types
 import os
 from pathlib import Path
 import subprocess
@@ -12,6 +15,43 @@ import user_game_native_gate as gate
 
 
 class UserGateTests(unittest.TestCase):
+    def test_shared_budget_driver_wiring_and_phase_routing(self):
+        # Execute the actual orchestration statements, not a duplicated fixture.
+        tree = ast.parse(inspect.getsource(gate.run))
+        body = next(n for n in ast.walk(tree) if isinstance(n, ast.Try)).body
+        statements = [n for n in body if
+            (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'compile_budget' for t in n.targets)) or
+            (isinstance(n, ast.Expr) and isinstance(n.value, ast.Call) and
+             isinstance(n.value.func, ast.Attribute) and n.value.func.attr == 'run' and
+             isinstance(n.value.func.value, ast.Name) and n.value.func.value.id in ('editor', 'standalone'))]
+        self.assertEqual(len(statements), 3)
+        editor, standalone = mock.Mock(), mock.Mock()
+        namespace = dict(editor=editor, standalone=standalone, artifacts=Path('/evidence'), context=object(), env={})
+        exec(compile(ast.Module(body=statements, type_ignores=[]), '<actual driver wiring>', 'exec'), namespace)
+        editor.CompileBudget.assert_called_once_with()
+        shared = editor.CompileBudget.return_value
+        self.assertIs(editor.run.call_args.kwargs['compile_budget'], shared)
+        self.assertIs(standalone.run.call_args.kwargs['compile_budget'], shared)
+        for module, phases in ((native, {'compile'}), (gate.standalone, {'compile', 'editor-compile'})):
+            tree = ast.parse(inspect.getsource(module.run))
+            execute = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == 'execute')
+            for budget in (None, mock.Mock()):
+                runner = mock.Mock()
+                namespace = dict(command=runner, compile_budget=budget, context=types.SimpleNamespace(project_root=Path('/project')))
+                exec(compile(ast.Module(body=[execute], type_ignores=[]), '<actual phase routing>', 'exec'), namespace)
+                for phase in ('compile', 'editor-compile', 'native', 'context-tests', 'inventory'):
+                    runner.reset_mock()
+                    if budget is not None:
+                        budget.reset_mock()
+                    namespace['execute'](['cargo'], Path('/evidence'), phase, {}, 900)
+                    if budget is not None and phase in phases:
+                        budget.command.assert_called_once_with(runner, ['cargo'], Path('/evidence'), phase, {}, Path('/project'))
+                        runner.assert_not_called()
+                    else:
+                        runner.assert_called_once_with(['cargo'], Path('/evidence'), phase, {}, 900, cwd=Path('/project'))
+                        if budget is not None:
+                            budget.command.assert_not_called()
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
