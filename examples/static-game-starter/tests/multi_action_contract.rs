@@ -154,6 +154,17 @@ fn frozen_domain_lifecycle_and_replay_are_exact() {
     let profile = G::action_profile().unwrap();
     let frozen = FrozenActionInputs::<G>::admit(profile.clone()).unwrap();
     assert_eq!(profile.state_count(), 144);
+    let before: Vec<_> = profile.states().map(|h| frozen.get(h).unwrap()).collect();
+    let mapping_calls = MAPPINGS.load(Ordering::SeqCst);
+    for _ in 0..100 {
+        assert_eq!(frozen.profile().controls_legend(), profile.controls_legend());
+    }
+    assert_eq!(frozen.profile(), &profile);
+    assert_eq!(MAPPINGS.load(Ordering::SeqCst), mapping_calls);
+    assert!(profile
+        .states()
+        .map(|h| frozen.get(h).unwrap())
+        .eq(before));
     for h in profile.states() {
         let i = frozen.get(h).unwrap();
         assert_eq!((i.x, i.y), (i32::from(h.x), i32::from(h.y)));

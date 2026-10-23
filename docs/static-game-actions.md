@@ -19,6 +19,28 @@ in automatically: `StandaloneGame::action_profile()` defaults to `None`.
 `StaticGameDescriptor`, `StaticInputDescriptor`, `StaticGameRegistry::new` and
 Delivery/Switchboard's legacy 18-state mapping remain unchanged.
 
+## Controls shown to players
+
+`HeldActionProfile::controls_legend()` derives a single-line physical-key legend
+from the admitted profile: `WASD/arrows move; jump: Space; fire: F; interact: E;
+dash: Q`. Actions keep declaration order and alternative keys keep binding order
+(for example `jump: Space/J`). Labels describe physical keys, not localized
+keyboard-layout glyphs. Zero actions displays movement only. The legend does not
+infer hold/press behavior, cooldowns or restart semantics from an action name.
+
+Editor Play caches this text at admission and adds `Escape/Tab releases`. The
+cached text is included in the aggregate frozen-data budget. The legacy manual
+hint is still validated independently, but action games display the admitted
+profile instead of that potentially stale hint. Derived legends are not subject
+to the legacy hint's 256-byte cap; all legal names and bindings remain visible.
+
+Standalone caches the same legend from its frozen profile once at startup. While
+active it adds `Escape pauses`; a win keeps `won` and the actual controls without
+claiming that Space restarts. Paused windows retain `Enter starts/resumes`.
+Feature-off and no-profile games keep their original hints and title behavior.
+Formatting does not sample input, run mapping callbacks or change replay data.
+This changes no optional dependencies or generated preview bootstrap pins.
+
 ## Define one ordered profile and typed mapper
 
 The following functions are application code, not a complete game. Use the input

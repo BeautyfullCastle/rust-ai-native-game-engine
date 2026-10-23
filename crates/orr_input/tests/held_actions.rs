@@ -244,3 +244,87 @@ fn profile_owns_exact_ordered_identity() {
         .unwrap()
     );
 }
+
+#[test]
+fn controls_legend_preserves_order_alternatives_and_domain() {
+    for actions in [
+        vec![],
+        vec![action("jump", &[Key::Space, Key::J])],
+        vec![
+            action("jump", &[Key::Space, Key::J]),
+            action("fire", &[Key::F]),
+            action("interact", &[Key::E]),
+            action("dash", &[Key::Q]),
+        ],
+    ] {
+        let profile = HeldActionProfile::new(actions).unwrap();
+        let before = profile.clone();
+        let states: Vec<_> = profile.states().collect();
+        let expected = match profile.actions().len() {
+            0 => "WASD/arrows move",
+            1 => "WASD/arrows move; jump: Space/J",
+            4 => "WASD/arrows move; jump: Space/J; fire: F; interact: E; dash: Q",
+            _ => unreachable!(),
+        };
+        assert_eq!(profile.controls_legend(), expected);
+        assert_eq!(profile.controls_legend(), expected);
+        assert_eq!(profile, before);
+        assert_eq!(profile.states().collect::<Vec<_>>(), states);
+        for (index, state) in states.into_iter().enumerate() {
+            assert_eq!(profile.index(state), Some(index));
+        }
+    }
+}
+
+#[test]
+fn controls_legend_keeps_maximum_names_and_all_available_bindings() {
+    // Only 23 non-reserved physical keys exist: four sets of eight cannot
+    // coexist without illegal duplicate bindings. Fill two sets to eight and
+    // distribute every remaining available key over the other two actions.
+    let keys = [
+        Key::B,
+        Key::C,
+        Key::E,
+        Key::F,
+        Key::G,
+        Key::H,
+        Key::I,
+        Key::J,
+        Key::K,
+        Key::L,
+        Key::M,
+        Key::N,
+        Key::O,
+        Key::P,
+        Key::Q,
+        Key::R,
+        Key::T,
+        Key::U,
+        Key::V,
+        Key::X,
+        Key::Y,
+        Key::Z,
+        Key::Space,
+    ];
+    let names: Vec<_> = ['a', 'b', 'c', 'd']
+        .into_iter()
+        .map(|c| c.to_string().repeat(64))
+        .collect();
+    let profile = HeldActionProfile::new(vec![
+        action(&names[0], &keys[..8]),
+        action(&names[1], &keys[8..16]),
+        action(&names[2], &keys[16..22]),
+        action(&names[3], &keys[22..]),
+    ])
+    .unwrap();
+    let legend = profile.controls_legend();
+    assert_eq!(legend, format!(
+        "WASD/arrows move; {}: B/C/E/F/G/H/I/J; {}: K/L/M/N/O/P/Q/R; {}: T/U/V/X/Y/Z; {}: Space",
+        names[0], names[1], names[2], names[3]
+    ));
+    assert!(legend.len() > 256); // The legacy hint cap must not truncate it.
+    assert!(legend.len() <= 15 + 4 * (4 + 64 + 8 * 5 + 7));
+    assert!(legend.is_ascii());
+    assert!(!legend.contains(['\n', '\r']));
+    assert!(!legend.contains("restart"));
+}

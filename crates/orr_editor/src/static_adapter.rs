@@ -312,6 +312,10 @@ impl RegisteredGame {
         self.entry().held[8].clone()
     }
     pub fn input_hint(self) -> &'static str {
+        #[cfg(feature = "static-game-actions")]
+        if let Some(actions) = &self.entry().actions {
+            return &actions.legend;
+        }
         self.entry().descriptor.input.hint
     }
     pub(crate) fn types(self) -> TypeRegistry {

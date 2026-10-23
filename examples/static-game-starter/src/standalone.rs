@@ -23,6 +23,23 @@ use winit::window::{Window, WindowId};
 const OBSERVATION_LIMIT: usize = 64 * 1024 * 1024;
 const REPLAY_LIMIT: usize = 4 * 1024 * 1024;
 
+// Host status is separate from admitted action semantics. In particular, Space
+// is not necessarily restart for an action game, even when it reports a win.
+fn controls_status(paused: bool, won: bool, legend: Option<&str>) -> std::borrow::Cow<'_, str> {
+    if paused {
+        return "paused: Enter starts/resumes".into();
+    }
+    if let Some(legend) = legend {
+        let prefix = if won { "won; " } else { "" };
+        return format!("{prefix}{legend}; Escape pauses").into();
+    }
+    if won {
+        "won: release then Space restarts".into()
+    } else {
+        "WASD/arrows move; Space acts; Escape pauses".into()
+    }
+}
+
 // This clock only schedules the view-side bridge pump. It never enters game state.
 #[allow(clippy::disallowed_types)]
 mod view_clock {
@@ -123,6 +140,8 @@ pub struct Controller<G: StandaloneGame> {
         orr_input::HeldActionInput,
         crate::presentation::FrozenActionInputs<G>,
     )>,
+    #[cfg(feature = "static-game-actions")]
+    action_legend: Option<String>,
     replay: Option<ReplayReader<G>>,
     focused: bool,
     neutral_pending: bool,
@@ -152,6 +171,10 @@ impl<G: StandaloneGame> Controller<G> {
                 Ok::<_, String>((input, frozen))
             })
             .transpose()?;
+        #[cfg(feature = "static-game-actions")]
+        let action_legend = actions
+            .as_ref()
+            .map(|(_, frozen)| frozen.profile().controls_legend());
         let mut input = Input::new(mapping())?;
         input.set_focused(false);
         input.set_blocked(true);
@@ -163,6 +186,8 @@ impl<G: StandaloneGame> Controller<G> {
             input,
             #[cfg(feature = "static-game-actions")]
             actions,
+            #[cfg(feature = "static-game-actions")]
+            action_legend,
             replay,
             focused: false,
             neutral_pending: false,
@@ -601,19 +626,15 @@ impl<G: StandaloneGame> Native<G> {
             .checked_add(1)
             .ok_or("presentation counter overflow")?;
         let state = G::state_value(snapshot.predicted());
-        let status = if self.controller.paused() {
-            "paused: Enter starts/resumes"
-        } else if state["won"].as_u64() == Some(1) {
-            "won: release then Space restarts"
-        } else {
-            "WASD/arrows move; Space acts; Escape pauses"
-        };
         #[cfg(feature = "static-game-actions")]
-        let status = if self.controller.actions.is_some() && !self.controller.paused() {
-            "WASD/arrows move; custom action controls; Escape pauses"
-        } else {
-            status
-        };
+        let action_legend = self.controller.action_legend.as_deref();
+        #[cfg(not(feature = "static-game-actions"))]
+        let action_legend = None;
+        let status = controls_status(
+            self.controller.paused(),
+            state["won"].as_u64() == Some(1),
+            action_legend,
+        );
         gfx.window.set_title(&format!("{} | {status}", G::ID));
         if let Some(observer) = &mut self.observer {
             let size = gfx.renderer.size();
@@ -804,6 +825,44 @@ pub fn run<G: StandaloneGame + 'static>(options: Options) -> Result<(), String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn controls_status_preserves_legacy_pause_active_and_win() {
+        for won in [false, true] {
+            assert_eq!(controls_status(true, won, None), "paused: Enter starts/resumes");
+        }
+        assert_eq!(
+            controls_status(false, false, None),
+            "WASD/arrows move; Space acts; Escape pauses"
+        );
+        assert_eq!(controls_status(false, true, None), "won: release then Space restarts");
+    }
+
+    #[cfg(feature = "static-game-actions")]
+    #[test]
+    fn action_controls_status_never_invents_restart_or_hides_pause() {
+        let profile = orr_input::HeldActionProfile::new(vec![Action {
+            name: "jump".into(),
+            bindings: vec![Button::Keyboard { key: Key::Space }],
+        }])
+        .unwrap();
+        let legend = profile.controls_legend();
+        for won in [false, true] {
+            assert_eq!(controls_status(true, won, Some(&legend)), "paused: Enter starts/resumes");
+            let status = controls_status(false, won, Some(&legend));
+            assert!(status.contains("jump: Space"));
+            assert!(status.ends_with("Escape pauses"));
+            assert!(!status.contains("restart"));
+        }
+        assert_eq!(
+            controls_status(false, false, Some(&legend)),
+            "WASD/arrows move; jump: Space; Escape pauses"
+        );
+        assert_eq!(
+            controls_status(false, true, Some(&legend)),
+            "won; WASD/arrows move; jump: Space; Escape pauses"
+        );
+    }
 
     #[test]
     fn outputs_stay_outside_runtime_bundle_and_normalize_parents() {

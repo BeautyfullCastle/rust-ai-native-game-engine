@@ -11,6 +11,7 @@ pub struct StaticActionDescriptor {
 pub(super) struct FrozenActions {
     pub profile: HeldActionProfile,
     pub values: Vec<J>,
+    pub legend: String,
 }
 const REGISTRY_BYTES: usize = 4 * 1024 * 1024;
 fn account(value: &J, total: &mut usize) -> Result<(), String> {
@@ -86,9 +87,12 @@ impl StaticGameRegistry {
                 }
                 values.push(value);
             }
+            let legend = format!("{}; Escape/Tab releases", descriptor.profile.controls_legend());
+            account(&J::String(legend.clone()), &mut total)?;
             entry.actions = Some(FrozenActions {
                 profile: descriptor.profile,
                 values,
+                legend,
             });
         }
         Ok(registry)
@@ -180,11 +184,22 @@ pub(crate) mod tests {
         }
         let mut c = companion();
         c.held = counted;
+        let mut d = descriptor();
+        d.input.hint = "stale manual controls";
         let r = Box::leak(Box::new(
-            StaticGameRegistry::with_action_profiles(vec![descriptor()], vec![c]).unwrap(),
+            StaticGameRegistry::with_action_profiles(vec![d], vec![c]).unwrap(),
         ));
         let g = r.handle("MultiGame").unwrap();
         assert_eq!(CALLS.load(Ordering::SeqCst), 72);
+        let hint = g.input_hint();
+        assert_eq!(
+            hint,
+            "WASD/arrows move; jump: Space; fire: F; interact: E; Escape/Tab releases"
+        );
+        for _ in 0..100 {
+            assert!(std::ptr::eq(hint, g.input_hint()));
+        }
+        assert_eq!(g.action_profile(), Some(&profile()));
         for k in profile().states() {
             assert_eq!(g.held_actions_value(k), Some(value(k)));
         }
@@ -299,6 +314,23 @@ pub(crate) mod tests {
             .unwrap();
         assert!(error.contains("4 MiB"), "{error}");
     }
+    #[test]
+    fn no_profile_preserves_legacy_hint_and_legend_is_budgeted() {
+        let mut d = descriptor();
+        d.input.hint = "legacy controls unchanged";
+        let registry = Box::leak(Box::new(
+            StaticGameRegistry::with_action_profiles(vec![d], vec![]).unwrap(),
+        ));
+        assert_eq!(registry.handle("MultiGame").unwrap().input_hint(), "legacy controls unchanged");
+        let legend = format!("{}; Escape/Tab releases", profile().controls_legend());
+        let bytes = serde_json::to_vec(&legend).unwrap().len();
+        let mut total = REGISTRY_BYTES - bytes;
+        account(&J::String(legend.clone()), &mut total).unwrap();
+        assert_eq!(total, REGISTRY_BYTES);
+        let mut total = REGISTRY_BYTES - bytes + 1;
+        assert!(account(&J::String(legend), &mut total).is_err());
+    }
+
     #[test]
     fn aggregate_budget_is_not_only_per_value() {
         let mut total = REGISTRY_BYTES - 2;

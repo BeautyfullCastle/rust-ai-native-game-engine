@@ -60,6 +60,27 @@ impl HeldActionProfile {
     pub fn actions(&self) -> &[Action] {
         &self.actions
     }
+    /// Human-readable physical controls in declaration/binding order.
+    /// This describes identity only, not localized glyphs or game semantics.
+    /// Admission bounds the output; no binding is truncated or omitted.
+    pub fn controls_legend(&self) -> String {
+        let mut legend = String::from("WASD/arrows move");
+        for action in &self.actions {
+            legend.push_str("; ");
+            legend.push_str(&action.name);
+            legend.push_str(": ");
+            for (index, binding) in action.bindings.iter().enumerate() {
+                if index != 0 {
+                    legend.push('/');
+                }
+                let Button::Keyboard { key } = binding else {
+                    unreachable!("held profile admission requires keyboard bindings");
+                };
+                legend.push_str(physical_key_label(*key));
+            }
+        }
+        legend
+    }
     pub fn state_count(&self) -> usize {
         9 * (1 << self.actions.len())
     }
@@ -99,6 +120,44 @@ impl HeldActionProfile {
         (-1..=1).flat_map(move |x| {
             (-1..=1).flat_map(move |y| (0..masks).map(move |actions| HeldActions { x, y, actions }))
         })
+    }
+}
+fn physical_key_label(key: Key) -> &'static str {
+    match key {
+        Key::A => "A",
+        Key::B => "B",
+        Key::C => "C",
+        Key::D => "D",
+        Key::E => "E",
+        Key::F => "F",
+        Key::G => "G",
+        Key::H => "H",
+        Key::I => "I",
+        Key::J => "J",
+        Key::K => "K",
+        Key::L => "L",
+        Key::M => "M",
+        Key::N => "N",
+        Key::O => "O",
+        Key::P => "P",
+        Key::Q => "Q",
+        Key::R => "R",
+        Key::S => "S",
+        Key::T => "T",
+        Key::U => "U",
+        Key::V => "V",
+        Key::W => "W",
+        Key::X => "X",
+        Key::Y => "Y",
+        Key::Z => "Z",
+        Key::ArrowLeft => "ArrowLeft",
+        Key::ArrowRight => "ArrowRight",
+        Key::ArrowUp => "ArrowUp",
+        Key::ArrowDown => "ArrowDown",
+        Key::Space => "Space",
+        Key::Escape => "Escape",
+        Key::Enter => "Enter",
+        Key::Tab => "Tab",
     }
 }
 fn reserved_key(key: Key) -> bool {

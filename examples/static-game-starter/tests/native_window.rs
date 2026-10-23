@@ -678,8 +678,10 @@ impl App for Proof {
                         self.app.editor.sync();
                     }
                     self.receipt["release_fixture"] = self.typed();
-                    self.click(self.play);
-                    self.stage(21);
+                    // Stop runs after EditorApp rendered this frame, when Play was
+                    // disabled. Let the native UI publish its enabled widget before
+                    // injecting a click: egui hit-tests the previous frame's widgets.
+                    self.stage(26);
                 }
                 10 if self.typed()["actor"]["position"] != self.baseline => {
                     assert!(!self.won(), "release proof must remain nonterminal");
@@ -705,7 +707,10 @@ impl App for Proof {
                     self.click(self.pause);
                     self.stage(12);
                 }
-                12 if !self.app.editor.sim().playing => {
+                12 if !self.app.editor.sim().playing
+                    && self.app.editor.timeline().is_some_and(|timeline| !timeline.playing)
+                    && self.app.frame_count() > self.stage_at + 1 =>
+                {
                     self.neutral("escape_neutral");
                     self.receipt["no_reclaim_proofs"]["escape"]["before"] = self.typed();
                     self.baseline = self.typed()["actor"]["position"].clone();
@@ -760,7 +765,10 @@ impl App for Proof {
                     self.click(self.pause);
                     self.stage(17);
                 }
-                17 if !self.app.editor.sim().playing => {
+                17 if !self.app.editor.sim().playing
+                    && self.app.editor.timeline().is_some_and(|timeline| !timeline.playing)
+                    && self.app.frame_count() > self.stage_at + 1 =>
+                {
                     self.neutral("focus_neutral");
                     self.receipt["no_reclaim_proofs"]["focus"]["before"] = self.typed();
                     self.baseline = self.typed()["actor"]["position"].clone();
@@ -778,6 +786,13 @@ impl App for Proof {
                     assert!(self.released());
                     self.check("reopen_identity");
                     self.capture(&ctx, "reopened");
+                }
+                26 if !self.app.editor.sim().playing
+                    && self.released()
+                    && self.app.frame_count() > self.stage_at + 1 =>
+                {
+                    self.click(self.play);
+                    self.stage(21);
                 }
                 21 if self.app.editor.sim().playing => {
                     self.click(self.take);
