@@ -27,19 +27,66 @@ const REPLAY_LIMIT: usize = 4 * 1024 * 1024;
 #[allow(clippy::disallowed_types)]
 mod view_clock {
     use std::time::{Duration, Instant};
-    pub struct Clock(Instant);
+    const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+    pub struct Clock {
+        last_update: Instant,
+        next_frame: Instant,
+    }
     impl Clock {
         pub fn new() -> Self {
-            Self(Instant::now())
+            let now = Instant::now();
+            Self {
+                last_update: now,
+                next_frame: now,
+            }
         }
         pub fn elapsed(&mut self) -> Duration {
             let now = Instant::now();
-            let elapsed = now.saturating_duration_since(self.0);
-            self.0 = now;
+            let elapsed = now.saturating_duration_since(self.last_update);
+            self.last_update = now;
             elapsed
         }
-        pub fn next_frame() -> Instant {
-            Instant::now() + Duration::from_millis(16)
+        pub fn request_frame(&mut self) -> bool {
+            self.request_frame_at(Instant::now())
+        }
+        fn request_frame_at(&mut self, now: Instant) -> bool {
+            if now < self.next_frame {
+                return false;
+            }
+            // A redraw wakes the event loop too. Keep this deadline across those
+            // wakes rather than unconditionally scheduling another redraw.
+            // Slow frames skip missed view deadlines, never a catch-up burst.
+            self.next_frame = now + FRAME_INTERVAL;
+            true
+        }
+        pub fn next_frame(&self) -> Instant {
+            self.next_frame
+        }
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn redraw_wakes_do_not_schedule_another_frame_before_deadline() {
+            let mut clock = Clock::new();
+            let start = clock.next_frame();
+            assert!(clock.request_frame_at(start));
+            for millis in 0..16 {
+                assert!(!clock.request_frame_at(start + Duration::from_millis(millis)));
+                assert_eq!(clock.next_frame(), start + FRAME_INTERVAL);
+            }
+            assert!(clock.request_frame_at(start + FRAME_INTERVAL));
+            assert!(!clock.request_frame_at(start + FRAME_INTERVAL));
+        }
+
+        #[test]
+        fn delayed_wake_schedules_one_frame_without_catch_up_burst() {
+            let mut clock = Clock::new();
+            let late = clock.next_frame() + Duration::from_secs(20);
+            assert!(clock.request_frame_at(late));
+            assert_eq!(clock.next_frame(), late + FRAME_INTERVAL);
+            assert!(!clock.request_frame_at(late));
         }
     }
 }
@@ -684,10 +731,12 @@ impl<G: StandaloneGame + 'static> ApplicationHandler for Native<G> {
         }
     }
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if let Some(gfx) = &self.graphics {
-            gfx.window.request_redraw();
+        if self.clock.request_frame() {
+            if let Some(gfx) = &self.graphics {
+                gfx.window.request_redraw();
+            }
         }
-        event_loop.set_control_flow(ControlFlow::WaitUntil(view_clock::Clock::next_frame()));
+        event_loop.set_control_flow(ControlFlow::WaitUntil(self.clock.next_frame()));
     }
 }
 
