@@ -5657,9 +5657,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         timeout-minutes: 3
       - uses: actions/setup-python@v5
+        id: generated_python
         timeout-minutes: 2
         with:
           python-version: "3.12"
+          update-environment: false
       - name: Install required native capabilities
         timeout-minutes: 4
         shell: bash
@@ -5686,12 +5688,14 @@ jobs:
       - name: Required generated project native editor and delivered games
         timeout-minutes: 70
         shell: bash
+        env:
+          ORR_ACCEPTANCE_PYTHON: ${{ steps.generated_python.outputs.python-path }}
         run: |
           set -euo pipefail
           ROOT="$RUNNER_TEMP/generated-user-native-job"
           trap 'status=$?; printf "{\"exit_code\":%s,\"native_acceptance_claim\":false}\n" "$status" > "$ROOT/process-exit.json"' EXIT
-          python3 -B -m unittest discover -s tools -p 'test_*game*gate.py' -v 2>&1 | tee "$ROOT/python-fixtures.log"
-          python3 -B tools/user_game_native_gate.py \
+          "$ORR_ACCEPTANCE_PYTHON" -B -m unittest discover -s tools -p 'test_*game*gate.py' -v 2>&1 | tee "$ROOT/python-fixtures.log"
+          "$ORR_ACCEPTANCE_PYTHON" -B tools/user_game_native_gate.py \
             --gate "$GITHUB_WORKSPACE" \
             --engine "$RUNNER_TEMP/generated-user-engine" \
             --project "$RUNNER_TEMP/generated user game" \
