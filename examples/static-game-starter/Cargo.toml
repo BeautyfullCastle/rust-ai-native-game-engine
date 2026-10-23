@@ -109,7 +109,8 @@ required-features = ["editor-trace-acceptance"]
 name = "multi-action-fixture-player"
 path = "tests/support/multi_action_fixture_player.rs"
 required-features = ["multi-action-standalone-acceptance"]
-test = false
+# The shared fixture contains contract tests, so keep its bin harness enabled.
+test = true
 bench = false
 
 [[test]]
