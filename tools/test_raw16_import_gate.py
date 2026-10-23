@@ -37,7 +37,7 @@ NATIVE_HEADER = '''  native:
 # and adds the independent four-row Room wall result. Pin all three steps and
 # dependency edges, including generated user-game and private action lanes in needs, result
 # binding and the fail-closed loop; actual Bash failure states are tested separately.
-AGGREGATE_SHA256 = 'e5bcdb49bc50ef54b20f907ea16069d5537cf87eb3d0d302b49e82dfe58339b8'
+AGGREGATE_SHA256 = '35eaffd9847d9332ac6cf0daf1808837934b23e82f51396e5ed7857bad9f9e38'
 
 
 def listing(names):
@@ -332,7 +332,7 @@ class Raw16GateTests(unittest.TestCase):
         workflow_contract(workflow)
         dependencies = ('native', 'wasm32', 'wasm32-browser', 'android-arm64',
                         'sample-build', 'generated-user-game-native',
-                        'static-game-actions-native', 'sample-arena-cpu',
+                        'static-game-actions-native', 'generated-user-game-actions-cpu', 'sample-arena-cpu',
                         'sample-fixture-preflight', 'sample-linked-prefabs',
                         'sample-room', 'static-model-authoring', 'room-wall-authoring')
         line = '    needs: [' + ', '.join(dependencies) + ']'
@@ -372,13 +372,16 @@ class Raw16GateTests(unittest.TestCase):
                          ('      - name: Require every independent static authoring matrix row to pass\n', '      - name: Require every independent static authoring matrix row to pass\n        if: false\n'),
                          ('[[ \"$AUTHORING_RESULT\" != \"success\" ]]', '[[ \"$AUTHORING_RESULT\" == \"success\" ]]'),
                          ("          ROOM_RESULT: ${{ needs['sample-room'].result }}\n", ''),
-                         ('LINKED_PREFABS_RESULT ROOM_RESULT GENERATED_USER_NATIVE_RESULT PRIVATE_ACTION_NATIVE_RESULT; do', 'LINKED_PREFABS_RESULT GENERATED_USER_NATIVE_RESULT PRIVATE_ACTION_NATIVE_RESULT; do'),
+                         ('LINKED_PREFABS_RESULT ROOM_RESULT GENERATED_USER_NATIVE_RESULT PRIVATE_ACTION_NATIVE_RESULT GENERATED_ACTION_CPU_RESULT; do', 'LINKED_PREFABS_RESULT GENERATED_USER_NATIVE_RESULT PRIVATE_ACTION_NATIVE_RESULT GENERATED_ACTION_CPU_RESULT; do'),
                          (', generated-user-game-native', ''),
                          ("          GENERATED_USER_NATIVE_RESULT: ${{ needs['generated-user-game-native'].result }}\n", ''),
-                         ('ROOM_RESULT GENERATED_USER_NATIVE_RESULT PRIVATE_ACTION_NATIVE_RESULT; do', 'ROOM_RESULT PRIVATE_ACTION_NATIVE_RESULT; do'),
+                         ('ROOM_RESULT GENERATED_USER_NATIVE_RESULT PRIVATE_ACTION_NATIVE_RESULT GENERATED_ACTION_CPU_RESULT; do', 'ROOM_RESULT PRIVATE_ACTION_NATIVE_RESULT GENERATED_ACTION_CPU_RESULT; do'),
                          (', static-game-actions-native', ''),
+                         (', generated-user-game-actions-cpu', ''),
+                         ("          GENERATED_ACTION_CPU_RESULT: ${{ needs['generated-user-game-actions-cpu'].result }}\n", ''),
+                         (' GENERATED_ACTION_CPU_RESULT; do', '; do'),
                          ("          PRIVATE_ACTION_NATIVE_RESULT: ${{ needs['static-game-actions-native'].result }}\n", ''),
-                         (' GENERATED_USER_NATIVE_RESULT PRIVATE_ACTION_NATIVE_RESULT; do', ' GENERATED_USER_NATIVE_RESULT; do'),
+                         (' GENERATED_USER_NATIVE_RESULT PRIVATE_ACTION_NATIVE_RESULT GENERATED_ACTION_CPU_RESULT; do', ' GENERATED_USER_NATIVE_RESULT; do'),
                          ('  native:\n', '  native:\n    if: false\n'),
                          ('          - os: macos-latest\n', ''),
                          ('    runs-on: ${{ matrix.os }}\n', '    runs-on: ubuntu-latest\n'),

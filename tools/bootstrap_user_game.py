@@ -21,6 +21,23 @@ PINNED_TREE = "59158bede83603d7cb272ce7a101b4178956c598"
 STARTER = "examples/static-game-starter/"
 OMITTED = {"tests/standalone_x11.rs", "tests/support/standalone_x11.rs"}
 MAX_FILE = 32 * 1024 * 1024
+ACTION_PREVIEW_COMMIT = "6f97ac85a80aabda26679b482d182c9365bff92e"
+ACTION_PREVIEW_TREE = "cd7cc2a03990a8778a99e60a82c3cfbb425c4d87"
+PROFILES = ("legacy", "multi-action-preview")
+ACTION_NATIVE_OMITTED = {
+    "tests/multi_action_standalone_x11.rs", "tests/multi_action_editor_x11.rs",
+    "tests/support/multi_action_fixture_player.rs", "tests/support/multi_action_fixture.rs",
+}
+
+
+def profile_contract(profile: str) -> tuple[str, str, set[str]]:
+    # Selection is explicit and closed: inventory data cannot choose its own trust root.
+    if profile == "legacy":
+        return PINNED_COMMIT, PINNED_TREE, OMITTED
+    if profile == "multi-action-preview":
+        return ACTION_PREVIEW_COMMIT, ACTION_PREVIEW_TREE, OMITTED | ACTION_NATIVE_OMITTED
+    raise ValueError("unknown bootstrap profile")
+
 
 
 def git_hash(kind: str, data: bytes) -> str:
@@ -102,9 +119,10 @@ def read_file(root_fd: int, path: str) -> tuple[bytes, int]:
         os.close(fd)
 
 
-def validate_engine(engine: Path, inventory: dict) -> dict[str, bytes]:
-    if (inventory.get("schema") != 1 or inventory.get("commit") != PINNED_COMMIT
-            or inventory.get("tree") != PINNED_TREE or inventory_tree(inventory["files"]) != PINNED_TREE):
+def validate_engine(engine: Path, inventory: dict, *, profile: str = "legacy") -> dict[str, bytes]:
+    commit, tree, _ = profile_contract(profile)
+    if (inventory.get("schema") != 1 or inventory.get("commit") != commit
+            or inventory.get("tree") != tree or inventory_tree(inventory["files"]) != tree):
         raise ValueError("inventory is not the pinned reviewed Git tree")
     expected = {item["path"] for item in inventory["files"]}
     root_fd = open_directory(engine)
@@ -138,7 +156,8 @@ def validate_engine(engine: Path, inventory: dict) -> dict[str, bytes]:
         os.close(root_fd)
 
 
-def project_manifest(original: bytes, engine: Path, name: str) -> bytes:
+def project_manifest(original: bytes, engine: Path, name: str, *, profile: str = "legacy") -> bytes:
+    profile_contract(profile)
     text = original.decode()
     text = text.replace('name = "orr_static_starter"', f'name = {json.dumps(name)}', 1)
     text = text.replace('version.workspace = true', 'version = "0.1.0"', 1)
@@ -149,6 +168,15 @@ def project_manifest(original: bytes, engine: Path, name: str) -> bytes:
                   lambda match: 'path = ' + json.dumps(str(engine / "crates" / match[1])), text)
     text = re.sub(r'\nstandalone-native-acceptance = \[[^\n]+\]\n', '\n', text)
     text = text.replace('[[test]]\nname = "standalone_x11"\npath = "tests/standalone_x11.rs"\nrequired-features = ["standalone-native-acceptance"]\n', '')
+    if profile == "multi-action-preview":
+        # These repository-only harnesses require the omitted source-fence support.
+        for feature in ("multi-action-standalone-acceptance", "multi-action-editor-acceptance"):
+            text = re.sub(r"(?m)^" + re.escape(feature) + r" = \[[^\n]+\]\n", "", text)
+        text = re.sub(r'(?ms)^\[\[(?:bin|test)\]\]\nname = "(?:multi-action-fixture-player|multi_action_standalone_x11|multi_action_editor_x11)"\n.*?(?=^\[|\Z)', "", text)
+        parsed_preview = tomllib.loads(text)
+        if (parsed_preview["features"].get("static-game-actions") != ["dep:orr_input", "orr_editor?/static-game-actions"]
+                or "static-game-actions" in parsed_preview["features"].get("default", [])):
+            raise ValueError("preview optional action feature contract changed")
     text += '\n[lib]\nname = "orr_static_starter"\n\n[workspace]\nresolver = "2"\n\n[profile.release]\ndebug = 1\ncodegen-units = 1\nlto = "thin"\n'
     parsed = tomllib.loads(text)
     if any(isinstance(v, dict) and v.get("workspace") for v in parsed["package"].values()):
@@ -228,18 +256,58 @@ instructions for this relocated workspace.
 '''.encode()
 
 
-def generated_files(snapshot: dict[str, bytes], engine: Path, name: str) -> dict[str, bytes]:
-    files = {p: data for p, data in snapshot.items() if p not in OMITTED and p not in ("Cargo.toml", "README.md")}
-    files["Cargo.toml"] = project_manifest(snapshot["Cargo.toml"], engine, name)
+def generated_files(snapshot: dict[str, bytes], engine: Path, name: str, *, profile: str = "legacy") -> dict[str, bytes]:
+    commit, tree, omitted = profile_contract(profile)
+    files = {p: data for p, data in snapshot.items() if p not in omitted and p not in ("Cargo.toml", "README.md")}
+    files["Cargo.toml"] = project_manifest(snapshot["Cargo.toml"], engine, name, profile=profile)
     files["UPSTREAM_README.md"] = snapshot["README.md"]
     files["README.md"] = project_readme(name)
+    if profile == "multi-action-preview":
+        if "tests/multi_action_contract.rs" not in files:
+            raise ValueError("preview portable action contract missing")
+        files["README.md"] += preview_readme()
     files[".gitignore"] = b"/target/\n"
-    receipt = {"schema": 1, "engine_commit": PINNED_COMMIT, "engine_tree": PINNED_TREE,
+    receipt = {"schema": 1, "engine_commit": commit, "engine_tree": tree,
                "engine_path": str(engine), "project_name": name, "user_source_commit": None,
-               "lockfile": "not generated; owned by user project", "omitted_engine_only_tests": sorted(OMITTED),
+               "lockfile": "not generated; owned by user project", "omitted_engine_only_tests": sorted(omitted),
                "files_sha256": {p: hashlib.sha256(data).hexdigest() for p, data in sorted(files.items())}}
+    if profile == "multi-action-preview":
+        receipt.update({"template_profile": profile, "stability": "preview",
+                        "hosted_native_acceptance": "unverified",
+                        "action_feature": "static-game-actions", "action_feature_default": False})
     files["provenance.json"] = (json.dumps(receipt, indent=2) + "\n").encode()
     return files
+
+
+def preview_readme() -> bytes:
+    return b"""
+## Explicit multi-action preview (not a stable or recommended release)
+
+This profile uses a different, exact reviewed engine commit recorded in
+provenance.json. It does not upgrade an existing project or the legacy profile.
+Hosted native CI and actual generated-project action execution are UNVERIFIED.
+No creation receipt certifies runtime, hardware, source-hidden or merge acceptance.
+
+The static-game-actions feature is opt-in, never a default. The included
+portable tests/multi_action_contract.rs demonstrates a typed four-action mapper
+and exercises admission, neutral input, and lifecycle handling in the standalone
+controller. It is a test fixture, not a third playable game. From this workspace:
+
+    cargo test --offline --locked --no-default-features --features standalone,static-game-actions --test multi_action_contract
+    cargo test --offline --locked --features static-game-actions --test acceptance
+
+These are commands to run, not results already obtained for your project.
+Implement your game's StandaloneGame action_profile and held_actions_input,
+and its editor registration with StaticGameRegistry::with_action_profiles and
+StaticActionDescriptor.
+The original Delivery/Switchboard remain legacy one-action samples. Enabling
+this feature does not automatically redesign those games' controls.
+
+Repository-only multi-action X11 harnesses and their private player/support
+fixtures are omitted along with the legacy source-fence test. Native validation
+of a generated user game requires a separately provenance-bound harness; do not
+use the engine's native receipts as proof for your modified user code.
+"""
 
 
 def rename_noreplace(parent_fd: int, source: str, destination: str) -> None:
@@ -254,7 +322,8 @@ def rename_noreplace(parent_fd: int, source: str, destination: str) -> None:
         raise OSError(code, os.strerror(code), destination)
 
 
-def bootstrap(engine: Path, destination: Path, name: str, inventory: dict) -> dict:
+def bootstrap(engine: Path, destination: Path, name: str, inventory: dict, *, profile: str = "legacy") -> dict:
+    _, tree, _ = profile_contract(profile)
     if sys.platform != "linux":
         raise ValueError("Linux with renameat2 is required; no unsafe publication fallback")
     if not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", name) or name in ("test", "build", "deps", "examples"):
@@ -272,8 +341,8 @@ def bootstrap(engine: Path, destination: Path, name: str, inventory: dict) -> di
             pass
         else:
             raise ValueError("destination already exists; no files were changed")
-        snapshot = validate_engine(engine, inventory)
-        files = generated_files(snapshot, engine, name)
+        snapshot = validate_engine(engine, inventory, profile=profile)
+        files = generated_files(snapshot, engine, name, profile=profile)
         os.mkdir(stage, 0o700, dir_fd=parent_fd)
         created = True
         stage_fd = os.open(stage, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
@@ -299,7 +368,7 @@ def bootstrap(engine: Path, destination: Path, name: str, inventory: dict) -> di
             os.close(stage_fd)
         rename_noreplace(parent_fd, stage, destination.name)
         created = False
-        return {"destination": str(destination), "engine_tree": PINNED_TREE, "files": len(files), "cargo_ran": False}
+        return {"destination": str(destination), "engine_tree": tree, "files": len(files), "cargo_ran": False}
     finally:
         if created:
             shutil.rmtree(stage, dir_fd=parent_fd)
@@ -311,10 +380,13 @@ def main() -> int:
     parser.add_argument("--engine", required=True, type=Path)
     parser.add_argument("--destination", required=True, type=Path, help="new directory; parent must already exist")
     parser.add_argument("--name", required=True)
+    parser.add_argument("--profile", choices=PROFILES, default="legacy",
+                        help="explicit template pin; multi-action-preview has no native acceptance")
     args = parser.parse_args()
     try:
-        inventory = json.loads(Path(__file__).with_name("user_game_bootstrap_source.json").read_text())
-        print(json.dumps(bootstrap(args.engine, args.destination, args.name, inventory)))
+        inventory_name = "user_game_bootstrap_source.json" if args.profile == "legacy" else "user_game_action_preview_source.json"
+        inventory = json.loads(Path(__file__).with_name(inventory_name).read_text())
+        print(json.dumps(bootstrap(args.engine, args.destination, args.name, inventory, profile=args.profile)))
     except (OSError, ValueError, KeyError, TypeError) as error:
         print(f"bootstrap refused: {error}", file=sys.stderr)
         return 1

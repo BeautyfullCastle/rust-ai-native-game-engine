@@ -815,10 +815,13 @@ class RoomWallSemanticTests(unittest.TestCase):
         gate.workflow_contract(text)
         for removed in (', generated-user-game-native',
                         "          GENERATED_USER_NATIVE_RESULT: ${{ needs['generated-user-game-native'].result }}\n",
-                        ' GENERATED_USER_NATIVE_RESULT PRIVATE_ACTION_NATIVE_RESULT; do',
+                        ' GENERATED_USER_NATIVE_RESULT PRIVATE_ACTION_NATIVE_RESULT GENERATED_ACTION_CPU_RESULT; do',
                         ', static-game-actions-native',
+                        ', generated-user-game-actions-cpu',
+                        "          GENERATED_ACTION_CPU_RESULT: ${{ needs['generated-user-game-actions-cpu'].result }}\n",
+                        ' GENERATED_ACTION_CPU_RESULT; do',
                         "          PRIVATE_ACTION_NATIVE_RESULT: ${{ needs['static-game-actions-native'].result }}\n",
-                        ' PRIVATE_ACTION_NATIVE_RESULT; do'):
+                        ' PRIVATE_ACTION_NATIVE_RESULT GENERATED_ACTION_CPU_RESULT; do'):
             replacement = '; do' if removed.endswith('; do') else ''
             self.assertIn(removed, text)
             with self.subTest(removed=removed), self.assertRaises(AssertionError):

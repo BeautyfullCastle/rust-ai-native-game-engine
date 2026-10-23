@@ -114,7 +114,7 @@ def workflow_contract(text):
     retention_binding_contract(acceptance, retention)
     aggregate = workflow_job(text, 'cross_platform_checksum_compare')
     aggregate_header = aggregate.split('    steps:\n', 1)[0]
-    expected_needs = '[native, wasm32, wasm32-browser, android-arm64, sample-build, generated-user-game-native, static-game-actions-native, sample-arena-cpu, sample-fixture-preflight, sample-linked-prefabs, sample-room, static-model-authoring, room-wall-authoring]'
+    expected_needs = '[native, wasm32, wasm32-browser, android-arm64, sample-build, generated-user-game-native, static-game-actions-native, generated-user-game-actions-cpu, sample-arena-cpu, sample-fixture-preflight, sample-linked-prefabs, sample-room, static-model-authoring, room-wall-authoring]'
     assert re.findall(r'^    needs:[ \t]*(.*)$', aggregate_header, re.M) == [expected_needs]
     assert re.findall(r'^    if:[ \t]*(.*)$', aggregate_header, re.M) == ['${{ always() }}']
     assert 'continue-on-error' not in aggregate_header

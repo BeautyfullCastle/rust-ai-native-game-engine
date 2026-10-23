@@ -5691,6 +5691,79 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  generated-user-game-actions-cpu:
+    name: generated user game actions CPU preview (ubuntu-22.04)
+    # Explicit opt-in preview only. This does not establish native acceptance.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 95
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      CARGO_TERM_COLOR: never
+    steps:
+      - name: Initialize preview failure evidence
+        timeout-minutes: 1
+        run: |
+          mkdir -p "$RUNNER_TEMP/generated-action-preview-job"
+          printf '%s\n' '{"status":"setup-started","native_acceptance":false}' > "$RUNNER_TEMP/generated-action-preview-job/setup.json"
+      - uses: actions/checkout@v4
+        timeout-minutes: 1
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        timeout-minutes: 2
+      - uses: actions/setup-python@v5
+        id: action_preview_python
+        timeout-minutes: 1
+        with:
+          python-version: "3.12"
+          update-environment: false
+      - name: Install required CPU compilation dependencies
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          { sudo apt-get update -q
+            sudo apt-get install -y -q libasound2-dev libudev-dev libxkbcommon-dev libwayland-dev pkg-config
+          } 2>&1 | tee "$RUNNER_TEMP/generated-action-preview-job/setup-packages.log"
+      - name: Prepare exact preview engine and locked registry inputs
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$RUNNER_TEMP/generated-action-preview-job"
+          PIN=6f97ac85a80aabda26679b482d182c9365bff92e
+          test "$(git rev-parse "$PIN^{tree}")" = cd7cc2a03990a8778a99e60a82c3cfbb425c4d87
+          mkdir "$RUNNER_TEMP/generated-action-preview-engine"
+          git archive "$PIN" | tar -x -C "$RUNNER_TEMP/generated-action-preview-engine"
+          (cd "$RUNNER_TEMP/generated-action-preview-engine" && cargo fetch --locked) 2>&1 | tee "$ROOT/registry-fetch.log"
+          printf '%s\n' '{"status":"setup-complete","native_acceptance":false}' > "$ROOT/setup.json"
+      - name: Required generated preview portable action contracts
+        timeout-minutes: 80
+        shell: bash
+        env:
+          ORR_ACCEPTANCE_PYTHON: ${{ steps.action_preview_python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          ROOT="$RUNNER_TEMP/generated-action-preview-job"
+          trap 'status=$?; printf "{\"exit_code\":%s,\"native_acceptance_claim\":false}\n" "$status" > "$ROOT/process-exit.json"' EXIT
+          "$ORR_ACCEPTANCE_PYTHON" -B -m unittest discover -s tools -p 'test_bootstrap*.py' -v 2>&1 | tee "$ROOT/bootstrap-fixtures.log"
+          "$ORR_ACCEPTANCE_PYTHON" -B -m unittest discover -s tools -p 'test_user_game_action_preview_gate.py' -v 2>&1 | tee "$ROOT/gate-fixtures.log"
+          "$ORR_ACCEPTANCE_PYTHON" -B tools/user_game_action_preview_gate.py \
+            --gate "$GITHUB_WORKSPACE" \
+            --engine "$RUNNER_TEMP/generated-action-preview-engine" \
+            --project "$RUNNER_TEMP/generated action preview" \
+            --target "$RUNNER_TEMP/generated-action-preview-target" \
+            --artifacts "$RUNNER_TEMP/generated-action-preview-job/acceptance" 2>&1 | tee "$ROOT/acceptance.log"
+      - name: Retain preview success or partial failure evidence
+        if: always()
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-user-game-actions-cpu-ubuntu-22.04
+          path: ${{ runner.temp }}/generated-action-preview-job
+          if-no-files-found: error
+          retention-days: 7
+
   generated-user-game-native:
     name: generated user game native (ubuntu-22.04)
     # One isolated mandatory lane, not a matrix. Existing engine gates remain.
@@ -6289,7 +6362,7 @@ jobs:
     name: cross-platform checksum comparison
     # Preserve this check name for existing branch protection. Every checksum
     # target, sample graphics/audio/editor matrix, linked-prefab and Room lanes must pass.
-    needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, generated-user-game-native, static-game-actions-native, sample-arena-cpu, sample-fixture-preflight, sample-linked-prefabs, sample-room, static-model-authoring, room-wall-authoring]
+    needs: [native, wasm32, wasm32-browser, android-arm64, sample-build, generated-user-game-native, static-game-actions-native, generated-user-game-actions-cpu, sample-arena-cpu, sample-fixture-preflight, sample-linked-prefabs, sample-room, static-model-authoring, room-wall-authoring]
     # Without always(), a failed/skipped dependency skips this required check.
     if: ${{ always() }}
     runs-on: ubuntu-latest
@@ -6306,11 +6379,12 @@ jobs:
           SAMPLE_BUILD_RESULT: ${{ needs['sample-build'].result }}
           GENERATED_USER_NATIVE_RESULT: ${{ needs['generated-user-game-native'].result }}
           PRIVATE_ACTION_NATIVE_RESULT: ${{ needs['static-game-actions-native'].result }}
+          GENERATED_ACTION_CPU_RESULT: ${{ needs['generated-user-game-actions-cpu'].result }}
           LINKED_PREFABS_RESULT: ${{ needs['sample-linked-prefabs'].result }}
           ROOM_RESULT: ${{ needs['sample-room'].result }}
         run: |
           failed=0
-          for result_var in NATIVE_RESULT WASM32_RESULT ANDROID_ARM64_RESULT BROWSER_RESULT SAMPLE_BUILD_RESULT SAMPLE_ARENA_CPU_RESULT SAMPLE_PREFLIGHT_RESULT LINKED_PREFABS_RESULT ROOM_RESULT GENERATED_USER_NATIVE_RESULT PRIVATE_ACTION_NATIVE_RESULT; do
+          for result_var in NATIVE_RESULT WASM32_RESULT ANDROID_ARM64_RESULT BROWSER_RESULT SAMPLE_BUILD_RESULT SAMPLE_ARENA_CPU_RESULT SAMPLE_PREFLIGHT_RESULT LINKED_PREFABS_RESULT ROOM_RESULT GENERATED_USER_NATIVE_RESULT PRIVATE_ACTION_NATIVE_RESULT GENERATED_ACTION_CPU_RESULT; do
             result="${!result_var}"
             echo "$result_var=$result"
             if [[ "$result" != "success" ]]; then

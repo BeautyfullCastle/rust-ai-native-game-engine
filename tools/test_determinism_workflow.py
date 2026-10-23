@@ -36,8 +36,9 @@ RESULTS = {
     "ROOM_RESULT": "${{ needs['sample-room'].result }}",
     "GENERATED_USER_NATIVE_RESULT": "${{ needs['generated-user-game-native'].result }}",
     "PRIVATE_ACTION_NATIVE_RESULT": "${{ needs['static-game-actions-native'].result }}",
+    "GENERATED_ACTION_CPU_RESULT": "${{ needs['generated-user-game-actions-cpu'].result }}",
 }
-REQUIRED_JOBS = {"native", "wasm32", "android-arm64", "wasm32-browser", "sample-build", "generated-user-game-native", "static-game-actions-native", "sample-arena-cpu", "sample-fixture-preflight", "sample-linked-prefabs", "sample-room", "static-model-authoring", "room-wall-authoring"}
+REQUIRED_JOBS = {"native", "wasm32", "android-arm64", "wasm32-browser", "sample-build", "generated-user-game-native", "static-game-actions-native", "generated-user-game-actions-cpu", "sample-arena-cpu", "sample-fixture-preflight", "sample-linked-prefabs", "sample-room", "static-model-authoring", "room-wall-authoring"}
 NATIVE_TEST = "cargo test --workspace --release --timings --exclude orr_sample --exclude orr_editor --exclude orr_web_gpu"
 SAMPLE_TEST = "cargo test -p orr_sample -p orr_view -p orr_bridge -p orr_rhi -p orr_render -p orr_editor -p orr_web_gpu --release --timings"
 FFI_ARTIFACTS = {
@@ -746,10 +747,10 @@ class DeterminismWorkflowTests(unittest.TestCase):
         # test domain. Each iteration reads only its own input, compares only
         # with success, and monotonically ORs failure into a fresh accumulator.
         # No cross-input dependency, early exit, or later reset is permitted.
-        # Thus all 6**11 inputs are covered by eleven independent six-state
+        # Thus all 6**12 inputs are covered by twelve independent six-state
         # equivalence classes, not by assuming sampled combinations generalize.
         prefix = """failed=0
-for result_var in NATIVE_RESULT WASM32_RESULT ANDROID_ARM64_RESULT BROWSER_RESULT SAMPLE_BUILD_RESULT SAMPLE_ARENA_CPU_RESULT SAMPLE_PREFLIGHT_RESULT LINKED_PREFABS_RESULT ROOM_RESULT GENERATED_USER_NATIVE_RESULT PRIVATE_ACTION_NATIVE_RESULT; do
+for result_var in NATIVE_RESULT WASM32_RESULT ANDROID_ARM64_RESULT BROWSER_RESULT SAMPLE_BUILD_RESULT SAMPLE_ARENA_CPU_RESULT SAMPLE_PREFLIGHT_RESULT LINKED_PREFABS_RESULT ROOM_RESULT GENERATED_USER_NATIVE_RESULT PRIVATE_ACTION_NATIVE_RESULT GENERATED_ACTION_CPU_RESULT; do
   result="${!result_var}"
   echo "$result_var=$result"
   if [[ "$result" != "success" ]]; then
@@ -784,8 +785,8 @@ fi
                 cases.extend(({**success, first: "failure", second: "unknown"},
                               {**success, first: "unknown", second: "failure"}))
         cases.extend({name: state for name in names} for state in states)
-        # 1 all-success + 11*5 single failures + 2*C(11,2) mixed pairs + 5 all-failure.
-        self.assertEqual(len(cases), 171)
+        # 1 all-success + 12*5 single failures + 2*C(12,2) mixed pairs + 5 all-failure.
+        self.assertEqual(len(cases), 198)
         for results in cases:
             with self.subTest(results=results):
                 result = self.run_gate(results)
