@@ -13,6 +13,8 @@ default-run = "orr_editor"
 workspace = true
 
 [features]
+# Explicit statically linked game adapters; no plugin discovery or code loading.
+static-games = []
 arena-project-export = ["sprites", "orr_sample/project-export", "dep:sha2"]
 # Optional finite visual-only Arena background authoring.
 tilemap = ["sprites", "orr_sample/tilemap", "dep:orr_tilemap"]

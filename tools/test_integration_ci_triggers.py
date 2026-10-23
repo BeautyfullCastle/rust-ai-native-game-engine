@@ -7,7 +7,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 TRIGGER = ('on:\n  pull_request:\n'
-           '    branches: [main, su/engine-correctness-hardening]\n'
+           '    branches: [main, su/engine-correctness-hardening, su/authoring-development-integration-20261021]\n'
            '    types: [ready_for_review]\n'
            '  workflow_dispatch:\n')
 
@@ -299,7 +299,8 @@ class IntegrationTriggers(unittest.TestCase):
         for bad in [
             TRIGGER.replace('ready_for_review', 'opened, synchronize'),
             TRIGGER.replace('    types: [ready_for_review]\n', ''),
-            TRIGGER.replace('branches: [main, su/engine-correctness-hardening]', "branches: ['**']"),
+            TRIGGER.replace('branches: [main, su/engine-correctness-hardening, su/authoring-development-integration-20261021]', "branches: ['**']"),
+            TRIGGER.replace('branches: [main, su/engine-correctness-hardening, su/authoring-development-integration-20261021]', 'branches: [main, su/engine-correctness-hardening]'),
             TRIGGER.replace('  workflow_dispatch:\n', ''),
             TRIGGER + '  push:\n',
             TRIGGER + '  schedule:\n    - cron: "0 * * * *"\n',

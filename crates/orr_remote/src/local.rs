@@ -55,6 +55,43 @@ impl LocalHost {
         Self::spawn_configured::<G>(setup, |_| {})
     }
 
+    /// Starts an opt-in reflected, managed-input host. The neutral value must
+    /// decode to the game's semantic default, not merely zeroed bytes.
+    /// Listener, authentication and pairing settings remain those from `setup`.
+    pub fn spawn_with_input<G: Game + 'static>(
+        setup: impl FnOnce() -> Result<(EditorDoc, ServerConfig), String> + Send + 'static,
+        input_name: &'static str,
+        max_players: u8,
+        commands: impl Fn(orr_sim::PlayerSlot, &G::Input) -> Vec<G::Command> + Send + Sync + 'static,
+        neutral_value: serde_json::Value,
+        work_status: Option<crate::work_status::WorkStatusService>,
+    ) -> Result<LocalHost, String>
+    where
+        G::Input: orr_reflect::Reflect,
+    {
+        if !(1..=16).contains(&max_players) {
+            return Err("structured input player limit must be 1..=16".into());
+        }
+        if input_name.is_empty()
+            || !input_name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b':')
+            || ["name", "schema", "entities"].contains(&input_name)
+        {
+            return Err("invalid reflected input type name".into());
+        }
+        <G::Input as orr_reflect::Reflect>::describe()
+            .check_layout(std::mem::size_of::<G::Input>())
+            .map_err(|e| format!("invalid reflected input layout: {e}"))?;
+        let input = crate::input::StructuredInput::<G>::new(input_name, max_players, commands);
+        let neutral = input.decode(&neutral_value).map_err(|e| format!("neutral input: {e}"))?;
+        if neutral != G::Input::default() {
+            return Err("neutral input must equal the game's Input::default()".into());
+        }
+        Self::spawn_configured_with_editor_work_status::<G>(setup, move |server| {
+            server.set_structured_input::<G>(input_name, max_players, move |player, value| (input.commands)(player, value));
+            server.enable_managed_input();
+        }, work_status)
+    }
+
     /// Starts a host and configures server-side protocols after the ERP server
     /// is live but before the host is published to clients or begins polling.
     /// The ordinary `spawn` API retains its original setup and readiness

@@ -9,6 +9,7 @@ use orr_remote::{
     TxHandle, ViewDeliveryMode,
 };
 use orr_sample::physics_game::PhysGame;
+use orr_bridge::Bridge;
 use serde_json::{json, Value as J};
 
 type RecordedRequests = Arc<Mutex<Vec<Request>>>;
@@ -19,14 +20,22 @@ struct ScriptTx {
     requests: Arc<Mutex<Vec<Request>>>,
     discovery: J,
     schema: J,
+    input: J,
     fail_method: Option<String>,
 }
 
 impl ScriptTx {
     fn answer(&self, req: Request) -> Result<(), ClientError> {
+        // Deliberately hostile early messages on the actual input handshake.
+        // They must be ignored until the input contract is accepted.
+        if req.method == "registry.input" {
+            self.responses.send(Incoming::Wire(vec![0xff])).unwrap();
+            self.responses.send(Incoming::Text(json!({"jsonrpc":"2.0","method":"watch.notes","params":{"notes":[{"kind":"branched","tick":0,"dropped":0}]}}).to_string())).unwrap();
+        }
         let result = match req.method.as_str() {
             "rpc.discover" => self.discovery.clone(),
             "registry.schema" => json!({"schema": self.schema}),
+            "registry.input" => self.input.clone(),
             "watch.subscribe" => json!({
                 "topics": ["frames", "events", "notes"],
                 "view_delivery": 1,
@@ -135,6 +144,7 @@ fn connect_with_error(
         requests: requests.clone(),
         discovery: remote_discovery,
         schema: remote_schema,
+        input: J::Null,
         fail_method: fail_method.map(str::to_owned),
     });
     let transport = ScriptTransport {
@@ -281,4 +291,124 @@ fn checked_handshake_classifies_discovery_and_schema_rpc_errors() {
     );
     assert!(error(result).contains("remote identity check:"));
     assert!(!methods(&requests.lock().unwrap()).contains(&"watch.subscribe"));
+}
+
+fn input_descriptor() -> J {
+    json!({"schema":{"title":"Input","type":"object"},
+        "value_format":orr_remote::methods::VALUE_FORMAT,"max_players":2,
+        "managed_held":{"version":1,"lease_ms":2000,"heartbeat_ms":500}})
+}
+fn connect_input(
+    input: J,
+    expected_identity: Option<RemoteIdentity>,
+    fail_method: Option<&str>,
+    token: Option<&str>,
+) -> (ConnectResult, RecordedRequests) {
+    let (response_tx, response_rx) = channel();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let tx = Arc::new(ScriptTx {
+        responses: response_tx,
+        requests: requests.clone(),
+        discovery: discovery(),
+        schema: schema(),
+        input,
+        fail_method: fail_method.map(str::to_owned),
+    });
+    let transport = ScriptTransport {
+        responses: response_rx,
+        tx,
+    };
+    let mut cfg = RemoteConfig::new("");
+    cfg.connect_timeout = Duration::from_secs(2);
+    cfg.expected_identity = expected_identity;
+    cfg.token = token.map(str::to_owned);
+    let expected = orr_remote::ExpectedInputDescriptor::new(
+        input_descriptor()["schema"].clone(),
+        orr_remote::methods::VALUE_FORMAT,
+        2,
+    )
+    .unwrap();
+    (
+        RemoteBridge::connect_transport_with_input(Box::new(transport), cfg, expected),
+        requests,
+    )
+}
+#[test]
+fn input_checked_frame_connection_validates_before_subscription() {
+    for token in [None, Some("token")] {
+        let (bridge, requests) = connect_input(input_descriptor(), Some(identity()), None, token);
+        let mut bridge = bridge.expect("matching input contract");
+        assert!(
+            bridge.snapshot().is_none(),
+            "early frames must not be published"
+        );
+        assert!(
+            bridge.take_errors().is_empty(),
+            "early frames must not be decoded"
+        );
+        assert!(!bridge.drain_events().iter().any(|event| matches!(
+            event,
+            orr_bridge::BridgeEvent::Lifecycle(orr_bridge::Lifecycle::Branched { .. })
+        )));
+        drop(bridge);
+        let requests = requests.lock().unwrap();
+        let mut expected = vec![
+            "rpc.discover",
+            "registry.schema",
+            "registry.input",
+            "watch.subscribe",
+            "sim.state",
+        ];
+        if token.is_some() {
+            expected.insert(0, "auth");
+        }
+        assert_eq!(methods(&requests), expected);
+    }
+}
+#[test]
+fn input_checked_frame_connection_rejects_mismatch_missing_and_rpc_error() {
+    let original = input_descriptor();
+    let mut bad_values = vec![J::Null];
+    for key in ["schema", "value_format", "max_players", "managed_held"] {
+        let mut changed = original.clone();
+        changed[key] = J::Null;
+        bad_values.push(changed);
+    }
+    for key in ["version", "lease_ms", "heartbeat_ms"] {
+        let mut changed = original.clone();
+        changed["managed_held"][key] = json!(99);
+        bad_values.push(changed);
+    }
+    for actual in bad_values {
+        let (result, requests) = connect_input(actual, Some(identity()), None, None);
+        assert!(error(result).contains("registry.input"));
+        assert!(!methods(&requests.lock().unwrap()).contains(&"watch.subscribe"));
+    }
+    let (result, requests) =
+        connect_input(original, Some(identity()), Some("registry.input"), None);
+    assert!(error(result).contains("remote identity check:"));
+    assert!(!methods(&requests.lock().unwrap()).contains(&"watch.subscribe"));
+}
+#[test]
+fn input_contract_requires_identity_and_does_not_skip_its_checks() {
+    let (result, requests) = connect_input(input_descriptor(), None, None, None);
+    assert!(error(result).contains("requires an expected remote identity"));
+    assert!(requests.lock().unwrap().is_empty());
+    let mut wrong = identity();
+    wrong.build_id = "wrong build".into();
+    let (result, requests) = connect_input(input_descriptor(), Some(wrong), None, None);
+    assert!(error(result).contains("build id mismatch"));
+    assert_eq!(methods(&requests.lock().unwrap()), ["rpc.discover"]);
+}
+
+#[test]
+fn input_checked_auth_refusal_never_discovers_or_subscribes() {
+    let (result, requests) = connect_input(
+        input_descriptor(),
+        Some(identity()),
+        Some("auth"),
+        Some("bad"),
+    );
+    assert!(error(result).contains("method unavailable"));
+    assert_eq!(methods(&requests.lock().unwrap()), ["auth"]);
 }

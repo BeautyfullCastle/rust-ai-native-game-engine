@@ -18,6 +18,8 @@ pub(super) struct Input {
     pub enabled: bool,
     pub collect_dodge: bool,
     pub room_escape: bool,
+    #[cfg(feature = "static-games")]
+    pub registered: Option<crate::static_adapter::RegisteredGame>,
     #[cfg(feature = "mesh-navigation")]
     pub mesh_navigation: bool,
     pending_restarts: u8,
@@ -69,6 +71,10 @@ impl Input {
         if self.phase != Phase::Off { self.phase = Phase::Releasing; }
     }
     pub fn keys(&mut self, keys: Keys) { if self.wanted {
+        #[cfg(feature = "static-games")]
+        if self.registered.is_some() && (!(-1..=1).contains(&keys.x) || !(-1..=1).contains(&keys.y)) {
+            self.release(); return;
+        }
         if self.collect_dodge && self.restart_armed && keys.fire && !self.latest.fire { self.pending_restarts = self.pending_restarts.saturating_add(1).min(8); }
         if !keys.fire { self.restart_armed = true; }
         self.latest = keys;
@@ -197,6 +203,15 @@ impl Input {
         Some((method, params, self.intent, op))
     }
     fn legacy_value(&mut self) -> J {
+        #[cfg(feature = "static-games")]
+        if let Some(game) = self.registered {
+            let keys = self.effective_keys();
+            // keys() admits only finite axes, including the neutral claim state.
+            let value = game.held_value(crate::static_adapter::StaticHeldKeys { x: keys.x, y: keys.y, action: keys.fire })
+                .expect("registered input keys were admitted");
+            self.sent = Some(keys);
+            return value;
+        }
         let value = if self.room_escape { json!({"move_x":self.latest.x,"move_z":-self.latest.y,"buttons":if self.effective_keys().fire {vec!["interact"]}else{vec![]}}) }
         else if self.collect_dodge { json!({"x":self.latest.x,"y":self.latest.y,"buttons":if self.effective_keys().fire {vec!["restart"]}else{vec![]}}) }
         else { self.effective_keys().value() };
@@ -273,6 +288,8 @@ impl Editor {
     }
 
     pub fn take_control(&mut self, player: u8, viewport_focused: bool) -> bool {
+        #[cfg(feature = "static-games")]
+        if self.game().is_registered() && player != 0 { return false; }
         if !viewport_focused || self.game().has_mesh_view() || !self.can_take_control() || player >= self.sim.player_count || self.input.phase != Phase::Off || self.pending.values().any(|p| matches!(p.kind,Pend::Input(..))) { return false; }
         self.state_generation += 1;
         self.input.claim(player); self.pump_input(); true
@@ -601,4 +618,49 @@ mod mesh_hazards_control_tests {
         assert!(editor.queue_mesh_play_goal(view.agent.spec.start).is_err());
     }
 
+}
+
+#[cfg(all(test, feature = "static-games"))]
+mod registered_input_tests {
+    use super::*;
+    fn input() -> Input {
+        let mut input = Input::new(true);
+        input.registered = Some(crate::static_adapter::tests::registry().handle("FixtureGame").unwrap());
+        input
+    }
+    fn claim_ack() -> J { json!({"player":0,"grant":"9","generation":"3","lease_ms":2000,"accepted_head_tick":0}) }
+    #[test]
+    fn registered_mapping_only_supplies_value_editor_owns_envelope_and_release() {
+        let mut input=input(); let now=Instant::now(); input.claim(0);
+        let (method,params,intent,op)=input.next(now).unwrap();
+        assert_eq!(method,"sim.input_claim");assert_eq!(params["player"],0);
+        input.answer(intent,op,Ok(claim_ack()),now);
+        input.keys(Keys{x:1,y:-1,fire:true});
+        let (method,params,_,op)=input.next(now).unwrap();
+        assert_eq!(method,"sim.input_value");assert_eq!(op,Op::Value);
+        assert_eq!(params["value"],json!({"axis_x":1,"axis_y":-1,"buttons":["fire"]}));
+        assert_eq!(params["player"],0);assert_eq!(params["grant"],"9");assert_eq!(params["generation"],"3");assert_eq!(params["sequence"],"1");
+        input.release();
+        let (method,_,_,op)=input.next(now).unwrap();assert_eq!(method,"sim.input_release");assert_eq!(op,Op::Release);
+    }
+    #[test]
+    fn registered_delayed_claim_release_and_disconnect_never_reclaim() {
+        let mut input=input();let now=Instant::now();input.claim(0);
+        let (_,_,intent,op)=input.next(now).unwrap();input.release();
+        input.answer(intent,op,Ok(claim_ack()),now);
+        assert_eq!(input.phase,Phase::Releasing);
+        assert_eq!(input.next(now).unwrap().0,"sim.input_release");
+        input.off();assert!(input.next(now).is_none());assert!(!input.wanted);
+        input.claim(0);assert_eq!(input.latest,Keys::default());
+        let (_,_,intent,op)=input.next(now).unwrap();
+        input.answer(intent,op,Ok(claim_ack()),now+Duration::from_millis(2001));
+        assert_eq!(input.phase,Phase::Releasing);assert!(!input.wanted);
+    }
+    #[test]
+    fn registered_invalid_axes_release_instead_of_clamp_or_fallback() {
+        let mut input=input();let now=Instant::now();input.claim(0);
+        let (_,_,intent,op)=input.next(now).unwrap();input.answer(intent,op,Ok(claim_ack()),now);
+        input.keys(Keys{x:2,y:0,fire:false});assert_eq!(input.phase,Phase::Releasing);
+        assert_eq!(input.next(now).unwrap().0,"sim.input_release");
+    }
 }

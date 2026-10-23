@@ -40,6 +40,7 @@ struct Ops {
 }
 
 /// One registered type.
+#[derive(Clone)]
 pub struct TypeInfo {
     name: &'static str,
     kind: TypeKind,
@@ -104,7 +105,7 @@ impl TypeInfo {
 ///
 /// Types are kept sorted by name, so every listing, schema and scene file
 /// has the same order on every machine.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct TypeRegistry {
     types: BTreeMap<&'static str, TypeInfo>,
 }
@@ -375,5 +376,33 @@ impl TypeRegistry {
     #[cfg(feature = "scene")]
     pub(crate) fn in_frame(&self, t: &TypeInfo, frame: &Frame) -> bool {
         (t.ops.in_frame)(frame)
+    }
+}
+
+#[cfg(all(test, feature = "scene"))]
+mod clone_contract_tests {
+    use super::*;
+    use orr_fp::{FPVec2, FP};
+
+    #[test]
+    fn cloned_registry_preserves_schema_and_owns_descriptor_collection() {
+        let mut original = TypeRegistry::new();
+        original.register_component::<FPVec2>("Point");
+        let mut copied = original.clone();
+        assert_eq!(original.json_schema(), copied.json_schema());
+        assert_eq!(original.legacy_json_schema(), copied.legacy_json_schema());
+        let a = original.get("Point").unwrap();
+        let b = copied.get("Point").unwrap();
+        assert_eq!(a.size(), b.size());
+        assert_eq!(a.kind(), b.kind());
+        let unchanged = a.default_bytes();
+        let mut owned = b.default_bytes();
+        b.set(&mut owned, "x", Value::Fixed(FP::ONE)).unwrap();
+        assert_eq!(a.default_bytes(), unchanged);
+        assert_ne!(owned, unchanged);
+        copied.register_component::<i32>("OnlyCopy");
+        assert!(copied.get("OnlyCopy").is_some());
+        assert!(original.get("OnlyCopy").is_none());
+        // No frame, entity storage, or runtime owner is involved in cloning.
     }
 }

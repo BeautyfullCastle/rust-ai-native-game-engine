@@ -387,6 +387,7 @@ enum Pending {
     Auth,
     Discover,
     Schema,
+    Input,
     Subscribe,
     ResetSubscribe,
     State,
@@ -865,7 +866,7 @@ impl<G: Game> RemoteBridge<G> {
             TransportQueueLimits::default(),
         )
         .map_err(|e| format!("cannot connect to {}: {e}", cfg.url))?;
-        Self::connect_transport_inner(Box::new(t), cfg, DEFAULT_ERROR_QUEUE_LIMITS, Some(policy))
+        Self::connect_transport_inner(Box::new(t), cfg, DEFAULT_ERROR_QUEUE_LIMITS, Some(policy), None)
     }
 
     /// Like [`connect`](Self::connect) on a connection that is already
@@ -885,7 +886,7 @@ impl<G: Game> RemoteBridge<G> {
         cfg: RemoteConfig,
         error_limits: QueueLimits,
     ) -> Result<Self, String> {
-        Self::connect_transport_inner(t, cfg, error_limits, None)
+        Self::connect_transport_inner(t, cfg, error_limits, None, None)
     }
 
     /// Connects an existing serialized transport with explicit frame codec
@@ -896,7 +897,20 @@ impl<G: Game> RemoteBridge<G> {
         policy: FrameCodecPolicy,
     ) -> Result<Self, String> {
         policy.validate(&cfg.source)?;
-        Self::connect_transport_inner(t, cfg, DEFAULT_ERROR_QUEUE_LIMITS, Some(policy))
+        Self::connect_transport_inner(t, cfg, DEFAULT_ERROR_QUEUE_LIMITS, Some(policy), None)
+    }
+
+    /// Checks reflected input on the actual frame connection before subscribing.
+    /// A compiled game/build/full-schema identity is mandatory.
+    pub fn connect_transport_with_input(
+        t: Box<dyn Transport>,
+        cfg: RemoteConfig,
+        expected: crate::ExpectedInputDescriptor,
+    ) -> Result<Self, String> {
+        if cfg.expected_identity.is_none() {
+            return Err("checked input requires an expected remote identity".into());
+        }
+        Self::connect_transport_inner(t, cfg, DEFAULT_ERROR_QUEUE_LIMITS, None, Some(expected))
     }
 
     fn connect_transport_inner(
@@ -904,6 +918,7 @@ impl<G: Game> RemoteBridge<G> {
         cfg: RemoteConfig,
         error_limits: QueueLimits,
         frame_codec: Option<FrameCodecPolicy>,
+        expected_input: Option<crate::ExpectedInputDescriptor>,
     ) -> Result<Self, String> {
         let tx = t
             .sender()
@@ -935,6 +950,7 @@ impl<G: Game> RemoteBridge<G> {
                     ready_tx,
                     thread_last_input,
                     thread_codec,
+                    expected_input,
                 );
                 thread_shared.alive.store(false, Ordering::Release);
                 thread_shared.tx.close();
@@ -1161,6 +1177,7 @@ struct StreamState {
 /// How often the connection thread looks at `stop` while nothing arrives.
 const POLL: Duration = Duration::from_millis(50);
 
+#[allow(clippy::too_many_arguments)]
 fn run<G: Game>(
     mut t: Box<dyn Transport>,
     cfg: RemoteConfig,
@@ -1169,6 +1186,7 @@ fn run<G: Game>(
     ready: Sender<Result<Info, String>>,
     last_input: Arc<Mutex<Option<G::Input>>>,
     frame_codec_policy: Option<FrameCodecPolicy>,
+    expected_input: Option<crate::ExpectedInputDescriptor>,
 ) {
     let registry = Simulation::<G>::build_registry();
     let mut pending: BTreeMap<u64, Pending> = BTreeMap::new();
@@ -1210,7 +1228,7 @@ fn run<G: Game>(
             queue_handshake(t.as_mut(), &mut pending, &mut next_id, kind, method, params)
         {
             if let Some(r) = ready.take() {
-                let message = if matches!(kind, Pending::Discover | Pending::Schema) {
+                let message = if matches!(kind, Pending::Discover | Pending::Schema | Pending::Input) {
                     identity_check_error(e)
                 } else {
                     e
@@ -1241,7 +1259,7 @@ fn run<G: Game>(
                 if let Some(r) = ready.take() {
                     let checking_identity = pending
                         .values()
-                        .any(|kind| matches!(kind, Pending::Discover | Pending::Schema));
+                        .any(|kind| matches!(kind, Pending::Discover | Pending::Schema | Pending::Input));
                     let message = if checking_identity {
                         identity_check_error(e)
                     } else {
@@ -1257,7 +1275,7 @@ fn run<G: Game>(
                 let Ok(j) = serde_json::from_str::<J>(&text) else {
                     let checking_identity = pending
                         .values()
-                        .any(|kind| matches!(kind, Pending::Discover | Pending::Schema));
+                        .any(|kind| matches!(kind, Pending::Discover | Pending::Schema | Pending::Input));
                     if checking_identity {
                         fail(
                             shared,
@@ -1275,7 +1293,7 @@ fn run<G: Game>(
                 if let Some(id) = j.get("id").and_then(J::as_u64) {
                     let error = j.get("error").map(RpcError::from_json);
                     match (pending.remove(&id), error) {
-                        (Some(Pending::Discover | Pending::Schema), Some(e)) => {
+                        (Some(Pending::Discover | Pending::Schema | Pending::Input), Some(e)) => {
                             if let Some(r) = ready.take() {
                                 let _ = r.send(Err(identity_check_error(e)));
                             }
@@ -1369,6 +1387,14 @@ fn run<G: Game>(
                                 fail(shared, &mut ready, e);
                                 return;
                             }
+                            if expected_input.is_some() {
+                                if let Err(e) = queue_handshake(t.as_mut(), &mut pending, &mut next_id,
+                                    Pending::Input, "registry.input", J::Null) {
+                                    fail(shared, &mut ready, identity_check_error(e));
+                                    return;
+                                }
+                                continue;
+                            }
                             identity_validated = true;
                             if let Err(e) = begin_subscription(
                                 t.as_mut(),
@@ -1377,6 +1403,19 @@ fn run<G: Game>(
                                 &cfg,
                                 selected_codec_limits,
                             ) {
+                                fail(shared, &mut ready, e);
+                                return;
+                            }
+                        }
+                        (Some(Pending::Input), None) => {
+                            let result = j.get("result").unwrap_or(&J::Null);
+                            if let Err(e) = expected_input.as_ref().expect("input was requested").validate(result) {
+                                fail(shared, &mut ready, identity_check_error(e));
+                                return;
+                            }
+                            identity_validated = true;
+                            if let Err(e) = begin_subscription(t.as_mut(), &mut pending, &mut next_id,
+                                &cfg, selected_codec_limits) {
                                 fail(shared, &mut ready, e);
                                 return;
                             }

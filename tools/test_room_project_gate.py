@@ -56,7 +56,7 @@ def workflow_section(text, header, indent):
 def room_workflow_steps(workflow):
     """The supported CI shape is deliberately strict; changed gates need review."""
     trigger = workflow_section(workflow, 'on:', 0)
-    assert trigger == 'on:\n  pull_request:\n    branches: [main, su/engine-correctness-hardening]\n    types: [ready_for_review]\n  workflow_dispatch:\n', 'workflow triggers'
+    assert trigger == 'on:\n  pull_request:\n    branches: [main, su/engine-correctness-hardening, su/authoring-development-integration-20261021]\n    types: [ready_for_review]\n  workflow_dispatch:\n', 'workflow triggers'
     jobs = workflow_section(workflow, 'jobs:', 0)
     sample = workflow_section(jobs, '  sample-build:', 2)
     assert sample.count('    steps:\n') == 1, 'sample-build steps'
@@ -386,6 +386,8 @@ class RoomProjectGateTests(unittest.TestCase):
     def test_workflow_checks_reject_missing_disabled_or_nonpropagating_gates(self):
         workflow = (ROOT / '.github/workflows/determinism.yml').read_text()
         check_room_workflow(workflow)
+        with self.assertRaises(AssertionError):
+            check_room_workflow(workflow.replace(', su/authoring-development-integration-20261021', '', 1))
         steps = room_workflow_steps(workflow)
         contracts = steps[ROOM_CONTRACTS]
         command = 'if tools/check-room-project.sh contracts; then'

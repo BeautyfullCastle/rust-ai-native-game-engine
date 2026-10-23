@@ -35,8 +35,9 @@ NATIVE_HEADER = '''  native:
 '''
 # Exact aggregate preserves the nine-result and eight-row authoring steps,
 # and adds the independent four-row Room wall result. Pin all three steps and
-# dependency edges; actual Bash failure states are tested separately.
-AGGREGATE_SHA256 = '6d7102ae05de069e9644da065c89993cebc58a8b2228569d8c208e8d834ae90a'
+# dependency edges, including the generated user-game lane in needs, result
+# binding and the fail-closed loop; actual Bash failure states are tested separately.
+AGGREGATE_SHA256 = '1f90c38f0b8e156b7ce29c523f1b1f9e73caa34d58f2a43d3bd3fe1bf5b102e7'
 
 
 def listing(names):
@@ -355,7 +356,10 @@ class Raw16GateTests(unittest.TestCase):
                          ('      - name: Require every independent static authoring matrix row to pass\n', '      - name: Require every independent static authoring matrix row to pass\n        if: false\n'),
                          ('[[ \"$AUTHORING_RESULT\" != \"success\" ]]', '[[ \"$AUTHORING_RESULT\" == \"success\" ]]'),
                          ("          ROOM_RESULT: ${{ needs['sample-room'].result }}\n", ''),
-                         ('LINKED_PREFABS_RESULT ROOM_RESULT; do', 'LINKED_PREFABS_RESULT; do'),
+                         ('LINKED_PREFABS_RESULT ROOM_RESULT GENERATED_USER_NATIVE_RESULT; do', 'LINKED_PREFABS_RESULT GENERATED_USER_NATIVE_RESULT; do'),
+                         (', generated-user-game-native', ''),
+                         ("          GENERATED_USER_NATIVE_RESULT: ${{ needs['generated-user-game-native'].result }}\n", ''),
+                         ('ROOM_RESULT GENERATED_USER_NATIVE_RESULT; do', 'ROOM_RESULT; do'),
                          ('  native:\n', '  native:\n    if: false\n'),
                          ('          - os: macos-latest\n', ''),
                          ('    runs-on: ${{ matrix.os }}\n', '    runs-on: ubuntu-latest\n'),

@@ -10,6 +10,8 @@ pub use orr_sample::editor_view::Drawable;
 /// Games with a compiled frame decoder, reflection and viewport mapping.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EditorGame {
+    #[cfg(feature = "static-games")]
+    Registered(crate::static_adapter::RegisteredGame),
     PhysGame,
     Arena,
     #[cfg(feature = "collect-dodge")]
@@ -28,6 +30,24 @@ pub enum EditorGame {
 }
 
 impl EditorGame {
+    #[cfg(feature = "static-games")]
+    pub fn registered(self) -> Option<crate::static_adapter::RegisteredGame> {
+        if let Self::Registered(game) = self { Some(game) } else { None }
+    }
+    pub fn is_registered(self) -> bool {
+        #[cfg(feature = "static-games")]
+        { self.registered().is_some() }
+        #[cfg(not(feature = "static-games"))]
+        { false }
+    }
+    /// A registered game supplies its own controls hint, not an Arena fallback.
+    pub fn registered_input_hint(self) -> Option<&'static str> {
+        #[cfg(feature = "static-games")]
+        { self.registered().map(|game| game.input_hint()) }
+        #[cfg(not(feature = "static-games"))]
+        { None }
+    }
+
     /// Missing or unknown identities never select a fallback decoder.
     pub fn from_local_name(name: &str) -> Result<Self, String> {
         match name {
@@ -73,7 +93,7 @@ impl EditorGame {
     }
 
     pub fn name(self) -> &'static str {
-        match self { Self::PhysGame => "PhysGame", Self::Arena => "Arena", #[cfg(feature = "collect-dodge")] Self::CollectDodge => "CollectDodgeV1", #[cfg(feature = "room-project")] Self::RoomEscape => "RoomEscapeV1", Self::Yard3D => "Yard3D", #[cfg(feature = "terrain-physics")] Self::TerrainYard3D => "TerrainYard3D", #[cfg(feature = "navigation")] Self::NavigationYard3D => "NavigationYard3D", #[cfg(feature = "mesh-navigation")] Self::MeshNavigation => "MeshNavigation", #[cfg(feature = "mesh-hazards")] Self::MeshHazardsV1 => "MeshHazardsV1" }
+        match self { #[cfg(feature = "static-games")] Self::Registered(game) => game.name(), Self::PhysGame => "PhysGame", Self::Arena => "Arena", #[cfg(feature = "collect-dodge")] Self::CollectDodge => "CollectDodgeV1", #[cfg(feature = "room-project")] Self::RoomEscape => "RoomEscapeV1", Self::Yard3D => "Yard3D", #[cfg(feature = "terrain-physics")] Self::TerrainYard3D => "TerrainYard3D", #[cfg(feature = "navigation")] Self::NavigationYard3D => "NavigationYard3D", #[cfg(feature = "mesh-navigation")] Self::MeshNavigation => "MeshNavigation", #[cfg(feature = "mesh-hazards")] Self::MeshHazardsV1 => "MeshHazardsV1" }
     }
 
     pub fn is_collect(self) -> bool {
@@ -84,8 +104,11 @@ impl EditorGame {
         #[cfg(feature = "room-project")] { self == Self::RoomEscape }
         #[cfg(not(feature = "room-project"))] { false }
     }
-    pub fn has_keyboard(self) -> bool { self == Self::Arena || self.is_collect() || self.is_room() }
-    pub fn position_field(self) -> &'static str { if self.is_collect() { "position" } else { "pos" } }
+    pub fn has_keyboard(self) -> bool { self == Self::Arena || self.is_collect() || self.is_room() || self.is_registered() }
+    pub fn position_field(self) -> &'static str {
+        #[cfg(feature = "static-games")]
+        if let Some(game) = self.registered() { return game.position().field; }
+        if self.is_collect() { "position" } else { "pos" } }
     pub fn is_3d(self) -> bool {
         self == Self::Yard3D || self.is_room() || self.is_terrain() || self.is_navigation() || self.has_mesh_view()
     }
@@ -130,6 +153,8 @@ impl EditorGame {
     pub fn types(self) -> TypeRegistry {
         let mut types = TypeRegistry::new();
         match self {
+            #[cfg(feature = "static-games")]
+            Self::Registered(game) => return game.types(),
             Self::PhysGame => orr_sample::physics_game::register_reflect(&mut types),
             Self::Arena => orr_sample::arena_game::register_reflect(&mut types),
             #[cfg(feature = "collect-dodge")]
@@ -151,6 +176,8 @@ impl EditorGame {
 
     pub fn drawables(self, frame: FrameView<'_>) -> Vec<Drawable> {
         match self {
+            #[cfg(feature = "static-games")]
+            Self::Registered(game) => game.draw(frame),
             Self::PhysGame => orr_sample::physics_view::body_views(frame),
             Self::Arena => orr_sample::arena_view::editor_drawables(frame),
             #[cfg(feature = "collect-dodge")]
@@ -170,13 +197,18 @@ impl EditorGame {
     }
 
     pub fn position_component(self) -> &'static str {
-        match self { Self::PhysGame => "orr_physics::Body", Self::Arena => "Position", #[cfg(feature = "collect-dodge")] Self::CollectDodge => "CollectDodgeV1::Actor", #[cfg(feature = "room-project")] Self::RoomEscape => "orr_physics3d::Body", Self::Yard3D => "orr_physics3d::Body", #[cfg(feature = "terrain-physics")] Self::TerrainYard3D => "orr_physics3d::Body", #[cfg(feature = "navigation")] Self::NavigationYard3D => "NavigationAgent", #[cfg(feature = "mesh-navigation")] Self::MeshNavigation => "MeshAgent", #[cfg(feature = "mesh-hazards")] Self::MeshHazardsV1 => "MeshAgent" }
+        match self { #[cfg(feature = "static-games")] Self::Registered(game) => game.position().component, Self::PhysGame => "orr_physics::Body", Self::Arena => "Position", #[cfg(feature = "collect-dodge")] Self::CollectDodge => "CollectDodgeV1::Actor", #[cfg(feature = "room-project")] Self::RoomEscape => "orr_physics3d::Body", Self::Yard3D => "orr_physics3d::Body", #[cfg(feature = "terrain-physics")] Self::TerrainYard3D => "orr_physics3d::Body", #[cfg(feature = "navigation")] Self::NavigationYard3D => "NavigationAgent", #[cfg(feature = "mesh-navigation")] Self::MeshNavigation => "MeshAgent", #[cfg(feature = "mesh-hazards")] Self::MeshHazardsV1 => "MeshAgent" }
     }
 
     /// Default scene for a locally started game, preferring the current
     /// working tree and falling back to the scene shipped with the editor.
     pub fn default_scene_path(self) -> PathBuf {
+        // Registered startup requires an explicit existing scene; no cwd/sample fallback.
+        #[cfg(feature = "static-games")]
+        if self.is_registered() { return PathBuf::new(); }
         let filename = match self {
+            #[cfg(feature = "static-games")]
+            Self::Registered(_) => unreachable!("registered scenes require explicit paths"),
             Self::PhysGame => "physics_demo.scene.yaml",
             Self::Arena => "arena_blank.scene.yaml",
             #[cfg(feature = "collect-dodge")]
@@ -203,6 +235,8 @@ impl EditorGame {
 
 /// Concrete decoders stay here; the rest of the editor consumes common snapshots.
 pub enum EditorStream {
+    #[cfg(feature = "static-games")]
+    Registered(Box<dyn crate::static_adapter::StaticFrameStream>),
     Phys(RemoteBridge<PhysGame>),
     Arena(RemoteBridge<Arena>),
     #[cfg(feature = "collect-dodge")]
@@ -223,6 +257,8 @@ pub enum EditorStream {
 impl EditorStream {
     pub fn connect(game: EditorGame, cfg: RemoteConfig) -> Result<Self, String> {
         match game {
+            #[cfg(feature = "static-games")]
+            EditorGame::Registered(_) => Err("registered games require explicit local startup".into()),
             EditorGame::PhysGame => RemoteBridge::connect(cfg).map(Self::Phys),
             EditorGame::Arena => RemoteBridge::connect(cfg).map(Self::Arena),
             #[cfg(feature = "collect-dodge")]
@@ -243,6 +279,8 @@ impl EditorStream {
 
     pub fn connect_transport(game: EditorGame, transport: Box<dyn Transport>, cfg: RemoteConfig) -> Result<Self, String> {
         match game {
+            #[cfg(feature = "static-games")]
+            EditorGame::Registered(game) => game.stream(transport, cfg).map(Self::Registered),
             EditorGame::PhysGame => RemoteBridge::connect_transport(transport, cfg).map(Self::Phys),
             EditorGame::Arena => RemoteBridge::connect_transport(transport, cfg).map(Self::Arena),
             #[cfg(feature = "collect-dodge")]
@@ -262,29 +300,29 @@ impl EditorStream {
     }
 
     pub fn poll_view(&mut self) -> ViewUpdate<()> {
-        match self { Self::Phys(s) => normalize(s.poll_view()), Self::Arena(s) => normalize(s.poll_view()), #[cfg(feature = "collect-dodge")] Self::CollectDodge(s) => normalize(s.poll_view()), #[cfg(feature = "room-project")] Self::RoomEscape(s) => normalize(s.poll_view()), Self::Yard3D(s) => normalize(s.poll_view()), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => normalize(s.poll_view()), #[cfg(feature = "navigation")] Self::NavigationYard3D(s) => normalize(s.poll_view()), #[cfg(feature = "mesh-navigation")] Self::MeshNavigation(s) => normalize(s.poll_view()), #[cfg(feature = "mesh-hazards")] Self::MeshHazards(s) => normalize(s.poll_view()) }
+        match self { #[cfg(feature = "static-games")] Self::Registered(s) => s.poll_view(), Self::Phys(s) => normalize(s.poll_view()), Self::Arena(s) => normalize(s.poll_view()), #[cfg(feature = "collect-dodge")] Self::CollectDodge(s) => normalize(s.poll_view()), #[cfg(feature = "room-project")] Self::RoomEscape(s) => normalize(s.poll_view()), Self::Yard3D(s) => normalize(s.poll_view()), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => normalize(s.poll_view()), #[cfg(feature = "navigation")] Self::NavigationYard3D(s) => normalize(s.poll_view()), #[cfg(feature = "mesh-navigation")] Self::MeshNavigation(s) => normalize(s.poll_view()), #[cfg(feature = "mesh-hazards")] Self::MeshHazards(s) => normalize(s.poll_view()) }
     }
 
     #[cfg(test)]
     pub fn snapshot(&self) -> Option<orr_bridge::Snapshot> {
-        match self { Self::Phys(s) => s.snapshot(), Self::Arena(s) => s.snapshot(), #[cfg(feature = "collect-dodge")] Self::CollectDodge(s) => s.snapshot(), #[cfg(feature = "room-project")] Self::RoomEscape(s) => s.snapshot(), Self::Yard3D(s) => s.snapshot(), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => s.snapshot(), #[cfg(feature = "navigation")] Self::NavigationYard3D(s) => s.snapshot(), #[cfg(feature = "mesh-navigation")] Self::MeshNavigation(s) => s.snapshot(), #[cfg(feature = "mesh-hazards")] Self::MeshHazards(s) => s.snapshot() }
+        match self { #[cfg(feature = "static-games")] Self::Registered(_) => None, Self::Phys(s) => s.snapshot(), Self::Arena(s) => s.snapshot(), #[cfg(feature = "collect-dodge")] Self::CollectDodge(s) => s.snapshot(), #[cfg(feature = "room-project")] Self::RoomEscape(s) => s.snapshot(), Self::Yard3D(s) => s.snapshot(), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => s.snapshot(), #[cfg(feature = "navigation")] Self::NavigationYard3D(s) => s.snapshot(), #[cfg(feature = "mesh-navigation")] Self::MeshNavigation(s) => s.snapshot(), #[cfg(feature = "mesh-hazards")] Self::MeshHazards(s) => s.snapshot() }
     }
 
     #[cfg(test)]
     pub fn request(&self, method: &str, params: serde_json::Value) -> Result<(), orr_bridge::BridgeError> {
-        match self { Self::Phys(s) => s.request(method, params), Self::Arena(s) => s.request(method, params), #[cfg(feature = "collect-dodge")] Self::CollectDodge(s) => s.request(method, params), #[cfg(feature = "room-project")] Self::RoomEscape(s) => s.request(method, params), Self::Yard3D(s) => s.request(method, params), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => s.request(method, params), #[cfg(feature = "navigation")] Self::NavigationYard3D(s) => s.request(method, params), #[cfg(feature = "mesh-navigation")] Self::MeshNavigation(s) => s.request(method, params), #[cfg(feature = "mesh-hazards")] Self::MeshHazards(s) => s.request(method, params) }
+        match self { #[cfg(feature = "static-games")] Self::Registered(_) => Err(orr_bridge::BridgeError::Disconnected), Self::Phys(s) => s.request(method, params), Self::Arena(s) => s.request(method, params), #[cfg(feature = "collect-dodge")] Self::CollectDodge(s) => s.request(method, params), #[cfg(feature = "room-project")] Self::RoomEscape(s) => s.request(method, params), Self::Yard3D(s) => s.request(method, params), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => s.request(method, params), #[cfg(feature = "navigation")] Self::NavigationYard3D(s) => s.request(method, params), #[cfg(feature = "mesh-navigation")] Self::MeshNavigation(s) => s.request(method, params), #[cfg(feature = "mesh-hazards")] Self::MeshHazards(s) => s.request(method, params) }
     }
 
     pub fn take_errors(&self) -> Vec<RpcError> {
-        match self { Self::Phys(s) => s.take_errors(), Self::Arena(s) => s.take_errors(), #[cfg(feature = "collect-dodge")] Self::CollectDodge(s) => s.take_errors(), #[cfg(feature = "room-project")] Self::RoomEscape(s) => s.take_errors(), Self::Yard3D(s) => s.take_errors(), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => s.take_errors(), #[cfg(feature = "navigation")] Self::NavigationYard3D(s) => s.take_errors(), #[cfg(feature = "mesh-navigation")] Self::MeshNavigation(s) => s.take_errors(), #[cfg(feature = "mesh-hazards")] Self::MeshHazards(s) => s.take_errors() }
+        match self { #[cfg(feature = "static-games")] Self::Registered(s) => s.take_errors(), Self::Phys(s) => s.take_errors(), Self::Arena(s) => s.take_errors(), #[cfg(feature = "collect-dodge")] Self::CollectDodge(s) => s.take_errors(), #[cfg(feature = "room-project")] Self::RoomEscape(s) => s.take_errors(), Self::Yard3D(s) => s.take_errors(), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => s.take_errors(), #[cfg(feature = "navigation")] Self::NavigationYard3D(s) => s.take_errors(), #[cfg(feature = "mesh-navigation")] Self::MeshNavigation(s) => s.take_errors(), #[cfg(feature = "mesh-hazards")] Self::MeshHazards(s) => s.take_errors() }
     }
 
     pub fn is_alive(&self) -> bool {
-        match self { Self::Phys(s) => s.is_alive(), Self::Arena(s) => s.is_alive(), #[cfg(feature = "collect-dodge")] Self::CollectDodge(s) => s.is_alive(), #[cfg(feature = "room-project")] Self::RoomEscape(s) => s.is_alive(), Self::Yard3D(s) => s.is_alive(), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => s.is_alive(), #[cfg(feature = "navigation")] Self::NavigationYard3D(s) => s.is_alive(), #[cfg(feature = "mesh-navigation")] Self::MeshNavigation(s) => s.is_alive(), #[cfg(feature = "mesh-hazards")] Self::MeshHazards(s) => s.is_alive() }
+        match self { #[cfg(feature = "static-games")] Self::Registered(s) => s.is_alive(), Self::Phys(s) => s.is_alive(), Self::Arena(s) => s.is_alive(), #[cfg(feature = "collect-dodge")] Self::CollectDodge(s) => s.is_alive(), #[cfg(feature = "room-project")] Self::RoomEscape(s) => s.is_alive(), Self::Yard3D(s) => s.is_alive(), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => s.is_alive(), #[cfg(feature = "navigation")] Self::NavigationYard3D(s) => s.is_alive(), #[cfg(feature = "mesh-navigation")] Self::MeshNavigation(s) => s.is_alive(), #[cfg(feature = "mesh-hazards")] Self::MeshHazards(s) => s.is_alive() }
     }
 
     pub fn view_delivery(&self) -> RemoteViewDelivery {
-        match self { Self::Phys(s) => s.view_delivery(), Self::Arena(s) => s.view_delivery(), #[cfg(feature = "collect-dodge")] Self::CollectDodge(s) => s.view_delivery(), #[cfg(feature = "room-project")] Self::RoomEscape(s) => s.view_delivery(), Self::Yard3D(s) => s.view_delivery(), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => s.view_delivery(), #[cfg(feature = "navigation")] Self::NavigationYard3D(s) => s.view_delivery(), #[cfg(feature = "mesh-navigation")] Self::MeshNavigation(s) => s.view_delivery(), #[cfg(feature = "mesh-hazards")] Self::MeshHazards(s) => s.view_delivery() }
+        match self { #[cfg(feature = "static-games")] Self::Registered(s) => s.view_delivery(), Self::Phys(s) => s.view_delivery(), Self::Arena(s) => s.view_delivery(), #[cfg(feature = "collect-dodge")] Self::CollectDodge(s) => s.view_delivery(), #[cfg(feature = "room-project")] Self::RoomEscape(s) => s.view_delivery(), Self::Yard3D(s) => s.view_delivery(), #[cfg(feature = "terrain-physics")] Self::TerrainYard3D(s) => s.view_delivery(), #[cfg(feature = "navigation")] Self::NavigationYard3D(s) => s.view_delivery(), #[cfg(feature = "mesh-navigation")] Self::MeshNavigation(s) => s.view_delivery(), #[cfg(feature = "mesh-hazards")] Self::MeshHazards(s) => s.view_delivery() }
     }
 }
 
