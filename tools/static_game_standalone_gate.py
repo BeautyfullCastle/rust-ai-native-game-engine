@@ -347,7 +347,7 @@ def test_summary(text, passed, filtered):
     require(found == [('ok',str(passed),'0','0','0',str(filtered))], 'actual executed test counts')
 
 
-def run(root, context=None, environment=None):
+def run(root, context=None, environment=None, *, compile_budget=None):
     root = root.resolve()
     root.mkdir(parents=True, exist_ok=True)
     require(not any(root.iterdir()), 'fresh evidence directory required')
@@ -368,7 +368,10 @@ def run(root, context=None, environment=None):
             receipt['acceptance_context_sha256'] = digest(context.context_path)
         sha = context.source_sha
         source = context.fence()
-        execute = lambda args, root, name, env, timeout: command(args, root, name, env, timeout, cwd=context.project_root)
+        def execute(args, root, name, env, timeout):
+            if compile_budget is not None and name in ('compile', 'editor-compile'):
+                return compile_budget.command(command, args, root, name, env, context.project_root)
+            return command(args, root, name, env, timeout, cwd=context.project_root)
         (root/'source-inventory.json').write_text(json.dumps(source,indent=2)+'\n')
         receipt.update(source_inventory_sha256=digest(root/'source-inventory.json'),source_tree=source['tree'])
         env.update(ORR_STATIC_STANDALONE_BUILD_SHA=sha,ORR_REQUIRE_STANDALONE_NATIVE='1',ORR_STANDALONE_ARTIFACT_DIR=str(root))

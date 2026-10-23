@@ -300,6 +300,46 @@ class NativeGateTests(unittest.TestCase):
                 gate.run(Path(directory))
             self.assertEqual(json.loads((Path(directory)/'gate.json').read_text())['status'], 'failed')
 
+    def test_shared_compile_budget_debits_success_and_failure(self):
+        budget = gate.CompileBudget()
+        runner = mock.Mock(return_value='compiled')
+        with mock.patch.object(gate.time, 'monotonic', side_effect=[10, 1110, 1111, 1311]):
+            self.assertEqual(budget.command(runner, [], Path('.'), 'compile', {}, Path('.')), 'compiled')
+            self.assertEqual(runner.call_args.args[4], 2700)
+            self.assertEqual(budget.remaining, 1600)
+            runner.side_effect = ValueError('compiler failed')
+            with self.assertRaisesRegex(ValueError, 'compiler failed'):
+                budget.command(runner, [], Path('.'), 'compile', {}, Path('.'))
+            self.assertEqual(runner.call_args.args[4], 1600)
+            self.assertEqual(budget.remaining, 1400)
+
+    def test_shared_compile_budget_exhaustion_never_launches_next_phase(self):
+        budget = gate.CompileBudget()
+        runner = mock.Mock()
+        with mock.patch.object(gate.time, 'monotonic', side_effect=[0, 2705]):
+            budget.command(runner, [], Path('.'), 'compile', {}, Path('.'))
+        self.assertEqual(budget.remaining, 0)
+        runner.reset_mock()
+        with self.assertRaisesRegex(ValueError, 'shared compile budget exhausted'):
+            budget.command(runner, [], Path('.'), 'editor-compile', {}, Path('.'))
+        runner.assert_not_called()
+
+    def test_command_success_and_failure_preserve_phase_timing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = gate.command([gate.sys.executable, '-c', 'print("finished")'],
+                                  root, 'success', dict(gate.os.environ), 2)
+            self.assertIn('finished', result)
+            timing = json.loads((root/'success-timing.json').read_text())
+            self.assertEqual(timing['exit_code'], 0)
+            self.assertFalse(timing['timed_out'])
+            self.assertEqual(timing['output_bytes'], len(result.encode()))
+            self.assertEqual(timing['timeout_seconds'], 2)
+            with self.assertRaisesRegex(ValueError, 'exit 3'):
+                gate.command([gate.sys.executable, '-c', 'raise SystemExit(3)'],
+                             root, 'failure', dict(gate.os.environ), 2)
+            self.assertEqual(json.loads((root/'failure-timing.json').read_text())['exit_code'], 3)
+
     def test_timeout_preserves_partial_log_and_stops_group(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -307,6 +347,10 @@ class NativeGateTests(unittest.TestCase):
                 gate.command([gate.sys.executable, '-c', 'import time; print("started", flush=True); time.sleep(5)'],
                              root, 'timeout', dict(gate.os.environ), 0.1)
             self.assertIn('started', (root/'timeout.log').read_text())
+            timing = json.loads((root/'timeout-timing.json').read_text())
+            self.assertTrue(timing['timed_out'])
+            self.assertGreater(timing['output_progress'][-1]['output_bytes'], 0)
+            self.assertGreaterEqual(timing['seconds'], 0.1)
 
     def test_test_inventory_result_cannot_be_zero_filtered_or_skipped(self):
         text = f'test {gate.TEST} ... native log\nok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1s\n'

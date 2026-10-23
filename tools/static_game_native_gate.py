@@ -12,6 +12,11 @@ import stat
 import struct
 import subprocess
 import sys
+import time
+try:
+    import resource
+except ImportError:  # Import-only validator fixtures also run on Windows.
+    resource = None
 import zlib
 
 SCHEMA = 'orr.static-game-native/1'
@@ -265,12 +270,48 @@ def context_test_output(text, filtered):
     summaries = re.findall(r'test result: (\w+)\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out', text)
     require(summaries == [('ok','3','0','0','0',str(filtered))], 'exact context test result')
 
+class CompileBudget:
+    """Reallocate the existing three 900-second generated compile allowances.
+
+    This is cumulative compiler wall time, not a new allowance per phase. No
+    runtime, source, producer or compiler-input validation is skipped.
+    """
+    def __init__(self):
+        self.remaining = 3 * 900.0
+
+    def command(self, runner, args, root, name, env, cwd):
+        require(self.remaining > 0, 'shared compile budget exhausted')
+        started = time.monotonic()
+        try:
+            return runner(args, root, name, env, self.remaining, cwd=cwd)
+        finally:
+            self.remaining = max(0.0, self.remaining - (time.monotonic() - started))
+
+
 def command(args, root, name, env, timeout, cwd=None):
+    started = time.monotonic()
+    cpu_before = resource.getrusage(resource.RUSAGE_CHILDREN) if resource else None
     process = subprocess.Popen(args, cwd=cwd, env=env, text=True, stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, start_new_session=True)
     timed_out = False
+    checkpoints = []
+    deadline = started + timeout
     try:
-        output, _ = process.communicate(timeout=timeout)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(args, timeout)
+            try:
+                output, _ = process.communicate(timeout=min(15, remaining))
+                break
+            except subprocess.TimeoutExpired as pending:
+                partial = pending.output or b''
+                size = len(partial.encode() if isinstance(partial, str) else partial)
+                checkpoint = {'seconds': time.monotonic() - started, 'output_bytes': size}
+                checkpoints.append(checkpoint)
+                print(name + ' progress: ' + json.dumps(checkpoint), flush=True)
+                if time.monotonic() >= deadline:
+                    raise
     except subprocess.TimeoutExpired:
         timed_out = True
         os.killpg(process.pid, signal.SIGTERM)
@@ -280,6 +321,14 @@ def command(args, root, name, env, timeout, cwd=None):
             os.killpg(process.pid, signal.SIGKILL)
             output, _ = process.communicate()
     (root/(name+'.log')).write_text(output)
+    cpu_after = resource.getrusage(resource.RUSAGE_CHILDREN) if resource else None
+    (root/(name+'-timing.json')).write_text(json.dumps({
+        'seconds': time.monotonic() - started, 'timeout_seconds': timeout,
+        'timed_out': timed_out, 'exit_code': process.returncode,
+        'output_bytes': len(output.encode()), 'output_progress': checkpoints,
+        'child_user_cpu_seconds': cpu_after.ru_utime - cpu_before.ru_utime if resource else None,
+        'child_system_cpu_seconds': cpu_after.ru_stime - cpu_before.ru_stime if resource else None,
+    }, indent=2)+'\n')
     print(output, end='', flush=True)
     require(not timed_out, f'{name} timed out after {timeout}s; process group terminated')
     require(process.returncode == 0, f'{name} exit {process.returncode}')
@@ -439,7 +488,7 @@ def engine_context(env):
     targets = {t['name']: Path(t['src_path']) for t in package['targets'] if t['name'] in ('native_window','standalone_x11','standalone_editor_trace','delivery-player','switchboard-player','orr_static_starter') or (t['name'] == 'bundle' and t['kind'] == ['bin'])}
     return ExecutionContext(root, package['name'], package['id'], targets, sha, root, sha, target_root=metadata['target_directory'])
 
-def run(root, context=None, environment=None):
+def run(root, context=None, environment=None, *, compile_budget=None):
     root = root.resolve()
     root.mkdir(parents=True, exist_ok=True)
     require(not any(root.iterdir()), 'artifact directory must be fresh, never reuse stale evidence')
@@ -460,7 +509,10 @@ def run(root, context=None, environment=None):
             receipt['acceptance_context_sha256'] = digest(context.context_path)
         sha = context.source_sha
         source = context.fence()
-        execute = lambda args, root, name, env, timeout: command(args, root, name, env, timeout, cwd=context.project_root)
+        def execute(args, root, name, env, timeout):
+            if compile_budget is not None and name == 'compile':
+                return compile_budget.command(command, args, root, name, env, context.project_root)
+            return command(args, root, name, env, timeout, cwd=context.project_root)
         source_path = root/'source-inventory.json'
         source_path.write_text(json.dumps(source, indent=2)+'\n')
         receipt['source_inventory_sha256'] = digest(source_path)

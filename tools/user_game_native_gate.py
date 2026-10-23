@@ -193,8 +193,11 @@ def run(gate, engine, project, target, artifacts):
         save()
         # Both drivers preserve all original execution and independent validation.
         # Pass explicit environment to avoid a process-global chdir or SHA override.
-        editor.run(artifacts/'editor', context, env)
-        standalone.run(artifacts/'standalone', context, env)
+        # A fresh generated target has no warm engine artifacts. Share, rather
+        # than increase, the three existing 900s compiler phase allocations.
+        compile_budget = editor.CompileBudget()
+        editor.run(artifacts/'editor', context, env, compile_budget=compile_budget)
+        standalone.run(artifacts/'standalone', context, env, compile_budget=compile_budget)
         fence()
         receipt.update(status='passed', native_acceptance=True,
                        editor_gate_sha256=editor.digest(artifacts/'editor/gate.json'),
