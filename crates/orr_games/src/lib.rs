@@ -28,3 +28,7 @@ pub mod collect_dodge_game;
 
 #[cfg(feature = "room-escape")]
 pub mod room_escape_game;
+
+/// Original cooperative tower defense, deterministic and opt-in.
+#[cfg(feature = "coop-defense")]
+pub mod coop_defense_game;
