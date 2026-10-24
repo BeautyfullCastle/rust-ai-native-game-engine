@@ -116,7 +116,13 @@ fn step(sim: &mut Simulation<RoomEscapeV1>, input: RoomInput) {
     sim.step(&inputs);
 }
 pub fn run(options: Options) -> Result<(), String> {
-    let project = PreparedProject::open_with_lighting(&options.project, cfg!(feature = "room-lighting"))?;
+    let project = PreparedProject::open_with_capabilities(
+        &options.project,
+        crate::room_project::RoomProjectCapabilities {
+            lighting: cfg!(feature = "room-lighting"),
+            character: cfg!(feature = "room-character"),
+        },
+    )?;
     if options.headless {
         headless(
             &project,
@@ -266,6 +272,27 @@ struct App {
     error: Option<String>,
 }
 impl App {
+    fn new(project: PreparedProject) -> Result<Self, String> {
+        let sim = project.scene().simulation()?;
+        let orbit = project.camera().map_or_else(
+            || OrbitCamera::new([0.0, 0.5, 0.0], 0.65, 1.02, 60.0),
+            |camera| camera.document.orbit(),
+        );
+        Ok(Self {
+            project,
+            sim,
+            graphics: None,
+            keys: Keys::default(),
+            focused: false,
+            last: Instant::now(),
+            accumulated: Duration::ZERO,
+            orbit,
+            drag: None,
+            cursor: None,
+            error: None,
+        })
+    }
+
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: String) {
         self.error = Some(error);
         event_loop.exit();
@@ -516,24 +543,7 @@ impl ApplicationHandler for App {
     }
 }
 pub fn run_window(project: PreparedProject) -> Result<(), String> {
-    let sim = project.scene().simulation()?;
-    let orbit = project.camera().map_or_else(
-        || OrbitCamera::new([0.0, 0.5, 0.0], 0.65, 1.02, 60.0),
-        |camera| camera.document.orbit(),
-    );
-    let mut app = App {
-        project,
-        sim,
-        graphics: None,
-        keys: Keys::default(),
-        focused: false,
-        last: Instant::now(),
-        accumulated: Duration::ZERO,
-        orbit,
-        drag: None,
-        cursor: None,
-        error: None,
-    };
+    let mut app = App::new(project)?;
     let event_loop = EventLoop::new().map_err(|e| e.to_string())?;
     event_loop.set_control_flow(ControlFlow::WaitUntil(
         Instant::now() + Duration::from_millis(16),
@@ -596,3 +606,7 @@ mod tests {
         assert_eq!(keys.sample().move_z, -1);
     }
 }
+
+#[cfg(all(test, feature = "room-character"))]
+#[path = "room_character_app_tests.rs"]
+mod character_tests;

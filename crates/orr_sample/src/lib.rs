@@ -132,3 +132,6 @@ mod project_fixture;
 
 #[cfg(feature = "room-lighting")]
 pub mod room_lighting;
+
+#[cfg(feature = "room-character")]
+pub mod room_character;

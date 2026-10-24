@@ -7,6 +7,8 @@
 mod collect_template;
 #[cfg(feature = "room-project")]
 mod room_template;
+#[cfg(feature = "room-character")]
+mod character_template;
 mod template;
 #[cfg(feature = "tilemap")]
 mod tilemap;
@@ -34,6 +36,7 @@ use std::{
 pub const TEMPLATE: &str = template::ID;
 pub const COLLECT_TEMPLATE: &str = "collect-dodge-2d-v1";
 pub const COLLECT_UI_TEMPLATE: &str = "collect-dodge-ui-2d-v1";
+pub const ROOM_CHARACTER_TEMPLATE: &str = "room-escape-character-3d-v1";
 pub const ROOM_TEMPLATE: &str = "room-escape-3d-v1";
 pub const MAX_SEED_BYTES: usize = 128;
 const MAX_FILE_BYTES: usize = 1024 * 1024;
@@ -106,7 +109,9 @@ fn create_transaction_finalized(
     finalize: impl FnOnce(&Path, &mut BTreeMap<String, Vec<u8>>) -> Result<(), String>,
 ) -> Result<CreateReport, String> {
     let with_ui = options.template == COLLECT_UI_TEMPLATE;
-    let with_room = options.template == ROOM_TEMPLATE;
+    let with_character = options.template == ROOM_CHARACTER_TEMPLATE;
+    if with_character && !cfg!(feature = "room-character") { return Err("Room character template requires room-character feature".into()); }
+    let with_room = options.template == ROOM_TEMPLATE || with_character;
     if with_room && !cfg!(feature = "room-project") {
         return Err("Room template requires room-project feature".into());
     }
@@ -178,15 +183,17 @@ fn create_transaction_finalized(
         #[cfg(feature = "room-project")]
         {
             let scene = room_template::scene(&options.seed)?;
-            let manifest = json_line(&serde_json::json!({"schema":2,"engine":"^0.0.1",
-                "entry":{"game":"room-escape-v1","scene":"room.scene.yaml","models":"room.models.json","camera":"room.camera.json"}}))?;
+            let mut manifest = serde_json::json!({"schema":2,"engine":"^0.0.1",
+                "entry":{"game":"room-escape-v1","scene":"room.scene.yaml","models":"room.models.json","camera":"room.camera.json"}});
+            if with_character { manifest["entry"]["character"] = serde_json::json!("room.character.json"); }
+            let manifest = json_line(&manifest)?;
             (
                 scene,
                 Vec::new(),
                 manifest,
                 "room.scene.yaml",
                 "room.models.json",
-                room_template::readme(&options.seed),
+                if with_character { format!("{}\nCharacter template: {}. Build editor/runtime/exporter with room-character. Original CC0 Key Courier selects Searching, Carrying and Escaped clips from the simulation frame.\n", room_template::readme(&options.seed), ROOM_CHARACTER_TEMPLATE) } else { room_template::readme(&options.seed) },
             )
         }
         #[cfg(not(feature = "room-project"))]
@@ -241,6 +248,8 @@ fn create_transaction_finalized(
     } else {
         sources
     };
+    #[cfg(feature = "room-character")]
+    let sources = if with_character { let mut sources = sources; sources.push((character_template::PACKAGE, character_template::SOURCE)); sources } else { sources };
     let mut roots = Vec::new();
     for (name, source) in &sources {
         let root = source_root.join(name);
@@ -304,6 +313,14 @@ fn create_transaction_finalized(
     #[cfg(feature = "room-project")]
     if with_room {
         let models = room_template::models(&project, &scene)?;
+        #[cfg(feature = "room-character")]
+        let models = if with_character {
+            let (models, character) = character_template::documents(&project, &scene, models)?;
+            let bytes = character.to_bytes()?;
+            write_new(&project_root.join("room.character.json"), &bytes)?;
+            expected.insert("room.character.json".into(), bytes);
+            models
+        } else { models };
         let bytes = json_line(&models)?;
         write_new(&project_root.join(sidecar_file), &bytes)?;
         expected.insert(sidecar_file.into(), bytes);
@@ -312,7 +329,7 @@ fn create_transaction_finalized(
     fs::remove_dir_all(&source_root).map_err(error)?;
     finalize(&project_root, &mut expected)?;
     checkpoint("before-validation", transaction.path())?;
-    verify_profile_stage(&project_root, &expected, with_ui)?;
+    verify_profile_stage(&project_root, &expected, with_ui, with_character)?;
     let initial_checksum = if progress.is_some() {
         #[cfg(feature = "collect-dodge")]
         {
@@ -334,7 +351,7 @@ fn create_transaction_finalized(
     } else if with_room {
         #[cfg(feature = "room-project")]
         {
-            crate::room_project::PreparedProject::open(&project_root)?
+            crate::room_project::PreparedProject::open_with_capabilities(&project_root, crate::room_project::RoomProjectCapabilities { lighting: false, character: with_character })?
                 .scene()
                 .frame()
                 .checksum()
@@ -349,7 +366,7 @@ fn create_transaction_finalized(
             .checksum()
     };
     checkpoint("before-publish", transaction.path())?;
-    verify_profile_stage(&project_root, &expected, with_ui)?;
+    verify_profile_stage(&project_root, &expected, with_ui, with_character)?;
     // Recheck ordinary parent changes. RENAME_NOREPLACE itself closes concurrent
     // destination creation, including an empty directory or dangling symlink.
     if destination(&options.output)? != output {
@@ -451,12 +468,13 @@ fn verify_profile_stage(
     root: &Path,
     expected: &BTreeMap<String, Vec<u8>>,
     with_ui: bool,
+    with_character: bool,
 ) -> Result<(), String> {
     let root_metadata = fs::symlink_metadata(root).map_err(error)?;
     if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
         return Err("starter stage root must be a nonsymlink directory".into());
     }
-    if expected.len() > if with_ui { 17 } else { MAX_FILES }
+    if expected.len() > if with_character { 24 } else if with_ui { 17 } else { MAX_FILES }
         || expected.values().map(Vec::len).sum::<usize>() > MAX_TOTAL_BYTES
     {
         return Err("starter payload exceeds transaction limits".into());

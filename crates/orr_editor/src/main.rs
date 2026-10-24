@@ -37,7 +37,7 @@ fn main() {
     #[cfg(feature = "collect-dodge")]
     let collect_project = args.collect_project.as_ref().map(|root| orr_sample::collect_project::PreparedProject::open_with_ui(root, orr_sample::collect_project::ProgressSupport::MetadataOnly, if cfg!(feature="sprites") { orr_sample::collect_project::SpriteSupport::Supported } else { orr_sample::collect_project::SpriteSupport::Unsupported }, cfg!(feature="collect-ui")).unwrap_or_else(|error| fail(&format!("--collect-project: {error}"))));
     #[cfg(feature="room-project")]
-    let room_project=args.room_project.as_ref().map(|root|orr_sample::room_project::PreparedProject::open_with_lighting(root, cfg!(feature="room-lighting")).unwrap_or_else(|error|fail(&format!("--room-project: {error}"))));
+    let room_project=args.room_project.as_ref().map(|root|orr_sample::room_project::PreparedProject::open_with_capabilities(root, orr_sample::room_project::RoomProjectCapabilities { lighting: cfg!(feature="room-lighting"), character: cfg!(feature="room-character") }).unwrap_or_else(|error|fail(&format!("--room-project: {error}"))));
     let spec = match &args.connect {
         Some(url) => HostSpec::remote(url, args.token.as_deref()),
         None => {
@@ -133,6 +133,11 @@ fn main() {
                 if let Some(camera)=project.take_camera() {
                     app.editor.install_room_camera(camera.document.clone()).unwrap_or_else(|error|fail(&error));
                     app.room_camera=Some(orr_editor::room_camera_panel::Panel::new(camera));
+                }
+                #[cfg(feature="room-character")]
+                if let Some(character) = project.take_character() {
+                    app.editor.install_room_character(character.document.clone()).unwrap_or_else(|error|fail(&error));
+                    app.room_character = Some(orr_editor::room_character_panel::Panel::new_for_editor(character, &app.editor).unwrap_or_else(|error|fail(&error)));
                 }
                 let (_,_,_,models)=project.into_parts();
                 app.models.install_room(models).unwrap_or_else(|error|fail(&format!("room presentation: {error}")));

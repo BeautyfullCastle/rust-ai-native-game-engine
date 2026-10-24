@@ -30,6 +30,7 @@ input-map-editor = ["dep:orr_input", "dep:tempfile", "orr_sample/input-actions"]
 collect-input-map-editor = ["dep:orr_input", "dep:tempfile", "orr_sample/collect-dodge", "orr_sample/input-actions"]
 # Optional new-project creator for explicit authoring and acceptance workflows.
 project-create = ["orr_sample/project-create"]
+room-character = ["room-animated-models", "orr_sample/room-character"]
 room-lighting = ["room-project", "orr_sample/room-lighting"]
 room-project = ["models", "orr_remote/room-project", "orr_sample/room-project"]
 room-animated-models = ["room-project", "animated-models", "orr_sample/room-animated-models"]
