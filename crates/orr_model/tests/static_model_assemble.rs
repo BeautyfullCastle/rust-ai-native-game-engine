@@ -1,6 +1,10 @@
 #![cfg(feature = "import")]
 #![allow(clippy::float_arithmetic)]
 
+#[cfg(unix)]
+#[path = "../../../tools/test_support/unix_socket.rs"]
+mod unix_socket;
+
 #[path = "../examples/static_model_assemble/authoring.rs"]
 mod authoring;
 
@@ -1038,7 +1042,7 @@ fn cli_windows_nonlocal_prefixes_reject() {
 #[cfg(unix)]
 #[test]
 fn cli_unix_socket_inputs_reject_without_opening_or_publishing() {
-    use std::os::unix::{ffi::OsStrExt, net::UnixListener};
+    use std::os::unix::ffi::OsStrExt;
     let fixture = CliFixture::with_temp(Temp::socket());
     let inputs = [
         (fixture.input.clone(), fixture.recipe.as_slice()),
@@ -1055,7 +1059,7 @@ fn cli_unix_socket_inputs_reject_without_opening_or_publishing() {
         // Capability errors are real test failures; there is no runtime skip or
         // new ignored test. A restricted executor must record an explicit local
         // exception rather than count socket coverage as passed.
-        let listener = UnixListener::bind(&path).unwrap();
+        let listener = unix_socket::SocketFixture::create(&path);
         let before = tree(&fixture.temp.0);
         let error = authoring::run(fixture.args()).unwrap_err();
         assert!(error.contains("bounded regular file"), "{error}");
