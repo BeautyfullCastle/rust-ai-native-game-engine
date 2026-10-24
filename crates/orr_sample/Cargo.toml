@@ -11,6 +11,7 @@ default-run = "arena"
 workspace = true
 
 [features]
+room-lighting = ["room-project"]
 # Optional finite visual-only Arena background authoring.
 tilemap = ["project", "dep:orr_tilemap"]
 # Bounded CPU-only authored particle documents; no optional renderer integration.

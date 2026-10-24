@@ -129,3 +129,6 @@ pub mod particle_preset;
 ))]
 #[path = "../tests/common/project.rs"]
 mod project_fixture;
+
+#[cfg(feature = "room-lighting")]
+pub mod room_lighting;

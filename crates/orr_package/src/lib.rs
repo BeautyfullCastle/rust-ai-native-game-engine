@@ -110,23 +110,90 @@ impl Runtime {
 /// Project metadata. Schema 1 remains metadata-only; schema 2 selects one
 /// entry scene; schema 3 adds explicit CollectDodge progress identity. None
 /// selects packages: the lock alone controls package activation and versions.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectManifest {
     pub schema: u32,
     pub engine: String,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "present_entry"
-    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub entry: Option<ProjectEntry>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "present_progress"
-    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub progress: Option<ProjectProgress>,
+}
+
+// Retain the derived legacy decoders (including their duplicate/unknown-field
+// checks), but remember object versus sequence shape until schema is known.
+// No intermediate JSON value may collapse duplicate keys before validation.
+struct ProjectShape<T> {
+    value: T,
+    object: bool,
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for ProjectShape<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        struct Visitor<T>(std::marker::PhantomData<T>);
+        impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for Visitor<T> {
+            type Value = ProjectShape<T>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("project metadata object or legacy sequence")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> std::result::Result<Self::Value, A::Error> {
+                T::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(|value| ProjectShape { value, object: true })
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                seq: A,
+            ) -> std::result::Result<Self::Value, A::Error> {
+                T::deserialize(serde::de::value::SeqAccessDeserializer::new(seq))
+                    .map(|value| ProjectShape {
+                        value,
+                        object: false,
+                    })
+            }
+        }
+        deserializer.deserialize_any(Visitor(std::marker::PhantomData))
+    }
+}
+
+impl<'de> Deserialize<'de> for ProjectManifest {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            schema: u32,
+            engine: String,
+            #[serde(default, deserialize_with = "present_entry")]
+            entry: Option<ProjectShape<ProjectEntry>>,
+            #[serde(default, deserialize_with = "present_progress")]
+            progress: Option<ProjectProgress>,
+        }
+        let decoded = ProjectShape::<Wire>::deserialize(deserializer)?;
+        let value = decoded.value;
+        if value.entry.as_ref().is_some_and(|e| e.value.lighting.is_some()) {
+            if !decoded.object {
+                return Err(serde::de::Error::custom(
+                    "lighting project must be an object",
+                ));
+            }
+            if value.entry.as_ref().is_some_and(|entry| !entry.object) {
+                return Err(serde::de::Error::custom("lighting entry must be an object"));
+            }
+        }
+        Ok(Self {
+            schema: value.schema,
+            engine: value.engine,
+            entry: value.entry.map(|entry| entry.value),
+            progress: value.progress,
+        })
+    }
 }
 
 /// Closed launch profiles supported by the project contract. This is metadata,
@@ -170,6 +237,10 @@ pub struct ProjectEntry {
         deserialize_with = "present_ui"
     )]
     pub ui: Option<ProjectUi>,
+    /// Optional bounded Room-only point-light presentation document. Keep additive fields last.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present_sprites")]
+    pub lighting: Option<String>,
+
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -200,8 +271,8 @@ pub struct ProjectFont {
 // second spelling of missing launch metadata (including on schema 1).
 fn present_entry<'de, D: serde::Deserializer<'de>>(
     d: D,
-) -> std::result::Result<Option<ProjectEntry>, D::Error> {
-    ProjectEntry::deserialize(d).map(Some)
+) -> std::result::Result<Option<ProjectShape<ProjectEntry>>, D::Error> {
+    ProjectShape::<ProjectEntry>::deserialize(d).map(Some)
 }
 fn present_sprites<'de, D: serde::Deserializer<'de>>(
     d: D,
@@ -251,6 +322,17 @@ impl ProjectManifest {
                     if sprites.eq_ignore_ascii_case(&entry.scene) {
                         return fail("entry scene and sprite sidecar must be different files");
                     }
+                }
+                if let Some(lighting) = &entry.lighting {
+                    portable(lighting)?;
+                    let aliases = [Some("orr.project.json"), Some("orr.packages.lock.json"), Some(entry.scene.as_str()),
+                        entry.models.as_deref(), entry.camera.as_deref(), entry.tilemap.as_deref(),
+                        entry.sprites.as_deref(),
+                        entry.ui.as_ref().and_then(|ui| ui.document.as_deref())];
+                    if entry.game != ProjectGame::RoomEscapeV1 || self.schema != 2
+                        || lighting.contains('/') || lighting.starts_with('.')
+                        || aliases.into_iter().flatten().any(|path| path.eq_ignore_ascii_case(lighting))
+                    { return fail("lighting requires a distinct root-level Room presentation document"); }
                 }
                 if let Some(camera) = &entry.camera {
                     portable(camera)?;
@@ -1017,6 +1099,46 @@ mod tests {
         #[cfg(unix)]
         let root = fs::canonicalize(root).unwrap();
         tempfile::tempdir_in(root).unwrap()
+    }
+
+    #[test]
+    fn lighting_preserves_legacy_positions_and_requires_manifest_objects() {
+        let ui = serde_json::json!({"profile":"collect-authored-v1", "document":"room.ui.json",
+            "font":{"package":"font", "asset":"font.otf"}});
+        let mut sequence = serde_json::json!(["background.json", "room.camera.json", "room-escape-v1", "room.yaml",
+            "room.sprites.json", "room.models.json", ui]);
+        let legacy: ProjectEntry = serde_json::from_value(sequence.clone()).unwrap();
+        assert_eq!(legacy.tilemap.as_deref(), Some("background.json"));
+        assert_eq!(legacy.camera.as_deref(), Some("room.camera.json"));
+        assert_eq!(legacy.lighting, None);
+        sequence.as_array_mut().unwrap().push("room.lighting.json".into());
+        let extended: ProjectEntry = serde_json::from_value(sequence.clone()).unwrap();
+        assert_eq!(extended.ui, legacy.ui);
+        assert_eq!(extended.lighting.as_deref(), Some("room.lighting.json"));
+        let entry = serde_json::json!({"game":"room-escape-v1", "scene":"room.yaml",
+            "lighting":"room.lighting.json"});
+        for schema in [1, 2, 3] {
+            let root_sequence = serde_json::json!([schema, "*", entry]);
+            assert!(serde_json::from_value::<ProjectManifest>(root_sequence).unwrap_err()
+                .to_string().contains("project must be an object"));
+            let entry_sequence = serde_json::json!({"schema":schema,"engine":"*","entry":sequence});
+            assert!(serde_json::from_value::<ProjectManifest>(entry_sequence).unwrap_err()
+                .to_string().contains("entry must be an object"));
+            let old_sequence = serde_json::json!([schema, "*", ["background.json", "room.camera.json", "room-escape-v1", "room.yaml"]]);
+            let old: ProjectManifest = serde_json::from_value(old_sequence).unwrap();
+            assert_eq!(old.entry.unwrap().lighting, None);
+        }
+        for lighting in ["null", "[1]", "42"] {
+            let encoded = format!(r#"{{"schema":2,"engine":"*","entry":{{"game":"room-escape-v1","scene":"room.yaml","lighting":{lighting}}}}}"#);
+            assert!(serde_json::from_str::<ProjectManifest>(&encoded).is_err());
+        }
+        for encoded in [
+            r#"{"schema":2,"engine":"*","entry":{"game":"room-escape-v1","scene":"room.yaml","lighting":"a.json","lighting":"b.json"}}"#,
+            r#"{"schema":2,"schema":2,"engine":"*"}"#,
+            r#"{"schema":2,"engine":"*","unknown":0}"#,
+            r#"{"schema":2,"engine":"*","entry":null}"#,
+            r#"{"schema":2,"engine":"*","progress":null}"#,
+        ] { assert!(serde_json::from_str::<ProjectManifest>(encoded).is_err()); }
     }
 
     #[test]

@@ -225,6 +225,13 @@ pub struct Editor {
     room_camera: Option<orr_sample::room_camera::Document>,
     #[cfg(feature="room-project")]
     room_camera_scene: Option<std::path::PathBuf>,
+    #[cfg(feature = "room-lighting")]
+    room_lighting: Option<orr_sample::room_lighting::Document>,
+    #[cfg(feature = "room-lighting")]
+    room_lighting_scene: Option<PathBuf>,
+    // Independent of camera installation and retired at every source replacement.
+    #[cfg(feature = "room-lighting")]
+    room_lighting_source: Arc<()>,
     yard_frame: crate::viewport3d::YardFrame,
     #[cfg(feature = "terrain-physics")]
     terrain_view: crate::terrain_physics::TerrainPhysicsView,
@@ -369,6 +376,9 @@ impl Editor {
             camera: Camera::new([0.0, 0.0], 20.0),
             #[cfg(feature="room-project")] room_camera: None,
             #[cfg(feature="room-project")] room_camera_scene: None,
+            #[cfg(feature="room-lighting")] room_lighting: None,
+            #[cfg(feature="room-lighting")] room_lighting_scene: None,
+            #[cfg(feature="room-lighting")] room_lighting_source: Arc::new(()),
             camera3d: orr_render::OrbitCamera::new([0.0, 2.0, 0.0], 0.55, 0.5, 16.0),
             #[cfg(feature = "mesh-navigation")]
             mesh_camera: None,
@@ -1968,6 +1978,8 @@ impl Editor {
                 let written = r.get("written").and_then(J::as_str).unwrap_or_default().to_string();
                 #[cfg(feature="room-project")]
                 if self.room_camera_scene.as_ref().is_some_and(|path| path != Path::new(&written)) { self.clear_room_camera(); }
+                #[cfg(feature = "room-lighting")]
+                if self.sim.scene_path.as_deref() != Some(written.as_str()) { self.clear_room_lighting(); }
                 #[cfg(feature = "tilemap")]
                 { self.tilemap_start_scene = None; }
                 self.sim.scene_path = Some(written.clone());
@@ -2276,6 +2288,44 @@ impl Editor {
     }
 
 
+    #[cfg(feature = "room-lighting")]
+    pub fn install_room_lighting(&mut self, document: orr_sample::room_lighting::Document) -> Result<(), String> {
+        // Startup may precede the watch barrier; explicit authoring never bypasses it.
+        if !self.yard_rows_coherent() { self.sync(); }
+        self.validate_room_lighting_document(&document)?;
+        self.room_lighting = Some(document);
+        self.room_lighting_scene = self.path();
+        Ok(())
+    }
+    #[cfg(feature = "room-lighting")]
+    pub fn validate_room_lighting_document(&self, document: &orr_sample::room_lighting::Document) -> Result<(), String> {
+        document.validate()?;
+        if !self.game().is_room() || !self.spec().is_local() || self.path().is_none()
+            || !self.yard_rows_coherent() || self.snapshot().is_none() {
+            return Err("lighting requires a coherent local Room snapshot".into());
+        }
+        Ok(())
+    }
+    #[cfg(feature = "room-lighting")]
+    pub fn room_lighting_source_token(&self) -> Arc<()> { self.room_lighting_source.clone() }
+    #[cfg(feature = "room-lighting")]
+    pub fn room_lighting_document(&self) -> Option<&orr_sample::room_lighting::Document> {
+        if self.game().is_room() && self.spec().is_local() && self.room_lighting_scene == self.path() {
+            self.room_lighting.as_ref()
+        } else { None }
+    }
+    #[cfg(feature = "models")]
+    pub fn room_point_light_settings(&self) -> orr_render::PointLightSettings {
+        #[cfg(feature = "room-lighting")]
+        if let Some(document) = self.room_lighting_document() { return document.settings(); }
+        orr_render::PointLightSettings::default()
+    }
+    #[cfg(feature = "room-lighting")]
+    fn clear_room_lighting(&mut self) {
+        self.room_lighting_source = Arc::new(());
+        self.room_lighting = None;
+        self.room_lighting_scene = None;
+    }
     #[cfg(feature="room-project")]
     pub fn install_room_camera(&mut self, document: orr_sample::room_camera::Document) -> Result<(),String> {
         document.validate()?;
@@ -2361,6 +2411,8 @@ impl Editor {
         self.camera3d.zoom(delta);
     }
     fn clear_room_camera(&mut self) {
+        #[cfg(feature = "room-lighting")]
+        self.clear_room_lighting();
         #[cfg(feature = "mesh-navigation")]
         self.clear_mesh_camera();
         #[cfg(feature="room-project")]
@@ -2981,6 +3033,15 @@ impl Editor {
                 return false;
             }
         };
+        #[cfg(feature = "room-lighting")]
+        if fresh.game().is_room() && fresh.path() == self.path() {
+            if let Some(document) = self.room_lighting_document() {
+                if let Err(error) = fresh.install_room_lighting(document.clone()) {
+                    self.error(format!("restart lighting rejected: {error}; reopen the complete project"));
+                    return false;
+                }
+            }
+        }
         fresh.log = std::mem::take(&mut self.log);
         if fresh.game() == self.game() {
             fresh.camera = self.camera;
@@ -3385,5 +3446,96 @@ mod work_status_operation_tests {
         assert!(editor.pending.is_empty());
         assert!(!editor.gesture.busy());
         assert_eq!(editor.work_status_operations(), Operations::OutcomeUncertain);
+    }
+}
+
+#[cfg(all(test, feature = "room-lighting", feature = "project-create"))]
+mod room_lighting_coherence_tests {
+    use super::*;
+    use crate::room_lighting_panel::Panel;
+    use orr_sample::{
+        project_create::{CreateOptions, create},
+        room_lighting::Document,
+        room_project::PreparedProject,
+    };
+
+    #[test]
+    fn incoherent_lighting_actions_preserve_live_document_disk_and_scene_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("room");
+        create(&CreateOptions {
+            output: root.clone(),
+            template: "room-escape-3d-v1".into(),
+            seed: "lighting-coherence".into(),
+        })
+        .unwrap();
+        let path = root.join("orr.project.json");
+        let mut manifest: J = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        manifest["entry"]["lighting"] = json!("room.lighting.json");
+        std::fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let bytes = Document::default().to_bytes().unwrap();
+        std::fs::write(root.join("room.lighting.json"), &bytes).unwrap();
+        let mut project = PreparedProject::open_with_lighting(&root, true).unwrap();
+        let lighting = project.take_lighting().unwrap();
+        let mut editor = Editor::start(&HostSpec::PreparedRoom {
+            scene: project.path().to_path_buf(),
+            text: project.scene().text().to_owned(),
+            listen: None,
+            debug_hooks: false,
+        })
+        .unwrap();
+        editor
+            .install_room_lighting(lighting.document.clone())
+            .unwrap();
+        let mut panel = Panel::new_for_editor(lighting, &editor).unwrap();
+        editor.sync();
+        let checksum = editor.checksum();
+        let history = editor.history().entries.len();
+        // Cover row staleness, state/frame disagreement, transactions, and a
+        // pending mutation without making an actual external mutation.
+        for failure in 0..4 {
+            match failure {
+                0 => editor.dirty.rows = true,
+                1 => editor.sim.checksum ^= 1,
+                2 => editor.sim.in_tx = true,
+                _ => {
+                    editor.pending.insert(
+                        u64::MAX,
+                        Pending {
+                            kind: Pend::Input(0, input::Op::Value),
+                            posted_at: Instant::now(),
+                        },
+                    );
+                }
+            }
+            assert!(
+                panel
+                    .apply_for_editor(&mut editor, Document::enabled_default())
+                    .is_err()
+            );
+            assert!(panel.undo_for_editor(&mut editor).is_err());
+            assert!(panel.redo_for_editor(&mut editor).is_err());
+            assert!(panel.save_for_editor(&editor).is_err());
+            assert_eq!(panel.document(), &Document::default());
+            assert_eq!(editor.room_lighting_document(), Some(&Document::default()));
+            assert_eq!(editor.checksum(), checksum);
+            assert_eq!(editor.history().entries.len(), history);
+            assert_eq!(
+                std::fs::read(root.join("room.lighting.json")).unwrap(),
+                bytes
+            );
+            match failure {
+                0 => editor.dirty.rows = false,
+                1 => editor.sim.checksum ^= 1,
+                2 => editor.sim.in_tx = false,
+                _ => {
+                    editor.pending.remove(&u64::MAX);
+                }
+            }
+        }
+        panel
+            .apply_for_editor(&mut editor, Document::enabled_default())
+            .unwrap();
+        assert_eq!(panel.document(), &Document::enabled_default());
     }
 }

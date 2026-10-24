@@ -128,6 +128,15 @@ pub struct PreparedModels {
     pub document: Document,
     pub assets: BTreeMap<(String, String), LoadedAsset>,
 }
+#[cfg(feature = "room-lighting")]
+pub struct PreparedRoomLighting {
+    pub scene_path: PathBuf,
+    pub path: PathBuf,
+    pub document: crate::room_lighting::Document,
+    pub bytes: Vec<u8>,
+    pub manifest_bytes: Vec<u8>,
+    pub manifest_path: PathBuf,
+}
 pub struct PreparedRoomCamera {
     pub path: PathBuf,
     pub document: crate::room_camera::Document,
@@ -136,6 +145,8 @@ pub struct PreparedRoomCamera {
     pub manifest_path: PathBuf,
 }
 pub struct PreparedProject {
+    #[cfg(feature = "room-lighting")]
+    lighting: Option<PreparedRoomLighting>,
     camera: Option<PreparedRoomCamera>,
     root: PathBuf,
     path: PathBuf,
@@ -144,6 +155,10 @@ pub struct PreparedProject {
 }
 impl PreparedProject {
     pub fn open(root: impl AsRef<Path>) -> Result<Self, String> {
+        Self::open_with_lighting(root, false)
+    }
+    /// Lighting requires explicit support from the consuming route, not feature unification.
+    pub fn open_with_lighting(root: impl AsRef<Path>, lighting_supported: bool) -> Result<Self, String> {
         let project = orr_package::Project::open(root.as_ref(), compiled_runtime())
             .map_err(|e| e.to_string())?;
         let before = project
@@ -159,27 +174,31 @@ impl PreparedProject {
         {
             return Err("room requires schema2 room-escape-v1 without sprites/UI/progress".into());
         }
-        let camera = if let Some(relative) = &entry.camera {
+        let manifest_path = project.root().join("orr.project.json");
+        let manifest_bytes = crate::project::read_regular(&manifest_path, 1024 * 1024)?;
+        let pinned: orr_package::ProjectManifest = serde_json::from_slice(&manifest_bytes)
+            .map_err(|e| format!("room manifest: {e}"))?;
+        if pinned != *manifest { return Err("room manifest changed during admission".into()); }
+        if entry.lighting.is_some() && !(lighting_supported && cfg!(feature = "room-lighting")) {
+            return Err("room lighting requires explicit lighting consumer support".into());
+        }
+        #[cfg(feature = "room-lighting")]
+        let lighting = entry.lighting.as_ref().map(|relative| {
+            let path = crate::project::entry_file(project.root(), relative)?;
+            let bytes = crate::project::read_regular(&path, crate::room_lighting::MAX_BYTES as u64)?;
+            let document = crate::room_lighting::Document::parse(&bytes)?;
+            Ok::<_, String>(PreparedRoomLighting {
+                scene_path: crate::project::entry_file(project.root(), &entry.scene)?,
+                path, document, bytes, manifest_bytes: manifest_bytes.clone(), manifest_path: manifest_path.clone(),
+            })
+        }).transpose()?;
+        let camera = entry.camera.as_ref().map(|relative| {
             let path = crate::project::entry_file(project.root(), relative)?;
             let bytes = crate::project::read_regular(&path, crate::room_camera::MAX_BYTES as u64)?;
             let document = crate::room_camera::Document::parse(&bytes)?;
-            let manifest_path = project.root().join("orr.project.json");
-            let manifest_bytes = crate::project::read_regular(&manifest_path, 1024 * 1024)?;
-            let pinned: orr_package::ProjectManifest = serde_json::from_slice(&manifest_bytes)
-                .map_err(|e| format!("room camera manifest: {e}"))?;
-            if pinned != *manifest {
-                return Err("room manifest changed during camera admission".into());
-            }
-            Some(PreparedRoomCamera {
-                path,
-                document,
-                bytes,
-                manifest_bytes,
-                manifest_path,
-            })
-        } else {
-            None
-        };
+            Ok::<_, String>(PreparedRoomCamera { path, document, bytes,
+                manifest_bytes: manifest_bytes.clone(), manifest_path: manifest_path.clone() })
+        }).transpose()?;
         let models_relative = entry.models.as_ref().ok_or("room model sidecar missing")?;
         // First profile places the existing sidecar at the root. Its local hints
         // cannot redirect project identity or escape the admitted root.
@@ -259,13 +278,27 @@ impl PreparedProject {
             scene.index(),
             &models,
         )?;
+        if crate::project::read_regular(&manifest_path, 1024 * 1024)? != manifest_bytes {
+            return Err("room manifest changed during admission".into());
+        }
         Ok(Self {
+            #[cfg(feature = "room-lighting")]
+            lighting,
             camera,
             root: project.root().to_path_buf(),
             path,
             scene,
             models,
         })
+    }
+    #[cfg(feature = "room-lighting")]
+    pub fn lighting(&self) -> Option<&PreparedRoomLighting> { self.lighting.as_ref() }
+    #[cfg(feature = "room-lighting")]
+    pub fn take_lighting(&mut self) -> Option<PreparedRoomLighting> { self.lighting.take() }
+    pub fn point_light_settings(&self) -> orr_render::PointLightSettings {
+        #[cfg(feature = "room-lighting")]
+        if let Some(lighting) = &self.lighting { return lighting.document.settings(); }
+        orr_render::PointLightSettings::default()
     }
     pub fn camera(&self) -> Option<&PreparedRoomCamera> {
         self.camera.as_ref()
