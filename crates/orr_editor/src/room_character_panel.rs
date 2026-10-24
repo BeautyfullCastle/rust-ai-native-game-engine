@@ -362,8 +362,16 @@ impl Panel {
                         });
                 }
                 if speeds != original_speeds {
-                    self.candidate.schema = 2;
+                    self.candidate.schema = if self.candidate.crossfade_ticks.is_some() { 3 } else { 2 };
                     self.candidate.speeds = Some(speeds);
+                }
+                let mut ticks = self.candidate.crossfade_ticks.unwrap_or(0);
+                let previous_ticks = ticks;
+                ui.add(egui::Slider::new(&mut ticks, 0..=orr_sample::room_character::MAX_CROSSFADE_TICKS).text("Crossfade ticks"));
+                if ticks != previous_ticks {
+                    self.candidate.schema = 3;
+                    self.candidate.speeds = Some(speeds);
+                    self.candidate.crossfade_ticks = Some(ticks);
                 }
                 if ui.button("Apply character settings").clicked() {
                     self.error = self
@@ -599,6 +607,34 @@ mod tests {
         assert_eq!(f.editor.room_character(), Some(&rated));
         f.panel.save_all(&f.editor, &mut f.models).unwrap();
         f.reopen(&rated);
+    }
+
+    #[test]
+    fn invalid_crossfade_apply_preserves_documents_disk_and_history() {
+        let mut f = Fixture::new();
+        let legacy = f.panel.document().clone();
+        let models = f.models.bindings.as_ref().unwrap().document().clone();
+        let disk = f.pair_bytes();
+        for (schema, speeds, crossfade_ticks) in [
+            (1, None, Some(0)),
+            (2, Some(Default::default()), Some(12)),
+            (3, None, Some(12)),
+            (3, Some(Default::default()), None),
+            (3, Some(Default::default()), Some(121)),
+        ] {
+            let mut invalid = legacy.clone();
+            invalid.schema = schema;
+            invalid.speeds = speeds;
+            invalid.crossfade_ticks = crossfade_ticks;
+            assert!(f.panel.apply_document(invalid, &mut f.editor, &mut f.models).is_err());
+            assert_eq!(f.editor.room_character(), Some(&legacy));
+            assert_eq!(f.panel.document(), &legacy);
+            assert_eq!(f.models.bindings.as_ref().unwrap().document(), &models);
+            assert_eq!(f.pair_bytes(), disk);
+            assert!(!f.panel.dirty());
+            assert!(f.panel.undo.is_empty());
+            assert!(f.panel.redo.is_empty());
+        }
     }
 
     #[test]
