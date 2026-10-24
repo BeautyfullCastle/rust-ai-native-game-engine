@@ -1,0 +1,24 @@
+// JS adapter unit checks with a mock DOM, not browser visual/input validation.
+import fs from 'node:fs';
+import vm from 'node:vm';
+import assert from 'node:assert/strict';
+const root=process.argv[2]||'dist/coop-defense-web';
+const wasm=(await WebAssembly.instantiate(fs.readFileSync(`${root}/game.wasm`),{})).instance.exports;
+const nodes=new Map(),listeners=new Map();
+const context2d=new Proxy({createLinearGradient:()=>({addColorStop(){}})}, {get:(o,p)=>o[p]||(()=>{})});
+const canvas={getContext:()=>context2d,addEventListener(){},getBoundingClientRect:()=>({left:0,top:0,width:1000,height:700})};
+const get=id=>{if(id==='game')return canvas;if(!nodes.has(id))nodes.set(id,{style:{},querySelector:()=>({})});return nodes.get(id);};
+const sandbox=vm.createContext({document:{getElementById:get,addEventListener:(name,fn)=>listeners.set(name,fn)},addEventListener(){},TextDecoder,Uint8Array,core:wasm,requestAnimationFrame(){},console});
+const source=fs.readFileSync(`${root}/game.js`,'utf8').split('try{let bytes;')[0];
+const run=code=>vm.runInContext(code,sandbox);
+run(source);run('start();');get('begin').onclick();get('reset').onclick();assert.equal(run('state'),undefined,'early controls safe before WASM loads');run('wasm=core;start();');
+assert.equal(run('state.tick'),0);assert.equal(get('summon').disabled,true,'ready gate disables spending');
+get('begin').onclick();assert.equal(get('summon').disabled,false);
+get('summon').onclick();run('animate(1);animate(35);');assert.equal(run('state.gold[0]'),125);
+get('pause').onclick();assert.equal(get('summon').disabled,true);const tick=run('state.tick');run('animate(60);animate(90);');assert.equal(run('state.tick'),tick);
+get('pause').onclick();assert.equal(get('summon').disabled,false);
+const oldSeq=run('seq');get('reset').onclick();assert.equal(run('state.tick'),0);assert.ok(run('seq')>oldSeq);assert.equal(get('summon').disabled,true);
+get('begin').onclick();get('summon').onclick();run('animate(100);animate(135);');assert.equal(run('state.gold[0]'),125,'input after authoritative reset remains accepted');
+run('for(let i=0;i<100;i++)command(1);');assert.equal(run('queue.length'),32);
+run('document.hidden=true;');listeners.get('visibilitychange')();assert.equal(get('summon').disabled,true,'background pause updates controls');assert.ok(fs.readFileSync(`${root}/index.html`,'utf8').includes('<div id="ready" hidden>'),'ready hidden before load succeeds');
+console.log(JSON.stringify({passed:true,kind:'mock-DOM adapter unit test, not browser QA',coverage:['safe pre-load controls','hidden ready during loading','background pause updates controls','ready gate','start','button to actual WASM input','pause/resume','same-seed authoritative restart','monotonic sequence','32-input queue bound']},null,2));

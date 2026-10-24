@@ -11,6 +11,7 @@ default-run = "arena"
 workspace = true
 
 [features]
+coop-defense = ["project", "game-ui", "orr_games/coop-defense"]
 room-character = ["room-animated-models"]
 room-lighting = ["room-project"]
 # Optional finite visual-only Arena background authoring.
@@ -172,4 +173,10 @@ test = false
 name = "material_demo"
 path = "src/bin/material_demo.rs"
 required-features = ["material-demo"]
+test = false
+
+[[bin]]
+name = "coop_defense"
+path = "src/bin/coop_defense.rs"
+required-features = ["coop-defense"]
 test = false

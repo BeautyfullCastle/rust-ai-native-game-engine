@@ -135,3 +135,10 @@ pub mod room_lighting;
 
 #[cfg(feature = "room-character")]
 pub mod room_character;
+
+#[cfg(feature = "coop-defense")]
+pub mod defense_app;
+#[cfg(feature = "coop-defense")]
+pub mod defense_view;
+#[cfg(feature = "coop-defense")]
+pub mod defense_ui;
