@@ -16,7 +16,7 @@ pub(crate) const MAX_DEPTH: usize = 64;
 const MAX_RESOURCES: usize = 256;
 
 // Names/extras are non-semantic exporter metadata. All other unknown fields
-// (including extensions at every level, sparse accessors and skin data) reject.
+// (including unsupported extensions, sparse accessors and skin data) reject.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Document {
@@ -170,8 +170,145 @@ pub(crate) struct TextureInfo {
     pub(crate) index: usize,
     #[serde(default)]
     pub(crate) tex_coord: u32,
+    #[serde(default, deserialize_with = "present_texture_extensions")]
+    extensions: Option<TextureExtensions>,
     #[serde(default, rename = "extras")]
     pub(crate) _extras: Option<serde_json::Value>,
+}
+const TEXTURE_TRANSFORM: &str = "KHR_texture_transform";
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TextureExtensions {
+    #[serde(rename = "KHR_texture_transform", deserialize_with = "map_value")]
+    transform: TextureTransform,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TextureTransform {
+    #[serde(default)]
+    offset: [f32; 2],
+    #[serde(default)]
+    rotation: f32,
+    #[serde(default = "unit_texture_scale")]
+    scale: [f32; 2],
+    #[serde(default, deserialize_with = "present_value")]
+    tex_coord: Option<u32>,
+}
+
+fn unit_texture_scale() -> [f32; 2] {
+    [1.0; 2]
+}
+
+// serde's derived structs also accept positional arrays. Extension descriptors
+// are glTF objects, so both nested boundaries explicitly require maps.
+fn map_value<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    deserializer: D,
+) -> Result<T, D::Error> {
+    struct Map<T>(std::marker::PhantomData<T>);
+    impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for Map<T> {
+        type Value = T;
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a texture extension object")
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<T, A::Error> {
+            T::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+        }
+    }
+    deserializer.deserialize_map(Map(std::marker::PhantomData))
+}
+
+fn present_texture_extensions<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<TextureExtensions>, D::Error> {
+    map_value(deserializer).map(Some)
+}
+
+impl TextureInfo {
+    fn effective_tex_coord(&self) -> u32 {
+        self.extensions
+            .as_ref()
+            .and_then(|e| e.transform.tex_coord)
+            .unwrap_or(self.tex_coord)
+    }
+
+    fn transformed_uv(&self, uv: [f32; 2]) -> Result<[f32; 2], Error> {
+        let valid = |v: [f32; 2]| v.iter().all(|x| x.is_finite() && x.abs() <= 65536.0);
+        // Check the source too: a zero scale must not hide invalid source data.
+        if !valid(uv) {
+            return Err(invalid("invalid source texture UV"));
+        }
+        let Some(extension) = &self.extensions else {
+            return Ok(uv);
+        };
+        let t = &extension.transform;
+        if t.offset == [0.0; 2] && t.rotation == 0.0 && t.scale == [1.0; 2] {
+            return Ok(uv); // Preserve identity coordinates, including signed zero.
+        }
+        let scaled = [uv[0] * t.scale[0], uv[1] * t.scale[1]];
+        let (s, c) = t.rotation.sin_cos();
+        let result = [
+            t.offset[0] + c * scaled[0] - s * scaled[1],
+            t.offset[1] + s * scaled[0] + c * scaled[1],
+        ];
+        if !valid(result) {
+            return Err(invalid("invalid transformed texture UV"));
+        }
+        Ok(result)
+    }
+}
+
+fn validate_texture_extensions(doc: &Document, animated: bool) -> Result<(), Error> {
+    let used: BTreeSet<_> = doc.extensions_used.iter().collect();
+    let required: BTreeSet<_> = doc.extensions_required.iter().collect();
+    if used.len() != doc.extensions_used.len()
+        || required.len() != doc.extensions_required.len()
+        || used.iter().any(|name| name.as_str() != TEXTURE_TRANSFORM)
+        || required.iter().any(|name| !used.contains(name))
+    {
+        return Err(invalid("unsupported or inconsistent glTF extensions"));
+    }
+    for material in &doc.materials {
+        let Some(info) = material
+            .pbr_metallic_roughness
+            .as_ref()
+            .and_then(|pbr| pbr.base_color_texture.as_ref())
+        else {
+            continue;
+        };
+        if let Some(extension) = &info.extensions {
+            if animated
+                || !doc
+                    .extensions_used
+                    .iter()
+                    .any(|name| name == TEXTURE_TRANSFORM)
+            {
+                return Err(invalid(
+                    "texture transform requires a declared static import",
+                ));
+            }
+            let t = &extension.transform;
+            if !t
+                .offset
+                .iter()
+                .chain(&t.scale)
+                .chain(std::iter::once(&t.rotation))
+                .all(|x| x.is_finite())
+            {
+                return Err(invalid("nonfinite texture transform"));
+            }
+        }
+        if info.effective_tex_coord() != 0 {
+            return Err(invalid("only effective TEXCOORD_0 is supported"));
+        }
+    }
+    if animated && (!used.is_empty() || !required.is_empty()) {
+        return Err(invalid(
+            "animated importer does not support texture transforms",
+        ));
+    }
+    Ok(())
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -371,11 +508,7 @@ pub(crate) fn load_resources(
     {
         return Err(invalid("static importer does not support skins/animations"));
     }
-    if doc.asset.version != "2.0"
-        || doc.asset.min_version.as_deref().is_some_and(|s| s != "2.0")
-        || !doc.extensions_used.is_empty()
-        || !doc.extensions_required.is_empty()
-    {
+    if doc.asset.version != "2.0" || doc.asset.min_version.as_deref().is_some_and(|s| s != "2.0") {
         return Err(invalid("unsupported glTF version/extensions"));
     }
     if doc.nodes.len() > MAX_NODES
@@ -392,6 +525,8 @@ pub(crate) fn load_resources(
     {
         return Err(invalid("glTF collection budget exceeded"));
     }
+    // Admit the entire document before any caller-provided resource resolver.
+    validate_texture_extensions(&doc, animated)?;
     #[cfg(feature = "animation")]
     if animated {
         crate::animation_import::validate_document_limits(&doc)?;
@@ -572,7 +707,7 @@ pub(crate) fn load_resources(
             || m.double_sided
             || p.base_color_texture
                 .as_ref()
-                .is_some_and(|t| t.tex_coord != 0)
+                .is_some_and(|t| t.effective_tex_coord() != 0)
         {
             return Err(invalid(
                 "requires opaque single-sided diffuse material, UV0",
@@ -791,7 +926,9 @@ fn diffuse_pbr(material: &MaterialDef) -> Result<&Pbr, Error> {
         invalid("default glTF PBR material has metallic=1; importer requires explicit metallic=0 and roughness=1")
     })?;
     if pbr.metallic_factor.unwrap_or(1.0) != 0.0 || pbr.roughness_factor.unwrap_or(1.0) != 1.0 {
-        return Err(invalid("diffuse importer requires explicit metallic=0 and roughness=1; omitted metallic defaults to 1"));
+        return Err(invalid(
+            "diffuse importer requires explicit metallic=0 and roughness=1; omitted metallic defaults to 1",
+        ));
     }
     Ok(pbr)
 }
@@ -890,6 +1027,9 @@ impl Builder<'_> {
                     .attributes
                     .get("TEXCOORD_0")
                     .map(|&index| &self.doc.accessors[index]);
+                let texture = diffuse_pbr(&self.doc.materials[material_index(self.doc, p)?])?
+                    .base_color_texture
+                    .as_ref();
                 let idx = &self.doc.accessors[p.indices];
                 self.vertices += pos.count;
                 self.indices += idx.count;
@@ -915,7 +1055,14 @@ impl Builder<'_> {
                     vertices.push(Vertex {
                         position,
                         normal: normal.floats(self.doc, self.buffers, v),
-                        uv: uv.map_or([0.0; 2], |a| a.floats(self.doc, self.buffers, v)),
+                        uv: {
+                            let source_uv =
+                                uv.map_or([0.0; 2], |a| a.floats(self.doc, self.buffers, v));
+                            match texture {
+                                Some(texture) => texture.transformed_uv(source_uv)?,
+                                None => source_uv,
+                            }
+                        },
                     });
                 }
                 let mut indices = Vec::with_capacity(idx.count);

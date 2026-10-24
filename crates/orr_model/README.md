@@ -27,12 +27,27 @@ The existing procedural primitive renderer is unchanged.
 
 Unknown schema fields reject except inert names, extras and asset generator/
 copyright metadata. In particular skins, joints/weights, animations, morphs,
-sparse accessors, additional vertex attributes, extensions (even optional used
-ones), compressed data, alpha blending/masking, double-sided, PBR textures,
-normal/emissive/occlusion maps and texture transforms reject. This is deliberately
+sparse accessors, additional vertex attributes, unsupported extensions (even
+optional used ones), compressed data, alpha blending/masking, double-sided, PBR
+textures and normal/emissive/occlusion maps reject. This is deliberately
 not a replacement for a complete glTF library or metallic-roughness PBR renderer.
 The initial normal `gltf 1.4.1` registry fetch was blocked by the executor's
 network policy; no third-party code was vendored or downloaded around that block.
+
+## Static texture transforms
+
+Static base-color textures support declared `KHR_texture_transform`: offset,
+rotation in radians about the UV origin, scale, and an effective UV set of zero.
+Transforms bake into each primitive's vertices in scale → rotation → translation
+order; an extension `texCoord` overrides the texture's selector. Geometry,
+material slots, images, sampler behavior and cooked format remain unchanged.
+Identity transforms preserve UV bits. Untextured diffuse materials still need no UV.
+
+Unknown/malformed extensions and inconsistent declarations reject before resource
+resolution. Animated import continues to reject this extension. Source and final
+UV components must be finite and within ±65536, an Orrery importer bound, not a
+glTF specification limit. This imports authored mapping; it is not a UV editor.
+See the [Khronos specification](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_texture_transform).
 
 ## Import, cook, load, render
 
