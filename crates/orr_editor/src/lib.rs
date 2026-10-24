@@ -268,3 +268,6 @@ pub(crate) mod room_camera_capture;
 
 #[cfg(feature = "tilemap")]
 pub mod tilemap_panel;
+
+#[cfg(feature="room-character")]
+pub mod room_character_panel;

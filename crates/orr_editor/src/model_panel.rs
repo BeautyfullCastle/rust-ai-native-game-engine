@@ -35,6 +35,8 @@ pub struct ModelPanel {
     error: Option<String>,
     reserved_scene_models: usize,
     room_identity: Option<(PathBuf, String)>,
+    #[cfg(feature = "animated-models")]
+    room_character_enabled: bool,
 }
 impl Default for ModelPanel {
     fn default() -> Self {
@@ -58,6 +60,8 @@ impl Default for ModelPanel {
             error: None,
             reserved_scene_models: 0,
             room_identity: None,
+            #[cfg(feature = "animated-models")]
+            room_character_enabled: false,
         }
     }
 }
@@ -68,6 +72,9 @@ impl ModelPanel {
         &mut self,
         prepared: orr_sample::room_project::PreparedModels,
     ) -> Result<(), String> {
+        if prepared.has_character() && !cfg!(feature="room-character") {
+            return Err("Room character requires explicit editor room-character support".into());
+        }
         let mut loaded = BTreeMap::new();
         for (guid, binding) in &prepared.document.bindings {
             let asset = prepared
@@ -82,7 +89,11 @@ impl ModelPanel {
             return Err("Room sidecar project must be exactly '.'".into());
         }
         let identity = (prepared.path.clone(), prepared.document.scene.clone());
+        #[cfg(feature = "animated-models")]
+        let character_enabled = prepared.has_character();
         let bindings = Bindings::from_document(prepared.path, prepared.document)?;
+        #[cfg(feature = "animated-models")]
+        { self.room_character_enabled = character_enabled; }
         self.room_identity = Some(identity);
         self.project = bindings
             .path
@@ -554,7 +565,7 @@ impl ModelPanel {
         self.loaded = loaded;
         Ok(())
     }
-    pub fn save(&mut self, editor: &Editor) -> Result<(), String> {
+    pub(crate) fn validate_save(&self, editor: &Editor) -> Result<(), String> {
         if editor.game().is_room() {
             if !self.editable(editor) {
                 return Err("Room model save requires the admitted scene in Edit mode".into());
@@ -573,10 +584,20 @@ impl ModelPanel {
                 self.reserved_scene_models,
             )?;
         }
-        self.bindings
-            .as_mut()
-            .ok_or("Open model bindings first")?
-            .save()
+        Ok(())
+    }
+    pub fn save(&mut self, editor: &Editor) -> Result<(), String> {
+        self.validate_save(editor)?;
+        #[cfg(feature="room-character")]
+        if let Some(character) = editor.room_character() {
+            let identity=self.room_identity.as_ref().ok_or("Room identity missing")?;
+            let root=identity.0.parent().ok_or("Room root missing")?;
+            let prepared=orr_sample::room_project::PreparedProject::open_with_capabilities(root, orr_sample::room_project::RoomProjectCapabilities { lighting: cfg!(feature="room-lighting"), character: true })?;
+            if prepared.character().map(|c| &c.document) != Some(character) {
+                return Err("Use Save character and model bindings for changed character clips".into());
+            }
+        }
+        self.bindings.as_mut().ok_or("Open model bindings first")?.save()
     }
     /// Sidecar undo/redo is independent of scene undo and preserves the previous
     /// valid binding/cache if restored content cannot be verified.
@@ -717,6 +738,10 @@ impl ModelPanel {
             orr_sample::room_project::validate_decoded_model_budget(loaded.values())?;
         }
         let mut identities = std::collections::BTreeSet::new();
+        #[cfg(feature="room-character")]
+        if let Some(character) = editor.room_character() {
+            Self::validate_room_character(editor, character, document, loaded)?;
+        }
         let mut draws = 5_usize.saturating_add(reserved_scene_models.saturating_mul(2));
         for (guid, binding) in &document.bindings {
             identities.insert((
@@ -949,6 +974,53 @@ impl ModelPanel {
             })
             .collect()
     }
+    /// Validate both presentation documents before committing a character edit.
+    #[cfg(feature="room-character")]
+    pub fn apply_character_mapping(&mut self, editor: &mut Editor, character: &orr_sample::room_character::Document) -> Result<(), String> {
+        if !self.editable(editor) { return Err("Character authoring requires coherent local Edit mode".into()); }
+        if !self.room_character_enabled || editor.room_character().is_none() { return Err("Character authoring requires an admitted character project".into()); }
+        let bindings = self.bindings.as_ref().ok_or("Room model bindings missing")?;
+        let mut candidate = bindings.document().clone();
+        let binding = candidate.bindings.get_mut(&character.player).ok_or("Character player model missing")?;
+        binding.animation = Some(AnimationDescriptor { clip_index: character.searching, playback: PlaybackMode::Loop });
+        let animation = binding.animation.unwrap();
+        Self::validate_room_character(editor, character, &candidate, &self.loaded)?;
+        self.bindings.as_mut().unwrap().set_character_animation(&character.player, animation)?;
+        editor.install_room_character(character.clone())?;
+        Ok(())
+    }
+    #[cfg(feature = "room-character")]
+    pub fn validate_room_character(
+        editor: &Editor,
+        character: &orr_sample::room_character::Document,
+        document: &model_bindings::Document,
+        loaded: &BTreeMap<String, LoadedAsset>,
+    ) -> Result<(), String> {
+        if !editor.game().is_room() || !editor.spec().is_local() || !editor.yard_rows_coherent() {
+            return Err("Room character requires a coherent local Room snapshot".into());
+        }
+        let snapshot = editor.snapshot().ok_or("Room character requires a coherent snapshot")?;
+        let mut index = orr_reflect::SceneIndex::default();
+        for row in editor.rows() {
+            if let Some(guid) = &row.guid {
+                index.insert(guid.clone(), row.entity);
+            }
+        }
+        let assets = loaded.values().map(|asset| {
+            ((asset.package().to_owned(), asset.asset().to_owned()), asset.clone())
+        }).collect();
+        let models = orr_sample::room_project::PreparedModels {
+            // This admission is CPU-only; no filesystem path is read or written.
+            path: PathBuf::new(),
+            document: document.clone(),
+            assets,
+            character: Some(character.clone()),
+        };
+        // Use the exact runtime closure, aggregate budget and composed placement
+        // checks, including all three clips at reachable room corners. Clip edits
+        // must not save a document which the native consumer rejects on reopen.
+        orr_sample::room_view::admit_presentation(snapshot.predicted(), &index, &models)
+    }
     /// Animated bindings are sampled at an absolute time from the same
     /// immutable Yard snapshot used for body poses. Edit/Stop returns the
     /// asset's rest pose; Play tick 0 and Seek 0 sample clip time zero.
@@ -963,38 +1035,67 @@ impl ModelPanel {
         let Some(snapshot) = editor.snapshot() else {
             return Ok(Vec::new());
         };
+        let room_animation = editor.game().is_room() && self.room_character_enabled;
+        #[cfg(not(feature="room-character"))]
+        if room_animation { return Err("Room animated rendering requires explicit editor room-character support".into()); }
+        #[cfg(feature="room-character")]
+        let room_character = if room_animation {
+            Some(editor.room_character().ok_or("Room animated rendering requires an installed character descriptor; reopen the project")?)
+        } else { None };
         let mut placements = Vec::new();
         for (guid, binding) in &bindings.document().bindings {
             if binding.kind != ModelKind::Animated {
                 continue;
+            }
+            #[cfg(feature="room-character")]
+            if room_character.is_some_and(|character| character.player != *guid) {
+                return Err("Room animated binding differs from admitted player".into());
             }
             let Some(row) = editor
                 .rows()
                 .iter()
                 .find(|row| row.guid.as_ref().is_some_and(|g| g.to_string() == *guid))
             else {
+                if room_animation { return Err("Room character GUID is absent from the coherent scene".into()); }
                 continue;
             };
+            #[cfg(feature="room-character")]
+            if room_character.is_some()
+                && !snapshot.predicted().get::<orr_sample::room_game::RoomActor>(row.entity)
+                    .is_some_and(|actor| actor.kind == orr_sample::room_game::PLAYER) {
+                return Err("Room character GUID no longer names the current PLAYER; reopen or repair the project".into());
+            }
             let Some((_, body_pose)) = editor
                 .yard_frame()
                 .poses
                 .iter()
                 .find(|(entity, _)| *entity == row.entity)
             else {
+                if room_animation { return Err("Room character has no current generation-bearing body pose".into()); }
                 continue;
             };
             let Some(loaded) = self.loaded.get(guid) else {
+                if room_animation { return Err("Room character verified asset cache is missing".into()); }
                 continue;
             };
-            if binding.validate(loaded).is_err() {
+            if let Err(error) = binding.validate(loaded) {
+                if room_animation { return Err(format!("Room character binding/cache mismatch: {error}")); }
                 continue;
             }
             let Some(model) = loaded.animated_model().cloned() else {
+                if room_animation { return Err("Room character cache is not animated".into()); }
                 continue;
             };
             let animation = binding
                 .animation
                 .ok_or_else(|| format!("{guid}: animated binding has no clip descriptor"))?;
+            #[cfg(feature="room-character")]
+            let animation = if let Some(character) = room_character {
+                if animation.clip_index != character.searching || animation.playback != PlaybackMode::Loop {
+                    return Err("Room character searching default no longer matches the model binding".into());
+                }
+                AnimationDescriptor { clip_index: character.clip(orr_sample::room_character::state(snapshot.predicted())), playback: PlaybackMode::Loop }
+            } else { animation };
             let duration = model
                 .source()
                 .clips
@@ -1019,14 +1120,20 @@ impl ModelPanel {
                 // Stopped and Edit scenes deliberately show the bind/rest pose.
                 (Mode::Edit, None) => None,
             };
-            let pose = match playback_time {
+            let sample_generic = || match playback_time {
                 Some(time) => model
                     .sample_clip(animation.clip_index, time)
-                    .map_err(|e| format!("{guid}: sample animation clip: {e}"))?,
+                    .map_err(|e| format!("{guid}: sample animation clip: {e}")),
                 None => model
                     .rest_pose()
-                    .map_err(|e| format!("{guid}: sample rest pose: {e}"))?,
+                    .map_err(|e| format!("{guid}: sample rest pose: {e}")),
             };
+            #[cfg(feature="room-character")]
+            let pose = if let Some(character) = room_character {
+                orr_sample::room_character::sample_pose(character, &model, snapshot.predicted(), snapshot.tick_rate(), playback_time.is_none())?
+            } else { sample_generic()? };
+            #[cfg(not(feature="room-character"))]
+            let pose = sample_generic()?;
             placements.push(AnimatedPlacement {
                 entity: row.entity,
                 instance: Self::animated_instance(*body_pose, binding.transform),

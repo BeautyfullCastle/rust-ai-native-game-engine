@@ -221,6 +221,12 @@ pub struct Editor {
     pub camera3d: orr_render::OrbitCamera,
     #[cfg(feature = "mesh-navigation")]
     mesh_camera: Option<MeshCamera>,
+    #[cfg(feature="room-character")]
+    room_character: Option<orr_sample::room_character::Document>,
+    #[cfg(feature="room-character")]
+    room_character_scene: Option<PathBuf>,
+    #[cfg(feature="room-character")]
+    room_character_source: Arc<()>,
     #[cfg(feature="room-project")]
     room_camera: Option<orr_sample::room_camera::Document>,
     #[cfg(feature="room-project")]
@@ -374,6 +380,9 @@ impl Editor {
             scene_edit_allowed,
             batch_uncertain: false,
             camera: Camera::new([0.0, 0.0], 20.0),
+            #[cfg(feature="room-character")] room_character: None,
+            #[cfg(feature="room-character")] room_character_scene: None,
+            #[cfg(feature="room-character")] room_character_source: Arc::new(()),
             #[cfg(feature="room-project")] room_camera: None,
             #[cfg(feature="room-project")] room_camera_scene: None,
             #[cfg(feature="room-lighting")] room_lighting: None,
@@ -1980,6 +1989,8 @@ impl Editor {
                 if self.room_camera_scene.as_ref().is_some_and(|path| path != Path::new(&written)) { self.clear_room_camera(); }
                 #[cfg(feature = "room-lighting")]
                 if self.sim.scene_path.as_deref() != Some(written.as_str()) { self.clear_room_lighting(); }
+                #[cfg(feature="room-character")]
+                if self.sim.scene_path.as_deref() != Some(written.as_str()) { self.clear_room_character(); }
                 #[cfg(feature = "tilemap")]
                 { self.tilemap_start_scene = None; }
                 self.sim.scene_path = Some(written.clone());
@@ -2288,6 +2299,26 @@ impl Editor {
     }
 
 
+    #[cfg(feature="room-character")]
+    pub fn install_room_character(&mut self, document: orr_sample::room_character::Document) -> Result<(), String> {
+        document.validate()?;
+        if !self.game().is_room() || !self.spec().is_local() || self.path().is_none() { return Err("character requires a local Room project".into()); }
+        self.room_character = Some(document);
+        self.room_character_scene = self.path();
+        Ok(())
+    }
+    #[cfg(feature="room-character")]
+    pub fn room_character_source_token(&self) -> Arc<()> { self.room_character_source.clone() }
+    #[cfg(feature="room-character")]
+    pub fn room_character(&self) -> Option<&orr_sample::room_character::Document> {
+        if self.game().is_room() && self.spec().is_local() && self.room_character_scene == self.path() { self.room_character.as_ref() } else { None }
+    }
+    #[cfg(feature="room-character")]
+    fn clear_room_character(&mut self) {
+        self.room_character_source = Arc::new(());
+        self.room_character = None;
+        self.room_character_scene = None;
+    }
     #[cfg(feature = "room-lighting")]
     pub fn install_room_lighting(&mut self, document: orr_sample::room_lighting::Document) -> Result<(), String> {
         // Startup may precede the watch barrier; explicit authoring never bypasses it.
@@ -2411,6 +2442,8 @@ impl Editor {
         self.camera3d.zoom(delta);
     }
     fn clear_room_camera(&mut self) {
+        #[cfg(feature="room-character")]
+        self.clear_room_character();
         #[cfg(feature = "room-lighting")]
         self.clear_room_lighting();
         #[cfg(feature = "mesh-navigation")]
@@ -3047,6 +3080,8 @@ impl Editor {
             fresh.camera = self.camera;
             fresh.initial_camera_fit = false;
         }
+        #[cfg(feature="room-character")]
+        if fresh.game().is_room() && fresh.path()==self.path() { if let Some(character)=self.room_character() { let _ = fresh.install_room_character(character.clone()); } }
         #[cfg(feature="room-project")]
         if self.has_room_camera() && fresh.game().is_room() && fresh.path()==self.path() {
             let _ = fresh.install_room_camera(self.room_camera.as_ref().unwrap().clone());

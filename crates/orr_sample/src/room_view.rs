@@ -9,6 +9,8 @@ use orr_ecs::Entity;
 use orr_games::room_escape_game::{RoomActor, RoomRun, EXIT, FLOOR, KEY, PLAYER, WALL};
 #[cfg(feature = "room-animated-models")]
 use orr_model::animation::{AnimatedModel, Pose, Trs};
+#[cfg(feature = "room-animated-models")]
+use orr_model_bindings::animation_time::sample_clip_time;
 use orr_model_bindings::model_bindings::{LocalTransform, ModelKind};
 use orr_physics3d::{Body, Collider};
 use orr_reflect::{Guid, SceneIndex};
@@ -190,6 +192,10 @@ pub fn admit_presentation(
     index: &SceneIndex,
     models: &PreparedModels,
 ) -> Result<(), String> {
+    #[cfg(feature = "room-character")]
+    if let Some(character) = &models.character {
+        character.validate_bindings(frame, index, &models.document, &models.assets)?;
+    }
     #[cfg(feature = "room-animated-models")]
     frame_placements(frame, index, models)?;
     #[cfg(not(feature = "room-animated-models"))]
@@ -226,32 +232,39 @@ pub fn admit_presentation(
                 {
                     let model = loaded.animated_model().ok_or("missing animated model")?;
                     let animation = binding.animation.ok_or("missing animation selection")?;
-                    let clip = model
-                        .source()
-                        .clips
-                        .get(animation.clip_index as usize)
-                        .ok_or("missing selected animation clip")?;
-                    let mut sample_poses =
-                        vec![model.rest_pose().map_err(|error| error.to_string())?];
-                    sample_poses.push(
-                        model
-                            .sample_clip(animation.clip_index, 0.0)
-                            .map_err(|error| error.to_string())?,
-                    );
-                    sample_poses.push(
-                        model
-                            .sample_clip(animation.clip_index, clip.duration())
-                            .map_err(|error| error.to_string())?,
-                    );
-                    for transform in placements {
-                        let matrix = world_matrix(transform, binding.transform);
-                        for pose in &sample_poses {
+                    let clips = vec![animation.clip_index];
+                    #[cfg(feature = "room-character")]
+                    let clips = match &models.character {
+                        Some(character) if &character.player == guid => {
+                            vec![character.searching, character.carrying, character.escaped]
+                        }
+                        _ => clips,
+                    };
+                    // Stream admission poses, retaining only one at a time under
+                    // the existing per-binding pose-memory budget.
+                    let validate_pose = |pose: &Pose| -> Result<(), String> {
+                        for transform in &placements {
                             SkinnedInstance {
                                 pose,
-                                transform: matrix,
+                                transform: world_matrix(*transform, binding.transform),
                             }
                             .validate_for(model)
                             .map_err(|error| format!("room admitted animation pose: {error}"))?;
+                        }
+                        Ok(())
+                    };
+                    validate_pose(&model.rest_pose().map_err(|error| error.to_string())?)?;
+                    for clip_index in clips {
+                        let clip = model
+                            .source()
+                            .clips
+                            .get(clip_index as usize)
+                            .ok_or("missing selected animation clip")?;
+                        for time in [0.0, clip.duration() * 0.5, clip.duration()] {
+                            let pose = model
+                                .sample_clip(clip_index, time)
+                                .map_err(|error| error.to_string())?;
+                            validate_pose(&pose)?;
                         }
                     }
                 }
@@ -348,6 +361,10 @@ fn frame_placements(
     models: &PreparedModels,
 ) -> Result<FramePlacements, String> {
     validate_models(models)?;
+    #[cfg(feature = "room-character")]
+    if let Some(character) = &models.character {
+        character.validate_current_bindings(frame, index, &models.document, &models.assets)?;
+    }
     let count = frame.alive_count() as usize;
     if !(3..=MAX_MODEL_BINDINGS).contains(&count)
         || index.len() != count
@@ -407,21 +424,38 @@ fn frame_placements(
                 let model = loaded
                     .animated_model()
                     .ok_or("room model is not animated")?;
-                let animation = binding.animation.ok_or("room model animation is absent")?;
-                let clip = model
-                    .source()
-                    .clips
-                    .get(animation.clip_index as usize)
-                    .ok_or("room model animation clip is absent")?;
-                let time = sample_clip_time(
-                    frame.tick(),
-                    orr_games::room_escape_game::TICK_RATE,
-                    clip.duration(),
-                    animation.playback,
-                )?;
-                let pose = model
-                    .sample_clip(animation.clip_index, time)
-                    .map_err(|error| error.to_string())?;
+                let sample_binding = || -> Result<Pose, String> {
+                    let animation = binding.animation.ok_or("room model animation is absent")?;
+                    let clip = model
+                        .source()
+                        .clips
+                        .get(animation.clip_index as usize)
+                        .ok_or("room model animation clip is absent")?;
+                    let time = sample_clip_time(
+                        frame.tick(),
+                        orr_games::room_escape_game::TICK_RATE,
+                        clip.duration(),
+                        animation.playback,
+                    )?;
+                    model
+                        .sample_clip(animation.clip_index, time)
+                        .map_err(|error| error.to_string())
+                };
+                #[cfg(feature = "room-character")]
+                let pose = match &models.character {
+                    Some(character) if character.player == guid.to_string() => {
+                        crate::room_character::sample_pose(
+                            character,
+                            model,
+                            frame,
+                            orr_games::room_escape_game::TICK_RATE,
+                            false,
+                        )?
+                    }
+                    _ => sample_binding()?,
+                };
+                #[cfg(not(feature = "room-character"))]
+                let pose = sample_binding()?;
                 let transform = world_matrix(body_transform, binding.transform);
                 SkinnedInstance {
                     pose: &pose,
@@ -473,105 +507,6 @@ fn matrix_multiply(
                 + left[3][row] * right[column][3]
         })
     })
-}
-
-#[cfg(feature = "room-animated-models")]
-fn sample_clip_time(
-    tick: u64,
-    tick_rate: u32,
-    duration_seconds: f32,
-    playback: orr_model_bindings::model_bindings::PlaybackMode,
-) -> Result<f32, String> {
-    use orr_model_bindings::model_bindings::PlaybackMode;
-
-    if tick_rate == 0 {
-        return Err("Room animation cannot sample a zero tick rate".into());
-    }
-    if !duration_seconds.is_finite() || duration_seconds < 0.0 {
-        return Err("Room animation duration must be finite and nonnegative".into());
-    }
-    if duration_seconds == 0.0 {
-        return Ok(0.0);
-    }
-    let duration = f64::from(duration_seconds);
-    let (significand, exponent) = f32_rational(duration_seconds);
-    let sampled = match playback {
-        PlaybackMode::Once if once_finished(tick, tick_rate, significand, exponent) => duration,
-        PlaybackMode::Once => tick as f64 / f64::from(tick_rate),
-        PlaybackMode::Loop => loop_remainder(tick, tick_rate, significand, exponent),
-    } as f32;
-    let sampled = if playback == PlaybackMode::Loop && sampled >= duration_seconds {
-        0.0
-    } else {
-        sampled
-    };
-    if !sampled.is_finite() {
-        return Err("Room animation sample time is not finite".into());
-    }
-    Ok(sampled)
-}
-
-#[cfg(feature = "room-animated-models")]
-fn f32_rational(value: f32) -> (u32, i32) {
-    let bits = value.to_bits();
-    let exponent_bits = ((bits >> 23) & 0xff) as i32;
-    let fraction = bits & 0x7f_ffff;
-    if exponent_bits == 0 {
-        (fraction, -149)
-    } else {
-        ((1 << 23) | fraction, exponent_bits - 127 - 23)
-    }
-}
-
-#[cfg(feature = "room-animated-models")]
-fn once_finished(tick: u64, tick_rate: u32, significand: u32, exponent: i32) -> bool {
-    let rate = u128::from(tick_rate);
-    let duration_ticks = if exponent >= 0 {
-        u128::from(significand)
-            .checked_shl(exponent as u32)
-            .and_then(|seconds| seconds.checked_mul(rate))
-    } else {
-        let numerator = u128::from(significand) * rate;
-        let shift = exponent.unsigned_abs();
-        let ceiling = if shift >= 128 {
-            1
-        } else {
-            let denominator = 1_u128 << shift;
-            numerator.saturating_add(denominator - 1) / denominator
-        };
-        return u128::from(tick) >= ceiling.max(1);
-    };
-    duration_ticks.is_some_and(|duration_ticks| u128::from(tick) >= duration_ticks)
-}
-
-#[cfg(feature = "room-animated-models")]
-fn loop_remainder(tick: u64, tick_rate: u32, significand: u32, exponent: i32) -> f64 {
-    let rate = u128::from(tick_rate);
-    if exponent >= 0 {
-        let Some(duration_ticks) = u128::from(significand)
-            .checked_shl(exponent as u32)
-            .and_then(|seconds| seconds.checked_mul(rate))
-        else {
-            return tick as f64 / f64::from(tick_rate);
-        };
-        return (u128::from(tick) % duration_ticks) as f64 / f64::from(tick_rate);
-    }
-    let shift = exponent.unsigned_abs();
-    let modulus = rate * u128::from(significand);
-    let mut power = 1_u128;
-    let mut base = 2_u128 % modulus;
-    let mut remaining = shift;
-    while remaining != 0 {
-        if remaining & 1 == 1 {
-            power = (power * base) % modulus;
-        }
-        remaining >>= 1;
-        if remaining != 0 {
-            base = (base * base) % modulus;
-        }
-    }
-    let numerator = (u128::from(tick) % modulus) * power % modulus;
-    (numerator as f64 / f64::from(tick_rate)) * 2.0_f64.powi(-(shift as i32))
 }
 
 struct CachedModel {

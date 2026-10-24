@@ -177,7 +177,7 @@ impl<'de> Deserialize<'de> for ProjectManifest {
         }
         let decoded = ProjectShape::<Wire>::deserialize(deserializer)?;
         let value = decoded.value;
-        if value.entry.as_ref().is_some_and(|e| e.value.lighting.is_some()) {
+        if value.entry.as_ref().is_some_and(|e| e.value.lighting.is_some() || e.value.character.is_some()) {
             if !decoded.object {
                 return Err(serde::de::Error::custom(
                     "lighting project must be an object",
@@ -240,6 +240,9 @@ pub struct ProjectEntry {
     /// Optional bounded Room-only point-light presentation document. Keep additive fields last.
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present_sprites")]
     pub lighting: Option<String>,
+    /// Optional Room state-selected character clips. Additive: preserve legacy sequence slots.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present_sprites")]
+    pub character: Option<String>,
 
 }
 
@@ -322,6 +325,17 @@ impl ProjectManifest {
                     if sprites.eq_ignore_ascii_case(&entry.scene) {
                         return fail("entry scene and sprite sidecar must be different files");
                     }
+                }
+                if let Some(character) = &entry.character {
+                    portable(character)?;
+                    let aliases = [Some("orr.project.json"), Some("orr.packages.lock.json"), Some(entry.scene.as_str()),
+                        entry.models.as_deref(), entry.camera.as_deref(), entry.tilemap.as_deref(), entry.lighting.as_deref(),
+                        entry.sprites.as_deref(),
+                        entry.ui.as_ref().and_then(|ui| ui.document.as_deref())];
+                    if entry.game != ProjectGame::RoomEscapeV1 || self.schema != 2
+                        || character.contains('/') || character.starts_with('.')
+                        || aliases.into_iter().flatten().any(|path| path.eq_ignore_ascii_case(character))
+                    { return fail("character requires a distinct root-level Room presentation document"); }
                 }
                 if let Some(lighting) = &entry.lighting {
                     portable(lighting)?;

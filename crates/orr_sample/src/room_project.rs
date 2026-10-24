@@ -123,10 +123,34 @@ pub fn compiled_runtime() -> orr_package::Runtime {
     runtime.capabilities.insert("animation".into());
     runtime
 }
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RoomProjectCapabilities {
+    pub lighting: bool,
+    pub character: bool,
+}
+#[cfg(feature = "room-character")]
+pub struct PreparedRoomCharacter {
+    pub scene_path: PathBuf,
+    pub path: PathBuf,
+    pub document: crate::room_character::Document,
+    pub bytes: Vec<u8>,
+    pub manifest_bytes: Vec<u8>,
+    pub manifest_path: PathBuf,
+}
 pub struct PreparedModels {
+    #[cfg(feature = "room-character")]
+    pub character: Option<crate::room_character::Document>,
     pub path: PathBuf,
     pub document: Document,
     pub assets: BTreeMap<(String, String), LoadedAsset>,
+}
+impl PreparedModels {
+    pub fn has_character(&self) -> bool {
+        #[cfg(feature = "room-character")]
+        { self.character.is_some() }
+        #[cfg(not(feature = "room-character"))]
+        { false }
+    }
 }
 #[cfg(feature = "room-lighting")]
 pub struct PreparedRoomLighting {
@@ -145,6 +169,8 @@ pub struct PreparedRoomCamera {
     pub manifest_path: PathBuf,
 }
 pub struct PreparedProject {
+    #[cfg(feature = "room-character")]
+    character: Option<PreparedRoomCharacter>,
     #[cfg(feature = "room-lighting")]
     lighting: Option<PreparedRoomLighting>,
     camera: Option<PreparedRoomCamera>,
@@ -159,6 +185,10 @@ impl PreparedProject {
     }
     /// Lighting requires explicit support from the consuming route, not feature unification.
     pub fn open_with_lighting(root: impl AsRef<Path>, lighting_supported: bool) -> Result<Self, String> {
+        Self::open_with_capabilities(root, RoomProjectCapabilities { lighting: lighting_supported, character: false })
+    }
+    /// Optional consumers opt in independently, regardless of Cargo feature unification.
+    pub fn open_with_capabilities(root: impl AsRef<Path>, capabilities: RoomProjectCapabilities) -> Result<Self, String> {
         let project = orr_package::Project::open(root.as_ref(), compiled_runtime())
             .map_err(|e| e.to_string())?;
         let before = project
@@ -179,9 +209,20 @@ impl PreparedProject {
         let pinned: orr_package::ProjectManifest = serde_json::from_slice(&manifest_bytes)
             .map_err(|e| format!("room manifest: {e}"))?;
         if pinned != *manifest { return Err("room manifest changed during admission".into()); }
-        if entry.lighting.is_some() && !(lighting_supported && cfg!(feature = "room-lighting")) {
+        if entry.lighting.is_some() && !(capabilities.lighting && cfg!(feature = "room-lighting")) {
             return Err("room lighting requires explicit lighting consumer support".into());
         }
+        if entry.character.is_some() && !(capabilities.character && cfg!(feature = "room-character")) {
+            return Err("room character requires explicit character consumer support".into());
+        }
+        #[cfg(feature = "room-character")]
+        let character = entry.character.as_ref().map(|relative| {
+            let path = crate::project::entry_file(project.root(), relative)?;
+            let bytes = crate::project::read_regular(&path, crate::room_character::MAX_BYTES as u64)?;
+            let document = crate::room_character::Document::parse(&bytes)?;
+            Ok::<_, String>(PreparedRoomCharacter { scene_path: crate::project::entry_file(project.root(), &entry.scene)?, path, document, bytes,
+                manifest_bytes: manifest_bytes.clone(), manifest_path: manifest_path.clone() })
+        }).transpose()?;
         #[cfg(feature = "room-lighting")]
         let lighting = entry.lighting.as_ref().map(|relative| {
             let path = crate::project::entry_file(project.root(), relative)?;
@@ -268,7 +309,13 @@ impl PreparedProject {
         if before != after {
             return Err("room active lock changed during admission; retry".into());
         }
+        #[cfg(feature = "room-character")]
+        if let Some(character) = &character {
+            character.document.validate_bindings(orr_bridge::FrameView::of(scene.frame()), scene.index(), &document, &assets)?;
+        }
         let models = PreparedModels {
+            #[cfg(feature = "room-character")]
+            character: character.as_ref().map(|c| c.document.clone()),
             path: model_path,
             document,
             assets,
@@ -282,6 +329,8 @@ impl PreparedProject {
             return Err("room manifest changed during admission".into());
         }
         Ok(Self {
+            #[cfg(feature = "room-character")]
+            character,
             #[cfg(feature = "room-lighting")]
             lighting,
             camera,
@@ -300,6 +349,10 @@ impl PreparedProject {
         if let Some(lighting) = &self.lighting { return lighting.document.settings(); }
         orr_render::PointLightSettings::default()
     }
+    #[cfg(feature = "room-character")]
+    pub fn character(&self) -> Option<&PreparedRoomCharacter> { self.character.as_ref() }
+    #[cfg(feature = "room-character")]
+    pub fn take_character(&mut self) -> Option<PreparedRoomCharacter> { self.character.take() }
     pub fn camera(&self) -> Option<&PreparedRoomCamera> {
         self.camera.as_ref()
     }

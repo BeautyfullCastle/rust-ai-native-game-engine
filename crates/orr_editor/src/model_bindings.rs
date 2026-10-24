@@ -107,6 +107,10 @@ impl Bindings {
     pub(crate) fn memory_dirty(&self) -> bool {
         self.document != self.saved
     }
+    #[cfg(feature="room-character")]
+    pub(crate) fn saved_document(&self) -> &Document { &self.saved }
+    #[cfg(feature="room-character")]
+    pub(crate) fn mark_current_saved(&mut self) { self.saved = self.document.clone(); }
     pub fn dirty(&self) -> bool {
         self.memory_dirty() || !self.path.exists()
     }
@@ -179,6 +183,31 @@ impl Bindings {
     ) -> Result<(), String> {
         let prepared = self.prepare_assignment(guids, binding, loaded)?;
         self.commit_assignment(prepared)
+    }
+
+    /// Character clips have their own history. Rebase model-only history onto
+    /// the active character descriptor instead of inserting a second undo step.
+    /// The disk baseline is deliberately untouched until the paired save.
+    #[cfg(feature = "room-character")]
+    pub(crate) fn set_character_animation(
+        &mut self,
+        player: &str,
+        animation: AnimationDescriptor,
+    ) -> Result<(), String> {
+        let binding = self.document.bindings.get_mut(player).ok_or("Character player model missing")?;
+        if binding.kind != ModelKind::Animated {
+            return Err("Character player model must be animated".into());
+        }
+        binding.animation = Some(animation);
+        for document in self.undo.iter_mut().chain(self.redo.iter_mut()) {
+            if let Some(binding) = document.bindings.get_mut(player) {
+                if binding.kind == ModelKind::Animated {
+                    binding.animation = Some(animation);
+                }
+            }
+        }
+        self.generation = Arc::new(());
+        Ok(())
     }
 
     fn commit(&mut self, next: Document) {
