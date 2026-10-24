@@ -156,3 +156,40 @@ fn installed_asset_tampering_fails_and_map_removal_restores_generic_animation() 
     std::fs::write(path, bytes).unwrap();
     assert!(open(&root).is_err());
 }
+
+#[test]
+fn crossfade_budget_counts_loaded_source_once_and_rejects_boundary_plus_one() {
+    use orr_sample::room_project::{
+        validate_decoded_model_budget_with_extra, MAX_DECODED_MODEL_BYTES,
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("budget");
+    create(&root);
+    let project = open(&root).unwrap();
+    let assets: Vec<_> = project.models().assets.values().collect();
+    // Find the exact remaining allowance with production accounting, then check
+    // its boundary and identity deduplication without constructing huge fixtures.
+    let (mut low, mut high) = (0, MAX_DECODED_MODEL_BYTES);
+    while low < high {
+        let middle = low + (high - low).div_ceil(2);
+        if validate_decoded_model_budget_with_extra(assets.iter().copied(), middle).is_ok() {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    assert!(low > 0 && low < MAX_DECODED_MODEL_BYTES);
+    assert!(validate_decoded_model_budget_with_extra(assets.iter().copied(), low).is_ok());
+    assert!(validate_decoded_model_budget_with_extra(assets.iter().copied(), low + 1).is_err());
+    assert!(
+        validate_decoded_model_budget_with_extra(assets.iter().chain(&assets).copied(), low)
+            .is_ok()
+    );
+    assert!(validate_decoded_model_budget_with_extra(assets.iter().copied(), usize::MAX).is_err());
+    let model = assets
+        .iter()
+        .find_map(|asset| asset.animated_model())
+        .unwrap();
+    let surcharge = orr_sample::room_character::crossfade_extra_pose_bytes(model).unwrap();
+    assert!(surcharge > 0 && surcharge <= low);
+}

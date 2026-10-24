@@ -227,6 +227,8 @@ pub struct Editor {
     room_character_scene: Option<PathBuf>,
     #[cfg(feature="room-character")]
     room_character_source: Arc<()>,
+    #[cfg(feature="room-character")]
+    room_character_revision: Arc<()>,
     #[cfg(feature="room-project")]
     room_camera: Option<orr_sample::room_camera::Document>,
     #[cfg(feature="room-project")]
@@ -383,6 +385,7 @@ impl Editor {
             #[cfg(feature="room-character")] room_character: None,
             #[cfg(feature="room-character")] room_character_scene: None,
             #[cfg(feature="room-character")] room_character_source: Arc::new(()),
+            #[cfg(feature="room-character")] room_character_revision: Arc::new(()),
             #[cfg(feature="room-project")] room_camera: None,
             #[cfg(feature="room-project")] room_camera_scene: None,
             #[cfg(feature="room-lighting")] room_lighting: None,
@@ -1108,7 +1111,15 @@ impl Editor {
         let r = self.timed_erp_call(method, params);
         self.ingest();
         match r {
-            Ok(v) => Ok(v),
+            Ok(v) => {
+                // Same-tick lifecycle controls can retain the host epoch. Keep
+                // playback history separate from the authoring source fence.
+                #[cfg(feature = "room-character")]
+                if self.game().is_room() && matches!(method, "sim.start" | "sim.stop" | "sim.seek" | "sim.branch" | "scene.load") {
+                    self.room_character_revision = Arc::new(());
+                }
+                Ok(v)
+            },
             Err(ClientError::Rpc(e)) => Err(e.message),
             Err(other) => {
                 self.connection_lost(&other.to_string());
@@ -1206,6 +1217,11 @@ impl Editor {
             }
             "watch.activity" => {
                 if let Some(list) = params.get("entries").and_then(J::as_array) {
+                    // Other ERP clients can issue same-tick controls too.
+                    #[cfg(feature = "room-character")]
+                    if self.game().is_room() && list.iter().any(|entry| entry["ok"] == true && matches!(entry["method"].as_str(), Some("sim.start" | "sim.stop" | "sim.seek" | "sim.branch" | "scene.load"))) {
+                        self.room_character_revision = Arc::new(());
+                    }
                     if list.iter().any(|entry| entry["method"] == "scene.load" && entry["ok"] == true) {
                         self.clear_room_camera();
                         self.select(None);
@@ -2310,12 +2326,15 @@ impl Editor {
     #[cfg(feature="room-character")]
     pub fn room_character_source_token(&self) -> Arc<()> { self.room_character_source.clone() }
     #[cfg(feature="room-character")]
+    pub(crate) fn room_character_revision(&self) -> &Arc<()> { &self.room_character_revision }
+    #[cfg(feature="room-character")]
     pub fn room_character(&self) -> Option<&orr_sample::room_character::Document> {
         if self.game().is_room() && self.spec().is_local() && self.room_character_scene == self.path() { self.room_character.as_ref() } else { None }
     }
     #[cfg(feature="room-character")]
     fn clear_room_character(&mut self) {
         self.room_character_source = Arc::new(());
+        self.room_character_revision = Arc::new(());
         self.room_character = None;
         self.room_character_scene = None;
     }

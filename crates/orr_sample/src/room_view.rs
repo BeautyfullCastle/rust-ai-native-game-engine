@@ -195,6 +195,16 @@ pub fn admit_presentation(
     #[cfg(feature = "room-character")]
     if let Some(character) = &models.character {
         character.validate_bindings(frame, index, &models.document, &models.assets)?;
+        if character.crossfade_ticks.unwrap_or(0) > 0 {
+            let binding = &models.document.bindings[&character.player];
+            let model = models.assets[&(binding.package.clone(), binding.asset.clone())]
+                .animated_model()
+                .ok_or("character model missing")?;
+            crate::room_project::validate_decoded_model_budget_with_extra(
+                models.assets.values(),
+                crate::room_character::crossfade_extra_pose_bytes(model)?,
+            )?;
+        }
     }
     #[cfg(feature = "room-animated-models")]
     frame_placements(frame, index, models)?;
@@ -360,6 +370,22 @@ fn frame_placements(
     index: &SceneIndex,
     models: &PreparedModels,
 ) -> Result<FramePlacements, String> {
+    frame_placements_with_playback(
+        frame,
+        index,
+        models,
+        #[cfg(feature = "room-character")]
+        None,
+    )
+}
+
+#[cfg(feature = "room-animated-models")]
+fn frame_placements_with_playback(
+    frame: FrameView<'_>,
+    index: &SceneIndex,
+    models: &PreparedModels,
+    #[cfg(feature = "room-character")] playback: Option<&crate::room_character::PlaybackCursor>,
+) -> Result<FramePlacements, String> {
     validate_models(models)?;
     #[cfg(feature = "room-character")]
     if let Some(character) = &models.character {
@@ -443,15 +469,28 @@ fn frame_placements(
                 };
                 #[cfg(feature = "room-character")]
                 let pose = match &models.character {
-                    Some(character) if character.player == guid.to_string() => {
-                        crate::room_character::sample_pose(
+                    Some(character) if character.player == guid.to_string() => match playback {
+                        Some(cursor) => cursor
+                            .pose(
+                                character,
+                                model,
+                                frame,
+                                crate::room_character::PlaybackContext {
+                                    entity,
+                                    tick_rate: orr_games::room_escape_game::TICK_RATE,
+                                    rest: false,
+                                    revision: 0,
+                                },
+                            )?
+                            .clone(),
+                        None => crate::room_character::sample_pose(
                             character,
                             model,
                             frame,
                             orr_games::room_escape_game::TICK_RATE,
                             false,
-                        )?
-                    }
+                        )?,
+                    },
                     _ => sample_binding()?,
                 };
                 #[cfg(not(feature = "room-character"))]
@@ -733,7 +772,15 @@ impl RoomRenderer {
             format: self.core.format,
             sample_count: 1,
         };
-        self.core.render(frame, index, models, camera, target)
+        self.core.render(
+            frame,
+            index,
+            models,
+            camera,
+            target,
+            #[cfg(feature = "room-character")]
+            None,
+        )
     }
 
     /// Draw directly into a window-owned texture without readback, copying, or
@@ -746,11 +793,52 @@ impl RoomRenderer {
         camera: &Camera3D,
         target: ImportedSceneTarget<'_, Wgpu>,
     ) -> Result<(), String> {
-        self.core.render(frame, index, models, camera, target)
+        self.core.render(
+            frame,
+            index,
+            models,
+            camera,
+            target,
+            #[cfg(feature = "room-character")]
+            None,
+        )
+    }
+    #[cfg(feature = "room-character")]
+    pub fn render_with_playback(
+        &mut self,
+        frame: FrameView<'_>,
+        index: &SceneIndex,
+        models: &PreparedModels,
+        camera: &Camera3D,
+        playback: &crate::room_character::PlaybackCursor,
+    ) -> Result<(), String> {
+        let target = ImportedSceneTarget {
+            view: self.target.render_view(),
+            size: self.target.size(),
+            format: self.core.format,
+            sample_count: 1,
+        };
+        self.core
+            .render(frame, index, models, camera, target, Some(playback))
+    }
+    #[cfg(feature = "room-character")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_to_with_playback(
+        &mut self,
+        frame: FrameView<'_>,
+        index: &SceneIndex,
+        models: &PreparedModels,
+        camera: &Camera3D,
+        target: ImportedSceneTarget<'_, Wgpu>,
+        playback: &crate::room_character::PlaybackCursor,
+    ) -> Result<(), String> {
+        self.core
+            .render(frame, index, models, camera, target, Some(playback))
     }
 }
 
 impl RoomRenderCore {
+    #[allow(clippy::too_many_arguments)]
     fn render(
         &mut self,
         frame: FrameView<'_>,
@@ -758,6 +846,7 @@ impl RoomRenderCore {
         models: &PreparedModels,
         camera: &Camera3D,
         target: ImportedSceneTarget<'_, Wgpu>,
+        #[cfg(feature = "room-character")] playback: Option<&crate::room_character::PlaybackCursor>,
     ) -> Result<(), String> {
         // Check caller metadata before changing retained instance lists or GPU state.
         if target.sample_count != 1 {
@@ -771,7 +860,13 @@ impl RoomRenderCore {
             return Err("room target must be 1..=4096 pixels per dimension".into());
         }
         #[cfg(feature = "room-animated-models")]
-        let frame_placements = frame_placements(frame, index, models)?;
+        let frame_placements = frame_placements_with_playback(
+            frame,
+            index,
+            models,
+            #[cfg(feature = "room-character")]
+            playback,
+        )?;
         #[cfg(not(feature = "room-animated-models"))]
         let placed = placements(frame, index, models)?;
         // Reject replaced/reopened content, including hidden-key assets. Never upload
@@ -1054,4 +1149,95 @@ mod tests {
         assert!((0.0..2.0).contains(&loop_time));
         assert!(sample_clip_time(1, 0, 1.0, PlaybackMode::Once).is_err());
     }
+}
+
+#[cfg(feature = "room-character")]
+#[derive(Clone, Copy)]
+pub struct PresentationTime {
+    pub tick_rate: u32,
+    pub rest: bool,
+}
+#[cfg(feature = "room-character")]
+impl Default for PresentationTime {
+    fn default() -> Self {
+        Self {
+            tick_rate: orr_games::room_escape_game::TICK_RATE,
+            rest: false,
+        }
+    }
+}
+#[cfg(feature = "room-character")]
+pub fn observe_character(
+    cursor: &mut crate::room_character::PlaybackCursor,
+    frame: FrameView<'_>,
+    index: &SceneIndex,
+    models: &PreparedModels,
+    time: PresentationTime,
+) -> Result<(), String> {
+    let Some(character) = &models.character else {
+        cursor.reset();
+        return Ok(());
+    };
+    character.validate_current_bindings(frame, index, &models.document, &models.assets)?;
+    let entity = index
+        .entity(&Guid::parse(&character.player)?)
+        .ok_or("character entity missing")?;
+    let binding = &models.document.bindings[&character.player];
+    let model = models.assets[&(binding.package.clone(), binding.asset.clone())]
+        .animated_model()
+        .ok_or("character model missing")?;
+    cursor.observe(
+        character,
+        model,
+        frame,
+        crate::room_character::PlaybackContext {
+            entity,
+            tick_rate: time.tick_rate,
+            rest: time.rest,
+            revision: 0,
+        },
+    )?;
+    Ok(())
+}
+
+/// Stateless character sampling for diagnostics; runtime draws use the observed cursor.
+#[cfg(feature = "room-character")]
+pub struct CharacterPlacement {
+    pub entity: Entity,
+    pub model: Arc<AnimatedModel>,
+    pub pose: Pose,
+    pub transform: orr_model::animation::Matrix4,
+}
+#[cfg(feature = "room-character")]
+pub fn character_placement(
+    frame: FrameView<'_>,
+    index: &SceneIndex,
+    models: &PreparedModels,
+    time: PresentationTime,
+) -> Result<Option<CharacterPlacement>, String> {
+    let Some(character) = &models.character else {
+        return Ok(None);
+    };
+    let placements = frame_placements(frame, index, models)?;
+    let entity = index
+        .entity(&Guid::parse(&character.player)?)
+        .ok_or("character entity missing")?;
+    let placed = placements
+        .animated_models
+        .into_iter()
+        .find(|placed| placed.entity == entity)
+        .ok_or("character placement missing")?;
+    let pose = crate::room_character::sample_pose(
+        character,
+        &placed.model,
+        frame,
+        time.tick_rate,
+        time.rest,
+    )?;
+    Ok(Some(CharacterPlacement {
+        entity,
+        model: placed.model,
+        pose,
+        transform: placed.transform,
+    }))
 }
