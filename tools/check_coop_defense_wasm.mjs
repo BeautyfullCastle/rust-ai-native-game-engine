@@ -17,6 +17,8 @@ w.defense_step(2,0,3,5);s=read();assert.equal(s.units.find(u=>u[0]===0&&u[1]===3
 w.defense_init(71825);for(let t=0;t<60000&&read().phase===0;t++)w.defense_step(0,0,0,0);assert.equal(read().phase,2,'unattended run reaches actual loss');
 w.defense_step(5,0,0,1);assert.equal(read().phase,0,'terminal restart restores playable run');
 w.defense_init(71825);let sequence=0;for(let t=0;t<1200;t++)w.defense_step(t%30===0?1:0,0,0,t%30===0?++sequence:0);s=read();
-assert.equal(s.checksum,'54de241af41d5860','native parity fixture, intentional core changes require reviewed update');
+// Identity schema v1 adds rollback-safe generation/unit/projectile IDs to Frame.
+// Independently reproduced by native coop_defense_run --seed 71825 --ticks 1200 --parity.
+assert.equal(s.checksum,'da0ca42edf9cf8a2','native identity-schema parity fixture, intentional changes require reviewed update');
 assert.equal(s.wave,2);assert.equal(s.hp,30);assert.ok(s.projectiles.length>0);assert.ok(s.units.some(u=>u[0]===1));
 console.log(JSON.stringify({passed:true,checksum:s.checksum,tick:s.tick,wave:s.wave,hp:s.hp,kills:s.kills,coverage:['summon','sequence deduplication','move','merge','loss','terminal restart','upgrade','invest','restart','AI partner','projectiles','1200-tick native parity']},null,2));

@@ -1,13 +1,51 @@
-# Stormglass Foundry browser adapter
+# Optional CoopDefense browser adapter
 
-This optional delivery crate compiles the same `orr_games/coop-defense` deterministic game into WebAssembly. JavaScript only handles input, drawing and optional synthesized audio. It does not simulate combat, economy or the AI partner.
+This delivery crate compiles `orr_games/coop-defense` into WebAssembly. JavaScript
+handles input, drawing and optional synthesized audio, never combat, economy or
+the AI partner. The portrait six-role game is a temporary validation fixture,
+not a claim of original-game fidelity or a completed remake.
 
-Build: `rustup target add wasm32-unknown-unknown`, then `tools/build_coop_defense_web.sh <output-directory>`. Serve that directory over HTTP(S); it has no third-party dependencies, accounts, relay or installation requirement. Browser support needs WebAssembly and Canvas2D. Native Windows execution is not claimed.
+## Build and use
 
-The ready panel holds the simulation at tick zero. Start, summon (Q), select a unit then another cell to move or merge two matching role/tier units, upgrade (E), invest (R), pause (Space) and restart. The right board is explicitly a local AI partner, not an online player.
+Install the official Rust `wasm32-unknown-unknown` target, then run
+`bash tools/build_coop_defense_web.sh /absolute/output-directory`. Serve that
+folder over HTTP(S), or open `stormglass-foundry-offline.html` without a server.
+The package includes both ES modules; offline packaging embeds their closed
+import graph and exact WASM/art bytes. There are no third-party runtime services,
+accounts or relay requirements. WebAssembly and Canvas2D are required.
 
-`defense_init` creates a fresh engine instance, `defense_step` advances one fixed60Hz tick with an input, and `defense_snapshot`/`defense_snapshot_len` expose UTF-8 presentation data. Copy snapshot bytes before the next snapshot or reset; never retain a WASM memory view across allocation. The initial page load initializes the runtime once. Both restart buttons send the authoritative in-game RESTART input with a higher sequence, retaining the seed and sequence history.
+Start, summon (Q), move by drag or two taps, merge matching role/tier units,
+upgrade (E), invest (R), pause (Space), and restart. The right board is local AI.
+Ready/pause/hidden states freeze presentation time. Audio is muted by default and
+requires a trusted gesture. Current character images use procedural fallback
+motion, not authored animations; audio cues are synthesized, not final design.
 
-Run `node tools/check_coop_defense_wasm.mjs <output-directory>/game.wasm` for actual-WASM economy, move, deduplication, restart, AI and deterministic parity checks. Browser visual and input validation is separate from this ABI check. `window.defenseDebug` exposes manual development snapshot/step helpers; it does not autoplay or change rules.
+## Engine contract
 
-`node tools/check_coop_defense_web_ui.mjs <output-directory>` exercises the JS adapter with a mock DOM and the actual WASM core: ready gating, action input, pause/resume, restart sequence and bounded input queue. It is explicitly not a browser visual test. Packaging also creates `stormglass-foundry-offline.html`, which embeds the exact WASM and can be opened without an HTTP server.
+`defense_init` creates a new source instance. `defense_step` advances one fixed
+60 Hz tick. Copy snapshot UTF-8 bytes before another snapshot/reset, never retain
+a WASM memory view across allocation. Restart uses the authoritative RESTART input
+with a higher sequence and the same seed.
+
+The strict consumer reads stable actor IDs and actual engine event keys after
+every step, not HP/cooldown differences or nearest-projectile guesses. Missing,
+unsupported or malformed contracts fail closed. Gaps, restart, overflow and
+source changes resync without invented effects. Windup is unsupported. See the
+[producer/consumer contract](../../docs/coop-defense-presentation.md).
+`window.defenseDebug` exposes development helpers, not autoplay or new rules.
+
+## Verification
+
+Run `bash tools/check-linux-local.sh` for mandatory repository acceptance and
+`bash tools/check_coop_defense_web.sh /absolute/output-directory` for this optional
+path. The latter requires Node and Python, plus an already installed
+`@napi-rs/canvas` for the native-rendering oracle. Set `ORR_CANVAS_MODULE` to its
+module path if it is not resolvable normally. Set `ORR_DEFENSE_PRIOR_WASM` to the
+preserved pre-event WASM to additionally compare legacy gameplay fields.
+
+The focused gate builds current WASM, validates its ABI, tests the strict event
+stream, pause lifecycle and atlas clipping, checks mock-DOM gestures, and verifies
+offline payloads and JavaScript syntax. `ORR_DEFENSE_WASM` selects that freshly
+built artifact for direct Node tests; its hash is logged, not tied to one compiler.
+Tests/fixtures are not shipped in the playable package. Browser layout/input,
+acoustic audio, cross-platform and hardware/GPU claims need separate evidence.

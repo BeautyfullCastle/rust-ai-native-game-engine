@@ -38,6 +38,69 @@ pub const EVENT_LEAK: u32 = 4;
 pub const EVENT_WAVE: u32 = 5;
 pub const EVENT_FINISH: u32 = 6;
 pub const EVENT_RESTART: u32 = 7;
+pub const EVENT_RELEASE: u32 = 8;
+pub const EVENT_HIT: u32 = 9;
+pub const EVENT_PROJECTILE_EXPIRED: u32 = 10;
+pub const EVENT_MOVE: u32 = 11;
+pub const EVENT_ENEMY_SPAWN: u32 = 12;
+/// Conservative structural bound: each projectile can hit every enemy and retire,
+/// each enemy can die/leak once, each unit can fire once, plus actions/wave events.
+pub const MAX_EVENTS_PER_TICK: usize =
+    MAX_PROJECTILES * (MAX_ENEMIES + 1) + 2 * MAX_ENEMIES + 2 * CELLS_PER_BOARD as usize + 8;
+
+/// Closed semantic event tags. The Pod payload stores the tag as u32, not a Rust
+/// enum, so every bit pattern remains safe to decode. Unknown tags are rejected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum DefenseEventKind {
+    Summon = EVENT_SUMMON,
+    Merge = EVENT_MERGE,
+    Death = EVENT_KILL,
+    Leak = EVENT_LEAK,
+    Wave = EVENT_WAVE,
+    Finish = EVENT_FINISH,
+    Restart = EVENT_RESTART,
+    Release = EVENT_RELEASE,
+    Hit = EVENT_HIT,
+    ProjectileExpired = EVENT_PROJECTILE_EXPIRED,
+    Move = EVENT_MOVE,
+    EnemySpawn = EVENT_ENEMY_SPAWN,
+}
+impl DefenseEventKind {
+    pub fn from_code(code: u32) -> Option<Self> {
+        Some(match code {
+            EVENT_SUMMON => Self::Summon,
+            EVENT_MERGE => Self::Merge,
+            EVENT_KILL => Self::Death,
+            EVENT_LEAK => Self::Leak,
+            EVENT_WAVE => Self::Wave,
+            EVENT_FINISH => Self::Finish,
+            EVENT_RESTART => Self::Restart,
+            EVENT_RELEASE => Self::Release,
+            EVENT_HIT => Self::Hit,
+            EVENT_PROJECTILE_EXPIRED => Self::ProjectileExpired,
+            EVENT_MOVE => Self::Move,
+            EVENT_ENEMY_SPAWN => Self::EnemySpawn,
+            _ => return None,
+        })
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Summon => "summon",
+            Self::Merge => "merge",
+            Self::Death => "death",
+            Self::Leak => "leak",
+            Self::Wave => "wave",
+            Self::Finish => "finish",
+            Self::Restart => "restart",
+            Self::Release => "release",
+            Self::Hit => "hit",
+            Self::ProjectileExpired => "projectile_expired",
+            Self::Move => "move",
+            Self::EnemySpawn => "enemy_spawn",
+        }
+    }
+}
 pub const SUMMON_COST: u32 = 25;
 pub const MAX_TIER: u32 = 5;
 pub const MAX_UPGRADE: u32 = 8;
@@ -72,6 +135,10 @@ pub struct DefenseRun {
     pub last_sequence: u32,
     pub seed: u32,
     pub rng_draws: u32,
+    /// Reset/RESTART namespace, rolled back and checksummed with the game.
+    pub generation: u32,
+    pub next_unit_id: u32,
+    pub next_projectile_id: u32,
 }
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
@@ -82,6 +149,8 @@ pub struct DefenseUnit {
     pub role: u32,
     pub tier: u32,
     pub cooldown: u32,
+    /// Logical actor identity, not the fixed ECS pool/cell entity. Zero is absent.
+    pub id: u32,
 }
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
@@ -106,6 +175,9 @@ pub struct DefenseProjectile {
     pub y: i32,
     pub damage: u32,
     pub speed: u32,
+    pub id: u32,
+    /// Source remains meaningful even after this unit moves or is merged away.
+    pub source_unit_id: u32,
 }
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
@@ -113,6 +185,50 @@ pub struct DefenseEvent {
     pub kind: u32,
     pub board: u32,
     pub value: u32,
+    pub generation: u32,
+    pub unit_id: u32,
+    /// Merge consumes this ID and preserves unit_id (the destination actor).
+    pub other_unit_id: u32,
+    pub enemy_id: u32,
+    pub projectile_id: u32,
+    pub role: u32,
+    pub hp_after: u32,
+    pub x: i32,
+    pub y: i32,
+}
+impl DefenseEvent {
+    pub fn event_kind(&self) -> Option<DefenseEventKind> {
+        DefenseEventKind::from_code(self.kind)
+    }
+    fn new(kind: DefenseEventKind, run: &DefenseRun, board: u32, value: u32) -> Self {
+        Self {
+            kind: kind as u32,
+            generation: run.generation,
+            board,
+            value,
+            ..Self::default()
+        }
+    }
+    fn unit(mut self, unit: &DefenseUnit) -> Self {
+        self.unit_id = unit.id;
+        self.role = unit.role;
+        (self.x, self.y) = board_cell_position(unit.board, unit.cell);
+        self
+    }
+    fn projectile(mut self, projectile: &DefenseProjectile) -> Self {
+        self.projectile_id = projectile.id;
+        self.unit_id = projectile.source_unit_id;
+        self.enemy_id = projectile.target_id;
+        self.role = projectile.role;
+        (self.x, self.y) = (projectile.x, projectile.y);
+        self
+    }
+    fn enemy(mut self, enemy: &DefenseEnemy) -> Self {
+        self.enemy_id = enemy.id;
+        self.hp_after = enemy.hp;
+        (self.x, self.y) = enemy_position(enemy.lane, enemy.progress);
+        self
+    }
 }
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
@@ -185,6 +301,8 @@ fn initial_run(seed: u32) -> DefenseRun {
         wave: 1,
         seed,
         next_enemy_id: 1,
+        next_unit_id: 1,
+        next_projectile_id: 1,
         ..Default::default()
     }
 }
@@ -251,8 +369,13 @@ pub fn role_name(role: u32) -> &'static str {
         _ => "Unknown",
     }
 }
-fn event(events: &mut Vec<DefenseEvent>, kind: u32, board: u32, value: u32) {
-    events.push(DefenseEvent { kind, board, value });
+fn allocate_id(next: &mut u32) -> u32 {
+    // Never alias an old lifetime. Exhaustion is explicit, never wrapping reuse.
+    let id = *next;
+    *next = next
+        .checked_add(1)
+        .expect("defense logical identity exhausted");
+    id
 }
 fn action(
     r: &mut DefenseRun,
@@ -266,6 +389,7 @@ fn action(
     match input.action {
         SUMMON if r.gold[b] >= SUMMON_COST => {
             if let Some(slot) = u.iter_mut().find(|u| u.board == board && u.active == 0) {
+                slot.id = allocate_id(&mut r.next_unit_id);
                 slot.active = 1;
                 slot.tier = 1;
                 slot.role = rng.next_u32() % 6;
@@ -273,7 +397,9 @@ fn action(
                 slot.cooldown = 0;
                 r.gold[b] -= SUMMON_COST;
                 r.summons += 1;
-                event(events, EVENT_SUMMON, board, slot.role);
+                events.push(
+                    DefenseEvent::new(DefenseEventKind::Summon, r, board, slot.role).unit(slot),
+                );
             }
         }
         MOVE_OR_MERGE
@@ -292,12 +418,17 @@ fn action(
                 u.swap(a, b);
                 u[a].cell = cell_a;
                 u[b].cell = cell_b;
+                events
+                    .push(DefenseEvent::new(DefenseEventKind::Move, r, board, cell_b).unit(&u[b]));
             } else if u[a].role == u[b].role && u[a].tier == u[b].tier && u[b].tier < MAX_TIER {
                 u[b].tier += 1;
                 u[b].cooldown = 0;
                 u[a].active = 0;
                 r.merges += 1;
-                event(events, EVENT_MERGE, board, u[b].tier);
+                let mut event =
+                    DefenseEvent::new(DefenseEventKind::Merge, r, board, u[b].tier).unit(&u[b]);
+                event.other_unit_id = u[a].id;
+                events.push(event);
             }
         }
         UPGRADE if r.upgrades[b] < MAX_UPGRADE => {
@@ -389,10 +520,16 @@ impl System<DefenseGame> for DefenseSystem {
         }
         if fresh && input.action == RESTART {
             let sequence = r.last_sequence;
+            let generation = r
+                .generation
+                .checked_add(1)
+                .expect("defense generation exhausted");
             r = initial_run(r.seed);
+            r.generation = generation;
             r.last_sequence = sequence;
             rng = FrameRng::new(r.seed as u64);
             for unit in &mut u {
+                unit.id = 0;
                 unit.active = 0;
                 unit.role = 0;
                 unit.tier = 0;
@@ -400,7 +537,7 @@ impl System<DefenseGame> for DefenseSystem {
             }
             e.fill(DefenseEnemy::default());
             p.fill(DefenseProjectile::default());
-            event(&mut events, EVENT_RESTART, 0, 0);
+            events.push(DefenseEvent::new(DefenseEventKind::Restart, &r, 0, 0));
         } else if r.phase == PLAYING {
             if fresh {
                 action(&mut r, &mut u, 0, input, &mut events, &mut rng);
@@ -423,17 +560,17 @@ impl System<DefenseGame> for DefenseSystem {
                             .min(99999);
                 }
             }
-            spawn_wave(&mut r, &mut e);
+            spawn_wave(&mut r, &mut e, &mut events);
             move_enemies(&mut r, &mut e, &mut events);
             advance_projectiles(&mut r, &mut e, &mut p, &mut events);
-            fire(&r, &mut u, &e, &mut p);
+            fire(&mut r, &mut u, &e, &mut p, &mut events);
             if r.reactor_hp == 0 {
                 r.phase = LOST;
-                event(&mut events, EVENT_FINISH, 0, LOST);
+                events.push(DefenseEvent::new(DefenseEventKind::Finish, &r, 0, LOST));
             } else if r.spawned >= wave_count(r.wave) && e.iter().all(|x| x.active == 0) {
                 if r.wave == 10 {
                     r.phase = WON;
-                    event(&mut events, EVENT_FINISH, 0, WON);
+                    events.push(DefenseEvent::new(DefenseEventKind::Finish, &r, 0, WON));
                 } else {
                     r.wave += 1;
                     r.wave_tick = 0;
@@ -441,7 +578,7 @@ impl System<DefenseGame> for DefenseSystem {
                     for gold in &mut r.gold {
                         *gold = (*gold + 40).min(99999);
                     }
-                    event(&mut events, EVENT_WAVE, 0, r.wave);
+                    events.push(DefenseEvent::new(DefenseEventKind::Wave, &r, 0, r.wave));
                 }
             }
         }
@@ -473,6 +610,10 @@ impl System<DefenseGame> for DefenseSystem {
         }
         ctx.frame.set_singleton(r);
         ctx.frame.set_singleton(rng);
+        assert!(
+            events.len() <= MAX_EVENTS_PER_TICK,
+            "defense event structural bound exceeded"
+        );
         for ev in events {
             ctx.emit(ev);
         }
@@ -481,7 +622,7 @@ impl System<DefenseGame> for DefenseSystem {
 fn wave_count(wave: u32) -> u32 {
     (8 + wave * 2) * 2
 }
-fn spawn_wave(r: &mut DefenseRun, e: &mut [DefenseEnemy]) {
+fn spawn_wave(r: &mut DefenseRun, e: &mut [DefenseEnemy], events: &mut Vec<DefenseEvent>) {
     if r.wave_tick < 180 || r.wave_tick % 35 != 0 || r.spawned >= wave_count(r.wave) {
         return;
     }
@@ -504,14 +645,14 @@ fn spawn_wave(r: &mut DefenseRun, e: &mut [DefenseEnemy]) {
         };
         *slot = DefenseEnemy {
             active: 1,
-            id: r.next_enemy_id,
+            id: allocate_id(&mut r.next_enemy_id),
             lane,
             kind,
             hp,
             max_hp: hp,
             ..Default::default()
         };
-        r.next_enemy_id += 1;
+        events.push(DefenseEvent::new(DefenseEventKind::EnemySpawn, r, lane, kind).enemy(slot));
         r.spawned += 1;
     }
 }
@@ -534,7 +675,9 @@ fn move_enemies(r: &mut DefenseRun, e: &mut [DefenseEnemy], events: &mut Vec<Def
             r.reactor_hp = r
                 .reactor_hp
                 .saturating_sub(if enemy.kind == BOSS { 10 } else { 2 });
-            event(events, EVENT_LEAK, enemy.lane, enemy.kind);
+            events.push(
+                DefenseEvent::new(DefenseEventKind::Leak, r, enemy.lane, enemy.kind).enemy(enemy),
+            );
         }
     }
 }
@@ -553,6 +696,10 @@ fn advance_projectiles(
             .position(|x| x.active != 0 && x.id == projectile.target_id)
         else {
             projectile.active = 0;
+            events.push(
+                DefenseEvent::new(DefenseEventKind::ProjectileExpired, r, projectile.board, 0)
+                    .projectile(projectile),
+            );
             continue;
         };
         let target_lane = e[target].lane;
@@ -580,7 +727,13 @@ fn advance_projectiles(
             } else {
                 projectile.damage
             };
+            let hp_before = enemy.hp;
             enemy.hp = enemy.hp.saturating_sub(damage);
+            events.push(
+                DefenseEvent::new(DefenseEventKind::Hit, r, enemy.lane, hp_before - enemy.hp)
+                    .projectile(projectile)
+                    .enemy(enemy),
+            );
             if projectile.role == CONDENSER {
                 enemy.slow_ticks = 100;
             }
@@ -590,13 +743,23 @@ fn advance_projectiles(
                 r.gold[projectile.board as usize] = (r.gold[projectile.board as usize]
                     + if enemy.kind == BOSS { 60 } else { 4 })
                 .min(99999);
-                event(events, EVENT_KILL, enemy.lane, enemy.kind);
+                events.push(
+                    DefenseEvent::new(DefenseEventKind::Death, r, enemy.lane, enemy.kind)
+                        .projectile(projectile)
+                        .enemy(enemy),
+                );
             }
         }
     }
 }
 
-fn fire(r: &DefenseRun, u: &mut [DefenseUnit], e: &[DefenseEnemy], p: &mut [DefenseProjectile]) {
+fn fire(
+    r: &mut DefenseRun,
+    u: &mut [DefenseUnit],
+    e: &[DefenseEnemy],
+    p: &mut [DefenseProjectile],
+    events: &mut Vec<DefenseEvent>,
+) {
     let haste: [u32; 2] = core::array::from_fn(|b| {
         u.iter()
             .filter(|x| x.active != 0 && x.board == b as u32 && x.role == HASTE)
@@ -636,6 +799,8 @@ fn fire(r: &DefenseRun, u: &mut [DefenseUnit], e: &[DefenseEnemy], p: &mut [Defe
         let multiplier = 1u32 << (unit.tier - 1);
         *slot = DefenseProjectile {
             active: 1,
+            id: allocate_id(&mut r.next_projectile_id),
+            source_unit_id: unit.id,
             board: unit.board,
             role: unit.role,
             target_id: target.id,
@@ -644,6 +809,10 @@ fn fire(r: &DefenseRun, u: &mut [DefenseUnit], e: &[DefenseEnemy], p: &mut [Defe
             damage: (base + r.upgrades[unit.board as usize] * 6) * multiplier,
             speed: if unit.role == MORTAR { 10 } else { 18 },
         };
+        events.push(
+            DefenseEvent::new(DefenseEventKind::Release, r, unit.board, slot.damage)
+                .projectile(slot),
+        );
         let cooldown = match unit.role {
             RIVET => 25,
             MORTAR => 75,
