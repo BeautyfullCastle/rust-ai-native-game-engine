@@ -1,6 +1,9 @@
 //! Editor-owned character authoring. Clip edits coordinate the searching binding
 //! default; pair saves roll back ordinary second-file failures, not process crashes.
-use orr_sample::{room_character::Document, room_project::PreparedRoomCharacter};
+use orr_sample::{
+    room_character::{Document, PlaybackRate},
+    room_project::PreparedRoomCharacter,
+};
 use std::{
     fs::{File, Metadata},
     io::{Read, Write},
@@ -281,8 +284,15 @@ impl Panel {
             });
         if let Err(error) = second {
             return match rollback.persist(&model_path) {
-                Ok(_) => { let _=pin.directory.sync_all(); Err(format!("Character save failed; model sidecar restored: {error}")) },
-                Err(rollback) => Err(format!("Character save failed ({error}); model rollback failed ({rollback}); reopen and recover the sidecars before continuing")),
+                Ok(_) => {
+                    let _ = pin.directory.sync_all();
+                    Err(format!(
+                        "Character save failed; model sidecar restored: {error}"
+                    ))
+                }
+                Err(rollback) => Err(format!(
+                    "Character save failed ({error}); model rollback failed ({rollback}); reopen and recover the sidecars before continuing"
+                )),
             };
         }
         models.bindings.as_mut().unwrap().mark_current_saved();
@@ -332,7 +342,30 @@ impl Panel {
                             }
                         });
                 }
-                if ui.button("Apply character clips").clicked() {
+                let mut speeds = self.candidate.speeds.unwrap_or_default();
+                let original_speeds = speeds;
+                for (label, value) in [
+                    ("Searching speed", &mut speeds.searching),
+                    ("Carrying key speed", &mut speeds.carrying),
+                    ("Escaped speed", &mut speeds.escaped),
+                ] {
+                    egui::ComboBox::from_label(label)
+                        .selected_text(value.label())
+                        .show_ui(ui, |ui| {
+                            for rate in PlaybackRate::ALL {
+                                ui.selectable_value(
+                                    value,
+                                    rate,
+                                    format!("{label} {}", rate.label()),
+                                );
+                            }
+                        });
+                }
+                if speeds != original_speeds {
+                    self.candidate.schema = 2;
+                    self.candidate.speeds = Some(speeds);
+                }
+                if ui.button("Apply character settings").clicked() {
                     self.error = self
                         .apply_document(self.candidate.clone(), editor, models)
                         .err();
@@ -529,6 +562,76 @@ mod tests {
     }
 
     #[test]
+    fn rate_only_history_preserves_model_transform_undo_redo_and_save() {
+        let mut f = Fixture::new();
+        let legacy = f.panel.document().clone();
+        let original = f.models.bindings.as_ref().unwrap().document().clone();
+        let player = original.bindings[&legacy.player].clone();
+        f.editor.select(Some(crate::Target::Guid(
+            orr_reflect::Guid::parse(&legacy.player).unwrap(),
+        )));
+        f.models.kind = player.kind;
+        f.models.package = player.package.clone();
+        f.models.asset = player.asset.clone();
+        f.models.animation = player.animation.unwrap();
+        f.models.transform = player.transform;
+        f.models.transform.scale = [1.1; 3];
+        f.models.assign(&f.editor).unwrap();
+        let transformed = f.models.bindings.as_ref().unwrap().document().clone();
+        let mut rated = legacy.clone();
+        rated.schema = 2;
+        rated.speeds = Some(orr_sample::room_character::PlaybackRates {
+            searching: PlaybackRate::Half,
+            carrying: PlaybackRate::Double,
+            escaped: PlaybackRate::Quadruple,
+        });
+        f.panel
+            .apply_document(rated.clone(), &mut f.editor, &mut f.models)
+            .unwrap();
+        assert_eq!(f.models.bindings.as_ref().unwrap().document(), &transformed);
+        f.panel.undo(&mut f.editor, &mut f.models).unwrap();
+        assert_eq!(f.editor.room_character(), Some(&legacy));
+        f.models.undo(&f.editor).unwrap();
+        assert_eq!(f.models.bindings.as_ref().unwrap().document(), &original);
+        f.panel.redo(&mut f.editor, &mut f.models).unwrap();
+        f.models.redo(&f.editor).unwrap();
+        assert_eq!(f.models.bindings.as_ref().unwrap().document(), &transformed);
+        assert_eq!(f.editor.room_character(), Some(&rated));
+        f.panel.save_all(&f.editor, &mut f.models).unwrap();
+        f.reopen(&rated);
+    }
+
+    #[test]
+    fn invalid_rate_schema_apply_preserves_documents_disk_and_history() {
+        let mut f = Fixture::new();
+        let legacy = f.panel.document().clone();
+        let models = f.models.bindings.as_ref().unwrap().document().clone();
+        let disk = f.pair_bytes();
+        for (schema, speeds) in [
+            (
+                1,
+                Some(orr_sample::room_character::PlaybackRates::default()),
+            ),
+            (2, None),
+        ] {
+            let mut invalid = legacy.clone();
+            invalid.schema = schema;
+            invalid.speeds = speeds;
+            assert!(f
+                .panel
+                .apply_document(invalid, &mut f.editor, &mut f.models)
+                .is_err());
+            assert_eq!(f.editor.room_character(), Some(&legacy));
+            assert_eq!(f.panel.document(), &legacy);
+            assert_eq!(f.models.bindings.as_ref().unwrap().document(), &models);
+            assert_eq!(f.pair_bytes(), disk);
+            assert!(!f.panel.dirty());
+            assert!(f.panel.undo.is_empty());
+            assert!(f.panel.redo.is_empty());
+        }
+    }
+
+    #[test]
     fn same_path_restart_retires_character_authoring_without_writes() {
         let mut fixture = Fixture::new();
         let before = fixture.pair_bytes();
@@ -549,6 +652,17 @@ mod tests {
         assert!(fixture
             .panel
             .apply_document(candidate, &mut fixture.editor, &mut fixture.models)
+            .unwrap_err()
+            .contains("source changed"));
+        let mut rated = document.clone();
+        rated.schema = 2;
+        rated.speeds = Some(orr_sample::room_character::PlaybackRates {
+            searching: PlaybackRate::Quarter,
+            ..Default::default()
+        });
+        assert!(fixture
+            .panel
+            .apply_document(rated, &mut fixture.editor, &mut fixture.models)
             .unwrap_err()
             .contains("source changed"));
         assert!(fixture
