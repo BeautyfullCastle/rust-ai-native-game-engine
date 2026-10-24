@@ -11,6 +11,7 @@ description = "Orrery sim-only sample games (PhysGame 2D physics, Yard3D 3D phys
 workspace = true
 
 [features]
+coop-defense = []
 room-escape = []
 collect-dodge = []
 navigation = ["dep:orr_navigation_runtime", "dep:orr_navigation", "dep:orr_terrain"]
@@ -36,3 +37,7 @@ bytemuck = { version = "1", features = ["derive"] }
 [[example]]
 name = "collect_dodge"
 required-features = ["collect-dodge"]
+
+[[example]]
+name = "coop_defense_run"
+required-features = ["coop-defense"]

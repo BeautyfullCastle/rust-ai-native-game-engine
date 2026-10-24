@@ -1,0 +1,75 @@
+:root{font-family:ui-rounded,"Noto Sans KR",system-ui,sans-serif;color:#304337;background:#a9c882;color-scheme:light}*{box-sizing:border-box}body{margin:0;background:linear-gradient(#d6e7ae,#87b983);min-height:100svh}main{max-width:1100px;margin:auto;padding:10px 18px 24px}header{display:flex;justify-content:space-between;align-items:center;gap:8px;height:42px}.title{font-size:21px;font-weight:900;color:#2d5439}.title small{font-size:10px;display:block;font-weight:600;color:#58744f}nav{display:flex;gap:5px}button{font:inherit;font-weight:700;cursor:pointer;border:2px solid #719658;border-radius:12px;color:#385335;background:#f7f0d4;box-shadow:0 3px 0 #63834f;padding:9px 14px;touch-action:manipulation}button:hover{filter:brightness(1.06)}button:active{transform:translateY(2px);box-shadow:0 1px 0 #63834f}button:focus-visible{outline:3px solid #3457b9;outline-offset:3px}nav button{font-size:11px;padding:6px 9px;min-height:32px}button[aria-disabled=true]{filter:saturate(.5);opacity:.7}.hud{display:flex;align-items:center;justify-content:space-around;gap:12px;background:#fff6d9;border:2px solid #79955c;border-radius:15px;min-height:53px;padding:6px 15px;margin:7px 0;box-shadow:0 3px 0 #71965844}.hud strong{font-size:21px}.castle{color:#bd5150;min-width:92px}.health{height:5px;background:#ddcba8;border-radius:4px;overflow:hidden}.health i{display:block;height:100%;background:#ec7972;width:100%}.wave{font-size:10px;font-weight:800;text-align:center}.wave strong{display:block;font-size:19px}.coins{color:#9a661b}.kills{font-size:11px}.kills strong{font-size:15px}.arena{position:relative;overflow:hidden;background:#9ac280;border:3px solid #6b985b;border-radius:22px;box-shadow:0 5px 0 #527d4933}canvas{display:block;width:100%;height:auto;touch-action:none;user-select:none}.dock{background:#fff8e1;border:2px solid #90a26b;border-radius:18px;padding:10px 12px;margin-top:10px;box-shadow:0 5px 0 #70935333}.selection{display:flex;align-items:center;justify-content:space-between;gap:10px}.selection strong{font-size:14px}.selection span{font-size:11px;color:#64704d}#notice{font-size:11px;min-height:22px;padding-top:4px;color:#93622b}.controls{display:grid;grid-template-columns:1fr 1.65fr 1fr;gap:10px}.controls button{min-height:58px;padding:7px}.controls b{display:block;font-size:15px}.controls span{display:block;font-size:11px;margin-top:3px}#summon{background:linear-gradient(#ffda61,#f7b93c);border-color:#bc8725;color:#65431b;box-shadow:0 4px 0 #bc8725}#summon b{font-size:22px}.codex{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.codex>div{padding:10px;background:#fff5d5;border-radius:8px;border-left:4px solid var(--role)}details{font-size:12px;line-height:1.6;padding:14px 4px;color:#425a3c}summary{cursor:pointer}#ready,#loading,#result{position:absolute;inset:0;z-index:2;background:#e9f3d4ed;display:flex;align-items:center;justify-content:center;flex-direction:column;text-align:center;padding:25px}#ready[hidden],#loading[hidden],#result[hidden]{display:none}#ready h1{font-size:clamp(28px,4vw,46px);line-height:1.15;margin:18px 0;color:#365f3c}#ready p{line-height:1.8;font-weight:600}#ready small{letter-spacing:2px;font-size:9px}#ready>span{font-size:11px;color:#697754;margin-top:18px;line-height:1.6}#begin,#again{font-size:20px;padding:15px 44px;background:#ffd162;border-color:#b98b39}#result h2{font-size:30px;color:#365f3c}#result p{line-height:1.7}@media(min-width:701px){main{max-width:min(1100px,calc((100svh - 252px)*1.5625 + 36px))}.arena{min-width:600px}main{min-width:636px}}@media(max-width:700px){main{padding:4px 0 170px}.title{font-size:17px}header{padding:0 10px}.hud{margin:4px 8px;min-height:48px}.arena{border-radius:16px;margin:0;border-width:0}.dock{position:fixed;bottom:0;left:0;right:0;z-index:3;margin:0;border-radius:18px 18px 0 0;padding:8px 10px calc(10px + env(safe-area-inset-bottom))}.selection{display:block}.selection strong{font-size:13px}.selection span{display:block;font-size:10px;margin-top:3px}#notice{font-size:10px;min-height:22px}.controls{gap:8px}.controls button{min-height:56px}.controls b{font-size:13px}#summon b{font-size:22px}.kills{display:none}.codex{grid-template-columns:repeat(2,1fr)}details{padding:12px}.hud strong{font-size:19px}}
+
+/* Legacy portrait skin. Canonical flow geometry is defined below. */
+@media(min-width:701px){
+ main{--play-width:clamp(324px,calc((100svh - 245px)*0.694444),520px);width:var(--play-width);max-width:none;min-width:0;padding:4px 0 155px}
+ header{height:42px;padding:0 4px}.title{font-size:17px}.title small{font-size:9px}nav{gap:4px}nav button{font-size:10px;padding:6px;min-height:32px}
+ .hud{margin:4px 0;min-height:48px;padding:6px 10px;gap:7px}.hud strong{font-size:19px}.kills{display:none}
+ .arena{width:100%;min-width:0;border-width:0;border-radius:16px}
+ .dock{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:var(--play-width);z-index:3;margin:0;border-radius:18px 18px 0 0;padding:8px 10px 10px}
+ .selection{display:block}.selection strong{font-size:13px}.selection span{display:block;font-size:10px;margin-top:3px}
+ #notice{font-size:10px;min-height:22px}.controls{gap:8px}.controls button{min-height:56px}.controls b{font-size:13px}#summon b{font-size:22px}
+}
+
+/* v8 geometry correction: extra QA panels must never shift a positional grid.
+   Flow height is content-owned. Short screens scroll instead of crushing the arena. */
+main{
+ --play-width:520px;
+ display:flex;
+ flex-direction:column;
+ align-items:stretch;
+ width:min(var(--play-width),100%);
+ max-width:none;
+ min-width:0;
+ height:auto;
+ min-height:0;
+ padding:4px 0;
+ margin:0 auto;
+}
+main > *{flex:0 0 auto}
+.arena{
+ display:block;
+ width:100%;
+ min-width:0;
+ min-height:0;
+ height:auto;
+ border-width:0;
+ aspect-ratio:25/36;
+}
+canvas{
+ display:block;
+ width:100%;
+ height:auto;
+ max-height:none;
+ max-width:100%;
+ min-width:0;
+ aspect-ratio:25/36;
+}
+.dock{
+ position:static;
+ inset:auto;
+ transform:none;
+ width:100%;
+ margin:0;
+ padding:8px 10px 10px;
+ border-radius:16px;
+}
+details{padding:6px 4px;margin:0}
+#ready,#loading,#result{overflow:auto;justify-content:safe center}
+@media(max-width:700px){
+ body{padding-bottom:calc(56px + env(safe-area-inset-bottom))}
+}
+@media(min-width:701px){
+ main{--play-width:clamp(324px,calc((100svh - 280px)*0.6944444444),520px)}
+}
+/* Explicit text leading prevents inherited desktop line boxes from consuming
+   the small-screen arena budget while keeping every label visible. */
+.hud,.hud strong{line-height:1.15}
+.selection{line-height:1.2}
+.selection strong{display:block}
+.controls,.controls b,.controls span{line-height:1.15}
+
+.slice-warning{padding:7px 12px;background:#fff2cf;color:#73552c;font:600 11px/1.5 system-ui;text-align:center;border-bottom:1px solid #d9c38c}
+.slice-warning summary{font-weight:700}
+.slice-warning p{margin:6px 0 0}
+

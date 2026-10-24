@@ -3130,6 +3130,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "orr_coop_defense_web"
+version = "0.0.1"
+dependencies = [
+ "orr_games",
+ "orr_sim",
+]
+
+[[package]]
 name = "orr_ecs"
 version = "0.0.1"
 dependencies = [
