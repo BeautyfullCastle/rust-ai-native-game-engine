@@ -1,5 +1,9 @@
 #![cfg(feature = "import")]
 #![allow(clippy::float_arithmetic)]
+#[cfg(unix)]
+#[path = "../../../tools/test_support/unix_socket.rs"]
+mod unix_socket;
+
 #[path = "../examples/static_model_extract/authoring.rs"]
 mod authoring;
 use authoring::{extract_glb_node, list_glb_nodes};
@@ -218,12 +222,73 @@ fn unsupported_animation_skin_extensions_and_attributes_are_never_dropped() {
     d["nodes"][2]["skin"] = json!(0);
     reject(&pack(&d, &b));
     let (mut d, b) = fixture_parts();
-    d["extensionsUsed"] = json!(["KHR_texture_transform"]);
+    d["extensionsUsed"] = json!(["ORR_unknown_extension"]);
     reject(&pack(&d, &b));
     let (mut d, b) = fixture_parts();
     d["meshes"][0]["primitives"][0]["attributes"]["COLOR_0"] = json!(2);
     reject(&pack(&d, &b));
 }
+#[test]
+fn extraction_preserves_supported_texture_transform_once() {
+    let baseline = extract_glb_node(&fixture(), SOURCE_ID, 1).unwrap();
+    let (mut document, binary) = fixture_parts();
+    document["extensionsUsed"] = json!(["KHR_texture_transform"]);
+    document["materials"][0]["pbrMetallicRoughness"]["baseColorTexture"]["extensions"] = json!({"KHR_texture_transform": {
+        "offset": [0.25, 0.75],
+        "rotation": std::f32::consts::FRAC_PI_2,
+        "scale": [0.5, -0.25]
+    }});
+    let input = pack(&document, &binary);
+    let before = input.clone();
+    let extracted = extract_glb_node(&input, SOURCE_ID, 1).unwrap();
+    assert_eq!(input, before);
+    assert_eq!(
+        extracted.source().primitives.len(),
+        baseline.source().primitives.len()
+    );
+    for (original, transformed) in baseline
+        .source()
+        .primitives
+        .iter()
+        .zip(&extracted.source().primitives)
+    {
+        assert_eq!(original.id, transformed.id);
+        assert_eq!(original.transform, transformed.transform);
+        assert_eq!(original.indices, transformed.indices);
+        assert_eq!(original.material, transformed.material);
+        assert_eq!(original.vertices.len(), transformed.vertices.len());
+        for (original_vertex, transformed_vertex) in
+            original.vertices.iter().zip(&transformed.vertices)
+        {
+            assert_eq!(original_vertex.position, transformed_vertex.position);
+            assert_eq!(original_vertex.normal, transformed_vertex.normal);
+            if original.material == 0 {
+                // Independent quarter-turn formula: scale, rotate, then offset.
+                // Comparing against untransformed input also detects double baking.
+                let expected = [
+                    0.25 + 0.25 * original_vertex.uv[1],
+                    0.75 + 0.5 * original_vertex.uv[0],
+                ];
+                assert!(
+                    (0..2).all(|axis| (transformed_vertex.uv[axis] - expected[axis]).abs() < 1e-6)
+                );
+            } else {
+                assert_eq!(original_vertex.uv, transformed_vertex.uv);
+            }
+        }
+    }
+    assert_eq!(extracted.source().materials, baseline.source().materials);
+    assert_eq!(extracted.source().images, baseline.source().images);
+    let cooked = extracted.to_bytes().unwrap();
+    assert_eq!(
+        StaticModel::from_bytes(&cooked)
+            .unwrap()
+            .to_bytes()
+            .unwrap(),
+        cooked
+    );
+}
+
 #[test]
 fn external_data_uri_and_unknown_container_resources_reject() {
     for uri in ["external.bin", "data:application/octet-stream;base64,AAAA"] {
@@ -571,11 +636,10 @@ fn cli_symlink_sources_destinations_and_ancestors_reject() {
 #[cfg(unix)]
 #[test]
 fn cli_nonregular_socket_input_rejects_without_opening_or_publication() {
-    use std::os::unix::net::UnixListener;
     let temp = Temp::new();
     let input = temp.join("socket.glb");
     let output = temp.join("prop.model.json");
-    let _socket = UnixListener::bind(&input).unwrap();
+    let _socket = unix_socket::SocketFixture::create(&input);
     assert!(authoring::run(args(&input, &output)).is_err());
     assert!(!output.exists());
 }

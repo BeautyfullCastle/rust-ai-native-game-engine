@@ -594,6 +594,7 @@ pub struct RoomRenderer {
 }
 
 struct RoomRenderCore {
+    point_light: PointLightSettings,
     format: TextureFormat,
     procedural: Renderer3D<Wgpu>,
     imported: ImportedSceneRenderer<Wgpu>,
@@ -752,6 +753,7 @@ impl RoomRenderer {
         Ok(Self {
             target: OffscreenTarget::new(rhi, size.0, size.1, format),
             core: RoomRenderCore {
+                point_light: PointLightSettings::default(),
                 format,
                 procedural: Renderer3D::with_settings(rhi.clone(), format, Settings3D::LOW),
                 imported,
@@ -760,6 +762,11 @@ impl RoomRenderer {
                 animated_models: animated_cache,
             },
         })
+    }
+    pub fn set_point_light_settings(&mut self, settings: PointLightSettings) -> Result<(), String> {
+        settings.validate().map_err(|e| e.to_string())?;
+        self.core.point_light = settings;
+        Ok(())
     }
     pub fn target(&self) -> &OffscreenTarget<Wgpu> {
         &self.target
@@ -938,7 +945,7 @@ impl RoomRenderCore {
                     target.size,
                     camera,
                     &list.lighting,
-                    &PointLightSettings::default(),
+                    &self.point_light,
                     &list,
                     &prepared,
                     &animated_prepared,
@@ -951,7 +958,7 @@ impl RoomRenderCore {
                 target.size,
                 camera,
                 &list.lighting,
-                &PointLightSettings::default(),
+                &self.point_light,
                 &list,
                 &prepared,
             )
@@ -985,7 +992,7 @@ impl RoomRenderCore {
                 target,
                 camera,
                 &list.lighting,
-                &PointLightSettings::default(),
+                &self.point_light,
                 &mut batches,
             )
             .map_err(|e| e.to_string())

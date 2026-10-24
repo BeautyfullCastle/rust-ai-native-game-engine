@@ -1,3 +1,7 @@
+#[cfg(unix)]
+#[path = "../../../tools/test_support/unix_socket.rs"]
+mod unix_socket;
+
 mod common;
 use common::*;
 use orr_terrain::Terrain;
@@ -331,16 +335,15 @@ fn public_file_api_rejects_display_failure_before_staging() {
     assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
 }
 
-// Separate default-on hosted-native coverage. A sandbox unable to create Unix
-// sockets must report this case blocked, not silently turn it into a success.
+// Default-on socket-inode coverage. Failure to create the exact file type
+// remains a failure, never a runtime skip or a different fixture type.
 #[cfg(unix)]
 #[test]
 fn socket_input_is_rejected_before_open() {
-    use std::os::unix::net::UnixListener;
     let root = temp();
     let socket = root.path().join("socket");
     let output = root.path().join("out.orrt");
-    let _listener = UnixListener::bind(&socket).expect("socket fixture creation unavailable");
+    let _listener = unix_socket::SocketFixture::create(&socket);
     fail(&cli(&args(&socket, &output)));
     assert!(!output.exists());
     assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);

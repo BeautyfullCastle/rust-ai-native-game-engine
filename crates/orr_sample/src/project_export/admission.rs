@@ -227,6 +227,7 @@ impl ProjectSnapshot {
         }
         plan.add(&entry.scene, MAX_SCENE_BYTES)?;
         if let Some(sidecar) = &entry.models { plan.add(sidecar,MAX_JSON_BYTES)?; }
+        if let Some(sidecar) = &entry.lighting { plan.add(sidecar,4096)?; }
         if let Some(sidecar) = &entry.camera { plan.add(sidecar,4096)?; }
         if let Some(sidecar) = &entry.sprites {
             plan.add(sidecar, MAX_JSON_BYTES)?;
@@ -278,6 +279,18 @@ impl ProjectSnapshot {
             }
             (None, None) => {}
             _ => return Err("sprite sidecar changed during runtime admission".into()),
+        }
+        #[cfg(feature = "room-lighting")]
+        if let Some(path) = &entry.lighting {
+            let super::Prepared::Room(room) = &prepared else { return Err("lighting requires Room consumer".into()); };
+            let admitted = room.lighting().ok_or("missing admitted Room lighting")?;
+            let mut file = SnapshotFile::read(&root.join(path), path, crate::room_lighting::MAX_BYTES as u64)?;
+            if file.source != admitted.path || file.bytes != admitted.bytes
+                || files[0].bytes != admitted.manifest_bytes {
+                return Err("lighting changed after runtime admission".into());
+            }
+            file.role = "lighting_sidecar";
+            files.push(file);
         }
         #[cfg(feature = "room-project")]
         if let Some(path) = &entry.camera {
