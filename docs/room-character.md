@@ -14,7 +14,9 @@ orr_new_arena --output /absolute/new-project --template room-escape-character-3d
 ```
 
 Open it in an editor built with `room-character` using `--room-project PATH`.
-The Room character panel assigns searching, carrying-key and escaped clips.
+The Room character panel assigns searching, carrying-key and escaped clips and
+per-state playback speeds: 1/4x, 1/2x, 1x, 2x or 4x. Changing a speed upgrades
+the candidate to schema 2; Apply, Undo/Redo and paired Save include these speeds.
 Apply validates all three clips and the complete reachable presentation before
 changing either in-memory document. Undo/Redo character edit coordinates the
 model binding's default searching clip with the character map. Use **Save
@@ -57,8 +59,17 @@ Selection reads the same authoritative Frame as body placement:
 2. Otherwise `RoomRun.key_collected != 0`: carrying
 3. Otherwise: searching
 
-Every clip uses the absolute Frame tick / tick rate at fixed 1x. Transitions do
-not reset phase. Pause, repeated draws, missing rendered frames, Seek and export
+Schema 1 keeps the exact original fields and fixed 1x behavior. Schema 2 requires
+a complete strict `speeds` object, for example
+`{"searching":"1/4x","carrying":"2x","escaped":"4x"}`. Missing/unknown/duplicate
+fields, null/sequence/numeric rates and unsupported choices (including 0x) fail
+closed. The generator still emits schema 1; speed-only edits do not change the
+model descriptor.
+
+Clip time is the absolute Frame tick / tick rate multiplied by the selected
+exact power-of-two ratio. Integer period reduction precedes float conversion,
+retaining fractional periods and adjacent huge ticks. Transitions do not reset
+phase. Pause, repeated draws, missing rendered frames, Seek and export
 therefore agree. Edit/Stop requests rest; Play or Seek at tick zero samples clip
 zero time. There is no renderer-history movement inference, animation clock in
 ECS, or modification to checkpoints/replays/golden checksums.
