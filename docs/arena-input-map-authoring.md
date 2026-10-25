@@ -1,8 +1,9 @@
 # Optional Arena input-map authoring
 
-Status: source implementation in progress. No Cargo, widget, Arena-load or GPU
-acceptance has yet run on this candidate. This is a bounded part of #106/#94,
-not a completed general input editor or a runtime settings replacement.
+Status: selected-action draft restoration is implemented with partial Windows
+CPU widget validation. Save As is blocked by OS error 5 in this environment;
+the exact executed scope is recorded below. This remains a bounded part of
+#106/#94, not completed general input-editor or runtime-settings acceptance.
 
 ## Workflow
 
@@ -12,6 +13,20 @@ Select an action, edit its keyboard/mouse binding list, then **Apply action**.
 Rejected conflicts keep the accepted map and Undo/Redo history unchanged.
 Changing the selected action, Open, Undo, Redo or Defaults discards pending
 unapplied widget edits. Save As saves only the accepted complete map.
+
+**Restore action defaults** fills only the selected action's draft with its
+Arena defaults, matched by action name even when an opened map reorders actions.
+Inspect the draft and use **Apply action** to commit one undoable change. Other
+actions, accepted history and files remain unchanged until Apply. If another
+action uses a restored key, Apply reports the existing binding conflict without
+stealing that key. Applying identical bindings is a no-op that preserves Redo.
+**Use Arena defaults** retains its separate whole-map reset behavior.
+
+**Discard action draft** restores the selected action's current accepted
+bindings, including custom bindings. It keeps the selected action, accepted map
+and Undo/Redo unchanged, clears the draft diagnostic, and does not Apply or Save.
+The button is disabled whenever the draft already matches the accepted bindings,
+including a defaults draft that introduces no actual change.
 
 The fixed Arena actions are `left`, `right`, `up`, `down`, `fire`, `pause`, `quit`.
 Zero through eight bindings per action are allowed, following existing Arena
@@ -97,11 +112,43 @@ automatic save, external process launch or generic project export integration.
    Optional tests cannot substitute for full required exact-head CI or a fresh
    development-union review. Main/PR1 are excluded.
 
-Tests in `tests/input_map_authoring.rs` have five ordinary contracts and two
+Tests in `tests/input_map_authoring.rs` have five ordinary contracts (four on
+Windows; the symlink case is Unix-only) and two
 separate mandatory ignored acceptances. Set `ORR_INPUT_MAP_ARENA_BIN` to the
 absolute exact Arena executable and `ORR_INPUT_MAP_EVIDENCE` to an existing
 absolute retained directory for those explicit runs. Never count ignored tests
 as executed. Source-only preparation is not execution evidence.
+
+## Selected-action restore: Windows focused result (2026-10-25)
+
+The existing target built in release mode with unchanged profiles and offline
+dependencies. Its initial run had one pass, three Save As failures with
+`save bindings ... (os error 5)`, and two ignored CLI/GPU acceptances. The save
+implementation groups write, sync and hard-link publication under that error;
+these logs do not identify the exact failing operation. No save/security policy
+was changed, no failed Save was retried, and the original failures remain.
+
+An isolated existing CPU case then passed with added genuine egui widget input:
+Open a regular reordered fixture, restore the selected action by name, preserve
+accepted state/files before Apply, commit only that action, Undo/Redo, reject a
+restored-key conflict and preserve Redo on an identical Apply. This fixture tests
+Open, not Save As publication. The original Save/reopen assertions remain and
+are not replaced by this partial pass. No test names or targets were added.
+Strict Clippy for the tool binary and existing test target also exited zero.
+
+Save As/reopen completion, ignored actual Arena CLI/GPU acceptance, native OS
+input, Unix symlinks, Linux/full gate and independent final review remain open.
+
+## Discard draft: focused Windows result (2026-10-25)
+
+One existing memory-only egui case passed with real Discard button clicks:
+conflicting, restored-default and ordinary edited drafts return to the selected
+action's accepted bindings; selection, accepted map and exact Undo/Redo remain
+unchanged. The button is disabled without a pending change. Existing Save-related
+assertions were preserved intact in the existing Save/reopen case, which was not
+run here. Test names and targets remain unchanged. Historical Save failures are
+still unresolved; this pass does not replace Save, native-window/GPU or full-gate
+acceptance. Strict Clippy for the selected tool binary and test target exited zero.
 
 ## References and provenance
 

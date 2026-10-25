@@ -88,22 +88,136 @@ fn seven_action_widgets_save_reopen_and_exact_undo_redo() {
     assert_eq!(h.state().document(), &expected); click(&mut h, "Undo map edit");
     assert_eq!(h.state().document(), &default_map()); click(&mut h, "Redo map edit");
     assert_eq!(h.state().document(), &expected);
+
+    // A loaded map may order actions differently from default_map(). Defaults
+    // must follow the selected name, never its index in either action array.
+    let mut reordered = expected.clone(); reordered.actions.reverse();
+    let reordered_file = dir.path().join("reordered.json"); reordered.save_new(&reordered_file).unwrap();
+    let reordered_bytes = fs::read(&reordered_file).unwrap();
+    path(&mut h, &reordered_file); click(&mut h, "Open map (undoable)");
+    assert_eq!(h.state().document(), &reordered);
+    action(&mut h, "right"); assert_combo(&h, "Binding 1", "Key L");
+    let history = (h.state().can_undo(), h.state().can_redo());
+    click(&mut h, "Restore action defaults");
+    assert_combo(&h, "Binding 1", "Key D"); assert_combo(&h, "Binding 2", "Key ArrowRight");
+    assert_eq!(h.state().document(), &reordered);
+    assert_eq!((h.state().can_undo(), h.state().can_redo()), history);
+    assert_eq!(fs::read(&file).unwrap(), before);
+    assert_eq!(fs::read(&reordered_file).unwrap(), reordered_bytes);
+    let draft_save = dir.path().join("pending-defaults.json"); save_widgets(&mut h, &draft_save);
+    assert_eq!(ActionMap::load_file(&draft_save).unwrap(), reordered, "Save ignores the pending restored draft");
+    // Restore itself added no history entry: Undo reaches the preceding Open.
+    click(&mut h, "Undo map edit"); assert_eq!(h.state().document(), &expected);
+    click(&mut h, "Redo map edit"); assert_eq!(h.state().document(), &reordered);
+    assert_combo(&h, "Binding 1", "Key L");
+    click(&mut h, "Restore action defaults"); click(&mut h, "Apply action");
+    assert!(h.state().message().starts_with("Action applied"));
+    let mut restored = reordered.clone();
+    restored.actions.iter_mut().find(|a|a.name=="right").unwrap().bindings = vec![key(Key::D), key(Key::ArrowRight)];
+    assert_eq!(h.state().document(), &restored, "Other actions and their order must remain exact");
+    click(&mut h, "Undo map edit"); assert_eq!(h.state().document(), &reordered);
+    click(&mut h, "Redo map edit"); assert_eq!(h.state().document(), &restored);
+    let restored_file = dir.path().join("restored.json"); save_widgets(&mut h, &restored_file);
+    let mut reopened = harness(); path(&mut reopened, &restored_file); click(&mut reopened, "Open map (undoable)");
+    assert_eq!(reopened.state().document(), &restored);
+    assert_eq!(fs::read(&file).unwrap(), before);
+    assert_eq!(fs::read(&reordered_file).unwrap(), reordered_bytes);
+
+    // Keep the Save-dependent defaults contract in the existing Save/reopen
+    // case, so the separate widget-conflict case can remain memory-only.
+    let mut h = harness();
+    set_action(&mut h, "right", "Key L"); set_action(&mut h, "left", "Key D");
+    let accepted = h.state().document().clone();
+    let dir = tempfile::tempdir().unwrap(); let file = dir.path().join("before-restore.json");
+    save_widgets(&mut h, &file); let bytes = fs::read(&file).unwrap();
+    set_action(&mut h, "quit", "Key Q"); let redo = h.state().document().clone();
+    click(&mut h, "Undo map edit"); assert_eq!(h.state().document(), &accepted); assert!(h.state().can_redo());
+    action(&mut h, "right"); click(&mut h, "Restore action defaults");
+    assert_combo(&h, "Binding 1", "Key D"); assert_combo(&h, "Binding 2", "Key ArrowRight");
+    assert_eq!(h.state().document(), &accepted); assert!(h.state().can_redo());
+    click(&mut h, "Apply action");
+    assert!(h.state().message().contains("duplicate physical binding"));
+    assert_eq!(h.state().document(), &accepted); assert!(h.state().can_redo());
+    assert_eq!(fs::read(&file).unwrap(), bytes);
+    click(&mut h, "Redo map edit"); assert_eq!(h.state().document(), &redo);
+    click(&mut h, "Undo map edit"); assert_eq!(h.state().document(), &accepted);
+    // Pause already has its defaults. Restoring and applying is a true no-op,
+    // preserving both the accepted document and the previously available redo.
+    action(&mut h, "pause"); click(&mut h, "Restore action defaults");
+    assert_combo(&h, "Binding 1", "Key P"); click(&mut h, "Apply action");
+    assert!(h.state().message().starts_with("Action applied"));
+    assert_eq!(h.state().document(), &accepted); assert!(h.state().can_redo());
+    click(&mut h, "Redo map edit"); assert_eq!(h.state().document(), &redo);
+    click(&mut h, "Undo map edit"); click(&mut h, "Undo map edit"); click(&mut h, "Undo map edit");
+    assert_eq!(h.state().document(), &default_map()); assert!(!h.state().can_undo());
+    assert_eq!(fs::read(&file).unwrap(), bytes);
 }
 
 #[test]
 fn widget_conflicts_pending_drafts_and_empty_actions_preserve_contract() {
     let mut h = harness(); let initial = h.state().document().clone();
+    assert!(h.get_by_label("Discard action draft").accesskit_node().is_disabled());
     action(&mut h, "right"); click(&mut h, "Clear action draft"); click(&mut h, "Add binding");
     open_combo(&mut h, "Binding 1"); click(&mut h, "Key A");
     assert_combo(&h, "Action", "right"); assert_combo(&h, "Binding 1", "Key A");
     click(&mut h, "Apply action");
     assert!(h.state().message().contains("duplicate physical binding"));
     assert_eq!(h.state().document(), &initial); assert!(!h.state().can_undo());
+    let history = (h.state().can_undo(), h.state().can_redo());
+    assert!(!h.get_by_label("Discard action draft").accesskit_node().is_disabled());
+    click(&mut h, "Discard action draft");
+    assert_combo(&h, "Action", "right");
+    assert_combo(&h, "Binding 1", "Key D"); assert_combo(&h, "Binding 2", "Key ArrowRight");
+    assert_eq!(h.state().document(), &initial);
+    assert_eq!((h.state().can_undo(), h.state().can_redo()), history);
+    assert!(h.state().message().is_empty());
+    assert!(h.get_by_label("Discard action draft").accesskit_node().is_disabled());
+    // Recreate the original conflicting draft after the independent Discard
+    // check: changing actions must itself discard a failed, pending draft.
+    click(&mut h, "Clear action draft"); click(&mut h, "Add binding");
+    open_combo(&mut h, "Binding 1"); click(&mut h, "Key A");
+    assert_combo(&h, "Action", "right"); assert_combo(&h, "Binding 1", "Key A");
+    click(&mut h, "Apply action");
+    assert!(h.state().message().contains("duplicate physical binding"));
+    assert_eq!(h.state().document(), &initial); assert!(!h.state().can_undo());
     action(&mut h, "left"); action(&mut h, "right");
+    assert_combo(&h, "Binding 1", "Key D"); assert_combo(&h, "Binding 2", "Key ArrowRight");
     click(&mut h, "Apply action"); assert_eq!(h.state().document(), &initial);
     click(&mut h, "Clear action draft"); click(&mut h, "Apply action");
     assert!(h.state().document().actions.iter().find(|a| a.name=="right").unwrap().bindings.is_empty());
     click(&mut h, "Undo map edit"); assert_eq!(h.state().document(), &initial);
+
+    // Restore defaults creates a draft, but Discard must return to the current
+    // accepted custom binding, preserving selection and an exact redo entry.
+    set_action(&mut h, "right", "Key L");
+    let accepted = h.state().document().clone();
+    set_action(&mut h, "quit", "Key Q"); let redo = h.state().document().clone();
+    click(&mut h, "Undo map edit"); assert_eq!(h.state().document(), &accepted); assert!(h.state().can_redo());
+    action(&mut h, "right"); click(&mut h, "Restore action defaults");
+    assert_combo(&h, "Binding 1", "Key D"); assert_combo(&h, "Binding 2", "Key ArrowRight");
+    assert_eq!(h.state().document(), &accepted); assert!(h.state().can_redo());
+    assert!(!h.get_by_label("Discard action draft").accesskit_node().is_disabled());
+    click(&mut h, "Discard action draft");
+    assert_combo(&h, "Action", "right"); assert_combo(&h, "Binding 1", "Key L");
+    assert_eq!(h.state().document(), &accepted); assert!(h.state().can_redo());
+    assert!(h.get_by_label("Discard action draft").accesskit_node().is_disabled());
+    // Applying the discarded draft is a no-op, not a hidden extra edit.
+    click(&mut h, "Apply action");
+    assert_eq!(h.state().document(), &accepted); assert!(h.state().can_redo());
+    click(&mut h, "Clear action draft"); click(&mut h, "Add binding");
+    assert_combo(&h, "Binding 1", "Key Z");
+    click(&mut h, "Discard action draft");
+    assert_combo(&h, "Binding 1", "Key L");
+    assert_eq!(h.state().document(), &accepted); assert!(h.state().can_redo());
+    action(&mut h, "pause"); click(&mut h, "Restore action defaults");
+    assert_combo(&h, "Binding 1", "Key P");
+    assert!(h.get_by_label("Discard action draft").accesskit_node().is_disabled());
+    assert_combo(&h, "Action", "pause");
+    assert_eq!(h.state().document(), &accepted); assert!(h.state().can_redo());
+    click(&mut h, "Redo map edit"); assert_eq!(h.state().document(), &redo);
+    click(&mut h, "Undo map edit"); assert_eq!(h.state().document(), &accepted);
+    click(&mut h, "Undo map edit");
+    assert_eq!(h.state().document(), &default_map()); assert!(!h.state().can_undo());
 }
 
 #[test]
@@ -129,6 +243,46 @@ fn malformed_limits_and_failed_open_leave_document_and_redo_unchanged() {
     for n in 0..50 { let mut c=p.document().clone(); c.actions[0].bindings=vec![key(if n%2==0{Key::I}else{Key::J})]; p.apply_document(c).unwrap(); }
     let mut count=0; while p.undo(){count+=1;} assert_eq!(count,32);
     let mut count=0; while p.redo(){count+=1;} assert_eq!(count,32);
+
+    // Independent CPU widget coverage: this regular input fixture tests Open,
+    // not Save As publication. The original Save/roundtrip assertions above
+    // remain mandatory and separate; this does not replace a failing Save test.
+    let mut reordered = default_map(); reordered.actions.reverse();
+    reordered.actions.iter_mut().find(|a|a.name=="right").unwrap().bindings = vec![key(Key::L)];
+    reordered.actions.iter_mut().find(|a|a.name=="left").unwrap().bindings = vec![key(Key::I)];
+    validate_map(&reordered).unwrap();
+    let fixture = dir.path().join("reordered-input-fixture.json");
+    let mut bytes = Vec::new(); reordered.save(&mut bytes).unwrap(); fs::write(&fixture, &bytes).unwrap();
+    let mut h = harness(); path(&mut h, &fixture); click(&mut h, "Open map (undoable)");
+    assert_eq!(h.state().document(), &reordered);
+    action(&mut h, "right"); click(&mut h, "Restore action defaults");
+    assert_combo(&h, "Binding 1", "Key D"); assert_combo(&h, "Binding 2", "Key ArrowRight");
+    assert_eq!(h.state().document(), &reordered); assert!(!h.state().can_redo());
+    assert_eq!(fs::read(&fixture).unwrap(), bytes);
+    click(&mut h, "Undo map edit"); assert_eq!(h.state().document(), &default_map()); assert!(!h.state().can_undo());
+    click(&mut h, "Redo map edit"); assert_eq!(h.state().document(), &reordered);
+    assert_combo(&h, "Binding 1", "Key L");
+    click(&mut h, "Restore action defaults"); click(&mut h, "Apply action");
+    let mut restored = reordered.clone();
+    restored.actions.iter_mut().find(|a|a.name=="right").unwrap().bindings = vec![key(Key::D), key(Key::ArrowRight)];
+    assert_eq!(h.state().document(), &restored);
+    click(&mut h, "Undo map edit"); assert_eq!(h.state().document(), &reordered);
+    click(&mut h, "Redo map edit"); assert_eq!(h.state().document(), &restored);
+    click(&mut h, "Undo map edit");
+    set_action(&mut h, "left", "Key D");
+    let conflicting = h.state().document().clone();
+    set_action(&mut h, "quit", "Key Q"); let redo = h.state().document().clone();
+    click(&mut h, "Undo map edit"); assert_eq!(h.state().document(), &conflicting); assert!(h.state().can_redo());
+    action(&mut h, "right"); click(&mut h, "Restore action defaults");
+    assert_combo(&h, "Binding 1", "Key D"); assert_combo(&h, "Binding 2", "Key ArrowRight");
+    assert_eq!(h.state().document(), &conflicting); assert!(h.state().can_redo());
+    click(&mut h, "Apply action"); assert!(h.state().message().contains("duplicate physical binding"));
+    assert_eq!(h.state().document(), &conflicting); assert!(h.state().can_redo());
+    action(&mut h, "pause"); click(&mut h, "Restore action defaults");
+    assert_combo(&h, "Binding 1", "Key P"); click(&mut h, "Apply action");
+    assert_eq!(h.state().document(), &conflicting); assert!(h.state().can_redo());
+    click(&mut h, "Redo map edit"); assert_eq!(h.state().document(), &redo);
+    assert_eq!(fs::read(&fixture).unwrap(), bytes);
 }
 
 #[cfg(unix)]

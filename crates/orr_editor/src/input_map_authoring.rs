@@ -46,6 +46,16 @@ impl Panel {
         self.draft = self.document.actions[self.selected].bindings.clone();
     }
 
+    /// Stage only the selected action's defaults; Apply remains the sole commit.
+    fn restore_action_defaults(&mut self) -> Result<(), String> {
+        let name = &self.document.actions.get(self.selected)
+            .ok_or("Select an Arena action before restoring its defaults")?.name;
+        let action = default_map().actions.into_iter().find(|action| &action.name == name)
+            .ok_or("Selected action has no Arena defaults")?;
+        self.draft = action.bindings;
+        Ok(())
+    }
+
     pub fn apply_document(&mut self, candidate: ActionMap) -> Result<(), String> {
         validate_map(&candidate)?;
         // Preserve the actual existing encoded-size contract as well as schema limits.
@@ -133,6 +143,10 @@ impl Panel {
                 self.draft.push(Button::Keyboard { key: Key::Z });
             }
             if ui.button("Clear action draft").clicked() { self.draft.clear(); }
+            if ui.button("Restore action defaults").clicked() {
+                self.message = self.restore_action_defaults().map_or_else(|error| error,
+                    |()| "Default bindings loaded into this action draft. Apply action to confirm.".into());
+            }
             if ui.button("Apply action").clicked() {
                 let mut candidate = self.document.clone();
                 candidate.actions[self.selected].bindings.clone_from(&self.draft);
@@ -142,6 +156,13 @@ impl Panel {
                 };
             }
         });
+        if ui.add_enabled(
+            self.draft != self.document.actions[self.selected].bindings,
+            egui::Button::new("Discard action draft"),
+        ).clicked() {
+            self.reset_draft();
+            self.message.clear();
+        }
         ui.separator();
         ui.label("Path for explicit Open or Save As (existing files are never overwritten)");
         ui.add(egui::TextEdit::singleline(&mut self.path).hint_text("/path/to/new-bindings.json").char_limit(4096));
