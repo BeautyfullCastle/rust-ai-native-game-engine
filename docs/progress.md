@@ -1,17 +1,28 @@
 # Orrery 현재 상태
 
-갱신: 2026-10-23 UTC · [설계 v2](design-v2.md) · [상위 추적 #2](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/2) · [게임 제작 #94](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94)
+갱신: 2026-10-26 UTC · [설계 v2](design-v2.md) · [상위 추적 #2](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/2) · [게임 제작 #94](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94)
 
 ## 지금의 제품 경로
 
-자연어 요구를 받은 에이전트가 작은 게임을 만들고, 직접 실행·수정·재현하여 전달하는 것이 목표다. 현재 경로는 정적 Rust 게임과 CLI/ERP, 에디터, standalone player, bundle이다. 다음 성과는 기능·PR·테스트 개수 증가가 아니라 **사람의 중간 수정 없이 끝난 게임 제작 과제의 비율**로 측정한다. 실제 모델 기반 기준선은 아직 없다.
+지금은 **Stormglass Foundry/Coop Defense를 실제 실행하고 직접 플레이하는 일**이 최우선이다. 조작, 전투, 웨이브 진행, 승리·패배, 재시작을 확인하고 플레이 차단 문제를 수정한 뒤 같은 게임에서 재검증한다. 패키지 및 일반 도구 개선은 실제 플레이의 확인된 차단 문제일 때만 우선한다. 기능 수·PR 수·테스트 통과 수는 게임 플레이 성공이나 엔진 완성도의 대체 증거가 아니다.
+
+자연어 요구에서 게임 제작·실행·수정·재현·전달로 이어지는 정적 Rust 경로는 유지한다. 무개입 제작 성공률은 후속 측정 지표이며 실제 모델 기반 기준선은 아직 없다. 이 지표의 준비로 현재 게임 플레이 확인을 미루지 않는다.
 
 - 결정론 코어: 고정소수점, 순서가 고정된 Game/System, 롤백·리플레이와 시뮬/뷰 분리가 구현되어 있다. Linux 로컬 검증으로 전환하며, 교차 플랫폼 동일성은 이번 실행으로 증명하지 않는다.
 - 제작 경로: `examples/static-game-starter`의 Delivery/Switchboard와 독립 사용자 프로젝트 생성기가 있다. 사용자 소스·자체 lockfile·native 실행·source-hidden 전달은 각각 해당 수용 검사로 판단한다. 생성 성공만으로 게임 전달 완료를 선언하지 않는다.
 - 다중 액션: 선택적 `static-game-actions`와 명시적 `multi-action-preview`가 있다. 기존 기본 프로필을 조용히 새 pin으로 바꾸지 않는다. private fixture는 새 사용자 게임 완료 수로 세지 않는다.
 - 에이전트 평가: `tools/arena_agent_trial.py`의 다섯 목표·실제 host·독립 oracle·중단/재개 기록이 있다. 현재 solver는 mock이며, scripted control이나 mock 통과를 실제 모델 성공률로 환산하지 않는다.
 
-## 통합 상태와 차단점
+## 실제 플레이 상태와 다음 행동
+
+- 기준: PR299 `1c08eca7577b4155f9833708e8b9a1de4bbeee83`의 소스 안내와 새 Windows PC의 기존 작업 산출물을 조사했다. **이 PC의 Stormglass 직접 플레이는 미확인**이다. 로컬 저장소/기존 target에서 `game.wasm`·완성 web dist·`coop_defense.exe`를 확인하지 못했다. `coop_defense_run`은 headless oracle이므로 직접 플레이 증거가 아니다. 다른 게임이나 다른 PC의 성공으로 대체하지 않는다.
+- 기존 Library의 Stormglass 오프라인 HTML 존재는 확인했다. 공식 로컬 가져오기 helper가 Windows의 확장 속성 API 미지원으로 실패하여 정상 가져오기·직접 실행은 미확인이다. helper를 우회하지 않는다. 다음 대안은 [게임 실행 안내](coop-defense.md)의 `orr_coop_defense_web` 전용 web 빌드 또는 `orr_sample/coop-defense`의 `coop_defense` 단일 binary 빌드다. 아직 시작하지 않았으며 전체 workspace 재빌드는 하지 않는다.
+- 실행 경로를 확보한 뒤 실제 화면에서 조작·전투·웨이브·승패·재시작을 관찰한다. 성공/실패/미확인을 나누고, 차단 문제를 고쳤다면 같은 산출물 계보의 게임에서 재검증한다. headless·모의 DOM·테스트 개수는 이 관측을 대신하지 않는다.
+- 동료는 로컬 AI다. 온라인 협동·계정·매칭·진행 저장과 production balance는 미구현/미확인 범위를 유지한다. 원작 전체 재현 완료도 주장하지 않는다. 이번 문서 작업은 게임 실행 성공이나 병합 완료 선언이 아니다.
+
+## 이전 통합 상태와 인계 기록
+
+아래 2026-10-23 기록과 실패 근거는 보존한다. 현재 작업 순서는 위 실제 플레이 경로이며, 이번 단계에서는 main·PR1을 포함한 어떤 브랜치도 병합하지 않는다.
 
 이번 요약의 소스 기준은 [PR #289](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/289)의 `f20097d6aeb2b4a110a7145b58ea07e0c7a0e8e6`, tree `b85846f63f77773624208fd5d93cf18f09d87da7`이다. 이것은 게시된 후보 기준이지 통합 완료 선언이 아니다. 새 Linux-only 후보는 이 계보의 후속 후보이며, 로컬 검증 및 리뷰가 끝나기 전 통과나 병합 완료로 표시하지 않는다.
 
