@@ -161,6 +161,32 @@ pub enum RemoteViewDelivery {
     Legacy,
 }
 
+/// Stamp namespace of an immutable, validated gameplay publication.
+/// Full fenced frames use delivery timeline IDs. Codec records use their
+/// separately negotiated codec reset epochs. Never compare scopes across origins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameEvidenceOrigin {
+    FencedFull,
+    FrameCodec,
+}
+
+/// One immutable snapshot and its stamp, bound under the presentation mailbox
+/// lock. Only the checked remote decoder can construct this value. A retained
+/// value is historical evidence, not proof that its scope is still current.
+#[derive(Clone)]
+pub struct RemoteFrameEvidence {
+    snapshot: Snapshot,
+    stamp: FrameStamp,
+    origin: FrameEvidenceOrigin,
+    identity: Arc<RemoteIdentity>,
+}
+impl RemoteFrameEvidence {
+    pub fn snapshot(&self) -> &Snapshot { &self.snapshot }
+    pub fn stamp(&self) -> FrameStamp { self.stamp }
+    pub fn origin(&self) -> FrameEvidenceOrigin { self.origin }
+    pub fn identity(&self) -> &RemoteIdentity { &self.identity }
+}
+
 /// The ERP identity that a checked [`RemoteBridge`] connection must match.
 ///
 /// Use [`RemoteIdentity::from_discovery`] with an identity and schema that
@@ -371,6 +397,7 @@ pub struct RemoteBridge<G: Game> {
     events: Receiver<BridgeEvent<G::Event>>,
     shared: Arc<Shared<G::Event>>,
     delivery: RemoteViewDelivery,
+    validated_identity: Option<Arc<RemoteIdentity>>,
     tick_rate: u32,
     player_count: u8,
     local: PlayerSlot,
@@ -559,6 +586,7 @@ fn queue_frame_codec_recovery<E>(
 
 struct Info {
     delivery: RemoteViewDelivery,
+    validated_identity: Option<Arc<RemoteIdentity>>,
     tick_rate: u32,
     player_count: u8,
 }
@@ -979,6 +1007,7 @@ impl<G: Game> RemoteBridge<G> {
             events,
             shared,
             delivery: info.delivery,
+            validated_identity: info.validated_identity,
             tick_rate: info.tick_rate,
             player_count: info.player_count,
             local: cfg.local_slot,
@@ -991,6 +1020,19 @@ impl<G: Game> RemoteBridge<G> {
     /// does not establish fenced delivery on old hosts.
     pub fn view_delivery(&self) -> RemoteViewDelivery {
         self.delivery
+    }
+
+    /// Read the current complete gameplay publication as one cut. Recovery,
+    /// disconnect, Edit/preview/Viewer and unnegotiated legacy delivery return
+    /// None even when an old snapshot remains available for display.
+    pub fn frame_evidence(&self) -> Option<RemoteFrameEvidence> {
+        if self.delivery != RemoteViewDelivery::Fenced || !self.shared.alive.load(Ordering::Acquire) {
+            return None;
+        }
+        let identity = self.validated_identity.clone()?;
+        let (snapshot, stamp, origin) = self.shared.view.lock()
+            .unwrap_or_else(|p| p.into_inner()).frame_evidence()?;
+        Some(RemoteFrameEvidence { snapshot, stamp, origin, identity })
     }
 
     /// Sends any ERP request without waiting for the answer (for example
@@ -1581,6 +1623,9 @@ fn run<G: Game>(
                             let players =
                                 res.get("player_count").and_then(J::as_u64).unwrap_or(1) as u8;
                             info = Some(Info {
+                                validated_identity: if identity_validated {
+                                    cfg.expected_identity.clone().map(Arc::new)
+                                } else { None },
                                 tick_rate,
                                 player_count: players,
                                 delivery,
@@ -1601,6 +1646,9 @@ fn run<G: Game>(
                                     let _ = events.send(BridgeEvent::Lifecycle(started));
                                 }
                                 let _ = r.send(Ok(Info {
+                                    validated_identity: if identity_validated {
+                                        cfg.expected_identity.clone().map(Arc::new)
+                                    } else { None },
                                     tick_rate,
                                     player_count: players,
                                     delivery,
@@ -2113,6 +2161,43 @@ fn commit_snapshot(state: &mut StreamState, prepared: PreparedSnapshot) -> Snaps
     prepared.snapshot
 }
 
+fn prepare_gameplay_frame<E>(
+    view: &ViewMailbox<E>,
+    metadata: &J,
+    snapshot: Snapshot,
+    codec_stamp: Option<FrameStamp>,
+) -> Result<crate::remote_view::PreparedFrame, String> {
+    let delivery = metadata.get("delivery").ok_or("missing negotiated frame metadata")?;
+    let record_play = metadata.get("mode").and_then(J::as_str) == Some("play")
+        && snapshot.timeline().is_some_and(|t| t.mode == orr_bridge::PlayMode::Record);
+    if !record_play {
+        return view.prepare_frame(delivery, Some(snapshot));
+    }
+    let (stamp, origin) = if let Some(stamp) = codec_stamp {
+        // Already decoded, checksummed and checked against play_epoch by the
+        // codec path. Its timeline_epoch is codec reset generation, not the
+        // presentation delivery timeline; preserve the exact validated stamp.
+        (stamp, FrameEvidenceOrigin::FrameCodec)
+    } else if let Some(play_epoch) = metadata.get("epoch").and_then(J::as_u64) {
+        // Fenced full/local frame_parts emits numeric epoch = play epoch.
+        // Delivery subscription/timeline identify this source-local namespace.
+        // This does NOT relabel it as a validated frame-codec record stamp.
+        let cut = Stamp::parse(delivery, true)?;
+        (FrameStamp {
+            scope: FrameScope {
+                stream_generation: cut.subscription,
+                play_epoch,
+                timeline_epoch: cut.timeline,
+            },
+            tick: snapshot.tick(),
+            frame_checksum: snapshot.predicted().checksum(),
+        }, FrameEvidenceOrigin::FencedFull)
+    } else {
+        return view.prepare_frame(delivery, Some(snapshot));
+    };
+    view.prepare_evidenced_frame(delivery, snapshot, stamp, origin)
+}
+
 fn on_frame<E>(
     meta: &J,
     frame: Arc<Frame>,
@@ -2126,11 +2211,7 @@ fn on_frame<E>(
     let prepared = prepare_snapshot(meta, frame, tick_rate, st, fenced, None, false)?;
     let mailbox_frame = if fenced {
         Some(
-            view.prepare_frame(
-                meta.get("delivery")
-                    .ok_or("missing negotiated frame metadata")?,
-                Some(prepared.snapshot.clone()),
-            )?,
+            prepare_gameplay_frame(&view, meta, prepared.snapshot.clone(), None)?,
         )
     } else {
         None
@@ -2193,10 +2274,9 @@ fn on_codec_frame<E>(
         is_reset,
     )?;
     let mut view = shared.view.lock().unwrap_or_else(|p| p.into_inner());
-    let delivery = meta
-        .get("delivery")
-        .ok_or("missing negotiated frame metadata")?;
-    let prepared_view = view.prepare_frame(delivery, Some(prepared_snapshot.snapshot.clone()))?;
+    let prepared_view = prepare_gameplay_frame(
+        &view, meta, prepared_snapshot.snapshot.clone(), Some(target),
+    )?;
 
     // Everything that can reject this publication has been preflighted. The
     // decoder, mailbox, stream counters and visible snapshot now commit as one
@@ -2224,6 +2304,109 @@ fn on_codec_frame<E>(
     metrics.latency_sum_us = metrics.latency_sum_us.saturating_add(latency);
     metrics.last_decode_us = sizes.decode_us;
     Ok(())
+}
+
+#[cfg(test)]
+mod frame_evidence_tests {
+    use super::*;
+    use crate::client::ClientError;
+
+    fn publication(mode: &str, timeline_mode: &str) -> (J, Snapshot) {
+        let frame = Arc::new(Frame::new(orr_ecs::ComponentRegistryBuilder::new().build()));
+        let metadata = json!({
+            "mode":mode, "epoch":3, "tick":0,
+            "delivery":{"subscription":"7","timeline":"11","through_cursor":"0","count":"0","loss_generation":"1","lifecycle":[]},
+            "timeline":{"mode":timeline_mode,"tick":0,"verified_tick":0,"first_tick":0,"last_tick":0,
+                "playing":true,"speed_permille":1000,"checksum":crate::wire::checksum_text(frame.checksum()),
+                "keyframes":[],"recent_checksums":[],"pending_edits":0,"branches":0,"epoch":0}
+        });
+        let state = StreamState { last: None, seq: 0, frames: 0 };
+        let snapshot = prepare_snapshot(&metadata, frame, 60, &state, true, None, false).unwrap().snapshot;
+        (metadata, snapshot)
+    }
+
+    fn mailbox() -> ViewMailbox<<orr_testgame::Arena as Game>::Event> {
+        let mut view = ViewMailbox::new(4);
+        view.negotiate(&json!({"subscription":"7","cursor":"0","count":"0"})).unwrap();
+        view
+    }
+
+    #[test]
+    fn gameplay_evidence_preserves_distinct_full_and_codec_scope_provenance() {
+        let (metadata, snapshot) = publication("play", "record");
+        let mut full = mailbox();
+        let prepared = prepare_gameplay_frame(&full, &metadata, snapshot.clone(), None).unwrap();
+        full.commit_frame(prepared);
+        full.poll();
+        let (_, stamp, origin) = full.frame_evidence().unwrap();
+        assert_eq!(stamp.scope, FrameScope { stream_generation:7, play_epoch:3, timeline_epoch:11 });
+        assert_eq!(origin, FrameEvidenceOrigin::FencedFull);
+        let mut codec = mailbox();
+        // The already validated codec target's epoch is a codec reset ID.
+        let target = FrameStamp { scope:FrameScope { timeline_epoch:99, ..stamp.scope }, ..stamp };
+        let prepared = prepare_gameplay_frame(&codec, &metadata, snapshot, Some(target)).unwrap();
+        codec.commit_frame(prepared);
+        codec.poll();
+        let (_, actual, origin) = codec.frame_evidence().unwrap();
+        assert_eq!(actual, target);
+        assert_eq!(origin, FrameEvidenceOrigin::FrameCodec);
+        assert_ne!(origin, FrameEvidenceOrigin::FencedFull);
+    }
+
+    #[test]
+    fn gameplay_evidence_rejects_edit_viewer_and_missing_full_play_epoch() {
+        for (mode, timeline_mode, missing_epoch) in [
+            ("edit", "record", false), ("play", "viewer", false), ("play", "record", true),
+        ] {
+            let (mut metadata, snapshot) = publication(mode, timeline_mode);
+            if missing_epoch { metadata.as_object_mut().unwrap().remove("epoch"); }
+            let mut view = mailbox();
+            let prepared = prepare_gameplay_frame(&view, &metadata, snapshot, None).unwrap();
+            view.commit_frame(prepared);
+            view.poll();
+            assert!(view.frame_evidence().is_none());
+        }
+    }
+
+    struct UnusedSender;
+    impl TxHandle for UnusedSender {
+        fn send(&self, _: Request) -> Result<(), ClientError> {
+            Err(ClientError::Transport("fixture does not send".into()))
+        }
+    }
+
+    #[test]
+    fn gameplay_evidence_requires_checked_identity_fenced_delivery_and_live_connection() {
+        let (metadata, snapshot) = publication("play", "record");
+        let mut view = mailbox();
+        let prepared = prepare_gameplay_frame(&view, &metadata, snapshot, None).unwrap();
+        view.commit_frame(prepared);
+        view.poll();
+        let identity = Arc::new(RemoteIdentity { game:"fixture".into(),build_id:"0x1".into(),schema:json!({}) });
+        let tx: Arc<dyn TxHandle> = Arc::new(UnusedSender);
+        let (_, events) = channel();
+        let shared = Arc::new(Shared {
+            view:Mutex::new(view),snapshot:ArcSwapOption::empty(),alive:AtomicBool::new(true),
+            stop:AtomicBool::new(false),metrics:Mutex::new(RemoteMetrics::default()),
+            errors:ErrorQueue::new(DEFAULT_ERROR_QUEUE_LIMITS),tx:tx.clone(),
+        });
+        let mut remote = RemoteBridge::<orr_testgame::Arena> {
+            tx,next_id:AtomicU64::new(FIRE_ID_BASE),events,shared,delivery:RemoteViewDelivery::Fenced,
+            validated_identity:Some(identity.clone()),tick_rate:60,player_count:1,local:PlayerSlot(0),
+            last_input:Arc::new(Mutex::new(None)),thread:None,
+        };
+        let evidence = remote.frame_evidence().unwrap();
+        assert_eq!(evidence.identity(), identity.as_ref());
+        assert_eq!(evidence.snapshot().tick(), evidence.stamp().tick);
+        remote.delivery = RemoteViewDelivery::Legacy;
+        assert!(remote.frame_evidence().is_none());
+        remote.delivery = RemoteViewDelivery::Fenced;
+        remote.validated_identity = None;
+        assert!(remote.frame_evidence().is_none());
+        remote.validated_identity = Some(identity);
+        remote.shared.alive.store(false, Ordering::Release);
+        assert!(remote.frame_evidence().is_none());
+    }
 }
 
 #[cfg(test)]

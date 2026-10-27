@@ -71,6 +71,36 @@ struct Lease {
     deadline: std::time::Instant,
 }
 
+/// Optional correlation only, never authority to write input or proof of consumption.
+/// Kept closed and bounded so activity can log it without retaining game payloads.
+pub(crate) fn command_correlation<'a>(method: &str, params: &'a J) -> Result<Option<&'a J>, RpcError> {
+    let Some(command) = params.get("command") else { return Ok(None); };
+    let decimal = |value: &J, nonzero: bool| {
+        value.as_str().is_some_and(|text| {
+            !text.is_empty() && text.len() <= 20
+                && text.bytes().all(|byte| byte.is_ascii_digit())
+                && (text == "0" || !text.starts_with('0'))
+                && text.parse::<u64>().is_ok_and(|number| !nonzero || number != 0)
+        })
+    };
+    let managed = method == "sim.input_value"
+        && ["grant", "generation", "sequence"].iter().all(|key| params.get(key).is_some());
+    let valid = command.as_object().is_some_and(|fields| {
+        fields.len() == 4 && ["id", "intent", "scene_epoch", "play_epoch"].iter().all(|key| fields.contains_key(*key))
+            && decimal(&command["id"], true)
+            && decimal(&command["scene_epoch"], false)
+            && decimal(&command["play_epoch"], false)
+            && command["intent"].as_str().is_some_and(|intent| {
+                !intent.is_empty() && intent.len() <= 96
+                    && intent.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b':'))
+            })
+    });
+    if !managed || !valid {
+        return Err(RpcError::params("command correlation requires managed sim.input_value and exactly bounded id/intent/scene_epoch/play_epoch fields"));
+    }
+    Ok(Some(command))
+}
+
 impl ManagedHeld {
     const TTL: std::time::Duration = std::time::Duration::from_secs(2);
 
@@ -143,15 +173,22 @@ impl ManagedHeld {
         params: &J,
     ) -> Option<Result<J, RpcError>> {
         let (connection, now) = caller;
-        self.expire(target, now);
         let ownership = matches!(
             method,
             "sim.input_claim" | "sim.input_renew" | "sim.input_release"
         );
         let input_write = matches!(method, "sim.input" | "sim.input_value");
         if !ownership && !input_write {
+            self.expire(target, now);
             return None;
         }
+        // Malformed correlation never falls through as legacy input, refreshes
+        // a lease, or consumes a transport sequence (including disabled hosts).
+        let correlation = match command_correlation(method, params) {
+            Ok(value) => value,
+            Err(error) => return Some(Err(error)),
+        };
+        self.expire(target, now);
         let tagged = ["grant", "generation", "sequence"]
             .iter()
             .any(|key| params.get(key).is_some());
@@ -270,9 +307,9 @@ impl ManagedHeld {
                 lease.sequence = sequence;
                 lease.deadline = now + Self::TTL;
             }
-            Ok(Some(
-                json!({"ok": true, "player": slot, "grant": grant.to_string(), "generation": generation.to_string(), "sequence": sequence.to_string(), "accepted_head_tick": accepted_head_tick}),
-            ))
+            let mut acknowledgement = json!({"ok": true, "player": slot, "grant": grant.to_string(), "generation": generation.to_string(), "sequence": sequence.to_string(), "accepted_head_tick": accepted_head_tick});
+            if let Some(command) = correlation { acknowledgement["command"] = command.clone(); }
+            Ok(Some(acknowledgement))
         })();
         match result {
             Ok(None) => None,
@@ -407,6 +444,88 @@ mod managed_tests {
         p["generation"] = grant["generation"].clone();
         p["sequence"] = json!(sequence.to_string());
         p
+    }
+
+    fn correlation() -> J {
+        json!({"id":"1","intent":"2game:move_left","scene_epoch":"0","play_epoch":"3"})
+    }
+
+    #[test]
+    fn command_correlation_is_closed_bounded_and_metadata_only() {
+        let tagged = json!({"grant":"1","generation":"2","sequence":"3","command":correlation()});
+        assert_eq!(command_correlation("sim.input_value", &tagged).unwrap(), Some(&tagged["command"]));
+        for (key, invalid) in [
+            ("id", json!("0")), ("id", json!("01")), ("id", json!("+1")),
+            ("id", json!("18446744073709551616")), ("id", json!(1)),
+            ("scene_epoch", json!("-1")), ("play_epoch", json!("00")),
+            ("intent", json!("")), ("intent", json!("x".repeat(97))),
+            ("intent", json!("move\nsecret")), ("intent", json!("move.path")),
+            ("intent", json!("move/secret")), ("intent", json!("이동")),
+        ] {
+            let mut params = tagged.clone();
+            params["command"][key] = invalid;
+            assert!(command_correlation("sim.input_value", &params).is_err(), "{key}: {params}");
+        }
+        let mut params = tagged.clone();
+        params["command"]["token"] = json!("never log me");
+        assert!(command_correlation("sim.input_value", &params).is_err());
+        params["command"] = J::Null;
+        assert!(command_correlation("sim.input_value", &params).is_err());
+        params["command"] = correlation();
+        params["command"]["id"] = json!(u64::MAX.to_string());
+        params["command"]["scene_epoch"] = json!(u64::MAX.to_string());
+        params["command"]["intent"] = json!("x".repeat(96));
+        assert!(command_correlation("sim.input_value", &params).is_ok());
+        params.as_object_mut().unwrap().remove("grant");
+        assert!(command_correlation("sim.input_value", &params).is_err());
+    }
+
+    #[test]
+    fn command_correlation_echo_preserves_lease_authority_and_rejected_state() {
+        let mut r = Rig::new();
+        let grant = r.claim(2, 0);
+        let mut params = tagged(&grant, 1, 1);
+        params["command"] = correlation();
+        let before = r.play.as_ref().unwrap().session().frame().checksum();
+        let deadline = r.held.leases[&0].deadline;
+        r.now += Duration::from_millis(1000);
+        let mut malformed = params.clone();
+        malformed["command"]["receipt"] = json!({"token":"must not survive"});
+        assert!(r.call(2, "sim.input_value", malformed).is_err());
+        assert_eq!(r.held.leases[&0].sequence, 0);
+        assert_eq!(r.held.leases[&0].deadline, deadline);
+        assert_eq!(r.play.as_ref().unwrap().session().frame().checksum(), before);
+        assert!(r.call(3, "sim.input_value", params.clone()).is_err());
+        assert_eq!(r.held.leases[&0].sequence, 0);
+        let ack = r.call(2, "sim.input_value", params.clone()).unwrap();
+        assert_eq!(ack["command"], correlation());
+        assert_eq!(ack["sequence"], "1");
+        assert_eq!(ack["accepted_head_tick"], 0);
+        assert!(ack.get("consumed").is_none());
+        assert!(r.call(2, "sim.input_value", params).is_err());
+        assert_eq!(r.step(), [-294, 300]);
+        r.call(2, "sim.pause", json!({})).unwrap();
+        let mut stale = tagged(&grant, 2, 1);
+        stale["command"] = correlation();
+        assert!(r.call(2, "sim.input_value", stale).is_err());
+    }
+
+    #[test]
+    fn command_correlation_never_falls_through_legacy_or_ownership_paths() {
+        let mut r = Rig::new();
+        let grant = r.claim(1, 0);
+        let mut params = tagged(&grant, 1, 1);
+        params["command"] = correlation();
+        for method in ["sim.input", "sim.input_claim", "sim.input_renew", "sim.input_release"] {
+            assert!(r.call(1, method, params.clone()).is_err());
+            assert_eq!(r.held.leases[&0].sequence, 0);
+        }
+        let mut legacy = value(1, 1);
+        legacy["command"] = correlation();
+        assert!(r.call(1, "sim.input_value", legacy.clone()).is_err());
+        r.held.enabled = false;
+        assert!(r.call(1, "sim.input_value", legacy).is_err());
+        assert!(r.call(1, "sim.input_value", params).is_err());
     }
 
     #[test]

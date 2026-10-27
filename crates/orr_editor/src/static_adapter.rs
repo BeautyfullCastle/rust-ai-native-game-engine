@@ -37,6 +37,9 @@ pub trait StaticFrameStream {
     fn take_errors(&self) -> Vec<RpcError>;
     fn is_alive(&self) -> bool;
     fn view_delivery(&self) -> RemoteViewDelivery;
+    /// Verified atomic frame evidence; legacy streams cannot authorize commands.
+    #[cfg(feature = "static-gameplay")]
+    fn frame_evidence(&self) -> Option<orr_remote::RemoteFrameEvidence> { None }
 }
 
 /// Finite held input. This is not an event queue: `action` remains pressed.

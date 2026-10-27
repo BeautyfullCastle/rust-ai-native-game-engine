@@ -1,6 +1,6 @@
-# Registered gameplay capabilities (contract stage)
+# Registered gameplay capabilities and CPU routing
 
-The default-off `orr_editor/static-gameplay` feature adds application-owned
+The default-off `orr_editor/static-gameplay` feature adds
 presentation and input contracts alongside `static-games`. Existing
 `StaticGameDescriptor`, `StaticGameRegistry`, held/action profiles and spatial
 picking are unchanged. No built-in game enum or per-game editor branch is added.
@@ -20,7 +20,7 @@ Schema factories and the 18 legacy held-value conversions do run. These are
 trusted compiled native callbacks, not sandboxed
 plugins. This adds no runtime discovery, downloaded code or hot reload.
 
-The future shared consumer can use the frozen identity, types, expected input,
+The shared CPU router uses the frozen identity, types, expected input,
 neutral and existing typed host/stream factories. Embedded views receive only
 `Ui`, borrowed read-only `FrameView` and readonly mode/input-ready context, returning at most one bounded
 `IntentRequest`. `create_view` is an explicit later operation, not validation.
@@ -31,7 +31,7 @@ return an empty catalog and no command bound. These getters neither regenerate
 schemas nor call application code. This is metadata discovery only: no ERP
 discovery endpoint or AI tool connection is provided by this stage.
 
-The supplied neutral is schema/range/size checked and frozen exactly. Reflection
+Neutral is schema/range/size checked and frozen. Reflection
 defaults are not proof of the game's semantic default. The existing typed host
 startup must check this same frozen value against `G::Input::default()` before
 publishing a connector. Metadata admission does not establish that equivalence.
@@ -50,29 +50,48 @@ Observation rejects a different scope or ACK tick earlier than preparation and
 waits for a frame strictly newer than the admitted ACK tick before calling the
 game's consumption observer, including the unchanged router-owned player context.
 
-## Authority and remaining work
+## Shared routing and authority
 
-The future command router still must authenticate and validate the actual managed
-input ACK, lease/player ownership, current scene/play lifecycle, monotonic
-correlation sequence, retries, one-pending-command bound, neutral and release.
-The helpers validate sequence bounds, not monotonicity. Calling `observe` with
-caller-supplied ACK metadata is not proof that an RPC ACK happened. A callback's
-Consumed result alone is not cross-session authority.
-It must supply frames from this descriptor's verified typed stream and reject
-view intents in Edit/Paused/Viewer or while input is not ready, even if a trusted
-view callback ignores that context. Arbitrary FrameView/game pairing is not
-validated here and could panic in game-specific reads.
+`editor::input::GameplayRouter::connect_local` pairs connections from one LocalHost.
+It owns its ERP client and typed stream. Human and
+AI library callers use the same bounded intent submission path. It reuses the
+existing managed-input lease/sequence/ACK machinery rather than introducing a
+second input transport. Startup checks the control and stream identity/input
+contracts. Readonly opaque frame evidence pairs a validated snapshot and scope;
+legacy streams without evidence fail closed. Unpaired remote hosts are unsupported.
+Full fenced frames and frame-codec
+records have explicitly distinct scope origins and cannot be exchanged.
 
-The next vertical slice is shared registered routing/viewport use, followed by
+The router separates submission, admission and game-observed consumption, with
+one pending command. A neutral ACK also needs a newer same-scope frame before
+another command can replace it. Lifecycle/focus loss, stale scope and timeout
+invalidate pending work and release control; an admitted action may already have
+run, so cancellation is not rollback. Unknown outcomes are not automatically
+resubmitted. Status retention is bounded; this is not universal exactly-once.
+
+Optional closed `sim.input_value.command` metadata correlates command ID, intent
+and scene/play scope. Existing ERP permissions, lease ownership and typed input
+validation remain authoritative. The ACK echoes validated metadata and existing
+activity summaries record admission only. Payloads, receipts and grants are not
+added to those summaries. A router consumption result links the same command ID;
+it is not a server-wide activity assertion of consumption.
+
+The next vertical slice is shared registered viewport use, followed by
 manifest resolution of already-compiled registered game IDs. Unknown IDs must
 fail closed. No manifest should download or execute arbitrary code.
 
 ## Verification and completion
 
-CPU contract tests cover legacy spatial/held compatibility, embedded admission,
+CPU tests cover legacy spatial/held compatibility, embedded admission,
 identity/schema/name failures, bounded typed intents and encoded values, token
-ownership and receipt scope/tick fencing without starting factories. Existing
-Delivery/Switchboard remain separate regression consumers.
+ownership and receipt scope/tick fencing. Project-side Delivery/Switchboard
+examples reuse their existing game rules and typed host/stream factories.
+
+AI observation reuses ERP queries, history/Undo, bounded activity queries and
+subscriptions, and existing frame/screenshot identities. Screenshot and structured
+state are not yet one atomic observation. Unified network semantic-command
+discovery/results, detailed log filters/privacy and viewport/manifest wiring remain
+separate acceptance work; this stage adds no coordinate-only automation layer.
 
 Contract test success does not establish native UI play or project opening.
 Final acceptance remains two distinct games authored only in project files,

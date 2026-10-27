@@ -15,6 +15,10 @@ pub struct IntentRequest {
     value: J,
 }
 impl IntentRequest {
+    /// The bounded intent identifier; payload validation still happens at admission.
+    pub fn id(&self) -> &str {
+        &self.name
+    }
     pub fn new(name: impl Into<String>, value: J) -> Result<Self, String> {
         let name = name.into();
         if !super::name(&name) {
