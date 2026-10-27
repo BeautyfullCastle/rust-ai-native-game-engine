@@ -25,6 +25,12 @@ pub(crate) mod actions;
 #[cfg(feature = "static-game-actions")]
 pub use actions::StaticActionDescriptor;
 
+#[cfg(feature = "static-gameplay")]
+#[path = "static_gameplay.rs"]
+mod gameplay;
+#[cfg(feature = "static-gameplay")]
+pub use gameplay::*;
+
 /// Owned snapshots only. A borrowed frame must never be retained by an adapter.
 pub trait StaticFrameStream {
     fn poll_view(&mut self) -> ViewUpdate<()>;
