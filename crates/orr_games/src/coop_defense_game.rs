@@ -107,10 +107,13 @@ pub const MAX_UPGRADE: u32 = 8;
 pub const MAX_INVESTMENT: u32 = 5;
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable, orr_reflect::Reflect)]
 pub struct DefenseInput {
+    #[reflect(range = "0..=5")]
     pub action: u32,
+    #[reflect(range = "0..=11")]
     pub source_cell: u32,
+    #[reflect(range = "0..=11")]
     pub target_cell: u32,
     /// Nonzero increasing action ID. Held/predicted samples cannot spend twice.
     pub sequence: u32,
