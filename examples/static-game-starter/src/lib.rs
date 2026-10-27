@@ -1,5 +1,6 @@
 //! Two application-owned games sharing the public static registration route.
 pub mod delivery;
+pub mod editor_args;
 pub mod game_contract;
 #[cfg(feature = "gameplay")]
 pub mod gameplay;

@@ -86,9 +86,15 @@ separate GPU capture evidence from human window QA.
 ## Remaining boundary
 
 Startup selection is currently an SDK/CLI API. The existing `HostSpec` listener
-configuration can expose ERP with the existing authentication model; the starter
-binary does not yet accept listener flags. In-process API acceptance does not
-prove an external WebSocket deployment. There is no running cross-game
+configuration exposes ERP with the existing authentication model. With the
+`gameplay` feature, the starter accepts `editor --project <manifest> --erp
+127.0.0.1:7777 --erp-token <existing-name:token:caps>` (repeat the token flag
+for multiple existing identities). Listener startup is opt-in, numeric loopback
+addresses only, and requires explicit tokens; there is no unauthenticated
+listener flag. Without these options the listener stays disabled. Token values
+are not echoed in parser diagnostics; command-line values may still be visible
+to local process inspection. Legacy positional games do not accept a listener.
+Parser tests do not prove a live WebSocket deployment. There is no running cross-game
 `project.open` RPC: a host is typed to one game, and `scene.load` cannot replace
 that type. Such a switch needs an explicit host/client handoff, invalidation of
 old bindings and capture requests, and a documented failure transaction. This
