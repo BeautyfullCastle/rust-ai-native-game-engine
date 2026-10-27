@@ -1011,8 +1011,13 @@ impl EditorApp {
         } else { false };
         #[cfg(not(all(feature = "collect-ui", feature = "collect-input-map-editor")))]
         let mapped_release = false;
-        if keyboard_focus_lost || self.ui.dialog.is_some() || self.editor.previewing().is_some()
-            || ctx.input(|input| !input.focused || (!mapped_collect && input.key_pressed(Key::Escape))) || mapped_release {
+        if self.ui.dialog.is_some() || self.editor.previewing().is_some()
+            || ctx.input(|input| !mapped_collect && input.key_pressed(Key::Escape)) || mapped_release {
+            self.editor.release_control();
+        } else if keyboard_focus_lost || ctx.input(|input| !input.focused) {
+            #[cfg(feature = "static-gameplay")]
+            self.editor.release_for_ui_focus_loss();
+            #[cfg(not(feature = "static-gameplay"))]
             self.editor.release_control();
         }
         // The host simulates and edits on its own; this takes in what it says (never waits for it).
@@ -2440,10 +2445,10 @@ impl EditorApp {
         #[cfg(feature = "static-gameplay")]
         if self.editor.game().is_gameplay() {
             let panel_rect = ui.available_rect_before_wrap();
-            let blocked = self.ui.dialog.is_some() || self.editor.previewing().is_some()
-                || ui.input(|input| !input.focused);
+            let force_blocked = self.ui.dialog.is_some() || self.editor.previewing().is_some();
+            let blocked = force_blocked || ui.input(|input| !input.focused);
             let embedded = self.registered_gameplay_view.show(ui, &mut self.editor,
-                &mut self.ui.take_control, self.ui.input_player, blocked);
+                &mut self.ui.take_control, self.ui.input_player, blocked, force_blocked);
             if !embedded { self.legacy_viewport(ui); }
             // Include capability controls in pointer ownership; their clicks must
             // not look like a click outside the game on the following frame.

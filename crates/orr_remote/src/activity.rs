@@ -212,6 +212,7 @@ pub(crate) fn classify(method: &str, params: &J) -> (ActivityKind, bool) {
         "scene.save" if params.get("write").and_then(J::as_bool) == Some(true) => ActivityKind::Edit,
         "proposal.begin" | "proposal.apply" | "proposal.accept" | "proposal.accept_verified" | "proposal.reject" => ActivityKind::Proposal,
         "proposal.verify" | "verify.self" => ActivityKind::Verify,
+        "editor.gameplay.control"|"editor.gameplay.submit"|"editor.gameplay.cancel"=>ActivityKind::Sim,
         "sim.state" | "sim.checksum" => ActivityKind::Read,
         m if m.starts_with("sim.") => ActivityKind::Sim,
         _ => ActivityKind::Read,
@@ -510,6 +511,7 @@ pub(crate) fn summarize(method: &str, params: &J, res: Option<&J>, verify: Optio
                 None => method.to_string(),
             }
         },
+        "editor.gameplay.control"|"editor.gameplay.submit"|"editor.gameplay.cancel"=>format!("{} request={} intent={} action={} command={} result={}",method,sv(params,"request_key"),sv(params,"intent"),sv(params,"action"),res.map(|value|sv(value,"command_id")).unwrap_or_default(),res.map(|value|sv(value,"status")).unwrap_or_default()),
         "history.undo" | "history.redo" => method.to_string(),
         "scene.load" => match arg("entities").and_then(J::as_u64) {
             Some(n) => format!("scene.load ({})", plural(n, "entity", "entities")),

@@ -139,6 +139,7 @@ impl State {
         take_control: &mut bool,
         player: u8,
         blocked: bool,
+        force_blocked: bool,
     ) -> bool {
         let Some(game) = editor.game().gameplay() else {
             if let Some(view) = &mut self.view {
@@ -172,8 +173,10 @@ impl State {
             .as_ref()
             .zip(evidence.as_ref())
             .is_some_and(|(previous, current)| !previous.same_source(current));
-        if blocked {
+        if force_blocked {
             editor.gameplay_focus_lost();
+        } else if blocked {
+            editor.release_for_ui_focus_loss();
         }
         let control = editor.input_phase();
         self.observe_cut(

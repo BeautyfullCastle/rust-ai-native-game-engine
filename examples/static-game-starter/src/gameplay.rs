@@ -224,6 +224,13 @@ pub fn registry() -> &'static GameplayContracts {
     })
 }
 
+#[cfg(all(test, feature = "api-acceptance"))]
+#[path = "gameplay_cpu_api_acceptance.rs"]
+mod cpu_api_acceptance;
+#[cfg(all(test, feature = "api-acceptance"))]
+#[path = "gameplay_api_acceptance.rs"]
+mod gpu_api_acceptance;
+
 #[cfg(test)]
 mod tests {
     use super::*;

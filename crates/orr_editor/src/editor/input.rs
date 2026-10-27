@@ -786,16 +786,18 @@ impl Editor {
     pub fn open_registered_project(project:crate::registered_project::PreparedRegisteredProject)->Result<Self,String>{Self::start(&project.host_spec())}
     pub fn open_gameplay(path:&Path,game:crate::static_adapter::RegisteredGameplay)->Result<Self,String> {if !game.has_commands(){return Err("command_capability_required".into());}Self::open_game(path,EditorGame::Gameplay(game))}
     pub fn gameplay_frame_evidence(&self)->Option<&orr_remote::RemoteFrameEvidence>{self.gameplay.as_ref().and_then(|core|core.frame.as_ref())}
-    pub fn can_submit_gameplay(&self)->bool {self.gameplay.as_ref().is_some_and(|core|self.down.is_none()&&core.can_submit(&self.input))}
+    pub fn can_submit_gameplay(&self)->bool {self.gameplay.as_ref().is_some_and(|core|self.down.is_none()&&self.preview.is_none()&&core.can_submit(&self.input))}
     pub fn gameplay_command_status(&self,id:CommandId)->Option<&CommandStatus>{self.gameplay.as_ref().and_then(|core|core.status(id))}
     pub fn gameplay_cleanup_notice(&self)->Option<&'static str>{self.gameplay_cleanup_notice}
     pub fn gameplay_error(&self)->Option<&str>{self.gameplay.as_ref().and_then(|core|core.error.as_deref())}
     pub fn claim_gameplay(&mut self,player:u8)->Result<(),String>{
         if self.down.is_some(){return Err("control_disconnected".into());}
+        if self.preview.is_some(){return Err("preview_active".into());}
         self.gameplay.as_mut().ok_or("command_capability_unavailable")?.claim(&mut self.input,player)?;self.pump_input();Ok(())
     }
     pub fn submit_gameplay_intent(&mut self,request:crate::static_adapter::IntentRequest)->Result<CommandId,String>{
         if self.down.is_some(){return Err("control_disconnected".into());}
+        if self.preview.is_some(){return Err("preview_active".into());}
         let id=self.gameplay.as_mut().ok_or("command_capability_unavailable")?.submit(&mut self.input,request)?;self.pump_input();Ok(id)
     }
     pub fn release_gameplay(&mut self){self.release_control();}

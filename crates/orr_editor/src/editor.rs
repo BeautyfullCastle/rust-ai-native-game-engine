@@ -132,6 +132,8 @@ pub struct Inspect {
 
 /// What the answer to a request that was sent without waiting is for.
 pub mod input;
+#[cfg(feature = "static-gameplay")]
+mod erp_gameplay;
 
 enum Pend {
     Input(u64, input::Op),
@@ -217,6 +219,8 @@ pub struct Editor {
     gameplay_lifecycle: Option<input::GameplayLifecycle>,
     #[cfg(feature="static-gameplay")]
     gameplay_cleanup_notice: Option<&'static str>,
+    #[cfg(feature = "static-gameplay")]
+    erp_gameplay: erp_gameplay::State,
     types: Arc<TypeRegistry>,
     down: Option<Down>,
     selection: Option<Target>,
@@ -387,6 +391,7 @@ impl Editor {
             #[cfg(feature="static-gameplay")] gameplay_state:J::Null,
             #[cfg(feature="static-gameplay")] gameplay_lifecycle:None,
             #[cfg(feature="static-gameplay")] gameplay_cleanup_notice:None,
+            #[cfg(feature="static-gameplay")] erp_gameplay:erp_gameplay::State::default(),
             backend,
             types,
             down: None,
@@ -1460,6 +1465,8 @@ impl Editor {
     pub fn pump(&mut self) {
         let started = Instant::now();
         self.pump_inner();
+        #[cfg(feature = "static-gameplay")]
+        self.pump_erp_gameplay();
         self.telemetry.pump.record(started.elapsed());
     }
 

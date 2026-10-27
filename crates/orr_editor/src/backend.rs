@@ -188,6 +188,8 @@ pub struct Backend {
     pub(crate) screenshot_owner: Option<ScreenshotOwner>,
     /// Sole publisher of this host-paired main editor observation. Never cloned.
     pub(crate) work_status_owner: Option<orr_remote::work_status::WorkStatusOwner>,
+    #[cfg(feature = "static-gameplay")]
+    pub(crate) editor_gameplay_owner: Option<orr_remote::editor_gameplay::EditorGameplayOwner>,
 }
 
 /// `ws://host:port` plus the path and query a dev-mode host needs to know
@@ -260,7 +262,8 @@ impl Backend {
                 rc.view_delivery = delivery(game, false);
                 rc.expected_identity = Some(identity.clone());
                 let bridge = EditorStream::connect(game, rc).map_err(|e| format!("frame stream of {url}: {e}"))?;
-                Ok(Backend { spec: spec.clone(), erp, bridge, host: None, own_client, url: Some(url.clone()), game, identity, managed_input, screenshot_owner: None, work_status_owner: None })
+                Ok(Backend { spec: spec.clone(), erp, bridge, host: None, own_client, url: Some(url.clone()), game, identity, managed_input, screenshot_owner: None, work_status_owner: None,
+                    #[cfg(feature = "static-gameplay")] editor_gameplay_owner: None })
             }
         }
     }
@@ -291,6 +294,11 @@ impl Backend {
         cfg.limits.max_step_per_call = 20_000;
         let (screenshot_service, screenshot_owner) = ScreenshotService::pair();
         cfg.screenshot = Some(screenshot_service);
+        #[cfg(feature = "static-gameplay")]
+        let (editor_gameplay_service, editor_gameplay_owner) = if selected_game.is_gameplay() {
+            let (service, owner) = orr_remote::editor_gameplay::EditorGameplayService::pair();
+            (Some(service), Some(owner))
+        } else { (None, None) };
         let mut work_status_owner = None;
         let mut status_service = || {
             let (service, owner) = orr_remote::work_status::WorkStatusService::pair();
@@ -339,6 +347,8 @@ impl Backend {
             #[cfg(feature = "mesh-hazards")]
             EditorGame::MeshHazardsV1 => orr_remote::mesh_navigation::hazards::spawn_mesh_hazards_scene_host(scene.to_path_buf(), cfg)?,
         };
+        #[cfg(feature = "static-gameplay")]
+        if let Some(service) = editor_gameplay_service { host.install_editor_gameplay(service)?; }
         let connector = host.connector();
         let link = |what: &str| connector.connect(USER_CLIENT, Caps::ALL).map_err(|e| format!("{what}: {e}"));
         let mut erp = ErpClient::with_transport(Box::new(link("ERP")?));
@@ -353,7 +363,8 @@ impl Backend {
         rc.expected_identity = Some(identity.clone());
         let bridge = EditorStream::connect_transport(game, Box::new(link("frames")?), rc)?;
         let url = host.url().map(str::to_string);
-        Ok(Backend { spec: spec.clone(), erp, bridge, host: Some(host), own_client, url, game, identity, managed_input, screenshot_owner: Some(screenshot_owner), work_status_owner })
+        Ok(Backend { spec: spec.clone(), erp, bridge, host: Some(host), own_client, url, game, identity, managed_input, screenshot_owner: Some(screenshot_owner), work_status_owner,
+            #[cfg(feature = "static-gameplay")] editor_gameplay_owner })
     }
 
     /// Another frame stream, for what the viewport previews (`proposal:p3`).
@@ -397,12 +408,46 @@ impl Backend {
         Ok(c)
     }
 
+    /// Explicit opt-in local SDK connection. This never upgrades an existing
+    /// client, grants proposal approval, impersonates the human, or opens a socket.
+    #[cfg(feature = "static-gameplay")]
+    pub fn gameplay_api_client(&self, name: &str, caps: Caps) -> Result<ErpClient, String> {
+        if self.editor_gameplay_owner.is_none() { return Err("gameplay_api_unavailable".into()); }
+        if !sdk_client_allowed(name, caps) { return Err("gameplay_api_client_denied".into()); }
+        let host = self.host.as_ref().ok_or("gameplay_api_requires_local_owner")?;
+        let transport = host.connector().connect(name, caps).map_err(|_| "gameplay_api_connect_failed")?;
+        let mut client = ErpClient::with_transport(Box::new(transport));
+        client.call_timeout = CALL_TIMEOUT;
+        Ok(client)
+    }
+
     /// Subscribes to the notifications the editor shows.
     pub fn subscribe(&mut self) -> Result<(), String> {
         self.erp
             .call("watch.subscribe", json!({"topics": ["tick", "history", "proposals", "activity"], "include_reads": true}))
             .map(|_| ())
             .map_err(|e| format!("watch.subscribe: {e}"))
+    }
+}
+
+#[cfg(feature = "static-gameplay")]
+fn sdk_client_allowed(name: &str, caps: Caps) -> bool {
+    !name.is_empty() && name.len() <= 64 && name != USER_CLIENT
+        && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+        && caps.has(orr_remote::Cap::Read) && !caps.has(orr_remote::Cap::Approve)
+}
+
+#[cfg(all(test, feature = "static-gameplay"))]
+mod gameplay_sdk_caps_tests {
+    use super::*;
+    #[test]
+    fn explicit_sdk_caps_allow_readonly_and_refuse_human_impersonation_or_approval() {
+        assert!(sdk_client_allowed("qa-reader", Caps::of(&[orr_remote::Cap::Read])));
+        assert!(sdk_client_allowed("qa-driver", Caps::parse("read,scene_edit,sim_control").unwrap()));
+        assert!(!sdk_client_allowed(USER_CLIENT, Caps::of(&[orr_remote::Cap::Read])));
+        assert!(!sdk_client_allowed("qa-driver", Caps::ALL));
+        assert!(!sdk_client_allowed("qa-driver", Caps::of(&[orr_remote::Cap::SimControl])));
+        assert!(!sdk_client_allowed("", Caps::of(&[orr_remote::Cap::Read])));
     }
 }
 
