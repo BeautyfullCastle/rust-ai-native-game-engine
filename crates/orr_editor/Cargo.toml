@@ -15,6 +15,8 @@ workspace = true
 [features]
 # Explicit statically linked game adapters; no plugin discovery or code loading.
 static-games = []
+# Additive validated gameplay capabilities; no runtime loading or editor wiring.
+static-gameplay = ["static-games"]
 # Additive bounded custom-game controls; legacy static-games stays unchanged.
 static-game-actions = ["static-games", "dep:orr_input"]
 arena-project-export = ["sprites", "orr_sample/project-export", "dep:sha2"]
