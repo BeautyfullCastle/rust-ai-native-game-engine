@@ -85,6 +85,16 @@ separate GPU capture evidence from human window QA.
 
 ## Remaining boundary
 
+The optional starter `stormglass` feature registers the existing `DefenseGame`
+without adding an engine game enum or another simulation. Launch it with
+`cargo run -p orr_static_starter --features stormglass --bin editor -- --project
+examples/static-game-starter/scenes/stormglass.project.json`. Delivery and
+Switchboard remain registered. The project admits only Stormglass's empty
+initial preset, not authored waves or arbitrary scene entities. Its readonly
+presenter emits the typed `act` intent (action 1–5, source/target cell 0–11).
+Consumption tracks the accepted input sequence; it does not promise a successful
+purchase or merge. Sequence exhaustion fails closed rather than wrapping.
+
 Startup selection is currently an SDK/CLI API. The existing `HostSpec` listener
 configuration exposes ERP with the existing authentication model. With the
 `gameplay` feature, the starter accepts `editor --project <manifest> --erp
@@ -100,3 +110,12 @@ that type. Such a switch needs an explicit host/client handoff, invalidation of
 old bindings and capture requests, and a documented failure transaction. This
 stage does not claim runtime discovery, hot reload, arbitrary plugin execution,
 an atomic query/image bundle, or complete platform/CI coverage.
+
+The starter's `gameplay::ws_acceptance` test exercises real loopback WebSockets
+with temporary test-only reader/controller tokens, permission rejection, both
+registered games' commands, consumption/neutral completion, and Stop/source
+preservation. `stormglass::tests` separately opens the shipped Stormglass
+manifest through the real Editor, summons a unit and preserves source on Stop.
+These are headless CPU/API tests, not rendered-window, remote-machine, bad-token,
+reconnect, or full-workspace certification. The WebSocket fixture uses bounded
+response polling; blocking connection setup has no global fixture deadline.

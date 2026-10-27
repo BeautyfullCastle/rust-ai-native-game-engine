@@ -4,9 +4,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let editor = if args.source == "--project" {
         #[cfg(feature = "gameplay")]
         {
+            #[cfg(feature = "stormglass")]
+            let registry = orr_static_starter::stormglass::registry();
+            #[cfg(not(feature = "stormglass"))]
+            let registry = orr_static_starter::gameplay::registry();
             let prepared = orr_editor::registered_project::PreparedRegisteredProject::open(
                 &args.path,
-                orr_static_starter::gameplay::registry(),
+                registry,
             )?;
             let spec = prepared.host_spec();
             let spec = match args.listener {

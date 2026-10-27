@@ -227,11 +227,16 @@ pub fn registry() -> &'static GameplayContracts {
 #[cfg(all(test, feature = "api-acceptance"))]
 #[path = "gameplay_cpu_api_acceptance.rs"]
 mod cpu_api_acceptance;
+#[cfg(test)]
+#[path = "gameplay_ws_acceptance.rs"]
+#[allow(clippy::disallowed_types, reason = "Wall-clock deadlines bound host transport tests, not simulation")]
+mod ws_acceptance;
 #[cfg(all(test, feature = "api-acceptance"))]
 #[path = "gameplay_api_acceptance.rs"]
 mod gpu_api_acceptance;
 
 #[cfg(test)]
+#[allow(clippy::disallowed_types, reason = "Wall-clock deadlines bound host lifecycle tests, not simulation")]
 mod tests {
     use super::*;
     use orr_editor::editor::input::{CommandStatus, GameplayRouter};
