@@ -1,0 +1,7 @@
+{
+  "schema": "orr.registered-project/1",
+  "game": "StarterSwitchboard",
+  "build_id": "0x5354415254455202",
+  "scene": "switchboard.scene.yaml",
+  "input": "commands"
+}

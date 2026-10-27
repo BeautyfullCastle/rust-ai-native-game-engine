@@ -209,6 +209,14 @@ struct MeshCamera {
 pub struct Editor {
     backend: Backend,
     input: input::Input,
+    #[cfg(feature="static-gameplay")]
+    gameplay: Option<input::GameplayCommandState>,
+    #[cfg(feature="static-gameplay")]
+    gameplay_state: J,
+    #[cfg(feature="static-gameplay")]
+    gameplay_lifecycle: Option<input::GameplayLifecycle>,
+    #[cfg(feature="static-gameplay")]
+    gameplay_cleanup_notice: Option<&'static str>,
     types: Arc<TypeRegistry>,
     down: Option<Down>,
     selection: Option<Target>,
@@ -249,7 +257,7 @@ pub struct Editor {
     navigation_blocker: Option<String>,
     #[cfg(feature = "mesh-navigation")]
     mesh_navigation_blocker: Option<String>,
-    #[cfg(any(feature = "static-game-actions", feature = "arena-project-export", feature = "terrain", feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
+    #[cfg(any(feature = "static-gameplay", feature = "static-game-actions", feature = "arena-project-export", feature = "terrain", feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
     scene_load_epoch: u64,
     #[cfg(feature = "tilemap")]
     tilemap_start_scene: Option<(crate::project::PreparedArenaScene, u64)>,
@@ -301,7 +309,7 @@ pub struct Editor {
     script_owner: BTreeMap<String, String>,
 }
 
-#[cfg(any(feature = "static-game-actions", feature = "arena-project-export", feature = "terrain", feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
+#[cfg(any(feature = "static-gameplay", feature = "static-game-actions", feature = "arena-project-export", feature = "terrain", feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
 fn next_scene_load_epoch() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -371,8 +379,14 @@ impl Editor {
         input.room_escape = backend.game.is_room();
         #[cfg(feature = "mesh-navigation")]
         { input.mesh_navigation = backend.game.has_mesh_view(); }
+        #[cfg(feature="static-gameplay")]
+        let gameplay=backend.game.gameplay().filter(|handle|handle.validated().command_max_sequence().is_some()).map(|handle|input::GameplayCommandState::new(handle.validated().clone(),J::Null,&mut input));
         let mut e = Self {
             input,
+            #[cfg(feature="static-gameplay")] gameplay,
+            #[cfg(feature="static-gameplay")] gameplay_state:J::Null,
+            #[cfg(feature="static-gameplay")] gameplay_lifecycle:None,
+            #[cfg(feature="static-gameplay")] gameplay_cleanup_notice:None,
             backend,
             types,
             down: None,
@@ -403,7 +417,7 @@ impl Editor {
             navigation_blocker: None,
             #[cfg(feature = "mesh-navigation")]
             mesh_navigation_blocker: None,
-            #[cfg(any(feature = "static-game-actions", feature = "arena-project-export", feature = "terrain", feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
+            #[cfg(any(feature = "static-gameplay", feature = "static-game-actions", feature = "arena-project-export", feature = "terrain", feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
             scene_load_epoch: next_scene_load_epoch(),
             #[cfg(feature = "tilemap")]
             tilemap_start_scene: None,
@@ -534,7 +548,7 @@ impl Editor {
 
     /// Field moved by the viewport, only when selected entity has it.
     pub fn movement_owner(&self) -> Option<Owner> {
-        let component = self.game().position_component();
+        let component = self.game().spatial_position()?.component;
         let row = self.selection.as_ref().and_then(|t| self.row_of(t))?;
         row.components.iter().any(|c| c == component).then(|| Owner::Component(component.to_string()))
     }
@@ -849,7 +863,7 @@ impl Editor {
 
     /// Read-only enablement; the host repeats all admission checks.
     pub fn can_nudge_selection(&self) -> bool {
-        !self.game().is_3d() && self.can_mutate() && self.mode() == Mode::Edit && self.preview.is_none()
+        self.game().spatial_position().is_some() && !self.game().is_3d() && self.can_mutate() && self.mode() == Mode::Edit && self.preview.is_none()
             && self.batch_supported && self.scene_edit_allowed && !self.batch_uncertain
             && !self.history.in_tx && !self.sim.in_tx && !self.gesture.busy()
             && !self.guid_selection.guids().is_empty()
@@ -991,7 +1005,7 @@ impl Editor {
     /// Frames the camera on the scene box (`Scene` singleton), like the sample does.
     pub fn fit_camera(&mut self) {
         #[cfg(feature = "static-games")]
-        if self.game().is_registered() {
+        if self.game().is_registered() || self.game().is_gameplay() {
             // Static primitive games have no builtin Scene singleton or world size.
             let mut low = [f32::INFINITY; 2];
             let mut high = [f32::NEG_INFINITY; 2];
@@ -1108,10 +1122,16 @@ impl Editor {
             return Err("an edit is still pending; wait for it to finish or cancel the drag".into());
         }
         if method.starts_with("sim.") && method != "sim.state" { self.state_generation += 1; }
+        #[cfg(feature="static-gameplay")]
+        if matches!(method,"scene.load"|"sim.seek"|"sim.branch"|"sim.stop") {
+            if let Some(core)=&mut self.gameplay {core.begin_lifecycle(&mut self.input,matches!(method,"scene.load"|"sim.stop"));}
+        }
         let r = self.timed_erp_call(method, params);
         self.ingest();
         match r {
             Ok(v) => {
+                #[cfg(feature="static-gameplay")]
+                if matches!(method,"scene.load"|"sim.stop") {if let Some(core)=&mut self.gameplay {if core.after_stop().is_err(){core.fail(&mut self.input,"scene_epoch_exhausted");}}}
                 // Same-tick lifecycle controls can retain the host epoch. Keep
                 // playback history separate from the authoring source fence.
                 #[cfg(feature = "room-character")]
@@ -1236,6 +1256,8 @@ impl Editor {
     fn on_answer(&mut self, kind: Pend, r: Result<J, orr_remote::RpcError>) {
         match kind {
             Pend::Input(intent, op) => {
+                #[cfg(feature="static-gameplay")]
+                if let Some(core)=&mut self.gameplay {core.answer(&mut self.input,intent,op,r,Instant::now());return;}
                 if let Some(message) = self.input.answer(intent, op, r, Instant::now()) { self.error(message); }
             }
             Pend::Gesture(id, reply) => self.gesture_answer(id, reply, r),
@@ -1314,6 +1336,7 @@ impl Editor {
     }
 
     fn apply_state(&mut self, v: &J) {
+        #[cfg(feature="static-gameplay")] {self.gameplay_state=v.clone(); if let Some(core)=&mut self.gameplay {core.apply_state(&mut self.input,v.clone());}}
         let was = self.sim.mode;
         let next=SimState::from_json(v);
         if self.sim.scene_path != next.scene_path { self.clear_room_camera(); }
@@ -1406,6 +1429,7 @@ impl Editor {
     }
 
     fn connection_lost(&mut self, err: &str) {
+        #[cfg(feature="static-gameplay")] {self.gameplay_lifecycle=None;if let Some(core)=&mut self.gameplay {core.fail(&mut self.input,"control_disconnected");}}
         if self.down.is_some() {
             return;
         }
@@ -1460,8 +1484,9 @@ impl Editor {
         }
         self.ingest();
         self.check_gesture_timeout();
-        self.pump_input();
         self.refresh_view();
+        self.pump_input();
+        #[cfg(feature="static-gameplay")] self.pump_gameplay_lifecycle();
         if self.down.is_some() {
             return;
         }
@@ -1955,12 +1980,12 @@ impl Editor {
         };
         match self.call("scene.load", if self.game().has_pinned_scene() { json!({"text": text}) } else { json!({"text": text, "path": path.display().to_string()}) }) {
             Ok(r) => {
-                #[cfg(any(feature = "static-game-actions", feature = "arena-project-export", feature = "terrain", feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
+                #[cfg(any(feature = "static-gameplay", feature = "static-game-actions", feature = "arena-project-export", feature = "terrain", feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
                 { self.scene_load_epoch = next_scene_load_epoch(); }
                 self.clear_room_camera();
                 self.select(None);
                 self.refit = true;
-                if self.game() == EditorGame::Arena || self.game().has_mesh_view() || self.game().is_registered() {
+                if self.game() == EditorGame::Arena || self.game().has_mesh_view() || self.game().is_registered() || self.game().is_gameplay() {
                     self.refit_checksum = r.get("checksum").and_then(orr_remote::wire::parse_checksum);
                 }
                 self.backend.spec.set_local_scene_path(path.to_path_buf());
@@ -2053,10 +2078,11 @@ impl Editor {
             self.error("host supplied no document checksum"); return false;
         };
         let guids = self.guid_selection.guids().to_vec();
-        let component = self.game().position_component();
+        let Some(position)=self.game().spatial_position() else {self.error("This presentation has no spatial position");return false;};
+        let component = position.component;
         let mut patches = Vec::with_capacity(guids.len());
         for guid in &guids {
-            let position = match self.field_of(&Target::Guid(guid.clone()), component, self.game().position_field()) {
+            let position = match self.field_of(&Target::Guid(guid.clone()), component, position.field) {
                 Ok(Value::Vec2(position)) => position,
                 Ok(_) => { self.error("selected position is not a two-dimensional fixed-point value"); return false; }
                 Err(error) => { self.error(error); return false; }
@@ -2067,7 +2093,7 @@ impl Editor {
             patches.push(json!({"guid":guid.to_string(), "value":value_to_json(&Value::Vec2(FPVec2::new(FP::from_raw(x), FP::from_raw(y))))}));
         }
         let params = json!({"label":"move selected entities", "expected_checksum":format!("0x{expected_checksum:016x}"),
-            "component":component, "path":self.game().position_field(), "patches":patches});
+            "component":component, "path":position.field, "patches":patches});
         if match serde_json::to_vec(&params) { Ok(bytes) => bytes.len() > 64 * 1024, Err(_) => true } {
             self.error("selection move exceeds the 64 KiB request limit"); return false;
         }
@@ -2220,7 +2246,7 @@ impl Editor {
         #[cfg(feature = "tilemap")]
         let changed_source = method == "scene.load" || (method == "scene.save" && params.get("write").and_then(J::as_bool) == Some(true));
         let result = self.call(method, params);
-        #[cfg(any(feature = "static-game-actions", feature = "arena-project-export", feature = "terrain", feature = "tilemap"))]
+        #[cfg(any(feature = "static-gameplay", feature = "static-game-actions", feature = "arena-project-export", feature = "terrain", feature = "tilemap"))]
         if method == "scene.load" && result.is_ok() { self.scene_load_epoch = next_scene_load_epoch(); }
         #[cfg(feature = "tilemap")]
         if changed_source && result.is_ok() { self.tilemap_start_scene = None; }
@@ -2306,7 +2332,7 @@ impl Editor {
     pub(crate) fn mesh_navigation_mark_edited(&mut self) { self.mark_edited(); }
     #[cfg(feature = "mesh-navigation")]
     pub fn set_mesh_navigation_blocker(&mut self, blocker: Option<String>) { self.mesh_navigation_blocker = blocker; }
-    #[cfg(any(feature = "static-game-actions", feature = "arena-project-export", feature = "terrain", feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
+    #[cfg(any(feature = "static-gameplay", feature = "static-game-actions", feature = "arena-project-export", feature = "terrain", feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
     pub(crate) fn scene_load_epoch(&self) -> u64 { self.scene_load_epoch }
     #[cfg(feature = "tilemap")]
     pub(crate) fn admitted_tilemap_scene_matches(&self, expected: &crate::project::PreparedArenaScene) -> bool {
@@ -2971,6 +2997,7 @@ impl Editor {
 
     /// Play button: starts the session if needed and runs by the clock.
     pub fn play(&mut self) {
+        #[cfg(feature="static-gameplay")] if self.defer_gameplay_lifecycle(input::GameplayLifecycle::Play){return;}
         if self.start_play() {
             self.control(ControlOp::Play);
         }
@@ -2983,6 +3010,7 @@ impl Editor {
 
     /// Step button: runs `n` ticks now (starting the session if needed).
     pub fn step(&mut self, n: u32) {
+        #[cfg(feature="static-gameplay")] if self.defer_gameplay_lifecycle(input::GameplayLifecycle::Step(n)){return;}
         if self.start_play() {
             self.control(ControlOp::Pause);
             self.control(ControlOp::Step(n));
@@ -2991,6 +3019,7 @@ impl Editor {
 
     /// Runs a timeline control (play mode only).
     pub fn control(&mut self, op: ControlOp) {
+        #[cfg(feature="static-gameplay")] if self.defer_gameplay_lifecycle(input::GameplayLifecycle::Control(op)){return;}
         if !matches!(op, ControlOp::Play | ControlOp::SetSpeed(_)) { self.release_control(); }
         if self.sim.mode != Mode::Play {
             return;
@@ -3033,6 +3062,7 @@ impl Editor {
     /// Ends play. The document is exactly as it was before play; the
     /// recording stays available from [`last_stopped`](Self::last_stopped).
     pub fn stop(&mut self) -> Option<&Stopped> {
+        #[cfg(feature="static-gameplay")] if self.defer_gameplay_lifecycle(input::GameplayLifecycle::Stop){return None;}
         self.release_control();
         if self.sim.mode != Mode::Play {
             return None;
@@ -3107,6 +3137,8 @@ impl Editor {
         }
         fresh.feed.filter = self.feed.filter;
         fresh.agent.expand_methods = std::mem::take(&mut self.agent.expand_methods);
+        #[cfg(feature="static-gameplay")]
+        if let (Some(prior),Some(next))=(&self.gameplay,&mut fresh.gameplay){next.continue_ids_from(prior);}
         *self = fresh;
         if local {
             self.info("simulation host restarted: the scene was opened again; edits that were not saved are lost");

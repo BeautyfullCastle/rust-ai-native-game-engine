@@ -1,5 +1,6 @@
-//! Validated, application-owned capabilities. This is not an editor handle,
-//! command router, plugin sandbox or hot-reload mechanism.
+//! Validated, application-owned capabilities and explicit startup handles.
+//! Admission tokens are distinct from handles; this is not a plugin sandbox
+//! or hot-reload mechanism.
 use super::*;
 use orr_reflect::{TypeInfo, TypeKind};
 use std::sync::Arc;
@@ -75,7 +76,7 @@ pub struct IntentSchema {
     pub payload: GameplaySchema,
 }
 
-/// Correlation and lifecycle scope are supplied by the future router, not the codec.
+/// Correlation and lifecycle scope are supplied by the shared router, not the codec.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CommandScope {
     pub scene_epoch: u64,
@@ -185,9 +186,50 @@ impl PreparedGameplayCommand {
 }
 
 /// Namespace admission can include an existing legacy registry without changing it.
-/// New entries cannot be opened as editor games until the common integration lands.
+/// Startup uses a separate handle backed by an application-lifetime registry.
 pub struct GameplayContracts {
     entries: Vec<ValidatedGameplay>,
+}
+
+/// A startup-lifetime registration selected by the application. This handle is
+/// distinct from legacy `RegisteredGame` and from a standalone admission token.
+#[derive(Clone, Copy)]
+pub struct RegisteredGameplay {
+    registry: &'static GameplayContracts,
+    index: usize,
+}
+impl PartialEq for RegisteredGameplay {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self.registry, other.registry) && self.index == other.index
+    }
+}
+impl Eq for RegisteredGameplay {}
+impl fmt::Debug for RegisteredGameplay {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("RegisteredGameplay").field(&self.name()).finish()
+    }
+}
+impl RegisteredGameplay {
+    pub fn validated(self) -> &'static ValidatedGameplay { &self.registry.entries[self.index] }
+    pub fn name(self) -> &'static str { &self.validated().0.identity.game }
+    pub fn local_alias(self) -> &'static str { self.validated().0.alias }
+    pub fn expected_identity(self) -> RemoteIdentity { self.validated().identity().clone() }
+    pub fn expected_input(self) -> ExpectedInputDescriptor { self.validated().expected_input().clone() }
+    pub fn neutral_value(self) -> J { self.validated().neutral_value().clone() }
+    pub fn types(self) -> TypeRegistry { self.validated().types().clone() }
+    pub fn spatial(self) -> Option<StaticPosition> { self.validated().spatial().map(|(position, _)| position) }
+    pub fn has_commands(self) -> bool { self.validated().command_max_sequence().is_some() }
+    pub fn create_view(self) -> Option<Box<dyn EmbeddedGameplayView>> { self.validated().create_view() }
+    pub(crate) fn spawn(self, request: StaticHostRequest) -> Result<LocalHost, String> {
+        (self.validated().host_factory())(request)
+    }
+    pub(crate) fn stream(self, transport: Box<dyn Transport>, config: RemoteConfig)
+        -> Result<Box<dyn StaticFrameStream>, String> {
+        (self.validated().stream_factory())(transport, config, self.expected_input())
+    }
+    pub(crate) fn draw(self, frame: FrameView<'_>) -> Vec<Drawable> {
+        self.validated().spatial().map_or_else(Vec::new, |(_, draw)| draw(frame))
+    }
 }
 impl GameplayContracts {
     pub fn new(
@@ -358,6 +400,11 @@ impl GameplayContracts {
             .iter()
             .find(|entry| entry.0.identity.game == id || entry.0.alias == id)
             .cloned()
+    }
+    /// Select only a compiled registration owned for the application's lifetime.
+    pub fn handle(&'static self, id: &str) -> Option<RegisteredGameplay> {
+        self.entries.iter().position(|entry| entry.0.identity.game == id || entry.0.alias == id)
+            .map(|index| RegisteredGameplay { registry: self, index })
     }
 }
 
@@ -673,6 +720,52 @@ mod tests {
             },
             player: 1,
         }
+    }
+
+    #[test]
+    fn registered_gameplay_handle_is_stable_and_distinct_from_metadata_equivalence() {
+        let registry: &'static GameplayContracts = Box::leak(Box::new(
+            GameplayContracts::new(vec![descriptor("HandleFixture", "handle-fixture")], None).unwrap(),
+        ));
+        let other: &'static GameplayContracts = Box::leak(Box::new(
+            GameplayContracts::new(vec![descriptor("HandleFixture", "handle-fixture")], None).unwrap(),
+        ));
+        let game = registry.handle("HandleFixture").unwrap();
+        assert_eq!(Some(game), registry.handle("handle-fixture"));
+        assert_ne!(game, other.handle("HandleFixture").unwrap());
+        assert!(registry.handle("missing").is_none());
+        assert_eq!(game.name(), "HandleFixture");
+        assert!(game.has_commands());
+        assert_eq!(game.expected_identity(), game.validated().identity().clone());
+        let editor_game = crate::game::EditorGame::Gameplay(game);
+        assert_eq!(editor_game.gameplay(), Some(game));
+        assert!(editor_game.has_embedded_gameplay());
+        assert!(editor_game.spatial_position().is_none());
+        assert!(game.spatial().is_none());
+        assert!(!editor_game.is_registered());
+    }
+
+    #[test]
+    fn generic_held_startup_is_explicitly_rejected_before_any_host_factory() {
+        let mut descriptor = descriptor("HeldFixture", "held-fixture");
+        descriptor.input = InputCapability::Held(StaticInputDescriptor {
+            type_name:"Input", types:input_types, max_players:1, hint:"held fixture",
+            held: |_| json!({"value":0,"sequence":0}),
+        });
+        let registry: &'static GameplayContracts = Box::leak(Box::new(
+            GameplayContracts::new(vec![descriptor], None).unwrap(),
+        ));
+        let game = registry.handle("HeldFixture").unwrap();
+        assert!(!game.has_commands());
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("held.scene.yaml");
+        std::fs::write(&path, "schema: orr.scene/1\nentities: {}\n").unwrap();
+        // The fixture factory panics if reached. No Arena input fallback exists.
+        let error = crate::backend::Backend::connect(&crate::backend::HostSpec::local_game(
+            &path, crate::game::EditorGame::Gameplay(game),
+        )).err().expect("held capability must be rejected by generic command startup");
+        assert!(error.contains("unsupported gameplay capability"), "{error}");
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "schema: orr.scene/1\nentities: {}\n");
     }
 
     #[test]

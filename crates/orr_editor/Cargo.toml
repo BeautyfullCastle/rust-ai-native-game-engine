@@ -16,7 +16,7 @@ workspace = true
 # Explicit statically linked game adapters; no plugin discovery or code loading.
 static-games = []
 # Additive validated gameplay capabilities; no runtime loading or editor wiring.
-static-gameplay = ["static-games"]
+static-gameplay = ["static-games", "dep:serde"]
 # Additive bounded custom-game controls; legacy static-games stays unchanged.
 static-game-actions = ["static-games", "dep:orr_input"]
 arena-project-export = ["sprites", "orr_sample/project-export", "dep:sha2"]
@@ -94,6 +94,7 @@ egui-wgpu = "0.36"
 png = "0.17"
 
 [dev-dependencies]
+tempfile = "3"
 bytemuck = { version = "1", features = ["derive"] }
 # Test-only Arena hosts and replay viewers; never linked directly by editor code.
 orr_edit = { path = "../orr_edit" }

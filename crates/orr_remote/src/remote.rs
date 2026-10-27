@@ -185,6 +185,11 @@ impl RemoteFrameEvidence {
     pub fn stamp(&self) -> FrameStamp { self.stamp }
     pub fn origin(&self) -> FrameEvidenceOrigin { self.origin }
     pub fn identity(&self) -> &RemoteIdentity { &self.identity }
+    /// Same validated decoder connection, not proof of current lease or host authority.
+    /// Retaining an evidence value keeps this opaque identity alive across reconnects.
+    pub fn same_source(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.identity, &other.identity)
+    }
 }
 
 /// The ERP identity that a checked [`RemoteBridge`] connection must match.
@@ -2398,6 +2403,15 @@ mod frame_evidence_tests {
         let evidence = remote.frame_evidence().unwrap();
         assert_eq!(evidence.identity(), identity.as_ref());
         assert_eq!(evidence.snapshot().tick(), evidence.stamp().tick);
+        let cloned = evidence.clone();
+        assert!(evidence.same_source(&cloned));
+        let different_connection = RemoteFrameEvidence {
+            identity: Arc::new(evidence.identity().clone()),
+            ..evidence.clone()
+        };
+        assert_eq!(evidence.identity(), different_connection.identity());
+        assert_eq!(evidence.stamp(), different_connection.stamp());
+        assert!(!evidence.same_source(&different_connection));
         remote.delivery = RemoteViewDelivery::Legacy;
         assert!(remote.frame_evidence().is_none());
         remote.delivery = RemoteViewDelivery::Fenced;
