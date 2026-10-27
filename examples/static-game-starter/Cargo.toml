@@ -45,6 +45,7 @@ tempfile = "3"
 default = ["editor"]
 editor = ["dep:orr_editor", "dep:eframe", "dep:egui", "dep:orr_sample"]
 static-game-actions = ["dep:orr_input", "orr_editor?/static-game-actions"]
+gameplay = ["editor", "orr_editor/static-gameplay"]
 standalone = ["dep:orr_render", "dep:winit", "dep:orr_input"]
 bundle = ["dep:sha2", "dep:tempfile"]
 native-acceptance = ["editor", "dep:egui_kittest", "dep:winit"]

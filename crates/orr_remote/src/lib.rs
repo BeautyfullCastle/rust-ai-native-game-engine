@@ -106,7 +106,8 @@ pub use link::{
 pub use local::LocalHost;
 pub use proposals::{default_build_id, BotFn, GameHooks};
 pub use remote::{
-    FrameCodecMode, FrameCodecPolicy, RemoteBridge, RemoteConfig, RemoteIdentity, RemoteMetrics,
+    FrameCodecMode, FrameCodecPolicy, FrameEvidenceOrigin, RemoteBridge, RemoteConfig,
+    RemoteFrameEvidence, RemoteIdentity, RemoteMetrics,
     RemoteViewDelivery, ViewDeliveryMode,
 };
 pub use screenshot::{

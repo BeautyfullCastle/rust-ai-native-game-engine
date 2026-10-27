@@ -1,6 +1,12 @@
 //! Explicit, bounded, nonblocking ownership of one realtime input slot.
 use super::*;
 
+#[cfg(feature = "static-gameplay")]
+#[path = "gameplay_router.rs"]
+mod gameplay;
+#[cfg(feature = "static-gameplay")]
+pub use gameplay::*;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Keys { pub x: i8, pub y: i8, pub fire: bool }
 impl Keys {
@@ -22,6 +28,8 @@ pub(super) struct Input {
     pub registered: Option<crate::static_adapter::RegisteredGame>,
     #[cfg(feature = "mesh-navigation")]
     pub mesh_navigation: bool,
+    #[cfg(feature = "static-gameplay")]
+    custom: Option<(J, Option<J>)>,
     pending_restarts: u8,
     restart_armed: bool,
     observed_restart: bool,
@@ -215,6 +223,8 @@ impl Input {
         Some((method, params, self.intent, op))
     }
     fn value_changed(&self) -> bool {
+        #[cfg(feature = "static-gameplay")]
+        if let Some((value, sent)) = &self.custom { return sent.as_ref() != Some(value); }
         #[cfg(feature = "static-game-actions")]
         if self.registered.is_some_and(|game| game.action_profile().is_some()) {
             return self.sent_actions != Some(self.latest_actions);
@@ -230,6 +240,8 @@ impl Input {
         self.latest_actions = keys;
     }
     fn legacy_value(&mut self) -> J {
+        #[cfg(feature = "static-gameplay")]
+        if let Some((value, sent)) = &mut self.custom { *sent = Some(value.clone()); return value.clone(); }
         #[cfg(feature = "static-game-actions")]
         if let Some(game) = self.registered.filter(|game| game.action_profile().is_some()) {
             let value = game.held_actions_value(self.latest_actions).expect("admitted action state");
