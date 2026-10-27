@@ -71,11 +71,10 @@ impl Options {
 }
 fn session() -> DefenseSession {
     let config = game::DefenseConfig::default();
-    Session::new(
-        config,
-        SessionConfig::new(1, PlayerSlot(0), u64::from(config.seed), game::TICK_RATE),
-        LocalInputSource,
-    )
+    let mut session_config =
+        SessionConfig::new(1, PlayerSlot(0), u64::from(config.seed), game::TICK_RATE);
+    session_config.build_id = game::SCENARIO_BUILD_ID;
+    Session::new(config, session_config, LocalInputSource)
 }
 pub fn run(options: Options) -> Result<(), String> {
     if options.headless {
@@ -316,6 +315,14 @@ pub fn headless(options: Options) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn session_tracks_scenario_build_identity() {
+        assert_eq!(
+            session().build_hash(),
+            orr_sim::build_hash_of(game::SCENARIO_BUILD_ID, 0)
+        );
+        assert_ne!(session().build_hash(), 0);
+    }
     #[test]
     fn bounded_cli() {
         assert!(Options::parse(["--headless", "--ticks", "36001"].map(String::from)).is_err());

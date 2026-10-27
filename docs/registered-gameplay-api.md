@@ -89,8 +89,10 @@ The optional starter `stormglass` feature registers the existing `DefenseGame`
 without adding an engine game enum or another simulation. Launch it with
 `cargo run -p orr_static_starter --features stormglass --bin editor -- --project
 examples/static-game-starter/scenes/stormglass.project.json`. Delivery and
-Switchboard remain registered. The project admits only Stormglass's empty
-initial preset, not authored waves or arbitrary scene entities. Its readonly
+Switchboard remain registered. Stormglass supports authored starting gold and
+reactor HP through the reflected Scenario singleton, with legacy empty-scene
+defaults, but not authored waves or arbitrary scene entities. See
+[authoring and identity migration](stormglass-authoring.md). Its readonly
 presenter emits the typed `act` intent (action 1–5, source/target cell 0–11).
 Consumption tracks the accepted input sequence; it does not promise a successful
 purchase or merge. Sequence exhaustion fails closed rather than wrapping.

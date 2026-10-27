@@ -1,15 +1,15 @@
-//! Opt-in CPU host for Stormglass's fixed initial preset.
-//!
-//! This reuses DefenseGame through ERP/PlaySession; it is not an editor view
-//! or an authored wave format. Only an empty scene is admitted. Comments
-//! survive Save, but authoritative initial state comes from Game::setup.
+//! Opt-in CPU host for Stormglass starting-condition authoring.
+//! Reuses DefenseGame through ERP/PlaySession; waves and runtime pools are not authored.
 use std::{path::PathBuf, sync::Arc};
 
 use orr_ecs::Frame;
 use orr_edit::{BakeAdmission, EditError, EditorDoc};
-use orr_games::coop_defense_game::{DefenseConfig, DefenseGame, TICK_RATE};
-use orr_reflect::{Scene, SceneIndex, TypeRegistry};
-use orr_sim::{Game, Simulation};
+use orr_games::coop_defense_game::{
+    scenario_types, DefenseConfig, DefenseGame, Scenario, SCENARIO_BUILD_ID, SCENARIO_NAME,
+    TICK_RATE,
+};
+use orr_reflect::{Scene, SceneIndex};
+use orr_sim::Simulation;
 use serde_json::json;
 
 use crate::{GameHooks, HostLimits, LocalHost, ServerConfig};
@@ -32,13 +32,25 @@ impl BakeAdmission for InitialAdmission {
     }
 
     fn admit(&self, scene: &Scene, frame: &mut Frame, _: &SceneIndex) -> Result<(), EditError> {
-        if !scene.entities.is_empty() || !scene.singletons.is_empty() || scene.has_prefab_links() {
+        if !scene.entities.is_empty()
+            || scene
+                .singletons
+                .iter()
+                .any(|(name, _)| name != SCENARIO_NAME)
+            || scene.has_prefab_links()
+        {
             return Err(EditError::Invalid(
-                "CoopDefense accepts only its empty initial scene".into(),
+                "CoopDefense accepts only Scenario starting conditions, no entities or prefabs"
+                    .into(),
             ));
         }
         // Baking supplies a fresh candidate, never a live game frame.
-        DefenseGame::setup(frame, &DefenseConfig::default());
+        let scenario = if scene.singletons.is_empty() {
+            Scenario::default()
+        } else {
+            *frame.singleton::<Scenario>()
+        };
+        DefenseGame::setup_scenario(frame, &DefenseConfig::default(), scenario);
         Ok(())
     }
 
@@ -52,7 +64,7 @@ impl BakeAdmission for InitialAdmission {
 pub fn document(text: &str) -> Result<EditorDoc, String> {
     EditorDoc::from_yaml_with_admission(
         text,
-        TypeRegistry::new(),
+        scenario_types(),
         Simulation::<DefenseGame>::build_registry(),
         u64::from(DefenseConfig::default().seed),
         Some(Arc::new(InitialAdmission)),
@@ -65,7 +77,7 @@ pub fn configure(limits: &mut HostLimits, path: Option<PathBuf>) {
     limits.player_count = 1;
     limits.tick_rate = TICK_RATE;
     limits.scene_path = path;
-    limits.build_id = crate::default_build_id(GAME);
+    limits.build_id = SCENARIO_BUILD_ID;
     limits.game = GameHooks::new(GAME);
     limits.view_stream = None;
 }

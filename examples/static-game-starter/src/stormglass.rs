@@ -1,6 +1,6 @@
-//! Project-owned registration of Stormglass's existing fixed initial preset.
+//! Project-owned registration of Stormglass's authored starting conditions.
 //! This is a readonly presenter and command codec, not another simulation or
-//! scene authoring format. All authoritative gameplay remains in DefenseGame.
+//! wave authoring format. All authoritative gameplay remains in DefenseGame.
 use orr_bridge::{Bridge, BridgeEvent, FrameView, ViewUpdate};
 use orr_editor::static_adapter::{
     CodecOutput, CommandContext, CommandContract, Consumption, EmbeddedGameplayView,
@@ -9,8 +9,8 @@ use orr_editor::static_adapter::{
     StaticHostRequest,
 };
 use orr_games::coop_defense_game::{
-    role_name, DefenseEnemy, DefenseGame, DefenseInput, DefenseRun, DefenseUnit, CELLS_PER_BOARD,
-    INVEST, MOVE_OR_MERGE, RESTART, SUMMON, UPGRADE,
+    role_name, scenario_types, DefenseEnemy, DefenseGame, DefenseInput, DefenseRun, DefenseUnit,
+    CELLS_PER_BOARD, INVEST, MOVE_OR_MERGE, RESTART, SUMMON, UPGRADE,
 };
 use orr_reflect::{Reflect, TypeRegistry};
 use orr_remote::{
@@ -174,7 +174,7 @@ impl EmbeddedGameplayView for StormglassView {
     ) -> Result<Option<IntentRequest>, String> {
         let run = frame.singleton::<DefenseRun>();
         ui.heading("Stormglass");
-        ui.label("Fixed initial preset; no scene or wave authoring");
+        ui.label("Edit Scenario starting gold / reactor HP before Play; waves are fixed");
         ui.label(format!(
             "Wave {} · Reactor {} · Gold {} / {} · Kills {} · Leaks {} · Phase {}",
             run.wave, run.reactor_hp, run.gold[0], run.gold[1], run.kills, run.leaks, run.phase
@@ -265,20 +265,17 @@ impl EmbeddedGameplayView for StormglassView {
 }
 
 /// Separate descriptor: never sent through the two-game Delivery/Switchboard
-/// callback branch. The empty reflection registry matches the preset host.
+/// callback branch. The Scenario reflection registry matches the host.
 pub fn descriptor() -> GameplayDescriptor {
     GameplayDescriptor {
         identity: RemoteIdentity {
             game: coop_defense::GAME.into(),
-            build_id: format!(
-                "0x{:016x}",
-                orr_remote::default_build_id(coop_defense::GAME)
-            ),
-            schema: serde_json::from_str(&TypeRegistry::new().legacy_json_schema())
-                .expect("empty preset scene schema"),
+            build_id: format!("0x{:016x}", orr_games::coop_defense_game::SCENARIO_BUILD_ID),
+            schema: serde_json::from_str(&scenario_types().legacy_json_schema())
+                .expect("Scenario scene schema"),
         },
         local_alias: "stormglass",
-        types: TypeRegistry::new,
+        types: scenario_types,
         host,
         stream,
         presentation: PresentationCapability::Embedded {
@@ -524,7 +521,7 @@ mod tests {
     }
 
     #[test]
-    fn saved_project_editor_summon_neutral_stop_and_empty_scene_admission() {
+    fn saved_project_authored_reopen_summon_neutral_stop_and_admission() {
         use orr_editor::editor::input::CommandStatus;
         use orr_editor::{registered_project::PreparedRegisteredProject, Editor, Mode};
         let directory = tempfile::tempdir().unwrap();
@@ -541,10 +538,32 @@ mod tests {
         assert!(manifest.len() < 65536);
         std::fs::write(&manifest_path, &manifest).unwrap();
         std::fs::write(&scene_path, coop_defense::INITIAL_SCENE).unwrap();
+        let mut old_manifest = parsed.clone();
+        old_manifest["build_id"] = json!("0xa93ac28bfcbe2442");
+        std::fs::write(&manifest_path, serde_json::to_vec(&old_manifest).unwrap()).unwrap();
+        assert!(PreparedRegisteredProject::open(&manifest_path, registry()).is_err());
+        std::fs::write(&manifest_path, &manifest).unwrap();
         let prepared = PreparedRegisteredProject::open(&manifest_path, registry()).unwrap();
         assert_eq!(prepared.game(), registry().handle("stormglass").unwrap());
         // Registered project startup is in-process and has no listener config.
         let mut editor = Editor::open_registered_project(prepared).unwrap();
+        editor.sync();
+        editor
+            .host_call(
+                "world.singleton.patch",
+                json!({
+                    "name":"CoopDefense::Scenario", "path":"",
+                    "value":{"starting_gold":250,"reactor_hp":80}
+                }),
+            )
+            .unwrap();
+        editor
+            .host_call("scene.save", json!({"write":true}))
+            .unwrap();
+        let authored_source = std::fs::read_to_string(&scene_path).unwrap();
+        drop(editor);
+        let reopened = PreparedRegisteredProject::open(&manifest_path, registry()).unwrap();
+        let mut editor = Editor::open_registered_project(reopened).unwrap();
         editor.sync();
         let original = editor.host_call("scene.save", J::Null).unwrap();
         let history = editor.host_call("history.list", J::Null).unwrap();
@@ -571,6 +590,8 @@ mod tests {
             .snapshot()
             .predicted()
             .singleton::<DefenseRun>();
+        assert_eq!(before.reactor_hp, 80);
+        assert!(before.gold[0] >= 250);
         let command = editor.submit_gameplay_intent(summon()).unwrap();
         assert!(editor.submit_gameplay_intent(summon()).is_err());
         wait_editor(&mut editor, |editor| {
@@ -612,11 +633,11 @@ mod tests {
         assert_eq!(std::fs::read(&manifest_path).unwrap(), manifest);
         assert_eq!(
             std::fs::read_to_string(&scene_path).unwrap(),
-            coop_defense::INITIAL_SCENE
+            authored_source
         );
         assert!(editor.submit_gameplay_intent(summon()).is_err());
         drop(editor);
-        // Empty reflection permits a component-free entity to parse, but the
+        // Reflection permits a component-free entity to parse, but the
         // reused preset host must reject it during authoritative bake admission.
         let nonempty = "schema: orr.scene/1\nentities: {e_00000001: {name: injected}}\n";
         std::fs::write(&scene_path, nonempty).unwrap();
@@ -625,7 +646,7 @@ mod tests {
             Ok(_) => panic!("nonempty Stormglass scene started"),
             Err(error) => error,
         };
-        assert!(error.contains("empty initial scene"), "{error}");
+        assert!(error.contains("no entities or prefabs"), "{error}");
         assert_eq!(std::fs::read_to_string(&scene_path).unwrap(), nonempty);
         assert_eq!(std::fs::read(&manifest_path).unwrap(), manifest);
     }

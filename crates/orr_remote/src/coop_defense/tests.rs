@@ -42,6 +42,8 @@ fn strict_initial_source_rejects_edits_atomically() {
     for invalid in [
         "schema: orr.scene/1\nentities: {e_00000001: {name: injected}}\n".to_string(),
         "schema: orr.scene/1\nentities: {}\nsingletons: {CoopDefense::Run: {}}\n".into(),
+        authored_scene(10001, 30),
+        authored_scene(150, 0),
         format!("{INITIAL_SCENE}metadata: {{seed: 1}}\n"),
         format!("{INITIAL_SCENE}entities: {{}}\n"),
         format!("{INITIAL_SCENE}---\n{INITIAL_SCENE}"),
@@ -295,4 +297,161 @@ fn typed_host_rejects_bad_input_stale_grants_and_duplicate_spending() {
         c.call("sim.state", json!({})).unwrap()["checksum"],
         initial["checksum"]
     );
+}
+
+fn authored_scene(gold: u32, hp: u32) -> String {
+    format!("schema: orr.scene/1\nsingletons:\n  CoopDefense::Scenario: {{starting_gold: {gold}, reactor_hp: {hp}}}\nentities: {{}}\n")
+}
+
+#[test]
+fn authored_start_restart_and_legacy_defaults_are_checksummed() {
+    use orr_games::coop_defense_game::RESTART;
+    let legacy = document(INITIAL_SCENE).unwrap();
+    let defaults = document(&authored_scene(150, 30)).unwrap();
+    assert_eq!(legacy.frame().to_bytes(), defaults.frame().to_bytes());
+    let doc = document(&authored_scene(250, 80)).unwrap();
+    assert_ne!(doc.checksum(), legacy.checksum());
+    let mut play =
+        PlayController::<DefenseGame>::start_play(&doc, doc.play_config(1, TICK_RATE)).unwrap();
+    let run = play.session().frame().singleton::<DefenseRun>();
+    assert_eq!(run.gold, [250; 2]);
+    assert_eq!(run.reactor_hp, 80);
+    play.session_mut().set_input(
+        PlayerSlot(0),
+        DefenseInput {
+            action: SUMMON,
+            sequence: 1,
+            ..Default::default()
+        },
+    );
+    play.control(ControlOp::Step(1));
+    assert_eq!(
+        play.session().frame().singleton::<DefenseRun>().gold[0],
+        225
+    );
+    play.session_mut().set_input(
+        PlayerSlot(0),
+        DefenseInput {
+            action: RESTART,
+            sequence: 2,
+            ..Default::default()
+        },
+    );
+    play.control(ControlOp::Step(1));
+    let run = play.session().frame().singleton::<DefenseRun>();
+    assert_eq!(run.gold, [250; 2]);
+    assert_eq!(run.reactor_hp, 80);
+    assert_eq!(run.generation, 1);
+    assert_eq!(
+        *play.session().frame().singleton::<Scenario>(),
+        Scenario {
+            starting_gold: 250,
+            reactor_hp: 80
+        }
+    );
+    assert_eq!(document(&doc.to_yaml()).unwrap().checksum(), doc.checksum());
+}
+
+#[test]
+fn scenario_erp_edit_undo_save_reopen_and_invalid_atomicity() {
+    let mut cfg = ServerConfig::new(Auth::DevNoAuth);
+    cfg.listen = false;
+    let host = spawn_host(INITIAL_SCENE.into(), None, cfg, None).unwrap();
+    let mut c = client(&host, Caps::ALL);
+    let original = c.call("scene.save", json!({})).unwrap();
+    let patch = |path: &str, value: J| json!({"name":SCENARIO_NAME,"path":path,"value":value});
+    c.call(
+        "world.singleton.patch",
+        patch("", json!({"starting_gold":250,"reactor_hp":80})),
+    )
+    .unwrap();
+    let edited = c.call("scene.save", json!({})).unwrap();
+    assert_ne!(edited["checksum"], original["checksum"]);
+    let reopened = document(edited["text"].as_str().unwrap()).unwrap();
+    assert_eq!(reopened.frame().singleton::<DefenseRun>().gold, [250; 2]);
+    assert_eq!(reopened.frame().singleton::<DefenseRun>().reactor_hp, 80);
+    c.call("history.undo", json!({})).unwrap();
+    let undone = c.call("scene.save", json!({})).unwrap();
+    assert_eq!(undone["text"], original["text"]);
+    assert_eq!(undone["checksum"], original["checksum"]);
+    c.call("history.redo", json!({})).unwrap();
+    let history = c.call("history.list", json!({})).unwrap();
+    for bad in [
+        patch("starting_gold", json!(-1)),
+        patch("starting_gold", json!(10001)),
+        patch("reactor_hp", json!(0)),
+        patch("reactor_hp", json!(1001)),
+        patch("starting_gold", json!(1.5)),
+        patch("reactor_hp", json!("invalid")),
+        patch("", json!({"starting_gold":300,"reactor_hp":0})),
+        patch("", json!({"starting_gold":300,"reactor_hp":80,"seed":1})),
+        json!({"name":"CoopDefense::Run","path":"gold","value":[999,999]}),
+    ] {
+        assert!(c.call("world.singleton.patch", bad).is_err());
+        assert_eq!(c.call("scene.save", json!({})).unwrap(), edited);
+        assert_eq!(c.call("history.list", json!({})).unwrap(), history);
+    }
+    let initial = c.call("sim.start", json!({})).unwrap();
+    assert_eq!(initial["checksum"], edited["checksum"]);
+    assert!(c
+        .call("world.singleton.patch", patch("starting_gold", json!(300)))
+        .is_err());
+    assert_eq!(
+        c.call("sim.state", json!({})).unwrap()["checksum"],
+        initial["checksum"]
+    );
+    c.call("sim.stop", json!({})).unwrap();
+    assert_eq!(c.call("scene.save", json!({})).unwrap(), edited);
+}
+
+#[test]
+fn first_singleton_field_edit_uses_safe_defaults_and_bounds() {
+    let mut doc = document(INITIAL_SCENE).unwrap();
+    doc.apply(
+        Op::SetSingletonField {
+            singleton: SCENARIO_NAME.into(),
+            path: "starting_gold".into(),
+            value: orr_reflect::Value::Int(0),
+        },
+        Origin::User,
+    )
+    .unwrap();
+    assert_eq!(
+        *doc.frame().singleton::<Scenario>(),
+        Scenario {
+            starting_gold: 0,
+            reactor_hp: 30
+        }
+    );
+    doc.undo().unwrap();
+    assert_eq!(doc.to_yaml(), INITIAL_SCENE);
+    for (gold, hp) in [(0, 1), (10000, 1000)] {
+        let doc = document(&authored_scene(gold, hp)).unwrap();
+        assert_eq!(doc.frame().singleton::<DefenseRun>().gold, [gold; 2]);
+        assert_eq!(doc.frame().singleton::<DefenseRun>().reactor_hp, hp);
+    }
+    let mut limits = HostLimits::default();
+    configure(&mut limits, None);
+    assert_eq!(limits.build_id, SCENARIO_BUILD_ID);
+    assert_ne!(limits.build_id, crate::default_build_id(GAME));
+}
+
+#[test]
+fn nonzero_replay_contract_rejects_previous_host_identity() {
+    use orr_session::{replay_verify_checked, ReplayError, ReplayHeader, ReplayWriter};
+    let old = crate::default_build_id(GAME);
+    let bytes = ReplayWriter::<DefenseGame>::new(ReplayHeader {
+        format_version: 3,
+        game_id: GAME.into(),
+        build_hash: orr_sim::build_hash_of(old, 0),
+        seed: u64::from(DefenseConfig::default().seed),
+        player_count: 1,
+        tick_rate: TICK_RATE,
+        input_size: std::mem::size_of::<DefenseInput>() as u32,
+    })
+    .finish();
+    assert!(matches!(
+        replay_verify_checked::<DefenseGame>(&bytes, DefenseConfig::default(), SCENARIO_BUILD_ID),
+        Err(ReplayError::BuildHashMismatch { .. })
+    ));
 }
