@@ -177,3 +177,8 @@ The dedicated input-map-authoring workflow triggers on every PR and pushes to
 checks are per-command boundaries. Local execution additionally requires the
 coordinator’s admitted resource budget and continuously monitored owned guard;
 this script is not authorization to take the Cargo lease.
+
+Draft preview reports conflicts before Apply without changing the accepted map, history,
+selection, draft, or command status. It uses the same validator and encoded-size contract
+as Apply. An exact-value cache avoids cloning and encoding again on unchanged frames;
+Apply always validates independently.

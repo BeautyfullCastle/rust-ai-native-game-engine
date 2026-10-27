@@ -22,6 +22,7 @@ enum ToolMode {
     Paint,
     Fill,
     Rectangle,
+    Pick,
 }
 
 /// An uncommitted gesture: selection is fixed at press, not at release.
@@ -358,6 +359,7 @@ impl TilemapPanel {
                 fill::candidate(&self.history.current, cell, region, &asset.document)?.0
             }
             ToolMode::Rectangle => return Err("Rectangle requires a complete gesture".into()),
+            ToolMode::Pick => return Err("Pick only changes the palette selection".into()),
         };
         Self::budget(&next, Self::actor_count(sprites))?;
         Ok(self.history.commit(next))
@@ -512,11 +514,12 @@ impl TilemapPanel {
                 let paint = ui.selectable_value(&mut self.mode, ToolMode::Paint, "Paint");
                 let fill = ui.selectable_value(&mut self.mode, ToolMode::Fill, "Fill");
                 let rectangle = ui.selectable_value(&mut self.mode, ToolMode::Rectangle, "Rectangle");
-                if paint.changed() || fill.changed() || rectangle.changed() {
+                let pick = ui.selectable_value(&mut self.mode, ToolMode::Pick, "Pick");
+                if paint.changed() || fill.changed() || rectangle.changed() || pick.changed() {
                     self.cancel_gesture();
                 }
             });
-            ui.label("Paint: click or drag. Fill: click once to replace connected matching cells. Rectangle: drag, then release to apply once.");
+            ui.label("Paint: click or drag. Fill: click once to replace connected matching cells. Rectangle: drag, then release to apply once. Pick: click a cell to select its region or Erase.");
             ui.horizontal(|ui| {
                 if ui
                     .add_enabled(
@@ -586,7 +589,7 @@ impl TilemapPanel {
             }
         });
         if !editable {
-            ui.label("Paint, Fill, Rectangle, Resize and Save require matching Edit viewport, without proposal, replay or disconnected host.");
+            ui.label("Paint, Fill, Rectangle, Pick, Resize and Save require matching Edit viewport, without proposal, replay or disconnected host.");
         }
         if let Some(error) = &self.error {
             ui.colored_label(egui::Color32::RED, error);
@@ -612,6 +615,15 @@ impl TilemapPanel {
             || rect.height() <= 0.
         {
             self.cancel_gesture();
+            return true;
+        }
+        if self.mode == ToolMode::Pick {
+            self.cancel_gesture();
+            if let Some(region) =
+                Self::picked_region(ui, &editor.camera, rect, pixels, &self.history.current)
+            {
+                self.selected = region;
+            }
             return true;
         }
         if self.mode == ToolMode::Rectangle {
@@ -648,6 +660,69 @@ impl TilemapPanel {
             }
         }
         true
+    }
+    /// Read only the cell under an actual, unobstructed primary press. The outer
+    /// viewport dispatcher retains the common tool/scene/epoch/Edit guards.
+    fn picked_region(
+        ui: &egui::Ui,
+        camera: &Camera,
+        rect: egui::Rect,
+        pixels: (u32, u32),
+        document: &ValidatedDocument,
+    ) -> Option<Option<u32>> {
+        if !ui.is_enabled()
+            || pixels.0 == 0
+            || pixels.1 == 0
+            || rect.width() <= 0.
+            || rect.height() <= 0.
+        {
+            return None;
+        }
+        let press = ui.input(|i| {
+            let mut press = None;
+            let mut released = false;
+            let mut ambiguous = false;
+            for event in &i.events {
+                if let egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    ..
+                } = event
+                {
+                    if *pressed {
+                        ambiguous |= press.is_some() || released;
+                        press = Some(*pos);
+                    } else {
+                        ambiguous |= press.is_none() || released;
+                        released = true;
+                    }
+                }
+            }
+            (i.focused
+                && !ambiguous
+                && !i.key_pressed(egui::Key::Escape)
+                && !i.events.iter().any(|event| {
+                    matches!(
+                        event,
+                        egui::Event::WindowFocused(false) | egui::Event::PointerGone
+                    )
+                }))
+            .then_some(press)
+            .flatten()
+        })?;
+        if !rect.contains(press)
+            || !ui.clip_rect().contains(press)
+            || ui.ctx().layer_id_at(press) != Some(ui.layer_id())
+        {
+            return None;
+        }
+        let screen = [
+            (press.x - rect.min.x) * pixels.0 as f32 / rect.width(),
+            (press.y - rect.min.y) * pixels.1 as f32 / rect.height(),
+        ];
+        let cell = Self::document_cell_at(document, camera.screen_to_world(screen, pixels))?;
+        document.cell(cell).ok()
     }
     /// No document mutation occurs until an actual primary release passes every guard.
     fn rectangle_viewport(
@@ -869,7 +944,10 @@ impl TilemapPanel {
         }
     }
     pub fn cell_at(&self, world: [f32; 2]) -> Option<CellCoord> {
-        let d = self.history.current.document();
+        Self::document_cell_at(&self.history.current, world)
+    }
+    fn document_cell_at(document: &ValidatedDocument, world: [f32; 2]) -> Option<CellCoord> {
+        let d = document.document();
         let x = ((world[0] - d.origin[0]) / (d.tile_size[0] as f32 * d.units_per_pixel)).floor();
         let y = ((d.origin[1] - world[1]) / (d.tile_size[1] as f32 * d.units_per_pixel)).floor();
         (x.is_finite()

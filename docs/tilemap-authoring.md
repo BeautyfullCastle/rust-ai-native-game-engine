@@ -13,7 +13,14 @@ viewport. Fill changes the four-connected area matching the clicked cell's
 exact value with one click. Diagonals are not connected. Choose Erase to clear
 the painted cell or filled area; empty cells and region ID zero remain distinct.
 Fill runs only on the initial unobstructed viewport press, never repeatedly
-while holding or dragging. Changing Paint/Fill/Rectangle mode ends an active stroke.
+while holding or dragging. Changing Paint/Fill/Rectangle/Pick mode ends an active stroke.
+
+Pick is an explicit mode: click an unobstructed cell in the matching Edit
+viewport to select its region thumbnail, or Erase for an empty cell. Region ID
+zero remains distinct from empty. Picking changes only the palette selection;
+it preserves document bytes, tile Undo/Redo, the saved marker and simulation
+checksums. Pick stays selected until you choose another mode; it never switches
+to Paint automatically. Holding or dragging into the viewport does not pick.
 
 A complete fill is one Undo tile / Redo tile entry in the separate, bounded
 128-edit history, not the scene document's Undo. Filling with the same value is
@@ -53,10 +60,10 @@ verify the saved presentation, then Play. Unsaved tiles must be saved or undone
 before Play or closing. Scene Save does not save tile data; scene Open and Save
 As do not retarget the installed tilemap. The app refuses those operations while
 the map is installed. Proposal preview, replay, disconnected hosts and mismatched
-scene identity cannot paint, fill, rectangle or resize. While enabled, the tile tool reserves viewport
+scene identity cannot paint, fill, rectangle, pick or resize. While enabled, the tile tool reserves viewport
 pointer input, including when an edit is refused, rather than moving actors.
 A paint or fill gesture must start inside the unobstructed viewport. Pressing elsewhere
-and dragging in does not paint. Palette buttons expose Static region N labels; mode buttons expose Paint, Fill and Rectangle labels.
+and dragging in does not paint. Palette buttons expose Static region N labels; mode buttons expose Paint, Fill, Rectangle and Pick labels.
 
 This visual layer replaces the runtime Arena floor presentation only. Empty and
 transparent texels show the normal clear background. Tiles do not create actors,
@@ -212,3 +219,22 @@ transition. The mandatory legacy tilemap cases cover the epoch pin but do not
 supply those missing transitions; separate editor transport tests are not part
 of the tilemap gate census. The existing read-only/editability guards remain in
 production, without claiming those two scenarios were executed by this suite.
+
+## Pick focused Windows verification (2026-10-25)
+
+The existing editor library target initially passed 19 focused release CPU cases with
+`tilemap` enabled, including four new Pick cases. Actual egui input frames cover
+region zero versus empty, history preservation, event-position picking, held
+input and drag-entry refusal, disabled/focus/clip/occlusion boundaries, and invalid
+grid/viewport coordinates. Strict Clippy also passed for the production library
+with `tilemap` enabled. A subsequent isolated release regression also passed:
+it admits a copied installed project, starts a socket-free in-process Arena
+host and sends egui input through the actual `paint_viewport` dispatcher. Picking
+dirty unsaved cells and empty cells changes the panel selection while preserving
+tile document/history/saved state, host history/checksum and exact project files.
+Held input, outside-origin drag, missing admission epoch and a disabled tool are
+also checked through that dispatcher. No test target was added. These CPU frames
+do not exercise a native window, GPU or the full EditorApp lifecycle. Proposal, replay,
+disconnect and scene/epoch transitions retain the common production admission
+guards but were not independently executed in this Pick run. Full Linux/CI and
+visual acceptance remain separate from this focused Windows result.

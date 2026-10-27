@@ -157,7 +157,20 @@ fn seven_action_widgets_save_reopen_and_exact_undo_redo() {
 fn widget_conflicts_pending_drafts_and_empty_actions_preserve_contract() {
     let mut h = harness(); let initial = h.state().document().clone();
     assert!(h.get_by_label("Discard action draft").accesskit_node().is_disabled());
-    action(&mut h, "right"); click(&mut h, "Clear action draft"); click(&mut h, "Add binding");
+    action(&mut h, "right"); click(&mut h, "Restore action defaults");
+    let command_status = h.state().message().to_owned(); assert!(!command_status.is_empty());
+    click(&mut h, "Clear action draft"); click(&mut h, "Add binding");
+    open_combo(&mut h, "Binding 1"); click(&mut h, "Key A");
+    assert!(h.state().draft_error().unwrap().contains("duplicate physical binding"));
+    h.state_mut().apply_document(initial.clone()).unwrap();
+    assert!(h.state().draft_error().is_none(), "public document transition invalidates preview immediately");
+    click(&mut h, "Clear action draft"); click(&mut h, "Add binding");
+    open_combo(&mut h, "Binding 1"); click(&mut h, "Key A");
+    h.get_by_label(&format!("Draft preview: {}", h.state().draft_error().unwrap()));
+    assert_eq!(h.state().message(), command_status);
+    assert_eq!(h.state().document(), &initial); assert!(!h.state().can_undo());
+    open_combo(&mut h, "Binding 1"); click(&mut h, "Key L");
+    assert!(h.state().draft_error().is_none()); assert_eq!(h.state().message(), command_status);
     open_combo(&mut h, "Binding 1"); click(&mut h, "Key A");
     assert_combo(&h, "Action", "right"); assert_combo(&h, "Binding 1", "Key A");
     click(&mut h, "Apply action");
@@ -171,6 +184,7 @@ fn widget_conflicts_pending_drafts_and_empty_actions_preserve_contract() {
     assert_eq!(h.state().document(), &initial);
     assert_eq!((h.state().can_undo(), h.state().can_redo()), history);
     assert!(h.state().message().is_empty());
+    assert!(h.state().draft_error().is_none());
     assert!(h.get_by_label("Discard action draft").accesskit_node().is_disabled());
     // Recreate the original conflicting draft after the independent Discard
     // check: changing actions must itself discard a failed, pending draft.
@@ -183,7 +197,9 @@ fn widget_conflicts_pending_drafts_and_empty_actions_preserve_contract() {
     action(&mut h, "left"); action(&mut h, "right");
     assert_combo(&h, "Binding 1", "Key D"); assert_combo(&h, "Binding 2", "Key ArrowRight");
     click(&mut h, "Apply action"); assert_eq!(h.state().document(), &initial);
-    click(&mut h, "Clear action draft"); click(&mut h, "Apply action");
+    click(&mut h, "Clear action draft");
+    assert!(h.state().draft_error().is_none()); assert_eq!(h.state().document(), &initial);
+    click(&mut h, "Apply action");
     assert!(h.state().document().actions.iter().find(|a| a.name=="right").unwrap().bindings.is_empty());
     click(&mut h, "Undo map edit"); assert_eq!(h.state().document(), &initial);
 
