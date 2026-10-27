@@ -1,9 +1,10 @@
-# Registered gameplay capabilities and CPU routing
+# Registered gameplay projects
 
 The default-off `orr_editor/static-gameplay` feature adds
 presentation and input contracts alongside `static-games`. Existing
 `StaticGameDescriptor`, `StaticGameRegistry`, held/action profiles and spatial
-picking are unchanged. No built-in game enum or per-game editor branch is added.
+picking are unchanged. One capability variant serves all registered projects;
+games do not add their own engine/editor enum or branch.
 
 ## Admission and use
 
@@ -13,54 +14,46 @@ run. Scene and input schemas are frozen and checked against the declared identit
 Spatial2d requires a reflected vec2 component field. Embedded presentation does
 not require a fake position component.
 
-A private `ValidatedGameplay` is an admission result, **not** `RegisteredGame` and
-not an editor launch handle. The current editor does not consume it yet. Host,
-stream, view, command codec and consumption callbacks do not run during admission.
-Schema factories and the 18 legacy held-value conversions do run. These are
-trusted compiled native callbacks, not sandboxed
-plugins. This adds no runtime discovery, downloaded code or hot reload.
+A private `ValidatedGameplay` is distinct from legacy `RegisteredGame`.
+`handle()` on an application-owned static registry produces a Copy
+`RegisteredGameplay` bound to that registry and entry. Host, stream, view, codec
+and consumption callbacks do not run during admission. Schema factories and the
+18 legacy held-value conversions do run. These are trusted compiled native
+callbacks, not sandboxed plugins. There is no downloaded code or hot reload.
 
 The shared CPU router uses the frozen identity, types, expected input,
 neutral and existing typed host/stream factories. Embedded views receive only
 `Ui`, borrowed read-only `FrameView` and readonly mode/input-ready context, returning at most one bounded
 `IntentRequest`. `create_view` is an explicit later operation, not validation.
 
-`intent_catalog()` borrows each admitted intent ID and exact payload schema;
-`command_max_sequence()` exposes the admitted command bound. Held capabilities
-return an empty catalog and no command bound. These getters neither regenerate
-schemas nor call application code. This is metadata discovery only: no ERP
-discovery endpoint or AI tool connection is provided by this stage.
+`intent_catalog()` borrows frozen IDs/schemas and `command_max_sequence()` exposes
+the admitted bound, without factories or allocation. Held returns empty/None.
+This is library metadata; no network semantic discovery endpoint is provided.
 
-Neutral is schema/range/size checked and frozen. Reflection
-defaults are not proof of the game's semantic default. The existing typed host
-startup must check this same frozen value against `G::Input::default()` before
-publishing a connector. Metadata admission does not establish that equivalence.
+Neutral is schema/range/size checked and frozen. Typed startup must compare it
+against `G::Input::default()` before publishing a connector; reflection defaults
+do not prove that equivalence.
 
-Commands declare a closed typed intent set and a reflected input schema. Every
-intent and encoded input is checked for shape, range and a 64KiB bound on every
-call. Receipts are opaque game-owned JSON bounded to 4KiB; they cannot select ERP
-methods, grants or transport sequence. The codec receives a router-owned player,
-correlation sequence and scene/play scope. It may encode game-specific receipt
-evidence without assuming any game's field names.
+Commands declare closed typed intents and reflected input. Every call checks
+shape, range and 64KiB bounds. Opaque game receipts are limited to 4KiB and cannot
+select ERP methods or grants. The codec receives router-owned player, sequence
+and scene/play scope; the engine assumes no game-specific fields.
 
-`ValidatedIntent` and `PreparedGameplayCommand` are bound to the exact immutable
-contract instance, not its name or callback pointers. A clone retains that
-identity; another admission with identical metadata cannot exchange tokens.
-Observation rejects a different scope or ACK tick earlier than preparation and
-waits for a frame strictly newer than the admitted ACK tick before calling the
-game's consumption observer, including the unchanged router-owned player context.
+Intent/prepared tokens belong to the exact immutable contract instance, even
+when another admission has identical metadata. Observation rejects mismatched
+scope and pre-preparation ACK ticks, then waits for a newer frame before invoking
+the game observer with the original player context.
 
-## Shared routing and authority
+## Shared execution and authority
 
-`editor::input::GameplayRouter::connect_local` pairs connections from one LocalHost.
-It owns its ERP client and typed stream. Human and
-AI library callers use the same bounded intent submission path. It reuses the
-existing managed-input lease/sequence/ACK machinery rather than introducing a
-second input transport. Startup checks the control and stream identity/input
-contracts. Readonly opaque frame evidence pairs a validated snapshot and scope;
-legacy streams without evidence fail closed. Unpaired remote hosts are unsupported.
-Full fenced frames and frame-codec
-records have explicitly distinct scope origins and cannot be exchanged.
+The Editor keeps its existing single Backend, ERP, typed stream, Input and
+Play/Pause/Step/Stop lifecycle. It shares a private command state machine with
+the standalone CPU `GameplayRouter`; it does not launch a second session.
+Human presenters and AI library callers use `Editor::submit_gameplay_intent`.
+Existing managed-input permissions, leases, sequences and ACKs remain authoritative.
+Opaque evidence pairs a validated snapshot and scope. Full fenced and codec
+origins are distinct; decoder source changes invalidate pending work. This does
+not prove screenshot coherence or arbitrary remote-host pairing.
 
 The router separates submission, admission and game-observed consumption, with
 one pending command. A neutral ACK also needs a newer same-scope frame before
@@ -69,16 +62,37 @@ invalidate pending work and release control; an admitted action may already have
 run, so cancellation is not rollback. Unknown outcomes are not automatically
 resubmitted. Status retention is bounded; this is not universal exactly-once.
 
-Optional closed `sim.input_value.command` metadata correlates command ID, intent
-and scene/play scope. Existing ERP permissions, lease ownership and typed input
-validation remain authoritative. The ACK echoes validated metadata and existing
-activity summaries record admission only. Payloads, receipts and grants are not
-added to those summaries. A router consumption result links the same command ID;
-it is not a server-wide activity assertion of consumption.
+Optional closed `sim.input_value.command` metadata correlates ID, intent and scope.
+ACKs echo validated metadata; activity summaries record admission only, excluding
+payloads/receipts/grants. Router consumption links that ID but is not a server-wide
+activity assertion.
 
-The next vertical slice is shared registered viewport use, followed by
-manifest resolution of already-compiled registered game IDs. Unknown IDs must
-fail closed. No manifest should download or execute arbitrary code.
+## Open and play
+
+`PreparedRegisteredProject::open(path, registry)` reads a closed manifest:
+`schema: "orr.registered-project/1"`, canonical `game` ID, canonical `build_id`,
+portable relative `scene` and `input: "commands"`. It rejects unknown/duplicate
+fields, unavailable IDs/builds/capabilities and linked or escaping scene paths.
+Manifest and scene reads are bounded to 64KiB/256KiB. Startup uses owned admitted
+scene bytes; normal Save/Restart retains the existing document lifecycle.
+This is trusted/quiescent file admission, not an atomic filesystem snapshot.
+The manifest selects compiled code; schema authority remains the compiled
+contract and exact host/stream handshake, not an independent project schema pin.
+
+The starter executable registers both examples once:
+
+```sh
+cargo build --locked --offline --release -j1 -p orr_static_starter --features gameplay,static-game-actions --bin editor
+editor --project examples/static-game-starter/scenes/delivery.project.json
+editor --project examples/static-game-starter/scenes/switchboard.project.json
+```
+
+Use Play, Take control and the project-owned presenter; Pause/Step/Stop are the
+existing Editor controls. Embedded presenters get readonly frame/context and
+return intents. Edit/Viewer snapshots are display-only; Play consumption requires
+opaque evidence. Focus/lifecycle/source changes reset presentation. The new
+generic startup supports Commands only; unsupported Held combinations are
+rejected while legacy registered held/action/spatial games remain supported.
 
 ## Verification and completion
 
@@ -87,13 +101,12 @@ identity/schema/name failures, bounded typed intents and encoded values, token
 ownership and receipt scope/tick fencing. Project-side Delivery/Switchboard
 examples reuse their existing game rules and typed host/stream factories.
 
-AI observation reuses ERP queries, history/Undo, bounded activity queries and
-subscriptions, and existing frame/screenshot identities. Screenshot and structured
-state are not yet one atomic observation. Unified network semantic-command
-discovery/results, detailed log filters/privacy and viewport/manifest wiring remain
-separate acceptance work; this stage adds no coordinate-only automation layer.
+AI observation reuses ERP queries, history/Undo, bounded activity subscriptions
+and frame/screenshot identities. Atomic screenshot/state observations, network
+semantic-command discovery/results and detailed log privacy remain separate work.
 
-Contract test success does not establish native UI play or project opening.
-Final acceptance remains two distinct games authored only in project files,
-opened and played/stopped through the shared editor without changing engine or
-editor sources. This stage does not yet provide that workflow.
+Acceptance requires two project manifests using the same executable, actual
+Editor input/consumption, Pause/Step/Stop, restart and document/history/file
+preservation. CPU and offscreen tests are distinct from native window evidence;
+report actual Windows UI observations separately. These examples do not establish
+Stormglass authoring, online cooperation or overall engine completion.

@@ -2,6 +2,11 @@
 use super::*;
 
 #[cfg(feature = "static-gameplay")]
+#[path = "gameplay_command.rs"]
+mod command;
+#[cfg(feature = "static-gameplay")]
+pub(super) use command::GameplayCommandState;
+#[cfg(feature = "static-gameplay")]
 #[path = "gameplay_router.rs"]
 mod gameplay;
 #[cfg(feature = "static-gameplay")]
@@ -391,7 +396,10 @@ impl Editor {
             self.pump_input();
         }
     }
-    pub fn release_control(&mut self) { self.input.release(); self.pump_input(); }
+    pub fn release_control(&mut self) {
+        #[cfg(feature="static-gameplay")] if let Some(core)=&mut self.gameplay {core.cancel(&mut self.input,"control_released");}
+        self.input.release(); self.pump_input();
+    }
     #[cfg(feature = "static-game-actions")]
     pub fn static_action_keys(&mut self, focused: bool, keys: orr_input::HeldActions) {
         if !focused || !self.can_take_control() { self.input.release(); }
@@ -404,6 +412,22 @@ impl Editor {
         self.pump_input();
     }
     pub(super) fn pump_input(&mut self) {
+        #[cfg(feature="static-gameplay")]
+        if self.gameplay.is_some() {
+            let evidence=self.backend.bridge.frame_evidence();
+            let now=Instant::now();
+            let core=self.gameplay.as_mut().expect("checked command core");
+            let _=core.update(&mut self.input,self.gameplay_state.clone(),evidence,now,self.gameplay_lifecycle.is_some()||self.down.is_some());
+            let next=core.next(&mut self.input,now);
+            if let Some((method,params,intent,op))=next {core.sent(op);self.post(method,params,Pend::Input(intent,op));}
+            if self.input.phase==Phase::Off {
+                self.gameplay.as_mut().expect("command core").expired_lease(&mut self.input);
+                let before=self.pending.len();
+                self.pending.retain(|_,pending| !matches!(pending.kind,Pend::Input(..)) || pending.posted_at.elapsed()<Duration::from_secs(2));
+                if self.pending.len()!=before {self.gameplay_cleanup_notice=Some("release_unconfirmed_host_lease_expiry_fallback");}
+            }
+            return;
+        }
         #[cfg(feature = "collect-dodge")]
         if self.game().is_collect() {
             if let Some(snapshot) = self.snapshot.as_ref() {
@@ -751,5 +775,44 @@ mod static_action_input_tests {
         input.claim(0);assert_eq!(input.latest_actions,HeldActions::default());
         input.next(now2);input.next(now2+Duration::from_millis(2001));
         assert_eq!(input.latest_actions,HeldActions::default());
+    }
+}
+
+#[cfg(feature="static-gameplay")]
+#[derive(Clone,Copy)]
+pub(super) enum GameplayLifecycle {Play,Step(u32),Stop,Control(ControlOp)}
+#[cfg(feature="static-gameplay")]
+impl Editor {
+    pub fn open_registered_project(project:crate::registered_project::PreparedRegisteredProject)->Result<Self,String>{Self::start(&project.host_spec())}
+    pub fn open_gameplay(path:&Path,game:crate::static_adapter::RegisteredGameplay)->Result<Self,String> {if !game.has_commands(){return Err("command_capability_required".into());}Self::open_game(path,EditorGame::Gameplay(game))}
+    pub fn gameplay_frame_evidence(&self)->Option<&orr_remote::RemoteFrameEvidence>{self.gameplay.as_ref().and_then(|core|core.frame.as_ref())}
+    pub fn can_submit_gameplay(&self)->bool {self.gameplay.as_ref().is_some_and(|core|self.down.is_none()&&self.preview.is_none()&&core.can_submit(&self.input))}
+    pub fn gameplay_command_status(&self,id:CommandId)->Option<&CommandStatus>{self.gameplay.as_ref().and_then(|core|core.status(id))}
+    pub fn gameplay_cleanup_notice(&self)->Option<&'static str>{self.gameplay_cleanup_notice}
+    pub fn gameplay_error(&self)->Option<&str>{self.gameplay.as_ref().and_then(|core|core.error.as_deref())}
+    pub fn claim_gameplay(&mut self,player:u8)->Result<(),String>{
+        if self.down.is_some(){return Err("control_disconnected".into());}
+        if self.preview.is_some(){return Err("preview_active".into());}
+        self.gameplay.as_mut().ok_or("command_capability_unavailable")?.claim(&mut self.input,player)?;self.pump_input();Ok(())
+    }
+    pub fn submit_gameplay_intent(&mut self,request:crate::static_adapter::IntentRequest)->Result<CommandId,String>{
+        if self.down.is_some(){return Err("control_disconnected".into());}
+        if self.preview.is_some(){return Err("preview_active".into());}
+        let id=self.gameplay.as_mut().ok_or("command_capability_unavailable")?.submit(&mut self.input,request)?;self.pump_input();Ok(id)
+    }
+    pub fn release_gameplay(&mut self){self.release_control();}
+    pub fn gameplay_focus_lost(&mut self){if let Some(core)=&mut self.gameplay {core.cancel(&mut self.input,"focus_lost");}self.pump_input();}
+    pub(super) fn defer_gameplay_lifecycle(&mut self,action:GameplayLifecycle)->bool {
+        let Some(core)=&mut self.gameplay else{return false;};
+        if core.error.is_some()||self.gameplay_lifecycle.is_some(){return true;}
+        core.begin_lifecycle(&mut self.input,matches!(action,GameplayLifecycle::Stop)||self.sim.mode==Mode::Edit);
+        if self.input.phase==Phase::Off&&!self.pending.values().any(|pending|matches!(pending.kind,Pend::Input(..))){false}
+        else{self.gameplay_lifecycle=Some(action);self.pump_input();true}
+    }
+    pub(super) fn pump_gameplay_lifecycle(&mut self){
+        if self.gameplay.as_ref().is_some_and(|core|core.error.is_some()){self.gameplay_lifecycle=None;return;}
+        if self.input.phase!=Phase::Off||self.pending.values().any(|pending|matches!(pending.kind,Pend::Input(..))){return;}
+        let Some(action)=self.gameplay_lifecycle.take() else{return;};
+        match action{GameplayLifecycle::Play=>self.play(),GameplayLifecycle::Step(n)=>self.step(n),GameplayLifecycle::Control(op)=>self.control(op),GameplayLifecycle::Stop=>{self.stop();}}
     }
 }

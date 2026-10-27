@@ -1,19 +1,23 @@
 //! Project-owned command capabilities for two existing, unchanged games.
 //!
-//! This CPU example exercises the shared router. It does not add a manifest
-//! resolver or claim that the native editor viewport consumes these descriptors.
+//! One compiled registry serves saved projects and the shared editor/router.
+//! The project owns its readonly presenter and intent payloads; the engine has
+//! no game-name branches and never copies these games' simulation rules.
 use orr_bridge::FrameView;
 use orr_editor::static_adapter::{
-    CodecOutput, CommandContext, CommandContract, Consumption, GameplayDescriptor, GameplaySchema,
-    InputCapability, IntentSchema, PresentationCapability,
+    CodecOutput, CommandContext, CommandContract, Consumption, EmbeddedGameplayView,
+    GameplayContracts, GameplayDescriptor, GameplaySchema, GameplayViewContext, GameplayViewPhase,
+    InputCapability, IntentRequest, IntentSchema, PresentationCapability,
 };
 use orr_reflect::{Reflect, TypeRegistry};
 use orr_remote::RemoteIdentity;
 use serde_json::{json, Value as J};
+use std::{marker::PhantomData, sync::OnceLock};
 
 use crate::{
     delivery::{Delivery, DeliveryGame},
     game_contract::{inputs, Starter},
+    presentation::StandaloneGame,
     switchboard::{Board, Cursor},
 };
 
@@ -27,6 +31,63 @@ fn intent_types() -> TypeRegistry {
     let mut types = TypeRegistry::new();
     types.register_component::<Act>("Act");
     types
+}
+
+struct StarterView<G>(PhantomData<fn() -> G>);
+impl<G: StandaloneGame> EmbeddedGameplayView for StarterView<G> {
+    #[allow(clippy::float_arithmetic)] // View-only pixel layout; no simulation writes.
+    fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        frame: FrameView<'_>,
+        context: GameplayViewContext,
+    ) -> Result<Option<IntentRequest>, String> {
+        let state = G::state_value(frame);
+        ui.heading(G::ID);
+        ui.label(if state["won"] == 1 {
+            "Victory — Act restarts"
+        } else {
+            "Act uses this game's existing action input"
+        });
+        ui.monospace(state.to_string());
+        let ready = context.phase == GameplayViewPhase::Live && context.input_ready;
+        let action = ui.add_enabled(ready, egui::Button::new("Act")).clicked();
+        if !ready {
+            ui.label("Play and Take control to use the project command");
+        }
+
+        let available = ui.available_size();
+        let size = egui::vec2(available.x.max(1.0), available.y.max(1.0));
+        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+        let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
+        painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(18, 23, 32));
+        let mut items = Vec::new();
+        G::extract(frame, &mut items);
+        // The existing project extractor is the only source of world positions,
+        // colors and visual state. This is a view, not another game simulation.
+        let scale = (rect.width() / 12.0).min(rect.height() / 8.0).max(1.0);
+        let origin = egui::pos2(rect.center().x - 2.0 * scale, rect.center().y + scale);
+        for item in items {
+            let point = origin + egui::vec2(item.transform.pos.x, -item.transform.pos.y) * scale;
+            let color: egui::Color32 = egui::Rgba::from_rgba_unmultiplied(
+                item.style.color[0],
+                item.style.color[1],
+                item.style.color[2],
+                item.style.color[3],
+            )
+            .into();
+            painter.circle_filled(point, (item.style.size * scale).clamp(3.0, 32.0), color);
+        }
+        if action {
+            IntentRequest::new("act", json!({"press":1})).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+    fn reset(&mut self) {}
+}
+fn view<G: StandaloneGame>() -> Box<dyn EmbeddedGameplayView> {
+    Box::new(StarterView::<G>(PhantomData))
 }
 
 fn delivery_encode(
@@ -112,9 +173,12 @@ pub fn descriptors() -> Vec<GameplayDescriptor> {
                 types: existing.types,
                 host: existing.host,
                 stream: existing.stream,
-                presentation: PresentationCapability::Spatial2d {
-                    position: existing.position,
-                    draw: existing.draw,
+                presentation: PresentationCapability::Embedded {
+                    create: if delivery {
+                        view::<DeliveryGame>
+                    } else {
+                        view::<crate::switchboard::SwitchGame>
+                    },
                 },
                 input: InputCapability::Commands(CommandContract {
                     input: GameplaySchema {
@@ -151,7 +215,28 @@ pub fn descriptors() -> Vec<GameplayDescriptor> {
         .collect()
 }
 
+/// The executable constructs its trusted compiled registry once, then projects
+/// select immutable handles from it. JSON never introduces callback code.
+pub fn registry() -> &'static GameplayContracts {
+    static GAMES: OnceLock<GameplayContracts> = OnceLock::new();
+    GAMES.get_or_init(|| {
+        GameplayContracts::new(descriptors(), None).expect("compiled gameplay contracts")
+    })
+}
+
+#[cfg(all(test, feature = "api-acceptance"))]
+#[path = "gameplay_cpu_api_acceptance.rs"]
+mod cpu_api_acceptance;
 #[cfg(test)]
+#[path = "gameplay_ws_acceptance.rs"]
+#[allow(clippy::disallowed_types, reason = "Wall-clock deadlines bound host transport tests, not simulation")]
+mod ws_acceptance;
+#[cfg(all(test, feature = "api-acceptance"))]
+#[path = "gameplay_api_acceptance.rs"]
+mod gpu_api_acceptance;
+
+#[cfg(test)]
+#[allow(clippy::disallowed_types, reason = "Wall-clock deadlines bound host lifecycle tests, not simulation")]
 mod tests {
     use super::*;
     use orr_editor::editor::input::{CommandStatus, GameplayRouter};
@@ -160,6 +245,267 @@ mod tests {
         Auth, Caps, ErpClient, LocalHost, RemoteConfig, ServerConfig, ViewDeliveryMode,
     };
     use std::time::{Duration, Instant};
+
+    fn saved_project(alias: &str, scene: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let (manifest, filename) = match alias {
+            "delivery" => (
+                include_str!("../scenes/delivery.project.json"),
+                "delivery.scene.yaml",
+            ),
+            "switchboard" => (
+                include_str!("../scenes/switchboard.project.json"),
+                "switchboard.scene.yaml",
+            ),
+            _ => panic!("unknown fixture"),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("project.json");
+        std::fs::write(&path, manifest).unwrap();
+        std::fs::write(dir.path().join(filename), scene).unwrap();
+        (dir, path)
+    }
+    fn wait_editor(
+        editor: &mut orr_editor::Editor,
+        mut done: impl FnMut(&orr_editor::Editor) -> bool,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            editor.pump();
+            assert!(editor.down().is_none(), "editor host disconnected");
+            assert!(
+                editor.gameplay_error().is_none(),
+                "{:?}",
+                editor.gameplay_error()
+            );
+            if done(editor) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "editor progress deadline: mode={:?}, tick={}, command error={:?}",
+                editor.mode(),
+                editor.sim().head_tick,
+                editor.gameplay_error()
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn saved_manifests_select_compiled_capabilities_and_reject_unsafe_inputs() {
+        use orr_editor::registered_project::PreparedRegisteredProject;
+        for (alias, scene) in [
+            ("delivery", crate::delivery::SCENE),
+            ("switchboard", crate::switchboard::SCENE),
+        ] {
+            let (dir, path) = saved_project(alias, scene);
+            let source = std::fs::read(&path).unwrap();
+            let prepared = PreparedRegisteredProject::open(&path, registry()).unwrap();
+            let handle = registry().handle(alias).unwrap();
+            assert_eq!(prepared.game(), handle);
+            assert_eq!(prepared.scene_text(), scene);
+            assert!(!format!("{prepared:?}").contains("entities:"));
+            let base: J = serde_json::from_slice(&source).unwrap();
+            for (field, bad) in [
+                ("game", json!("NotCompiled")),
+                ("game", json!(alias)),
+                ("build_id", json!("0x0000000000000001")),
+                ("build_id", json!("0x1")),
+                ("input", json!("held")),
+                ("input", json!("downloaded-code")),
+                ("scene", json!("../outside.yaml")),
+                ("scene", json!("C:/outside.yaml")),
+                ("scene", json!("game.yaml:stream")),
+                ("scene", json!("CON.yaml")),
+                ("scene", json!("https://example.com/game.yaml")),
+                ("code", json!("untrusted.dll")),
+            ] {
+                let mut invalid = base.clone();
+                invalid[field] = bad;
+                std::fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+                assert!(
+                    PreparedRegisteredProject::open(&path, registry()).is_err(),
+                    "accepted field {field}"
+                );
+            }
+            std::fs::write(&path, vec![b' '; 64 * 1024 + 1]).unwrap();
+            assert!(PreparedRegisteredProject::open(&path, registry())
+                .unwrap_err()
+                .contains("65536"));
+            std::fs::write(&path, &source).unwrap();
+            let scene_path = prepared.scene_path();
+            std::fs::write(scene_path, vec![b' '; 256 * 1024 + 1]).unwrap();
+            assert!(PreparedRegisteredProject::open(&path, registry())
+                .unwrap_err()
+                .contains("262144"));
+            std::fs::write(
+                scene_path,
+                "schema: orr.scene/1\nentities: {e_00000001: {AlienType: {}}}\n",
+            )
+            .unwrap();
+            assert!(PreparedRegisteredProject::open(&path, registry()).is_err());
+            std::fs::write(scene_path, scene).unwrap();
+            #[cfg(unix)]
+            {
+                let target = dir.path().join("real.scene.yaml");
+                std::fs::rename(scene_path, &target).unwrap();
+                std::os::unix::fs::symlink(&target, scene_path).unwrap();
+                assert!(PreparedRegisteredProject::open(&path, registry()).is_err());
+            }
+            #[cfg(not(unix))]
+            let _ = dir;
+        }
+    }
+
+    #[test]
+    fn saved_projects_drive_the_existing_editor_lifecycle_and_preserve_source() {
+        use orr_editor::{registered_project::PreparedRegisteredProject, Editor, Mode};
+        // CPU-only win fixtures change scene data. Shipped native projects keep
+        // the original delivery goal [4,0] and switch target 5.
+        for (alias, scene) in [
+            (
+                "delivery",
+                crate::delivery::SCENE.replace("goal: [4, 0]", "goal: [0, 0]"),
+            ),
+            (
+                "switchboard",
+                crate::switchboard::SCENE.replace("target: 5", "target: 1"),
+            ),
+        ] {
+            let (_dir, path) = saved_project(alias, &scene);
+            let manifest_bytes = std::fs::read(&path).unwrap();
+            let prepared = PreparedRegisteredProject::open(&path, registry()).unwrap();
+            let handle = prepared.game();
+            let scene_path = prepared.scene_path().to_path_buf();
+            // Admission owns the exact scene bytes. First startup must succeed
+            // even after the on-disk scene becomes invalid, without rereading it.
+            std::fs::write(&scene_path, "invalid after admission").unwrap();
+            let mut editor = Editor::open_registered_project(prepared).unwrap();
+            editor.sync();
+            assert_eq!(editor.game().gameplay(), Some(handle));
+            std::fs::write(&scene_path, &scene).unwrap();
+            let original = editor.host_call("scene.save", J::Null).unwrap();
+            let history = editor.host_call("history.list", J::Null).unwrap();
+            assert!(editor.submit_gameplay_intent(act()).is_err());
+            editor.play();
+            wait_editor(&mut editor, |e| {
+                e.sim().playing
+                    && e.gameplay_frame_evidence()
+                        .is_some_and(|v| v.snapshot().tick() > 0)
+            });
+            editor.claim_gameplay(0).unwrap();
+            wait_editor(&mut editor, Editor::can_submit_gameplay);
+            let id = editor.submit_gameplay_intent(act()).unwrap();
+            assert!(editor.submit_gameplay_intent(act()).is_err());
+            wait_editor(&mut editor, |e| {
+                matches!(
+                    e.gameplay_command_status(id),
+                    Some(CommandStatus::Completed { .. })
+                )
+            });
+            let frame = editor
+                .gameplay_frame_evidence()
+                .unwrap()
+                .snapshot()
+                .predicted();
+            if alias == "delivery" {
+                assert_eq!(frame.singleton::<Delivery>().won, 1);
+            } else {
+                assert_eq!(frame.singleton::<Board>().solved, 1);
+                assert_eq!(frame.singleton::<Board>().moves, 1);
+            }
+            let next = editor.submit_gameplay_intent(act()).unwrap();
+            wait_editor(&mut editor, |e| {
+                matches!(
+                    e.gameplay_command_status(next),
+                    Some(CommandStatus::Completed { .. })
+                )
+            });
+            let frame = editor
+                .gameplay_frame_evidence()
+                .unwrap()
+                .snapshot()
+                .predicted();
+            if alias == "delivery" {
+                assert_eq!(frame.singleton::<Delivery>().won, 0);
+            } else {
+                assert_eq!(frame.singleton::<Board>().solved, 0);
+                assert_eq!(frame.singleton::<Board>().moves, 0);
+            }
+            editor.pause();
+            wait_editor(&mut editor, |e| {
+                !e.sim().playing && e.input_phase() == orr_editor::editor::input::Phase::Off
+            });
+            let paused = editor.sim().head_tick;
+            for _ in 0..10 {
+                editor.pump();
+            }
+            assert_eq!(editor.sim().head_tick, paused);
+            assert!(editor.submit_gameplay_intent(act()).is_err());
+            editor.step(1);
+            wait_editor(&mut editor, |e| {
+                e.sim().head_tick == paused + 1 && !e.sim().playing
+            });
+            let _ = editor.stop();
+            wait_editor(&mut editor, |e| e.mode() == Mode::Edit);
+            editor.sync();
+            assert_eq!(editor.host_call("scene.save", J::Null).unwrap(), original);
+            assert_eq!(editor.host_call("history.list", J::Null).unwrap(), history);
+            assert_eq!(std::fs::read_to_string(&scene_path).unwrap(), scene);
+            assert_eq!(std::fs::read(&path).unwrap(), manifest_bytes);
+            assert!(editor.start_play());
+            editor.sync();
+            assert_eq!(editor.sim().head_tick, 0);
+            assert!(!editor.sim().playing);
+            assert_eq!(
+                editor.host_call("sim.state", J::Null).unwrap()["checksum"],
+                original["checksum"]
+            );
+            let _ = editor.stop();
+            wait_editor(&mut editor, |e| e.mode() == Mode::Edit);
+            assert!(editor.restart());
+            editor.sync();
+            assert_eq!(editor.game().gameplay(), Some(handle));
+            assert_eq!(editor.host_call("scene.save", J::Null).unwrap(), original);
+            assert_eq!(editor.mode(), Mode::Edit);
+            assert_eq!(editor.sim().head_tick, 0);
+            assert!(!editor.sim().playing);
+            assert_eq!(editor.input_phase(), orr_editor::editor::input::Phase::Off);
+            assert!(!editor.can_submit_gameplay());
+            assert!(editor.gameplay_command_status(id).is_none());
+            assert!(editor.gameplay_command_status(next).is_none());
+            editor.play();
+            wait_editor(&mut editor, |e| {
+                e.sim().playing
+                    && e.gameplay_frame_evidence()
+                        .is_some_and(|v| v.snapshot().tick() > 0)
+            });
+            editor.claim_gameplay(0).unwrap();
+            wait_editor(&mut editor, Editor::can_submit_gameplay);
+            let after_restart = editor.submit_gameplay_intent(act()).unwrap();
+            assert!(after_restart.0 > next.0);
+            assert_ne!(after_restart, id);
+            assert_ne!(after_restart, next);
+            assert!(editor.gameplay_command_status(id).is_none());
+            assert!(editor.gameplay_command_status(next).is_none());
+            wait_editor(&mut editor, |e| {
+                matches!(
+                    e.gameplay_command_status(after_restart),
+                    Some(CommandStatus::Completed { .. })
+                )
+            });
+            let _ = editor.stop();
+            wait_editor(&mut editor, |e| e.mode() == Mode::Edit);
+            assert_eq!(editor.host_call("scene.save", J::Null).unwrap(), original);
+            assert_eq!(editor.host_call("history.list", J::Null).unwrap(), history);
+            drop(editor);
+            let reopened = PreparedRegisteredProject::open(&path, registry()).unwrap();
+            let mut editor = Editor::open_registered_project(reopened).unwrap();
+            editor.sync();
+            assert_eq!(editor.host_call("scene.save", J::Null).unwrap(), original);
+            assert_eq!(editor.host_call("history.list", J::Null).unwrap(), history);
+        }
+    }
 
     struct Fixture {
         _dir: tempfile::TempDir,

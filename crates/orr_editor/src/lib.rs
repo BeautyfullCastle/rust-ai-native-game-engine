@@ -56,6 +56,10 @@ pub mod inspector;
 pub mod game;
 #[cfg(feature = "static-games")]
 pub mod static_adapter;
+#[cfg(feature = "static-gameplay")]
+pub mod registered_project;
+#[cfg(feature = "static-gameplay")]
+mod registered_gameplay_view;
 pub mod model;
 pub mod script;
 pub mod viewport;

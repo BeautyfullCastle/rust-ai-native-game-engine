@@ -1,5 +1,6 @@
 //! Two application-owned games sharing the public static registration route.
 pub mod delivery;
+pub mod editor_args;
 pub mod game_contract;
 #[cfg(feature = "gameplay")]
 pub mod gameplay;
@@ -8,6 +9,8 @@ pub mod presentation;
 #[cfg(feature = "standalone")]
 pub mod standalone;
 pub mod switchboard;
+#[cfg(feature = "stormglass")]
+pub mod stormglass;
 pub const SEED: u64 = 42;
 pub const TICK_RATE: u32 = 60;
 

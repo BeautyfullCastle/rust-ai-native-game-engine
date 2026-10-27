@@ -67,6 +67,13 @@ pub enum HostSpec {
     /// Initial RoomEscape project bytes admitted before host startup.
     #[cfg(feature = "room-project")]
     PreparedRoom { scene: PathBuf, text: String, listen: Option<ServerConfig>, debug_hooks: bool },
+    /// A compiled registered project whose first startup consumes admitted bytes.
+    #[cfg(feature = "static-gameplay")]
+    PreparedRegistered {
+        project: crate::registered_project::PreparedRegisteredProject,
+        listen: Option<ServerConfig>,
+        debug_hooks: bool,
+    },
     /// A host in another process.
     Remote {
         /// `ws://host:port` of its ERP server.
@@ -90,6 +97,8 @@ impl HostSpec {
     /// Adds an ERP listener to an editor-owned local host.
     pub fn with_listener(mut self, listen: ServerConfig) -> HostSpec {
         match &mut self {
+            #[cfg(feature = "static-gameplay")]
+            HostSpec::PreparedRegistered { listen: current, .. } => *current = Some(listen),
             HostSpec::Local { listen: current, .. } | HostSpec::LocalGame { listen: current, .. } => *current = Some(listen),
             #[cfg(feature = "sprites")]
             HostSpec::PreparedArena { listen: current, .. } => *current = Some(listen),
@@ -105,6 +114,14 @@ impl HostSpec {
     /// Updates the persisted scene path of a local host spec after open/save.
     pub fn set_local_scene_path(&mut self, path: PathBuf) -> bool {
         match self {
+            #[cfg(feature = "static-gameplay")]
+            HostSpec::PreparedRegistered { project, listen, debug_hooks } => {
+                *self = HostSpec::LocalGame {
+                    scene: path, game: EditorGame::Gameplay(project.game()),
+                    listen: listen.clone(), debug_hooks: *debug_hooks,
+                };
+                true
+            }
             HostSpec::Local { scene, .. } | HostSpec::LocalGame { scene, .. } => {
                 *scene = path;
                 true
@@ -171,6 +188,8 @@ pub struct Backend {
     pub(crate) screenshot_owner: Option<ScreenshotOwner>,
     /// Sole publisher of this host-paired main editor observation. Never cloned.
     pub(crate) work_status_owner: Option<orr_remote::work_status::WorkStatusOwner>,
+    #[cfg(feature = "static-gameplay")]
+    pub(crate) editor_gameplay_owner: Option<orr_remote::editor_gameplay::EditorGameplayOwner>,
 }
 
 /// `ws://host:port` plus the path and query a dev-mode host needs to know
@@ -189,6 +208,17 @@ impl Backend {
     /// Starts the host thread or attaches to the host, and opens both channels.
     pub fn connect(spec: &HostSpec) -> Result<Backend, String> {
         match spec {
+            #[cfg(feature = "static-gameplay")]
+            HostSpec::PreparedRegistered { project, listen, debug_hooks } => {
+                let game = EditorGame::Gameplay(project.game());
+                // Capture is used once. Restart follows the current saved file,
+                // including a later Save made through the shared ERP document.
+                let restart = HostSpec::LocalGame {
+                    scene: project.scene_path().to_path_buf(), game,
+                    listen: listen.clone(), debug_hooks: *debug_hooks,
+                };
+                Self::connect_local(&restart, project.scene_path(), project.scene_text().to_string(), game, listen, *debug_hooks)
+            }
             HostSpec::Local { scene, listen, debug_hooks } => {
                 let text = std::fs::read_to_string(scene).map_err(|e| format!("cannot read {}: {e}", scene.display()))?;
                 Self::connect_local(spec, scene, text, EditorGame::PhysGame, listen, *debug_hooks)
@@ -232,7 +262,8 @@ impl Backend {
                 rc.view_delivery = delivery(game, false);
                 rc.expected_identity = Some(identity.clone());
                 let bridge = EditorStream::connect(game, rc).map_err(|e| format!("frame stream of {url}: {e}"))?;
-                Ok(Backend { spec: spec.clone(), erp, bridge, host: None, own_client, url: Some(url.clone()), game, identity, managed_input, screenshot_owner: None, work_status_owner: None })
+                Ok(Backend { spec: spec.clone(), erp, bridge, host: None, own_client, url: Some(url.clone()), game, identity, managed_input, screenshot_owner: None, work_status_owner: None,
+                    #[cfg(feature = "static-gameplay")] editor_gameplay_owner: None })
             }
         }
     }
@@ -245,6 +276,10 @@ impl Backend {
         listen: &Option<ServerConfig>,
         debug_hooks: bool,
     ) -> Result<Backend, String> {
+        #[cfg(feature = "static-gameplay")]
+        if selected_game.gameplay().is_some_and(|game| !game.has_commands()) {
+            return Err("unsupported gameplay capability: this startup requires commands; use the legacy registered path for held input".into());
+        }
         let mut cfg = match listen {
             Some(c) => c.clone(),
             None => {
@@ -259,6 +294,11 @@ impl Backend {
         cfg.limits.max_step_per_call = 20_000;
         let (screenshot_service, screenshot_owner) = ScreenshotService::pair();
         cfg.screenshot = Some(screenshot_service);
+        #[cfg(feature = "static-gameplay")]
+        let (editor_gameplay_service, editor_gameplay_owner) = if selected_game.is_gameplay() {
+            let (service, owner) = orr_remote::editor_gameplay::EditorGameplayService::pair();
+            (Some(service), Some(owner))
+        } else { (None, None) };
         let mut work_status_owner = None;
         let mut status_service = || {
             let (service, owner) = orr_remote::work_status::WorkStatusService::pair();
@@ -266,6 +306,19 @@ impl Backend {
             service
         };
         let host = match selected_game {
+            #[cfg(feature = "static-gameplay")]
+            EditorGame::Gameplay(game) => {
+                cfg.limits.player_count = game.expected_input().max_players();
+                let host = game.spawn(crate::static_adapter::StaticHostRequest {
+                    scene_text: text, scene_path: scene.to_path_buf(), config: cfg,
+                    work_status: status_service(), neutral_value: game.neutral_value(),
+                    expected_input: game.expected_input(),
+                })?;
+                if listen.is_none() && host.url().is_some() {
+                    return Err("gameplay factory unexpectedly enabled a listener".into());
+                }
+                host
+            },
             #[cfg(feature = "static-games")]
             EditorGame::Registered(game) => {
                 if listen.is_some() { return Err("registered startup does not support a listener".into()); }
@@ -294,6 +347,8 @@ impl Backend {
             #[cfg(feature = "mesh-hazards")]
             EditorGame::MeshHazardsV1 => orr_remote::mesh_navigation::hazards::spawn_mesh_hazards_scene_host(scene.to_path_buf(), cfg)?,
         };
+        #[cfg(feature = "static-gameplay")]
+        if let Some(service) = editor_gameplay_service { host.install_editor_gameplay(service)?; }
         let connector = host.connector();
         let link = |what: &str| connector.connect(USER_CLIENT, Caps::ALL).map_err(|e| format!("{what}: {e}"));
         let mut erp = ErpClient::with_transport(Box::new(link("ERP")?));
@@ -308,12 +363,15 @@ impl Backend {
         rc.expected_identity = Some(identity.clone());
         let bridge = EditorStream::connect_transport(game, Box::new(link("frames")?), rc)?;
         let url = host.url().map(str::to_string);
-        Ok(Backend { spec: spec.clone(), erp, bridge, host: Some(host), own_client, url, game, identity, managed_input, screenshot_owner: Some(screenshot_owner), work_status_owner })
+        Ok(Backend { spec: spec.clone(), erp, bridge, host: Some(host), own_client, url, game, identity, managed_input, screenshot_owner: Some(screenshot_owner), work_status_owner,
+            #[cfg(feature = "static-gameplay")] editor_gameplay_owner })
     }
 
     /// Another frame stream, for what the viewport previews (`proposal:p3`).
     pub fn frame_stream(&self, source: &str) -> Result<EditorStream, String> {
         let mut rc = match &self.spec {
+            #[cfg(feature = "static-gameplay")]
+            HostSpec::PreparedRegistered { .. } => RemoteConfig::new(""),
             HostSpec::Local { .. } | HostSpec::LocalGame { .. } => RemoteConfig::new(""),
             #[cfg(feature = "room-project")]
             HostSpec::PreparedRoom { .. } => RemoteConfig::new(""),
@@ -350,6 +408,19 @@ impl Backend {
         Ok(c)
     }
 
+    /// Explicit opt-in local SDK connection. This never upgrades an existing
+    /// client, grants proposal approval, impersonates the human, or opens a socket.
+    #[cfg(feature = "static-gameplay")]
+    pub fn gameplay_api_client(&self, name: &str, caps: Caps) -> Result<ErpClient, String> {
+        if self.editor_gameplay_owner.is_none() { return Err("gameplay_api_unavailable".into()); }
+        if !sdk_client_allowed(name, caps) { return Err("gameplay_api_client_denied".into()); }
+        let host = self.host.as_ref().ok_or("gameplay_api_requires_local_owner")?;
+        let transport = host.connector().connect(name, caps).map_err(|_| "gameplay_api_connect_failed")?;
+        let mut client = ErpClient::with_transport(Box::new(transport));
+        client.call_timeout = CALL_TIMEOUT;
+        Ok(client)
+    }
+
     /// Subscribes to the notifications the editor shows.
     pub fn subscribe(&mut self) -> Result<(), String> {
         self.erp
@@ -359,8 +430,45 @@ impl Backend {
     }
 }
 
+#[cfg(feature = "static-gameplay")]
+fn sdk_client_allowed(name: &str, caps: Caps) -> bool {
+    !name.is_empty() && name.len() <= 64 && name != USER_CLIENT
+        && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+        && caps.has(orr_remote::Cap::Read) && !caps.has(orr_remote::Cap::Approve)
+}
+
+#[cfg(all(test, feature = "static-gameplay"))]
+mod gameplay_sdk_caps_tests {
+    use super::*;
+    #[test]
+    fn explicit_sdk_caps_allow_readonly_and_refuse_human_impersonation_or_approval() {
+        assert!(sdk_client_allowed("qa-reader", Caps::of(&[orr_remote::Cap::Read])));
+        assert!(sdk_client_allowed("qa-driver", Caps::parse("read,scene_edit,sim_control").unwrap()));
+        assert!(!sdk_client_allowed(USER_CLIENT, Caps::of(&[orr_remote::Cap::Read])));
+        assert!(!sdk_client_allowed("qa-driver", Caps::ALL));
+        assert!(!sdk_client_allowed("qa-driver", Caps::of(&[orr_remote::Cap::SimControl])));
+        assert!(!sdk_client_allowed("", Caps::of(&[orr_remote::Cap::Read])));
+    }
+}
+
 // Local selection is an explicit validated handle, never a name-based fallback.
 fn discover_selected(erp: &mut ErpClient, selected: EditorGame) -> Result<(EditorGame, RemoteIdentity, String, bool), String> {
+    #[cfg(feature = "static-gameplay")]
+    if let EditorGame::Gameplay(game) = selected {
+        let d = erp.call("rpc.discover", J::Null).map_err(|e| format!("rpc.discover: {e}"))?;
+        let expected = game.expected_identity();
+        if d["erp_version"].as_u64() != Some(1)
+            || d.pointer("/engine/game").and_then(J::as_str) != Some(expected.game.as_str())
+            || d.pointer("/engine/build_id").and_then(J::as_str) != Some(expected.build_id.as_str()) {
+            return Err("gameplay game/build identity mismatch".into());
+        }
+        let schema = erp.call("registry.schema", J::Null).map_err(|e| format!("registry.schema: {e}"))?;
+        if schema.get("schema") != Some(&expected.schema) { return Err("gameplay full reflection schema mismatch".into()); }
+        let input = erp.call("registry.input", J::Null).map_err(|e| format!("registry.input: {e}"))?;
+        game.expected_input().validate(&input)?;
+        let own = d.pointer("/you/client").and_then(J::as_str).unwrap_or(USER_CLIENT).to_string();
+        return Ok((selected, expected, own, true));
+    }
     #[cfg(feature = "static-games")]
     if let EditorGame::Registered(game) = selected {
         let d = erp.call("rpc.discover", J::Null).map_err(|e| format!("rpc.discover: {e}"))?;

@@ -83,6 +83,7 @@ mod server;
 mod viewstream;
 pub mod wire;
 pub mod work_status;
+pub mod editor_gameplay;
 #[cfg(feature = "coop-defense")]
 pub mod coop_defense;
 #[cfg(feature = "sample-host")]
