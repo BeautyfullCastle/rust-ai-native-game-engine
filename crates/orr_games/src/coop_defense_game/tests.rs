@@ -1,5 +1,63 @@
 use super::*;
 use orr_sim::{Simulation, TickInputs};
+
+#[test]
+fn reflected_input_preserves_pod_layout_and_neutral_default() {
+    use orr_reflect::{Kind, Reflect};
+
+    let desc = DefenseInput::describe();
+    assert_eq!(std::mem::size_of::<DefenseInput>(), 16);
+    desc.check_layout(std::mem::size_of::<DefenseInput>()).unwrap();
+    let Kind::Struct { size, fields } = &desc.kind else {
+        panic!("DefenseInput must expose its existing struct layout");
+    };
+    assert_eq!(*size, 16);
+    assert_eq!(
+        fields.iter().map(|field| (field.name.as_str(), field.offset)).collect::<Vec<_>>(),
+        [("action", 0), ("source_cell", 4), ("target_cell", 8), ("sequence", 12)]
+    );
+    let neutral = DefenseInput::default_value();
+    assert_eq!(neutral, DefenseInput::default());
+    assert_eq!(bytemuck::bytes_of(&neutral), &[0; 16]);
+    desc.check(&desc.read(bytemuck::bytes_of(&neutral)), true).unwrap();
+}
+
+#[test]
+fn reflected_input_round_trip_covers_all_actions_cells_and_full_sequence() {
+    use orr_reflect::Reflect;
+
+    let desc = DefenseInput::describe();
+    for action in NOOP..=RESTART {
+        for source_cell in 0..CELLS_PER_BOARD {
+            for target_cell in 0..CELLS_PER_BOARD {
+                let input = DefenseInput { action, source_cell, target_cell, sequence: u32::MAX };
+                let value = desc.read(bytemuck::bytes_of(&input));
+                let mut decoded = DefenseInput::default();
+                desc.write(bytemuck::bytes_of_mut(&mut decoded), &value).unwrap();
+                assert_eq!(decoded, input);
+            }
+        }
+    }
+}
+
+#[test]
+fn reflected_input_rejects_invalid_action_and_cells_without_mutating_bytes() {
+    use orr_reflect::Reflect;
+
+    let desc = DefenseInput::describe();
+    for invalid in [
+        DefenseInput { action: RESTART + 1, ..Default::default() },
+        DefenseInput { source_cell: CELLS_PER_BOARD, ..Default::default() },
+        DefenseInput { target_cell: CELLS_PER_BOARD, ..Default::default() },
+    ] {
+        let value = desc.read(bytemuck::bytes_of(&invalid));
+        let mut decoded = DefenseInput { sequence: 123, ..Default::default() };
+        let before = decoded;
+        assert!(desc.write(bytemuck::bytes_of_mut(&mut decoded), &value).is_err());
+        assert_eq!(decoded, before);
+    }
+}
+
 fn new(seed: u32) -> Simulation<DefenseGame> {
     Simulation::new(DefenseConfig { seed }, TICK_RATE, seed as u64)
 }

@@ -83,6 +83,8 @@ mod server;
 mod viewstream;
 pub mod wire;
 pub mod work_status;
+#[cfg(feature = "coop-defense")]
+pub mod coop_defense;
 #[cfg(feature = "sample-host")]
 pub mod yard3d;
 
