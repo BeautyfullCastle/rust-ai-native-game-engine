@@ -1,7 +1,7 @@
 use super::*;
 use crate::{Auth, Caps, ErpClient};
 use orr_edit::{Op, Origin, PlayController};
-use orr_games::coop_defense_game::{DefenseInput, DefenseRun, SUMMON};
+use orr_games::coop_defense_game::{DefenseInput, DefenseRun, Scenario, SCENARIO_NAME, SUMMON};
 use orr_session::{ControlOp, LocalInputSource, Session, SessionConfig};
 use orr_sim::PlayerSlot;
 use serde_json::Value as J;
@@ -454,4 +454,68 @@ fn nonzero_replay_contract_rejects_previous_host_identity() {
         replay_verify_checked::<DefenseGame>(&bytes, DefenseConfig::default(), SCENARIO_BUILD_ID),
         Err(ReplayError::BuildHashMismatch { .. })
     ));
+}
+
+#[test]
+fn saved_authored_scene_matches_native_setup_and_consumed_trace() {
+    use orr_games::coop_defense_scene::parse_scenario;
+    let authored = document(&authored_scene(250, 75)).unwrap().to_yaml();
+    let doc = document(&authored).unwrap();
+    let mut native = Session::<DefenseGame, LocalInputSource>::new(
+        DefenseConfig {
+            scenario: parse_scenario(&authored).unwrap(),
+            ..Default::default()
+        },
+        native_config(),
+        LocalInputSource,
+    );
+    let mut play =
+        PlayController::<DefenseGame>::start_play(&doc, doc.play_config(1, TICK_RATE)).unwrap();
+    assert_eq!(native.predicted_frame().to_bytes(), doc.frame().to_bytes());
+    assert_eq!(
+        native.predicted_frame().singleton::<DefenseRun>().gold,
+        [250; 2]
+    );
+    assert_eq!(
+        native
+            .predicted_frame()
+            .singleton::<DefenseRun>()
+            .reactor_hp,
+        75
+    );
+    let delay = native.config().input_delay;
+    let mut pending = VecDeque::from(vec![DefenseInput::default(); delay as usize]);
+    for tick in 0..120 {
+        let value = if tick == 4 {
+            DefenseInput {
+                action: SUMMON,
+                sequence: 1,
+                ..Default::default()
+            }
+        } else if tick == 90 {
+            DefenseInput {
+                action: orr_games::coop_defense_game::RESTART,
+                sequence: 2,
+                ..Default::default()
+            }
+        } else {
+            DefenseInput::default()
+        };
+        pending.push_back(value);
+        play.session_mut()
+            .set_input(PlayerSlot(0), pending.pop_front().unwrap());
+        play.control(ControlOp::Step(1));
+        native.advance(value, vec![]);
+        assert_eq!(
+            native.predicted_frame().to_bytes(),
+            play.session().frame().to_bytes(),
+            "tick {tick}"
+        );
+        if tick == 90 + delay {
+            let run = native.predicted_frame().singleton::<DefenseRun>();
+            assert_eq!(run.gold, [250; 2]);
+            assert_eq!(run.reactor_hp, 75);
+            assert_eq!(run.generation, 1);
+        }
+    }
 }

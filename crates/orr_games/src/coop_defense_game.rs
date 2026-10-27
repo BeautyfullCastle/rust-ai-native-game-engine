@@ -279,10 +279,14 @@ impl SimCommand for NoCommand {
 #[derive(Clone, Copy, Debug)]
 pub struct DefenseConfig {
     pub seed: u32,
+    pub scenario: Scenario,
 }
 impl Default for DefenseConfig {
     fn default() -> Self {
-        Self { seed: 0x0c00_2026 }
+        Self {
+            seed: 0x0c00_2026,
+            scenario: Scenario::default(),
+        }
     }
 }
 pub struct DefenseGame;
@@ -299,7 +303,7 @@ impl Game for DefenseGame {
         b.register_singleton::<Scenario>(SCENARIO_NAME);
     }
     fn setup(f: &mut Frame, c: &DefenseConfig) {
-        Self::setup_scenario(f, c, Scenario::default());
+        Self::setup_scenario(f, c, c.scenario);
     }
     fn systems() -> Vec<Box<dyn System<Self>>> {
         vec![Box::new(DefenseSystem)]

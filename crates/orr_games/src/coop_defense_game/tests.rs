@@ -89,7 +89,14 @@ fn reflected_input_rejects_invalid_action_and_cells_without_mutating_bytes() {
 }
 
 fn new(seed: u32) -> Simulation<DefenseGame> {
-    Simulation::new(DefenseConfig { seed }, TICK_RATE, seed as u64)
+    Simulation::new(
+        DefenseConfig {
+            seed,
+            ..Default::default()
+        },
+        TICK_RATE,
+        seed as u64,
+    )
 }
 fn step(s: &mut Simulation<DefenseGame>, input: DefenseInput) {
     let mut inputs = TickInputs::new(s.tick(), 1);

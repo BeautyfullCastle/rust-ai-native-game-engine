@@ -5,8 +5,7 @@ use std::{path::PathBuf, sync::Arc};
 use orr_ecs::Frame;
 use orr_edit::{BakeAdmission, EditError, EditorDoc};
 use orr_games::coop_defense_game::{
-    scenario_types, DefenseConfig, DefenseGame, Scenario, SCENARIO_BUILD_ID, SCENARIO_NAME,
-    TICK_RATE,
+    scenario_types, DefenseConfig, DefenseGame, SCENARIO_BUILD_ID, TICK_RATE,
 };
 use orr_reflect::{Scene, SceneIndex};
 use orr_sim::Simulation;
@@ -16,40 +15,19 @@ use crate::{GameHooks, HostLimits, LocalHost, ServerConfig};
 
 pub const GAME: &str = "CoopDefense";
 pub const INITIAL_SCENE: &str = "schema: orr.scene/1\nentities: {}\n";
-/// Bound parsing and source text retained for Save, not the world size.
-pub const MAX_SOURCE_BYTES: usize = 64 * 1024;
+pub use orr_games::coop_defense_scene::MAX_SOURCE_BYTES;
+use orr_games::coop_defense_scene::{scenario_from_baked, validate_source};
 
 struct InitialAdmission;
 
 impl BakeAdmission for InitialAdmission {
     fn admit_source(&self, text: &str) -> Result<(), EditError> {
-        if text.len() > MAX_SOURCE_BYTES {
-            return Err(EditError::Invalid(
-                "CoopDefense source exceeds 64 KiB".into(),
-            ));
-        }
-        Ok(())
+        validate_source(text).map_err(EditError::Invalid)
     }
 
     fn admit(&self, scene: &Scene, frame: &mut Frame, _: &SceneIndex) -> Result<(), EditError> {
-        if !scene.entities.is_empty()
-            || scene
-                .singletons
-                .iter()
-                .any(|(name, _)| name != SCENARIO_NAME)
-            || scene.has_prefab_links()
-        {
-            return Err(EditError::Invalid(
-                "CoopDefense accepts only Scenario starting conditions, no entities or prefabs"
-                    .into(),
-            ));
-        }
-        // Baking supplies a fresh candidate, never a live game frame.
-        let scenario = if scene.singletons.is_empty() {
-            Scenario::default()
-        } else {
-            *frame.singleton::<Scenario>()
-        };
+        // The native player shares the same closed-shape and baked-default rules.
+        let scenario = scenario_from_baked(scene, frame).map_err(EditError::Invalid)?;
         DefenseGame::setup_scenario(frame, &DefenseConfig::default(), scenario);
         Ok(())
     }

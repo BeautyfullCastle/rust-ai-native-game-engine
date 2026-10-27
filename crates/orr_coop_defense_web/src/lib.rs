@@ -32,7 +32,10 @@ pub extern "C" fn defense_init(seed: u32) {
     CLIENT.with(|slot| {
         *slot.borrow_mut() = Some(Client {
             sim: Simulation::with_build_id(
-                DefenseConfig { seed },
+                DefenseConfig {
+                    seed,
+                    ..Default::default()
+                },
                 TICK_RATE,
                 u64::from(seed),
                 SCENARIO_BUILD_ID,

@@ -12,6 +12,8 @@ workspace = true
 
 [features]
 coop-defense = []
+# Optional source admission; CPU simulation alone does not enable YAML.
+coop-defense-scene = ["coop-defense", "orr_reflect/scene"]
 room-escape = []
 collect-dodge = []
 navigation = ["dep:orr_navigation_runtime", "dep:orr_navigation", "dep:orr_terrain"]

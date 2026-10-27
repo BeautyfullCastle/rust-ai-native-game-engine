@@ -40,7 +40,7 @@ Generic checked replay retains its existing zero-header wildcard: old native
 recordings with build_hash=0 are not guaranteed identity rejection. Unguarded
 replay APIs likewise do not gain protection from this change. Native/browser previously used a zero build-ID wildcard;
 new construction now supplies the shared identity. No saved replay migration
-or new native/browser scene-loading UI is provided.
+or browser scene-loading UI is provided.
 
 
 ## Acceptance
@@ -53,3 +53,28 @@ rejection. These tests require execution on the exact candidate; this document
 does not claim they have passed. Existing editor project tests cover Play,
 command consumption and Stop. No GPU, platform or live-model authorship result
 is implied by CPU/API tests.
+
+## Native saved-scene playback
+
+Save the authored scene through the existing ERP `scene.save`/CLI path, then
+run `coop_defense --scene PATH` or
+`coop_defense --scene PATH --headless --ticks 120`. The file must be regular,
+non-symlink UTF-8 and at most 64 KiB. Loading and strict admission happen before
+any window, GPU or session creation. Omit `--scene` to retain the old defaults.
+The native HUD reads its maximum reactor HP from the same Scenario singleton.
+
+`orr_games/coop-defense-scene` is an opt-in source-admission package feature;
+plain `coop-defense` still does not enable YAML. ERP and native playback reuse
+the same Scene parser/baker, reflection bounds, legacy defaults and closed
+source shape. A present Scenario in source YAML requires both fields; ERP
+whole-value edit defaults do not make partial source YAML valid. No editor/ERP dependency enters native simulation, and no new
+protocol or package format is added. `DefenseConfig` now carries `scenario`;
+Rust callers using a struct literal add `..Default::default()` or an explicit
+Scenario. This configuration change does not change the Scenario frame layout
+or build identity introduced above.
+
+New source tests cover saved Editor/native initial bytes and consumed-input
+traces, restart, CLI/default equivalence, invalid/oversized/non-UTF-8 sources,
+nonregular files and Unix link/FIFO rejection. These are focused CPU checks,
+not a substitute for the exact candidate’s mandatory integration gate.
+Windows/macOS file behavior and actual native HUD rendering remain unverified.

@@ -15,8 +15,14 @@ fn main() {
     let seed = value("--seed", DefenseConfig::default().seed);
     let cadence = value("--cadence", 90).max(1);
     let limit = value("--ticks", 60 * 600);
-    let mut sim =
-        Simulation::<DefenseGame>::new(DefenseConfig { seed }, TICK_RATE, u64::from(seed));
+    let mut sim = Simulation::<DefenseGame>::new(
+        DefenseConfig {
+            seed,
+            ..Default::default()
+        },
+        TICK_RATE,
+        u64::from(seed),
+    );
     let mut recorded = Vec::new();
     let mut sequence = 0;
     let mut previous_wave = 0;
@@ -62,8 +68,14 @@ fn main() {
             "run exceeded bounded completion window"
         );
     }
-    let mut replay =
-        Simulation::<DefenseGame>::new(DefenseConfig { seed }, TICK_RATE, u64::from(seed));
+    let mut replay = Simulation::<DefenseGame>::new(
+        DefenseConfig {
+            seed,
+            ..Default::default()
+        },
+        TICK_RATE,
+        u64::from(seed),
+    );
     for input in &recorded {
         replay.step(input);
     }
