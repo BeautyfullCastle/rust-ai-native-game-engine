@@ -10,5 +10,5 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-orr_games = { path = "../orr_games", features = ["coop-defense"] }
+orr_games = { path = "../orr_games", features = ["coop-defense-scene"] }
 orr_sim = { path = "../orr_sim" }
