@@ -1,6 +1,6 @@
 //! Thin browser ABI: all economy, combat, spawning and AI remain in DefenseGame.
 use orr_games::coop_defense_game::*;
-use orr_games::coop_defense_scene::{parse_scenario, MAX_SOURCE_BYTES};
+use orr_games::coop_defense_scene::{parse_config, MAX_SOURCE_BYTES};
 use orr_sim::{PlayerSlot, Simulation, TickInputs};
 use std::cell::{Cell, RefCell};
 mod presentation;
@@ -43,11 +43,11 @@ pub extern "C" fn defense_init_scene(length: usize) -> u32 {
     let candidate = SCENE_BYTES.with(|bytes| {
         let bytes = bytes.borrow();
         let text = std::str::from_utf8(&bytes[..length]).map_err(|_| 2u32)?;
-        parse_scenario(text).map_err(|_| 3)
+        parse_config(text).map_err(|_| 3)
     });
     match candidate {
-        Ok(scenario) => {
-            replace_client(DefenseConfig { scenario, ..Default::default() });
+        Ok(config) => {
+            replace_client(config);
             0
         }
         Err(status) => status,
@@ -110,7 +110,8 @@ pub extern "C" fn defense_snapshot() -> *const u8 {
         let r = run(frame);
         let out = &mut client.json;
         out.clear();
-        write!(out, "{{\"phase\":{},\"tick\":{},\"wave\":{},\"hp\":{},\"maxHp\":{},\"gold\":{:?},\"investment\":{:?},\"upgrades\":{:?},\"kills\":{},\"leaks\":{},\"summons\":{},\"merges\":{},\"units\":[", r.phase,r.tick,r.wave,r.reactor_hp,frame.singleton::<Scenario>().reactor_hp,r.gold,r.investment,r.upgrades,r.kills,r.leaks,r.summons,r.merges).unwrap();
+        let last_wave = frame.singleton::<Campaign>().last_wave;
+        write!(out, "{{\"phase\":{},\"tick\":{},\"wave\":{},\"lastWave\":{},\"hp\":{},\"maxHp\":{},\"gold\":{:?},\"investment\":{:?},\"upgrades\":{:?},\"kills\":{},\"leaks\":{},\"summons\":{},\"merges\":{},\"units\":[", r.phase,r.tick,r.wave,last_wave,r.reactor_hp,frame.singleton::<Scenario>().reactor_hp,r.gold,r.investment,r.upgrades,r.kills,r.leaks,r.summons,r.merges).unwrap();
         let mut comma = "";
         for u in units(frame).into_iter().filter(|u| u.active != 0) {
             let (x,y) = board_cell_position(u.board,u.cell);
@@ -177,7 +178,7 @@ mod tests {
     #[test]
     fn saved_scene_matches_canonical_simulation_and_restart() {
         assert_eq!(load(AUTHORED.as_bytes()), 0);
-        let config = DefenseConfig { scenario: parse_scenario(AUTHORED).unwrap(), ..Default::default() };
+        let config = parse_config(AUTHORED).unwrap();
         let mut expected = Simulation::<DefenseGame>::with_build_id(config, TICK_RATE, u64::from(config.seed), SCENARIO_BUILD_ID);
         CLIENT.with(|slot| assert_eq!(slot.borrow().as_ref().unwrap().sim.checksum(), expected.checksum()));
         assert!(json().contains("\"hp\":75,\"maxHp\":75,\"gold\":[250, 250]"));

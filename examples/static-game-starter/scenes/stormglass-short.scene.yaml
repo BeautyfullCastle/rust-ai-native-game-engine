@@ -1,0 +1,5 @@
+schema: orr.scene/1
+entities: {}
+singletons:
+  CoopDefense::Scenario: {starting_gold: 250, reactor_hp: 75}
+  CoopDefense::Campaign: {last_wave: 3}

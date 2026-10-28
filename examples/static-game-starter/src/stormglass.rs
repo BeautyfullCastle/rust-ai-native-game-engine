@@ -9,8 +9,8 @@ use orr_editor::static_adapter::{
     StaticHostRequest,
 };
 use orr_games::coop_defense_game::{
-    role_name, scenario_types, DefenseEnemy, DefenseGame, DefenseInput, DefenseRun, DefenseUnit,
-    CELLS_PER_BOARD, INVEST, MOVE_OR_MERGE, RESTART, SUMMON, UPGRADE,
+    role_name, scenario_types, Campaign, DefenseEnemy, DefenseGame, DefenseInput, DefenseRun,
+    DefenseUnit, CELLS_PER_BOARD, INVEST, MOVE_OR_MERGE, RESTART, SUMMON, UPGRADE,
 };
 use orr_reflect::{Reflect, TypeRegistry};
 use orr_remote::{
@@ -174,10 +174,17 @@ impl EmbeddedGameplayView for StormglassView {
     ) -> Result<Option<IntentRequest>, String> {
         let run = frame.singleton::<DefenseRun>();
         ui.heading("Stormglass");
-        ui.label("Edit Scenario starting gold / reactor HP before Play; waves are fixed");
+        ui.label("Edit Scenario resources / Campaign last wave (1–10) before Play");
         ui.label(format!(
-            "Wave {} · Reactor {} · Gold {} / {} · Kills {} · Leaks {} · Phase {}",
-            run.wave, run.reactor_hp, run.gold[0], run.gold[1], run.kills, run.leaks, run.phase
+            "Wave {}/{} · Reactor {} · Gold {} / {} · Kills {} · Leaks {} · Phase {}",
+            run.wave,
+            frame.singleton::<Campaign>().last_wave,
+            run.reactor_hp,
+            run.gold[0],
+            run.gold[1],
+            run.kills,
+            run.leaks,
+            run.phase
         ));
         let ready = context.phase == GameplayViewPhase::Live && context.input_ready;
         if !ready {
@@ -539,7 +546,7 @@ mod tests {
         std::fs::write(&manifest_path, &manifest).unwrap();
         std::fs::write(&scene_path, coop_defense::INITIAL_SCENE).unwrap();
         let mut old_manifest = parsed.clone();
-        old_manifest["build_id"] = json!("0xa93ac28bfcbe2442");
+        old_manifest["build_id"] = json!("0x7b2a3ab98f619dca");
         std::fs::write(&manifest_path, serde_json::to_vec(&old_manifest).unwrap()).unwrap();
         assert!(PreparedRegisteredProject::open(&manifest_path, registry()).is_err());
         std::fs::write(&manifest_path, &manifest).unwrap();
@@ -554,6 +561,14 @@ mod tests {
                 json!({
                     "name":"CoopDefense::Scenario", "path":"",
                     "value":{"starting_gold":250,"reactor_hp":80}
+                }),
+            )
+            .unwrap();
+        editor
+            .host_call(
+                "world.singleton.patch",
+                json!({
+                    "name":"CoopDefense::Campaign", "path":"last_wave", "value":3
                 }),
             )
             .unwrap();
@@ -590,6 +605,16 @@ mod tests {
             .snapshot()
             .predicted()
             .singleton::<DefenseRun>();
+        assert_eq!(
+            editor
+                .gameplay_frame_evidence()
+                .unwrap()
+                .snapshot()
+                .predicted()
+                .singleton::<Campaign>()
+                .last_wave,
+            3
+        );
         assert_eq!(before.reactor_hp, 80);
         assert!(before.gold[0] >= 250);
         let command = editor.submit_gameplay_intent(summon()).unwrap();

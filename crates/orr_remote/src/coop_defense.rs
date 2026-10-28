@@ -1,5 +1,5 @@
 //! Opt-in CPU host for Stormglass starting-condition authoring.
-//! Reuses DefenseGame through ERP/PlaySession; waves and runtime pools are not authored.
+//! Reuses DefenseGame through ERP/PlaySession; campaign length is bounded; runtime pools are not authored.
 use std::{path::PathBuf, sync::Arc};
 
 use orr_ecs::Frame;
@@ -16,7 +16,7 @@ use crate::{GameHooks, HostLimits, LocalHost, ServerConfig};
 pub const GAME: &str = "CoopDefense";
 pub const INITIAL_SCENE: &str = "schema: orr.scene/1\nentities: {}\n";
 pub use orr_games::coop_defense_scene::MAX_SOURCE_BYTES;
-use orr_games::coop_defense_scene::{scenario_from_baked, validate_source};
+use orr_games::coop_defense_scene::{config_from_baked, validate_source};
 
 struct InitialAdmission;
 
@@ -27,8 +27,8 @@ impl BakeAdmission for InitialAdmission {
 
     fn admit(&self, scene: &Scene, frame: &mut Frame, _: &SceneIndex) -> Result<(), EditError> {
         // The native player shares the same closed-shape and baked-default rules.
-        let scenario = scenario_from_baked(scene, frame).map_err(EditError::Invalid)?;
-        DefenseGame::setup_scenario(frame, &DefenseConfig::default(), scenario);
+        let config = config_from_baked(scene, frame).map_err(EditError::Invalid)?;
+        DefenseGame::setup_scenario(frame, &config, config.scenario);
         Ok(())
     }
 

@@ -18,8 +18,8 @@ const game = await load(binary);
 const peer = await load(binary);
 const baseline = process.argv[3] && await load(process.argv[3]);
 const legacy = s => {
-  // maxHp is additive Scenario HUD metadata absent in older ABI snapshots.
-  const { presentation, checksum, maxHp, ...state } = s;
+  // maxHp and lastWave are additive authoring metadata absent in older ABI snapshots.
+  const { presentation, checksum, maxHp, lastWave, ...state } = s;
   return { ...state, units: s.units.map(u => u.slice(0, 7)), projectiles: s.projectiles.map(p => p.slice(0, 6)) };
 };
 const kinds = new Set(['summon', 'merge', 'death', 'leak', 'wave', 'finish', 'restart', 'release', 'hit', 'projectile_expired', 'move', 'enemy_spawn']);
@@ -28,6 +28,7 @@ const shots = new Map();
 let maximumBatch = 0;
 function validate(s) {
   assert.equal(s.maxHp, 30, 'default Scenario HUD maximum (authored75 checked in scene-loading.test.mjs)');
+  assert.equal(s.lastWave, 10, 'default Campaign keeps the historic ten-wave run');
   const p = s.presentation;
   assert.equal(p.version, 1);
   assert.equal(p.delivery, 'latest_tick');
@@ -107,10 +108,10 @@ for (let tick = 0; tick < 1200; tick++) {
   assert.deepEqual(canonical(s), canonical(other));
   if (baseline) assert.deepEqual(legacy(s), legacy(baseline.read()), `gameplay changed at tick ${tick + 1}`);
 }
-// Historical pre-Scenario identity fixture was da0ca42edf9cf8a2.
-// Unchanged a6844afb WASM and independent native legacy seed/input trace both
-// reproduce 9056df75782da6ab after the upstream Scenario singleton schema change.
-assert.equal(s.checksum, '9056df75782da6ab', 'independently reproduced native Scenario-schema fixture');
+// Historical pre-Scenario identity fixture was da0ca42edf9cf8a2; Scenario-v1 golden
+// was 9056df75782da6ab before Campaign became a checksummed singleton.
+// Native legacy seed/input trace independently reproduces the current 0x04ee32c4 build.
+assert.equal(s.checksum, 'be2bdbfedfabd614', 'independently reproduced native Scenario+Campaign fixture');
 assert.ok(coverage.has('release') && coverage.has('hit') && coverage.has('death'));
 const parityChecksum = s.checksum;
 // Real leaks must not become death events, including later terminal ticks.

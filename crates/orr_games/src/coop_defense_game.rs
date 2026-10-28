@@ -138,12 +138,29 @@ impl Default for Scenario {
         }
     }
 }
-// Scenario v1 changes the game frame contract, not the global engine format.
-pub const SCENARIO_BUILD_ID: u64 = orr_sim::frame_build_id(0x5354_4f52_4d00_0001);
+/// Authored prefix of the existing ten-wave campaign. Separate from Scenario
+/// so its strict two-field source YAML remains compatible.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable, orr_reflect::Reflect)]
+#[reflect(default)]
+pub struct Campaign {
+    #[reflect(range = "1..=10")]
+    pub last_wave: u32,
+}
+impl Default for Campaign {
+    fn default() -> Self {
+        Self { last_wave: 10 }
+    }
+}
+// Campaign v2 appends a singleton; Scenario v1 was 0x7b2a3ab98f619dca.
+// This changes this game's frame contract, not the global engine format.
+pub const SCENARIO_BUILD_ID: u64 = orr_sim::frame_build_id(0x5354_4f52_4d00_0002);
+pub const CAMPAIGN_NAME: &str = "CoopDefense::Campaign";
 pub const SCENARIO_NAME: &str = "CoopDefense::Scenario";
 pub fn scenario_types() -> orr_reflect::TypeRegistry {
     let mut types = orr_reflect::TypeRegistry::new();
     types.register_singleton::<Scenario>(SCENARIO_NAME);
+    types.register_singleton::<Campaign>(CAMPAIGN_NAME);
     types
 }
 
@@ -276,16 +293,18 @@ impl SimCommand for NoCommand {
         (c.reserved == 0).then_some(c)
     }
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DefenseConfig {
     pub seed: u32,
     pub scenario: Scenario,
+    pub campaign: Campaign,
 }
 impl Default for DefenseConfig {
     fn default() -> Self {
         Self {
             seed: 0x0c00_2026,
             scenario: Scenario::default(),
+            campaign: Campaign::default(),
         }
     }
 }
@@ -301,6 +320,7 @@ impl Game for DefenseGame {
         b.register_component::<DefenseEnemy>("CoopDefense::Enemy");
         b.register_component::<DefenseProjectile>("CoopDefense::Projectile");
         b.register_singleton::<Scenario>(SCENARIO_NAME);
+        b.register_singleton::<Campaign>(CAMPAIGN_NAME);
     }
     fn setup(f: &mut Frame, c: &DefenseConfig) {
         Self::setup_scenario(f, c, c.scenario);
@@ -313,6 +333,7 @@ impl DefenseGame {
     /// Initialize a fresh frame after scene validation, never a live frame.
     pub fn setup_scenario(f: &mut Frame, c: &DefenseConfig, scenario: Scenario) {
         f.set_singleton(scenario);
+        f.set_singleton(c.campaign);
         f.set_singleton(initial_run(c.seed, scenario));
         f.set_singleton(FrameRng::new(c.seed as u64));
         for board in 0..2 {
@@ -612,7 +633,7 @@ impl System<DefenseGame> for DefenseSystem {
                 r.phase = LOST;
                 events.push(DefenseEvent::new(DefenseEventKind::Finish, &r, 0, LOST));
             } else if r.spawned >= wave_count(r.wave) && e.iter().all(|x| x.active == 0) {
-                if r.wave == 10 {
+                if r.wave == ctx.frame.singleton::<Campaign>().last_wave {
                     r.phase = WON;
                     events.push(DefenseEvent::new(DefenseEventKind::Finish, &r, 0, WON));
                 } else {
