@@ -1803,7 +1803,8 @@ impl EditorApp {
                 self.mesh_play_controls.show(ui, &mut self.editor);
                 #[cfg(feature="mesh-hazards")]
                 ui.add_enabled_ui(!self.mesh_navigation.has_unplaced_draft(), |ui| self.mesh_hazards.show(ui, &mut self.editor));
-                self.mesh_camera.show(ui, &mut self.editor);
+                let camera_editable = !self.hazard_export_busy();
+                ui.add_enabled_ui(camera_editable, |ui| self.mesh_camera.show(ui, &mut self.editor));
                 ui.add_enabled_ui(!self.mesh_navigation.has_unplaced_draft(), |ui| self.mesh_lighting.show(ui, &self.editor));
                 ui.add_enabled_ui(!self.mesh_navigation.has_unplaced_draft(), |ui| self.mesh_hud.show(ui, &self.editor));
                 #[cfg(feature="mesh-mission")]

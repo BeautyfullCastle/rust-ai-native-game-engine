@@ -1,44 +1,62 @@
-# Scene-only hazard game export
+# Hazard game export with an authored camera
 
-Build the editor and `orr_mesh_hazards_player` with the optional
-`mesh-hazards-export` feature. This feature is separate from legacy mesh export.
+Build the editor and `orr_mesh_hazards_player` with `mesh-hazards-export`.
+This opt-in route is separate from legacy mesh export.
 
-1. Create or open a local **MeshHazardsV1** scene. Apply hazard and mission form
-   changes, save the scene, resolve proposals and transactions, and remain in Edit.
-2. Choose **File > Export hazard game…**.
-3. Enter the absolute path to a self-built, QA-tested hazard player and an absolute
-   output directory path that does not exist. These are literal filesystem paths,
-   never shell commands. No file-picker dependency or shell invocation is used.
-4. Check the explicit runtime trust checkbox, then choose **Export hazard game**.
+1. Create or open a local **MeshHazardsV1** scene. Apply hazard and mission
+   changes, enable hazards, save the scene and remain in Edit mode.
+2. Optionally author a perspective or orthographic view in **Mesh game camera**.
+   Capture or Apply the camera, then **Save game camera** separately from the
+   scene. Save or discard camera drafts before Play or export.
+3. Choose **File > Export hazard game…** (or the Export guide's settings button).
+4. Enter the absolute path to a self-built, QA-tested hazard player and a new
+   absolute output directory. Paths are literal filesystem paths, not commands.
+5. Confirm runtime trust and choose **Export hazard game**.
 
-The worker validates the saved scene and the executable's format/capability
-marker, then publishes exactly three files: the scene, the profile manifest and
-an x86-64 PE (Windows) or ELF (Linux) executable. A capability marker does not
-establish executable trust. The editor does **not** execute the supplied player.
-Only use a player built and independently tested from trusted source.
+## Bundle contract
 
-## Current limits
+Camera-free exports retain schema 1 and exactly three files: `game.scene.yaml`,
+`orr.mesh-hazards-bundle.json`, and the x86-64 PE/ELF hazard player. Camera-bearing
+exports use schema 2 and exactly one additional file:
+`game.scene.yaml.mesh-camera.json`. The manifest records its exact filename,
+length and SHA-256. The existing camera decoder validates the source scene name,
+graph revision, projection and follow configuration; only the exported copy is
+rebound to `game.scene.yaml`. The source sidecar is never rewritten by export.
+Moving the whole bundle does not require the original source directory.
 
-- Hazards must be enabled. A starter created without a sphere must have hazards
-  authored and enabled before export. The exporter reports this unsupported case.
-- Adjacent agent art, props, camera, lighting, HUD, and animation presentation
-  sidecars are refused explicitly; they are not silently dropped or composed.
-- Read-only/remote hosts, Play, preview, dirty scenes, unapplied hazard/mission
-  drafts, transactions, proposals and conflicting authoring operations block export.
-- A single bounded background job runs at a time. Save, Open, new-game creation,
-  Play and Step are blocked while that job is outstanding. The UI remains responsive
-  and continues polling even if its export window is closed.
-- Cancellation cancels acceptance of the result. It cannot undo an already-published
-  directory. Wait for the result and inspect the destination before retrying.
+Both versions require the native `.orrhaz` player capability. Schema 2 additionally
+requires `.orrhcam` with `ORR_MESH_HAZARDS_CAMERA_V1`. Markers are bounded native
+section-format checks, **not executable trust**. Supply a player you built and
+independently tested from trusted source. The editor copies it but never runs it.
 
-The request captures scene path, load epoch, authoritative checksum, runtime path
-and file identity. These are checked before dispatch and again on completion;
-worker-side bounded runtime hashes must match the bundle receipt. Changed inputs
-or cancellation produce a retained-but-not-current result, not a success claim for
-the current editor scene. The exporter independently validates bytes, paths,
-sidecars and no-overwrite publication. This is not a filesystem sandbox against
-adversarial concurrent directory replacement.
+The player uses the same authored camera, projection, follow and mesh picking
+path as the editor. Play uses the saved view; Restart restores it. Camera settings
+are presentation-only and do not change simulation checksums or camera-free defaults.
 
-Model tests cover trust/blocker refusal without scene writes, busy/disconnected
-worker handling, stale epoch/path/checksum/runtime rejection, and Play refusal.
-Actual GUI export and relocated-player execution need separate integration evidence.
+## Safety and workflow limits
+
+- Hazards must be enabled. Art, props, lighting, HUD, animation and unknown
+  adjacent attachments remain explicitly rejected, not silently omitted.
+- Read-only/remote hosts, Play, preview, dirty scenes or cameras, unapplied
+  drafts, proposals, transactions and conflicting authoring work block export.
+- One background job runs at a time. Camera editing, Save, Open, creation, Play
+  and Step are blocked while it is pending. Closing the export window does not
+  stop polling. Cancellation only cancels result acceptance: published output
+  is retained, so inspect it before retrying.
+- Camera presence and original source bytes are captured at request time and
+  checked at worker admission, before publication and on completion. Addition,
+  removal or replacement invalidates the result. Scene/runtime identities and
+  hashes are also checked; existing output is never overwritten.
+- Files are bounded and regular; symlinks, FIFOs, case aliases, malformed camera
+  data and incompatible runtimes fail closed. Path checks are not a sandbox
+  against adversarial concurrent ancestor-directory replacement.
+
+## Acceptance boundary
+
+Reproducible tests cover camera editing/history/save/reopen, projection and
+synthetic picking, Player state transitions, simulation parity, four-file
+relocation, capability checks and malformed/stale-input rejection. Headless
+EditorApp/PlayerApp tests exercise application logic, not GPU output or a launched
+native executable. Actual rendering requires a GPU lane; normal exported-player
+launch requires a native window. Record those checks separately rather than
+inferring them from headless success.

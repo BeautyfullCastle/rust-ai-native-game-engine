@@ -43,6 +43,7 @@ pub(crate) struct Panel {
     cursor: usize,
     next_id: u64,
     saved_id: Option<u64>,
+    profile: Option<EditorGame>,
     scene: Option<PathBuf>,
     scene_epoch: Option<u64>,
     graph_revision: Option<[u8; 32]>,
@@ -79,6 +80,7 @@ impl Default for Panel {
             cursor: 0,
             next_id: 1,
             saved_id: Some(0),
+            profile: None,
             scene: None,
             scene_epoch: None,
             graph_revision: None,
@@ -94,18 +96,18 @@ impl Default for Panel {
 
 impl Panel {
     pub(crate) fn sync(&mut self, editor: &mut Editor) {
-        if editor.game() != EditorGame::MeshNavigation || !editor.spec().is_local() {
+        if !supports_camera_profile(editor.game()) || !editor.spec().is_local() {
             self.document_pending = true;
             return;
         }
-        let Some((scene, graph_revision)) = current_identity(editor) else {
+        let Some((profile, scene, scene_epoch, graph_revision)) = current_identity(editor) else {
             self.document_pending = true;
             self.status = "Waiting for the requested local mesh scene and admitted graph.".into();
             return;
         };
         self.document_pending = false;
-        let scene_epoch = editor.scene_load_epoch();
         if self.scene.as_ref() == Some(&scene)
+            && self.profile == Some(profile)
             && self.scene_epoch == Some(scene_epoch)
             && self.graph_revision == Some(graph_revision)
         {
@@ -113,12 +115,13 @@ impl Panel {
         }
         if self.dirty() {
             self.context_stale = true;
-            self.status = "Unsaved game camera belongs to another scene or graph revision; explicitly discard and reload before continuing.".into();
+            self.status = "Unsaved game camera belongs to another profile, scene, load epoch, or graph revision; explicitly discard and reload before continuing.".into();
             return;
         }
         if editor.has_mesh_camera() {
             editor.clear_mesh_camera();
         }
+        self.profile = Some(profile);
         self.scene = Some(scene.clone());
         self.scene_epoch = Some(scene_epoch);
         self.graph_revision = Some(graph_revision);
@@ -152,7 +155,7 @@ impl Panel {
     }
 
     pub(crate) fn show(&mut self, ui: &mut Ui, editor: &mut Editor) {
-        if editor.game() != EditorGame::MeshNavigation {
+        if !supports_camera_profile(editor.game()) {
             return;
         }
         self.sync(editor);
@@ -350,7 +353,7 @@ impl Panel {
     }
 
     pub(crate) fn play_blocker(&self, editor: &Editor) -> Option<String> {
-        if editor.game() != EditorGame::MeshNavigation {
+        if !supports_camera_profile(editor.game()) {
             return None;
         }
         if self.document_pending || current_identity(editor).is_none() {
@@ -358,7 +361,7 @@ impl Panel {
         }
         if self.context_stale {
             return Some(
-                "Discard or resolve the game camera from the previous scene or graph revision"
+                "Discard or resolve the game camera from the previous profile, scene, load epoch, or graph revision"
                     .into(),
             );
         }
@@ -370,17 +373,33 @@ impl Panel {
         }
         if self.current_document().is_some()
             && (self.scene_epoch != Some(editor.scene_load_epoch())
-                || current_identity(editor).is_none_or(|(scene, revision)| {
-                    self.scene.as_ref() != Some(&scene) || self.graph_revision != Some(revision)
+                || current_identity(editor).is_none_or(|(profile, scene, epoch, revision)| {
+                    self.profile != Some(profile)
+                        || self.scene.as_ref() != Some(&scene)
+                        || self.scene_epoch != Some(epoch)
+                        || self.graph_revision != Some(revision)
                 }))
         {
-            return Some("Game camera does not match the current mesh scene and graph".into());
+            return Some(
+                "Game camera does not match the current mesh profile, scene, load epoch, and graph"
+                    .into(),
+            );
         }
         None
     }
 
     pub(crate) fn dirty(&self) -> bool {
         self.form_dirty || self.context_stale || self.history_is_dirty()
+    }
+
+    /// Whether this already-admitted panel still represents the exact optional
+    /// camera sidecar digest captured by a caller before launch/export.
+    pub(crate) fn matches_saved_sidecar(&self, expected: Option<&str>) -> bool {
+        !self.document_pending
+            && !self.dirty()
+            && !self.context_stale
+            && self.sidecar_error.is_none()
+            && self.sidecar_sha.as_deref() == expected
     }
 
     pub(crate) fn workspace_save_blocker(&self, editor: &Editor) -> Option<String> {
@@ -449,7 +468,7 @@ impl Panel {
     }
 
     fn can_edit_scene(&self, editor: &Editor) -> bool {
-        editor.game() == EditorGame::MeshNavigation && editor.spec().is_local()
+        supports_camera_profile(editor.game()) && editor.spec().is_local()
     }
 
     fn can_change_history(&self, editor: &Editor) -> bool {
@@ -505,9 +524,10 @@ impl Panel {
     }
 
     fn identity_matches(&self, editor: &Editor) -> bool {
-        current_identity(editor).is_some_and(|(scene, revision)| {
+        current_identity(editor).is_some_and(|(profile, scene, epoch, revision)| {
             self.scene.as_ref() == Some(&scene)
-                && self.scene_epoch == Some(editor.scene_load_epoch())
+                && self.profile == Some(profile)
+                && self.scene_epoch == Some(epoch)
                 && self.graph_revision == Some(revision)
         })
     }
@@ -534,7 +554,7 @@ impl Panel {
             self.error = Some("Apply requires the matching editable local mesh scene".into());
             return;
         }
-        let Some((scene, graph_revision)) = current_identity(editor) else {
+        let Some((_profile, scene, _epoch, graph_revision)) = current_identity(editor) else {
             self.error = Some("The current mesh scene is not ready for camera changes".into());
             return;
         };
@@ -597,7 +617,7 @@ impl Panel {
             );
             return;
         }
-        let Some((scene, graph_revision)) = current_identity(editor) else {
+        let Some((_profile, scene, _epoch, graph_revision)) = current_identity(editor) else {
             self.error = Some("The current mesh scene is not ready for camera reload".into());
             return;
         };
@@ -643,7 +663,7 @@ impl Panel {
             );
             return;
         }
-        let Some((scene, graph_revision)) = current_identity(editor) else {
+        let Some((_profile, scene, _epoch, graph_revision)) = current_identity(editor) else {
             self.error = Some("The current mesh scene is not ready for camera reload".into());
             return;
         };
@@ -736,6 +756,7 @@ impl Panel {
             editor.clear_mesh_camera();
         }
         self.scene = Some(scene.to_path_buf());
+        self.profile = Some(editor.game());
         self.scene_epoch = Some(editor.scene_load_epoch());
         self.graph_revision = Some(graph_revision);
         self.document_pending = false;
@@ -936,8 +957,17 @@ fn capture_document(
         .with_follow_offset(follow_offset)
 }
 
-fn current_identity(editor: &Editor) -> Option<(PathBuf, [u8; 32])> {
-    if editor.game() != EditorGame::MeshNavigation
+fn supports_camera_profile(profile: EditorGame) -> bool {
+    match profile {
+        EditorGame::MeshNavigation => true,
+        #[cfg(feature = "mesh-hazards")]
+        EditorGame::MeshHazardsV1 => true,
+        _ => false,
+    }
+}
+
+fn current_identity(editor: &Editor) -> Option<(EditorGame, PathBuf, u64, [u8; 32])> {
+    if !supports_camera_profile(editor.game())
         || !editor.spec().is_local()
         || editor.down().is_some()
         || editor.previewing().is_some()
@@ -945,7 +975,7 @@ fn current_identity(editor: &Editor) -> Option<(PathBuf, [u8; 32])> {
         return None;
     }
     let scene = editor.path()?;
-    if !reported_scene_matches_request(editor.spec(), &scene) {
+    if !reported_scene_matches_request(editor.spec(), &scene, editor.game()) {
         return None;
     }
     let snapshot = editor.snapshot()?;
@@ -954,17 +984,22 @@ fn current_identity(editor: &Editor) -> Option<(PathBuf, [u8; 32])> {
         return None;
     }
     let view = mesh_from_view(frame).ok()?;
-    Some((scene, view.graph.revision()))
+    Some((
+        editor.game(),
+        scene,
+        editor.scene_load_epoch(),
+        view.graph.revision(),
+    ))
 }
 
-fn reported_scene_matches_request(spec: &HostSpec, reported: &Path) -> bool {
+fn reported_scene_matches_request(spec: &HostSpec, reported: &Path, profile: EditorGame) -> bool {
     let requested = match spec {
-        HostSpec::Local { scene, .. } => scene.as_path(),
-        HostSpec::LocalGame {
-            scene,
-            game: EditorGame::MeshNavigation,
-            ..
-        } => scene.as_path(),
+        HostSpec::Local { scene, .. } if profile == EditorGame::MeshNavigation => scene.as_path(),
+        HostSpec::LocalGame { scene, game, .. }
+            if *game == profile && supports_camera_profile(*game) =>
+        {
+            scene.as_path()
+        }
         _ => return false,
     };
     if requested == reported {

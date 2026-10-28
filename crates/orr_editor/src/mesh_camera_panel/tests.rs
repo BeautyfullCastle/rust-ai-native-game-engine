@@ -1,4 +1,4 @@
-use super::{capture_document, parse_number, HistoryEntry, Panel, ProjectionMode, MAX_HISTORY};
+use super::{HistoryEntry, MAX_HISTORY, Panel, ProjectionMode, capture_document, parse_number};
 use crate::mesh_camera::{Document, Projection};
 use orr_fp::FP;
 use orr_render::camera3d::OrbitCamera;
@@ -171,6 +171,29 @@ fn reset_history_starts_with_a_single_saved_entry() {
 }
 
 #[test]
+fn saved_sidecar_binding_matches_exact_optional_digest_only_when_admitted_cleanly() {
+    let mut panel = Panel::default();
+    panel.document_pending = false;
+    panel.reset_history(None, Some(0));
+    assert!(panel.matches_saved_sidecar(None));
+    assert!(!panel.matches_saved_sidecar(Some("camera-digest")));
+
+    panel.sidecar_sha = Some("camera-digest".into());
+    assert!(panel.matches_saved_sidecar(Some("camera-digest")));
+    assert!(!panel.matches_saved_sidecar(None));
+    assert!(!panel.matches_saved_sidecar(Some("another-digest")));
+
+    panel.form_dirty = true;
+    assert!(!panel.matches_saved_sidecar(Some("camera-digest")));
+    panel.form_dirty = false;
+    panel.sidecar_error = Some("invalid sidecar".into());
+    assert!(!panel.matches_saved_sidecar(Some("camera-digest")));
+    panel.sidecar_error = None;
+    panel.document_pending = true;
+    assert!(!panel.matches_saved_sidecar(Some("camera-digest")));
+}
+
+#[test]
 fn capturing_after_orthographic_zoom_preserves_view_framing() {
     let saved = Document::from_orbit(OrbitCamera::new([1.0, 2.0, 3.0], 0.4, 0.3, 16.0))
         .unwrap()
@@ -200,8 +223,8 @@ fn capturing_viewport_preserves_the_follow_offset_setting() {
 
 #[test]
 fn capturing_a_panned_follow_camera_preserves_its_effective_view() {
-    use orr_navigation::{mesh::StaticMeshGraph, AgentProfile};
-    use orr_remote::mesh_navigation::{authoring::create_mesh_scene, mesh_from_view, AgentSpec};
+    use orr_navigation::{AgentProfile, mesh::StaticMeshGraph};
+    use orr_remote::mesh_navigation::{AgentSpec, authoring::create_mesh_scene, mesh_from_view};
 
     let saved = Document::from_orbit(OrbitCamera::new([1.0, 2.0, 3.0], 0.4, 0.3, 16.0))
         .unwrap()
@@ -241,4 +264,100 @@ fn capturing_a_panned_follow_camera_preserves_its_effective_view() {
     assert_eq!(captured.follow_offset, Some([2.5, 3.0, 3.0]));
     assert_eq!(after_capture, before_capture);
     assert_eq!(after_capture.view(), before_capture.view());
+}
+
+#[cfg(feature = "mesh-hazards")]
+#[test]
+fn hazards_profile_camera_capture_history_save_reopen_play_and_restart() {
+    use crate::{game::EditorGame, mesh_workspace::mission::Settings};
+
+    let directory = tempfile::tempdir().unwrap();
+    let scene = directory.path().join("camera-hazards.scene.yaml");
+    let mut editor =
+        crate::mesh_hazards_creator::prepare(&scene, &Settings::default(), true).unwrap();
+    let mut panel = Panel::default();
+    panel.sync(&mut editor);
+
+    assert_eq!(editor.game(), EditorGame::MeshHazardsV1);
+    assert_eq!(panel.profile, Some(EditorGame::MeshHazardsV1));
+    assert!(panel.can_edit(&editor));
+    assert!(panel.current_document().is_none());
+
+    panel.capture_viewport(&editor);
+    assert!(panel.form_dirty);
+    panel.apply(&mut editor);
+    assert!(panel.error.is_none(), "{:?}", panel.error);
+    let captured = panel.current_document().unwrap().clone();
+    assert!(panel.history_is_dirty());
+    assert!(panel.play_blocker(&editor).is_some());
+
+    panel.save(&editor);
+    assert!(panel.error.is_none(), "{:?}", panel.error);
+    assert!(!panel.dirty());
+    assert!(panel.play_blocker(&editor).is_none());
+
+    panel.target[0] = "3".into();
+    panel.form_dirty = true;
+    panel.apply(&mut editor);
+    assert!(panel.error.is_none(), "{:?}", panel.error);
+    assert!(panel.dirty());
+    panel.undo(&mut editor);
+    assert!(!panel.dirty());
+    assert_eq!(panel.current_document(), Some(&captured));
+    panel.redo(&mut editor);
+    assert!(panel.dirty());
+    panel.save(&editor);
+    assert!(!panel.dirty());
+
+    // A clean restart changes the scene-load epoch and reloads the authored
+    // camera from its sidecar rather than carrying panel history across hosts.
+    assert!(editor.start_play());
+    assert!(panel.play_blocker(&editor).is_none());
+    assert!(editor.restart());
+    panel.sync(&mut editor);
+    assert_eq!(panel.profile, Some(EditorGame::MeshHazardsV1));
+    assert_eq!(panel.current_document().unwrap().target[0], 3.0);
+    assert!(!panel.dirty());
+
+    drop(editor);
+    let mut reopened = crate::editor::Editor::open_game(&scene, EditorGame::MeshHazardsV1).unwrap();
+    reopened.sync();
+    let mut reopened_panel = Panel::default();
+    reopened_panel.sync(&mut reopened);
+    assert_eq!(reopened_panel.current_document(), panel.current_document());
+    assert_eq!(reopened_panel.profile, Some(EditorGame::MeshHazardsV1));
+    assert!(reopened_panel.play_blocker(&reopened).is_none());
+}
+
+#[cfg(feature = "mesh-hazards")]
+#[test]
+fn profile_switch_marks_dirty_camera_stale_even_for_same_scene_epoch_and_graph() {
+    use crate::{game::EditorGame, mesh_workspace::mission::Settings};
+
+    let directory = tempfile::tempdir().unwrap();
+    let scene = directory.path().join("camera-profile-switch.scene.yaml");
+    let mut editor =
+        crate::mesh_hazards_creator::prepare(&scene, &Settings::default(), true).unwrap();
+    let mut panel = Panel::default();
+    panel.sync(&mut editor);
+    let scene_epoch = panel.scene_epoch;
+    let graph_revision = panel.graph_revision;
+    panel.profile = Some(EditorGame::MeshNavigation);
+    panel.form_dirty = true;
+
+    panel.sync(&mut editor);
+
+    assert_eq!(panel.scene_epoch, scene_epoch);
+    assert_eq!(panel.graph_revision, graph_revision);
+    assert_eq!(panel.profile, Some(EditorGame::MeshNavigation));
+    assert!(panel.context_stale);
+    assert!(panel.dirty());
+    assert!(panel.play_blocker(&editor).is_some());
+
+    panel.confirm_discard_changes = true;
+    panel.discard_changes_and_reload(&mut editor);
+    assert!(!panel.context_stale);
+    assert_eq!(panel.profile, Some(EditorGame::MeshHazardsV1));
+    assert!(!panel.dirty());
+    assert!(panel.play_blocker(&editor).is_none());
 }
