@@ -2,6 +2,10 @@
 """Portable regressions for the optional web package's exact module closure."""
 import base64
 import json
+import hashlib
+import io
+import struct
+import zlib
 import os
 import subprocess
 from unittest import mock
@@ -170,6 +174,202 @@ class OfflineModules(unittest.TestCase):
         for bad in [b'', b'schema: wrong', scene.read_bytes().replace(b'reactor_hp: 75', b'reactor_hp: 0')]:
             with self.assertRaises(subprocess.CalledProcessError): packer.validate_scene(bad, (self.root/'game.wasm').read_bytes())
         with self.assertRaises(subprocess.CalledProcessError): packer.validate_scene(scene.read_bytes(), b'bad wasm')
+
+
+    def animations(self, manifest=None):
+        from PIL import Image
+        png = io.BytesIO()
+        image = Image.new('RGBA', (8, 4), (240, 40, 40, 255))
+        image.paste((20, 180, 240, 255), (4, 0, 8, 4))
+        image.save(png, format='PNG'); image.close()
+        (self.root / 'assets/sprite.png').write_bytes(png.getvalue())
+        manifest = manifest or {'unit:0': {'image': 'sprite.png', 'anchor': [.5, 1.16], 'pivot': [-1, 4], 'logicalSize': [8, 8], 'clips': {
+            'idle': {'frames': [[0, 0, 4, 4], [4, 0, 4, 4]], 'fps': 12, 'loop': True, 'pivots': [[1, 3], [2, 4]]},
+            'attack': {'frames': [[4, 0, 4, 4]], 'windupMs': 100, 'releaseMs': 70, 'recoveryMs': 160},
+            'death': {'frames': [[4, 0, 4, 4], [0, 0, 4, 4]], 'loop': False}}}}
+        path = self.root / 'animations.json'
+        path.write_text(json.dumps(manifest), encoding='utf-8')
+        return path, self.root / 'animated.html'
+
+    def test_animations_exact_bytes_and_closed_inventory(self):
+        source, output = self.animations()
+        (self.root / 'assets/unused.png').write_bytes(b'not PNG, deliberately unreferenced')
+        original = {p: p.read_bytes() for p in (source, self.root / 'assets/sprite.png')}
+        with mock.patch.object(packer, 'snapshot_file', wraps=packer.snapshot_file) as snapshots:
+            packer.package(self.root, output=output, animations=source)
+        html = output.read_text()
+        for path, data in original.items():
+            self.assertEqual(path.read_bytes(), data)
+            self.assertIn(base64.b64encode(data).decode(), html)
+            self.assertIn(hashlib.sha256(data).hexdigest(), html)
+            self.assertEqual(sum(Path(call.args[0]) == path for call in snapshots.call_args_list), 1)
+        self.assertNotIn('not PNG, deliberately unreferenced', html)
+        self.assertIn('authored-animation-image-0', html)
+        self.assertNotIn('authored-animation-image-1', html)
+        (self.root / 'assets/characters.json').write_text(json.dumps({'heroes': [[]]*6, 'enemies': [[]]*4}))
+        output.unlink(); packer.package(self.root, output=output, animations=source)
+        result = subprocess.run(['python3', str(Path(__file__).with_name('check_coop_defense_offline.py')), str(self.root), str(output)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output.write_text(output.read_text().replace('"width":8', '"width":7'))
+        result = subprocess.run(['python3', str(Path(__file__).with_name('check_coop_defense_offline.py')), str(self.root), str(output)], capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_animation_new_output_and_scene_composition(self):
+        source, output = self.animations(); scene, _ = self.authored()
+        with self.assertRaises(ValueError): packer.package(self.root, animations=source)
+        with mock.patch.object(packer, 'validate_scene', return_value={'version': 1}):
+            packer.package(self.root, scene, output, source)
+        self.assertIn('id="authored-scene"', output.read_text())
+        before = output.read_bytes()
+        with self.assertRaises(FileExistsError): packer.package(self.root, output=output, animations=source)
+        self.assertEqual(output.read_bytes(), before)
+        for path in [source, self.root / 'assets/sprite.png']:
+            with self.assertRaises(FileExistsError): packer.package(self.root, output=path, animations=source)
+
+    def test_animation_path_and_schema_rejections(self):
+        source, output = self.animations(); valid = json.loads(source.read_text())
+        def rejected(spec):
+            source.write_text(json.dumps(spec))
+            with self.assertRaises((ValueError, TypeError, OverflowError)):
+                packer.package(self.root, output=output, animations=source)
+            self.assertFalse(output.exists())
+        for path in ['', '../sprite.png', '/sprite.png', 'https://host/x.png', 'file:///x.png', 'data:image/png;base64,AA==', r'a\sprite.png', 'a//sprite.png', './sprite.png', 'a/../sprite.png', '%2e%2e/x.png', 'a'*125+'.png', 'sprite.jpg']:
+            spec = json.loads(json.dumps(valid)); spec['unit:0']['image'] = path; rejected(spec)
+        for role in ['unit:6', 'enemy:5', '__proto__', 'unit:01', 'unit:-1']:
+            rejected({role: valid['unit:0']})
+        rejected({}); rejected({'src': 'manifest.json'}); rejected([])
+        changes = [
+            ('unknown', 1), ('anchor', [0, 17]), ('pivot', [0, 4097]), ('logicalSize', [0, 1]),
+            ('logicalSize', [1, 4097]), ('anchor', [True, 0]), ('pivot', None),
+            ('clips', {'unknown': {'frames': [[0, 0, 1, 1]]}}), ('clips', {}),
+        ]
+        for field, value in changes:
+            spec = json.loads(json.dumps(valid)); spec['unit:0'][field] = value; rejected(spec)
+        for field, value in [('fps', 0), ('fps', 121), ('fps', True), ('fps', float('inf')), ('loop', 1), ('frames', []), ('frames', [[0,0,1,1]]*257), ('frames', [[7,0,2,4]]), ('frames', [[-1,0,2,4]]), ('frames', [[0,0,0,1]]), ('frames', [[0,0,1]]), ('frames', [[0,0,float('nan'),1]]), ('pivots', [[1,2]]), ('pivots', [[1,2],[1,4097]]), ('windupMs', 100), ('src', 'other.json')]:
+            spec = json.loads(json.dumps(valid)); spec['unit:0']['clips']['idle'][field] = value; rejected(spec)
+        for value in [0, 2001, '10', False]:
+            spec=json.loads(json.dumps(valid)); spec['unit:0']['clips']['attack']['releaseMs']=value; rejected(spec)
+        for raw in [b'{}', b'\xff', b'[]', b'{"unit:0":{},"unit:0":{}}', b'{"src":"elsewhere"}', b'{"unit:0":{"image":"sprite.png","image":"units.png","clips":{}}}', b'['*10000+b']'*10000, b' '*65537]:
+            source.write_bytes(raw)
+            with self.assertRaises(ValueError): packer.package(self.root, output=output, animations=source)
+            self.assertFalse(output.exists())
+
+    def test_animation_exact_limits_and_single_snapshot_shared_atlas(self):
+        source, output = self.animations()
+        manifest = {'unit:0': {'image': 'units.png', 'pivot': [-4096,4096], 'anchor': [-16,16], 'logicalSize': [.5,4096], 'clips': {'idle': {'frames': [[0,0,.5,.5]]*256,'fps':120}}}}
+        source.write_text(json.dumps(manifest)); source.write_bytes(source.read_bytes() + b' '*(65536-source.stat().st_size))
+        (self.root/'assets/units.png').write_bytes((self.root/'assets/sprite.png').read_bytes())
+        with mock.patch.object(packer, 'snapshot_file', wraps=packer.snapshot_file) as snapshots:
+            packer.package(self.root, output=output, animations=source)
+        self.assertEqual(sum(Path(call.args[0]) == self.root/'assets/units.png' for call in snapshots.call_args_list), 1)
+        self.assertEqual(source.stat().st_size, 65536)
+        self.assertEqual((packer.MAX_IMAGE,packer.MAX_IMAGES_TOTAL,packer.MAX_IMAGES,packer.MAX_DIMENSION), (8*1024*1024,32*1024*1024,11,4096))
+        image=(self.root/'assets/sprite.png').read_bytes()
+        eleven={f'unit:{i}':{'image':f'{i}.png','clips':{'idle':{'frames':[[0,0,1,1]]}}} for i in range(6)}
+        eleven.update({f'enemy:{i}':{'image':f'{i+6}.png','clips':{'idle':{'frames':[[0,0,1,1]]}}} for i in range(5)})
+        receipt=packer.validate_animations(json.dumps(eleven).encode(),{f'{i}.png':image for i in range(11)})
+        self.assertEqual(len(receipt['images']),11)
+
+    def test_animation_file_types_byte_limits_and_missing_reference(self):
+        source, output = self.animations(); image=self.root/'assets/sprite.png'; original=image.read_bytes()
+        for kind in ['missing','symlink','fifo','directory','oversized']:
+            if image.exists() or image.is_symlink():
+                if image.is_dir(): image.rmdir()
+                else: image.unlink()
+            if kind=='symlink': image.symlink_to(self.root/'index.html')
+            elif kind=='fifo': os.mkfifo(image)
+            elif kind=='directory': image.mkdir()
+            elif kind=='oversized':
+                with image.open('wb') as stream: stream.truncate(packer.MAX_IMAGE+1)
+            with self.assertRaises((ValueError,OSError)): packer.package(self.root, output=output, animations=source)
+            self.assertFalse(output.exists())
+        image.unlink(); image.write_bytes(original)
+        with mock.patch.object(packer, 'MAX_IMAGES_TOTAL', len(original)-1):
+            with self.assertRaisesRegex(ValueError, 'byte limit'): packer.package(self.root, output=output, animations=source)
+        nested=self.root/'assets/nested'; nested.symlink_to(self.root/'assets',target_is_directory=True)
+        manifest=json.loads(source.read_text()); manifest['unit:0']['image']='nested/sprite.png'; source.write_text(json.dumps(manifest))
+        with self.assertRaises(OSError): packer.package(self.root, output=output, animations=source)
+        source.unlink(); source.symlink_to(self.root/'index.html')
+        with self.assertRaises(OSError): packer.package(self.root, output=output, animations=source)
+        source.unlink(); os.mkfifo(source)
+        with self.assertRaises(ValueError): packer.package(self.root, output=output, animations=source)
+
+    def test_png_full_decode_crc_bounds_and_static_only(self):
+        source, output=self.animations(); path=self.root/'assets/sprite.png'; png=path.read_bytes()
+        def chunk(kind,data): return struct.pack('>I',len(data))+kind+data+struct.pack('>I',zlib.crc32(kind+data))
+        ihdr=chunk(b'IHDR',struct.pack('>IIBBBBB',8,4,8,6,0,0,0))
+        end=chunk(b'IEND',b'')
+        invalid_deflate=b'\x89PNG\r\n\x1a\n'+ihdr+chunk(b'IDAT',b'invalid deflate, valid CRC')+end
+        too_wide=b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',4097,4,8,6,0,0,0))+chunk(b'IDAT',b'x')+end
+        apng=png[:33]+chunk(b'acTL',struct.pack('>II',1,0))+png[33:]
+        unknown_critical=png[:33]+chunk(b'ZZZZ',b'')+png[33:]
+        for data in [b'not PNG',png[:-1],png+b'trailing',png[:-5]+b'X'+png[-4:],invalid_deflate,too_wide,apng,unknown_critical]:
+            path.write_bytes(data)
+            with self.assertRaises((ValueError,OSError,SyntaxError)): packer.package(self.root, output=output, animations=source)
+            self.assertFalse(output.exists())
+        # Exact maximum encoded size uses an inert ancillary chunk, not recompression.
+        padding=packer.MAX_IMAGE-len(png)-12
+        exact=png[:-12]+chunk(b'npAD',b'\x00'*padding)+end
+        self.assertEqual(len(exact),packer.MAX_IMAGE);self.assertEqual(packer.validate_png(exact),(8,4))
+        from PIL import Image
+        buffer=io.BytesIO()
+        with Image.new('1',(4096,4096)) as image: image.save(buffer,format='PNG')
+        self.assertEqual(packer.validate_png(buffer.getvalue()),(4096,4096))
+
+    def test_animation_snapshot_and_publication_fail_closed(self):
+        source, output=self.animations(); image=self.root/'assets/sprite.png'; original=image.read_bytes(); validate=packer.validate_animations
+        def mutate(data,images,sampler):
+            self.assertEqual(images['sprite.png'],original)
+            image.write_bytes(b'changed after snapshot');source.write_bytes(b'changed after snapshot')
+            return validate(data,images,sampler)
+        with mock.patch.object(packer,'validate_animations',side_effect=mutate): packer.package(self.root,output=output,animations=source)
+        self.assertIn(base64.b64encode(original).decode(),output.read_text())
+        output.unlink();source,output=self.animations()
+        def race(data,images,sampler):
+            output.write_text('other writer')
+            return validate(data,images,sampler)
+        with mock.patch.object(packer,'validate_animations',side_effect=race):
+            with self.assertRaises(FileExistsError): packer.package(self.root,output=output,animations=source)
+        self.assertEqual(output.read_text(),'other writer');self.assertEqual(list(self.root.glob('.orr-offline-*')),[])
+        output.unlink()
+        for failure in [FileNotFoundError('node missing'),subprocess.TimeoutExpired('node',15),subprocess.CalledProcessError(1,'node')]:
+            with mock.patch.object(packer.subprocess,'run',side_effect=failure):
+                with self.assertRaises(type(failure)): packer.package(self.root,output=output,animations=source)
+            self.assertFalse(output.exists())
+
+    def test_animation_midread_mutation_leaves_no_output(self):
+        source,output=self.animations();image=self.root/'assets/sprite.png';snapshot=packer.snapshot_file
+        before=image.stat();after=mock.Mock(st_size=before.st_size,st_mtime_ns=before.st_mtime_ns+1,st_ctime_ns=before.st_ctime_ns)
+        def changed(path,limit):
+            if Path(path)==image:
+                with mock.patch.object(packer.os,'fstat',side_effect=[before,after]):return snapshot(path,limit)
+            return snapshot(path,limit)
+        with mock.patch.object(packer,'snapshot_file',side_effect=changed):
+            with self.assertRaisesRegex(ValueError,'changed'):packer.package(self.root,output=output,animations=source)
+        self.assertFalse(output.exists())
+
+    def test_no_animation_does_not_require_pillow(self):
+        import builtins
+        original=builtins.__import__
+        def unavailable(name,*args,**kwargs):
+            if name=='PIL' or name.startswith('PIL.'):raise ImportError('Pillow deliberately unavailable')
+            return original(name,*args,**kwargs)
+        with mock.patch.object(builtins,'__import__',side_effect=unavailable):
+            self.assertTrue(packer.package(self.root).exists())
+
+    def test_animation_validator_uses_build_sampler_snapshot(self):
+        source,output=self.animations()
+        sampler=self.root/'combat-presentation.mjs'
+        sampler.write_text(sampler.read_text().replace("const raw = Math.floor", "const raw = 1 + Math.floor"))
+        with self.assertRaises(subprocess.CalledProcessError): packer.package(self.root,output=output,animations=source)
+        self.assertFalse(output.exists())
+
+    def test_animation_duplicate_ids_and_existing_served_hook_rejected(self):
+        source,output=self.animations(); index=self.root/'index.html'; original=index.read_text()
+        for suffix in ['<div id="authored-animation-manifest"></div>','<div id="authored-animation-image-0"></div>', '<script id="combat-animation-manifest">{}</script>', '<div id="wasm-core"></div>','<div id="ready"></div>','<div id="new" id="new"></div>']:
+            index.write_text(original+suffix)
+            with self.assertRaises(ValueError): packer.package(self.root,output=output,animations=source)
+            self.assertFalse(output.exists())
 
 
 if __name__ == "__main__": unittest.main()
