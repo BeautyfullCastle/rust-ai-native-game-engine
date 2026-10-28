@@ -1,0 +1,7 @@
+{
+  "schema": "orr.registered-project/1",
+  "game": "StarterDelivery",
+  "build_id": "0x5354415254455201",
+  "scene": "delivery.scene.yaml",
+  "input": "commands"
+}

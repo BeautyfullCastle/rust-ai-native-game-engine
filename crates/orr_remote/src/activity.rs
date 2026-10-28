@@ -212,6 +212,7 @@ pub(crate) fn classify(method: &str, params: &J) -> (ActivityKind, bool) {
         "scene.save" if params.get("write").and_then(J::as_bool) == Some(true) => ActivityKind::Edit,
         "proposal.begin" | "proposal.apply" | "proposal.accept" | "proposal.accept_verified" | "proposal.reject" => ActivityKind::Proposal,
         "proposal.verify" | "verify.self" => ActivityKind::Verify,
+        "editor.gameplay.control"|"editor.gameplay.submit"|"editor.gameplay.cancel"=>ActivityKind::Sim,
         "sim.state" | "sim.checksum" => ActivityKind::Read,
         m if m.starts_with("sim.") => ActivityKind::Sim,
         _ => ActivityKind::Read,
@@ -496,6 +497,21 @@ pub(crate) fn summarize(method: &str, params: &J, res: Option<&J>, verify: Optio
             Some(t) => format!("sim.stop at tick {t}"),
             None => "sim.stop".to_string(),
         },
+        "sim.input_value" => {
+            match crate::input::command_correlation(method, params).ok().flatten() {
+                Some(command) => {
+                    // A successful managed ACK is admission, not consumption.
+                    // Only the closed bounded metadata is logged, never value,
+                    // receipt, grants, tokens, or arbitrary caller properties.
+                    let admitted = res.is_some_and(|result| result.get("command") == Some(command) && result["ok"] == true);
+                    format!("sim.input_value command={} intent={} scene={} play={} admission={}",
+                        sv(command, "id"), sv(command, "intent"), sv(command, "scene_epoch"), sv(command, "play_epoch"),
+                        if admitted { "accepted" } else { "rejected" })
+                }
+                None => method.to_string(),
+            }
+        },
+        "editor.gameplay.control"|"editor.gameplay.submit"|"editor.gameplay.cancel"=>format!("{} request={} intent={} action={} command={} result={}",method,sv(params,"request_key"),sv(params,"intent"),sv(params,"action"),res.map(|value|sv(value,"command_id")).unwrap_or_default(),res.map(|value|sv(value,"status")).unwrap_or_default()),
         "history.undo" | "history.redo" => method.to_string(),
         "scene.load" => match arg("entities").and_then(J::as_u64) {
             Some(n) => format!("scene.load ({})", plural(n, "entity", "entities")),
@@ -541,6 +557,26 @@ mod tests {
         assert_eq!(summarize("proposal.accept", &json!({"id": "p2"}), Some(&json!({"history_id": 14})), None), "proposal.accept p2 \u{2192} history #14");
         assert_eq!(summarize("sim.step", &json!({"n": 60}), Some(&json!({"head_tick": 180})), None), "sim.step 60 \u{2192} tick 180");
         assert_eq!(summarize("world.query", &json!({}), Some(&json!({"total": 49})), None), "world.query (49 entities)");
+    }
+
+    #[test]
+    fn managed_command_summaries_log_only_bounded_admission_correlation() {
+        let command = json!({"id":"9","intent":"2game:move_left","scene_epoch":"4","play_epoch":"7"});
+        let params = json!({"player":0,"grant":"secret-grant","generation":"secret-generation","sequence":"1", "command":command,"value":{"token":"private-payload"},"receipt":"private-receipt"});
+        let result = json!({"ok":true,"command":command,"accepted_head_tick":12});
+        let accepted = summarize("sim.input_value", &params, Some(&result), None);
+        assert_eq!(accepted, "sim.input_value command=9 intent=2game:move_left scene=4 play=7 admission=accepted");
+        assert!(!accepted.contains("secret"));
+        assert!(!accepted.contains("private"));
+        assert!(!accepted.contains("consumed"));
+        assert_eq!(summarize("sim.input_value", &params, None, None), "sim.input_value command=9 intent=2game:move_left scene=4 play=7 admission=rejected");
+        assert_eq!(summarize("sim.input_value", &params, Some(&json!({"ok":true})), None), "sim.input_value command=9 intent=2game:move_left scene=4 play=7 admission=rejected");
+        let mut malformed = params.clone();
+        malformed["command"]["token"] = json!("private-metadata");
+        assert_eq!(summarize("sim.input_value", &malformed, None, None), "sim.input_value");
+        malformed["command"] = json!("private-metadata".repeat(1000));
+        assert_eq!(summarize("sim.input_value", &malformed, None, None), "sim.input_value");
+        assert_eq!(summarize("sim.input_value", &json!({"value":"old-legacy"}), None, None), "sim.input_value");
     }
 
     #[test]

@@ -78,6 +78,10 @@ mod editor {
         fn view_delivery(&self) -> RemoteViewDelivery {
             self.0.view_delivery()
         }
+        #[cfg(feature = "gameplay")]
+        fn frame_evidence(&self) -> Option<orr_remote::RemoteFrameEvidence> {
+            self.0.frame_evidence()
+        }
     }
     fn stream<G: Starter>(
         t: Box<dyn Transport>,

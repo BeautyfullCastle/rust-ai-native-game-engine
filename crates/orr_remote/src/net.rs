@@ -37,6 +37,8 @@ const MAX_AUTH_FAILURES: u32 = 5;
 
 /// What the host thread gets from the network threads.
 pub(crate) enum Inbound {
+    /// Trusted native startup only; never parsed from a network RPC.
+    InstallEditorGameplay{service:crate::editor_gameplay::EditorGameplayService,reply:std::sync::mpsc::Sender<Result<(),String>>},
     Connected {
         conn: u64,
         client: String,

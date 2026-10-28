@@ -160,6 +160,8 @@ impl IrradiancePanel {
             HostSpec::PreparedCollect { .. } => return Err("CollectDodge does not support local 3D asset authoring".into()),
             #[cfg(feature = "room-project")]
             HostSpec::PreparedRoom { scene, .. } => scene,
+            #[cfg(feature = "static-gameplay")]
+            HostSpec::PreparedRegistered { .. } => return Err("Registered gameplay does not provide irradiance authoring authority".into()),
             HostSpec::Remote { .. } => {
                 return Err("Remote paths are not local asset authority".into())
             }

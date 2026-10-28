@@ -192,6 +192,8 @@ impl ModelPanel {
                     crate::backend::HostSpec::PreparedCollect { .. } => return false,
                     #[cfg(feature = "room-project")]
                     crate::backend::HostSpec::PreparedRoom { scene, .. } => scene,
+                    #[cfg(feature = "static-gameplay")]
+                    crate::backend::HostSpec::PreparedRegistered { .. } => return false,
                     crate::backend::HostSpec::Remote { .. } => return false,
                 };
                 if !local_path
@@ -232,6 +234,8 @@ impl ModelPanel {
             }
             #[cfg(feature = "room-project")]
             crate::backend::HostSpec::PreparedRoom { scene, .. } => scene,
+            #[cfg(feature = "static-gameplay")]
+            crate::backend::HostSpec::PreparedRegistered { .. } => return Err("Registered gameplay does not provide local model authoring authority".into()),
             crate::backend::HostSpec::Remote { .. } => {
                 return Err("Remote scene paths are not local authority".into())
             }

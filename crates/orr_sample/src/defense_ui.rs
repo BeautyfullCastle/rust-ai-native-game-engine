@@ -51,6 +51,7 @@ impl DefenseUi {
         frame: &orr_ecs::Frame,
     ) -> (egui::FullOutput, Option<game::DefenseInput>) {
         let run = game::run(frame);
+        let max_hp = frame.singleton::<game::Scenario>().reactor_hp;
         let units = game::units(frame);
         let enemies = game::enemies(frame);
         if run.tick < self.observed_tick {
@@ -104,14 +105,20 @@ impl DefenseUi {
                 60.0,
                 18.0,
                 PAPER,
-                format!("WAVE {:02} / 10     CORE {} / 30", run.wave, run.reactor_hp),
+                format!(
+                    "WAVE {:02} / 10     CORE {} / {}",
+                    run.wave, run.reactor_hp, max_hp
+                ),
             );
             let core = l.rect(805.0, 78.0, 345.0, 4.0);
             p.rect_filled(core, 0.0, BRONZE.gamma_multiply(0.3));
             p.rect_filled(
                 Rect::from_min_size(
                     core.min,
-                    vec2(core.width() * run.reactor_hp as f32 / 30.0, core.height()),
+                    vec2(
+                        core.width() * core_fraction(run.reactor_hp, max_hp),
+                        core.height(),
+                    ),
                 ),
                 0.0,
                 TEAL,
@@ -616,5 +623,21 @@ mod tests {
             (game::MOVE_OR_MERGE, 0, 1)
         );
         assert!(command.sequence > 1);
+    }
+}
+
+fn core_fraction(hp: u32, max_hp: u32) -> f32 {
+    hp.min(max_hp) as f32 / max_hp.max(1) as f32
+}
+
+#[cfg(test)]
+mod authored_core_tests {
+    #[test]
+    fn health_bar_uses_authored_maximum_and_stays_bounded() {
+        assert_eq!(super::core_fraction(75, 75), 1.0);
+        assert_eq!(super::core_fraction(15, 75), 0.2);
+        assert_eq!(super::core_fraction(90, 75), 1.0);
+        assert_eq!(super::core_fraction(0, 75), 0.0);
+        assert_eq!(super::core_fraction(10, 0), 0.0);
     }
 }

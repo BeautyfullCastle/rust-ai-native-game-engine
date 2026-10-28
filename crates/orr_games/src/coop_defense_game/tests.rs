@@ -1,7 +1,102 @@
 use super::*;
 use orr_sim::{Simulation, TickInputs};
+
+#[test]
+fn reflected_input_preserves_pod_layout_and_neutral_default() {
+    use orr_reflect::{Kind, Reflect};
+
+    let desc = DefenseInput::describe();
+    assert_eq!(std::mem::size_of::<DefenseInput>(), 16);
+    desc.check_layout(std::mem::size_of::<DefenseInput>())
+        .unwrap();
+    let Kind::Struct { size, fields } = &desc.kind else {
+        panic!("DefenseInput must expose its existing struct layout");
+    };
+    assert_eq!(*size, 16);
+    assert_eq!(
+        fields
+            .iter()
+            .map(|field| (field.name.as_str(), field.offset))
+            .collect::<Vec<_>>(),
+        [
+            ("action", 0),
+            ("source_cell", 4),
+            ("target_cell", 8),
+            ("sequence", 12)
+        ]
+    );
+    let neutral = DefenseInput::default_value();
+    assert_eq!(neutral, DefenseInput::default());
+    assert_eq!(bytemuck::bytes_of(&neutral), &[0; 16]);
+    desc.check(&desc.read(bytemuck::bytes_of(&neutral)), true)
+        .unwrap();
+}
+
+#[test]
+fn reflected_input_round_trip_covers_all_actions_cells_and_full_sequence() {
+    use orr_reflect::Reflect;
+
+    let desc = DefenseInput::describe();
+    for action in NOOP..=RESTART {
+        for source_cell in 0..CELLS_PER_BOARD {
+            for target_cell in 0..CELLS_PER_BOARD {
+                let input = DefenseInput {
+                    action,
+                    source_cell,
+                    target_cell,
+                    sequence: u32::MAX,
+                };
+                let value = desc.read(bytemuck::bytes_of(&input));
+                let mut decoded = DefenseInput::default();
+                desc.write(bytemuck::bytes_of_mut(&mut decoded), &value)
+                    .unwrap();
+                assert_eq!(decoded, input);
+            }
+        }
+    }
+}
+
+#[test]
+fn reflected_input_rejects_invalid_action_and_cells_without_mutating_bytes() {
+    use orr_reflect::Reflect;
+
+    let desc = DefenseInput::describe();
+    for invalid in [
+        DefenseInput {
+            action: RESTART + 1,
+            ..Default::default()
+        },
+        DefenseInput {
+            source_cell: CELLS_PER_BOARD,
+            ..Default::default()
+        },
+        DefenseInput {
+            target_cell: CELLS_PER_BOARD,
+            ..Default::default()
+        },
+    ] {
+        let value = desc.read(bytemuck::bytes_of(&invalid));
+        let mut decoded = DefenseInput {
+            sequence: 123,
+            ..Default::default()
+        };
+        let before = decoded;
+        assert!(desc
+            .write(bytemuck::bytes_of_mut(&mut decoded), &value)
+            .is_err());
+        assert_eq!(decoded, before);
+    }
+}
+
 fn new(seed: u32) -> Simulation<DefenseGame> {
-    Simulation::new(DefenseConfig { seed }, TICK_RATE, seed as u64)
+    Simulation::new(
+        DefenseConfig {
+            seed,
+            ..Default::default()
+        },
+        TICK_RATE,
+        seed as u64,
+    )
 }
 fn step(s: &mut Simulation<DefenseGame>, input: DefenseInput) {
     let mut inputs = TickInputs::new(s.tick(), 1);
@@ -42,7 +137,7 @@ fn duplicate_malformed_and_insufficient_actions_never_double_spend() {
 }
 #[test]
 fn merge_requires_two_matching_units_and_movement_preserves_identity() {
-    let mut r = initial_run(1);
+    let mut r = initial_run(1, Scenario::default());
     let mut rng = FrameRng::new(1);
     let mut u = units(new(1).frame());
     let mut ev = Vec::new();
@@ -87,7 +182,7 @@ fn merge_requires_two_matching_units_and_movement_preserves_identity() {
 }
 #[test]
 fn projectile_damage_only_on_arrival_and_lanes_share_reactor() {
-    let mut r = initial_run(1);
+    let mut r = initial_run(1, Scenario::default());
     let mut ev = Vec::new();
     let mut e = vec![DefenseEnemy {
         active: 1,
@@ -203,7 +298,7 @@ fn restart_resets_gameplay_and_rng_without_replaying_held_action() {
 
 #[test]
 fn bounded_economy_caps_and_full_board_do_not_spend() {
-    let mut r = initial_run(77);
+    let mut r = initial_run(77, Scenario::default());
     let mut rng = FrameRng::new(77);
     let mut u = units(new(77).frame());
     let mut events = Vec::new();
@@ -239,7 +334,7 @@ fn bounded_economy_caps_and_full_board_do_not_spend() {
 #[test]
 fn boss_waves_and_role_mechanics_are_real_simulation() {
     for wave in [5, 10] {
-        let mut r = initial_run(1);
+        let mut r = initial_run(1, Scenario::default());
         r.wave = wave;
         r.wave_tick = 210;
         let mut e = vec![DefenseEnemy::default(); MAX_ENEMIES];
@@ -253,7 +348,7 @@ fn boss_waves_and_role_mechanics_are_real_simulation() {
     // Armor reduces rivets; prism ignores it; condenser applies timed slow.
     for (role, expected_hp, expected_slow) in [(RIVET, 87, 0), (PRISM, 80, 0), (CONDENSER, 87, 100)]
     {
-        let mut r = initial_run(1);
+        let mut r = initial_run(1, Scenario::default());
         let mut e = vec![DefenseEnemy {
             active: 1,
             id: 1,
@@ -280,7 +375,7 @@ fn boss_waves_and_role_mechanics_are_real_simulation() {
 
 #[test]
 fn allied_mortar_splash_follows_target_lane_not_shooter_board() {
-    let mut r = initial_run(1);
+    let mut r = initial_run(1, Scenario::default());
     let mut e = vec![
         DefenseEnemy {
             active: 1,
@@ -337,7 +432,7 @@ fn step_events(
 
 #[test]
 fn logical_unit_identity_survives_move_and_merge_consumes_only_source() {
-    let mut r = initial_run(1);
+    let mut r = initial_run(1, Scenario::default());
     let mut rng = FrameRng::new(1);
     let mut u = units(new(1).frame());
     let mut events = Vec::new();
@@ -385,7 +480,7 @@ fn logical_unit_identity_survives_move_and_merge_consumes_only_source() {
 
 #[test]
 fn projectile_identity_and_source_survive_motion_and_pool_reuse() {
-    let mut r = initial_run(1);
+    let mut r = initial_run(1, Scenario::default());
     let mut u = vec![DefenseUnit {
         active: 1,
         id: 9,
@@ -438,7 +533,7 @@ fn projectile_identity_and_source_survive_motion_and_pool_reuse() {
 
 #[test]
 fn simultaneous_splash_hits_have_exact_source_projectile_and_victim_ids() {
-    let mut r = initial_run(1);
+    let mut r = initial_run(1, Scenario::default());
     let mut e = vec![
         DefenseEnemy {
             active: 1,
@@ -504,7 +599,7 @@ fn simultaneous_splash_hits_have_exact_source_projectile_and_victim_ids() {
 
 #[test]
 fn leak_and_kill_same_tick_are_not_ambiguous_retirements() {
-    let mut r = initial_run(1);
+    let mut r = initial_run(1, Scenario::default());
     let mut e = vec![
         DefenseEnemy {
             active: 1,

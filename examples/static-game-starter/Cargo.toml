@@ -23,6 +23,7 @@ orr_remote = { path = "../../crates/orr_remote", default-features = false }
 orr_editor = { optional = true, path = "../../crates/orr_editor", features = ["static-games"] }
 orr_sample = { optional = true, path = "../../crates/orr_sample" }
 orr_view = { path = "../../crates/orr_view" }
+orr_games = { path = "../../crates/orr_games", optional = true }
 
 orr_render = { path = "../../crates/orr_render", optional = true }
 orr_input = { path = "../../crates/orr_input", optional = true }
@@ -45,6 +46,9 @@ tempfile = "3"
 default = ["editor"]
 editor = ["dep:orr_editor", "dep:eframe", "dep:egui", "dep:orr_sample"]
 static-game-actions = ["dep:orr_input", "orr_editor?/static-game-actions"]
+gameplay = ["editor", "orr_editor/static-gameplay"]
+stormglass = ["gameplay", "dep:orr_games", "orr_games/coop-defense", "orr_remote/coop-defense"]
+api-acceptance = ["gameplay", "dep:egui_kittest", "egui_kittest/wgpu", "dep:png", "dep:sha2"]
 standalone = ["dep:orr_render", "dep:winit", "dep:orr_input"]
 bundle = ["dep:sha2", "dep:tempfile"]
 native-acceptance = ["editor", "dep:egui_kittest", "dep:winit"]

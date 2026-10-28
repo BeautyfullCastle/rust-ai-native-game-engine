@@ -107,14 +107,46 @@ pub const MAX_UPGRADE: u32 = 8;
 pub const MAX_INVESTMENT: u32 = 5;
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable, orr_reflect::Reflect)]
 pub struct DefenseInput {
+    #[reflect(range = "0..=5")]
     pub action: u32,
+    #[reflect(range = "0..=11")]
     pub source_cell: u32,
+    #[reflect(range = "0..=11")]
     pub target_cell: u32,
     /// Nonzero increasing action ID. Held/predicted samples cannot spend twice.
     pub sequence: u32,
 }
+/// Authored starting conditions, stored in Frame so rollback and RESTART agree.
+/// Runtime pools and DefenseRun deliberately are not reflected authoring types.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable, orr_reflect::Reflect)]
+#[reflect(default)]
+pub struct Scenario {
+    /// Starting gold for each board.
+    #[reflect(range = "0..=10000")]
+    pub starting_gold: u32,
+    #[reflect(range = "1..=1000")]
+    pub reactor_hp: u32,
+}
+impl Default for Scenario {
+    fn default() -> Self {
+        Self {
+            starting_gold: 150,
+            reactor_hp: 30,
+        }
+    }
+}
+// Scenario v1 changes the game frame contract, not the global engine format.
+pub const SCENARIO_BUILD_ID: u64 = orr_sim::frame_build_id(0x5354_4f52_4d00_0001);
+pub const SCENARIO_NAME: &str = "CoopDefense::Scenario";
+pub fn scenario_types() -> orr_reflect::TypeRegistry {
+    let mut types = orr_reflect::TypeRegistry::new();
+    types.register_singleton::<Scenario>(SCENARIO_NAME);
+    types
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
 pub struct DefenseRun {
@@ -247,10 +279,14 @@ impl SimCommand for NoCommand {
 #[derive(Clone, Copy, Debug)]
 pub struct DefenseConfig {
     pub seed: u32,
+    pub scenario: Scenario,
 }
 impl Default for DefenseConfig {
     fn default() -> Self {
-        Self { seed: 0x0c00_2026 }
+        Self {
+            seed: 0x0c00_2026,
+            scenario: Scenario::default(),
+        }
     }
 }
 pub struct DefenseGame;
@@ -264,9 +300,20 @@ impl Game for DefenseGame {
         b.register_component::<DefenseUnit>("CoopDefense::Unit");
         b.register_component::<DefenseEnemy>("CoopDefense::Enemy");
         b.register_component::<DefenseProjectile>("CoopDefense::Projectile");
+        b.register_singleton::<Scenario>(SCENARIO_NAME);
     }
     fn setup(f: &mut Frame, c: &DefenseConfig) {
-        f.set_singleton(initial_run(c.seed));
+        Self::setup_scenario(f, c, c.scenario);
+    }
+    fn systems() -> Vec<Box<dyn System<Self>>> {
+        vec![Box::new(DefenseSystem)]
+    }
+}
+impl DefenseGame {
+    /// Initialize a fresh frame after scene validation, never a live frame.
+    pub fn setup_scenario(f: &mut Frame, c: &DefenseConfig, scenario: Scenario) {
+        f.set_singleton(scenario);
+        f.set_singleton(initial_run(c.seed, scenario));
         f.set_singleton(FrameRng::new(c.seed as u64));
         for board in 0..2 {
             for cell in 0..CELLS_PER_BOARD {
@@ -290,14 +337,11 @@ impl Game for DefenseGame {
             f.add(e, DefenseProjectile::default());
         }
     }
-    fn systems() -> Vec<Box<dyn System<Self>>> {
-        vec![Box::new(DefenseSystem)]
-    }
 }
-fn initial_run(seed: u32) -> DefenseRun {
+fn initial_run(seed: u32, scenario: Scenario) -> DefenseRun {
     DefenseRun {
-        reactor_hp: 30,
-        gold: [150; 2],
+        reactor_hp: scenario.reactor_hp,
+        gold: [scenario.starting_gold; 2],
         wave: 1,
         seed,
         next_enemy_id: 1,
@@ -524,7 +568,7 @@ impl System<DefenseGame> for DefenseSystem {
                 .generation
                 .checked_add(1)
                 .expect("defense generation exhausted");
-            r = initial_run(r.seed);
+            r = initial_run(r.seed, *ctx.frame.singleton::<Scenario>());
             r.generation = generation;
             r.last_sequence = sequence;
             rng = FrameRng::new(r.seed as u64);

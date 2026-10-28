@@ -32,3 +32,6 @@ pub mod room_escape_game;
 /// Original cooperative tower defense, deterministic and opt-in.
 #[cfg(feature = "coop-defense")]
 pub mod coop_defense_game;
+
+#[cfg(feature = "coop-defense-scene")]
+pub mod coop_defense_scene;

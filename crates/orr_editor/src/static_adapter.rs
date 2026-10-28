@@ -25,12 +25,21 @@ pub(crate) mod actions;
 #[cfg(feature = "static-game-actions")]
 pub use actions::StaticActionDescriptor;
 
+#[cfg(feature = "static-gameplay")]
+#[path = "static_gameplay.rs"]
+mod gameplay;
+#[cfg(feature = "static-gameplay")]
+pub use gameplay::*;
+
 /// Owned snapshots only. A borrowed frame must never be retained by an adapter.
 pub trait StaticFrameStream {
     fn poll_view(&mut self) -> ViewUpdate<()>;
     fn take_errors(&self) -> Vec<RpcError>;
     fn is_alive(&self) -> bool;
     fn view_delivery(&self) -> RemoteViewDelivery;
+    /// Verified atomic frame evidence; legacy streams cannot authorize commands.
+    #[cfg(feature = "static-gameplay")]
+    fn frame_evidence(&self) -> Option<orr_remote::RemoteFrameEvidence> { None }
 }
 
 /// Finite held input. This is not an event queue: `action` remains pressed.

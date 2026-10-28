@@ -31,7 +31,15 @@ pub extern "C" fn defense_init(seed: u32) {
     });
     CLIENT.with(|slot| {
         *slot.borrow_mut() = Some(Client {
-            sim: Simulation::new(DefenseConfig { seed }, TICK_RATE, u64::from(seed)),
+            sim: Simulation::with_build_id(
+                DefenseConfig {
+                    seed,
+                    ..Default::default()
+                },
+                TICK_RATE,
+                u64::from(seed),
+                SCENARIO_BUILD_ID,
+            ),
             json: String::new(),
             source,
             events: LatestTickEvents::new(),
@@ -128,6 +136,17 @@ mod tests {
     fn json() -> String {
         defense_snapshot();
         CLIENT.with(|slot| slot.borrow().as_ref().unwrap().json.clone())
+    }
+    #[test]
+    fn browser_tracks_scenario_build_identity() {
+        defense_init(7);
+        CLIENT.with(|slot| {
+            assert_eq!(
+                slot.borrow().as_ref().unwrap().sim.build_id(),
+                SCENARIO_BUILD_ID
+            );
+        });
+        assert_ne!(SCENARIO_BUILD_ID, 0);
     }
     #[test]
     fn repeated_snapshots_preserve_keys_and_reset_has_a_new_source() {
