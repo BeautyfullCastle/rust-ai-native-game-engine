@@ -4,6 +4,7 @@ import { StrictEventAdapter, applyStrictSnapshot } from './strict-event-adapter.
 const $=id=>document.getElementById(id),canvas=$('game'),c=canvas.getContext('2d');
 const roles=[['여우 궁수','빠른 단일 사격','#c57b32'],['멧돼지 포격수','넓은 범위의 폭발 공격','#c45d4c'],['아르마딜로 전사','적의 장갑을 파쇄','#9773bb'],['올빼미 마법사','적의 이동 속도를 늦춤','#4f9faf'],['토끼 고수','내 보드 전체 공격 지원','#629455'],['두더지 광부','추가 자원 생산','#b58d36']];
 $('codex').innerHTML=roles.map(r=>`<div style="--role:${r[2]}"><b>${r[0]}</b><br>${r[1]}</div>`).join('');
+let sceneLoadGeneration=0;
 let wasm,state,selected=-1,ready=true,paused=false,seq=0,queue=[],last=0,acc=0,sound=false,seed=71825;
 let towerAtlas=null,heroRects=null,enemyAtlas=null,enemyRects=null,gesture=null,hover=-1,pending=null,feedback=[],oldEnemies=new Map(),lastNotice='';
 // The verified reference uses a portrait stacked arena on every screen.
@@ -27,7 +28,28 @@ function blocked(){return !state?'게임을 준비하고 있어요.':ready?'방�
 function actionReason(action,source,target){let reason=blocked();if(reason)return reason;if(queue.length>=32)return'입력 처리 중입니다. 잠시 기다려 주세요.';if(action===2){const u=unitAt(source),v=unitAt(target);if(!u)return'먼저 내 수호대를 선택하세요.';if(source===target)return'다른 칸에 놓아 주세요.';if(target<0||target>=12)return'내 보드 안에 놓아 주세요.';if(v&&(u[2]!==v[2]||u[3]!==v[3]))return'같은 역할·등급만 합성 가능 · 선택한 수호대를 탭하면 선택 해제';if(v&&u[3]>=5)return'최고 등급은 더 합성할 수 없어요.';return'';}const index=action===1?0:action===3?1:2;if(state.gold[0]<state.costs[index])return`자원이 ${state.costs[index]-state.gold[0]} 부족해요.`;if(action===1&&state.units.filter(u=>u[0]===0).length>=12)return'보드가 가득 찼어요. 같은 수호대를 합성하세요.';if(action===3&&state.upgrades[0]>=8)return'전투 강화가 최고 단계입니다.';if(action===4&&state.investment[0]>=5)return'경제 투자가 최고 단계입니다.';return'';}
 function command(action,source=selected,target=selected){const reason=actionReason(action,source,target);if(reason){notice(reason);return false;}queue.push([action,Math.max(0,source),Math.max(0,target),++seq]);return true;}
 function cancelGesture(){if(gesture&&canvas.hasPointerCapture?.(gesture.id))canvas.releasePointerCapture(gesture.id);gesture=null;hover=-1;}
-function start(){if(!wasm)return;cancelGesture();if(state)wasm.defense_step(5,0,0,++seq);else wasm.defense_init(seed);state=snapshot();selected=-1;queue=[];pending=null;acc=0;paused=true;ready=true;$('ready').hidden=false;$('result').hidden=true;oldEnemies.clear();feedback=[];presentation.reset();observePresentation();$('pause').textContent='정지';notice('내 보드에 수호대를 소환하세요. 동료는 로컬 AI입니다.');update();}
+function start(){++sceneLoadGeneration;if(!wasm)return;if(state)wasm.defense_step(5,0,0,++seq);else wasm.defense_init(seed);resetView();}
+function resetView(){cancelGesture();state=snapshot();selected=-1;queue=[];pending=null;acc=0;paused=true;ready=true;$('ready').hidden=false;$('result').hidden=true;oldEnemies.clear();feedback=[];presentation.reset();observePresentation();$('pause').textContent='정지';notice('내 보드에 수호대를 소환하세요. 동료는 로컬 AI입니다.');update();}
+// Local bytes only: never upload scene contents or fetch a file-derived URL.
+async function loadSceneFile(file){
+ const generation=++sceneLoadGeneration;
+ if(!file||!wasm)return;
+ const capacity=wasm.defense_scene_capacity();
+ if(file.size>capacity){notice('장면은 64 KiB 이하여야 합니다. 기존 게임을 유지합니다.');return;}
+ try{
+  const bytes=new Uint8Array(await file.arrayBuffer());
+  if(generation!==sceneLoadGeneration)return;
+  if(bytes.length>capacity)throw Error('64 KiB 초과');
+  const pointer=wasm.defense_scene_buffer();
+  new Uint8Array(wasm.memory.buffer,pointer,bytes.length).set(bytes);
+  const status=wasm.defense_init_scene(bytes.length);
+  if(status!==0)throw Error(['','64 KiB 초과','UTF-8 오류','지원하지 않는 장면 또는 값'][status]||'장면 오류');
+  seq=0;resetView();
+  $('scene-source').textContent=file.name;
+  notice('로컬 장면을 불러왔습니다. 방어 시작을 누르세요.');
+ }catch(error){if(generation===sceneLoadGeneration)notice('장면을 불러오지 못했습니다. 기존 게임 유지: '+error.message);}
+}
+$('scene-file').onchange=e=>{void loadSceneFile(e.target.files?.[0]);e.target.value='';};
 function togglePause(){if(!state||ready||state.phase)return;cancelGesture();paused=!paused;acc=0;$('pause').textContent=paused?'계속':'정지';notice(paused?'일시정지 · 계속 버튼 또는 Space로 재개':'수호대를 끌거나 탭해서 배치하세요.');update();}
 $('summon').onclick=()=>command(1);$('upgrade').onclick=()=>command(3);$('invest').onclick=()=>command(4);$('again').onclick=start;$('reset').onclick=start;
 $('begin').onclick=e=>{if(sound)void presentation.audio.unlock(e);if(!wasm||!state)return;ready=false;paused=false;last=0;acc=0;$('ready').hidden=true;notice('소환 버튼으로 첫 수호대를 불러오세요!');update();};
@@ -41,7 +63,7 @@ canvas.addEventListener('pointerdown',e=>{if(e.button!==undefined&&e.button!==0)
 canvas.addEventListener('pointermove',e=>{const p=pointerPoint(e);hover=cellAt(p);if(!gesture||gesture.id!==e.pointerId)return;gesture.p=p;if(gesture.source>=0&&Math.hypot(p[0]-gesture.start[0],p[1]-gesture.start[1])>8){gesture.drag=true;selected=gesture.source;}if(gesture.drag)e.preventDefault?.();});
 canvas.addEventListener('pointerup',e=>{if(!gesture||gesture.id!==e.pointerId)return;const g=gesture,target=cellAt(pointerPoint(e));cancelGesture();if(blocked()){notice(blocked());return;}if(g.drag){if(target<0){notice('이동 취소 · 내 보드 안에 놓아 주세요.');selected=g.source;}else if(target!==g.source)command(2,g.source,target);}else if(target===g.cell){if(g.selectedBefore>=0&&unitAt(g.selectedBefore)&&target!==g.selectedBefore){const a=unitAt(g.selectedBefore),b=unitAt(target);if(b&&(a[2]!==b[2]||a[3]!==b[3]||a[3]>=5)){selected=target;notice('수호대 선택 · 빈 칸이나 같은 역할·등급 위에 놓으세요.');}else command(2,g.selectedBefore,target);}else{selected=unitAt(target)?(g.selectedBefore===target?-1:target):-1;notice(selected>=0?'빈 칸으로 이동 · 빛나는 같은 수호대 위에 놓으면 합성':'수호대를 선택하거나 소환하세요.');}}update();});
 canvas.addEventListener('pointercancel',()=>{cancelGesture();notice('이동을 취소했습니다.');});canvas.addEventListener('lostpointercapture',()=>{gesture=null;hover=-1;});canvas.addEventListener('pointerleave',()=>{if(!gesture)hover=-1;});
-function update(){syncPresentation();if(!state)return;$('health').textContent=state.hp;$('healthbar').style.width=Math.max(0,Math.min(100,state.hp/30*100))+'%';$('wave').textContent=`${String(state.wave).padStart(2,'0')} / 10`;$('gold').textContent=state.gold[0];$('kills').textContent=state.kills;for(const [i,id]of['summon','upgrade','invest'].entries()){const b=$(id);b.querySelector('span').textContent=`● ${state.costs[i]} · ${['Q','E','R'][i]}`;b.disabled=false;b.setAttribute?.('aria-disabled',String(!!actionReason([1,3,4][i],0,0)));}const u=unitAt(selected);$('selected').textContent=u?`${roles[u[2]][0]} ${'★'.repeat(u[3])}`:'수호대를 소환하세요';$('detail').textContent=u?roles[u[2]][1]+' · 끌기 / 탭으로 이동':'같은 역할·등급 둘을 합성 · 소환은 첫 빈 칸';if(state.phase){cancelGesture();$('result').hidden=false;$('outcome').textContent=state.phase===1?'숲을 지켜냈어요!':'다시 함께 도전해요';$('summary').textContent=`${state.wave} 웨이브 · ${state.kills} 처치 · ${state.merges} 합성 · ${state.leaks} 돌파`;}}
+function update(){syncPresentation();if(!state)return;$('health').textContent=state.hp;$('healthbar').style.width=Math.max(0,Math.min(100,state.hp/state.maxHp*100))+'%';$('wave').textContent=`${String(state.wave).padStart(2,'0')} / 10`;$('gold').textContent=state.gold[0];$('kills').textContent=state.kills;for(const [i,id]of['summon','upgrade','invest'].entries()){const b=$(id);b.querySelector('span').textContent=`● ${state.costs[i]} · ${['Q','E','R'][i]}`;b.disabled=false;b.setAttribute?.('aria-disabled',String(!!actionReason([1,3,4][i],0,0)));}const u=unitAt(selected);$('selected').textContent=u?`${roles[u[2]][0]} ${'★'.repeat(u[3])}`:'수호대를 소환하세요';$('detail').textContent=u?roles[u[2]][1]+' · 끌기 / 탭으로 이동':'같은 역할·등급 둘을 합성 · 소환은 첫 빈 칸';if(state.phase){cancelGesture();$('result').hidden=false;$('outcome').textContent=state.phase===1?'숲을 지켜냈어요!':'다시 함께 도전해요';$('summary').textContent=`${state.wave} 웨이브 · ${state.kills} 처치 · ${state.merges} 합성 · ${state.leaks} 돌파`;}}
 function execute(a){const before=state;wasm.defense_step(...a);state=snapshot();observePresentation();if(!a[0])return;let success=false,message='',f=440;if(a[0]===1){success=state.units.filter(u=>u[0]===0).length>before.units.filter(u=>u[0]===0).length;message='새 수호대가 합류했어요!';f=530;}if(a[0]===3){success=state.upgrades[0]>before.upgrades[0];message='내 수호대의 공격력이 올랐어요!';}if(a[0]===4){success=state.investment[0]>before.investment[0];message='경제 투자를 완료했어요!';f=350;}if(a[0]===2){const old=before.units.find(u=>u[0]===0&&u[1]===a[1]),now=unitAt(a[2]),wasTarget=before.units.find(u=>u[0]===0&&u[1]===a[2]);success=!!old&&!!now&&!unitAt(a[1])&&now[2]===old[2]&&now[3]===old[3]+(wasTarget?1:0);message=wasTarget?'합성 성공! 더 강한 수호대가 되었어요.':'배치를 옮겼어요.';if(success){selected=a[2];}}if(success){notice(message);if(a[0]!==2)tone(f);}else notice('입력이 적용되지 않았어요. 현재 배치와 자원을 확인하세요.');}
 function circle(x,y,r,fill,stroke,width=1){c.beginPath();c.arc(x,y,r,0,Math.PI*2);if(fill){c.fillStyle=fill;c.fill();}if(stroke){c.strokeStyle=stroke;c.lineWidth=width;c.stroke();}}
 function line(points,color,width){c.beginPath();points.forEach((p,i)=>i?c.lineTo(...p):c.moveTo(...p));c.strokeStyle=color;c.lineWidth=width;c.lineCap='round';c.lineJoin='round';c.stroke();}

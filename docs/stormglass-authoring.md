@@ -78,3 +78,19 @@ traces, restart, CLI/default equivalence, invalid/oversized/non-UTF-8 sources,
 nonregular files and Unix link/FIFO rejection. These are focused CPU checks,
 not a substitute for the exact candidate’s mandatory integration gate.
 Windows/macOS file behavior and actual native HUD rendering remain unverified.
+
+## Browser saved-scene playback
+
+The optional browser adapter accepts the same saved Scene YAML through its local
+file picker, without uploading contents. A fixed adapter-owned 64 KiB WASM staging
+buffer and length/status admission reuse the shared strict parser; malformed
+UTF-8, oversized or invalid scenes leave the existing client/source identity
+unchanged. A successful load starts a new ready session, clears queued gestures
+and commands, and uses the canonical `DefenseConfig` default seed. The legacy
+browser `defense_init(seed)` path remains seed-compatible. Restart retains the
+imported Scenario and the HUD uses authored `maxHp`, not a fixed 30.
+
+Overlapping asynchronous file reads are generation-guarded; a later selection or
+restart supersedes earlier reads. Served and generated offline pages use the same
+picker. Selected scenes are not persisted or embedded by the offline exporter.
+Actual WASM ABI and simulated DOM checks are distinct from browser/GPU/manual QA.

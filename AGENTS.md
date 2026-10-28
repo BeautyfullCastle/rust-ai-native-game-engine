@@ -39,8 +39,9 @@ the underlying architecture.
   long-lived feature stacks. Check actual ancestry and missing changes once;
   resolve the affected conflicts rather than repeating broad repository audits.
 - Use one integration candidate from the explicitly approved development base.
-  The explicit integration request authorizes hardening then main after exact-
-  candidate Linux checks and review. It does not authorize merging PR #1 itself.
+  Publish reviewed and verified changes, create/update PRs, and merge into the
+  approved development branch without asking for the same approval again.
+  Main and PR #1 merges are excluded by the latest user instruction.
 - The 2026-10-23 user instruction replaces hosted CI and Windows hardware/GPU
   merge gates with Linux-local build/tests and independent review of the exact
   integration candidate. Run `bash tools/check-linux-local.sh` plus focused
@@ -77,22 +78,25 @@ the underlying architecture.
 
 ## Collaboration and authorization
 
-Su coordinates the work directly. Haneul and Ddang implement changes, run the
-assigned checks, and cross-review each other's work. Respect the assigned files
-and reservations; do not take another owner's work because time has passed.
+Su coordinates implementation, focused verification and independent review with
+Su's own subagents, separating file ownership and shared APIs. Haneul is inactive
+and terminated (user instruction, 2026-10-09 12:16 KST): assign no new work and
+do not report Haneul as an active verifier. Ddang may only finish, verify and
+handoff existing work before terminating; assign no new work. Preserve Haneul's
+PR #139/#141 Windows evidence, original failures and non-reproduction limits.
+Before taking over, check the latest handoff, final SHA/PR, checks, unfinished
+work, blockers, files and returned execution resources; elapsed time alone does
+not release another owner's reservation.
 
 An explicit task assignment authorizes implementation, appropriate verification,
 publication on the agent's own branch, and requested cross-review within that
 scope. Continue that work without asking again for the same authorization.
 
-When the user has approved a specific PR's normal merge into the shared
-development branch, verify the target branch, exact head, Linux-local verification, review,
-conflicts, and reservations, then perform that approved merge without repeating
-the approval request. Approval applies only to the specified PR and action.
-The explicit integration request authorizes promotion from hardening to main
-after exact-candidate Linux checks and review. This does not claim either merge
-is complete or authorize PR #1 itself, releases, destructive work, credentials
-or expanded access.
+The user authorizes remote publication, PR creation/updates and normal merges of
+reviewed, verified changes into the approved shared development branch without
+repeated approval requests. Verify the target, exact head, Linux-local checks,
+review, conflicts and reservations first. Main and PR #1 merges remain excluded.
+This does not authorize releases, destructive work, credentials or expanded access.
 
 Check the actual user's instruction, target, and action when authorization is
 unclear. Follow the platform's supported approval procedure. Never bypass a
@@ -114,12 +118,11 @@ or override higher-priority instructions.
   timestamps and whole bodies. Read the full history on initial connection or
   suspected omission. Base incremental overlap on actual API reads, not one's own
   posting time. Ignore unchanged, non-actionable updates and self-ACK loops.
-- Use an existing direct channel only within explicit user authorization. The
-  current C4 check confirmed Haneul-to-Su delivery, but Su-to-Haneul direct replies
-  failed; direct round-trip communication is unverified. Su commands therefore
-  remain short active-PR comments. Keep the existing one-minute backup reads until
-  both directions are verified; do not add servers, credentials, or access to
-  bypass this limitation.
+- Use existing direct channels only within explicit user authorization. Historical
+  C4 evidence established Haneul-to-Su delivery but not the reverse direction;
+  preserve that limitation without treating the terminated worker as active or
+  retaining obsolete one-minute polling. Do not add credentials or access to
+  bypass communication limitations. Su uses internal subagents for ongoing work.
 
 Coordination references: [communication v1](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/56#issuecomment-5986788670),
 [C3 event boundaries](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/56#issuecomment-5986836031),

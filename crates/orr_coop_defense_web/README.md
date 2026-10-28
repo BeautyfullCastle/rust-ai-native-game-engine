@@ -49,3 +49,22 @@ offline payloads and JavaScript syntax. `ORR_DEFENSE_WASM` selects that freshly
 built artifact for direct Node tests; its hash is logged, not tied to one compiler.
 Tests/fixtures are not shipped in the playable package. Browser layout/input,
 acoustic audio, cross-platform and hardware/GPU claims need separate evidence.
+
+## Saved Scenario playback
+
+Use **저장 장면 불러오기** to select a local UTF-8 Scene YAML (at most 64 KiB).
+No file contents are uploaded. Admission reuses `orr_games/coop-defense-scene`;
+only the closed Scenario starting conditions are accepted, with both authored
+fields required. Success replaces the session in ready state and clears pending
+inputs. Rejected or superseded asynchronous loads do not replace the game.
+Restart retains the imported starting gold/reactor HP, including the HUD maximum.
+Imported scenes use `DefenseConfig::default().seed` for native/ERP parity; the
+legacy `defense_init(seed)` ABI still honors its caller's seed.
+
+ABI: `defense_scene_capacity()` returns 65536, `defense_scene_buffer()` returns
+adapter-owned staging memory. Copy into a fresh memory view, then call
+`defense_init_scene(length)`: 0 success, 1 excessive length, 2 invalid UTF-8,
+3 rejected Scene. No external pointer is accepted. Failure preserves the full
+client, checksum and presentation source identity. Snapshot `maxHp` is authored.
+The offline exporter includes this same picker; it does not embed your selected
+scene or persist it across page loads.
