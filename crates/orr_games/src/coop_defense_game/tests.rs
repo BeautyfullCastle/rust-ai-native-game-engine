@@ -338,7 +338,7 @@ fn boss_waves_and_role_mechanics_are_real_simulation() {
         r.wave = wave;
         r.wave_tick = 210;
         let mut e = vec![DefenseEnemy::default(); MAX_ENEMIES];
-        spawn_wave(&mut r, &mut e, &mut Vec::new());
+        spawn_wave(&mut r, &mut e, &mut Vec::new(), WavePacing::default());
         assert_eq!(
             e.iter().filter(|e| e.active != 0 && e.kind == BOSS).count(),
             2
@@ -708,8 +708,27 @@ fn restart_reused_ids_are_namespaced_by_rollback_safe_generation() {
 
 #[test]
 fn authored_campaign_completes_three_real_waves_and_replays_then_restarts() {
+    check_authored_campaign(35);
+}
+
+#[test]
+fn paced_campaign_completes_three_real_waves_and_replays_then_restarts() {
+    check_authored_campaign(70);
+}
+
+#[test]
+fn maximum_pacing_completes_three_real_waves_and_replays_then_restarts() {
+    check_authored_campaign(350);
+}
+
+fn check_authored_campaign(interval: u32) {
+    // Maximum pacing needs 12,600 spawn ticks for 10+12+14 paired batches.
+    // Leave room for the last enemies to travel/fight without advancing state
+    // artificially. Reaching the bound without an actual victory fails.
+    const MAX_CAMPAIGN_TICKS: u32 = 20_000;
     let config = DefenseConfig {
         campaign: Campaign { last_wave: 3 },
+        wave_pacing: WavePacing { spawn_interval_ticks: interval },
         ..Default::default()
     };
     let mut sim = Simulation::<DefenseGame>::with_build_id(
@@ -722,7 +741,7 @@ fn authored_campaign_completes_three_real_waves_and_replays_then_restarts() {
     let mut recorded = Vec::new();
     let mut spawned = [0; 3];
     let mut waves = Vec::new();
-    for tick in 0..10000 {
+    for tick in 0..MAX_CAMPAIGN_TICKS {
         let state = run(sim.frame());
         if state.phase != PLAYING {
             break;
@@ -738,6 +757,9 @@ fn authored_campaign_completes_three_real_waves_and_replays_then_restarts() {
         for event in &events {
             if event.payload.kind == EVENT_ENEMY_SPAWN {
                 spawned[(wave - 1) as usize] += 1;
+                let wave_tick = run(sim.frame()).wave_tick;
+                assert!(wave_tick >= 180);
+                assert_eq!(wave_tick % interval, 0);
             }
             if event.payload.kind == EVENT_WAVE {
                 waves.push(event.payload.value);
@@ -758,6 +780,8 @@ fn authored_campaign_completes_three_real_waves_and_replays_then_restarts() {
     assert_eq!(run(sim.frame()), terminal);
     assert_eq!(units(sim.frame()), terminal_units);
     assert_eq!(projectiles(sim.frame()), terminal_projectiles);
+    let restart_sequence = recorded.iter().map(|(command, _, _)| command.sequence)
+        .max().unwrap().checked_add(1).unwrap();
     sim.restore(&initial);
     for (command, checksum, expected) in recorded {
         let actual = step_events(&mut sim, command);
@@ -773,7 +797,7 @@ fn authored_campaign_completes_three_real_waves_and_replays_then_restarts() {
                 .collect::<Vec<_>>()
         );
     }
-    step(&mut sim, input(RESTART, 10001));
+    step(&mut sim, input(RESTART, restart_sequence));
     assert_eq!(
         *sim.frame().singleton::<Campaign>(),
         Campaign { last_wave: 3 }
@@ -787,6 +811,43 @@ fn authored_campaign_completes_three_real_waves_and_replays_then_restarts() {
         (1, PLAYING, 0)
     );
     assert_eq!(run(sim.frame()).reactor_hp, config.scenario.reactor_hp);
+    assert_eq!(*sim.frame().singleton::<WavePacing>(), config.wave_pacing);
+    assert_eq!(run(sim.frame()).generation, 1);
+    assert_eq!(run(sim.frame()).last_sequence, restart_sequence);
+
+    // Win again using only the production legal-input strategy. This is not
+    // a frame-mutating spawn/liveness fixture; failed gameplay must fail here.
+    let mut restarted_spawns = [0; 3];
+    for tick in 0..MAX_CAMPAIGN_TICKS {
+        let state = run(sim.frame());
+        if state.phase != PLAYING {
+            break;
+        }
+        let command = if tick % 15 == 0 {
+            strategy_input(
+                &state,
+                &units(sim.frame()),
+                0,
+                restart_sequence.checked_add(tick + 1).unwrap(),
+            )
+        } else {
+            DefenseInput::default()
+        };
+        let events = step_events(&mut sim, command);
+        let state = run(sim.frame());
+        assert!(state.wave <= 3);
+        for event in events {
+            if event.payload.kind == EVENT_ENEMY_SPAWN {
+                restarted_spawns[(state.wave - 1) as usize] += 1;
+                assert!(state.wave_tick >= 180);
+                assert_eq!(state.wave_tick % interval, 0);
+            }
+        }
+        assert_eq!(*sim.frame().singleton::<WavePacing>(), config.wave_pacing);
+    }
+    assert_eq!((run(sim.frame()).phase, run(sim.frame()).wave), (WON, 3));
+    assert_eq!(restarted_spawns, [wave_count(1), wave_count(2), wave_count(3)]);
+    assert!(enemies(sim.frame()).iter().all(|e| e.active == 0));
 }
 
 #[test]
@@ -829,4 +890,36 @@ fn final_wave_waits_for_last_enemy_and_last_leak_defeat_has_priority() {
         );
         assert_eq!(run(sim.frame()).wave, 3);
     }
+}
+
+#[test]
+fn pacing_has_fixed_width_layout_and_exact_spawn_alignment() {
+    use orr_reflect::Reflect;
+    WavePacing::describe().check_layout(4).unwrap();
+    assert_eq!(std::mem::size_of::<WavePacing>(), 4);
+    for interval in [35, 70, 350] {
+        let mut r = initial_run(1, Scenario::default());
+        let mut enemies = [DefenseEnemy::default(); MAX_ENEMIES];
+        let mut events = Vec::new();
+        let pacing = WavePacing { spawn_interval_ticks: interval };
+        let first = 180_u32.div_ceil(interval) * interval;
+        for tick in 0..=first + interval {
+            r.wave_tick = tick;
+            let before = r.spawned;
+            spawn_wave(&mut r, &mut enemies, &mut events, pacing);
+            assert_eq!(r.spawned - before, if tick == first || tick == first + interval { 2 } else { 0 }, "interval {interval}, tick {tick}");
+        }
+        assert_eq!(events.len(), 4);
+        assert_eq!(enemies.iter().filter(|e| e.active != 0 && e.lane == 0).count(), 2);
+        assert_eq!(enemies.iter().filter(|e| e.active != 0 && e.lane == 1).count(), 2);
+    }
+}
+
+#[test]
+#[should_panic(expected = "invalid wave pacing config")]
+fn typed_setup_rejects_zero_pacing_before_simulation() {
+    let _ = Simulation::<DefenseGame>::new(DefenseConfig {
+        wave_pacing: WavePacing { spawn_interval_ticks: 0 },
+        ..Default::default()
+    }, TICK_RATE, 1);
 }

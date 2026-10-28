@@ -2,7 +2,7 @@ use super::*;
 use crate::{Auth, Caps, ErpClient};
 use orr_edit::{Op, Origin, PlayController};
 use orr_games::coop_defense_game::{
-    Campaign, DefenseInput, DefenseRun, Scenario, CAMPAIGN_NAME, SCENARIO_NAME, SUMMON,
+    Campaign, DefenseInput, DefenseRun, Scenario, WavePacing, CAMPAIGN_NAME, SCENARIO_NAME, WAVE_PACING_NAME, SUMMON,
 };
 use orr_session::{ControlOp, LocalInputSource, Session, SessionConfig};
 use orr_sim::PlayerSlot;
@@ -53,7 +53,7 @@ fn strict_initial_source_rejects_edits_atomically() {
             "{INITIAL_SCENE}singletons: {{CoopDefense::Campaign: {{last_wave: 3, extra: 1}}}}\n"
         ),
         format!("{INITIAL_SCENE}singletons: {{CoopDefense::Run: {{}}}}\n"),
-        format!("schema: orr.scene/2\nentities: {{}}\nprefabs: {{prefab.yaml: {{}}}}\n"),
+        "schema: orr.scene/2\nentities: {}\nprefabs: {prefab.yaml: {}}\n".to_string(),
         format!("{INITIAL_SCENE}metadata: {{seed: 1}}\n"),
         format!("{INITIAL_SCENE}entities: {{}}\n"),
         format!("{INITIAL_SCENE}---\n{INITIAL_SCENE}"),
@@ -528,8 +528,8 @@ fn campaign_invalid_source_and_values_are_atomic() {
             "{INITIAL_SCENE}singletons: {{CoopDefense::Campaign: {{last_wave: 3, extra: 1}}}}\n"
         ),
         format!("{INITIAL_SCENE}singletons: {{CoopDefense::Run: {{}}}}\n"),
-        format!("schema: orr.scene/1\nentities: {{e_00000001: {{name: injected}}}}\n"),
-        format!("schema: orr.scene/2\nentities: {{}}\nprefabs: {{prefab.yaml: {{}}}}\n"),
+        "schema: orr.scene/1\nentities: {e_00000001: {name: injected}}\n".to_string(),
+        "schema: orr.scene/2\nentities: {}\nprefabs: {prefab.yaml: {}}\n".to_string(),
     ] {
         assert!(document(&invalid).is_err());
         assert!(doc.load_yaml(&invalid).is_err());
@@ -560,8 +560,8 @@ fn campaign_invalid_source_and_values_are_atomic() {
             "{INITIAL_SCENE}singletons: {{CoopDefense::Campaign: {{last_wave: 3, extra: 1}}}}\n"
         ),
         format!("{INITIAL_SCENE}singletons: {{CoopDefense::Run: {{}}}}\n"),
-        format!("schema: orr.scene/1\nentities: {{e_00000001: {{name: injected}}}}\n"),
-        format!("schema: orr.scene/2\nentities: {{}}\nprefabs: {{prefab.yaml: {{}}}}\n"),
+        "schema: orr.scene/1\nentities: {e_00000001: {name: injected}}\n".to_string(),
+        "schema: orr.scene/2\nentities: {}\nprefabs: {prefab.yaml: {}}\n".to_string(),
     ];
     for bad in bad_sources {
         assert!(c.call("scene.load", json!({"text":bad})).is_err());
@@ -620,7 +620,7 @@ fn first_singleton_field_edit_uses_safe_defaults_and_bounds() {
 #[test]
 fn nonzero_replay_contract_rejects_previous_host_identity() {
     use orr_session::{replay_verify_checked, ReplayError, ReplayHeader, ReplayWriter};
-    let old_identities = [crate::default_build_id(GAME), 0x7b2a_3ab9_8f61_9dca];
+    let old_identities = [crate::default_build_id(GAME), 0x7b2a_3ab9_8f61_9dca, 0x04ee_32c4_873f_6941];
     for old in old_identities {
         let bytes = ReplayWriter::<DefenseGame>::new(ReplayHeader {
             format_version: 3,
@@ -664,7 +664,7 @@ fn nonzero_replay_contract_rejects_previous_host_identity() {
 #[test]
 fn saved_authored_scene_matches_native_setup_and_consumed_trace() {
     use orr_games::coop_defense_scene::parse_config;
-    let authored = document(&authored_scenario_campaign(250, 75, 3))
+    let authored = document(include_str!("../../../../examples/static-game-starter/scenes/stormglass-training.scene.yaml"))
         .unwrap()
         .to_yaml();
     let doc = document(&authored).unwrap();
@@ -691,6 +691,7 @@ fn saved_authored_scene_matches_native_setup_and_consumed_trace() {
         native.predicted_frame().singleton::<Campaign>().last_wave,
         3
     );
+    assert_eq!(native.predicted_frame().singleton::<WavePacing>().spawn_interval_ticks, 70);
     let delay = native.config().input_delay;
     let mut pending = VecDeque::from(vec![DefenseInput::default(); delay as usize]);
     for tick in 0..120 {
@@ -727,7 +728,46 @@ fn saved_authored_scene_matches_native_setup_and_consumed_trace() {
                 native.predicted_frame().singleton::<Campaign>().last_wave,
                 3
             );
+            assert_eq!(native.predicted_frame().singleton::<WavePacing>().spawn_interval_ticks, 70);
             assert_eq!(run.generation, 1);
         }
     }
+}
+
+#[test]
+fn pacing_erp_schema_atomic_edits_history_reopen_and_play() {
+    let mut cfg = ServerConfig::new(Auth::DevNoAuth);
+    cfg.listen = false;
+    let host = spawn_host(INITIAL_SCENE.into(), None, cfg, None).unwrap();
+    let mut c = client(&host, Caps::ALL);
+    let schema = c.call("registry.schema", json!({"type":WAVE_PACING_NAME})).unwrap()["schema"].clone();
+    assert_eq!(schema["properties"]["spawn_interval_ticks"]["minimum"], 35);
+    assert_eq!(schema["properties"]["spawn_interval_ticks"]["maximum"], 350);
+    assert_eq!(schema["required"], json!(["spawn_interval_ticks"]));
+    let original = c.call("scene.save", json!({})).unwrap();
+    let patch = |value: J| json!({"name":WAVE_PACING_NAME,"path":"spawn_interval_ticks","value":value});
+    c.call("world.singleton.patch", patch(json!(70))).unwrap();
+    let edited = c.call("scene.save", json!({})).unwrap();
+    let history = c.call("history.list", json!({})).unwrap();
+    let reopened = document(edited["text"].as_str().unwrap()).unwrap();
+    assert_eq!(reopened.frame().singleton::<WavePacing>().spawn_interval_ticks, 70);
+    assert_eq!(*reopened.frame().singleton::<Scenario>(), Scenario::default());
+    assert_eq!(*reopened.frame().singleton::<Campaign>(), Campaign::default());
+    for invalid in [json!(0), json!(34), json!(351), json!(-1), json!(70.5)] {
+        assert!(c.call("world.singleton.patch", patch(invalid)).is_err());
+        assert_eq!(c.call("scene.save", json!({})).unwrap(), edited);
+        assert_eq!(c.call("history.list", json!({})).unwrap(), history);
+    }
+    assert!(c.call("world.singleton.patch", json!({"name":WAVE_PACING_NAME,"path":"","value":{}})).is_err());
+    assert_eq!(c.call("scene.save", json!({})).unwrap(), edited);
+    c.call("history.undo", json!({})).unwrap();
+    assert_eq!(c.call("scene.save", json!({})).unwrap(), original);
+    c.call("history.redo", json!({})).unwrap();
+    assert_eq!(c.call("scene.save", json!({})).unwrap(), edited);
+    let play = c.call("sim.start", json!({})).unwrap();
+    assert_eq!(play["checksum"], edited["checksum"]);
+    assert!(c.call("world.singleton.patch", patch(json!(105))).is_err());
+    c.call("sim.stop", json!({})).unwrap();
+    assert_eq!(c.call("scene.save", json!({})).unwrap(), edited);
+    assert_eq!(c.call("history.list", json!({})).unwrap(), history);
 }

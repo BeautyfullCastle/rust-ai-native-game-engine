@@ -152,15 +152,34 @@ impl Default for Campaign {
         Self { last_wave: 10 }
     }
 }
-// Campaign v2 appends a singleton; Scenario v1 was 0x7b2a3ab98f619dca.
+/// Slower-only authored spawn cadence, in simulation ticks (60 ticks/second).
+/// Stored in Frame, independent of presentation clocks and retained by RESTART.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable, orr_reflect::Reflect)]
+#[reflect(default)]
+pub struct WavePacing {
+    #[reflect(range = "35..=350")]
+    pub spawn_interval_ticks: u32,
+}
+impl Default for WavePacing {
+    fn default() -> Self {
+        Self {
+            spawn_interval_ticks: 35,
+        }
+    }
+}
+// WavePacing v3 appends a singleton; Campaign v2 was 0x04ee32c4873f6941.
+// Scenario v1 was 0x7b2a3ab98f619dca.
 // This changes this game's frame contract, not the global engine format.
-pub const SCENARIO_BUILD_ID: u64 = orr_sim::frame_build_id(0x5354_4f52_4d00_0002);
+pub const SCENARIO_BUILD_ID: u64 = orr_sim::frame_build_id(0x5354_4f52_4d00_0003);
+pub const WAVE_PACING_NAME: &str = "CoopDefense::WavePacing";
 pub const CAMPAIGN_NAME: &str = "CoopDefense::Campaign";
 pub const SCENARIO_NAME: &str = "CoopDefense::Scenario";
 pub fn scenario_types() -> orr_reflect::TypeRegistry {
     let mut types = orr_reflect::TypeRegistry::new();
     types.register_singleton::<Scenario>(SCENARIO_NAME);
     types.register_singleton::<Campaign>(CAMPAIGN_NAME);
+    types.register_singleton::<WavePacing>(WAVE_PACING_NAME);
     types
 }
 
@@ -298,6 +317,7 @@ pub struct DefenseConfig {
     pub seed: u32,
     pub scenario: Scenario,
     pub campaign: Campaign,
+    pub wave_pacing: WavePacing,
 }
 impl Default for DefenseConfig {
     fn default() -> Self {
@@ -305,6 +325,7 @@ impl Default for DefenseConfig {
             seed: 0x0c00_2026,
             scenario: Scenario::default(),
             campaign: Campaign::default(),
+            wave_pacing: WavePacing::default(),
         }
     }
 }
@@ -321,6 +342,7 @@ impl Game for DefenseGame {
         b.register_component::<DefenseProjectile>("CoopDefense::Projectile");
         b.register_singleton::<Scenario>(SCENARIO_NAME);
         b.register_singleton::<Campaign>(CAMPAIGN_NAME);
+        b.register_singleton::<WavePacing>(WAVE_PACING_NAME);
     }
     fn setup(f: &mut Frame, c: &DefenseConfig) {
         Self::setup_scenario(f, c, c.scenario);
@@ -332,8 +354,13 @@ impl Game for DefenseGame {
 impl DefenseGame {
     /// Initialize a fresh frame after scene validation, never a live frame.
     pub fn setup_scenario(f: &mut Frame, c: &DefenseConfig, scenario: Scenario) {
+        assert!(
+            (35..=350).contains(&c.wave_pacing.spawn_interval_ticks),
+            "invalid wave pacing config"
+        );
         f.set_singleton(scenario);
         f.set_singleton(c.campaign);
+        f.set_singleton(c.wave_pacing);
         f.set_singleton(initial_run(c.seed, scenario));
         f.set_singleton(FrameRng::new(c.seed as u64));
         for board in 0..2 {
@@ -625,7 +652,12 @@ impl System<DefenseGame> for DefenseSystem {
                             .min(99999);
                 }
             }
-            spawn_wave(&mut r, &mut e, &mut events);
+            spawn_wave(
+                &mut r,
+                &mut e,
+                &mut events,
+                *ctx.frame.singleton::<WavePacing>(),
+            );
             move_enemies(&mut r, &mut e, &mut events);
             advance_projectiles(&mut r, &mut e, &mut p, &mut events);
             fire(&mut r, &mut u, &e, &mut p, &mut events);
@@ -687,8 +719,18 @@ impl System<DefenseGame> for DefenseSystem {
 fn wave_count(wave: u32) -> u32 {
     (8 + wave * 2) * 2
 }
-fn spawn_wave(r: &mut DefenseRun, e: &mut [DefenseEnemy], events: &mut Vec<DefenseEvent>) {
-    if r.wave_tick < 180 || r.wave_tick % 35 != 0 || r.spawned >= wave_count(r.wave) {
+fn spawn_wave(
+    r: &mut DefenseRun,
+    e: &mut [DefenseEnemy],
+    events: &mut Vec<DefenseEvent>,
+    pacing: WavePacing,
+) {
+    // Keep the historical wave-tick alignment: the first multiple at/after 180.
+    // Admission and typed setup reject zero/out-of-range intervals.
+    if r.wave_tick < 180
+        || r.wave_tick % pacing.spawn_interval_ticks != 0
+        || r.spawned >= wave_count(r.wave)
+    {
         return;
     }
     for lane in 0..2 {

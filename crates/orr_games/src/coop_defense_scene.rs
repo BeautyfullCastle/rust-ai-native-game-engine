@@ -1,7 +1,7 @@
 //! Optional strict source admission shared by ERP and the native player.
 //! No editor, transport, filesystem or window dependency belongs here.
 use crate::coop_defense_game::{
-    scenario_types, Campaign, DefenseConfig, DefenseGame, Scenario, CAMPAIGN_NAME, SCENARIO_NAME,
+    scenario_types, Campaign, DefenseConfig, DefenseGame, Scenario, WavePacing, CAMPAIGN_NAME, SCENARIO_NAME, WAVE_PACING_NAME,
 };
 use orr_ecs::Frame;
 use orr_reflect::Scene;
@@ -23,11 +23,11 @@ pub fn config_from_baked(scene: &Scene, frame: &Frame) -> Result<DefenseConfig, 
         || scene
             .singletons
             .iter()
-            .any(|(name, _)| name != SCENARIO_NAME && name != CAMPAIGN_NAME)
+            .any(|(name, _)| name != SCENARIO_NAME && name != CAMPAIGN_NAME && name != WAVE_PACING_NAME)
         || scene.has_prefab_links()
     {
         return Err(
-            "CoopDefense accepts only Scenario and Campaign, no entities or prefabs".into(),
+            "CoopDefense accepts only Scenario, Campaign and WavePacing, no entities or prefabs".into(),
         );
     }
     // Bake leaves absent singletons zeroed. Presence must be checked per type:
@@ -44,12 +44,17 @@ pub fn config_from_baked(scene: &Scene, frame: &Frame) -> Result<DefenseConfig, 
         } else {
             Campaign::default()
         },
+        wave_pacing: if present(WAVE_PACING_NAME) {
+            *frame.singleton::<WavePacing>()
+        } else {
+            WavePacing::default()
+        },
         ..DefenseConfig::default()
     })
 }
 
 /// Reuse the engine's bounded strict YAML, reflected defaults/ranges and bake.
-/// Return all admitted authoring state together; consumers must not drop Campaign.
+/// Return all admitted authoring state together; consumers must not drop Campaign or WavePacing.
 pub fn parse_config(text: &str) -> Result<DefenseConfig, String> {
     validate_source(text)?;
     let types = scenario_types();
@@ -124,4 +129,25 @@ mod tests {
             format!("{EMPTY}singletons: {{CoopDefense::Scenario: {{starting_gold: 1, starting_gold: 2, reactor_hp: 30}}}}\n"),
         ] { assert!(parse_config(&bad).is_err(), "accepted: {bad}"); }
     }
+    #[test]
+    fn wave_pacing_defaults_independently_and_is_strict() {
+        for interval in [35, 70, 350] {
+            let text = format!("{EMPTY}singletons: {{CoopDefense::WavePacing: {{spawn_interval_ticks: {interval}}}}}\n");
+            let config = parse_config(&text).unwrap();
+            assert_eq!(config.wave_pacing.spawn_interval_ticks, interval);
+            assert_eq!(config.scenario, Scenario::default());
+            assert_eq!(config.campaign, Campaign::default());
+        }
+        for fields in ["{}", "{spawn_interval_ticks: 0}", "{spawn_interval_ticks: 34}",
+            "{spawn_interval_ticks: 351}", "{spawn_interval_ticks: -1}",
+            "{spawn_interval_ticks: 70.5}", "{spawn_interval_ticks: 4294967296}",
+            "{spawn_interval_ticks: 70, extra: 1}",
+            "{spawn_interval_ticks: 70, spawn_interval_ticks: 35}"] {
+            assert!(parse_config(&format!("{EMPTY}singletons: {{CoopDefense::WavePacing: {fields}}}\n")).is_err(), "accepted {fields}");
+        }
+        let legacy = parse_config(&format!("{EMPTY}singletons: {{CoopDefense::Scenario: {{starting_gold: 250, reactor_hp: 75}}, CoopDefense::Campaign: {{last_wave: 3}}}}\n")).unwrap();
+        assert_eq!(legacy.wave_pacing, WavePacing::default());
+        assert_eq!(parse_config(EMPTY).unwrap().wave_pacing, WavePacing::default());
+    }
+
 }

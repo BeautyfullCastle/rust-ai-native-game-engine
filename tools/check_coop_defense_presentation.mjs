@@ -110,8 +110,10 @@ for (let tick = 0; tick < 1200; tick++) {
 }
 // Historical pre-Scenario identity fixture was da0ca42edf9cf8a2; Scenario-v1 golden
 // was 9056df75782da6ab before Campaign became a checksummed singleton.
-// Native legacy seed/input trace independently reproduces the current 0x04ee32c4 build.
-assert.equal(s.checksum, 'be2bdbfedfabd614', 'independently reproduced native Scenario+Campaign fixture');
+// Campaign-v2 historical golden: be2bdbfedfabd614 (build 0x04ee32c4873f6941).
+// WavePacing-v3 appends the singleton; independently executed native 1200-tick
+// oracle and rebuilt actual WASM agree on the new checksum below.
+assert.equal(s.checksum, '41a0cf5eb1436a07', 'independently reproduced native Scenario+Campaign+WavePacing fixture');
 assert.ok(coverage.has('release') && coverage.has('hit') && coverage.has('death'));
 const parityChecksum = s.checksum;
 // Real leaks must not become death events, including later terminal ticks.

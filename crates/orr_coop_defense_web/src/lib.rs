@@ -284,3 +284,41 @@ mod tests {
         assert!(snapshot.contains("\"events\":[]"));
     }
 }
+
+#[cfg(test)]
+mod pacing_tests {
+    use super::*;
+    #[test]
+    fn pacing_admission_is_atomic_and_matches_native_after_spawns() {
+        let source = include_bytes!("../../../examples/static-game-starter/scenes/stormglass-training.scene.yaml");
+        SCENE_BYTES.with(|buffer| buffer.borrow_mut()[..source.len()].copy_from_slice(source));
+        assert_eq!(defense_init_scene(source.len()), 0);
+        let config = parse_config(std::str::from_utf8(source).unwrap()).unwrap();
+        let mut expected = Simulation::<DefenseGame>::with_build_id(config, TICK_RATE, u64::from(config.seed), SCENARIO_BUILD_ID);
+        for tick in 0..500 {
+            let mut input = TickInputs::new(expected.tick(), 2);
+            let value = DefenseInput { action: if tick == 490 { RESTART } else { 0 }, sequence: tick + 1, ..Default::default() };
+            input.set_input(PlayerSlot(0), value);
+            let events = expected.step(&input);
+            defense_step(value.action, 0, 0, value.sequence);
+            CLIENT.with(|slot| {
+                let client = slot.borrow();
+                let client = client.as_ref().unwrap();
+                assert_eq!(client.sim.frame().to_bytes(), expected.frame().to_bytes());
+                assert_eq!(client.events.dropped, 0);
+                assert_eq!(
+                    client.events.events.iter().map(|e| (e.key, e.payload)).collect::<Vec<_>>(),
+                    events.iter().map(|e| (e.key, e.payload)).collect::<Vec<_>>()
+                );
+            });
+        }
+        CLIENT.with(|slot| assert_eq!(slot.borrow().as_ref().unwrap().sim.frame().singleton::<WavePacing>().spawn_interval_ticks, 70));
+        let before = CLIENT.with(|slot| slot.borrow().as_ref().unwrap().sim.frame().to_bytes());
+        for interval in [0, 34, 351] {
+            let text = format!("schema: orr.scene/1\nentities: {{}}\nsingletons: {{CoopDefense::WavePacing: {{spawn_interval_ticks: {interval}}}}}\n");
+            SCENE_BYTES.with(|buffer| buffer.borrow_mut()[..text.len()].copy_from_slice(text.as_bytes()));
+            assert_eq!(defense_init_scene(text.len()), 3);
+            CLIENT.with(|slot| assert_eq!(slot.borrow().as_ref().unwrap().sim.frame().to_bytes(), before));
+        }
+    }
+}

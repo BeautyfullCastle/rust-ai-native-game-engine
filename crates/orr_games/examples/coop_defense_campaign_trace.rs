@@ -5,9 +5,14 @@ use orr_sim::{PlayerSlot, Simulation, TickInputs};
 use std::fmt::Write;
 
 fn main() {
-    let source =
-        include_str!("../../../examples/static-game-starter/scenes/stormglass-short.scene.yaml");
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    let source = match args.as_slice() {
+        [] => include_str!("../../../examples/static-game-starter/scenes/stormglass-short.scene.yaml"),
+        [arg] if arg == "--training" => include_str!("../../../examples/static-game-starter/scenes/stormglass-training.scene.yaml"),
+        _ => panic!("usage: coop_defense_campaign_trace [--training]"),
+    };
     let config = parse_config(source).unwrap();
+    let interval = config.wave_pacing.spawn_interval_ticks;
     let make = || {
         Simulation::<DefenseGame>::with_build_id(
             config,
@@ -69,6 +74,13 @@ fn main() {
         );
         let state = run(sim.frame());
         assert!(state.wave <= 3);
+        for event in &events {
+            if event.payload.kind == EVENT_ENEMY_SPAWN {
+                assert!(state.wave_tick >= 180);
+                assert_eq!(state.wave_tick % interval, 0);
+            }
+        }
+        assert_eq!(*sim.frame().singleton::<WavePacing>(), config.wave_pacing);
         assert_ne!(state.phase, LOST);
         assert!(!events
             .iter()
