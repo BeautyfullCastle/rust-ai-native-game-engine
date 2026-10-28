@@ -4,7 +4,7 @@ import { StrictEventAdapter, applyStrictSnapshot } from './strict-event-adapter.
 const $=id=>document.getElementById(id),canvas=$('game'),c=canvas.getContext('2d');
 const roles=[['여우 궁수','빠른 단일 사격','#c57b32'],['멧돼지 포격수','넓은 범위의 폭발 공격','#c45d4c'],['아르마딜로 전사','적의 장갑을 파쇄','#9773bb'],['올빼미 마법사','적의 이동 속도를 늦춤','#4f9faf'],['토끼 고수','내 보드 전체 공격 지원','#629455'],['두더지 광부','추가 자원 생산','#b58d36']];
 $('codex').innerHTML=roles.map(r=>`<div style="--role:${r[2]}"><b>${r[0]}</b><br>${r[1]}</div>`).join('');
-let sceneLoadGeneration=0;
+let sceneLoadGeneration=0,startupPending=false;
 let wasm,state,selected=-1,ready=true,paused=false,seq=0,queue=[],last=0,acc=0,sound=false,seed=71825;
 let towerAtlas=null,heroRects=null,enemyAtlas=null,enemyRects=null,gesture=null,hover=-1,pending=null,feedback=[],oldEnemies=new Map(),lastNotice='';
 // The verified reference uses a portrait stacked arena on every screen.
@@ -28,10 +28,39 @@ function blocked(){return !state?'게임을 준비하고 있어요.':ready?'방�
 function actionReason(action,source,target){let reason=blocked();if(reason)return reason;if(queue.length>=32)return'입력 처리 중입니다. 잠시 기다려 주세요.';if(action===2){const u=unitAt(source),v=unitAt(target);if(!u)return'먼저 내 수호대를 선택하세요.';if(source===target)return'다른 칸에 놓아 주세요.';if(target<0||target>=12)return'내 보드 안에 놓아 주세요.';if(v&&(u[2]!==v[2]||u[3]!==v[3]))return'같은 역할·등급만 합성 가능 · 선택한 수호대를 탭하면 선택 해제';if(v&&u[3]>=5)return'최고 등급은 더 합성할 수 없어요.';return'';}const index=action===1?0:action===3?1:2;if(state.gold[0]<state.costs[index])return`자원이 ${state.costs[index]-state.gold[0]} 부족해요.`;if(action===1&&state.units.filter(u=>u[0]===0).length>=12)return'보드가 가득 찼어요. 같은 수호대를 합성하세요.';if(action===3&&state.upgrades[0]>=8)return'전투 강화가 최고 단계입니다.';if(action===4&&state.investment[0]>=5)return'경제 투자가 최고 단계입니다.';return'';}
 function command(action,source=selected,target=selected){const reason=actionReason(action,source,target);if(reason){notice(reason);return false;}queue.push([action,Math.max(0,source),Math.max(0,target),++seq]);return true;}
 function cancelGesture(){if(gesture&&canvas.hasPointerCapture?.(gesture.id))canvas.releasePointerCapture(gesture.id);gesture=null;hover=-1;}
-function start(){++sceneLoadGeneration;if(!wasm)return;if(state)wasm.defense_step(5,0,0,++seq);else wasm.defense_init(seed);resetView();}
+function start(){if(startupPending)return;++sceneLoadGeneration;if(!wasm)return;if(state)wasm.defense_step(5,0,0,++seq);else wasm.defense_init(seed);resetView();}
 function resetView(){cancelGesture();state=snapshot();selected=-1;queue=[];pending=null;acc=0;paused=true;ready=true;$('ready').hidden=false;$('result').hidden=true;oldEnemies.clear();feedback=[];presentation.reset();observePresentation();$('pause').textContent='정지';notice('내 보드에 수호대를 소환하세요. 동료는 로컬 AI입니다.');update();}
+// Shared local and embedded byte path. Rust validates before replacing its client.
+function loadSceneBytes(bytes){
+ if(!(bytes instanceof Uint8Array)||bytes.length>65536||bytes.length>wasm.defense_scene_capacity())throw Error('64 KiB 초과 또는 장면 바이트 오류');
+ const pointer=wasm.defense_scene_buffer();
+ new Uint8Array(wasm.memory.buffer,pointer,bytes.length).set(bytes);
+ const status=wasm.defense_init_scene(bytes.length);
+ if(status!==0)throw Error(['','64 KiB 초과','UTF-8 오류','지원하지 않는 장면 또는 값'][status]||'장면 오류');
+ seq=0;resetView();
+}
+async function loadEmbeddedScene(wasmBytes){
+ const scene=document.getElementById('authored-scene'),receiptNode=document.getElementById('authored-scene-receipt');
+ if(!scene&&!receiptNode)return false;
+ if(!scene||!receiptNode)throw Error('내장 장면 증빙 누락');
+ const encoded=scene.textContent.trim();
+ if(encoded.length>87384||encoded.length%4!==0||! /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded))throw Error('내장 장면 인코딩 오류');
+ const decoded=atob(encoded),bytes=Uint8Array.from(decoded,v=>v.charCodeAt(0));
+ if(bytes.length>65536||btoa(decoded)!==encoded)throw Error('내장 장면 크기 또는 인코딩 오류');
+ if(receiptNode.textContent.length>1024)throw Error('내장 장면 증빙 크기 오류');
+ const receipt=JSON.parse(receiptNode.textContent);
+ if(receipt?.version!==1||receipt.sceneBytes!==bytes.length||!/^[0-9a-f]{64}$/.test(receipt.sceneSha256)||!/^[0-9a-f]{64}$/.test(receipt.wasmSha256)||!/^[0-9a-f]{16}$/.test(receipt.initialChecksum))throw Error('내장 장면 증빙 오류');
+ const hash=async data=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',data)),v=>v.toString(16).padStart(2,'0')).join('');
+ if(await hash(bytes)!==receipt.sceneSha256||await hash(wasmBytes)!==receipt.wasmSha256)throw Error('내장 장면 해시 불일치');
+ loadSceneBytes(bytes);
+ if(state.tick!==0||state.checksum!==receipt.initialChecksum)throw Error('내장 장면 초기 체크섬 불일치');
+ $('scene-source').textContent='내장 제작 장면';
+ notice('제작 장면이 준비되었습니다. 방어 시작을 누르세요.');
+ return true;
+}
 // Local bytes only: never upload scene contents or fetch a file-derived URL.
 async function loadSceneFile(file){
+ if(startupPending)return;
  const generation=++sceneLoadGeneration;
  if(!file||!wasm)return;
  const capacity=wasm.defense_scene_capacity();
@@ -39,12 +68,7 @@ async function loadSceneFile(file){
  try{
   const bytes=new Uint8Array(await file.arrayBuffer());
   if(generation!==sceneLoadGeneration)return;
-  if(bytes.length>capacity)throw Error('64 KiB 초과');
-  const pointer=wasm.defense_scene_buffer();
-  new Uint8Array(wasm.memory.buffer,pointer,bytes.length).set(bytes);
-  const status=wasm.defense_init_scene(bytes.length);
-  if(status!==0)throw Error(['','64 KiB 초과','UTF-8 오류','지원하지 않는 장면 또는 값'][status]||'장면 오류');
-  seq=0;resetView();
+  loadSceneBytes(bytes);
   $('scene-source').textContent=file.name;
   notice('로컬 장면을 불러왔습니다. 방어 시작을 누르세요.');
  }catch(error){if(generation===sceneLoadGeneration)notice('장면을 불러오지 못했습니다. 기존 게임 유지: '+error.message);}
@@ -52,7 +76,7 @@ async function loadSceneFile(file){
 $('scene-file').onchange=e=>{void loadSceneFile(e.target.files?.[0]);e.target.value='';};
 function togglePause(){if(!state||ready||state.phase)return;cancelGesture();paused=!paused;acc=0;$('pause').textContent=paused?'계속':'정지';notice(paused?'일시정지 · 계속 버튼 또는 Space로 재개':'수호대를 끌거나 탭해서 배치하세요.');update();}
 $('summon').onclick=()=>command(1);$('upgrade').onclick=()=>command(3);$('invest').onclick=()=>command(4);$('again').onclick=start;$('reset').onclick=start;
-$('begin').onclick=e=>{if(sound)void presentation.audio.unlock(e);if(!wasm||!state)return;ready=false;paused=false;last=0;acc=0;$('ready').hidden=true;notice('소환 버튼으로 첫 수호대를 불러오세요!');update();};
+$('begin').onclick=e=>{if(sound)void presentation.audio.unlock(e);if(startupPending||!wasm||!state)return;ready=false;paused=false;last=0;acc=0;$('ready').hidden=true;notice('소환 버튼으로 첫 수호대를 불러오세요!');update();};
 $('pause').onclick=togglePause;$('sound').onclick=e=>{sound=!sound;void presentation.audio.setMuted(!sound);if(sound)void presentation.audio.unlock(e);$('sound').textContent=sound?'♪ ON':'♪ OFF';$('sound').setAttribute?.('aria-label',sound?'소리 끄기':'소리 켜기');};
 addEventListener('keydown',e=>{if(e.repeat||['INPUT','TEXTAREA','SELECT'].includes(e.target?.tagName))return;if(e.target instanceof HTMLButtonElement&&['Space','Enter'].includes(e.code))return;const actions={KeyQ:1,KeyE:3,KeyR:4};if(actions[e.code]){e.preventDefault();command(actions[e.code]);}if(e.code==='Space'){e.preventDefault();togglePause();}if(e.code==='Escape'){cancelGesture();selected=-1;update();}});
 document.addEventListener('visibilitychange',()=>{presentation.setHidden(document.hidden);if(document.hidden){cancelGesture();queue=[];if(state&&!paused){paused=true;$('pause').textContent='계속';acc=0;update();}}});
@@ -89,4 +113,4 @@ const manifest={};heroRects?.forEach((r,i)=>{manifest[`unit:${i}`]={image:'units
 const animationSource=$('combat-animation-manifest');
 if(animationSource){try{const spec=JSON.parse(animationSource.textContent),authored=spec.src?await(await fetch(new URL(spec.src,document.baseURI))).json():spec;for(const [key,definition]of Object.entries(authored)){if(!animationImages.has(definition.image))animationImages.set(definition.image,await image(new URL('assets/'+definition.image,document.baseURI).href));if(animationImages.get(definition.image))manifest[key]=definition;}}catch(error){console.warn('Animation atlas unavailable; using explicit single-sprite fallback.',error);}}
 presentation.setManifest(manifest);}
-try{let bytes;const embedded=document.getElementById('wasm-core');if(embedded){bytes=Uint8Array.from(atob(embedded.textContent.trim()),v=>v.charCodeAt(0));}else{const res=await fetch(new URL('game.wasm',import.meta.url));if(!res.ok)throw Error(`HTTP ${res.status}`);bytes=await res.arrayBuffer();}const module=await WebAssembly.instantiate(bytes,{});wasm=module.instance.exports;await loadAtlas();dimensions();start();$('loading').hidden=true;window.defenseDebug={presentationStats:()=>({...presentation.stats(),transport:visualAdapter.stats()}),presentationPose:id=>presentation.pose(id),presentationFrame:id=>presentation.frame(id),snapshot:()=>snapshot(),command,start,setPaused:v=>{paused=v;update();},step:n=>{for(let i=0;i<n;i++)execute(queue.shift()||[0,0,0,0]);presentation.advance(1000/60);update();draw();}};addEventListener('pagehide',e=>{paused=true;queue=[];cancelGesture();syncPresentation();if(!e.persisted)presentation.dispose();});addEventListener('pageshow',e=>{if(e.persisted){$('pause').textContent='계속';update();}});requestAnimationFrame(animate);}catch(e){$('ready').hidden=true;$('loading').hidden=false;$('loading').textContent='게임 코어를 불러오지 못했습니다. '+e.message;console.error(e);}
+try{let bytes;startupPending=true;const embedded=document.getElementById('wasm-core');if(embedded){bytes=Uint8Array.from(atob(embedded.textContent.trim()),v=>v.charCodeAt(0));}else{const res=await fetch(new URL('game.wasm',import.meta.url));if(!res.ok)throw Error(`HTTP ${res.status}`);bytes=await res.arrayBuffer();}const module=await WebAssembly.instantiate(bytes,{});wasm=module.instance.exports;await loadAtlas();dimensions();const authoredReady=await loadEmbeddedScene(bytes);startupPending=false;if(!authoredReady)start();$('loading').hidden=true;window.defenseDebug={presentationStats:()=>({...presentation.stats(),transport:visualAdapter.stats()}),presentationPose:id=>presentation.pose(id),presentationFrame:id=>presentation.frame(id),snapshot:()=>snapshot(),command,start,setPaused:v=>{paused=v;update();},step:n=>{for(let i=0;i<n;i++)execute(queue.shift()||[0,0,0,0]);presentation.advance(1000/60);update();draw();}};addEventListener('pagehide',e=>{paused=true;queue=[];cancelGesture();syncPresentation();if(!e.persisted)presentation.dispose();});addEventListener('pageshow',e=>{if(e.persisted){$('pause').textContent='계속';update();}});requestAnimationFrame(animate);}catch(e){wasm=null;state=undefined;queue=[];paused=true;$('ready').hidden=true;$('loading').hidden=false;$('loading').textContent='게임 코어를 불러오지 못했습니다. '+e.message;console.error(e);}

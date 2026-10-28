@@ -66,5 +66,17 @@ adapter-owned staging memory. Copy into a fresh memory view, then call
 `defense_init_scene(length)`: 0 success, 1 excessive length, 2 invalid UTF-8,
 3 rejected Scene. No external pointer is accepted. Failure preserves the full
 client, checksum and presentation source identity. Snapshot `maxHp` is authored.
-The offline exporter includes this same picker; it does not embed your selected
+The offline exporter includes this same picker; it does not automatically embed your selected
 scene or persist it across page loads.
+
+
+### Deliver a saved scene offline
+
+`python3 tools/pack_coop_defense_offline.py BUILD_DIR --scene saved.scene.yaml --output authored-game.html`
+validates the exact saved bytes using the trusted local `game.wasm` and Node, embeds
+an initial-state/hash receipt, and atomically creates a **new** single-file game.
+The authored scene opens ready at tick zero and survives restart. Existing output
+paths, symlinks, nonregular or oversized inputs are rejected; the input is untouched.
+No scene upload is involved. Hashes identify content, not authorship. WebCrypto is
+required for authored startup integrity; unavailable verification fails closed.
+See [the authoring contract](../../docs/stormglass-authoring.md).
