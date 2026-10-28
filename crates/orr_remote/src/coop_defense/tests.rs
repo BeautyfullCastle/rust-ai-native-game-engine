@@ -1,7 +1,9 @@
 use super::*;
 use crate::{Auth, Caps, ErpClient};
 use orr_edit::{Op, Origin, PlayController};
-use orr_games::coop_defense_game::{DefenseInput, DefenseRun, Scenario, SCENARIO_NAME, SUMMON};
+use orr_games::coop_defense_game::{
+    Campaign, DefenseInput, DefenseRun, Scenario, CAMPAIGN_NAME, SCENARIO_NAME, SUMMON,
+};
 use orr_session::{ControlOp, LocalInputSource, Session, SessionConfig};
 use orr_sim::PlayerSlot;
 use serde_json::Value as J;
@@ -44,6 +46,14 @@ fn strict_initial_source_rejects_edits_atomically() {
         "schema: orr.scene/1\nentities: {}\nsingletons: {CoopDefense::Run: {}}\n".into(),
         authored_scene(10001, 30),
         authored_scene(150, 0),
+        campaign_scene(0),
+        campaign_scene(11),
+        format!("{INITIAL_SCENE}singletons: {{CoopDefense::Campaign: {{}}}}\n"),
+        format!(
+            "{INITIAL_SCENE}singletons: {{CoopDefense::Campaign: {{last_wave: 3, extra: 1}}}}\n"
+        ),
+        format!("{INITIAL_SCENE}singletons: {{CoopDefense::Run: {{}}}}\n"),
+        format!("schema: orr.scene/2\nentities: {{}}\nprefabs: {{prefab.yaml: {{}}}}\n"),
         format!("{INITIAL_SCENE}metadata: {{seed: 1}}\n"),
         format!("{INITIAL_SCENE}entities: {{}}\n"),
         format!("{INITIAL_SCENE}---\n{INITIAL_SCENE}"),
@@ -303,19 +313,28 @@ fn authored_scene(gold: u32, hp: u32) -> String {
     format!("schema: orr.scene/1\nsingletons:\n  CoopDefense::Scenario: {{starting_gold: {gold}, reactor_hp: {hp}}}\nentities: {{}}\n")
 }
 
+fn campaign_scene(last_wave: u32) -> String {
+    format!("schema: orr.scene/1\nsingletons:\n  CoopDefense::Campaign: {{last_wave: {last_wave}}}\nentities: {{}}\n")
+}
+
+fn authored_scenario_campaign(gold: u32, hp: u32, last_wave: u32) -> String {
+    format!("schema: orr.scene/1\nsingletons:\n  CoopDefense::Scenario: {{starting_gold: {gold}, reactor_hp: {hp}}}\n  CoopDefense::Campaign: {{last_wave: {last_wave}}}\nentities: {{}}\n")
+}
+
 #[test]
 fn authored_start_restart_and_legacy_defaults_are_checksummed() {
     use orr_games::coop_defense_game::RESTART;
     let legacy = document(INITIAL_SCENE).unwrap();
     let defaults = document(&authored_scene(150, 30)).unwrap();
     assert_eq!(legacy.frame().to_bytes(), defaults.frame().to_bytes());
-    let doc = document(&authored_scene(250, 80)).unwrap();
+    let doc = document(&authored_scenario_campaign(250, 80, 3)).unwrap();
     assert_ne!(doc.checksum(), legacy.checksum());
     let mut play =
         PlayController::<DefenseGame>::start_play(&doc, doc.play_config(1, TICK_RATE)).unwrap();
     let run = play.session().frame().singleton::<DefenseRun>();
     assert_eq!(run.gold, [250; 2]);
     assert_eq!(run.reactor_hp, 80);
+    assert_eq!(play.session().frame().singleton::<Campaign>().last_wave, 3);
     play.session_mut().set_input(
         PlayerSlot(0),
         DefenseInput {
@@ -342,6 +361,7 @@ fn authored_start_restart_and_legacy_defaults_are_checksummed() {
     assert_eq!(run.gold, [250; 2]);
     assert_eq!(run.reactor_hp, 80);
     assert_eq!(run.generation, 1);
+    assert_eq!(play.session().frame().singleton::<Campaign>().last_wave, 3);
     assert_eq!(
         *play.session().frame().singleton::<Scenario>(),
         Scenario {
@@ -405,6 +425,166 @@ fn scenario_erp_edit_undo_save_reopen_and_invalid_atomicity() {
 }
 
 #[test]
+fn campaign_erp_schema_edits_roundtrip_play_and_history() {
+    let mut cfg = ServerConfig::new(Auth::DevNoAuth);
+    cfg.listen = false;
+    let host = spawn_host(INITIAL_SCENE.into(), None, cfg, None).unwrap();
+    let mut c = client(&host, Caps::ALL);
+
+    let schema = c
+        .call("registry.schema", json!({"type":CAMPAIGN_NAME}))
+        .unwrap()["schema"]
+        .clone();
+    assert_eq!(schema["properties"]["last_wave"]["minimum"], 1);
+    assert_eq!(schema["properties"]["last_wave"]["maximum"], 10);
+    assert_eq!(schema["required"], json!(["last_wave"]));
+    assert_eq!(Campaign::default().last_wave, 10);
+    let types = c.call("registry.types", json!({})).unwrap();
+    assert!(types["types"].as_array().unwrap().iter().any(|entry| {
+        entry["name"].as_str() == Some(CAMPAIGN_NAME) && entry["kind"].as_str() == Some("singleton")
+    }));
+    let initial_doc = document(INITIAL_SCENE).unwrap();
+    assert_eq!(initial_doc.frame().singleton::<Campaign>().last_wave, 10);
+    let campaign_only = document(&campaign_scene(3)).unwrap();
+    assert_eq!(campaign_only.frame().singleton::<Campaign>().last_wave, 3);
+    assert_eq!(
+        *campaign_only.frame().singleton::<Scenario>(),
+        Scenario::default()
+    );
+    assert_eq!(
+        campaign_only.frame().singleton::<DefenseRun>().gold,
+        [150, 150]
+    );
+    assert_eq!(
+        campaign_only.frame().singleton::<DefenseRun>().reactor_hp,
+        30
+    );
+
+    let original = c.call("scene.save", json!({})).unwrap();
+    let patch = |path: &str, value: J| json!({"name":CAMPAIGN_NAME,"path":path,"value":value});
+    // The wire singleton whole-value path remains strict: do not broaden it
+    // just because the type has reflected defaults for first-field edits.
+    assert!(c.call("world.singleton.patch", patch("", json!({}))).is_err());
+    assert_eq!(c.call("scene.save", json!({})).unwrap(), original);
+
+    // Editing the first field initializes the remaining Campaign fields from
+    // their defaults while preserving Scenario defaults.
+    c.call("world.singleton.patch", patch("last_wave", json!(3)))
+        .unwrap();
+    let edited = c.call("scene.save", json!({})).unwrap();
+    let reopened = document(edited["text"].as_str().unwrap()).unwrap();
+    assert_eq!(reopened.frame().singleton::<Campaign>().last_wave, 3);
+    assert_eq!(
+        *reopened.frame().singleton::<Scenario>(),
+        Scenario::default()
+    );
+    assert_eq!(reopened.frame().singleton::<DefenseRun>().gold, [150, 150]);
+    assert_eq!(reopened.frame().singleton::<DefenseRun>().reactor_hp, 30);
+
+    // Campaign and Scenario authoring coexist, with both values surviving the
+    // same strict parse/bake boundary.
+    let both = document(&authored_scenario_campaign(250, 75, 3)).unwrap();
+    assert_eq!(both.frame().singleton::<Campaign>().last_wave, 3);
+    assert_eq!(
+        *both.frame().singleton::<Scenario>(),
+        Scenario {
+            starting_gold: 250,
+            reactor_hp: 75
+        }
+    );
+
+    let edited_history = c.call("history.list", json!({})).unwrap();
+    c.call("history.undo", json!({})).unwrap();
+    assert_eq!(c.call("scene.save", json!({})).unwrap(), original);
+    c.call("history.redo", json!({})).unwrap();
+    assert_eq!(c.call("scene.save", json!({})).unwrap(), edited);
+    assert_eq!(c.call("history.list", json!({})).unwrap(), edited_history);
+
+    let play_start = c.call("sim.start", json!({})).unwrap();
+    assert_eq!(play_start["checksum"], edited["checksum"]);
+    assert_eq!(c.call("history.list", json!({})).unwrap(), edited_history);
+    // This authoring preset intentionally disallows play-frame scene capture.
+    // Starting Play must not alter the authored document or its history.
+    assert!(c.call("scene.save", json!({"source":"play"})).is_err());
+    assert_eq!(c.call("scene.save", json!({})).unwrap(), edited);
+    c.call("sim.stop", json!({})).unwrap();
+    assert_eq!(c.call("scene.save", json!({})).unwrap(), edited);
+    assert_eq!(c.call("history.list", json!({})).unwrap(), edited_history);
+}
+
+#[test]
+fn campaign_invalid_source_and_values_are_atomic() {
+    let text = format!("# keep campaign source\n{INITIAL_SCENE}");
+    let mut doc = document(&text).unwrap();
+    let bytes = doc.frame().to_bytes();
+    let source = doc.to_yaml();
+    let revision = doc.revision();
+    let history = doc.history().clone();
+    for invalid in [
+        campaign_scene(0),
+        campaign_scene(11),
+        format!("{INITIAL_SCENE}singletons: {{CoopDefense::Campaign: {{}}}}\n"),
+        format!(
+            "{INITIAL_SCENE}singletons: {{CoopDefense::Campaign: {{last_wave: 3, extra: 1}}}}\n"
+        ),
+        format!("{INITIAL_SCENE}singletons: {{CoopDefense::Run: {{}}}}\n"),
+        format!("schema: orr.scene/1\nentities: {{e_00000001: {{name: injected}}}}\n"),
+        format!("schema: orr.scene/2\nentities: {{}}\nprefabs: {{prefab.yaml: {{}}}}\n"),
+    ] {
+        assert!(document(&invalid).is_err());
+        assert!(doc.load_yaml(&invalid).is_err());
+        assert_eq!(doc.frame().to_bytes(), bytes);
+        assert_eq!(doc.to_yaml(), source);
+        assert_eq!(doc.revision(), revision);
+        assert_eq!(doc.history(), history);
+        assert!(!doc.can_undo() && !doc.can_redo() && !doc.is_dirty());
+    }
+
+    let mut cfg = ServerConfig::new(Auth::DevNoAuth);
+    cfg.listen = false;
+    let host = spawn_host(text, None, cfg, None).unwrap();
+    let mut c = client(&host, Caps::ALL);
+    let original = c.call("scene.save", json!({})).unwrap();
+    c.call(
+        "world.singleton.patch",
+        json!({"name":CAMPAIGN_NAME,"path":"last_wave","value":3}),
+    )
+    .unwrap();
+    let edited = c.call("scene.save", json!({})).unwrap();
+    let history = c.call("history.list", json!({})).unwrap();
+    let bad_sources = [
+        campaign_scene(0),
+        campaign_scene(11),
+        format!("{INITIAL_SCENE}singletons: {{CoopDefense::Campaign: {{}}}}\n"),
+        format!(
+            "{INITIAL_SCENE}singletons: {{CoopDefense::Campaign: {{last_wave: 3, extra: 1}}}}\n"
+        ),
+        format!("{INITIAL_SCENE}singletons: {{CoopDefense::Run: {{}}}}\n"),
+        format!("schema: orr.scene/1\nentities: {{e_00000001: {{name: injected}}}}\n"),
+        format!("schema: orr.scene/2\nentities: {{}}\nprefabs: {{prefab.yaml: {{}}}}\n"),
+    ];
+    for bad in bad_sources {
+        assert!(c.call("scene.load", json!({"text":bad})).is_err());
+        assert_eq!(c.call("scene.save", json!({})).unwrap(), edited);
+        assert_eq!(c.call("history.list", json!({})).unwrap(), history);
+    }
+    for bad in [
+        json!({"name":CAMPAIGN_NAME,"path":"last_wave","value":0}),
+        json!({"name":CAMPAIGN_NAME,"path":"last_wave","value":11}),
+        json!({"name":CAMPAIGN_NAME,"path":"last_wave","value":"invalid"}),
+        json!({"name":CAMPAIGN_NAME,"path":"","value":{"last_wave":0}}),
+        json!({"name":CAMPAIGN_NAME,"path":"","value":{"last_wave":3,"extra":1}}),
+        json!({"name":"CoopDefense::Run","path":"gold","value":[999,999]}),
+    ] {
+        assert!(c.call("world.singleton.patch", bad).is_err());
+        assert_eq!(c.call("scene.save", json!({})).unwrap(), edited);
+        assert_eq!(c.call("history.list", json!({})).unwrap(), history);
+    }
+    c.call("history.undo", json!({})).unwrap();
+    assert_eq!(c.call("scene.save", json!({})).unwrap(), original);
+}
+
+#[test]
 fn first_singleton_field_edit_uses_safe_defaults_and_bounds() {
     let mut doc = document(INITIAL_SCENE).unwrap();
     doc.apply(
@@ -423,6 +603,7 @@ fn first_singleton_field_edit_uses_safe_defaults_and_bounds() {
             reactor_hp: 30
         }
     );
+    assert_eq!(doc.frame().singleton::<Campaign>().last_wave, 10);
     doc.undo().unwrap();
     assert_eq!(doc.to_yaml(), INITIAL_SCENE);
     for (gold, hp) in [(0, 1), (10000, 1000)] {
@@ -439,33 +620,56 @@ fn first_singleton_field_edit_uses_safe_defaults_and_bounds() {
 #[test]
 fn nonzero_replay_contract_rejects_previous_host_identity() {
     use orr_session::{replay_verify_checked, ReplayError, ReplayHeader, ReplayWriter};
-    let old = crate::default_build_id(GAME);
-    let bytes = ReplayWriter::<DefenseGame>::new(ReplayHeader {
+    let old_identities = [crate::default_build_id(GAME), 0x7b2a_3ab9_8f61_9dca];
+    for old in old_identities {
+        let bytes = ReplayWriter::<DefenseGame>::new(ReplayHeader {
+            format_version: 3,
+            game_id: GAME.into(),
+            build_hash: orr_sim::build_hash_of(old, 0),
+            seed: u64::from(DefenseConfig::default().seed),
+            player_count: 1,
+            tick_rate: TICK_RATE,
+            input_size: std::mem::size_of::<DefenseInput>() as u32,
+        })
+        .finish();
+        assert!(matches!(
+            replay_verify_checked::<DefenseGame>(
+                &bytes,
+                DefenseConfig::default(),
+                SCENARIO_BUILD_ID
+            ),
+            Err(ReplayError::BuildHashMismatch { .. })
+        ));
+    }
+    // The replay contract deliberately treats an absent (zero) header identity
+    // as a wildcard; it cannot reject legacy files that never recorded one.
+    let wildcard = ReplayWriter::<DefenseGame>::new(ReplayHeader {
         format_version: 3,
         game_id: GAME.into(),
-        build_hash: orr_sim::build_hash_of(old, 0),
+        build_hash: 0,
         seed: u64::from(DefenseConfig::default().seed),
         player_count: 1,
         tick_rate: TICK_RATE,
         input_size: std::mem::size_of::<DefenseInput>() as u32,
     })
     .finish();
-    assert!(matches!(
-        replay_verify_checked::<DefenseGame>(&bytes, DefenseConfig::default(), SCENARIO_BUILD_ID),
-        Err(ReplayError::BuildHashMismatch { .. })
-    ));
+    assert!(replay_verify_checked::<DefenseGame>(
+        &wildcard,
+        DefenseConfig::default(),
+        SCENARIO_BUILD_ID
+    )
+    .is_ok());
 }
 
 #[test]
 fn saved_authored_scene_matches_native_setup_and_consumed_trace() {
-    use orr_games::coop_defense_scene::parse_scenario;
-    let authored = document(&authored_scene(250, 75)).unwrap().to_yaml();
+    use orr_games::coop_defense_scene::parse_config;
+    let authored = document(&authored_scenario_campaign(250, 75, 3))
+        .unwrap()
+        .to_yaml();
     let doc = document(&authored).unwrap();
     let mut native = Session::<DefenseGame, LocalInputSource>::new(
-        DefenseConfig {
-            scenario: parse_scenario(&authored).unwrap(),
-            ..Default::default()
-        },
+        parse_config(&authored).unwrap(),
         native_config(),
         LocalInputSource,
     );
@@ -482,6 +686,10 @@ fn saved_authored_scene_matches_native_setup_and_consumed_trace() {
             .singleton::<DefenseRun>()
             .reactor_hp,
         75
+    );
+    assert_eq!(
+        native.predicted_frame().singleton::<Campaign>().last_wave,
+        3
     );
     let delay = native.config().input_delay;
     let mut pending = VecDeque::from(vec![DefenseInput::default(); delay as usize]);
@@ -515,6 +723,10 @@ fn saved_authored_scene_matches_native_setup_and_consumed_trace() {
             let run = native.predicted_frame().singleton::<DefenseRun>();
             assert_eq!(run.gold, [250; 2]);
             assert_eq!(run.reactor_hp, 75);
+            assert_eq!(
+                native.predicted_frame().singleton::<Campaign>().last_wave,
+                3
+            );
             assert_eq!(run.generation, 1);
         }
     }

@@ -52,6 +52,7 @@ impl DefenseUi {
     ) -> (egui::FullOutput, Option<game::DefenseInput>) {
         let run = game::run(frame);
         let max_hp = frame.singleton::<game::Scenario>().reactor_hp;
+        let last_wave = frame.singleton::<game::Campaign>().last_wave;
         let units = game::units(frame);
         let enemies = game::enemies(frame);
         if run.tick < self.observed_tick {
@@ -105,10 +106,7 @@ impl DefenseUi {
                 60.0,
                 18.0,
                 PAPER,
-                format!(
-                    "WAVE {:02} / 10     CORE {} / {}",
-                    run.wave, run.reactor_hp, max_hp
-                ),
+                wave_header(run.wave, last_wave, run.reactor_hp, max_hp),
             );
             let core = l.rect(805.0, 78.0, 345.0, 4.0);
             p.rect_filled(core, 0.0, BRONZE.gamma_multiply(0.3));
@@ -201,14 +199,7 @@ impl DefenseUi {
                     egui::StrokeKind::Inside,
                 );
                 l.text(&p, 310.0, 310.0, 29.0, PAPER, "ASSEMBLE YOUR CREW");
-                l.text(
-                    &p,
-                    310.0,
-                    350.0,
-                    16.0,
-                    TEAL,
-                    "Two foundries. One core. Ten incoming waves.",
-                );
+                l.text(&p, 310.0, 350.0, 16.0, TEAL, campaign_intro(last_wave));
                 for (i, rule) in [
                     "1   SPACE or SUMMON: recruit a random turret for 25 brass.",
                     "2   Click a unit, then an identical role + tier to merge.",
@@ -516,9 +507,51 @@ impl DefenseUi {
         (output, action)
     }
 }
+fn wave_header(wave: u32, last_wave: u32, reactor_hp: u32, max_hp: u32) -> String {
+    format!("WAVE {wave:02} / {last_wave}     CORE {reactor_hp} / {max_hp}")
+}
+
+fn campaign_intro(last_wave: u32) -> String {
+    format!("Two foundries. One core. {last_wave} incoming waves.")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn hud_wave_total_uses_default_and_authored_campaign() {
+        let defaults =
+            orr_sim::Simulation::<game::DefenseGame>::new(game::DefenseConfig::default(), 60, 1);
+        let default_waves = defaults.frame().singleton::<game::Campaign>().last_wave;
+        assert_eq!(default_waves, 10);
+        assert_eq!(
+            wave_header(1, default_waves, 30, 30),
+            "WAVE 01 / 10     CORE 30 / 30"
+        );
+        assert_eq!(
+            campaign_intro(default_waves),
+            "Two foundries. One core. 10 incoming waves."
+        );
+
+        let authored = orr_sim::Simulation::<game::DefenseGame>::new(
+            game::DefenseConfig {
+                campaign: game::Campaign { last_wave: 3 },
+                ..Default::default()
+            },
+            60,
+            1,
+        );
+        let authored_waves = authored.frame().singleton::<game::Campaign>().last_wave;
+        assert_eq!(authored_waves, 3);
+        assert_eq!(
+            wave_header(1, authored_waves, 30, 30),
+            "WAVE 01 / 3     CORE 30 / 30"
+        );
+        assert_eq!(
+            campaign_intro(authored_waves),
+            "Two foundries. One core. 3 incoming waves."
+        );
+    }
     #[test]
     fn responsive_cell_hit_is_local_and_exact() {
         for size in [vec2(1200.0, 940.0), vec2(750.0, 900.0), vec2(1800.0, 800.0)] {

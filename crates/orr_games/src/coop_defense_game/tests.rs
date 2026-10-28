@@ -705,3 +705,128 @@ fn restart_reused_ids_are_namespaced_by_rollback_safe_generation() {
     assert_eq!(replay_checksum, s.checksum());
     assert_eq!(DefenseEventKind::from_code(u32::MAX), None);
 }
+
+#[test]
+fn authored_campaign_completes_three_real_waves_and_replays_then_restarts() {
+    let config = DefenseConfig {
+        campaign: Campaign { last_wave: 3 },
+        ..Default::default()
+    };
+    let mut sim = Simulation::<DefenseGame>::with_build_id(
+        config,
+        TICK_RATE,
+        u64::from(config.seed),
+        SCENARIO_BUILD_ID,
+    );
+    let initial = sim.frame().clone();
+    let mut recorded = Vec::new();
+    let mut spawned = [0; 3];
+    let mut waves = Vec::new();
+    for tick in 0..10000 {
+        let state = run(sim.frame());
+        if state.phase != PLAYING {
+            break;
+        }
+        let command = if tick % 15 == 0 {
+            strategy_input(&state, &units(sim.frame()), 0, tick + 1)
+        } else {
+            DefenseInput::default()
+        };
+        let events = step_events(&mut sim, command);
+        let wave = run(sim.frame()).wave;
+        assert!(wave <= 3, "authored campaign must never start wave four");
+        for event in &events {
+            if event.payload.kind == EVENT_ENEMY_SPAWN {
+                spawned[(wave - 1) as usize] += 1;
+            }
+            if event.payload.kind == EVENT_WAVE {
+                waves.push(event.payload.value);
+            }
+        }
+        recorded.push((command, sim.checksum(), events));
+    }
+    let terminal = run(sim.frame());
+    assert_eq!((terminal.phase, terminal.wave), (WON, 3));
+    assert_eq!(waves, [2, 3]);
+    assert_eq!(spawned, [wave_count(1), wave_count(2), wave_count(3)]);
+    assert!(enemies(sim.frame()).iter().all(|e| e.active == 0));
+    let terminal_units = units(sim.frame());
+    let terminal_projectiles = projectiles(sim.frame());
+    for _ in 0..60 {
+        assert!(step_events(&mut sim, DefenseInput::default()).is_empty());
+    }
+    assert_eq!(run(sim.frame()), terminal);
+    assert_eq!(units(sim.frame()), terminal_units);
+    assert_eq!(projectiles(sim.frame()), terminal_projectiles);
+    sim.restore(&initial);
+    for (command, checksum, expected) in recorded {
+        let actual = step_events(&mut sim, command);
+        assert_eq!(sim.checksum(), checksum);
+        assert_eq!(
+            actual
+                .iter()
+                .map(|e| (e.key, e.payload))
+                .collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|e| (e.key, e.payload))
+                .collect::<Vec<_>>()
+        );
+    }
+    step(&mut sim, input(RESTART, 10001));
+    assert_eq!(
+        *sim.frame().singleton::<Campaign>(),
+        Campaign { last_wave: 3 }
+    );
+    assert_eq!(
+        (
+            run(sim.frame()).wave,
+            run(sim.frame()).phase,
+            run(sim.frame()).tick
+        ),
+        (1, PLAYING, 0)
+    );
+    assert_eq!(run(sim.frame()).reactor_hp, config.scenario.reactor_hp);
+}
+
+#[test]
+fn final_wave_waits_for_last_enemy_and_last_leak_defeat_has_priority() {
+    for hp in [1, 30] {
+        let config = DefenseConfig {
+            campaign: Campaign { last_wave: 3 },
+            ..Default::default()
+        };
+        let mut sim = Simulation::<DefenseGame>::new(config, TICK_RATE, u64::from(config.seed));
+        // Narrow edge fixture, separate from the full gameplay/replay above.
+        let mut state = run(sim.frame());
+        state.wave = 3;
+        state.spawned = wave_count(3);
+        state.reactor_hp = hp;
+        sim.frame_mut().set_singleton(state);
+        let enemy = sim.frame_mut().query::<(&DefenseEnemy,)>().next().unwrap().0;
+        sim.frame_mut()
+            .get_mut::<DefenseEnemy>(enemy)
+            .unwrap()
+            .active = 1;
+        sim.frame_mut().get_mut::<DefenseEnemy>(enemy).unwrap().hp = 100;
+        let events = step_events(&mut sim, DefenseInput::default());
+        assert_eq!(run(sim.frame()).phase, PLAYING);
+        assert!(!events.iter().any(|e| e.payload.kind == EVENT_FINISH));
+        sim.frame_mut()
+            .get_mut::<DefenseEnemy>(enemy)
+            .unwrap()
+            .progress = 1999;
+        let events = step_events(&mut sim, DefenseInput::default());
+        let expected = if hp == 1 { LOST } else { WON };
+        assert_eq!(run(sim.frame()).phase, expected);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e.payload.kind == EVENT_FINISH)
+                .map(|e| e.payload.value)
+                .collect::<Vec<_>>(),
+            [expected]
+        );
+        assert_eq!(run(sim.frame()).wave, 3);
+    }
+}

@@ -43,3 +43,7 @@ required-features = ["collect-dodge"]
 [[example]]
 name = "coop_defense_run"
 required-features = ["coop-defense"]
+
+[[example]]
+name = "coop_defense_campaign_trace"
+required-features = ["coop-defense-scene"]

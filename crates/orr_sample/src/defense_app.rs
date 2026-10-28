@@ -73,7 +73,7 @@ impl Options {
 }
 /// Resolve and validate source before creating any window, GPU, or session.
 fn prepare_config(options: &Options) -> Result<game::DefenseConfig, String> {
-    use orr_games::coop_defense_scene::{parse_scenario, MAX_SOURCE_BYTES};
+    use orr_games::coop_defense_scene::{parse_config, MAX_SOURCE_BYTES};
     use std::io::Read;
     let Some(path) = &options.scene else {
         return Ok(game::DefenseConfig::default());
@@ -120,10 +120,7 @@ fn prepare_config(options: &Options) -> Result<game::DefenseConfig, String> {
         return Err("scene grew beyond 64 KiB".into());
     }
     let text = std::str::from_utf8(&bytes).map_err(|_| "scene must be UTF-8".to_string())?;
-    Ok(game::DefenseConfig {
-        scenario: parse_scenario(text)?,
-        ..Default::default()
-    })
+    parse_config(text)
 }
 
 fn session(config: game::DefenseConfig) -> DefenseSession {
@@ -406,6 +403,33 @@ mod tests {
         assert!(Options::parse(["--scene", "a", "--headless"].map(String::from)).is_ok());
     }
     #[test]
+    fn campaign_only_scene_preserves_default_scenario_and_authored_campaign() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("campaign.yaml");
+        std::fs::write(
+            &path,
+            "schema: orr.scene/1\nentities: {}\nsingletons: {CoopDefense::Campaign: {last_wave: 3}}\n",
+        )
+        .unwrap();
+        let config = prepare_config(&Options {
+            scene: Some(path.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(config.scenario, game::Scenario::default());
+        assert_eq!(config.scenario.starting_gold, 150);
+        assert_eq!(config.scenario.reactor_hp, 30);
+        assert_eq!(config.campaign.last_wave, 3);
+
+        let native = session(config);
+        let frame = native.predicted_frame();
+        assert_eq!(frame.singleton::<game::Campaign>().last_wave, 3);
+        assert_eq!(
+            frame.singleton::<game::Scenario>(),
+            &game::Scenario::default()
+        );
+    }
+    #[test]
     fn bounded_scene_loading_preserves_defaults_and_authored_restart() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("scene.yaml");
@@ -422,8 +446,15 @@ mod tests {
                 .to_bytes(),
             explicit_default.predicted_frame().to_bytes()
         );
-        std::fs::write(&path, "schema: orr.scene/1\nentities: {}\nsingletons: {CoopDefense::Scenario: {starting_gold: 250, reactor_hp: 75}}\n").unwrap();
+        std::fs::write(&path, "schema: orr.scene/1\nentities: {}\nsingletons: {CoopDefense::Scenario: {starting_gold: 250, reactor_hp: 75}, CoopDefense::Campaign: {last_wave: 3}}\n").unwrap();
         let mut native = session(prepare_config(&options).unwrap());
+        assert_eq!(
+            native
+                .predicted_frame()
+                .singleton::<game::Campaign>()
+                .last_wave,
+            3
+        );
         assert_eq!(game::run(native.predicted_frame()).gold, [250; 2]);
         assert_eq!(game::run(native.predicted_frame()).reactor_hp, 75);
         let delay = native.config().input_delay;
@@ -442,10 +473,24 @@ mod tests {
         }
         assert_eq!(game::run(native.predicted_frame()).gold, [250; 2]);
         assert_eq!(game::run(native.predicted_frame()).reactor_hp, 75);
+        assert_eq!(
+            native
+                .predicted_frame()
+                .singleton::<game::Campaign>()
+                .last_wave,
+            3
+        );
         assert_eq!(game::run(native.predicted_frame()).generation, 1);
-        for invalid in [vec![0xff], vec![b' '; 65537], b"schema: invalid\n".to_vec()] {
+        let active_frame_before_invalid_source = native.predicted_frame().to_bytes();
+        for invalid in [
+            vec![0xff],
+            vec![b' '; 65537],
+            b"schema: invalid\n".to_vec(),
+            b"schema: orr.scene/1\nentities: {}\nsingletons: {CoopDefense::Campaign: {last_wave: 11}}\n".to_vec(),
+        ] {
             std::fs::write(&path, invalid).unwrap();
             assert!(prepare_config(&options).is_err());
+            assert_eq!(native.predicted_frame().to_bytes(), active_frame_before_invalid_source);
             assert!(run(Options {
                 scene: Some(path.clone()),
                 ..Default::default()
