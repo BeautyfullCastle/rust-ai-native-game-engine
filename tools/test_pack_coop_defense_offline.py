@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 """Portable regressions for the optional web package's exact module closure."""
+import base64
+import json
+import os
+import subprocess
+from unittest import mock
 import importlib.util
 from pathlib import Path
 import shutil
@@ -65,6 +70,106 @@ class OfflineModules(unittest.TestCase):
         p.write_text(original)
         p = self.root / "style.css"; p.write_text(p.read_text() + "/* </style> */")
         with self.assertRaisesRegex(ValueError, "terminate"): packer.package(self.root)
+
+    def authored(self):
+        scene = self.root / 'saved.scene.yaml'
+        scene.write_text('schema: orr.scene/1\nentities: {}\nsingletons: {CoopDefense::Scenario: {starting_gold: 250, reactor_hp: 75}}\n', encoding='utf-8')
+        return scene, self.root / 'delivered.html'
+
+    def test_authored_requires_new_explicit_destination(self):
+        scene, out = self.authored()
+        with self.assertRaises(ValueError): packer.package(self.root, scene)
+        for destination in [scene, self.root / 'game.wasm', self.root / 'assets']:
+            with self.assertRaises(FileExistsError): packer.package(self.root, scene, destination)
+        out.symlink_to(scene)
+        with self.assertRaises(FileExistsError): packer.package(self.root, scene, out)
+
+    def test_nonregular_symlink_and_bounded_inputs(self):
+        scene, out = self.authored()
+        for data in [b'x' * 65537, b'\xff']:
+            scene.write_bytes(data)
+            with self.assertRaises((ValueError, UnicodeDecodeError)): packer.package(self.root, scene, out)
+            self.assertFalse(out.exists())
+        scene.unlink(); scene.symlink_to(self.root / 'index.html')
+        with self.assertRaises(OSError): packer.package(self.root, scene, out)
+        scene.unlink(); os.mkfifo(scene)
+        with self.assertRaises(ValueError): packer.package(self.root, scene, out)
+        scene.unlink(); scene.write_bytes(b'valid')
+        asset = self.root / 'assets/units.png'; asset.unlink(); asset.symlink_to(self.root / 'game.wasm')
+        with self.assertRaises(OSError): packer.package(self.root, scene, out)
+
+    def test_directory_symlink_and_midread_mutation_rejected(self):
+        scene, out = self.authored()
+        linked = self.root / 'linked'; linked.symlink_to(self.root, target_is_directory=True)
+        with self.assertRaises(OSError): packer.package(linked, scene, out)
+        with self.assertRaises(OSError): packer.publish_new(linked / 'new.html', 'content')
+        before = scene.stat()
+        changed = mock.Mock(st_size=before.st_size, st_mtime_ns=before.st_mtime_ns + 1, st_ctime_ns=before.st_ctime_ns)
+        with mock.patch.object(packer.os, 'fstat', side_effect=[before, changed]):
+            with self.assertRaisesRegex(ValueError, 'changed'): packer.snapshot_file(scene, 65536)
+
+    def test_snapshotted_bytes_not_reread_after_validation(self):
+        scene, out = self.authored(); original = scene.read_bytes()
+        def validate(data, wasm):
+            self.assertEqual(data, original)
+            scene.write_bytes(b'changed after validation')
+            return {'version': 1, 'initialChecksum': '0'*16}
+        with mock.patch.object(packer, 'validate_scene', side_effect=validate): packer.package(self.root, scene, out)
+        self.assertIn(base64.b64encode(original).decode(), out.read_text())
+        self.assertNotIn(base64.b64encode(scene.read_bytes()).decode(), out.read_text())
+
+    def test_validator_failures_leave_no_output(self):
+        scene, out = self.authored()
+        for failure in [FileNotFoundError('node missing'), subprocess.TimeoutExpired('node',15), subprocess.CalledProcessError(1,'node')]:
+            with mock.patch.object(packer.subprocess, 'run', side_effect=failure):
+                with self.assertRaises(type(failure)): packer.package(self.root, scene, out)
+            self.assertFalse(out.exists())
+
+    def test_publication_race_and_failure_preserve_destination(self):
+        scene, out = self.authored()
+        def validate(*_):
+            out.write_bytes(b'other writer')
+            return {'version': 1}
+        with mock.patch.object(packer, 'validate_scene', side_effect=validate):
+            with self.assertRaises(FileExistsError): packer.package(self.root, scene, out)
+        self.assertEqual(out.read_bytes(), b'other writer')
+        self.assertEqual(list(self.root.glob('.orr-offline-*')), [])
+        out.unlink()
+        with mock.patch.object(packer, 'validate_scene', return_value={'version':1}), mock.patch.object(packer.os, 'link', side_effect=OSError('publication failed')):
+            with self.assertRaises(OSError): packer.package(self.root, scene, out)
+        self.assertFalse(out.exists()); self.assertEqual(list(self.root.glob('.orr-offline-*')), [])
+
+    @unittest.skipUnless(os.environ.get('ORR_DEFENSE_WASM'), 'actual WASM not provided')
+    def test_actual_wasm_scene_admission_and_receipt(self):
+        scene, out = self.authored()
+        shutil.copyfile(os.environ['ORR_DEFENSE_WASM'], self.root / 'game.wasm')
+        scene.write_text(scene.read_text() + '# Unicode 한글 </script>\n', encoding='utf-8')
+        exact = scene.read_bytes() + b'#' + b'x' * (65536 - len(scene.read_bytes()) - 1)
+        self.assertEqual(packer.validate_scene(exact, (self.root/'game.wasm').read_bytes())['sceneBytes'], 65536)
+        receipt = packer.validate_scene(scene.read_bytes(), (self.root / 'game.wasm').read_bytes())
+        self.assertEqual(receipt['sceneBytes'], len(scene.read_bytes()))
+        packer.package(self.root, scene, out)
+        self.assertIn(receipt['initialChecksum'], out.read_text())
+        self.assertNotIn('Unicode 한글', out.read_text())
+        # Python accepts nonzero base64 pad bits; runtime intentionally rejects them.
+        payload = scene.read_bytes()
+        while len(payload) % 3 == 0:
+            payload += b' '
+        scene.write_bytes(payload)
+        canonical = base64.b64encode(payload).decode('ascii')
+        alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+        last = len(canonical.rstrip('=')) - 1
+        corrupted = canonical[:last] + alphabet[alphabet.index(canonical[last]) | 1] + canonical[last+1:]
+        self.assertEqual(base64.b64decode(corrupted, validate=True), payload)
+        out.unlink(); packer.package(self.root, scene, out)
+        out.write_text(out.read_text().replace(canonical, corrupted))
+        checked = subprocess.run(['python3', str(Path(__file__).with_name('check_coop_defense_offline.py')), str(self.root), str(out)], capture_output=True, text=True)
+        self.assertNotEqual(checked.returncode, 0)
+        self.assertIn('noncanonical authored scene base64', checked.stderr)
+
+        for bad in [b'', b'schema: wrong', scene.read_bytes().replace(b'reactor_hp: 75', b'reactor_hp: 0')]:
+            with self.assertRaises(subprocess.CalledProcessError): packer.validate_scene(bad, (self.root/'game.wasm').read_bytes())
+        with self.assertRaises(subprocess.CalledProcessError): packer.validate_scene(scene.read_bytes(), b'bad wasm')
 
 
 if __name__ == "__main__": unittest.main()

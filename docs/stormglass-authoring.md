@@ -1,7 +1,6 @@
 # Stormglass starting-condition authoring
 
-The registered Stormglass project reuses DefenseGame; it does not introduce
-another simulation, engine game enum, protocol or package format.
+Stormglass reuses DefenseGame and existing protocol/package formats.
 
 ## Contract and use
 
@@ -19,10 +18,9 @@ In Edit mode use the existing ERP `world.singleton.patch`, for example:
 
 Or use `orr propose "starting resources" sset
 CoopDefense::Scenario.starting_gold=250`, verify and accept the proposal.
-Existing undo/redo, scene.save and registered-project reopen retain the
-settings. Play starts with them; RESTART resets the run/pools using the same
-seed and authored values, which remain in the rollback/checksummed Frame.
-The example scene stays empty for backwards source compatibility.
+Undo/redo, scene.save and reopen retain settings. Play and RESTART use authored
+values in the rollback/checksummed Frame.
+The example scene remains empty for compatibility.
 
 ## Identity and migration
 
@@ -39,20 +37,15 @@ An old-snapshot fixture has not been executed for this change. Checked replay/bu
 Generic checked replay retains its existing zero-header wildcard: old native
 recordings with build_hash=0 are not guaranteed identity rejection. Unguarded
 replay APIs likewise do not gain protection from this change. Native/browser previously used a zero build-ID wildcard;
-new construction now supplies the shared identity. No saved replay migration
-or browser scene-loading UI is provided.
+new construction now supplies the shared identity. No saved replay migration is provided.
 
 
 ## Acceptance
 
-Focused source tests cover default/native byte equality and 600-tick input
-trace, explicit-default/legacy equivalence, authored start and restart,
-ERP singleton edits/undo/redo/save/reparse, invalid whole-object atomicity,
-ranges and first-field defaults, Play-edit rejection, and old manifest
-rejection. These tests require execution on the exact candidate; this document
-does not claim they have passed. Existing editor project tests cover Play,
-command consumption and Stop. No GPU, platform or live-model authorship result
-is implied by CPU/API tests.
+Source tests cover default/native bytes and input traces, authored start/restart,
+ERP edits/undo/redo/save/reparse, atomic invalid-value rejection, ranges/defaults,
+Play-edit rejection and old manifest rejection. CPU/API checks do not establish
+GPU, platform or live-model authorship results.
 
 ## Native saved-scene playback
 
@@ -70,13 +63,11 @@ source shape. A present Scenario in source YAML requires both fields; ERP
 whole-value edit defaults do not make partial source YAML valid. No editor/ERP dependency enters native simulation, and no new
 protocol or package format is added. `DefenseConfig` now carries `scenario`;
 Rust callers using a struct literal add `..Default::default()` or an explicit
-Scenario. This configuration change does not change the Scenario frame layout
-or build identity introduced above.
+Scenario. Scenario frame layout/build identity are unchanged.
 
 New source tests cover saved Editor/native initial bytes and consumed-input
 traces, restart, CLI/default equivalence, invalid/oversized/non-UTF-8 sources,
-nonregular files and Unix link/FIFO rejection. These are focused CPU checks,
-not a substitute for the exact candidate’s mandatory integration gate.
+nonregular files and Unix link/FIFO rejection. The exact candidate still requires its integration gate.
 Windows/macOS file behavior and actual native HUD rendering remain unverified.
 
 ## Browser saved-scene playback
@@ -92,5 +83,26 @@ imported Scenario and the HUD uses authored `maxHp`, not a fixed 30.
 
 Overlapping asynchronous file reads are generation-guarded; a later selection or
 restart supersedes earlier reads. Served and generated offline pages use the same
-picker. Selected scenes are not persisted or embedded by the offline exporter.
-Actual WASM ABI and simulated DOM checks are distinct from browser/GPU/manual QA.
+picker. The exporter also delivers saved scenes without a later picker step.
+Actual WASM/simulated DOM checks are distinct from browser/GPU/manual QA.
+
+
+```sh
+python3 tools/pack_coop_defense_offline.py dist/coop-defense-web \
+  --scene saved.scene.yaml --output authored-game.html
+python3 tools/check_coop_defense_offline.py dist/coop-defense-web authored-game.html
+```
+
+Authored delivery requires a new explicit output path. The packer snapshots regular,
+non-symlink inputs, admits the exact UTF-8 scene (at most 64 KiB) through the trusted
+local build’s WASM with a bounded Node subprocess, then publishes atomically without
+replacing existing files. No scene-derived paths or network requests are used.
+The default packaging command remains compatible. Node must be installed.
+
+The HTML carries base64 scene bytes and a versioned receipt containing scene/WASM
+SHA-256 hashes, scene byte count and tick-zero checksum—not local paths. These are
+content identities, not signatures or proof of authorship. Opening the page verifies
+the receipt and starts the authored ready screen at tick zero; invalid payloads fail
+closed rather than falling back to the default game. Restart retains the Scenario.
+WebCrypto is required at startup; unavailable verification fails closed.
+This validates trusted engine output, not hostile WASM in a security sandbox.

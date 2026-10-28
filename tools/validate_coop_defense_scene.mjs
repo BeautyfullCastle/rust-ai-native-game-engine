@@ -1,0 +1,24 @@
+// Validate exact scene bytes against a trusted locally built adapter, never a JS parser.
+import fs from 'node:fs';
+import { createHash } from 'node:crypto';
+import assert from 'node:assert/strict';
+const wasm = fs.readFileSync(process.argv[2]);
+const scene = fs.readFileSync(process.argv[3]);
+assert.ok(scene.length <= 65536, 'scene exceeds 64 KiB');
+new TextDecoder('utf-8', { fatal: true }).decode(scene);
+const module = await WebAssembly.compile(wasm);
+assert.equal(WebAssembly.Module.imports(module).length, 0, 'engine must not require imports');
+const w = (await WebAssembly.instantiate(module, {})).exports;
+assert.ok(w.memory instanceof WebAssembly.Memory, 'missing memory');
+for (const name of ['defense_scene_buffer', 'defense_scene_capacity', 'defense_init_scene', 'defense_snapshot', 'defense_snapshot_len']) assert.equal(typeof w[name], 'function', `missing ${name}`);
+assert.equal(w.defense_scene_capacity(), 65536, 'unsupported staging capacity');
+new Uint8Array(w.memory.buffer, w.defense_scene_buffer(), scene.length).set(scene);
+assert.equal(w.defense_init_scene(scene.length), 0, 'engine rejected authored scene');
+const pointer = w.defense_snapshot();
+const length = w.defense_snapshot_len();
+assert.ok(length > 0 && length <= 1024 * 1024, 'invalid snapshot size');
+const snapshot = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array(w.memory.buffer, pointer, length)));
+assert.equal(snapshot.tick, 0, 'expected initial snapshot');
+assert.match(snapshot.checksum, /^[0-9a-f]{16}$/);
+const sha = bytes => createHash('sha256').update(bytes).digest('hex');
+console.log(JSON.stringify({ version: 1, sceneSha256: sha(scene), sceneBytes: scene.length, wasmSha256: sha(wasm), initialChecksum: snapshot.checksum }));
