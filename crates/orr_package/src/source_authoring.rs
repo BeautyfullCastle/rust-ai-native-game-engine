@@ -5,8 +5,15 @@ use std::{
     ffi::OsString,
     fs::{self, Metadata, OpenOptions},
     io::{Read, Write},
+    path::{Component, Path, PathBuf},
+};
+
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::MetadataExt;
+#[cfg(windows)]
+use std::{
     os::windows::fs::{MetadataExt, OpenOptionsExt},
-    path::{Component, Path, PathBuf, Prefix},
+    path::Prefix,
 };
 
 pub const USAGE: &str = "package_source --source DIR --name NAME --version EXACT --engine REQUIREMENT [--capability NAME]... [--dependency NAME=EXACT]... --file PORTABLE_PATH...";
@@ -19,7 +26,9 @@ const MAX_CAPABILITIES: usize = 128;
 const MAX_DEPENDENCIES: usize = 128;
 const MAX_SOURCE_PATH_BYTES: usize = 4096;
 const MAX_SOURCE_COMPONENTS: usize = 64;
+#[cfg(windows)]
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+#[cfg(windows)]
 const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 
 #[derive(Clone, Debug)]
@@ -179,6 +188,10 @@ pub fn create(options: &Options) -> Result<Report, String> {
     if exists(&target)? {
         return Err("package manifest already exists".into());
     }
+    // Recheck observed ancestry before publication; path-based checks do not
+    // defend against hostile concurrent directory replacement.
+    #[cfg(target_os = "linux")]
+    source_root(&source)?;
     let mut temporary = tempfile::NamedTempFile::new_in(&source).map_err(error)?;
     temporary.write_all(&manifest_bytes).map_err(error)?;
     temporary.as_file().sync_all().map_err(error)?;
@@ -305,6 +318,7 @@ fn validate_asset_collisions(files: &BTreeSet<&String>) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(windows)]
 fn source_root(path: &Path) -> Result<PathBuf, String> {
     let text = path.to_str().ok_or("source path must be Unicode")?;
     if text.len() > MAX_SOURCE_PATH_BYTES
@@ -363,6 +377,7 @@ fn source_root(path: &Path) -> Result<PathBuf, String> {
     Ok(canonical)
 }
 
+#[cfg(windows)]
 fn absolute_disk_path(path: &Path) -> bool {
     let Some(text) = path.to_str() else {
         return false;
@@ -383,7 +398,52 @@ fn absolute_disk_path(path: &Path) -> bool {
         && components.all(|component| matches!(component, Component::Normal(_)))
 }
 
+// Linux deliberately keeps the checked lexical path instead of treating a
+// canonicalize-then-open sequence as a confinement boundary. Callers must own
+// and keep the source directory tree quiescent throughout authoring.
+#[cfg(target_os = "linux")]
+fn source_root(path: &Path) -> Result<PathBuf, String> {
+    if !absolute_disk_path(path) {
+        return Err("source must be a bounded normalized absolute non-root path".into());
+    }
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component);
+        let metadata = fs::symlink_metadata(&current)
+            .map_err(|error| format!("source path {}: {error}", current.display()))?;
+        if !is_directory(&metadata) {
+            return Err("source ancestors must be non-symlink directories".into());
+        }
+    }
+    Ok(path.to_path_buf())
+}
+
+#[cfg(target_os = "linux")]
+fn absolute_disk_path(path: &Path) -> bool {
+    let Some(text) = path.to_str() else {
+        return false;
+    };
+    // Path::components normalizes repeated separators and interior `.`. Check
+    // raw text first so those inputs cannot silently become accepted paths.
+    text.starts_with('/')
+        && text.len() > 1
+        && text.len() <= MAX_SOURCE_PATH_BYTES
+        && !text.chars().any(char::is_control)
+        && text[1..]
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..")
+        && path.components().count() <= MAX_SOURCE_COMPONENTS
+        && path
+            .components()
+            .skip(1)
+            .all(|part| matches!(part, Component::Normal(_)))
+}
+
 fn read_source_file(root: &Path, relative: &str) -> Result<Vec<u8>, String> {
+    #[cfg(target_os = "linux")]
+    source_root(root)?;
+    #[cfg(target_os = "linux")]
+    let mut expected_metadata = None;
     let mut path = root.to_path_buf();
     let parts: Vec<_> = relative.split('/').collect();
     for (index, part) in parts.iter().enumerate() {
@@ -396,19 +456,29 @@ fn read_source_file(root: &Path, relative: &str) -> Result<Vec<u8>, String> {
                     "declared source must be a regular file within limits: {relative}"
                 ));
             }
+            #[cfg(target_os = "linux")]
+            {
+                expected_metadata = Some(metadata);
+            }
         } else if !is_directory(&metadata) {
             return Err(format!(
                 "declared source ancestor is not a non-reparse directory: {relative}"
             ));
         }
     }
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(&path)
-        .map_err(error)?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    let file = options.open(&path).map_err(error)?;
     let opened = file.metadata().map_err(error)?;
     if !is_regular(&opened) || opened.len() > MAX_FILE_BYTES {
+        return Err(format!("declared source changed while opening: {relative}"));
+    }
+    #[cfg(target_os = "linux")]
+    if !expected_metadata
+        .is_some_and(|expected| expected.dev() == opened.dev() && expected.ino() == opened.ino())
+    {
         return Err(format!("declared source changed while opening: {relative}"));
     }
     let mut bytes = Vec::new();
@@ -443,12 +513,24 @@ fn create_snapshot_placeholder(path: &Path) -> Result<(), String> {
         .map_err(error)
 }
 
+#[cfg(windows)]
 fn is_regular(metadata: &Metadata) -> bool {
     metadata.is_file() && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
 }
 
+#[cfg(windows)]
 fn is_directory(metadata: &Metadata) -> bool {
     metadata.is_dir() && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+}
+
+#[cfg(target_os = "linux")]
+fn is_regular(metadata: &Metadata) -> bool {
+    metadata.is_file() && !metadata.file_type().is_symlink()
+}
+
+#[cfg(target_os = "linux")]
+fn is_directory(metadata: &Metadata) -> bool {
+    metadata.is_dir() && !metadata.file_type().is_symlink()
 }
 
 fn exists(path: &Path) -> Result<bool, String> {
