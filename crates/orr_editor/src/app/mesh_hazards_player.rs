@@ -244,6 +244,17 @@ impl State {
     }
 }
 
+impl super::EditorApp {
+    /// Keep the already admitted hazards-player camera panel bound to its
+    /// validated sidecar instead of letting the first UI frame load it again.
+    pub(crate) fn install_validated_hazards_camera(
+        &mut self,
+        panel: crate::mesh_camera_panel::Panel,
+    ) {
+        self.mesh_camera = panel;
+    }
+}
+
 /// Check the hazard registry before accessing its typed singleton state.
 pub(crate) fn validate_fresh_session(editor: &Editor) -> Result<(), String> {
     if editor.game() != EditorGame::MeshHazardsV1 || editor.mode() != Mode::Play {

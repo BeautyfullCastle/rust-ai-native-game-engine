@@ -18,6 +18,7 @@ fn request(editor: &mut Editor, scene: &Path, runtime: &Path) -> Request {
         epoch: editor.scene_load_epoch(),
         checksum,
         scene_identity: Identity::read(scene).unwrap(),
+        camera_source: bundle::capture_camera_source(scene).unwrap(),
         runtime: Identity::read(runtime).unwrap(),
         destination: scene.with_file_name("bundle"),
     }
@@ -72,6 +73,126 @@ fn completion_stamp_rejects_epoch_checksum_path_and_runtime_changes() {
     assert!(run(&stamp).unwrap_err().contains("identity changed"));
     assert!(!stamp.destination.exists());
 }
+
+#[test]
+fn completion_stamp_binds_optional_camera_presence_and_exact_source_bytes() {
+    let (temp, mut editor, scene) = fixture();
+    let runtime = temp.path().join("player");
+    fs::write(&runtime, b"fixture runtime").unwrap();
+    let absent = request(&mut editor, &scene, &runtime);
+    assert_eq!(absent.camera_source, None);
+    assert!(source_matches(&mut editor, None, &absent));
+
+    let sidecar = crate::mesh_camera_store::sidecar_path(&scene).unwrap();
+    fs::write(&sidecar, b"camera bytes A").unwrap();
+    assert!(!source_matches(&mut editor, None, &absent));
+
+    let present = request(&mut editor, &scene, &runtime);
+    assert_eq!(
+        present.camera_source.as_deref(),
+        Some(&b"camera bytes A"[..])
+    );
+    assert!(source_matches(&mut editor, None, &present));
+    fs::write(&sidecar, b"camera bytes B").unwrap();
+    assert!(!source_matches(&mut editor, None, &present));
+
+    let replacement = request(&mut editor, &scene, &runtime);
+    assert_eq!(
+        replacement.camera_source.as_deref(),
+        Some(&b"camera bytes B"[..])
+    );
+    fs::remove_file(&sidecar).unwrap();
+    assert!(!source_matches(&mut editor, None, &replacement));
+}
+
+#[test]
+fn changed_camera_marks_published_result_stale_without_removing_it() {
+    let (temp, mut editor, scene) = fixture();
+    let runtime = temp.path().join("player");
+    fs::write(&runtime, b"fixture runtime").unwrap();
+    let sidecar = crate::mesh_camera_store::sidecar_path(&scene).unwrap();
+    fs::write(&sidecar, b"camera A").unwrap();
+    let stamp = request(&mut editor, &scene, &runtime);
+    assert_eq!(stamp.camera_source.as_deref(), Some(&b"camera A"[..]));
+    let root = temp.path().join("published-bundle");
+    fs::create_dir(&root).unwrap();
+    let marker = root.join("published-marker");
+    fs::write(&marker, b"already published").unwrap();
+    // Same length intentionally exercises exact-byte binding rather than metadata.
+    fs::write(&sidecar, b"camera B").unwrap();
+
+    let receipt = Receipt {
+        root: root.clone(),
+        scene: root.join("game.scene.yaml"),
+        runtime: root.join("player"),
+        manifest: root.join(bundle::MANIFEST_FILENAME),
+        checksum: stamp.checksum,
+        graph_revision: [0; 32],
+        scene_sha256: "scene".into(),
+        runtime_sha256: "runtime".into(),
+        camera_sha256: Some("published-camera-hash".into()),
+        platform: bundle::RuntimePlatform::LinuxX86_64,
+    };
+    let (sender, receiver) = mpsc::sync_channel(1);
+    assert!(
+        sender
+            .send(Completion {
+                request: stamp.clone(),
+                result: Ok(receipt),
+            })
+            .is_ok()
+    );
+    let mut panel = Panel {
+        runtime: runtime.display().to_string(),
+        output: stamp.destination.display().to_string(),
+        trusted_runtime: true,
+        pending: Some(receiver),
+        ..Default::default()
+    };
+    panel.poll(&mut editor, None);
+    assert!(panel.status.contains("Bundle retained"));
+    assert_eq!(fs::read(marker).unwrap(), b"already published");
+}
+
+#[test]
+fn worker_admission_rejects_camera_addition_after_ui_request() {
+    let (temp, mut editor, scene) = fixture();
+    let runtime = temp.path().join("player");
+    fs::write(&runtime, b"fixture runtime").unwrap();
+    let stamp = request(&mut editor, &scene, &runtime);
+    assert_eq!(stamp.camera_source, None);
+    fs::write(
+        crate::mesh_camera_store::sidecar_path(&scene).unwrap(),
+        b"added after UI request",
+    )
+    .unwrap();
+    let error = run(&stamp).unwrap_err();
+    assert!(
+        error.contains("camera") || error.contains("sidecar"),
+        "{error}"
+    );
+    assert!(!stamp.destination.exists());
+}
+
+#[test]
+fn worker_admission_rejects_equal_length_camera_replacement() {
+    let (temp, mut editor, scene) = fixture();
+    let runtime = temp.path().join("player");
+    fs::write(&runtime, b"fixture runtime").unwrap();
+    let sidecar = crate::mesh_camera_store::sidecar_path(&scene).unwrap();
+    fs::write(&sidecar, b"camera A").unwrap();
+    let stamp = request(&mut editor, &scene, &runtime);
+    fs::write(&sidecar, b"camera B").unwrap();
+    assert_eq!(stamp.camera_source.as_deref(), Some(&b"camera A"[..]));
+    assert_eq!(fs::metadata(&sidecar).unwrap().len(), 8);
+    let error = run(&stamp).unwrap_err();
+    assert!(
+        error.contains("camera") || error.contains("sidecar"),
+        "{error}"
+    );
+    assert!(!stamp.destination.exists());
+}
+
 #[test]
 fn play_mode_and_missing_trust_are_not_eligible() {
     let (_temp, mut editor, _) = fixture();

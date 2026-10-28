@@ -18,7 +18,8 @@ const MAX_STARTUP_TICKS: u32 = 10_000;
 const MAX_CAPTURE_PIXELS: u64 = 1_048_576;
 const USAGE: &str = "orr_mesh_hazards_player [--bundle DIR] [--ticks N] [--screenshot PNG [--frames N]] [--size WxH]\n       orr_mesh_hazards_player --capabilities\n\nWithout --bundle, the validated bundle beside this executable is used.\n--ticks N starts Play and leaves the admitted simulation paused at tick N.\n--screenshot writes a bounded window PNG; --frames defaults to 30.\n--size sets the initial window dimensions in points (default 960x600).";
 
-const CAPABILITIES: &str = "ORR_MESH_HAZARDS_PLAYER_V1\nORR_MESH_INPUT_V1";
+const CAPABILITIES: &str =
+    "ORR_MESH_HAZARDS_PLAYER_V1\nORR_MESH_INPUT_V1\nORR_MESH_HAZARDS_CAMERA_V1";
 
 enum Request {
     Help,
@@ -322,6 +323,7 @@ fn launch(options: Options) -> Result<(), String> {
     panel.sync(&editor);
     let mut camera_panel = crate::mesh_camera_panel::Panel::default();
     camera_panel.sync(&mut editor);
+    verify_loaded_camera_bundle(&bundle_root, &bundle, &camera_panel)?;
     let mut lighting_panel = crate::mesh_lighting_panel::Panel::default();
     lighting_panel.sync(&editor);
     #[cfg(feature = "mesh-animated-models")]
@@ -361,6 +363,7 @@ fn launch(options: Options) -> Result<(), String> {
         native_options,
         Box::new(move |creation_context| {
             let mut inner = EditorApp::new(editor, creation_context.wgpu_render_state.clone());
+            inner.install_validated_hazards_camera(camera_panel);
             inner.set_mesh_player_input_allowed(mesh_input_allowed);
             if let Some(path) = screenshot {
                 inner = inner.with_screenshot(ScreenshotJob::new(path, frames).with_settle());
@@ -372,6 +375,26 @@ fn launch(options: Options) -> Result<(), String> {
         }),
     )
     .map_err(|error| format!("Mesh Hazards Player window: {error}"))
+}
+
+fn verify_loaded_camera_bundle(
+    bundle_root: &Path,
+    bundle: &crate::mesh_hazards_export::PreparedBundle,
+    camera_panel: &crate::mesh_camera_panel::Panel,
+) -> Result<(), String> {
+    if !camera_panel.matches_saved_sidecar(bundle.camera_sha256.as_deref()) {
+        return Err("loaded game camera sidecar differs from the validated bundle".into());
+    }
+    // Re-read and validate the manifest + bounded file inventory after the
+    // camera has been installed. This detects ordinary edits between initial
+    // admission and launch; it does not claim immunity to an adversarial writer.
+    let current = crate::mesh_hazards_export::open_bundle(bundle_root).map_err(|error| {
+        format!("game bundle changed while the authored camera was loading: {error}")
+    })?;
+    if current != *bundle {
+        return Err("game bundle changed while the authored camera was loading".into());
+    }
+    Ok(())
 }
 
 fn start_playback(editor: &mut Editor, ticks: Option<u32>, capturing: bool) -> Result<(), String> {

@@ -383,3 +383,285 @@ fn failed_publication_cleans_owned_stage_and_preserves_existing_destination() {
     );
     assert_eq!(fs::read_dir(&destination).unwrap().count(), 1);
 }
+
+impl Fixture {
+    fn camera_path(&self) -> PathBuf {
+        self.scene
+            .with_file_name("source.scene.yaml.mesh-camera.json")
+    }
+    fn add_camera(&self, platform: RuntimePlatform) -> Vec<u8> {
+        let revision = admit_scene(&fs::read(&self.scene).unwrap()).unwrap().1;
+        let document =
+            crate::mesh_camera::Document::from_orbit(orr_render::camera3d::OrbitCamera {
+                target: [1.0, 0.0, 0.5],
+                yaw: 0.9,
+                pitch: 0.7,
+                distance: 14.0,
+                fov_y_degrees: 61.0,
+            })
+            .unwrap()
+            .with_projection(
+                crate::mesh_camera::Projection::Orthographic { half_height: 6.0 },
+                0.2,
+                200.0,
+            )
+            .unwrap()
+            .with_follow_offset(Some([0.0, 1.0, 0.0]))
+            .unwrap();
+        let bytes = document.encode("source.scene.yaml", revision).unwrap();
+        fs::write(self.camera_path(), &bytes).unwrap();
+        fs::write(&self.runtime, runtime::valid_test_camera_runtime(platform)).unwrap();
+        bytes
+    }
+    fn request<'a>(&'a self, destination: &'a Path) -> ExportRequest<'a> {
+        ExportRequest {
+            scene: &self.scene,
+            expected_checksum: self.checksum,
+            destination,
+            runtime: &self.runtime,
+            trusted_runtime: true,
+        }
+    }
+}
+
+#[test]
+fn camera_v2_rebinds_only_exported_copy_and_relocates_exact_four_files() {
+    for platform in [RuntimePlatform::LinuxX86_64, RuntimePlatform::WindowsX86_64] {
+        let fixture = Fixture::new(platform);
+        let source_bytes = fixture.add_camera(platform);
+        let destination = fixture.root.join("camera-game");
+        let receipt = fixture.export(&destination, true).unwrap();
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&receipt.manifest).unwrap()).unwrap();
+        assert_eq!(manifest["schema"], 2);
+        assert_eq!(manifest["camera"]["name"], CAMERA_FILENAME);
+        assert_eq!(fs::read_dir(&destination).unwrap().count(), 4);
+        assert_eq!(fs::read(fixture.camera_path()).unwrap(), source_bytes);
+        let camera_bytes = fs::read(destination.join(CAMERA_FILENAME)).unwrap();
+        assert_ne!(camera_bytes, source_bytes);
+        assert_eq!(
+            receipt.camera_sha256.as_deref(),
+            Some(digest(&camera_bytes).as_str())
+        );
+        let source = crate::mesh_camera::Document::decode(
+            &source_bytes,
+            "source.scene.yaml",
+            receipt.graph_revision,
+        )
+        .unwrap();
+        assert_eq!(
+            crate::mesh_camera::Document::decode(
+                &camera_bytes,
+                SCENE_FILENAME,
+                receipt.graph_revision
+            )
+            .unwrap(),
+            source
+        );
+        fs::rename(&fixture.scene, fixture.root.join("hidden-scene")).unwrap();
+        fs::rename(fixture.camera_path(), fixture.root.join("hidden-camera")).unwrap();
+        let relocated = fixture.root.join("relocated");
+        fs::rename(&destination, &relocated).unwrap();
+        let prepared = open_bundle(&relocated).unwrap();
+        assert_eq!(prepared.checksum, fixture.checksum);
+        assert_eq!(prepared.camera_sha256, receipt.camera_sha256);
+    }
+}
+
+#[test]
+fn camera_bundle_requires_both_capability_and_explicit_runtime_trust() {
+    for platform in [RuntimePlatform::LinuxX86_64, RuntimePlatform::WindowsX86_64] {
+        let fixture = Fixture::new(platform);
+        fixture.add_camera(platform);
+        let destination = fixture.root.join("out");
+        assert!(fixture.export(&destination, false).is_err());
+        fs::write(&fixture.runtime, runtime::valid_test_runtime(platform)).unwrap();
+        assert!(fixture.export(&destination, true).is_err());
+        assert!(!destination.exists());
+        fs::remove_file(fixture.camera_path()).unwrap();
+        assert!(
+            fixture
+                .export(&destination, true)
+                .unwrap()
+                .camera_sha256
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn camera_manifest_shape_name_hash_schema_and_binding_fail_closed() {
+    for case in 0..12 {
+        let fixture = Fixture::new(RuntimePlatform::LinuxX86_64);
+        fixture.add_camera(RuntimePlatform::LinuxX86_64);
+        let destination = fixture.root.join("out");
+        fixture.export(&destination, true).unwrap();
+        mutate_manifest(&destination, |value| match case {
+            0 => value["schema"] = 1.into(),
+            1 => value["camera"] = serde_json::Value::Null,
+            2 => {
+                value.as_object_mut().unwrap().remove("camera");
+            }
+            3 => value["camera"]["name"] = "../escape.json".into(),
+            4 => value["camera"]["sha256"] = "0".repeat(64).into(),
+            5 => value["camera"]["bytes"] = (MAX_CAMERA_BYTES + 1).into(),
+            6 => value["camera"]["unknown"] = true.into(),
+            7 => value["camera"] = serde_json::json!([CAMERA_FILENAME, 1, "0".repeat(64)]),
+            8 => {
+                fs::remove_file(destination.join(CAMERA_FILENAME)).unwrap();
+            }
+            9 => {
+                fs::write(destination.join(CAMERA_FILENAME), b"corrupt").unwrap();
+            }
+            10 => {
+                let path = destination.join(CAMERA_FILENAME);
+                let mut camera: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                camera["scene_filename"] = "source.scene.yaml".into();
+                let bytes = serde_json::to_vec(&camera).unwrap();
+                fs::write(path, &bytes).unwrap();
+                value["camera"] = serde_json::to_value(record(CAMERA_FILENAME, &bytes)).unwrap();
+            }
+            _ => {
+                let bytes = runtime::valid_test_runtime(RuntimePlatform::LinuxX86_64);
+                fs::write(
+                    destination.join(RuntimePlatform::LinuxX86_64.runtime_filename()),
+                    &bytes,
+                )
+                .unwrap();
+                value["runtime"] = serde_json::to_value(record(
+                    RuntimePlatform::LinuxX86_64.runtime_filename(),
+                    &bytes,
+                ))
+                .unwrap();
+            }
+        });
+        assert!(open_bundle(&destination).is_err(), "case {case}");
+    }
+    let fixture = Fixture::new(RuntimePlatform::LinuxX86_64);
+    let destination = fixture.root.join("scene-only");
+    fixture.export(&destination, true).unwrap();
+    mutate_manifest(&destination, |value| {
+        value["camera"] = serde_json::Value::Null
+    });
+    assert!(
+        open_bundle(&destination).is_err(),
+        "v1 must not accept a camera field even when null"
+    );
+}
+
+#[test]
+fn camera_source_corrupt_wrong_scene_graph_oversized_and_case_alias_rejected() {
+    for case in 0..6 {
+        let fixture = Fixture::new(RuntimePlatform::LinuxX86_64);
+        let bytes = fixture.add_camera(RuntimePlatform::LinuxX86_64);
+        let path = fixture.camera_path();
+        match case {
+            0 => fs::write(&path, b"{}").unwrap(),
+            1 | 2 => {
+                let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                if case == 1 {
+                    value["scene_filename"] = "other.scene.yaml".into();
+                } else {
+                    value["graph_revision"][0] =
+                        (value["graph_revision"][0].as_u64().unwrap() ^ 1).into();
+                }
+                fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+            }
+            3 => fs::write(&path, vec![b' '; MAX_CAMERA_BYTES as usize + 1]).unwrap(),
+            4 => {
+                fs::rename(
+                    &path,
+                    fixture.root.join("source.scene.yaml.MESH-CAMERA.JSON"),
+                )
+                .unwrap();
+            }
+            _ => {
+                fs::write(fixture.root.join("source.scene.yaml.mesh-art.json"), b"{}").unwrap();
+            }
+        }
+        let destination = fixture.root.join("out");
+        assert!(fixture.export(&destination, true).is_err(), "case {case}");
+        assert!(!destination.exists());
+    }
+}
+
+#[test]
+fn camera_presence_and_original_bytes_bound_at_admission_and_prepublication() {
+    for before_publication in [false, true] {
+        for case in 0..3 {
+            let fixture = Fixture::new(RuntimePlatform::LinuxX86_64);
+            let bytes = fixture.add_camera(RuntimePlatform::LinuxX86_64);
+            if case == 0 {
+                fs::remove_file(fixture.camera_path()).unwrap();
+            }
+            let snapshot = capture_camera_source(&fixture.scene).unwrap();
+            let change = || match case {
+                0 => fs::write(fixture.camera_path(), &bytes).unwrap(),
+                1 => fs::remove_file(fixture.camera_path()).unwrap(),
+                _ => {
+                    // Semantically identical JSON with distinct source bytes must be stale.
+                    let mut replacement = bytes.clone();
+                    assert_eq!(replacement.last(), Some(&b'\n'));
+                    *replacement.last_mut().unwrap() = b' ';
+                    assert_eq!(replacement.len(), bytes.len());
+                    fs::write(fixture.camera_path(), replacement).unwrap();
+                }
+            };
+            let destination = fixture.root.join("out");
+            let result = if before_publication {
+                export_with_recheck(fixture.request(&destination), &snapshot, change)
+            } else {
+                change();
+                export_interactive_bound(fixture.request(&destination), &snapshot)
+            };
+            assert!(
+                result.is_err(),
+                "before_publication={before_publication} case={case}"
+            );
+            assert!(!destination.exists());
+            assert!(!fs::read_dir(&fixture.root).unwrap().any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".orr-hazards-stage-")
+            }));
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn camera_source_and_bundle_symlinks_are_rejected() {
+    use std::os::unix::fs::symlink;
+    let fixture = Fixture::new(RuntimePlatform::LinuxX86_64);
+    let bytes = fixture.add_camera(RuntimePlatform::LinuxX86_64);
+    let real = fixture.root.join("camera-real.json");
+    fs::write(&real, bytes).unwrap();
+    fs::remove_file(fixture.camera_path()).unwrap();
+    symlink(&real, fixture.camera_path()).unwrap();
+    assert!(capture_camera_source(&fixture.scene).is_err());
+    fs::remove_file(fixture.camera_path()).unwrap();
+    fixture.add_camera(RuntimePlatform::LinuxX86_64);
+    let destination = fixture.root.join("out");
+    fixture.export(&destination, true).unwrap();
+    fs::remove_file(destination.join(CAMERA_FILENAME)).unwrap();
+    symlink(real, destination.join(CAMERA_FILENAME)).unwrap();
+    assert!(open_bundle(&destination).is_err());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn camera_fifo_source_rejects_without_blocking() {
+    let fixture = Fixture::new(RuntimePlatform::LinuxX86_64);
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(fixture.camera_path())
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(capture_camera_source(&fixture.scene).is_err());
+    assert!(fixture.export(&fixture.root.join("out"), true).is_err());
+}

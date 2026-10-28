@@ -1,4 +1,4 @@
-//! Separate, opt-in scene-only hazard export UI. No process launching.
+//! Separate, opt-in hazard export UI with an optional authored camera. No process launching.
 use crate::{
     editor::Editor,
     mesh_hazards_export::{self as bundle, ExportRequest, Receipt},
@@ -41,6 +41,10 @@ struct Request {
     epoch: u64,
     checksum: u64,
     scene_identity: Identity,
+    /// The optional source sidecar is part of the export input, even when it is
+    /// absent. Keeping its exact bytes (rather than a timestamp) lets us reject
+    /// additions, removals, and replacements across the async boundary.
+    camera_source: Option<Vec<u8>>,
     runtime: Identity,
     destination: PathBuf,
 }
@@ -62,6 +66,12 @@ impl Panel {
     pub(crate) fn busy(&self) -> bool {
         self.pending.is_some()
     }
+    #[cfg(test)]
+    pub(crate) fn hold_pending_for_test(&mut self) -> impl FnOnce() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        self.pending = Some(receiver);
+        move || drop(sender)
+    }
     pub(crate) fn show(&mut self, ctx: &egui::Context, editor: &mut Editor, blocked: Option<&str>) {
         self.poll(editor, blocked);
         // A closed window must still poll/repaint until the worker is observed.
@@ -73,7 +83,7 @@ impl Panel {
         }
         let mut open = self.open;
         egui::Window::new("Export hazard game").open(&mut open).default_width(600.0).show(ctx, |ui| {
-            ui.label("Scene-only MeshHazardsV1 bundle: scene, manifest and PE/ELF hazard player. Enabled hazards are required; adjacent presentation sidecars are unsupported.");
+            ui.label("MeshHazardsV1 bundle: scene, optional authored camera and manifest, plus a PE/ELF hazard player. Enabled hazards are required; other adjacent presentation sidecars are unsupported.");
             ui.label("Use only a player you built and QA-tested yourself. Format/capability validation does not establish trust. The editor never runs the copied executable.");
             if let Some(reason) = blocked { ui.label(reason); }
             ui.add_enabled_ui(!self.busy(), |ui| {
@@ -113,6 +123,7 @@ impl Panel {
                 epoch: editor.scene_load_epoch(),
                 checksum,
                 scene_identity: Identity::read(&scene)?,
+                camera_source: bundle::capture_camera_source(&scene)?,
                 scene,
                 runtime: Identity::read(Path::new(self.runtime.trim()))?,
                 destination: PathBuf::from(self.output.trim()),
@@ -178,7 +189,7 @@ impl Panel {
                 ) && source_matches(editor, blocked, &completion.request)
                     && receipt.checksum == completion.request.checksum;
                 self.status = format!(
-                    "{} at {}. Platform: {:?}; scene checksum {:016x}; player SHA-256 {}. Player was not launched.",
+                    "{} at {}. Platform: {:?}; scene checksum {:016x}; player SHA-256 {}; camera SHA-256 {}. Player was not launched.",
                     if current {
                         "Hazard export complete"
                     } else {
@@ -187,7 +198,8 @@ impl Panel {
                     receipt.root.display(),
                     receipt.platform,
                     receipt.checksum,
-                    receipt.runtime_sha256
+                    receipt.runtime_sha256,
+                    receipt.camera_sha256.as_deref().unwrap_or("none")
                 );
             }
         }
@@ -208,6 +220,7 @@ fn source_matches(editor: &mut Editor, blocked: Option<&str>, request: &Request)
         || editor.scene_load_epoch() != request.epoch
         || !request.runtime.unchanged()
         || !request.scene_identity.unchanged()
+        || bundle::capture_camera_source(&request.scene).as_ref() != Ok(&request.camera_source)
     {
         return false;
     }
@@ -236,17 +249,21 @@ fn run(request: &Request) -> Result<Receipt, String> {
         return Err("Scene or runtime identity changed before dispatch".into());
     }
     let digest = digest_runtime(&request.runtime.path)?;
-    let receipt = bundle::export_interactive(ExportRequest {
-        scene: &request.scene,
-        expected_checksum: request.checksum,
-        destination: &request.destination,
-        runtime: &request.runtime.path,
-        trusted_runtime: true,
-    })?;
+    let receipt = bundle::export_interactive_bound(
+        ExportRequest {
+            scene: &request.scene,
+            expected_checksum: request.checksum,
+            destination: &request.destination,
+            runtime: &request.runtime.path,
+            trusted_runtime: true,
+        },
+        &request.camera_source,
+    )?;
     if receipt.runtime_sha256 != digest
         || digest_runtime(&request.runtime.path)? != digest
         || !request.runtime.unchanged()
         || !request.scene_identity.unchanged()
+        || bundle::capture_camera_source(&request.scene).as_ref() != Ok(&request.camera_source)
     {
         return Err(format!(
             "Source identity changed during export; any published bundle remains at {} and is not accepted as current",

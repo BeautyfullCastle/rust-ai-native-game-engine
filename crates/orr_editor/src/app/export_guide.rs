@@ -52,7 +52,7 @@ pub(super) fn route(game: EditorGame) -> Route {
             } else {
                 "This editor was built without mesh-hazards-export. Legacy mesh-export alone does not export this profile."
             },
-            limits: "Packaging requires a Windows or Linux host. Scene-only bundle with enabled hazards. Adjacent art, props, camera, lighting, HUD and animation sidecars are refused. The editor never executes the supplied player.",
+            limits: "Packaging requires a Windows or Linux host. Enabled hazards with an optional separately saved camera. Art, props, lighting, HUD and animation sidecars are refused. Camera bundles require a camera-capable player. The editor never executes the supplied player.",
             settings: {
                 #[cfg(feature = "mesh-hazards-export")]
                 { Some(Settings::Hazards) }

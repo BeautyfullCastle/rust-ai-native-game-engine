@@ -165,7 +165,7 @@ fn invalid_or_conflicting_player_options_are_rejected() {
 fn capabilities_report_hazards_and_interactive_input_profiles() {
     assert_eq!(
         super::CAPABILITIES,
-        "ORR_MESH_HAZARDS_PLAYER_V1\nORR_MESH_INPUT_V1"
+        "ORR_MESH_HAZARDS_PLAYER_V1\nORR_MESH_INPUT_V1\nORR_MESH_HAZARDS_CAMERA_V1"
     );
 }
 
@@ -222,6 +222,7 @@ fn executable_identity_checks_platform_and_actual_bytes() {
         graph_revision: [0; 32],
         runtime_sha256: super::sha256_file_bounded(&executable).unwrap(),
         platform: native,
+        camera_sha256: None,
     };
     super::verify_executable(&executable, &bundle).unwrap();
     fs::write(&executable, b"changed runtime").unwrap();
@@ -254,4 +255,142 @@ fn fresh_session_rejects_legacy_profile_before_typed_hazard_access() {
     editor.sync();
     assert_eq!(editor.game(), EditorGame::MeshNavigation);
     assert!(crate::app::mesh_hazards_player::validate_fresh_session(&editor).is_err());
+}
+
+struct BoundBundleFixture {
+    _directory: tempfile::TempDir,
+    bundle: crate::mesh_hazards_export::PreparedBundle,
+    camera_panel: crate::mesh_camera_panel::Panel,
+    graph_revision: [u8; 32],
+}
+
+fn bound_bundle_fixture(with_camera: bool) -> BoundBundleFixture {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let source = root.join("source.scene.yaml");
+    let editor = crate::mesh_hazards_creator::prepare(
+        &source,
+        &crate::mesh_workspace::mission::Settings::default(),
+        true,
+    )
+    .unwrap();
+    let snapshot = editor.snapshot().unwrap();
+    let graph_revision = orr_remote::mesh_navigation::mesh_from_view(snapshot.predicted())
+        .unwrap()
+        .graph
+        .revision();
+    let checksum = editor.checksum();
+    if with_camera {
+        let camera = crate::mesh_camera::Document::from_orbit(orr_render::OrbitCamera::new(
+            [2.5, 2.0, 0.0],
+            0.55,
+            0.5,
+            16.0,
+        ))
+        .unwrap();
+        crate::mesh_camera_store::save(&source, Some(&camera), None, graph_revision).unwrap();
+    }
+    let platform = if cfg!(windows) {
+        crate::mesh_hazards_export::RuntimePlatform::WindowsX86_64
+    } else {
+        crate::mesh_hazards_export::RuntimePlatform::LinuxX86_64
+    };
+    let runtime = root.join(platform.runtime_filename());
+    fs::write(
+        &runtime,
+        crate::mesh_hazards_export::test_camera_runtime(platform),
+    )
+    .unwrap();
+    let destination = root.join("relocated bundle");
+    crate::mesh_hazards_export::export_interactive(crate::mesh_hazards_export::ExportRequest {
+        scene: &source,
+        expected_checksum: checksum,
+        destination: &destination,
+        runtime: &runtime,
+        trusted_runtime: true,
+    })
+    .unwrap();
+    let bundle = crate::mesh_hazards_export::open_bundle(&destination).unwrap();
+    let mut loaded = Editor::open_game(&bundle.scene, EditorGame::MeshHazardsV1).unwrap();
+    loaded.sync();
+    let mut camera_panel = crate::mesh_camera_panel::Panel::default();
+    camera_panel.sync(&mut loaded);
+    assert!(camera_panel.matches_saved_sidecar(bundle.camera_sha256.as_deref()));
+    BoundBundleFixture {
+        _directory: directory,
+        bundle,
+        camera_panel,
+        graph_revision,
+    }
+}
+
+#[test]
+fn player_rechecks_removed_replaced_and_new_camera_bundle_sidecars() {
+    let deleted = bound_bundle_fixture(true);
+    let expected_sha = deleted.bundle.camera_sha256.as_deref().unwrap();
+    fs::remove_file(deleted.bundle.root.join("game.scene.yaml.mesh-camera.json")).unwrap();
+    assert!(
+        super::verify_loaded_camera_bundle(
+            &deleted.bundle.root,
+            &deleted.bundle,
+            &deleted.camera_panel
+        )
+        .is_err()
+    );
+    assert!(
+        deleted
+            .camera_panel
+            .matches_saved_sidecar(Some(expected_sha))
+    );
+
+    let replaced = bound_bundle_fixture(true);
+    let original_sha = replaced.bundle.camera_sha256.as_deref().unwrap();
+    let replacement = crate::mesh_camera::Document::from_orbit(orr_render::OrbitCamera::new(
+        [3.5, 2.0, 0.0],
+        0.8,
+        0.35,
+        12.0,
+    ))
+    .unwrap();
+    crate::mesh_camera_store::save(
+        &replaced.bundle.scene,
+        Some(&replacement),
+        Some(original_sha),
+        replaced.graph_revision,
+    )
+    .unwrap();
+    assert!(
+        replaced
+            .camera_panel
+            .matches_saved_sidecar(Some(original_sha))
+    );
+    assert!(
+        super::verify_loaded_camera_bundle(
+            &replaced.bundle.root,
+            &replaced.bundle,
+            &replaced.camera_panel
+        )
+        .is_err()
+    );
+
+    let added = bound_bundle_fixture(false);
+    assert!(added.camera_panel.matches_saved_sidecar(None));
+    let addition = crate::mesh_camera::Document::from_orbit(orr_render::OrbitCamera::new(
+        [2.5, 2.0, 0.0],
+        0.55,
+        0.5,
+        16.0,
+    ))
+    .unwrap();
+    crate::mesh_camera_store::save(
+        &added.bundle.scene,
+        Some(&addition),
+        None,
+        added.graph_revision,
+    )
+    .unwrap();
+    assert!(
+        super::verify_loaded_camera_bundle(&added.bundle.root, &added.bundle, &added.camera_panel)
+            .is_err()
+    );
 }
