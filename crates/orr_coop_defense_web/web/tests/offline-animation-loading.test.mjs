@@ -173,7 +173,7 @@ test('self-consistent receipt cannot admit APNG, malformed/trailing chunks or un
 });
 
 const shippedPath=process.env.ORR_DEFENSE_OFFLINE_ANIMATION_HTML||process.env.ORR_DEFENSE_ANIMATION_HTML;
-test('actual generated single HTML boots its bundled source/WASM/scene/PNG with all network disabled',{skip:!binary||!shippedPath},async()=>{
+test('actual generated single HTML boots its bundled source/WASM/scene/PNG with all network disabled',{skip:!binary||!shippedPath},async(t)=>{
  const html=fs.readFileSync(shippedPath,'utf8'),h=await harness({shippedHtml:html});assertReady(h);
  assert.equal(h.run('state.presentation.source'),'1');assert.equal(h.run('state.hp'),75);assert.equal(h.run('state.lastWave'),3);assert.deepEqual(plain(h.run('state.gold')),[250,250]);
  const wasm=h.elements.find(element=>element.id==='wasm-core'),receipt=JSON.parse(h.elements.find(element=>element.id==='authored-animation-receipt').textContent);
@@ -182,5 +182,29 @@ test('actual generated single HTML boots its bundled source/WASM/scene/PNG with 
  assert.equal(h.run('presentation.manifest["unit:0"].clips.idle.frames.length'),2);assert.equal(h.run('animationImages.has("'+imageName+'")'),true);
  h.ui.get('begin').onclick({});h.run('command(1);execute(queue.shift());presentation.advance(100);draw();');
  const clips=plain(h.run('[...presentation.actors].map(([id])=>presentation.frame(id))'));assert.ok(clips.some(frame=>frame.index===1));assert.ok(authoredDraws(h).some(args=>args[0]===2));
+ // Optional exact native oracle for the scene embedded in this relocated HTML.
+ // The harness executes bundled game code/WASM; source scene/art paths are never read.
+ const tracePath=process.env.ORR_DEFENSE_OFFLINE_TRACE;
+ if(tracePath){
+  const trace=JSON.parse(fs.readFileSync(tracePath,'utf8'));
+  assert.ok(trace.rows.length>0,'native offline trace must contain consumed ticks');
+  // A UI restart legitimately increments generation; use a fresh embedded boot
+  // for a native tick-zero oracle rather than pretending reset is initial state.
+  const replay=await harness({shippedHtml:html});assertReady(replay);
+  assert.equal(replay.run('state.checksum'),trace.initialChecksum);
+  let wins=0,restarts=0,prior=replay.run('state.phase');
+  for(const [action,source,target,sequence,checksum,wave,phase,tick,generation] of trace.rows){
+   if(action===5)restarts++;
+   replay.sandbox.consumed=[action,source,target,sequence];replay.run('execute(consumed)');
+   const actual=plain(replay.run('state'));
+   assert.equal(actual.checksum,checksum);assert.equal(actual.wave,wave);
+   assert.equal(actual.phase,phase);assert.equal(actual.tick,tick);
+   assert.equal(actual.presentation.generation,generation);assert.ok(wave<=3);
+   assert.notEqual(phase,2);if(phase===1&&prior!==1)wins++;prior=phase;
+  }
+  assert.equal(wins,2);assert.equal(restarts,1);assert.equal(prior,1);
+  assert.equal(replay.fetches.length,0);
+  t.diagnostic(JSON.stringify({offlineTraceRows:trace.rows.length,wins,restarts,networkRequests:replay.fetches.length}));
+ }
  assert.equal(h.fetches.length,0);assert.ok(h.imageSources.every(src=>src.startsWith('data:image/png;base64,')));assert.equal(h.raf.length,1);
 });

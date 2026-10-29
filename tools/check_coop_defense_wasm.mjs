@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import assert from 'node:assert/strict';
 const binary=process.argv[2]||'dist/coop-defense-web/game.wasm';
 const campaignTracePath=process.argv[3];
+const campaignScenePath=process.argv[4]||'examples/static-game-starter/scenes/stormglass-short.scene.yaml';
 const w=(await WebAssembly.instantiate(fs.readFileSync(binary),{})).instance.exports;
 const read=()=>{const p=w.defense_snapshot();return JSON.parse(new TextDecoder().decode(new Uint8Array(w.memory.buffer,p,w.defense_snapshot_len())));};
 const load=text=>{const bytes=new TextEncoder().encode(text);new Uint8Array(w.memory.buffer,w.defense_scene_buffer(),bytes.length).set(bytes);return w.defense_init_scene(bytes.length);};
@@ -16,6 +17,10 @@ for(const lastWave of [0,11]){assert.equal(load(`schema: orr.scene/1\nentities: 
 assert.equal(load('schema: orr.scene/1\nentities: {}\nsingletons: {CoopDefense::Scenario: {starting_gold: 250, reactor_hp: 75}, CoopDefense::Campaign: {last_wave: 3}}\n'),0);
 s=read();assert.equal(s.lastWave,3);assert.equal(s.hp,75);assert.equal(s.maxHp,75);assert.deepEqual(s.gold,[250,250]);
 w.defense_step(5,0,0,1);s=read();assert.equal(s.lastWave,3);assert.equal(s.maxHp,75);assert.deepEqual(s.gold,[250,250],'restart preserves both singletons');
+assert.equal(load('schema: orr.scene/1\nentities: {}\nsingletons: {CoopDefense::WavePacing: {spawn_interval_ticks: 70}}\n'),0);
+s=read();assert.equal(s.lastWave,10);assert.equal(s.hp,30);assert.deepEqual(s.gold,[150,150]);
+const pacingSnapshot=read();
+for(const interval of [0,34,351]){assert.equal(load(`schema: orr.scene/1\nentities: {}\nsingletons: {CoopDefense::WavePacing: {spawn_interval_ticks: ${interval}}}\n`),3);assert.deepEqual(read(),pacingSnapshot,'invalid pacing does not replace state');}
 w.defense_init(71825);s=read();
 w.defense_step(1,0,0,1);s=read();assert.equal(s.gold[0],125);assert.equal(s.units.filter(u=>u[0]===0).length,1);
 w.defense_step(1,0,0,1);assert.equal(read().gold[0],125,'held sample spends only once');
@@ -32,16 +37,18 @@ w.defense_init(71825);let sequence=0;for(let t=0;t<1200;t++)w.defense_step(t%30=
 // Scenario singleton schema intentionally added authored defaults to checksummed Frame.
 // Historical identity-only fixture: da0ca42edf9cf8a2 (before Scenario).
 // Scenario-v1 historical golden: 9056df75782da6ab (before Campaign singleton).
-// Native legacy_seed_trace_matches_native_simulation produces be2bdbfedfabd614 for
-// seed71825, default Scenario+Campaign, 2 input slots and this same 1200-tick trace.
-assert.equal(s.checksum,'be2bdbfedfabd614','native Scenario+Campaign schema parity fixture');
+// Campaign-v2 historical golden: be2bdbfedfabd614.
+// WavePacing-v3 changes Frame layout; native legacy_seed_trace_matches_native_simulation
+// independently reproduced 41a0cf5eb1436a07, then fresh actual WASM matched it.
+// Same seed71825/default settings, two input slots, 1200 consumed ticks.
+assert.equal(s.checksum,'41a0cf5eb1436a07','native Scenario+Campaign+WavePacing schema parity fixture');
 assert.equal(s.wave,2);assert.equal(s.hp,30);assert.ok(s.projectiles.length>0);assert.ok(s.units.some(u=>u[0]===1));
 if(campaignTracePath){
  // Replay only exact consumed inputs from the native seeded strategy. No frame state
  // is edited or inferred by this WASM checker.
  const trace=JSON.parse(fs.readFileSync(campaignTracePath,'utf8'));
  assert.equal(trace.lastWave,3);assert.match(trace.buildId,/^[0-9a-f]{16}$/);
- const scene=fs.readFileSync('examples/static-game-starter/scenes/stormglass-short.scene.yaml');
+ const scene=fs.readFileSync(campaignScenePath);
  assert.equal(w.defense_scene_capacity(),65536);
  new Uint8Array(w.memory.buffer,w.defense_scene_buffer(),scene.length).set(scene);
  assert.equal(w.defense_init_scene(scene.length),0);s=read();

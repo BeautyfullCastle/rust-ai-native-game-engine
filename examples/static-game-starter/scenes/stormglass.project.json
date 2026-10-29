@@ -1,7 +1,7 @@
 {
   "schema": "orr.registered-project/1",
   "game": "CoopDefense",
-  "build_id": "0x04ee32c4873f6941",
+  "build_id": "0xb2a3336f29697b0b",
   "scene": "stormglass.scene.yaml",
   "input": "commands"
 }

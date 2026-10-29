@@ -446,7 +446,7 @@ mod tests {
                 .to_bytes(),
             explicit_default.predicted_frame().to_bytes()
         );
-        std::fs::write(&path, "schema: orr.scene/1\nentities: {}\nsingletons: {CoopDefense::Scenario: {starting_gold: 250, reactor_hp: 75}, CoopDefense::Campaign: {last_wave: 3}}\n").unwrap();
+        std::fs::write(&path, "schema: orr.scene/1\nentities: {}\nsingletons: {CoopDefense::Scenario: {starting_gold: 250, reactor_hp: 75}, CoopDefense::Campaign: {last_wave: 3}, CoopDefense::WavePacing: {spawn_interval_ticks: 70}}\n").unwrap();
         let mut native = session(prepare_config(&options).unwrap());
         assert_eq!(
             native
@@ -481,6 +481,7 @@ mod tests {
             3
         );
         assert_eq!(game::run(native.predicted_frame()).generation, 1);
+        assert_eq!(native.predicted_frame().singleton::<game::WavePacing>().spawn_interval_ticks, 70);
         let active_frame_before_invalid_source = native.predicted_frame().to_bytes();
         for invalid in [
             vec![0xff],

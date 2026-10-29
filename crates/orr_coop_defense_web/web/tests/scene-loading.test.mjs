@@ -18,11 +18,12 @@ test('actual WASM authored Scene, native trace parity, maxHp and restart',{skip:
  const w=await core();assert.equal(w.defense_scene_capacity(),65536);assert.equal(load(w,encode(authored)),0);
  let s=snapshot(w);assert.equal(s.hp,75);assert.equal(s.maxHp,75);assert.equal(s.lastWave,10);assert.deepEqual(s.gold,[250,250]);assert.deepEqual(s.presentation.events,[]);
  for(const [action,sequence]of [[1,1],[3,2],[5,3],[1,4]])w.defense_step(action,0,0,sequence);
- // Historical Scenario-v1 authored four-action checksum was ccfc379122860c2e.
- s=snapshot(w);assert.equal(s.checksum,'7400c35f6c84178e','native Rust independently consumed same trace (Campaign singleton schema)');assert.equal(s.hp,75);assert.equal(s.maxHp,75);assert.equal(s.lastWave,10);assert.equal(s.gold[0],225);
+ // Historical Scenario-v1: ccfc379122860c2e; Campaign-v2: 7400c35f6c84178e.
+ // WavePacing-v3 native Rust independently reproduced this same four-action trace.
+ s=snapshot(w);assert.equal(s.checksum,'c62add69c518309c','native Rust independently consumed same trace (WavePacing singleton schema)');assert.equal(s.hp,75);assert.equal(s.maxHp,75);assert.equal(s.lastWave,10);assert.equal(s.gold[0],225);
  const source=s.presentation.source;assert.equal(load(w,encode(authored)),0);assert.notEqual(snapshot(w).presentation.source,source);
  w.defense_init(0x0c002026);const canonical=snapshot(w).checksum;assert.equal(load(w,encode('schema: orr.scene/1\nentities: {}\n')),0);assert.equal(snapshot(w).checksum,canonical);
- w.defense_init(71825);for(let t=0,seq=0;t<1200;t++)w.defense_step(t%30===0?1:0,0,0,t%30===0?++seq:0);assert.equal(snapshot(w).checksum,'be2bdbfedfabd614','native Scenario+Campaign schema parity fixture');
+ w.defense_init(71825);for(let t=0,seq=0;t<1200;t++)w.defense_step(t%30===0?1:0,0,0,t%30===0?++seq:0);assert.equal(snapshot(w).checksum,'41a0cf5eb1436a07','native WavePacing schema parity fixture');
 });
 test('actual WASM Campaign-only source defaults Scenario, displays max and survives restart',{skip:!binary},async()=>{
  const w=await core();w.defense_init(71825);assert.equal(snapshot(w).lastWave,10);

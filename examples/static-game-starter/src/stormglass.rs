@@ -546,9 +546,11 @@ mod tests {
         std::fs::write(&manifest_path, &manifest).unwrap();
         std::fs::write(&scene_path, coop_defense::INITIAL_SCENE).unwrap();
         let mut old_manifest = parsed.clone();
-        old_manifest["build_id"] = json!("0x7b2a3ab98f619dca");
-        std::fs::write(&manifest_path, serde_json::to_vec(&old_manifest).unwrap()).unwrap();
-        assert!(PreparedRegisteredProject::open(&manifest_path, registry()).is_err());
+        for old_id in ["0x7b2a3ab98f619dca", "0x04ee32c4873f6941"] {
+            old_manifest["build_id"] = json!(old_id);
+            std::fs::write(&manifest_path, serde_json::to_vec(&old_manifest).unwrap()).unwrap();
+            assert!(PreparedRegisteredProject::open(&manifest_path, registry()).is_err());
+        }
         std::fs::write(&manifest_path, &manifest).unwrap();
         let prepared = PreparedRegisteredProject::open(&manifest_path, registry()).unwrap();
         assert_eq!(prepared.game(), registry().handle("stormglass").unwrap());
@@ -572,6 +574,9 @@ mod tests {
                 }),
             )
             .unwrap();
+        editor.host_call("world.singleton.patch", json!({
+            "name":"CoopDefense::WavePacing", "path":"spawn_interval_ticks", "value":70
+        })).unwrap();
         editor
             .host_call("scene.save", json!({"write":true}))
             .unwrap();
@@ -615,6 +620,8 @@ mod tests {
                 .last_wave,
             3
         );
+        assert_eq!(editor.gameplay_frame_evidence().unwrap().snapshot().predicted()
+            .singleton::<orr_games::coop_defense_game::WavePacing>().spawn_interval_ticks, 70);
         assert_eq!(before.reactor_hp, 80);
         assert!(before.gold[0] >= 250);
         let command = editor.submit_gameplay_intent(summon()).unwrap();
