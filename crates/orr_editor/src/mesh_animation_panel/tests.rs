@@ -437,3 +437,162 @@ fn animation_preview_clears_when_scene_context_changes() {
     assert!(!super::preview::has_preview(&panel));
     assert_eq!(panel.scene.as_deref(), Some(second_scene.as_path()));
 }
+
+#[cfg(all(feature = "mesh-mission", feature = "mesh-animated-models"))]
+#[test]
+fn named_authored_clips_stage_apply_save_and_restore_history() {
+    use egui_kittest::{kittest::Queryable, Harness};
+    let (_directory, editor, panel, original, scene_bytes, sidecar_bytes) = preview_fixture();
+    let clips = original.clips();
+    let clip_label = |index: usize| {
+        let (index, name, duration) = &clips[index];
+        let name = if name.trim().is_empty() {
+            "(unnamed)"
+        } else {
+            name
+        };
+        format!("Clip {index}: {name} ({duration:.3}s)")
+    };
+    let sidecar = crate::mesh_animation_store::sidecar_path(panel.scene.as_ref().unwrap()).unwrap();
+    let checksum = editor.checksum();
+    let mut harness = Harness::builder()
+        .with_size([1200.0, 1800.0])
+        .build_ui_state(
+            |ui, (panel, editor): &mut (Panel, crate::editor::Editor)| panel.show(ui, editor),
+            (panel, editor),
+        );
+    harness.get_by_label("Mesh agent animation").click();
+    harness.run_steps(3);
+    {
+        let (panel, editor) = harness.state_mut();
+        super::preview::request(panel, editor, "1", "16");
+        assert!(super::preview::has_preview(panel));
+    }
+    harness.get_by_label("Moving animation clip").click();
+    harness.run_steps(3);
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, &clip_label(0))
+        .click();
+    harness.run_steps(3);
+    assert!(harness.state().0.form_dirty);
+    assert!(!super::preview::has_preview(&harness.state().0));
+    assert_eq!(
+        harness.state().0.current_snapshot().unwrap().settings(),
+        original.settings()
+    );
+    assert_eq!(std::fs::read(&sidecar).unwrap(), sidecar_bytes);
+    harness.get_by_label("Idle animation clip").click();
+    harness.run_steps(3);
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, &clip_label(1))
+        .click();
+    harness.run_steps(3);
+    harness.get_by_label("Apply mesh animation").click();
+    harness.run_steps(3);
+    let authored = harness.state().0.current_snapshot().unwrap().settings();
+    assert_eq!(authored.clip, clips[0].0);
+    assert_eq!(authored.idle_clip, Some(clips[1].0));
+    harness.get_by_label("Undo mesh animation").click();
+    harness.run_steps(3);
+    assert_eq!(
+        harness.state().0.current_snapshot().unwrap().settings(),
+        original.settings()
+    );
+    assert_eq!(harness.state().0.clip, original.settings().clip.to_string());
+    assert_eq!(
+        harness.state().0.idle_clip,
+        original.settings().idle_clip.unwrap().to_string()
+    );
+    assert!(harness.state().0.idle_clip_enabled);
+    harness.get_by_label("Redo mesh animation").click();
+    harness.run_steps(3);
+    assert_eq!(
+        harness.state().0.current_snapshot().unwrap().settings(),
+        authored
+    );
+    assert_eq!(harness.state().0.clip, authored.clip.to_string());
+    assert_eq!(
+        harness.state().0.idle_clip,
+        authored.idle_clip.unwrap().to_string()
+    );
+    assert!(harness.state().0.idle_clip_enabled);
+    harness.get_by_label("Save mesh animation").click();
+    harness.run_steps(3);
+    assert!(!harness.state().0.dirty(), "{:?}", harness.state().0.error);
+    harness.get_by_label("Reload mesh animation").click();
+    harness.run_steps(3);
+    assert_eq!(
+        harness.state().0.current_snapshot().unwrap().settings(),
+        authored
+    );
+    assert_eq!(harness.state().1.checksum(), checksum);
+    assert_eq!(
+        std::fs::read(harness.state().0.scene.as_ref().unwrap()).unwrap(),
+        scene_bytes
+    );
+}
+
+#[cfg(all(feature = "mesh-mission", feature = "mesh-animated-models"))]
+#[test]
+fn named_authored_clip_list_uses_candidate_metadata_then_saved_fallback() {
+    use egui_kittest::{kittest::Queryable, Harness};
+    for use_candidate in [true, false] {
+        let (_directory, editor, mut panel, saved, _, _) = preview_fixture();
+        let candidate_root = tempfile::tempdir().unwrap();
+        let package = animated_package(candidate_root.path());
+        // Same-length JSON name replacement preserves the GLB chunk layout.
+        let mut bytes = ANIMATED_GLB.to_vec();
+        let occurrences: Vec<_> = bytes
+            .windows(4)
+            .enumerate()
+            .filter_map(|(index, bytes)| (bytes == b"bend").then_some(index))
+            .collect();
+        assert_eq!(occurrences.len(), 1);
+        bytes[occurrences[0]..occurrences[0] + 4].copy_from_slice(b"rest");
+        std::fs::write(package.join("animated.glb"), bytes).unwrap();
+        let candidate = Snapshot::from_package(
+            &package,
+            "animated.glb",
+            "LICENSE.txt",
+            saved.graph_revision(),
+        )
+        .unwrap();
+        assert_eq!(saved.clips()[0].1, "bend");
+        assert_eq!(candidate.clips()[0].1, "rest");
+        if use_candidate {
+            panel.candidate = Some(candidate);
+        }
+        let mut harness = Harness::builder()
+            .with_size([1200.0, 1800.0])
+            .build_ui_state(
+                |ui, (panel, editor): &mut (Panel, crate::editor::Editor)| panel.show(ui, editor),
+                (panel, editor),
+            );
+        harness.get_by_label("Mesh agent animation").click();
+        harness.run_steps(3);
+        harness.get_by_label("Moving animation clip").click();
+        harness.run_steps(3);
+        let duration = saved.clips()[0].2;
+        let (expected, absent) = if use_candidate {
+            ("rest", "bend")
+        } else {
+            ("bend", "rest")
+        };
+        assert!(harness
+            .query_by_role_and_label(
+                egui::accesskit::Role::Button,
+                &format!("Clip 0: {expected} ({duration:.3}s)")
+            )
+            .is_some());
+        assert!(harness
+            .query_by_role_and_label(
+                egui::accesskit::Role::Button,
+                &format!("Clip 0: {absent} ({duration:.3}s)")
+            )
+            .is_none());
+        assert_eq!(
+            harness.state().0.current_snapshot().unwrap().settings(),
+            saved.settings()
+        );
+    }
+}
