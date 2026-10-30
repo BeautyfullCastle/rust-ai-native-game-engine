@@ -220,10 +220,14 @@ impl Panel {
                 for (axis, label) in ["Animation rotation X (degrees)", "Animation rotation Y (degrees)", "Animation rotation Z (degrees)"].into_iter().enumerate() {
                     changed |= text_field(ui, label, &mut self.rotation[axis]);
                 }
+                let clips = self.candidate.as_ref().or_else(|| self.current_snapshot())
+                    .map(Snapshot::clips).unwrap_or_default();
                 changed |= ui.checkbox(&mut self.idle_clip_enabled, "Use idle and moving clips").changed();
                 if self.idle_clip_enabled {
+                    changed |= clip_choices::show_labeled(ui, "Idle animation clip", &clips, &mut self.idle_clip);
                     changed |= text_field(ui, "Animation idle clip index", &mut self.idle_clip);
                 }
+                changed |= clip_choices::show_labeled(ui, "Moving animation clip", &clips, &mut self.clip);
                 changed |= text_field(ui, "Animation clip index", &mut self.clip);
                 changed |= text_field(ui, "Animation playback rate", &mut self.rate);
                 changed |= ui.checkbox(&mut self.looped, "Loop mesh animation").changed();
