@@ -23,12 +23,20 @@ from pathlib import Path
 import re
 import sys
 
+from pack_coop_defense_audio import snapshot_audio
+
 GAME_IMPORTS = (
     "import { CombatPresentation } from './combat-presentation.mjs';\n"
     "import { StrictEventAdapter, applyStrictSnapshot } from './strict-event-adapter.mjs';\n"
     "import { RUN_SAVE_LIMITS, parseRunSave, createRunRecorder, sceneInitial, sha256, replayRunSave } from './run-save.mjs';\n"
+    "import { loadAuthoredAudio } from './audio/coop-defense-audio.mjs';\n"
 )
 MODULES = ("combat-presentation.mjs", "strict-event-adapter.mjs", "run-save.mjs")
+# Audio modules use private scopes to preserve their reviewed binding names.
+EXTRA_MODULES = {
+    "audio/authored-asset-audio.mjs": ("", "audioGain, loadAuthoredAssetBank, loadSampleAssetBank, AuthoredAssetAudio"),
+    "audio/coop-defense-audio.mjs": ("import { AuthoredAssetAudio, loadAuthoredAssetBank } from './authored-asset-audio.mjs';\n", "CoopDefenseAudio, loadAuthoredAudio"),
+}
 
 
 def bundle_game(root, files=None):
@@ -38,6 +46,15 @@ def bundle_game(root, files=None):
     if not game.startswith(GAME_IMPORTS):
         raise ValueError("Unexpected game import graph; update the explicit offline contract")
     sources = [read(name) for name in MODULES]
+    for name, (imports, exports) in EXTRA_MODULES.items():
+        source = read(name)
+        # Only the exact reviewed dependency edge is admitted.
+        if imports:
+            if source.count(imports) != 1:
+                raise ValueError("Unexpected authored-audio module graph")
+            source = source.replace(imports, "", 1)
+        source = re.sub(r"^export (?=(?:async )?(?:const|class|function) )", "", source, flags=re.M)
+        sources.append(f"const {{{exports}}}=(()=>{{\n{source}\nreturn {{{exports}}};\n}})();")
     sources.append(game[len(GAME_IMPORTS):])
     for source in sources:
         # Module scope is shared; syntax checking catches duplicate bindings.
@@ -59,7 +76,7 @@ def bundle_game(root, files=None):
     return "\n".join(sources)
 
 
-ASSETS = (*MODULES, "game.js", "index.html", "style.css", "game.wasm",
+ASSETS = (*MODULES, *EXTRA_MODULES, "game.js", "index.html", "style.css", "game.wasm",
           "assets/characters.json", "assets/units.png", "assets/enemies.png")
 MAX_ASSET = 64 * 1024 * 1024
 MAX_SCENE = 65536
@@ -232,7 +249,7 @@ class EmbeddedIds(HTMLParser):
 def check_reserved_ids(html):
     parsed = EmbeddedIds()
     parsed.feed(html)
-    reserved = {"wasm-core", "tower-atlas", "enemy-atlas", "character-atlas-meta", "game-module", "authored-scene", "authored-scene-receipt"}
+    reserved = {"authored-audio-bank", "wasm-core", "tower-atlas", "enemy-atlas", "character-atlas-meta", "game-module", "authored-scene", "authored-scene-receipt"}
     if parsed.ids & reserved or any(value.startswith("authored-animation-") for value in parsed.ids):
         raise ValueError("Reserved embedded asset ID already exists")
     if "combat-animation-manifest" in parsed.ids:
@@ -320,13 +337,13 @@ def publish_new(output, html):
         os.close(directory)
 
 
-def package(root, scene=None, output=None, animations=None):
+def package(root, scene=None, output=None, animations=None, audio=None):
     root = Path(root)
     explicit_output = output is not None
-    if (scene is not None or animations is not None) and output is None:
-        raise ValueError("Authored scene/animations require explicit new --output")
+    if (scene is not None or animations is not None or audio is not None) and output is None:
+        raise ValueError("Authored scene/animations/audio require explicit new --output")
     output = Path(output) if output is not None else root / "stormglass-foundry-offline.html"
-    if scene is not None or animations is not None or explicit_output:
+    if scene is not None or animations is not None or audio is not None or explicit_output:
         if os.path.lexists(output):
             raise FileExistsError("Output already exists; choose a new destination")
     files = {name: snapshot_file(root / name, MAX_ASSET) for name in ASSETS}
@@ -354,6 +371,8 @@ def package(root, scene=None, output=None, animations=None):
     if re.search(r"</style", css, re.I):
         raise ValueError("CSS would terminate its HTML style element")
     embedded = binary_script("wasm-core", files["game.wasm"])
+    if audio is not None:
+        embedded += snapshot_audio(audio, snapshot_file, strict_json)
     metadata = json.loads(files["assets/characters.json"].decode("utf-8"))
     encoded = json.dumps(metadata, ensure_ascii=False, separators=(",", ":")).replace("<", "\\u003c")
     embedded += f'<script type="application/json" id="character-atlas-meta">{encoded}</script>'
@@ -376,7 +395,7 @@ def package(root, scene=None, output=None, animations=None):
     html = html.replace(style_anchor, "<style>" + css + "</style>")
     html = html.replace(script_anchor, embedded + '<script type="module" id="game-module">' + js + "</script>")
     # Default command retains its historical replace behavior; authored deliveries never do.
-    if scene is None and animations is None and not explicit_output:
+    if scene is None and animations is None and audio is None and not explicit_output:
         if output.is_symlink():
             raise ValueError("Output cannot be a symlink")
         output.write_text(html, encoding="utf-8")
@@ -391,5 +410,6 @@ if __name__ == "__main__":
     parser.add_argument("--scene", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--animations", type=Path)
+    parser.add_argument("--audio", type=Path, help="authored PCM bank.json (explicit opt-in)")
     args = parser.parse_args()
-    print(package(args.build_dir, args.scene, args.output, args.animations))
+    print(package(args.build_dir, args.scene, args.output, args.animations, args.audio))

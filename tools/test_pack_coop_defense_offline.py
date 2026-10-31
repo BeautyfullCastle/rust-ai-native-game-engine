@@ -26,7 +26,8 @@ class OfflineModules(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        for name in (*packer.MODULES, "game.js", "index.html", "style.css"):
+        for name in (*packer.MODULES, *packer.EXTRA_MODULES, "game.js", "index.html", "style.css"):
+            (self.root / name).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(WEB / name, self.root / name)
         (self.root / "game.wasm").write_bytes(b"test fixture, not executable WASM")
         (self.root / "assets").mkdir()
