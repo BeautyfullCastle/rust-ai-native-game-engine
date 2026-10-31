@@ -18,7 +18,7 @@ Change
   history | undo | redo
 
 Other
-  gameplay act <intent>        semantic action in an already running registered game
+  gameplay describe|control|act  registered game contract, lifecycle, semantic action
   sim start|stop|input|play|pause|step|seek|speed|state
   activity [-f]                what agents did on the host (a live feed with -f)
   save [--write]               scene YAML, or write the host's scene file
@@ -36,8 +36,17 @@ Values are JSON when they parse (pos=[6,18], angle=0.5), else bare strings (kind
 const COMMANDS: &[(&str, &str, &str)] = &[
     (
         "gameplay",
-        "orr gameplay act <intent> [--payload JSON] [--player N] [--timeout-ms N]",
-        "orr gameplay act <intent> [--payload JSON] [--player N] [--timeout-ms N]
+        "orr gameplay describe [intent] | control play|pause|step|stop | act <intent>",
+        "orr gameplay describe [intent] [--timeout-ms N]
+orr gameplay control play|pause|step|stop [--timeout-ms N]
+orr gameplay act <intent> [--payload JSON] [--player N] [--timeout-ms N]
+
+Describe is read-only: lists intent IDs or the requested payload schema and current state.
+Control uses the paired editor lifecycle (not sim.*): mutate once then observe target state.
+Step advances one tick and requires paused Play. Queued is not success; exit 0 means
+observed target state without error/pending cleanup, not exclusive causal proof.
+No automatic retries/reconnects. Lifecycle commands need read and sim_control;
+describe needs only read. Describe intentionally includes the registered contract/schema.
 
 Perform one semantic action in an already running registered game. Uses one connection:
 describe readiness, claim once, fresh describe, submit once, read-only status polling,

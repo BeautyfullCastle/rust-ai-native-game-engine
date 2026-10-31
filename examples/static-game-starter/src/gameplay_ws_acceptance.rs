@@ -191,7 +191,41 @@ fn two_games(cli: bool) {
             call(&mut editor, &mut reader, "sim.state", J::Null).unwrap()["mode"],
             "edit"
         );
-        control(&mut editor, &mut writer, json!({"action":"play"}));
+        if cli {
+            let contract =
+                cli_command(&mut editor, &url, &reader_token, &["describe", "act"], true);
+            assert_eq!(contract["intent"], "act");
+            assert!(contract["payload_schema"].is_object());
+            cli_command(
+                &mut editor,
+                &url,
+                &reader_token,
+                &["control", "play"],
+                false,
+            );
+            let mut paused_tick = None;
+            for action in ["play", "pause", "step", "play"] {
+                let observed =
+                    cli_command(&mut editor, &url, &writer_token, &["control", action], true);
+                assert_eq!(observed["status"], "observed");
+                assert_eq!(observed["action"], action);
+                assert_eq!(observed["state"]["mode"], "play");
+                assert_eq!(observed["state"]["playing"], action == "play");
+                let tick = observed["state"]["tick"]
+                    .as_str()
+                    .unwrap()
+                    .parse::<u64>()
+                    .unwrap();
+                if action == "pause" {
+                    paused_tick = Some(tick);
+                }
+                if action == "step" {
+                    assert!(tick >= paused_tick.unwrap() + 1);
+                }
+            }
+        } else {
+            control(&mut editor, &mut writer, json!({"action":"play"}));
+        }
         wait_read(&mut editor, &mut writer, "sim.state", J::Null, |v| {
             v["playing"] == true
         });
@@ -268,7 +302,13 @@ fn two_games(cli: bool) {
         } else {
             assert_eq!(state["value"]["moves"], 1);
         }
-        control(&mut editor, &mut writer, json!({"action":"stop"}));
+        if cli {
+            let stopped = cli_command(&mut editor, &url, &writer_token, &["control", "stop"], true);
+            assert_eq!(stopped["status"], "observed");
+            assert_eq!(stopped["state"]["mode"], "edit");
+        } else {
+            control(&mut editor, &mut writer, json!({"action":"stop"}));
+        }
         wait_read(&mut editor, &mut writer, "sim.state", J::Null, |v| {
             v["mode"] == "edit"
         });
@@ -552,6 +592,32 @@ fn stormglass_game(cli: bool) {
 // Spawn the actual CLI while the same existing editor fixture is pumped.
 // No real credentials are read; the fixture token is passed via child env, not argv.
 fn cli_action(editor: &mut Editor, url: &str, token: &str, payload: J) -> J {
+    let result = cli_command(
+        editor,
+        url,
+        token,
+        &["act", "act", "--payload", &payload.to_string()],
+        true,
+    );
+    assert_eq!(result["status"], "completed");
+    let consumed = result["consumed"]["tick"]
+        .as_str()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    let neutral = result["neutral"]["tick"]
+        .as_str()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    assert!(neutral > consumed);
+    for key in ["stream_generation", "play_epoch", "timeline_epoch"] {
+        assert!(result["consumed"][key].as_str().is_some());
+        assert_eq!(result["consumed"][key], result["neutral"][key]);
+    }
+    result
+}
+fn cli_command(editor: &mut Editor, url: &str, token: &str, args: &[&str], success: bool) -> J {
     use std::process::{Command, Stdio};
     let bin = std::env::var_os("ORR_GAMEPLAY_CLI_BIN")
         .expect("explicit freshly built CLI path is required");
@@ -567,18 +633,8 @@ fn cli_action(editor: &mut Editor, url: &str, token: &str, payload: J) -> J {
     }
     let mut child = ChildGuard(
         Command::new(bin)
-            .args([
-                "--erp",
-                url,
-                "--json",
-                "gameplay",
-                "act",
-                "act",
-                "--payload",
-                &payload.to_string(),
-                "--timeout-ms",
-                "10000",
-            ])
+            .args(["--erp", url, "--json", "gameplay", "--timeout-ms", "10000"])
+            .args(args)
             .env("ORR_ERP_TOKEN", token)
             .env_remove("ORR_ERP")
             .env_remove("ORR_ERP_URL")
@@ -620,24 +676,11 @@ fn cli_action(editor: &mut Editor, url: &str, token: &str, payload: J) -> J {
         .read_to_string(&mut stderr)
         .unwrap();
     assert!(!stdout.contains(token) && !stderr.contains(token));
-    assert!(status.success(), "CLI failed: {stderr}");
-    let result: J = serde_json::from_str(&stdout).expect("CLI JSON receipt");
-    assert_eq!(result["status"], "completed");
-    assert!(result.get("scope").is_none() && result.get("connection").is_none());
-    let consumed = result["consumed"]["tick"]
-        .as_str()
-        .unwrap()
-        .parse::<u64>()
-        .unwrap();
-    let neutral = result["neutral"]["tick"]
-        .as_str()
-        .unwrap()
-        .parse::<u64>()
-        .unwrap();
-    assert!(neutral > consumed);
-    for key in ["stream_generation", "play_epoch", "timeline_epoch"] {
-        assert!(result["consumed"][key].as_str().is_some());
-        assert_eq!(result["consumed"][key], result["neutral"][key]);
+    assert_eq!(status.success(), success, "unexpected CLI exit: {stderr}");
+    if !success {
+        return J::Null;
     }
+    let result: J = serde_json::from_str(&stdout).expect("CLI JSON result");
+    assert!(result.get("scope").is_none() && result.get("connection").is_none());
     result
 }

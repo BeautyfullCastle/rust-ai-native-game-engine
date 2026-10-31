@@ -1,4 +1,5 @@
-//! A single-connection semantic action, never a simulation lifecycle command.
+//! Single-connection semantic gameplay operations through the paired editor.
+mod lifecycle;
 use crate::{args::parse, CliErr, Ctx};
 use orr_remote::{ClientError, ErpClient, PumpedWs};
 use serde_json::{json, Value as J};
@@ -303,9 +304,34 @@ fn act(s: &mut impl Session, o: &Options, d: Instant) -> Result<J, CliErr> {
     }
     Ok(result)
 }
+fn is_act(args: &[String]) -> Result<bool, CliErr> {
+    let dispatch = parse(
+        args,
+        &[
+            ("--payload", true),
+            ("--player", true),
+            ("--timeout-ms", true),
+        ],
+        false,
+    )
+    .map_err(|_| CliErr::Usage("invalid gameplay options; see `orr help gameplay`".into()))?;
+    Ok(dispatch.pos.first().is_some_and(|s| s == "act"))
+}
 pub fn run(ctx: &mut Ctx, args: &[String]) -> Result<(), CliErr> {
-    let o = options(args)?;
-    let d = Instant::now() + o.timeout;
+    // Parse before connecting; preserve options before positional command words.
+    let action = is_act(args)?;
+    let act_options = if action { Some(options(args)?) } else { None };
+    let lifecycle_options = if action {
+        None
+    } else {
+        Some(lifecycle::options(args)?)
+    };
+    let timeout = act_options
+        .as_ref()
+        .map(|o| o.timeout)
+        .or_else(|| lifecycle_options.as_ref().map(|o| o.timeout))
+        .unwrap();
+    let d = Instant::now() + timeout;
     let transport = PumpedWs::connect(&ctx.url, remaining(d)?)
         .map_err(|_| CliErr::Conn("gameplay connection failed; no reconnect attempted".into()))?;
     let mut s = ErpClient::with_transport(Box::new(transport));
@@ -313,8 +339,13 @@ pub fn run(ctx: &mut Ctx, args: &[String]) -> Result<(), CliErr> {
         let left = remaining(d)?;
         Session::call(&mut s, "auth", json!({"token":token}), left)?;
     }
-    let result = act(&mut s, &o, d)?;
-    ctx.emit("Gameplay action consumed, neutral input confirmed, control released. This is not a game-victory assertion.",&result);
+    if let Some(o) = act_options {
+        let result = act(&mut s, &o, d)?;
+        ctx.emit("Gameplay action consumed, neutral input confirmed, control released. This is not a game-victory assertion.", &result);
+    } else {
+        let result = lifecycle::execute(&mut s, &lifecycle_options.unwrap(), d)?;
+        ctx.emit(&serde_json::to_string_pretty(&result).unwrap(), &result);
+    }
     Ok(())
 }
 #[cfg(test)]
