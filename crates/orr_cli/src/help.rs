@@ -18,7 +18,7 @@ Change
   history | undo | redo
 
 Other
-  gameplay describe|control|act  registered game contract, lifecycle, semantic action
+  gameplay describe|control|act|capture  registered game contract, lifecycle, semantic action
   sim start|stop|input|play|pause|step|seek|speed|state
   activity [-f]                what agents did on the host (a live feed with -f)
   save [--write]               scene YAML, or write the host's scene file
@@ -36,10 +36,11 @@ Values are JSON when they parse (pos=[6,18], angle=0.5), else bare strings (kind
 const COMMANDS: &[(&str, &str, &str)] = &[
     (
         "gameplay",
-        "orr gameplay describe [intent] | control play|pause|step|stop | act <intent>",
+        "orr gameplay describe [intent] | control play|pause|step|stop | act <intent> | capture --out PATH",
         "orr gameplay describe [intent] [--timeout-ms N]
 orr gameplay control play|pause|step|stop [--timeout-ms N]
 orr gameplay act <intent> [--payload JSON] [--player N] [--timeout-ms N]
+orr gameplay capture --out PATH [--max-width N] [--max-height N] [--timeout-ms N]
 
 Describe is read-only: lists intent IDs or the requested payload schema and current state.
 Control uses the paired editor lifecycle (not sim.*): mutate once then observe target state.
@@ -60,7 +61,11 @@ Output (including --json) excludes lease, scope, payload and host error text.
 --player N         player slot 0..15, additionally bounded by the host (default 0)
 --timeout-ms N     whole operation deadline including connection/auth, 100..60000 (default 10000)
 The global --timeout does not override this command's bounded deadline.
-Prefer ORR_ERP_TOKEN to --token. Requires read and sim_control capabilities.
+Prefer ORR_ERP_TOKEN to --token. Act/control require read and sim_control; describe/capture require read.
+Capture saves one bounded PNG locally without replacing any path, after game/build
+identity and PNG validation. It requires read and an available editor framebuffer.
+No force, automatic retry or reconnect. State queries and capture are not atomic.
+PNG saving may succeed before stdout fails; use a new destination, not a blind retry.
 See docs/gameplay-cli.md for acceptance and limitations.",
     ),
     (

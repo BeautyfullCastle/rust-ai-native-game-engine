@@ -1,4 +1,5 @@
 //! Single-connection semantic gameplay operations through the paired editor.
+mod capture;
 mod lifecycle;
 use crate::{args::parse, CliErr, Ctx};
 use orr_remote::{ClientError, ErpClient, PumpedWs};
@@ -304,22 +305,33 @@ fn act(s: &mut impl Session, o: &Options, d: Instant) -> Result<J, CliErr> {
     }
     Ok(result)
 }
-fn is_act(args: &[String]) -> Result<bool, CliErr> {
+fn command(args: &[String]) -> Result<String, CliErr> {
     let dispatch = parse(
         args,
         &[
             ("--payload", true),
             ("--player", true),
             ("--timeout-ms", true),
+            ("--out", true),
+            ("--max-width", true),
+            ("--max-height", true),
         ],
         false,
     )
     .map_err(|_| CliErr::Usage("invalid gameplay options; see `orr help gameplay`".into()))?;
-    Ok(dispatch.pos.first().is_some_and(|s| s == "act"))
+    Ok(dispatch.pos.first().cloned().unwrap_or_default())
+}
+#[cfg(test)]
+fn is_act(args: &[String]) -> Result<bool, CliErr> {
+    Ok(command(args)? == "act")
 }
 pub fn run(ctx: &mut Ctx, args: &[String]) -> Result<(), CliErr> {
     // Parse before connecting; preserve options before positional command words.
-    let action = is_act(args)?;
+    let selected = command(args)?;
+    if selected == "capture" {
+        return capture::run(ctx, args);
+    }
+    let action = selected == "act";
     let act_options = if action { Some(options(args)?) } else { None };
     let lifecycle_options = if action {
         None
