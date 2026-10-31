@@ -30,6 +30,7 @@ pub fn dispatch(ctx: &mut Ctx, cmd: &str, args: &[String]) -> Result<(), CliErr>
         "undo" => undo(ctx, args),
         "redo" => redo(ctx, args),
         "sim" => sim(ctx, args),
+        "gameplay" => crate::gameplay::run(ctx, args),
         "activity" => activity(ctx, args),
         "save" => save(ctx, args),
         "agents-md" => agents_md(ctx, args),

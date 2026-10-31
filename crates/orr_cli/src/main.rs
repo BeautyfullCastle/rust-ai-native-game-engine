@@ -12,6 +12,7 @@
 mod args;
 mod cmds;
 mod help;
+mod gameplay;
 mod ops;
 
 use std::io::Write;
