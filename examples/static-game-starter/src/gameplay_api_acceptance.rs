@@ -1284,3 +1284,163 @@ fn compact_stormglass_hud_preserves_controls_and_enlarges_board() {
         }),
     ).unwrap();
 }
+
+/// One pointer-selected move through the real registered presenter and host.
+/// No CLI, simulated screenshot, or full combat replay is involved.
+#[cfg(feature = "stormglass")]
+#[test]
+#[ignore = "requires actual WGPU and a fresh ORR_GAMEPLAY_API_CAPTURE_DIR"]
+fn stormglass_board_picks_move_one_unit_actual_wgpu() {
+    use egui_kittest::kittest::Queryable;
+    use orr_games::coop_defense_game::{DefenseRun, DefenseUnit};
+
+    fn pump_until(h: &mut Harness<'_, EditorApp>, mut done: impl FnMut(&Editor) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            h.run_steps(1);
+            let editor = &h.state().editor;
+            assert!(editor.down().is_none(), "game host disconnected");
+            assert!(
+                editor.gameplay_error().is_none(),
+                "{:?}",
+                editor.gameplay_error()
+            );
+            if done(editor) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "board interaction did not settle"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+    fn state(editor: &Editor) -> (u32, u32, Vec<(u32, u32, u32)>) {
+        let evidence = editor
+            .gameplay_frame_evidence()
+            .expect("validated game frame");
+        let frame = evidence.snapshot().predicted();
+        let run = frame.singleton::<DefenseRun>();
+        let units = frame
+            .dense::<DefenseUnit>()
+            .1
+            .iter()
+            .filter(|unit| unit.active != 0 && unit.board == 0)
+            .map(|unit| (unit.cell, unit.role, unit.tier))
+            .collect();
+        (run.last_sequence, run.gold[0], units)
+    }
+    fn click_cell(h: &mut Harness<'_, EditorApp>, cell: u32) {
+        let bounds = h.get_by_label("Stormglass board").rect();
+        let at = orr_sample::defense_view::Layout::new(bounds)
+            .cell(0, cell)
+            .center();
+        h.event(egui::Event::PointerMoved(at));
+        h.step();
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            h.step();
+        }
+        h.run_steps(3);
+    }
+
+    let directory = PathBuf::from(std::env::var_os("ORR_GAMEPLAY_API_CAPTURE_DIR").unwrap());
+    assert!(directory.is_absolute());
+    std::fs::create_dir(&directory).expect("fresh capture directory required");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("project.json");
+    let scene_path = dir.path().join("stormglass.scene.yaml");
+    let manifest = include_bytes!("../scenes/stormglass.project.json");
+    let scene = include_bytes!("../scenes/stormglass.scene.yaml");
+    std::fs::write(&path, manifest).unwrap();
+    std::fs::write(&scene_path, scene).unwrap();
+    let prepared = PreparedRegisteredProject::open(&path, crate::stormglass::registry()).unwrap();
+    let editor = Editor::open_registered_project(prepared).unwrap();
+    let mut agent = editor
+        .gameplay_api_client("board-move-observer", Caps::parse("read").unwrap())
+        .unwrap();
+    let mut h = harness(editor, "stormglass", true);
+    let identity = rpc(&mut h, &mut agent, "rpc.discover", J::Null);
+    let original_document = rpc(&mut h, &mut agent, "scene.save", J::Null);
+    let original_history = rpc(&mut h, &mut agent, "history.list", J::Null);
+    h.get_by_label("Focus viewport").click();
+    h.run_steps(3);
+    h.get_by_label(orr_editor::app::LBL_PLAY).click();
+    wait_description(&mut h, &mut agent, |description| {
+        description["can_claim"] == true
+    });
+    h.get_by_label("Take control").click();
+    pump_until(&mut h, |editor| editor.can_submit_gameplay());
+    let empty = state(&h.state().editor);
+    assert!(empty.2.is_empty());
+    h.get_by_label("Summon").click();
+    pump_until(&mut h, |editor| {
+        let current = state(editor);
+        current.0 == empty.0 + 1 && current.2.len() == 1 && editor.can_submit_gameplay()
+    });
+    let summoned = state(&h.state().editor);
+    assert_eq!(summoned.2[0].0, 0, "Summon uses the first empty cell");
+
+    // Repeated selection must not issue an action or change the unit. The
+    // live simulation may advance ticks; sequence and unit placement may not.
+    for _ in 0..2 {
+        h.get_by_label("Pick source").click();
+        h.run_steps(3);
+        click_cell(&mut h, 0);
+        h.get_by_label("Pick target").click();
+        h.run_steps(3);
+        click_cell(&mut h, 1);
+        assert_eq!(state(&h.state().editor).0, summoned.0);
+        assert_eq!(state(&h.state().editor).2, summoned.2);
+        assert!(h.state().editor.can_submit_gameplay());
+    }
+    h.get_by_label("Move / merge").click();
+    pump_until(&mut h, |editor| {
+        let current = state(editor);
+        current.0 == summoned.0 + 1
+            && current.2.len() == 1
+            && current.2[0].0 == 1
+            && editor.can_submit_gameplay()
+    });
+    h.run_steps(3);
+    let moved = state(&h.state().editor);
+    assert_eq!(moved.0, summoned.0 + 1, "exactly one move was consumed");
+    assert_eq!(moved.2, vec![(1, summoned.2[0].1, summoned.2[0].2)]);
+    // Gold is recorded, not compared across live ticks: passive income and
+    // enemy rewards may arrive while the pointer interaction is exercised.
+    // Pausing uses the existing host lifecycle, not a forged snapshot.
+    h.state_mut().editor.pause();
+    let capture = capture_paused(&mut h, &mut agent, &identity, "stormglass-board-moved");
+    assert_eq!(capture.metadata["mode"], "play");
+    assert_eq!(state(&h.state().editor).2, moved.2);
+    let receipt = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(directory.join("board-move.json"))
+        .unwrap();
+    serde_json::to_writer_pretty(receipt, &json!({
+        "summoned":{"sequence":summoned.0,"gold":summoned.1,"units":summoned.2},
+        "moved":{"sequence":moved.0,"gold":moved.1,"units":moved.2},
+        "capture":capture.metadata,
+        "limitations":"one actual UI-selected move through host; offscreen WGPU, not native window/hardware or full combat certification"
+    })).unwrap();
+    h.state_mut().editor.stop();
+    wait_description(&mut h, &mut agent, |s| {
+        s["mode"] == "edit" && s["cleanup_pending"] == false
+    });
+    assert_eq!(
+        rpc(&mut h, &mut agent, "scene.save", J::Null),
+        original_document
+    );
+    assert_eq!(
+        rpc(&mut h, &mut agent, "history.list", J::Null),
+        original_history
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), manifest);
+    assert_eq!(std::fs::read(&scene_path).unwrap(), scene);
+}

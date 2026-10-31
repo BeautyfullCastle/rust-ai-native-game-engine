@@ -160,11 +160,20 @@ fn observe(
     )
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum PickCell {
+    Source,
+    #[default]
+    Target,
+}
+
 #[derive(Default)]
 struct StormglassView {
     source: u32,
     target: u32,
     selected: Option<u32>,
+    selected_source: Option<u32>,
+    pick: PickCell,
     generation: Option<u32>,
 }
 impl EmbeddedGameplayView for StormglassView {
@@ -202,9 +211,16 @@ impl EmbeddedGameplayView for StormglassView {
         if !ready {
             ui.label("Play and Take control to send commands");
         }
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.selectable_value(&mut self.pick, PickCell::Source, "Pick source");
+            ui.selectable_value(&mut self.pick, PickCell::Target, "Pick target");
             ui.label("Source cell");
-            ui.add(egui::DragValue::new(&mut self.source).range(0..=11));
+            if ui
+                .add(egui::DragValue::new(&mut self.source).range(0..=11))
+                .changed()
+            {
+                self.selected_source = Some(self.source);
+            }
             ui.label("Target cell");
             if ui
                 .add(egui::DragValue::new(&mut self.target).range(0..=11))
@@ -240,8 +256,9 @@ impl EmbeddedGameplayView for StormglassView {
                     );
                     ui.label("Check gold, units and the board to confirm the action result.");
                     ui.label(
-                        "Click your left board to select a target; source and actions stay above.",
+                        "Pick source (orange) or target (teal), then click your left board. Move / merge sends the action.",
                     );
+                    ui.label("Summon uses the first empty cell, not the selected target.");
                     ui.label("Active enemies (authoritative snapshot)");
                     for enemy in frame
                         .dense::<DefenseEnemy>()
@@ -258,6 +275,9 @@ impl EmbeddedGameplayView for StormglassView {
         });
         let available = ui.available_size().max(egui::vec2(1.0, 1.0));
         let (rect, response) = ui.allocate_exact_size(available, egui::Sense::click());
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "Stormglass board")
+        });
         let clip = rect.intersect(ui.clip_rect());
         let layout = orr_sample::defense_view::Layout::new(rect);
         if response.clicked() {
@@ -265,8 +285,16 @@ impl EmbeddedGameplayView for StormglassView {
                 .interact_pointer_pos()
                 .and_then(|point| layout.hit_cell_clipped(clip, point))
             {
-                self.target = cell;
-                self.selected = Some(cell);
+                match self.pick {
+                    PickCell::Source => {
+                        self.source = cell;
+                        self.selected_source = Some(cell);
+                    }
+                    PickCell::Target => {
+                        self.target = cell;
+                        self.selected = Some(cell);
+                    }
+                }
             }
         }
         orr_sample::defense_view::paint_view(
@@ -275,6 +303,16 @@ impl EmbeddedGameplayView for StormglassView {
             frame,
             self.selected,
         );
+        // Source uses an inner orange outline, distinct even when both picks
+        // name the same cell. The existing outer teal outline remains target.
+        if let Some(cell) = self.selected_source {
+            ui.painter().with_clip_rect(clip).rect_stroke(
+                layout.cell(0, cell).shrink(3.0 * layout.scale),
+                2.0 * layout.scale,
+                egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 165, 64)),
+                egui::StrokeKind::Inside,
+            );
+        }
         action
             .map(|action| {
                 IntentRequest::new(
@@ -486,6 +524,121 @@ mod tests {
     }
     #[cfg(feature = "api-acceptance")]
     #[test]
+    fn board_pick_source_target_emit_only_explicit_move_payload() {
+        use egui_kittest::{kittest::Queryable, Harness};
+        let session = session();
+        let frame = FrameView::of(session.predicted_frame());
+        let before = session.predicted_frame().to_bytes();
+        let mut h = Harness::builder().with_size([960.0, 650.0]).build_ui_state(
+            |ui, state: &mut (StormglassView, Vec<IntentRequest>)| {
+                if let Some(intent) = state
+                    .0
+                    .show(
+                        ui,
+                        frame,
+                        GameplayViewContext {
+                            phase: GameplayViewPhase::Live,
+                            input_ready: true,
+                        },
+                    )
+                    .unwrap()
+                {
+                    state.1.push(intent);
+                }
+            },
+            (StormglassView::default(), Vec::new()),
+        );
+        h.run_steps(3);
+        let click = |h: &mut Harness<'_, (StormglassView, Vec<IntentRequest>)>, point| {
+            h.event(egui::Event::PointerMoved(point));
+            for pressed in [true, false] {
+                h.event(egui::Event::PointerButton {
+                    pos: point,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            h.run_steps(3);
+        };
+        h.get_by_label("Pick source").click();
+        h.run_steps(3);
+        let layout =
+            orr_sample::defense_view::Layout::new(h.get_by_label("Stormglass board").rect());
+        click(&mut h, layout.cell(0, 3).center());
+        assert_eq!(
+            (h.state().0.source, h.state().0.selected_source),
+            (3, Some(3))
+        );
+        h.get_by_label("Pick target").click();
+        h.run_steps(3);
+        for _ in 0..3 {
+            click(&mut h, layout.cell(0, 7).center());
+        }
+        assert_eq!(
+            (h.state().0.source, h.state().0.target, h.state().0.selected),
+            (3, 7, Some(7))
+        );
+        // Remote board, background and points outside the allocated canvas are not picks.
+        click(&mut h, layout.cell(1, 2).center());
+        click(&mut h, layout.p(600.0, 30.0));
+        click(&mut h, egui::pos2(-10.0, -10.0));
+        assert_eq!((h.state().0.source, h.state().0.target), (3, 7));
+        assert!(h.state().1.is_empty());
+        h.get_by_label("Move / merge").click();
+        h.run_steps(3);
+        assert_eq!(h.state().1.len(), 1);
+        let intent = h.state_mut().1.pop().unwrap();
+        let game = registry().get("stormglass").unwrap();
+        let valid = game.validate_intent(intent).unwrap();
+        assert_eq!(
+            game.encode(&valid, context(1), frame).unwrap().input(),
+            &json!({"action":MOVE_OR_MERGE,"source_cell":3,"target_cell":7,"sequence":1})
+        );
+        assert_eq!(session.predicted_frame().to_bytes(), before);
+    }
+
+    #[test]
+    fn board_pick_generation_reset_clears_both_outlines_and_mode() {
+        let session = session();
+        let frame = FrameView::of(session.predicted_frame());
+        let mut presenter = StormglassView {
+            source: 3,
+            target: 7,
+            selected: Some(7),
+            selected_source: Some(3),
+            pick: PickCell::Source,
+            generation: Some(u32::MAX),
+        };
+        let context = egui::Context::default();
+        let mut output = context.run_ui(egui::RawInput::default(), |ui| {
+            assert!(presenter
+                .show(
+                    ui,
+                    frame,
+                    GameplayViewContext {
+                        phase: GameplayViewPhase::Live,
+                        input_ready: true,
+                    }
+                )
+                .unwrap()
+                .is_none());
+        });
+        output.textures_delta.clear();
+        assert_eq!((presenter.source, presenter.target), (0, 0));
+        assert_eq!(
+            (presenter.selected_source, presenter.selected),
+            (None, None)
+        );
+        assert_eq!(presenter.pick, PickCell::Target);
+        assert_eq!(
+            presenter.generation,
+            Some(frame.singleton::<DefenseRun>().generation)
+        );
+    }
+
+    #[cfg(feature = "api-acceptance")]
+    #[test]
     fn compact_hud_details_preserve_selection_and_emit_no_commands() {
         use egui_kittest::{kittest::Queryable, Harness};
         let session = session();
@@ -496,6 +649,7 @@ mod tests {
             target: 7,
             selected: Some(7),
             generation: Some(frame.singleton::<DefenseRun>().generation),
+            ..Default::default()
         };
         let mut h = Harness::builder().with_size([960.0, 650.0]).build_ui_state(
             |ui, presenter: &mut StormglassView| {
@@ -623,6 +777,7 @@ mod tests {
             target: 10,
             selected: Some(10),
             generation: Some(u32::MAX),
+            ..Default::default()
         };
         let context = egui::Context::default();
         let mut output = context.run_ui(egui::RawInput::default(), |ui| {
