@@ -1,6 +1,6 @@
 # Registered gameplay from the CLI
 
-Open the registered project in the editor, then use its ERP endpoint:
+Open a registered project in the editor:
 
 ```sh
 orr gameplay describe --json
@@ -13,8 +13,7 @@ orr --erp ws://127.0.0.1:7777 gameplay act act --payload '{"press":1}'
 orr gameplay act act --payload '{"action":1,"source_cell":0,"target_cell":0}' --player 0 --timeout-ms 10000 --json
 ```
 
-The intent and payload must match that registered game's existing contract.
-The examples are not universal actions. Authentication uses the existing
+Intent and payload must match the registered contract; examples are not universal. Authentication uses the existing
 `ORR_ERP_TOKEN` or `--token`; prefer the environment to keep tokens out of
 process arguments. Payload arguments can still be visible in process listings.
 Describe requires `read`; control and act require `read` and `sim_control`.
@@ -69,7 +68,35 @@ ignored CLI variants: `gameplay_cli_two_registered_games_consume_and_release`
 and, with `stormglass`, `gameplay_cli_stormglass_consumes_summon_and_preserves_source`.
 Run them explicitly with `ORR_GAMEPLAY_CLI_BIN` set to the absolute path of the
 same candidate's freshly built `orr`; absent paths fail rather than skip.
-The two-game CLI fixture also performs describe, read-only denial, Play/Pause/
-one-tick Step/resume/Stop. They reuse authored projects, fabricated credentials and outcome/
-source/history checks. These tests are scripted Linux transport acceptance,
+The two-game fixture also checks describe, read-only denial, Play/Pause/Step/resume/Stop,
+using authored projects, fabricated credentials and outcome/source/history checks. These tests are scripted Linux transport acceptance,
 not real-model play, window/GPU input or cross-platform certification.
+
+## Local framebuffer capture
+
+`orr gameplay capture --out frame.png --json` authenticates once, reads game/build
+identity, and requests `view.screenshot` exactly once on that connection. Requires
+`read` and the paired editor framebuffer. `--max-width`/`--max-height` accept
+1–2048 (default 2048); the image also has a 1,048,576-pixel and 4 MiB PNG cap.
+Bounded base64 and PNG decoding check checksums, dimensions and allocation limits. The incoming transport payload queue is capped at 6 MiB.
+`--timeout-ms` (100–60000, default 10000) bounds connection/auth/requests; the host
+capture request is at most 5 seconds. Local filesystem operations can take longer.
+
+The destination and all existing parent components must not be symlinks; parents
+must already exist. There is no `--force`: existing files, directories and broken
+links are refused before connection. Same-directory staging and atomic no-clobber
+publication also reject a later destination collision and clean ordinary failures.
+This is not crash durability or protection against hostile parent-directory swaps.
+
+Output contains only capture metadata and the local path, never base64 or raw
+host errors. A PNG may already be saved if stdout subsequently fails. Capture and
+a separate state query are **not atomic**. `epoch` is the PlaySession timeline
+epoch, not the gameplay binding epoch. Busy/stale/timeout responses fail without
+automatic retry/reconnect; choose a fresh path for an intentional later capture.
+
+The explicit ignored `gameplay_cli_two_projects_capture_actual_wgpu_png` test
+uses `ORR_GAMEPLAY_CLI_BIN` for the same candidate and `api-acceptance`: a real
+localhost read-authorized CLI captures Delivery/Switchboard's actual offscreen
+EditorApp framebuffer, checks project colors and unchanged scene/history/source.
+It never retries capture and labels the adapter; software WGPU is not hardware
+GPU, OS-window, other-platform or real-model play certification.

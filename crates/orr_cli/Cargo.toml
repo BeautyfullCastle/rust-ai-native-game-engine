@@ -22,6 +22,7 @@ orr_remote = { path = "../orr_remote", default-features = false }
 serde_json = { version = "1", features = ["arbitrary_precision", "preserve_order"] }
 # Stage local replay exports beside the destination, then commit without truncation.
 tempfile = "3"
+png = "0.18.1"
 
 [dev-dependencies]
 orr_edit = { path = "../orr_edit" }

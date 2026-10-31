@@ -664,3 +664,124 @@ fn two_projects_api_edit_play_and_capture_actual_wgpu_png_without_cua() {
         assert_eq!(std::fs::read(&scene_path).unwrap(), scene_file);
     }
 }
+
+/// Explicit binary-dependent acceptance, distinct from the in-process retrying helper.
+#[test]
+#[ignore = "requires same-candidate ORR_GAMEPLAY_CLI_BIN; run explicitly"]
+fn gameplay_cli_two_projects_capture_actual_wgpu_png() {
+    use orr_remote::{Auth, ServerConfig, TokenEntry};
+    use std::process::{Command, Stdio};
+    let binary = PathBuf::from(
+        std::env::var_os("ORR_GAMEPLAY_CLI_BIN").expect("explicit fresh CLI binary required"),
+    );
+    assert!(binary.is_absolute() && binary.is_file());
+    for alias in ["delivery", "switchboard"] {
+        let (dir, path) = fixture(alias);
+        let source = std::fs::read(&path).unwrap();
+        let prepared = PreparedRegisteredProject::open(&path, crate::gameplay::registry()).unwrap();
+        let scene = prepared.scene_path().to_owned();
+        let scene_source = std::fs::read(&scene).unwrap();
+        let token = format!(
+            "test-only-capture-{}",
+            dir.path().file_name().unwrap().to_string_lossy()
+        );
+        let mut config = ServerConfig::new(Auth::Tokens(vec![TokenEntry {
+            token: token.clone(),
+            client: "capture-fixture".into(),
+            caps: Caps::parse("read").unwrap(),
+        }]));
+        config.bind = "127.0.0.1:0".parse().unwrap();
+        let spec = prepared.host_spec().with_listener(config);
+        let mut editor = Editor::start(&spec).unwrap();
+        editor.sync();
+        let url = editor.erp_status().unwrap().0;
+        let address: std::net::SocketAddr = url
+            .strip_prefix("ws://")
+            .unwrap()
+            .trim_end_matches('/')
+            .parse()
+            .unwrap();
+        assert!(address.ip().is_loopback() && address.port() != 0);
+        let mut agent = editor
+            .gameplay_api_client("capture-observer", Caps::parse("read").unwrap())
+            .unwrap();
+        let mut harness = harness(editor, alias, false);
+        let before = rpc(&mut harness, &mut agent, "scene.save", J::Null);
+        let history = rpc(&mut harness, &mut agent, "history.list", J::Null);
+        let identity = rpc(
+            &mut harness,
+            &mut agent,
+            "editor.gameplay.describe",
+            json!({}),
+        );
+        let output_path = dir.path().join("capture.png");
+        let mut child = Command::new(&binary)
+            .args([
+                "--erp",
+                &url,
+                "--json",
+                "gameplay",
+                "--timeout-ms",
+                "10000",
+                "capture",
+                "--out",
+            ])
+            .arg(&output_path)
+            .env("ORR_ERP_TOKEN", &token)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if child.try_wait().unwrap().is_some() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("CLI capture deadline; no retry");
+            }
+            harness.run_steps(1);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "capture failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let metadata: J = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(metadata.get("png_base64").is_none());
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(&token));
+        assert_eq!(metadata["game"], identity["game"]);
+        assert_eq!(metadata["build_id"], identity["build_id"]);
+        assert_eq!(metadata["status"], "captured");
+        assert_eq!(metadata["local_png_path"], json!(output_path));
+        let bytes = std::fs::read(&output_path).unwrap();
+        let mut reader = png::Decoder::new(Cursor::new(&bytes)).read_info().unwrap();
+        assert_eq!((reader.info().width, reader.info().height), (WIDTH, HEIGHT));
+        assert_eq!(reader.info().color_type, png::ColorType::Rgba);
+        let mut rgba = vec![0; reader.output_buffer_size().unwrap()];
+        reader.next_frame(&mut rgba).unwrap();
+        reader.finish().unwrap();
+        let capture = Capture {
+            metadata,
+            rgba,
+            viewport: harness.state().ui.viewport_rect.unwrap(),
+        };
+        project_pixels(alias, &capture);
+        assert_eq!(rpc(&mut harness, &mut agent, "scene.save", J::Null), before);
+        assert_eq!(
+            rpc(&mut harness, &mut agent, "history.list", J::Null),
+            history
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), source);
+        assert_eq!(std::fs::read(&scene).unwrap(), scene_source);
+        eprintln!(
+            "CLI_GPU_CAPTURE {}",
+            json!({"project":alias,"sha256":Sha256::digest(&bytes).iter().map(|byte|format!("{byte:02x}")).collect::<String>(),"source":"actual EditorApp offscreen WGPU; no retry; not hardware certification"})
+        );
+    }
+}
