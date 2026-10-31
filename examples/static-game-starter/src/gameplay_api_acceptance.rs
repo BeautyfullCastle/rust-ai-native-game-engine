@@ -1444,3 +1444,131 @@ fn stormglass_board_picks_move_one_unit_actual_wgpu() {
     assert_eq!(std::fs::read(&path).unwrap(), manifest);
     assert_eq!(std::fs::read(&scene_path).unwrap(), scene);
 }
+
+/// Snapshot-only economy hints in the real project presenter. This deliberately
+/// sends no gameplay command and does not infer purchase success from a receipt.
+#[cfg(feature = "stormglass")]
+#[test]
+#[ignore = "requires actual WGPU and a fresh ORR_GAMEPLAY_API_CAPTURE_DIR"]
+fn stormglass_action_cost_hints_actual_wgpu() {
+    use egui_kittest::kittest::Queryable;
+    use orr_games::coop_defense_game::{investment_cost, upgrade_cost, DefenseRun, SUMMON_COST};
+
+    let directory = PathBuf::from(std::env::var_os("ORR_GAMEPLAY_API_CAPTURE_DIR").unwrap());
+    assert!(directory.is_absolute());
+    std::fs::create_dir(&directory).expect("fresh output directory required");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("project.json");
+    let scene_path = dir.path().join("stormglass.scene.yaml");
+    let manifest = include_bytes!("../scenes/stormglass.project.json");
+    let scene = include_bytes!("../scenes/stormglass.scene.yaml");
+    std::fs::write(&path, manifest).unwrap();
+    std::fs::write(&scene_path, scene).unwrap();
+    let prepared = PreparedRegisteredProject::open(&path, crate::stormglass::registry()).unwrap();
+    let editor = Editor::open_registered_project(prepared).unwrap();
+    let mut agent = editor
+        .gameplay_api_client("cost-hint-observer", Caps::parse("read").unwrap())
+        .unwrap();
+    let mut h = harness(editor, "stormglass", true);
+    let identity = rpc(&mut h, &mut agent, "rpc.discover", J::Null);
+    let document = rpc(&mut h, &mut agent, "scene.save", J::Null);
+    let history = rpc(&mut h, &mut agent, "history.list", J::Null);
+    let state = rpc(&mut h, &mut agent, "sim.state", J::Null);
+    // The registered presenter uses Editor::snapshot() in Edit, not live
+    // gameplay_frame_evidence. This is display evidence, never command scope.
+    assert_eq!(h.state().editor.mode(), orr_editor::Mode::Edit);
+    let before = *h
+        .state()
+        .editor
+        .snapshot()
+        .expect("Edit presenter requires the host-published display snapshot")
+        .predicted()
+        .singleton::<DefenseRun>();
+    assert_eq!(before.gold[0], 150);
+    assert_eq!((before.upgrades[0], before.investment[0]), (0, 0));
+    let costs = [
+        ("Summon", SUMMON_COST),
+        ("Upgrade", upgrade_cost(before.upgrades[0])),
+        ("Invest", investment_cost(before.investment[0])),
+    ];
+    h.get_by_label("Focus viewport").click();
+    h.run_steps(3);
+    for (label, cost) in costs {
+        let expected = format!("{label}: {cost} gold");
+        let hint = h.get_by_label(&expected);
+        assert!(hint.rect().is_positive(), "missing visible hint {expected}");
+        assert!(
+            hint.rect().min.y >= 0.0 && hint.rect().max.y <= HEIGHT as f32,
+            "hint outside framebuffer: {expected}"
+        );
+    }
+    for label in [
+        "Source cell",
+        "Target cell",
+        "Pick source",
+        "Pick target",
+        "Summon",
+        "Move / merge",
+        "Upgrade",
+        "Invest",
+        "Restart",
+        "Details",
+        "Play and Take control to send commands",
+        "Restore panels",
+    ] {
+        assert!(h.query_by_label(label).is_some(), "missing control {label}");
+    }
+    let capture = capture_paused(&mut h, &mut agent, &identity, "stormglass-cost-hints");
+    let tile_pixels = capture
+        .rgba
+        .chunks_exact(4)
+        .filter(|pixel| {
+            [[92u8, 111, 91], [66, 88, 78]].iter().any(|color| {
+                pixel[..3]
+                    .iter()
+                    .zip(color)
+                    .all(|(a, b)| a.abs_diff(*b) <= 2)
+            })
+        })
+        .count();
+    assert!(
+        tile_pixels > 1000,
+        "board must remain visible beneath hints"
+    );
+    assert_eq!(h.state().editor.mode(), orr_editor::Mode::Edit);
+    let after = *h
+        .state()
+        .editor
+        .snapshot()
+        .expect("Edit presenter requires the host-published display snapshot")
+        .predicted()
+        .singleton::<DefenseRun>();
+    assert_eq!(after.last_sequence, before.last_sequence);
+    assert_eq!(after.gold, before.gold);
+    assert_eq!(after.upgrades, before.upgrades);
+    assert_eq!(after.investment, before.investment);
+    assert_paused_anchor(
+        &state,
+        &rpc(&mut h, &mut agent, "sim.state", J::Null),
+        "stormglass",
+    );
+    assert_eq!(rpc(&mut h, &mut agent, "scene.save", J::Null), document);
+    assert_eq!(rpc(&mut h, &mut agent, "history.list", J::Null), history);
+    assert_eq!(std::fs::read(&path).unwrap(), manifest);
+    assert_eq!(std::fs::read(&scene_path).unwrap(), scene);
+    let evidence = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(directory.join("cost-hints-evidence.json"))
+        .unwrap();
+    serde_json::to_writer_pretty(evidence, &json!({
+        "gold": before.gold[0],
+        "summon_cost": SUMMON_COST,
+        "upgrade_cost": upgrade_cost(before.upgrades[0]),
+        "investment_cost": investment_cost(before.investment[0]),
+        "last_sequence_before": before.last_sequence,
+        "last_sequence_after": after.last_sequence,
+        "board_tile_pixels": tile_pixels,
+        "limitations": "actual offscreen edit-state framebuffer and host-published display snapshot, not live command evidence; advisory hints; no gameplay command or purchase-success claim"
+    })).unwrap();
+}

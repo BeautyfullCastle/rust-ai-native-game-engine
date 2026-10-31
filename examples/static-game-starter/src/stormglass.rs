@@ -9,8 +9,9 @@ use orr_editor::static_adapter::{
     StaticHostRequest,
 };
 use orr_games::coop_defense_game::{
-    scenario_types, Campaign, DefenseEnemy, DefenseGame, DefenseInput, DefenseRun, CELLS_PER_BOARD,
-    INVEST, LOST, MOVE_OR_MERGE, PLAYING, RESTART, SUMMON, UPGRADE, WON,
+    investment_cost, scenario_types, upgrade_cost, Campaign, DefenseEnemy, DefenseGame,
+    DefenseInput, DefenseRun, CELLS_PER_BOARD, INVEST, LOST, MAX_INVESTMENT, MAX_UPGRADE,
+    MOVE_OR_MERGE, PLAYING, RESTART, SUMMON, SUMMON_COST, UPGRADE, WON,
 };
 use orr_reflect::{Reflect, TypeRegistry};
 use orr_remote::{
@@ -160,6 +161,32 @@ fn observe(
     )
 }
 
+// Snapshot-only economic advice, not action eligibility or a dispatch gate.
+fn cost_hint(label: &str, gold: u32, cost: Option<u32>) -> String {
+    match cost {
+        None => format!("{label}: maximum reached"),
+        Some(cost) if gold < cost => {
+            format!("{label}: {cost} gold (need {} more)", cost - gold)
+        }
+        Some(cost) => format!("{label}: {cost} gold"),
+    }
+}
+fn cost_hints(run: &DefenseRun) -> [String; 3] {
+    [
+        cost_hint("Summon", run.gold[0], Some(SUMMON_COST)),
+        cost_hint(
+            "Upgrade",
+            run.gold[0],
+            (run.upgrades[0] < MAX_UPGRADE).then(|| upgrade_cost(run.upgrades[0])),
+        ),
+        cost_hint(
+            "Invest",
+            run.gold[0],
+            (run.investment[0] < MAX_INVESTMENT).then(|| investment_cost(run.investment[0])),
+        ),
+    ]
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum PickCell {
     Source,
@@ -243,6 +270,13 @@ impl EmbeddedGameplayView for StormglassView {
                 }
             }
         });
+        ui.horizontal_wrapped(|ui| {
+            for hint in cost_hints(run) {
+                ui.small(hint).on_hover_text(
+                    "Snapshot cost only; slot availability, phase and later state can still reject an action.",
+                );
+            }
+        });
         ui.collapsing("Details", |ui| {
             // Project help is bounded; generic command status and errors remain
             // in the editor chrome and are never hidden by this disclosure.
@@ -255,6 +289,7 @@ impl EmbeddedGameplayView for StormglassView {
                         "Completion means consumed, not necessarily a successful purchase or move.",
                     );
                     ui.label("Check gold, units and the board to confirm the action result.");
+                    ui.label("Costs use the displayed snapshot, not an execution guarantee. Buttons still use the normal control-readiness rules.");
                     ui.label(
                         "Pick source (orange) or target (teal), then click your left board. Move / merge sends the action.",
                     );
@@ -522,6 +557,138 @@ mod tests {
             Consumption::Invalid
         );
     }
+    #[test]
+    fn action_cost_hints_cover_gold_edges_and_shared_costs() {
+        let mut run = *session().predicted_frame().singleton::<DefenseRun>();
+        for level in 0..MAX_UPGRADE {
+            run.upgrades[0] = level;
+            let cost = upgrade_cost(level);
+            for gold in [0, cost - 1, cost, cost + 1, u32::MAX] {
+                run.gold[0] = gold;
+                let expected = if gold < cost {
+                    format!("Upgrade: {cost} gold (need {} more)", cost - gold)
+                } else {
+                    format!("Upgrade: {cost} gold")
+                };
+                assert_eq!(cost_hints(&run)[1], expected);
+            }
+        }
+        for level in 0..MAX_INVESTMENT {
+            run.investment[0] = level;
+            let cost = investment_cost(level);
+            for gold in [cost - 1, cost, cost + 1] {
+                run.gold[0] = gold;
+                assert_eq!(cost_hints(&run)[2], cost_hint("Invest", gold, Some(cost)));
+            }
+        }
+        for gold in [0, SUMMON_COST - 1, SUMMON_COST, u32::MAX] {
+            run.gold[0] = gold;
+            assert_eq!(
+                cost_hints(&run)[0],
+                cost_hint("Summon", gold, Some(SUMMON_COST))
+            );
+        }
+        assert_eq!(
+            cost_hint("Summon", 24, Some(SUMMON_COST)),
+            "Summon: 25 gold (need 1 more)"
+        );
+        assert_eq!(
+            cost_hint("Invest", 59, Some(investment_cost(0))),
+            "Invest: 60 gold (need 1 more)"
+        );
+    }
+
+    #[test]
+    fn action_cost_hints_caps_override_gold_and_ignore_remote_player() {
+        let mut run = *session().predicted_frame().singleton::<DefenseRun>();
+        for gold in [0, u32::MAX] {
+            run.gold = [gold, 777];
+            for level in [MAX_UPGRADE, MAX_UPGRADE + 1, u32::MAX] {
+                run.upgrades[0] = level;
+                assert_eq!(cost_hints(&run)[1], "Upgrade: maximum reached");
+            }
+            for level in [MAX_INVESTMENT, MAX_INVESTMENT + 1, u32::MAX] {
+                run.investment[0] = level;
+                assert_eq!(cost_hints(&run)[2], "Invest: maximum reached");
+            }
+        }
+        run.gold[0] = 24;
+        run.upgrades = [0, MAX_UPGRADE];
+        run.investment = [0, MAX_INVESTMENT];
+        assert_eq!(
+            cost_hints(&run),
+            [
+                "Summon: 25 gold (need 1 more)",
+                "Upgrade: 60 gold (need 36 more)",
+                "Invest: 60 gold (need 36 more)",
+            ]
+        );
+    }
+
+    #[cfg(feature = "api-acceptance")]
+    #[test]
+    fn action_cost_hints_do_not_gate_or_change_command_payloads() {
+        use egui_kittest::{kittest::Queryable, Harness};
+        for (gold, upgrade, investment) in [
+            (0, 0, 0),
+            (150, 0, 0),
+            (u32::MAX, MAX_UPGRADE, MAX_INVESTMENT),
+        ] {
+            let mut frame = session().predicted_frame().clone();
+            let run = frame.singleton_mut::<DefenseRun>();
+            run.gold[0] = gold;
+            run.upgrades[0] = upgrade;
+            run.investment[0] = investment;
+            let expected_hints = cost_hints(run);
+            let before = frame.to_bytes();
+            let view = FrameView::of(&frame);
+            let presenter = StormglassView {
+                source: 3,
+                target: 7,
+                generation: Some(view.singleton::<DefenseRun>().generation),
+                ..Default::default()
+            };
+            let mut h = Harness::builder().with_size([960.0, 650.0]).build_ui_state(
+                |ui, state: &mut (StormglassView, Vec<IntentRequest>)| {
+                    if let Some(intent) = state
+                        .0
+                        .show(
+                            ui,
+                            view,
+                            GameplayViewContext {
+                                phase: GameplayViewPhase::Live,
+                                input_ready: true,
+                            },
+                        )
+                        .unwrap()
+                    {
+                        state.1.push(intent);
+                    }
+                },
+                (presenter, Vec::new()),
+            );
+            h.run_steps(3);
+            assert!(h.state().1.is_empty());
+            for hint in expected_hints {
+                assert!(h.query_by_label(&hint).is_some(), "missing {hint}");
+            }
+            for (label, action) in [("Summon", SUMMON), ("Upgrade", UPGRADE), ("Invest", INVEST)] {
+                h.get_by_label(label).click();
+                h.run_steps(3);
+                assert_eq!(h.state().1.len(), 1);
+                let game = registry().get("stormglass").unwrap();
+                let valid = game
+                    .validate_intent(h.state_mut().1.pop().unwrap())
+                    .unwrap();
+                assert_eq!(
+                    game.encode(&valid, context(1), view).unwrap().input(),
+                    &json!({"action":action,"source_cell":3,"target_cell":7,"sequence":1})
+                );
+            }
+            assert_eq!(frame.to_bytes(), before);
+        }
+    }
+
     #[cfg(feature = "api-acceptance")]
     #[test]
     fn board_pick_source_target_emit_only_explicit_move_payload() {
