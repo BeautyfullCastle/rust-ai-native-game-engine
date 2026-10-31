@@ -554,3 +554,229 @@ fn verified_animated_package_preview_samples_explicit_poses_without_authoring() 
     )
     .unwrap();
 }
+
+// Explicit UI time is retained by RawInput::take, so click/settle event frames
+// use the same timestamp. Playback never depends on wall-clock sleeps.
+fn audition_at(h: &mut Harness<'_, EditorApp>, seconds: f64) {
+    h.input_mut().time = Some(seconds);
+    h.step();
+    assert_eq!(h.ctx.input(|input| input.time), seconds);
+}
+
+#[test]
+#[ignore = "requires software Vulkan and fresh ORR_PACKAGE_ANIMATION_AUDITION_CAPTURE_DIR"]
+fn verified_package_animation_audition_plays_pauses_and_restarts_without_authoring() {
+    let evidence = PathBuf::from(
+        std::env::var_os("ORR_PACKAGE_ANIMATION_AUDITION_CAPTURE_DIR")
+            .expect("fresh evidence directory"),
+    );
+    assert!(evidence.is_absolute());
+    fs::create_dir(&evidence).unwrap();
+    let root = evidence.join("room");
+    let sources = evidence.join("owned-package-copies");
+    fixture(&root, &sources);
+    let original = files(&root);
+    let source_bytes = files(&sources);
+    let mut h = harness(&root);
+    settle(&mut h);
+    let checksum = h.state().editor.checksum();
+    let history = h.state().editor.history().clone();
+    let camera = h.state().editor.camera3d;
+    let bindings = h
+        .state()
+        .models
+        .bindings
+        .as_ref()
+        .unwrap()
+        .document()
+        .clone();
+    h.get_by_label("File").click();
+    h.run_steps(2);
+    h.get_by_label("Content packages…").click_accesskit();
+    settle(&mut h);
+    verify(&mut h);
+    preview(&mut h, "animated.glb");
+    audition_at(&mut h, 100.0);
+    set_field(&mut h, "Preview clip index", "1");
+    sample(&mut h, "0");
+    let start = crop(&mut h, &evidence, "01-start-canvas.png");
+    click(&mut h, "Play preview once");
+    assert!(h.query_by_label("Preview playback: playing").is_some());
+    audition_at(&mut h, 100.25);
+    assert!(h
+        .query_by_label("Accepted preview pose: clip 1 at 0.250s")
+        .is_some());
+    audition_at(&mut h, 100.5);
+    assert!(h
+        .query_by_label("Accepted preview pose: clip 1 at 0.500s")
+        .is_some());
+    let moving = crop(&mut h, &evidence, "02-playing-midpoint-canvas.png");
+    let moving_pixels = differences(&start, &moving);
+    assert!(
+        moving_pixels > 1000,
+        "playing clip must visibly deform: {moving_pixels}"
+    );
+    shot(&mut h, &evidence, "02-playing-midpoint.png");
+    click(&mut h, "Pause preview");
+    assert!(h.query_by_label("Preview playback: paused").is_some());
+    audition_at(&mut h, 100.75);
+    audition_at(&mut h, 101.0);
+    assert_eq!(crop(&mut h, &evidence, "03-paused-canvas.png"), moving);
+    click(&mut h, "Restart preview");
+    assert!(h.query_by_label("Preview playback: paused").is_some());
+    assert!(h
+        .query_by_label("Accepted preview pose: clip 1 at 0.000s")
+        .is_some());
+    assert_eq!(
+        crop(&mut h, &evidence, "04-restarted-paused-canvas.png"),
+        start
+    );
+
+    click(&mut h, "Play preview once");
+    audition_at(&mut h, 101.25);
+    click(&mut h, "Restart preview");
+    assert!(h.query_by_label("Preview playback: playing").is_some());
+    assert!(h
+        .query_by_label("Accepted preview pose: clip 1 at 0.000s")
+        .is_some());
+    audition_at(&mut h, 101.5);
+    audition_at(&mut h, 102.25);
+    assert!(h
+        .query_by_label("Accepted preview pose: clip 1 at 1.000s")
+        .is_some());
+    assert!(h.query_by_label("Preview playback: paused").is_some());
+    let endpoint = crop(&mut h, &evidence, "05-endpoint-canvas.png");
+    audition_at(&mut h, 102.5);
+    assert_eq!(
+        crop(&mut h, &evidence, "06-endpoint-held-canvas.png"),
+        endpoint
+    );
+    click(&mut h, "Play preview once");
+    assert!(h
+        .query_by_label("Accepted preview pose: clip 1 at 0.000s")
+        .is_some());
+    audition_at(&mut h, 102.75);
+    let before_draft = crop(&mut h, &evidence, "07-before-draft-canvas.png");
+    set_field(&mut h, "Preview seconds", "0.7");
+    assert!(h.query_by_label("Preview playback: paused").is_some());
+    audition_at(&mut h, 103.0);
+    assert_eq!(
+        crop(&mut h, &evidence, "08-draft-paused-canvas.png"),
+        before_draft
+    );
+    click(&mut h, "Sample preview pose");
+    assert!(h
+        .query_by_label("Accepted preview pose: clip 1 at 0.700s")
+        .is_some());
+    let manual = crop(&mut h, &evidence, "09-manual-canvas.png");
+    audition_at(&mut h, 103.25);
+    assert_eq!(crop(&mut h, &evidence, "10-manual-held-canvas.png"), manual);
+    // Invalid Play is transactional, like invalid explicit sampling.
+    set_field(&mut h, "Preview seconds", "NaN");
+    click(&mut h, "Play preview once");
+    assert!(h
+        .query_by_label_contains("Preview sample refused:")
+        .is_some());
+    assert!(h.query_by_label("Preview playback: paused").is_some());
+    assert_eq!(
+        crop(&mut h, &evidence, "11-invalid-retained-canvas.png"),
+        manual
+    );
+
+    set_field(&mut h, "Preview seconds", "0");
+    click(&mut h, "Play preview once");
+    audition_at(&mut h, 103.5);
+    click(
+        &mut h,
+        "Preview static model sample-imported-scene/foreground.glb",
+    );
+    wait(&mut h, |h| {
+        h.query_by_label("Static package model preview canvas")
+            .is_some()
+    });
+    assert!(h.query_by_label(CANVAS).is_none());
+    assert!(h.query_by_label("Play preview once").is_none());
+    preview(&mut h, "animated.glb");
+    assert!(h
+        .query_by_label("Accepted preview pose: clip 0 at 0.000s")
+        .is_some());
+    assert!(h.query_by_label("Preview playback: paused").is_some());
+    click(&mut h, "Play preview once");
+    click(&mut h, "Close animated preview");
+    assert!(h.query_by_label(CANVAS).is_none());
+    preview(&mut h, "animated.glb");
+    assert!(h
+        .query_by_label("Accepted preview pose: clip 0 at 0.000s")
+        .is_some());
+    assert!(h.query_by_label("Preview playback: paused").is_some());
+
+    assert!(h.state().editor.selection().is_none());
+    assert_eq!(h.state().editor.checksum(), checksum);
+    assert_eq!(h.state().editor.history(), &history);
+    assert_eq!(h.state().editor.camera3d, camera);
+    assert_eq!(
+        h.state().models.bindings.as_ref().unwrap().document(),
+        &bindings
+    );
+    assert!(!h.state().models.bindings.as_ref().unwrap().dirty());
+    assert_eq!(files(&root), original);
+    assert_eq!(files(&sources), source_bytes);
+
+    // Only after the read-only assertions, change an owned installed asset's
+    // length. The next automatic sample must refuse it and retain its image.
+    set_field(&mut h, "Preview clip index", "1");
+    sample(&mut h, "0");
+    click(&mut h, "Play preview once");
+    audition_at(&mut h, 103.75);
+    let before_stale = crop(&mut h, &evidence, "12-before-stale-canvas.png");
+    let lock = orr_editor::package_manager::inspect(&root).unwrap();
+    let cached = root
+        .join(".orr/packages/objects")
+        .join(&lock.packages[PACKAGE].digest)
+        .join("animated.glb");
+    let good_bytes = fs::read(&cached).unwrap();
+    let mut changed_bytes = good_bytes.clone();
+    changed_bytes.push(0);
+    fs::write(&cached, changed_bytes).unwrap();
+    audition_at(&mut h, 104.0);
+    assert!(h
+        .query_by_label_contains("Preview sample refused:")
+        .is_some());
+    assert!(h.query_by_label("Preview playback: paused").is_some());
+    assert!(h
+        .query_by_label("Accepted preview pose: clip 1 at 0.250s")
+        .is_some());
+    assert_eq!(
+        crop(&mut h, &evidence, "13-stale-retained-canvas.png"),
+        before_stale
+    );
+    shot(&mut h, &evidence, "13-stale-refused.png");
+    click(&mut h, "Close animated preview");
+    fs::write(&cached, good_bytes).unwrap();
+    verify(&mut h);
+    assert_eq!(files(&root), original);
+    assert_eq!(files(&sources), source_bytes);
+    assert_eq!(h.state().editor.checksum(), checksum);
+    assert_eq!(h.state().editor.history(), &history);
+    assert_eq!(h.state().editor.camera3d, camera);
+    assert_eq!(
+        h.state().models.bindings.as_ref().unwrap().document(),
+        &bindings
+    );
+    fs::write(evidence.join("audition-receipt.json"), serde_json::to_vec_pretty(
+        &serde_json::json!({
+            "test": "verified_package_animation_audition_plays_pauses_and_restarts_without_authoring",
+            "adapter": h.state().viewport3d_gpu().unwrap().gpu().adapter_name(),
+            "clip_index": 1, "clip_name": "pulse", "playing_times": [0.0, 0.5],
+            "playing_changed_pixels": moving_pixels,
+            "paused_exact_canvas": true, "restart_paused_zero": true,
+            "restart_playing_then_endpoint_stop": true, "play_at_end_restarts_zero": true,
+            "draft_edit_pauses_without_sampling": true, "manual_sample_stays_idle": true,
+            "invalid_play_preserves_accepted_canvas": true,
+            "static_replacement_and_close_clear_playback": true,
+            "stale_automatic_sample_refused_and_canvas_preserved": true,
+            "preview_preserves_files_frame_history_bindings_selection_and_camera": true,
+            "scope": "software WGPU, explicit UI time, no host simulation playback"
+        })
+    ).unwrap()).unwrap();
+}
