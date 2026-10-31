@@ -138,7 +138,7 @@ pub mod room_character;
 
 #[cfg(feature = "coop-defense")]
 pub mod defense_app;
-#[cfg(feature = "coop-defense")]
+#[cfg(feature = "coop-defense-presentation")]
 pub mod defense_view;
 #[cfg(feature = "coop-defense")]
 pub mod defense_ui;

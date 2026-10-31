@@ -9,8 +9,8 @@ use orr_editor::static_adapter::{
     StaticHostRequest,
 };
 use orr_games::coop_defense_game::{
-    role_name, scenario_types, Campaign, DefenseEnemy, DefenseGame, DefenseInput, DefenseRun,
-    DefenseUnit, CELLS_PER_BOARD, INVEST, MOVE_OR_MERGE, RESTART, SUMMON, UPGRADE,
+    scenario_types, Campaign, DefenseEnemy, DefenseGame, DefenseInput, DefenseRun, CELLS_PER_BOARD,
+    INVEST, MOVE_OR_MERGE, RESTART, SUMMON, UPGRADE,
 };
 use orr_reflect::{Reflect, TypeRegistry};
 use orr_remote::{
@@ -164,6 +164,8 @@ fn observe(
 struct StormglassView {
     source: u32,
     target: u32,
+    selected: Option<u32>,
+    generation: Option<u32>,
 }
 impl EmbeddedGameplayView for StormglassView {
     fn show(
@@ -173,6 +175,10 @@ impl EmbeddedGameplayView for StormglassView {
         context: GameplayViewContext,
     ) -> Result<Option<IntentRequest>, String> {
         let run = frame.singleton::<DefenseRun>();
+        if self.generation != Some(run.generation) {
+            self.reset();
+            self.generation = Some(run.generation);
+        }
         ui.heading("Stormglass");
         ui.label("Edit Scenario resources / Campaign last wave (1–10) before Play");
         ui.label(format!(
@@ -195,7 +201,12 @@ impl EmbeddedGameplayView for StormglassView {
             ui.label("Source cell");
             ui.add(egui::DragValue::new(&mut self.source).range(0..=11));
             ui.label("Target cell");
-            ui.add(egui::DragValue::new(&mut self.target).range(0..=11));
+            if ui
+                .add(egui::DragValue::new(&mut self.target).range(0..=11))
+                .changed()
+            {
+                self.selected = Some(self.target);
+            }
         });
         let mut action = None;
         ui.horizontal_wrapped(|ui| {
@@ -211,50 +222,43 @@ impl EmbeddedGameplayView for StormglassView {
                 }
             }
         });
-        let units = frame.dense::<DefenseUnit>().1;
-        for board in 0..2 {
-            ui.label(if board == 0 {
-                "Your board"
-            } else {
-                "Co-op AI board"
-            });
-            egui::Grid::new(("stormglass-board", board)).show(ui, |ui| {
-                for cell in 0..CELLS_PER_BOARD {
-                    let unit = units
+        ui.collapsing("Active enemies (authoritative snapshot)", |ui| {
+            egui::ScrollArea::vertical()
+                .max_height(100.0)
+                .show(ui, |ui| {
+                    for enemy in frame
+                        .dense::<DefenseEnemy>()
+                        .1
                         .iter()
-                        .find(|unit| unit.board == board && unit.cell == cell);
-                    let text = match unit.filter(|unit| unit.active != 0) {
-                        Some(unit) => {
-                            format!("{cell}: {} / tier {}", role_name(unit.role), unit.tier)
-                        }
-                        None => format!("{cell}: empty"),
-                    };
-                    if ui
-                        .add_enabled(board == 0, egui::Button::new(text))
-                        .clicked()
+                        .filter(|e| e.active != 0)
                     {
-                        self.target = cell;
+                        ui.label(format!(
+                            "#{} lane {} · HP {}/{} · progress {}",
+                            enemy.id, enemy.lane, enemy.hp, enemy.max_hp, enemy.progress
+                        ));
                     }
-                    if cell % 4 == 3 {
-                        ui.end_row();
-                    }
-                }
-            });
-        }
-        ui.label("Active enemies (authoritative snapshot)");
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for enemy in frame
-                .dense::<DefenseEnemy>()
-                .1
-                .iter()
-                .filter(|e| e.active != 0)
-            {
-                ui.label(format!(
-                    "#{} lane {} · HP {}/{} · progress {}",
-                    enemy.id, enemy.lane, enemy.hp, enemy.max_hp, enemy.progress
-                ));
-            }
+                });
         });
+        ui.label("Click your left board to select a target; source and actions stay above.");
+        let available = ui.available_size().max(egui::vec2(1.0, 1.0));
+        let (rect, response) = ui.allocate_exact_size(available, egui::Sense::click());
+        let clip = rect.intersect(ui.clip_rect());
+        let layout = orr_sample::defense_view::Layout::new(rect);
+        if response.clicked() {
+            if let Some(cell) = response
+                .interact_pointer_pos()
+                .and_then(|point| layout.hit_cell_clipped(clip, point))
+            {
+                self.target = cell;
+                self.selected = Some(cell);
+            }
+        }
+        orr_sample::defense_view::paint_view(
+            &ui.painter().with_clip_rect(clip),
+            layout,
+            frame,
+            self.selected,
+        );
         action
             .map(|action| {
                 IntentRequest::new(
@@ -323,7 +327,7 @@ pub fn registry() -> &'static GameplayContracts {
 mod tests {
     use super::*;
     use orr_editor::static_adapter::CommandScope;
-    use orr_games::coop_defense_game::{DefenseConfig, TICK_RATE};
+    use orr_games::coop_defense_game::{DefenseConfig, DefenseUnit, TICK_RATE};
     use orr_session::{LocalInputSource, Session, SessionConfig};
     use orr_sim::PlayerSlot;
 
@@ -496,8 +500,47 @@ mod tests {
         assert_eq!(session.predicted_frame().to_bytes(), before);
         presenter.source = 11;
         presenter.target = 10;
+        presenter.selected = Some(10);
         presenter.reset();
         assert_eq!((presenter.source, presenter.target), (0, 0));
+        assert_eq!(presenter.selected, None);
+        assert_eq!(presenter.generation, None);
+    }
+    #[test]
+    fn presenter_generation_change_clears_local_selection_without_commands() {
+        let session = session();
+        let frame = FrameView::of(session.predicted_frame());
+        let before = frame.checksum();
+        let mut presenter = StormglassView {
+            source: 11,
+            target: 10,
+            selected: Some(10),
+            generation: Some(u32::MAX),
+        };
+        let context = egui::Context::default();
+        let mut output = context.run_ui(egui::RawInput::default(), |ui| {
+            assert!(presenter
+                .show(
+                    ui,
+                    frame,
+                    GameplayViewContext {
+                        phase: GameplayViewPhase::Live,
+                        input_ready: true,
+                    }
+                )
+                .unwrap()
+                .is_none());
+        });
+        output.textures_delta.clear();
+        assert_eq!(
+            (presenter.source, presenter.target, presenter.selected),
+            (0, 0, None)
+        );
+        assert_eq!(
+            presenter.generation,
+            Some(frame.singleton::<DefenseRun>().generation)
+        );
+        assert_eq!(frame.checksum(), before);
     }
     #[allow(
         clippy::disallowed_types,
@@ -574,9 +617,14 @@ mod tests {
                 }),
             )
             .unwrap();
-        editor.host_call("world.singleton.patch", json!({
-            "name":"CoopDefense::WavePacing", "path":"spawn_interval_ticks", "value":70
-        })).unwrap();
+        editor
+            .host_call(
+                "world.singleton.patch",
+                json!({
+                    "name":"CoopDefense::WavePacing", "path":"spawn_interval_ticks", "value":70
+                }),
+            )
+            .unwrap();
         editor
             .host_call("scene.save", json!({"write":true}))
             .unwrap();
@@ -620,8 +668,16 @@ mod tests {
                 .last_wave,
             3
         );
-        assert_eq!(editor.gameplay_frame_evidence().unwrap().snapshot().predicted()
-            .singleton::<orr_games::coop_defense_game::WavePacing>().spawn_interval_ticks, 70);
+        assert_eq!(
+            editor
+                .gameplay_frame_evidence()
+                .unwrap()
+                .snapshot()
+                .predicted()
+                .singleton::<orr_games::coop_defense_game::WavePacing>()
+                .spawn_interval_ticks,
+            70
+        );
         assert_eq!(before.reactor_hp, 80);
         assert!(before.gold[0] >= 250);
         let command = editor.submit_gameplay_intent(summon()).unwrap();

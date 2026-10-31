@@ -11,7 +11,8 @@ default-run = "arena"
 workspace = true
 
 [features]
-coop-defense = ["project", "game-ui", "orr_games/coop-defense-scene", "dep:rustix"]
+coop-defense-presentation = ["dep:egui", "orr_games/coop-defense"]
+coop-defense = ["coop-defense-presentation", "project", "game-ui", "orr_games/coop-defense-scene", "dep:rustix"]
 room-character = ["room-animated-models"]
 room-lighting = ["room-project"]
 # Optional finite visual-only Arena background authoring.
