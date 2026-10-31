@@ -66,7 +66,17 @@ for test in \
   tools/test_static_game_native_ui_settle_gate.py \
   tools/test_user_game_action_preview_gate.py \
   tools/test_user_game_own_lock_gate.py; do
-  python3 -B "$test"
+  case "$test" in
+    tools/test_static_game_actions_observation_pacing.py|tools/test_static_game_standalone_focus_sync.py|tools/test_static_game_native_ui_settle_gate.py)
+      if [[ -n "${ORR_LOCAL_POLICY_RECEIPTS:-}" ]]; then
+        phase="${test#tools/test_}"
+        python3 -I -S -B tools/linux_local_gate.py --phase "${phase%.py}" --receipt-dir "$ORR_LOCAL_POLICY_RECEIPTS"
+      else
+        python3 -B "$test"
+      fi
+      ;;
+    *) python3 -B "$test" ;;
+  esac
 done
 set +x
 printf 'Advisory rustfmt exit status: %s (0 means passed).\n' "$format_status"
