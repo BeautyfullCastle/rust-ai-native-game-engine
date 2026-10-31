@@ -9,6 +9,8 @@ pub use project_identity::{format_game_id, ProgressProfile, ProjectProgress};
 mod cached_revision;
 mod checked_remove;
 mod restore_removed;
+mod source_export;
+pub use source_export::{ExportedSource, SourceExportReport};
 mod verification;
 pub use verification::PackageVerification;
 
