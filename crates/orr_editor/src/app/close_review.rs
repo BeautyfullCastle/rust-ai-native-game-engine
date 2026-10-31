@@ -74,6 +74,8 @@ impl EditorApp {
             )
             .clicked()
         {
+            // Explicit navigation reveals its destination; passive close checks do not.
+            self.ui.viewport_focus = false;
             self.ui.bottom_tab = BottomTab::UnsavedWork;
         }
     }
