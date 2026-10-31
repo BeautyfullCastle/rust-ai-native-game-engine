@@ -1,11 +1,12 @@
 import { CombatPresentation } from './combat-presentation.mjs';
 import { StrictEventAdapter, applyStrictSnapshot } from './strict-event-adapter.mjs';
 import { RUN_SAVE_LIMITS, parseRunSave, createRunRecorder, sceneInitial, sha256, replayRunSave } from './run-save.mjs';
+import { loadAuthoredAudio } from './audio/coop-defense-audio.mjs';
 // Presentation/input adapter only. All gameplay and command acceptance remain in Rust.
 const $=id=>document.getElementById(id),canvas=$('game'),c=canvas.getContext('2d');
 const roles=[['여우 궁수','빠른 단일 사격','#c57b32'],['멧돼지 포격수','넓은 범위의 폭발 공격','#c45d4c'],['아르마딜로 전사','적의 장갑을 파쇄','#9773bb'],['올빼미 마법사','적의 이동 속도를 늦춤','#4f9faf'],['토끼 고수','내 보드 전체 공격 지원','#629455'],['두더지 광부','추가 자원 생산','#b58d36']];
 $('codex').innerHTML=roles.map(r=>`<div style="--role:${r[2]}"><b>${r[0]}</b><br>${r[1]}</div>`).join('');
-let sceneLoadGeneration=0,startupPending=false;
+let sceneLoadGeneration=0,startupPending=false,authoredAudio=null,startupCancelled=false;
 let loadedWasmBytes=null,loadedWasmSha256=null,runRecorder=null,runImportActive=false,runImportBusy=false;
 let wasm,state,selected=-1,ready=true,paused=false,seq=0,queue=[],last=0,acc=0,sound=false,seed=71825;
 let towerAtlas=null,heroRects=null,enemyAtlas=null,enemyRects=null,gesture=null,hover=-1,pending=null,feedback=[],oldEnemies=new Map(),lastNotice='';
@@ -19,8 +20,16 @@ function scale(board){return board?(mobile()?.5:.82):(mobile()?1:1.05);}
 const presentation=new CombatPresentation();
 const visualAdapter=new StrictEventAdapter({project,scale});
 const animationImages=new Map();
-function observePresentation(){const result=applyStrictSnapshot(presentation,visualAdapter,state);const out=$('event-status');if(out)out.textContent=`엔진 이벤트 v1 · ${result.status} · ${result.reason}`;return result;}
+function observePresentation(){const result=applyStrictSnapshot(presentation,visualAdapter,state);authoredAudio?.observe(result,state.presentation);const out=$('event-status');if(out)out.textContent=`엔진 이벤트 v1 · ${result.status} · ${result.reason}`;return result;}
 function syncPresentation(){presentation.setPaused(paused||ready);presentation.setHidden(document.hidden);}
+// Lifecycle owns silence independently of whether candidate restoration is pending.
+addEventListener('pagehide',e=>{
+ if(startupPending||!wasm)startupCancelled=true;
+ if(runImportBusy)invalidateRunImport();
+ paused=true;queue=[];cancelGesture();syncPresentation();
+ if(!e.persisted)presentation.dispose();
+});
+addEventListener('pageshow',e=>{if(e.persisted&&wasm&&state){$('pause').textContent='계속';update();}});
 function paintFrame(frame,image,size,fallbackRect){const rect=frame?.rect||fallbackRect;if(!image||!rect)return false;const logical=frame?.logicalSize||[rect[2],rect[3]],k=Math.min(size/logical[0],size/logical[1]),anchor=frame?.anchor||[.5,.86],pivot=frame?.pivot||[rect[2]*anchor[0],rect[3]*anchor[1]];c.drawImage(image,...rect,-pivot[0]*k,20-pivot[1]*k,rect[2]*k,rect[3]*k);return true;}
 function unitAt(cell){return state?.units.find(u=>u[0]===0&&u[1]===cell);}
 function snapshot(){const p=wasm.defense_snapshot(),n=wasm.defense_snapshot_len();return JSON.parse(new TextDecoder().decode(new Uint8Array(wasm.memory.buffer,p,n)));}
@@ -80,6 +89,9 @@ async function loadRunFile(file){
   // Pointer capture may already have been lost while candidate replay yielded.
   const capturedGesture=gesture;gesture=null;hover=-1;
   try{if(capturedGesture&&canvas.hasPointerCapture?.(capturedGesture.id))canvas.releasePointerCapture(capturedGesture.id);}catch{/* Capture was lost; logical selection is already clear. */}
+  // Candidate replay has no audio observer. Only the successful instance swap
+  // retires the old audio identity, retaining trusted activation but remaining paused.
+  syncPresentation();authoredAudio?.replaceInstanceBinding(state.presentation);
   oldEnemies.clear();feedback=[];presentation.reset();visualAdapter.reset();observePresentation();
   $('ready').hidden=true;$('result').hidden=true;$('pause').textContent='계속';
   $('scene-source').textContent=saved.initial.kind==='scene'?'방어전 파일의 제작 장면':'방어전 파일의 기본 장면';
@@ -139,7 +151,7 @@ $('summon').onclick=()=>command(1);$('upgrade').onclick=()=>command(3);$('invest
 $('begin').onclick=e=>{if(sound)void presentation.audio.unlock(e);if(runImportActive||startupPending||!wasm||!state)return;ready=false;paused=false;last=0;acc=0;$('ready').hidden=true;notice('소환 버튼으로 첫 수호대를 불러오세요!');update();};
 $('pause').onclick=togglePause;$('sound').onclick=e=>{sound=!sound;void presentation.audio.setMuted(!sound);if(sound)void presentation.audio.unlock(e);$('sound').textContent=sound?'♪ ON':'♪ OFF';$('sound').setAttribute?.('aria-label',sound?'소리 끄기':'소리 켜기');};
 addEventListener('keydown',e=>{if(runImportActive)return;if(e.repeat||['INPUT','TEXTAREA','SELECT'].includes(e.target?.tagName))return;if(e.target instanceof HTMLButtonElement&&['Space','Enter'].includes(e.code))return;const actions={KeyQ:1,KeyE:3,KeyR:4};if(actions[e.code]){e.preventDefault();command(actions[e.code]);}if(e.code==='Space'){e.preventDefault();togglePause();}if(e.code==='Escape'){cancelGesture();selected=-1;update();}});
-document.addEventListener('visibilitychange',()=>{if(runImportActive)return;presentation.setHidden(document.hidden);if(document.hidden){cancelGesture();queue=[];if(state&&!paused){paused=true;$('pause').textContent='계속';acc=0;update();}}});
+document.addEventListener('visibilitychange',()=>{presentation.setHidden(document.hidden);if(document.hidden){cancelGesture();queue=[];if(state&&!paused){paused=true;$('pause').textContent='계속';acc=0;update();}}});
 addEventListener('blur',()=>{if(runImportActive)return;cancelGesture();queue=[];if(state&&!paused&&!ready&&!state.phase){paused=true;acc=0;$('pause').textContent='계속';notice('창을 벗어나 자동으로 일시정지했어요.');update();}});addEventListener('resize',()=>{if(runImportActive)return;cancelGesture();dimensions();});
 function pointerPoint(e){const r=canvas.getBoundingClientRect();return[(e.clientX-r.left)*canvas.width/r.width,(e.clientY-r.top)*canvas.height/r.height];}
 function cellAt(p){return state?.cells.filter(a=>a[0]===0).find(a=>{const q=project(a[2],a[3],0);return Math.abs(p[0]-q[0])<=34&&Math.abs(p[1]-q[1])<=34;})?.[1]??-1;}
@@ -303,4 +315,4 @@ async function loadAtlas(){
  towerAtlas=nextTower;enemyAtlas=nextEnemy;heroRects=data?.heroes??null;enemyRects=data?.enemies??null;
  animationImages.clear();for(const [name,value]of nextImages)animationImages.set(name,value);presentation.setManifest(manifest);
 }
-try{let bytes;startupPending=true;const embedded=document.getElementById('wasm-core');if(embedded){bytes=Uint8Array.from(atob(embedded.textContent.trim()),v=>v.charCodeAt(0));}else{const res=await fetch(new URL('game.wasm',import.meta.url));if(!res.ok)throw Error(`HTTP ${res.status}`);bytes=await res.arrayBuffer();}loadedWasmBytes=new Uint8Array(bytes).slice();loadedWasmSha256=await sha256(loadedWasmBytes);const module=await WebAssembly.instantiate(loadedWasmBytes,{});wasm=module.instance.exports;await loadAtlas();dimensions();const authoredReady=await loadEmbeddedScene(bytes);startupPending=false;if(!authoredReady)start();$('loading').hidden=true;window.defenseDebug={presentationStats:()=>({...presentation.stats(),transport:visualAdapter.stats()}),presentationPose:id=>presentation.pose(id),presentationFrame:id=>presentation.frame(id),snapshot:()=>snapshot(),command,start,setPaused:v=>{if(runImportActive)return;paused=v;update();},step:n=>{if(runImportActive)return;for(let i=0;i<n;i++)execute(queue.shift()||[0,0,0,0]);presentation.advance(1000/60);update();draw();}};addEventListener('pagehide',e=>{if(runImportBusy){invalidateRunImport();return;}paused=true;queue=[];cancelGesture();syncPresentation();if(!e.persisted)presentation.dispose();});addEventListener('pageshow',e=>{if(e.persisted){$('pause').textContent='계속';update();}});requestAnimationFrame(animate);}catch(e){wasm=null;state=undefined;queue=[];paused=true;$('ready').hidden=true;$('loading').hidden=false;$('loading').textContent='게임 코어를 불러오지 못했습니다. '+e.message;console.error(e);}
+try{let bytes;startupPending=true;const embedded=document.getElementById('wasm-core');if(embedded){bytes=Uint8Array.from(atob(embedded.textContent.trim()),v=>v.charCodeAt(0));}else{const res=await fetch(new URL('game.wasm',import.meta.url));if(!res.ok)throw Error(`HTTP ${res.status}`);bytes=await res.arrayBuffer();}loadedWasmBytes=new Uint8Array(bytes).slice();loadedWasmSha256=await sha256(loadedWasmBytes);const module=await WebAssembly.instantiate(loadedWasmBytes,{});wasm=module.instance.exports;authoredAudio=await loadAuthoredAudio(document);if(startupCancelled){authoredAudio?.dispose();throw Error('Startup cancelled by pagehide');}if(authoredAudio){presentation.audio.dispose();presentation.audio=authoredAudio;}await loadAtlas();if(startupCancelled)throw Error('Startup cancelled by pagehide');dimensions();const authoredReady=await loadEmbeddedScene(bytes);if(startupCancelled)throw Error('Startup cancelled by pagehide');startupPending=false;if(!authoredReady)start();$('loading').hidden=true;window.defenseDebug={presentationStats:()=>({...presentation.stats(),transport:visualAdapter.stats()}),presentationPose:id=>presentation.pose(id),presentationFrame:id=>presentation.frame(id),snapshot:()=>snapshot(),command,start,setPaused:v=>{if(runImportActive)return;paused=v;update();},step:n=>{if(runImportActive)return;for(let i=0;i<n;i++)execute(queue.shift()||[0,0,0,0]);presentation.advance(1000/60);update();draw();}};requestAnimationFrame(animate);}catch(e){authoredAudio?.dispose();wasm=null;state=undefined;queue=[];paused=true;$('ready').hidden=true;$('loading').hidden=false;$('loading').textContent='게임 코어를 불러오지 못했습니다. '+e.message;console.error(e);}
