@@ -1,5 +1,6 @@
 //! Original vector art for Stormglass Foundry. Presentation never mutates simulation.
 use egui::{vec2, Align2, Color32 as C, FontId, Painter, Pos2, Rect, Shape, Stroke};
+use orr_bridge::FrameView;
 use orr_games::coop_defense_game as game;
 
 pub const INK: C = C::from_rgb(12, 32, 37);
@@ -47,6 +48,10 @@ impl Layout {
     }
     pub fn hit_cell(self, point: Pos2) -> Option<u32> {
         (0..game::CELLS_PER_BOARD).find(|&cell| self.cell(0, cell).contains(point))
+    }
+    /// Ignore clipped and remote-board cells when embedding this canvas.
+    pub fn hit_cell_clipped(self, clip: Rect, point: Pos2) -> Option<u32> {
+        clip.contains(point).then(|| self.hit_cell(point)).flatten()
     }
     pub fn text(self, p: &Painter, x: f32, y: f32, size: f32, color: C, text: impl ToString) {
         p.text(
@@ -214,7 +219,21 @@ pub fn turret(p: &Painter, c: Pos2, s: f32, role: u32, tier: u32, tick: u32) {
 }
 
 pub fn paint(p: &Painter, l: Layout, frame: &orr_ecs::Frame, selected: Option<u32>) {
-    let run = game::run(frame);
+    paint_view(p, l, FrameView::of(frame), selected);
+}
+
+// Frame helpers historically iterate ascending entity indices, not dense storage
+// order (which can change on removal). Preserve that order for overlapping art.
+fn ordered<T: orr_ecs::Component + Copy>(frame: FrameView<'_>) -> Vec<T> {
+    let mut values: Vec<_> = frame.iter::<T>().collect();
+    values.sort_by_key(|(entity, _)| entity.index);
+    values.into_iter().map(|(_, value)| *value).collect()
+}
+
+/// Draw the same vector scene from the registered presenter's readonly snapshot.
+/// The caller owns clipping and selection; no commands or simulation mutations.
+pub fn paint_view(p: &Painter, l: Layout, frame: FrameView<'_>, selected: Option<u32>) {
+    let run = frame.singleton::<game::DefenseRun>();
     p.rect_filled(l.rect(0.0, 0.0, 1200.0, 940.0), 0.0, INK);
     // Slate floor, hand-laid garden edges, and fine brass conduit work.
     p.rect_filled(
@@ -306,8 +325,9 @@ pub fn paint(p: &Painter, l: Layout, frame: &orr_ecs::Frame, selected: Option<u3
             }
         }
     }
-    let units = game::units(frame);
-    let shots = game::projectiles(frame);
+    let mut units = ordered::<game::DefenseUnit>(frame);
+    units.sort_by_key(|unit| (unit.board, unit.cell));
+    let shots = ordered::<game::DefenseProjectile>(frame);
     if let Some(unit) = selected.and_then(|cell| {
         units
             .iter()
@@ -321,7 +341,8 @@ pub fn paint(p: &Painter, l: Layout, frame: &orr_ecs::Frame, selected: Option<u3
             } else {
                 390.0
             } * l.scale;
-            let clipped = p.with_clip_rect(l.rect(130.0, 280.0, 450.0, 440.0));
+            let clipped =
+                p.with_clip_rect(p.clip_rect().intersect(l.rect(130.0, 280.0, 450.0, 440.0)));
             clipped.add(Shape::closed_line(
                 vec![
                     center + vec2(0.0, -radius),
@@ -358,7 +379,10 @@ pub fn paint(p: &Painter, l: Layout, frame: &orr_ecs::Frame, selected: Option<u3
             );
         }
     }
-    for enemy in game::enemies(frame).into_iter().filter(|e| e.active != 0) {
+    for enemy in ordered::<game::DefenseEnemy>(frame)
+        .into_iter()
+        .filter(|e| e.active != 0)
+    {
         let (x, y) = game::enemy_position(enemy.lane, enemy.progress);
         let c = l.world(x, y);
         let s = l.scale;
@@ -429,8 +453,8 @@ pub fn paint(p: &Painter, l: Layout, frame: &orr_ecs::Frame, selected: Option<u3
             TEAL,
         );
     }
-    let visible_enemies = game::enemies(frame);
-    for shot in game::projectiles(frame)
+    let visible_enemies = ordered::<game::DefenseEnemy>(frame);
+    for shot in ordered::<game::DefenseProjectile>(frame)
         .into_iter()
         .filter(|s| s.active != 0)
     {
@@ -469,4 +493,93 @@ pub fn paint(p: &Painter, l: Layout, frame: &orr_ecs::Frame, selected: Option<u3
     }
     diamond(p, c, 20.0 * l.scale, TEAL);
     l.text(p, 520.0, 755.0, 13.0, MUTED, "SHARED STORMGLASS CORE");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn aspect_fit_and_clipped_hits_only_select_local_cells() {
+        for size in [vec2(1200.0, 940.0), vec2(320.0, 700.0), vec2(900.0, 180.0)] {
+            let rect = Rect::from_min_size(egui::pos2(37.0, 91.0), size);
+            let layout = Layout::new(rect);
+            let canvas = layout.rect(0.0, 0.0, 1200.0, 940.0);
+            assert!(rect.expand(0.001).contains_rect(canvas));
+            for cell in 0..game::CELLS_PER_BOARD {
+                let local = layout.cell(0, cell).center();
+                assert_eq!(layout.hit_cell_clipped(rect, local), Some(cell));
+                assert_eq!(
+                    layout.hit_cell_clipped(rect, layout.cell(1, cell).center()),
+                    None
+                );
+                let hidden = Rect::from_min_max(rect.min, egui::pos2(rect.max.x, local.y - 1.0));
+                assert_eq!(layout.hit_cell_clipped(hidden, local), None);
+            }
+            assert_eq!(
+                layout.hit_cell_clipped(rect, rect.min - vec2(1.0, 1.0)),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn frame_wrapper_and_readonly_view_produce_identical_clipped_shapes() {
+        let mut sim =
+            orr_sim::Simulation::<game::DefenseGame>::new(game::DefenseConfig::default(), 60, 1);
+        for tick in 0..240 {
+            let mut inputs = orr_sim::TickInputs::new(tick, 1);
+            if tick == 0 {
+                inputs.set_input(
+                    orr_sim::PlayerSlot(0),
+                    game::DefenseInput {
+                        action: game::SUMMON,
+                        sequence: 1,
+                        ..Default::default()
+                    },
+                );
+            }
+            sim.step(&inputs);
+        }
+        let frame = sim.frame();
+        let before = frame.checksum();
+        let context = egui::Context::default();
+        let rect = Rect::from_min_size(Pos2::ZERO, vec2(320.0, 230.0));
+        let layout = Layout::new(rect);
+        let draw = |view: bool| {
+            let mut output = context.run_ui(egui::RawInput::default(), |ui| {
+                let painter = ui.painter().with_clip_rect(rect);
+                if view {
+                    paint_view(&painter, layout, FrameView::of(frame), Some(0));
+                } else {
+                    paint(&painter, layout, frame, Some(0));
+                }
+            });
+            output.textures_delta.clear();
+            output.shapes
+        };
+        let original = draw(false);
+        let readonly = draw(true);
+        assert_eq!(original, readonly);
+        assert!(!readonly.is_empty());
+        assert!(readonly
+            .iter()
+            .all(|shape| rect.contains_rect(shape.clip_rect)));
+        assert_eq!(frame.checksum(), before);
+        let view = FrameView::of(frame);
+        let mut units = ordered::<game::DefenseUnit>(view);
+        units.sort_by_key(|unit| (unit.board, unit.cell));
+        assert_eq!(
+            bytemuck::cast_slice::<_, u8>(&units),
+            bytemuck::cast_slice::<_, u8>(&game::units(frame))
+        );
+        assert_eq!(
+            bytemuck::cast_slice::<_, u8>(&ordered::<game::DefenseEnemy>(view)),
+            bytemuck::cast_slice::<_, u8>(&game::enemies(frame))
+        );
+        assert_eq!(
+            bytemuck::cast_slice::<_, u8>(&ordered::<game::DefenseProjectile>(view)),
+            bytemuck::cast_slice::<_, u8>(&game::projectiles(frame))
+        );
+    }
 }
