@@ -10,7 +10,7 @@ use orr_editor::static_adapter::{
 };
 use orr_games::coop_defense_game::{
     scenario_types, Campaign, DefenseEnemy, DefenseGame, DefenseInput, DefenseRun, CELLS_PER_BOARD,
-    INVEST, MOVE_OR_MERGE, RESTART, SUMMON, UPGRADE,
+    INVEST, LOST, MOVE_OR_MERGE, PLAYING, RESTART, SUMMON, UPGRADE, WON,
 };
 use orr_reflect::{Reflect, TypeRegistry};
 use orr_remote::{
@@ -179,24 +179,29 @@ impl EmbeddedGameplayView for StormglassView {
             self.reset();
             self.generation = Some(run.generation);
         }
-        ui.heading("Stormglass");
-        ui.label("Edit Scenario resources / Campaign last wave (1–10) before Play");
-        ui.label(format!(
-            "Wave {}/{} · Reactor {} · Gold {} / {} · Kills {} · Leaks {} · Phase {}",
-            run.wave,
-            frame.singleton::<Campaign>().last_wave,
-            run.reactor_hp,
-            run.gold[0],
-            run.gold[1],
-            run.kills,
-            run.leaks,
-            run.phase
-        ));
+        ui.horizontal_wrapped(|ui| {
+            ui.strong("Stormglass");
+            ui.label(match run.phase {
+                PLAYING => "Defending",
+                WON => "Victory",
+                LOST => "Defeat",
+                _ => "Unknown phase",
+            });
+            ui.label(format!(
+                "Wave {}/{} · Reactor {} · Gold {} / {} · Kills {} · Leaks {}",
+                run.wave,
+                frame.singleton::<Campaign>().last_wave,
+                run.reactor_hp,
+                run.gold[0],
+                run.gold[1],
+                run.kills,
+                run.leaks,
+            ));
+        });
         let ready = context.phase == GameplayViewPhase::Live && context.input_ready;
         if !ready {
             ui.label("Play and Take control to send commands");
         }
-        ui.label("Completion means consumed, not necessarily a successful purchase or move.");
         ui.horizontal(|ui| {
             ui.label("Source cell");
             ui.add(egui::DragValue::new(&mut self.source).range(0..=11));
@@ -222,10 +227,22 @@ impl EmbeddedGameplayView for StormglassView {
                 }
             }
         });
-        ui.collapsing("Active enemies (authoritative snapshot)", |ui| {
+        ui.collapsing("Details", |ui| {
+            // Project help is bounded; generic command status and errors remain
+            // in the editor chrome and are never hidden by this disclosure.
             egui::ScrollArea::vertical()
+                .id_salt("stormglass-details")
                 .max_height(100.0)
                 .show(ui, |ui| {
+                    ui.label("Edit Scenario resources / Campaign last wave (1–10) before Play");
+                    ui.label(
+                        "Completion means consumed, not necessarily a successful purchase or move.",
+                    );
+                    ui.label("Check gold, units and the board to confirm the action result.");
+                    ui.label(
+                        "Click your left board to select a target; source and actions stay above.",
+                    );
+                    ui.label("Active enemies (authoritative snapshot)");
                     for enemy in frame
                         .dense::<DefenseEnemy>()
                         .1
@@ -239,7 +256,6 @@ impl EmbeddedGameplayView for StormglassView {
                     }
                 });
         });
-        ui.label("Click your left board to select a target; source and actions stay above.");
         let available = ui.available_size().max(egui::vec2(1.0, 1.0));
         let (rect, response) = ui.allocate_exact_size(available, egui::Sense::click());
         let clip = rect.intersect(ui.clip_rect());
@@ -468,6 +484,97 @@ mod tests {
             Consumption::Invalid
         );
     }
+    #[cfg(feature = "api-acceptance")]
+    #[test]
+    fn compact_hud_details_preserve_selection_and_emit_no_commands() {
+        use egui_kittest::{kittest::Queryable, Harness};
+        let session = session();
+        let frame = FrameView::of(session.predicted_frame());
+        let before = session.predicted_frame().to_bytes();
+        let presenter = StormglassView {
+            source: 3,
+            target: 7,
+            selected: Some(7),
+            generation: Some(frame.singleton::<DefenseRun>().generation),
+        };
+        let mut h = Harness::builder().with_size([960.0, 650.0]).build_ui_state(
+            |ui, presenter: &mut StormglassView| {
+                assert!(presenter
+                    .show(
+                        ui,
+                        frame,
+                        GameplayViewContext {
+                            phase: GameplayViewPhase::Live,
+                            input_ready: true,
+                        }
+                    )
+                    .unwrap()
+                    .is_none());
+            },
+            presenter,
+        );
+        h.run_steps(3);
+        for _ in 0..3 {
+            h.get_by_label("Details").click();
+            h.run_steps(3);
+            for label in ["Summon", "Move / merge", "Upgrade", "Invest", "Restart"] {
+                assert!(h.query_by_label(label).is_some(), "missing action {label}");
+            }
+            assert_eq!(
+                (h.state().source, h.state().target, h.state().selected),
+                (3, 7, Some(7))
+            );
+            h.get_by_label("Details").click();
+            h.run_steps(3);
+            assert_eq!(
+                (h.state().source, h.state().target, h.state().selected),
+                (3, 7, Some(7))
+            );
+        }
+        assert_eq!(session.predicted_frame().to_bytes(), before);
+    }
+
+    #[cfg(feature = "api-acceptance")]
+    #[test]
+    fn compact_hud_unavailable_controls_and_readable_phase_remain_visible() {
+        use egui_kittest::{kittest::Queryable, Harness};
+        let session = session();
+        let frame = FrameView::of(session.predicted_frame());
+        let mut h = Harness::builder().with_size([390.0, 650.0]).build_ui_state(
+            |ui, presenter: &mut StormglassView| {
+                assert!(presenter
+                    .show(
+                        ui,
+                        frame,
+                        GameplayViewContext {
+                            phase: GameplayViewPhase::Edit,
+                            input_ready: false,
+                        }
+                    )
+                    .unwrap()
+                    .is_none());
+            },
+            StormglassView::default(),
+        );
+        h.run_steps(3);
+        assert!(h.query_by_label("Defending").is_some());
+        assert!(h
+            .query_by_label("Play and Take control to send commands")
+            .is_some());
+        for label in [
+            "Source cell",
+            "Target cell",
+            "Summon",
+            "Move / merge",
+            "Upgrade",
+            "Invest",
+            "Restart",
+            "Details",
+        ] {
+            assert!(h.query_by_label(label).is_some(), "missing control {label}");
+        }
+    }
+
     #[test]
     fn presenter_reads_snapshot_without_mutating_simulation() {
         let session = session();
