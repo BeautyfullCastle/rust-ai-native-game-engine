@@ -26,8 +26,9 @@ import sys
 GAME_IMPORTS = (
     "import { CombatPresentation } from './combat-presentation.mjs';\n"
     "import { StrictEventAdapter, applyStrictSnapshot } from './strict-event-adapter.mjs';\n"
+    "import { RUN_SAVE_LIMITS, parseRunSave, createRunRecorder, sceneInitial, sha256, replayRunSave } from './run-save.mjs';\n"
 )
-MODULES = ("combat-presentation.mjs", "strict-event-adapter.mjs")
+MODULES = ("combat-presentation.mjs", "strict-event-adapter.mjs", "run-save.mjs")
 
 
 def bundle_game(root, files=None):
