@@ -785,3 +785,296 @@ fn gameplay_cli_two_projects_capture_actual_wgpu_png() {
         );
     }
 }
+/// One real game session, driven only through the immutable CLI and existing ERP.
+/// Runtime frame reads are observation oracles, never a state mutation shortcut.
+#[cfg(feature = "stormglass")]
+#[test]
+#[ignore = "requires verified ORR_GAMEPLAY_CLI_BIN and fresh ORR_GAMEPLAY_API_CAPTURE_DIR"]
+fn gameplay_cli_stormglass_play_loop_actual_wgpu_png() {
+    use orr_games::coop_defense_game::{
+        DefenseEnemy, DefenseRun, DefenseUnit, Scenario, SUMMON_COST,
+    };
+    use orr_remote::{Auth, ServerConfig, TokenEntry};
+    use std::{
+        io::Write,
+        process::{Child, Command, Stdio},
+    };
+
+    // Kill/reap our own CLI even if the renderer/assertion unwinds.
+    struct OwnedChild(Option<Child>);
+    impl Drop for OwnedChild {
+        fn drop(&mut self) {
+            if let Some(child) = self.0.as_mut() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+    fn save(path: &std::path::Path, value: &J) {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .unwrap();
+        file.write_all(&serde_json::to_vec_pretty(value).unwrap())
+            .unwrap();
+    }
+    fn observed(h: &Harness<'_, EditorApp>) -> J {
+        let evidence = h.state().editor.gameplay_frame_evidence().unwrap();
+        let frame = evidence.snapshot().predicted();
+        let r = frame.singleton::<DefenseRun>();
+        let units: Vec<_> = frame
+            .dense::<DefenseUnit>()
+            .1
+            .iter()
+            .filter(|u| u.active != 0)
+            .map(|u| json!({"board":u.board,"cell":u.cell,"role":u.role,"tier":u.tier}))
+            .collect();
+        let enemies: Vec<_> = frame
+            .dense::<DefenseEnemy>()
+            .1
+            .iter()
+            .filter(|e| e.active != 0)
+            .map(|e| json!({"id":e.id,"hp":e.hp,"max_hp":e.max_hp,"progress":e.progress}))
+            .collect();
+        json!({"tick":r.tick,"generation":r.generation,"wave":r.wave,"reactor_hp":r.reactor_hp,
+            "gold":r.gold,"kills":r.kills,"leaks":r.leaks,"units":units,"enemies":enemies})
+    }
+    fn cli(
+        h: &mut Harness<'_, EditorApp>,
+        binary: &std::path::Path,
+        url: &str,
+        token: &str,
+        args: &[&str],
+    ) -> J {
+        let mut child = OwnedChild(Some(
+            Command::new(binary)
+                .args(["--erp", url, "--json", "gameplay", "--timeout-ms", "10000"])
+                .args(args)
+                .env("ORR_ERP_TOKEN", token)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        ));
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while child.0.as_mut().unwrap().try_wait().unwrap().is_none() {
+            assert!(Instant::now() < deadline, "CLI deadline; no retry");
+            h.run_steps(1);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let output = child.0.take().unwrap().wait_with_output().unwrap();
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(token));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains(token));
+        assert!(
+            output.status.success(),
+            "CLI operation failed (raw output withheld)"
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    }
+    fn capture(
+        h: &mut Harness<'_, EditorApp>,
+        binary: &std::path::Path,
+        url: &str,
+        token: &str,
+        directory: &std::path::Path,
+        label: &str,
+        identity: &J,
+    ) -> J {
+        let before = observed(h);
+        let path = directory.join(format!("{label}.png"));
+        let metadata = cli(
+            h,
+            binary,
+            url,
+            token,
+            &["capture", "--out", path.to_str().unwrap()],
+        );
+        assert_eq!(metadata["status"], "captured");
+        assert_eq!(metadata["game"], identity["game"]);
+        assert_eq!(metadata["build_id"], identity["build_id"]);
+        assert_eq!(metadata["paused"], true);
+        assert_eq!(observed(h), before, "paused state drift during capture");
+        let bytes = std::fs::read(&path).unwrap();
+        let mut reader = png::Decoder::new(Cursor::new(&bytes)).read_info().unwrap();
+        assert_eq!((reader.info().width, reader.info().height), (WIDTH, HEIGHT));
+        assert_eq!(reader.info().color_type, png::ColorType::Rgba);
+        let mut rgba = vec![0; reader.output_buffer_size().unwrap()];
+        reader.next_frame(&mut rgba).unwrap();
+        reader.finish().unwrap();
+        assert!(rgba.chunks_exact(4).any(|p| p[..3] != [0, 0, 0]));
+        let hash = Sha256::digest(&bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        save(
+            &directory.join(format!("{label}.json")),
+            &json!({"capture":metadata,"observed":before,
+            "sha256":hash,"source":"actual Stormglass presenter / EditorApp offscreen WGPU; manually inspect PNG"}),
+        );
+        before
+    }
+    let binary = PathBuf::from(std::env::var_os("ORR_GAMEPLAY_CLI_BIN").unwrap());
+    assert!(binary.is_absolute() && binary.is_file());
+    let directory = PathBuf::from(std::env::var_os("ORR_GAMEPLAY_API_CAPTURE_DIR").unwrap());
+    assert!(directory.is_absolute());
+    std::fs::create_dir(&directory).expect("fresh external artifact directory required");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("project.json");
+    let scene = dir.path().join("stormglass.scene.yaml");
+    let manifest = include_bytes!("../scenes/stormglass.project.json");
+    let source = include_bytes!("../scenes/stormglass.scene.yaml");
+    std::fs::write(&path, manifest).unwrap();
+    std::fs::write(&scene, source).unwrap();
+    let prepared = PreparedRegisteredProject::open(&path, crate::stormglass::registry()).unwrap();
+    let token = format!(
+        "test-only-loop-{}",
+        dir.path().file_name().unwrap().to_string_lossy()
+    );
+    let mut config = ServerConfig::new(Auth::Tokens(vec![TokenEntry {
+        token: token.clone(),
+        client: "loop-fixture".into(),
+        caps: Caps::parse("read,sim_control").unwrap(),
+    }]));
+    config.bind = "127.0.0.1:0".parse().unwrap();
+    let mut editor = Editor::start(&prepared.host_spec().with_listener(config)).unwrap();
+    editor.sync();
+    let url = editor.erp_status().unwrap().0;
+    let address: std::net::SocketAddr = url
+        .strip_prefix("ws://")
+        .unwrap()
+        .trim_end_matches('/')
+        .parse()
+        .unwrap();
+    assert!(address.ip().is_loopback() && address.port() != 0);
+    let mut agent = editor
+        .gameplay_api_client("loop-observer", Caps::parse("read").unwrap())
+        .unwrap();
+    let mut h = harness(editor, "stormglass", false);
+    let identity = cli(&mut h, &binary, &url, &token, &["describe"]);
+    let history = rpc(&mut h, &mut agent, "history.list", J::Null);
+    let saved = rpc(&mut h, &mut agent, "scene.save", J::Null);
+    cli(&mut h, &binary, &url, &token, &["control", "play"]);
+    let summon = cli(
+        &mut h,
+        &binary,
+        &url,
+        &token,
+        &[
+            "act",
+            "act",
+            "--payload",
+            r#"{"action":1,"source_cell":0,"target_cell":0}"#,
+        ],
+    );
+    save(&directory.join("summon-receipt.json"), &summon);
+    assert_eq!(summon["status"], "completed");
+    cli(&mut h, &binary, &url, &token, &["control", "pause"]);
+    let purchased = capture(
+        &mut h,
+        &binary,
+        &url,
+        &token,
+        &directory,
+        "01-summon",
+        &identity,
+    );
+    let scenario = Scenario::default();
+    assert_eq!(
+        purchased["units"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|u| u["board"] == 0)
+            .count(),
+        1
+    );
+    // This bounded initial observation must precede passive income; otherwise fail,
+    // rather than claiming a net balance proves the purchase.
+    assert!(purchased["tick"].as_u64().unwrap() < 60);
+    assert_eq!(purchased["gold"][0], scenario.starting_gold - SUMMON_COST);
+    cli(&mut h, &binary, &url, &token, &["control", "play"]);
+    let deadline = Instant::now() + Duration::from_secs(45);
+    loop {
+        h.run_steps(1);
+        let state = observed(&h);
+        if state["kills"].as_u64().unwrap() > 0 && !state["enemies"].as_array().unwrap().is_empty()
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no actual combat progress within 45 seconds"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    cli(&mut h, &binary, &url, &token, &["control", "pause"]);
+    let combat = capture(
+        &mut h,
+        &binary,
+        &url,
+        &token,
+        &directory,
+        "02-combat",
+        &identity,
+    );
+    assert!(combat["kills"].as_u64().unwrap() > 0);
+    assert!(
+        !combat["enemies"].as_array().unwrap().is_empty(),
+        "combat capture requires visible enemy HP"
+    );
+    assert!(combat["tick"].as_u64().unwrap() > purchased["tick"].as_u64().unwrap());
+    cli(&mut h, &binary, &url, &token, &["control", "play"]);
+    let restart = cli(
+        &mut h,
+        &binary,
+        &url,
+        &token,
+        &[
+            "act",
+            "act",
+            "--payload",
+            r#"{"action":5,"source_cell":0,"target_cell":0}"#,
+        ],
+    );
+    save(&directory.join("restart-receipt.json"), &restart);
+    assert_eq!(restart["status"], "completed");
+    cli(&mut h, &binary, &url, &token, &["control", "pause"]);
+    let reset = capture(
+        &mut h,
+        &binary,
+        &url,
+        &token,
+        &directory,
+        "03-restart",
+        &identity,
+    );
+    assert_eq!(
+        reset["generation"].as_u64().unwrap(),
+        combat["generation"].as_u64().unwrap() + 1
+    );
+    assert!(
+        reset["tick"].as_u64().unwrap() < 45,
+        "reset observation missed pre-AI initial interval"
+    );
+    assert_eq!(
+        reset["gold"],
+        json!([scenario.starting_gold, scenario.starting_gold])
+    );
+    assert_eq!(reset["reactor_hp"], scenario.reactor_hp);
+    assert_eq!(reset["wave"], 1);
+    assert_eq!(reset["kills"], 0);
+    assert_eq!(reset["leaks"], 0);
+    assert!(reset["units"].as_array().unwrap().is_empty());
+    assert!(reset["enemies"].as_array().unwrap().is_empty());
+    cli(&mut h, &binary, &url, &token, &["control", "stop"]);
+    assert_eq!(rpc(&mut h, &mut agent, "history.list", J::Null), history);
+    assert_eq!(rpc(&mut h, &mut agent, "scene.save", J::Null), saved);
+    assert_eq!(std::fs::read(&path).unwrap(), manifest);
+    assert_eq!(std::fs::read(&scene).unwrap(), source);
+    save(
+        &directory.join("receipts.json"),
+        &json!({"summon":summon,"restart":restart,"limitations":"software/offscreen evidence only; no win/lose, audio, native window, physical GPU or real-model claim"}),
+    );
+}
