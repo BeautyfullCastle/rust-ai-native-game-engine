@@ -1173,3 +1173,114 @@ fn viewport_focus_enlarges_stormglass_and_preserves_registered_projects() {
         assert_eq!(rpc(&mut h, &mut agent, "history.list", J::Null), history);
     }
 }
+
+/// Project HUD only; no gameplay commands or combat replay.
+#[cfg(feature = "stormglass")]
+#[test]
+#[ignore = "requires WGPU, verified ORR_STORMGLASS_HUD_BASELINE PNG, and fresh capture directory"]
+fn compact_stormglass_hud_preserves_controls_and_enlarges_board() {
+    use egui_kittest::kittest::Queryable;
+    let directory = PathBuf::from(std::env::var_os("ORR_GAMEPLAY_API_CAPTURE_DIR").unwrap());
+    assert!(directory.is_absolute());
+    std::fs::create_dir(&directory).expect("fresh output directory required");
+    let baseline_path = PathBuf::from(std::env::var_os("ORR_STORMGLASS_HUD_BASELINE").unwrap());
+    assert!(baseline_path.is_absolute());
+    let bytes = std::fs::read(&baseline_path).unwrap();
+    assert!(bytes.len() <= 4 * 1024 * 1024, "bounded baseline image");
+    let mut reader = png::Decoder::new(Cursor::new(&bytes)).read_info().unwrap();
+    assert_eq!((reader.info().width, reader.info().height), (WIDTH, HEIGHT));
+    assert_eq!(reader.info().color_type, png::ColorType::Rgba);
+    let mut baseline = vec![0; reader.output_buffer_size().unwrap()];
+    let decoded = reader.next_frame(&mut baseline).unwrap();
+    baseline.truncate(decoded.buffer_size());
+    let tile_pixels = |rgba: &[u8]| {
+        rgba.chunks_exact(4)
+            .filter(|p| {
+                [[92u8, 111, 91], [66, 88, 78]]
+                    .iter()
+                    .any(|color| p[..3].iter().zip(color).all(|(a, b)| a.abs_diff(*b) <= 2))
+            })
+            .count()
+    };
+    let before = tile_pixels(&baseline);
+    assert!(
+        before > 1000,
+        "baseline must contain rendered Stormglass boards"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("project.json");
+    std::fs::write(&path, include_bytes!("../scenes/stormglass.project.json")).unwrap();
+    std::fs::write(
+        dir.path().join("stormglass.scene.yaml"),
+        include_bytes!("../scenes/stormglass.scene.yaml"),
+    )
+    .unwrap();
+    let prepared = PreparedRegisteredProject::open(&path, crate::stormglass::registry()).unwrap();
+    let editor = Editor::open_registered_project(prepared).unwrap();
+    let mut agent = editor
+        .gameplay_api_client("compact-hud-observer", Caps::parse("read").unwrap())
+        .unwrap();
+    let mut h = harness(editor, "stormglass", true);
+    let identity = rpc(&mut h, &mut agent, "rpc.discover", J::Null);
+    let document = rpc(&mut h, &mut agent, "scene.save", J::Null);
+    let history = rpc(&mut h, &mut agent, "history.list", J::Null);
+    let state = rpc(&mut h, &mut agent, "sim.state", J::Null);
+    h.get_by_label("Focus viewport").click();
+    h.run_steps(3);
+    let compact = capture_paused(&mut h, &mut agent, &identity, "stormglass-compact");
+    let after = tile_pixels(&compact.rgba);
+    assert!(
+        after > before + before / 10,
+        "compact board area did not improve: {before} -> {after}"
+    );
+    for _ in 0..2 {
+        h.get_by_label("Details").click();
+        h.run_steps(3);
+        for label in [
+            "Source cell",
+            "Target cell",
+            "Summon",
+            "Move / merge",
+            "Upgrade",
+            "Invest",
+            "Restart",
+            "Restore panels",
+        ] {
+            assert!(h.query_by_label(label).is_some(), "missing control {label}");
+        }
+        h.get_by_label("Details").click();
+        h.run_steps(3);
+    }
+    let restored = capture_paused(&mut h, &mut agent, &identity, "stormglass-compact-restored");
+    assert_eq!(
+        tile_pixels(&restored.rgba),
+        after,
+        "closing details must restore board area"
+    );
+    h.get_by_label("Details").click();
+    h.run_steps(3);
+    let expanded = capture_paused(&mut h, &mut agent, &identity, "stormglass-details");
+    assert!(
+        tile_pixels(&expanded.rgba) < after,
+        "bounded help must occupy visible space"
+    );
+    assert_paused_anchor(
+        &state,
+        &rpc(&mut h, &mut agent, "sim.state", J::Null),
+        "stormglass",
+    );
+    assert_eq!(rpc(&mut h, &mut agent, "scene.save", J::Null), document);
+    assert_eq!(rpc(&mut h, &mut agent, "history.list", J::Null), history);
+    eprintln!("COMPACT_HUD_BOARD_PIXELS {before} -> {after}");
+    let comparison = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(directory.join("hud-comparison.json"))
+        .unwrap();
+    serde_json::to_writer_pretty(comparison, &json!({
+            "baseline_sha256": Sha256::digest(&bytes).iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+            "baseline_tile_pixels": before, "compact_tile_pixels": after,
+            "limitations": "verified prior focused edit-state framebuffer comparison; software/offscreen only; no gameplay command replay"
+        }),
+    ).unwrap();
+}
