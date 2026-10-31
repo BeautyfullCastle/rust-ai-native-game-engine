@@ -2,9 +2,13 @@
 //! its own camera, texture, and one-model GPU cache.
 #![allow(clippy::float_arithmetic)]
 
+#[cfg(feature = "room-animated-models")]
+#[path = "package_model_preview/transport.rs"]
+mod transport;
+
 use super::EditorApp;
 use crate::{
-    package_model_preview::{bounded_size, PreviewCamera, PreviewRequest, State},
+    package_model_preview::{PreviewCamera, PreviewRequest, State, bounded_size},
     viewport3d::{GpuViewport3d, ModelPlacement},
 };
 
@@ -22,6 +26,8 @@ pub(super) struct PreviewWindow {
     seconds: String,
     #[cfg(feature = "room-animated-models")]
     sample_error: Option<String>,
+    #[cfg(feature = "room-animated-models")]
+    transport: transport::Transport,
 }
 
 impl PreviewWindow {
@@ -38,6 +44,7 @@ impl PreviewWindow {
         self.clip_index = "0".into();
         self.seconds = "0".into();
         self.sample_error = None;
+        self.transport = transport::Transport::default();
     }
 
     fn close(&mut self) {
@@ -59,9 +66,11 @@ impl PreviewWindow {
     #[cfg(feature = "room-animated-models")]
     fn animation_controls(&mut self, ui: &mut egui::Ui) -> bool {
         let Some(ready) = self.state.ready() else {
+            self.transport.pause();
             return false;
         };
         let Some(model) = ready.loaded.animated_model() else {
+            self.transport.pause();
             return false;
         };
         let clips: Vec<_> = model
@@ -81,6 +90,7 @@ impl PreviewWindow {
                 || "Choose a valid clip".to_owned(),
                 |(index, name, _)| format!("{index}: {name}"),
             );
+        let prior_draft = (self.clip_index.clone(), self.seconds.clone());
         egui::ComboBox::from_label("Preview animation clip")
             .selected_text(label)
             .show_ui(ui, |ui| {
@@ -108,29 +118,91 @@ impl PreviewWindow {
             )
             .labelled_by(time_label.id);
         });
+        if prior_draft != (self.clip_index.clone(), self.seconds.clone()) {
+            self.transport.pause();
+        }
+        let now = ui.input(|input| input.time);
+        let frame = ui.ctx().cumulative_frame_nr();
         let mut changed = false;
+        let mut manual_action = false;
         if ui.button("Sample preview pose").clicked() {
-            let result = (|| {
-                let index = self
-                    .clip_index
-                    .trim()
-                    .parse::<u32>()
-                    .map_err(|_| "Clip index must be a nonnegative integer".to_owned())?;
-                let seconds = self
-                    .seconds
-                    .trim()
-                    .parse::<f32>()
-                    .map_err(|_| "Preview seconds must be a finite number".to_owned())?;
-                self.state.sample(index, seconds)
-            })();
-            match result {
-                Ok(()) => {
-                    self.sample_error = None;
-                    changed = true;
+            manual_action = true;
+            self.transport.pause();
+            changed |= self.sample_draft(false, &clips, now, frame);
+        }
+        ui.horizontal(|ui| {
+            if ui.button("Play preview once").clicked() {
+                manual_action = true;
+                self.transport.pause();
+                changed |= self.sample_draft(true, &clips, now, frame);
+            }
+            if ui.button("Pause preview").clicked() {
+                manual_action = true;
+                self.transport.pause();
+            }
+            if ui.button("Restart preview").clicked() {
+                manual_action = true;
+                let running = self.transport.running;
+                self.transport.pause();
+                // Restart the accepted clip, never silently accept an invalid draft.
+                if let Some(accepted) = self
+                    .state
+                    .ready()
+                    .and_then(|ready| ready.animation.as_ref())
+                {
+                    let index = accepted.clip_index;
+                    let duration = clips[index as usize].2;
+                    match self.state.sample(index, 0.0) {
+                        Ok(()) => {
+                            self.clip_index = index.to_string();
+                            self.seconds = "0".into();
+                            self.sample_error = None;
+                            if running {
+                                self.transport.start(0.0, duration, now, frame);
+                            }
+                            changed = true;
+                        }
+                        Err(error) => self.sample_error = Some(error),
+                    }
                 }
-                Err(error) => self.sample_error = Some(error),
+            }
+        });
+        if !manual_action {
+            if let Some(accepted) = self
+                .state
+                .ready()
+                .and_then(|ready| ready.animation.as_ref())
+            {
+                let index = accepted.clip_index;
+                let duration = clips[index as usize].2;
+                if let Some(seconds) =
+                    self.transport
+                        .advance(now, frame, ui.input(|input| input.focused), duration)
+                {
+                    match self.state.sample(index, seconds) {
+                        Ok(()) => {
+                            self.transport.accept(seconds, duration);
+                            self.seconds = seconds.to_string();
+                            self.sample_error = None;
+                            changed = true;
+                        }
+                        Err(error) => {
+                            self.transport.pause();
+                            self.sample_error = Some(error);
+                        }
+                    }
+                }
             }
         }
+        if self.transport.running {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs_f64(1.0 / 30.0));
+        }
+        ui.label(if self.transport.running {
+            "Preview playback: playing"
+        } else {
+            "Preview playback: paused"
+        });
         if let Some(error) = &self.sample_error {
             ui.colored_label(
                 egui::Color32::YELLOW,
@@ -147,8 +219,60 @@ impl PreviewWindow {
                 accepted.clip_index, accepted.seconds
             ));
         }
-        ui.label("Pose sampling is explicit. The preview does not play or change model bindings.");
+        ui.label("Preview-only playback. No game time or model bindings are changed.");
         changed
+    }
+
+    #[cfg(feature = "room-animated-models")]
+    fn sample_draft(
+        &mut self,
+        play: bool,
+        clips: &[(usize, String, f32)],
+        now: f64,
+        frame: u64,
+    ) -> bool {
+        let result = (|| {
+            let index = self
+                .clip_index
+                .trim()
+                .parse::<u32>()
+                .map_err(|_| "Clip index must be a nonnegative integer".to_owned())?;
+            let seconds = self
+                .seconds
+                .trim()
+                .parse::<f32>()
+                .map_err(|_| "Preview seconds must be a finite number".to_owned())?;
+            let duration = clips
+                .get(index as usize)
+                .ok_or("Preview clip index is out of range")?
+                .2;
+            if !seconds.is_finite() || seconds < 0.0 || seconds > duration {
+                return Err(format!(
+                    "sample time must be finite and between 0 and {duration} seconds"
+                ));
+            }
+            let seconds = if play && seconds == duration {
+                0.0
+            } else {
+                seconds
+            };
+            self.state.sample(index, seconds)?;
+            Ok((seconds, duration))
+        })();
+        match result {
+            Ok((seconds, duration)) => {
+                self.sample_error = None;
+                self.seconds = seconds.to_string();
+                if play {
+                    self.transport.start(seconds, duration, now, frame);
+                }
+                true
+            }
+            Err(error) => {
+                self.sample_error = Some(error);
+                false
+            }
+        }
     }
 
     fn show(&mut self, ctx: &egui::Context, render_state: Option<&egui_wgpu::RenderState>) {
@@ -157,6 +281,8 @@ impl PreviewWindow {
             return;
         };
         if self.state.ready().is_none() {
+            #[cfg(feature = "room-animated-models")]
+            self.transport.pause();
             self.release_gpu();
         }
         let animated = request.kind == crate::model_bindings::ModelKind::Animated;
@@ -335,6 +461,8 @@ impl EditorApp {
             self.package_model_preview.close();
         }
         if self.package_model_preview.state.ready().is_none() {
+            #[cfg(feature = "room-animated-models")]
+            self.package_model_preview.transport.pause();
             self.package_model_preview.release_gpu();
         }
     }
