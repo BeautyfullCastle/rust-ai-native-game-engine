@@ -192,6 +192,8 @@ struct BodyDrag {
 pub struct UiState {
     /// Advisory close review; dismissal never grants permission to exit later.
     close_review: close_review::State,
+    /// Window-only layout preference. Does not change simulation or input ownership.
+    pub viewport_focus: bool,
     /// Bottom panel tab.
     pub bottom_tab: BottomTab,
     /// Hierarchy filter text.
@@ -1077,6 +1079,7 @@ impl EditorApp {
         self.poll_remote_capture_request();
         self.start_pulses(ctx.input(|i| i.time));
         if self.editor.agent_mut().take_tab_request() {
+            self.ui.viewport_focus = false;
             self.ui.bottom_tab = BottomTab::Agent;
         }
         // Notifications and frames arrive any time: look again soon, and at once while playing.
@@ -1125,27 +1128,30 @@ impl EditorApp {
             egui::Panel::top("down").show(ui, |ui| self.down_banner(ui));
         }
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
-        // The Agent tab needs more room than the timeline; each has its own remembered height.
-        let (bottom_id, bottom_h) = if self.ui.bottom_tab == BottomTab::Agent { ("bottom_agent", 470.0) } else { ("bottom", 120.0) };
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
-        let (bottom_id, bottom_h) = if self.ui.bottom_tab == BottomTab::ArenaExport { ("bottom_arena_export", 350.0) } else { (bottom_id, bottom_h) };
-        egui::Panel::bottom(bottom_id).resizable(true).default_size(bottom_h).show(ui, |ui| self.bottom(ui));
-        egui::Panel::left("hierarchy").resizable(true).default_size(230.0).show(ui, |ui| self.hierarchy(ui));
-        let inspector = egui::Panel::right("inspector").resizable(true).default_size(340.0);
-        let inspector = if self.editor.game().has_mesh_view() { inspector.max_size(340.0) } else { inspector };
-        inspector.show(ui, |ui| {
-            #[cfg(feature = "terrain")]
-            if self.editor.game() == crate::game::EditorGame::Yard3D || self.editor.game().is_navigation() {
-                // Keep expanded terrain, ramp and navigation controls reachable
-                // without changing the other games' inspector layout.
-                egui::ScrollArea::vertical()
-                    .id_salt("terrain_authoring_inspector")
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| self.inspector(ui));
-                return;
-            }
-            self.inspector(ui);
-        });
+        // Keep panel IDs and their persisted sizes intact while hidden.
+        if !self.ui.viewport_focus {
+            // The Agent tab needs more room than the timeline; each has its own remembered height.
+            let (bottom_id, bottom_h) = if self.ui.bottom_tab == BottomTab::Agent { ("bottom_agent", 470.0) } else { ("bottom", 120.0) };
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
+            let (bottom_id, bottom_h) = if self.ui.bottom_tab == BottomTab::ArenaExport { ("bottom_arena_export", 350.0) } else { (bottom_id, bottom_h) };
+            egui::Panel::bottom(bottom_id).resizable(true).default_size(bottom_h).show(ui, |ui| self.bottom(ui));
+            egui::Panel::left("hierarchy").resizable(true).default_size(230.0).show(ui, |ui| self.hierarchy(ui));
+            let inspector = egui::Panel::right("inspector").resizable(true).default_size(340.0);
+            let inspector = if self.editor.game().has_mesh_view() { inspector.max_size(340.0) } else { inspector };
+            inspector.show(ui, |ui| {
+                #[cfg(feature = "terrain")]
+                if self.editor.game() == crate::game::EditorGame::Yard3D || self.editor.game().is_navigation() {
+                    // Keep expanded terrain, ramp and navigation controls reachable
+                    // without changing the other games' inspector layout.
+                    egui::ScrollArea::vertical()
+                        .id_salt("terrain_authoring_inspector")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| self.inspector(ui));
+                    return;
+                }
+                self.inspector(ui);
+            });
+        }
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.viewport(ui));
 
         // A scrub widget can disappear after selection/navigation changes.
@@ -1478,6 +1484,14 @@ impl EditorApp {
     // ---- top bar ----
 
     fn top_bar(&mut self, ui: &mut Ui) {
+        // Separate wrapped row keeps the exit reachable even on narrow windows.
+        // No shortcut: Escape already belongs to gesture/input cancellation.
+        ui.horizontal_wrapped(|ui| {
+            let label = if self.ui.viewport_focus { "Restore panels" } else { "Focus viewport" };
+            if ui.button(label).on_hover_text("Hide or restore authoring panels; playback and input safety are unchanged").clicked() {
+                self.ui.viewport_focus = !self.ui.viewport_focus;
+            }
+        });
         let mutable = self.editor.can_mutate() && self.editor.previewing().is_none();
         #[cfg(feature="mesh-mission")]
         let mutable = mutable && !self.mesh_game_creator.busy();

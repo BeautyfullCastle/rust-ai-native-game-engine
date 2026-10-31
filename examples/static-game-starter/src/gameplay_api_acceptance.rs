@@ -1078,3 +1078,98 @@ fn gameplay_cli_stormglass_play_loop_actual_wgpu_png() {
         &json!({"summon":summon,"restart":restart,"limitations":"software/offscreen evidence only; no win/lose, audio, native window, physical GPU or real-model claim"}),
     );
 }
+
+/// Layout-only acceptance: no summon, combat or simulation command is replayed.
+#[cfg(feature = "stormglass")]
+#[test]
+#[ignore = "requires actual WGPU and a fresh ORR_GAMEPLAY_API_CAPTURE_DIR"]
+#[allow(clippy::float_arithmetic)] // Screen rectangles only.
+fn viewport_focus_enlarges_stormglass_and_preserves_registered_projects() {
+    use egui_kittest::kittest::Queryable;
+    let directory = PathBuf::from(std::env::var_os("ORR_GAMEPLAY_API_CAPTURE_DIR").unwrap());
+    assert!(directory.is_absolute());
+    std::fs::create_dir(&directory).expect("fresh output directory required");
+    for alias in ["stormglass", "delivery"] {
+        let (_dir, path) = if alias == "stormglass" {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("project.json");
+            std::fs::write(&path, include_bytes!("../scenes/stormglass.project.json")).unwrap();
+            std::fs::write(
+                dir.path().join("stormglass.scene.yaml"),
+                include_bytes!("../scenes/stormglass.scene.yaml"),
+            )
+            .unwrap();
+            (dir, path)
+        } else {
+            fixture(alias)
+        };
+        let registry = if alias == "stormglass" {
+            crate::stormglass::registry()
+        } else {
+            crate::gameplay::registry()
+        };
+        let prepared = PreparedRegisteredProject::open(&path, registry).unwrap();
+        let editor = Editor::open_registered_project(prepared).unwrap();
+        let mut agent = editor
+            .gameplay_api_client("focus-observer", Caps::parse("read").unwrap())
+            .unwrap();
+        let mut h = harness(editor, alias, true);
+        let identity = rpc(&mut h, &mut agent, "rpc.discover", J::Null);
+        let document = rpc(&mut h, &mut agent, "scene.save", J::Null);
+        let history = rpc(&mut h, &mut agent, "history.list", J::Null);
+        let state = rpc(&mut h, &mut agent, "sim.state", J::Null);
+        let normal = capture_paused(&mut h, &mut agent, &identity, &format!("{alias}-normal"));
+        h.get_by_label("Focus viewport").click();
+        h.run_steps(3);
+        assert!(h.state().ui.viewport_focus);
+        for label in [
+            orr_editor::app::LBL_PLAY,
+            orr_editor::app::LBL_PAUSE,
+            orr_editor::app::LBL_STEP,
+            orr_editor::app::LBL_STOP,
+        ] {
+            assert!(h.query_by_label(label).is_some());
+        }
+        let focused = capture_paused(&mut h, &mut agent, &identity, &format!("{alias}-focused"));
+        assert!(focused.viewport.width() > normal.viewport.width() + 400.0);
+        assert!(focused.viewport.height() > normal.viewport.height() + 1.0,
+            "hidden bottom panel must return space: {:?} -> {:?}", normal.viewport, focused.viewport);
+        if alias == "stormglass" {
+            // These two exact sRGB fills are the board tiles, not the HUD. Their
+            // rendered area must grow: merely adding a letterbox cannot pass.
+            let tile_pixels = |capture: &Capture| {
+                capture
+                    .rgba
+                    .chunks_exact(4)
+                    .filter(|p| {
+                        [[92u8, 111, 91], [66, 88, 78]]
+                            .iter()
+                            .any(|color| p[..3].iter().zip(color).all(|(a, b)| a.abs_diff(*b) <= 2))
+                    })
+                    .count()
+            };
+            let before = tile_pixels(&normal);
+            let after = tile_pixels(&focused);
+            assert!(before > 1000, "missing visible board tiles");
+            assert!(
+                after > before + before / 2,
+                "tile pixel area did not grow: {before} -> {after}"
+            );
+            eprintln!("FOCUS_BOARD_PIXELS {before} -> {after}");
+        } else {
+            project_pixels(alias, &normal);
+            project_pixels(alias, &focused);
+        }
+        h.get_by_label("Restore panels").click();
+        h.run_steps(3);
+        assert!(!h.state().ui.viewport_focus);
+        assert_eq!(h.state().ui.viewport_rect.unwrap(), normal.viewport);
+        assert_paused_anchor(
+            &state,
+            &rpc(&mut h, &mut agent, "sim.state", J::Null),
+            alias,
+        );
+        assert_eq!(rpc(&mut h, &mut agent, "scene.save", J::Null), document);
+        assert_eq!(rpc(&mut h, &mut agent, "history.list", J::Null), history);
+    }
+}
