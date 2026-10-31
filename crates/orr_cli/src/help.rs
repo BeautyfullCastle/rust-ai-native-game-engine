@@ -18,6 +18,7 @@ Change
   history | undo | redo
 
 Other
+  gameplay act <intent>        semantic action in an already running registered game
   sim start|stop|input|play|pause|step|seek|speed|state
   activity [-f]                what agents did on the host (a live feed with -f)
   save [--write]               scene YAML, or write the host's scene file
@@ -33,6 +34,26 @@ Values are JSON when they parse (pos=[6,18], angle=0.5), else bare strings (kind
 
 /// (name, usage line, help text)
 const COMMANDS: &[(&str, &str, &str)] = &[
+    (
+        "gameplay",
+        "orr gameplay act <intent> [--payload JSON] [--player N] [--timeout-ms N]",
+        "orr gameplay act <intent> [--payload JSON] [--player N] [--timeout-ms N]
+
+Perform one semantic action in an already running registered game. Uses one connection:
+describe readiness, claim once, fresh describe, submit once, read-only status polling,
+verify consumed + neutral receipts, release once and verify release.
+No automatic Play/Stop, capture, mutation retry or reconnect. Completion is consumption,
+not game victory. A timeout, rejected/uncertain result or failed release exits nonzero.
+The host cleans up a disconnected controller; errors do not trigger another mutation.
+Output (including --json) excludes lease, scope, payload and host error text.
+
+--payload JSON     intent payload (default {}, maximum 64 KiB); may appear in process lists
+--player N         player slot 0..15, additionally bounded by the host (default 0)
+--timeout-ms N     whole operation deadline including connection/auth, 100..60000 (default 10000)
+The global --timeout does not override this command's bounded deadline.
+Prefer ORR_ERP_TOKEN to --token. Requires read and sim_control capabilities.
+See docs/gameplay-cli.md for acceptance and limitations.",
+    ),
     (
         "status",
         "orr status",

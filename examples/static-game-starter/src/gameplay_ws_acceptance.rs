@@ -104,6 +104,14 @@ fn control(editor: &mut Editor, api: &mut Api, fields: J) {
 
 #[test]
 fn two_registered_games_accept_authenticated_websocket_semantic_input() {
+    two_games(false);
+}
+#[test]
+#[ignore = "requires ORR_GAMEPLAY_CLI_BIN pointing to this candidate's freshly built orr"]
+fn gameplay_cli_two_registered_games_consume_and_release() {
+    two_games(true);
+}
+fn two_games(cli: bool) {
     for (manifest, scene_name, scene, singleton, outcome) in [
         (
             include_str!("../scenes/delivery.project.json"),
@@ -194,52 +202,58 @@ fn two_registered_games_accept_authenticated_websocket_semantic_input() {
             json!({}),
             |v| v["can_claim"] == true,
         );
-        control(
-            &mut editor,
-            &mut writer,
-            json!({"action":"claim","player":0}),
-        );
-        let description = wait_read(
-            &mut editor,
-            &mut writer,
-            "editor.gameplay.describe",
-            json!({}),
-            |v| v["can_submit"] == true,
-        );
-        let request = writer.mutation(&description, json!({"intent":"act","payload":{"press":1}}));
-        let accepted = call(&mut editor, &mut writer, "editor.gameplay.submit", request).unwrap();
-        let command = &accepted["command_id"];
-        assert!(command.as_str().unwrap().parse::<u64>().unwrap() > 0);
-        let completed = wait_read(
-            &mut editor,
-            &mut writer,
-            "editor.gameplay.status",
-            json!({"binding":description["binding"],"connection":description["connection"],"command_id":command}),
-            |v| {
-                assert!(
-                    matches!(
-                        v["status"].as_str(),
-                        Some("pending" | "consumed" | "completed")
-                    ),
-                    "unexpected command status"
-                );
-                v["status"] == "completed"
-            },
-        );
-        let consumed = completed["consumed"]["tick"]
-            .as_str()
-            .unwrap()
-            .parse::<u64>()
-            .unwrap();
-        let neutral = completed["neutral"]["tick"]
-            .as_str()
-            .unwrap()
-            .parse::<u64>()
-            .unwrap();
-        assert!(neutral > consumed);
-        for field in ["stream_generation", "play_epoch", "timeline_epoch"] {
-            assert!(completed["consumed"].get(field).is_some());
-            assert_eq!(completed["consumed"][field], completed["neutral"][field]);
+        if cli {
+            cli_action(&mut editor, &url, &writer_token, json!({"press":1}));
+        } else {
+            control(
+                &mut editor,
+                &mut writer,
+                json!({"action":"claim","player":0}),
+            );
+            let description = wait_read(
+                &mut editor,
+                &mut writer,
+                "editor.gameplay.describe",
+                json!({}),
+                |v| v["can_submit"] == true,
+            );
+            let request =
+                writer.mutation(&description, json!({"intent":"act","payload":{"press":1}}));
+            let accepted =
+                call(&mut editor, &mut writer, "editor.gameplay.submit", request).unwrap();
+            let command = &accepted["command_id"];
+            assert!(command.as_str().unwrap().parse::<u64>().unwrap() > 0);
+            let completed = wait_read(
+                &mut editor,
+                &mut writer,
+                "editor.gameplay.status",
+                json!({"binding":description["binding"],"connection":description["connection"],"command_id":command}),
+                |v| {
+                    assert!(
+                        matches!(
+                            v["status"].as_str(),
+                            Some("pending" | "consumed" | "completed")
+                        ),
+                        "unexpected command status"
+                    );
+                    v["status"] == "completed"
+                },
+            );
+            let consumed = completed["consumed"]["tick"]
+                .as_str()
+                .unwrap()
+                .parse::<u64>()
+                .unwrap();
+            let neutral = completed["neutral"]["tick"]
+                .as_str()
+                .unwrap()
+                .parse::<u64>()
+                .unwrap();
+            assert!(neutral > consumed);
+            for field in ["stream_generation", "play_epoch", "timeline_epoch"] {
+                assert!(completed["consumed"].get(field).is_some());
+                assert_eq!(completed["consumed"][field], completed["neutral"][field]);
+            }
         }
         let state = call(
             &mut editor,
@@ -275,6 +289,16 @@ fn two_registered_games_accept_authenticated_websocket_semantic_input() {
 #[cfg(feature = "stormglass")]
 #[test]
 fn stormglass_authored_project_accepts_authenticated_websocket_summon_and_preserves_source() {
+    stormglass_game(false);
+}
+#[cfg(feature = "stormglass")]
+#[test]
+#[ignore = "requires ORR_GAMEPLAY_CLI_BIN pointing to this candidate's freshly built orr"]
+fn gameplay_cli_stormglass_consumes_summon_and_preserves_source() {
+    stormglass_game(true);
+}
+#[cfg(feature = "stormglass")]
+fn stormglass_game(cli: bool) {
     use orr_games::coop_defense_game::{
         scenario_types, DefenseRun, DefenseUnit, SCENARIO_NAME, SUMMON,
     };
@@ -385,23 +409,29 @@ fn stormglass_authored_project_accepts_authenticated_websocket_summon_and_preser
         json!({}),
         |v| v["can_claim"] == true,
     );
-    control(
-        &mut editor,
-        &mut writer,
-        json!({"action":"claim","player":0}),
-    );
+    if !cli {
+        control(
+            &mut editor,
+            &mut writer,
+            json!({"action":"claim","player":0}),
+        );
+    }
     // Deliberately cross the AI board's first summon at tick 45. Aggregate
     // summons and net gold are not valid player-command oracles under WS delay.
     wait_read(&mut editor, &mut writer, "sim.state", J::Null, |v| {
         v["head_tick"].as_u64().is_some_and(|tick| tick >= 46)
     });
-    let description = wait_read(
-        &mut editor,
-        &mut writer,
-        "editor.gameplay.describe",
-        json!({}),
-        |v| v["can_submit"] == true,
-    );
+    let description = if cli {
+        J::Null
+    } else {
+        wait_read(
+            &mut editor,
+            &mut writer,
+            "editor.gameplay.describe",
+            json!({}),
+            |v| v["can_submit"] == true,
+        )
+    };
     // Run is deliberately not an authored/reflected singleton. Inspect the
     // existing public frame evidence instead of inventing a runtime read RPC.
     let before = *editor
@@ -423,26 +453,36 @@ fn stormglass_authored_project_accepts_authenticated_websocket_summon_and_preser
             .count(),
         0
     );
-    let request = writer.mutation(
-        &description,
-        json!({"intent":"act","payload":{"action":SUMMON,"source_cell":0,"target_cell":0}}),
-    );
-    let accepted = call(&mut editor, &mut writer, "editor.gameplay.submit", request).unwrap();
-    let command = &accepted["command_id"];
-    assert!(command.as_str().unwrap().parse::<u64>().unwrap() > 0);
-    let completed = wait_read(
-        &mut editor,
-        &mut writer,
-        "editor.gameplay.status",
-        json!({"binding":description["binding"],"connection":description["connection"],"command_id":command}),
-        |v| {
-            assert!(matches!(
-                v["status"].as_str(),
-                Some("pending" | "consumed" | "completed")
-            ));
-            v["status"] == "completed"
-        },
-    );
+    let completed = if cli {
+        cli_action(
+            &mut editor,
+            &url,
+            &writer_token,
+            json!({"action":SUMMON,"source_cell":0,"target_cell":0}),
+        )
+    } else {
+        let request = writer.mutation(
+            &description,
+            json!({"intent":"act","payload":{"action":SUMMON,"source_cell":0,"target_cell":0}}),
+        );
+        let accepted = call(&mut editor, &mut writer, "editor.gameplay.submit", request).unwrap();
+        let command = &accepted["command_id"];
+        assert!(command.as_str().unwrap().parse::<u64>().unwrap() > 0);
+        let completed = wait_read(
+            &mut editor,
+            &mut writer,
+            "editor.gameplay.status",
+            json!({"binding":description["binding"],"connection":description["connection"],"command_id":command}),
+            |v| {
+                assert!(matches!(
+                    v["status"].as_str(),
+                    Some("pending" | "consumed" | "completed")
+                ));
+                v["status"] == "completed"
+            },
+        );
+        completed
+    };
     let consumed = completed["consumed"]["tick"]
         .as_str()
         .unwrap()
@@ -507,4 +547,97 @@ fn stormglass_authored_project_accepts_authenticated_websocket_summon_and_preser
     assert_eq!(std::fs::read_to_string(&manifest_path).unwrap(), manifest);
     // Clients, listener and temporary project drop in that order. No environment
     // credentials, external services, production auth changes or mutation retries.
+}
+
+// Spawn the actual CLI while the same existing editor fixture is pumped.
+// No real credentials are read; the fixture token is passed via child env, not argv.
+fn cli_action(editor: &mut Editor, url: &str, token: &str, payload: J) -> J {
+    use std::process::{Command, Stdio};
+    let bin = std::env::var_os("ORR_GAMEPLAY_CLI_BIN")
+        .expect("explicit freshly built CLI path is required");
+    assert!(std::path::Path::new(&bin).is_absolute());
+    struct ChildGuard(std::process::Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            if self.0.try_wait().ok().flatten().is_none() {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+    }
+    let mut child = ChildGuard(
+        Command::new(bin)
+            .args([
+                "--erp",
+                url,
+                "--json",
+                "gameplay",
+                "act",
+                "act",
+                "--payload",
+                &payload.to_string(),
+                "--timeout-ms",
+                "10000",
+            ])
+            .env("ORR_ERP_TOKEN", token)
+            .env_remove("ORR_ERP")
+            .env_remove("ORR_ERP_URL")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("CLI spawn failed"),
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        editor.pump();
+        if let Some(status) = child.0.try_wait().expect("CLI wait failed") {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "CLI subprocess exceeded bounded deadline"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    use std::io::Read;
+    let mut stdout = String::new();
+    child
+        .0
+        .stdout
+        .take()
+        .unwrap()
+        .take(8192)
+        .read_to_string(&mut stdout)
+        .unwrap();
+    let mut stderr = String::new();
+    child
+        .0
+        .stderr
+        .take()
+        .unwrap()
+        .take(8192)
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert!(!stdout.contains(token) && !stderr.contains(token));
+    assert!(status.success(), "CLI failed: {stderr}");
+    let result: J = serde_json::from_str(&stdout).expect("CLI JSON receipt");
+    assert_eq!(result["status"], "completed");
+    assert!(result.get("scope").is_none() && result.get("connection").is_none());
+    let consumed = result["consumed"]["tick"]
+        .as_str()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    let neutral = result["neutral"]["tick"]
+        .as_str()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    assert!(neutral > consumed);
+    for key in ["stream_generation", "play_epoch", "timeline_epoch"] {
+        assert!(result["consumed"][key].as_str().is_some());
+        assert_eq!(result["consumed"][key], result["neutral"][key]);
+    }
+    result
 }
