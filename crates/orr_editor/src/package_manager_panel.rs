@@ -1,3 +1,5 @@
+mod usage;
+
 use crate::package_manager::{self, Plan, RemovalPlan, RemovalReceipt, UpdatePlan};
 use egui::Context;
 use orr_model_bindings::model_bindings::ModelKind;
@@ -8,6 +10,10 @@ use std::{
 };
 
 enum Completion {
+    UsageInspected {
+        identity: usage::Identity,
+        result: Result<usage::UsageReport, String>,
+    },
     UpdatePreviewed {
         root: PathBuf,
         source_identity: String,
@@ -102,6 +108,7 @@ pub struct Panel {
     source_generation: u64,
     model_filter: String,
     verified: Option<Lock>,
+    usage: usage::State,
     preview: Option<PreviewedPlan>,
     update_preview: Option<PreviewedUpdate>,
     removal_name: String,
@@ -199,6 +206,11 @@ impl Panel {
         self.select_project(project);
         self.select_source();
         let was_mutating = self.removal_busy();
+        // Invalidate before polling: a completed saved-state query must not
+        // reappear after dirty authoring, a modal, or closing this panel.
+        if blocked_reason.is_some() || !self.open {
+            self.usage.invalidate();
+        }
         self.poll();
         if blocked_reason.is_some() {
             self.update_preview = None;
@@ -354,6 +366,7 @@ impl Panel {
                         (self.project_generation, self.source_generation),
                     );
                 }
+                self.show_usage(ui, can_operate);
                 ui.horizontal(|ui| {
                     ui.label(format!("Removal selection: {}", self.removal_name));
                     if ui.add_enabled(can_operate && self.verified.as_ref().is_some_and(|lock| lock.direct.contains_key(&self.removal_name)), egui::Button::new("Preview package removal")).clicked() { self.start_removal_preview(); }
@@ -392,12 +405,16 @@ impl Panel {
                     ui.label(&self.status);
                 }
             });
+        if !open {
+            self.usage.invalidate();
+        }
         self.open = open;
     }
 
     fn select_project(&mut self, project: Option<&Path>) {
         let next_root = project.map(Path::to_path_buf);
         if self.root != next_root {
+            self.usage = usage::State::default();
             self.root = next_root;
             self.project_generation = self.project_generation.saturating_add(1);
             self.last_removal = None;
@@ -420,6 +437,7 @@ impl Panel {
     fn select_source(&mut self) {
         let next_source = self.source.trim().to_owned();
         if self.source_identity != next_source {
+            self.usage.invalidate();
             self.update_preview = None;
             self.removal_preview = None;
             self.source_identity = next_source;
@@ -454,6 +472,9 @@ impl Panel {
         self.removing = false;
         self.updating = false;
         match completion {
+            Completion::UsageInspected { identity, result } => {
+                self.finish_usage(identity, result);
+            }
             Completion::UpdatePreviewed {
                 root,
                 source_identity,
@@ -733,6 +754,7 @@ impl Panel {
     }
 
     fn invalidate_package_cache(&mut self) {
+        self.usage.invalidate();
         self.preview_request = None;
         self.last_removal = None;
         self.restoration_preview = None;
@@ -780,6 +802,7 @@ impl Panel {
         if self.busy() {
             return;
         }
+        self.usage.invalidate();
         let Some(root) = self.root.clone() else {
             self.status = "Open a Room project before previewing a package update.".into();
             return;
@@ -820,6 +843,7 @@ impl Panel {
         if self.busy() {
             return;
         }
+        self.usage.invalidate();
         if let Err(error) = parse_source_path(&self.source) {
             self.update_preview = None;
             self.status = error;
@@ -872,6 +896,7 @@ impl Panel {
         if self.busy() {
             return;
         }
+        self.usage.invalidate();
         let Some(root) = self.root.clone() else {
             return;
         };
@@ -911,6 +936,7 @@ impl Panel {
         if self.busy() {
             return;
         }
+        self.usage.invalidate();
         let Some(plan) = self.removal_preview.take() else {
             return;
         };
@@ -953,6 +979,7 @@ impl Panel {
         if self.busy() {
             return;
         }
+        self.usage.invalidate();
         let Some(receipt) = self.last_removal.take() else {
             return;
         };
@@ -990,6 +1017,7 @@ impl Panel {
         if self.busy() || self.restoration_preview.is_none() {
             return;
         }
+        self.usage.invalidate();
         let Some(receipt) = self.last_removal.take() else {
             return;
         };
@@ -1028,6 +1056,7 @@ impl Panel {
         if self.busy() {
             return;
         }
+        self.usage.invalidate();
         self.last_removal = None;
         self.restoration_preview = None;
         self.restoration_generation = self.restoration_generation.saturating_add(1);
@@ -1061,6 +1090,7 @@ impl Panel {
         if self.busy() {
             return;
         }
+        self.usage.invalidate();
         let Some(root) = self.root.clone() else {
             self.status = "Open a Room project before previewing a package.".into();
             return;
@@ -1100,6 +1130,7 @@ impl Panel {
         if self.busy() {
             return;
         }
+        self.usage.invalidate();
         if let Err(error) = parse_source_path(&self.source) {
             self.status = error;
             return;
