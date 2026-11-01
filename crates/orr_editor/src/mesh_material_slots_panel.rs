@@ -11,6 +11,66 @@ struct SlotFields {
     wrap_t: Wrap,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TintFieldReason {
+    InvalidNumber,
+    NonFinite,
+    OutOfRange,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TintFieldError {
+    material: u32,
+    channel: usize,
+    reason: TintFieldReason,
+}
+
+impl std::fmt::Display for TintFieldError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let reason = match self.reason {
+            TintFieldReason::InvalidNumber => "enter a number in 0..=1",
+            TintFieldReason::NonFinite => "value must be finite and within 0..=1",
+            TintFieldReason::OutOfRange => "value must be within 0..=1",
+        };
+        write!(
+            formatter,
+            "Material slot {} tint {}: {reason}",
+            self.material,
+            ["R", "G", "B", "A"][self.channel]
+        )
+    }
+}
+
+impl SlotFields {
+    fn settings(&self) -> Result<crate::mesh_material_slots::Settings, TintFieldError> {
+        let mut tint = [0.0; 4];
+        for (channel, text) in self.tint.iter().enumerate() {
+            let error = |reason| TintFieldError {
+                material: self.material,
+                channel,
+                reason,
+            };
+            let value = text
+                .parse::<f32>()
+                .map_err(|_| error(TintFieldReason::InvalidNumber))?;
+            if !value.is_finite() {
+                return Err(error(TintFieldReason::NonFinite));
+            }
+            if !(0.0..=1.0).contains(&value) {
+                return Err(error(TintFieldReason::OutOfRange));
+            }
+            tint[channel] = value;
+        }
+        Ok(crate::mesh_material_slots::Settings {
+            material: self.material,
+            tint,
+            linear_filter: self.linear_filter,
+            wrap_s: self.wrap_s,
+            wrap_t: self.wrap_t,
+        })
+    }
+}
+
 struct Staged {
     overrides: Vec<crate::mesh_material_slots::Settings>,
     all_slots: Vec<crate::mesh_material_slots::Settings>,
@@ -161,6 +221,17 @@ impl Panel {
         if let Some(error) = &self.error {
             ui.label(error);
         }
+        if let Some(invalid) = self.invalid_tint() {
+            if ui
+                .add_enabled(
+                    self.selected != Some(invalid.material),
+                    egui::Button::new("Show invalid material slot"),
+                )
+                .clicked()
+            {
+                self.selected = Some(invalid.material);
+            }
+        }
         let mut staged = None;
         ui.horizontal(|ui| {
             if ui
@@ -250,6 +321,9 @@ impl Panel {
         &self,
         model: &StaticModel,
     ) -> Result<Vec<crate::mesh_material_slots::Settings>, String> {
+        if let Some(error) = self.invalid_tint() {
+            return Err(error.to_string());
+        }
         let mut overrides = Vec::new();
         for field in &self.fields {
             let source = model
@@ -257,20 +331,7 @@ impl Panel {
                 .materials
                 .get(field.material as usize)
                 .ok_or_else(|| "Material slot is outside the admitted model".to_owned())?;
-            let mut tint = [0.0; 4];
-            for (index, value) in field.tint.iter().enumerate() {
-                tint[index] = value
-                    .parse::<f32>()
-                    .map_err(|_| "Material slot tint must be finite RGBA in 0..=1")?;
-            }
-            let settings = crate::mesh_material_slots::Settings {
-                material: field.material,
-                tint,
-                linear_filter: field.linear_filter,
-                wrap_s: field.wrap_s,
-                wrap_t: field.wrap_t,
-            };
-            validate_settings(&settings)?;
+            let settings = field.settings().map_err(|error| error.to_string())?;
             if !settings.is_identity_for(source) {
                 overrides.push(settings);
             }
@@ -281,27 +342,25 @@ impl Panel {
     fn current_cached(&self) -> Option<Vec<crate::mesh_material_slots::Settings>> {
         self.fields
             .iter()
-            .map(|field| {
-                let mut tint = [0.0; 4];
-                for (index, value) in field.tint.iter().enumerate() {
-                    tint[index] = value.parse().ok()?;
-                }
-                let settings = crate::mesh_material_slots::Settings {
-                    material: field.material,
-                    tint,
-                    linear_filter: field.linear_filter,
-                    wrap_s: field.wrap_s,
-                    wrap_t: field.wrap_t,
-                };
-                validate_settings(&settings).ok()?;
-                Some(settings)
-            })
+            .map(|field| field.settings().ok())
             .collect()
     }
 
+    fn invalid_tint(&self) -> Option<TintFieldError> {
+        self.fields
+            .iter()
+            .filter_map(|field| field.settings().err())
+            .min_by_key(|error| (error.material, error.channel))
+    }
+
     fn current_all_slots(&self) -> Result<Vec<crate::mesh_material_slots::Settings>, String> {
-        self.current_cached()
-            .ok_or_else(|| "Material slot fields contain an invalid value".into())
+        if let Some(error) = self.invalid_tint() {
+            return Err(error.to_string());
+        }
+        self.fields
+            .iter()
+            .map(|field| field.settings().map_err(|error| error.to_string()))
+            .collect()
     }
 }
 
