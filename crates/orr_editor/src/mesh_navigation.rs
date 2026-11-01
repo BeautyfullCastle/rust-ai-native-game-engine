@@ -42,6 +42,10 @@ mod geometry_history;
 mod geometry_vertex_view;
 #[path = "mesh_navigation/geometry_vertex_viewport.rs"]
 mod geometry_vertex_viewport;
+#[path = "mesh_navigation/route_diagnostics.rs"]
+mod route_diagnostics;
+#[path = "mesh_navigation/route_diagnostics_panel.rs"]
+mod route_diagnostics_panel;
 #[cfg(feature = "mesh-mission")]
 #[path = "mesh_navigation/mission_view.rs"]
 mod mission_view;
@@ -101,6 +105,7 @@ pub struct Panel {
     geometry_preview: Option<Arc<StaticModel>>,
     geometry_preview_visible: bool,
     geometry_vertex: geometry_vertex_viewport::State,
+    route_diagnostics: route_diagnostics_panel::State,
     #[cfg(feature = "mesh-mission")]
     mission_bound: bool,
     #[cfg(feature = "mesh-mission")]
@@ -145,6 +150,7 @@ impl Default for Panel {
             geometry_preview: None,
             geometry_preview_visible: false,
             geometry_vertex: geometry_vertex_viewport::State::default(),
+            route_diagnostics: route_diagnostics_panel::State::default(),
             #[cfg(feature = "mesh-mission")]
             mission_bound: false,
             #[cfg(feature = "mesh-mission")]
@@ -752,6 +758,7 @@ impl Panel {
             self.draft_dirty |= field(ui, "Maximum slope", &mut self.max_slope);
             self.draft_dirty |= field(ui, "Maximum vertical projection", &mut self.max_vertical);
             self.draft_dirty |= field(ui, "Distance per tick", &mut self.distance_per_tick);
+            self.show_route_diagnostics(ui, editor);
             self.show_agent_picking(ui, editor);
             if let Some(reason) = self.authoring_blocker(editor) {
                 ui.label(reason);
