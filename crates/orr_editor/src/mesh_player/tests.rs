@@ -188,7 +188,7 @@ fn invalid_or_conflicting_player_options_are_rejected() {
 fn capabilities_report_replay_and_interactive_input_profiles() {
     assert_eq!(
         super::CAPABILITIES,
-        "ORR_MESH_PLAYER_V1\nORR_MESH_INPUT_V1\nORR_MESH_MATERIAL_SLOTS_V1"
+        "ORR_MESH_PLAYER_V1\nORR_MESH_INPUT_V1\nORR_MESH_MATERIAL_SLOTS_V1\nORR_MESH_POST_PROCESS_V1"
     );
 }
 

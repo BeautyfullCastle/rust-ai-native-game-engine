@@ -28,6 +28,8 @@ pub(crate) struct Panel {
     shadow_radius: String,
     tonemap: bool,
     exposure: String,
+    post_process: orr_render::PostProcessSettings,
+    post_process_authored: bool,
     form_dirty: bool,
     presets: presets::Controls,
     confirm_remove: bool,
@@ -63,6 +65,8 @@ impl Default for Panel {
             shadow_radius: format_number(defaults.shadow_radius),
             tonemap: defaults.tonemap,
             exposure: format_number(defaults.exposure),
+            post_process: Default::default(),
+            post_process_authored: false,
             form_dirty: false,
             presets: presets::Controls::default(),
             confirm_remove: false,
@@ -171,6 +175,18 @@ impl Panel {
                 changed |= text_field(ui, "Shadow radius", &mut self.shadow_radius);
                 changed |= ui.checkbox(&mut self.tonemap, "Enable tonemapping").changed();
                 changed |= text_field(ui, "Exposure", &mut self.exposure);
+                let mut effects_changed = ui.checkbox(&mut self.post_process.enabled, "Saved HDR post-processing").changed();
+                ui.add_enabled_ui(self.post_process.enabled, |ui| {
+                    effects_changed |= ui.checkbox(&mut self.post_process.bloom, "Saved bloom").changed();
+                    effects_changed |= ui.add(egui::Slider::new(&mut self.post_process.threshold, 0.0..=65_504.0).text("Bloom threshold")).changed();
+                    effects_changed |= ui.add(egui::Slider::new(&mut self.post_process.strength, 0.0..=8.0).text("Bloom strength")).changed();
+                    effects_changed |= ui.add(egui::Slider::new(&mut self.post_process.radius, 1..=8).text("Bloom radius")).changed();
+                    effects_changed |= ui.add(egui::Slider::new(&mut self.post_process.iterations, 1..=4).text("Bloom iterations")).changed();
+                });
+                if effects_changed {
+                    self.post_process_authored = true;
+                    changed = true;
+                }
                 if changed {
                     self.form_dirty = true;
                     self.error = None;
@@ -241,6 +257,15 @@ impl Panel {
         }
         self.current_document()
             .and_then(|document| document.lighting().ok())
+    }
+
+    /// Only an admitted document can supply the renderer's saved policy.
+    pub(crate) fn applied_post_process(
+        &self,
+        editor: &Editor,
+    ) -> Option<orr_render::PostProcessSettings> {
+        self.applied_lighting(editor)?;
+        self.current_document().map(Document::post_process_settings)
     }
 
     pub(crate) fn play_blocker(&self, editor: &Editor) -> Option<String> {
@@ -414,6 +439,11 @@ impl Panel {
         lighting.tonemap = self.tonemap;
         lighting.exposure = parse_number(&self.exposure, "exposure")?;
         let document = Document::from_lighting(lighting)?;
+        let document = if self.post_process_authored {
+            document.with_post_process(self.post_process)?
+        } else {
+            document
+        };
         let filename = scene
             .file_name()
             .and_then(|value| value.to_str())
@@ -618,20 +648,25 @@ impl Panel {
 
     fn copy_document_fields(&mut self, document: &Document) -> Result<(), String> {
         self.copy_lighting_fields(document.lighting()?);
+        self.post_process = document.post_process_settings();
+        self.post_process_authored = document.has_post_process();
         Ok(())
     }
 
     fn copy_current_fields(&mut self) {
-        match self.current_document().map(Document::lighting) {
-            Some(Ok(lighting)) => self.copy_lighting_fields(lighting),
-            Some(Err(error)) => {
-                self.error = Some(format!("Current game lighting is invalid: {error}"))
+        match self.current_document().cloned() {
+            Some(document) => {
+                if let Err(error) = self.copy_document_fields(&document) {
+                    self.error = Some(format!("Current game lighting is invalid: {error}"));
+                }
             }
             None => self.copy_lighting_fields(orr_sample::yard3d_view::yard_lighting()),
         }
     }
 
     fn copy_lighting_fields(&mut self, lighting: orr_render::Lighting) {
+        self.post_process = Default::default();
+        self.post_process_authored = false;
         self.direction = lighting.direction.map(format_number);
         self.color = lighting.color.map(format_number);
         self.intensity = format_number(lighting.intensity);
@@ -741,3 +776,7 @@ fn text_field(ui: &mut Ui, label: &str, value: &mut String) -> bool {
 #[cfg(test)]
 #[path = "mesh_lighting_panel/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "mesh_lighting_panel/post_process_tests.rs"]
+mod post_process_tests;

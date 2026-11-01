@@ -16,6 +16,9 @@ use std::fs;
 const STATIC_GLB: &[u8] = include_bytes!("../../../orr_model/tests/fixtures/model.glb");
 const LICENSE: &[u8] = b"Example license text\n";
 
+#[path = "post_process_tests.rs"]
+mod post_process_tests;
+
 #[path = "facing_tests.rs"]
 mod facing_tests;
 

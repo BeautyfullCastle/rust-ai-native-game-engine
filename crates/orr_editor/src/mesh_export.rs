@@ -37,6 +37,8 @@ const CAMERA_RUNTIME_MARKER: &[u8] = b"ORR_MESH_CAMERA_V1";
 const MATERIAL_RUNTIME_MARKER: &[u8] = b"ORR_MESH_MATERIAL_V1";
 const ANIMATION_RUNTIME_MARKER: &[u8] = b"ORR_MESH_ANIMATION_V1";
 const SURFACE_RUNTIME_MARKER: &[u8] = b"ORR_MESH_SURFACE_V1";
+const POST_PROCESS_RUNTIME_MARKER: &[u8] = b"ORR_MESH_POST_PROCESS_V1";
+const POST_PROCESS_RUNTIME_SECTION: &[u8; 8] = b".orrpost";
 const LIGHTING_RUNTIME_MARKER: &[u8] = b"ORR_MESH_LIGHTING_V1";
 const INPUT_RUNTIME_MARKER: &[u8] = b"ORR_MESH_INPUT_V1";
 const FACING_RUNTIME_MARKER: &[u8] = b"ORR_MESH_FACING_V1";
@@ -329,13 +331,14 @@ fn export_with_profile(
         None => None,
     };
     let lighting_path = crate::mesh_lighting_store::sidecar_path(&scene_path)?;
+    let mut requires_post_process = false;
     let lighting_bytes = match read_optional_bounded(
         &lighting_path,
         crate::mesh_lighting::MAX_BYTES as u64,
         "mesh lighting sidecar",
     )? {
         Some(bytes) => {
-            let Some((_, admitted_hash)) =
+            let Some((document, admitted_hash)) =
                 crate::mesh_lighting_store::load(&scene_path, graph_revision)?
             else {
                 return Err("mesh lighting sidecar could not be admitted".into());
@@ -349,6 +352,7 @@ fn export_with_profile(
             {
                 return Err("mesh lighting sidecar changed during admission".into());
             }
+            requires_post_process = document.has_post_process();
             Some(bytes)
         }
         None => None,
@@ -386,6 +390,7 @@ fn export_with_profile(
             require_hud: hud_bytes.is_some(),
         },
     )?;
+    validate_runtime_post_process(&runtime_bytes, requires_post_process)?;
     requires_facing |= optional_facing_present(props_bytes.as_deref(), true)?
         || optional_facing_present(animation_bytes.as_deref(), false)?;
     validate_runtime_facing(&runtime_bytes, requires_facing)?;
@@ -835,6 +840,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
         }
     }
     let lighting_path = canonical_root.join(&lighting_name);
+    let mut requires_post_process = false;
     match (
         &manifest.lighting,
         read_optional_bounded(
@@ -845,7 +851,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
     ) {
         (Some(record), Some(bytes)) => {
             verify_file(record, &bytes, "bundle mesh lighting sidecar")?;
-            let Some((_, admitted_hash)) =
+            let Some((document, admitted_hash)) =
                 crate::mesh_lighting_store::load(&scene_path, graph_revision)?
             else {
                 return Err("bundle mesh lighting sidecar could not be admitted".into());
@@ -861,6 +867,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
                     "bundle mesh lighting admission hash does not match its manifest".into(),
                 );
             }
+            requires_post_process = document.has_post_process();
         }
         (None, None) => {}
         _ => {
@@ -906,6 +913,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
             require_hud: manifest.hud.is_some(),
         },
     )?;
+    validate_runtime_post_process(&runtime_bytes, requires_post_process)?;
     validate_runtime_facing(&runtime_bytes, requires_facing)?;
     validate_runtime_dense_props(&runtime_bytes, requires_dense_props)?;
     validate_runtime_profile(&runtime_bytes, manifest.input_profile)?;
@@ -1793,6 +1801,20 @@ fn validate_runtime_with_lighting(
         && validate_runtime_section(bytes, HUD_RUNTIME_SECTION, HUD_RUNTIME_MARKER)?.is_none()
     {
         return Err("mesh player runtime does not advertise Mesh HUD support".into());
+    }
+    Ok(())
+}
+
+fn validate_runtime_post_process(bytes: &[u8], required: bool) -> Result<(), String> {
+    if required
+        && validate_runtime_section(
+            bytes,
+            POST_PROCESS_RUNTIME_SECTION,
+            POST_PROCESS_RUNTIME_MARKER,
+        )?
+        .is_none()
+    {
+        return Err("mesh player runtime does not advertise mesh post-processing support".into());
     }
     Ok(())
 }
