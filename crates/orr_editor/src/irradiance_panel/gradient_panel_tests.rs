@@ -226,3 +226,82 @@ fn authored_gradient_clears_bake_receipt_and_undo_restores_exact_receipt() {
     panel.undo(&editor).unwrap();
     assert_eq!(panel.bindings.as_ref().unwrap().document(), &baked);
 }
+
+#[test]
+fn pending_bake_cannot_replace_authored_gradient() {
+    let _serial = crate::irradiance_bake::WORKER_TEST_SERIAL.lock().unwrap();
+    let (_temp, path, editor, mut panel) = fixture();
+    let models = ModelPanel::default();
+    panel.bake_settings.rays_per_probe = 64;
+    let original = panel.bindings.as_ref().unwrap().document().clone();
+    let original_revision = panel.bindings.as_ref().unwrap().revision();
+    let sidecar = panel.bindings.as_ref().unwrap().path.clone();
+    let saved = fs::read(&sidecar).unwrap();
+    let scene = fs::read(&path).unwrap();
+    let history = editor.history().clone();
+    let checksum = editor.checksum();
+    // No publication/sync occurs while waiting: the real job remains attached
+    // to its original revision. This is not a cancellation-before-work test.
+    panel.start_bake(&editor, &models).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let (completed, total) = panel.bake_progress().unwrap();
+        assert!(total > 0);
+        if completed == total {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "actual worker did not complete probe tracing"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    // Progress is observable without consuming the result; this does not claim
+    // the private receiver already contains a successful post-trace asset check.
+    let pending = panel.pending_bake.as_ref().unwrap();
+    assert_eq!(pending.revision, original_revision);
+    assert!(!pending.cancelled);
+    assert!(pending.rejection.is_none());
+    panel.gradient_axis = 1;
+    panel.gradient_start = [0.125, 0.25, 0.5];
+    panel.gradient_end = [2.0, 1.0, 0.75];
+    panel.apply_gradient(&editor).unwrap();
+    let authored = panel.bindings.as_ref().unwrap().document().clone();
+    let authored_revision = panel.bindings.as_ref().unwrap().revision();
+    assert_eq!(authored_revision, original_revision + 1);
+    assert_eq!(authored.grid.provenance, IrradianceProvenance::Authored);
+    assert!(authored.bake_receipt.is_none());
+    // Applying the gradient itself must not cancel or detach the pending job;
+    // the exact revision mismatch is the publication boundary under test.
+    assert!(panel.is_baking());
+    assert!(!panel.pending_bake.as_ref().unwrap().cancelled);
+    assert!(panel.pending_bake.as_ref().unwrap().rejection.is_none());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while panel.is_baking() {
+        panel.sync_bake_for_editor(&editor, &models);
+        assert!(
+            Instant::now() < deadline,
+            "completed probe worker was not drained"
+        );
+        if panel.is_baking() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    assert_eq!(panel.bake_status(), Some(
+        "Bake discarded: Irradiance document changed while baking. Previous irradiance retained"));
+    let bindings = panel.bindings.as_ref().unwrap();
+    assert_eq!(bindings.document(), &authored);
+    assert_eq!(bindings.revision(), authored_revision);
+    assert!(bindings.dirty());
+    assert_eq!(fs::read(&sidecar).unwrap(), saved);
+    assert_eq!(fs::read(&path).unwrap(), scene);
+    assert_eq!(editor.history(), &history);
+    assert_eq!(editor.checksum(), checksum);
+    // No hidden bake commit may have added another sidecar undo entry.
+    panel.undo(&editor).unwrap();
+    assert_eq!(panel.bindings.as_ref().unwrap().document(), &original);
+    assert!(!panel.bindings.as_ref().unwrap().can_undo());
+    panel.redo(&editor).unwrap();
+    assert_eq!(panel.bindings.as_ref().unwrap().document(), &authored);
+    assert_eq!(fs::read(sidecar).unwrap(), saved);
+}

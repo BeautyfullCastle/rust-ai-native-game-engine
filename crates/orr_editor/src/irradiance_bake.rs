@@ -44,6 +44,8 @@ const MAX_FRAME_BODIES: usize = 65536;
 const MAX_ASSET_FILES: usize = 4096;
 const MAX_ASSET_BYTES: u64 = 256 * 1024 * 1024;
 static WORKER_ACTIVE: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+pub(crate) static WORKER_TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BakeCost {
@@ -1504,7 +1506,6 @@ mod tests {
     use orr_render::irradiance::constant_irradiance;
     use orr_view::{RenderItem3, Shape3, Style3, Transform3, Vec3};
     use std::time::Duration;
-    static WORKER_TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn scene() -> BakeScene {
         BakeScene {
