@@ -1,3 +1,4 @@
+mod update_impact;
 mod usage;
 
 use crate::package_manager::{self, Plan, RemovalPlan, RemovalReceipt, UpdatePlan};
@@ -10,6 +11,14 @@ use std::{
 };
 
 enum Completion {
+    UpdateImpactInspected {
+        identity: update_impact::Identity,
+        result: Result<package_manager::UpdateImpactReport, String>,
+    },
+    UpdateImpactChecked {
+        identity: update_impact::Identity,
+        result: Result<package_manager::UpdateImpactReport, String>,
+    },
     UsageInspected {
         identity: usage::Identity,
         result: Result<usage::UsageReport, String>,
@@ -109,6 +118,7 @@ pub struct Panel {
     model_filter: String,
     verified: Option<Lock>,
     usage: usage::State,
+    update_impact: update_impact::State,
     preview: Option<PreviewedPlan>,
     update_preview: Option<PreviewedUpdate>,
     removal_name: String,
@@ -210,6 +220,7 @@ impl Panel {
         // reappear after dirty authoring, a modal, or closing this panel.
         if blocked_reason.is_some() || !self.open {
             self.usage.invalidate();
+            self.update_impact.invalidate();
         }
         self.poll();
         if blocked_reason.is_some() {
@@ -329,6 +340,7 @@ impl Panel {
                         update_preview_details(ui, preview.plan.preview());
                     }
                 }
+                self.show_update_impact(ui, can_operate);
                 self.model_import.show(
                     ui,
                     can_operate && !self.busy(),
@@ -407,6 +419,7 @@ impl Panel {
             });
         if !open {
             self.usage.invalidate();
+            self.update_impact.invalidate();
         }
         self.open = open;
     }
@@ -415,6 +428,7 @@ impl Panel {
         let next_root = project.map(Path::to_path_buf);
         if self.root != next_root {
             self.usage = usage::State::default();
+            self.update_impact.invalidate();
             self.root = next_root;
             self.project_generation = self.project_generation.saturating_add(1);
             self.last_removal = None;
@@ -438,6 +452,7 @@ impl Panel {
         let next_source = self.source.trim().to_owned();
         if self.source_identity != next_source {
             self.usage.invalidate();
+            self.update_impact.invalidate();
             self.update_preview = None;
             self.removal_preview = None;
             self.source_identity = next_source;
@@ -472,6 +487,12 @@ impl Panel {
         self.removing = false;
         self.updating = false;
         match completion {
+            Completion::UpdateImpactInspected { identity, result } => {
+                self.recheck_update_impact(identity, result);
+            }
+            Completion::UpdateImpactChecked { identity, result } => {
+                self.finish_update_impact(identity, result);
+            }
             Completion::UsageInspected { identity, result } => {
                 self.finish_usage(identity, result);
             }
@@ -755,6 +776,7 @@ impl Panel {
 
     fn invalidate_package_cache(&mut self) {
         self.usage.invalidate();
+        self.update_impact.invalidate();
         self.preview_request = None;
         self.last_removal = None;
         self.restoration_preview = None;
@@ -803,6 +825,7 @@ impl Panel {
             return;
         }
         self.usage.invalidate();
+        self.update_impact.invalidate();
         let Some(root) = self.root.clone() else {
             self.status = "Open a Room project before previewing a package update.".into();
             return;
@@ -844,6 +867,7 @@ impl Panel {
             return;
         }
         self.usage.invalidate();
+        self.update_impact.invalidate();
         if let Err(error) = parse_source_path(&self.source) {
             self.update_preview = None;
             self.status = error;
@@ -897,6 +921,7 @@ impl Panel {
             return;
         }
         self.usage.invalidate();
+        self.update_impact.invalidate();
         let Some(root) = self.root.clone() else {
             return;
         };
@@ -937,6 +962,7 @@ impl Panel {
             return;
         }
         self.usage.invalidate();
+        self.update_impact.invalidate();
         let Some(plan) = self.removal_preview.take() else {
             return;
         };
@@ -980,6 +1006,7 @@ impl Panel {
             return;
         }
         self.usage.invalidate();
+        self.update_impact.invalidate();
         let Some(receipt) = self.last_removal.take() else {
             return;
         };
@@ -1018,6 +1045,7 @@ impl Panel {
             return;
         }
         self.usage.invalidate();
+        self.update_impact.invalidate();
         let Some(receipt) = self.last_removal.take() else {
             return;
         };
@@ -1057,6 +1085,7 @@ impl Panel {
             return;
         }
         self.usage.invalidate();
+        self.update_impact.invalidate();
         self.last_removal = None;
         self.restoration_preview = None;
         self.restoration_generation = self.restoration_generation.saturating_add(1);
@@ -1091,6 +1120,7 @@ impl Panel {
             return;
         }
         self.usage.invalidate();
+        self.update_impact.invalidate();
         let Some(root) = self.root.clone() else {
             self.status = "Open a Room project before previewing a package.".into();
             return;
@@ -1131,6 +1161,7 @@ impl Panel {
             return;
         }
         self.usage.invalidate();
+        self.update_impact.invalidate();
         if let Err(error) = parse_source_path(&self.source) {
             self.status = error;
             return;

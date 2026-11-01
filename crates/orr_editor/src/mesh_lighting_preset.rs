@@ -44,6 +44,11 @@ impl Preset {
     /// Construct a new draft; this never mutates the target or writes a sidecar.
     pub(crate) fn merge_into(&self, target: &Document) -> Result<Document, String> {
         let merged = self.with_shadow_bounds(target.shadow_center, target.shadow_radius);
+        let merged = if target.has_post_process() {
+            merged.with_post_process(target.post_process_settings())?
+        } else {
+            merged
+        };
         merged.validate()?;
         Ok(merged)
     }
@@ -140,6 +145,7 @@ impl Preset {
             shadow_radius,
             tonemap: self.tonemap,
             exposure: self.exposure,
+            post_process: None,
         }
     }
 }
