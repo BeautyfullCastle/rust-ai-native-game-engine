@@ -2,8 +2,8 @@
 #![cfg(feature = "mesh-mission")]
 use super::*;
 use egui_kittest::{
-    kittest::{NodeT, Queryable},
     Harness,
+    kittest::{NodeT, Queryable},
 };
 use std::fs;
 
@@ -94,10 +94,12 @@ fn projection_match_button_changes_form_only_until_explicit_apply_and_save() {
     assert_eq!(fs::read(&scene).unwrap(), scene_bytes);
     assert!(!sidecar.exists());
     assert!(panel.play_blocker(editor).is_some());
-    assert!(harness
-        .get_by_label("Save game camera")
-        .accesskit_node()
-        .is_disabled());
+    assert!(
+        harness
+            .get_by_label("Save game camera")
+            .accesskit_node()
+            .is_disabled()
+    );
 
     harness.get_by_label("Apply game camera").click();
     harness.run_steps(3);
@@ -209,8 +211,57 @@ fn stale_and_play_contexts_reject_direct_conversion_and_disable_the_button() {
         assert_eq!(editor.history(), &editor_history);
         assert!(!editor.has_mesh_camera());
         assert_eq!(fs::read(&scene).unwrap(), scene_bytes);
-        assert!(!crate::mesh_camera_store::sidecar_path(&scene)
-            .unwrap()
-            .exists());
+        assert!(
+            !crate::mesh_camera_store::sidecar_path(&scene)
+                .unwrap()
+                .exists()
+        );
     }
+}
+
+#[test]
+fn projection_match_same_frame_edit_keeps_new_conversion_error() {
+    let (_directory, scene, editor, mut panel) = fixture();
+    let bytes = fs::read(&scene).unwrap();
+    let camera_history = history(&panel);
+    let editor_history = editor.history().clone();
+    panel.distance = "invalid".into();
+    let fields = form(&panel).0;
+    // These are the two events collected by show() during one UI frame.
+    panel.handle_form_actions(true, true, &editor);
+    assert!(
+        panel
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("Projection matching failed:"))
+    );
+    assert_eq!(form(&panel).0, fields);
+    assert_eq!(panel.projection, ProjectionMode::Perspective);
+    assert!(panel.form_dirty);
+    assert_eq!(history(&panel), camera_history);
+    assert_eq!(editor.history(), &editor_history);
+    assert!(!editor.has_mesh_camera());
+    assert_eq!(fs::read(&scene).unwrap(), bytes);
+    assert!(
+        !crate::mesh_camera_store::sidecar_path(&scene)
+            .unwrap()
+            .exists()
+    );
+}
+
+#[test]
+fn projection_match_same_frame_edit_clears_old_error_before_success() {
+    let (_directory, _scene, editor, mut panel) = fixture();
+    panel.error = Some("previous failure".into());
+    panel.distance = "18".into();
+    panel.handle_form_actions(true, false, &editor);
+    assert!(panel.error.is_none());
+    assert!(panel.form_dirty);
+    assert!(panel.status.starts_with("Game camera form changed"));
+    panel.error = Some("another previous failure".into());
+    panel.handle_form_actions(true, true, &editor);
+    assert!(panel.error.is_none());
+    assert_eq!(panel.projection, ProjectionMode::Orthographic);
+    assert!(panel.status.starts_with("Projection matched"));
+    assert!(!editor.has_mesh_camera());
 }

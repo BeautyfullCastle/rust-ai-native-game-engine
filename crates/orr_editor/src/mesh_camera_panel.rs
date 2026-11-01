@@ -232,14 +232,8 @@ impl Panel {
                 ui.weak("Match target-plane scale only, at the explicit aspect below (not the current viewport). Depth perspective still changes.");
                 text_field(ui, "Match projection aspect width", &mut self.match_width);
                 text_field(ui, "Match projection aspect height", &mut self.match_height);
-                if ui.button("Switch projection keeping target-plane scale").clicked() {
-                    self.match_projection(editor);
-                }
-                if changed {
-                    self.form_dirty = true;
-                    self.error = None;
-                    self.status = "Game camera form changed; apply it before Play or save.".into();
-                }
+                let match_requested = ui.button("Switch projection keeping target-plane scale").clicked();
+                self.handle_form_actions(changed, match_requested, editor);
                 ui.horizontal_wrapped(|ui| {
                     if ui
                         .button("Capture viewport as game camera")
@@ -559,6 +553,19 @@ impl Panel {
                     "Viewport pose captured in the form; Apply and Save remain explicit.".into();
             }
             Err(error) => self.error = Some(format!("Capture viewport camera failed: {error}")),
+        }
+    }
+
+    fn handle_form_actions(&mut self, changed: bool, match_requested: bool, editor: &Editor) {
+        // Both events can occur in one UI frame. Clear only the previous error
+        // before conversion so its new failure (or success status) remains visible.
+        if changed {
+            self.form_dirty = true;
+            self.error = None;
+            self.status = "Game camera form changed; apply it before Play or save.".into();
+        }
+        if match_requested {
+            self.match_projection(editor);
         }
     }
 
