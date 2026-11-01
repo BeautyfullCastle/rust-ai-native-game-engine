@@ -1,3 +1,6 @@
+#[path = "mesh_camera_panel/projection_match.rs"]
+mod projection_match;
+
 use crate::{
     backend::HostSpec,
     editor::Editor,
@@ -35,6 +38,8 @@ pub(crate) struct Panel {
     far: String,
     half_height: String,
     projection: ProjectionMode,
+    match_width: String,
+    match_height: String,
     form_dirty: bool,
     confirm_remove: bool,
     confirm_discard_changes: bool,
@@ -69,6 +74,8 @@ impl Default for Panel {
             far: "500".into(),
             half_height: "8".into(),
             projection: ProjectionMode::Perspective,
+            match_width: "16".into(),
+            match_height: "9".into(),
             form_dirty: false,
             confirm_remove: false,
             confirm_discard_changes: false,
@@ -222,6 +229,12 @@ impl Panel {
                         )
                         .changed();
                 });
+                ui.weak("Match target-plane scale only, at the explicit aspect below (not the current viewport). Depth perspective still changes.");
+                text_field(ui, "Match projection aspect width", &mut self.match_width);
+                text_field(ui, "Match projection aspect height", &mut self.match_height);
+                if ui.button("Switch projection keeping target-plane scale").clicked() {
+                    self.match_projection(editor);
+                }
                 if changed {
                     self.form_dirty = true;
                     self.error = None;
@@ -546,6 +559,40 @@ impl Panel {
                     "Viewport pose captured in the form; Apply and Save remain explicit.".into();
             }
             Err(error) => self.error = Some(format!("Capture viewport camera failed: {error}")),
+        }
+    }
+
+    fn match_projection(&mut self, editor: &Editor) {
+        if !self.can_edit(editor) {
+            self.error = Some("Projection matching requires the matching editable local mesh scene".into());
+            return;
+        }
+        let result = (|| {
+            let size = (self.match_width.parse::<u32>().map_err(|_| "Aspect width must be an integer in 1..=16384")?,
+                self.match_height.parse::<u32>().map_err(|_| "Aspect height must be an integer in 1..=16384")?);
+            let scene = self.scene.as_deref().ok_or("No matching camera scene")?;
+            let revision = self.graph_revision.ok_or("No matching graph revision")?;
+            let current = self.parse_form(scene, revision)?;
+            projection_match::match_projection(&current, size)
+        })();
+        match result {
+            Ok(document) => {
+                // Only projection parameters change. Preserve all other user text exactly.
+                match document.projection {
+                    Projection::Perspective => {
+                        self.projection = ProjectionMode::Perspective;
+                        self.fov_y_degrees = format_number(document.fov_y_degrees);
+                    }
+                    Projection::Orthographic { half_height } => {
+                        self.projection = ProjectionMode::Orthographic;
+                        self.half_height = format_number(half_height);
+                    }
+                }
+                self.form_dirty = true;
+                self.error = None;
+                self.status = "Projection matched at the specified aspect and target plane; Apply and Save remain explicit.".into();
+            }
+            Err(error) => self.error = Some(format!("Projection matching failed: {error}")),
         }
     }
 
@@ -1038,3 +1085,7 @@ fn text_field(ui: &mut Ui, label: &str, value: &mut String) -> bool {
 #[cfg(test)]
 #[path = "mesh_camera_panel/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "mesh_camera_panel/projection_match_tests.rs"]
+mod projection_match_tests;
