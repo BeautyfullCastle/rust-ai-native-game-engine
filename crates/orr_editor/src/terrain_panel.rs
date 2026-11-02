@@ -18,9 +18,11 @@ use orr_terrain::Edit;
 use std::{path::PathBuf, sync::Arc};
 
 pub mod flatten;
+pub mod smooth;
 
 pub struct TerrainPanel {
     pub flatten: flatten::Spec,
+    pub smooth: smooth::Spec,
     pub document: TerrainSession,
     pub local_path: String,
     pub asset_id: String,
@@ -44,6 +46,7 @@ impl Default for TerrainPanel {
     fn default() -> Self {
         Self {
             flatten: flatten::Spec::default(),
+            smooth: smooth::Spec::default(),
             document: TerrainSession::default(),
             local_path: "terrain.orrt".into(),
             asset_id: "terrain/local.orrt".into(),
@@ -601,6 +604,7 @@ impl TerrainPanel {
                 }
             }
             self.show_flatten(ui, editor, writable);
+            self.show_smooth(ui, editor, writable);
             ui.horizontal(|ui| {
                 if ui
                     .add_enabled(
