@@ -57,6 +57,8 @@ pub mod project_compositor;
 
 #[cfg(all(feature = "project-export", target_os = "linux", target_arch = "x86_64"))]
 pub mod project_export;
+#[cfg(all(feature = "runtime-export-support", target_os = "linux", target_arch = "x86_64"))]
+pub mod trusted_runtime;
 #[cfg(all(windows, target_arch = "x86_64", feature = "project-export"))]
 pub mod windows_export;
 #[cfg(all(windows, target_arch = "x86_64", feature = "project-create", feature = "room-project"))]
@@ -74,7 +76,7 @@ pub mod project_create;
 
 #[cfg(all(
     target_os = "linux",
-    any(feature = "project-create", all(feature = "project-export", target_arch = "x86_64"))
+    any(feature = "project-create", all(feature = "project-export", target_arch = "x86_64"), feature = "runtime-export-support")
 ))]
 mod project_publish;
 

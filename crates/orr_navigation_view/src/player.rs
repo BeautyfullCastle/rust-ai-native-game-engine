@@ -6,7 +6,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-pub const USAGE: &str = "navigation_player --scene FILE --ticks 0..100000 [--restart-check] [--capture NEW.png]\nReads an authored point-agent NavigationYard3D scene; no input, network, editor or bundle publishing. Capture requires gpu. Terrain-triangle point agent only: no radius clearance, avoidance or physical collision guarantee.";
+pub const USAGE: &str = "navigation_player (--scene FILE | --bundle DIR) --ticks 0..100000 [--restart-check] [--capture NEW.png]\nReads an authored point-agent NavigationYard3D scene; no input, network, editor or bundle publishing. Capture requires gpu and is unavailable in bundle mode. --capabilities reports compiled admission profiles. Terrain-triangle point agent only: no radius clearance, avoidance or physical collision guarantee.";
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Options {
@@ -91,6 +91,80 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Options>
     }))
 }
 
+/// Keep legacy Options/parse callers source-compatible; bundle never falls back to scene admission.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Command {
+    Scene(Options),
+    Bundle(Options),
+    Capabilities,
+}
+pub fn capabilities() -> &'static str {
+    if cfg!(all(feature = "authored-bundle", target_arch = "x86_64")) {
+        "ORR_NAVIGATION_PLAYER_V1\nORR_NAVIGATION_BUNDLE_V1"
+    } else {
+        "ORR_NAVIGATION_PLAYER_V1"
+    }
+}
+pub fn parse_command(args: impl IntoIterator<Item = OsString>) -> Result<Option<Command>, String> {
+    let mut bounded = Vec::new();
+    let mut bytes = 0usize;
+    for arg in args {
+        bytes = bytes
+            .checked_add(arg.len())
+            .ok_or("argument size overflow")?;
+        if bounded.len() == 8 || bytes > 16 * 1024 {
+            return Err("argument count/size limit exceeded".into());
+        }
+        bounded.push(arg);
+    }
+    if bounded.len() == 1 && bounded[0] == "--capabilities" {
+        return Ok(Some(Command::Capabilities));
+    }
+    let mut bundle = false;
+    let mut i = 0;
+    while i < bounded.len() {
+        if bounded[i] == "--bundle" {
+            if !cfg!(all(feature = "authored-bundle", target_arch = "x86_64")) {
+                return Err("--bundle requires authored-bundle".into());
+            }
+            bundle = true;
+            bounded[i] = OsString::from("--scene");
+        }
+        i += if bounded[i] == "--restart-check" {
+            1
+        } else {
+            2
+        };
+    }
+    let options = parse(bounded)?;
+    options
+        .map(|options| {
+            if bundle {
+                if options.capture.is_some() {
+                    return Err("bundle mode does not support capture".into());
+                }
+                Ok(Command::Bundle(options))
+            } else {
+                Ok(Command::Scene(options))
+            }
+        })
+        .transpose()
+}
+pub fn run_bundle(options: Options) -> Result<serde_json::Value, String> {
+    if options.capture.is_some() {
+        return Err("bundle mode does not support capture".into());
+    }
+    validate_options(&options)?;
+    #[cfg(all(feature = "authored-bundle", target_arch = "x86_64"))]
+    {
+        let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+        let player = crate::bundle::verify_bundle(&options.scene, Some(&executable))?;
+        run_player(options, player, None)
+    }
+    #[cfg(not(all(feature = "authored-bundle", target_arch = "x86_64")))]
+    Err("bundle mode requires authored-bundle".into())
+}
+
 fn capture_path(path: &Path) -> Result<PathBuf, String> {
     if path.extension().and_then(|v| v.to_str()) != Some("png") {
         return Err("capture output must end in .png".into());
@@ -132,7 +206,7 @@ fn hex(bytes: [u8; 32]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-pub fn run(options: Options) -> Result<serde_json::Value, String> {
+fn validate_options(options: &Options) -> Result<(), String> {
     // Public callers must receive exactly the same limits as command-line callers.
     if options.ticks > 100_000 {
         return Err("ticks exceeds 100000".into());
@@ -148,9 +222,22 @@ pub fn run(options: Options) -> Result<serde_json::Value, String> {
             return Err("capture path must be 1..4096 bytes".into());
         }
     }
+    Ok(())
+}
+
+pub fn run(options: Options) -> Result<serde_json::Value, String> {
+    validate_options(&options)?;
     // Refuse bad output before opening the scene or stepping authoritative state.
     let capture = options.capture.as_deref().map(capture_path).transpose()?;
-    let mut player = AuthoredPlayer::open(&options.scene)?;
+    let player = AuthoredPlayer::open(&options.scene)?;
+    run_player(options, player, capture)
+}
+
+fn run_player(
+    options: Options,
+    mut player: AuthoredPlayer,
+    capture: Option<PathBuf>,
+) -> Result<serde_json::Value, String> {
     // At most 100001 u64 checksums (800008 bytes), only when requested.
     let mut trajectory = if options.restart_check {
         Vec::with_capacity(options.ticks as usize + 1)
