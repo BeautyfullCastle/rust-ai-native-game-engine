@@ -90,24 +90,45 @@ impl ProgressPaths {
         key: &ProgressKey,
     ) -> Result<Self, String> {
         key.validate()?;
-        let base = if let Some(path) = xdg.map(Path::new).filter(|p| p.is_absolute()) {
-            path.to_path_buf()
-        } else if let Some(path) = home.map(Path::new).filter(|p| p.is_absolute()) {
-            path.join(".local/share")
-        } else {
-            return Err("progress requires absolute XDG_DATA_HOME or HOME".into());
-        };
-        Self::from_directory(
-            base.join("orrery/games")
-                .join(key.game())
-                .join(PROFILE)
-                .join(hex(&key.challenge)),
-        )
+        environment_paths(xdg, home, &key.game(), PROFILE, &key.challenge)
     }
     pub fn directory(&self) -> &Path {
         &self.directory
     }
 }
+fn environment_paths(
+    xdg: Option<&OsStr>,
+    home: Option<&OsStr>,
+    game: &str,
+    profile: &str,
+    challenge: &[u8; 32],
+) -> Result<ProgressPaths, String> {
+    let base = if let Some(path) = xdg.map(Path::new).filter(|p| p.is_absolute()) {
+        path.to_path_buf()
+    } else if let Some(path) = home.map(Path::new).filter(|p| p.is_absolute()) {
+        path.join(".local/share")
+    } else {
+        return Err("progress requires absolute XDG_DATA_HOME or HOME".into());
+    };
+    ProgressPaths::from_directory(
+        base.join("orrery/games")
+            .join(game)
+            .join(profile)
+            .join(hex(challenge)),
+    )
+}
+/// Reject project/export-local data. Callers supply admitted canonical roots;
+/// the transport separately enforces no-follow traversal and trusted ownership.
+#[cfg(feature = "room-progress")]
+pub(crate) fn require_external(directory: &Path, protected: &[&Path]) -> Result<(), String> {
+    if directory.components().any(|c| c.as_os_str() == ".orr")
+        || protected.iter().any(|root| directory.starts_with(root))
+    {
+        return Err("progress data must be external to project and export roots".into());
+    }
+    Ok(())
+}
+
 fn validate_directory_path(path: &Path) -> Result<(), String> {
     if !path.is_absolute() || path.parent().is_none() {
         return Err("progress directory must be an absolute non-root path".into());
@@ -168,6 +189,97 @@ impl Loaded {
         }
     }
 }
+#[cfg(feature = "room-progress")]
+#[path = "room_progress_store.rs"]
+pub mod room;
+
+// Closed policies: filenames, identity and value semantics cannot be selected independently.
+#[derive(Clone, Copy)]
+enum StoreCodec<'a> {
+    Collect(&'a ProgressKey),
+    #[cfg(feature = "room-progress")]
+    Room(&'a room::RoomClearKey),
+}
+#[derive(Clone, Copy)]
+struct StoreNames {
+    primary: &'static str,
+    backup: &'static str,
+    lock: &'static str,
+}
+impl StoreCodec<'_> {
+    fn names(self) -> StoreNames {
+        match self {
+            Self::Collect(_) => StoreNames {
+                primary: PRIMARY_NAME,
+                backup: BACKUP_NAME,
+                lock: LOCK_NAME,
+            },
+            #[cfg(feature = "room-progress")]
+            Self::Room(_) => StoreNames {
+                primary: "completion.json",
+                backup: "completion.json.bak",
+                lock: "completion.lock",
+            },
+        }
+    }
+    fn profile(self) -> &'static str {
+        match self {
+            Self::Collect(_) => PROFILE,
+            #[cfg(feature = "room-progress")]
+            Self::Room(_) => room::PROFILE,
+        }
+    }
+    fn game(self) -> String {
+        match self {
+            Self::Collect(k) => k.game(),
+            #[cfg(feature = "room-progress")]
+            Self::Room(k) => k.game(),
+        }
+    }
+    fn challenge(self) -> [u8; 32] {
+        match self {
+            Self::Collect(k) => k.challenge,
+            #[cfg(feature = "room-progress")]
+            Self::Room(k) => k.challenge,
+        }
+    }
+    fn validate(self) -> Result<(), String> {
+        match self {
+            Self::Collect(k) => k.validate(),
+            #[cfg(feature = "room-progress")]
+            Self::Room(k) => k.validate(),
+        }
+    }
+    fn merge(self, stored: u32, candidate: u32) -> Result<u32, String> {
+        match self {
+            Self::Collect(k) => {
+                if stored > k.goal || candidate > k.goal {
+                    return Err("score exceeds challenge goal".into());
+                }
+                Ok(stored.max(candidate))
+            }
+            #[cfg(feature = "room-progress")]
+            Self::Room(_) => {
+                if stored > 1 || candidate > 1 {
+                    return Err("invalid internal Room completion value".into());
+                }
+                Ok(u32::from(stored == 1 || candidate == 1))
+            }
+        }
+    }
+    fn encode(self, value: u32) -> Result<Vec<u8>, String> {
+        self.merge(value, value)?;
+        match self {
+            Self::Collect(k) => {
+                serde_json::to_vec(&ProgressV1::new(k, value)).map_err(|e| e.to_string())
+            }
+            #[cfg(feature = "room-progress")]
+            Self::Room(k) => serde_json::to_vec(&room::CompletionV1::new(k, value == 1))
+                .map_err(|e| e.to_string()),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ProgressStore {
     paths: ProgressPaths,
@@ -267,7 +379,7 @@ mod linux {
         profile: Option<serde_json::Value>,
         challenge: Option<serde_json::Value>,
     }
-    fn decode(bytes: Vec<u8>, key: &ProgressKey) -> Snapshot {
+    fn decode(bytes: Vec<u8>, codec: StoreCodec<'_>) -> Snapshot {
         let envelope: Envelope = match serde_json::from_slice(&bytes) {
             Ok(value) => value,
             Err(e)
@@ -306,12 +418,16 @@ mod linux {
             );
         }
         for (field, observed, expected) in [
-            ("game_id", envelope.game_id.as_ref(), key.game()),
-            ("profile", envelope.profile.as_ref(), PROFILE.to_owned()),
+            ("game_id", envelope.game_id.as_ref(), codec.game()),
+            (
+                "profile",
+                envelope.profile.as_ref(),
+                codec.profile().to_owned(),
+            ),
             (
                 "challenge",
                 envelope.challenge.as_ref(),
-                hex(&key.challenge),
+                hex(&codec.challenge()),
             ),
         ] {
             if value.get(field).is_some()
@@ -322,11 +438,40 @@ mod linux {
                 );
             }
         }
+        #[cfg(feature = "room-progress")]
+        if let StoreCodec::Room(_) = codec {
+            return match serde_json::from_slice::<room::CompletionV1>(&bytes) {
+                Ok(v)
+                    if v.version == 1
+                        && v.game_id == codec.game()
+                        && v.profile == codec.profile()
+                        && v.challenge == hex(&codec.challenge()) =>
+                {
+                    Snapshot::Valid {
+                        best: u32::from(v.cleared),
+                        bytes,
+                    }
+                }
+                Ok(_) => Snapshot::Malformed {
+                    reason: "invalid Room completion identity/version".into(),
+                    bytes,
+                },
+                Err(e) => Snapshot::Malformed {
+                    reason: e.to_string(),
+                    bytes,
+                },
+            };
+        }
+        let key = match codec {
+            StoreCodec::Collect(key) => key,
+            #[cfg(feature = "room-progress")]
+            StoreCodec::Room(_) => unreachable!("Room codec returned above"),
+        };
         match serde_json::from_slice::<ProgressV1>(&bytes) {
             Ok(v) if v.version == 1 => {
-                if v.game_id != key.game()
+                if v.game_id != codec.game()
                     || v.profile != PROFILE
-                    || v.challenge != hex(&key.challenge)
+                    || v.challenge != hex(&codec.challenge())
                 {
                     Snapshot::Unsupported("progress identity mismatch; preserved read-only".into())
                 } else if v.best > key.goal {
@@ -448,7 +593,11 @@ mod linux {
         }
     }
 
-    fn read_snapshot(directory: &File, name: &str, key: &ProgressKey) -> Result<Snapshot, String> {
+    fn read_snapshot(
+        directory: &File,
+        name: &str,
+        codec: StoreCodec<'_>,
+    ) -> Result<Snapshot, String> {
         let Some(before) = stat_regular(directory, name)? else {
             return Ok(Snapshot::Missing);
         };
@@ -488,7 +637,7 @@ mod linux {
         {
             return Err(format!("{name} changed while reading"));
         }
-        Ok(decode(bytes, key))
+        Ok(decode(bytes, codec))
     }
 
     fn loaded(primary: &Snapshot, backup: &Snapshot) -> Loaded {
@@ -538,6 +687,22 @@ mod linux {
         key: &ProgressKey,
         checkpoint: impl FnOnce(),
     ) -> Loaded {
+        load_codec_with_checkpoint(paths, StoreCodec::Collect(key), checkpoint)
+    }
+
+    #[cfg(feature = "room-progress")]
+    pub(super) fn load_codec(paths: &ProgressPaths, codec: StoreCodec<'_>) -> Loaded {
+        load_codec_with_checkpoint(paths, codec, || {})
+    }
+    pub(super) fn load_codec_with_checkpoint(
+        paths: &ProgressPaths,
+        codec: StoreCodec<'_>,
+        checkpoint: impl FnOnce(),
+    ) -> Loaded {
+        if let Err(e) = codec.validate() {
+            return Loaded::readonly(0, e);
+        }
+        let names = codec.names();
         let directory = match open_directory(paths, false) {
             Ok(Some(d)) => d,
             Ok(None) => return loaded(&Snapshot::Missing, &Snapshot::Missing),
@@ -545,7 +710,7 @@ mod linux {
         };
         // Reading must cooperate with publication too. Never create a lock or
         // directory merely to discover saved progress.
-        let guard = match read_lock(&directory) {
+        let guard = match read_lock(&directory, names.lock) {
             Ok(ReadLock::Busy) => {
                 return Loaded::deferred("progress load deferred: another writer holds the lock");
             }
@@ -553,8 +718,8 @@ mod linux {
             Err(e) => return Loaded::readonly(0, e),
         };
         checkpoint();
-        let result = load_snapshots(&directory, key);
-        let named = match stat_regular(&directory, LOCK_NAME) {
+        let result = load_snapshots(&directory, codec);
+        let named = match stat_regular(&directory, names.lock) {
             Ok(named) => named,
             Err(e) => return Loaded::readonly(0, e),
         };
@@ -574,17 +739,18 @@ mod linux {
         }
     }
 
-    fn load_snapshots(directory: &File, key: &ProgressKey) -> Loaded {
-        let primary = match read_snapshot(directory, PRIMARY_NAME, key) {
+    fn load_snapshots(directory: &File, codec: StoreCodec<'_>) -> Loaded {
+        let names = codec.names();
+        let primary = match read_snapshot(directory, names.primary, codec) {
             Ok(v) => v,
             Err(e) => return Loaded::readonly(0, e),
         };
-        let backup = match read_snapshot(directory, BACKUP_NAME, key) {
+        let backup = match read_snapshot(directory, names.backup, codec) {
             Ok(v) => v,
             Err(e) => return Loaded::readonly(loaded(&primary, &Snapshot::Missing).best, e),
         };
         let mut result = loaded(&primary, &backup);
-        for name in [PRIMARY_NAME, BACKUP_NAME, LOCK_NAME] {
+        for name in [names.primary, names.backup, names.lock] {
             let failure = match stat_regular(directory, name) {
                 Ok(Some(s)) if s.st_mode & 0o200 == 0 => Some(format!("{name} is read-only")),
                 Err(e) => Some(e),
@@ -605,21 +771,21 @@ mod linux {
         Held(File),
         Busy,
     }
-    fn read_lock(directory: &File) -> Result<ReadLock, String> {
-        let Some(before) = stat_regular(directory, LOCK_NAME)? else {
+    fn read_lock(directory: &File, lock_name: &str) -> Result<ReadLock, String> {
+        let Some(before) = stat_regular(directory, lock_name)? else {
             return Ok(ReadLock::Missing);
         };
         let file = File::from(
             fs::openat(
                 directory,
-                LOCK_NAME,
+                lock_name,
                 OFlags::RDONLY | FILE_FLAGS,
                 Mode::empty(),
             )
             .map_err(error)?,
         );
         let opened = fs::fstat(&file).map_err(error)?;
-        let named = stat_regular(directory, LOCK_NAME)?
+        let named = stat_regular(directory, lock_name)?
             .ok_or("progress lock disappeared while opening for load")?;
         if !same_file(&before, &opened) || !same_file(&named, &opened) {
             return Err("progress lock changed while opening for load".into());
@@ -629,15 +795,15 @@ mod linux {
             Err(rustix::io::Errno::AGAIN) => return Ok(ReadLock::Busy),
             Err(failure) => return Err(format!("progress read locking is unavailable: {failure}")),
         }
-        let named = stat_regular(directory, LOCK_NAME)?
+        let named = stat_regular(directory, lock_name)?
             .ok_or("progress lock disappeared while acquiring read lock")?;
         if !same_file(&named, &fs::fstat(&file).map_err(error)?) {
             return Err("progress lock changed while acquiring read lock".into());
         }
         Ok(ReadLock::Held(file))
     }
-    fn lock(directory: &File) -> Result<File, String> {
-        let old = stat_regular(directory, LOCK_NAME)?;
+    fn lock(directory: &File, lock_name: &str) -> Result<File, String> {
+        let old = stat_regular(directory, lock_name)?;
         if old.as_ref().is_some_and(|stat| stat.st_mode & 0o200 == 0) {
             return Err("progress lock is read-only".into());
         }
@@ -646,12 +812,12 @@ mod linux {
         } else {
             OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | FILE_FLAGS
         };
-        let fd = match fs::openat(directory, LOCK_NAME, flags, Mode::RUSR | Mode::WUSR) {
+        let fd = match fs::openat(directory, lock_name, flags, Mode::RUSR | Mode::WUSR) {
             Ok(fd) => fd,
             // Another cooperating writer may have created the stable lock.
             Err(rustix::io::Errno::EXIST) if old.is_none() => fs::openat(
                 directory,
-                LOCK_NAME,
+                lock_name,
                 OFlags::RDWR | FILE_FLAGS,
                 Mode::empty(),
             )
@@ -659,7 +825,7 @@ mod linux {
             Err(failure) => return Err(error(failure)),
         };
         let file = File::from(fd);
-        let Some(named) = stat_regular(directory, LOCK_NAME)? else {
+        let Some(named) = stat_regular(directory, lock_name)? else {
             return Err("progress lock disappeared".into());
         };
         if !same_file(&named, &fs::fstat(&file).map_err(error)?) {
@@ -715,31 +881,41 @@ mod linux {
         paths: &ProgressPaths,
         key: &ProgressKey,
         candidate: u32,
+        checkpoint: impl FnMut(&str) -> Result<(), String>,
+    ) -> Result<(u32, CommitOutcome), String> {
+        commit_codec(paths, StoreCodec::Collect(key), candidate, checkpoint)
+    }
+    pub(super) fn commit_codec(
+        paths: &ProgressPaths,
+        codec: StoreCodec<'_>,
+        candidate: u32,
         mut checkpoint: impl FnMut(&str) -> Result<(), String>,
     ) -> Result<(u32, CommitOutcome), String> {
+        codec.validate()?;
+        codec.merge(0, candidate)?;
+        let names = codec.names();
         let mut published = false;
         let mut committed_best = 0;
         let result = (|| -> Result<(), String> {
             let directory = open_directory(paths, true)?.ok_or("progress directory missing")?;
-            let _lock = lock(&directory)?;
-            for name in [PRIMARY_NAME, BACKUP_NAME] {
+            let _lock = lock(&directory, names.lock)?;
+            for name in [names.primary, names.backup] {
                 if stat_regular(&directory, name)?.is_some_and(|stat| stat.st_mode & 0o200 == 0) {
                     return Err(format!("{name} is read-only"));
                 }
             }
-            let primary = read_snapshot(&directory, PRIMARY_NAME, key)?;
-            let backup = read_snapshot(&directory, BACKUP_NAME, key)?;
-            let primary_identity = stat_regular(&directory, PRIMARY_NAME)?;
-            let backup_identity = stat_regular(&directory, BACKUP_NAME)?;
+            let primary = read_snapshot(&directory, names.primary, codec)?;
+            let backup = read_snapshot(&directory, names.backup, codec)?;
+            let primary_identity = stat_regular(&directory, names.primary)?;
+            let backup_identity = stat_regular(&directory, names.backup)?;
             let state = loaded(&primary, &backup);
             if !matches!(state.write_state, WriteState::Ready) {
                 return Err(state
                     .notice
                     .unwrap_or_else(|| "progress are read-only".into()));
             }
-            committed_best = candidate.max(state.best);
-            let mut bytes =
-                serde_json::to_vec(&ProgressV1::new(key, committed_best)).map_err(error)?;
+            committed_best = codec.merge(state.best, candidate)?;
+            let mut bytes = codec.encode(committed_best)?;
             bytes.push(b'\n');
             if bytes.len() > MAX_PROGRESS_BYTES {
                 return Err("serialized progress exceeds bounds".into());
@@ -780,10 +956,10 @@ mod linux {
             // Re-read BOTH byte snapshots, including malformed bytes, so a
             // newly arrived future document is never silently downgraded.
             for (name, original, identity) in [
-                (PRIMARY_NAME, &primary, &primary_identity),
-                (BACKUP_NAME, &backup, &backup_identity),
+                (names.primary, &primary, &primary_identity),
+                (names.backup, &backup, &backup_identity),
             ] {
-                if read_snapshot(&directory, name, key)? != *original
+                if read_snapshot(&directory, name, codec)? != *original
                     || !same_identity(identity.as_ref(), stat_regular(&directory, name)?.as_ref())
                 {
                     return Err(format!(
@@ -791,18 +967,18 @@ mod linux {
                     ));
                 }
             }
-            let named_lock = stat_regular(&directory, LOCK_NAME)?
+            let named_lock = stat_regular(&directory, names.lock)?
                 .ok_or("progress lock disappeared before publication")?;
             if !same_file(&named_lock, &fs::fstat(&_lock).map_err(error)?) {
                 return Err("progress lock changed before publication".into());
             }
             checkpoint("primary-rename")?;
-            primary_stage.publish(PRIMARY_NAME)?;
+            primary_stage.publish(names.primary)?;
             published = true;
             checkpoint("after-publication")?;
             if let Some(stage) = backup_stage {
                 checkpoint("backup-rename")?;
-                stage.publish(BACKUP_NAME)?;
+                stage.publish(names.backup)?;
             }
             checkpoint("directory-sync")?;
             directory.sync_all().map_err(error)?;

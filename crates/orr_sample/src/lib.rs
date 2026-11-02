@@ -92,8 +92,12 @@ pub mod authored_ui;
 #[cfg(feature = "collect-ui")]
 pub mod collect_ui;
 
-#[cfg(all(feature = "collect-progress", target_os = "linux"))]
+#[cfg(all(any(feature = "collect-progress", feature = "room-progress"), target_os = "linux"))]
 pub mod game_progress;
+#[cfg(all(feature = "room-progress", target_os = "linux"))]
+mod room_progress;
+#[cfg(all(feature = "room-progress", target_os = "linux"))]
+mod room_progress_digest;
 #[cfg(all(feature = "collect-progress", target_os = "linux"))]
 mod collect_progress;
 

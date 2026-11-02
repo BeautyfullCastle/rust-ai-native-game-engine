@@ -116,12 +116,18 @@ fn step(sim: &mut Simulation<RoomEscapeV1>, input: RoomInput) {
     sim.step(&inputs);
 }
 pub fn run(options: Options) -> Result<(), String> {
-    let project = PreparedProject::open_with_capabilities(
+    let support = if cfg!(all(feature = "room-progress", target_os = "linux")) {
+        crate::room_project::ProgressSupport::MetadataOnly
+    } else {
+        crate::room_project::ProgressSupport::Unsupported
+    };
+    let project = PreparedProject::open_with_progress(
         &options.project,
         crate::room_project::RoomProjectCapabilities {
             lighting: cfg!(feature = "room-lighting"),
             character: cfg!(feature = "room-character"),
         },
+        support,
     )?;
     if options.headless {
         headless(
@@ -284,6 +290,8 @@ struct Graphics {
     format: TextureFormat,
 }
 struct App {
+    #[cfg(all(feature = "room-progress", target_os = "linux"))]
+    progress: crate::room_progress::ProgressSession,
     project: PreparedProject,
     sim: Simulation<RoomEscapeV1>,
     #[cfg(feature = "room-character")]
@@ -315,7 +323,11 @@ impl App {
             || OrbitCamera::new([0.0, 0.5, 0.0], 0.65, 1.02, 60.0),
             |camera| camera.document.orbit(),
         );
+        #[cfg(all(feature = "room-progress", target_os = "linux"))]
+        let progress = crate::room_progress::ProgressSession::open(&project);
         Ok(Self {
+            #[cfg(all(feature = "room-progress", target_os = "linux"))]
+            progress,
             project,
             sim,
             #[cfg(feature = "room-character")]
@@ -337,7 +349,16 @@ impl App {
         event_loop.exit();
     }
     fn step_authoritative(&mut self, input: RoomInput) -> Result<(), String> {
+        #[cfg(all(feature = "room-progress", target_os = "linux"))]
+        let before = (self.sim.tick(), self.sim.frame().singleton::<RoomRun>().won);
         step(&mut self.sim, input);
+        #[cfg(all(feature = "room-progress", target_os = "linux"))]
+        self.progress.observe(
+            before.0,
+            before.1,
+            self.sim.tick(),
+            self.sim.frame().singleton::<RoomRun>().won,
+        );
         #[cfg(feature = "room-character")]
         self.observe_character()?;
         Ok(())
@@ -393,7 +414,10 @@ impl App {
         }
         let g = self.graphics.as_mut().expect("graphics checked above");
         let run = self.sim.frame().singleton::<RoomRun>();
-        g.window.set_title(&format!("Room Escape | key: {} | {} | WASD/arrows move, E interact, R restart, Esc quit | mouse orbit/pan/zoom", run.key_collected, if run.won != 0 { "WON" } else if run.key_collected == 0 { "exit locked" } else { "exit unlocked" }));
+        let title = format!("Room Escape | key: {} | {} | WASD/arrows move, E interact, R restart, Esc quit | mouse orbit/pan/zoom", run.key_collected, if run.won != 0 { "WON" } else if run.key_collected == 0 { "exit locked" } else { "exit unlocked" });
+        #[cfg(all(feature = "room-progress", target_os = "linux"))]
+        let title = format!("{title} | {}", self.progress.status());
+        g.window.set_title(&title);
         // The backend reconfigures lost/outdated surfaces and returns Skip.
         if let Acquire::Frame(surface_frame) = g.rhi.acquire_frame(&mut g.surface) {
             let view = g.rhi.frame_view(&surface_frame);
@@ -679,3 +703,7 @@ mod tests {
 #[cfg(all(test, feature = "room-character"))]
 #[path = "room_character_app_tests.rs"]
 mod character_tests;
+
+#[cfg(all(test, feature = "room-progress", feature = "project-create", target_os = "linux"))]
+#[path = "room_progress_app_tests.rs"]
+mod progress_tests;

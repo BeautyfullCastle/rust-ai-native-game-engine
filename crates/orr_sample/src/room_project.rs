@@ -168,7 +168,11 @@ pub struct PreparedRoomCamera {
     pub manifest_bytes: Vec<u8>,
     pub manifest_path: PathBuf,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProgressSupport { Unsupported, MetadataOnly }
+
 pub struct PreparedProject {
+    progress: Option<orr_package::ProjectProgress>,
     #[cfg(feature = "room-character")]
     character: Option<PreparedRoomCharacter>,
     #[cfg(feature = "room-lighting")]
@@ -189,6 +193,10 @@ impl PreparedProject {
     }
     /// Optional consumers opt in independently, regardless of Cargo feature unification.
     pub fn open_with_capabilities(root: impl AsRef<Path>, capabilities: RoomProjectCapabilities) -> Result<Self, String> {
+        Self::open_with_progress(root, capabilities, ProgressSupport::Unsupported)
+    }
+    /// Metadata admission only; this method never opens or writes a progress store.
+    pub fn open_with_progress(root: impl AsRef<Path>, capabilities: RoomProjectCapabilities, progress_support: ProgressSupport) -> Result<Self, String> {
         let project = orr_package::Project::open(root.as_ref(), compiled_runtime())
             .map_err(|e| e.to_string())?;
         let before = project
@@ -196,13 +204,13 @@ impl PreparedProject {
             .map_err(|e| format!("room active lock: {e}"))?;
         let manifest = project.manifest().ok_or("room project manifest missing")?;
         let entry = manifest.entry.as_ref().ok_or("room entry missing")?;
-        if manifest.schema != 2
+        if !matches!((manifest.schema, manifest.progress.as_ref()), (2, None) | (3, Some(orr_package::ProjectProgress { profile: orr_package::ProgressProfile::RoomEscapeClearV1, .. })))
             || entry.game != orr_package::ProjectGame::RoomEscapeV1
             || entry.sprites.is_some()
             || entry.ui.is_some()
-            || manifest.progress.is_some()
+            || (manifest.progress.is_some() && progress_support != ProgressSupport::MetadataOnly)
         {
-            return Err("room requires schema2 room-escape-v1 without sprites/UI/progress".into());
+            return Err("room requires schema2 or explicitly supported Room progress schema3 without sprites/UI".into());
         }
         let manifest_path = project.root().join("orr.project.json");
         let manifest_bytes = crate::project::read_regular(&manifest_path, 1024 * 1024)?;
@@ -329,6 +337,7 @@ impl PreparedProject {
             return Err("room manifest changed during admission".into());
         }
         Ok(Self {
+            progress: manifest.progress.clone(),
             #[cfg(feature = "room-character")]
             character,
             #[cfg(feature = "room-lighting")]
@@ -359,6 +368,7 @@ impl PreparedProject {
     pub fn take_camera(&mut self) -> Option<PreparedRoomCamera> {
         self.camera.take()
     }
+    pub fn progress(&self) -> Option<&orr_package::ProjectProgress> { self.progress.as_ref() }
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -589,3 +599,7 @@ fn add_bytes(total: usize, count: usize, stride: usize) -> Result<usize, String>
         .and_then(|n| total.checked_add(n))
         .ok_or_else(|| "room decoded model size overflow".into())
 }
+
+#[cfg(all(test, feature = "room-progress", feature = "project-create"))]
+#[path = "room_progress_admission_tests.rs"]
+mod progress_admission_tests;
