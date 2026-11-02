@@ -2,7 +2,7 @@
 //! Arena viewport, collider, simulation state, host timeline or scene save.
 use crate::{
     animated_bindings::{self, Binding, Bindings, LoadedAsset, PlaybackMode, PlaybackSettings},
-    animated_preview::{GpuAnimatedPreview, PreviewPlayers},
+    animated_preview::{GpuAnimatedPreview, PreviewPlayers, PreviewStep},
     editor::Editor,
     game::EditorGame,
     model::Mode,
@@ -573,7 +573,24 @@ impl AnimatedPanel {
                 self.report(r);
             }
         });
+        ui.horizontal_wrapped(|ui| {
+            let previous = ui.button("Previous preview sample (1/60 s)").clicked();
+            let next = ui.button("Next preview sample (1/60 s)").clicked();
+            let direction = if previous {
+                Some(PreviewStep::Previous)
+            } else if next {
+                Some(PreviewStep::Next)
+            } else {
+                None
+            };
+            if let Some(direction) = direction {
+                let result = self.players.step(guid, direction);
+                self.report(result);
+            }
+        });
+        ui.weak("Source-time steps pause preview; previous clamps at zero. Once holds the end; Loop forward wraps.");
         if let Some(player) = self.players.player(guid) {
+            ui.label(format!("Preview sample time: {} s", player.time()));
             let mut time = player.time();
             let playing = player.state() == orr_model::animation::PlaybackState::Playing;
             ui.label(format!("Preview state: {:?}", player.state()));
