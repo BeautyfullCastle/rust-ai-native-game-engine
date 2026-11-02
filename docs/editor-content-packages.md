@@ -39,6 +39,40 @@ Only one new direct package is added; dependencies must already resolve from
 the installed lock. Existing selections and identities stay unchanged. New
 packages must declare `LICENSE.txt`; its presence is not legal trust.
 
+### Add a package with local dependency candidates
+
+For a package whose dependencies are not installed yet, keep the primary source
+in **Local content package directory** and enter 1–8 absolute local directories
+in **Dependency candidate directories (one per line)**. Each path is bounded to
+4096 bytes and the candidate text to 32768 bytes. Use **Preview package with
+dependencies**, inspect the direct/indirect selections and unused candidates,
+then explicitly **Add package with dependencies**.
+
+The primary is the only new direct selection. The existing resolver activates
+only reachable dependency candidates; unused candidates remain inactive. Every
+supplied source must pass the existing compiled Room capability, license-file,
+portable path and byte-integrity checks, even when unused. Duplicate paths/names
+and names already active in the lock are rejected; this lane is not an update
+or dependency-version replacement tool. Existing selections and package
+identities must remain unchanged. No package source is downloaded or executed.
+
+Preview writes nothing. Its private plan pins the complete prior/candidate lock,
+the Room project manifest and all supplied package identities, including unused
+ones. Apply rechecks them and repeats source/manifest admission immediately
+before publication under the existing writer guard. Use trusted, stable local
+directories: this is not isolation from hostile concurrent writers. A failed
+commit preserves the old active lock, but staged unreachable immutable cache
+objects can remain. A post-publication Room verification failure reports the
+package as installed rather than claiming rollback.
+
+Changing primary/candidate fields, project or authoring context invalidates the
+preview. Package operations share one in-flight lane; repeated clicks cannot
+start a second operation. Closing or editing after dispatch does not cancel or
+roll back an installation. A completion for a prior project is reported for
+that project, not reused as the current inventory. Disconnected/uncertain
+workers require verification, not automatic retry. Existing detached-worker
+lifetime behavior is unchanged; this is not a joined-worker guarantee.
+
 After verification, **Preview static model** inspects static assets without entity
 selection or assignment. **Use model {package}/{asset}** assigns an installed
 `.glb`, `.gltf` or `.orrmodel` to the selected persistent entity without changing
@@ -67,7 +101,7 @@ deactivated. Changed project/lock bytes invalidate previews.
 
 Removal retains cache objects, original sources, scene/model/camera bytes and
 history. Successful removal refreshes verified inventory. During removal,
-restoration or update commits, authoring and playback input—including keyboard
+restoration, update or dependency-add commits, authoring and playback input—including keyboard
 and accessibility actions—is frozen through the completion frame. External
 host/ERP writers are not isolated. Another project's completion never replaces
 the current inventory.

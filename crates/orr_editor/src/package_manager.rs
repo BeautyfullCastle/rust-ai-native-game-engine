@@ -1,3 +1,5 @@
+mod dependency_add;
+pub use dependency_add::{apply_add_with_dependencies, plan_add_with_dependencies, DependencyAddPlan};
 mod update_impact;
 pub use update_impact::{inspect_update_impact, AssetChange, BindingImpact, UpdateImpactReport};
 mod removal;
