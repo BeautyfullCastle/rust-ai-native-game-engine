@@ -66,6 +66,12 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Value, String> {
     if bytes.len() > MAX_BYTES {
         return Err("animation manifest exceeds 64 KiB".into());
     }
+    parse_bounded(bytes, MAX_BYTES)
+}
+pub(super) fn parse_bounded(bytes: &[u8], max: usize) -> Result<Value, String> {
+    if bytes.len() > max {
+        return Err("JSON exceeds byte bound".into());
+    }
     let text = std::str::from_utf8(bytes).map_err(|e| e.to_string())?;
     serde_json::from_str::<Strict>(text)
         .map(|s| s.0)

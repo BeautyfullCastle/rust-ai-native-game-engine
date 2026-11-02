@@ -41,6 +41,9 @@ impl Prepared {
     pub(super) fn bytes(&self) -> &[u8] {
         &self.bytes
     }
+    pub(super) fn image_bytes(&self, name: &str) -> &[u8] {
+        &self.snapshots[name]
+    }
     pub(super) fn images(&self) -> &[ImageReceipt] {
         &self.images
     }
@@ -74,6 +77,30 @@ pub(super) fn prepare(bytes: Vec<u8>, assets: &Path) -> Result<Prepared, String>
         snapshots.insert(name.clone(), data);
     }
     recheck_directory(&root, &fd)?;
+    prepare_images(bytes, &root, snapshots)
+}
+// Offline bounds arithmetic, not simulation floating-point state.
+#[allow(clippy::float_arithmetic)]
+pub(super) fn prepare_images(
+    bytes: Vec<u8>,
+    root: &Path,
+    snapshots: BTreeMap<String, Vec<u8>>,
+) -> Result<Prepared, String> {
+    let value = manifest::parse(&bytes)?;
+    let names = manifest::names(&value)?;
+    if names.len() != snapshots.len() || names.iter().any(|n| !snapshots.contains_key(n)) {
+        return Err("animation image inventory mismatch".into());
+    }
+    let total = snapshots.values().try_fold(0usize, |sum, b| {
+        if b.len() > 8 * 1024 * 1024 {
+            return Err("image exceeds8MiB");
+        }
+        sum.checked_add(b.len()).ok_or("image byte overflow")
+    })?;
+    if total > 32 * 1024 * 1024 {
+        return Err("animation images exceed32MiB".into());
+    }
+    let root = absolute(root)?;
     let mut images = Vec::new();
     for (i, name) in names.iter().enumerate() {
         let data = &snapshots[name];

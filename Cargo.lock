@@ -1952,6 +1952,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
+name = "html5gum"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbae3133814a10216af5242a254420a74cb0d2f7715646924f5a8e7720cd188b"
+
+[[package]]
 name = "httlib-huffman"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3354,7 +3360,9 @@ dependencies = [
 name = "orr_package"
 version = "0.0.1"
 dependencies = [
+ "base64 0.22.1",
  "crc32fast",
+ "html5gum",
  "orr_asset_cook",
  "orr_ecs",
  "orr_model",

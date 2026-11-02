@@ -41,3 +41,18 @@ fn collision_and_postpublish_uncertainty_do_not_rollback() {
     );
     assert_eq!(std::fs::read(&done).unwrap(), b"complete");
 }
+#[test]
+fn offline_size_policy_does_not_relax_existing_manifest_publisher() {
+    let t = tempfile::tempdir().unwrap();
+    let bytes = vec![b'x'; 65537];
+    assert!(write(&t.path().join("small"), &bytes, |_, _| Ok(())).is_err());
+    assert!(write_bounded(
+        &t.path().join("html"),
+        &bytes,
+        super::super::offline::MAX_OUTPUT,
+        |_, _| Ok(())
+    )
+    .unwrap()
+    .is_none());
+    assert_eq!(std::fs::read(t.path().join("html")).unwrap(), bytes);
+}
