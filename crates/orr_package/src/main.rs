@@ -3,7 +3,7 @@ use std::{env, path::PathBuf};
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.is_empty() || args[0] == "--help" {
-        println!("orr_pkg <install PROJECT [--dry-run] --path SOURCE [--dependency-path SOURCE]... | remove PROJECT NAME [--dry-run] | restore PROJECT NAME DIGEST [--dry-run] | list PROJECT | explain PROJECT NAME | verify PROJECT [--package NAME] | inspect SOURCE>\nOptional Linux authoring: orr_pkg create-assembled --help (requires model-authoring feature); create-animated-sequence --help (requires animation-authoring feature); create-sprite --help (requires sprite-authoring feature); create-coop-audio-bank[-from-wav] --help (requires audio-authoring feature); deployment --help (requires deployment-authoring feature).\nOffline content only. Runtime capabilities must be validated by the consuming host.");
+        println!("orr_pkg <install PROJECT [--dry-run] --path SOURCE [--dependency-path SOURCE]... | remove PROJECT NAME [--dry-run] | restore PROJECT NAME DIGEST [--dry-run] | list PROJECT | explain PROJECT NAME | verify PROJECT [--package NAME] | inspect SOURCE>\nOptional Linux authoring: orr_pkg create-assembled --help (requires model-authoring feature); create-animated-sequence --help (requires animation-authoring feature); create-sprite --help (requires sprite-authoring feature); create-coop-audio-bank[-from-wav] --help (requires audio-authoring feature); deployment --help (requires deployment-authoring feature); bootstrap-user-game --help (requires bootstrap-authoring feature).\nOffline content only. Runtime capabilities must be validated by the consuming host.");
         return Ok(());
     }
     let engine = Runtime::content_only().engine_version;
@@ -86,6 +86,16 @@ fn preview_limits() {
     eprintln!("Read-only content/graph preview; no activation or writer reservation. Future write permissions, writer availability and inactive destination objects are not guaranteed. Compiled capability validation is deferred to the consuming host.");
 }
 fn main() {
+    if env::args_os().nth(1).is_some_and(|arg| arg == "bootstrap-user-game") {
+        #[cfg(all(feature = "bootstrap-authoring", target_os = "linux"))]
+        std::process::exit(i32::from(orr_package::user_game_bootstrap::run_cli(env::args_os().skip(2))));
+        #[cfg(not(all(feature = "bootstrap-authoring", target_os = "linux")))]
+        {
+            eprintln!("Bootstrap requires Linux with --features bootstrap-authoring; no input/output opened");
+            std::process::exit(2);
+        }
+    }
+
     if env::args_os().nth(1).is_some_and(|arg| arg == "deployment") {
         #[cfg(all(feature = "deployment-authoring", target_os = "linux"))]
         std::process::exit(i32::from(orr_package::deployment_manifest::run_cli(env::args_os().skip(2))));
