@@ -7,7 +7,7 @@ orr_pkg pack-coop-offline --build-dir trusted/dist --output new-game.html \
   --scene authored.scene.yaml --animations animation.json --audio bank.json
 ```
 
-All three authored inputs are optional. This delivery command requires neither Python nor Pillow. Trusted Node on PATH remains required when a Scene or animation is supplied. It does not build/fetch code, install packages, or accept executable/script overrides. The legacy Python tool remains a compatibility oracle; copy and recipe entrypoints are separate migration work.
+All three authored inputs are optional. This delivery command requires neither Python nor Pillow. Trusted Node on PATH remains required when a Scene or animation is supplied. It does not build/fetch code, install packages, or accept executable/script overrides. The legacy Python tool remains a compatibility oracle; copy and recipe entrypoints share this hub through the [Rust workflow](rust-coop-workflow.md).
 
 ## Same immutable build, real validation
 

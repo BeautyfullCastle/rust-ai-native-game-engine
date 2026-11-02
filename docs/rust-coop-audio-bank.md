@@ -43,9 +43,9 @@ verified, directory/parent sync failure reports a complete existing bank with
 uncertain durability, not absence. This conservative error policy intentionally
 differs from the old Python cleanup; successful12file bytes remain identical.
 
-Legacy Python tools and native WAV CLI remain for compatibility. The final web
-HTML packer still uses Python; removing soundbank-authoring Python does not remove
-that separate deployment dependency. Tests run the unchanged strict packer
+Legacy Python tools and native WAV CLI remain for compatibility. The final web HTML packer and official build now also have a
+[Python-free Rust workflow](rust-coop-workflow.md); authored runtime validation
+still requires trusted Node. Tests run the unchanged strict packer
 admission and actual Node consumer with mock WebAudio, including exact samples,
 mute/pause and duplicate suppression. That is not hardware playback or listening
 certification. UI cues do not become invented authoritative engine events.

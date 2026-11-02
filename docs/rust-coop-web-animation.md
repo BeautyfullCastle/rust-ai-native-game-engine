@@ -11,7 +11,8 @@ The existing role/FPS schema is not converted to sprite duration_ms. Default FPS
 and loop fields stay absent unless authored; the actual JS consumer supplies them.
 This slice removes Python/Pillow from these two production authoring commands.
 Trusted Node on PATH **remains required** for the actual JS sampler gate. Final
-HTML packaging and scene/WASM validation are separate, still Python-backed tools.
+HTML packaging and Scene/WASM validation also have Rust entrypoints; see
+[rust-coop-workflow.md](rust-coop-workflow.md) for the Python-free official build path.
 The original Python commands remain for compatibility and differential tests.
 
 Manifest admission rejects duplicate keys before image lookup, nonfinite values,
