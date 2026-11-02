@@ -32,9 +32,9 @@ explicit Apply; existing applied props are not changed by loading.
 
 **This first slice is Editor authoring and Play preview only.** Shaded props are
 explicitly rejected by mesh export and bundle-open admission, even in a build
-with the feature enabled. Prefab capture is also disabled for shaded props to
-avoid silently losing the settings. Existing unshaded export/prefabs remain
-supported. Standalone player/export support needs a later capability and consumer
+with the feature enabled. Local [prop prefabs](editor-mesh-prop-prefabs.md)
+preserve scalar settings when this feature is enabled; feature-off readers reject
+those records. Existing unshaded export/prefabs remain supported. Standalone player/export support needs a later capability and consumer
 validation slice; no new runtime capability is advertised here.
 
 Focused acceptance covers strict data/feature boundaries, real prop controls,
