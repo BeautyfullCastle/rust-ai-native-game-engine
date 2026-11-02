@@ -1,4 +1,4 @@
-> Python-free PCM/WAV authoring is now available through [the optional Rust CLI](rust-coop-audio-bank.md). Legacy commands below remain for compatibility; the final HTML packer still requires Python.
+> Python-free PCM/WAV authoring is now available through [the optional Rust CLI](rust-coop-audio-bank.md). Legacy commands below remain for compatibility. The [Rust web workflow](rust-coop-workflow.md) also replaces the final HTML packer; authored validation still uses Node.
 
 # Author a CoopDefense soundbank
 

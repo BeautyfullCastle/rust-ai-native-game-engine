@@ -1,3 +1,5 @@
+> New user-facing Linux workflows should use the [optional Rust CLI](rust-coop-workflow.md). The Python commands below remain compatibility and differential-test references.
+
 # Portable CoopDefense deployment recipe
 
 This optional web-authoring CLI remembers the inputs for one offline HTML

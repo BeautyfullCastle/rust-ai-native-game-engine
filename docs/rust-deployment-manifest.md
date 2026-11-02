@@ -49,7 +49,8 @@ is not atomic file publication. Validation/id/export never write the source.
 Original Python tools remain for compatibility and differential testing. Actual
 native-client option consumption and in-memory relay handshakes are tested without
 sockets; browser plan parity is not browser execution. No Windows/GPU certification
-or removal of the separate final-HTML Python packer dependency is claimed.
+is claimed. Final HTML packaging now has a separate optional Linux
+[Rust workflow](rust-coop-workflow.md); authored execution gates still require Node.
 
 The native CLI also rejects repeated singleton flags and unpaired Unicode surrogate
 escapes, instead of Python last-value argument selection or non-scalar strings.
