@@ -1,5 +1,7 @@
 //! Optional web animation authoring. Python/Pillow-free; trusted Node remains required.
 mod manifest;
+mod node_gate;
+mod scene;
 mod png;
 mod prepared;
 mod publish;
@@ -228,4 +230,9 @@ pub fn run_cli(args: impl IntoIterator<Item = OsString>, compose: bool) -> u8 {
             1
         }
     }
+}
+
+/// Create Scene YAML only after execution against the supplied trusted WASM.
+pub fn run_scene_cli(args: impl IntoIterator<Item = OsString>) -> u8 {
+    scene::run_cli(args)
 }
