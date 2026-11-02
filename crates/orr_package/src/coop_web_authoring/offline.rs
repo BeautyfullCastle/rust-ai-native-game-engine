@@ -310,6 +310,22 @@ fn generate(o: &Options) -> Result<OfflineHtml, String> {
         bytes: html.into_bytes(),
     })
 }
+pub(super) fn asset_names() -> &'static [&'static str] {
+    &bundle::ASSETS
+}
+pub(super) fn build_recipe(recipe: &super::recipe::Recipe) -> Result<Option<String>, String> {
+    let o = Options {
+        root: recipe.build_dir().to_owned(),
+        output: recipe.output().to_owned(),
+        scene: recipe.scene().map(Path::to_owned),
+        animations: recipe.animations().map(Path::to_owned),
+        audio: recipe.audio().map(Path::to_owned),
+    };
+    publish::preflight(&o.output)?;
+    let html = generate(&o)?;
+    recipe.recheck()?;
+    publish::publish_offline(&o.output, &html)
+}
 pub(super) fn run_cli(args: impl IntoIterator<Item = OsString>) -> u8 {
     let args: Vec<_> = args.into_iter().take(12).collect();
     if args.len() == 1 && args[0] == "--help" {

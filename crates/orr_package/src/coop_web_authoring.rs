@@ -3,6 +3,8 @@ mod manifest;
 mod node_gate;
 mod scene;
 mod offline;
+mod recipe;
+mod copy_assets;
 mod png;
 mod prepared;
 mod publish;
@@ -240,3 +242,8 @@ pub fn run_scene_cli(args: impl IntoIterator<Item = OsString>) -> u8 {
 
 /// Build one explicit-new offline HTML delivery with applicable real engine gates.
 pub fn run_offline_cli(args: impl IntoIterator<Item = OsString>) -> u8 { offline::run_cli(args) }
+
+/// Build a portable closed recipe through the same verified offline hub.
+pub fn run_recipe_cli(args: impl IntoIterator<Item = OsString>) -> u8 { recipe::run_cli(args) }
+/// Refresh explicit generated build assets; not an atomic release publisher.
+pub fn run_copy_cli(args: impl IntoIterator<Item = OsString>) -> u8 { copy_assets::run_cli(args) }
