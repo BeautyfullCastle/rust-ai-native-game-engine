@@ -1,6 +1,10 @@
 //! Optional in-process static model package authoring. No child executable,
 //! installation, runtime capability grant or rights verification is performed.
-use std::{collections::BTreeMap, ffi::OsString, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ffi::OsString,
+    path::PathBuf,
+};
 
 mod publish;
 
@@ -8,6 +12,30 @@ pub const USAGE: &str = "orr_pkg create-assembled --recipe FILE --asset-id ID.as
 const MAX_RECIPE: usize = 16 * 1024;
 const MAX_LICENSE: usize = 1024 * 1024;
 const MAX_MODEL: usize = 64 * 1024 * 1024;
+
+/// Closed internal policy: callers cannot choose a decoder, filename or grants.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PackageKind {
+    Static,
+    #[cfg(feature = "animation-authoring")]
+    AnimatedSequence,
+}
+impl PackageKind {
+    fn model_name(self) -> &'static str {
+        match self {
+            Self::Static => "model.model.json",
+            #[cfg(feature = "animation-authoring")]
+            Self::AnimatedSequence => "model.animated.json",
+        }
+    }
+    fn capabilities(self) -> BTreeSet<String> {
+        match self {
+            Self::Static => ["models".into()].into(),
+            #[cfg(feature = "animation-authoring")]
+            Self::AnimatedSequence => ["models".into(), "animation".into()].into(),
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Metadata {
@@ -91,6 +119,9 @@ fn valid_metadata(value: &str) -> bool {
 /// All decoding remains in the existing assembler and package-source libraries.
 /// Bounded inputs replace the old child-process timeout, not a wall-time guarantee.
 pub fn create(options: &Options) -> Result<Report, String> {
+    create_kind(options, PackageKind::Static)
+}
+pub(crate) fn create_kind(options: &Options, kind: PackageKind) -> Result<Report, String> {
     for value in [
         &options.asset_id,
         &options.metadata.name,
@@ -117,14 +148,30 @@ pub fn create(options: &Options) -> Result<Report, String> {
     {
         return Err("license must contain nonempty user-provided text".into());
     }
-    let model = orr_model::static_assemble::assemble_recipe(&options.recipe, &options.asset_id)?;
+    let model = match kind {
+        PackageKind::Static => {
+            orr_model::static_assemble::assemble_recipe(&options.recipe, &options.asset_id)?
+        }
+        #[cfg(feature = "animation-authoring")]
+        PackageKind::AnimatedSequence => {
+            orr_model::animation_sequence::sequence_recipe(&options.recipe, &options.asset_id)?
+        }
+    };
     if model.len() > MAX_MODEL {
         return Err("assembled model exceeds 64 MiB".into());
     }
     if publish::snapshot(&options.recipe, MAX_RECIPE)? != recipe {
         return Err("recipe changed during assembly".into());
     }
-    publish::publish(&options.output, &model, &license, &options.metadata)
+    match kind {
+        PackageKind::Static => {
+            publish::publish(&options.output, &model, &license, &options.metadata)
+        }
+        #[cfg(feature = "animation-authoring")]
+        PackageKind::AnimatedSequence => {
+            publish::publish_kind(&options.output, &model, &license, &options.metadata, kind)
+        }
+    }
 }
 /// Dedicated CLI entry point. Legacy external executable options are never run.
 pub fn run_cli(arguments: impl IntoIterator<Item = OsString>) -> u8 {

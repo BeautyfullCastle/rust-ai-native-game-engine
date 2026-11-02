@@ -11,6 +11,7 @@ workspace = true
 [features]
 default = []
 model-authoring = ["dep:orr_model", "dep:rustix"]
+animation-authoring = ["model-authoring", "orr_model/animation"]
 
 [dependencies]
 orr_model = { path = "../orr_model", features = ["import"], optional = true }
