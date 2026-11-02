@@ -1,6 +1,6 @@
 //! Bounded original parser for an explicit glTF 2.0/GLB subset. This is not a
 //! general glTF implementation. Unknown schema fields/extensions fail closed.
-//! Indexed triangles, f32 POSITION/NORMAL and optional unused UV0, node TRS/affine matrices, PNG,
+//! Indexed or sequential non-indexed triangles, f32 POSITION/NORMAL and optional unused UV0, node TRS/affine matrices, PNG,
 //! opaque diffuse base-color materials. No network or ambient filesystem reads.
 use crate::*;
 use base64::Engine;
@@ -332,7 +332,8 @@ pub(crate) struct Mesh {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct PrimitiveDef {
     pub(crate) attributes: BTreeMap<String, usize>,
-    pub(crate) indices: usize,
+    #[serde(default, deserialize_with = "present_value")]
+    pub(crate) indices: Option<usize>,
     #[serde(default, deserialize_with = "present_value")]
     pub(crate) material: Option<usize>,
     pub(crate) mode: Option<u32>,
@@ -965,7 +966,7 @@ fn validate_primitive(doc: &Document, p: &PrimitiveDef) -> Result<(), Error> {
         || (requires_uv(doc, p)? && !has_uv)
     {
         return Err(invalid(
-            "requires indexed TRIANGLES with POSITION/NORMAL and only optional TEXCOORD_0 (required for textured materials)",
+            "requires TRIANGLES with POSITION/NORMAL and only optional TEXCOORD_0 (required for textured materials)",
         ));
     }
     material_index(doc, p)?;
@@ -996,7 +997,10 @@ fn validate_primitive(doc: &Document, p: &PrimitiveDef) -> Result<(), Error> {
     {
         return Err(invalid("POSITION bounds required"));
     }
-    let idx = at(&doc.accessors, p.indices, "indices")?;
+    let Some(index) = p.indices else {
+        return validate_sequential_count(pos.count);
+    };
+    let idx = at(&doc.accessors, index, "indices")?;
     let view = &doc.buffer_views[idx.buffer_view];
     if idx.kind != "SCALAR"
         || !matches!(idx.component_type, 5121 | 5123 | 5125)
@@ -1008,6 +1012,42 @@ fn validate_primitive(doc: &Document, p: &PrimitiveDef) -> Result<(), Error> {
     }
     Ok(())
 }
+// Called only after the POSITION accessor and primitive topology are admitted.
+// Missing indices mean consecutive vertices, not welding/deduplication.
+pub(crate) fn validate_sequential_count(count: usize) -> Result<(), Error> {
+    if count == 0 || count % 3 != 0 || count > MAX_VERTICES || count > MAX_INDICES {
+        return Err(invalid("invalid non-indexed TRIANGLES vertex count"));
+    }
+    Ok(())
+}
+
+pub(crate) fn primitive_index_count(doc: &Document, p: &PrimitiveDef) -> usize {
+    p.indices.map_or_else(
+        || doc.accessors[p.attributes["POSITION"]].count,
+        |index| doc.accessors[index].count,
+    )
+}
+
+// No allocation; callers first validate descriptors and account for the effective
+// index count in their existing source/expanded budgets.
+pub(crate) fn primitive_index(
+    doc: &Document,
+    buffers: &[Vec<u8>],
+    p: &PrimitiveDef,
+    offset: usize,
+) -> u32 {
+    let Some(index) = p.indices else {
+        return u32::try_from(offset).expect("validated bounded vertex count");
+    };
+    let accessor = &doc.accessors[index];
+    let bytes = accessor.bytes(doc, buffers, offset);
+    match accessor.component_type {
+        5121 => u32::from(bytes[0]),
+        5123 => u32::from(u16::from_le_bytes(bytes.try_into().expect("u16 index"))),
+        _ => u32::from_le_bytes(bytes.try_into().expect("u32 index")),
+    }
+}
+
 struct Builder<'a> {
     doc: &'a Document,
     buffers: &'a [Vec<u8>],
@@ -1039,9 +1079,9 @@ impl Builder<'_> {
                 let texture = diffuse_pbr(&self.doc.materials[material_index(self.doc, p)?])?
                     .base_color_texture
                     .as_ref();
-                let idx = &self.doc.accessors[p.indices];
-                self.vertices += pos.count;
-                self.indices += idx.count;
+                let index_count = primitive_index_count(self.doc, p);
+                self.vertices = self.vertices.saturating_add(pos.count);
+                self.indices = self.indices.saturating_add(index_count);
                 if self.vertices > MAX_VERTICES
                     || self.indices > MAX_INDICES
                     || self.primitives.len() >= MAX_PRIMITIVES
@@ -1074,14 +1114,9 @@ impl Builder<'_> {
                         },
                     });
                 }
-                let mut indices = Vec::with_capacity(idx.count);
-                for n in 0..idx.count {
-                    let b = idx.bytes(self.doc, self.buffers, n);
-                    let index = match idx.component_type {
-                        5121 => u32::from(b[0]),
-                        5123 => u32::from(u16::from_le_bytes(b.try_into().expect("u16 index"))),
-                        _ => u32::from_le_bytes(b.try_into().expect("u32 index")),
-                    };
+                let mut indices = Vec::with_capacity(index_count);
+                for n in 0..index_count {
+                    let index = primitive_index(self.doc, self.buffers, p, n);
                     if index as usize >= pos.count {
                         return Err(invalid("index out of bounds"));
                     }
