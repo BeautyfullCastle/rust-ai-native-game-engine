@@ -1,3 +1,5 @@
+mod clipboard;
+
 use egui::Ui;
 use orr_model::{StaticModel, Wrap};
 use std::sync::Arc;
@@ -78,6 +80,7 @@ struct Staged {
 
 #[derive(Default)]
 pub(crate) struct Panel {
+    copied: Option<clipboard::Copied>,
     fields: Vec<SlotFields>,
     selected: Option<u32>,
     baseline: Vec<crate::mesh_material_slots::Settings>,
@@ -93,6 +96,7 @@ impl Panel {
         model: &Arc<StaticModel>,
         overrides: &[crate::mesh_material_slots::Settings],
     ) -> Result<(), String> {
+        self.copied = None;
         let used = used_materials(model)?;
         if overrides.len() > 256 {
             return Err("Material slot override limit exceeded".into());
@@ -153,6 +157,7 @@ impl Panel {
         model: &Arc<StaticModel>,
     ) -> Option<Vec<crate::mesh_material_slots::Settings>> {
         if !self.model_matches(model) {
+            self.copied = None;
             self.error = Some("The admitted model changed; reload this panel".into());
             ui.label(self.error.as_deref().unwrap_or_default());
             return None;
@@ -216,6 +221,7 @@ impl Panel {
         wrap_combo(ui, "Material slot wrap S", &mut field.wrap_s);
         wrap_combo(ui, "Material slot wrap T", &mut field.wrap_t);
 
+        self.show_clipboard(ui, model);
         let current = self.current_overrides(model);
         self.error = current.as_ref().err().cloned();
         if let Some(error) = &self.error {
