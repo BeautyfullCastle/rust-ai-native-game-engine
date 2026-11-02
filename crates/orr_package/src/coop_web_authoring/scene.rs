@@ -149,6 +149,14 @@ fn validate_node(wasm: &[u8], scene: &[u8]) -> Result<Vec<u8>, String> {
     command.arg(&script).arg(&wasm_path).arg(&scene_path);
     super::node_gate::execute(command, Duration::from_secs(15))
 }
+pub(super) fn verify_bytes(bytes: Vec<u8>, wasm: &[u8]) -> Result<Verified, String> {
+    if bytes.len() > 65536 || wasm.len() > 64 * 1024 * 1024 {
+        return Err("scene/WASM exceeds bounds".into());
+    }
+    std::str::from_utf8(&bytes).map_err(|e| e.to_string())?;
+    let result = validate_node(wasm, &bytes)?;
+    admit(bytes, wasm, &result)
+}
 fn create_with(
     o: &Options,
     gate: impl FnOnce(&[u8], &[u8]) -> Result<Vec<u8>, String>,

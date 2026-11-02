@@ -2,6 +2,7 @@
 mod manifest;
 mod node_gate;
 mod scene;
+mod offline;
 mod png;
 mod prepared;
 mod publish;
@@ -236,3 +237,6 @@ pub fn run_cli(args: impl IntoIterator<Item = OsString>, compose: bool) -> u8 {
 pub fn run_scene_cli(args: impl IntoIterator<Item = OsString>) -> u8 {
     scene::run_cli(args)
 }
+
+/// Build one explicit-new offline HTML delivery with applicable real engine gates.
+pub fn run_offline_cli(args: impl IntoIterator<Item = OsString>) -> u8 { offline::run_cli(args) }

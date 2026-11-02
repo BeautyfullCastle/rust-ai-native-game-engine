@@ -32,12 +32,31 @@ pub(super) fn publish_scene(
 ) -> Result<Option<String>, String> {
     write(path, verified.bytes(), |_, _| Ok(()))
 }
+pub(super) fn publish_offline(
+    path: &Path,
+    verified: &super::offline::OfflineHtml,
+) -> Result<Option<String>, String> {
+    write_bounded(
+        path,
+        verified.bytes(),
+        super::offline::MAX_OUTPUT,
+        |_, _| Ok(()),
+    )
+}
 fn write(
     path: &Path,
     bytes: &[u8],
+    checkpoint: impl FnMut(&str, &Path) -> Result<(), String>,
+) -> Result<Option<String>, String> {
+    write_bounded(path, bytes, 65536, checkpoint)
+}
+fn write_bounded(
+    path: &Path,
+    bytes: &[u8],
+    max: usize,
     mut checkpoint: impl FnMut(&str, &Path) -> Result<(), String>,
 ) -> Result<Option<String>, String> {
-    if bytes.len() > 65536 {
+    if bytes.len() > max {
         return Err("manifest exceeds64KiB".into());
     }
     let path = absolute(path)?;
@@ -80,7 +99,7 @@ fn write(
         if named.st_dev != info.dev() || named.st_ino != info.ino() {
             return Err("staged identity changed".into());
         }
-        if read_at(&parent, name.as_ref(), 65536)? != bytes {
+        if read_at(&parent, name.as_ref(), max)? != bytes {
             return Err("staged bytes changed".into());
         }
         unix::linkat(&parent, name.as_str(), &parent, target, AtFlags::empty()).map_err(error)?;
