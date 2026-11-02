@@ -143,11 +143,15 @@ fn document(root: &Path) -> Document {
     Document {
         props: vec![
             Prop {
+                #[cfg(feature = "mesh-prop-shading")]
+                shading: None,
                 id: 7,
                 name: "Bench".into(),
                 art: snapshot(root),
             },
             Prop {
+                #[cfg(feature = "mesh-prop-shading")]
+                shading: None,
                 id: 19,
                 name: "Lamp".into(),
                 art: snapshot(root),
@@ -164,6 +168,8 @@ fn roundtrips_embedded_props_after_package_source_is_removed() {
     let scene_path = scene(&root);
     let document = Document {
         props: vec![Prop {
+            #[cfg(feature = "mesh-prop-shading")]
+            shading: None,
             id: 7,
             name: "Bench".into(),
             art: Snapshot::from_package(&source, "model.glb", "LICENSE.txt", REVISION).unwrap(),
@@ -200,6 +206,8 @@ fn maximum_props_reopen_as_one_interned_asset_with_reserved_draw_budget() {
     let document = Document {
         props: (0..super::MAX_PROPS)
             .map(|index| Prop {
+                #[cfg(feature = "mesh-prop-shading")]
+                shading: None,
                 id: index as u64 + 1,
                 name: format!("Prop {index}"),
                 art: art
@@ -253,6 +261,8 @@ fn rejects_129_props_before_sidecar_creation() {
     let document = Document {
         props: (0..=super::MAX_PROPS)
             .map(|index| Prop {
+                #[cfg(feature = "mesh-prop-shading")]
+                shading: None,
                 id: index as u64 + 1,
                 name: format!("Prop {index}"),
                 art: art.clone(),
@@ -282,6 +292,8 @@ fn rejects_seven_distinct_appearance_identities() {
             .iter()
             .enumerate()
             .map(|(index, art)| Prop {
+                #[cfg(feature = "mesh-prop-shading")]
+                shading: None,
                 id: index as u64 + 1,
                 name: format!("Appearance {index}"),
                 art: art.clone(),
@@ -302,6 +314,8 @@ fn rejects_seven_distinct_appearance_identities() {
             .iter()
             .enumerate()
             .map(|(index, art)| Prop {
+                #[cfg(feature = "mesh-prop-shading")]
+                shading: None,
                 id: index as u64 + 1,
                 name: format!("Appearance {index}"),
                 art: art.clone(),
@@ -327,6 +341,8 @@ fn render_budget_accepts_the_limit_and_rejects_one_extra_draw() {
     let accepted = Document {
         props: (0..128)
             .map(|index| Prop {
+                #[cfg(feature = "mesh-prop-shading")]
+                shading: None,
                 id: index + 1,
                 name: format!("Draw {index}"),
                 art: accepted_art.clone(),
@@ -344,6 +360,8 @@ fn render_budget_accepts_the_limit_and_rejects_one_extra_draw() {
     let over_budget = Document {
         props: (0..128)
             .map(|index| Prop {
+                #[cfg(feature = "mesh-prop-shading")]
+                shading: None,
                 id: index + 1,
                 name: format!("Draw {index}"),
                 art: over_budget_art.clone(),
@@ -444,4 +462,131 @@ fn refuses_existing_destination_and_non_scene_paths() {
     assert!(save(&scene_path, Some(&document), None, REVISION).is_err());
     assert!(sidecar_path(&root.join("missing.scene.yaml")).is_err());
     assert!(sidecar_path(&root.join("..\\escape.scene.yaml")).is_err());
+}
+
+#[test]
+fn absent_prop_shading_preserves_legacy_record_bytes_and_present_null_fails() {
+    let root = tempfile::tempdir().unwrap();
+    let art = snapshot(root.path());
+    let doc = Document {
+        props: vec![Prop {
+            id: 1,
+            name: "Legacy".into(),
+            art,
+            #[cfg(feature = "mesh-prop-shading")]
+            shading: None,
+        }],
+    };
+    let bytes = doc.encode("game.scene.yaml", REVISION).unwrap();
+    // Independent pre-feature wire layout copied from base4fabcd46: no new
+    // serializer/type is used to construct this expected legacy record.
+    #[derive(serde::Serialize)]
+    struct LegacyProp {
+        id: u64,
+        name: String,
+        art: serde_json::Value,
+    }
+    #[derive(serde::Serialize)]
+    struct LegacySidecar {
+        schema: u32,
+        scene_filename: String,
+        graph_revision: [u8; 32],
+        props: Vec<LegacyProp>,
+    }
+    let legacy = LegacySidecar {
+        schema: 1,
+        scene_filename: "game.scene.yaml".into(),
+        graph_revision: REVISION,
+        props: doc
+            .props
+            .iter()
+            .map(|prop| LegacyProp {
+                id: prop.id,
+                name: prop.name.clone(),
+                art: serde_json::from_slice(&prop.art.encode_embedded("game.scene.yaml").unwrap())
+                    .unwrap(),
+            })
+            .collect(),
+    };
+    assert_eq!(bytes, serde_json::to_vec(&legacy).unwrap());
+    let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(value["props"][0].get("shading").is_none());
+    assert_eq!(
+        Document::decode(&bytes, "game.scene.yaml", REVISION)
+            .unwrap()
+            .encode("game.scene.yaml", REVISION)
+            .unwrap(),
+        bytes
+    );
+    value["props"][0]["shading"] = serde_json::Value::Null;
+    assert!(Document::decode(
+        &serde_json::to_vec(&value).unwrap(),
+        "game.scene.yaml",
+        REVISION
+    )
+    .is_err());
+    #[cfg(not(feature = "mesh-prop-shading"))]
+    {
+        value["props"][0]["shading"] = serde_json::json!({"version":1,"slots":[{"material":0,"metallic":0.5,"roughness":0.5}]});
+        assert!(Document::decode(
+            &serde_json::to_vec(&value).unwrap(),
+            "game.scene.yaml",
+            REVISION
+        )
+        .is_err());
+    }
+}
+#[cfg(feature = "mesh-prop-shading")]
+#[test]
+fn prop_shading_roundtrip_interning_and_appearance_budget_include_shading() {
+    use crate::mesh_prop_shading::{Settings, Slot};
+    let root = tempfile::tempdir().unwrap();
+    let art = snapshot(root.path());
+    let original_identity = art.render_identity();
+    let model = art.source_model_arc();
+    let material = model.source().primitives[0].material;
+    let make = |index: u32| {
+        Settings::new(
+            vec![Slot {
+                material,
+                metallic: index as f32 / 10.0,
+                roughness: 0.5,
+            }],
+            &model,
+        )
+        .unwrap()
+    };
+    let mut doc = Document {
+        props: (0..6)
+            .map(|i| Prop {
+                id: u64::from(i) + 1,
+                name: format!("Prop {i}"),
+                art: art.clone(),
+                shading: Some(make(i)),
+            })
+            .collect(),
+    };
+    let bytes = doc.encode("game.scene.yaml", REVISION).unwrap();
+    let restored = Document::decode(&bytes, "game.scene.yaml", REVISION).unwrap();
+    assert_eq!(restored.encode("game.scene.yaml", REVISION).unwrap(), bytes);
+    let placements = restored.placements().unwrap();
+    assert_ne!(placements[0].shading, placements[1].shading);
+    assert_eq!(restored.props[0].art.render_identity(), original_identity);
+    doc.props.push(Prop {
+        id: 7,
+        name: "Seventh".into(),
+        art: art.clone(),
+        shading: Some(make(6)),
+    });
+    assert!(doc
+        .encode("game.scene.yaml", REVISION)
+        .unwrap_err()
+        .contains("six-appearance"));
+    doc.props[6].shading = Some(make(0));
+    let placements = doc.placements().unwrap();
+    assert!(std::sync::Arc::ptr_eq(
+        &placements[0].model,
+        &placements[6].model
+    ));
+    assert_eq!(placements[0].shading, placements[6].shading);
 }

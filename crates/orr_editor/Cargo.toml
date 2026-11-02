@@ -52,6 +52,8 @@ mesh-navigation = ["models", "orr_remote/mesh-navigation", "dep:orr_navigation"]
 mesh-mission = ["mesh-navigation", "orr_remote/mesh-mission"]
 mesh-hazards = ["mesh-mission", "orr_remote/mesh-hazards"]
 mesh-export = ["mesh-navigation"]
+# Optional static-prop scalar shading authoring/preview; export remains unsupported.
+mesh-prop-shading = ["mesh-navigation", "orr_render/metallic-roughness"]
 mesh-hazards-export = ["mesh-hazards", "mesh-export"]
 mesh-animated-models = ["mesh-navigation", "animated-models"]
 terrain-physics = ["terrain", "orr_remote/terrain-physics"]

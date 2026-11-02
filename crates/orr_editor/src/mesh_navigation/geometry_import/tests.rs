@@ -61,6 +61,8 @@ fn vertex(position: [f32; 3]) -> Vertex {
 
 fn placement(model: StaticModel) -> SceneModel {
     SceneModel {
+        #[cfg(feature = "mesh-prop-shading")]
+        shading: None,
         model: Arc::new(model),
         instance: StaticInstance::default(),
     }
