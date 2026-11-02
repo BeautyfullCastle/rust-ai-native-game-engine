@@ -26,6 +26,12 @@ pub(super) fn preflight(path: &Path) -> Result<(), String> {
 pub(super) fn publish(path: &Path, verified: &Verified) -> Result<Option<String>, String> {
     write(path, verified.prepared().bytes(), |_, _| Ok(()))
 }
+pub(super) fn publish_scene(
+    path: &Path,
+    verified: &super::scene::Verified,
+) -> Result<Option<String>, String> {
+    write(path, verified.bytes(), |_, _| Ok(()))
+}
 fn write(
     path: &Path,
     bytes: &[u8],
