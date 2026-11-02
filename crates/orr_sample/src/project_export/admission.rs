@@ -199,7 +199,10 @@ impl ProjectSnapshot {
             .entry
             .clone()
             .ok_or("export requires an authored game entry")?;
-        if entry.tilemap.is_some() { return Err("tilemap projects are not supported by export yet".into()); }
+        #[cfg(not(feature = "tilemap"))]
+        if entry.tilemap.is_some() {
+            return Err("tilemap export requires --features tilemap".into());
+        }
         // list performs the existing package validation/resolution without
         // reading object assets. Only that authoritative closure is enumerated.
         let lock = project
@@ -226,6 +229,10 @@ impl ProjectSnapshot {
             plan.add(PACKAGE_LOCK, MAX_JSON_BYTES)?;
         }
         plan.add(&entry.scene, MAX_SCENE_BYTES)?;
+        #[cfg(feature = "tilemap")]
+        if let Some(sidecar) = &entry.tilemap {
+            plan.add(sidecar, orr_tilemap::MAX_BYTES as u64)?;
+        }
         if let Some(sidecar) = &entry.models { plan.add(sidecar,MAX_JSON_BYTES)?; }
         if let Some(sidecar) = &entry.lighting { plan.add(sidecar,4096)?; }
         if let Some(sidecar) = &entry.character { plan.add(sidecar,4096)?; }
@@ -280,6 +287,21 @@ impl ProjectSnapshot {
             }
             (None, None) => {}
             _ => return Err("sprite sidecar changed during runtime admission".into()),
+        }
+        #[cfg(feature = "tilemap")]
+        match (&entry.tilemap, prepared.tilemap()) {
+            (Some(path), Some(tilemap)) => {
+                let mut file = SnapshotFile::read(
+                    &root.join(path), path, orr_tilemap::MAX_BYTES as u64,
+                )?;
+                if file.source != tilemap.path || file.bytes != tilemap.original_bytes() {
+                    return Err("tilemap sidecar changed after runtime admission".into());
+                }
+                file.role = "tilemap_sidecar";
+                files.push(file);
+            }
+            (None, None) => {}
+            _ => return Err("tilemap sidecar changed during runtime admission".into()),
         }
         #[cfg(feature = "room-character")]
         if let Some(path) = &entry.character {
@@ -842,3 +864,6 @@ mod tests {
         assert!(SnapshotFile::read(&socket, "asset", 64).is_err());
     }
 }
+
+#[cfg(all(test, feature = "tilemap"))]
+mod tilemap_tests;

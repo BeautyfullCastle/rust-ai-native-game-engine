@@ -75,8 +75,10 @@ The palette uses SpritePanel's admitted read-only asset and egui texture cache.
 The long-lived project compositor uses a separate GPU backend representation of
 the same admitted assets. There is no second image decoder or egui atlas cache.
 Cache-changing sprite operations are refused while the tilemap pins that cache.
-Package mutation, image reimport and export are unsupported, even when a usage
-query succeeds. Usage information is not permission to remove packages.
+Package mutation, image reimport and editor-button export remain unsupported, even
+when a usage query succeeds. The optional Linux CLI export path is documented in
+[Export an Arena tilemap](arena-tilemap-export.md). Usage information is not
+permission to remove packages.
 
 Save compares the root/scene identity, manifest, lock and exact original/saved
 sidecar bytes and pinned actor-sprite sidecar before replacing the file through a
@@ -103,7 +105,7 @@ visual evidence; four runtime captures have an independent pixel oracle.
 Strict Clippy passed for the selected production libraries and three new sample
 integration targets, including the final runtime fixture. This is not a full
 workspace or editor `cfg(test)` Clippy claim. Export-enabled library compilation
-was checked, but export functionality remains unsupported and was not accepted.
+was checked, but export functionality was unsupported and was not accepted in that run.
 
 Original failed attempts are retained in the issue's validation history: a
 missing test import, interleaved shader-cache warnings confusing the result
@@ -147,7 +149,7 @@ passed 25 pure-Python validator tests, without changing a workflow or creating a
 new job. Local
 SwiftShader results are not hosted required-CI results: that gate requires
 llvmpipe. Native OS input, Windows and exported-player behavior remain outside
-this acceptance; export remains unsupported. See
+this historical acceptance; export was unsupported in that run. See
 [issue #261](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/261).
 
 ## Resize local verification scope (2026-10-20)
@@ -183,8 +185,8 @@ The existing tilemap gate specifies CPU35/GPU5. Its 35 pure-Python validator tes
 and the applied gate against the actual local evidence passed, without adding or
 changing a workflow or job. Local SwiftShader validation is not hosted required
 CI, whose gate requires llvmpipe. Native OS input, Windows, hosted required CI and
-exported-player behavior remain outside this acceptance; export remains
-unsupported. See
+exported-player behavior remain outside this historical acceptance; export was
+unsupported in that run. See
 [issue #263](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/263).
 
 ## Rectangle implementation status (2026-10-20)
