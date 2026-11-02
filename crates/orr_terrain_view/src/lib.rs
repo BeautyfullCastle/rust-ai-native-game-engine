@@ -6,6 +6,9 @@
 //! Simulation crates must not depend on this presentation crate.
 #![allow(clippy::float_arithmetic)]
 
+#[cfg(feature = "raw16")]
+pub mod raw16;
+
 use orr_fp::FP;
 use orr_model::{
     Dependency, Image, Material, ModelSource, Primitive, StaticModel, Vertex, Wrap, IDENTITY,

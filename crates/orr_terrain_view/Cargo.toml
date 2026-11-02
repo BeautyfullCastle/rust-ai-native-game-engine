@@ -11,6 +11,7 @@ workspace = true
 
 [features]
 default = []
+raw16 = []
 gpu = ["dep:orr_render", "dep:png"]
 
 [dependencies]

@@ -19,10 +19,14 @@ use std::{path::PathBuf, sync::Arc};
 
 pub mod flatten;
 pub mod smooth;
+#[cfg(feature = "terrain-raw16")]
+pub mod raw16;
 
 pub struct TerrainPanel {
     pub flatten: flatten::Spec,
     pub smooth: smooth::Spec,
+    #[cfg(feature = "terrain-raw16")]
+    pub raw16: raw16::State,
     pub document: TerrainSession,
     pub local_path: String,
     pub asset_id: String,
@@ -47,6 +51,8 @@ impl Default for TerrainPanel {
         Self {
             flatten: flatten::Spec::default(),
             smooth: smooth::Spec::default(),
+            #[cfg(feature = "terrain-raw16")]
+            raw16: raw16::State::default(),
             document: TerrainSession::default(),
             local_path: "terrain.orrt".into(),
             asset_id: "terrain/local.orrt".into(),
@@ -605,6 +611,8 @@ impl TerrainPanel {
             }
             self.show_flatten(ui, editor, writable);
             self.show_smooth(ui, editor, writable);
+            #[cfg(feature = "terrain-raw16")]
+            self.show_raw16(ui, editor, writable);
             ui.horizontal(|ui| {
                 if ui
                     .add_enabled(
