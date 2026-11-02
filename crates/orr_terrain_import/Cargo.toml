@@ -17,7 +17,7 @@ gpu-acceptance = ["dep:orr_render", "orr_terrain_view/gpu"]
 [dependencies]
 orr_fp = { path = "../orr_fp" }
 orr_terrain = { path = "../orr_terrain" }
-orr_terrain_view = { path = "../orr_terrain_view", default-features = false }
+orr_terrain_view = { path = "../orr_terrain_view", default-features = false, features = ["raw16"] }
 orr_editor = { path = "../orr_editor", features = ["terrain"], optional = true }
 orr_render = { path = "../orr_render", features = ["models"], optional = true }
 
