@@ -7,6 +7,7 @@
 #![deny(clippy::float_arithmetic)]
 
 pub mod authoring;
+pub mod wav_import;
 mod pipeline;
 pub use pipeline::*;
 

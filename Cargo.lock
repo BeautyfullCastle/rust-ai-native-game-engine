@@ -3354,6 +3354,7 @@ dependencies = [
 name = "orr_package"
 version = "0.0.1"
 dependencies = [
+ "orr_asset_cook",
  "orr_model",
  "orr_sprite",
  "rustix 1.1.5",
