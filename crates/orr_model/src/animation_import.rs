@@ -402,7 +402,7 @@ fn validate_primitive(doc: &Document, p: &PrimitiveDef) -> Result<bool, Error> {
         || (has_skin
             && (!p.attributes.contains_key("JOINTS_0") || !p.attributes.contains_key("WEIGHTS_0")))
     {
-        return Err(invalid("requires indexed TRIANGLES with POSITION/NORMAL, optional UV0 (required for textured materials), and at most JOINTS_0/WEIGHTS_0; additional influences unsupported"));
+        return Err(invalid("requires TRIANGLES with POSITION/NORMAL, optional UV0 (required for textured materials), and at most JOINTS_0/WEIGHTS_0; additional influences unsupported"));
     }
     crate::import::material_index(doc, p)?;
     let pos = at(&doc.accessors, p.attributes["POSITION"], "POSITION")?;
@@ -445,7 +445,11 @@ fn validate_primitive(doc: &Document, p: &PrimitiveDef) -> Result<bool, Error> {
             }
         }
     }
-    let idx = at(&doc.accessors, p.indices, "indices")?;
+    let Some(index) = p.indices else {
+        import::validate_sequential_count(pos.count)?;
+        return Ok(has_skin);
+    };
+    let idx = at(&doc.accessors, index, "indices")?;
     let view = &doc.buffer_views[idx.buffer_view];
     if idx.kind != "SCALAR"
         || !matches!(idx.component_type, 5121 | 5123 | 5125)
@@ -572,9 +576,9 @@ fn read_primitives(
                 .attributes
                 .get("TEXCOORD_0")
                 .map(|&index| &doc.accessors[index]);
-            let idx = &doc.accessors[primitive.indices];
+            let index_count = import::primitive_index_count(doc, primitive);
             source_vertices = source_vertices.saturating_add(pos.count);
-            source_indices = source_indices.saturating_add(idx.count);
+            source_indices = source_indices.saturating_add(index_count);
             if source_vertices > MAX_VERTICES || source_indices > MAX_INDICES {
                 return Err(invalid("source geometry aggregate budget exceeded"));
             }
@@ -601,13 +605,8 @@ fn read_primitives(
                     influences(doc, buffers, primitive, i, usize::MAX)?;
                 }
             }
-            for i in 0..idx.count {
-                let b = idx.bytes(doc, buffers, i);
-                let index = match idx.component_type {
-                    5121 => u32::from(b[0]),
-                    5123 => u32::from(u16::from_le_bytes(b.try_into().expect("u16 index"))),
-                    _ => u32::from_le_bytes(b.try_into().expect("u32 index")),
-                };
+            for i in 0..index_count {
+                let index = import::primitive_index(doc, buffers, primitive, i);
                 if index as usize >= pos.count {
                     return Err(invalid("source index out of range"));
                 }
@@ -632,9 +631,9 @@ fn read_primitives(
                 .attributes
                 .get("TEXCOORD_0")
                 .map(|&index| &doc.accessors[index]);
-            let idx = &doc.accessors[primitive.indices];
+            let index_count = import::primitive_index_count(doc, primitive);
             vertices_total = vertices_total.saturating_add(pos.count);
-            indices_total = indices_total.saturating_add(idx.count);
+            indices_total = indices_total.saturating_add(index_count);
             if vertices_total > MAX_VERTICES
                 || indices_total > MAX_INDICES
                 || primitives.len() >= MAX_PRIMITIVES
@@ -682,14 +681,9 @@ fn read_primitives(
                     weights,
                 });
             }
-            let mut indices = Vec::with_capacity(idx.count);
-            for i in 0..idx.count {
-                let bytes = idx.bytes(doc, buffers, i);
-                let index = match idx.component_type {
-                    5121 => u32::from(bytes[0]),
-                    5123 => u32::from(u16::from_le_bytes(bytes.try_into().expect("u16 index"))),
-                    _ => u32::from_le_bytes(bytes.try_into().expect("u32 index")),
-                };
+            let mut indices = Vec::with_capacity(index_count);
+            for i in 0..index_count {
+                let index = import::primitive_index(doc, buffers, primitive, i);
                 if index as usize >= pos.count {
                     return Err(invalid("index out of range"));
                 }
