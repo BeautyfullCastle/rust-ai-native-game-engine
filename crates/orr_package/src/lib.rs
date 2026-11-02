@@ -302,8 +302,10 @@ impl ProjectManifest {
                 if let Err(message) = progress.validate() {
                     return fail(&message);
                 }
-                if self.entry.as_ref().map(|e| e.game) != Some(ProjectGame::CollectDodgeV1) {
-                    return fail("schema-3 progress requires collect-dodge-v1");
+                if !matches!((self.entry.as_ref().map(|e| e.game), progress.profile),
+                    (Some(ProjectGame::CollectDodgeV1), ProgressProfile::CollectDodgeHighscoreV1) |
+                    (Some(ProjectGame::RoomEscapeV1), ProgressProfile::RoomEscapeClearV1)) {
+                    return fail("schema-3 progress requires the matching game/profile pair");
                 }
             }
             _ => return fail("progress metadata requires schema 3 and schema 3 requires progress"),
@@ -332,7 +334,7 @@ impl ProjectManifest {
                         entry.models.as_deref(), entry.camera.as_deref(), entry.tilemap.as_deref(), entry.lighting.as_deref(),
                         entry.sprites.as_deref(),
                         entry.ui.as_ref().and_then(|ui| ui.document.as_deref())];
-                    if entry.game != ProjectGame::RoomEscapeV1 || self.schema != 2
+                    if entry.game != ProjectGame::RoomEscapeV1 || !matches!(self.schema, 2 | 3)
                         || character.contains('/') || character.starts_with('.')
                         || aliases.into_iter().flatten().any(|path| path.eq_ignore_ascii_case(character))
                     { return fail("character requires a distinct root-level Room presentation document"); }
@@ -343,14 +345,14 @@ impl ProjectManifest {
                         entry.models.as_deref(), entry.camera.as_deref(), entry.tilemap.as_deref(),
                         entry.sprites.as_deref(),
                         entry.ui.as_ref().and_then(|ui| ui.document.as_deref())];
-                    if entry.game != ProjectGame::RoomEscapeV1 || self.schema != 2
+                    if entry.game != ProjectGame::RoomEscapeV1 || !matches!(self.schema, 2 | 3)
                         || lighting.contains('/') || lighting.starts_with('.')
                         || aliases.into_iter().flatten().any(|path| path.eq_ignore_ascii_case(lighting))
                     { return fail("lighting requires a distinct root-level Room presentation document"); }
                 }
                 if let Some(camera) = &entry.camera {
                     portable(camera)?;
-                    if entry.game != ProjectGame::RoomEscapeV1 || self.schema != 2
+                    if entry.game != ProjectGame::RoomEscapeV1 || !matches!(self.schema, 2 | 3)
                         || camera.contains('/') || camera.starts_with('.')
                         || camera.eq_ignore_ascii_case("orr.project.json")
                         || camera.eq_ignore_ascii_case("orr.packages.lock.json")
@@ -365,9 +367,9 @@ impl ProjectManifest {
                     }
                 }
                 if entry.game == ProjectGame::RoomEscapeV1
-                    && (self.schema != 2 || entry.sprites.is_some() || entry.ui.is_some() || entry.models.is_none())
+                    && (!matches!(self.schema, 2 | 3) || entry.sprites.is_some() || entry.ui.is_some() || entry.models.is_none())
                 {
-                    return fail("room-escape-v1 requires schema 2 and models, without sprites/UI/progress");
+                    return fail("room-escape-v1 requires schema 2 or valid progress schema 3 and models, without sprites/UI");
                 }
                 if let Some(ui) = &entry.ui {
                     match (entry.game, ui.profile, &ui.document) {
@@ -1888,4 +1890,33 @@ mod tests {
         bad["progress"] = serde_json::Value::Null;
         assert!(serde_json::from_value::<ProjectManifest>(bad).is_err());
     }
+    #[test]
+    fn room_progress_closed_pair_preserves_presentation_and_collect_contract() {
+        let room = serde_json::json!({"schema":3,"engine":"*","entry":{"game":"room-escape-v1","scene":"room.yaml","models":"models.json","camera":"camera.json","lighting":"lighting.json","character":"character.json"},"progress":{"schema":1,"game_id":"12345678-1234-4234-8234-123456789abc","profile":"room-escape-clear-v1"}});
+        let validate = |v: serde_json::Value| serde_json::from_value::<ProjectManifest>(v).unwrap().validate(&Runtime::content_only());
+        validate(room.clone()).unwrap();
+        let mut legacy = room.clone();
+        legacy["schema"] = 2.into();
+        legacy.as_object_mut().unwrap().remove("progress");
+        validate(legacy).unwrap();
+        for profile in ["collect-dodge-highscore-v1"] {
+            let mut crossed = room.clone(); crossed["progress"]["profile"] = profile.into();
+            assert!(validate(crossed).is_err());
+        }
+        let mut collect = room.clone();
+        collect["entry"] = serde_json::json!({"game":"collect-dodge-v1","scene":"level.yaml"});
+        assert!(validate(collect.clone()).is_err());
+        collect["progress"]["profile"] = "collect-dodge-highscore-v1".into();
+        validate(collect).unwrap();
+        for schema in [1, 2, 4] { let mut bad = room.clone(); bad["schema"] = schema.into(); assert!(validate(bad).is_err()); }
+        for field in ["models", "progress"] {
+            let mut bad = room.clone();
+            if field == "models" { bad["entry"].as_object_mut().unwrap().remove(field); }
+            else { bad.as_object_mut().unwrap().remove(field); }
+            assert!(validate(bad).is_err());
+        }
+        let mut aliased = room; aliased["entry"]["camera"] = "room.yaml".into();
+        assert!(validate(aliased).is_err());
+    }
+
 }
