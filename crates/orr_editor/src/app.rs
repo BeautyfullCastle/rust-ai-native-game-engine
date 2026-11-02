@@ -2360,11 +2360,11 @@ impl EditorApp {
             #[cfg(not(feature="navigation"))]
             let model = self.terrain.viewport_model(&self.editor);
             #[allow(unused_mut)]
-            let mut models: Vec<_> = model.into_iter().map(|model| crate::viewport3d::SceneModel { model, instance: Default::default() }).collect();
+            let mut models: Vec<_> = model.into_iter().map(|model| crate::viewport3d::SceneModel { #[cfg(feature = "mesh-prop-shading")] shading: None, model, instance: Default::default() }).collect();
             #[cfg(feature="navigation")]
             if self.editor.game().is_navigation() {
                 if let Some(model) = self.editor.admitted_navigation().overlay_model(self.navigation.route_stale(&self.editor, &self.terrain)) {
-                    models.push(crate::viewport3d::SceneModel { model, instance: Default::default() });
+                    models.push(crate::viewport3d::SceneModel { #[cfg(feature = "mesh-prop-shading")] shading: None, model, instance: Default::default() });
                 }
             }
             models
@@ -2377,7 +2377,7 @@ impl EditorApp {
             let mut models = Vec::new();
             if self.editor.game().has_mesh_view() {
                 if let Some(model) = self.mesh_navigation.model() {
-                    models.push(crate::viewport3d::SceneModel { model, instance: Default::default() });
+                    models.push(crate::viewport3d::SceneModel { #[cfg(feature = "mesh-prop-shading")] shading: None, model, instance: Default::default() });
                 }
                 #[cfg(feature="mesh-animated-models")]
                 let show_static_art = !self.mesh_animation.active(&self.editor);

@@ -145,6 +145,10 @@ mod mesh_surface_package_panel;
 mod mesh_art_panel;
 #[cfg(feature = "mesh-navigation")]
 mod mesh_props;
+#[cfg(feature = "mesh-prop-shading")]
+mod mesh_prop_shading;
+#[cfg(feature = "mesh-prop-shading")]
+mod mesh_prop_shading_panel;
 #[cfg(feature = "mesh-navigation")]
 mod mesh_prop_prefab;
 #[cfg(feature = "mesh-navigation")]

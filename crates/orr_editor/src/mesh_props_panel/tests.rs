@@ -27,6 +27,8 @@ fn document(count: usize) -> Document {
     Document {
         props: (0..count)
             .map(|index| Prop {
+                #[cfg(feature = "mesh-prop-shading")]
+                shading: None,
                 id: index as u64 + 1,
                 name: format!("Prop {index}"),
                 art: art.clone(),
@@ -325,6 +327,8 @@ fn workspace_save_detects_unapplied_prop_fields_and_candidate_only_drafts() {
         let mut rotated_panel = Panel {
             document: Document {
                 props: vec![Prop {
+                #[cfg(feature = "mesh-prop-shading")]
+                shading: None,
                     id: 1,
                     name: "Rotated prop".into(),
                     art: rotated_art.clone(),
@@ -597,11 +601,15 @@ fn prop_selection_clears_candidate_and_rebinds_material_slots_to_selected_arc() 
         document: Document {
             props: vec![
                 Prop {
+                #[cfg(feature = "mesh-prop-shading")]
+                shading: None,
                     id: 1,
                     name: "First prop".into(),
                     art: first_snapshot,
                 },
                 Prop {
+                #[cfg(feature = "mesh-prop-shading")]
+                shading: None,
                     id: 2,
                     name: "Second prop".into(),
                     art: second_snapshot,
@@ -627,11 +635,15 @@ fn prop_undo_and_redo_clear_candidates_before_rebinding_material_slots() {
         document: Document {
             props: vec![
                 Prop {
+                #[cfg(feature = "mesh-prop-shading")]
+                shading: None,
                     id: 1,
                     name: "First prop".into(),
                     art: snapshot(),
                 },
                 Prop {
+                #[cfg(feature = "mesh-prop-shading")]
+                shading: None,
                     id: 2,
                     name: "Second prop".into(),
                     art: snapshot(),
@@ -1025,3 +1037,7 @@ fn unsaved_prop_discard_requires_confirmation_changes_and_idle_context() {
     assert!(!discard_changes_ready(true, false, true));
     assert!(!discard_changes_ready(true, true, false));
 }
+
+#[cfg(feature = "mesh-prop-shading")]
+#[path = "shading_tests.rs"]
+mod shading_tests;

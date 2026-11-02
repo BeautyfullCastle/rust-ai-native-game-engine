@@ -236,6 +236,7 @@ fn export_with_profile(
                 else {
                     return Err("mesh props sidecar could not be admitted".into());
                 };
+                reject_shaded_props(&document)?;
                 requires_dense_props = document.props.len() > LEGACY_PROP_LIMIT;
                 requires_rotation |= document
                     .props
@@ -747,6 +748,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
             else {
                 return Err("bundle mesh props sidecar could not be admitted".into());
             };
+            reject_shaded_props(&document)?;
             requires_dense_props = document.props.len() > LEGACY_PROP_LIMIT;
             requires_rotation |= document
                 .props
@@ -2070,4 +2072,13 @@ fn digest(bytes: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+// Editor-only scalar authoring must not silently degrade in an exported player.
+fn reject_shaded_props(_document: &crate::mesh_props::Document) -> Result<(), String> {
+    #[cfg(feature = "mesh-prop-shading")]
+    if _document.props.iter().any(|prop| prop.shading.is_some()) {
+        return Err("Scalar-shaded props are Editor-only; standalone mesh export is not supported yet".into());
+    }
+    Ok(())
 }

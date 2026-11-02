@@ -127,6 +127,8 @@ pub struct ModelPlacement {
 /// Scene-owned geometry has no ECS identity and must never hide a collider.
 #[cfg(feature = "models")]
 pub struct SceneModel {
+    #[cfg(feature = "mesh-prop-shading")]
+    pub shading: Option<Vec<orr_render::MaterialShading>>,
     pub model: std::sync::Arc<orr_model::StaticModel>,
     pub instance: orr_render::StaticInstance,
 }
@@ -142,10 +144,108 @@ pub struct AnimatedPlacement {
 }
 #[cfg(feature = "models")]
 struct CachedModel {
-    model: std::sync::Arc<orr_model::StaticModel>,
+    model: StaticModelKey,
     renderer: orr_render::ModelRenderer<Wgpu>,
     instances: Vec<orr_render::StaticInstance>,
 }
+/// Private cache identity: explicit tables never alias another appearance or
+/// the legacy None policy, even when the immutable mesh Arc is shared.
+#[cfg(feature = "models")]
+#[derive(Clone)]
+struct StaticModelKey {
+    model: std::sync::Arc<orr_model::StaticModel>,
+    #[cfg(feature = "mesh-prop-shading")]
+    shading: Option<Vec<orr_render::MaterialShading>>,
+}
+#[cfg(feature = "models")]
+impl StaticModelKey {
+    fn as_ref(&self) -> &orr_model::StaticModel {
+        &self.model
+    }
+    fn matches(&self, other: &Self) -> bool {
+        if !std::sync::Arc::ptr_eq(&self.model, &other.model) {
+            return false;
+        }
+        #[cfg(feature = "mesh-prop-shading")]
+        if self.shading != other.shading {
+            return false;
+        }
+        true
+    }
+    fn validate(&self) -> Result<(), String> {
+        #[cfg(feature = "mesh-prop-shading")]
+        if self
+            .shading
+            .as_ref()
+            .is_some_and(|values| values.len() != self.model.source().materials.len())
+        {
+            return Err("Viewport shading table must match every model material slot".into());
+        }
+        Ok(())
+    }
+    fn renderer(
+        &self,
+        rhi: Wgpu,
+        format: orr_render::orr_rhi::TextureFormat,
+    ) -> Result<orr_render::ModelRenderer<Wgpu>, String> {
+        #[cfg(feature = "mesh-prop-shading")]
+        if let Some(shading) = &self.shading {
+            return orr_render::ModelRenderer::new_with_materials(
+                rhi,
+                format,
+                (*self.model).clone(),
+                shading,
+            )
+            .map_err(|error| error.to_string());
+        }
+        orr_render::ModelRenderer::new(rhi, format, (*self.model).clone())
+            .map_err(|error| error.to_string())
+    }
+}
+#[cfg(feature = "models")]
+type StaticGroups = Vec<(StaticModelKey, Vec<orr_render::StaticInstance>)>;
+#[cfg(feature = "models")]
+fn static_groups(
+    placements: &[ModelPlacement],
+    scene: &[SceneModel],
+) -> Result<StaticGroups, String> {
+    let mut groups: StaticGroups = Vec::new();
+    let entity = placements.iter().map(|p| {
+        (
+            StaticModelKey {
+                model: p.model.clone(),
+                #[cfg(feature = "mesh-prop-shading")]
+                shading: None,
+            },
+            p.instance,
+        )
+    });
+    let scene = scene.iter().map(|p| {
+        (
+            StaticModelKey {
+                model: p.model.clone(),
+                #[cfg(feature = "mesh-prop-shading")]
+                shading: p.shading.clone(),
+            },
+            p.instance,
+        )
+    });
+    for (key, instance) in entity.chain(scene) {
+        key.validate()?;
+        if let Some((_, instances)) = groups.iter_mut().find(|(cached, _)| cached.matches(&key)) {
+            instances.push(instance);
+        } else {
+            if groups.len() >= 8 {
+                return Err("Viewport supports at most eight distinct model assets".into());
+            }
+            groups.push((key, vec![instance]));
+        }
+    }
+    Ok(groups)
+}
+#[cfg(all(test, feature = "mesh-prop-shading"))]
+#[path = "viewport3d/prop_shading_tests.rs"]
+mod prop_shading_tests;
 #[cfg(feature = "animated-models")]
 struct CachedAnimatedModel {
     model: std::sync::Arc<orr_model::animation::AnimatedModel>,
@@ -421,26 +521,9 @@ impl Viewport3dGpu {
             return Err("Viewport supports at most 256 model-bound entities".into());
         }
 
-        // Group by immutable asset identity and own all sampled poses before
-        // building SkinnedInstance slices that borrow those poses.
-        let mut groups: Vec<(
-            std::sync::Arc<orr_model::StaticModel>,
-            Vec<orr_render::StaticInstance>,
-        )> = Vec::new();
-        for (model, instance) in placements.iter().map(|p| (&p.model, p.instance))
-            .chain(scene_models.iter().map(|p| (&p.model, p.instance))) {
-            if let Some((_, instances)) = groups
-                .iter_mut()
-                .find(|(cached, _)| std::sync::Arc::ptr_eq(cached, model))
-            {
-                instances.push(instance);
-            } else {
-                if groups.len() >= 8 {
-                    return Err("Viewport supports at most eight distinct model assets".into());
-                }
-                groups.push((model.clone(), vec![instance]));
-            }
-        }
+        // Immutable appearance identity includes both model Arc and shading.
+        // All table and count admission happens before any GPU/cache mutation.
+        let groups = static_groups(placements, scene_models)?;
 
         #[cfg(feature = "animated-models")]
         let mut animated_groups: Vec<AnimatedGroup> = Vec::new();
@@ -546,16 +629,11 @@ impl Viewport3dGpu {
                 || !self
                     .models
                     .iter()
-                    .any(|entry| std::sync::Arc::ptr_eq(&entry.model, model))
+                    .any(|entry| entry.model.matches(model))
             {
                 new_models.push(CachedModel {
                     model: model.clone(),
-                    renderer: orr_render::ModelRenderer::new(
-                        rhi.clone(),
-                        format,
-                        (**model).clone(),
-                    )
-                    .map_err(|error| error.to_string())?,
+                    renderer: model.renderer(rhi.clone(), format)?,
                     instances: Vec::new(),
                 });
             }
@@ -594,7 +672,7 @@ impl Viewport3dGpu {
             let index = self
                 .models
                 .iter()
-                .position(|entry| std::sync::Arc::ptr_eq(&entry.model, model))
+                .position(|entry| entry.model.matches(model))
                 .expect("admitted static cache");
             let mut entry = self.models.swap_remove(index);
             entry.instances.clone_from(instances);

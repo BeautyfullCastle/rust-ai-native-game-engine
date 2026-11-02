@@ -53,6 +53,8 @@ fn vertex(position: [f32; 3]) -> Vertex {
 
 fn scene_model(translation: [f32; 3]) -> SceneModel {
     SceneModel {
+        #[cfg(feature = "mesh-prop-shading")]
+        shading: None,
         model: model(),
         instance: StaticInstance {
             translation,
@@ -67,6 +69,8 @@ fn bounds_include_node_vertices_and_instance_transform() {
     let mut source = model().source().clone();
     source.primitives[0].transform[3][0] = 1.0;
     let model = SceneModel {
+        #[cfg(feature = "mesh-prop-shading")]
+        shading: None,
         model: Arc::new(StaticModel::new(source).unwrap()),
         instance: StaticInstance {
             translation: [3.0, 2.0, -4.0],
