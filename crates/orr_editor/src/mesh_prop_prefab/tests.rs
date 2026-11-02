@@ -186,3 +186,158 @@ fn prefab_decode_rejects_original_graph_mismatch_and_nested_malformed_art() {
 fn prefab_input_is_bounded_before_json_parsing() {
     assert!(Template::decode(&vec![b' '; MAX_BYTES + 1], [0x71; 32]).is_err());
 }
+
+#[test]
+fn absent_shading_retains_exact_legacy_wire_bytes_and_present_field_is_strict() {
+    #[derive(serde::Serialize)]
+    struct LegacyWire {
+        schema: u32,
+        name: String,
+        graph_revision: [u8; 32],
+        art_json: String,
+    }
+    let root = tempfile::tempdir().unwrap();
+    let revision = [0x35; 32];
+    let art = snapshot(root.path(), revision);
+    let expected = serde_json::to_vec(&LegacyWire {
+        schema: 1,
+        name: "Legacy".into(),
+        graph_revision: revision,
+        art_json: String::from_utf8(art.encode_embedded(PREFAB_SCENE_FILENAME).unwrap()).unwrap(),
+    })
+    .unwrap();
+    let captured = Template::capture("Legacy", &art).unwrap();
+    assert_eq!(captured.encode().unwrap(), expected);
+    assert_eq!(
+        Template::decode(&expected, revision)
+            .unwrap()
+            .encode()
+            .unwrap(),
+        expected
+    );
+    let mut value = wrapper_value(&expected);
+    value["shading"] = serde_json::Value::Null;
+    assert!(Template::decode(&serde_json::to_vec(&value).unwrap(), revision).is_err());
+    #[cfg(not(feature = "mesh-prop-shading"))]
+    {
+        value["shading"] = serde_json::json!({"version":1,"slots":[{"material":0,"metallic":0.5,"roughness":0.5}]});
+        assert!(Template::decode(&serde_json::to_vec(&value).unwrap(), revision).is_err());
+    }
+}
+
+#[cfg(feature = "mesh-prop-shading")]
+#[test]
+fn shaded_prefab_roundtrip_and_graph_rebind_preserve_art_and_explicit_clear_is_local() {
+    use crate::mesh_prop_shading::{Settings, Slot};
+    let root = tempfile::tempdir().unwrap();
+    let revision = [0x35; 32];
+    let target = [0xa7; 32];
+    let art = snapshot(root.path(), revision);
+    let model = art.source_model_arc();
+    let material = model.source().primitives[0].material;
+    let shading = Settings::new(
+        vec![Slot {
+            material,
+            metallic: 0.7,
+            roughness: 0.2,
+        }],
+        model,
+    )
+    .unwrap();
+    let legacy = Template::capture("Shaded", &art).unwrap();
+    let legacy_bytes = legacy.encode().unwrap();
+    let shaded = legacy.clone().with_shading(Some(shading.clone())).unwrap();
+    let bytes = shaded.encode().unwrap();
+    let reopened = Template::decode(&bytes, target).unwrap();
+    assert_eq!(reopened.shading(), Some(&shading));
+    assert_eq!(reopened.art().graph_revision(), target);
+    assert_eq!(
+        reopened.art().source_model_arc().to_bytes().unwrap(),
+        model.to_bytes().unwrap()
+    );
+    let rebound = art
+        .clone()
+        .with_graph_revision(target)
+        .encode_embedded(PREFAB_SCENE_FILENAME)
+        .unwrap();
+    assert_eq!(
+        reopened
+            .art()
+            .encode_embedded(PREFAB_SCENE_FILENAME)
+            .unwrap(),
+        rebound
+    );
+    assert_eq!(
+        Template::decode(&bytes, revision)
+            .unwrap()
+            .encode()
+            .unwrap(),
+        bytes
+    );
+    assert_eq!(
+        shaded.clone().with_shading(None).unwrap().encode().unwrap(),
+        legacy_bytes
+    );
+    assert_eq!(shaded.shading(), Some(&shading));
+    assert!(legacy.shading().is_none());
+}
+
+#[cfg(feature = "mesh-prop-shading")]
+#[test]
+fn shaded_prefab_rejects_invalid_records_and_foreign_material_slots() {
+    use serde_json::json;
+    let root = tempfile::tempdir().unwrap();
+    let revision = [0x35; 32];
+    let art = snapshot(root.path(), revision);
+    let baseline = Template::capture("Strict", &art).unwrap().encode().unwrap();
+    for shading in [
+        json!(null),
+        json!([]),
+        json!({"version":1,"slots":[]}),
+        json!({"version":2,"slots":[{"material":0,"metallic":0,"roughness":1}]}),
+        json!({"version":1,"slots":[{"material":999,"metallic":0,"roughness":1}]}),
+        json!({"version":1,"slots":[{"material":0,"metallic":-1,"roughness":1}]}),
+        json!({"version":1,"slots":[{"material":0,"metallic":0,"roughness":2}]}),
+        json!({"version":1,"slots":[{"material":0,"metallic":null,"roughness":1}]}),
+        json!({"version":1,"slots":[{"material":0,"metallic":0,"roughness":1}],"extra":true}),
+    ] {
+        let mut value = wrapper_value(&baseline);
+        value["shading"] = shading;
+        assert!(Template::decode(&serde_json::to_vec(&value).unwrap(), revision).is_err());
+    }
+    for slots in [
+        vec![json!({"material":0,"metallic":0,"roughness":1}); 2],
+        (0..257)
+            .map(|material| json!({"material":material,"metallic":0,"roughness":1}))
+            .collect(),
+    ] {
+        let mut value = wrapper_value(&baseline);
+        value["shading"] = json!({"version":1,"slots":slots});
+        assert!(Template::decode(&serde_json::to_vec(&value).unwrap(), revision).is_err());
+    }
+    let mut value = wrapper_value(&baseline);
+    value["shading"] = json!({"version":1,"slots":[{"material":0,"metallic":0.5,"roughness":0.5}]});
+    let raw = serde_json::to_string(&value).unwrap();
+    assert!(Template::decode(
+        raw.replace("\"version\":1", "\"version\":1,\"version\":1")
+            .as_bytes(),
+        revision
+    )
+    .is_err());
+    assert!(Template::decode(
+        raw.replace("\"shading\":", "\"shading\":null,\"shading\":")
+            .as_bytes(),
+        revision
+    )
+    .is_err());
+    let foreign: crate::mesh_prop_shading::Settings = serde_json::from_value(
+        json!({"version":1,"slots":[{"material":999,"metallic":0,"roughness":1}]}),
+    )
+    .unwrap();
+    assert!(Template::capture("Strict", &art)
+        .unwrap()
+        .with_shading(Some(foreign))
+        .is_err());
+    let oversized = vec![b' '; MAX_BYTES + 1];
+    assert!(Template::decode(&oversized, revision).is_err());
+}

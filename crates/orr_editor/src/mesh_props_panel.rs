@@ -291,18 +291,17 @@ impl Panel {
                 self.cancel_gesture();
             }
             let editable = self.can_edit(editor) && self.gesture.is_none();
-            let selected = self
-                .selected_prop()
-                .map(|prop| (prop.name.clone(), prop.art.clone()));
+            let selected = self.selected_prop().cloned();
             let prefab_editable = editable && !self.pending_prefab() && !self.unapplied_form_dirty();
-            #[cfg(feature = "mesh-prop-shading")]
-            let prefab_editable = prefab_editable && !self.selected_prop().is_some_and(|prop| prop.shading.is_some());
-            #[cfg(feature = "mesh-prop-shading")]
-            if self.selected_prop().is_some_and(|prop| prop.shading.is_some()) { ui.weak("Shaded prop prefab capture is not supported; remove scalar shading explicitly first."); }
             if let Some(template) = self.prefab.show(
                 ui,
                 prefab_context(editor),
-                selected.as_ref().map(|(name, art)| (name.as_str(), art)),
+                selected.as_ref().map(|prop| crate::mesh_prop_prefab_panel::SaveSource {
+                    name: &prop.name,
+                    art: &prop.art,
+                    #[cfg(feature = "mesh-prop-shading")]
+                    shading: prop.shading.as_ref(),
+                }),
                 prefab_editable,
             ) {
                 self.accept_prefab(editor, template);
@@ -1138,6 +1137,8 @@ impl Panel {
                 .ok_or("No unique prop prefab name is available")?
         };
         self.copy_snapshot_fields(template.art());
+        #[cfg(feature = "mesh-prop-shading")]
+        self.shading.load(template.art().source_model_arc(), template.shading());
         self.name = name;
         self.candidate = Some(template.art().clone());
         self.prefab_candidate = true;
@@ -2383,3 +2384,7 @@ fn same_document_placements(left: &Document, right: &Document) -> bool {
 #[cfg(test)]
 #[path = "mesh_props_panel/tests.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "mesh-prop-shading"))]
+#[path = "mesh_props_panel/shaded_prefab_tests.rs"]
+mod shaded_prefab_tests;
