@@ -500,10 +500,13 @@ fn loaded_tilemap_is_refused_independently_of_saved_manifest() {
         serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     manifest["entry"].as_object_mut().unwrap().remove("tilemap");
     fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
-    assert!(app
-        .arena_export_dispatch()
-        .unwrap_err()
-        .contains("Loaded tilemap"));
+    app.arena_export.project = root.to_string_lossy().into_owned();
+    app.arena_export.runtime = root.join("unused-runtime").to_string_lossy().into_owned();
+    app.arena_export.output = root.join("new-output").to_string_lossy().into_owned();
+    app.arena_export.hash = "a".repeat(64);
+    app.arena_export.trusted = true;
+    assert!(app.arena_export_dispatch().unwrap_err().contains("changed externally"));
+    assert!(!app.arena_export.busy());
     assert!(app.tilemap.is_some());
 }
 #[test]

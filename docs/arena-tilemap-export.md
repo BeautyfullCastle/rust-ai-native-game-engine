@@ -38,8 +38,14 @@ The relocated launcher reads its adjacent `project/` directory.
 
 ## Boundaries and acceptance
 
-The editor export button still refuses tilemap projects. This is CLI support,
-not native editor interaction, Windows export or physics tilemaps. Historical
+The optional editor `arena-project-export,tilemap` build accepts the same saved
+Arena through **Export saved Arena**. Save tiles explicitly first: scene Save
+does not save tiles. Unsaved tiles, active gestures, Play, stale loaded projects
+or mismatched installed assets are refused before a worker starts. The worker
+binds exact saved tile bytes and preserves the existing trusted-runtime and
+new-output-only transaction. Later editor changes are not included; results
+remain labelled with their captured source. This is not Windows export or
+physics tilemaps. Historical
 Paint/Fill/Resize acceptance in `tilemap-authoring.md` remains historical; it
 never certified an exported player.
 
@@ -55,7 +61,7 @@ unrun or unavailable GPU capture is not a pass. Report adapter and terminal
 results separately from CPU checks; no hardware-wide or physical-input claim.
 
 Older generated starter README files say export is unsupported; that statement
-predates this CLI path. Their editor-button limitation still applies.
+predates this CLI path. Their historical editor-button limitation is superseded by the optional route above.
 
 Headless capture uses the same background-before-actors composition as the native
 player; optional game UI paints afterward. Explicit GPU acceptance also runs with

@@ -14,8 +14,15 @@ use std::{
 
 const PROJECT_MANIFEST: &str = "orr.project.json";
 const PACKAGE_LOCK: &str = "orr.packages.lock.json";
+#[cfg(not(feature = "tilemap"))]
 const MAX_SOURCE_FILES: usize = 4;
-const MAX_SOURCE_BYTES: u64 = MAX_SCENE_BYTES + 3 * MAX_JSON_BYTES;
+#[cfg(feature = "tilemap")]
+const MAX_SOURCE_FILES: usize = 5;
+const MAX_SOURCE_BYTES: u64 = MAX_SCENE_BYTES + 3 * MAX_JSON_BYTES + MAX_TILEMAP_SOURCE_BYTES;
+#[cfg(feature = "tilemap")]
+const MAX_TILEMAP_SOURCE_BYTES: u64 = orr_tilemap::MAX_BYTES as u64;
+#[cfg(not(feature = "tilemap"))]
+const MAX_TILEMAP_SOURCE_BYTES: u64 = 0;
 const MAX_CANONICAL_PATH_BYTES: usize = 4096;
 const MAX_UI_FONT_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -240,7 +247,7 @@ impl ArenaExportSource {
             return Err("Arena export scene path must be bounded, absolute and canonical".into());
         }
         if !(3..=MAX_SOURCE_FILES).contains(&self.inventory.len()) {
-            return Err("Arena export source inventory must contain 3 or 4 authority files".into());
+            return Err(format!("Arena export source inventory must contain 3 to {MAX_SOURCE_FILES} authority files"));
         }
         let mut paths = BTreeSet::new();
         let mut total = 0u64;
@@ -279,12 +286,12 @@ impl ArenaExportSource {
         self.validate()?;
         let entry = &project.entry;
         if entry.game != orr_package::ProjectGame::Arena
-            || entry.tilemap.is_some()
+            || (entry.tilemap.is_some() && !cfg!(feature = "tilemap"))
             || entry.models.is_some()
             || entry.camera.is_some()
         {
             return Err(
-                "editor Arena export supports only Arena scene, sprites and the Korean UI preset, without tilemap, models or camera"
+                "editor Arena export supports only Arena scene, sprites and the Korean UI preset, without unsupported tilemap, models or camera"
                     .into(),
             );
         }
@@ -305,6 +312,10 @@ impl ArenaExportSource {
         ]);
         if let Some(sprites) = entry.sprites.as_deref() {
             required.insert(sprites, MAX_JSON_BYTES);
+        }
+        #[cfg(feature = "tilemap")]
+        if let Some(tilemap) = entry.tilemap.as_deref() {
+            required.insert(tilemap, MAX_TILEMAP_SOURCE_BYTES);
         }
         if self.inventory.len() != required.len() {
             return Err(
@@ -1132,7 +1143,7 @@ mod tests {
         ] {
             assert!(ArenaExportSource::new(path, 0, source.inventory.clone()).is_err());
         }
-        for count in [0, 1, 2, 5] {
+        for count in [0, 1, 2, MAX_SOURCE_FILES + 1] {
             let inventory = (0..count)
                 .map(|index| ArenaSourceFile::new(format!("file{index}"), Some(digest(1))).unwrap())
                 .collect();
@@ -1408,13 +1419,13 @@ mod tests {
                 }
                 _ => unreachable!(),
             }
-            assert!(
-                source
-                    .check_snapshot(&snapshot)
-                    .unwrap_err()
-                    .contains("only Arena"),
-                "{field}"
-            );
+            let error = source.check_snapshot(&snapshot).unwrap_err();
+            let expected = if field == "tilemap" && cfg!(feature = "tilemap") {
+                "inventory"
+            } else {
+                "only Arena"
+            };
+            assert!(error.contains(expected), "{field}: {error}");
         }
     }
 
@@ -1606,3 +1617,6 @@ mod tests {
         fixture.no_stage();
     }
 }
+
+#[cfg(all(test, feature = "tilemap"))]
+mod tilemap_tests;
