@@ -418,10 +418,22 @@ fn validate_primitive(doc: &Document, p: &PrimitiveDef) -> Result<bool, Error> {
             continue;
         };
         let a = at(&doc.accessors, index, name)?;
-        if a.component_type != 5126 || a.normalized || a.kind != kind || a.count != pos.count {
+        if a.kind != kind || a.count != pos.count {
             return Err(invalid("vertex attribute type/count mismatch"));
         }
-        vertex_accessor(doc, a)?;
+        if name == "TEXCOORD_0" {
+            import::validate_uv(doc, a)?;
+            // Keep the existing f32 vertex alignment policy. New integer UVs
+            // use the shared UV-specific relative offset/stride contract.
+            if a.component_type == 5126 {
+                vertex_accessor(doc, a)?;
+            }
+        } else {
+            if a.component_type != 5126 || a.normalized {
+                return Err(invalid("vertex attribute type/count mismatch"));
+            }
+            vertex_accessor(doc, a)?;
+        }
     }
     if pos.min.as_ref().is_none_or(|v| v.len() != 3)
         || pos.max.as_ref().is_none_or(|v| v.len() != 3)
@@ -586,7 +598,7 @@ fn read_primitives(
             for i in 0..pos.count {
                 let position = pos.floats::<3>(doc, buffers, i);
                 let normal = normal.floats::<3>(doc, buffers, i);
-                let uv = uv.map_or([0.0; 2], |a| a.floats::<2>(doc, buffers, i));
+                let uv = uv.map_or([0.0; 2], |a| import::decode_uv(a, doc, buffers, i));
                 if (0..3).any(|c| {
                     !position[c].is_finite()
                         || position[c].abs() > 1.0e6
@@ -674,7 +686,7 @@ fn read_primitives(
                         uv: import::primitive_uv(
                             doc,
                             primitive,
-                            uv.map_or([0.0; 2], |a| a.floats(doc, buffers, i)),
+                            uv.map_or([0.0; 2], |a| import::decode_uv(a, doc, buffers, i)),
                         )?,
                     },
                     joints,

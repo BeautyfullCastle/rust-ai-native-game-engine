@@ -259,9 +259,8 @@ impl TextureInfo {
     }
 }
 
-/// Apply the same admitted base-color UV policy to skeletal source validation
-/// and emitted vertices. This does not alter joints, poses or texture bytes.
-#[cfg(feature = "animation")]
+/// Apply the same admitted base-color UV policy to static/skeletal source
+/// validation and emitted vertices, without changing poses or texture bytes.
 pub(crate) fn primitive_uv(
     doc: &Document,
     primitive: &PrimitiveDef,
@@ -634,7 +633,9 @@ pub(crate) fn load_resources(
         if a.count == 0
             || a.count > MAX_INDICES
             || stride < size
-            || (!animated && (a.normalized || matches!(a.kind.as_str(), "VEC4" | "MAT4")))
+            || (!animated
+                && ((a.normalized && !normalized_uv(a))
+                    || matches!(a.kind.as_str(), "VEC4" | "MAT4")))
             || (a.normalized && !matches!(a.component_type, 5121 | 5123))
             || (a.kind == "MAT4" && a.component_type != 5126)
             || stride % component != 0
@@ -805,6 +806,7 @@ pub fn import_with_resolver(
     } = load_resources(asset_id, bytes, resolver, false)?;
     // Validate every source mesh before allocating any decoded geometry.
     let mut primitive_count = 0usize;
+    let mut normalized_uv_count = 0usize;
     for mesh in &doc.meshes {
         primitive_count += mesh.primitives.len();
         if mesh.primitives.is_empty() || primitive_count > MAX_PRIMITIVES {
@@ -812,6 +814,24 @@ pub fn import_with_resolver(
         }
         for p in &mesh.primitives {
             validate_primitive(&doc, p)?;
+            if let Some(a) = p
+                .attributes
+                .get("TEXCOORD_0")
+                .map(|&index| &doc.accessors[index])
+                .filter(|a| normalized_uv(a))
+            {
+                normalized_uv_count = normalized_uv_count
+                    .checked_add(a.count)
+                    .ok_or_else(|| invalid("normalized UV source vertex budget overflow"))?;
+                if normalized_uv_count > MAX_VERTICES {
+                    return Err(invalid("normalized UV source vertex budget exceeded"));
+                }
+                // New integer UVs are validated even on unused meshes. Keep
+                // the legacy float whole-source admission contract unchanged.
+                for vertex in 0..a.count {
+                    primitive_uv(&doc, p, decode_uv(a, &doc, &buffers, vertex))?;
+                }
+            }
         }
     }
     let mut parents = vec![0u32; doc.nodes.len()];
@@ -931,6 +951,59 @@ impl Accessor {
         })
     }
 }
+/// The only normalized accessor form newly admitted by the static importer.
+fn normalized_uv(a: &Accessor) -> bool {
+    a.kind == "VEC2" && a.normalized && matches!(a.component_type, 5121 | 5123)
+}
+
+pub(crate) fn validate_uv(doc: &Document, a: &Accessor) -> Result<(), Error> {
+    let view = &doc.buffer_views[a.buffer_view];
+    if a.kind != "VEC2"
+        || !((a.component_type == 5126 && !a.normalized) || normalized_uv(a))
+        || view.target.is_some_and(|target| target != 34962)
+    {
+        return Err(invalid(
+            "UV attribute must be f32 or normalized unsigned u8/u16 VEC2",
+        ));
+    }
+    if normalized_uv(a) {
+        let (component, elements) = a.layout()?;
+        // glTF vertex offsets/strides are four-byte aligned relative to the
+        // view; the combined offset retains the existing component alignment.
+        if a.byte_offset % 4 != 0 || view.byte_stride.unwrap_or(component * elements) % 4 != 0 {
+            return Err(invalid(
+                "normalized UV vertex offset/stride alignment mismatch",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Called only after shared bounds and primitive type/count admission.
+pub(crate) fn decode_uv(
+    a: &Accessor,
+    doc: &Document,
+    buffers: &[Vec<u8>],
+    vertex: usize,
+) -> [f32; 2] {
+    match a.component_type {
+        5121 => {
+            let bytes = a.bytes(doc, buffers, vertex);
+            [f32::from(bytes[0]) / 255.0, f32::from(bytes[1]) / 255.0]
+        }
+        5123 => {
+            let bytes = a.bytes(doc, buffers, vertex);
+            std::array::from_fn(|channel| {
+                f32::from(u16::from_le_bytes([
+                    bytes[channel * 2],
+                    bytes[channel * 2 + 1],
+                ])) / 65535.0
+            })
+        }
+        _ => a.floats(doc, buffers, vertex),
+    }
+}
+
 fn diffuse_pbr(material: &MaterialDef) -> Result<&Pbr, Error> {
     let pbr = material.pbr_metallic_roughness.as_ref().ok_or_else(|| {
         invalid("default glTF PBR material has metallic=1; importer requires explicit metallic=0 and roughness=1")
@@ -984,7 +1057,10 @@ fn validate_primitive(doc: &Document, p: &PrimitiveDef) -> Result<(), Error> {
         };
         let a = at(&doc.accessors, index, name)?;
         let view = &doc.buffer_views[a.buffer_view];
-        if a.component_type != 5126
+        if name == "TEXCOORD_0" {
+            validate_uv(doc, a)?;
+        }
+        if (name != "TEXCOORD_0" && a.component_type != 5126)
             || a.kind != kind
             || a.count != pos.count
             || view.target.is_some_and(|v| v != 34962)
@@ -1106,7 +1182,7 @@ impl Builder<'_> {
                         normal: normal.floats(self.doc, self.buffers, v),
                         uv: {
                             let source_uv =
-                                uv.map_or([0.0; 2], |a| a.floats(self.doc, self.buffers, v));
+                                uv.map_or([0.0; 2], |a| decode_uv(a, self.doc, self.buffers, v));
                             match texture {
                                 Some(texture) => texture.transformed_uv(source_uv)?,
                                 None => source_uv,
