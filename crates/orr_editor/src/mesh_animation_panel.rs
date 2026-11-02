@@ -22,6 +22,8 @@ pub(crate) struct Panel {
     clip: String,
     idle_clip_enabled: bool,
     idle_clip: String,
+    crossfade_enabled: bool,
+    crossfade_ticks: String,
     rate: String,
     looped: bool,
     face_route: bool,
@@ -47,6 +49,7 @@ pub(crate) struct Panel {
     status: String,
     error: Option<String>,
     preview: preview::State,
+    playback: crate::mesh_animation::playback::PlaybackCursor,
 }
 
 impl Default for Panel {
@@ -61,6 +64,8 @@ impl Default for Panel {
             clip: "0".into(),
             idle_clip_enabled: false,
             idle_clip: "0".into(),
+            crossfade_enabled: false,
+            crossfade_ticks: "0".into(),
             rate: "1".into(),
             looped: true,
             face_route: false,
@@ -89,11 +94,14 @@ impl Default for Panel {
             status: String::new(),
             error: None,
             preview: preview::State::default(),
+            playback: Default::default(),
         }
     }
 }
 
 impl Panel {
+    pub(crate) fn reset_playback(&mut self) { self.playback.reset(); }
+
     pub(crate) fn sync(&mut self, editor: &Editor) {
         preview::sync(self, editor);
         if editor.game() != EditorGame::MeshNavigation || !editor.spec().is_local() {
@@ -229,6 +237,11 @@ impl Panel {
                 }
                 changed |= clip_choices::show_labeled(ui, "Moving animation clip", &clips, &mut self.clip);
                 changed |= text_field(ui, "Animation clip index", &mut self.clip);
+                changed |= ui.checkbox(&mut self.crossfade_enabled, "Use idle/move crossfade").changed();
+                if self.crossfade_enabled {
+                    changed |= text_field(ui, "Crossfade duration (ticks, 0–120)", &mut self.crossfade_ticks);
+                    ui.label("Positive duration requires an idle clip. Unobserved timeline ticks snap.");
+                }
                 changed |= text_field(ui, "Animation playback rate", &mut self.rate);
                 changed |= ui.checkbox(&mut self.looped, "Loop mesh animation").changed();
                 changed |= ui.checkbox(&mut self.face_route, "Animation face route direction").changed();
@@ -387,7 +400,16 @@ impl Panel {
     }
 
     pub(crate) fn placement(
-        &self,
+        &mut self,
+        editor: &Editor,
+    ) -> Result<Option<crate::viewport3d::AnimatedPlacement>, String> {
+        let result = self.placement_inner(editor);
+        if result.is_err() || matches!(&result, Ok(None)) { self.playback.reset(); }
+        result
+    }
+
+    fn placement_inner(
+        &mut self,
         editor: &Editor,
     ) -> Result<Option<crate::viewport3d::AnimatedPlacement>, String> {
         if self.document_pending || self.context_stale {
@@ -419,11 +441,17 @@ impl Panel {
             .predicted();
         let view = mesh_from_view(frame)?;
         if let Some(placement) = self.preview.placement(self, editor, &view)? {
+            self.playback.reset();
             return Ok(Some(placement));
         }
-        self.current_snapshot()
-            .map(|snapshot| snapshot.placement_for_view(&view, frame.tick()))
-            .transpose()
+        let snapshot = self.current_snapshot().cloned();
+        snapshot.map(|snapshot| self.playback.observe(&snapshot, &view, frame.tick(),
+            crate::mesh_animation::playback::PlaybackContext {
+                scene_epoch: editor.scene_load_epoch(),
+                sim_epoch: editor.sim().epoch,
+                discontinuity: editor.mesh_animation_revision(),
+                rest: editor.mode() != Mode::Play,
+            })).transpose()
     }
 
     fn animation_state(&self, editor: &Editor) -> Option<(bool, u32)> {
@@ -460,10 +488,20 @@ impl Panel {
                     .into(),
             );
         }
-        if self.current_snapshot().is_some() {
-            if let Err(error) = self.placement(editor) {
-                return Some(error);
-            }
+        if let Some(snapshot) = self.current_snapshot() {
+            // Admission is stateless: checking Play must not advance presentation history.
+            let check = (|| -> Result<(), String> {
+                let (scene, revision) = self.current_identity(editor)
+                    .ok_or("Wait for a coherent Mesh Navigation frame")?;
+                if self.scene.as_ref() != Some(&scene) || self.graph_revision != Some(revision) {
+                    return Err("Mesh animation belongs to a different scene or graph revision".into());
+                }
+                let frame = editor.snapshot().ok_or("Mesh animation requires a coherent Frame")?.predicted();
+                let view = mesh_from_view(frame)?;
+                snapshot.placement_for_view(&view, frame.tick())?;
+                Ok(())
+            })();
+            if let Err(error) = check { return Some(error); }
         }
         None
     }
@@ -538,6 +576,7 @@ impl Panel {
             &self.rotation,
             PlaybackFields {
                 moving_clip: &self.clip,
+                crossfade_ticks: self.crossfade_enabled.then_some(self.crossfade_ticks.as_str()),
                 idle_clip: self.idle_clip_enabled.then_some(self.idle_clip.as_str()),
                 rate: &self.rate,
                 looped: self.looped,
@@ -842,6 +881,8 @@ impl Panel {
         self.clip = settings.clip.to_string();
         self.idle_clip_enabled = settings.idle_clip.is_some();
         self.idle_clip = settings.idle_clip.unwrap_or(0).to_string();
+        self.crossfade_enabled = settings.crossfade_ticks.is_some();
+        self.crossfade_ticks = settings.crossfade_ticks.unwrap_or(0).to_string();
         self.rate = format_number(settings.rate);
         self.looped = settings.looped;
         self.face_route = settings.facing == crate::mesh_facing::Facing::Route;
@@ -857,6 +898,8 @@ impl Panel {
             self.clip = "0".into();
             self.idle_clip_enabled = false;
             self.idle_clip = "0".into();
+            self.crossfade_enabled = false;
+            self.crossfade_ticks = "0".into();
             self.rate = "1".into();
             self.looped = true;
             self.face_route = false;
@@ -951,6 +994,7 @@ fn text_field(ui: &mut Ui, label: &str, value: &mut String) -> bool {
 
 struct PlaybackFields<'a> {
     moving_clip: &'a str,
+    crossfade_ticks: Option<&'a str>,
     idle_clip: Option<&'a str>,
     rate: &'a str,
     looped: bool,
@@ -1008,6 +1052,13 @@ fn parse_settings(
     if offset.iter().any(|value| !value.is_finite()) || !scale.is_finite() || !rate.is_finite() {
         return Err("Animation transform and playback values must be finite".into());
     }
+    let crossfade_ticks = playback.crossfade_ticks.map(|text| {
+        if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err("Crossfade ticks must be an integer between 0 and 120".to_owned());
+        }
+        text.parse::<u32>().ok().filter(|ticks| *ticks <= 120)
+            .ok_or_else(|| "Crossfade ticks must be an integer between 0 and 120".to_owned())
+    }).transpose()?;
     Ok(crate::mesh_animation::Settings {
         offset,
         scale,
@@ -1021,6 +1072,7 @@ fn parse_settings(
         idle_clip,
         rate,
         looped: playback.looped,
+        crossfade_ticks,
     })
 }
 

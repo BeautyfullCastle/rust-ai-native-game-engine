@@ -279,6 +279,8 @@ pub fn run() -> Result<(), String> {
         }
         Request::Capabilities => {
             println!("{CAPABILITIES}");
+            #[cfg(feature = "mesh-animated-models")]
+            println!("ORR_MESH_CROSSFADE_V1");
             Ok(())
         }
         Request::Launch(options) => launch(options),

@@ -46,6 +46,7 @@ fn playback_fields<'fields>(
     face_route: bool,
 ) -> PlaybackFields<'fields> {
     PlaybackFields {
+        crossfade_ticks: None,
         moving_clip,
         idle_clip,
         rate,
@@ -594,5 +595,92 @@ fn named_authored_clip_list_uses_candidate_metadata_then_saved_fallback() {
             harness.state().0.current_snapshot().unwrap().settings(),
             saved.settings()
         );
+    }
+}
+
+#[cfg(all(feature = "mesh-mission", feature = "mesh-animated-models"))]
+#[test]
+fn crossfade_compatibility_apply_preserves_value_and_invalid_idle_is_atomic() {
+    let (_directory, editor, mut panel, snapshot, scene_bytes, _) = preview_fixture();
+    let configured = snapshot.clone().with_settings(crate::mesh_animation::Settings {
+        crossfade_ticks: Some(12), ..snapshot.settings()
+    }).unwrap();
+    panel.push_state(Some(configured));
+    panel.copy_current_settings();
+    assert!(panel.save_workspace_changes(&editor).unwrap());
+    let scene = editor.path().unwrap();
+    let sidecar = crate::mesh_animation_store::sidecar_path(&scene).unwrap();
+    let saved = std::fs::read(&sidecar).unwrap();
+    panel.rate = "1.5".into();
+    panel.form_dirty = true;
+    panel.apply(&editor);
+    assert!(panel.error.is_none(), "{:?}", panel.error);
+    let settings = panel.current_snapshot().unwrap().settings();
+    assert_eq!(settings.crossfade_ticks, Some(12));
+    assert_eq!(settings.rate, 1.5);
+    assert_eq!(std::fs::read(&sidecar).unwrap(), saved, "Apply is not Save");
+    let cursor = panel.cursor;
+    let history_len = panel.history.len();
+    panel.idle_clip_enabled = false;
+    panel.form_dirty = true;
+    panel.apply(&editor);
+    assert!(panel.error.as_deref().unwrap().contains("crossfade"));
+    assert_eq!(panel.current_snapshot().unwrap().settings(), settings);
+    assert_eq!(panel.cursor, cursor);
+    assert_eq!(panel.history.len(), history_len);
+    assert_eq!(std::fs::read(&sidecar).unwrap(), saved);
+    assert_eq!(std::fs::read(scene).unwrap(), scene_bytes);
+}
+
+#[cfg(all(feature = "mesh-mission", feature = "mesh-animated-models"))]
+#[test]
+fn crossfade_single_clip_preview_is_private_and_leaves_document_policy_intact() {
+    let (_directory, editor, mut panel, snapshot, scene_bytes, sidecar_bytes) = preview_fixture();
+    let configured = snapshot.clone().with_settings(crate::mesh_animation::Settings {
+        crossfade_ticks: Some(12), ..snapshot.settings()
+    }).unwrap();
+    panel.push_state(Some(configured.clone()));
+    let settings = configured.settings();
+    let cursor = panel.cursor;
+    let (preview, tick) = super::preview::prepare_snapshot(&configured, "0", "12").unwrap();
+    assert_eq!(tick, 12);
+    assert_eq!(preview.settings().idle_clip, None);
+    assert_eq!(preview.settings().crossfade_ticks, None);
+    assert_eq!(configured.settings(), settings);
+    assert_eq!(panel.current_snapshot().unwrap().settings(), settings);
+    assert_eq!(panel.cursor, cursor);
+    let scene = editor.path().unwrap();
+    assert_eq!(std::fs::read(&scene).unwrap(), scene_bytes);
+    assert_eq!(std::fs::read(crate::mesh_animation_store::sidecar_path(&scene).unwrap()).unwrap(), sidecar_bytes);
+}
+
+#[cfg(all(feature="mesh-mission", feature="mesh-animated-models"))]
+#[test]
+fn crossfade_controls_apply_undo_redo_save_reopen_and_reject_invalid_duration() {
+    let (_directory, editor, mut panel, _, _, _) = preview_fixture();
+    panel.crossfade_enabled = true;
+    panel.crossfade_ticks = "6".into();
+    panel.form_dirty = true;
+    panel.apply(&editor);
+    assert!(panel.error.is_none(), "{:?}", panel.error);
+    assert_eq!(panel.current_snapshot().unwrap().settings().crossfade_ticks, Some(6));
+    panel.undo();
+    assert_eq!(panel.current_snapshot().unwrap().settings().crossfade_ticks, None);
+    panel.redo();
+    assert_eq!(panel.current_snapshot().unwrap().settings().crossfade_ticks, Some(6));
+    assert!(panel.save_workspace_changes(&editor).unwrap());
+    let mut reopened = Panel::default();
+    reopened.sync(&editor);
+    assert!(reopened.crossfade_enabled);
+    assert_eq!(reopened.crossfade_ticks, "6");
+    let settings = reopened.current_snapshot().unwrap().settings();
+    let id = reopened.current_entry().unwrap().id;
+    for invalid in ["-1", "121", "NaN", "1.5", "", "+1"] {
+        reopened.crossfade_ticks = invalid.into();
+        reopened.form_dirty = true;
+        reopened.apply(&editor);
+        assert!(reopened.error.is_some());
+        assert_eq!(reopened.current_snapshot().unwrap().settings(), settings);
+        assert_eq!(reopened.current_entry().unwrap().id, id);
     }
 }

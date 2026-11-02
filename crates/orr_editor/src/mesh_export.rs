@@ -35,6 +35,8 @@ const PROPS_RUNTIME_MARKER: &[u8] = b"ORR_MESH_PROPS_V1";
 const ROTATION_RUNTIME_MARKER: &[u8] = b"ORR_MESH_ROTATION_V1";
 const CAMERA_RUNTIME_MARKER: &[u8] = b"ORR_MESH_CAMERA_V1";
 const MATERIAL_RUNTIME_MARKER: &[u8] = b"ORR_MESH_MATERIAL_V1";
+const CROSSFADE_RUNTIME_MARKER: &[u8] = b"ORR_MESH_CROSSFADE_V1";
+const CROSSFADE_RUNTIME_SECTION: &[u8; 8] = b".orrxfad";
 const ANIMATION_RUNTIME_MARKER: &[u8] = b"ORR_MESH_ANIMATION_V1";
 const SURFACE_RUNTIME_MARKER: &[u8] = b"ORR_MESH_SURFACE_V1";
 const POST_PROCESS_RUNTIME_MARKER: &[u8] = b"ORR_MESH_POST_PROCESS_V1";
@@ -187,6 +189,10 @@ fn export_with_profile(
     let mut requires_surface = false;
     let mut requires_facing = false;
     let mut requires_character = false;
+    #[cfg(feature = "mesh-animated-models")]
+    let mut requires_crossfade = false;
+    #[cfg(not(feature = "mesh-animated-models"))]
+    let requires_crossfade = false;
     let mut requires_dense_props = false;
     let sidecar_bytes = match read_optional_bounded(
         &sidecar_path,
@@ -301,6 +307,7 @@ fn export_with_profile(
             else {
                 return Err("mesh animation sidecar could not be admitted".into());
             };
+            requires_crossfade = animation.settings().crossfade_ticks.is_some();
             requires_character |= animation.settings().idle_clip.is_some()
                 || serialized_animation_idle_present(&bytes)?;
             if admitted_hash != digest(&bytes)
@@ -391,6 +398,7 @@ fn export_with_profile(
         },
     )?;
     validate_runtime_post_process(&runtime_bytes, requires_post_process)?;
+    validate_runtime_crossfade(&runtime_bytes, requires_crossfade)?;
     requires_facing |= optional_facing_present(props_bytes.as_deref(), true)?
         || optional_facing_present(animation_bytes.as_deref(), false)?;
     validate_runtime_facing(&runtime_bytes, requires_facing)?;
@@ -685,6 +693,10 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
     let mut requires_surface = false;
     let mut requires_facing = false;
     let mut requires_character = false;
+    #[cfg(feature = "mesh-animated-models")]
+    let mut requires_crossfade = false;
+    #[cfg(not(feature = "mesh-animated-models"))]
+    let requires_crossfade = false;
     let mut requires_dense_props = false;
     match (
         &manifest.sidecar,
@@ -818,6 +830,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
             else {
                 return Err("bundle mesh animation sidecar could not be admitted".into());
             };
+            requires_crossfade = animation.settings().crossfade_ticks.is_some();
             requires_character |= animation.settings().idle_clip.is_some()
                 || serialized_animation_idle_present(&bytes)?;
             if admitted_hash != record.sha256
@@ -914,6 +927,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
         },
     )?;
     validate_runtime_post_process(&runtime_bytes, requires_post_process)?;
+    validate_runtime_crossfade(&runtime_bytes, requires_crossfade)?;
     validate_runtime_facing(&runtime_bytes, requires_facing)?;
     validate_runtime_dense_props(&runtime_bytes, requires_dense_props)?;
     validate_runtime_profile(&runtime_bytes, manifest.input_profile)?;
@@ -1801,6 +1815,16 @@ fn validate_runtime_with_lighting(
         && validate_runtime_section(bytes, HUD_RUNTIME_SECTION, HUD_RUNTIME_MARKER)?.is_none()
     {
         return Err("mesh player runtime does not advertise Mesh HUD support".into());
+    }
+    Ok(())
+}
+
+fn validate_runtime_crossfade(bytes: &[u8], required: bool) -> Result<(), String> {
+    if required
+        && validate_runtime_section(bytes, CROSSFADE_RUNTIME_SECTION, CROSSFADE_RUNTIME_MARKER)?
+            .is_none()
+    {
+        return Err("mesh player runtime does not advertise mesh crossfade support".into());
     }
     Ok(())
 }

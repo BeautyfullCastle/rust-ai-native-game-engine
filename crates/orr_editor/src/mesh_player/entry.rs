@@ -27,6 +27,11 @@ static MESH_MATERIAL_SLOTS_MARKER: [u8; 26] = *b"ORR_MESH_MATERIAL_SLOTS_V1";
 #[unsafe(link_section = ".orranim")]
 static MESH_ANIMATION_MARKER: [u8; 21] = *b"ORR_MESH_ANIMATION_V1";
 
+#[cfg(feature = "mesh-animated-models")]
+#[used]
+#[unsafe(link_section = ".orrxfad")]
+static MESH_CROSSFADE_MARKER: [u8; 21] = *b"ORR_MESH_CROSSFADE_V1";
+
 #[used]
 #[unsafe(link_section = ".orrsurf")]
 static MESH_SURFACE_MARKER: [u8; 19] = *b"ORR_MESH_SURFACE_V1";
@@ -73,6 +78,8 @@ fn main() {
     std::hint::black_box(&MESH_MATERIAL_SLOTS_MARKER);
     #[cfg(feature = "mesh-animated-models")]
     std::hint::black_box(&MESH_ANIMATION_MARKER);
+    #[cfg(feature = "mesh-animated-models")]
+    std::hint::black_box(&MESH_CROSSFADE_MARKER);
     std::hint::black_box(&MESH_SURFACE_MARKER);
     std::hint::black_box(&MESH_LIGHTING_MARKER);
     std::hint::black_box(&MESH_POST_PROCESS_MARKER);

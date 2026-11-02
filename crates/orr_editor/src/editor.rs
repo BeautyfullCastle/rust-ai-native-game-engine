@@ -241,6 +241,8 @@ pub struct Editor {
     room_character_source: Arc<()>,
     #[cfg(feature="room-character")]
     room_character_revision: Arc<()>,
+    #[cfg(feature="mesh-animated-models")]
+    mesh_animation_revision: u64,
     #[cfg(feature="room-project")]
     room_camera: Option<orr_sample::room_camera::Document>,
     #[cfg(feature="room-project")]
@@ -405,6 +407,7 @@ impl Editor {
             #[cfg(feature="room-character")] room_character_scene: None,
             #[cfg(feature="room-character")] room_character_source: Arc::new(()),
             #[cfg(feature="room-character")] room_character_revision: Arc::new(()),
+            #[cfg(feature="mesh-animated-models")] mesh_animation_revision: 0,
             #[cfg(feature="room-project")] room_camera: None,
             #[cfg(feature="room-project")] room_camera_scene: None,
             #[cfg(feature="room-lighting")] room_lighting: None,
@@ -2956,6 +2959,9 @@ impl Editor {
 
     /// Starts a play session from the scene, paused at tick 0. Does nothing
     /// if one already runs.
+    #[cfg(feature="mesh-animated-models")]
+    pub(crate) fn mesh_animation_revision(&self) -> u64 { self.mesh_animation_revision }
+
     pub fn start_play(&mut self) -> bool {
         #[cfg(feature = "mesh-navigation")]
         if self.game().has_mesh_view() && self.sim.mode != Mode::Play {
@@ -2988,6 +2994,8 @@ impl Editor {
         self.end_edit();
         match self.call("sim.start", json!({})) {
             Ok(r) => {
+                #[cfg(feature="mesh-animated-models")]
+                { self.mesh_animation_revision = self.mesh_animation_revision.wrapping_add(1); }
                 self.apply_state(&r);
                 #[cfg(feature = "mesh-navigation")]
                 if self.has_mesh_camera() { self.camera3d = self.mesh_camera.as_ref().unwrap().document.orbit(); }
@@ -3041,6 +3049,10 @@ impl Editor {
         };
         match self.call(method, params) {
             Ok(r) => {
+                #[cfg(feature="mesh-animated-models")]
+                if matches!(op, ControlOp::Seek(_) | ControlOp::Branch) {
+                    self.mesh_animation_revision = self.mesh_animation_revision.wrapping_add(1);
+                }
                 self.apply_state(&r);
                 if matches!(op, ControlOp::Seek(_) | ControlOp::Branch | ControlOp::Step(_)) {
                     self.mark_changed();
@@ -3076,6 +3088,8 @@ impl Editor {
         }
         match self.call("sim.stop", json!({"include_replay": true})) {
             Ok(r) => {
+                #[cfg(feature="mesh-animated-models")]
+                { self.mesh_animation_revision = self.mesh_animation_revision.wrapping_add(1); }
                 let replay = r.get("replay").and_then(J::as_str).and_then(b64_decode).unwrap_or_default();
                 let checksum = r.get("checksum").and_then(orr_remote::wire::parse_checksum).unwrap_or(0);
                 self.stopped = Some(Stopped { tick: r.get("tick").and_then(J::as_u64).unwrap_or(0), checksum, replay });
