@@ -1,8 +1,12 @@
-//! Optional, GPU-free presentation data. No simulation state, wall clock, image
-//! decoder or renderer is owned here. Times are caller-supplied milliseconds.
+//! Optional, GPU-free presentation data. No simulation state, wall clock or
+//! renderer is owned here. Optional PNG decoding is feature-gated.
+//! Times are caller-supplied milliseconds.
 //! JSON schema version 1 is separate from ORAM, motion and PCM formats.
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, fmt};
+
+#[cfg(feature = "png-import")]
+pub mod png_import;
 
 pub const FORMAT: &str = "orr_sprite";
 pub const VERSION: u32 = 1;

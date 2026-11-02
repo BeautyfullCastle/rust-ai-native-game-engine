@@ -1930,3 +1930,6 @@ mod tests {
 
 #[cfg(all(feature = "animation-authoring", target_os = "linux"))]
 pub mod animated_sequence_package;
+
+#[cfg(feature = "sprite-authoring")]
+pub mod sprite_package;

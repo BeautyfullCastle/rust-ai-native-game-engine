@@ -3355,6 +3355,7 @@ name = "orr_package"
 version = "0.0.1"
 dependencies = [
  "orr_model",
+ "orr_sprite",
  "rustix 1.1.5",
  "semver",
  "serde",
@@ -3592,6 +3593,7 @@ dependencies = [
 name = "orr_sprite"
 version = "0.0.1"
 dependencies = [
+ "png 0.17.16",
  "serde",
  "serde_json",
 ]
