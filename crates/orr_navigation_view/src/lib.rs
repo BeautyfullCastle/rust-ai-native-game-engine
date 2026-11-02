@@ -280,3 +280,6 @@ mod tests {
         .is_err());
     }
 }
+
+#[cfg(all(feature = "authored-bundle", target_os = "linux", target_arch = "x86_64"))]
+pub mod bundle;

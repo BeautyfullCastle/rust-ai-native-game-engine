@@ -3329,12 +3329,15 @@ dependencies = [
  "orr_package",
  "orr_remote",
  "orr_render",
+ "orr_sample",
  "orr_sim",
  "orr_terrain",
  "orr_terrain_view",
  "png 0.18.1",
+ "rustix 1.1.5",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
 ]
 

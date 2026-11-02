@@ -11,10 +11,14 @@ workspace = true
 
 [features]
 default = []
+authored-bundle = ["authored", "dep:orr_sample", "dep:rustix", "dep:sha2"]
 authored = ["dep:orr_remote", "dep:orr_sim", "dep:orr_ecs", "dep:orr_bridge", "dep:orr_games"]
 gpu = ["dep:orr_render", "dep:png"]
 
 [dependencies]
+orr_sample = { path = "../orr_sample", default-features = false, features = ["runtime-export-support"], optional = true }
+rustix = { version = "1.1.5", features = ["fs", "process"], optional = true }
+sha2 = { version = "0.11", optional = true }
 orr_remote = { path = "../orr_remote", default-features = false, features = ["navigation"], optional = true }
 orr_sim = { path = "../orr_sim", optional = true }
 orr_ecs = { path = "../orr_ecs", optional = true }
@@ -43,5 +47,12 @@ required-features = ["gpu"]
 name = "navigation_player"
 path = "src/bin/navigation_player.rs"
 required-features = ["authored"]
+test = false
+bench = false
+
+[[bin]]
+name = "navigation_export"
+path = "src/bin/navigation_export.rs"
+required-features = ["authored-bundle"]
 test = false
 bench = false
