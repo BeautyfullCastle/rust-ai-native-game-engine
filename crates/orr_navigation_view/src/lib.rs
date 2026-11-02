@@ -1,12 +1,18 @@
 //! Optional view of the bounded terrain-triangle point-agent prototype.
 //! Terrain, a portal-midpoint path, and an agent are primitives in ONE immutable
 //! StaticModel, so ModelRenderer's independent clear/depth pass cannot erase them.
-//! This is not an editor, scene, physics, avoidance, or general navmesh integration.
+//! Optional authored playback reuses the existing scene admission and simulation.
+//! This is not physics, avoidance, or general navmesh integration.
 #![allow(clippy::float_arithmetic)]
 use orr_fp::FP;
 use orr_model::{Image, Material, Primitive, StaticModel, Vertex, Wrap, IDENTITY};
 use orr_navigation::NavigationPath;
 use orr_terrain::Terrain;
+
+#[cfg(all(feature = "authored", target_os = "linux"))]
+pub mod authored;
+#[cfg(all(feature = "authored", target_os = "linux"))]
+pub mod player;
 
 #[cfg(feature = "gpu")]
 pub mod gpu;

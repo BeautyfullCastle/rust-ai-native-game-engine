@@ -3183,6 +3183,7 @@ dependencies = [
  "orr_model",
  "orr_model_bindings",
  "orr_navigation",
+ "orr_navigation_view",
  "orr_package",
  "orr_reflect",
  "orr_remote",
@@ -3319,11 +3320,16 @@ dependencies = [
 name = "orr_navigation_view"
 version = "0.0.1"
 dependencies = [
+ "orr_bridge",
+ "orr_ecs",
  "orr_fp",
+ "orr_games",
  "orr_model",
  "orr_navigation",
  "orr_package",
+ "orr_remote",
  "orr_render",
+ "orr_sim",
  "orr_terrain",
  "orr_terrain_view",
  "png 0.18.1",
