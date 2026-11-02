@@ -1,3 +1,7 @@
+mod dependency_update;
+pub use dependency_update::{
+    apply_update_with_dependencies, plan_update_with_dependencies, DependencyUpdatePlan,
+};
 mod dependency_add;
 pub use dependency_add::{apply_add_with_dependencies, plan_add_with_dependencies, DependencyAddPlan};
 mod update_impact;

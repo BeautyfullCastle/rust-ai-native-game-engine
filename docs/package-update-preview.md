@@ -1,127 +1,95 @@
 # Checked local package update preview
 
-The optional `orr_editor/package-manager` feature can replace one installed,
-unassigned **direct** package with an explicitly selected local version. It uses
-the existing `Project::preview_install` and `Project::install_checked` APIs.
-There is no registry lookup, automatic dependency upgrade, new package format,
-network access, or change to the engine's default feature set.
+The optional `orr_editor/package-manager` feature replaces one installed,
+unassigned **direct** package with an explicitly selected local exact version.
+There is no registry lookup, automatic dependency upgrade, network access, new
+package format or default-feature change.
 
 ## Editor workflow
 
-1. Open a saved Room project and choose **Verify installed packages**
-2. Set the existing local package directory field to a package with the same
-   installed name and a different exact version
-3. Choose **Preview update** and review the old/new versions and full package
-   digests
-4. Choose **Update previewed package** to apply that specific preview
-5. Verify installed packages again before opening the updated asset preview or
-   assigning a model
+1. Open a saved Room project and **Verify installed packages**.
+2. Enter a local package directory with the same installed name and a different
+   exact version.
+3. For unchanged dependencies, choose **Preview update**, inspect versions and
+   digests, then **Update previewed package**.
+4. For additional dependencies, enter 1–8 **Dependency candidate directories
+   (one per line)**. Choose **Preview package update with dependencies**, inspect
+   the full lock and unused candidates, then **Update package with dependencies**.
+5. Verify again before previewing or assigning an installed model. Existing
+   Use/Save controls remain the separate assignment path.
 
-Preview does not alter the active lock, package cache, scene, model bindings,
-camera, simulation history, or source files. The editor discards a pending
-preview when the selected source or project changes. An asynchronous result for
-an older source/project generation cannot authorize a later update. A failed preview
-requires a new explicit preview before Apply.
-
-After a successful update, existing model preview/Use/Save controls remain the
-way to assign an installed model to a Room entity. Package update itself does
-not create or migrate model assignments. The updated installed model can be
-assigned to a KEY, saved, reopened without authoring/package sources, collected
-during Play, and restored by Restart using the existing Room flow.
+Preview writes no lock, cache, scene, binding, camera, history or source files.
+Source/project changes invalidate previews; failed previews require a new one.
+Candidate Add and Update have separate opaque plans: starting either preview
+invalidates the other's ready plan. All mutation lanes share a pending-operation
+fence. Field edits cannot cancel a dispatched commit or imply rollback; older
+results retain their captured-project attribution. Worker lifetime remains the
+existing detached design, not a new joined guarantee.
 
 ## Admission and preserved state
 
-The replacement must have the same name as an installed direct package and a
-different exact version. An indirect/transitive-only package is refused.
-Both the old and new lock must contain exactly the same package names and direct
-selection names. Only the selected package's version and immutable package
-identity may differ. Its dependency map must remain identical; all other direct
-selections and complete locked package identities must remain identical.
+The target must be a direct package with a different exact version, unused by
+saved static **and animated** bindings. Unsupported references fail closed; no
+reference migration occurs. All other direct selections and complete installed
+package identities remain identical.
 
-The selected package must be unused by saved static or animated model bindings.
-Unsupported or malformed references are refused conservatively. This slice does
-not rewrite references, migrate assets, change dependencies, or remove packages.
-Existing source validation still applies: bounded local absolute paths, regular
-non-symlink/non-reparse files, portable declared paths, a declared `LICENSE.txt`,
-and supported package/runtime metadata. A declared license file is not a legal
-review.
+The single-source lane requires identical dependency maps and package name sets.
+The candidate lane permits **additions only**: every old target dependency entry
+and exact version remains unchanged in the new map. New reachable candidates
+become indirect; unused candidates stay inactive. Candidates cannot reuse active
+package names. Existing resolver cycle/conflict/capability checks apply. No
+package removal or dependency upgrade is included.
 
-`plan_update` returns an immutable `UpdatePlan`. Its getters expose the selected
-root, source, name and preview for inspection; callers cannot alter the plan's
-checked snapshot. `apply_update` verifies the saved project and expected lock
-again, then uses the package core's writer guard and checked publication path.
-The writer callback rechecks the admitted root identity, source identity and
-bytes (including whitespace-only manifest edits), saved scene, camera and static/animated bindings before lock publication.
-Stale previews, source changes, path replacement, a competing writer, or saved
-project changes fail closed instead of updating a different state.
+Both lanes reuse the package core's preview and checked-install transaction;
+the candidate lane uses its existing dependency variants. Plans pin source
+identity and contents, previous/approved locks and saved Room admission.
+Candidate updates additionally pin every supplied source, including unused
+ones, as directory identity, raw manifest and full inspected package. Exact Room
+manifest/root and the existing scene/binding/camera/Frame snapshot are checked
+at planning, Apply and again in the writer callback before publication. Stale
+files, competing writers or changed saved content refuse publication.
 
-The package store can retain unreachable staged objects after a failed apply.
-The checked operation promises no unintended active-lock publication, not cache
-garbage collection or rollback of staging. If publication succeeded but later
-verification fails, the error reports that the published lock is retained; the
-editor does not silently roll back an uncertain publication. Filesystem checks
-are designed for a trusted local project, not as a sandbox against a hostile
-process continuously swapping filesystem ancestry.
+Inputs retain existing bounded-path, regular non-link/non-reparse, portable
+asset-path, declared `LICENSE.txt` and supported-runtime checks. License data is
+not a rights assessment. Filesystem observations assume trusted, quiescent
+ancestry, not hostile concurrent path swapping.
 
-## Acceptance contract
+Failure protects the active lock, not the entire filesystem: unreachable
+immutable objects may remain staged. Postpublication re-admission errors say the
+package was installed and retain the published lock. No automatic rollback or
+retry is promised.
 
-`.github/workflows/package-update.yml` is additive. Its required aggregate job
-needs every CPU/Linux, CPU/Windows and software-Vulkan UI/Linux row to succeed.
-Existing mandatory workflows remain required separately. The evidence location
-uses `runner.temp` in the execution step's environment and the matching artifact
-upload path, never a job-level context expression.
+## Focused acceptance
 
-Every row starts from a clean current checkout, captures the complete source
-path/byte/mode inventory, and builds retained producers in a fresh empty target.
-Cargo JSON proves the package, manifest, source target, enabled features, release
-profile and newly compiled executable. Logs and retained binaries are hashed;
-source and producer fences run before/after commands and at completion. Historical
-Cargo or runtime hashes do not freeze future unrelated changes. Local source
-review against the intended base remains necessary alongside executable checks.
+The candidate lane exercises a valid Room baseline plus unused A v1→A v2 adding
+B→C, with D unused; immutable Preview; preserved old entries; used-target,
+dependency-removal/version-change, malformed/conflicting and stale-source/Room
+refusals. Actual accessibility-button Update is followed by hiding all source
+folders and reading C through installed runtime/Binding/PreparedRoom. A binding
+file written by the test is not an Editor Save action. Existing candidate Add
+and single Update regressions remain separate. CPU consumer proof is not
+physical mouse, native-window or GPU acceptance.
 
-New backend and panel inventories are named explicitly and counted separately
-from existing removal/panel regressions. Ignored tests are not passing tests:
-the production EditorApp acceptance must execute its exact single ignored case.
-Missing GPU support, changed inventories, skipped cases, incomplete captures,
-wrong producer/source identity, or an unchanged/nonfresh producer fail the gate.
-Strict Clippy, default-off compilation, minimal `package-manager` compilation,
-and animated support without package-manager are checked independently.
+Current `AGENTS.md` Linux-local checks and exact-source independent review govern
+integration. Empty hosted checks are not PASS. The old hosted workflow was
+retired; the original single-source acceptance tooling below is retained, not a
+new merge gate or claim that every row ran.
 
-The UI acceptance creates distinct v1/v2 raw GLB inputs and imports them through
-the production path. It retains evidence for immutable preview, checked Apply,
-unchanged other packages, actual KEY Use and Save, hidden-source fresh reopen,
-keyboard collection and Restart. Default production renderer options are used.
-Saved/reopened/restarted pixels and installed hashes are compared, and a
-presentation-free replay checks exact authoritative Frame/checksum parity.
-Retained receipt claims alone do not replace file, image and lock comparisons.
-
-The Linux UI gate accepts either one installed Lavapipe manifest or one explicit
-absolute `VK_DRIVER_FILES`/`VK_ICD_FILENAMES` selection. If both are set, they must
-name the same manifest. Path lists, relative/link paths, malformed or oversized
-JSON, duplicate keys, and non-Lavapipe libraries are refused. The selected
-manifest is copied and hashed; its bytes are fenced through completion. No
-system Vulkan configuration or loader search path is rewritten.
-
-Run the independent Python rejection fixtures without Cargo or a GPU:
+That tooling fences clean source bytes/modes and fresh producer identities,
+hashes logs/binaries, checks exact inventories, and separately validates CPU,
+UI, feature isolation and strict Clippy. Its actual UI case uses distinct v1/v2
+GLBs, KEY Use/Save, hidden-source reopen, keyboard collection/Restart, pixel/hash
+comparison and presentation-free Frame replay. Ignored, blocked, skipped or
+unrun rows are not successes. Its software-Vulkan selector requires one pinned
+absolute regular Lavapipe manifest; it does not rewrite system driver settings.
+See `tools/package_update_gate.py` and its independent rejection tests for the
+retained row contract and manifest restrictions.
 
 ```sh
 PYTHONDONTWRITEBYTECODE=1 python -B tools/test_package_update_gate.py
+ORR_PACKAGE_UPDATE_EVIDENCE=/absolute/fresh/evidence \
+  python -B tools/package_update_gate.py cpu  # or ui, with its actual prerequisites
 ```
 
-On a clean committed checkout, run one acceptance row with a new evidence path
-outside the repository:
-
-```sh
-PYTHONDONTWRITEBYTECODE=1 \
-ORR_PACKAGE_UPDATE_EVIDENCE=/absolute/fresh/package-update-cpu \
-python -B tools/package_update_gate.py cpu
-
-PYTHONDONTWRITEBYTECODE=1 \
-ORR_PACKAGE_UPDATE_EVIDENCE=/absolute/fresh/package-update-ui \
-python -B tools/package_update_gate.py ui
-```
-
-A CPU-only local pass does not certify the UI row, Windows behavior, or hosted
-CI. A blocked/failed check is recorded as such, never replaced with historical
-results. This document defines required evidence; it does not claim a particular
-local or hosted run has passed.
+A local CPU pass never certifies Windows, GPU, browser or hosted CI. Record the
+exact executed checks and preserve original failures.
