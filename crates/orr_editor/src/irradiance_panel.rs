@@ -1,6 +1,9 @@
 //! Local Yard3D irradiance authoring, independent from scene state and ERP undo.
 //! Static sun-bounce baking runs on an immutable CPU snapshot. Publication is
 //! guarded and remains independent from scene state, ERP, and package files.
+#[path = "irradiance_panel/gradient.rs"]
+mod gradient;
+
 use crate::{
     backend::HostSpec,
     editor::Editor,
@@ -62,6 +65,9 @@ pub struct IrradiancePanel {
     /// Linear RGB; the color widget displays these authoring values directly.
     pub color: [f32; 3],
     pub intensity: f32,
+    gradient_axis: usize,
+    gradient_start: [f32; 3],
+    gradient_end: [f32; 3],
     seen_scene: Option<String>,
     confirm_discard: bool,
     error: Option<String>,
@@ -99,6 +105,9 @@ impl Default for IrradiancePanel {
             selected_node: [0; 3],
             color: [1.0; 3],
             intensity: 1.0,
+            gradient_axis: 0,
+            gradient_start: [0.0; 3],
+            gradient_end: [1.0; 3],
             seen_scene: None,
             confirm_discard: false,
             error: None,
@@ -466,6 +475,20 @@ impl IrradiancePanel {
         })();
         self.report(result)
     }
+    pub fn apply_gradient(&mut self, editor: &Editor) -> Result<(), String> {
+        let result = (|| {
+            self.require_editable(editor)?;
+            let source = &self.bindings.as_ref().ok_or("Open irradiance first")?.document().grid;
+            let grid = gradient::build_gradient(source, gradient::GradientSpec {
+                axis: self.gradient_axis,
+                start: self.gradient_start,
+                end: self.gradient_end,
+            })?;
+            self.bindings.as_mut().ok_or("Open irradiance first")?.replace_grid(grid)
+        })();
+        self.report(result)
+    }
+
     /// Analyze exactly the participants that the CPU worker will receive. This
     /// does not modify the accepted irradiance or any document/history.
     fn preflight_key(&self, editor: &Editor, models: &ModelPanel) -> PreflightKey {
@@ -1122,6 +1145,27 @@ impl IrradiancePanel {
                             let _ = self.set_node_constant(editor, true);
                         }
                     });
+                    ui.separator();
+                    ui.label("Authored probe gradient (replaces all nodes, not a physical bake)");
+                    ui.horizontal(|ui| {
+                        ui.label("Gradient axis");
+                        for (axis, name) in ["X", "Y", "Z"].into_iter().enumerate() {
+                            ui.selectable_value(&mut self.gradient_axis, axis, name);
+                        }
+                    });
+                    for (label, color) in [("Gradient start linear RGB", &mut self.gradient_start),
+                                           ("Gradient end linear RGB", &mut self.gradient_end)] {
+                        ui.horizontal(|ui| {
+                            ui.label(label);
+                            for channel in color {
+                                ui.add(egui::DragValue::new(channel).speed(0.05));
+                            }
+                        });
+                    }
+                    if ui.button("Apply authored probe gradient").clicked() {
+                        let _ = self.apply_gradient(editor);
+                    }
+
                     ui.collapsing("Selected SH9 coefficients", |ui| {
                         if let Some(grid) = self.bindings.as_ref().map(|b| &b.document().grid) {
                             if let Some(index) = grid.node_index(self.selected_node) {
@@ -1410,3 +1454,7 @@ mod tests {
         assert!(panel.bindings.as_ref().unwrap().dirty());
     }
 }
+
+#[cfg(test)]
+#[path = "irradiance_panel/gradient_panel_tests.rs"]
+mod gradient_panel_tests;
