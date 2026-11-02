@@ -259,7 +259,24 @@ impl TextureInfo {
     }
 }
 
-fn validate_texture_extensions(doc: &Document, animated: bool) -> Result<(), Error> {
+/// Apply the same admitted base-color UV policy to skeletal source validation
+/// and emitted vertices. This does not alter joints, poses or texture bytes.
+#[cfg(feature = "animation")]
+pub(crate) fn primitive_uv(
+    doc: &Document,
+    primitive: &PrimitiveDef,
+    source_uv: [f32; 2],
+) -> Result<[f32; 2], Error> {
+    let texture = diffuse_pbr(&doc.materials[material_index(doc, primitive)?])?
+        .base_color_texture
+        .as_ref();
+    match texture {
+        Some(texture) => texture.transformed_uv(source_uv),
+        None => Ok(source_uv),
+    }
+}
+
+fn validate_texture_extensions(doc: &Document) -> Result<(), Error> {
     let used: BTreeSet<_> = doc.extensions_used.iter().collect();
     let required: BTreeSet<_> = doc.extensions_required.iter().collect();
     if used.len() != doc.extensions_used.len()
@@ -278,15 +295,12 @@ fn validate_texture_extensions(doc: &Document, animated: bool) -> Result<(), Err
             continue;
         };
         if let Some(extension) = &info.extensions {
-            if animated
-                || !doc
-                    .extensions_used
-                    .iter()
-                    .any(|name| name == TEXTURE_TRANSFORM)
+            if !doc
+                .extensions_used
+                .iter()
+                .any(|name| name == TEXTURE_TRANSFORM)
             {
-                return Err(invalid(
-                    "texture transform requires a declared static import",
-                ));
+                return Err(invalid("texture transform requires a declared import"));
             }
             let t = &extension.transform;
             if !t
@@ -302,11 +316,6 @@ fn validate_texture_extensions(doc: &Document, animated: bool) -> Result<(), Err
         if info.effective_tex_coord() != 0 {
             return Err(invalid("only effective TEXCOORD_0 is supported"));
         }
-    }
-    if animated && (!used.is_empty() || !required.is_empty()) {
-        return Err(invalid(
-            "animated importer does not support texture transforms",
-        ));
     }
     Ok(())
 }
@@ -526,7 +535,7 @@ pub(crate) fn load_resources(
         return Err(invalid("glTF collection budget exceeded"));
     }
     // Admit the entire document before any caller-provided resource resolver.
-    validate_texture_extensions(&doc, animated)?;
+    validate_texture_extensions(&doc)?;
     #[cfg(feature = "animation")]
     if animated {
         crate::animation_import::validate_document_limits(&doc)?;
