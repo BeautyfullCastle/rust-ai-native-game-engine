@@ -722,6 +722,8 @@ fn add_props(scene: &std::path::Path, revision: [u8; 32]) {
     let art = Snapshot::from_package(&package_root, "model.glb", "LICENSE.txt", revision).unwrap();
     let document = Document {
         props: vec![Prop {
+                #[cfg(feature = "mesh-prop-shading")]
+                shading: None,
             id: 1,
             name: "crate".into(),
             art,
@@ -1580,3 +1582,6 @@ fn surface_marker_composes_with_all_existing_player_sections() {
     )
     .is_err());
 }
+
+#[path = "prop_shading_tests.rs"]
+mod prop_shading_tests;

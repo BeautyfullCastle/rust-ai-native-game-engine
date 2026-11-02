@@ -62,6 +62,8 @@ pub(crate) struct Panel {
     surface_pivot: [String; 3],
     material_slots: crate::mesh_material_slots_panel::Panel,
     material_slots_draft: Vec<crate::mesh_material_slots::Settings>,
+    #[cfg(feature = "mesh-prop-shading")]
+    shading: crate::mesh_prop_shading_panel::Panel,
     prefab: crate::mesh_prop_prefab_panel::Panel,
     prefab_candidate: bool,
     grid_columns: String,
@@ -114,6 +116,8 @@ impl Default for Panel {
             surface_pivot: ["0".into(), "0".into(), "0".into()],
             material_slots: crate::mesh_material_slots_panel::Panel::default(),
             material_slots_draft: Vec::new(),
+            #[cfg(feature = "mesh-prop-shading")]
+            shading: crate::mesh_prop_shading_panel::Panel::default(),
             prefab: crate::mesh_prop_prefab_panel::Panel::default(),
             prefab_candidate: false,
             grid_columns: "4".into(),
@@ -291,6 +295,10 @@ impl Panel {
                 .selected_prop()
                 .map(|prop| (prop.name.clone(), prop.art.clone()));
             let prefab_editable = editable && !self.pending_prefab() && !self.unapplied_form_dirty();
+            #[cfg(feature = "mesh-prop-shading")]
+            let prefab_editable = prefab_editable && !self.selected_prop().is_some_and(|prop| prop.shading.is_some());
+            #[cfg(feature = "mesh-prop-shading")]
+            if self.selected_prop().is_some_and(|prop| prop.shading.is_some()) { ui.weak("Shaded prop prefab capture is not supported; remove scalar shading explicitly first."); }
             if let Some(template) = self.prefab.show(
                 ui,
                 prefab_context(editor),
@@ -371,6 +379,11 @@ impl Panel {
                     } else {
                         ui.weak("Load or select a mesh prop before editing material slots.");
                     }
+                });
+                #[cfg(feature = "mesh-prop-shading")]
+                ui.collapsing("Scalar material shading", |ui| {
+                    let model = self.candidate.as_ref().or_else(|| self.selected_prop().map(|prop| &prop.art)).map(|snapshot| std::sync::Arc::clone(snapshot.source_model_arc()));
+                    if let Some(model) = model { self.shading.show(ui, &model); } else { ui.weak("Load or select a prop before editing scalar shading."); }
                 });
                 ui.checkbox(&mut self.surface_enabled, "Edit prop UV and pivot");
                 if self.surface_enabled {
@@ -1033,6 +1046,8 @@ impl Panel {
             return true;
         };
         let base = self.candidate.as_ref().unwrap_or(&selected.art).clone();
+        #[cfg(feature = "mesh-prop-shading")]
+        if self.shading.settings(base.source_model_arc()).as_ref().map(|value| value != &selected.shading).unwrap_or(true) { return true; }
         let baseline = crate::mesh_rotation::to_degrees(selected.art.rotation())
             .and_then(crate::mesh_rotation::from_degrees)
             .and_then(|rotation| {
@@ -1369,7 +1384,9 @@ impl Panel {
             }
         };
         let mut document = self.document.clone();
-        document.props.push(Prop { id, name, art });
+        #[cfg(feature = "mesh-prop-shading")]
+        let shading = match self.shading.settings(art.source_model_arc()) { Ok(value) => value, Err(error) => { self.error = Some(error); return; } };
+        document.props.push(Prop { id, name, art, #[cfg(feature = "mesh-prop-shading")] shading });
         let Some(graph_revision) = self.graph_revision else {
             self.error = Some("Wait for an admitted mesh graph before adding a prop".into());
             return;
@@ -1438,6 +1455,8 @@ impl Panel {
         };
         let mut document = self.document.clone();
         document.props[index].name = name;
+        #[cfg(feature = "mesh-prop-shading")]
+        { document.props[index].shading = match self.shading.settings(art.source_model_arc()) { Ok(value) => value, Err(error) => { self.error = Some(error); return; } }; }
         document.props[index].art = art;
         let Some(graph_revision) = self.graph_revision else {
             self.error = Some("Wait for an admitted mesh graph before updating a prop".into());
@@ -1842,9 +1861,13 @@ impl Panel {
         {
             self.name = name;
             self.copy_snapshot_fields(&snapshot);
+            #[cfg(feature = "mesh-prop-shading")]
+            { let settings = self.selected_prop().and_then(|p| p.shading.clone()); self.shading.load(snapshot.source_model_arc(), settings.as_ref()); }
         } else {
             self.material_slots = crate::mesh_material_slots_panel::Panel::default();
             self.material_slots_draft.clear();
+            #[cfg(feature = "mesh-prop-shading")]
+            { self.shading = crate::mesh_prop_shading_panel::Panel::default(); }
         }
     }
 
@@ -1856,6 +1879,8 @@ impl Panel {
     }
 
     fn copy_snapshot_fields(&mut self, snapshot: &Snapshot) {
+        #[cfg(feature = "mesh-prop-shading")]
+        self.shading.load(snapshot.source_model_arc(), None);
         self.position = snapshot.offset().map(format_number);
         self.scale = format_number(snapshot.scale());
         if let Ok(rotation) = crate::mesh_rotation::to_degrees(snapshot.rotation()) {
@@ -2016,6 +2041,8 @@ fn duplicate_prop_document(
         id: new_id,
         name,
         art: source.art.clone(),
+        #[cfg(feature = "mesh-prop-shading")]
+        shading: source.shading.clone(),
     });
     Ok(duplicated)
 }
@@ -2141,6 +2168,8 @@ fn stamp_prop_grid(
                 id: identifier,
                 name,
                 art,
+                #[cfg(feature = "mesh-prop-shading")]
+                shading: source.shading.clone(),
             });
             identifier = identifier.checked_add(1).unwrap_or(1);
         }

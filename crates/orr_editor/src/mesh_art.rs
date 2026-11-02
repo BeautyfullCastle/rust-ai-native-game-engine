@@ -377,6 +377,8 @@ impl Snapshot {
             .validate_for(&self.render_model)
             .map_err(|error| format!("mesh art placement: {error}"))?;
         Ok(SceneModel {
+            #[cfg(feature = "mesh-prop-shading")]
+            shading: None,
             model: Arc::clone(&self.render_model),
             instance,
         })

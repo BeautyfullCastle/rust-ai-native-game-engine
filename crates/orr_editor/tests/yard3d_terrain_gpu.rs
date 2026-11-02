@@ -280,6 +280,8 @@ fn scene_terrain_hole_reveals_entity_model_and_filled_neighbor_occludes_it() {
         instance: Default::default(),
     }];
     let scene_models = [SceneModel {
+        #[cfg(feature = "mesh-prop-shading")]
+        shading: None,
         model: front,
         instance: Default::default(),
     }];
@@ -352,6 +354,8 @@ fn scene_terrain_hole_reveals_entity_model_and_filled_neighbor_occludes_it() {
     let cache = gpu.model_cache_counts();
     let overflow: Vec<_> = (0..257)
         .map(|_| SceneModel {
+            #[cfg(feature = "mesh-prop-shading")]
+            shading: None,
             model: scene_models[0].model.clone(),
             instance: Default::default(),
         })
