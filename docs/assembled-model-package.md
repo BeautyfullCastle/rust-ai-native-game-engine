@@ -1,5 +1,7 @@
 # Installable assembled static models
 
+For a Python-free Linux authoring command, prefer [Rust assembled-model package authoring](rust-assembled-model-package.md). The Python interface below remains a compatibility path.
+
 `tools/create_assembled_model_package.py` bridges the existing cooked static-model
 assembler and package-source authoring tools. It is an optional offline authoring
 CLI, not a new decoder or automatic engine capability switch. The editor's GLB

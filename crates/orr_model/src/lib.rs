@@ -8,6 +8,10 @@ use std::{collections::BTreeSet, fmt};
 #[cfg(feature = "import")]
 pub mod import;
 
+#[cfg(feature = "import")]
+#[path = "authoring/static_assemble.rs"]
+pub mod static_assemble;
+
 pub const MAX_FILE_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_DECODED_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_VERTICES: usize = 250_000;

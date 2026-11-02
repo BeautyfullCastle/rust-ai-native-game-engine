@@ -1,5 +1,12 @@
 //! Offline, content-only packages. No script execution, downloads or Cargo edits.
 //! The application supplies its real compiled capabilities through [`Runtime`].
+#[cfg(any(windows, target_os = "linux"))]
+#[path = "source_authoring_core.rs"]
+pub mod source_authoring;
+
+#[cfg(all(feature = "model-authoring", target_os = "linux"))]
+pub mod assembled_package;
+
 mod preview;
 pub use preview::{PackageChange, PackagePreview, PackageSelection};
 mod explanation;
