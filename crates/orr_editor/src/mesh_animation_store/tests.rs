@@ -85,3 +85,22 @@ fn sidecar_presence_detects_dangling_symlinks() {
     symlink(directory.path().join("missing-target"), &sidecar).unwrap();
     assert!(super::has_sidecar(&scene).unwrap());
 }
+
+#[cfg(feature = "mesh-animated-models")]
+#[test]
+fn crossfade_sidecar_roundtrip_and_stale_write_preserve_configuration() {
+    let directory = tempfile::tempdir().unwrap();
+    let scene = directory.path().join("crossfade.mesh.yaml");
+    fs::write(&scene, b"scene").unwrap();
+    let base = fixture();
+    let snapshot = base.clone().with_settings(crate::mesh_animation::Settings {
+        idle_clip: Some(0), crossfade_ticks: Some(12), ..base.settings()
+    }).unwrap();
+    let stamp = save(&scene, Some(&snapshot), None, GRAPH_REVISION).unwrap().unwrap();
+    let (loaded, loaded_stamp) = load(&scene, GRAPH_REVISION).unwrap().unwrap();
+    assert_eq!(loaded.settings(), snapshot.settings());
+    assert_eq!(stamp, loaded_stamp);
+    let before = fs::read(sidecar_path(&scene).unwrap()).unwrap();
+    assert!(save(&scene, Some(&base), None, GRAPH_REVISION).is_err());
+    assert_eq!(fs::read(sidecar_path(&scene).unwrap()).unwrap(), before);
+}

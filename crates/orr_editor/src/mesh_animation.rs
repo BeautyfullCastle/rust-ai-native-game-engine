@@ -21,6 +21,8 @@ const MAX_SCALE: f32 = 1000.0;
 const MIN_RATE: f32 = 0.125;
 const MAX_RATE: f32 = 4.0;
 const SCHEMA: u32 = 1;
+const CROSSFADE_SCHEMA: u32 = 2;
+pub(crate) mod playback;
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -39,6 +41,8 @@ pub(crate) struct Settings {
         deserialize_with = "deserialize_idle_clip"
     )]
     pub(crate) idle_clip: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_idle_clip")]
+    pub(crate) crossfade_ticks: Option<u32>,
 }
 
 impl Default for Settings {
@@ -52,6 +56,7 @@ impl Default for Settings {
             rate: 1.0,
             looped: true,
             idle_clip: None,
+            crossfade_ticks: None,
         }
     }
 }
@@ -381,7 +386,7 @@ impl Snapshot {
             return Err("embedded animated source changed after admission".into());
         }
         let bytes = serde_json::to_vec(&Sidecar {
-            schema: SCHEMA,
+            schema: if settings.crossfade_ticks.is_some() { CROSSFADE_SCHEMA } else { SCHEMA },
             scene_filename: scene_filename.to_owned(),
             graph_revision: self.graph_revision,
             manifest: self.manifest.clone(),
@@ -415,7 +420,7 @@ impl Snapshot {
         validate_scene_filename(scene_filename)?;
         let sidecar: Sidecar = serde_json::from_slice(bytes)
             .map_err(|error| format!("invalid mesh animation sidecar: {error}"))?;
-        if sidecar.schema != SCHEMA
+        if !matches!((sidecar.schema, sidecar.settings.crossfade_ticks), (SCHEMA, None) | (CROSSFADE_SCHEMA, Some(0..=120)))
             || sidecar.scene_filename != scene_filename
             || sidecar.graph_revision != graph_revision
         {
@@ -626,6 +631,14 @@ fn validate_settings(settings: Settings, model: &AnimatedModel) -> Result<Settin
         return Err(
             "mesh animation transform or playback rate is outside its finite bounds".into(),
         );
+    }
+    if settings.crossfade_ticks.is_some_and(|ticks| ticks > 120)
+        || (settings.crossfade_ticks.is_some_and(|ticks| ticks > 0) && settings.idle_clip.is_none())
+    {
+        return Err("mesh crossfade requires 0..120 ticks and a valid idle clip for positive duration".into());
+    }
+    if settings.crossfade_ticks.is_some_and(|ticks| ticks > 0) {
+        playback::validate_pose_budget(model)?;
     }
     let rotation = mesh_rotation::validate_normalize(settings.rotation)?;
     let clip = model
