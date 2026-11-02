@@ -17,7 +17,10 @@ use orr_render::Camera3D;
 use orr_terrain::Edit;
 use std::{path::PathBuf, sync::Arc};
 
+pub mod flatten;
+
 pub struct TerrainPanel {
+    pub flatten: flatten::Spec,
     pub document: TerrainSession,
     pub local_path: String,
     pub asset_id: String,
@@ -40,6 +43,7 @@ pub struct TerrainPanel {
 impl Default for TerrainPanel {
     fn default() -> Self {
         Self {
+            flatten: flatten::Spec::default(),
             document: TerrainSession::default(),
             local_path: "terrain.orrt".into(),
             asset_id: "terrain/local.orrt".into(),
@@ -596,6 +600,7 @@ impl TerrainPanel {
                     let _ = self.apply_hole(editor);
                 }
             }
+            self.show_flatten(ui, editor, writable);
             ui.horizontal(|ui| {
                 if ui
                     .add_enabled(
