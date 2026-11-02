@@ -514,10 +514,11 @@ pub fn headless(
                 .as_ref()
                 .map(|_| crate::game_ui_gpu::GpuOverlay::new(&gpu, TextureFormat::Rgba8UnormSrgb));
             let mut pending = crate::game_ui_gpu::PendingOverlay::default();
-            compositor.draw_with_overlay(
+            compositor.draw_with_background_and_overlay(
                 target.render_view(),
                 size,
                 presentation.shapes(),
+                presentation.background(),
                 presentation.sprites(),
                 &presentation.camera,
                 |gpu, view, size| {
@@ -552,10 +553,11 @@ pub fn headless(
             )?;
         }
         #[cfg(not(feature = "game-ui"))]
-        compositor.draw(
+        compositor.draw_with_background(
             target.render_view(),
             size,
             presentation.shapes(),
+            presentation.background(),
             presentation.sprites(),
             &presentation.camera,
         )?;

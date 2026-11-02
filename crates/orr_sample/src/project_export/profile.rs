@@ -112,6 +112,16 @@ impl Prepared {
             Self::Collect(p) => p.sprites(),
         }
     }
+    #[cfg(feature = "tilemap")]
+    pub fn tilemap(&self) -> Option<&crate::project_tilemap::PreparedTilemap> {
+        match self {
+            Self::Arena(p) => p.project().tilemap(),
+            #[cfg(feature = "room-project")]
+            Self::Room(_) => None,
+            #[cfg(feature = "collect-dodge")]
+            Self::Collect(_) => None,
+        }
+    }
     pub fn smoke(&self) -> Result<Vec<u8>, String> {
         match self {
             #[cfg(feature="room-project")] Self::Room(p) => { let checksum=p.scene().frame().checksum(); Ok(format!("room initial checksum: 0x{checksum:016x}\nroom tick: 0 checksum: 0x{checksum:016x}\nroom key: 0 won: 0\n").into_bytes()) },
