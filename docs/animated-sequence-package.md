@@ -1,3 +1,5 @@
+> Rust-first replacement: [in-process animated package authoring](rust-animated-sequence-package.md). The Python command below is retained for compatibility and differential tests.
+
 # From authored sequence to installed animated model
 
 This optional offline CLI connects `animation_clip_sequence` output to the

@@ -1,6 +1,6 @@
 //! Linux no-replace package publication with owned stage cleanup.
 //! Requires trusted stable ancestry; held descriptors are not a hostile-user sandbox.
-use super::{Metadata, Report};
+use super::{Metadata, PackageKind, Report};
 use rustix::fs::{self as unix, AtFlags, Mode, OFlags, RenameFlags};
 use std::{
     collections::BTreeSet,
@@ -10,10 +10,10 @@ use std::{
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
+#[cfg(test)]
 const MODEL: &str = "model.model.json";
 const LICENSE: &str = "LICENSE.txt";
 const MANIFEST: &str = "orr.package.json";
-const NAMES: [&str; 3] = [MODEL, LICENSE, MANIFEST];
 const DIR_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
     .union(OFlags::NOFOLLOW)
@@ -136,7 +136,13 @@ fn write_at(directory: &File, name: &str, bytes: &[u8]) -> Result<(), String> {
     file.write_all(bytes).map_err(error)?;
     file.sync_all().map_err(error)
 }
-fn cleanup(parent_path: &Path, parent: &File, name: &str, stage: &File) -> Result<(), String> {
+fn cleanup(
+    parent_path: &Path,
+    parent: &File,
+    name: &str,
+    stage: &File,
+    names: [&str; 3],
+) -> Result<(), String> {
     recheck_directory(parent_path, parent)?;
     let current = File::from(unix::openat(parent, name, DIR_FLAGS, Mode::empty()).map_err(error)?);
     if !same(
@@ -145,7 +151,7 @@ fn cleanup(parent_path: &Path, parent: &File, name: &str, stage: &File) -> Resul
     ) {
         return Err("stage identity changed; refusing cleanup".into());
     }
-    for name in NAMES {
+    for name in names {
         match unix::unlinkat(stage, name, AtFlags::empty()) {
             Ok(()) | Err(rustix::io::Errno::NOENT) => {}
             Err(e) => return Err(error(e)),
@@ -169,15 +175,44 @@ pub(super) fn publish(
     license: &[u8],
     metadata: &Metadata,
 ) -> Result<Report, String> {
-    publish_with(output, model, license, metadata, |_, _| Ok(()))
+    publish_kind(output, model, license, metadata, PackageKind::Static)
 }
+pub(super) fn publish_kind(
+    output: &Path,
+    model: &[u8],
+    license: &[u8],
+    metadata: &Metadata,
+    kind: PackageKind,
+) -> Result<Report, String> {
+    publish_with_kind(output, model, license, metadata, kind, |_, _| Ok(()))
+}
+#[cfg(test)]
 fn publish_with(
     output: &Path,
     model: &[u8],
     license: &[u8],
     metadata: &Metadata,
+    checkpoint: impl FnMut(&str, &Path) -> Result<(), String>,
+) -> Result<Report, String> {
+    publish_with_kind(
+        output,
+        model,
+        license,
+        metadata,
+        PackageKind::Static,
+        checkpoint,
+    )
+}
+fn publish_with_kind(
+    output: &Path,
+    model: &[u8],
+    license: &[u8],
+    metadata: &Metadata,
+    kind: PackageKind,
     mut checkpoint: impl FnMut(&str, &Path) -> Result<(), String>,
 ) -> Result<Report, String> {
+    let model_name = kind.model_name();
+    let names = [model_name, LICENSE, MANIFEST];
     if model.len() > 64 * 1024 * 1024 || license.len() > 1024 * 1024 {
         return Err("model/license exceeds package bound".into());
     }
@@ -217,7 +252,7 @@ fn publish_with(
     let result = (|| -> Result<(), String> {
         checkpoint("stage-created", &stage_path)?;
         recheck_directory(&stage_path, &stage)?;
-        write_at(&stage, MODEL, model)?;
+        write_at(&stage, model_name, model)?;
         write_at(&stage, LICENSE, license)?;
         recheck_directory(parent_path, &parent)?;
         recheck_directory(&stage_path, &stage)?;
@@ -226,9 +261,9 @@ fn publish_with(
             name: metadata.name.clone(),
             version: metadata.version.clone(),
             engine: metadata.engine.clone(),
-            capabilities: vec!["models".into()],
+            capabilities: kind.capabilities().into_iter().collect(),
             dependencies: vec![],
-            files: vec![MODEL.into(), LICENSE.into()],
+            files: vec![model_name.into(), LICENSE.into()],
         })?;
         checkpoint("manifest-created", &stage_path)?;
         recheck_directory(&stage_path, &stage)?;
@@ -236,14 +271,14 @@ fn publish_with(
             .map_err(error)?
             .map(|entry| entry.map(|e| e.file_name()).map_err(error))
             .collect::<Result<BTreeSet<_>, _>>()?;
-        let expected = NAMES
+        let expected = names
             .into_iter()
             .map(std::ffi::OsString::from)
             .collect::<BTreeSet<_>>();
         if actual != expected {
             return Err("unexpected staged package inventory".into());
         }
-        if read_at(&stage, MODEL.as_ref(), 64 * 1024 * 1024)? != model
+        if read_at(&stage, model_name.as_ref(), 64 * 1024 * 1024)? != model
             || read_at(&stage, LICENSE.as_ref(), 1024 * 1024)? != license
         {
             return Err("staged model/license changed".into());
@@ -258,9 +293,11 @@ fn publish_with(
             name: metadata.name.clone(),
             version: metadata.version.clone(),
             engine: metadata.engine.clone(),
-            capabilities: ["models".to_owned()].into_iter().collect(),
+            capabilities: kind.capabilities(),
             dependencies: Default::default(),
-            files: [MODEL.to_owned(), LICENSE.to_owned()].into_iter().collect(),
+            files: [model_name.to_owned(), LICENSE.to_owned()]
+                .into_iter()
+                .collect(),
         };
         if decoded != expected_manifest {
             return Err("staged package manifest differs from requested metadata".into());
@@ -271,7 +308,7 @@ fn publish_with(
         if inspected.manifest != decoded {
             return Err("staged package inspection mismatch".into());
         }
-        for name in NAMES {
+        for name in names {
             File::from(
                 unix::openat(
                     &stage,
@@ -288,7 +325,7 @@ fn publish_with(
         checkpoint("before-rename", &stage_path)?;
         recheck_directory(parent_path, &parent)?;
         recheck_directory(&stage_path, &stage)?;
-        if read_at(&stage, MODEL.as_ref(), 64 * 1024 * 1024)? != model
+        if read_at(&stage, model_name.as_ref(), 64 * 1024 * 1024)? != model
             || read_at(&stage, LICENSE.as_ref(), 1024 * 1024)? != license
             || read_at(&stage, MANIFEST.as_ref(), 1024 * 1024)? != manifest
         {
@@ -325,7 +362,7 @@ fn publish_with(
             output,
             durability_warning: Some(format!("published; durability uncertain: {e}")),
         }),
-        Err(e) => match cleanup(parent_path, &parent, &name, &stage) {
+        Err(e) => match cleanup(parent_path, &parent, &name, &stage, names) {
             Ok(()) => Err(e),
             Err(cleanup) => Err(format!(
                 "{e}; cleanup incomplete: {cleanup}; inspect {}",

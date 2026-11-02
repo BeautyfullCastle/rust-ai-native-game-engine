@@ -12,6 +12,10 @@ pub mod import;
 #[path = "authoring/static_assemble.rs"]
 pub mod static_assemble;
 
+#[cfg(all(feature = "animation", feature = "import"))]
+#[path = "authoring/animation_sequence.rs"]
+pub mod animation_sequence;
+
 pub const MAX_FILE_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_DECODED_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_VERTICES: usize = 250_000;

@@ -1927,3 +1927,6 @@ mod tests {
     }
 
 }
+
+#[cfg(all(feature = "animation-authoring", target_os = "linux"))]
+pub mod animated_sequence_package;
