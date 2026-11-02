@@ -10,8 +10,9 @@ orr_pkg bootstrap-user-game --engine /absolute/preview-engine --destination /abs
 This replaces Python for materializing the existing reviewed starter. It does not
 run Python, Git, Cargo, a shell, the generated game, network requests or downloads.
 It cannot choose a custom inventory, commit or executable. The original Python
-tool remains for compatibility and differential tests. The final HTML packer has
-a separate remaining Python dependency.
+tool remains for compatibility and differential tests. The optional Linux
+[Rust web workflow](rust-coop-workflow.md) also replaces final HTML packaging;
+Node remains required for authored execution gates.
 
 The closed `legacy` profile pins commit `27e53b356b25aa505995f3e8b322093948ef9db0`,
 tree `59158bede83603d7cb272ce7a101b4178956c598`; `multi-action-preview` pins commit

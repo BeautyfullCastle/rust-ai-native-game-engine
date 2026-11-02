@@ -1,3 +1,5 @@
+> New user-facing Linux workflows should use the [optional Rust CLI](rust-coop-audio-bank.md). The Python commands below remain compatibility and differential-test references.
+
 # WAV cues into an optional CoopDefense soundbank
 
 The PCM bank authoring CLI accepts engine-cooked samples. This separate frontend

@@ -62,7 +62,8 @@ hostile-concurrent-user sandbox or a claim of guaranteed storage across every cr
 
 The Python frontend remains available for compatibility and differential tests;
 its removal awaits consumer migration. New user-facing workflows should use Rust.
-Animated sequence packaging is the next same-priority slice, not implemented by
-this static command. Tests distinguish exact package-byte/inspection equivalence,
+[Animated sequence packaging](rust-animated-sequence-package.md) is available
+through the separate default-off `animation-authoring` feature and
+`orr_pkg create-animated-sequence`, not through this static command. Tests distinguish exact package-byte/inspection equivalence,
 real install/source-hidden Binding loading, rejection/cleanup and publication
 failure injection from GPU rendering or browser execution.
