@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 
 #[path = "mesh_lighting_panel/presets.rs"]
 mod presets;
+#[path = "mesh_lighting_panel/shadow_fit.rs"]
+mod shadow_fit;
 
 const MAX_HISTORY: usize = 16;
 
@@ -130,7 +132,16 @@ impl Panel {
         self.load_context(&scene, graph_revision, scene_epoch);
     }
 
+    #[cfg(all(test, feature = "mesh-mission"))]
     pub(crate) fn show(&mut self, ui: &mut Ui, editor: &Editor) {
+        self.show_inner(ui, editor, None);
+    }
+
+    pub(crate) fn show_with_navigation(&mut self, ui: &mut Ui, editor: &Editor, navigation: &crate::mesh_navigation::Panel) {
+        self.show_inner(ui, editor, Some(navigation));
+    }
+
+    fn show_inner(&mut self, ui: &mut Ui, editor: &Editor, navigation: Option<&crate::mesh_navigation::Panel>) {
         if editor.game() != EditorGame::MeshNavigation {
             return;
         }
@@ -191,6 +202,9 @@ impl Panel {
                     self.form_dirty = true;
                     self.error = None;
                     self.status = "Lighting form changed; apply it before Play or save.".into();
+                }
+                if let Some(navigation) = navigation {
+                    self.show_shadow_fit(ui, editor, navigation);
                 }
                 if ui
                     .add_enabled(self.form_dirty || self.current_document().is_none(), egui::Button::new("Apply game lighting"))
@@ -342,6 +356,66 @@ impl Panel {
 
     fn current_document(&self) -> Option<&Document> {
         self.history.get(self.cursor)?.document.as_ref()
+    }
+
+    fn show_shadow_fit(
+        &mut self,
+        ui: &mut Ui,
+        editor: &Editor,
+        navigation: &crate::mesh_navigation::Panel,
+    ) {
+        ui.weak("One-time shadow bounds draft for the current static mesh and applied, saved props. Refit after geometry or light direction edits. Excludes agents and animation; not a live coverage or quality guarantee.");
+        let ready = self.can_edit(editor)
+            && navigation.workspace_save_blocker(editor).is_none()
+            && !navigation.geometry_preview_active()
+            && !navigation.has_unplaced_draft();
+        if ui
+            .add_enabled(ready, egui::Button::new("Fit static shadow bounds"))
+            .clicked()
+        {
+            if let Err(error) = self.fit_shadow_bounds(editor, navigation) {
+                self.error = Some(format!("Fit static shadow bounds failed: {error}"));
+            }
+        }
+    }
+
+    fn fit_shadow_bounds(
+        &mut self,
+        editor: &Editor,
+        navigation: &crate::mesh_navigation::Panel,
+    ) -> Result<(), String> {
+        if !self.can_edit(editor) {
+            return Err("Shadow fitting requires the matching editable local mesh scene".into());
+        }
+        if let Some(reason) = navigation.workspace_save_blocker(editor) {
+            return Err(reason);
+        }
+        if navigation.geometry_preview_active() || navigation.has_unplaced_draft() {
+            return Err(
+                "Place or discard geometry drafts and save applied props before fitting shadows"
+                    .into(),
+            );
+        }
+        let scene = self.scene.as_deref().ok_or("Mesh scene is not ready")?;
+        let revision = self.graph_revision.ok_or("Mesh graph is not ready")?;
+        let lighting = self.parse_document(scene, revision)?.lighting()?;
+        let snapshot = editor
+            .snapshot()
+            .ok_or("Wait for an authoritative mesh Frame")?;
+        let view = mesh_from_view(snapshot.predicted())?;
+        if view.graph.revision() != revision {
+            return Err("Mesh graph changed before fitting shadows".into());
+        }
+        let props = navigation.prop_models(editor);
+        let (center, radius) = shadow_fit::fit(&view.graph, &props, lighting)?;
+        // A one-time draft, deliberately retained if geometry changes later.
+        // No current-coverage receipt, render mutation, Apply, or Save occurs.
+        self.shadow_center = center.map(format_number);
+        self.shadow_radius = format_number(radius);
+        self.form_dirty = true;
+        self.error = None;
+        self.status = "Static shadow bounds staged only; explicitly Apply game lighting, then Save. Refit after geometry or direction edits.".into();
+        Ok(())
     }
 
     fn can_edit(&self, editor: &Editor) -> bool {
@@ -780,3 +854,7 @@ mod tests;
 #[cfg(test)]
 #[path = "mesh_lighting_panel/post_process_tests.rs"]
 mod post_process_tests;
+
+#[cfg(test)]
+#[path = "mesh_lighting_panel/shadow_fit_panel_tests.rs"]
+mod shadow_fit_panel_tests;
