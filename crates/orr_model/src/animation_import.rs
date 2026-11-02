@@ -3,7 +3,8 @@
 //! The shared resource parser retains the static importer's image/material and
 //! containment checks. This entrypoint adds TRS nodes, four influences, skins,
 //! and STEP/LINEAR TRS channels. Morph targets, extra influence sets, matrix
-//! nodes, sparse accessors, extensions and CUBICSPLINE fail closed.
+//! nodes, sparse accessors, unknown extensions and CUBICSPLINE fail closed.
+//! Declared base-color KHR_texture_transform is baked into UV0 at import only.
 //! See https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#skins
 //! and https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#animations.
 use crate::{
@@ -593,6 +594,9 @@ fn read_primitives(
                 {
                     return Err(invalid("invalid source vertex position/normal/UV"));
                 }
+                // Validate transformed UV even for unused meshes/nonselected nodes.
+                // The shared helper also validates source UV before zero scaling.
+                import::primitive_uv(doc, primitive, uv)?;
                 if has_skin {
                     influences(doc, buffers, primitive, i, usize::MAX)?;
                 }
@@ -668,7 +672,11 @@ fn read_primitives(
                     vertex: Vertex {
                         position,
                         normal: normal.floats(doc, buffers, i),
-                        uv: uv.map_or([0.0; 2], |a| a.floats(doc, buffers, i)),
+                        uv: import::primitive_uv(
+                            doc,
+                            primitive,
+                            uv.map_or([0.0; 2], |a| a.floats(doc, buffers, i)),
+                        )?,
                     },
                     joints,
                     weights,

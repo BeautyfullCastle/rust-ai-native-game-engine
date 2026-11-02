@@ -403,6 +403,7 @@ impl Panel {
 
     /// Whether this already-admitted panel still represents the exact optional
     /// camera sidecar digest captured by a caller before launch/export.
+    #[cfg(any(feature = "mesh-hazards-export", test))]
     pub(crate) fn matches_saved_sidecar(&self, expected: Option<&str>) -> bool {
         !self.document_pending
             && !self.dirty()
