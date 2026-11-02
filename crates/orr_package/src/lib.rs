@@ -1934,7 +1934,7 @@ pub mod animated_sequence_package;
 #[cfg(feature = "sprite-authoring")]
 pub mod sprite_package;
 
-#[cfg(all(any(feature = "model-authoring", feature = "audio-authoring", feature = "deployment-authoring", feature = "bootstrap-authoring"), target_os = "linux"))]
+#[cfg(all(any(feature = "model-authoring", feature = "audio-authoring", feature = "deployment-authoring", feature = "bootstrap-authoring", feature = "coop-web-authoring"), target_os = "linux"))]
 mod authoring_io;
 #[cfg(all(feature = "audio-authoring", target_os = "linux"))]
 pub mod coop_audio_bank;
@@ -1944,3 +1944,6 @@ pub mod deployment_manifest;
 
 #[cfg(all(feature = "bootstrap-authoring", target_os = "linux"))]
 pub mod user_game_bootstrap;
+
+#[cfg(all(feature = "coop-web-authoring", target_os = "linux"))]
+pub mod coop_web_authoring;

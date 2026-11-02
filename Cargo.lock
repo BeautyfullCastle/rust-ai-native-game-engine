@@ -3354,11 +3354,13 @@ dependencies = [
 name = "orr_package"
 version = "0.0.1"
 dependencies = [
+ "crc32fast",
  "orr_asset_cook",
  "orr_ecs",
  "orr_model",
  "orr_sim",
  "orr_sprite",
+ "png 0.17.16",
  "regex",
  "rustix 1.1.5",
  "semver",
