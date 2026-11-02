@@ -1,6 +1,8 @@
 //! Closed Linux x86_64 saved-scene point-navigation delivery verification.
 //! No signature, license verification or filesystem sandbox is claimed.
 pub mod export;
+mod source;
+pub use source::SavedSource;
 pub(crate) mod io;
 pub(crate) mod manifest;
 use crate::authored::AuthoredPlayer;

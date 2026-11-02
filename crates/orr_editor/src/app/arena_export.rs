@@ -117,6 +117,7 @@ impl EditorApp {
             || self.ui.dialog.is_some()
             || self.package_work_pending()
             || self.hazard_export_busy()
+            || self.navigation_export_busy()
         {
             return Err("Finish screenshot mode, capture, path dialogs and pending content work before export".into());
         }
