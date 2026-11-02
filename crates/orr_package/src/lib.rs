@@ -570,6 +570,19 @@ impl Project {
     ) -> Result<Lock> {
         self.install_transaction(sources, &[], Some(expected), Some(approved), before_publish)
     }
+    /// Checked activation with explicit dependency candidates. Candidates do not
+    /// become direct selections; the same writer, snapshots and publication
+    /// ordering as `install_checked` apply, including its orphan-cache caveat.
+    pub fn install_checked_with_dependencies(
+        &self,
+        sources: &[PathBuf],
+        candidates: &[PathBuf],
+        expected: &Lock,
+        approved: &Lock,
+        before_publish: impl FnOnce() -> std::result::Result<(), String>,
+    ) -> Result<Lock> {
+        self.install_transaction(sources, candidates, Some(expected), Some(approved), before_publish)
+    }
     fn install_transaction(
         &self,
         sources: &[PathBuf],
@@ -1906,7 +1919,8 @@ mod tests {
         legacy["schema"] = 2.into();
         legacy.as_object_mut().unwrap().remove("progress");
         validate(legacy).unwrap();
-        for profile in ["collect-dodge-highscore-v1"] {
+        {
+            let profile = "collect-dodge-highscore-v1";
             let mut crossed = room.clone(); crossed["progress"]["profile"] = profile.into();
             assert!(validate(crossed).is_err());
         }
