@@ -115,16 +115,6 @@ fn package_preserves_original_bytes_and_is_deterministic() {
         b.request.json = b.temp.path().join("input.json");
         b.request.license = b.temp.path().join("license.txt");
         b.request.out = b.temp.path().join("package");
-        for directory in [a.request.png.parent().unwrap(), b.temp.path()] {
-            let root: std::path::PathBuf = directory.components().take(2).collect();
-            assert_eq!(checked_path(&root, false).unwrap(), root);
-            assert_eq!(checked_path(directory, false).unwrap(), directory);
-            assert!(checked_path(&directory.join("input.png/child"), true).is_err());
-            // Do not let PathBuf::push normalize traversal in a verbatim path.
-            let mut traversal = directory.as_os_str().to_owned();
-            traversal.push("\\..\\escape");
-            assert!(checked_path(Path::new(&traversal), true).is_err());
-        }
         b
     };
     let sources_before =

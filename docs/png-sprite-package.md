@@ -1,3 +1,5 @@
+> For Python-free explicit rectangles/clips or direct JSON via `orr_pkg`, see [Rust sprite authoring](rust-sprite-package.md). This legacy example remains available. Publication errors now preserve partial output for manual inspection; no recursive cleanup.
+
 # Offline PNG + Sprite JSON package authoring
 
 `png_sprite_package` is a deliberately narrow, opt-in example. Give it an existing
@@ -23,8 +25,8 @@ All six options are required exactly once. `--help` alone prints usage. Paths ar
 OS-native arguments; names and versions must be UTF-8. Running without
 `project-create` exits unsuccessfully with a feature-required message **before
 argument processing or any source/output file access**, including for `--help`.
-There are no new dependencies, Cargo features, public library APIs or runtime
-routes.
+The implementation now shares optional Rust sprite-authoring and PNG-import
+library APIs with `orr_pkg`; it still does not activate a runtime route.
 
 The package name is 1–64 lowercase ASCII letters, digits, `-` or `_`. The version
 must be canonical SemVer 2.0.0 with exactly three non-leading-zero unsigned-u64
@@ -106,12 +108,13 @@ an empty directory or symlink, and its parent must already exist.
 
 All input validation completes before creating output. `create_dir` claims a new
 directory without replacing an existing path, and each file uses `create_new`.
-On a reported write error, cleanup attempts to remove only that claimed output
-under the trusted-directory assumption; cleanup failure is reported explicitly.
+On a reported write error, partial output is preserved for manual inspection.
+No recursive cleanup is attempted, so foreign or replaced output contents are
+not removed by failure handling. Do not blindly retry, overwrite or delete it.
 
 These are ordinary path checks and opens, **not race-proof** descriptor-relative
 no-follow operations. A malicious concurrent path replacement can invalidate the
-checks or cleanup assumptions. The output directory is visible before all files
+checks. The output directory is visible before all files
 are written. A crash, kill or power loss may leave a partial directory, and
 per-file `sync_all` does not establish directory-entry crash durability. Inspect
 and remove such partial output yourself before retrying, or choose a new path.

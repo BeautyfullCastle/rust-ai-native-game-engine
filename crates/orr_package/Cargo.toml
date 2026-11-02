@@ -12,8 +12,10 @@ workspace = true
 default = []
 model-authoring = ["dep:orr_model", "dep:rustix"]
 animation-authoring = ["model-authoring", "orr_model/animation"]
+sprite-authoring = ["dep:orr_sprite", "orr_sprite/png-import"]
 
 [dependencies]
+orr_sprite = { path = "../orr_sprite", optional = true }
 orr_model = { path = "../orr_model", features = ["import"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
