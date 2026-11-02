@@ -91,6 +91,9 @@ pub(crate) fn safe_activity_result(result:&Result<J,RpcError>)->Result<J,RpcErro
 }
 impl EditorGameplayService {
     pub fn pair()->(Self,EditorGameplayOwner){
+        // Keep the declared Rust 1.85 API; try_update is newer (1.95).
+        // Rust 1.99 deprecates this alias without changing atomic semantics.
+        #[allow(deprecated)]
         let binding=NEXT_BINDING.fetch_update(Ordering::Relaxed,Ordering::Relaxed,|old|old.checked_add(1)).expect("editor gameplay binding exhausted");
         let shared=Arc::new(Mutex::new(Shared{binding,owner_alive:true,next_serial:1,next_connection:1,records:VecDeque::new(),connections:BTreeMap::new(),commands:BTreeMap::new(),cancelled:VecDeque::new()}));
         (Self{shared:shared.clone()},EditorGameplayOwner{shared})

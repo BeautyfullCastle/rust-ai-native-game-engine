@@ -11,9 +11,15 @@ workspace = true
 
 [features]
 default = []
+authored = ["dep:orr_remote", "dep:orr_sim", "dep:orr_ecs", "dep:orr_bridge", "dep:orr_games"]
 gpu = ["dep:orr_render", "dep:png"]
 
 [dependencies]
+orr_remote = { path = "../orr_remote", default-features = false, features = ["navigation"], optional = true }
+orr_sim = { path = "../orr_sim", optional = true }
+orr_ecs = { path = "../orr_ecs", optional = true }
+orr_bridge = { path = "../orr_bridge", optional = true }
+orr_games = { path = "../orr_games", features = ["navigation"], optional = true }
 orr_navigation = { path = "../orr_navigation" }
 orr_terrain = { path = "../orr_terrain" }
 orr_terrain_view = { path = "../orr_terrain_view" }
@@ -32,3 +38,10 @@ tempfile = "3"
 name = "navigation_lab"
 path = "src/bin/navigation_lab.rs"
 required-features = ["gpu"]
+
+[[bin]]
+name = "navigation_player"
+path = "src/bin/navigation_player.rs"
+required-features = ["authored"]
+test = false
+bench = false

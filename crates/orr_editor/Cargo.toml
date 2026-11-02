@@ -94,6 +94,8 @@ egui-wgpu = "0.36"
 png = "0.17"
 
 [dev-dependencies]
+# Read-only authored-player parity tests; not an editor runtime dependency.
+orr_navigation_view = { path = "../orr_navigation_view", features = ["authored"] }
 tempfile = "3"
 bytemuck = { version = "1", features = ["derive"] }
 # Test-only Arena hosts and replay viewers; never linked directly by editor code.
