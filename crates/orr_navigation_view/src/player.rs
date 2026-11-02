@@ -307,8 +307,7 @@ fn capture_png(
     use orr_render::orr_rhi::{Rhi, Wgpu, WgpuOptions};
     use std::io::Write;
     let gpu = Wgpu::headless(WgpuOptions::default()).map_err(|e| e.to_string())?;
-    let mut renderer = crate::gpu::renderer(
-        &gpu,
+    let model = crate::to_static_model(
         &view.terrain,
         view.navigator.path(),
         view.navigator.position(),
@@ -316,13 +315,12 @@ fn capture_png(
     )
     .map_err(|e| e.to_string())?;
     let size = (1000, 750);
-    let pixels = crate::gpu::capture(
-        &mut renderer,
-        &crate::gpu::top_camera(),
-        &crate::gpu::lighting(),
-        size,
-    )
-    .map_err(|e| e.to_string())?;
+    let camera = crate::gpu::framing::fitted_top_camera(&model, size).map_err(|e| e.to_string())?;
+    let mut renderer = orr_render::ModelRenderer::new(gpu.clone(), crate::gpu::FORMAT, model)
+        .map_err(|e| e.to_string())?;
+    renderer.clear = [0.0, 0.0, 0.0, 1.0];
+    let pixels = crate::gpu::capture(&mut renderer, &camera, &crate::gpu::lighting(), size)
+        .map_err(|e| e.to_string())?;
     if pixels.len() != 1000 * 750 * 4 {
         return Err("capture RGBA size mismatch".into());
     }
