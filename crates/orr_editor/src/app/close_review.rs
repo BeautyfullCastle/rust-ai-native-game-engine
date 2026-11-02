@@ -28,9 +28,13 @@ impl EditorApp {
         });
         #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
         self.poll_arena_export(&ctx);
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "navigation-export"))]
+        self.poll_navigation_export(&ctx);
         draw(self, ui);
         #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
         self.poll_arena_export(&ctx);
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "navigation-export"))]
+        self.poll_navigation_export(&ctx);
         let observed = self.work_status_domains(Inspection::Observation);
         self.publish_work_status(observed.clone());
         if root_close {
@@ -52,6 +56,7 @@ impl EditorApp {
                 || closing.iter().any(|row| row.is_blocker());
             #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
             if self.arena_export.busy() { self.ui.close_review.blocked = true; }
+            if self.navigation_export_busy() { self.ui.close_review.blocked = true; }
             if self.ui.close_review.blocked {
                 ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             }
@@ -84,6 +89,9 @@ impl EditorApp {
     /// The latter are historical UI details, not current API facts or close vetoes.
     pub(super) fn close_review_items(&self) -> Vec<Item> {
         let mut items = Vec::new();
+        if self.navigation_export_busy() {
+            items.push(Item { name: "Navigation export · worker owned", action: "Wait for terminal and joined completion, then explicitly close again. Editing remains available.", last_close: false });
+        }
         #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
         if self.arena_export.busy() {
             items.push(Item { name: "Arena export · worker owned", action: "Wait for export worker completion and join, then explicitly close again. Editing remains available.", last_close: false });

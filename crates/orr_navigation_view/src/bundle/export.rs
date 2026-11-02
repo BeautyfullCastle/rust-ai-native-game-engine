@@ -106,6 +106,61 @@ pub fn run_cli(args: impl IntoIterator<Item = OsString>) -> Result<(), String> {
     println!("{}", path.display());
     Ok(())
 }
+/// Explicitly trusted local runtime selection; hash is integrity, not authentication.
+#[derive(Clone, Debug)]
+pub struct ExportRequest {
+    pub runtime: PathBuf,
+    pub runtime_sha256: String,
+    pub output: PathBuf,
+    pub trusted_runtime: bool,
+    pub source_revision: Option<String>,
+}
+#[derive(Debug)]
+pub struct ExportReport {
+    pub output: PathBuf,
+    pub initial_checksum: u64,
+}
+/// Publishes the captured saved source, never a later replacement scene.
+/// The supplied trusted executable is run for capability and trajectory checks.
+pub fn export_for_source(
+    request: &ExportRequest,
+    source: &super::SavedSource,
+) -> Result<ExportReport, String> {
+    if !request.trusted_runtime {
+        return Err("explicit runtime trust is required; runtime is not sandboxed".into());
+    }
+    let options = Options {
+        scene: source.scene_path().to_owned(),
+        runtime: request.runtime.clone(),
+        hash: request.runtime_sha256.clone(),
+        output: request.output.clone(),
+        revision: request.source_revision.clone(),
+    };
+    let output = export_bound(&options, Some(source), |_| Ok(()))?;
+    Ok(ExportReport {
+        output,
+        initial_checksum: source.initial_checksum(),
+    })
+}
+// Both typed and CLI callers use the same value and aggregate argument bounds.
+fn validate_options(options: &Options) -> Result<(), String> {
+    let mut args = vec![
+        OsString::from("--scene"),
+        options.scene.clone().into_os_string(),
+        OsString::from("--runtime"),
+        options.runtime.clone().into_os_string(),
+        OsString::from("--runtime-sha256"),
+        options.hash.clone().into(),
+        OsString::from("--output"),
+        options.output.clone().into_os_string(),
+        OsString::from("--trusted-runtime"),
+    ];
+    if let Some(revision) = &options.revision {
+        args.extend([OsString::from("--source-revision"), revision.into()]);
+    }
+    parse(args)?.ok_or("missing export options")?;
+    Ok(())
+}
 fn hash(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
@@ -178,14 +233,34 @@ fn same_dir(path: &Path, expected: &fs::Metadata) -> Result<(), String> {
 }
 fn export(
     options: &Options,
+    checkpoint: impl FnMut(&str) -> Result<(), String>,
+) -> Result<PathBuf, String> {
+    export_bound(options, None, checkpoint)
+}
+fn export_bound(
+    options: &Options,
+    source: Option<&super::SavedSource>,
     mut checkpoint: impl FnMut(&str) -> Result<(), String>,
 ) -> Result<PathBuf, String> {
+    validate_options(options)?;
+    if let Some(source) = source {
+        source.recheck()?;
+    }
     let scene_path = checked_path(&options.scene)?;
     let runtime_path = checked_path(&options.runtime)?;
     let source_root = scene_path.parent().ok_or("scene parent missing")?;
     let output = fresh_output(&options.output, source_root, &runtime_path)?;
     let scene = Snapshot::read(&scene_path, 1024 * 1024)?;
     let admitted = AuthoredPlayer::open(&scene_path)?;
+    if let Some(source) = source {
+        if scene_path != source.scene_path()
+            || scene.bytes != source.scene_bytes()
+            || admitted.frame().to_bytes() != source.initial_frame_bytes()
+        {
+            return Err("saved navigation source differs from captured source".into());
+        }
+        source.recheck()?;
+    }
     let terrain_relative = admitted
         .frame()
         .singleton::<NavigationScenePin>()
@@ -329,6 +404,9 @@ fn export(
         same_dir(parent, &parent_meta)?;
         same_dir(&stage, &stage_meta)?;
         fresh_output(&output, source_root, &runtime_path)?;
+        if let Some(source) = source {
+            source.recheck()?;
+        }
         publish_no_replace(&stage, &output)?;
         published = true;
         checkpoint("after-publish")?;
@@ -355,3 +433,85 @@ fn export(
 #[cfg(test)]
 #[path = "export_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod source_contract_tests {
+    use super::*;
+    fn fixture(root: &Path) -> PathBuf {
+        fs::create_dir_all(root.join("navigation")).unwrap();
+        let scene = root.join("point.yaml");
+        fs::write(
+            &scene,
+            include_bytes!("../../../../scenes/navigation_point.scene.yaml"),
+        )
+        .unwrap();
+        fs::write(
+            root.join("navigation/point_demo.orrt"),
+            include_bytes!("../../../../scenes/navigation/point_demo.orrt"),
+        )
+        .unwrap();
+        scene
+    }
+    #[test]
+    fn typed_request_cannot_skip_cli_value_and_aggregate_bounds() {
+        let root = tempfile::tempdir().unwrap();
+        let source = super::super::SavedSource::capture(&fixture(root.path())).unwrap();
+        let mut request = ExportRequest {
+            runtime: root.path().join("missing"),
+            runtime_sha256: "0".repeat(64),
+            output: root.path().join("output"),
+            trusted_runtime: false,
+            source_revision: None,
+        };
+        assert!(export_for_source(&request, &source)
+            .unwrap_err()
+            .contains("trust"));
+        request.trusted_runtime = true;
+        request.runtime_sha256 = "A".repeat(64);
+        assert!(export_for_source(&request, &source)
+            .unwrap_err()
+            .contains("lowercase"));
+        request.runtime_sha256 = "0".repeat(64);
+        request.source_revision = Some("claim\nother".into());
+        assert!(export_for_source(&request, &source)
+            .unwrap_err()
+            .contains("noncontrol"));
+        request.source_revision = None;
+        request.runtime = PathBuf::from("x".repeat(16385));
+        assert!(export_for_source(&request, &source)
+            .unwrap_err()
+            .contains("budget"));
+        assert!(!request.output.exists());
+    }
+    #[test]
+    #[ignore = "requires explicit actual bundle-capable player; executes trusted smoke"]
+    fn captured_source_changed_before_publish_is_not_published() {
+        let runtime = PathBuf::from(
+            std::env::var_os("ORR_NAVIGATION_BUNDLE_PLAYER")
+                .expect("actual trusted player required"),
+        );
+        let root = tempfile::tempdir().unwrap();
+        let scene = fixture(&root.path().join("author"));
+        let source = super::super::SavedSource::capture(&scene).unwrap();
+        let options = Options {
+            scene: scene.clone(),
+            hash: hash(&fs::read(&runtime).unwrap()),
+            runtime,
+            output: root.path().join("output"),
+            revision: None,
+        };
+        let error = export_bound(&options, Some(&source), |point| {
+            if point == "before-publish" {
+                let mut bytes = fs::read(&scene).unwrap();
+                bytes.extend_from_slice(b"\n# changed\n");
+                fs::write(&scene, bytes).unwrap();
+            }
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(error.contains("not published"));
+        assert!(error.contains("stage retained"));
+        assert!(!options.output.exists());
+        assert!(source.recheck().is_err());
+    }
+}

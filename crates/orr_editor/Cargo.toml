@@ -46,6 +46,7 @@ collect-dodge = ["orr_remote/collect-dodge", "orr_sample/collect-dodge"]
 # Explicit saved-project UI admission and read-only preset/font preview.
 collect-ui = ["collect-dodge", "project-ui", "orr_sample/collect-ui"]
 project-ui = ["sprites", "orr_sample/game-ui"]
+navigation-export = ["navigation", "dep:orr_navigation_view", "orr_navigation_view/authored-bundle"]
 navigation = ["terrain", "orr_remote/navigation", "dep:orr_navigation"]
 mesh-navigation = ["models", "orr_remote/mesh-navigation", "dep:orr_navigation"]
 mesh-mission = ["mesh-navigation", "orr_remote/mesh-mission"]
@@ -62,6 +63,7 @@ models = ["dep:orr_model_bindings", "dep:orr_model", "orr_render/imported-scene"
 animated-models = ["orr_model_bindings/animated-models", "models", "orr_model/animation", "orr_render/animation"]
 
 [dependencies]
+orr_navigation_view = { path = "../orr_navigation_view", default-features = false, optional = true }
 orr_tilemap = { path = "../orr_tilemap", optional = true }
 orr_input = { path = "../orr_input", optional = true }
 orr_model_bindings = { path = "../orr_model_bindings", optional = true }
