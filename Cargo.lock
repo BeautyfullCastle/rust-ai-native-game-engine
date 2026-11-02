@@ -3354,6 +3354,8 @@ dependencies = [
 name = "orr_package"
 version = "0.0.1"
 dependencies = [
+ "orr_model",
+ "rustix 1.1.5",
  "semver",
  "serde",
  "serde_json",
