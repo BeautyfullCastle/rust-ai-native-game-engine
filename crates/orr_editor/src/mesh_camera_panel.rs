@@ -1,5 +1,6 @@
 #[path = "mesh_camera_panel/projection_match.rs"]
 mod projection_match;
+mod focus_agent;
 
 use crate::{
     backend::HostSpec,
@@ -234,6 +235,7 @@ impl Panel {
                 text_field(ui, "Match projection aspect height", &mut self.match_height);
                 let match_requested = ui.button("Switch projection keeping target-plane scale").clicked();
                 self.handle_form_actions(changed, match_requested, editor);
+                self.show_focus_agent(ui, editor, match_requested);
                 ui.horizontal_wrapped(|ui| {
                     if ui
                         .button("Capture viewport as game camera")
