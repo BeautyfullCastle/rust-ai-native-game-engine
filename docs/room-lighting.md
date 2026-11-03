@@ -27,7 +27,10 @@ unsupported consumer; actual lighting routes explicitly use
 
 Open the complete project in an editor built with `room-lighting`. The Lighting
 panel stages edits; Apply updates presentation, Undo/Redo retain up to 32 steps,
-and Save replaces the sidecar. Reopen to load saved values. Editing requires a
+and Save replaces the sidecar. **Discard lighting draft** restores fields from
+the currently applied light, including unsaved applied values. It does not Apply,
+change Undo/Redo, reset the viewport, or write files. Invalid draft fields can be
+discarded; Play and stale-source restrictions still apply. Reopen to load saved values. Editing requires a
 coherent local Edit snapshot. Play, remote editing, stale/replaced sources and
 changed on-disk manifest/sidecar bytes refuse authoring. Source replacement or a
 successful restart retires existing panel drafts, even before their first frame.
