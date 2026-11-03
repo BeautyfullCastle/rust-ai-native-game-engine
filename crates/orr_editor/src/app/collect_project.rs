@@ -111,6 +111,7 @@ impl EditorApp {
         }
         #[cfg(feature = "mesh-navigation")]
         if self.mesh_navigation.art_import_busy()
+            || self.mesh_animation_import_busy()
             || self.mesh_navigation.prop_gesture_busy()
             || self.mesh_navigation.agent_pick_busy()
             || self.mesh_navigation.geometry_vertex_busy()

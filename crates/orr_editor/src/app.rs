@@ -598,6 +598,13 @@ impl EditorApp {
         self.mesh_creation_authoring_blocker()
     }
 
+    fn mesh_animation_import_busy(&self) -> bool {
+        #[cfg(feature="mesh-animated-models")]
+        { self.mesh_animation.import_busy() }
+        #[cfg(not(feature="mesh-animated-models"))]
+        { false }
+    }
+
     #[cfg(feature="mesh-navigation")]
     fn mesh_animation_dirty(&self) -> bool {
         #[cfg(feature="mesh-animated-models")]
@@ -715,7 +722,7 @@ impl EditorApp {
         if self.mesh_navigation.prop_gesture_busy() {
             return Some("Finish or cancel the viewport prop move before changing mesh workspaces or exporting".into());
         }
-        if self.mesh_navigation.art_import_busy() {
+        if self.mesh_navigation.art_import_busy() || self.mesh_animation_import_busy() {
             return Some("Finish model package imports before changing mesh workspaces or exporting".into());
         }
         if !(self.editor.game() == crate::game::EditorGame::PhysGame || self.editor.game().has_mesh_view())
@@ -858,6 +865,7 @@ impl EditorApp {
 
     #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))]
     fn windows_project_blocker(&self) -> Option<String> {
+        if self.mesh_animation_import_busy() { return Some("Wait for animation package import completion before changing projects".into()); }
         #[cfg(feature="mesh-mission")]
         if self.mesh_game_creator.busy() { return Some("Finish or cancel new mesh game creation before changing projects".into()); }
         #[cfg(feature="package-manager")]
@@ -1426,7 +1434,7 @@ impl EditorApp {
         #[cfg(feature="mesh-mission")]
         if self.mesh_game_creator.busy() { return; }
         #[cfg(feature="mesh-navigation")]
-        if self.mesh_navigation.art_import_busy() || self.mesh_navigation.prop_gesture_busy() || self.mesh_navigation.agent_pick_busy() || self.mesh_navigation.geometry_vertex_busy() || self.mesh_mission_pick_busy() || self.hazard_pick_busy() { return; }
+        if self.mesh_navigation.art_import_busy() || self.mesh_animation_import_busy() || self.mesh_navigation.prop_gesture_busy() || self.mesh_navigation.agent_pick_busy() || self.mesh_navigation.geometry_vertex_busy() || self.mesh_mission_pick_busy() || self.hazard_pick_busy() { return; }
         if self.editor.input_phase() != crate::editor::input::Phase::Off || ctx.egui_wants_keyboard_input() || !self.editor.can_mutate() || self.editor.previewing().is_some() {
             return;
         }
@@ -2947,7 +2955,7 @@ impl EditorApp {
             }
 
             #[cfg(feature="mesh-navigation")]
-            if self.mesh_navigation.art_import_busy() || self.mesh_navigation.prop_gesture_busy() || self.mesh_navigation.agent_pick_busy() || self.mesh_mission_pick_busy() || self.hazard_pick_busy() {
+            if self.mesh_navigation.art_import_busy() || self.mesh_animation_import_busy() || self.mesh_navigation.prop_gesture_busy() || self.mesh_navigation.agent_pick_busy() || self.mesh_mission_pick_busy() || self.hazard_pick_busy() {
                 self.editor.error("Finish content imports, viewport moves or endpoint picking before changing the scene path");
                 self.ui.dialog = Some(dialog);
                 return;
@@ -3567,3 +3575,7 @@ mod post_process_tests;
 #[cfg(all(test, feature="mesh-mission", feature="mesh-animated-models"))]
 #[path="app/mesh_crossfade_tests.rs"]
 mod mesh_crossfade_tests;
+
+#[cfg(all(test, feature = "mesh-animated-models", feature = "mesh-mission"))]
+#[path = "app/mesh_animation_import_tests.rs"]
+mod mesh_animation_import_tests;
