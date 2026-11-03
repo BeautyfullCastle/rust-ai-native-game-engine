@@ -12,6 +12,7 @@ workspace = true
 [features]
 default = []
 raw16 = []
+png16 = ["raw16", "dep:png", "dep:fdeflate"]
 gpu = ["dep:orr_render", "dep:png"]
 
 [dependencies]
@@ -21,6 +22,7 @@ orr_model = { path = "../orr_model" }
 orr_package = { path = "../orr_package" }
 orr_render = { path = "../orr_render", features = ["models"], optional = true }
 png = { version = "0.18", optional = true }
+fdeflate = { version = "0.3", optional = true }
 serde_json = "1"
 
 [dev-dependencies]
