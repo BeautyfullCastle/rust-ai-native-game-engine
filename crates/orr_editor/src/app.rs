@@ -3556,6 +3556,10 @@ mod tilemap_resize_tests;
 #[path = "app/tilemap_rectangle_tests.rs"]
 mod tilemap_rectangle_tests;
 
+#[cfg(all(test, feature = "tilemap", feature = "project-create", target_os = "linux"))]
+#[path = "app/tilemap_copy_stamp_tests.rs"]
+mod tilemap_copy_stamp_tests;
+
 #[cfg(all(test, feature = "mesh-mission"))]
 #[path = "app/post_process_tests.rs"]
 mod post_process_tests;

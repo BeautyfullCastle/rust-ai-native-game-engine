@@ -242,3 +242,6 @@ do not exercise a native window, GPU or the full EditorApp lifecycle. Proposal, 
 disconnect and scene/epoch transitions retain the common production admission
 guards but were not independently executed in this Pick run. Full Linux/CI and
 visual acceptance remain separate from this focused Windows result.
+
+See [Tile pattern Copy and Stamp](tilemap-copy-stamp.md) for bounded rectangle
+copying and single-click stamping, including empty-cell erasure and lifetime.

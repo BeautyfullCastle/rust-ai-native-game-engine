@@ -118,6 +118,8 @@ mod tests {
         assert!(panel.arena_export_ready(&editor, &root).is_err());
         panel.painting = false;
         panel.rectangle = Some(RectangleGesture {
+            purpose: RectanglePurpose::PaintRectangle,
+            copy_atlas: None,
             start: CellCoord { column: 0, row: 0 },
             end: CellCoord { column: 1, row: 1 },
             region: Some(10),

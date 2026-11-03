@@ -605,6 +605,8 @@ fn tilemap_actor_sources_and_save_refuse_active_tile_gestures_without_cancelling
     for rectangle in [false, true] {
         panel.painting = !rectangle;
         panel.rectangle = rectangle.then(|| RectangleGesture {
+            purpose: RectanglePurpose::PaintRectangle,
+            copy_atlas: None,
             start: CellCoord { column: 0, row: 0 },
             end: CellCoord { column: 1, row: 1 },
             region: Some(10),
