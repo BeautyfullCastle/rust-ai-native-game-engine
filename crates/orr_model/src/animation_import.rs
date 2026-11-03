@@ -2,8 +2,9 @@
 //!
 //! The shared resource parser retains the static importer's image/material and
 //! containment checks. This entrypoint adds TRS nodes, four influences, skins,
-//! and STEP/LINEAR TRS channels. Morph targets, extra influence sets, matrix
-//! nodes, sparse accessors, unknown extensions and CUBICSPLINE fail closed.
+//! and STEP/LINEAR TRS channels. Untargeted matrix nodes may encode a bounded
+//! positive-scale TRS. Morph targets, extra influence sets, targeted matrices,
+//! sparse accessors, unknown extensions and CUBICSPLINE fail closed.
 //! Declared base-color KHR_texture_transform is baked into UV0 at import only.
 //! See https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#skins
 //! and https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#animations.
@@ -13,6 +14,8 @@ use crate::{
     *,
 };
 use std::{collections::BTreeSet, path::Path};
+
+mod matrix;
 
 /// Import from an immutable package snapshot, rejecting escaping symlinks/FIFOs.
 pub fn import_path(root: &Path, asset_id: &str) -> Result<AnimatedModel, Error> {
@@ -85,19 +88,35 @@ pub(crate) fn validate_document_limits(doc: &Document) -> Result<(), Error> {
 
 type Hierarchy = (Vec<AnimatedNode>, Vec<Option<usize>>, Vec<bool>);
 fn hierarchy(doc: &Document) -> Result<Hierarchy, Error> {
+    // glTF forbids matrices on a node targeted by ANY animation, including
+    // clips not currently sampled and nodes outside the selected scene. Scan
+    // the complete source before converting even the first matrix.
+    let mut targeted = vec![false; doc.nodes.len()];
+    for clip in doc.animations.as_deref().unwrap_or_default() {
+        for channel in &clip.channels {
+            *targeted
+                .get_mut(channel.target.node)
+                .ok_or_else(|| invalid("animation target node index out of range"))? = true;
+        }
+    }
     let mut parents = vec![None; doc.nodes.len()];
     let mut nodes = Vec::with_capacity(doc.nodes.len());
     for (i, node) in doc.nodes.iter().enumerate() {
-        if node.matrix.is_some() {
-            return Err(invalid(
-                "animated subset requires TRS nodes; matrix nodes unsupported",
-            ));
-        }
-        node.transform()?;
-        let rest = Trs {
-            translation: node.translation.unwrap_or([0.0; 3]),
-            rotation: node.rotation.unwrap_or([0.0, 0.0, 0.0, 1.0]),
-            scale: node.scale.unwrap_or([1.0; 3]),
+        let rest = if node.matrix.is_some() {
+            // Retain shared affine, range, invertibility and matrix/TRS checks.
+            let transform = node.transform()?;
+            if targeted[i] {
+                return Err(invalid("animation-targeted matrix nodes unsupported"));
+            }
+            matrix::decompose(transform)?
+        } else {
+            // Preserve the authored TRS path, including quaternion/sign bits.
+            node.transform()?;
+            Trs {
+                translation: node.translation.unwrap_or([0.0; 3]),
+                rotation: node.rotation.unwrap_or([0.0, 0.0, 0.0, 1.0]),
+                scale: node.scale.unwrap_or([1.0; 3]),
+            }
         };
         if rest.scale.iter().any(|s| !s.is_finite() || *s <= 0.0) {
             return Err(invalid("animated node scale must be positive"));
