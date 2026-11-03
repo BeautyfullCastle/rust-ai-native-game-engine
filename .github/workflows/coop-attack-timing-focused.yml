@@ -16,11 +16,7 @@ jobs:
       CARGO_BUILD_JOBS: 2
       CARGO_INCREMENTAL: 0
       CARGO_TERM_COLOR: never
-      EVIDENCE: ${{ runner.temp }}/attack-timing-evidence
-      ORR_ATTACK_TIMING_EVIDENCE_DIR: ${{ runner.temp }}/attack-timing-evidence/actual
-      ORR_BASELINE_PACKAGE_BIN: ${{ runner.temp }}/attack-timing-evidence/orr_pkg-baseline
       ORR_RUST_PACKAGE_BIN: ${{ github.workspace }}/target/release/orr_pkg
-      ORR_COOP_WEB_BUILD_DIR: ${{ runner.temp }}/attack-timing-evidence/web-build
     steps:
       - uses: actions/checkout@v4
         with:
@@ -34,6 +30,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          export EVIDENCE="$RUNNER_TEMP/attack-timing-evidence"
+          export ORR_ATTACK_TIMING_EVIDENCE_DIR="$EVIDENCE/actual"
+          export ORR_BASELINE_PACKAGE_BIN="$EVIDENCE/orr_pkg-baseline"
+          export ORR_COOP_WEB_BUILD_DIR="$EVIDENCE/web-build"
+          for name in EVIDENCE ORR_ATTACK_TIMING_EVIDENCE_DIR ORR_BASELINE_PACKAGE_BIN ORR_COOP_WEB_BUILD_DIR; do
+            printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
+          done
           mkdir "$EVIDENCE" "$ORR_ATTACK_TIMING_EVIDENCE_DIR"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           git rev-parse HEAD HEAD^{tree} | tee "$EVIDENCE/source.txt"
@@ -84,5 +87,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: coop-attack-timing-${{ github.sha }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/attack-timing-evidence
           if-no-files-found: error
+          path: ${{ runner.temp }}/attack-timing-evidence
