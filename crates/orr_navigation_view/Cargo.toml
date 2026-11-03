@@ -11,6 +11,7 @@ workspace = true
 
 [features]
 default = []
+authored-surface-bundle = ["authored-bundle", "orr_terrain_view/surface"]
 authored-bundle = ["authored", "dep:orr_sample", "dep:rustix", "dep:sha2"]
 authored = ["dep:orr_remote", "dep:orr_sim", "dep:orr_ecs", "dep:orr_bridge", "dep:orr_games"]
 gpu = ["dep:orr_render", "dep:png"]
@@ -54,5 +55,19 @@ bench = false
 name = "navigation_export"
 path = "src/bin/navigation_export.rs"
 required-features = ["authored-bundle"]
+test = false
+bench = false
+
+[[bin]]
+name = "navigation_surface_player"
+path = "src/bin/navigation_surface_player.rs"
+required-features = ["authored-surface-bundle"]
+test = false
+bench = false
+
+[[bin]]
+name = "navigation_surface_export"
+path = "src/bin/navigation_surface_export.rs"
+required-features = ["authored-surface-bundle"]
 test = false
 bench = false

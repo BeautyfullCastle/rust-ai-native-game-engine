@@ -104,6 +104,11 @@ impl EditorApp {
         &mut self,
         spawn: impl FnOnce(String, Box<dyn FnOnce() + Send>) -> std::io::Result<JoinHandle<()>>,
     ) -> Result<(), String> {
+        #[cfg(feature = "terrain-surface")]
+        {
+            self.terrain_surface.state.sync(&self.editor, &self.terrain);
+            self.terrain_surface.state.v1_export_guard(&self.editor, &self.terrain)?;
+        }
         if self.navigation_export.busy() {
             return Err(
                 "A Navigation export worker is still owned; wait for terminal and joined completion"

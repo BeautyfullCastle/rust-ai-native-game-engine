@@ -150,12 +150,20 @@ impl AdmittedTerrain {
 /// change retains the previous association; never render it in a different scene.
 #[derive(Default)]
 pub struct TerrainSession {
+    #[cfg(feature = "terrain-surface")]
+    appearance_busy: bool,
     scene: Option<PathBuf>,
     admitted: Option<AdmittedTerrain>,
     // Supplied by the current composed viewport. Never cooked or put in history.
     render_admission_error: Option<String>,
 }
 impl TerrainSession {
+    #[cfg(feature = "terrain-surface")]
+    pub(crate) fn set_appearance_busy(&mut self, busy: bool) { self.appearance_busy = busy; }
+    #[cfg(feature = "terrain-surface")]
+    pub(crate) fn require_appearance_clean(&self) -> Result<(), String> {
+        if self.appearance_busy { Err("Save or explicitly discard appearance work before replacing terrain".into()) } else { Ok(()) }
+    }
     /// Refresh before authoring actions using the current viewport's other
     /// participants. Empty all-hole geometry needs no renderer reservation.
     pub fn set_render_admission_error(&mut self, error: Option<String>) {
@@ -282,6 +290,8 @@ impl TerrainSession {
     /// Copy to a new file, never overwrite an existing scene asset or package.
     /// Reverify the installed identity before copying the admitted canonical bytes.
     pub fn copy_to_scene(&mut self, relative: &str) -> Result<(), String> {
+        #[cfg(feature = "terrain-surface")]
+        self.require_appearance_clean()?;
         let path = self.local_path(relative)?;
         require_missing(&path)?;
         let admitted = self.admitted.as_ref().ok_or("open a terrain first")?;
@@ -385,6 +395,8 @@ impl TerrainSession {
     }
 
     fn require_clean(&self) -> Result<(), String> {
+        #[cfg(feature = "terrain-surface")]
+        self.require_appearance_clean()?;
         if self.dirty() {
             Err("terrain has unsaved changes; Save or explicitly Discard before continuing".into())
         } else {

@@ -150,7 +150,7 @@ impl Snapshot {
         Ok(())
     }
 }
-pub(super) fn inventory(root: &Path, files: &BTreeSet<PathBuf>) -> Result<(), String> {
+pub(crate) fn inventory(root: &Path, files: &BTreeSet<PathBuf>) -> Result<(), String> {
     let root = checked_path(root)?;
     let fd = directory(&root)?;
     let mut dirs = BTreeSet::new();

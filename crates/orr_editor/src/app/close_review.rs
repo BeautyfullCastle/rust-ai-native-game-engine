@@ -60,6 +60,8 @@ impl EditorApp {
                 || closing.iter().any(|row| row.is_blocker());
             #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
             if self.arena_export.busy() { self.ui.close_review.blocked = true; }
+            #[cfg(feature = "terrain-surface")]
+            if self.terrain_surface.state.busy() { self.ui.close_review.blocked = true; }
             if self.navigation_export_busy() { self.ui.close_review.blocked = true; }
             if self.mesh_animation_import_busy() { self.ui.close_review.blocked = true; }
             if self.ui.close_review.blocked {
@@ -94,6 +96,8 @@ impl EditorApp {
     /// The latter are historical UI details, not current API facts or close vetoes.
     pub(super) fn close_review_items(&self) -> Vec<Item> {
         let mut items = Vec::new();
+        #[cfg(feature = "terrain-surface")]
+        if self.terrain_surface.state.busy() { items.push(Item { name: "Terrain appearance · unsaved or pending", action: "Save appearance, cancel Preview or explicitly discard appearance work before closing.", last_close: false }); }
         if self.mesh_animation_import_busy() {
             items.push(Item { name: "Mesh animation import · worker owned", action: "Wait for import worker completion and join, then explicitly close again. A published package is not automatically applied or saved.", last_close: false });
         }

@@ -3701,7 +3701,9 @@ dependencies = [
  "orr_render",
  "orr_terrain",
  "png 0.18.1",
+ "serde",
  "serde_json",
+ "sha2",
  "tempfile",
 ]
 
