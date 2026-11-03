@@ -50,6 +50,7 @@ pub(crate) struct Panel {
     error: Option<String>,
     preview: preview::State,
     playback: crate::mesh_animation::playback::PlaybackCursor,
+    import: import_panel::State,
 }
 
 impl Default for Panel {
@@ -95,6 +96,7 @@ impl Default for Panel {
             error: None,
             preview: preview::State::default(),
             playback: Default::default(),
+            import: Default::default(),
         }
     }
 }
@@ -103,6 +105,7 @@ impl Panel {
     pub(crate) fn reset_playback(&mut self) { self.playback.reset(); }
 
     pub(crate) fn sync(&mut self, editor: &Editor) {
+        import_panel::poll(self, editor);
         preview::sync(self, editor);
         if editor.game() != EditorGame::MeshNavigation || !editor.spec().is_local() {
             return;
@@ -194,6 +197,7 @@ impl Panel {
             if self.document_pending {
                 ui.label("Waiting for the requested scene to become the authoritative editor document.");
             }
+            import_panel::show(ui, self, editor);
             let editable = self.can_edit(editor);
             ui.add_enabled_ui(editable, |ui| {
                 let source_changed = text_field(ui, "Animation package source directory", &mut self.package_root)
@@ -308,6 +312,13 @@ impl Panel {
         });
     }
 
+    pub(crate) fn import_busy(&self) -> bool { self.import.busy() }
+
+    #[cfg(test)]
+    pub(crate) fn start_blocked_import_for_test(&mut self, editor: &Editor) -> std::sync::mpsc::Sender<()> {
+        import_panel::start_blocked_for_test(self, editor)
+    }
+
     pub(crate) fn dirty(&self) -> bool {
         self.form_dirty
             || self.source_dirty
@@ -317,6 +328,7 @@ impl Panel {
     }
 
     pub(crate) fn workspace_save_blocker(&self, editor: &Editor) -> Option<String> {
+        if self.import_busy() { return Some("Wait for the animation package import worker before saving".into()); }
         if editor.game() != EditorGame::MeshNavigation {
             return None;
         }
@@ -465,6 +477,7 @@ impl Panel {
     }
 
     pub(crate) fn play_blocker(&self, editor: &Editor) -> Option<String> {
+        if self.import_busy() { return Some("Wait for the animation package import worker before Play".into()); }
         if editor.game() != EditorGame::MeshNavigation {
             return None;
         }
@@ -770,7 +783,8 @@ impl Panel {
     }
 
     fn can_edit(&self, editor: &Editor) -> bool {
-        !self.document_pending
+        !self.import_busy()
+            && !self.document_pending
             && !self.context_stale
             && self.sidecar_error.is_none()
             && editor.game() == EditorGame::MeshNavigation
@@ -799,7 +813,8 @@ impl Panel {
     }
 
     fn can_change_history(&self, editor: &Editor) -> bool {
-        editor.game() == EditorGame::MeshNavigation
+        !self.import_busy()
+            && editor.game() == EditorGame::MeshNavigation
             && editor.spec().is_local()
             && editor.mode() == Mode::Edit
             && editor.can_mutate()
@@ -934,6 +949,7 @@ mod clip_choices;
 
 #[path = "mesh_animation_panel/preview.rs"]
 mod preview;
+mod import_panel;
 
 fn reported_scene_matches_request(
     game: EditorGame,

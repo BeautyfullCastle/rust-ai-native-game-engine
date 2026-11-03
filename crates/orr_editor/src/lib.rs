@@ -207,6 +207,8 @@ mod mesh_animation_store;
 mod mesh_animation;
 #[cfg(feature = "mesh-animated-models")]
 mod mesh_animation_panel;
+#[cfg(feature = "mesh-animated-models")]
+mod mesh_animation_import;
 #[cfg(feature="mesh-navigation")]
 mod mesh_scene;
 #[cfg(feature="mesh-navigation")]

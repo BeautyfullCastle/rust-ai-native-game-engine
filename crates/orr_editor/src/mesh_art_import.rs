@@ -41,10 +41,10 @@ pub(crate) struct Report {
     pub snapshot: Snapshot,
 }
 
-struct InputFile {
-    path: PathBuf,
-    bytes: Vec<u8>,
-    sha256: String,
+pub(crate) struct InputFile {
+    pub(crate) path: PathBuf,
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) sha256: String,
 }
 
 pub(crate) fn import_package(request: Request) -> Result<Report, String> {
@@ -125,7 +125,7 @@ pub(crate) fn import_package(request: Request) -> Result<Report, String> {
     })
 }
 
-fn validate_package_identity(name: &str, version: &str) -> Result<(), String> {
+pub(crate) fn validate_package_identity(name: &str, version: &str) -> Result<(), String> {
     if name.is_empty()
         || name.len() > 64
         || !name
@@ -142,7 +142,7 @@ fn validate_package_identity(name: &str, version: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn read_input_file(path: &Path, limit: u64, label: &str) -> Result<InputFile, String> {
+pub(crate) fn read_input_file(path: &Path, limit: u64, label: &str) -> Result<InputFile, String> {
     let canonical = checked_file_path(path, label)?;
     let before =
         fs::symlink_metadata(&canonical).map_err(|error| format!("inspect {label}: {error}"))?;
@@ -190,7 +190,7 @@ fn read_input_file(path: &Path, limit: u64, label: &str) -> Result<InputFile, St
     })
 }
 
-fn recheck_input(input: &InputFile, limit: u64, label: &str) -> Result<(), String> {
+pub(crate) fn recheck_input(input: &InputFile, limit: u64, label: &str) -> Result<(), String> {
     let current = read_input_file(&input.path, limit, label)?;
     if current.sha256 != input.sha256 || current.bytes != input.bytes {
         return Err(format!("{label} changed before package publication"));
@@ -221,7 +221,7 @@ fn checked_file_path(path: &Path, label: &str) -> Result<PathBuf, String> {
     Ok(canonical)
 }
 
-fn checked_new_destination(path: &Path) -> Result<(PathBuf, PathBuf), String> {
+pub(crate) fn checked_new_destination(path: &Path) -> Result<(PathBuf, PathBuf), String> {
     validate_path_shape(path, "package destination")?;
     if path.components().any(|component| {
         matches!(component, Component::Normal(part) if part.to_string_lossy().eq_ignore_ascii_case(".orr"))
@@ -309,7 +309,7 @@ fn reserved_device_name(name: &str) -> bool {
         })
 }
 
-fn checked_directory(path: &Path, label: &str) -> Result<PathBuf, String> {
+pub(crate) fn checked_directory(path: &Path, label: &str) -> Result<PathBuf, String> {
     validate_path_shape(path, label)?;
     let components: Vec<_> = path.components().collect();
     let mut current = PathBuf::new();
@@ -424,7 +424,7 @@ fn open_without_following(path: &Path) -> std::io::Result<File> {
     options.open(path)
 }
 
-fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -435,7 +435,7 @@ fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .map_err(|error| format!("write staged package file: {error}"))
 }
 
-fn refuse_existing(path: &Path) -> Result<(), String> {
+pub(crate) fn refuse_existing(path: &Path) -> Result<(), String> {
     match fs::symlink_metadata(path) {
         Ok(_) => Err("mesh art package destination already exists".into()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -443,7 +443,7 @@ fn refuse_existing(path: &Path) -> Result<(), String> {
     }
 }
 
-fn publish_new_directory(stage: &Path, destination: &Path) -> Result<(), String> {
+pub(crate) fn publish_new_directory(stage: &Path, destination: &Path) -> Result<(), String> {
     let stage_metadata = fs::symlink_metadata(stage).map_err(|error| error.to_string())?;
     if !regular_directory(&stage_metadata) {
         return Err("mesh art staging directory changed before publication".into());
