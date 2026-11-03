@@ -15,6 +15,7 @@ use std::{
 };
 const MAX_HISTORY: usize = 128;
 
+#[cfg_attr(feature = "tilemap", derive(Clone))]
 pub struct Bindings {
     pub path: PathBuf,
     document: Document,
@@ -192,6 +193,46 @@ impl Bindings {
         if let Some(next) = self.redo.pop() {
             self.undo.push(std::mem::replace(&mut self.document, next));
         }
+    }
+    /// Tilemap-owned history changes only existing actor sources. Asset and
+    /// admission checks belong to TilemapPanel, before this candidate is installed.
+    #[cfg(feature = "tilemap")]
+    pub(crate) fn set_existing_sources(
+        &mut self,
+        guids: &[orr_reflect::Guid],
+        source: Source,
+    ) -> Result<(), String> {
+        if guids.is_empty() {
+            return Err("select at least one already-bound actor".into());
+        }
+        if !matches!(source, Source::Region(_) | Source::Clip(_)) {
+            return Err("tilemap actor appearance supports Region or Clip only".into());
+        }
+        let mut next = self.document.clone();
+        for guid in guids {
+            next.bindings
+                .get_mut(guid.as_str())
+                .ok_or("selected entity has no admitted actor binding")?
+                .source = source.clone();
+        }
+        self.commit(next)
+    }
+    #[cfg(feature = "tilemap")]
+    pub(crate) fn mark_tilemap_saved(&mut self) {
+        self.saved = self.document.clone();
+    }
+    #[cfg(feature = "tilemap")]
+    pub(crate) fn history_available(&self) -> (bool, bool) {
+        (!self.undo.is_empty(), !self.redo.is_empty())
+    }
+    #[cfg(all(test, feature = "tilemap", feature = "project-create", target_os = "linux"))]
+    pub(crate) fn tilemap_history_snapshot(&self) -> (Document, Document, Vec<Document>, Vec<Document>) {
+        (
+            self.document.clone(),
+            self.saved.clone(),
+            self.undo.clone(),
+            self.redo.clone(),
+        )
     }
     pub fn save(&mut self) -> Result<(), String> {
         self.document.validate()?;

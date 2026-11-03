@@ -75,6 +75,8 @@ The palette uses SpritePanel's admitted read-only asset and egui texture cache.
 The long-lived project compositor uses a separate GPU backend representation of
 the same admitted assets. There is no second image decoder or egui atlas cache.
 Cache-changing sprite operations are refused while the tilemap pins that cache.
+Existing actors can change only their Region/Clip within the same admitted asset
+through [Actor appearance](tilemap-actor-sources.md), with separate guarded Save.
 Package mutation, image reimport and editor-button export remain unsupported, even
 when a usage query succeeds. The optional Linux CLI export path is documented in
 [Export an Arena tilemap](arena-tilemap-export.md). Usage information is not
