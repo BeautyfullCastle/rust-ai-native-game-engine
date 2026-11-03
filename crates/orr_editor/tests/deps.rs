@@ -25,6 +25,75 @@ fn dependencies(manifest: &str) -> Vec<String> {
     out
 }
 
+/// Parse real Cargo TOML so comments, quoted keys, and table declarations cannot
+/// hide required production dependencies. Dev/build dependencies are excluded.
+fn production_dependencies_are_optional(manifest: &str, prefix: &str) -> bool {
+    let manifest: toml::Value = toml::from_str(manifest).expect("valid Cargo manifest");
+    let check = |dependencies: Option<&toml::Value>| {
+        dependencies.is_none_or(|dependencies| {
+            dependencies.as_table().expect("dependency table").iter()
+                .filter(|(name, _)| name.starts_with(prefix))
+                .all(|(_, value)| value.get("optional").and_then(toml::Value::as_bool) == Some(true))
+        })
+    };
+    check(manifest.get("dependencies"))
+        && manifest.get("target").is_none_or(|targets| {
+            targets.as_table().expect("target table").values()
+                .all(|target| check(target.get("dependencies")))
+        })
+}
+
+fn package_defaults_are_empty(manifest: &str) -> bool {
+    let manifest: toml::Value = toml::from_str(manifest).expect("valid Cargo manifest");
+    manifest.get("features").and_then(|features| features.get("default"))
+        .and_then(toml::Value::as_array).is_some_and(Vec::is_empty)
+}
+
+#[test]
+fn production_dependency_scope_includes_targets_but_not_test_or_build_tools() {
+    let manifest = r#"
+[dependencies]
+orr_navigation = { optional = true }
+[dev-dependencies]
+orr_navigation_view = {}
+[build-dependencies]
+orr_navigation_build = {}
+[target.'cfg(unix)'.dependencies]
+orr_navigation_runtime = { optional = true }
+[target.'cfg(unix)'.dev-dependencies]
+orr_navigation_test = {}
+[target.'cfg(unix)'.build-dependencies]
+orr_navigation_build = {}
+"#;
+    assert!(production_dependencies_are_optional(manifest, "orr_navigation"));
+}
+
+#[test]
+fn production_boundaries_reject_required_dependencies_and_enabled_defaults() {
+    for section in ["[dependencies]", "[dependencies] # trailing comment",
+        "[target.'cfg(unix)'.dependencies]", "[target.'cfg(unix)'.dependencies] # comment"] {
+        for prefix in ["orr_navigation", "orr_"] {
+            let required = format!("{section}\norr_navigation = {{ path = \"../orr_navigation\" }}");
+            assert!(!production_dependencies_are_optional(&required, prefix));
+            let disabled = format!("{section}\norr_navigation = {{ optional = false }} # optional = true");
+            assert!(!production_dependencies_are_optional(&disabled, prefix));
+            let optional = format!("{section}\norr_navigation = {{ optional = true }}");
+            assert!(production_dependencies_are_optional(&optional, prefix));
+        }
+    }
+    for section in ["[dependencies.orr_navigation]", "[dependencies.'orr_navigation'] # comment",
+        "[target.'cfg(unix)'.dependencies.orr_navigation]",
+        "[target.'cfg(unix)'.dependencies.'orr_navigation'] # comment"] {
+        assert!(!production_dependencies_are_optional(&format!("{section}\nversion = \"1\""), "orr_"));
+        assert!(!production_dependencies_are_optional(&format!("{section}\noptional = false"), "orr_"));
+        assert!(production_dependencies_are_optional(&format!("{section}\noptional = true"), "orr_"));
+    }
+    assert!(!production_dependencies_are_optional("[dependencies]\n'orr_navigation' = \"1\"", "orr_"));
+    assert!(package_defaults_are_empty("[features] # comment\ndefault = []"));
+    assert!(!package_defaults_are_empty("[features]\ndefault = [\"deployment-authoring\"]"));
+    assert!(!package_defaults_are_empty("# default = []\n[features]\nmodel-authoring = []"));
+}
+
 /// The code of a line: no comment, no string literals (type names like `"orr_physics::Body"` are data).
 fn code_of(line: &str) -> String {
     let mut out = String::new();
@@ -126,9 +195,7 @@ fn navigation_is_optional_and_independent_of_terrain_physics() {
         for forbidden in ["terrain-physics", "animated-models", "irradiance-probes"] {
             assert!(!feature.contains(forbidden), "navigation must not require {forbidden}");
         }
-        for line in manifest.lines().filter(|line| line.starts_with("orr_navigation")) {
-            assert!(line.contains("optional = true"), "navigation must stay opt-in: {line}");
-        }
+        assert!(production_dependencies_are_optional(&manifest, "orr_navigation"), "navigation production dependencies must stay opt-in: {name}");
     }
     let runtime = std::fs::read_to_string(root.join("../orr_navigation_runtime/Cargo.toml")).unwrap();
     for dep in dependencies(&runtime) {
@@ -149,7 +216,8 @@ fn saved_projects_reuse_optional_sprite_packages_without_new_core_dependencies()
     let library = std::fs::read_to_string(root.join("src/lib.rs")).unwrap();
     assert!(library.contains("#[cfg(feature = \"sprites\")]\npub mod project;"));
     let package = std::fs::read_to_string(root.join("../orr_package/Cargo.toml")).unwrap();
-    assert!(dependencies(&package).iter().all(|dependency| !dependency.starts_with("orr_")), "package metadata must stay independent of engine, simulation and renderer crates");
+    assert!(package_defaults_are_empty(&package), "package authoring must remain default-off");
+    assert!(production_dependencies_are_optional(&package, "orr_"), "default package metadata must not require engine crates");
 }
 
 #[test]
