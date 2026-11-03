@@ -355,11 +355,61 @@ fn saved_pinned_edit_survives_close_but_discard_and_other_source_do_not_latch() 
     click(&mut h, "Create terrain");
     click(&mut h, "Save terrain");
     click(&mut h, "Build route");
+    assert!(
+        h.state().editor.admitted_navigation().admitted,
+        "Build must admit the initial pin before testing saved-source invalidation: navigation={:?}, admission={:?}",
+        h.state().navigation.error,
+        h.state().editor.admitted_navigation().error
+    );
+    assert_eq!(
+        h.state().editor.admitted_navigation().source,
+        "terrain.orrt"
+    );
+    assert_eq!(h.state().editor.history().entries.len(), 1);
+    let pinned_revision = h.state().terrain.document.revision();
+    let pinned_bytes = h.state().terrain.document.bytes().unwrap().to_vec();
 
     click(&mut h, "Vertex");
     type_into(&mut h, "Terrain height", "0.5");
+    assert_eq!(
+        h.state().terrain.height,
+        "0.5",
+        "typing must update the height draft"
+    );
     click(&mut h, "Apply terrain height");
+    assert!(
+        h.state().terrain.document.dirty(),
+        "Apply must change terrain before Save: {:?}",
+        h.state().terrain.error()
+    );
+    let selected_vertex = h.state().terrain.selected_vertex;
+    let terrain = h.state().terrain.document.terrain().unwrap();
+    let index = (selected_vertex[1] * terrain.width() + selected_vertex[0]) as usize;
+    assert_eq!(
+        terrain.heights()[index].raw(),
+        32768,
+        "Apply must set the selected vertex to exact 0.5"
+    );
+    let edited_revision = h.state().terrain.document.revision();
+    assert_ne!(edited_revision, pinned_revision);
+    assert_ne!(h.state().terrain.document.bytes().unwrap(), pinned_bytes);
     click(&mut h, "Save terrain");
+    assert!(
+        !h.state().terrain.document.dirty(),
+        "Save must persist the edited terrain: {:?}",
+        h.state().terrain.error()
+    );
+    assert_eq!(h.state().terrain.document.revision(), edited_revision);
+    assert_eq!(
+        std::fs::read(root_path.join("terrain.orrt")).unwrap(),
+        h.state().terrain.document.bytes().unwrap()
+    );
+    assert!(
+        h.state()
+            .navigation
+            .route_stale(&h.state().editor, &h.state().terrain),
+        "saved revision mismatch must be stale before Close"
+    );
     click(&mut h, "Close terrain");
     assert!(h.state().terrain.document.terrain().is_none());
     assert!(
