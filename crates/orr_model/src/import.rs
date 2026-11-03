@@ -1330,29 +1330,55 @@ fn decode_png(bytes: &[u8], remaining: usize) -> Result<Image, Error> {
     {
         return Err(invalid("PNG extent or APNG unsupported"));
     }
-    let expected = width as usize * height as usize * 4;
+    let pixels = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or_else(|| invalid("PNG size overflow"))?;
+    let expected = pixels
+        .checked_mul(4)
+        .ok_or_else(|| invalid("PNG size overflow"))?;
     if expected > remaining {
         return Err(invalid("decoded image budget exceeded"));
     }
     let len = reader
         .output_buffer_size()
         .ok_or_else(|| invalid("PNG size overflow"))?;
-    if len != expected {
-        return Err(invalid("PNG must decode to exact RGBA8"));
+    // Only widen the input contract for genuinely opaque, original RGB8 PNGs.
+    // EXPAND/STRIP_16 and the existing RGBA output path remain unchanged.
+    let opaque_rgb = reader.info().color_type == png::ColorType::Rgb
+        && reader.info().bit_depth == png::BitDepth::Eight
+        && reader.info().trns.is_none()
+        && reader.output_color_type() == (png::ColorType::Rgb, png::BitDepth::Eight);
+    let decoded_len = if opaque_rgb { pixels * 3 } else { expected };
+    if len != decoded_len {
+        return Err(invalid("PNG must decode to exact RGBA8 or opaque RGB8"));
     }
-    let mut rgba8 = vec![0; len];
+    // Reserve the final, budgeted size once; no second full-image allocation.
+    let mut rgba8 = vec![0; expected];
     let info = reader
-        .next_frame(&mut rgba8)
+        .next_frame(&mut rgba8[..decoded_len])
         .map_err(|e| invalid(format!("PNG: {e}")))?;
     if info.width != width
         || info.height != height
-        || info.buffer_size() != expected
-        || info.color_type != png::ColorType::Rgba
+        || info.buffer_size() != decoded_len
+        || info.color_type
+            != if opaque_rgb {
+                png::ColorType::Rgb
+            } else {
+                png::ColorType::Rgba
+            }
         || info.bit_depth != png::BitDepth::Eight
     {
         return Err(invalid("PNG frame does not match static RGBA8 image"));
     }
     reader.finish().map_err(|e| invalid(format!("PNG: {e}")))?;
+    if opaque_rgb {
+        // Expand backwards so each source pixel is read before it is overwritten.
+        for pixel in (0..pixels).rev() {
+            let rgb = [rgba8[pixel * 3], rgba8[pixel * 3 + 1], rgba8[pixel * 3 + 2]];
+            rgba8[pixel * 4..pixel * 4 + 3].copy_from_slice(&rgb);
+            rgba8[pixel * 4 + 3] = 255;
+        }
+    }
     Ok(Image {
         width,
         height,
@@ -1363,6 +1389,51 @@ fn decode_png(bytes: &[u8], remaining: usize) -> Result<Image, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn rgb_png(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, width, height);
+            encoder.set_color(png::ColorType::Rgb);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            writer
+                .write_image_data(&vec![17; width as usize * height as usize * 3])
+                .unwrap();
+            writer.finish().unwrap();
+        }
+        bytes
+    }
+    #[test]
+    fn opaque_rgb_budget_is_final_rgba_size_and_exact_boundary_is_accepted() {
+        assert_eq!(
+            decode_png(&rgb_png(1, 1), 4).unwrap().rgba8,
+            [17, 17, 17, 255]
+        );
+        let bytes = rgb_png(2, 2);
+        assert_eq!(
+            decode_png(&bytes, 16).unwrap().rgba8,
+            [17, 17, 17, 255].repeat(4)
+        );
+        for remaining in [0, 12, 15] {
+            assert!(decode_png(&bytes, remaining)
+                .unwrap_err()
+                .to_string()
+                .contains("decoded image budget exceeded"));
+        }
+        // Insufficient final budget must fail before attempting to decode pixels.
+        assert!(decode_png(&bytes[..41], 15)
+            .unwrap_err()
+            .to_string()
+            .contains("decoded image budget exceeded"));
+    }
+    #[test]
+    fn opaque_rgb_extent_remains_bounded() {
+        let bytes = rgb_png(MAX_IMAGE_EXTENT + 1, 1);
+        assert!(decode_png(&bytes, MAX_DECODED_BYTES)
+            .unwrap_err()
+            .to_string()
+            .contains("PNG extent"));
+    }
     #[test]
     fn sha256_known_vectors() {
         assert_eq!(
