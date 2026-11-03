@@ -405,6 +405,31 @@ impl TilemapPanel {
             self.pattern_texture = None;
         }
     }
+    fn transform_pattern(
+        &mut self,
+        transform: copy::LayoutTransform,
+        editor: &Editor,
+        sprites: &SpritePanel,
+    ) -> Result<(), String> {
+        if !self.editable(editor) {
+            return Err("Layout transforms require matching Edit viewport".into());
+        }
+        if self.painting || self.rectangle.is_some() {
+            return Err("finish or cancel the current tile gesture before transforming".into());
+        }
+        self.check_stamp()?;
+        self.verify_pattern_assets()?;
+        self.check_stamp()?;
+        let (asset, _) = sprites
+            .tilemap_asset(&self.key())
+            .ok_or("shared atlas missing")?;
+        let pattern = self.pattern.as_mut().ok_or("Copy a rectangle first")?;
+        if !pattern.matches(&self.history.current, editor.scene_load_epoch(), &asset.document) {
+            return Err("copied pattern expired; Copy again".into());
+        }
+        pattern.transform(transform);
+        Ok(())
+    }
     fn stamp_pattern(
         &mut self,
         anchor: CellCoord,
@@ -610,6 +635,18 @@ impl TilemapPanel {
             ui.label("Paint: click or drag. Fill: click once to replace connected matching cells. Rectangle: drag, then release to apply once. Pick: click a cell to select its region or Erase.");
             ui.label("Copy: drag a rectangle, then release. Stamp: click its top-left destination once; the whole pattern must fit.");
             ui.label(self.pattern.as_ref().map_or_else(|| "No copied pattern".to_string(), |p| format!("Pattern: {} × {}", p.width, p.height)));
+            ui.add_enabled_ui(self.pattern.is_some() && !self.painting && self.rectangle.is_none(), |ui| {
+                for (label, transform) in [
+                    ("Rotate layout clockwise", copy::LayoutTransform::Clockwise),
+                    ("Mirror layout horizontally", copy::LayoutTransform::Horizontal),
+                    ("Mirror layout vertically", copy::LayoutTransform::Vertical),
+                ] {
+                    if ui.button(label).clicked() {
+                        self.error = self.transform_pattern(transform, editor, sprites).err();
+                    }
+                }
+            });
+            ui.label("Layout transforms rearrange copied cells only; individual tile artwork stays upright. Stamp applies the result.");
             ui.horizontal(|ui| {
                 if ui
                     .add_enabled(

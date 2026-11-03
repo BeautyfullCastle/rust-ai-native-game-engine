@@ -361,6 +361,45 @@ mod installed_copy_gestures {
     }
 
     #[test]
+    fn layout_transform_panel_guard_preserves_history_and_pattern() {
+        let mut h = Harness::new();
+        h.seed_redo();
+        let initial = h.panel.history_snapshot();
+        let source_bytes = std::fs::read(&h.panel.path).unwrap();
+        let start = h.point(0, 0);
+        let end = h.point(2, 1);
+        h.press(start);
+        h.release(end);
+        h.panel
+            .transform_pattern(super::LayoutTransform::Clockwise, &h.editor, &h.sprites)
+            .unwrap();
+        let p = h.panel.pattern.as_ref().unwrap();
+        assert_eq!((p.width, p.height), (2, 3));
+        assert_eq!(h.panel.history_snapshot(), initial);
+        assert_eq!(std::fs::read(&h.panel.path).unwrap(), source_bytes);
+        // Active gesture blocks even direct panel command invocation.
+        h.press(start);
+        assert!(h
+            .panel
+            .transform_pattern(super::LayoutTransform::Horizontal, &h.editor, &h.sprites)
+            .is_err());
+        h.panel.cancel_gesture();
+        // Source replacement refuses and does not silently transform the copy.
+        std::fs::write(&h.panel.path, b"external replacement").unwrap();
+        assert!(h
+            .panel
+            .transform_pattern(super::LayoutTransform::Clockwise, &h.editor, &h.sprites)
+            .is_err());
+        let p = h.panel.pattern.as_ref().unwrap();
+        assert_eq!((p.width, p.height), (2, 3));
+        assert_eq!(h.panel.history_snapshot(), initial);
+        assert_eq!(
+            std::fs::read(&h.panel.path).unwrap(),
+            b"external replacement"
+        );
+    }
+
+    #[test]
     fn copy_capture_is_read_only_stamp_once_and_resize_undo_expires() {
         let mut h = Harness::new();
         h.seed_redo();
@@ -657,4 +696,122 @@ mod installed_copy_gestures {
         );
         assert_eq!(h.panel.history.undo.len(), before.2.len() + 1);
     }
+}
+
+#[test]
+fn layout_transform_literal_rectangular_permutations_and_identities() {
+    // Two rows [0, empty, 1] / [1, 0, empty], asymmetric in both axes.
+    let source = document(
+        3,
+        3,
+        vec![
+            Some(0),
+            None,
+            Some(1),
+            Some(1),
+            Some(0),
+            None,
+            None,
+            None,
+            None,
+        ],
+    );
+    let original = Pattern::capture(&source, cell(0, 0), cell(2, 1), 9, &atlas()).unwrap();
+    for (transform, expected, dimensions, repetitions) in [
+        (
+            LayoutTransform::Clockwise,
+            vec![Some(1), Some(0), Some(0), None, None, Some(1)],
+            (2, 3),
+            4,
+        ),
+        (
+            LayoutTransform::Horizontal,
+            vec![Some(1), None, Some(0), None, Some(0), Some(1)],
+            (3, 2),
+            2,
+        ),
+        (
+            LayoutTransform::Vertical,
+            vec![Some(1), Some(0), None, Some(0), None, Some(1)],
+            (3, 2),
+            2,
+        ),
+    ] {
+        let mut pattern = original.clone();
+        pattern.transform(transform);
+        assert_eq!(pattern.cells, expected);
+        assert_eq!((pattern.width, pattern.height), dimensions);
+        assert_eq!(pattern.geometry, original.geometry);
+        assert_eq!(pattern.epoch, original.epoch);
+        assert_eq!(pattern.atlas, original.atlas);
+        assert!(pattern.matches(&source, 9, &atlas()));
+        let stamped = pattern.candidate(&source, cell(0, 0), 9, &atlas()).unwrap();
+        for row in 0..pattern.height {
+            for column in 0..pattern.width {
+                assert_eq!(
+                    stamped.cell(cell(column, row)).unwrap(),
+                    expected[(row * pattern.width + column) as usize]
+                );
+            }
+        }
+        for _ in 1..repetitions {
+            pattern.transform(transform);
+        }
+        assert_eq!(pattern.cells, original.cells);
+        assert_eq!((pattern.width, pattern.height), (3, 2));
+    }
+    assert_eq!(
+        source.document().cells,
+        vec![
+            Some(0),
+            None,
+            Some(1),
+            Some(1),
+            Some(0),
+            None,
+            None,
+            None,
+            None
+        ]
+    );
+}
+
+#[test]
+fn layout_transform_bounds_empty_singleton_and_maximum_pins() {
+    let source = document(3, 2, vec![Some(0), None, Some(1), Some(1), Some(0), None]);
+    let mut pattern = Pattern::capture(&source, cell(0, 0), cell(2, 1), 9, &atlas()).unwrap();
+    pattern.transform(LayoutTransform::Clockwise);
+    assert!(pattern.candidate(&source, cell(0, 0), 9, &atlas()).is_err()); // 2x3 cannot fit 3x2
+    pattern.transform(LayoutTransform::Clockwise);
+    assert!(pattern.candidate(&source, cell(0, 0), 9, &atlas()).is_ok());
+    assert!(pattern
+        .candidate(&source, cell(0, 0), 10, &atlas())
+        .is_err());
+    let changed_atlas =
+        SpriteDocument::from_json(&atlas().to_json().unwrap().replace("atlas.png", "other.png"))
+            .unwrap();
+    assert!(pattern
+        .candidate(&source, cell(0, 0), 9, &changed_atlas)
+        .is_err());
+    for cells in [vec![None], vec![Some(0)]] {
+        let source = document(1, 1, cells.clone());
+        let mut pattern = Pattern::capture(&source, cell(0, 0), cell(0, 0), 0, &atlas()).unwrap();
+        for transform in [
+            LayoutTransform::Clockwise,
+            LayoutTransform::Horizontal,
+            LayoutTransform::Vertical,
+        ] {
+            pattern.transform(transform);
+            assert_eq!(pattern.cells, cells);
+            assert_eq!((pattern.width, pattern.height), (1, 1));
+        }
+    }
+    let source = document(64, 64, vec![Some(0); 4096]);
+    let mut pattern = Pattern::capture(&source, cell(0, 0), cell(63, 63), 1, &atlas()).unwrap();
+    pattern.transform(LayoutTransform::Clockwise);
+    assert_eq!(pattern.cells.len(), 4096);
+    assert_eq!(
+        pattern.candidate(&source, cell(0, 0), 1, &atlas()).unwrap(),
+        source
+    );
 }

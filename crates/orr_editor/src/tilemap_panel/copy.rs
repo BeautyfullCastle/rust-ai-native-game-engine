@@ -22,6 +22,13 @@ impl Geometry {
         }
     }
 }
+/// Rearranges cells only: tile image orientation and source geometry are unchanged.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum LayoutTransform {
+    Clockwise,
+    Horizontal,
+    Vertical,
+}
 #[derive(Clone, Debug)]
 pub(super) struct Pattern {
     pub(super) width: u32,
@@ -63,6 +70,28 @@ impl Pattern {
             epoch,
             atlas: atlas.to_json().map_err(|e| e.to_string())?,
         })
+    }
+    pub(super) fn transform(&mut self, transform: LayoutTransform) {
+        // Captured dimensions are nonzero and their product is at most MAX_CELLS.
+        // Always read the immutable old layout, including empty erasing cells.
+        let (width, height) = match transform {
+            LayoutTransform::Clockwise => (self.height, self.width),
+            _ => (self.width, self.height),
+        };
+        let mut cells = vec![None; self.cells.len()];
+        for row in 0..self.height {
+            for column in 0..self.width {
+                let (x, y) = match transform {
+                    LayoutTransform::Clockwise => (self.height - 1 - row, column),
+                    LayoutTransform::Horizontal => (self.width - 1 - column, row),
+                    LayoutTransform::Vertical => (column, self.height - 1 - row),
+                };
+                cells[(y * width + x) as usize] = self.cells[(row * self.width + column) as usize];
+            }
+        }
+        self.width = width;
+        self.height = height;
+        self.cells = cells;
     }
     pub(super) fn geometry_matches(&self, source: &ValidatedDocument) -> bool {
         self.geometry == Geometry::of(source)
