@@ -12,6 +12,8 @@ use orr_remote::mesh_navigation::mesh_from_view;
 use orr_render::Camera3D;
 use std::path::{Path, PathBuf};
 
+mod surface_grid;
+
 const MAX_HISTORY: usize = 4;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -69,6 +71,8 @@ pub(crate) struct Panel {
     grid_columns: String,
     grid_rows: String,
     grid_spacing: [String; 2],
+    surface_grid_max_vertical: String,
+    surface_grid_height_offset: String,
     license_acknowledged: bool,
     confirm_remove: bool,
     confirm_discard_invalid: bool,
@@ -123,6 +127,8 @@ impl Default for Panel {
             grid_columns: "4".into(),
             grid_rows: "3".into(),
             grid_spacing: ["1.5".into(), "1.5".into()],
+            surface_grid_max_vertical: "4".into(),
+            surface_grid_height_offset: "0".into(),
             license_acknowledged: false,
             confirm_remove: false,
             confirm_discard_invalid: false,
@@ -458,6 +464,16 @@ impl Panel {
                     ui.weak("Keep the selected prop as cell [0,0]; add the remaining cells as one undoable cosmetic edit. Nothing is saved automatically.");
                     if ui.button("Stamp selected prop grid").clicked() {
                         self.stamp_grid();
+                    }
+                    field(ui, "Surface grid maximum vertical distance", &mut self.surface_grid_max_vertical);
+                    field(ui, "Surface grid height offset", &mut self.surface_grid_height_offset);
+                    ui.weak("Surface grid: query each new cell from the original pivot height, then add the height offset. Rotation and scale stay unchanged; this is not collision or bottom snapping. Decimal inputs round to Q16; presentation uses f32.");
+                    if ui.add_enabled(
+                        !agent_pick_busy && self.candidate.is_none()
+                            && !editor.history().in_tx && !editor.sim().in_tx,
+                        egui::Button::new("Stamp surface-height prop grid"),
+                    ).clicked() {
+                        self.stamp_surface_grid(editor, agent_pick_busy);
                     }
                 });
             });
