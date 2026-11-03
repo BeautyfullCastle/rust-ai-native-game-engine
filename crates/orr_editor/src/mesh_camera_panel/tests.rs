@@ -172,8 +172,10 @@ fn reset_history_starts_with_a_single_saved_entry() {
 
 #[test]
 fn saved_sidecar_binding_matches_exact_optional_digest_only_when_admitted_cleanly() {
-    let mut panel = Panel::default();
-    panel.document_pending = false;
+    let mut panel = Panel {
+        document_pending: false,
+        ..Default::default()
+    };
     panel.reset_history(None, Some(0));
     assert!(panel.matches_saved_sidecar(None));
     assert!(!panel.matches_saved_sidecar(Some("camera-digest")));
