@@ -19,6 +19,9 @@ pub(super) struct State {
     ready: Option<(Identity, package_manager::DependencyAddPlan)>,
 }
 impl State {
+    pub(super) fn candidate_identity(&self) -> (&str, u64) {
+        (&self.candidates, self.generation)
+    }
     pub(super) fn invalidate(&mut self) {
         self.generation = self.generation.saturating_add(1);
         self.ready = None;
@@ -30,7 +33,7 @@ impl State {
         }
     }
 }
-fn candidates(text: &str) -> Result<Vec<PathBuf>, String> {
+pub(super) fn candidates(text: &str) -> Result<Vec<PathBuf>, String> {
     if text.len() > 32768 {
         return Err("Dependency directory text exceeds 32768 bytes.".into());
     }
@@ -124,6 +127,7 @@ impl Panel {
             return;
         }
         self.select_source();
+        self.dependency_update.invalidate();
         self.usage.invalidate();
         self.update_impact.invalidate();
         self.dependency_add.observe();

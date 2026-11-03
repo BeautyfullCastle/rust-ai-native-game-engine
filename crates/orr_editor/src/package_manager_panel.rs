@@ -1,4 +1,5 @@
 mod dependency_add;
+mod dependency_update;
 mod update_impact;
 mod usage;
 
@@ -12,6 +13,14 @@ use std::{
 };
 
 enum Completion {
+    DependenciesUpdatePreviewed {
+        identity: dependency_update::Identity,
+        result: Result<package_manager::DependencyUpdatePlan, String>,
+    },
+    DependenciesUpdated {
+        identity: dependency_update::Identity,
+        result: Result<Lock, String>,
+    },
     DependenciesPreviewed {
         identity: dependency_add::Identity,
         result: Result<package_manager::DependencyAddPlan, String>,
@@ -127,6 +136,8 @@ pub struct Panel {
     model_filter: String,
     verified: Option<Lock>,
     dependency_add: dependency_add::State,
+    dependency_update: dependency_update::State,
+    updating_dependencies: bool,
     installing_dependencies: bool,
     usage: usage::State,
     update_impact: update_impact::State,
@@ -148,7 +159,7 @@ pub struct Panel {
 impl Panel {
     pub(crate) fn removal_busy(&self) -> bool {
         // The host uses this existing hook for its whole-frame mutation fence.
-        (self.removing || self.updating || self.installing_dependencies) && self.pending.is_some()
+        (self.removing || self.updating || self.installing_dependencies || self.updating_dependencies) && self.pending.is_some()
     }
     pub fn busy(&self) -> bool {
         self.pending.is_some() || self.model_import.busy()
@@ -234,6 +245,7 @@ impl Panel {
             self.usage.invalidate();
             self.update_impact.invalidate();
             self.dependency_add.invalidate();
+            self.dependency_update.invalidate();
         }
         self.poll();
         if blocked_reason.is_some() {
@@ -354,6 +366,7 @@ impl Panel {
                     }
                 }
                 self.show_dependency_add(ui, can_operate, was_mutating);
+                self.show_dependency_update(ui, can_operate);
                 self.show_update_impact(ui, can_operate);
                 self.model_import.show(
                     ui,
@@ -435,6 +448,7 @@ impl Panel {
             self.usage.invalidate();
             self.update_impact.invalidate();
             self.dependency_add.invalidate();
+            self.dependency_update.invalidate();
         }
         self.open = open;
     }
@@ -445,6 +459,7 @@ impl Panel {
             self.usage = usage::State::default();
             self.update_impact.invalidate();
             self.dependency_add.invalidate();
+            self.dependency_update.invalidate();
             self.root = next_root;
             self.project_generation = self.project_generation.saturating_add(1);
             self.last_removal = None;
@@ -470,6 +485,7 @@ impl Panel {
             self.usage.invalidate();
             self.update_impact.invalidate();
             self.dependency_add.invalidate();
+            self.dependency_update.invalidate();
             self.update_preview = None;
             self.removal_preview = None;
             self.source_identity = next_source;
@@ -479,6 +495,7 @@ impl Panel {
     }
 
     fn poll(&mut self) {
+        self.clear_stale_dependency_update();
         let Some(receiver) = &self.pending else {
             return;
         };
@@ -488,18 +505,21 @@ impl Panel {
             Err(TryRecvError::Disconnected) => {
                 self.pending = None;
                 self.removing = false;
-                self.status = if self.installing_dependencies {
+                self.status = if self.updating_dependencies {
+                    "Dependency Update worker disconnected; publication outcome is uncertain. Verify installed packages; no automatic retry or rollback was performed.".into()
+                } else if self.installing_dependencies {
                     "Dependency Add worker disconnected; publication outcome is uncertain. Verify installed packages; no automatic retry or rollback was performed.".into()
                 } else if self.updating {
                     "Package update worker disconnected; publication outcome is uncertain. Verify installed packages before another attempt; no automatic retry or rollback was performed.".into()
                 } else {
                     "Package worker disconnected before returning a result.".into()
                 };
-                if self.updating || self.installing_dependencies {
+                if self.updating || self.installing_dependencies || self.updating_dependencies {
                     self.invalidate_package_cache();
                 }
                 self.updating = false;
                 self.installing_dependencies = false;
+                self.updating_dependencies = false;
                 return;
             }
         };
@@ -507,7 +527,14 @@ impl Panel {
         self.removing = false;
         self.updating = false;
         self.installing_dependencies = false;
+        self.updating_dependencies = false;
         match completion {
+            Completion::DependenciesUpdatePreviewed { identity, result } => {
+                self.finish_dependencies_update_preview(identity, result);
+            }
+            Completion::DependenciesUpdated { identity, result } => {
+                self.finish_dependencies_update(identity, result);
+            }
             Completion::DependenciesPreviewed { identity, result } => {
                 self.finish_dependencies_preview(identity, result);
             }
@@ -805,6 +832,7 @@ impl Panel {
         self.usage.invalidate();
         self.update_impact.invalidate();
         self.dependency_add.invalidate();
+        self.dependency_update.invalidate();
         self.preview_request = None;
         self.last_removal = None;
         self.restoration_preview = None;
@@ -855,6 +883,7 @@ impl Panel {
         self.usage.invalidate();
         self.update_impact.invalidate();
         self.dependency_add.invalidate();
+        self.dependency_update.invalidate();
         let Some(root) = self.root.clone() else {
             self.status = "Open a Room project before previewing a package update.".into();
             return;
@@ -898,6 +927,7 @@ impl Panel {
         self.usage.invalidate();
         self.update_impact.invalidate();
         self.dependency_add.invalidate();
+        self.dependency_update.invalidate();
         if let Err(error) = parse_source_path(&self.source) {
             self.update_preview = None;
             self.status = error;
@@ -953,6 +983,7 @@ impl Panel {
         self.usage.invalidate();
         self.update_impact.invalidate();
         self.dependency_add.invalidate();
+        self.dependency_update.invalidate();
         let Some(root) = self.root.clone() else {
             return;
         };
@@ -995,6 +1026,7 @@ impl Panel {
         self.usage.invalidate();
         self.update_impact.invalidate();
         self.dependency_add.invalidate();
+        self.dependency_update.invalidate();
         let Some(plan) = self.removal_preview.take() else {
             return;
         };
@@ -1040,6 +1072,7 @@ impl Panel {
         self.usage.invalidate();
         self.update_impact.invalidate();
         self.dependency_add.invalidate();
+        self.dependency_update.invalidate();
         let Some(receipt) = self.last_removal.take() else {
             return;
         };
@@ -1080,6 +1113,7 @@ impl Panel {
         self.usage.invalidate();
         self.update_impact.invalidate();
         self.dependency_add.invalidate();
+        self.dependency_update.invalidate();
         let Some(receipt) = self.last_removal.take() else {
             return;
         };
@@ -1121,6 +1155,7 @@ impl Panel {
         self.usage.invalidate();
         self.update_impact.invalidate();
         self.dependency_add.invalidate();
+        self.dependency_update.invalidate();
         self.last_removal = None;
         self.restoration_preview = None;
         self.restoration_generation = self.restoration_generation.saturating_add(1);
@@ -1157,6 +1192,7 @@ impl Panel {
         self.usage.invalidate();
         self.update_impact.invalidate();
         self.dependency_add.invalidate();
+        self.dependency_update.invalidate();
         let Some(root) = self.root.clone() else {
             self.status = "Open a Room project before previewing a package.".into();
             return;
@@ -1199,6 +1235,7 @@ impl Panel {
         self.usage.invalidate();
         self.update_impact.invalidate();
         self.dependency_add.invalidate();
+        self.dependency_update.invalidate();
         if let Err(error) = parse_source_path(&self.source) {
             self.status = error;
             return;
