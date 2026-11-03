@@ -193,6 +193,10 @@ impl Panel {
         }
         self.candidate = self.document.clone();
     }
+    fn discard_draft(&mut self) {
+        self.candidate = self.document.clone();
+        self.error = None;
+    }
     fn undo(&mut self) -> bool {
         if let Some(previous) = self.undo.pop() {
             push_bounded(
@@ -438,6 +442,12 @@ impl Panel {
                     number_bounded(ui, "Range", &mut light.range, 1e-6, 1e9);
                 }
 
+                if ui
+                    .add_enabled(self.candidate != self.document, egui::Button::new("Discard lighting draft"))
+                    .clicked()
+                {
+                    self.discard_draft();
+                }
                 if ui.button("Apply lighting").clicked() {
                     let result = match editor.as_deref_mut() {
                         Some(editor) => self.apply_checked(editor, self.candidate.clone()),
@@ -874,5 +884,150 @@ mod tests {
         assert!(matches!(panel.source, SourcePin::Retired));
         assert!(panel.undo.is_empty());
         assert!(panel.redo.is_empty());
+    }
+    #[test]
+    fn discard_invalid_draft_preserves_applied_unsaved_history_and_source() {
+        let (_dir, prepared) = fixture();
+        let mut panel = Panel::new(prepared);
+        let mut editor = MockLightingEditor::new(&panel);
+        let mut first = panel.document.clone();
+        first.point_light.as_mut().unwrap().intensity = 7.0;
+        panel.apply_checked(&mut editor, first.clone()).unwrap();
+        let mut second = first.clone();
+        second.point_light.as_mut().unwrap().range = 18.0;
+        panel.apply_checked(&mut editor, second.clone()).unwrap();
+        assert!(panel.undo_checked(&mut editor).unwrap());
+        let before = (
+            panel.document.clone(),
+            panel.saved.clone(),
+            panel.saved_bytes.clone(),
+            panel.undo.clone(),
+            panel.redo.clone(),
+            std::fs::read(&panel.path).unwrap(),
+            std::fs::read(&panel.manifest_path).unwrap(),
+        );
+        let source = Arc::clone(&editor.source);
+        panel.candidate.point_light.as_mut().unwrap().intensity = f32::NAN;
+        panel.error = Some("invalid draft".into());
+        panel.discard_draft();
+        assert_eq!(panel.candidate, first);
+        assert!(panel.error.is_none());
+        assert_ne!(panel.document, panel.saved);
+        assert_eq!(
+            before,
+            (
+                panel.document.clone(),
+                panel.saved.clone(),
+                panel.saved_bytes.clone(),
+                panel.undo.clone(),
+                panel.redo.clone(),
+                std::fs::read(&panel.path).unwrap(),
+                std::fs::read(&panel.manifest_path).unwrap(),
+            )
+        );
+        assert!(Arc::ptr_eq(&source, &editor.source));
+        assert_eq!(editor.document.as_ref(), Some(&first));
+        for _ in 0..3 {
+            panel.discard_draft();
+        }
+        assert_eq!(panel.redo, vec![second.clone()]);
+        assert!(panel.redo_checked(&mut editor).unwrap());
+        assert_eq!(panel.document, second);
+    }
+
+    #[test]
+    fn discard_widget_restores_custom_reopened_light_without_reset_or_write() {
+        use egui_kittest::{
+            Harness,
+            kittest::{NodeT, Queryable},
+        };
+        let (_dir, mut prepared) = fixture();
+        let light = prepared.document.point_light.as_mut().unwrap();
+        light.position = [2.0, 5.0, -3.0];
+        light.color = [0.25, 0.5, 0.75];
+        light.intensity = 7.0;
+        light.range = 19.0;
+        prepared.bytes = prepared.document.to_bytes().unwrap();
+        std::fs::write(&prepared.path, &prepared.bytes).unwrap();
+        let panel = Panel::new(prepared);
+        let custom = panel.document.clone();
+        let bytes = panel.saved_bytes.clone();
+        let mut h = Harness::builder().with_size([600.0, 900.0]).build_ui_state(
+            |ui, state: &mut (Panel, usize)| {
+                state.1 += usize::from(state.0.show_impl(ui, true, None));
+            },
+            (panel, 0),
+        );
+        h.run_steps(3);
+        h.get_by_label("Room lighting").click();
+        h.run_steps(3);
+        assert!(
+            h.get_by_label("Discard lighting draft")
+                .accesskit_node()
+                .is_disabled()
+        );
+        h.get_by_label("Point light enabled").click();
+        h.run_steps(3);
+        assert!(h.state().0.candidate.point_light.is_none());
+        h.get_by_label("Point light enabled").click();
+        h.run_steps(3);
+        assert_eq!(h.state().0.candidate, Document::enabled_default());
+        h.get_by_label("Discard lighting draft").click_accesskit();
+        h.run_steps(3);
+        assert_eq!(h.state().0.candidate, custom);
+        assert_eq!(h.state().0.document, custom);
+        assert!(h.state().0.undo.is_empty() && h.state().0.redo.is_empty());
+        assert_eq!(h.state().1, 0);
+        assert_eq!(std::fs::read(&h.state().0.path).unwrap(), bytes);
+        assert!(
+            h.get_by_label("Discard lighting draft")
+                .accesskit_node()
+                .is_disabled()
+        );
+    }
+
+    #[test]
+    fn discard_widget_play_and_retired_source_preserve_draft_and_error() {
+        use egui_kittest::{
+            Harness,
+            kittest::{NodeT, Queryable},
+        };
+        for retired in [false, true] {
+            let (_dir, prepared) = fixture();
+            let mut panel = Panel::new(prepared);
+            let mut editor = MockLightingEditor::new(&panel);
+            panel.ensure_source(&editor).unwrap();
+            panel.candidate.point_light.as_mut().unwrap().intensity = 8.0;
+            let draft = panel.candidate.clone();
+            let applied = panel.document.clone();
+            if retired {
+                editor.source = Arc::new(());
+            }
+            let mut h = Harness::builder().with_size([600.0, 900.0]).build_ui_state(
+                |ui, state: &mut (Panel, MockLightingEditor)| {
+                    assert!(!state.0.show_impl(ui, retired, Some(&mut state.1)));
+                },
+                (panel, editor),
+            );
+            h.run_steps(3);
+            h.get_by_label("Room lighting").click();
+            h.run_steps(3);
+            assert!(
+                h.get_by_label("Discard lighting draft")
+                    .accesskit_node()
+                    .is_disabled()
+            );
+            let error = h.state().0.error.clone();
+            h.get_by_label("Discard lighting draft").click_accesskit();
+            h.run_steps(3);
+            assert_eq!(h.state().0.candidate, draft);
+            assert_eq!(h.state().0.document, applied);
+            assert_eq!(h.state().0.error, error);
+            if retired {
+                assert!(error.unwrap().contains("source changed"));
+                assert!(matches!(h.state().0.source, SourcePin::Retired));
+            }
+            assert!(h.state().0.undo.is_empty() && h.state().0.redo.is_empty());
+        }
     }
 }

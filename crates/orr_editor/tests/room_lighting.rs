@@ -588,3 +588,337 @@ fn lighting_save_as_without_camera_retires_source() {
         Document::default().to_bytes().unwrap()
     );
 }
+
+mod draft_acceptance {
+    use super::*;
+    use egui_kittest::kittest::NodeT;
+
+    const CAPTURES: [&str; 10] = [
+        "01-saved-custom",
+        "02-reopened-custom",
+        "03-numeric-draft",
+        "04-discarded-numeric",
+        "05-disabled-draft",
+        "06-discarded-disabled",
+        "07-enabled-default-draft",
+        "08-discarded-enabled",
+        "09-next-applied",
+        "10-next-reopened",
+    ];
+
+    fn app(fixture: &Fixture) -> (Harness<'_, EditorApp>, egui_wgpu::wgpu::AdapterInfo) {
+        let info = Arc::new(std::sync::Mutex::new(None));
+        let captured = Arc::clone(&info);
+        // Exercise normal adapter selection, with no forced backend or skip path.
+        let harness = Harness::builder()
+            .with_size([1500.0, 1200.0])
+            .with_step_dt(1.0 / 60.0)
+            .wgpu()
+            .build_eframe(|cc| {
+                *captured.lock().unwrap() = Some(
+                    cc.wgpu_render_state
+                        .as_ref()
+                        .expect("mandatory actual GPU render state")
+                        .adapter
+                        .get_info(),
+                );
+                fixture.build_app(cc.wgpu_render_state.clone())
+            });
+        let info = info.lock().unwrap().take().unwrap();
+        eprintln!(
+            "room lighting draft adapter: name={}; backend={:?}; device_type={:?}",
+            info.name, info.backend, info.device_type
+        );
+        (harness, info)
+    }
+
+    fn activate(h: &mut Harness<'_, EditorApp>, label: &str) {
+        let node = h.get_by_label(label);
+        assert!(!node.accesskit_node().is_disabled(), "disabled {label}");
+        // This is the production widget's accessibility action, not a panel API.
+        node.click_accesskit();
+        settle(h);
+    }
+
+    fn controls(h: &Harness<'_, EditorApp>, expected: &Document) {
+        assert_eq!(
+            h.get_by_role_and_label(Role::CheckBox, "Point light enabled")
+                .accesskit_node()
+                .toggled(),
+            Some(if expected.point_light.is_some() {
+                egui::accesskit::Toggled::True
+            } else {
+                egui::accesskit::Toggled::False
+            }),
+        );
+        if let Some(light) = expected.point_light {
+            for (label, value) in [
+                ("Position X", light.position[0]),
+                ("Position Y", light.position[1]),
+                ("Position Z", light.position[2]),
+                ("Linear R", light.color[0]),
+                ("Linear G", light.color[1]),
+                ("Linear B", light.color[2]),
+                ("Intensity", light.intensity),
+                ("Range", light.range),
+            ] {
+                assert_eq!(
+                    h.get_by_role_and_label(Role::SpinButton, label)
+                        .accesskit_node()
+                        .numeric_value(),
+                    Some(f64::from(value)),
+                    "draft control {label}"
+                );
+            }
+        } else {
+            assert!(
+                h.query_by_role_and_label(Role::SpinButton, "Intensity")
+                    .is_none()
+            );
+        }
+    }
+
+    fn empty_history(h: &mut Harness<'_, EditorApp>) {
+        for label in ["Undo lighting edit", "Redo lighting edit"] {
+            assert!(
+                h.get_by_label(label).accesskit_node().is_disabled(),
+                "freshly reopened/discarded lighting must have no history: {label}"
+            );
+        }
+        let app = h.state_mut();
+        let panel = app.room_lighting.as_mut().unwrap();
+        assert!(!panel.undo_for_editor(&mut app.editor).unwrap());
+        assert!(!panel.redo_for_editor(&mut app.editor).unwrap());
+    }
+
+    fn pixels(h: &Harness<'_, EditorApp>, directory: &Path, label: &str) -> Vec<u8> {
+        assert!(CAPTURES.contains(&label), "unexpected capture label");
+        let viewport = h
+            .state()
+            .viewport3d_gpu()
+            .expect("actual production viewport");
+        let size = h.state().ui.viewport_px;
+        let rgba = viewport.gpu().read_rgba8();
+        assert_eq!(rgba.len(), (size.0 * size.1 * 4) as usize);
+        assert!(
+            rgba.as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|p| *p != &rgba[..4])
+                .count()
+                > 100,
+            "blank production viewport"
+        );
+        let image =
+            egui::ColorImage::from_rgba_unmultiplied([size.0 as usize, size.1 as usize], &rgba);
+        let path = directory.join(format!("{label}.png"));
+        assert!(
+            !path.exists(),
+            "capture must not overwrite earlier evidence"
+        );
+        orr_editor::app::write_png(&path, &image).unwrap();
+        rgba
+    }
+
+    #[test]
+    #[ignore = "mandatory actual GPU acceptance; set ORR_REQUIRE_GPU=1 and a fresh absolute ORR_ROOM_LIGHTING_DRAFT_DIR"]
+    fn discard_lighting_draft_actual_gpu_preserves_applied_state() {
+        assert_eq!(std::env::var("ORR_REQUIRE_GPU").as_deref(), Ok("1"));
+        let evidence = PathBuf::from(
+            std::env::var_os("ORR_ROOM_LIGHTING_DRAFT_DIR").expect("capture directory"),
+        );
+        assert!(evidence.is_absolute(), "capture directory must be absolute");
+        assert!(!evidence.exists(), "use a fresh capture directory");
+        fs::create_dir_all(&evidence).unwrap();
+
+        let fixture = Fixture::new("room-escape-3d-v1");
+        let (mut h, adapter) = app(&fixture);
+        settle(&mut h);
+        activate(&mut h, "Room lighting");
+        activate(&mut h, "Point light enabled");
+        for (label, value) in [
+            ("Position X", "-3"),
+            ("Position Y", "2"),
+            ("Position Z", "3"),
+            ("Linear R", "0.75"),
+            ("Linear G", "0.5"),
+            ("Linear B", "0.25"),
+            ("Intensity", "4"),
+            ("Range", "10"),
+        ] {
+            type_number(&mut h, label, value);
+        }
+        let mut custom = Document::enabled_default();
+        let light = custom.point_light.as_mut().unwrap();
+        light.position = [-3.0, 2.0, 3.0];
+        light.color = [0.75, 0.5, 0.25];
+        light.intensity = 4.0;
+        light.range = 10.0;
+        controls(&h, &custom);
+        assert_eq!(document(&h), Document::default());
+        activate(&mut h, "Apply lighting");
+        activate(&mut h, "Save lighting");
+        assert_eq!(document(&h), custom);
+        let saved_pixels = pixels(&h, &evidence, CAPTURES[0]);
+        let saved_files = project_files(&fixture.root);
+        assert_eq!(
+            Document::parse(saved_files.get(Path::new("room.lighting.json")).unwrap()).unwrap(),
+            custom
+        );
+        fixture.assert_preserved();
+        drop(h);
+
+        // A fresh panel has no lighting history: recovery cannot rely on Undo.
+        let (mut h, reopened_adapter) = app(&fixture);
+        assert_eq!(reopened_adapter.name, adapter.name);
+        assert_eq!(reopened_adapter.backend, adapter.backend);
+        settle(&mut h);
+        activate(&mut h, "Room lighting");
+        controls(&h, &custom);
+        empty_history(&mut h);
+        assert_eq!(pixels(&h, &evidence, CAPTURES[1]), saved_pixels);
+        let frame = frame_bytes(&mut h.state_mut().editor);
+        let history = h.state().editor.history().clone();
+        let sim = h.state().editor.sim().clone();
+        let source = h.state().editor.room_lighting_source_token();
+        let unchanged = |h: &mut Harness<'_, EditorApp>| {
+            assert_eq!(document(h), custom);
+            assert_eq!(
+                h.state().room_lighting.as_ref().unwrap().document(),
+                &custom
+            );
+            assert_eq!(frame_bytes(&mut h.state_mut().editor), frame);
+            assert_eq!(h.state().editor.history(), &history);
+            assert_eq!(h.state().editor.sim(), &sim);
+            assert!(Arc::ptr_eq(
+                &source,
+                &h.state().editor.room_lighting_source_token()
+            ));
+            assert_eq!(project_files(&fixture.root), saved_files);
+            let _ = h.get_by_label("Lighting saved");
+            empty_history(h);
+        };
+
+        for (label, value) in [
+            ("Position X", "1"),
+            ("Position Y", "5"),
+            ("Position Z", "-2"),
+            ("Linear R", "0.25"),
+            ("Linear G", "0.75"),
+            ("Linear B", "1"),
+            ("Intensity", "9"),
+            ("Range", "20"),
+        ] {
+            type_number(&mut h, label, value);
+        }
+        let mut numeric_draft = custom.clone();
+        let light = numeric_draft.point_light.as_mut().unwrap();
+        light.position = [1.0, 5.0, -2.0];
+        light.color = [0.25, 0.75, 1.0];
+        light.intensity = 9.0;
+        light.range = 20.0;
+        controls(&h, &numeric_draft);
+        unchanged(&mut h);
+        assert_eq!(pixels(&h, &evidence, CAPTURES[2]), saved_pixels);
+        activate(&mut h, "Discard lighting draft");
+        controls(&h, &custom);
+        unchanged(&mut h);
+        assert_eq!(pixels(&h, &evidence, CAPTURES[3]), saved_pixels);
+
+        activate(&mut h, "Point light enabled");
+        controls(&h, &Document::default());
+        unchanged(&mut h);
+        assert_eq!(pixels(&h, &evidence, CAPTURES[4]), saved_pixels);
+        activate(&mut h, "Discard lighting draft");
+        controls(&h, &custom);
+        unchanged(&mut h);
+        assert_eq!(pixels(&h, &evidence, CAPTURES[5]), saved_pixels);
+
+        activate(&mut h, "Point light enabled");
+        activate(&mut h, "Point light enabled");
+        controls(&h, &Document::enabled_default());
+        unchanged(&mut h);
+        assert_eq!(pixels(&h, &evidence, CAPTURES[6]), saved_pixels);
+        activate(&mut h, "Discard lighting draft");
+        controls(&h, &custom);
+        unchanged(&mut h);
+        assert_eq!(pixels(&h, &evidence, CAPTURES[7]), saved_pixels);
+
+        // Discard does not retire the source or saved revision: ordinary editing
+        // can still Apply, Save, and reopen a different authored light.
+        type_number(&mut h, "Position X", "3");
+        type_number(&mut h, "Intensity", "6");
+        activate(&mut h, "Apply lighting");
+        let mut next = custom.clone();
+        let light = next.point_light.as_mut().unwrap();
+        light.position[0] = 3.0;
+        light.intensity = 6.0;
+        assert_eq!(document(&h), next);
+        let _ = h.get_by_label("Lighting (unsaved)");
+        assert!(
+            !h.get_by_label("Undo lighting edit")
+                .accesskit_node()
+                .is_disabled()
+        );
+        let next_pixels = pixels(&h, &evidence, CAPTURES[8]);
+        let changed = changed_pixels(&saved_pixels, &next_pixels);
+        assert!(
+            changed > 20,
+            "later Apply must change actual viewport pixels"
+        );
+        assert_eq!(
+            project_files(&fixture.root),
+            saved_files,
+            "Apply must not save"
+        );
+        activate(&mut h, "Save lighting");
+        assert_eq!(
+            Document::parse(&fs::read(fixture.root.join("room.lighting.json")).unwrap()).unwrap(),
+            next
+        );
+        assert_eq!(frame_bytes(&mut h.state_mut().editor), frame);
+        assert_eq!(h.state().editor.history(), &history);
+        assert_eq!(h.state().editor.sim(), &sim);
+        fixture.assert_preserved();
+        drop(h);
+
+        let (mut h, final_adapter) = app(&fixture);
+        assert_eq!(final_adapter.name, adapter.name);
+        assert_eq!(final_adapter.backend, adapter.backend);
+        settle(&mut h);
+        activate(&mut h, "Room lighting");
+        assert_eq!(document(&h), next);
+        controls(&h, &next);
+        empty_history(&mut h);
+        assert_eq!(pixels(&h, &evidence, CAPTURES[9]), next_pixels);
+        assert_eq!(frame_bytes(&mut h.state_mut().editor), frame);
+        fixture.assert_preserved();
+
+        assert_eq!(fs::read_dir(&evidence).unwrap().count(), CAPTURES.len());
+        fs::write(
+            evidence.join("receipt.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "test": "draft_acceptance::discard_lighting_draft_actual_gpu_preserves_applied_state",
+                "features": ["room-lighting", "project-create"],
+                "adapter": adapter.name,
+                "adapter_backend": format!("{:?}", adapter.backend),
+                "adapter_device_type": format!("{:?}", adapter.device_type),
+                "software_gpu": adapter.device_type == egui_wgpu::wgpu::DeviceType::Cpu,
+                "adapter_selection": "normal Harness.wgpu()",
+                "input": "actual egui widgets: keyboard input and accessibility activation",
+                "physical_os_input": false,
+                "capture_kind": "production viewport RGBA8 readback",
+                "capture_count": CAPTURES.len(),
+                "captures": CAPTURES.map(|label| format!("{label}.png")),
+                "discard_changed_pixels": 0,
+                "next_apply_changed_pixels": changed,
+                "saved_source_file_count": saved_files.len(),
+                "draft_recovery_with_empty_history": true,
+                "document_host_frame_history_sim_source_files_preserved": true,
+                "later_apply_save_fresh_reopen": true,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+}
