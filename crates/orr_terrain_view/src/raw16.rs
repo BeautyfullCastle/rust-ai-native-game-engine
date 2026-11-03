@@ -7,6 +7,10 @@ use orr_terrain::{Terrain, MAX_ASSET_ID_BYTES, MAX_SIDE};
 use std::fmt;
 
 pub mod input;
+pub mod output;
+
+#[cfg(test)]
+mod export_tests;
 
 pub const MAX_RAW_BYTES: usize = 2 * (MAX_SIDE * MAX_SIDE) as usize;
 const DISPLAY_LIMIT: u64 = 1_000_000 * 65_536;
@@ -162,4 +166,68 @@ pub fn import_raw16(bytes: &[u8], recipe: &Recipe) -> Result<Terrain> {
         .map_err(|e| Error(format!("terrain display admission: {e}")))?
         .ok_or_else(|| Error("RAW16 terrain unexpectedly has no triangles".into()))?;
     Ok(terrain)
+}
+
+/// Export heights only, using the smallest sample that reproduces each height
+/// exactly through `import_raw16`. Holes and other terrain state are not encoded.
+/// No quantization, clamping, metadata substitution, or filesystem work occurs.
+pub fn export_raw16(terrain: &Terrain, recipe: &Recipe) -> Result<Vec<u8>> {
+    let expected = recipe.validate()?;
+    if terrain.asset_id() != recipe.asset_id
+        || terrain.width() != recipe.width
+        || terrain.depth() != recipe.depth
+        || terrain.origin() != recipe.origin
+        || terrain.spacing() != recipe.spacing
+    {
+        return Err(Error(
+            "export recipe metadata must exactly match current terrain".into(),
+        ));
+    }
+    let scale = i128::from(recipe.height_scale.raw());
+    let offset = i128::from(recipe.height_offset.raw());
+    let mut bytes = vec![0; expected];
+    for z in 0..recipe.depth {
+        let target_z = if recipe.flip_z {
+            recipe.depth - 1 - z
+        } else {
+            z
+        };
+        for x in 0..recipe.width {
+            let height = terrain.heights()[(z * recipe.width + x) as usize];
+            admit_coordinate(height)?;
+            let delta = i128::from(height.raw()) - offset;
+            let sample = if scale == 0 {
+                if delta != 0 {
+                    return Err(Error(
+                        "zero-scale export requires every height to equal the offset".into(),
+                    ));
+                }
+                0
+            } else {
+                if delta < 0 || delta > scale {
+                    return Err(Error("height is outside the export recipe range".into()));
+                }
+                let candidate = (delta * 65535 + scale - 1) / scale;
+                if candidate > 65535 || candidate * scale / 65535 != delta {
+                    return Err(Error(
+                        "height has no exact RAW16 sample under this recipe".into(),
+                    ));
+                }
+                candidate as u16
+            };
+            let pair = match recipe.endian {
+                Endian::Little => sample.to_le_bytes(),
+                Endian::Big => sample.to_be_bytes(),
+            };
+            let start = 2 * (target_z * recipe.width + x) as usize;
+            bytes[start..start + 2].copy_from_slice(&pair);
+        }
+    }
+    let imported = import_raw16(&bytes, recipe)?;
+    if imported.heights() != terrain.heights() {
+        return Err(Error(
+            "export/import exact height verification failed".into(),
+        ));
+    }
+    Ok(bytes)
 }

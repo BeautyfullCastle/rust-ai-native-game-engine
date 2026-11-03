@@ -1,0 +1,78 @@
+name: terrain-raw16-export focused Linux CI
+# Publication waits for final product review and exact remote PR/head handoff.
+# Added by the 2026-11-03 request for minimal actual remote CI.
+# Additive to existing Linux-local verification and independent review.
+on:
+  push:
+    branches: [su/terrain-raw16-export-20261103]
+permissions:
+  contents: read
+concurrency:
+  group: terrain-raw16-export-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  terrain-raw16-export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      EVIDENCE: ${{ github.workspace }}/ci-evidence
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Record exact source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$EVIDENCE"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git rev-parse HEAD HEAD^{tree} | tee "$EVIDENCE/source.txt"
+      - name: Install Linux build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q 2>&1 | tee "$EVIDENCE/dependencies.log"
+          sudo apt-get install -y -q build-essential pkg-config libasound2-dev libudev-dev libx11-dev libxkbcommon-dev libwayland-dev 2>&1 | tee -a "$EVIDENCE/dependencies.log"
+          runtime=$(mktemp -d "$RUNNER_TEMP/terrain-raw16-export-xdg.XXXXXXXX")
+          echo "XDG_RUNTIME_DIR=$runtime" >> "$GITHUB_ENV"
+      - name: Select verified Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup override set 1.99.1
+          rustc --version --verbose | tee "$EVIDENCE/rustc.txt"
+          cargo --version | tee "$EVIDENCE/cargo.txt"
+      - name: Run focused feature contracts and actual UI
+        shell: python {0}
+        run: |
+          import json, os, re, runpy
+          from pathlib import Path
+          evidence = Path(os.environ['EVIDENCE'])
+          helpers = runpy.run_path('tools/check-authoring-controls.py')
+          suites = [('converter-output', 'orr_terrain_view', 'raw16', ['--lib', 'raw16'], 17), ('editor-cpu', 'orr_editor', 'terrain-raw16', ['--lib', 'terrain_panel::raw16'], 12)]
+          for label, package, features, args, count in suites:
+              flags = ['--format=pretty', '--color=never', '--test-threads=1']
+              command = ['cargo', 'test', '--locked', '--release', '-p', package, '--features', features] + args + ['--'] + flags
+              output = helpers['run_logged'](command, evidence / (label + '.log'))
+              normalized = output.replace('\r\n', '\n')
+              summaries = helpers['SUMMARY'].findall(normalized)
+              cases = helpers['CASE'].findall(normalized)
+              if len(summaries) != 1 or tuple(map(int, summaries[0][:4])) != (count, 0, 0, 0):
+                  raise RuntimeError(f'{label}: expected exactly {count} passing tests with no skips')
+              if len(cases) != count or len({name for name, status in cases}) != count or any(status != 'ok' for name, status in cases):
+                  raise RuntimeError(f'{label}: missing, duplicate or failing individual cases')
+              if re.findall(r'^running (\d+) tests?$', normalized, re.MULTILINE) != [str(count)]:
+                  raise RuntimeError(f'{label}: inconsistent executed test count')
+          (evidence / 'scope.json').write_text(json.dumps({'head': os.environ['GITHUB_SHA'], 'executed_test_counts': {suite[0]: suite[4] for suite in suites}, 'gpu': False, 'full_workspace': False}, indent=2))
+      - name: Preserve source, logs and captures including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: terrain-raw16-export-${{ github.sha }}-${{ github.run_attempt }}
+          path: ci-evidence
+          if-no-files-found: error
