@@ -87,6 +87,14 @@ struct Recipe {
     cell_height: u32,
     columns: u32,
     rows: u32,
+    #[serde(default)]
+    margin_x: u32,
+    #[serde(default)]
+    margin_y: u32,
+    #[serde(default)]
+    spacing_x: u32,
+    #[serde(default)]
+    spacing_y: u32,
     #[serde(deserialize_with = "bounded_clips")]
     clips: Vec<NamedClip>,
 }
@@ -169,20 +177,38 @@ pub fn import_package(request: &Request) -> Result<Report, String> {
         .checked_mul(recipe.rows)
         .filter(|v| *v as usize <= MAX_REGIONS)
         .ok_or("grid cell count exceeds runtime limit")?;
-    let width = recipe
-        .cell_width
-        .checked_mul(recipe.columns)
-        .ok_or("grid width overflow")?;
-    let height = recipe
-        .cell_height
-        .checked_mul(recipe.rows)
-        .ok_or("grid height overflow")?;
+    // Validate the complete extent before allocating regions or decoding PNG.
+    // A singleton axis has no gap, even when its unused spacing is u32::MAX.
+    let extent = |cell: u32, count: u32, margin: u32, spacing: u32| {
+        cell.checked_mul(count)?
+            .checked_add(margin.checked_mul(2)?)?
+            .checked_add(spacing.checked_mul(count.checked_sub(1)?)?)
+    };
+    let width = extent(
+        recipe.cell_width,
+        recipe.columns,
+        recipe.margin_x,
+        recipe.spacing_x,
+    )
+    .ok_or("grid width overflow")?;
+    let height = extent(
+        recipe.cell_height,
+        recipe.rows,
+        recipe.margin_y,
+        recipe.spacing_y,
+    )
+    .ok_or("grid height overflow")?;
     let rgba_bytes = rgba_size(width, height)?;
     let regions = (0..cells)
         .map(|id| Region {
             id,
-            x: (id % recipe.columns) * recipe.cell_width,
-            y: (id / recipe.columns) * recipe.cell_height,
+            // Each term and sum is bounded by the checked full extent above.
+            x: recipe.margin_x
+                + (id % recipe.columns) * recipe.cell_width
+                + (id % recipe.columns) * recipe.spacing_x,
+            y: recipe.margin_y
+                + (id / recipe.columns) * recipe.cell_height
+                + (id / recipe.columns) * recipe.spacing_y,
             width: recipe.cell_width,
             height: recipe.cell_height,
         })
