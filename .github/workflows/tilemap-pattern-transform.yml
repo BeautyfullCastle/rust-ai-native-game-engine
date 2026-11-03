@@ -1,0 +1,97 @@
+name: tilemap-pattern-transform focused Linux CI
+# Added by the 2026-11-03 request for minimal actual remote CI.
+# Additive to existing Linux-local verification and independent review.
+on:
+  push:
+    branches: [su/tilemap-pattern-transform-20261103]
+permissions:
+  contents: read
+concurrency:
+  group: tilemap-pattern-transform-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  tilemap-pattern-transform:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      LIBGL_ALWAYS_SOFTWARE: '1'
+      EGL_PLATFORM: surfaceless
+      WGPU_BACKEND: gl
+      ORR_REQUIRE_GPU: '1'
+      EVIDENCE: ${{ github.workspace }}/ci-evidence
+      ORR_TILEMAP_PATTERN_TRANSFORM_EVIDENCE: ${{ github.workspace }}/ci-evidence/captures
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Record exact source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$EVIDENCE" "$ORR_TILEMAP_PATTERN_TRANSFORM_EVIDENCE"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git rev-parse HEAD HEAD^{tree} | tee "$EVIDENCE/source.txt"
+      - name: Install Linux build and software rendering dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q 2>&1 | tee "$EVIDENCE/dependencies.log"
+          sudo apt-get install -y -q build-essential pkg-config libasound2-dev libudev-dev libx11-dev libxkbcommon-dev libwayland-dev libegl1-mesa-dev libgl1-mesa-dev mesa-vulkan-drivers 2>&1 | tee -a "$EVIDENCE/dependencies.log"
+          runtime=$(mktemp -d "$RUNNER_TEMP/tilemap-pattern-transform-xdg.XXXXXXXX")
+          echo "XDG_RUNTIME_DIR=$runtime" >> "$GITHUB_ENV"
+      - name: Select verified Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup override set 1.99.1
+          rustc --version --verbose | tee "$EVIDENCE/rustc.txt"
+          cargo --version | tee "$EVIDENCE/cargo.txt"
+      - name: Run focused feature contracts and actual UI
+        shell: python {0}
+        run: |
+          import json, os, re, runpy
+          from pathlib import Path
+          evidence = Path(os.environ['EVIDENCE'])
+          helpers = runpy.run_path('tools/check-authoring-controls.py')
+          suites = [('panel', 'orr_editor', 'tilemap,project-create,arena-project-export', ['--lib', 'tilemap_panel::copy::tests::'], 12), ('actual-ui', 'orr_editor', 'tilemap,project-create,arena-project-export', ['--lib', 'app::tilemap_copy_stamp_tests::actual_pattern_layout_transform_save_reopen_play_literal_cells'], 1)]
+          for label, package, features, args, count in suites:
+              flags = ['--format=pretty', '--color=never', '--test-threads=1']
+              if label == 'actual-ui':
+                  flags += ['--ignored', '--exact', '--show-output']
+              command = ['cargo', 'test', '--locked', '--release', '-p', package, '--features', features] + args + ['--'] + flags
+              output = helpers['run_logged'](command, evidence / (label + '.log'))
+              normalized = output.replace('\r\n', '\n')
+              summaries = helpers['SUMMARY'].findall(normalized)
+              cases = helpers['CASE'].findall(normalized)
+              if len(summaries) != 1 or tuple(map(int, summaries[0][:4])) != (count, 0, 0, 0):
+                  raise RuntimeError(f'{label}: expected exactly {count} passing tests with no skips')
+              if len(cases) != count or len({name for name, status in cases}) != count or any(status != 'ok' for name, status in cases):
+                  raise RuntimeError(f'{label}: missing, duplicate or failing individual cases')
+              if re.findall(r'^running (\d+) tests?$', normalized, re.MULTILINE) != [str(count)]:
+                  raise RuntimeError(f'{label}: inconsistent executed test count')
+          captures = evidence / 'captures'
+          receipt = json.loads((captures / 'receipt.json').read_text())
+          if receipt.get('completed') is not True or len(receipt.get('captures', [])) != 11:
+              raise RuntimeError('Expected completed receipt with 11 registered captures')
+          images = list(captures.glob('*.png'))
+          if len(images) != 21 or len(list(captures.glob('*-app.png'))) != 10:
+              raise RuntimeError('Expected 10 viewport, 10 whole-App diagnostic, 1 runtime PNGs')
+          for path in images:
+              data = path.read_bytes()
+              if len(data) < 33 or data[:8] != b'\x89PNG\r\n\x1a\n' or data[12:16] != b'IHDR':
+                  raise RuntimeError(f'Invalid PNG: {path.name}')
+          if len(list(captures.glob('*.frame'))) != 12 or len(list(captures.glob('*.rgba'))) != 11:
+              raise RuntimeError('Expected 12 Frame and 11 RGBA files')
+          (evidence / 'scope.json').write_text(json.dumps({'head': os.environ['GITHUB_SHA'], 'executed_test_counts': {suite[0]: suite[4] for suite in suites}, 'full_workspace': False}, indent=2))
+      - name: Preserve source, logs and captures including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tilemap-pattern-transform-${{ github.sha }}-${{ github.run_attempt }}
+          path: ci-evidence
+          if-no-files-found: error
