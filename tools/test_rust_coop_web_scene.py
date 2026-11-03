@@ -1,4 +1,4 @@
-"""Legacy Scene parity and Rust wave/health options through trusted WASM/offline delivery.
+"""Legacy Scene parity and Rust wave/health/composition options through trusted WASM/offline delivery.
 
 Requires ORR_PKG_BIN and ORR_COOP_WEB_BUILD_DIR containing the reviewed locally
 built CoopDefense game.wasm, plus Node on PATH. No mock WASM/scene validator.
@@ -299,6 +299,134 @@ console.log(JSON.stringify({passed:true}));
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(json.loads(result.stdout)['passed'])
         self.assertEqual(self.sentinel.read_bytes(), b'keep')
+
+    def test_native_composition_offline_relocated_spawn_order_and_restart(self):
+        import base64
+        scene = self.root / 'composition.scene.yaml'
+        receipt = self.success(True, scene, ['--starting-gold', 250, '--reactor-hp', 1000,
+                                            '--last-wave', 1, '--spawn-interval-ticks', 70,
+                                            '--wave-pairs', '6,2,3,4,5,6,7,8,9,28',
+                                            '--enemy-health-multiplier', 2,
+                                            '--wave-kinds', ';'.join(['3,2,0,1'] * 10),
+                                            '--opening-bosses', '1,0,0,0,0,0,0,0,0,0'])
+        scene_bytes = scene.read_bytes()
+        web = self.root / 'composition-web'
+        shutil.copytree(self.build, web)
+        html = self.root / 'composition.html'
+        result = self.execute([self.binary, 'pack-coop-offline', '--build-dir', str(web),
+                               '--scene', str(scene), '--output', str(html)])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        checked = self.execute([sys.executable, '-B', str(TOOLS / 'check_coop_defense_offline.py'), str(web), str(html)])
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+        self.assertTrue(json.loads(checked.stdout)['passed'])
+        consumer = self.root / 'relocated-consumer'
+        consumer.mkdir()
+        relocated = consumer / 'game.html'
+        html.rename(relocated)
+        # Hide all original temporary producer inputs before extracting only the
+        # delivered HTML. This is Node/WASM consumption, not browser-rendered QA.
+        for source in (scene, self.wasm, web):
+            source.rename(source.with_name(source.name + '.hidden'))
+            self.assertFalse(source.exists())
+        parsed = EmbeddedScripts()
+        text = relocated.read_text()
+        parsed.feed(text)
+        embedded_wasm = base64.b64decode(parsed.scripts['wasm-core'], validate=True)
+        embedded_scene = base64.b64decode(parsed.scripts['authored-scene'], validate=True)
+        self.assertEqual(embedded_wasm, self.wasm_bytes)
+        self.assertEqual(embedded_scene, scene_bytes)
+        self.assertEqual(json.loads(parsed.scripts['authored-scene-receipt']), receipt)
+        self.assertEqual(packer.validate_scene(embedded_scene, embedded_wasm), receipt)
+        for source in (scene, self.wasm, web):
+            self.assertNotIn(str(source), text)
+        (consumer / 'embedded.wasm').write_bytes(embedded_wasm)
+        (consumer / 'embedded.yaml').write_bytes(embedded_scene)
+        script = """
+const fs=require('fs'),assert=require('assert/strict');
+(async()=>{const w=(await WebAssembly.instantiate(fs.readFileSync('embedded.wasm'),{})).instance.exports;
+const scene=fs.readFileSync('embedded.yaml');
+new Uint8Array(w.memory.buffer,w.defense_scene_buffer(),scene.length).set(scene);
+assert.equal(w.defense_init_scene(scene.length),0);
+const read=()=>{const p=w.defense_snapshot();return JSON.parse(new TextDecoder().decode(new Uint8Array(w.memory.buffer,p,w.defense_snapshot_len())))};
+const expected=[4,2,0,1,3,2],traces=[];
+for(let run=0;run<2;run++){
+ const initial=read();assert.equal(initial.tick,0);if(run===0)assert.equal(initial.checksum,process.argv[1]);
+ assert.equal(initial.hp,1000);assert.equal(initial.lastWave,1);assert.deepEqual(initial.gold,[250,250]);
+ const trace=[];
+ for(let tick=1;tick<=630;tick++){
+  w.defense_step(0,0,0,0);const s=read();assert.equal(s.tick,tick);
+  assert.equal(s.presentation.status,'complete');
+  const spawned=s.presentation.events.filter(e=>e.kind==='enemy_spawn');
+  if(spawned.length){
+   const index=trace.length,kind=expected[index];assert.equal(spawned.length,2);
+   assert.deepEqual(spawned.map(e=>e.board),[0,1]);assert.deepEqual(spawned.map(e=>e.value),[kind,kind]);
+   assert.equal(tick,210+70*index);
+   for(const event of spawned){
+    const enemy=s.enemies.find(e=>e[0]===event.enemyId);assert.ok(enemy);
+    assert.equal(enemy[1],event.board);assert.equal(enemy[2],kind);assert.ok(enemy[3]>0);
+   }
+   trace.push(kind);
+  }
+ }
+ assert.deepEqual(trace,expected);traces.push(trace);
+ if(run===0)w.defense_step(5,0,0,1);
+}
+assert.deepEqual(traces[0],traces[1]);
+console.log(JSON.stringify({passed:true}));
+})().catch(e=>{console.error(e);process.exitCode=1});
+"""
+        result = subprocess.run(['node', '-e', script, receipt['initialChecksum']], cwd=consumer,
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(json.loads(result.stdout)['passed'])
+        self.assertEqual(self.sentinel.read_bytes(), b'keep')
+
+    def test_native_composition_optional_counterparts_and_explicit_defaults(self):
+        kinds = ';'.join(','.join(str((wave + ordinal) % 4) for ordinal in range(4))
+                         for wave in range(1, 11))
+        bosses = '0,0,0,0,1,0,0,0,0,1'
+        omitted = self.success(True, self.root / 'omitted-composition.yaml')
+        expected = (legacy.scene_text() + '  CoopDefense::WaveComposition:\n'
+                    + '    regular_kinds: [' + ', '.join('[' + row.replace(',', ', ') + ']'
+                                                       for row in kinds.split(';')) + ']\n'
+                    + '    opening_boss: [' + bosses.replace(',', ', ') + ']\n').encode()
+        for index, extra in enumerate((['--wave-kinds', kinds], ['--opening-bosses', bosses],
+                                       ['--wave-kinds', kinds, '--opening-bosses', bosses])):
+            output = self.root / f'default-composition-{index}.yaml'
+            receipt = self.success(True, output, extra)
+            self.assertEqual(output.read_bytes(), expected)
+            self.assertEqual(receipt['initialChecksum'], omitted['initialChecksum'])
+            self.assertEqual(packer.validate_scene(expected, self.wasm_bytes), receipt)
+
+    def test_native_invalid_composition_never_publishes_or_replaces(self):
+        kinds = ';'.join(['0,1,2,3'] * 10)
+        bosses = '0,1,0,1,0,1,0,1,0,1'
+        cases = []
+        for key, valid in (('--wave-kinds', kinds), ('--opening-bosses', bosses)):
+            invalid = ['', '1', valid + ',0', valid + ';0,1,2,3', '9' * 4097]
+            invalid += [valid.replace('0', bad, 1) for bad in
+                        ['-1', '4', 'true', '1.0', '0x1', '١', '1__0',
+                         '18446744073709551616', '0\nother: 1']]
+            cases += [[key, value] for value in invalid]
+            cases += [[key], [key, valid, key, valid]]
+        cases += [['--wave-kinds', ';'.join(['0,1,2,3'] * 9)],
+                  ['--wave-kinds', ';'.join(['0,1,2'] * 10)],
+                  ['--opening-bosses', '2,1,0,1,0,1,0,1,0,1'],
+                  ['--opening-bosses', '0,1,0,1,0,1,0,1,0']]
+        for extra in cases:
+            for existing in (False, True):
+                with self.subTest(extra=extra, existing=existing):
+                    output = self.root / f'refused-composition-{existing}.yaml'
+                    if existing:
+                        output.write_bytes(b'keep output')
+                    result = self.execute(self.command(True, output, extra))
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    if existing:
+                        self.assertEqual(output.read_bytes(), b'keep output')
+                    else:
+                        self.assertFalse(os.path.lexists(output))
+                    self.assertEqual(self.wasm.read_bytes(), self.wasm_bytes)
+                    self.assertEqual(self.sentinel.read_bytes(), b'keep')
 
     def test_native_invalid_wave_pairs_never_publish(self):
         invalid = ['', '1', '1,2,3,4,5,6,7,8,9', '1,2,3,4,5,6,7,8,9,10,11',

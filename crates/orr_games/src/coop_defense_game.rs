@@ -174,7 +174,7 @@ impl Default for WavePacing {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable, orr_reflect::Reflect)]
 #[reflect(default)]
 pub struct WaveCounts {
-    /// Counts for waves 1 through 10. Kind, HP and ordering remain fixed.
+    /// Counts for waves 1 through 10; composition is authored independently.
     #[reflect(range = "1..=28")]
     pub pair_counts: [u32; 10],
 }
@@ -210,12 +210,45 @@ impl EnemyHealth {
         (1..=4).contains(&self.multiplier)
     }
 }
+/// Four repeating regular enemy families per wave and an optional opening boss pair.
+/// An opening boss replaces ordinal zero; subsequent pairs retain their ordinal.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable, orr_reflect::Reflect)]
+#[reflect(default)]
+pub struct WaveComposition {
+    /// Waves 1 through 10, each with four regular families (normal/fast/armored/horde).
+    #[reflect(range = "0..=3")]
+    pub regular_kinds: [[u32; 4]; 10],
+    /// One flag per wave: 1 replaces its first pair with bosses; 0 uses regular kinds.
+    #[reflect(range = "0..=1")]
+    pub opening_boss: [u32; 10],
+}
+impl Default for WaveComposition {
+    fn default() -> Self {
+        Self {
+            regular_kinds: [
+                [1, 2, 3, 0], [2, 3, 0, 1], [3, 0, 1, 2], [0, 1, 2, 3],
+                [1, 2, 3, 0], [2, 3, 0, 1], [3, 0, 1, 2], [0, 1, 2, 3],
+                [1, 2, 3, 0], [2, 3, 0, 1],
+            ],
+            opening_boss: [0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+        }
+    }
+}
+impl WaveComposition {
+    pub fn is_valid(&self) -> bool {
+        self.regular_kinds.iter().flatten().all(|kind| *kind <= 3)
+            && self.opening_boss.iter().all(|flag| *flag <= 1)
+    }
+}
+// WaveComposition v6 appends a singleton after EnemyHealth v5.
 // EnemyHealth v5 appends a singleton after WaveCounts v4.
 // WaveCounts v4 appends a singleton after WavePacing v3.
 // Campaign v2 was 0x04ee32c4873f6941.
 // Scenario v1 was 0x7b2a3ab98f619dca.
 // This changes this game's frame contract, not the global engine format.
-pub const SCENARIO_BUILD_ID: u64 = orr_sim::frame_build_id(0x5354_4f52_4d00_0005);
+pub const SCENARIO_BUILD_ID: u64 = orr_sim::frame_build_id(0x5354_4f52_4d00_0006);
+pub const WAVE_COMPOSITION_NAME: &str = "CoopDefense::WaveComposition";
 pub const ENEMY_HEALTH_NAME: &str = "CoopDefense::EnemyHealth";
 pub const WAVE_COUNTS_NAME: &str = "CoopDefense::WaveCounts";
 pub const WAVE_PACING_NAME: &str = "CoopDefense::WavePacing";
@@ -228,6 +261,7 @@ pub fn scenario_types() -> orr_reflect::TypeRegistry {
     types.register_singleton::<WavePacing>(WAVE_PACING_NAME);
     types.register_singleton::<WaveCounts>(WAVE_COUNTS_NAME);
     types.register_singleton::<EnemyHealth>(ENEMY_HEALTH_NAME);
+    types.register_singleton::<WaveComposition>(WAVE_COMPOSITION_NAME);
     types
 }
 
@@ -368,6 +402,7 @@ pub struct DefenseConfig {
     pub wave_pacing: WavePacing,
     pub wave_counts: WaveCounts,
     pub enemy_health: EnemyHealth,
+    pub wave_composition: WaveComposition,
 }
 impl Default for DefenseConfig {
     fn default() -> Self {
@@ -378,6 +413,7 @@ impl Default for DefenseConfig {
             wave_pacing: WavePacing::default(),
             wave_counts: WaveCounts::default(),
             enemy_health: EnemyHealth::default(),
+            wave_composition: WaveComposition::default(),
         }
     }
 }
@@ -397,6 +433,7 @@ impl Game for DefenseGame {
         b.register_singleton::<WavePacing>(WAVE_PACING_NAME);
         b.register_singleton::<WaveCounts>(WAVE_COUNTS_NAME);
         b.register_singleton::<EnemyHealth>(ENEMY_HEALTH_NAME);
+        b.register_singleton::<WaveComposition>(WAVE_COMPOSITION_NAME);
     }
     fn setup(f: &mut Frame, c: &DefenseConfig) {
         Self::setup_scenario(f, c, c.scenario);
@@ -414,11 +451,13 @@ impl DefenseGame {
         );
         assert!(c.wave_counts.is_valid(), "invalid wave counts config");
         assert!(c.enemy_health.is_valid(), "invalid enemy health config");
+        assert!(c.wave_composition.is_valid(), "invalid wave composition config");
         f.set_singleton(scenario);
         f.set_singleton(c.campaign);
         f.set_singleton(c.wave_pacing);
         f.set_singleton(c.wave_counts);
         f.set_singleton(c.enemy_health);
+        f.set_singleton(c.wave_composition);
         f.set_singleton(initial_run(c.seed, scenario));
         f.set_singleton(FrameRng::new(c.seed as u64));
         for board in 0..2 {
@@ -717,6 +756,7 @@ impl System<DefenseGame> for DefenseSystem {
                 *ctx.frame.singleton::<WavePacing>(),
                 *ctx.frame.singleton::<WaveCounts>(),
                 *ctx.frame.singleton::<EnemyHealth>(),
+                *ctx.frame.singleton::<WaveComposition>(),
             );
             move_enemies(&mut r, &mut e, &mut events);
             advance_projectiles(&mut r, &mut e, &mut p, &mut events);
@@ -794,6 +834,7 @@ fn spawn_wave(
     pacing: WavePacing,
     counts: WaveCounts,
     health: EnemyHealth,
+    composition: WaveComposition,
 ) {
     // Keep the historical wave-tick alignment: the first multiple at/after 180.
     // Admission and typed setup reject zero/out-of-range intervals.
@@ -808,10 +849,10 @@ fn spawn_wave(
             return;
         };
         let ordinal = r.spawned / 2;
-        let kind = if (r.wave == 5 || r.wave == 10) && ordinal == 0 {
+        let kind = if composition.opening_boss[(r.wave - 1) as usize] != 0 && ordinal == 0 {
             BOSS
         } else {
-            (ordinal + r.wave) % 4
+            composition.regular_kinds[(r.wave - 1) as usize][(ordinal % 4) as usize]
         };
         let base = 24 + r.wave * 15;
         let hp = match kind {
@@ -1008,3 +1049,6 @@ mod wave_counts_tests;
 
 #[cfg(test)]
 mod enemy_health_tests;
+
+#[cfg(test)]
+mod wave_composition_tests;

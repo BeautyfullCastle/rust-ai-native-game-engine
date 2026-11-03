@@ -87,6 +87,7 @@ fn all_wave_families_lanes_and_multipliers_preserve_spawn_order_and_cadence() {
                         pair_counts: [6; 10],
                     },
                     EnemyHealth { multiplier },
+                    WaveComposition::default(),
                 );
                 assert_eq!(
                     r.spawned - before,
@@ -133,6 +134,7 @@ fn scaled_health_changes_actual_hits_and_deaths_and_restart_retains_it() {
             WavePacing::default(),
             WaveCounts::default(),
             EnemyHealth { multiplier },
+            WaveComposition::default(),
         );
         let (x, y) = enemy_position(0, 0);
         let mut shots = [DefenseProjectile {
@@ -191,7 +193,7 @@ fn old_v4_frame_is_rejected_before_simulation() {
         Frame::from_bytes(Simulation::<DefenseGame>::build_registry(), &old.to_bytes()),
         Err(orr_ecs::FrameDecodeError::SchemaCount {
             kind: "singleton",
-            expected: 7,
+            expected: 8,
             found: 6
         })
     ));

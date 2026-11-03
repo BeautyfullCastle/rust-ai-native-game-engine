@@ -19,8 +19,12 @@ fn main() {
         [arg] if arg == "--health" => include_str!(
             "../../../examples/static-game-starter/scenes/stormglass-health.scene.yaml"
         ),
-        _ => panic!("usage: coop_defense_campaign_trace [--training|--counts|--health]"),
+        [arg] if arg == "--composition" => include_str!(
+            "../../../examples/static-game-starter/scenes/stormglass-composition.scene.yaml"
+        ),
+        _ => panic!("usage: coop_defense_campaign_trace [--training|--counts|--health|--composition]"),
     };
+    let composition_trace = args.first().is_some_and(|arg| arg == "--composition");
     let health_trace = args.first().is_some_and(|arg| arg == "--health");
     let mut event_rows = String::new();
     let config = parse_config(source).unwrap();
@@ -101,14 +105,23 @@ fn main() {
                     _ => base_hp,
                 };
                 assert_eq!(event.payload.board, spawned[victories][wave] % 2);
+                let (expected_kind, expected_hp) = if composition_trace {
+                    // Literal oracle, not calculated from the authored config or spawn code.
+                    const KINDS: [&[u32]; 3] = [&[4, 0, 2, 1, 3], &[2, 3, 1, 0, 2, 3], &[4, 2, 3, 1, 0, 2, 3]];
+                    const HP: [&[u32]; 3] = [&[1092, 78, 156, 78, 52], &[216, 72, 108, 108, 216, 72], &[1932, 276, 92, 138, 138, 276, 92]];
+                    (KINDS[wave][ordinal as usize], HP[wave][ordinal as usize])
+                } else {
+                    (expected_kind, expected_hp * config.enemy_health.multiplier)
+                };
                 assert_eq!(event.payload.value, expected_kind);
-                assert_eq!(event.payload.hp_after, expected_hp * config.enemy_health.multiplier);
+                assert_eq!(event.payload.hp_after, expected_hp);
                 spawned[victories][wave] += 1;
             }
         }
         assert_eq!(*sim.frame().singleton::<WavePacing>(), config.wave_pacing);
         assert_eq!(*sim.frame().singleton::<WaveCounts>(), config.wave_counts);
         assert_eq!(*sim.frame().singleton::<EnemyHealth>(), config.enemy_health);
+        assert_eq!(*sim.frame().singleton::<WaveComposition>(), config.wave_composition);
         assert_ne!(state.phase, LOST);
         assert!(
             !events
@@ -129,7 +142,7 @@ fn main() {
             state.generation
         )
         .unwrap();
-        if health_trace {
+        if health_trace || composition_trace {
             event_rows.push_str(comma);
             event_rows.push('[');
             for (index, event) in events.iter().enumerate() {
@@ -158,7 +171,10 @@ fn main() {
         }
     }
     output.push(']');
-    if health_trace {
+    if composition_trace {
+        output.push_str(",\"compositionOracle\":true");
+    }
+    if health_trace || composition_trace {
         write!(output, ",\"eventRows\":[{event_rows}]").unwrap();
     }
     output.push('}');

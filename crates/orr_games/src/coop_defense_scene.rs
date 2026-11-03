@@ -1,8 +1,9 @@
 //! Optional strict source admission shared by ERP and the native player.
 //! No editor, transport, filesystem or window dependency belongs here.
 use crate::coop_defense_game::{
-    scenario_types, EnemyHealth, ENEMY_HEALTH_NAME, Campaign, DefenseConfig, DefenseGame, Scenario, WaveCounts, WavePacing,
-    CAMPAIGN_NAME, SCENARIO_NAME, WAVE_COUNTS_NAME, WAVE_PACING_NAME,
+    scenario_types, Campaign, DefenseConfig, DefenseGame, EnemyHealth, Scenario,
+    WaveComposition, WaveCounts, WavePacing, CAMPAIGN_NAME, ENEMY_HEALTH_NAME,
+    SCENARIO_NAME, WAVE_COMPOSITION_NAME, WAVE_COUNTS_NAME, WAVE_PACING_NAME,
 };
 use orr_ecs::Frame;
 use orr_reflect::Scene;
@@ -30,11 +31,12 @@ pub fn config_from_baked(scene: &Scene, frame: &Frame) -> Result<DefenseConfig, 
                     && name != WAVE_PACING_NAME
                     && name != WAVE_COUNTS_NAME
                     && name != ENEMY_HEALTH_NAME
+                    && name != WAVE_COMPOSITION_NAME
             })
         || scene.has_prefab_links()
     {
         return Err(
-            "CoopDefense accepts only Scenario, Campaign, WavePacing, WaveCounts and EnemyHealth, no entities or prefabs".into(),
+            "CoopDefense accepts only Scenario, Campaign, WavePacing, WaveCounts, EnemyHealth and WaveComposition, no entities or prefabs".into(),
         );
     }
     // Bake leaves absent singletons zeroed. Presence must be checked per type:
@@ -56,6 +58,14 @@ pub fn config_from_baked(scene: &Scene, frame: &Frame) -> Result<DefenseConfig, 
     if !enemy_health.is_valid() {
         return Err("EnemyHealth.multiplier must be in 1..=4".into());
     }
+    let wave_composition = if present(WAVE_COMPOSITION_NAME) {
+        *frame.singleton::<WaveComposition>()
+    } else {
+        WaveComposition::default()
+    };
+    if !wave_composition.is_valid() {
+        return Err("WaveComposition requires ten four-kind rows in 0..=3 and ten opening_boss flags in 0..=1".into());
+    }
     Ok(DefenseConfig {
         scenario: if present(SCENARIO_NAME) {
             *frame.singleton::<Scenario>()
@@ -74,6 +84,7 @@ pub fn config_from_baked(scene: &Scene, frame: &Frame) -> Result<DefenseConfig, 
         },
         wave_counts,
         enemy_health,
+        wave_composition,
         ..DefenseConfig::default()
     })
 }
