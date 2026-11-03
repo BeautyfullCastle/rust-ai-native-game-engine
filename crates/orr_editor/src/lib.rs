@@ -286,3 +286,6 @@ pub mod room_character_panel;
 mod terrain_surface;
 #[cfg(feature = "terrain-surface")]
 mod terrain_surface_panel;
+
+#[cfg(all(feature = "mesh-prop-delivery", target_os = "linux", target_arch = "x86_64"))]
+pub mod mesh_prop_delivery;
