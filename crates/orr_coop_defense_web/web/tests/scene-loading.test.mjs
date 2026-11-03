@@ -5,6 +5,7 @@ import vm from 'node:vm';
 import { createHash, webcrypto } from 'node:crypto';
 import { CombatPresentation } from '../combat-presentation.mjs';
 import { StrictEventAdapter, applyStrictSnapshot } from '../strict-event-adapter.mjs';
+import { loadAuthoredAudio } from '../audio/coop-defense-audio.mjs';
 const binary=process.env.ORR_DEFENSE_WASM;
 const campaignTracePath=process.env.ORR_DEFENSE_CAMPAIGN_TRACE;
 const authored='schema: orr.scene/1\nentities: {}\nsingletons: {CoopDefense::Scenario: {starting_gold: 250, reactor_hp: 75}}\n';
@@ -19,11 +20,12 @@ test('actual WASM authored Scene, native trace parity, maxHp and restart',{skip:
  let s=snapshot(w);assert.equal(s.hp,75);assert.equal(s.maxHp,75);assert.equal(s.lastWave,10);assert.deepEqual(s.gold,[250,250]);assert.deepEqual(s.presentation.events,[]);
  for(const [action,sequence]of [[1,1],[3,2],[5,3],[1,4]])w.defense_step(action,0,0,sequence);
  // Historical Scenario-v1: ccfc379122860c2e; Campaign-v2: 7400c35f6c84178e.
- // WavePacing-v3 native Rust independently reproduced this same four-action trace.
- s=snapshot(w);assert.equal(s.checksum,'c62add69c518309c','native Rust independently consumed same trace (WavePacing singleton schema)');assert.equal(s.hp,75);assert.equal(s.maxHp,75);assert.equal(s.lastWave,10);assert.equal(s.gold[0],225);
+ // WavePacing-v3 four-action checksum: c62add69c518309c; 1200 ticks: 41a0cf5eb1436a07.
+ // WaveCounts-v4 native Rust independently reproduced both updated fixtures.
+ s=snapshot(w);assert.equal(s.checksum,'f5ed72e9e27c2e15','native Rust independently consumed same trace (WaveCounts singleton schema)');assert.equal(s.hp,75);assert.equal(s.maxHp,75);assert.equal(s.lastWave,10);assert.equal(s.gold[0],225);
  const source=s.presentation.source;assert.equal(load(w,encode(authored)),0);assert.notEqual(snapshot(w).presentation.source,source);
  w.defense_init(0x0c002026);const canonical=snapshot(w).checksum;assert.equal(load(w,encode('schema: orr.scene/1\nentities: {}\n')),0);assert.equal(snapshot(w).checksum,canonical);
- w.defense_init(71825);for(let t=0,seq=0;t<1200;t++)w.defense_step(t%30===0?1:0,0,0,t%30===0?++seq:0);assert.equal(snapshot(w).checksum,'41a0cf5eb1436a07','native WavePacing schema parity fixture');
+ w.defense_init(71825);for(let t=0,seq=0;t<1200;t++)w.defense_step(t%30===0?1:0,0,0,t%30===0?++seq:0);assert.equal(snapshot(w).checksum,'fe7ec338439dce34','native WaveCounts schema parity fixture');
 });
 test('actual WASM Campaign-only source defaults Scenario, displays max and survives restart',{skip:!binary},async()=>{
  const w=await core();w.defense_init(71825);assert.equal(snapshot(w).lastWave,10);
@@ -49,8 +51,10 @@ test('actual WASM rejects before replacing checksum/source/events',{skip:!binary
 });
 async function dom(initialize=true){
  const w=await core(),nodes=new Map();const ctx=new Proxy({},{get:(o,p)=>o[p]||(()=>{})});
- const get=id=>{if(['authored-scene','authored-scene-receipt','wasm-core'].includes(id)&&!nodes.has(id))return null;if(!nodes.has(id))nodes.set(id,{style:{},span:{},getContext:()=>ctx,querySelector(){return this.span;},addEventListener(){},setAttribute(){},hasPointerCapture:()=>false});return nodes.get(id);};
- const sandbox=vm.createContext({CombatPresentation,StrictEventAdapter,applyStrictSnapshot,document:{getElementById:get,addEventListener(){}},addEventListener(){},TextDecoder,Uint8Array,HTMLButtonElement:class{},core:w,console:{error(){}},WebAssembly,crypto:webcrypto,atob,btoa,window:{},requestAnimationFrame(){}});
+ const get=id=>{if(['authored-scene','authored-scene-receipt','wasm-core','authored-audio-bank'].includes(id)&&!nodes.has(id))return null;if(!nodes.has(id))nodes.set(id,{style:{},span:{},getContext:()=>ctx,querySelector(){return this.span;},addEventListener(){},setAttribute(){},hasPointerCapture:()=>false});return nodes.get(id);};
+ const sandbox=vm.createContext({CombatPresentation,StrictEventAdapter,applyStrictSnapshot,loadAuthoredAudio,TextEncoder,document:{getElementById:get,addEventListener(){}},addEventListener(){},TextDecoder,Uint8Array,HTMLButtonElement:class{},core:w,console:{error(){}},WebAssembly,crypto:webcrypto,atob,btoa,window:{},requestAnimationFrame(){}});
+ // Evaluate the actual module in this realm so injected crypto faults remain real.
+ vm.runInContext(fs.readFileSync(new URL('../run-save.mjs',import.meta.url),'utf8').replace(/^export /mg,''),sandbox);
  vm.runInContext(fs.readFileSync(new URL('../game.js',import.meta.url),'utf8').split('try{let bytes;')[0].replace(/^import .*$/mg,''),sandbox);
  const run=s=>vm.runInContext(s,sandbox);run('wasm=core;dimensions();');if(initialize)run('start();');
  return {w,get,run,sandbox,nodes};
@@ -62,7 +66,7 @@ test('mock DOM + actual WASM success clears pending input and ready/restart uses
  run('start()');assert.equal(snapshot(w).hp,75);assert.equal(snapshot(w).gold[0],250);
 });
 test('mock DOM HUD and intro report the Campaign maximum, not a fixed ten waves',{skip:!binary},async()=>{
- const {w,get,run}=await dom(false);assert.equal(load(w,encode(campaignOnly)),0);run('state=snapshot();update();');
+ const {w,get,run,sandbox}=await dom(false);sandbox.file=file(campaignOnly);await run('loadSceneFile(file)');
  assert.equal(get('wave').textContent,'01 / 3');assert.equal(get('campaign-intro').textContent,'최대 3 웨이브, 숲을 함께 지켜요.');
  run('start()');assert.equal(snapshot(w).lastWave,3);assert.equal(get('wave').textContent,'01 / 3');
 });

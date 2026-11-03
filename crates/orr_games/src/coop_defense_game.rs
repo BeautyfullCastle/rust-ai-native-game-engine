@@ -168,10 +168,35 @@ impl Default for WavePacing {
         }
     }
 }
-// WavePacing v3 appends a singleton; Campaign v2 was 0x04ee32c4873f6941.
+/// Authored pair counts for all ten waves, one enemy per lane in each pair.
+/// Every entry is validated even when Campaign ends before that wave.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable, orr_reflect::Reflect)]
+#[reflect(default)]
+pub struct WaveCounts {
+    /// Counts for waves 1 through 10. Kind, HP and ordering remain fixed.
+    #[reflect(range = "1..=28")]
+    pub pair_counts: [u32; 10],
+}
+impl Default for WaveCounts {
+    fn default() -> Self {
+        Self {
+            pair_counts: [10, 12, 14, 16, 18, 20, 22, 24, 26, 28],
+        }
+    }
+}
+impl WaveCounts {
+    /// Validate the whole campaign, including entries beyond its authored end.
+    pub fn is_valid(&self) -> bool {
+        self.pair_counts.iter().all(|count| (1..=28).contains(count))
+    }
+}
+// WaveCounts v4 appends a singleton after WavePacing v3.
+// Campaign v2 was 0x04ee32c4873f6941.
 // Scenario v1 was 0x7b2a3ab98f619dca.
 // This changes this game's frame contract, not the global engine format.
-pub const SCENARIO_BUILD_ID: u64 = orr_sim::frame_build_id(0x5354_4f52_4d00_0003);
+pub const SCENARIO_BUILD_ID: u64 = orr_sim::frame_build_id(0x5354_4f52_4d00_0004);
+pub const WAVE_COUNTS_NAME: &str = "CoopDefense::WaveCounts";
 pub const WAVE_PACING_NAME: &str = "CoopDefense::WavePacing";
 pub const CAMPAIGN_NAME: &str = "CoopDefense::Campaign";
 pub const SCENARIO_NAME: &str = "CoopDefense::Scenario";
@@ -180,6 +205,7 @@ pub fn scenario_types() -> orr_reflect::TypeRegistry {
     types.register_singleton::<Scenario>(SCENARIO_NAME);
     types.register_singleton::<Campaign>(CAMPAIGN_NAME);
     types.register_singleton::<WavePacing>(WAVE_PACING_NAME);
+    types.register_singleton::<WaveCounts>(WAVE_COUNTS_NAME);
     types
 }
 
@@ -318,6 +344,7 @@ pub struct DefenseConfig {
     pub scenario: Scenario,
     pub campaign: Campaign,
     pub wave_pacing: WavePacing,
+    pub wave_counts: WaveCounts,
 }
 impl Default for DefenseConfig {
     fn default() -> Self {
@@ -326,6 +353,7 @@ impl Default for DefenseConfig {
             scenario: Scenario::default(),
             campaign: Campaign::default(),
             wave_pacing: WavePacing::default(),
+            wave_counts: WaveCounts::default(),
         }
     }
 }
@@ -343,6 +371,7 @@ impl Game for DefenseGame {
         b.register_singleton::<Scenario>(SCENARIO_NAME);
         b.register_singleton::<Campaign>(CAMPAIGN_NAME);
         b.register_singleton::<WavePacing>(WAVE_PACING_NAME);
+        b.register_singleton::<WaveCounts>(WAVE_COUNTS_NAME);
     }
     fn setup(f: &mut Frame, c: &DefenseConfig) {
         Self::setup_scenario(f, c, c.scenario);
@@ -358,9 +387,11 @@ impl DefenseGame {
             (35..=350).contains(&c.wave_pacing.spawn_interval_ticks),
             "invalid wave pacing config"
         );
+        assert!(c.wave_counts.is_valid(), "invalid wave counts config");
         f.set_singleton(scenario);
         f.set_singleton(c.campaign);
         f.set_singleton(c.wave_pacing);
+        f.set_singleton(c.wave_counts);
         f.set_singleton(initial_run(c.seed, scenario));
         f.set_singleton(FrameRng::new(c.seed as u64));
         for board in 0..2 {
@@ -657,6 +688,7 @@ impl System<DefenseGame> for DefenseSystem {
                 &mut e,
                 &mut events,
                 *ctx.frame.singleton::<WavePacing>(),
+                *ctx.frame.singleton::<WaveCounts>(),
             );
             move_enemies(&mut r, &mut e, &mut events);
             advance_projectiles(&mut r, &mut e, &mut p, &mut events);
@@ -664,7 +696,9 @@ impl System<DefenseGame> for DefenseSystem {
             if r.reactor_hp == 0 {
                 r.phase = LOST;
                 events.push(DefenseEvent::new(DefenseEventKind::Finish, &r, 0, LOST));
-            } else if r.spawned >= wave_count(r.wave) && e.iter().all(|x| x.active == 0) {
+            } else if r.spawned >= wave_count(r.wave, *ctx.frame.singleton::<WaveCounts>())
+                && e.iter().all(|x| x.active == 0)
+            {
                 if r.wave == ctx.frame.singleton::<Campaign>().last_wave {
                     r.phase = WON;
                     events.push(DefenseEvent::new(DefenseEventKind::Finish, &r, 0, WON));
@@ -716,20 +750,21 @@ impl System<DefenseGame> for DefenseSystem {
         }
     }
 }
-fn wave_count(wave: u32) -> u32 {
-    (8 + wave * 2) * 2
+fn wave_count(wave: u32, counts: WaveCounts) -> u32 {
+    counts.pair_counts[(wave - 1) as usize] * 2
 }
 fn spawn_wave(
     r: &mut DefenseRun,
     e: &mut [DefenseEnemy],
     events: &mut Vec<DefenseEvent>,
     pacing: WavePacing,
+    counts: WaveCounts,
 ) {
     // Keep the historical wave-tick alignment: the first multiple at/after 180.
     // Admission and typed setup reject zero/out-of-range intervals.
     if r.wave_tick < 180
         || r.wave_tick % pacing.spawn_interval_ticks != 0
-        || r.spawned >= wave_count(r.wave)
+        || r.spawned >= wave_count(r.wave, counts)
     {
         return;
     }
@@ -932,3 +967,5 @@ fn fire(
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod wave_counts_tests;

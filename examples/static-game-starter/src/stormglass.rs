@@ -340,6 +340,8 @@ impl EmbeddedGameplayView for StormglassView {
         );
         // Source uses an inner orange outline, distinct even when both picks
         // name the same cell. The existing outer teal outline remains target.
+        // Pixel-only outline sizing; these values never feed authoritative state.
+        #[allow(clippy::float_arithmetic)]
         if let Some(cell) = self.selected_source {
             ui.painter().with_clip_rect(clip).rect_stroke(
                 layout.cell(0, cell).shrink(3.0 * layout.scale),
@@ -1165,6 +1167,143 @@ mod tests {
         };
         assert!(error.contains("no entities or prefabs"), "{error}");
         assert_eq!(std::fs::read_to_string(&scene_path).unwrap(), nonempty);
+        assert_eq!(std::fs::read(&manifest_path).unwrap(), manifest);
+    }
+
+    #[test]
+    fn counts_registered_editor_save_reopen_and_typed_play_match_canonical_frames() {
+        use orr_editor::{registered_project::PreparedRegisteredProject, Editor};
+        use orr_games::coop_defense_game::{WaveCounts, WavePacing, SCENARIO_BUILD_ID};
+        use orr_games::coop_defense_scene::parse_config;
+        use orr_sim::{Simulation, TickInputs};
+        let fixture = include_str!("../scenes/stormglass-counts.scene.yaml");
+        let config = parse_config(fixture).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let scene_path = directory.path().join("stormglass.scene.yaml");
+        let manifest_path = directory.path().join("project.json");
+        let manifest = include_bytes!("../scenes/stormglass.project.json");
+        std::fs::write(&manifest_path, manifest).unwrap();
+        std::fs::write(&scene_path, coop_defense::INITIAL_SCENE).unwrap();
+        let prepared = PreparedRegisteredProject::open(&manifest_path, registry()).unwrap();
+        let mut editor = Editor::open_registered_project(prepared).unwrap();
+        editor.sync();
+        for (name, path, value) in [
+            (
+                "CoopDefense::Scenario",
+                "",
+                json!({"starting_gold":1000,"reactor_hp":1000}),
+            ),
+            ("CoopDefense::Campaign", "last_wave", json!(3)),
+            ("CoopDefense::WavePacing", "spawn_interval_ticks", json!(70)),
+            (
+                "CoopDefense::WaveCounts",
+                "pair_counts",
+                json!(config.wave_counts.pair_counts),
+            ),
+        ] {
+            editor
+                .host_call(
+                    "world.singleton.patch",
+                    json!({"name":name,"path":path,"value":value}),
+                )
+                .unwrap();
+        }
+        let authored = editor.host_call("scene.save", J::Null).unwrap();
+        assert_eq!(
+            parse_config(authored["text"].as_str().unwrap()).unwrap(),
+            config
+        );
+        assert!(editor.undo());
+        let undone = editor.host_call("scene.save", J::Null).unwrap();
+        assert_eq!(
+            parse_config(undone["text"].as_str().unwrap())
+                .unwrap()
+                .wave_counts,
+            WaveCounts::default()
+        );
+        assert!(editor.redo());
+        assert_eq!(editor.host_call("scene.save", J::Null).unwrap(), authored);
+        // Exercise the actual Editor Save path, not a hand-written fixture copy.
+        assert!(editor.save());
+        let saved_source = std::fs::read_to_string(&scene_path).unwrap();
+        assert_eq!(parse_config(&saved_source).unwrap(), config);
+        drop(editor);
+
+        let prepared = PreparedRegisteredProject::open(&manifest_path, registry()).unwrap();
+        let mut editor = Editor::open_registered_project(prepared).unwrap();
+        editor.sync();
+        let saved = editor.host_call("scene.save", J::Null).unwrap();
+        let history = editor.host_call("history.list", J::Null).unwrap();
+        let mut expected = Simulation::<DefenseGame>::with_build_id(
+            config,
+            TICK_RATE,
+            u64::from(config.seed),
+            SCENARIO_BUILD_ID,
+        );
+        let start = editor.host_call("sim.start", json!({})).unwrap();
+        assert_eq!(start["head_tick"], 0);
+        assert_eq!(start["checksum"], format!("0x{:016x}", expected.checksum()));
+        let grant = editor
+            .host_call("sim.input_claim", json!({"player":0,"replace_held":true}))
+            .unwrap();
+        // CPU-only registered Editor + typed ERP input. No window/GPU claim.
+        for tick in 0..460u32 {
+            let value = if tick == 450 {
+                DefenseInput {
+                    action: RESTART,
+                    sequence: tick + 1,
+                    ..Default::default()
+                }
+            } else if tick % 30 == 0 {
+                orr_games::coop_defense_game::strategy_input(
+                    &orr_games::coop_defense_game::run(expected.frame()),
+                    &orr_games::coop_defense_game::units(expected.frame()),
+                    0,
+                    tick + 1,
+                )
+            } else {
+                DefenseInput::default()
+            };
+            editor
+                .host_call(
+                    "sim.input_value",
+                    json!({
+                        "player":0, "grant":grant["grant"], "generation":grant["generation"],
+                        "sequence":(u64::from(tick) + 1).to_string(),
+                        "value":{"action":value.action,"source_cell":value.source_cell,
+                            "target_cell":value.target_cell,"sequence":value.sequence}
+                    }),
+                )
+                .unwrap();
+            let mut inputs = TickInputs::new(expected.tick(), 1);
+            inputs.set_input(PlayerSlot(0), value);
+            expected.step(&inputs);
+            let stepped = editor.host_call("sim.step", json!({"n":1})).unwrap();
+            assert_eq!(
+                stepped["checksum"],
+                format!("0x{:016x}", expected.checksum()),
+                "tick {tick}"
+            );
+            if tick == 450 {
+                let run = expected.frame().singleton::<DefenseRun>();
+                assert_eq!(run.generation, 1);
+                assert_eq!(run.gold, [1000; 2]);
+                assert_eq!(run.reactor_hp, 1000);
+            }
+        }
+        assert_eq!(
+            *expected.frame().singleton::<WaveCounts>(),
+            config.wave_counts
+        );
+        assert_eq!(
+            *expected.frame().singleton::<WavePacing>(),
+            config.wave_pacing
+        );
+        assert_eq!(*expected.frame().singleton::<Campaign>(), config.campaign);
+        editor.host_call("sim.stop", json!({})).unwrap();
+        assert_eq!(editor.host_call("scene.save", J::Null).unwrap(), saved);
+        assert_eq!(editor.host_call("history.list", J::Null).unwrap(), history);
+        assert_eq!(std::fs::read_to_string(&scene_path).unwrap(), saved_source);
         assert_eq!(std::fs::read(&manifest_path).unwrap(), manifest);
     }
 

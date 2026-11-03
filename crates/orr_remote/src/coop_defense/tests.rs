@@ -2,7 +2,8 @@ use super::*;
 use crate::{Auth, Caps, ErpClient};
 use orr_edit::{Op, Origin, PlayController};
 use orr_games::coop_defense_game::{
-    Campaign, DefenseInput, DefenseRun, Scenario, WavePacing, CAMPAIGN_NAME, SCENARIO_NAME, WAVE_PACING_NAME, SUMMON,
+    Campaign, DefenseInput, DefenseRun, Scenario, WaveCounts, WavePacing, CAMPAIGN_NAME, SCENARIO_NAME,
+    SUMMON, WAVE_COUNTS_NAME, WAVE_PACING_NAME,
 };
 use orr_session::{ControlOp, LocalInputSource, Session, SessionConfig};
 use orr_sim::PlayerSlot;
@@ -620,7 +621,7 @@ fn first_singleton_field_edit_uses_safe_defaults_and_bounds() {
 #[test]
 fn nonzero_replay_contract_rejects_previous_host_identity() {
     use orr_session::{replay_verify_checked, ReplayError, ReplayHeader, ReplayWriter};
-    let old_identities = [crate::default_build_id(GAME), 0x7b2a_3ab9_8f61_9dca, 0x04ee_32c4_873f_6941];
+    let old_identities = [crate::default_build_id(GAME), 0x7b2a_3ab9_8f61_9dca, 0x04ee_32c4_873f_6941, 0xb2a3_336f_2969_7b0b];
     for old in old_identities {
         let bytes = ReplayWriter::<DefenseGame>::new(ReplayHeader {
             format_version: 3,
@@ -770,4 +771,298 @@ fn pacing_erp_schema_atomic_edits_history_reopen_and_play() {
     c.call("sim.stop", json!({})).unwrap();
     assert_eq!(c.call("scene.save", json!({})).unwrap(), edited);
     assert_eq!(c.call("history.list", json!({})).unwrap(), history);
+}
+
+
+const COUNTS_SCENE: &str =
+    include_str!("../../../../examples/static-game-starter/scenes/stormglass-counts.scene.yaml");
+
+#[test]
+fn counts_erp_array_edits_undo_redo_save_reopen_and_consumed_play() {
+    use orr_games::coop_defense_scene::parse_config;
+    let mut cfg = ServerConfig::new(Auth::DevNoAuth);
+    cfg.listen = false;
+    let host = spawn_host(INITIAL_SCENE.into(), None, cfg, None).unwrap();
+    let mut c = client(&host, Caps::ALL);
+    let schema = c
+        .call("registry.schema", json!({"type":WAVE_COUNTS_NAME}))
+        .unwrap()["schema"]
+        .clone();
+    let array = &schema["properties"]["pair_counts"];
+    assert_eq!(array["type"], "array");
+    assert_eq!(array["minItems"], 10);
+    assert_eq!(array["maxItems"], 10);
+    assert_eq!(array["items"]["minimum"], 1);
+    assert_eq!(array["items"]["maximum"], 28);
+    assert_eq!(schema["required"], json!(["pair_counts"]));
+    let defaults = document(INITIAL_SCENE).unwrap();
+    assert_eq!(
+        defaults.frame().singleton::<WaveCounts>().pair_counts,
+        [10, 12, 14, 16, 18, 20, 22, 24, 26, 28]
+    );
+    for (name, path, value) in [
+        (
+            SCENARIO_NAME,
+            "",
+            json!({"starting_gold":1000,"reactor_hp":1000}),
+        ),
+        (CAMPAIGN_NAME, "last_wave", json!(3)),
+        (WAVE_PACING_NAME, "spawn_interval_ticks", json!(70)),
+    ] {
+        c.call(
+            "world.singleton.patch",
+            json!({"name":name,"path":path,"value":value}),
+        )
+        .unwrap();
+    }
+    let original = c.call("scene.save", json!({})).unwrap();
+    let pair_counts = parse_config(COUNTS_SCENE).unwrap().wave_counts.pair_counts;
+    let patch = |path: &str, value: J| json!({"name":WAVE_COUNTS_NAME,"path":path,"value":value});
+    // A first indexed edit materializes the singleton with safe defaults.
+    c.call("world.singleton.patch", patch("pair_counts[0]", json!(1)))
+        .unwrap();
+    let first = c.call("scene.save", json!({})).unwrap();
+    assert_eq!(
+        document(first["text"].as_str().unwrap())
+            .unwrap()
+            .frame()
+            .singleton::<WaveCounts>()
+            .pair_counts,
+        [1, 12, 14, 16, 18, 20, 22, 24, 26, 28]
+    );
+    c.call("history.undo", json!({})).unwrap();
+    assert_eq!(c.call("scene.save", json!({})).unwrap(), original);
+    c.call("history.redo", json!({})).unwrap();
+    assert_eq!(c.call("scene.save", json!({})).unwrap(), first);
+    c.call(
+        "world.singleton.patch",
+        patch("", json!({"pair_counts":pair_counts})),
+    )
+    .unwrap();
+    let edited = c.call("scene.save", json!({})).unwrap();
+    let history = c.call("history.list", json!({})).unwrap();
+    c.call("history.undo", json!({})).unwrap();
+    assert_eq!(c.call("scene.save", json!({})).unwrap(), first);
+    c.call("history.redo", json!({})).unwrap();
+    assert_eq!(c.call("scene.save", json!({})).unwrap(), edited);
+    assert_eq!(c.call("history.list", json!({})).unwrap(), history);
+
+    let source = edited["text"].as_str().unwrap();
+    let config = parse_config(source).unwrap();
+    assert_eq!(config, parse_config(COUNTS_SCENE).unwrap());
+    let reopened = document(source).unwrap();
+    assert_eq!(
+        *reopened.frame().singleton::<WaveCounts>(),
+        config.wave_counts
+    );
+    let started = c.call("sim.start", json!({})).unwrap();
+    assert_eq!(started["checksum"], edited["checksum"]);
+    assert!(c
+        .call("world.singleton.patch", patch("pair_counts[9]", json!(27)))
+        .is_err());
+    assert_eq!(
+        c.call("sim.state", json!({})).unwrap()["checksum"],
+        started["checksum"]
+    );
+    c.call("sim.stop", json!({})).unwrap();
+    assert_eq!(c.call("scene.save", json!({})).unwrap(), edited);
+    assert_eq!(c.call("history.list", json!({})).unwrap(), history);
+
+    let mut native =
+        Session::<DefenseGame, LocalInputSource>::new(config, native_config(), LocalInputSource);
+    let mut play =
+        PlayController::<DefenseGame>::start_play(&reopened, reopened.play_config(1, TICK_RATE))
+            .unwrap();
+    assert_eq!(
+        native.predicted_frame().to_bytes(),
+        reopened.frame().to_bytes()
+    );
+    let delay = native.config().input_delay;
+    let mut pending = VecDeque::from(vec![DefenseInput::default(); delay as usize]);
+    for tick in 0..500 {
+        let value = if tick == 450 {
+            DefenseInput {
+                action: orr_games::coop_defense_game::RESTART,
+                sequence: tick + 1,
+                ..Default::default()
+            }
+        } else if tick % 30 == 0 {
+            orr_games::coop_defense_game::strategy_input(
+                native.predicted_frame().singleton::<DefenseRun>(),
+                &orr_games::coop_defense_game::units(native.predicted_frame()),
+                0,
+                tick + 1,
+            )
+        } else {
+            DefenseInput::default()
+        };
+        pending.push_back(value);
+        play.session_mut()
+            .set_input(PlayerSlot(0), pending.pop_front().unwrap());
+        play.control(ControlOp::Step(1));
+        native.advance(value, vec![]);
+        assert_eq!(
+            native.predicted_frame().to_bytes(),
+            play.session().frame().to_bytes(),
+            "tick {tick}"
+        );
+        assert_eq!(
+            *play.session().frame().singleton::<WaveCounts>(),
+            config.wave_counts
+        );
+        if tick == 450 + delay {
+            let run = play.session().frame().singleton::<DefenseRun>();
+            assert_eq!(run.generation, 1);
+            assert_eq!(run.gold, [1000; 2]);
+            assert_eq!(run.reactor_hp, 1000);
+        }
+    }
+    for _ in 0..delay {
+        play.session_mut()
+            .set_input(PlayerSlot(0), pending.pop_front().unwrap());
+        play.control(ControlOp::Step(1));
+        native.advance(DefenseInput::default(), vec![]);
+        assert_eq!(
+            native.predicted_frame().to_bytes(),
+            play.session().frame().to_bytes()
+        );
+    }
+    assert!(pending.is_empty());
+    assert_eq!(reopened.to_yaml(), source);
+    assert_eq!(reopened.revision(), 0);
+    assert!(reopened.history().is_empty());
+    assert!(!reopened.is_dirty() && !reopened.can_undo() && !reopened.can_redo());
+}
+
+#[test]
+fn counts_invalid_sources_and_edits_preserve_frame_source_and_redo_branch() {
+    let mut doc = document(COUNTS_SCENE).unwrap();
+    let edit = |path: &str, value| Op::SetSingletonField {
+        singleton: WAVE_COUNTS_NAME.into(),
+        path: path.into(),
+        value,
+    };
+    doc.apply(
+        edit("pair_counts[0]", orr_reflect::Value::Int(2)),
+        Origin::User,
+    )
+    .unwrap();
+    doc.apply(
+        edit("pair_counts[1]", orr_reflect::Value::Int(3)),
+        Origin::User,
+    )
+    .unwrap();
+    doc.undo().unwrap();
+    assert!(doc.is_dirty() && doc.can_undo() && doc.can_redo());
+    let frame = doc.frame().to_bytes();
+    let source = doc.to_yaml();
+    let revision = doc.revision();
+    let history = doc.history().clone();
+    let counts = "[1, 2, 3, 16, 18, 20, 22, 24, 26, 28]";
+    let mut invalid_sources = Vec::new();
+    for invalid in [
+        "[1, 2, 3, 16, 18, 20, 22, 24, 26, 0]",
+        "[1, 2, 3, 16, 18, 20, 22, 24, 26, 29]",
+        "[1, 2, 3, 16, 18, 20, 22, 24, 26, -1]",
+        "[1, 2, 3, 16, 18, 20, 22, 24, 26, 1.5]",
+        "[1, 2, 3, 16, 18, 20, 22, 24, 26, 4294967296]",
+        "[1, 2, 3, 16, 18, 20, 22, 24, 26, bad]",
+        "[1, 2, 3]",
+        "[1, 2, 3, 16, 18, 20, 22, 24, 26, 28, 1]",
+        "null",
+    ] {
+        invalid_sources.push(COUNTS_SCENE.replace(counts, invalid));
+    }
+    for fields in [
+        "{}".to_string(),
+        format!("{{pair_counts: {counts}, extra: 1}}"),
+        format!("{{pair_counts: {counts}, pair_counts: {counts}}}"),
+    ] {
+        invalid_sources.push(COUNTS_SCENE.replace(&format!("{{pair_counts: {counts}}}"), &fields));
+    }
+    invalid_sources
+        .push(COUNTS_SCENE.replace("entities: {}", "entities: {e_00000001: {name: injected}}"));
+    invalid_sources.push(format!("{COUNTS_SCENE}---\n{COUNTS_SCENE}"));
+    for invalid in &invalid_sources {
+        assert!(document(invalid).is_err(), "accepted {invalid}");
+        assert!(doc.load_yaml(invalid).is_err(), "loaded {invalid}");
+        assert_eq!(doc.frame().to_bytes(), frame);
+        assert_eq!(doc.to_yaml(), source);
+        assert_eq!(doc.revision(), revision);
+        assert_eq!(doc.history(), history);
+        assert!(doc.is_dirty() && doc.can_undo() && doc.can_redo());
+    }
+    // The tenth value is checked even with Campaign.last_wave = 3.
+    for (path, value) in [
+        ("pair_counts[9]", orr_reflect::Value::Int(0)),
+        ("pair_counts[9]", orr_reflect::Value::Int(29)),
+        ("pair_counts[9]", orr_reflect::Value::Int(-1)),
+        ("pair_counts[10]", orr_reflect::Value::Int(1)),
+        (
+            "pair_counts",
+            orr_reflect::Value::Array(vec![orr_reflect::Value::Int(1); 9]),
+        ),
+        (
+            "pair_counts",
+            orr_reflect::Value::Array(vec![orr_reflect::Value::Int(1); 11]),
+        ),
+    ] {
+        assert!(doc.apply(edit(path, value), Origin::User).is_err());
+        assert_eq!(doc.frame().to_bytes(), frame);
+        assert_eq!(doc.to_yaml(), source);
+        assert_eq!(doc.revision(), revision);
+        assert_eq!(doc.history(), history);
+        assert!(doc.is_dirty() && doc.can_undo() && doc.can_redo());
+    }
+    let mut cfg = ServerConfig::new(Auth::DevNoAuth);
+    cfg.listen = false;
+    let host = spawn_host(source, None, cfg, None).unwrap();
+    let mut c = client(&host, Caps::ALL);
+    c.call(
+        "world.singleton.patch",
+        json!({"name":WAVE_COUNTS_NAME,"path":"pair_counts[1]","value":3}),
+    )
+    .unwrap();
+    c.call("history.undo", json!({})).unwrap();
+    let saved = c.call("scene.save", json!({})).unwrap();
+    let saved_history = c.call("history.list", json!({})).unwrap();
+    for invalid in invalid_sources {
+        assert!(c.call("scene.load", json!({"text":invalid})).is_err());
+        assert_eq!(c.call("scene.save", json!({})).unwrap(), saved);
+        assert_eq!(c.call("history.list", json!({})).unwrap(), saved_history);
+    }
+    for (path, value) in [
+        ("pair_counts[9]", json!(0)),
+        ("pair_counts[9]", json!(29)),
+        ("pair_counts[9]", json!(-1)),
+        ("pair_counts[9]", json!(1.5)),
+        ("pair_counts[9]", json!(4294967296u64)),
+        ("pair_counts[9]", json!("bad")),
+        ("pair_counts[10]", json!(1)),
+        ("pair_counts", json!([1, 2, 3])),
+        ("", json!({})),
+        (
+            "",
+            json!({"pair_counts":[1,2,3,16,18,20,22,24,26,28],"extra":1}),
+        ),
+    ] {
+        assert!(c
+            .call(
+                "world.singleton.patch",
+                json!({"name":WAVE_COUNTS_NAME,"path":path,"value":value})
+            )
+            .is_err());
+        assert_eq!(c.call("scene.save", json!({})).unwrap(), saved);
+        assert_eq!(c.call("history.list", json!({})).unwrap(), saved_history);
+    }
+    c.call("history.redo", json!({})).unwrap();
+    let redone = c.call("scene.save", json!({})).unwrap();
+    assert_eq!(
+        document(redone["text"].as_str().unwrap())
+            .unwrap()
+            .frame()
+            .singleton::<WaveCounts>()
+            .pair_counts[1],
+        3
+    );
 }

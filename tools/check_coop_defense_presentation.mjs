@@ -113,7 +113,8 @@ for (let tick = 0; tick < 1200; tick++) {
 // Campaign-v2 historical golden: be2bdbfedfabd614 (build 0x04ee32c4873f6941).
 // WavePacing-v3 appends the singleton; independently executed native 1200-tick
 // oracle and rebuilt actual WASM agree on the new checksum below.
-assert.equal(s.checksum, '41a0cf5eb1436a07', 'independently reproduced native Scenario+Campaign+WavePacing fixture');
+// Historical WavePacing-v3: 41a0cf5eb1436a07; new Frame schema intentionally differs.
+assert.equal(s.checksum, 'fe7ec338439dce34', 'independently reproduced native WaveCounts-v4 fixture');
 assert.ok(coverage.has('release') && coverage.has('hit') && coverage.has('death'));
 const parityChecksum = s.checksum;
 // Real leaks must not become death events, including later terminal ticks.

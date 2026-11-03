@@ -283,6 +283,209 @@ mod tests {
         assert!(snapshot.contains("\"status\":\"overflow\",\"dropped\":1025,\"fullResync\":true"));
         assert!(snapshot.contains("\"events\":[]"));
     }
+
+    const COUNTS_SCENE: &str =
+        include_str!("../../../examples/static-game-starter/scenes/stormglass-counts.scene.yaml");
+
+    #[test]
+    fn counts_scene_abi_matches_shared_config_consumed_trace_win_and_restart() {
+        assert_eq!(load(COUNTS_SCENE.as_bytes()), 0);
+        let config = parse_config(COUNTS_SCENE).unwrap();
+        assert_eq!(
+            config.wave_counts.pair_counts,
+            [1, 2, 3, 16, 18, 20, 22, 24, 26, 28]
+        );
+        let mut expected = Simulation::<DefenseGame>::with_build_id(
+            config,
+            TICK_RATE,
+            u64::from(config.seed),
+            SCENARIO_BUILD_ID,
+        );
+        let source = CLIENT.with(|slot| slot.borrow().as_ref().unwrap().source);
+        let mut spawn_count = 0;
+        let mut sequence = 0;
+        for tick in 0..6000 {
+            let value = if tick % 30 == 0 {
+                sequence += 1;
+                strategy_input(
+                    &run(expected.frame()),
+                    &units(expected.frame()),
+                    0,
+                    sequence,
+                )
+            } else {
+                DefenseInput::default()
+            };
+            // Both paths consume this exact input now, not at a guessed local
+            // submission tick. The separate ERP trace covers Session delay.
+            let mut inputs = TickInputs::new(expected.tick(), 2);
+            inputs.set_input(PlayerSlot(0), value);
+            let events = expected.step(&inputs);
+            spawn_count += events
+                .iter()
+                .filter(|event| event.payload.event_kind() == Some(DefenseEventKind::EnemySpawn))
+                .count();
+            defense_step(
+                value.action,
+                value.source_cell,
+                value.target_cell,
+                value.sequence,
+            );
+            CLIENT.with(|slot| {
+                let client = slot.borrow();
+                let client = client.as_ref().unwrap();
+                assert_eq!(
+                    client.sim.frame().to_bytes(),
+                    expected.frame().to_bytes(),
+                    "tick {tick}"
+                );
+                assert_eq!(client.sim.checksum(), expected.checksum());
+                assert_eq!(client.source, source);
+                assert_eq!(client.events.dropped, 0);
+                assert_eq!(
+                    client
+                        .events
+                        .events
+                        .iter()
+                        .map(|e| (e.key, e.payload))
+                        .collect::<Vec<_>>(),
+                    events
+                        .iter()
+                        .map(|e| (e.key, e.payload))
+                        .collect::<Vec<_>>()
+                );
+            });
+            if run(expected.frame()).phase != PLAYING {
+                break;
+            }
+        }
+        let finished = run(expected.frame());
+        assert_eq!(finished.phase, WON);
+        assert_eq!(finished.wave, 3);
+        assert_eq!(spawn_count, 2 * (1 + 2 + 3));
+        assert_eq!(finished.kills + finished.leaks, 12);
+        sequence += 1;
+        let mut inputs = TickInputs::new(expected.tick(), 2);
+        inputs.set_input(
+            PlayerSlot(0),
+            DefenseInput {
+                action: RESTART,
+                sequence,
+                ..Default::default()
+            },
+        );
+        expected.step(&inputs);
+        defense_step(RESTART, 0, 0, sequence);
+        CLIENT.with(|slot| {
+            let client = slot.borrow();
+            let client = client.as_ref().unwrap();
+            assert_eq!(client.sim.frame().to_bytes(), expected.frame().to_bytes());
+            assert_eq!(client.source, source);
+            assert_eq!(
+                *client.sim.frame().singleton::<WaveCounts>(),
+                config.wave_counts
+            );
+            assert_eq!(
+                *client.sim.frame().singleton::<WavePacing>(),
+                config.wave_pacing
+            );
+            assert_eq!(*client.sim.frame().singleton::<Campaign>(), config.campaign);
+            assert_eq!(*client.sim.frame().singleton::<Scenario>(), config.scenario);
+            let restarted = run(client.sim.frame());
+            assert_eq!(restarted.generation, 1);
+            assert_eq!(restarted.gold, [1000; 2]);
+            assert_eq!(restarted.reactor_hp, 1000);
+            assert_eq!(restarted.wave, 1);
+            assert_eq!(restarted.spawned, 0);
+            assert_eq!(client.events.events.len(), 1);
+            assert_eq!(
+                client.events.events[0].payload.event_kind(),
+                Some(DefenseEventKind::Restart)
+            );
+        });
+    }
+
+    #[test]
+    fn rejected_counts_scene_preserves_all_client_state_and_source_serial() {
+        assert_eq!(load(COUNTS_SCENE.as_bytes()), 0);
+        defense_step(SUMMON, 0, 0, 1);
+        let before_json = json();
+        let (before_frame, before_source, before_tick, before_build, before_events, before_dropped) =
+            CLIENT.with(|slot| {
+                let client = slot.borrow();
+                let client = client.as_ref().unwrap();
+                (
+                    client.sim.frame().to_bytes(),
+                    client.source,
+                    client.sim.tick(),
+                    client.sim.build_id(),
+                    client
+                        .events
+                        .events
+                        .iter()
+                        .map(|e| (e.key, e.payload))
+                        .collect::<Vec<_>>(),
+                    client.events.dropped,
+                )
+            });
+        let before_serial = SOURCE.with(Cell::get);
+        assert!(!before_events.is_empty());
+        let assert_unchanged = || {
+            // Check the stored serialization before calling snapshot again.
+            CLIENT.with(|slot| {
+                let client = slot.borrow();
+                let client = client.as_ref().unwrap();
+                assert_eq!(client.json, before_json);
+                assert_eq!(client.sim.frame().to_bytes(), before_frame);
+                assert_eq!(client.source, before_source);
+                assert_eq!(client.sim.tick(), before_tick);
+                assert_eq!(client.sim.build_id(), before_build);
+                assert_eq!(
+                    client
+                        .events
+                        .events
+                        .iter()
+                        .map(|e| (e.key, e.payload))
+                        .collect::<Vec<_>>(),
+                    before_events
+                );
+                assert_eq!(client.events.dropped, before_dropped);
+            });
+            assert_eq!(SOURCE.with(Cell::get), before_serial);
+            assert_eq!(json(), before_json);
+        };
+        let counts = "[1, 2, 3, 16, 18, 20, 22, 24, 26, 28]";
+        let mut invalid = Vec::new();
+        for bad in [
+            "[1, 2, 3, 16, 18, 20, 22, 24, 26, 0]",
+            "[1, 2, 3, 16, 18, 20, 22, 24, 26, 29]",
+            "[1, 2, 3, 16, 18, 20, 22, 24, 26, -1]",
+            "[1, 2, 3, 16, 18, 20, 22, 24, 26, 1.5]",
+            "[1, 2, 3, 16, 18, 20, 22, 24, 26, 4294967296]",
+            "[1, 2, 3, 16, 18, 20, 22, 24, 26, bad]",
+            "[1, 2, 3]",
+            "[1, 2, 3, 16, 18, 20, 22, 24, 26, 28, 1]",
+            "null",
+        ] {
+            invalid.push(COUNTS_SCENE.replace(counts, bad));
+        }
+        for fields in [
+            "{}".to_string(),
+            format!("{{pair_counts: {counts}, extra: 1}}"),
+            format!("{{pair_counts: {counts}, pair_counts: {counts}}}"),
+        ] {
+            invalid.push(COUNTS_SCENE.replace(&format!("{{pair_counts: {counts}}}"), &fields));
+        }
+        for text in invalid {
+            assert_eq!(load(text.as_bytes()), 3, "accepted {text}");
+            assert_unchanged();
+        }
+        assert_eq!(defense_init_scene(MAX_SOURCE_BYTES + 1), 1);
+        assert_unchanged();
+        assert_eq!(load(&[0xff]), 2);
+        assert_unchanged();
+    }
+
 }
 
 #[cfg(test)]

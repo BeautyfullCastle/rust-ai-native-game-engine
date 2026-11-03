@@ -12,6 +12,7 @@ singletons:
   CoopDefense::Scenario: {starting_gold: 250, reactor_hp: 75}
   CoopDefense::Campaign: {last_wave: 3}
   CoopDefense::WavePacing: {spawn_interval_ticks: 70}
+  CoopDefense::WaveCounts: {pair_counts: [1, 2, 3, 16, 18, 20, 22, 24, 26, 28]}
 ```
 
 `Scenario.starting_gold` is an integer 0–10000 (default 150 per board);
@@ -22,6 +23,11 @@ simulation ticks/second. It slows the existing paired-lane spawns, not game
 speed, movement, attacks, counts, bosses or enemy composition. Spawns retain
 wave-tick alignment: the first interval multiple at/after tick 180, then every
 interval. For example 70 starts at tick 210, then 280; 350 starts at 350.
+`WaveCounts.pair_counts` is exactly ten integers, each 1–28. Each entry is
+one wave's number of paired-lane spawns: total enemies are twice the entry.
+Defaults are [10,12,14,16,18,20,22,24,26,28]. All ten entries are validated even
+outside the selected campaign. Zero/skipped waves and kind/HP/order overrides
+are unsupported. The existing ordinal kind, HP and boss rules stay unchanged.
 Missing singletons default independently; old scenes remain valid.
 A present singleton in source YAML requires all its fields. `{}`, unknown
 fields, invalid ranges, entities, prefab links and runtime pools are rejected.
@@ -44,6 +50,7 @@ HUDs and ready-screen instructions show the authored wave count.
 The default example remains empty; `examples/static-game-starter/scenes/stormglass-short.scene.yaml`
 is the explicit 250-gold/75-HP/three-wave fixture.
 `stormglass-training.scene.yaml` additionally sets the interval to 70.
+`stormglass-counts.scene.yaml` supplies 1/2/3 pairs for its three waves.
 
 ## Saved-scene playback and delivery
 
@@ -53,7 +60,7 @@ regular, non-symlink UTF-8 file no larger than 64 KiB, before any window/session
 Omit `--scene` for defaults. Browser file import uses the same strict parser and
 a fixed 64 KiB staging buffer. Invalid input preserves the current client; newer
 selections or restart supersede pending reads. Successful import starts ready at
-tick zero with the canonical seed, and restart retains all three singletons.
+tick zero with the canonical seed, and restart retains all four singletons.
 
 ```sh
 python3 tools/pack_coop_defense_offline.py dist/coop-defense-web \
@@ -64,18 +71,17 @@ python3 tools/check_coop_defense_offline.py dist/coop-defense-web short-game.htm
 
 The unchanged packer admits exact UTF-8 bytes through trusted local WASM and
 publishes to a new explicit path without replacing files. Node is required.
-The unchanged receipt carries scene/WASM SHA-256, byte count and tick-zero
-checksum—not local paths. These are content identities, not signatures or
-proof of authorship. Startup verifies them and fails closed without WebCrypto
-or valid payload. No scene-derived paths or network requests are used.
+The receipt binds scene/WASM hashes, size and initial checksum, not authorship.
+Startup verifies the payload without scene-derived paths or network requests.
 
 ## Identity and migration
 
-WavePacing v3 appends a checksummed singleton, changing Frame bytes, registry
-fingerprint and checksums even with default pacing. The game-specific
-`SCENARIO_BUILD_ID` is `0xb2a3336f29697b0b`; the source-derived identity must agree
-across host, starter manifest, native and browser. Prior Campaign-v2 identity
-`0x04ee32c4873f6941`, Scenario-v1 `0x7b2a3ab98f619dca` and other mismatching
+WaveCounts v4 appends a 40-byte checksummed singleton, changing Frame bytes,
+registry fingerprint and checksums even with default counts. The game-specific
+`SCENARIO_BUILD_ID` is `0xe6f403d2595bd8cf`; the source-derived identity must agree
+across host, starter manifest, native and browser. Prior WavePacing-v3 identity
+`0xb2a3336f29697b0b`, Campaign-v2 `0x04ee32c4873f6941`, Scenario-v1
+`0x7b2a3ab98f619dca` and other mismatching
 nonzero replay identities are rejected. Old YAML compatibility does not imply
 binary replay compatibility. The generic zero-header replay wildcard remains;
 there is no replay migration. Global frame/protocol/package formats and WASM
@@ -84,30 +90,26 @@ an older game binary or receipt as evidence for this simulation.
 
 `coop-defense-scene` remains optional: simulation-only `coop-defense` does not
 enable YAML; editor/ERP dependencies do not enter native simulation.
-`DefenseConfig` carries `scenario`, `campaign` and `wave_pacing`; use
+`DefenseConfig` carries `scenario`, `campaign`, `wave_pacing` and `wave_counts`; use
 `..Default::default()` for unchanged settings. Typed setup rejects out-of-range
-pacing before ticking; source admission returns an error instead.
+pacing/counts before ticking; source admission returns an error instead.
 
 ## Acceptance and limits
 
-The candidate tests cover strict/atomic admission, independent defaults,
+Tests cover strict/atomic admission, independent defaults,
 ERP edit/undo/redo/save/reopen/Play, exact paired spawn timing, terminal/restart
-retention and replay. The native trace example accepts `--training` for two
+retention and replay. The native trace example accepts `--counts` for the count fixture or `--training` for two
 complete 70-tick three-wave games without runtime-state edits; pass the matching
 scene to `tools/check_coop_defense_wasm.mjs` after the WASM and trace paths. Default trace use still selects the original short scene.
 Use the same training scene with the existing offline packer/checker above,
 then verify source-hidden delivery and matching consumed-input checksums.
 
-Focused CPU tests cover complete 35/70/350-tick campaigns, exact replay and a
-second victory after restart. Native and actual WASM match all 6,010 consumed
-training-trace rows through two wins and restart. The relocated single HTML
-replays that trace in a no-network mock DOM after original packaging input
-paths are removed. This is not actual-browser or independent-window acceptance.
-Default old/new WASM snapshots, including every event key/payload, match across
-12,000 ticks apart from the intentionally changed Frame checksum. New goldens
-were independently reproduced natively before updating WASM assertions;
-historical values and initial failures remain recorded.
+The v4 native and actual-WASM count fixture matches all 1,794 consumed inputs
+through two wins and restart. A relocated HTML with packaging inputs hidden
+replays the same embedded-WASM trace. Default v3/v4 snapshot gameplay and every
+event match across 12,001 snapshots, excluding changed checksums. Replay-loader
+rejection uses a recorded nonzero v3 header, not an archived old gameplay replay.
+Historical receipts and failures remain preserved.
 
-Full Linux candidate verification and final integration remain separate gates.
-CPU/WASM or mock-DOM results cannot establish actual browser/GPU, other-platform
-or real-model authoring quality; this is sample-game authoring, not engine completion.
+Linux verification and integration remain separate gates.
+CPU/WASM and mock-DOM results do not establish browser/GPU or other-platform acceptance.

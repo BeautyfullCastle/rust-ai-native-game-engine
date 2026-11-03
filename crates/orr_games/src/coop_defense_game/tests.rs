@@ -338,7 +338,13 @@ fn boss_waves_and_role_mechanics_are_real_simulation() {
         r.wave = wave;
         r.wave_tick = 210;
         let mut e = vec![DefenseEnemy::default(); MAX_ENEMIES];
-        spawn_wave(&mut r, &mut e, &mut Vec::new(), WavePacing::default());
+        spawn_wave(
+            &mut r,
+            &mut e,
+            &mut Vec::new(),
+            WavePacing::default(),
+            WaveCounts::default(),
+        );
         assert_eq!(
             e.iter().filter(|e| e.active != 0 && e.kind == BOSS).count(),
             2
@@ -770,7 +776,11 @@ fn check_authored_campaign(interval: u32) {
     let terminal = run(sim.frame());
     assert_eq!((terminal.phase, terminal.wave), (WON, 3));
     assert_eq!(waves, [2, 3]);
-    assert_eq!(spawned, [wave_count(1), wave_count(2), wave_count(3)]);
+    assert_eq!(spawned, [
+        wave_count(1, WaveCounts::default()),
+        wave_count(2, WaveCounts::default()),
+        wave_count(3, WaveCounts::default()),
+    ]);
     assert!(enemies(sim.frame()).iter().all(|e| e.active == 0));
     let terminal_units = units(sim.frame());
     let terminal_projectiles = projectiles(sim.frame());
@@ -846,7 +856,11 @@ fn check_authored_campaign(interval: u32) {
         assert_eq!(*sim.frame().singleton::<WavePacing>(), config.wave_pacing);
     }
     assert_eq!((run(sim.frame()).phase, run(sim.frame()).wave), (WON, 3));
-    assert_eq!(restarted_spawns, [wave_count(1), wave_count(2), wave_count(3)]);
+    assert_eq!(restarted_spawns, [
+        wave_count(1, WaveCounts::default()),
+        wave_count(2, WaveCounts::default()),
+        wave_count(3, WaveCounts::default()),
+    ]);
     assert!(enemies(sim.frame()).iter().all(|e| e.active == 0));
 }
 
@@ -861,7 +875,7 @@ fn final_wave_waits_for_last_enemy_and_last_leak_defeat_has_priority() {
         // Narrow edge fixture, separate from the full gameplay/replay above.
         let mut state = run(sim.frame());
         state.wave = 3;
-        state.spawned = wave_count(3);
+        state.spawned = wave_count(3, WaveCounts::default());
         state.reactor_hp = hp;
         sim.frame_mut().set_singleton(state);
         let enemy = sim.frame_mut().query::<(&DefenseEnemy,)>().next().unwrap().0;
@@ -906,7 +920,13 @@ fn pacing_has_fixed_width_layout_and_exact_spawn_alignment() {
         for tick in 0..=first + interval {
             r.wave_tick = tick;
             let before = r.spawned;
-            spawn_wave(&mut r, &mut enemies, &mut events, pacing);
+            spawn_wave(
+                &mut r,
+                &mut enemies,
+                &mut events,
+                pacing,
+                WaveCounts::default(),
+            );
             assert_eq!(r.spawned - before, if tick == first || tick == first + interval { 2 } else { 0 }, "interval {interval}, tick {tick}");
         }
         assert_eq!(events.len(), 4);
