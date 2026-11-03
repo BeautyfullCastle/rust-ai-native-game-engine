@@ -13,6 +13,8 @@ use std::{
     path::PathBuf,
 };
 
+mod clip_timing;
+
 struct Loaded {
     asset: Asset,
     texture: TextureHandle,
@@ -37,6 +39,7 @@ pub struct SpritePanel {
     pub replacement_image: String,
     #[cfg(all(feature = "image-reimport", target_os = "linux", target_arch = "x86_64"))]
     pub replacement_version: String,
+    timing: clip_timing::State,
     preview_playing: bool,
     preview_started: f64,
 }
@@ -60,6 +63,7 @@ impl Default for SpritePanel {
             replacement_image: String::new(),
             #[cfg(all(feature = "image-reimport", target_os = "linux", target_arch = "x86_64"))]
             replacement_version: String::new(),
+            timing: clip_timing::State::default(),
             preview_playing: false,
             preview_started: 0.0,
         }
@@ -471,6 +475,7 @@ impl SpritePanel {
         });
     }
     pub fn update(&mut self, editor: &mut Editor) {
+        self.update_timing(editor);
         let matches = self.scene_matches(editor);
         self.playback.update(
             editor,
@@ -522,6 +527,7 @@ impl SpritePanel {
         self.error = result.err();
     }
     pub fn show(&mut self, ui: &mut Ui, editor: &Editor) {
+        self.update_timing(editor);
         if editor.game() != EditorGame::Arena && !editor.game().is_collect() {
             return;
         }
@@ -639,6 +645,7 @@ impl SpritePanel {
                         self.picked_orientation = None;
                     }
                 }
+                self.show_timing(ui, editor);
                 self.show_orientation(ui, editor);
                 let enabled = self.editable(editor) && !editor.selected_guids().is_empty();
                 if ui.add_enabled(enabled, egui::Button::new("Remove selected sprite bindings")).clicked() {
