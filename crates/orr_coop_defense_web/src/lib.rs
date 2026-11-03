@@ -289,8 +289,20 @@ mod tests {
 
     #[test]
     fn counts_scene_abi_matches_shared_config_consumed_trace_win_and_restart() {
-        assert_eq!(load(COUNTS_SCENE.as_bytes()), 0);
-        let config = parse_config(COUNTS_SCENE).unwrap();
+        campaign_scene_abi_parity(COUNTS_SCENE);
+    }
+
+    const HEALTH_SCENE: &str =
+        include_str!("../../../examples/static-game-starter/scenes/stormglass-health.scene.yaml");
+
+    #[test]
+    fn health_scene_abi_matches_shared_config_consumed_trace_win_and_restart() {
+        campaign_scene_abi_parity(HEALTH_SCENE);
+    }
+
+    fn campaign_scene_abi_parity(scene: &str) {
+        assert_eq!(load(scene.as_bytes()), 0);
+        let config = parse_config(scene).unwrap();
         assert_eq!(
             config.wave_counts.pair_counts,
             [1, 2, 3, 16, 18, 20, 22, 24, 26, 28]
@@ -389,6 +401,7 @@ mod tests {
                 *client.sim.frame().singleton::<WavePacing>(),
                 config.wave_pacing
             );
+            assert_eq!(*client.sim.frame().singleton::<EnemyHealth>(), config.enemy_health);
             assert_eq!(*client.sim.frame().singleton::<Campaign>(), config.campaign);
             assert_eq!(*client.sim.frame().singleton::<Scenario>(), config.scenario);
             let restarted = run(client.sim.frame());
@@ -403,6 +416,46 @@ mod tests {
                 Some(DefenseEventKind::Restart)
             );
         });
+    }
+
+
+    #[test]
+    fn rejected_health_scene_preserves_client_and_source_serial() {
+        assert_eq!(load(HEALTH_SCENE.as_bytes()), 0);
+        defense_step(SUMMON, 0, 0, 1);
+        let before = json();
+        let frame = CLIENT.with(|slot| slot.borrow().as_ref().unwrap().sim.frame().to_bytes());
+        let serial = SOURCE.with(Cell::get);
+        for fields in [
+            "{}", "{multiplier: 0}", "{multiplier: 5}", "{multiplier: -1}",
+            "{multiplier: 1.5}", "{multiplier: 4294967296}", "{multiplier: null}",
+            "{multiplier: 2, extra: 1}", "{multiplier: 2, multiplier: 3}",
+        ] {
+            let bad = HEALTH_SCENE.replace("{multiplier: 4}", fields);
+            assert_eq!(load(bad.as_bytes()), 3, "accepted {bad}");
+            CLIENT.with(|slot| {
+                let client = slot.borrow();
+                let client = client.as_ref().unwrap();
+                assert_eq!(client.json, before);
+                assert_eq!(client.sim.frame().to_bytes(), frame);
+            });
+            assert_eq!(SOURCE.with(Cell::get), serial);
+            assert_eq!(json(), before);
+        }
+        for multiplier in 1..=4 {
+            let source = format!("schema: orr.scene/1\nentities: {{}}\nsingletons: {{CoopDefense::EnemyHealth: {{multiplier: {multiplier}}}}}\n");
+            assert_eq!(load(source.as_bytes()), 0);
+            defense_step(RESTART, 0, 0, 1);
+            CLIENT.with(|slot| {
+                let client = slot.borrow();
+                let frame = client.as_ref().unwrap().sim.frame();
+                assert_eq!(frame.singleton::<EnemyHealth>().multiplier, multiplier);
+                assert_eq!(*frame.singleton::<Scenario>(), Scenario::default());
+                assert_eq!(*frame.singleton::<Campaign>(), Campaign::default());
+                assert_eq!(*frame.singleton::<WaveCounts>(), WaveCounts::default());
+                assert_eq!(*frame.singleton::<WavePacing>(), WavePacing::default());
+            });
+        }
     }
 
     #[test]

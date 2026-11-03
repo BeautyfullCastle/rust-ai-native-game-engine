@@ -344,6 +344,7 @@ fn boss_waves_and_role_mechanics_are_real_simulation() {
             &mut Vec::new(),
             WavePacing::default(),
             WaveCounts::default(),
+            EnemyHealth::default(),
         );
         assert_eq!(
             e.iter().filter(|e| e.active != 0 && e.kind == BOSS).count(),
@@ -926,6 +927,7 @@ fn pacing_has_fixed_width_layout_and_exact_spawn_alignment() {
                 &mut events,
                 pacing,
                 WaveCounts::default(),
+                EnemyHealth::default(),
             );
             assert_eq!(r.spawned - before, if tick == first || tick == first + interval { 2 } else { 0 }, "interval {interval}, tick {tick}");
         }

@@ -16,8 +16,13 @@ fn main() {
         [arg] if arg == "--counts" => include_str!(
             "../../../examples/static-game-starter/scenes/stormglass-counts.scene.yaml"
         ),
-        _ => panic!("usage: coop_defense_campaign_trace [--training|--counts]"),
+        [arg] if arg == "--health" => include_str!(
+            "../../../examples/static-game-starter/scenes/stormglass-health.scene.yaml"
+        ),
+        _ => panic!("usage: coop_defense_campaign_trace [--training|--counts|--health]"),
     };
+    let health_trace = args.first().is_some_and(|arg| arg == "--health");
+    let mut event_rows = String::new();
     let config = parse_config(source).unwrap();
     let interval = config.wave_pacing.spawn_interval_ticks;
     let make = || {
@@ -97,12 +102,13 @@ fn main() {
                 };
                 assert_eq!(event.payload.board, spawned[victories][wave] % 2);
                 assert_eq!(event.payload.value, expected_kind);
-                assert_eq!(event.payload.hp_after, expected_hp);
+                assert_eq!(event.payload.hp_after, expected_hp * config.enemy_health.multiplier);
                 spawned[victories][wave] += 1;
             }
         }
         assert_eq!(*sim.frame().singleton::<WavePacing>(), config.wave_pacing);
         assert_eq!(*sim.frame().singleton::<WaveCounts>(), config.wave_counts);
+        assert_eq!(*sim.frame().singleton::<EnemyHealth>(), config.enemy_health);
         assert_ne!(state.phase, LOST);
         assert!(
             !events
@@ -123,6 +129,20 @@ fn main() {
             state.generation
         )
         .unwrap();
+        if health_trace {
+            event_rows.push_str(comma);
+            event_rows.push('[');
+            for (index, event) in events.iter().enumerate() {
+                if index != 0 { event_rows.push(','); }
+                let e = event.payload;
+                write!(event_rows, "[\"{}\",{},{},\"{}\",{},{},{},{},{},{},{},{},{},{},{}]",
+                    event.key.tick, event.key.system_index, event.key.seq,
+                    e.event_kind().unwrap().name(), e.generation, e.unit_id,
+                    e.other_unit_id, e.enemy_id, e.projectile_id, e.board, e.role,
+                    e.value, e.hp_after, e.x, e.y).unwrap();
+            }
+            event_rows.push(']');
+        }
         comma = ",";
     }
     assert_eq!(victories, 1);
@@ -137,6 +157,10 @@ fn main() {
             assert_eq!(count, config.wave_counts.pair_counts[wave] * 2);
         }
     }
-    output.push_str("]}");
+    output.push(']');
+    if health_trace {
+        write!(output, ",\"eventRows\":[{event_rows}]").unwrap();
+    }
+    output.push('}');
     println!("{output}");
 }

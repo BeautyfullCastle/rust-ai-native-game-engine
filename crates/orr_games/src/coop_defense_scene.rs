@@ -1,7 +1,7 @@
 //! Optional strict source admission shared by ERP and the native player.
 //! No editor, transport, filesystem or window dependency belongs here.
 use crate::coop_defense_game::{
-    scenario_types, Campaign, DefenseConfig, DefenseGame, Scenario, WaveCounts, WavePacing,
+    scenario_types, EnemyHealth, ENEMY_HEALTH_NAME, Campaign, DefenseConfig, DefenseGame, Scenario, WaveCounts, WavePacing,
     CAMPAIGN_NAME, SCENARIO_NAME, WAVE_COUNTS_NAME, WAVE_PACING_NAME,
 };
 use orr_ecs::Frame;
@@ -29,11 +29,12 @@ pub fn config_from_baked(scene: &Scene, frame: &Frame) -> Result<DefenseConfig, 
                     && name != CAMPAIGN_NAME
                     && name != WAVE_PACING_NAME
                     && name != WAVE_COUNTS_NAME
+                    && name != ENEMY_HEALTH_NAME
             })
         || scene.has_prefab_links()
     {
         return Err(
-            "CoopDefense accepts only Scenario, Campaign, WavePacing and WaveCounts, no entities or prefabs".into(),
+            "CoopDefense accepts only Scenario, Campaign, WavePacing, WaveCounts and EnemyHealth, no entities or prefabs".into(),
         );
     }
     // Bake leaves absent singletons zeroed. Presence must be checked per type:
@@ -46,6 +47,14 @@ pub fn config_from_baked(scene: &Scene, frame: &Frame) -> Result<DefenseConfig, 
     };
     if !wave_counts.is_valid() {
         return Err("WaveCounts.pair_counts must contain ten values in 1..=28".into());
+    }
+    let enemy_health = if present(ENEMY_HEALTH_NAME) {
+        *frame.singleton::<EnemyHealth>()
+    } else {
+        EnemyHealth::default()
+    };
+    if !enemy_health.is_valid() {
+        return Err("EnemyHealth.multiplier must be in 1..=4".into());
     }
     Ok(DefenseConfig {
         scenario: if present(SCENARIO_NAME) {
@@ -64,6 +73,7 @@ pub fn config_from_baked(scene: &Scene, frame: &Frame) -> Result<DefenseConfig, 
             WavePacing::default()
         },
         wave_counts,
+        enemy_health,
         ..DefenseConfig::default()
     })
 }

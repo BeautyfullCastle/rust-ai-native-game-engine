@@ -29,6 +29,20 @@ const countsSnapshot=read();
 for(const values of ['[]','null','[1,2,3,16,18,20,22,24,26]','[1,2,3,16,18,20,22,24,26,0]','[1,2,3,16,18,20,22,24,26,29]','[1,2,3,16,18,20,22,24,26,4294967296]']){
  assert.equal(load(countScene(values)),3);assert.deepEqual(read(),countsSnapshot,'invalid count array preserves current state');
 }
+// Health-only authoring is independent; malformed values cannot replace a live client.
+const healthScene=fields=>`schema: orr.scene/1\nentities: {}\nsingletons: {CoopDefense::EnemyHealth: ${fields}}\n`;
+for(const multiplier of [1,2,3,4]){
+ assert.equal(load(healthScene(`{multiplier: ${multiplier}}`)),0);
+ s=read();assert.equal(s.hp,30);assert.equal(s.lastWave,10);assert.deepEqual(s.gold,[150,150]);
+ w.defense_step(1,0,0,1);const before=read();
+ for(const fields of ['{}','{multiplier: 0}','{multiplier: 5}','{multiplier: -1}','{multiplier: 1.5}','{multiplier: 4294967296}','{multiplier: null}','{multiplier: 2, extra: 1}','{multiplier: 2, multiplier: 3}']){
+  assert.equal(load(healthScene(fields)),3);assert.deepEqual(read(),before,'invalid health preserves the complete live snapshot');
+ }
+ w.defense_step(5,0,0,2);
+ for(let tick=0;tick<210;tick++)w.defense_step(0,0,0,0);
+ const spawned=read().presentation.events.filter(e=>e.kind==='enemy_spawn');
+ assert.equal(spawned.length,2);assert.ok(spawned.every(e=>e.value===1&&e.hpAfter===39*multiplier),'restart keeps authored multiplier on both lanes');
+}
 w.defense_init(71825);s=read();
 w.defense_step(1,0,0,1);s=read();assert.equal(s.gold[0],125);assert.equal(s.units.filter(u=>u[0]===0).length,1);
 w.defense_step(1,0,0,1);assert.equal(read().gold[0],125,'held sample spends only once');
@@ -50,12 +64,14 @@ w.defense_init(71825);let sequence=0;for(let t=0;t<1200;t++)w.defense_step(t%30=
 // independently reproduced 41a0cf5eb1436a07, then fresh actual WASM matched it.
 // Same seed71825/default settings, two input slots, 1200 consumed ticks.
 // WaveCounts-v4 native ABI test independently produced fe7ec338439dce34.
-assert.equal(s.checksum,'fe7ec338439dce34','native WaveCounts-v4 schema parity fixture');
+// EnemyHealth-v5 independently printed by native legacy_seed_trace_matches_native_simulation.
+assert.equal(s.checksum,'5f42bc7d8e18cc35','native EnemyHealth-v5 schema parity fixture');
 assert.equal(s.wave,2);assert.equal(s.hp,30);assert.ok(s.projectiles.length>0);assert.ok(s.units.some(u=>u[0]===1));
 if(campaignTracePath){
  // Replay only exact consumed inputs from the native seeded strategy. No frame state
  // is edited or inferred by this WASM checker.
  const trace=JSON.parse(fs.readFileSync(campaignTracePath,'utf8'));
+ if(trace.eventRows)assert.equal(trace.eventRows.length,trace.rows.length);
  assert.equal(trace.lastWave,3);assert.match(trace.buildId,/^[0-9a-f]{16}$/);
  const scene=fs.readFileSync(campaignScenePath);
  assert.equal(w.defense_scene_capacity(),65536);
@@ -69,6 +85,7 @@ if(campaignTracePath){
   if(action===5)restarts++;
   w.defense_step(action,source,target,sequence);s=read();
   assert.equal(s.checksum,checksum,`native consumed-input checksum at trace row ${i}`);
+  if(trace.eventRows)assert.deepEqual(s.presentation.events.map(e=>[e.tick,e.system,e.seq,e.kind,e.generation,e.unitId,e.otherUnitId,e.enemyId,e.projectileId,e.board,e.role,e.value,e.hpAfter,e.x,e.y]),trace.eventRows[i],`native complete event payloads at trace row ${i}`);
   assert.equal(s.wave,wave);assert.equal(s.phase,phase);assert.equal(s.tick,tick);
   assert.equal(s.presentation.generation,generation);assert.equal(s.lastWave,3);
   assert.ok(s.wave<=3,'short authored campaign never spawns wave four');

@@ -6,7 +6,7 @@ Create a new Scene without running an editor/ERP host or hand-editing YAML:
 orr_pkg create-coop-scene \
   --wasm dist/coop-defense-web/game.wasm \
   --starting-gold 250 --reactor-hp 75 --last-wave 3 --spawn-interval-ticks 70 \
-  --wave-pairs 3,4,5,6,7,8,9,10,11,12 \
+  --wave-pairs 3,4,5,6,7,8,9,10,11,12 --enemy-health-multiplier 2 \
   --output short-game.scene.yaml
 ```
 
@@ -14,7 +14,7 @@ Use a **trusted locally built** CoopDefense WASM. The tool executes it in Node;
 this is not a sandbox for untrusted WASM. The native `orr_pkg` executable, Node
 and an existing build are required; the command does not build, download, start
 a server or upload. The legacy Python creator remains available for scenes
-without `--wave-pairs`; its output bytes are unchanged.
+without `--wave-pairs` or `--enemy-health-multiplier`; its output bytes are unchanged.
 
 The optional values are starting gold per board (0–10000, default 150), reactor
 HP (1–1000, default 30), and the last wave (1–10, default 10). Last wave selects
@@ -32,11 +32,21 @@ Omitting it preserves the previous Scene bytes exactly. Old scenes without the
 singleton use the historical counts `[10, 12, 14, 16, 18, 20, 22, 24, 26, 28]`.
 Repeated options, missing/extra counts, non-integers and out-of-range values fail
 before publication. The tool emits Scenario/Campaign and optional
-WavePacing/WaveCounts, with no entities; it does not edit existing scenes.
+WavePacing/WaveCounts/EnemyHealth, with no entities; it does not edit existing scenes.
+
+Rust-only `--enemy-health-multiplier` accepts one integer 1–4 (default 1).
+It writes `CoopDefense::EnemyHealth: {multiplier: 2}` in the example. The
+multiplier applies after the historical family HP calculation, to both current
+and maximum HP, every wave, both lanes and bosses. Maximum resulting HP is
+9744. Omitting the flag preserves previous output bytes; explicit 1 writes the
+singleton but preserves default gameplay. No percentage or per-wave HP option
+is implied. Higher HP can change kills, leaks, wave completion and outcomes;
+this is not a balance or victory guarantee.
 
 WaveCounts is the CoopDefense game build's v4 frame boundary, not a change to
 the global Scene format or a promise of old binary snapshot/replay compatibility.
-Use the new game build and matching assets for count-authored scenes. Earlier
+EnemyHealth adds the game-specific v5 boundary. Use a matching v5 build and
+assets for health-authored scenes. Earlier
 game builds do not admit the new singleton; omission compatibility means old
 Scene text remains loadable by the new build.
 

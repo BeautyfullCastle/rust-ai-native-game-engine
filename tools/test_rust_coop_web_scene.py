@@ -1,4 +1,4 @@
-"""Legacy Scene parity and Rust wave counts through trusted WASM/offline delivery.
+"""Legacy Scene parity and Rust wave/health options through trusted WASM/offline delivery.
 
 Requires ORR_PKG_BIN and ORR_COOP_WEB_BUILD_DIR containing the reviewed locally
 built CoopDefense game.wasm, plus Node on PATH. No mock WASM/scene validator.
@@ -192,6 +192,113 @@ class RustCoopWebScene(unittest.TestCase):
                     self.assertEqual(receipt['initialChecksum'], omitted['initialChecksum'])
                 else:
                     self.assertNotEqual(receipt['initialChecksum'], omitted['initialChecksum'])
+
+    def test_native_health_exact_bytes_and_default_semantics(self):
+        omitted = self.success(True, self.root / 'omitted-health.yaml')
+        for multiplier in range(1, 5):
+            with self.subTest(multiplier=multiplier):
+                output = self.root / f'health-{multiplier}.yaml'
+                extra = ['--enemy-health-multiplier', multiplier]
+                receipt = self.success(True, output, extra)
+                expected = (legacy.scene_text() + '  CoopDefense::EnemyHealth:\n'
+                            + f'    multiplier: {multiplier}\n').encode()
+                self.assertEqual(output.read_bytes(), expected)
+                self.assertEqual(self.success(True, self.root / f'repeated-health-{multiplier}.yaml', extra), receipt)
+                if multiplier == 1:
+                    self.assertEqual(receipt['initialChecksum'], omitted['initialChecksum'])
+                    self.assertNotEqual(receipt['sceneSha256'], omitted['sceneSha256'])
+                else:
+                    self.assertNotEqual(receipt['initialChecksum'], omitted['initialChecksum'])
+                self.assertEqual(packer.validate_scene(expected, self.wasm_bytes), receipt)
+                result = self.execute(self.command(True, output, extra))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(output.read_bytes(), expected)
+
+    def test_native_invalid_health_never_publishes_or_replaces_output(self):
+        invalid = ['', '0', '5', '-1', '1.5', 'true', 'NaN', '1e2', '0x1',
+                   '1__0', '١', '1\nother: 2', '18446744073709551616']
+        cases = [['--enemy-health-multiplier', value] for value in invalid]
+        cases += [['--enemy-health-multiplier'],
+                  ['--enemy-health-multiplier', '1', '--enemy-health-multiplier', '4']]
+        for extra in cases:
+            for existing in (False, True):
+                with self.subTest(extra=extra, existing=existing):
+                    output = self.root / f'refused-health-{existing}.yaml'
+                    if existing:
+                        output.write_bytes(b'keep output')
+                    result = self.execute(self.command(True, output, extra))
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    if existing:
+                        self.assertEqual(output.read_bytes(), b'keep output')
+                    else:
+                        self.assertFalse(os.path.lexists(output))
+                    self.assertEqual(self.wasm.read_bytes(), self.wasm_bytes)
+                    self.assertEqual(self.sentinel.read_bytes(), b'keep')
+
+    def test_native_health_offline_relocated_source_hidden_consumption(self):
+        import base64
+        scene = self.root / 'health.scene.yaml'
+        receipt = self.success(True, scene, ['--starting-gold', 250, '--reactor-hp', 75,
+                                            '--last-wave', 3, '--spawn-interval-ticks', 70,
+                                            '--wave-pairs', '1,2,3,4,5,6,7,8,9,28',
+                                            '--enemy-health-multiplier', 4])
+        scene_bytes = scene.read_bytes()
+        web = self.root / 'health-web'
+        shutil.copytree(self.build, web)
+        html = self.root / 'health.html'
+        result = self.execute([self.binary, 'pack-coop-offline', '--build-dir', str(web),
+                               '--scene', str(scene), '--output', str(html)])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        checked = self.execute([sys.executable, '-B', str(TOOLS / 'check_coop_defense_offline.py'), str(web), str(html)])
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+        self.assertTrue(json.loads(checked.stdout)['passed'])
+        consumer = self.root / 'relocated-consumer'
+        consumer.mkdir()
+        relocated = consumer / 'game.html'
+        html.rename(relocated)
+        # Hide all original temporary producer inputs before extracting only the
+        # delivered HTML. This is Node/WASM consumption, not browser-rendered QA.
+        for source in (scene, self.wasm, web):
+            source.rename(source.with_name(source.name + '.hidden'))
+            self.assertFalse(source.exists())
+        parsed = EmbeddedScripts()
+        text = relocated.read_text()
+        parsed.feed(text)
+        embedded_wasm = base64.b64decode(parsed.scripts['wasm-core'], validate=True)
+        embedded_scene = base64.b64decode(parsed.scripts['authored-scene'], validate=True)
+        self.assertEqual(embedded_wasm, self.wasm_bytes)
+        self.assertEqual(embedded_scene, scene_bytes)
+        self.assertEqual(json.loads(parsed.scripts['authored-scene-receipt']), receipt)
+        self.assertEqual(packer.validate_scene(embedded_scene, embedded_wasm), receipt)
+        for source in (scene, self.wasm, web):
+            self.assertNotIn(str(source), text)
+        (consumer / 'embedded.wasm').write_bytes(embedded_wasm)
+        (consumer / 'embedded.yaml').write_bytes(embedded_scene)
+        script = """
+const fs=require('fs'),assert=require('assert/strict');
+(async()=>{const w=(await WebAssembly.instantiate(fs.readFileSync('embedded.wasm'),{})).instance.exports;
+const scene=fs.readFileSync('embedded.yaml');
+new Uint8Array(w.memory.buffer,w.defense_scene_buffer(),scene.length).set(scene);
+assert.equal(w.defense_init_scene(scene.length),0);
+const read=()=>{const p=w.defense_snapshot();return JSON.parse(new TextDecoder().decode(new Uint8Array(w.memory.buffer,p,w.defense_snapshot_len())))};
+for(let run=0;run<2;run++){
+ const initial=read();assert.equal(initial.tick,0);if(run===0)assert.equal(initial.checksum,process.argv[1]);
+ assert.equal(initial.hp,75);assert.equal(initial.lastWave,3);assert.deepEqual(initial.gold,[250,250]);
+ for(let tick=1;tick<=210;tick++)w.defense_step(0,0,0,0);
+ const s=read();assert.equal(s.tick,210);assert.equal(s.enemies.length,2);
+ assert.deepEqual(s.enemies.map(e=>e[1]),[0,1]);
+ // First wave, first pair is FAST: base HP 24 + 1*15, multiplied by four.
+ for(const e of s.enemies){assert.equal(e[3],156);assert.equal(e[4],156);}
+ if(run===0)w.defense_step(5,0,0,1);
+}
+console.log(JSON.stringify({passed:true}));
+})().catch(e=>{console.error(e);process.exitCode=1});
+"""
+        result = subprocess.run(['node', '-e', script, receipt['initialChecksum']], cwd=consumer,
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(json.loads(result.stdout)['passed'])
+        self.assertEqual(self.sentinel.read_bytes(), b'keep')
 
     def test_native_invalid_wave_pairs_never_publish(self):
         invalid = ['', '1', '1,2,3,4,5,6,7,8,9', '1,2,3,4,5,6,7,8,9,10,11',

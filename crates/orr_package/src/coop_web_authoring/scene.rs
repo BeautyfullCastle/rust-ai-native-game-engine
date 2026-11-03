@@ -9,7 +9,7 @@ const VALIDATOR: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../tools/validate_coop_defense_scene.mjs"
 ));
-const USAGE:&str="orr_pkg create-coop-scene --wasm TRUSTED_LOCAL_WASM --output NEW_SCENE [--starting-gold 0..10000] [--reactor-hp 1..1000] [--last-wave 1..10] [--spawn-interval-ticks 35..350] [--wave-pairs N1,N2,N3,N4,N5,N6,N7,N8,N9,N10]\nWave pairs require exactly ten integers, each 1..28; each pair spawns one enemy in each lane. Executes trusted local WASM in trusted Node on PATH; not a sandbox. No fetch or build. Integers accept ASCII decimal digits, optional sign, whitespace and single underscores between digits; Unicode digits are not accepted. Duplicate options are refused.";
+const USAGE:&str="orr_pkg create-coop-scene --wasm TRUSTED_LOCAL_WASM --output NEW_SCENE [--starting-gold 0..10000] [--reactor-hp 1..1000] [--last-wave 1..10] [--spawn-interval-ticks 35..350] [--wave-pairs N1,N2,N3,N4,N5,N6,N7,N8,N9,N10] [--enemy-health-multiplier 1..4]\nWave pairs require exactly ten integers, each 1..28; each pair spawns one enemy in each lane. Enemy health defaults to 1 when omitted. Executes trusted local WASM in trusted Node on PATH; not a sandbox. No fetch or build. Integers accept ASCII decimal digits, optional sign, whitespace and single underscores between digits; Unicode digits are not accepted. Duplicate options are refused.";
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(super) struct Receipt {
@@ -40,6 +40,7 @@ struct Options {
     wave: i64,
     pacing: Option<i64>,
     wave_pairs: Option<[u32; 10]>,
+    enemy_health: Option<i64>,
 }
 fn integer(value: &OsString) -> Result<i64, String> {
     let raw = value
@@ -83,7 +84,7 @@ fn wave_pairs(value: &OsString) -> Result<[u32; 10], String> {
     Ok(counts)
 }
 fn options(args: &[OsString]) -> Result<Options, String> {
-    if args.len() > 14
+    if args.len() > 16
         || args.len() % 2 != 0
         || args.iter().any(|s| {
             s.is_empty() || s.as_encoded_bytes().len() > 4096 || s.as_encoded_bytes().contains(&0)
@@ -94,6 +95,7 @@ fn options(args: &[OsString]) -> Result<Options, String> {
     let (mut wasm, mut output) = (None, None);
     let (mut gold, mut hp, mut wave, mut pacing) = (150, 30, 10, None);
     let mut pairs = None;
+    let mut enemy_health = None;
     let mut seen = BTreeSet::new();
     for pair in args.chunks_exact(2) {
         let key = pair[0].to_str().ok_or("invalid option")?;
@@ -108,6 +110,7 @@ fn options(args: &[OsString]) -> Result<Options, String> {
             "--last-wave" => wave = integer(&pair[1])?,
             "--spawn-interval-ticks" => pacing = Some(integer(&pair[1])?),
             "--wave-pairs" => pairs = Some(wave_pairs(&pair[1])?),
+            "--enemy-health-multiplier" => enemy_health = Some(integer(&pair[1])?),
             _ => return Err("unknown option".into()),
         }
     }
@@ -119,6 +122,7 @@ fn options(args: &[OsString]) -> Result<Options, String> {
         wave,
         pacing,
         wave_pairs: pairs,
+        enemy_health,
     };
     scene_text(&o)?;
     Ok(o)
@@ -127,6 +131,7 @@ fn scene_text(o: &Options) -> Result<Vec<u8>, String> {
     if !(0..=10000).contains(&o.gold)
         || !(1..=1000).contains(&o.hp)
         || !(1..=10).contains(&o.wave)
+        || o.enemy_health.is_some_and(|m| !(1..=4).contains(&m))
         || o.pacing.is_some_and(|p| !(35..=350).contains(&p))
         || o.wave_pairs
             .is_some_and(|counts| counts.iter().any(|n| !(1..=28).contains(n)))
@@ -143,6 +148,11 @@ fn scene_text(o: &Options) -> Result<Vec<u8>, String> {
         let values = counts.map(|n| n.to_string()).join(", ");
         text.push_str(&format!(
             "  CoopDefense::WaveCounts:\n    pair_counts: [{values}]\n"
+        ));
+    }
+    if let Some(multiplier) = o.enemy_health {
+        text.push_str(&format!(
+            "  CoopDefense::EnemyHealth:\n    multiplier: {multiplier}\n"
         ));
     }
     Ok(text.into_bytes())
@@ -206,7 +216,7 @@ fn create_with(
     Ok((verified, warning))
 }
 pub(super) fn run_cli(args: impl IntoIterator<Item = OsString>) -> u8 {
-    let args: Vec<_> = args.into_iter().take(16).collect();
+    let args: Vec<_> = args.into_iter().take(18).collect();
     if args.len() == 1 && (args[0] == "--help" || args[0] == "-h") {
         println!("{USAGE}");
         return 0;
