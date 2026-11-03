@@ -756,15 +756,18 @@ fn png_rgba_indexed_alpha_and_16_bit_alpha_match_importer() {
 #[test]
 fn png_rgb_grayscale_and_indexed_without_alpha_are_rejected() {
     let source = fixture().to_bytes().unwrap();
+    // Model import now admits opaque RGB8; this separate authoring decoder does not.
+    let rgb = png_bytes(
+        1,
+        1,
+        png::ColorType::Rgb,
+        png::BitDepth::Eight,
+        &[3, 5, 7],
+        false,
+    );
+    assert_eq!(imported_image(&rgb).unwrap().rgba8, [3, 5, 7, 255]);
+    assert!(apply(&recipe_bytes(), RECIPE_ID, &source, &rgb).is_err());
     for png in [
-        png_bytes(
-            1,
-            1,
-            png::ColorType::Rgb,
-            png::BitDepth::Eight,
-            &[3, 5, 7],
-            false,
-        ),
         png_bytes(
             1,
             1,
