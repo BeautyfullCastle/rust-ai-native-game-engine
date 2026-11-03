@@ -88,6 +88,10 @@ impl SpritePanel {
     pub(crate) fn tilemap_asset(&self, key: &orr_sample::project_sprites::AssetKey) -> Option<(&Asset, egui::TextureId)> {
         self.loaded.get(key).map(|loaded| (&loaded.asset, loaded.texture.id()))
     }
+    #[cfg(feature = "tilemap")]
+    pub(crate) fn tilemap_is_pinned(&self) -> bool {
+        self.tilemap_pinned
+    }
     /// Startup only: install a missing already-admitted asset before pinning.
     #[cfg(feature = "tilemap")]
     pub(crate) fn install_tilemap_asset(&mut self, ctx: &egui::Context, asset: Option<(orr_sample::project_sprites::AssetKey, Asset)>) {
@@ -526,7 +530,7 @@ impl SpritePanel {
         }
         ui.collapsing("Sprite bindings (view only)", |ui| {
             if self.tilemap_pinned {
-                ui.weak("Tilemap shares these admitted atlases. Sprite Load/Assign/Remove/Close, history, reload and image reimport are unavailable until a whole-project reopen.");
+                ui.weak("Tilemap shares these admitted atlases. Use Actor appearance in the Tilemap panel for existing actors. Sprite Load/Assign/Remove/Close, generic history/Save, reload and image reimport remain unavailable until a whole-project reopen.");
                 return;
             }
             ui.weak("Separate sidecar save and undo. Scene Save does not save bindings. Picking uses existing collider shapes.");

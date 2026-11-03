@@ -1455,6 +1455,10 @@ impl EditorApp {
     fn playback_start_blocker(&self) -> Option<String> {
         #[cfg(feature = "tilemap")]
         if self.tilemap.as_ref().is_some_and(|panel| panel.dirty()) { return Some("Save tilemap or Undo its edits before Play or Step".into()); }
+        #[cfg(feature = "tilemap")]
+        if self.tilemap.is_some() && self.sprites.bindings.as_ref().is_some_and(|bindings| bindings.dirty()) {
+            return Some("Save actor appearances or Undo their edits before Play or Step".into());
+        }
         #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "project-create", feature = "collect-ui"))]
         if self.collect_project_dialog_open() { return Some("Finish or cancel the Collect project dialog before Play or Step".into()); }
         if self.package_removal_pending() { return Some("Wait for package selection change completion before Play or Step".into()); }
@@ -1919,7 +1923,7 @@ impl EditorApp {
         #[cfg(feature = "sprites")]
         self.sprites.show(ui, &self.editor);
         #[cfg(feature = "tilemap")]
-        if let Some(panel) = &mut self.tilemap { panel.show(ui, &self.editor, &self.sprites); }
+        if let Some(panel) = &mut self.tilemap { panel.show(ui, &self.editor, &mut self.sprites); }
         #[cfg(feature = "project-ui")]
         if let Some(preview) = &self.project_ui { preview.show(ui); }
         #[cfg(feature="collect-ui")]
@@ -3535,6 +3539,10 @@ pub(crate) mod mesh_hazards_player;
 #[cfg(all(test, feature = "tilemap", feature = "project-create", target_os = "linux"))]
 #[path = "app/tilemap_tests.rs"]
 mod tilemap_tests;
+
+#[cfg(all(test, feature = "tilemap", feature = "project-create", target_os = "linux"))]
+#[path = "app/tilemap_actor_source_tests.rs"]
+mod tilemap_actor_source_tests;
 
 #[cfg(all(test, feature = "tilemap", feature = "project-create", target_os = "linux"))]
 #[path = "app/tilemap_fill_tests.rs"]

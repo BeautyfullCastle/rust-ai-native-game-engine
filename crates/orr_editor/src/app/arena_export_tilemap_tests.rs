@@ -65,7 +65,7 @@ fn harness(app: EditorApp, tiles: bool) -> Harness<'static, EditorApp> {
                 app.tilemap
                     .as_mut()
                     .unwrap()
-                    .show(ui, &app.editor, &app.sprites);
+                    .show(ui, &app.editor, &mut app.sprites);
             } else {
                 app.show_arena_export(ui);
             }

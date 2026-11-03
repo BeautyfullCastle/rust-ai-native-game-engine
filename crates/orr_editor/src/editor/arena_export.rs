@@ -35,6 +35,7 @@ impl Editor {
         Ok(())
     }
 
+    #[cfg(any(not(feature = "tilemap"), test))]
     pub(crate) fn arena_export_source(
         &mut self,
         root: &Path,

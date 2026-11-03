@@ -15,6 +15,7 @@ use std::{
 };
 #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
 mod export;
+mod actors;
 mod fill;
 mod rectangle;
 mod resize;
@@ -164,6 +165,7 @@ pub struct TilemapPanel {
     draft_height: String,
     error: Option<String>,
     compositor: Option<ProjectCompositor<Wgpu>>,
+    actors: actors::State,
 }
 impl TilemapPanel {
     pub fn prepare(root: &Path, scene: &Path, prepared: PreparedTilemap) -> Result<Self, String> {
@@ -236,6 +238,7 @@ impl TilemapPanel {
             selected: None,
             error: None,
             compositor: None,
+            actors: actors::State::default(),
         })
     }
     pub fn install_renderer(
@@ -495,7 +498,7 @@ impl TilemapPanel {
         Self::budget(&self.history.current, Self::actor_count(sprites))?;
         self.save_document()
     }
-    pub fn show(&mut self, ui: &mut egui::Ui, editor: &Editor, sprites: &SpritePanel) {
+    pub fn show(&mut self, ui: &mut egui::Ui, editor: &Editor, sprites: &mut SpritePanel) {
         ui.heading("Tile background");
         ui.label("Replaces Arena floor presentation only. Empty / transparent cells show clear background, not collision or navmesh.");
         ui.label("Scene Save / Save As does not save or retarget this tilemap. Package mutation remains unsupported. Saved tilemaps can use Arena Export when built with arena-project-export and tilemap.");
@@ -593,6 +596,7 @@ impl TilemapPanel {
         if !editable {
             ui.label("Paint, Fill, Rectangle, Pick, Resize and Save require matching Edit viewport, without proposal, replay or disconnected host.");
         }
+        self.show_actors(ui, editor, sprites);
         if let Some(error) = &self.error {
             ui.colored_label(egui::Color32::RED, error);
         }
