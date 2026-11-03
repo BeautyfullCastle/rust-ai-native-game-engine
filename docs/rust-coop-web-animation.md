@@ -4,6 +4,7 @@ Optional Linux tools, built with `cargo build --release -p orr_package --bin orr
 
 ```
 orr_pkg create-coop-animation --assets-dir assets --output new.json --role unit:0 --image unit.png --frame idle 0 0 32 32 --clip idle 10 loop
+orr_pkg create-coop-animation --assets-dir assets --output attack.json --role unit:0 --image unit.png --frame attack 0 0 32 32 --attack-timing 110.5 70.25 160
 orr_pkg compose-coop-animations --assets-dir assets --output combined.json --manifest unit.json --manifest enemy.json
 ```
 
@@ -14,6 +15,23 @@ Trusted Node on PATH **remains required** for the actual JS sampler gate. Final
 HTML packaging and Scene/WASM validation also have Rust entrypoints; see
 [rust-coop-workflow.md](rust-coop-workflow.md) for the Python-free official build path.
 The original Python commands remain for compatibility and differential tests.
+
+`create-coop-animation` accepts one optional
+`--attack-timing WINDUP_MS RELEASE_MS RECOVERY_MS`. It requires authored `attack`
+frames, but not `--clip attack`; the flag may precede the frames. Each independent
+duration is finite and within 1–2000 milliseconds inclusive, including fractions.
+There is no ordering, total-duration or FPS constraint. The values become
+`windupMs`, `releaseMs` and `recoveryMs` on that role's attack clip only. Omitting
+the flag preserves the existing Rust command's exact manifest bytes and leaves
+timing defaults to the consumer. Repeated, incomplete, malformed, out-of-range
+or nonfinite timing, missing attack frames and use on the compose command are
+rejected. Composition still preserves admitted timing from input manifests.
+
+These fields affect presentation only. A real unit release event starts immediately
+at the authored windup offset, already in the release phase; it does not wait out
+the windup. Timing changes neither gameplay attack cadence nor damage timing and
+does not invent enemy attack events. This option is new Rust support; the legacy
+Python authoring command is unchanged and does not accept it.
 
 Manifest admission rejects duplicate keys before image lookup, nonfinite values,
 boolean numbers, unknown fields/roles/clips, invalid image paths and all existing

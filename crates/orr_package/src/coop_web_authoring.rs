@@ -1,20 +1,20 @@
 //! Optional web animation authoring. Python/Pillow-free; trusted Node remains required.
+mod copy_assets;
 mod manifest;
 mod node_gate;
-mod scene;
 mod offline;
-mod recipe;
-mod copy_assets;
 mod png;
 mod prepared;
 mod publish;
+mod recipe;
 mod sampler;
+mod scene;
 use std::{
     collections::BTreeSet,
     ffi::OsString,
     path::{Component, Path, PathBuf},
 };
-const USAGE:&str="orr_pkg create-coop-animation --assets-dir DIR --output NEW --role ROLE --image IMAGE --frame CLIP X Y W H [--frame ...] [--clip CLIP FPS loop|once] [--pivot X Y]\norr_pkg compose-coop-animations --assets-dir DIR --output NEW --manifest FILE [--manifest FILE]...\nRequires trusted Node on PATH; no Python/Pillow. Final HTML packaging remains separate.";
+const USAGE:&str="orr_pkg create-coop-animation --assets-dir DIR --output NEW --role ROLE --image IMAGE --frame CLIP X Y W H [--frame ...] [--clip CLIP FPS loop|once] [--pivot X Y] [--attack-timing WINDUP_MS RELEASE_MS RECOVERY_MS]\norr_pkg compose-coop-animations --assets-dir DIR --output NEW --manifest FILE [--manifest FILE]...\nAttack timing requires attack frames; each duration is finite, 1..2000 ms.\nRequires trusted Node on PATH; no Python/Pillow. Final HTML packaging remains separate.";
 fn absolute(path: &Path) -> Result<PathBuf, String> {
     let raw = path.as_os_str().as_encoded_bytes();
     if raw.is_empty()
@@ -54,6 +54,7 @@ struct Options {
     frames: Vec<(String, [f64; 4])>,
     clips: Vec<(String, f64, bool)>,
     pivot: Option<[f64; 2]>,
+    attack_timing: Option<[f64; 3]>,
     manifests: Vec<PathBuf>,
 }
 fn options(args: &[OsString], compose: bool) -> Result<Options, String> {
@@ -64,6 +65,7 @@ fn options(args: &[OsString], compose: bool) -> Result<Options, String> {
     let mut frames = Vec::new();
     let mut clips = Vec::new();
     let mut pivot = None;
+    let mut attack_timing = None;
     let mut manifests = Vec::new();
     let mut seen = BTreeSet::new();
     let mut i = 0;
@@ -75,7 +77,7 @@ fn options(args: &[OsString], compose: bool) -> Result<Options, String> {
             "--manifest" if compose => 1,
             "--role" | "--image" if !compose => 1,
             "--frame" if !compose => 5,
-            "--clip" if !compose => 3,
+            "--clip" | "--attack-timing" if !compose => 3,
             "--pivot" if !compose => 2,
             _ => return Err("unknown animation flag".into()),
         };
@@ -118,6 +120,9 @@ fn options(args: &[OsString], compose: bool) -> Result<Options, String> {
                 clips.push((text(&v[0])?, number(&v[1])?, mode));
             }
             "--pivot" => pivot = Some([number(&v[0])?, number(&v[1])?]),
+            "--attack-timing" => {
+                attack_timing = Some([number(&v[0])?, number(&v[1])?, number(&v[2])?]);
+            }
             "--manifest" => {
                 if manifests.len() >= 11 {
                     return Err("too many manifests".into());
@@ -141,6 +146,7 @@ fn options(args: &[OsString], compose: bool) -> Result<Options, String> {
         frames,
         clips,
         pivot,
+        attack_timing,
         manifests,
     })
 }
@@ -161,6 +167,7 @@ fn run(options: Options, compose: bool) -> Result<(), String> {
                 &options.frames,
                 &options.clips,
                 options.pivot,
+                options.attack_timing,
             )?,
             None,
         )
@@ -241,9 +248,19 @@ pub fn run_scene_cli(args: impl IntoIterator<Item = OsString>) -> u8 {
 }
 
 /// Build one explicit-new offline HTML delivery with applicable real engine gates.
-pub fn run_offline_cli(args: impl IntoIterator<Item = OsString>) -> u8 { offline::run_cli(args) }
+pub fn run_offline_cli(args: impl IntoIterator<Item = OsString>) -> u8 {
+    offline::run_cli(args)
+}
 
 /// Build a portable closed recipe through the same verified offline hub.
-pub fn run_recipe_cli(args: impl IntoIterator<Item = OsString>) -> u8 { recipe::run_cli(args) }
+pub fn run_recipe_cli(args: impl IntoIterator<Item = OsString>) -> u8 {
+    recipe::run_cli(args)
+}
 /// Refresh explicit generated build assets; not an atomic release publisher.
-pub fn run_copy_cli(args: impl IntoIterator<Item = OsString>) -> u8 { copy_assets::run_cli(args) }
+pub fn run_copy_cli(args: impl IntoIterator<Item = OsString>) -> u8 {
+    copy_assets::run_cli(args)
+}
+
+#[cfg(test)]
+#[path = "coop_web_authoring/cli_tests.rs"]
+mod cli_tests;
