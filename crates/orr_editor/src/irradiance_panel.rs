@@ -3,6 +3,8 @@
 //! guarded and remains independent from scene state, ERP, and package files.
 #[path = "irradiance_panel/gradient.rs"]
 mod gradient;
+#[path = "irradiance_panel/color_gain.rs"]
+mod color_gain;
 
 use crate::{
     backend::HostSpec,
@@ -65,6 +67,8 @@ pub struct IrradiancePanel {
     /// Linear RGB; the color widget displays these authoring values directly.
     pub color: [f32; 3],
     pub intensity: f32,
+    /// Per-channel multiplier of every signed SH9 coefficient, in 0..=16.
+    pub coefficient_gain: [f32; 3],
     gradient_axis: usize,
     gradient_start: [f32; 3],
     gradient_end: [f32; 3],
@@ -105,6 +109,7 @@ impl Default for IrradiancePanel {
             selected_node: [0; 3],
             color: [1.0; 3],
             intensity: 1.0,
+            coefficient_gain: [1.0; 3],
             gradient_axis: 0,
             gradient_start: [0.0; 3],
             gradient_end: [1.0; 3],
@@ -485,6 +490,20 @@ impl IrradiancePanel {
                 end: self.gradient_end,
             })?;
             self.bindings.as_mut().ok_or("Open irradiance first")?.replace_grid(grid)
+        })();
+        self.report(result)
+    }
+
+    /// Adjust all probes without replacing their directional SH9 structure.
+    /// Identical coefficient bits preserve provenance, bake receipt and history.
+    pub fn apply_coefficient_gain(&mut self, editor: &Editor) -> Result<(), String> {
+        let result = (|| {
+            self.require_editable(editor)?;
+            let source = &self.bindings.as_ref().ok_or("Open irradiance first")?.document().grid;
+            if let Some(grid) = color_gain::apply_gain(source, self.coefficient_gain)? {
+                self.bindings.as_mut().ok_or("Open irradiance first")?.replace_grid(grid)?;
+            }
+            Ok(())
         })();
         self.report(result)
     }
@@ -1166,6 +1185,19 @@ impl IrradiancePanel {
                         let _ = self.apply_gradient(editor);
                     }
 
+                    ui.separator();
+                    ui.label("SH9 RGB gain · all probes, preserves directional coefficients");
+                    ui.weak("Gain 0 erases a color channel. Changes become Authored, not a verified bake. Identity leaves bake provenance unchanged.");
+                    ui.horizontal(|ui| {
+                        for (label, gain) in ["Gain R", "Gain G", "Gain B"].into_iter().zip(&mut self.coefficient_gain) {
+                            ui.label(label);
+                            ui.add(egui::DragValue::new(gain).speed(0.05).range(0.0..=16.0));
+                        }
+                    });
+                    if ui.button("Apply irradiance RGB gain").clicked() {
+                        let _ = self.apply_coefficient_gain(editor);
+                    }
+
                     ui.collapsing("Selected SH9 coefficients", |ui| {
                         if let Some(grid) = self.bindings.as_ref().map(|b| &b.document().grid) {
                             if let Some(index) = grid.node_index(self.selected_node) {
@@ -1458,3 +1490,7 @@ mod tests {
 #[cfg(test)]
 #[path = "irradiance_panel/gradient_panel_tests.rs"]
 mod gradient_panel_tests;
+
+#[cfg(test)]
+#[path = "irradiance_panel/gain_panel_tests.rs"]
+mod gain_panel_tests;
