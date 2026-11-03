@@ -1,4 +1,4 @@
-use crate::model_package_import::{self, Report, Request};
+use crate::model_package_import::{self, Report, Request, SourceFormat};
 use egui::Ui;
 use orr_model_bindings::model_bindings::ModelKind;
 use std::{
@@ -7,6 +7,7 @@ use std::{
 };
 
 struct Completion {
+    source_format: SourceFormat,
     project_root: PathBuf,
     expected_destination: Result<PathBuf, String>,
     project_generation: u64,
@@ -21,6 +22,7 @@ pub struct Panel {
     name: String,
     version: String,
     kind: ModelKind,
+    source_format: SourceFormat,
     license_acknowledged: bool,
     pending: Option<Receiver<Completion>>,
     destination_identity: Option<PathBuf>,
@@ -36,6 +38,7 @@ impl Default for Panel {
             name: String::new(),
             version: String::new(),
             kind: ModelKind::Static,
+            source_format: SourceFormat::default(),
             license_acknowledged: false,
             pending: None,
             destination_identity: None,
@@ -65,8 +68,7 @@ impl Panel {
                 self.pending = None;
                 self.license_acknowledged = false;
                 self.destination_identity = None;
-                self.status =
-                    "Raw GLB import worker disconnected before returning a result.".into();
+                self.status = "Model import worker disconnected before returning a result.".into();
                 return None;
             }
         };
@@ -74,7 +76,8 @@ impl Panel {
         self.license_acknowledged = false;
         let is_current = project_root == Some(completion.project_root.as_path())
             && project_generation == completion.project_generation
-            && source_generation == completion.source_generation;
+            && source_generation == completion.source_generation
+            && self.source_format == completion.source_format;
         match completion.result {
             Ok(report)
                 if is_current && completion.expected_destination.as_ref() == Ok(&report.root) =>
@@ -112,13 +115,17 @@ impl Panel {
             }
             Err(error) if is_current => {
                 self.destination_identity = None;
-                self.status = format!("Raw GLB package import failed: {error}");
+                self.status = format!(
+                    "{} package import failed: {error}",
+                    format_label(completion.source_format)
+                );
                 None
             }
             Err(error) => {
                 self.destination_identity = None;
                 self.status = format!(
-                    "Raw GLB package import for a prior project/source state failed: {error}"
+                    "{} package import for a prior project/source state failed: {error}",
+                    format_label(completion.source_format)
                 );
                 None
             }
@@ -133,18 +140,30 @@ impl Panel {
         project_generation: u64,
         source_generation: u64,
     ) {
-        egui::CollapsingHeader::new("Import a raw GLB package")
+        egui::CollapsingHeader::new("Import a model package")
             .default_open(false)
             .show(ui, |ui| {
-                ui.label("Import a local self-contained GLB and a license file into a new package folder.");
+                ui.label("Import a local self-contained GLB or cooked static model and a license file into a new package folder.");
+                ui.label("Cooked .model.json files retain their exact bytes and historical dependency digests; those dependencies are not loaded or added to the package.");
                 ui.label("External resources, scripts, network access and package activation are not supported.");
                 ui.label("A supplied license file is metadata only; its presence is not legal review or a rights determination.");
                 let fields_enabled = enabled && !self.busy();
                 ui.add_enabled_ui(fields_enabled, |ui| {
-                    let source_changed = path_field(ui, "Raw GLB file", &mut self.source);
+                    let mut source_format = self.source_format;
+                    ui.horizontal(|ui| {
+                        ui.label("Source format");
+                        ui.radio_value(&mut source_format, SourceFormat::RawGlb, "Raw GLB");
+                        ui.radio_value(&mut source_format, SourceFormat::CookedStatic, "Cooked static model");
+                    });
+                    self.set_source_format(source_format);
+                    let source_label = match self.source_format {
+                        SourceFormat::RawGlb => "Raw GLB file",
+                        SourceFormat::CookedStatic => "Cooked static model file (.model.json)",
+                    };
+                    let source_changed = path_field(ui, source_label, &mut self.source);
                     let license_changed = path_field(ui, "License file", &mut self.license);
                     if source_changed || license_changed {
-                        self.license_acknowledged = false;
+                        self.source_inputs_changed();
                     }
                     path_field(ui, "Package destination directory", &mut self.destination);
                     text_field(ui, "Package name", &mut self.name, 128);
@@ -152,7 +171,9 @@ impl Panel {
                     ui.horizontal(|ui| {
                         ui.radio_value(&mut self.kind, ModelKind::Static, "Static model");
                         #[cfg(feature = "room-animated-models")]
-                        ui.radio_value(&mut self.kind, ModelKind::Animated, "Animated model");
+                        ui.add_enabled_ui(self.source_format == SourceFormat::RawGlb, |ui| {
+                            ui.radio_value(&mut self.kind, ModelKind::Animated, "Animated model");
+                        });
                         #[cfg(not(feature = "room-animated-models"))]
                         ui.add_enabled(false, egui::RadioButton::new(false, "Animated model"));
                     });
@@ -163,6 +184,9 @@ impl Panel {
                 });
                 #[cfg(not(feature = "room-animated-models"))]
                 ui.small("Animated import requires the room-animated-models feature; it never falls back to static.");
+                if self.source_format == SourceFormat::CookedStatic {
+                    ui.small("Cooked import requires Static model mode and never falls back to GLB parsing.");
+                }
                 let request_ready = fields_enabled
                     && project_root.is_some()
                     && self.license_acknowledged
@@ -172,9 +196,14 @@ impl Panel {
                     && !self.name.trim().is_empty()
                     && !self.version.trim().is_empty()
                     && (self.kind == ModelKind::Static
-                        || cfg!(feature = "room-animated-models"));
+                        || (self.source_format == SourceFormat::RawGlb
+                            && cfg!(feature = "room-animated-models")));
+                let import_label = match self.source_format {
+                    SourceFormat::RawGlb => "Import raw GLB package",
+                    SourceFormat::CookedStatic => "Import cooked static package",
+                };
                 if ui
-                    .add_enabled(request_ready, egui::Button::new("Import raw GLB package"))
+                    .add_enabled(request_ready, egui::Button::new(import_label))
                     .clicked()
                 {
                     match project_root {
@@ -184,7 +213,7 @@ impl Panel {
                             source_generation,
                         ),
                         None => {
-                            self.status = "Open a Room project before importing a raw GLB package.".into();
+                            self.status = "Open a Room project before importing a model package.".into();
                         }
                     }
                 }
@@ -210,15 +239,8 @@ impl Panel {
         if self.busy() {
             return;
         }
-        let request = Request {
-            source: PathBuf::from(self.source.trim()),
-            license: PathBuf::from(self.license.trim()),
-            destination: PathBuf::from(self.destination.trim()),
-            name: self.name.trim().to_owned(),
-            version: self.version.trim().to_owned(),
-            kind: self.kind,
-            license_acknowledged: self.license_acknowledged,
-        };
+        let request = self.request();
+        let source_format = request.source_format;
         let (sender, receiver) = mpsc::channel();
         match std::thread::Builder::new()
             .name("orr-model-package-import".into())
@@ -226,6 +248,7 @@ impl Panel {
                 let expected_destination = request_destination(&request.destination);
                 let result = model_package_import::import_package(request);
                 let _ = sender.send(Completion {
+                    source_format,
                     project_root,
                     expected_destination,
                     project_generation,
@@ -236,10 +259,58 @@ impl Panel {
             Ok(_) => {
                 self.destination_identity = None;
                 self.pending = Some(receiver);
-                self.status = "Importing and validating the self-contained GLB on a worker…".into();
+                self.status = match source_format {
+                    SourceFormat::RawGlb => {
+                        "Importing and validating the self-contained GLB on a worker…"
+                    }
+                    SourceFormat::CookedStatic => {
+                        "Importing and validating the cooked static model on a worker…"
+                    }
+                }
+                .into();
             }
-            Err(error) => self.status = format!("Cannot start raw GLB package import: {error}"),
+            Err(error) => {
+                self.status = format!(
+                    "Cannot start {} package import: {error}",
+                    format_label(source_format)
+                )
+            }
         }
+    }
+
+    fn set_source_format(&mut self, source_format: SourceFormat) {
+        if self.source_format != source_format {
+            self.source_format = source_format;
+            if source_format == SourceFormat::CookedStatic {
+                self.kind = ModelKind::Static;
+            }
+            self.source_inputs_changed();
+        }
+    }
+
+    fn source_inputs_changed(&mut self) {
+        self.license_acknowledged = false;
+        self.destination_identity = None;
+    }
+
+    fn request(&self) -> Request {
+        Request {
+            source: PathBuf::from(self.source.trim()),
+            license: PathBuf::from(self.license.trim()),
+            destination: PathBuf::from(self.destination.trim()),
+            name: self.name.trim().to_owned(),
+            version: self.version.trim().to_owned(),
+            kind: self.kind,
+            source_format: self.source_format,
+            license_acknowledged: self.license_acknowledged,
+        }
+    }
+}
+
+fn format_label(source_format: SourceFormat) -> &'static str {
+    match source_format {
+        SourceFormat::RawGlb => "Raw GLB",
+        SourceFormat::CookedStatic => "Cooked static model",
     }
 }
 
