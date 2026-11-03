@@ -655,7 +655,7 @@ fn stamp(h: &mut Harness<'_, TestApp>, at: (u32, u32)) {
 
 // Read retained native viewport bytes, not a reconstructed compositor result.
 // Geometry and source texels are literal; no production placement/UV helper.
-fn app_play_oracle(h: &Harness<'_, TestApp>, dir: &Path, name: &str) {
+fn app_play_oracle(h: &Harness<'_, TestApp>, dir: &Path, name: &str, literal: &[Option<u32>; 28]) {
     let size = h.state().viewport_gpu().unwrap().gpu().target().size();
     let pixels = fs::read(dir.join(format!("{name}.rgba"))).unwrap();
     assert_eq!(h.state().editor.camera, Camera::new([0., 80.], 160.));
@@ -673,7 +673,7 @@ fn app_play_oracle(h: &Harness<'_, TestApp>, dir: &Path, name: &str) {
                     let py = (f64::from(size.1) / 2. - (63.5 - (row * 16 + y) as f64) * scale)
                         .floor() as usize;
                     let index = (py * size.0 as usize + px) * 4;
-                    let want = expected(REPEATED[row * 7 + col], x, y);
+                    let want = expected(literal[row * 7 + col], x, y);
                     assert!(
                         pixels[index..index + 4]
                             .iter()
@@ -921,7 +921,7 @@ fn actual_copy_stamp_save_reopen_play_literal_cells() {
     assert_eq!(reopened.state().editor.mode(), Mode::Play);
     assert_eq!(play.tick(), 1);
     document(&reopened, &map, &REPEATED);
-    app_play_oracle(&reopened, &evidence, "12-play");
+    app_play_oracle(&reopened, &evidence, "12-play", &REPEATED);
     let state = reopened.state().render_state.as_ref().unwrap();
     let gpu = Wgpu::from_parts(
         state.instance.clone(),
@@ -991,6 +991,312 @@ fn actual_copy_stamp_save_reopen_play_literal_cells() {
             "core_source_fnv1a64":fingerprint(include_bytes!("../../../orr_tilemap/src/lib.rs")),
             "original_atlas_zero_id_present":false,"native_os_input":false,"native_window":false,
             "selected_actor_opaque_texels_checked":actor_before.len(),"predictable_texture_filtering":false,"export":false,"windows":false
+        }),
+    );
+}
+
+#[test]
+#[ignore = "explicit actual EditorApp pattern layout transform GPU acceptance; ORR_REQUIRE_GPU=1"]
+fn actual_pattern_layout_transform_save_reopen_play_literal_cells() {
+    assert_eq!(std::env::var("ORR_REQUIRE_GPU").as_deref(), Ok("1"));
+    let evidence = PathBuf::from(
+        std::env::var_os("ORR_TILEMAP_PATTERN_TRANSFORM_EVIDENCE")
+            .expect("fresh retained pattern transform evidence directory required"),
+    );
+    assert!(evidence.is_absolute() && evidence.is_dir());
+    assert!(fs::read_dir(&evidence).unwrap().next().is_none());
+    // Independent literal results for the copied [10, None, 11; 20, 21, 10]
+    // motif, transformed cumulatively and stamped at (4, 1). Clockwise gives
+    // [20,10;21,None;10,11], horizontal mirror [10,20;None,21;11,10],
+    // then vertical mirror [11,10;None,21;10,20]. No transform helper is used.
+    let rotated = [
+        Some(10),
+        None,
+        Some(11),
+        Some(20),
+        Some(21),
+        Some(20),
+        Some(11),
+        Some(20),
+        Some(21),
+        Some(10),
+        Some(11),
+        Some(20),
+        Some(10),
+        Some(10),
+        Some(11),
+        Some(20),
+        Some(21),
+        Some(10),
+        Some(21),
+        None,
+        Some(11),
+        Some(21),
+        Some(11),
+        Some(20),
+        None,
+        Some(10),
+        Some(11),
+        Some(21),
+    ];
+    let horizontal = [
+        Some(10),
+        None,
+        Some(11),
+        Some(20),
+        Some(21),
+        Some(20),
+        Some(11),
+        Some(20),
+        Some(21),
+        Some(10),
+        Some(11),
+        Some(10),
+        Some(20),
+        Some(10),
+        Some(11),
+        Some(20),
+        Some(21),
+        Some(10),
+        None,
+        Some(21),
+        Some(11),
+        Some(21),
+        Some(11),
+        Some(20),
+        None,
+        Some(11),
+        Some(10),
+        Some(21),
+    ];
+    let vertical = [
+        Some(10),
+        None,
+        Some(11),
+        Some(20),
+        Some(21),
+        Some(20),
+        Some(11),
+        Some(20),
+        Some(21),
+        Some(10),
+        Some(11),
+        Some(11),
+        Some(10),
+        Some(10),
+        Some(11),
+        Some(20),
+        Some(21),
+        Some(10),
+        None,
+        Some(21),
+        Some(11),
+        Some(21),
+        Some(11),
+        Some(20),
+        None,
+        Some(10),
+        Some(20),
+        Some(21),
+    ];
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("created");
+    orr_sample::project_create::create_tilemap(&orr_sample::project_create::CreateOptions {
+        output: root.clone(),
+        template: "arena-tilemap-2d-v1".into(),
+        seed: "pattern-layout-transform-acceptance".into(),
+    })
+    .unwrap();
+    let mut map: orr_tilemap::Document =
+        serde_json::from_slice(&fs::read(root.join("arena.tilemap.json")).unwrap()).unwrap();
+    map.width = 7;
+    map.height = 4;
+    map.origin = [-56., 144.];
+    map.cells = BEFORE.to_vec();
+    fs::write(
+        root.join("arena.tilemap.json"),
+        serde_json::to_vec(&map).unwrap(),
+    )
+    .unwrap();
+    let source_files = files(&root);
+    let mut captures = Vec::new();
+    let mut h = open(&root);
+    click(&mut h, "hero");
+    let selection = h.state().editor.selected_guids().to_vec();
+    let scene_history = h.state().editor.history().clone();
+    let initial = capture(&mut h, &evidence, "01-before", &mut captures).to_bytes();
+    let actor_before = actor_oracle(&h, &evidence.join("01-before-app.png"));
+    let initial_history = h.state().tilemap.as_ref().unwrap().history_snapshot();
+    click(&mut h, "Tile tool (owns viewport clicks)");
+    click(&mut h, "Copy");
+    rectangle(&mut h, (2, 1), (0, 0));
+    document(&h, &map, &BEFORE);
+    assert_eq!(
+        h.state().tilemap.as_ref().unwrap().history_snapshot(),
+        initial_history
+    );
+    assert!(h.query_by_label("Pattern: 3 × 2").is_some());
+    for (index, (label, literal)) in [
+        ("Rotate layout clockwise", &rotated),
+        ("Mirror layout horizontally", &horizontal),
+        ("Mirror layout vertically", &vertical),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let before_transform = h.state().tilemap.as_ref().unwrap().history_snapshot();
+        click(&mut h, label);
+        assert!(h.query_by_label("Pattern: 2 × 3").is_some());
+        assert_eq!(
+            h.state().tilemap.as_ref().unwrap().history_snapshot(),
+            before_transform,
+            "layout transforms are clipboard-only and preserve redo/saved marker"
+        );
+        document(&h, &map, &BEFORE);
+        assert_eq!(
+            capture(
+                &mut h,
+                &evidence,
+                &format!("02-{index}-transformed"),
+                &mut captures
+            )
+            .to_bytes(),
+            initial
+        );
+        click(&mut h, "Stamp");
+        stamp(&mut h, (5, 2)); // 2x3 exceeds bottom edge, despite fitting width.
+        document(&h, &map, &BEFORE);
+        assert_eq!(
+            h.state().tilemap.as_ref().unwrap().history_snapshot(),
+            before_transform,
+            "transformed out-of-bounds stamp preserves history without clipping"
+        );
+        stamp(&mut h, (4, 1));
+        document(&h, &map, literal);
+        let stamped = h.state().tilemap.as_ref().unwrap().history_snapshot();
+        assert_eq!(stamped.2.len(), initial_history.2.len() + 1);
+        assert!(stamped.3.is_empty());
+        assert_eq!(
+            capture(
+                &mut h,
+                &evidence,
+                &format!("03-{index}-stamped"),
+                &mut captures
+            )
+            .to_bytes(),
+            initial
+        );
+        click(&mut h, "Undo tile");
+        document(&h, &map, &BEFORE);
+        click(&mut h, "Redo tile");
+        document(&h, &map, literal);
+        assert_eq!(
+            h.state().tilemap.as_ref().unwrap().history_snapshot(),
+            stamped
+        );
+        if index < 2 {
+            click(&mut h, "Undo tile");
+        }
+    }
+    assert_eq!(h.state().editor.selected_guids(), &selection);
+    assert_eq!(h.state().editor.history(), &scene_history);
+    assert!(h.state().ui.body_drag.is_none());
+    assert_eq!(
+        files(&root),
+        source_files,
+        "no implicit save or asset mutation"
+    );
+    click(&mut h, "Save tilemap");
+    assert_eq!(
+        capture(&mut h, &evidence, "04-saved", &mut captures).to_bytes(),
+        initial
+    );
+    assert_eq!(
+        actor_oracle(&h, &evidence.join("04-saved-app.png")),
+        actor_before
+    );
+    assert!(!h.state().tilemap.as_ref().unwrap().dirty());
+    let saved = fs::read(root.join("arena.tilemap.json")).unwrap();
+    let mut expected_map = map.clone();
+    expected_map.cells = vertical.to_vec();
+    assert_eq!(
+        serde_json::from_slice::<orr_tilemap::Document>(&saved).unwrap(),
+        expected_map
+    );
+    fs::write(evidence.join("saved.tilemap.json"), &saved).unwrap();
+    let mut expected_files = source_files;
+    expected_files.insert(PathBuf::from("arena.tilemap.json"), saved);
+    assert_eq!(
+        files(&root),
+        expected_files,
+        "only tilemap cells may persist"
+    );
+    drop(h);
+    let mut reopened = open(&root);
+    document(&reopened, &map, &vertical);
+    assert!(!reopened.state().tilemap.as_ref().unwrap().dirty());
+    assert!(reopened
+        .state()
+        .tilemap
+        .as_ref()
+        .unwrap()
+        .history_snapshot()
+        .2
+        .is_empty());
+    assert_eq!(
+        capture(&mut reopened, &evidence, "05-reopened", &mut captures).to_bytes(),
+        initial
+    );
+    click(&mut reopened, LBL_STEP);
+    reopened.state_mut().sprites.playback.suspend_follow();
+    reopened.state_mut().editor.camera = Camera::new([0., 80.], 160.);
+    drain(&mut reopened, 3);
+    let play = capture(&mut reopened, &evidence, "06-play", &mut captures);
+    assert_eq!(reopened.state().editor.mode(), Mode::Play);
+    assert_eq!(play.tick(), 1);
+    app_play_oracle(&reopened, &evidence, "06-play", &vertical);
+    let state = reopened.state().render_state.as_ref().unwrap();
+    let gpu = Wgpu::from_parts(
+        state.instance.clone(),
+        state.adapter.clone(),
+        state.device.clone(),
+        state.queue.clone(),
+    );
+    let (_, runtime_frame) = consume_saved(
+        &root,
+        &evidence,
+        &gpu,
+        "07-runtime",
+        &vertical,
+        &mut captures,
+    );
+    assert_eq!(play.to_bytes(), runtime_frame);
+    let mut bare = PreparedRuntime::open(&root).unwrap().bridge().unwrap();
+    bare.step(1);
+    let bare_frame = bare.host().session().frame().to_bytes();
+    fs::write(evidence.join("presentation-free.frame"), &bare_frame).unwrap();
+    retained_frame(
+        &evidence.join("presentation-free.frame"),
+        bare.host().session().frame(),
+    );
+    assert_eq!(
+        bare_frame, runtime_frame,
+        "layout transformations and rendering do not alter simulation Frame"
+    );
+    assert_eq!(files(&root), expected_files);
+    write_json(
+        &evidence.join("receipt.json"),
+        &json!({
+            "completed":true,"captures":captures,"literal_before":BEFORE,
+            "literal_clockwise":rotated,"literal_horizontal":horizontal,"literal_vertical":vertical,
+            "actual_app_play_oracle_texels":7168,"runtime_oracle_pixels":7168,
+            "frame_parity":"unchanged authoring Frame; same-tick App Play, saved runtime and presentation-free Frame bytes equal",
+            "source_rgba_fnv1a64":fingerprint(SOURCE),
+            "test_source_fnv1a64":fingerprint(include_bytes!("tilemap_copy_stamp_tests.rs")),
+            "panel_source_fnv1a64":fingerprint(include_bytes!("../tilemap_panel.rs")),
+            "copy_source_fnv1a64":fingerprint(include_bytes!("../tilemap_panel/copy.rs")),
+            "native_os_input":false,"native_window":false,"windows":false,
+            "selected_actor_opaque_texels_checked":actor_before.len(),"predictable_texture_filtering":false
         }),
     );
 }
