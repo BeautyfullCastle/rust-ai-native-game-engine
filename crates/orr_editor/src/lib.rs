@@ -281,3 +281,8 @@ pub mod tilemap_panel;
 
 #[cfg(feature="room-character")]
 pub mod room_character_panel;
+
+#[cfg(feature = "terrain-surface")]
+mod terrain_surface;
+#[cfg(feature = "terrain-surface")]
+mod terrain_surface_panel;

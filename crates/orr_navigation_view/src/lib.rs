@@ -283,3 +283,9 @@ mod tests {
 
 #[cfg(all(feature = "authored-bundle", target_os = "linux", target_arch = "x86_64"))]
 pub mod bundle;
+
+#[cfg(all(feature = "authored-surface-bundle", target_os = "linux", target_arch = "x86_64"))]
+pub mod surface_player;
+#[cfg(all(feature = "authored-surface-bundle", target_os = "linux", target_arch = "x86_64"))]
+#[path = "surface_bundle/mod.rs"]
+pub mod surface_bundle;

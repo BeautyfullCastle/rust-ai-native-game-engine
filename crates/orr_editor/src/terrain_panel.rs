@@ -278,6 +278,8 @@ impl TerrainPanel {
     pub fn discard_for_editor(&mut self, editor: &Editor) -> Result<(), String> {
         let result = (|| {
             Self::require_context(editor)?;
+            #[cfg(feature = "terrain-surface")]
+            self.document.require_appearance_clean()?;
             self.document.discard();
             self.confirm_discard = false;
             Ok(())
