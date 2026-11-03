@@ -40,10 +40,12 @@ Existing files, symlinks and dangling symlinks are never overwritten.
   PNG bytes are CRC-checked and fully decoded; the existing sampler admits the
   exact manifest bytes that are atomically published without replacement.
 
-This first bridge does not expose multiple roles, per-frame pivots, anchor,
+This legacy Python bridge does not expose multiple roles, per-frame pivots, anchor,
 logical size or attack timing. It reads no existing manifest, so it cannot
 silently discard those fields. Existing advanced manifests remain usable with
 the offline packer. Other roles retain their existing fallback presentation.
+The [Rust authoring command](rust-coop-web-animation.md) additionally supports
+`--attack-timing`; this Python command remains unchanged.
 
 Acceptance covers focused invalid-input/no-clobber checks and generated-manifest
 packing. Actual WASM + Node mock DOM/Image/Canvas checks can establish actor frame

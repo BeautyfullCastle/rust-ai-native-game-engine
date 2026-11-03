@@ -268,6 +268,7 @@ pub(super) fn create(
     frames: &[(String, [f64; 4])],
     clips: &[(String, f64, bool)],
     pivot: Option<[f64; 2]>,
+    attack_timing: Option<[f64; 3]>,
 ) -> Result<Vec<u8>, String> {
     if frames.len() > 5 * 256 || clips.len() > 5 {
         return Err("animation input count exceeds bounds".into());
@@ -294,6 +295,19 @@ pub(super) fn create(
         let c = definitions.get_mut(name).unwrap().as_object_mut().unwrap();
         c.insert("fps".into(), finite(*fps)?);
         c.insert("loop".into(), Value::Bool(*looping));
+    }
+    if let Some(timing) = attack_timing {
+        let attack = definitions
+            .get_mut("attack")
+            .ok_or("attack timing requires authored attack frames")?
+            .as_object_mut()
+            .unwrap();
+        for (field, value) in ["windupMs", "releaseMs", "recoveryMs"]
+            .into_iter()
+            .zip(timing)
+        {
+            attack.insert(field.into(), finite(value)?);
+        }
     }
     let mut d = Map::new();
     d.insert("image".into(), image.into());

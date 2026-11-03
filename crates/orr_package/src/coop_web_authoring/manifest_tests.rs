@@ -105,7 +105,35 @@ fn create_preserves_omitted_defaults_and_configured_frame_order() {
         ("idle".into(), [-0.0, 0.0, 1.0, 2.0]),
         ("idle".into(), [2.0, 0.0, 1.0, 2.0]),
     ];
-    let bytes = create("unit:0", "a.png", &frames, &[], None).unwrap();
+    let bytes = create("unit:0", "a.png", &frames, &[], None, None).unwrap();
+    // Literal pre-option output, independent of the encoder under test.
+    assert_eq!(
+        bytes,
+        br#"{
+  "unit:0": {
+    "clips": {
+      "idle": {
+        "frames": [
+          [
+            -0.0,
+            0.0,
+            1.0,
+            2.0
+          ],
+          [
+            2.0,
+            0.0,
+            1.0,
+            2.0
+          ]
+        ]
+      }
+    },
+    "image": "a.png"
+  }
+}
+"#
+    );
     let v = parse(&bytes).unwrap();
     let c = &v["unit:0"]["clips"]["idle"];
     assert!(c.get("fps").is_none());
@@ -118,6 +146,7 @@ fn create_preserves_omitted_defaults_and_configured_frame_order() {
         "a.png",
         &frames,
         &[("move".into(), 12.0, true)],
+        None,
         None
     )
     .is_err());
@@ -126,6 +155,7 @@ fn create_preserves_omitted_defaults_and_configured_frame_order() {
         "a.png",
         &frames,
         &[("idle".into(), 12.0, true), ("idle".into(), 12.0, false)],
+        None,
         None
     )
     .is_err());
@@ -134,9 +164,155 @@ fn create_preserves_omitted_defaults_and_configured_frame_order() {
         "a.png",
         &[("idle".into(), [0.0, 0.0, f64::NAN, 1.0])],
         &[],
+        None,
         None
     )
     .is_err());
+}
+#[test]
+fn create_omitted_timing_preserves_configured_attack_bytes() {
+    let bytes = create(
+        "enemy:4",
+        "a.png",
+        &[("attack".into(), [0.0, 0.0, 1.0, 2.0])],
+        &[("attack".into(), 12.5, false)],
+        Some([0.5, 2.0]),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        bytes,
+        br#"{
+  "enemy:4": {
+    "clips": {
+      "attack": {
+        "fps": 12.5,
+        "frames": [
+          [
+            0.0,
+            0.0,
+            1.0,
+            2.0
+          ]
+        ],
+        "loop": false
+      }
+    },
+    "image": "a.png",
+    "pivot": [
+      0.5,
+      2.0
+    ]
+  }
+}
+"#
+    );
+}
+#[test]
+fn create_attack_timing_preserves_defaults_options_and_other_clips() {
+    let frames = vec![
+        ("attack".into(), [1.0, 0.0, 1.0, 2.0]),
+        ("idle".into(), [0.0, 0.0, 1.0, 2.0]),
+        ("attack".into(), [2.0, 0.0, 1.0, 2.0]),
+    ];
+    for configured in [false, true] {
+        let clips = if configured {
+            vec![("attack".into(), 120.0, true)]
+        } else {
+            vec![]
+        };
+        let bytes = create(
+            "unit:0",
+            "a.png",
+            &frames,
+            &clips,
+            Some([0.5, 2.0]),
+            Some([110.5, 70.25, 160.75]),
+        )
+        .unwrap();
+        let v = parse(&bytes).unwrap();
+        let attack = &v["unit:0"]["clips"]["attack"];
+        assert_eq!(attack["windupMs"], json!(110.5));
+        assert_eq!(attack["releaseMs"], json!(70.25));
+        assert_eq!(attack["recoveryMs"], json!(160.75));
+        assert_eq!(
+            attack["frames"],
+            json!([[1.0, 0.0, 1.0, 2.0], [2.0, 0.0, 1.0, 2.0]])
+        );
+        assert_eq!(
+            v["unit:0"]["clips"]["idle"],
+            json!({"frames": [[0.0, 0.0, 1.0, 2.0]]})
+        );
+        assert_eq!(v["unit:0"]["pivot"], json!([0.5, 2.0]));
+        if configured {
+            assert_eq!(attack["fps"], json!(120.0));
+            assert_eq!(attack["loop"], json!(true));
+        } else {
+            assert!(attack.get("fps").is_none());
+            assert!(attack.get("loop").is_none());
+        }
+    }
+}
+#[test]
+fn create_attack_timing_admits_independent_inclusive_durations() {
+    for role in ["unit:0", "enemy:4"] {
+        for timing in [
+            [1.0; 3],
+            [2000.0; 3],
+            [2000.0, 1.25, 1.0],
+            [1.0, 2000.0, 1.5],
+        ] {
+            // Durations need not be ordered, sum to a limit, or fit the clip/FPS.
+            let bytes = create(
+                role,
+                "a.png",
+                &[("attack".into(), [0.0, 0.0, 1.0, 2.0])],
+                &[("attack".into(), 120.0, false)],
+                None,
+                Some(timing),
+            )
+            .unwrap();
+            let v = parse(&bytes).unwrap();
+            for (field, value) in ["windupMs", "releaseMs", "recoveryMs"]
+                .into_iter()
+                .zip(timing)
+            {
+                assert_eq!(v[role]["clips"]["attack"][field].as_f64(), Some(value));
+            }
+        }
+    }
+}
+#[test]
+fn create_attack_timing_rejects_missing_attack_and_invalid_each_duration() {
+    for frames in [vec![], vec![("idle".into(), [0.0, 0.0, 1.0, 2.0])]] {
+        assert!(create("unit:0", "a.png", &frames, &[], None, Some([1.0; 3])).is_err());
+    }
+    for index in 0..3 {
+        for bad in [
+            0.0,
+            -1.0,
+            0.999,
+            2000.001,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            let mut timing = [1.0; 3];
+            timing[index] = bad;
+            assert!(
+                create(
+                    "unit:0",
+                    "a.png",
+                    &[("attack".into(), [0.0, 0.0, 1.0, 2.0])],
+                    &[],
+                    None,
+                    Some(timing),
+                )
+                .is_err(),
+                "duration {index}: {bad}"
+            );
+        }
+    }
 }
 #[test]
 fn compose_receipts_preserve_input_order_and_refuse_duplicate_roles() {
