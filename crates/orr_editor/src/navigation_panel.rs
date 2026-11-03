@@ -13,6 +13,12 @@ use orr_navigation::{AgentProfile, Navigator, SearchBudget, TerrainGraph};
 use orr_remote::navigation_yard3d::{NavigationAgentSpec, NavigationScenePin, PIN_NAME};
 use serde_json::json;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Endpoint {
+    Start,
+    Goal,
+}
+
 pub struct NavigationPanel {
     pub start: [String; 2],
     pub goal: [String; 2],
@@ -177,7 +183,7 @@ impl NavigationPanel {
         editor.admitted_navigation().error.clone()
     }
 
-    fn source<'a>(
+    pub(crate) fn source<'a>(
         &self,
         editor: &Editor,
         terrain: &'a TerrainPanel,
@@ -270,18 +276,29 @@ impl NavigationPanel {
         result
     }
 
-    pub fn show(&mut self, ui: &mut Ui, editor: &mut Editor, terrain: &TerrainPanel) {
+    pub fn show(
+        &mut self,
+        ui: &mut Ui,
+        editor: &mut Editor,
+        terrain: &TerrainPanel,
+    ) -> Option<Endpoint> {
         if editor.game() != EditorGame::NavigationYard3D {
-            return;
+            return None;
         }
         self.sync_from_editor(editor);
         self.observe_terrain(editor, terrain);
+        let mut pick = None;
         ui.collapsing("Point navigation", |ui| {
             ui.weak("One point agent · terrain triangles · zero radius, headroom and step");
             let context = self.source(editor, terrain);
             if let Err(reason) = &context { ui.label(reason); }
             let enabled = context.is_ok();
             ui.add_enabled_ui(editor.mode() == Mode::Edit, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(enabled, egui::Button::new("Pick navigation start")).clicked() { pick = Some(Endpoint::Start); }
+                    if ui.add_enabled(enabled, egui::Button::new("Pick navigation goal")).clicked() { pick = Some(Endpoint::Goal); }
+                });
+                ui.weak("Viewport picks snap to a walkable cell center; Build validates the complete route");
                 field(ui, "Navigation start X", &mut self.start[0]);
                 field(ui, "Navigation start Z", &mut self.start[1]);
                 field(ui, "Navigation goal X", &mut self.goal[0]);
@@ -314,6 +331,7 @@ impl NavigationPanel {
                 ui.colored_label(egui::Color32::RED, error);
             }
         });
+        pick
     }
 }
 
