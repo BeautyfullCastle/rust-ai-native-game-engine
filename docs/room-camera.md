@@ -73,3 +73,13 @@ Frame identity preservation, explicit software-GPU render/pick, and exact
 production-tool source-hidden read-only export. OS-window interaction, physical
 GPU, Windows local, camera follow, cutscenes, a generic rig system, and richer HUD
 are separate work. This slice does not complete roadmap #94 or #104.
+
+### Redo an authored camera edit
+
+Use **Undo camera edit** and **Redo camera edit** to compare applied camera
+compositions. Both restore all authored camera fields and reset the live view;
+they discard an un-applied camera draft. Transient viewport navigation is not
+camera history. A different successful Apply (including Reset defaults) clears
+the redo branch; invalid or unchanged Apply preserves it. The bounded history
+holds 32 applied changes. Save remains explicit and preserves Undo/Redo, while
+reopening starts with empty history. These controls are disabled during Play.
