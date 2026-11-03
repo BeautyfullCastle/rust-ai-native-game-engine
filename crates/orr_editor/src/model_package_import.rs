@@ -17,6 +17,29 @@ const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 #[cfg(windows)]
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SourceFormat {
+    #[default]
+    RawGlb,
+    CookedStatic,
+}
+
+impl SourceFormat {
+    fn asset_name(self) -> &'static str {
+        match self {
+            Self::RawGlb => "model.glb",
+            Self::CookedStatic => "model.orrmodel",
+        }
+    }
+
+    fn source_label(self) -> &'static str {
+        match self {
+            Self::RawGlb => "GLB source",
+            Self::CookedStatic => "cooked static model source",
+        }
+    }
+}
+
 pub(crate) struct Request {
     pub source: PathBuf,
     pub license: PathBuf,
@@ -24,6 +47,7 @@ pub(crate) struct Request {
     pub name: String,
     pub version: String,
     pub kind: ModelKind,
+    pub source_format: SourceFormat,
     pub license_acknowledged: bool,
 }
 
@@ -48,17 +72,35 @@ pub(crate) fn import_package(request: Request) -> Result<Report, String> {
     validate_destination_policy(&request.destination)?;
     let (destination_parent, destination) = checked_new_directory(&request.destination)?;
     validate_destination_policy(&destination)?;
-    let source_path = checked_file_path(&request.source, "GLB source")?;
+    if request.source_format == SourceFormat::CookedStatic && request.kind != ModelKind::Static {
+        return Err("cooked static model import requires Static model mode".into());
+    }
+    let source_label = request.source_format.source_label();
+    let asset_name = request.source_format.asset_name();
+    let source_path = checked_file_path(&request.source, source_label)?;
     let license_path = checked_file_path(&request.license, "license source")?;
-    if !source_path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("glb"))
-    {
-        return Err("source must be a self-contained .glb file".into());
+    match request.source_format {
+        SourceFormat::RawGlb => {
+            if !source_path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("glb"))
+            {
+                return Err("source must be a self-contained .glb file".into());
+            }
+        }
+        SourceFormat::CookedStatic => {
+            if !source_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.to_ascii_lowercase().ends_with(".model.json"))
+            {
+                return Err("cooked static source must be a .model.json file".into());
+            }
+        }
     }
 
-    let source = read_bounded_file(&source_path, MAX_SOURCE_BYTES, "GLB source")?;
+    let source = read_bounded_file(&source_path, MAX_SOURCE_BYTES, source_label)?;
     let license = read_bounded_file(&license_path, MAX_LICENSE_BYTES, "license source")?;
     if std::str::from_utf8(&license.bytes)
         .ok()
@@ -66,17 +108,25 @@ pub(crate) fn import_package(request: Request) -> Result<Report, String> {
     {
         return Err("license must be nonempty UTF-8 text".into());
     }
-    validate_glb(&source.bytes, request.kind)?;
+    match request.source_format {
+        SourceFormat::RawGlb => validate_glb(&source.bytes, request.kind)?,
+        SourceFormat::CookedStatic => {
+            // Validate the cooked payload directly. Dependency digests describe its
+            // history; they are neither resolver inputs nor package dependencies.
+            orr_model::StaticModel::from_bytes(&source.bytes)
+                .map_err(|error| format!("cooked static model import: {error}"))?;
+        }
+    }
 
     let stage = tempfile::Builder::new()
         .prefix(".orr-model-import-")
         .tempdir_in(&destination_parent)
         .map_err(|error| format!("create package staging directory: {error}"))?;
-    let manifest = package_manifest(&request)?;
+    let manifest = package_manifest(&request, asset_name)?;
     let manifest_bytes = serde_json::to_vec(&manifest)
         .map_err(|error| format!("serialize package manifest: {error}"))?;
 
-    write_new(&stage.path().join("model.glb"), &source.bytes)?;
+    write_new(&stage.path().join(asset_name), &source.bytes)?;
     write_new(&stage.path().join("LICENSE.txt"), &license.bytes)?;
     write_new(&stage.path().join("orr.package.json"), &manifest_bytes)?;
     let runtime = orr_sample::room_project::compiled_runtime();
@@ -94,6 +144,7 @@ pub(crate) fn import_package(request: Request) -> Result<Report, String> {
     publish_directory(
         stage.path(),
         &destination,
+        asset_name,
         &source.bytes,
         &license.bytes,
         &manifest_bytes,
@@ -101,14 +152,14 @@ pub(crate) fn import_package(request: Request) -> Result<Report, String> {
     Ok(Report {
         root: destination,
         package: request.name,
-        asset: "model.glb".into(),
+        asset: asset_name.into(),
         kind: request.kind,
         source_sha256: source.digest,
         license_sha256: license.digest,
     })
 }
 
-fn package_manifest(request: &Request) -> Result<Manifest, String> {
+fn package_manifest(request: &Request, asset_name: &str) -> Result<Manifest, String> {
     let capabilities = match request.kind {
         ModelKind::Static => BTreeSet::from(["models".to_owned()]),
         ModelKind::Animated => {
@@ -130,7 +181,7 @@ fn package_manifest(request: &Request) -> Result<Manifest, String> {
         ),
         capabilities,
         dependencies: BTreeMap::new(),
-        files: BTreeSet::from(["LICENSE.txt".into(), "model.glb".into()]),
+        files: BTreeSet::from(["LICENSE.txt".into(), asset_name.into()]),
     };
     Ok(manifest)
 }
@@ -330,6 +381,7 @@ fn checked_new_directory(path: &Path) -> Result<(PathBuf, PathBuf), String> {
 fn publish_directory(
     stage: &Path,
     destination: &Path,
+    asset_name: &str,
     source: &[u8],
     license: &[u8],
     manifest: &[u8],
@@ -337,7 +389,7 @@ fn publish_directory(
     fs::create_dir(destination).map_err(|error| format!("create package destination: {error}"))?;
     let mut created = Vec::new();
     let result = (|| {
-        for (name, bytes) in [("model.glb", source), ("LICENSE.txt", license)] {
+        for (name, bytes) in [(asset_name, source), ("LICENSE.txt", license)] {
             let staged = stage.join(name);
             let staged_bytes =
                 fs::read(&staged).map_err(|error| format!("read staged {name}: {error}"))?;

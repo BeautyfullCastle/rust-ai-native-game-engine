@@ -452,7 +452,7 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), String> {
         return Err("expected exactly three unique option/value pairs; use --help".into());
     }
     let mut values = BTreeMap::new();
-    for pair in args.chunks_exact(2) {
+    for pair in args.chunks(2) {
         let key = pair[0].to_str().ok_or("option names must be UTF-8")?;
         if !["--recipe", "--asset-id", "--output"].contains(&key) {
             return Err(format!("unknown option {key}"));
