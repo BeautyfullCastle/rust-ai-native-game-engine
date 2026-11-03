@@ -513,6 +513,8 @@ fn staged_material_overrides_apply_to_added_prop_and_survive_history() {
     let mut panel = Panel::default();
     let candidate = snapshot();
     let override_settings = material_override(&candidate);
+    #[cfg(feature = "mesh-prop-shading")]
+    panel.shading.load(candidate.source_model_arc(), None);
     panel.candidate = Some(candidate);
     panel.material_slots_draft = vec![override_settings];
     panel.graph_revision = Some(GRAPH_REVISION);
@@ -657,7 +659,10 @@ fn prop_undo_and_redo_clear_candidates_before_rebinding_material_slots() {
     let initial = panel.document.clone();
     panel.reset_history(initial, Some(0));
     panel.graph_revision = Some(GRAPH_REVISION);
-    panel.candidate = Some(snapshot());
+    let candidate = snapshot();
+    #[cfg(feature = "mesh-prop-shading")]
+    panel.shading.load(candidate.source_model_arc(), None);
+    panel.candidate = Some(candidate);
     panel.name = "Updated second prop".into();
     panel.update_selected();
     assert_eq!(panel.document.props[1].name, "Updated second prop");

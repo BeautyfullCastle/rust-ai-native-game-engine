@@ -552,7 +552,7 @@ fn prop_shading_roundtrip_interning_and_appearance_budget_include_shading() {
                 metallic: index as f32 / 10.0,
                 roughness: 0.5,
             }],
-            &model,
+            model,
         )
         .unwrap()
     };
