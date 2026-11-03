@@ -33,6 +33,7 @@ pub struct Panel {
     saved_bytes: Vec<u8>,
     manifest_bytes: Vec<u8>,
     undo: Vec<Document>,
+    redo: Vec<Document>,
     error: Option<String>,
 }
 
@@ -156,6 +157,7 @@ impl Panel {
             saved_bytes: prepared.bytes,
             manifest_bytes: prepared.manifest_bytes,
             undo: Vec::new(),
+            redo: Vec::new(),
             error,
         }
     }
@@ -169,6 +171,7 @@ impl Panel {
         // Serialization performs shared validation before any mutation.
         candidate.to_bytes()?;
         if candidate != self.document {
+            self.redo.clear();
             if self.undo.len() == MAX_UNDO {
                 self.undo.remove(0);
             }
@@ -180,7 +183,21 @@ impl Panel {
     }
     pub fn undo(&mut self) -> bool {
         if let Some(previous) = self.undo.pop() {
-            self.document = previous;
+            self.redo
+                .push(std::mem::replace(&mut self.document, previous));
+            self.candidate = self.document.clone();
+            true
+        } else {
+            false
+        }
+    }
+    /// Restore one undone authored camera; transient viewport movement is not history.
+    pub fn redo(&mut self) -> bool {
+        if let Some(next) = self.redo.pop() {
+            if self.undo.len() == MAX_UNDO {
+                self.undo.remove(0);
+            }
+            self.undo.push(std::mem::replace(&mut self.document, next));
             self.candidate = self.document.clone();
             true
         } else {
@@ -283,6 +300,13 @@ impl Panel {
                     .clicked()
                 {
                     reset_live = self.undo();
+                    self.error = None;
+                }
+                if ui
+                    .add_enabled(!self.redo.is_empty(), egui::Button::new("Redo camera edit"))
+                    .clicked()
+                {
+                    reset_live = self.redo();
                     self.error = None;
                 }
                 if ui.button("Reset camera defaults").clicked() {
@@ -643,3 +667,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "room_camera_panel/redo_tests.rs"]
+mod redo_tests;
