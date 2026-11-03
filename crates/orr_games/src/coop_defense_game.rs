@@ -191,11 +191,32 @@ impl WaveCounts {
         self.pair_counts.iter().all(|count| (1..=28).contains(count))
     }
 }
+/// Global integer multiplier applied after each enemy family's base HP formula.
+/// Retained in Frame across rollback and RESTART.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable, orr_reflect::Reflect)]
+#[reflect(default)]
+pub struct EnemyHealth {
+    #[reflect(range = "1..=4")]
+    pub multiplier: u32,
+}
+impl Default for EnemyHealth {
+    fn default() -> Self {
+        Self { multiplier: 1 }
+    }
+}
+impl EnemyHealth {
+    pub fn is_valid(&self) -> bool {
+        (1..=4).contains(&self.multiplier)
+    }
+}
+// EnemyHealth v5 appends a singleton after WaveCounts v4.
 // WaveCounts v4 appends a singleton after WavePacing v3.
 // Campaign v2 was 0x04ee32c4873f6941.
 // Scenario v1 was 0x7b2a3ab98f619dca.
 // This changes this game's frame contract, not the global engine format.
-pub const SCENARIO_BUILD_ID: u64 = orr_sim::frame_build_id(0x5354_4f52_4d00_0004);
+pub const SCENARIO_BUILD_ID: u64 = orr_sim::frame_build_id(0x5354_4f52_4d00_0005);
+pub const ENEMY_HEALTH_NAME: &str = "CoopDefense::EnemyHealth";
 pub const WAVE_COUNTS_NAME: &str = "CoopDefense::WaveCounts";
 pub const WAVE_PACING_NAME: &str = "CoopDefense::WavePacing";
 pub const CAMPAIGN_NAME: &str = "CoopDefense::Campaign";
@@ -206,6 +227,7 @@ pub fn scenario_types() -> orr_reflect::TypeRegistry {
     types.register_singleton::<Campaign>(CAMPAIGN_NAME);
     types.register_singleton::<WavePacing>(WAVE_PACING_NAME);
     types.register_singleton::<WaveCounts>(WAVE_COUNTS_NAME);
+    types.register_singleton::<EnemyHealth>(ENEMY_HEALTH_NAME);
     types
 }
 
@@ -345,6 +367,7 @@ pub struct DefenseConfig {
     pub campaign: Campaign,
     pub wave_pacing: WavePacing,
     pub wave_counts: WaveCounts,
+    pub enemy_health: EnemyHealth,
 }
 impl Default for DefenseConfig {
     fn default() -> Self {
@@ -354,6 +377,7 @@ impl Default for DefenseConfig {
             campaign: Campaign::default(),
             wave_pacing: WavePacing::default(),
             wave_counts: WaveCounts::default(),
+            enemy_health: EnemyHealth::default(),
         }
     }
 }
@@ -372,6 +396,7 @@ impl Game for DefenseGame {
         b.register_singleton::<Campaign>(CAMPAIGN_NAME);
         b.register_singleton::<WavePacing>(WAVE_PACING_NAME);
         b.register_singleton::<WaveCounts>(WAVE_COUNTS_NAME);
+        b.register_singleton::<EnemyHealth>(ENEMY_HEALTH_NAME);
     }
     fn setup(f: &mut Frame, c: &DefenseConfig) {
         Self::setup_scenario(f, c, c.scenario);
@@ -388,10 +413,12 @@ impl DefenseGame {
             "invalid wave pacing config"
         );
         assert!(c.wave_counts.is_valid(), "invalid wave counts config");
+        assert!(c.enemy_health.is_valid(), "invalid enemy health config");
         f.set_singleton(scenario);
         f.set_singleton(c.campaign);
         f.set_singleton(c.wave_pacing);
         f.set_singleton(c.wave_counts);
+        f.set_singleton(c.enemy_health);
         f.set_singleton(initial_run(c.seed, scenario));
         f.set_singleton(FrameRng::new(c.seed as u64));
         for board in 0..2 {
@@ -689,6 +716,7 @@ impl System<DefenseGame> for DefenseSystem {
                 &mut events,
                 *ctx.frame.singleton::<WavePacing>(),
                 *ctx.frame.singleton::<WaveCounts>(),
+                *ctx.frame.singleton::<EnemyHealth>(),
             );
             move_enemies(&mut r, &mut e, &mut events);
             advance_projectiles(&mut r, &mut e, &mut p, &mut events);
@@ -753,12 +781,19 @@ impl System<DefenseGame> for DefenseSystem {
 fn wave_count(wave: u32, counts: WaveCounts) -> u32 {
     counts.pair_counts[(wave - 1) as usize] * 2
 }
+fn scaled_enemy_hp(base_hp: u32, health: EnemyHealth) -> Option<u32> {
+    if !health.is_valid() {
+        return None;
+    }
+    base_hp.checked_mul(health.multiplier)
+}
 fn spawn_wave(
     r: &mut DefenseRun,
     e: &mut [DefenseEnemy],
     events: &mut Vec<DefenseEvent>,
     pacing: WavePacing,
     counts: WaveCounts,
+    health: EnemyHealth,
 ) {
     // Keep the historical wave-tick alignment: the first multiple at/after 180.
     // Admission and typed setup reject zero/out-of-range intervals.
@@ -785,6 +820,7 @@ fn spawn_wave(
             HORDE => base * 2 / 3,
             _ => base,
         };
+        let hp = scaled_enemy_hp(hp, health).expect("validated enemy health overflow");
         *slot = DefenseEnemy {
             active: 1,
             id: allocate_id(&mut r.next_enemy_id),
@@ -969,3 +1005,6 @@ fn fire(
 mod tests;
 #[cfg(test)]
 mod wave_counts_tests;
+
+#[cfg(test)]
+mod enemy_health_tests;

@@ -621,7 +621,7 @@ fn first_singleton_field_edit_uses_safe_defaults_and_bounds() {
 #[test]
 fn nonzero_replay_contract_rejects_previous_host_identity() {
     use orr_session::{replay_verify_checked, ReplayError, ReplayHeader, ReplayWriter};
-    let old_identities = [crate::default_build_id(GAME), 0x7b2a_3ab9_8f61_9dca, 0x04ee_32c4_873f_6941, 0xb2a3_336f_2969_7b0b];
+    let old_identities = [crate::default_build_id(GAME), 0x7b2a_3ab9_8f61_9dca, 0x04ee_32c4_873f_6941, 0xb2a3_336f_2969_7b0b, 0xe6f4_03d2_595b_d8cf];
     for old in old_identities {
         let bytes = ReplayWriter::<DefenseGame>::new(ReplayHeader {
             format_version: 3,
@@ -1065,4 +1065,77 @@ fn counts_invalid_sources_and_edits_preserve_frame_source_and_redo_branch() {
             .pair_counts[1],
         3
     );
+}
+
+#[test]
+fn enemy_health_erp_edit_undo_redo_save_reopen_and_atomic_invalids() {
+    use orr_games::coop_defense_game::{EnemyHealth, ENEMY_HEALTH_NAME};
+    let mut cfg = ServerConfig::new(Auth::DevNoAuth);
+    cfg.listen = false;
+    let host = spawn_host(INITIAL_SCENE.into(), None, cfg, None).unwrap();
+    let mut c = client(&host, Caps::ALL);
+    let schema = c
+        .call("registry.schema", json!({"type":ENEMY_HEALTH_NAME}))
+        .unwrap();
+    assert_eq!(schema["schema"]["properties"]["multiplier"]["minimum"], 1);
+    assert_eq!(schema["schema"]["properties"]["multiplier"]["maximum"], 4);
+    let patch = |value: J| json!({"name":ENEMY_HEALTH_NAME,"path":"multiplier","value":value});
+    // ERP deliberately accepts decimal numeric strings for integer fields.
+    c.call("world.singleton.patch", patch(json!("2"))).unwrap();
+    let numeric_string = c.call("scene.save", json!({})).unwrap();
+    assert_eq!(
+        document(numeric_string["text"].as_str().unwrap())
+            .unwrap()
+            .frame()
+            .singleton::<EnemyHealth>()
+            .multiplier,
+        2
+    );
+    c.call("history.undo", json!({})).unwrap();
+    let original = c.call("scene.save", json!({})).unwrap();
+    c.call("world.singleton.patch", patch(json!(4))).unwrap();
+    let authored = c.call("scene.save", json!({})).unwrap();
+    c.call("history.undo", json!({})).unwrap();
+    assert_eq!(c.call("scene.save", json!({})).unwrap(), original);
+    let history = c.call("history.list", json!({})).unwrap();
+    for bad in [
+        json!(0),
+        json!(5),
+        json!(-1),
+        json!(1.5),
+        json!(4294967296u64),
+        json!(null),
+        json!("bad"),
+    ] {
+        assert!(
+            c.call("world.singleton.patch", patch(bad.clone())).is_err(),
+            "accepted invalid multiplier {bad}"
+        );
+        assert_eq!(c.call("scene.save", json!({})).unwrap(), original);
+        assert_eq!(c.call("history.list", json!({})).unwrap(), history);
+    }
+    for fields in [
+        "{}",
+        "null",
+        "{multiplier: null}",
+        "{multiplier: 0}",
+        "{multiplier: 5}",
+        "{multiplier: 2, extra: 1}",
+        "{multiplier: 1, multiplier: 2}",
+    ] {
+        let source = format!("schema: orr.scene/1\nentities: {{}}\nsingletons: {{CoopDefense::EnemyHealth: {fields}}}\n");
+        assert!(c.call("scene.load", json!({"text":source})).is_err());
+        assert_eq!(c.call("scene.save", json!({})).unwrap(), original);
+        assert_eq!(c.call("history.list", json!({})).unwrap(), history);
+    }
+    c.call("history.redo", json!({})).unwrap();
+    assert_eq!(c.call("scene.save", json!({})).unwrap(), authored);
+    let source = authored["text"].as_str().unwrap();
+    let reopened = document(source).unwrap();
+    assert_eq!(reopened.frame().singleton::<EnemyHealth>().multiplier, 4);
+    let play = c.call("sim.start", json!({})).unwrap();
+    assert_eq!(play["checksum"], authored["checksum"]);
+    assert!(c.call("world.singleton.patch", patch(json!(2))).is_err());
+    c.call("sim.stop", json!({})).unwrap();
+    assert_eq!(c.call("scene.save", json!({})).unwrap(), authored);
 }

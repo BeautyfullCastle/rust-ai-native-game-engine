@@ -151,6 +151,74 @@ fn malformed_or_duplicate_wave_pairs_are_usage_errors() {
     }
 }
 #[test]
+fn enemy_health_is_optional_bounded_and_uses_existing_integer_grammar() {
+    let default = scene_text(&options(&args(&[])).unwrap()).unwrap();
+    for (input, multiplier) in [("1", 1), ("2", 2), ("3", 3), ("4", 4), (" +0_4 ", 4)] {
+        let o = options(&args(&["--enemy-health-multiplier", input])).unwrap();
+        assert_eq!(o.enemy_health, Some(multiplier));
+        let mut expected = default.clone();
+        expected.extend_from_slice(
+            format!("  CoopDefense::EnemyHealth:\n    multiplier: {multiplier}\n").as_bytes(),
+        );
+        assert_eq!(scene_text(&o).unwrap(), expected);
+    }
+    for input in [
+        "",
+        "0",
+        "5",
+        "-1",
+        "1.0",
+        "true",
+        "0x1",
+        "1__0",
+        "١",
+        "18446744073709551616",
+        "1\nother: 2",
+    ] {
+        assert!(
+            options(&args(&["--enemy-health-multiplier", input])).is_err(),
+            "{input:?}"
+        );
+    }
+    assert!(options(&args(&["--enemy-health-multiplier"])).is_err());
+    assert!(options(&args(&[
+        "--enemy-health-multiplier",
+        "1",
+        "--enemy-health-multiplier",
+        "4"
+    ]))
+    .is_err());
+    let mut o = options(&args(&[])).unwrap();
+    for invalid in [0, 5, i64::MAX] {
+        o.enemy_health = Some(invalid);
+        assert!(scene_text(&o).is_err());
+    }
+}
+#[test]
+fn all_eight_options_emit_health_after_existing_fields() {
+    let all = args(&[
+        "--starting-gold",
+        "250",
+        "--reactor-hp",
+        "75",
+        "--last-wave",
+        "3",
+        "--spawn-interval-ticks",
+        "70",
+        "--wave-pairs",
+        "1,2,3,4,5,6,7,8,9,28",
+        "--enemy-health-multiplier",
+        "4",
+    ]);
+    assert_eq!(all.len(), 16);
+    let mut expected = scene_text(&options(&all[..14]).unwrap()).unwrap();
+    expected.extend_from_slice(b"  CoopDefense::EnemyHealth:\n    multiplier: 4\n");
+    assert_eq!(scene_text(&options(&all).unwrap()).unwrap(), expected);
+    let mut excess = all;
+    excess.extend([OsString::from("--unknown"), OsString::from("1")]);
+    assert!(options(&excess).is_err());
+}
+#[test]
 fn receipt_requires_exact_fields_types_hashes_and_checksum() {
     let wasm = b"fixture";
     let scene = scene_text(&options(&args(&[])).unwrap()).unwrap();

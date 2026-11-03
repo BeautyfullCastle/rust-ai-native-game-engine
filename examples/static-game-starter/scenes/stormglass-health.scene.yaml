@@ -1,0 +1,8 @@
+schema: orr.scene/1
+entities: {}
+singletons:
+  CoopDefense::Scenario: {starting_gold: 1000, reactor_hp: 1000}
+  CoopDefense::Campaign: {last_wave: 3}
+  CoopDefense::WavePacing: {spawn_interval_ticks: 70}
+  CoopDefense::WaveCounts: {pair_counts: [1, 2, 3, 16, 18, 20, 22, 24, 26, 28]}
+  CoopDefense::EnemyHealth: {multiplier: 4}

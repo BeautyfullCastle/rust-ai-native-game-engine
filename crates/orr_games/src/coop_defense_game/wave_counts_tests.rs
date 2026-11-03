@@ -192,6 +192,7 @@ fn default_and_custom_counts_preserve_literal_kind_hp_order_lanes_and_pacing() {
                             spawn_interval_ticks: interval,
                         },
                         counts,
+                        EnemyHealth::default(),
                     );
                     let is_spawn =
                         tick >= first && tick < first + interval * pairs && tick % interval == 0;
@@ -412,7 +413,7 @@ fn old_v3_frame_schema_is_rejected_and_nonzero_build_identity_changes() {
         result,
         Err(orr_ecs::FrameDecodeError::SchemaCount {
             kind: "singleton",
-            expected: 6,
+            expected: 7,
             found: 5,
         })
     ));
