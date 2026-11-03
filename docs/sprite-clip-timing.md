@@ -51,3 +51,7 @@ exact sampling boundaries, input and aggregate limits, source/context guards,
 no-replace publication, and actual editor widgets. The workflow is informed by
 [Aseprite animation](https://www.aseprite.org/docs/animation/); no compatibility
 with its file format or editor is implied.
+
+For a new frame order starting from an admitted Region, use the separate
+[clip sequence mode](sprite-clip-sequence.md). Timing-only variants retain the
+fixed-frame contract described above.
