@@ -22,6 +22,8 @@ pub mod smooth;
 pub mod stamp;
 #[cfg(feature = "terrain-raw16")]
 pub mod raw16;
+#[cfg(feature = "terrain-png16")]
+pub mod png16;
 
 pub struct TerrainPanel {
     pub flatten: flatten::Spec,
@@ -29,6 +31,8 @@ pub struct TerrainPanel {
     pub stamp: stamp::State,
     #[cfg(feature = "terrain-raw16")]
     pub raw16: raw16::State,
+    #[cfg(feature = "terrain-png16")]
+    pub png16: png16::State,
     pub document: TerrainSession,
     pub local_path: String,
     pub asset_id: String,
@@ -56,6 +60,8 @@ impl Default for TerrainPanel {
             stamp: stamp::State::default(),
             #[cfg(feature = "terrain-raw16")]
             raw16: raw16::State::default(),
+            #[cfg(feature = "terrain-png16")]
+            png16: png16::State::default(),
             document: TerrainSession::default(),
             local_path: "terrain.orrt".into(),
             asset_id: "terrain/local.orrt".into(),
@@ -617,6 +623,8 @@ impl TerrainPanel {
             self.show_stamp(ui, editor, writable);
             #[cfg(feature = "terrain-raw16")]
             self.show_raw16(ui, editor, writable);
+            #[cfg(feature = "terrain-png16")]
+            self.show_png16(ui, editor, writable);
             ui.horizontal(|ui| {
                 if ui
                     .add_enabled(

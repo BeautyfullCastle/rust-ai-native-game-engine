@@ -3694,6 +3694,7 @@ dependencies = [
 name = "orr_terrain_view"
 version = "0.0.1"
 dependencies = [
+ "fdeflate",
  "orr_fp",
  "orr_model",
  "orr_package",

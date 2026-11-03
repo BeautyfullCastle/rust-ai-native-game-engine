@@ -8,6 +8,8 @@
 
 #[cfg(feature = "raw16")]
 pub mod raw16;
+#[cfg(feature = "png16")]
+pub mod png16;
 
 use orr_fp::FP;
 use orr_model::{
