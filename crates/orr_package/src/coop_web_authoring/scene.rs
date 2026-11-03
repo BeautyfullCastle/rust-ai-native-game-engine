@@ -9,7 +9,7 @@ const VALIDATOR: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../tools/validate_coop_defense_scene.mjs"
 ));
-const USAGE:&str="orr_pkg create-coop-scene --wasm TRUSTED_LOCAL_WASM --output NEW_SCENE [--starting-gold 0..10000] [--reactor-hp 1..1000] [--last-wave 1..10] [--spawn-interval-ticks 35..350]\nExecutes trusted local WASM in trusted Node on PATH; not a sandbox. No fetch or build. Integers accept ASCII decimal digits, optional sign, whitespace and single underscores between digits; Unicode digits are not accepted. Duplicate options are refused.";
+const USAGE:&str="orr_pkg create-coop-scene --wasm TRUSTED_LOCAL_WASM --output NEW_SCENE [--starting-gold 0..10000] [--reactor-hp 1..1000] [--last-wave 1..10] [--spawn-interval-ticks 35..350] [--wave-pairs N1,N2,N3,N4,N5,N6,N7,N8,N9,N10]\nWave pairs require exactly ten integers, each 1..28; each pair spawns one enemy in each lane. Executes trusted local WASM in trusted Node on PATH; not a sandbox. No fetch or build. Integers accept ASCII decimal digits, optional sign, whitespace and single underscores between digits; Unicode digits are not accepted. Duplicate options are refused.";
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(super) struct Receipt {
@@ -39,6 +39,7 @@ struct Options {
     hp: i64,
     wave: i64,
     pacing: Option<i64>,
+    wave_pairs: Option<[u32; 10]>,
 }
 fn integer(value: &OsString) -> Result<i64, String> {
     let raw = value
@@ -60,8 +61,29 @@ fn integer(value: &OsString) -> Result<i64, String> {
         .parse()
         .map_err(|_| "integer outside supported range".into())
 }
+fn wave_pairs(value: &OsString) -> Result<[u32; 10], String> {
+    let raw = value
+        .to_str()
+        .ok_or("wave pairs must be UTF-8 ASCII decimals")?;
+    let mut parts = raw.split(',');
+    let mut counts = [0; 10];
+    for count in &mut counts {
+        let part = parts
+            .next()
+            .ok_or("wave pairs require exactly ten integers")?;
+        let value = integer(&OsString::from(part))?;
+        if !(1..=28).contains(&value) {
+            return Err("wave pairs must each be in 1..28".into());
+        }
+        *count = value as u32;
+    }
+    if parts.next().is_some() {
+        return Err("wave pairs require exactly ten integers".into());
+    }
+    Ok(counts)
+}
 fn options(args: &[OsString]) -> Result<Options, String> {
-    if args.len() > 12
+    if args.len() > 14
         || args.len() % 2 != 0
         || args.iter().any(|s| {
             s.is_empty() || s.as_encoded_bytes().len() > 4096 || s.as_encoded_bytes().contains(&0)
@@ -71,6 +93,7 @@ fn options(args: &[OsString]) -> Result<Options, String> {
     }
     let (mut wasm, mut output) = (None, None);
     let (mut gold, mut hp, mut wave, mut pacing) = (150, 30, 10, None);
+    let mut pairs = None;
     let mut seen = BTreeSet::new();
     for pair in args.chunks_exact(2) {
         let key = pair[0].to_str().ok_or("invalid option")?;
@@ -84,6 +107,7 @@ fn options(args: &[OsString]) -> Result<Options, String> {
             "--reactor-hp" => hp = integer(&pair[1])?,
             "--last-wave" => wave = integer(&pair[1])?,
             "--spawn-interval-ticks" => pacing = Some(integer(&pair[1])?),
+            "--wave-pairs" => pairs = Some(wave_pairs(&pair[1])?),
             _ => return Err("unknown option".into()),
         }
     }
@@ -94,6 +118,7 @@ fn options(args: &[OsString]) -> Result<Options, String> {
         hp,
         wave,
         pacing,
+        wave_pairs: pairs,
     };
     scene_text(&o)?;
     Ok(o)
@@ -103,6 +128,8 @@ fn scene_text(o: &Options) -> Result<Vec<u8>, String> {
         || !(1..=1000).contains(&o.hp)
         || !(1..=10).contains(&o.wave)
         || o.pacing.is_some_and(|p| !(35..=350).contains(&p))
+        || o.wave_pairs
+            .is_some_and(|counts| counts.iter().any(|n| !(1..=28).contains(n)))
     {
         return Err("scene integer outside authored bounds".into());
     }
@@ -110,6 +137,12 @@ fn scene_text(o: &Options) -> Result<Vec<u8>, String> {
     if let Some(pacing) = o.pacing {
         text.push_str(&format!(
             "  CoopDefense::WavePacing:\n    spawn_interval_ticks: {pacing}\n"
+        ));
+    }
+    if let Some(counts) = o.wave_pairs {
+        let values = counts.map(|n| n.to_string()).join(", ");
+        text.push_str(&format!(
+            "  CoopDefense::WaveCounts:\n    pair_counts: [{values}]\n"
         ));
     }
     Ok(text.into_bytes())
@@ -173,7 +206,7 @@ fn create_with(
     Ok((verified, warning))
 }
 pub(super) fn run_cli(args: impl IntoIterator<Item = OsString>) -> u8 {
-    let args: Vec<_> = args.into_iter().take(14).collect();
+    let args: Vec<_> = args.into_iter().take(16).collect();
     if args.len() == 1 && (args[0] == "--help" || args[0] == "-h") {
         println!("{USAGE}");
         return 0;

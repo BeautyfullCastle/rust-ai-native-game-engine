@@ -220,7 +220,7 @@ fn two_games(cli: bool) {
                     paused_tick = Some(tick);
                 }
                 if action == "step" {
-                    assert!(tick >= paused_tick.unwrap() + 1);
+                    assert!(tick > paused_tick.unwrap());
                 }
             }
         } else {

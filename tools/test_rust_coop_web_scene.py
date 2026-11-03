@@ -1,4 +1,4 @@
-"""Actual Rust/Python Scene CLI parity through trusted WASM and offline delivery.
+"""Legacy Scene parity and Rust wave counts through trusted WASM/offline delivery.
 
 Requires ORR_PKG_BIN and ORR_COOP_WEB_BUILD_DIR containing the reviewed locally
 built CoopDefense game.wasm, plus Node on PATH. No mock WASM/scene validator.
@@ -171,6 +171,82 @@ class RustCoopWebScene(unittest.TestCase):
                 with self.subTest(name=name, value=value):
                     self.rejected_both([name, value])
 
+    def test_native_wave_pairs_exact_bytes_boundaries_and_default_equivalence(self):
+        defaults = [10, 12, 14, 16, 18, 20, 22, 24, 26, 28]
+        omitted = self.success(True, self.root / 'omitted-counts.yaml')
+        for index, counts in enumerate(([1] * 10, [28] * 10,
+                                        [3, 1, 28, 4, 5, 6, 7, 8, 9, 10], defaults)):
+            with self.subTest(counts=counts):
+                output = self.root / f'counts-{index}.yaml'
+                extra = ['--wave-pairs', ','.join(map(str, counts))]
+                receipt = self.success(True, output, extra)
+                expected = (legacy.scene_text() + '  CoopDefense::WaveCounts:\n'
+                            + '    pair_counts: [' + ', '.join(map(str, counts)) + ']\n').encode()
+                self.assertEqual(output.read_bytes(), expected)
+                repeated = self.root / f'repeated-counts-{index}.yaml'
+                self.assertEqual(self.success(True, repeated, extra), receipt)
+                result = self.execute(self.command(True, output, extra))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(output.read_bytes(), expected)
+                if counts == defaults:
+                    self.assertEqual(receipt['initialChecksum'], omitted['initialChecksum'])
+                else:
+                    self.assertNotEqual(receipt['initialChecksum'], omitted['initialChecksum'])
+
+    def test_native_invalid_wave_pairs_never_publish(self):
+        invalid = ['', '1', '1,2,3,4,5,6,7,8,9', '1,2,3,4,5,6,7,8,9,10,11',
+                   ',2,3,4,5,6,7,8,9,10', '1,2,3,4,5,6,7,8,9,',
+                   '1,2,3,4,,6,7,8,9,10', '1,2,3,4,5,6,7,8,9,0',
+                   '1,2,3,4,5,6,7,8,9,29', '-1,2,3,4,5,6,7,8,9,10',
+                   '1.0,2,3,4,5,6,7,8,9,10', 'true,2,3,4,5,6,7,8,9,10',
+                   '١,2,3,4,5,6,7,8,9,10', '1,2,3,4,5,6,7,8,9,10\nother: 1',
+                   '1,2,3,4,5,6,7,8,9,18446744073709551616']
+        cases = [['--wave-pairs', value] for value in invalid]
+        valid = '1,2,3,4,5,6,7,8,9,10'
+        cases += [['--wave-pairs'], ['--wave-pairs', valid, '--wave-pairs', valid]]
+        for extra in cases:
+            with self.subTest(extra=extra):
+                output = self.root / 'refused-counts.yaml'
+                result = self.execute(self.command(True, output, extra))
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertFalse(os.path.lexists(output))
+                self.assertEqual(self.wasm.read_bytes(), self.wasm_bytes)
+                self.assertEqual(self.sentinel.read_bytes(), b'keep')
+
+    def test_native_saved_wave_pairs_control_spawn_totals_and_survive_restart(self):
+        script = """
+const fs=require('fs'),assert=require('assert/strict');
+(async()=>{const w=(await WebAssembly.instantiate(fs.readFileSync(process.argv[1]),{})).instance.exports;
+const scene=fs.readFileSync(process.argv[2]),pairs=Number(process.argv[3]),interval=70;
+new Uint8Array(w.memory.buffer,w.defense_scene_buffer(),scene.length).set(scene);
+assert.equal(w.defense_init_scene(scene.length),0);
+const read=()=>{const p=w.defense_snapshot();return JSON.parse(new TextDecoder().decode(new Uint8Array(w.memory.buffer,p,w.defense_snapshot_len())))};
+const first=Math.ceil(180/interval)*interval,traces=[];
+for(let run=0;run<2;run++){
+ const initial=read();assert.equal(initial.tick,0);assert.equal(initial.hp,1000);assert.equal(initial.lastWave,1);
+ const ticks=[];
+ for(let tick=1;tick<=first+pairs*interval;tick++){
+  w.defense_step(0,0,0,0);const s=read();assert.equal(s.tick,tick);
+  assert.equal(s.presentation.status,'complete');
+  const added=s.presentation.events.filter(e=>e.kind==='enemy_spawn');
+  if(added.length){assert.equal(added.length,2);assert.deepEqual(added.map(e=>e.board),[0,1]);ticks.push(tick);}
+ }
+ assert.deepEqual(ticks,Array.from({length:pairs},(_,i)=>first+i*interval));traces.push(ticks);
+ if(run===0)w.defense_step(5,0,0,1);
+}
+console.log(JSON.stringify({pairs,traces}));
+})().catch(e=>{console.error(e);process.exitCode=1});
+"""
+        for pairs in (1, 3, 28):
+            with self.subTest(pairs=pairs):
+                output = self.root / f'counted-restart-{pairs}.yaml'
+                self.success(True, output, ['--reactor-hp', 1000, '--last-wave', 1,
+                                            '--spawn-interval-ticks', 70,
+                                            '--wave-pairs', ','.join([str(pairs)] * 10)])
+                result = self.execute(['node', '-e', script, str(self.wasm), str(output), str(pairs)])
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout)['pairs'], pairs)
+
     def test_invalid_truncated_and_wrong_module_wasm_never_publish(self):
         # Empty valid WASM module is structurally valid but lacks required game ABI;
         # it is a bounded inert fixture, not an arbitrary third-party executable.
@@ -259,6 +335,35 @@ class RustCoopWebScene(unittest.TestCase):
         self.assertNotIn(str(self.wasm), html.read_text())
         # The unchanged checker executes actual trusted-WASM scene admission and
         # Node syntax checking. It does not run a browser or certify rendered play.
+
+    def test_counted_scene_same_build_native_and_legacy_offline_receipts(self):
+        import base64
+        scene = self.root / 'counted.scene.yaml'
+        receipt = self.success(True, scene, ['--starting-gold', 250, '--reactor-hp', 75,
+                                            '--last-wave', 3, '--spawn-interval-ticks', 70,
+                                            '--wave-pairs', '1,2,3,4,5,6,7,8,9,28'])
+        web = self.root / 'counted-web'
+        shutil.copytree(self.build, web)
+        for native in (False, True):
+            with self.subTest(native=native):
+                html = self.root / f'counted-{native}.html'
+                if native:
+                    result = self.execute([self.binary, 'pack-coop-offline', '--build-dir', str(web),
+                                           '--scene', str(scene), '--output', str(html)])
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                else:
+                    packer.package(web, scene=scene, output=html)
+                parsed = EmbeddedScripts()
+                parsed.feed(html.read_text())
+                self.assertEqual(base64.b64decode(parsed.scripts['wasm-core'], validate=True), self.wasm_bytes)
+                self.assertEqual(base64.b64decode(parsed.scripts['authored-scene'], validate=True), scene.read_bytes())
+                self.assertEqual(json.loads(parsed.scripts['authored-scene-receipt']), receipt)
+                result = self.execute([sys.executable, '-B', str(TOOLS / 'check_coop_defense_offline.py'), str(web), str(html)])
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue(json.loads(result.stdout)['passed'])
+        self.assertEqual(packer.validate_scene(scene.read_bytes(), self.wasm_bytes), receipt)
+        self.assertEqual((web / 'game.wasm').read_bytes(), self.wasm_bytes)
+        self.assertEqual(self.sentinel.read_bytes(), b'keep')
 
 
 if __name__ == '__main__':

@@ -7,9 +7,16 @@ use std::fmt::Write;
 fn main() {
     let args: Vec<_> = std::env::args().skip(1).collect();
     let source = match args.as_slice() {
-        [] => include_str!("../../../examples/static-game-starter/scenes/stormglass-short.scene.yaml"),
-        [arg] if arg == "--training" => include_str!("../../../examples/static-game-starter/scenes/stormglass-training.scene.yaml"),
-        _ => panic!("usage: coop_defense_campaign_trace [--training]"),
+        [] => {
+            include_str!("../../../examples/static-game-starter/scenes/stormglass-short.scene.yaml")
+        }
+        [arg] if arg == "--training" => include_str!(
+            "../../../examples/static-game-starter/scenes/stormglass-training.scene.yaml"
+        ),
+        [arg] if arg == "--counts" => include_str!(
+            "../../../examples/static-game-starter/scenes/stormglass-counts.scene.yaml"
+        ),
+        _ => panic!("usage: coop_defense_campaign_trace [--training|--counts]"),
     };
     let config = parse_config(source).unwrap();
     let interval = config.wave_pacing.spawn_interval_ticks;
@@ -31,6 +38,7 @@ fn main() {
     let mut comma = "";
     let mut victories = 0;
     let mut terminal_ticks = 0;
+    let mut spawned = [[0_u32; 3]; 2];
     for tick in 0..20000 {
         let state = run(sim.frame());
         let input = if state.phase == WON {
@@ -78,13 +86,29 @@ fn main() {
             if event.payload.kind == EVENT_ENEMY_SPAWN {
                 assert!(state.wave_tick >= 180);
                 assert_eq!(state.wave_tick % interval, 0);
+                let wave = (state.wave - 1) as usize;
+                let ordinal = spawned[victories][wave] / 2;
+                let expected_kind = (ordinal + state.wave) % 4;
+                let base_hp = 24 + state.wave * 15;
+                let expected_hp = match expected_kind {
+                    ARMORED => base_hp * 2,
+                    HORDE => base_hp * 2 / 3,
+                    _ => base_hp,
+                };
+                assert_eq!(event.payload.board, spawned[victories][wave] % 2);
+                assert_eq!(event.payload.value, expected_kind);
+                assert_eq!(event.payload.hp_after, expected_hp);
+                spawned[victories][wave] += 1;
             }
         }
         assert_eq!(*sim.frame().singleton::<WavePacing>(), config.wave_pacing);
+        assert_eq!(*sim.frame().singleton::<WaveCounts>(), config.wave_counts);
         assert_ne!(state.phase, LOST);
-        assert!(!events
-            .iter()
-            .any(|e| e.payload.kind == EVENT_WAVE && e.payload.value > 3));
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.payload.kind == EVENT_WAVE && e.payload.value > 3)
+        );
         write!(
             output,
             "{comma}[{},{},{},{},\"{:016x}\",{},{},{},{}]",
@@ -108,6 +132,11 @@ fn main() {
         *sim.frame().singleton::<Campaign>(),
         Campaign { last_wave: 3 }
     );
+    for run_counts in spawned {
+        for (wave, count) in run_counts.into_iter().enumerate() {
+            assert_eq!(count, config.wave_counts.pair_counts[wave] * 2);
+        }
+    }
     output.push_str("]}");
     println!("{output}");
 }

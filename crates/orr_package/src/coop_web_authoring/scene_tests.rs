@@ -59,6 +59,98 @@ fn strict_options_bounds_and_decimal_compatibility() {
     assert!(options(&args(&["--starting-gold", &"9".repeat(4097)])).is_err());
 }
 #[test]
+fn explicit_wave_pairs_emit_exact_array_without_changing_omitted_bytes() {
+    let default = scene_text(&options(&args(&[])).unwrap()).unwrap();
+    for (input, expected) in [
+        ("1,1,1,1,1,1,1,1,1,1", [1; 10]),
+        ("28,28,28,28,28,28,28,28,28,28", [28; 10]),
+        (
+            " +01 ,0_2,3,4,5,6,7,8,9,28 ",
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 28],
+        ),
+        (
+            "10,12,14,16,18,20,22,24,26,28",
+            [10, 12, 14, 16, 18, 20, 22, 24, 26, 28],
+        ),
+    ] {
+        let o = options(&args(&["--wave-pairs", input])).unwrap();
+        assert_eq!(o.wave_pairs, Some(expected));
+        let values = expected.map(|n| n.to_string()).join(", ");
+        let mut bytes = default.clone();
+        bytes.extend_from_slice(
+            format!("  CoopDefense::WaveCounts:\n    pair_counts: [{values}]\n").as_bytes(),
+        );
+        assert_eq!(scene_text(&o).unwrap(), bytes);
+    }
+    let all = args(&[
+        "--starting-gold",
+        "250",
+        "--reactor-hp",
+        "75",
+        "--last-wave",
+        "3",
+        "--spawn-interval-ticks",
+        "70",
+        "--wave-pairs",
+        "1,2,3,4,5,6,7,8,9,28",
+    ]);
+    assert_eq!(all.len(), 14);
+    let text = scene_text(&options(&all).unwrap()).unwrap();
+    assert_eq!(text, b"schema: orr.scene/1\nentities: {}\nsingletons:\n  CoopDefense::Scenario:\n    starting_gold: 250\n    reactor_hp: 75\n  CoopDefense::Campaign:\n    last_wave: 3\n  CoopDefense::WavePacing:\n    spawn_interval_ticks: 70\n  CoopDefense::WaveCounts:\n    pair_counts: [1, 2, 3, 4, 5, 6, 7, 8, 9, 28]\n");
+}
+#[test]
+fn malformed_or_duplicate_wave_pairs_are_usage_errors() {
+    for value in [
+        "",
+        "1",
+        "1,2,3,4,5,6,7,8,9",
+        "1,2,3,4,5,6,7,8,9,10,11",
+        "1,2,3,4,5,6,7,8,9,",
+        ",2,3,4,5,6,7,8,9,10",
+        "1,2,3,4,,6,7,8,9,10",
+        "1,2,3,4,5,6,7,8,9,0",
+        "1,2,3,4,5,6,7,8,9,29",
+        "-1,2,3,4,5,6,7,8,9,10",
+        "1.0,2,3,4,5,6,7,8,9,10",
+        "true,2,3,4,5,6,7,8,9,10",
+        "0x1,2,3,4,5,6,7,8,9,10",
+        "1__0,2,3,4,5,6,7,8,9,10",
+        "١,2,3,4,5,6,7,8,9,10",
+        "1,2,3,4,5,6,7,8,9,18446744073709551616",
+        "[1,2,3,4,5,6,7,8,9,10]",
+        "1 2 3 4 5 6 7 8 9 10",
+        "1,2,3,4,5,6,7,8,9,10\nother: 1",
+    ] {
+        assert!(
+            options(&args(&["--wave-pairs", value])).is_err(),
+            "{value:?}"
+        );
+    }
+    let valid = "1,2,3,4,5,6,7,8,9,10";
+    assert!(options(&args(&["--wave-pairs"])).is_err());
+    assert!(options(&args(&["--wave-pairs", valid, "--wave-pairs", valid])).is_err());
+    assert!(options(&args(&[
+        "--starting-gold",
+        "250",
+        "--reactor-hp",
+        "75",
+        "--last-wave",
+        "3",
+        "--spawn-interval-ticks",
+        "70",
+        "--wave-pairs",
+        valid,
+        "--extra",
+        "1",
+    ]))
+    .is_err());
+    let mut o = options(&args(&["--wave-pairs", valid])).unwrap();
+    for count in [0, 29, u32::MAX] {
+        o.wave_pairs = Some([count; 10]);
+        assert!(scene_text(&o).is_err());
+    }
+}
+#[test]
 fn receipt_requires_exact_fields_types_hashes_and_checksum() {
     let wasm = b"fixture";
     let scene = scene_text(&options(&args(&[])).unwrap()).unwrap();

@@ -21,6 +21,14 @@ assert.equal(load('schema: orr.scene/1\nentities: {}\nsingletons: {CoopDefense::
 s=read();assert.equal(s.lastWave,10);assert.equal(s.hp,30);assert.deepEqual(s.gold,[150,150]);
 const pacingSnapshot=read();
 for(const interval of [0,34,351]){assert.equal(load(`schema: orr.scene/1\nentities: {}\nsingletons: {CoopDefense::WavePacing: {spawn_interval_ticks: ${interval}}}\n`),3);assert.deepEqual(read(),pacingSnapshot,'invalid pacing does not replace state');}
+// WaveCounts-only admission keeps the other independently defaulted settings.
+const countScene=values=>`schema: orr.scene/1\nentities: {}\nsingletons: {CoopDefense::WaveCounts: {pair_counts: ${values}}}\n`;
+assert.equal(load(countScene('[1,2,3,16,18,20,22,24,26,28]')),0);
+s=read();assert.equal(s.lastWave,10);assert.equal(s.hp,30);assert.deepEqual(s.gold,[150,150]);
+const countsSnapshot=read();
+for(const values of ['[]','null','[1,2,3,16,18,20,22,24,26]','[1,2,3,16,18,20,22,24,26,0]','[1,2,3,16,18,20,22,24,26,29]','[1,2,3,16,18,20,22,24,26,4294967296]']){
+ assert.equal(load(countScene(values)),3);assert.deepEqual(read(),countsSnapshot,'invalid count array preserves current state');
+}
 w.defense_init(71825);s=read();
 w.defense_step(1,0,0,1);s=read();assert.equal(s.gold[0],125);assert.equal(s.units.filter(u=>u[0]===0).length,1);
 w.defense_step(1,0,0,1);assert.equal(read().gold[0],125,'held sample spends only once');
@@ -41,7 +49,8 @@ w.defense_init(71825);let sequence=0;for(let t=0;t<1200;t++)w.defense_step(t%30=
 // WavePacing-v3 changes Frame layout; native legacy_seed_trace_matches_native_simulation
 // independently reproduced 41a0cf5eb1436a07, then fresh actual WASM matched it.
 // Same seed71825/default settings, two input slots, 1200 consumed ticks.
-assert.equal(s.checksum,'41a0cf5eb1436a07','native Scenario+Campaign+WavePacing schema parity fixture');
+// WaveCounts-v4 native ABI test independently produced fe7ec338439dce34.
+assert.equal(s.checksum,'fe7ec338439dce34','native WaveCounts-v4 schema parity fixture');
 assert.equal(s.wave,2);assert.equal(s.hp,30);assert.ok(s.projectiles.length>0);assert.ok(s.units.some(u=>u[0]===1));
 if(campaignTracePath){
  // Replay only exact consumed inputs from the native seeded strategy. No frame state
