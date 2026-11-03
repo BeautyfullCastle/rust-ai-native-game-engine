@@ -1,4 +1,5 @@
-//! Preview-bound RAW16 height replacement; no file publication or format inference.
+//! Explicit RAW16 height replacement and exact-height export.
+mod export;
 use super::{text_field, Editor, TerrainPanel, TerrainSource};
 use crate::terrain_document::format_fixed;
 use orr_terrain::{Edit, MAX_EDITS};
@@ -38,6 +39,8 @@ struct Candidate {
 #[derive(Default)]
 pub struct State {
     pub fields: Fields,
+    pub output_path: String,
+    export_status: Option<String>,
     candidate: Option<Candidate>,
 }
 impl State {
@@ -213,6 +216,7 @@ impl TerrainPanel {
             }
             let before = self.raw16.fields.clone();
             text_field(ui,"RAW16 absolute input path",&mut self.raw16.fields.path);
+            ui.weak("Offset, scale, byte order and flip below are shared by Import and Export.");
             text_field(ui,"RAW16 height offset",&mut self.raw16.fields.offset);
             text_field(ui,"RAW16 full-range height scale",&mut self.raw16.fields.scale);
             ui.horizontal(|ui| { ui.radio_value(&mut self.raw16.fields.endian,Endian::Little,"RAW16 little endian"); ui.radio_value(&mut self.raw16.fields.endian,Endian::Big,"RAW16 big endian"); });
@@ -223,6 +227,11 @@ impl TerrainPanel {
                 ui.label(format!("{} heights change · range {} .. {} · current source snapshot only",c.edits.len(),format_fixed(c.range[0]),format_fixed(c.range[1])));
             }
             if ui.add_enabled(writable && self.raw16.has_preview(),egui::Button::new("Apply RAW16 heights")).clicked() { let _ = self.apply_raw16(editor); }
+            ui.separator();
+            ui.weak("Export current heights exactly using shared settings. Backing terrain must already be saved. New .raw file only; no Save or Undo step.");
+            text_field(ui, "RAW16 absolute output path", &mut self.raw16.output_path);
+            if ui.add_enabled(writable, egui::Button::new("Export RAW16 heights")).clicked() { let _ = self.export_raw16(editor); }
+            if let Some(status) = &self.raw16.export_status { ui.label(status); }
         });
     }
 }

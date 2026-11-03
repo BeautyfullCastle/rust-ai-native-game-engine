@@ -1,4 +1,4 @@
-# Apply RAW16 heights to existing Editor terrain
+# Import and export RAW16 heights in the Editor
 
 Enable the optional Editor feature `terrain-raw16` (default off). It includes
 `terrain` plus the existing converter exposed through `orr_terrain_view/raw16`;
@@ -35,8 +35,8 @@ rendering. The source path is additionally required to be absolute and at most
 The existing reader rejects symlink ancestry, traversal, nonregular files and
 wrong lengths, and compares opened-file metadata while taking a bounded snapshot.
 Input ancestry must remain trusted and stable; this is not a hostile concurrent
-filesystem sandbox. The source cannot alias the current `.orrt` target. No output
-publisher, permissions, file deletion or automatic Save is added by this UI.
+filesystem sandbox. The source cannot alias the current `.orrt` target. Import does not publish files or automatically Save. Export uses a separate
+explicit destination and the bounded no-overwrite publisher described below.
 
 ## Preview validity and acceptance
 
@@ -55,3 +55,50 @@ pre-Save target bytes, holes/XZ/identity and model heights, single Undo/Redo and
 Save/Reopen; stale input/context/recipe, budget and failed admission cases; and
 original CLI conversion/publication plus feature isolation after API extraction.
 CPU/egui/model data evidence is not physical GPU or native-window execution.
+
+## Exact-height export
+
+Within **Import RAW16 heights**, the offset, full-range scale, endian and flip-Z
+controls are explicitly shared by import and export. Set a separate absolute
+`.raw` output path and press **Export RAW16 heights**. The attached writable
+terrain must already have a saved backing `.orrt` file; new unsaved terrain must
+be saved first. Subsequent dirty in-memory height edits are exported without
+requiring Save. The same 4096-vertex Editor limit applies; the converter's
+129×129 capability does not enlarge that limit.
+
+For each current height, export chooses the smallest unsigned 16-bit sample that
+maps back to that exact fixed-point height under the displayed recipe. A height
+with no matching sample is rejected before publication, never clamped or
+quantized. For zero scale, every height must equal the offset and canonical
+samples are zero. Negative scale is invalid. Endian encoding and optional Z-row
+reversal use the same explicit convention in both directions. This is an exact
+height inverse, not a promise to recover original RAW bytes: several samples may
+map to one height. RAW carries neither holes nor identity, X/Z origin, spacing,
+dimensions or other terrain metadata. Keep the recipe separately. Importing into
+the same existing terrain preserves its non-height metadata; exporting is not a
+whole-terrain serialization inverse.
+
+Export pins in-memory cooked bytes, recipe, source, scene and scene-load epoch
+separately from bounded saved scene (1 MiB maximum) and terrain file snapshots.
+Saved bytes need not equal dirty memory. Both backing files are checked before
+staging and again before final publication. Context, settings, memory, Play,
+scene changes and changed backing bytes refuse publication. Trusted stable local
+ancestry is required; symlink ancestry, nonregular or oversized backing files
+are refused. These checks do not claim protection against hostile concurrent
+filesystem replacement.
+
+The destination must not exist. Publication never overwrites an existing file.
+Success and failure leave document history, dirty state and any import preview
+candidate unchanged. A post-publication durability or cleanup warning means the
+file was published; do not retry that destination as though no output exists.
+Export does not automatically Save or modify the scene or backing terrain.
+
+The focused CPU/egui acceptance uses the actual Export button on dirty heights,
+then existing Preview/Apply, Undo/Redo and Save/Reopen, checking literal heights,
+model Y positions and retained hole/identity/XZ data. It also covers refused
+representations, existing outputs, stale context and external backing changes.
+This is not a physical GPU or native-window execution claim.
+
+[Unity's heightmap workflow documentation](https://docs.unity.cn/Manual/terrain-Heightmaps.html)
+is workflow context for explicit RAW parameters only, not a claim of Unity file
+compatibility or scene interchange.
