@@ -1443,3 +1443,208 @@ fn sequence_pingpong_widget_exports_pairs_without_scene_mutation() {
     assert_eq!(editor.checksum(), checksum);
     assert_eq!(editor.history().entries.len(), history);
 }
+
+#[test]
+fn sequence_uniform_duration_preserves_order_and_samples_exact_boundaries() {
+    let mut draft = sequence_draft();
+    draft.kind = DraftKind::Sequence {
+        regions: vec![9, 7, 9],
+        selected: 1,
+    };
+    draft.durations = ["5", "7", "11"].map(String::from).into();
+    let original = draft.original_json.clone();
+    let kind = draft.kind.clone();
+    prime_sequence_preview(&mut draft);
+    assert!(draft.edit_sequence(SequenceEdit::UniformDuration).unwrap());
+    assert_eq!(draft.kind, kind);
+    assert_eq!(draft.durations, ["7", "7", "7"]);
+    assert!(draft.preview.is_none());
+    assert!(!draft.playing);
+    assert_eq!((draft.started, draft.elapsed), (0.0, 0));
+    for mode in [PlaybackMode::Loop, PlaybackMode::Once] {
+        draft.edit_sequence(SequenceEdit::Mode(mode)).unwrap();
+        let document = draft.candidate().unwrap();
+        let reopened = SpriteDocument::from_json(&document.to_json().unwrap()).unwrap();
+        let clip = reopened.clip("variant").unwrap();
+        for (time, index, region) in [
+            (0, 0, 9),
+            (6, 0, 9),
+            (7, 1, 7),
+            (13, 1, 7),
+            (14, 2, 9),
+            (20, 2, 9),
+        ] {
+            let sample = clip.sample(time);
+            assert_eq!(
+                (sample.frame_index, sample.region, sample.finished),
+                (index, region, false)
+            );
+        }
+        let sample = clip.sample(21);
+        assert_eq!(
+            (sample.frame_index, sample.finished),
+            if mode == PlaybackMode::Loop {
+                (0, false)
+            } else {
+                (2, true)
+            }
+        );
+    }
+    assert_eq!(draft.original_json, original);
+}
+
+#[test]
+fn sequence_uniform_duration_noop_and_overflow_are_atomic() {
+    let mut draft = sequence_draft();
+    for count in [1, 3, MAX_FRAMES_PER_CLIP] {
+        draft.kind = DraftKind::Sequence {
+            regions: vec![7; count],
+            selected: count - 1,
+        };
+        draft.durations = vec!["5".into(); count];
+        prime_sequence_preview(&mut draft);
+        let before = draft_snapshot(&draft);
+        assert!(!draft.edit_sequence(SequenceEdit::UniformDuration).unwrap());
+        assert_eq!(draft_snapshot(&draft), before);
+    }
+    // The original total fits; replicating its selected hold does not.
+    draft.kind = DraftKind::Sequence {
+        regions: vec![7, 9],
+        selected: 1,
+    };
+    draft.durations = vec!["1".into(), (u64::MAX - 1).to_string()];
+    prime_sequence_preview(&mut draft);
+    let before = draft_snapshot(&draft);
+    assert!(draft
+        .edit_sequence(SequenceEdit::UniformDuration)
+        .unwrap_err()
+        .contains("Total clip duration"));
+    assert_eq!(draft_snapshot(&draft), before);
+    for invalid in ["0", "bad", "18446744073709551616"] {
+        draft.durations[1] = invalid.into();
+        let before = draft_snapshot(&draft);
+        assert!(draft.edit_sequence(SequenceEdit::UniformDuration).is_err());
+        assert_eq!(draft_snapshot(&draft), before);
+    }
+}
+
+#[test]
+fn sequence_uniform_duration_pending_fields_and_stale_source_reject() {
+    let (_dir, _ctx, mut panel, editor) = panel_fixture_with_clips(false);
+    panel.begin_sequence(&editor).unwrap();
+    panel
+        .edit_sequence(&editor, SequenceEdit::Append(20))
+        .unwrap();
+    for (id, duration) in [("pending", "100"), ("sequence", "invalid")] {
+        panel.timing.sequence_inputs.id = id.into();
+        panel.timing.sequence_inputs.duration = duration.into();
+        let before = draft_snapshot(panel.timing.draft.as_ref().unwrap());
+        assert!(panel
+            .edit_sequence(&editor, SequenceEdit::UniformDuration)
+            .is_err());
+        assert_eq!(draft_snapshot(panel.timing.draft.as_ref().unwrap()), before);
+    }
+    panel.timing.sequence_inputs.id = panel.timing.draft.as_ref().unwrap().id.clone();
+    panel.timing.sequence_inputs.duration = "100".into();
+    panel.timing.draft.as_mut().unwrap().pin.epoch += 1;
+    let before = draft_snapshot(panel.timing.draft.as_ref().unwrap());
+    assert!(panel
+        .edit_sequence(&editor, SequenceEdit::UniformDuration)
+        .is_err());
+    assert_eq!(draft_snapshot(panel.timing.draft.as_ref().unwrap()), before);
+}
+
+#[test]
+fn sequence_uniform_duration_widget_exports_pairs_without_scene_mutation() {
+    use egui::accesskit::Role;
+    use egui_kittest::{kittest::Queryable, Harness};
+    let (dir, _ctx, mut panel, editor) = panel_fixture_with_clips(false);
+    panel.begin_sequence(&editor).unwrap();
+    panel
+        .edit_sequence(&editor, SequenceEdit::Duration("5".into()))
+        .unwrap();
+    panel
+        .edit_sequence(&editor, SequenceEdit::Append(20))
+        .unwrap();
+    panel
+        .edit_sequence(&editor, SequenceEdit::Duration("17".into()))
+        .unwrap();
+    panel
+        .edit_sequence(&editor, SequenceEdit::Append(10))
+        .unwrap();
+    panel
+        .edit_sequence(&editor, SequenceEdit::Duration("23".into()))
+        .unwrap();
+    let output = dir.path().join("uniform.json");
+    panel.timing.draft.as_mut().unwrap().output = output.to_string_lossy().into_owned();
+    let checksum = editor.checksum();
+    let history = editor.history().entries.len();
+    let bindings = panel.bindings.as_ref().unwrap().document().clone();
+    let mut harness = Harness::builder().with_size([600.0, 900.0]).build_ui_state(
+        |ui, state: &mut (SpritePanel, Editor)| state.0.show_timing(ui, &state.1),
+        (panel, editor),
+    );
+    harness.run_steps(3);
+    for label in [
+        "Use selected duration for all frames",
+        "Preview clip sequence",
+        "Export clip sequence JSON",
+    ] {
+        harness
+            .get_by_role_and_label(Role::Button, label)
+            .scroll_to_me();
+        harness.run_steps(3);
+        harness.get_by_role_and_label(Role::Button, label).click();
+        harness.run_steps(3);
+        assert!(
+            harness.state().0.error.is_none(),
+            "{:?}",
+            harness.state().0.error
+        );
+    }
+    let source: SpriteSource = serde_json::from_slice(&std::fs::read(output).unwrap()).unwrap();
+    let frames = &source.clips.last().unwrap().frames;
+    assert_eq!(
+        frames,
+        &[
+            Frame {
+                region: 10,
+                duration_ms: 23
+            },
+            Frame {
+                region: 20,
+                duration_ms: 23
+            },
+            Frame {
+                region: 10,
+                duration_ms: 23
+            },
+        ]
+    );
+    let document = SpriteDocument::new(source.clone()).unwrap();
+    let clip = document.clip(&source.clips.last().unwrap().id).unwrap();
+    for (time, index, region) in [
+        (0, 0, 10),
+        (22, 0, 10),
+        (23, 1, 20),
+        (45, 1, 20),
+        (46, 2, 10),
+        (68, 2, 10),
+        (69, 0, 10),
+    ] {
+        let sample = clip.sample(time);
+        assert_eq!((sample.frame_index, sample.region), (index, region));
+    }
+    let (panel, editor) = harness.state();
+    assert_eq!(panel.timing.sequence_inputs.duration, "23");
+    assert_eq!(
+        panel.timing.draft.as_ref().unwrap().kind,
+        DraftKind::Sequence {
+            regions: vec![10, 20, 10],
+            selected: 2
+        }
+    );
+    assert_eq!(panel.bindings.as_ref().unwrap().document(), &bindings);
+    assert_eq!(editor.checksum(), checksum);
+    assert_eq!(editor.history().entries.len(), history);
+}

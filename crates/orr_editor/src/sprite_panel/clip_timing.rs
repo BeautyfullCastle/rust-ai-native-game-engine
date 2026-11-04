@@ -36,6 +36,7 @@ enum SequenceEdit {
     MoveDown,
     Reverse,
     PingPong,
+    UniformDuration,
 }
 impl SequenceInputs {
     fn matches(&self, draft: &Draft) -> bool {
@@ -224,6 +225,10 @@ impl Draft {
             SequenceEdit::Id(value) => id = value,
             SequenceEdit::Duration(value) => durations[*selected] = value,
             SequenceEdit::Mode(value) => mode = value,
+            SequenceEdit::UniformDuration => {
+                let duration = durations[*selected].clone();
+                durations.fill(duration);
+            }
             SequenceEdit::Append(region) => {
                 regions.push(region);
                 durations.push("100".into());
@@ -660,6 +665,9 @@ impl SpritePanel {
                         });
                         let fields_applied = inputs.id == draft.id
                             && draft.durations.get(*selected) == Some(&inputs.duration);
+                        if ui.add_enabled(fields_applied, egui::Button::new("Use selected duration for all frames")).clicked() {
+                            sequence_edit = Some(SequenceEdit::UniformDuration);
+                        }
                         ui.add_enabled_ui(fields_applied, |ui| { ui.horizontal(|ui| {
                             let mut mode = draft.mode;
                             let changed_loop = ui.radio_value(&mut mode, PlaybackMode::Loop, "Sequence Loop").changed();
