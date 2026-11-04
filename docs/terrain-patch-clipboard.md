@@ -1,9 +1,7 @@
 # Terrain patch clipboard
 
-Duplicate a small authored terrain feature, including its slope and holes, without
-repainting individual vertices. The clipboard belongs to the current terrain
-panel; it is not an operating-system clipboard. Explicit JSON assets let you reuse
-a captured patch in another session or terrain.
+Reuse terrain slopes and holes without repainting vertices. This panel-local
+clipboard supports JSON assets for reuse in another session or terrain.
 
 ## Use
 
@@ -19,6 +17,24 @@ cell onto a hole restores its surface. The height offset applies to copied
 heights, not the destination's previous heights. Copy takes a snapshot: overlapping
 pastes and later source edits do not change its contents. Repeated pastes reuse
 that original sample until another Copy succeeds or the context becomes invalid.
+
+## Rotate and mirror
+
+After Copy or Load, use **Rotate terrain patch clockwise**, **Mirror terrain
+patch X** or **Mirror terrain patch Z**. Rotation maps +X toward +Z and swaps
+the cell dimensions; mirrors reverse the named coordinate. Both vertex heights
+and hole cells move together without interpolation, rounding or height changes.
+Terrain keeps its fixed triangle diagonal, so a nonplanar cell’s interpolated
+interior is not guaranteed to be a rigidly rotated surface.
+The size shown is the transformed footprint. Four rotations or two identical
+mirrors restore the original sample exactly.
+
+Transforms change only the clipboard, even when pending paste coordinates or
+offset are invalid. Terrain, files and history stay unchanged until explicit
+Paste or Save. A rotated patch may no longer fit at the current destination;
+Paste refuses the whole operation instead of clipping. Save patch asset stores
+the transformed layout for reuse, while Copy/Load replaces it. Stale, Play and
+read-only contexts refuse transforms.
 
 ## Reusable assets
 
@@ -47,7 +63,7 @@ exist: inspect it instead of retrying.
 ## Contract
 
 - Source and destination use cell indices. The entire footprint must fit; no
-  clipping, scaling, rotation, interpolation or falloff.
+  clipping, scaling, interpolation or falloff.
   Boundary heights are shared with adjacent cells, so changing them can reshape
   neighboring surfaces. Heights outside the vertex footprint and hole flags
   outside the cell footprint remain untouched.
@@ -70,7 +86,7 @@ reopen the written `.orrt`, and query its terrain sampler and static-model
 consumer. An asymmetric height fixture verifies coordinate order, a fractional
 offset, copied holes and restored solid cells. Additional tests cover overlapping
 snapshot reuse, raw fixed-point precision and overflow, footprint limits,
-portable save/load into a different terrain, malformed/file rejection,
+portable save/load into a different terrain, exact grid transforms, malformed/file rejection,
 no-op/failed-paste Redo preservation, failed-Copy invalidation, context changes,
 and installed-package immutability.
 
