@@ -4,6 +4,8 @@
 //! belong to the +X/+Z cell; outer edges belong to the final cell. A hole owns its
 //! boundaries under this rule. Heights round once toward negative infinity.
 #![deny(clippy::float_arithmetic)]
+pub mod sculpt;
+
 use orr_fp::FP;
 use sha2::{Digest, Sha256};
 use std::fmt;
