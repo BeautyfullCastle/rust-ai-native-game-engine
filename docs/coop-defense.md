@@ -30,6 +30,12 @@ The native and browser frontends provide their current controls on screen.
 - A terminal run shows victory or defeat and can restart from the same seed.
   Replaying identical actions with that seed gives an identical checksum.
 
+Native pointer actions use the control or board cell where a primary press and
+release occurred, not the final hover position of a rendered frame. Both ends
+must identify the same target without a layout change; a drag, cancelled pointer
+or lost focus cannot turn into a click. At most one eligible pointer target is
+handled per frame. Board movement remains two clicks, not drag-to-move.
+
 ## Integration boundary
 
 `orr_games/coop-defense` is disabled by default. It contains only bounded,

@@ -8,10 +8,152 @@ fn just_pressed(ctx: &egui::Context, key: Key) -> bool {
     ctx.input(|i|i.events.iter().any(|event|matches!(event,egui::Event::Key{key:pressed,pressed:true,repeat:false,..} if *pressed==key)))
 }
 
+// Native controls are click-to-act, not drag targets. Pin the semantic target at
+// press time and accept only a nearby release on that same target. Do not combine
+// egui's frame-wide clicked flag with its final hover position: later motion can
+// otherwise turn an unrelated click into Restart. Use the public egui click
+// distance/duration settings; leaving the radius cancels even on return.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClickTarget {
+    Start,
+    Action(u32),
+    Cell(u32),
+}
+#[derive(Clone, Copy)]
+struct Press {
+    target: ClickTarget,
+    origin: egui::Pos2,
+    screen: Rect,
+    generation: u32,
+    time: f64,
+    distance_sq: f32,
+    duration: f64,
+}
+#[derive(Default)]
+struct PointerClicks {
+    down: bool,
+    press: Option<Press>,
+}
+impl PointerClicks {
+    fn take(
+        &mut self,
+        input: &egui::InputState,
+        options: egui::InputOptions,
+        screen: Rect,
+        started: bool,
+        generation: u32,
+    ) -> Option<ClickTarget> {
+        let events = &input.events;
+        if !input.focused
+            || events
+                .iter()
+                .any(|e| matches!(e, egui::Event::WindowFocused(false)))
+        {
+            *self = Self::default();
+            return None;
+        }
+        let layout = Layout::new(screen);
+        let target_at = |pos| {
+            if !screen.contains(pos) {
+                return None;
+            }
+            if !started {
+                return layout
+                    .rect(310.0, 590.0, 580.0, 55.0)
+                    .contains(pos)
+                    .then_some(ClickTarget::Start);
+            }
+            for (index, action) in [game::SUMMON, game::UPGRADE, game::INVEST]
+                .into_iter()
+                .enumerate()
+            {
+                if layout
+                    .rect(270.0 + index as f32 * 220.0, 842.0, 205.0, 55.0)
+                    .contains(pos)
+                {
+                    return Some(ClickTarget::Action(action));
+                }
+            }
+            if layout.rect(950.0, 842.0, 200.0, 55.0).contains(pos) {
+                return Some(ClickTarget::Action(game::RESTART));
+            }
+            layout.hit_cell(pos).map(ClickTarget::Cell)
+        };
+        if self
+            .press
+            .is_some_and(|p| p.screen != screen || p.generation != generation)
+        {
+            self.press = None;
+        }
+        let mut clicked = None;
+        for event in events {
+            match *event {
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    ..
+                } => {
+                    // A duplicate press cannot re-arm an already held gesture.
+                    self.press = if self.down {
+                        None
+                    } else {
+                        target_at(pos)
+                            .filter(|_| {
+                                options.max_click_dist >= 0.0 && options.max_click_duration >= 0.0
+                            })
+                            .map(|target| Press {
+                                target,
+                                origin: pos,
+                                screen,
+                                generation,
+                                time: input.time,
+                                distance_sq: options.max_click_dist.powi(2),
+                                duration: options.max_click_duration,
+                            })
+                    };
+                    self.down = true;
+                }
+                egui::Event::PointerMoved(pos) => {
+                    if self.press.is_some_and(|p| {
+                        let distance = p.origin.distance_sq(pos);
+                        distance.is_nan() || distance > p.distance_sq
+                    }) {
+                        self.press = None;
+                    }
+                }
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    ..
+                } => {
+                    if let Some(press) = self.press.take() {
+                        if self.down
+                            && press.origin.distance_sq(pos) <= press.distance_sq
+                            && (0.0..=press.duration).contains(&(input.time - press.time))
+                            && target_at(pos) == Some(press.target)
+                        {
+                            // The UI returns one command per frame. Keep the first
+                            // eligible click, rather than reassigning it to a later release.
+                            clicked = clicked.or(Some(press.target));
+                        }
+                    }
+                    self.down = false;
+                }
+                egui::Event::PointerGone => *self = Self::default(),
+                _ => {}
+            }
+        }
+        clicked
+    }
+}
+
 pub struct DefenseUi {
     pub context: egui::Context,
     pub selected: Option<u32>,
     pub started: bool,
+    pointer_clicks: PointerClicks,
     sequence: u32,
     previous: BTreeMap<u32, game::DefenseEnemy>,
     impacts: Vec<(i32, i32, u32, u32)>,
@@ -29,6 +171,7 @@ impl DefenseUi {
             context: egui::Context::default(),
             selected: None,
             started: false,
+            pointer_clicks: PointerClicks::default(),
             sequence: 0,
             previous: BTreeMap::new(),
             impacts: Vec::new(),
@@ -84,6 +227,11 @@ impl DefenseUi {
             let ctx = root.ctx();
             let screen = ctx.input(|i| i.content_rect());
             let l = Layout::new(screen);
+            let options = ctx.options(|o| o.input_options);
+            let clicked = ctx.input(|i| {
+                self.pointer_clicks
+                    .take(i, options, screen, self.started, run.generation)
+            });
             let p = ctx.layer_painter(egui::LayerId::new(
                 egui::Order::Background,
                 egui::Id::new("foundry"),
@@ -229,11 +377,9 @@ impl DefenseUi {
                     PAPER,
                     "[ENTER / SPACE]  START DEFENSE",
                 );
-                let clicked = ctx.input(|i| {
-                    i.pointer.primary_clicked()
-                        && i.pointer.interact_pos().is_some_and(|p| start.contains(p))
-                });
-                if clicked || (just_pressed(ctx, Key::Enter) || just_pressed(ctx, Key::Space)) {
+                if clicked == Some(ClickTarget::Start)
+                    || (just_pressed(ctx, Key::Enter) || just_pressed(ctx, Key::Space))
+                {
                     self.started = true;
                 }
                 return;
@@ -410,24 +556,19 @@ impl DefenseUi {
                     game::UPGRADE => Key::U,
                     _ => Key::I,
                 };
-                let clicked = pointer.is_some_and(|point| r.contains(point))
-                    && ctx.input(|i| i.pointer.primary_clicked());
-                if allowed && (clicked || just_pressed(ctx, key)) {
+                if allowed && (clicked == Some(ClickTarget::Action(*a)) || just_pressed(ctx, key)) {
                     action = Some(self.command(*a, 0, 0));
                 }
             }
             let restart = l.rect(950.0, 842.0, 200.0, 55.0);
             p.rect_filled(restart, 6.0 * l.scale, Color32::from_rgb(49, 64, 61));
             l.text(&p, 970.0, 868.0, 14.0, PAPER, "[R] RESTART");
-            if just_pressed(ctx, Key::R)
-                || (pointer.is_some_and(|p| restart.contains(p))
-                    && ctx.input(|i| i.pointer.primary_clicked()))
-            {
+            if just_pressed(ctx, Key::R) || clicked == Some(ClickTarget::Action(game::RESTART)) {
                 self.selected = None;
                 action = Some(self.command(game::RESTART, 0, 0));
             }
-            if run.phase == game::PLAYING && ctx.input(|i| i.pointer.primary_clicked()) {
-                if let Some(cell) = hover {
+            if run.phase == game::PLAYING {
+                if let Some(ClickTarget::Cell(cell)) = clicked {
                     if let Some(source) = self.selected {
                         if source == cell {
                             self.selected = None;
@@ -672,5 +813,413 @@ mod authored_core_tests {
         assert_eq!(super::core_fraction(90, 75), 1.0);
         assert_eq!(super::core_fraction(0, 75), 0.0);
         assert_eq!(super::core_fraction(10, 0), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod click_attribution_tests {
+    use super::*;
+    use egui::{pos2, Event, PointerButton, Pos2};
+    type Sim = orr_sim::Simulation<game::DefenseGame>;
+
+    fn button(pos: Pos2, button: PointerButton, pressed: bool) -> Event {
+        Event::PointerButton {
+            pos,
+            button,
+            pressed,
+            modifiers: Default::default(),
+        }
+    }
+    fn press(pos: Pos2) -> Event {
+        button(pos, PointerButton::Primary, true)
+    }
+    fn release(pos: Pos2) -> Event {
+        button(pos, PointerButton::Primary, false)
+    }
+    fn click(pos: Pos2) -> Vec<Event> {
+        vec![Event::PointerMoved(pos), press(pos), release(pos)]
+    }
+    fn draw(
+        ui: &mut DefenseUi,
+        sim: &Sim,
+        time: f64,
+        events: Vec<Event>,
+    ) -> Option<game::DefenseInput> {
+        ui.show(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 940.0))),
+                time: Some(time),
+                events,
+                ..Default::default()
+            },
+            sim.frame(),
+        )
+        .1
+    }
+    fn apply(sim: &mut Sim, command: game::DefenseInput) {
+        let mut inputs = orr_sim::TickInputs::new(sim.frame().tick(), 1);
+        inputs.set_input(orr_sim::PlayerSlot(0), command);
+        sim.step(&inputs);
+    }
+    fn fixture() -> (DefenseUi, Sim) {
+        let mut sim = Sim::new(game::DefenseConfig::default(), 60, 1);
+        apply(
+            &mut sim,
+            game::DefenseInput {
+                action: game::SUMMON,
+                sequence: 1,
+                ..Default::default()
+            },
+        );
+        let mut ui = DefenseUi::new();
+        ui.started = true;
+        assert!(draw(&mut ui, &sim, 0.0, vec![]).is_none());
+        (ui, sim)
+    }
+    fn outside() -> Pos2 {
+        pos2(40.0, 100.0)
+    }
+    fn restart() -> Pos2 {
+        pos2(1050.0, 870.0)
+    }
+    fn summon() -> Pos2 {
+        pos2(350.0, 870.0)
+    }
+    fn cell(cell: u32) -> Pos2 {
+        Layout::new(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 940.0)))
+            .cell(0, cell)
+            .center()
+    }
+
+    #[test]
+    fn unrelated_click_cannot_restart_spend_or_select_after_late_motion() {
+        for destination in [
+            restart(),
+            summon(),
+            pos2(600.0, 870.0),
+            pos2(800.0, 870.0),
+            cell(0),
+        ] {
+            let (mut ui, sim) = fixture();
+            let before = sim.frame().checksum();
+            let mut events = click(outside());
+            events.push(Event::PointerMoved(destination));
+            assert!(draw(&mut ui, &sim, 0.1, events).is_none());
+            assert_eq!(ui.selected, None);
+            assert_eq!(sim.frame().checksum(), before);
+            assert_eq!(game::run(sim.frame()).generation, 0);
+            assert_eq!(game::run(sim.frame()).gold[0], 125);
+        }
+    }
+
+    #[test]
+    fn genuine_economic_and_restart_clicks_keep_event_target_and_mutate_simulation() {
+        for (position, action) in [
+            (summon(), game::SUMMON),
+            (pos2(600.0, 870.0), game::UPGRADE),
+            (pos2(800.0, 870.0), game::INVEST),
+            (restart(), game::RESTART),
+        ] {
+            let (mut ui, mut sim) = fixture();
+            let before = game::run(sim.frame());
+            let mut events = click(position);
+            events.push(Event::PointerMoved(if action == game::RESTART {
+                summon()
+            } else {
+                restart()
+            }));
+            let command = draw(&mut ui, &sim, 0.1, events).unwrap();
+            assert_eq!(command.action, action);
+            assert_eq!(command.sequence, 2);
+            apply(&mut sim, command);
+            let after = game::run(sim.frame());
+            match action {
+                game::SUMMON => assert_eq!(after.gold[0], before.gold[0] - game::SUMMON_COST),
+                game::UPGRADE => assert_eq!(after.upgrades[0], before.upgrades[0] + 1),
+                game::INVEST => assert_eq!(after.investment[0], before.investment[0] + 1),
+                game::RESTART => {
+                    assert_eq!(after.generation, 1);
+                    assert_eq!(after.tick, 0);
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn start_is_pinned_to_click_not_late_hover_and_does_not_spend() {
+        let (_, sim) = fixture();
+        let mut ui = DefenseUi::new();
+        draw(&mut ui, &sim, 0.0, vec![]);
+        let start = pos2(600.0, 615.0);
+        let mut events = click(outside());
+        events.push(Event::PointerMoved(start));
+        assert!(draw(&mut ui, &sim, 0.1, events).is_none());
+        assert!(!ui.started);
+        let before = sim.frame().checksum();
+        let mut events = click(start);
+        events.push(Event::PointerMoved(summon()));
+        assert!(draw(&mut ui, &sim, 0.2, events).is_none());
+        assert!(ui.started);
+        assert_eq!(sim.frame().checksum(), before);
+    }
+
+    #[test]
+    fn board_clicks_select_and_move_actual_unit_without_hover_retargeting() {
+        let (mut ui, mut sim) = fixture();
+        let mut events = click(cell(0));
+        events.push(Event::PointerMoved(cell(1)));
+        assert!(draw(&mut ui, &sim, 0.1, events).is_none());
+        assert_eq!(ui.selected, Some(0));
+        let before = sim.frame().checksum();
+        let mut events = click(outside());
+        events.push(Event::PointerMoved(cell(1)));
+        assert!(draw(&mut ui, &sim, 0.2, events).is_none());
+        assert_eq!(sim.frame().checksum(), before);
+        assert_eq!(ui.selected, Some(0));
+        let mut events = click(cell(1));
+        events.push(Event::PointerMoved(restart()));
+        let command = draw(&mut ui, &sim, 0.3, events).unwrap();
+        assert_eq!(
+            (command.action, command.source_cell, command.target_cell),
+            (game::MOVE_OR_MERGE, 0, 1)
+        );
+        apply(&mut sim, command);
+        assert!(game::units(sim.frame())
+            .iter()
+            .any(|u| u.board == 0 && u.cell == 1 && u.active != 0));
+        assert_eq!(game::run(sim.frame()).generation, 0);
+    }
+
+    #[test]
+    fn cross_frame_press_works_but_drag_out_return_or_bare_release_does_not() {
+        let (mut ui, mut sim) = fixture();
+        assert!(draw(&mut ui, &sim, 0.1, vec![press(summon())]).is_none());
+        let command = draw(&mut ui, &sim, 0.2, vec![release(summon())]).unwrap();
+        apply(&mut sim, command);
+        assert_eq!(game::run(sim.frame()).gold[0], 100);
+        assert!(draw(&mut ui, &sim, 0.3, vec![release(restart())]).is_none());
+        assert!(draw(
+            &mut ui,
+            &sim,
+            0.4,
+            vec![
+                press(restart()),
+                Event::PointerMoved(outside()),
+                Event::PointerMoved(restart()),
+                release(restart())
+            ]
+        )
+        .is_none());
+        assert!(draw(
+            &mut ui,
+            &sim,
+            0.5,
+            vec![press(summon()), release(restart())]
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn mixed_click_and_drag_releases_do_not_borrow_eligibility() {
+        let (mut ui, mut sim) = fixture();
+        let drag = vec![
+            press(outside()),
+            Event::PointerMoved(restart()),
+            release(restart()),
+        ];
+        let mut events = click(outside());
+        events.extend(drag.clone());
+        assert!(draw(&mut ui, &sim, 0.1, events).is_none());
+        let mut events = click(summon());
+        events.extend(drag);
+        let command = draw(&mut ui, &sim, 0.2, events).unwrap();
+        assert_eq!(command.action, game::SUMMON);
+        apply(&mut sim, command);
+        assert_eq!(game::run(sim.frame()).gold[0], 100);
+        assert_eq!(game::run(sim.frame()).generation, 0);
+    }
+
+    #[test]
+    fn secondary_buttons_never_qualify_or_retarget_primary_click() {
+        let (mut ui, mut sim) = fixture();
+        assert!(draw(
+            &mut ui,
+            &sim,
+            0.1,
+            vec![
+                button(restart(), PointerButton::Secondary, true),
+                button(restart(), PointerButton::Secondary, false)
+            ]
+        )
+        .is_none());
+        assert!(draw(
+            &mut ui,
+            &sim,
+            0.2,
+            vec![
+                press(summon()),
+                button(restart(), PointerButton::Secondary, false)
+            ]
+        )
+        .is_none());
+        let command = draw(&mut ui, &sim, 0.3, vec![release(summon())]).unwrap();
+        assert_eq!(command.action, game::SUMMON);
+        apply(&mut sim, command);
+        assert_eq!(game::run(sim.frame()).gold[0], 100);
+    }
+
+    #[test]
+    fn pointer_gone_cancels_pending_and_focus_loss_cancels_entire_frame() {
+        for cancellation in [Event::PointerGone, Event::WindowFocused(false)] {
+            let (mut ui, sim) = fixture();
+            draw(&mut ui, &sim, 0.1, vec![press(restart())]);
+            assert!(draw(
+                &mut ui,
+                &sim,
+                0.2,
+                vec![cancellation, Event::WindowFocused(true), release(restart())]
+            )
+            .is_none());
+            assert!(draw(&mut ui, &sim, 0.3, vec![release(restart())]).is_none());
+        }
+        let (mut ui, mut sim) = fixture();
+        draw(&mut ui, &sim, 0.1, vec![press(restart())]);
+        assert!(ui
+            .show(
+                egui::RawInput {
+                    focused: false,
+                    time: Some(0.2),
+                    ..Default::default()
+                },
+                sim.frame()
+            )
+            .1
+            .is_none());
+        assert!(draw(&mut ui, &sim, 0.3, vec![release(restart())]).is_none());
+        let mut focus_events = click(restart());
+        focus_events.push(Event::WindowFocused(false));
+        focus_events.push(Event::WindowFocused(true));
+        assert!(draw(&mut ui, &sim, 0.35, focus_events).is_none());
+        let mut events = click(summon());
+        events.push(Event::PointerGone);
+        let command = draw(&mut ui, &sim, 0.4, events).unwrap();
+        assert_eq!(command.action, game::SUMMON);
+        apply(&mut sim, command);
+        assert_eq!(game::run(sim.frame()).gold[0], 100);
+    }
+
+    #[test]
+    fn first_eligible_click_wins_and_later_valid_click_cannot_restart() {
+        let (mut ui, mut sim) = fixture();
+        let mut events = click(outside());
+        events.extend(click(summon()));
+        events.extend(click(restart()));
+        let command = draw(&mut ui, &sim, 0.1, events).unwrap();
+        assert_eq!(command.action, game::SUMMON);
+        assert_eq!(command.sequence, 2);
+        apply(&mut sim, command);
+        assert_eq!(game::run(sim.frame()).gold[0], 100);
+        assert_eq!(game::run(sim.frame()).generation, 0);
+    }
+
+    #[test]
+    fn configured_click_distance_duration_and_generation_bound_pending_press() {
+        let (mut ui, mut sim) = fixture();
+        ui.context.options_mut(|o| {
+            o.input_options.max_click_dist = 2.0;
+            o.input_options.max_click_duration = 0.1;
+        });
+        draw(&mut ui, &sim, 0.1, vec![press(summon())]);
+        assert!(draw(&mut ui, &sim, 0.3, vec![release(summon())]).is_none());
+        draw(&mut ui, &sim, 0.4, vec![press(summon())]);
+        assert!(draw(
+            &mut ui,
+            &sim,
+            0.45,
+            vec![release(summon() + vec2(3.0, 0.0))]
+        )
+        .is_none());
+        draw(&mut ui, &sim, 0.5, vec![press(summon())]);
+        let command = draw(
+            &mut ui,
+            &sim,
+            0.55,
+            vec![release(summon() + vec2(1.0, 0.0))],
+        )
+        .unwrap();
+        apply(&mut sim, command);
+        assert_eq!(game::run(sim.frame()).gold[0], 100);
+        draw(&mut ui, &sim, 0.6, vec![press(restart())]);
+        apply(
+            &mut sim,
+            game::DefenseInput {
+                action: game::RESTART,
+                sequence: 3,
+                ..Default::default()
+            },
+        );
+        assert!(draw(&mut ui, &sim, 0.65, vec![release(restart())]).is_none());
+        for (distance, duration) in [(-2.0, 0.1), (f32::NAN, 0.1), (2.0, -0.1), (2.0, f64::NAN)] {
+            ui.context.options_mut(|o| {
+                o.input_options.max_click_dist = distance;
+                o.input_options.max_click_duration = duration;
+            });
+            assert!(draw(&mut ui, &sim, 0.7, click(restart())).is_none());
+        }
+    }
+    #[test]
+    fn resized_layout_and_duplicate_press_cancel_old_gesture() {
+        let (mut ui, sim) = fixture();
+        draw(&mut ui, &sim, 0.1, vec![press(restart())]);
+        assert!(ui
+            .show(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1190.0, 940.0))),
+                    time: Some(0.2),
+                    events: vec![release(restart())],
+                    ..Default::default()
+                },
+                sim.frame()
+            )
+            .1
+            .is_none());
+        assert!(draw(
+            &mut ui,
+            &sim,
+            0.3,
+            vec![press(restart()), press(restart()), release(restart())]
+        )
+        .is_none());
+        // A later fresh, complete gesture is still admitted.
+        assert_eq!(
+            draw(&mut ui, &sim, 0.4, click(summon())).unwrap().action,
+            game::SUMMON
+        );
+    }
+
+    #[test]
+    fn keyboard_pulses_still_reach_simulation_after_pointer_cancellation() {
+        for (key, action) in [
+            (Key::Space, game::SUMMON),
+            (Key::U, game::UPGRADE),
+            (Key::I, game::INVEST),
+            (Key::R, game::RESTART),
+        ] {
+            let (mut ui, mut sim) = fixture();
+            let mut events = vec![press(restart()), Event::PointerGone];
+            events.push(Event::Key {
+                key,
+                physical_key: Some(key),
+                pressed: true,
+                repeat: false,
+                modifiers: Default::default(),
+            });
+            let command = draw(&mut ui, &sim, 0.1, events).unwrap();
+            assert_eq!(command.action, action);
+            assert_eq!(command.sequence, 2);
+            apply(&mut sim, command);
+            assert_eq!(game::run(sim.frame()).last_sequence, 2);
+        }
     }
 }
