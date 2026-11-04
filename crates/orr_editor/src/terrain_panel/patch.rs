@@ -5,6 +5,9 @@ use orr_fp::FP;
 use orr_terrain::{Edit, Terrain, MAX_EDITS};
 use std::path::PathBuf;
 
+mod asset;
+mod files;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Geometry {
     asset_id: String,
@@ -144,6 +147,8 @@ pub struct State {
     pub destination: [u32; 2],
     pub height_offset: String,
     clipboard: Option<BoundClipboard>,
+    pub asset_path: String,
+    notice: Option<String>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -153,6 +158,8 @@ impl Default for State {
             destination: [0; 2],
             height_offset: "0".into(),
             clipboard: None,
+            asset_path: String::new(),
+            notice: None,
         }
     }
 }
@@ -253,6 +260,7 @@ impl TerrainPanel {
             if let Some(clipboard) = &self.patch.clipboard {
                 ui.label(format!("Copied footprint: {} vertices and cells.", clipboard.patch.footprint()));
             }
+            self.show_patch_files(ui, editor, writable);
             let preview = self.patch_edits(editor);
             match &preview {
                 Ok(edits) if edits.is_empty() => { ui.label("No values will change; history is preserved."); }
