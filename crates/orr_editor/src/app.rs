@@ -3634,3 +3634,7 @@ mod mesh_animation_import_tests;
 #[cfg(all(test, feature = "tilemap", feature = "project-create", target_os = "linux"))]
 #[path = "app/custom_tileset_tests.rs"]
 mod custom_tileset_tests;
+
+#[cfg(all(test, feature = "tilemap", feature = "project-create", target_os = "linux"))]
+#[path = "app/tilemap_pattern_asset_tests.rs"]
+mod tilemap_pattern_asset_tests;
