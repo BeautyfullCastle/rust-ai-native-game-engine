@@ -404,19 +404,46 @@ impl SpritePanel {
         Ok(())
     }
     fn begin_sequence(&mut self, editor: &Editor) -> Result<(), String> {
+        self.begin_sequence_from(editor, false)
+    }
+    fn begin_clip_sequence(&mut self, editor: &Editor) -> Result<(), String> {
+        self.begin_sequence_from(editor, true)
+    }
+    fn begin_sequence_from(&mut self, editor: &Editor, copy_clip: bool) -> Result<(), String> {
         self.verify_timing_source(editor, None)?;
-        let Source::Region(region) = self.source else {
-            return Err("Select an existing Region source first".into());
-        };
         let key = (self.package.clone(), self.document.clone());
         let loaded = self.loaded.get(&key).ok_or("Load source first")?;
         let original_json = loaded.asset.document.to_json().map_err(|e| e.to_string())?;
         let original: SpriteSource =
             serde_json::from_str(&original_json).map_err(|e| e.to_string())?;
-        Draft::frame_budget(&original, 1)?;
-        if !original.regions.iter().any(|r| r.id == region) {
-            return Err("Select an admitted existing Region source first".into());
-        }
+        let (regions, durations, mode) = match (&self.source, copy_clip) {
+            (Source::Region(region), false) => {
+                if !original.regions.iter().any(|r| r.id == *region) {
+                    return Err("Select an admitted existing Region source first".into());
+                }
+                (vec![*region], vec!["100".to_owned()], PlaybackMode::Loop)
+            }
+            (Source::Clip(id), true) => {
+                let clip = original
+                    .clips
+                    .iter()
+                    .find(|clip| clip.id == *id)
+                    .ok_or("Source clip missing")?;
+                (
+                    clip.frames.iter().map(|frame| frame.region).collect(),
+                    clip.frames
+                        .iter()
+                        .map(|frame| frame.duration_ms.to_string())
+                        .collect(),
+                    clip.mode,
+                )
+            }
+            (_, true) => return Err("Select an existing Clip source first".into()),
+            (_, false) => return Err("Select an existing Region source first".into()),
+        };
+        Draft::frame_budget(&original, regions.len())?;
+        let region = regions[0];
+        let duration = durations[0].clone();
         let mut id = "sequence".to_owned();
         for suffix in 2..=MAX_CLIPS + 1 {
             if !original.clips.iter().any(|clip| clip.id == id) {
@@ -438,12 +465,12 @@ impl SpritePanel {
             original,
             original_json,
             kind: DraftKind::Sequence {
-                regions: vec![region],
+                regions,
                 selected: 0,
             },
             id: id.clone(),
-            durations: vec!["100".into()],
-            mode: PlaybackMode::Loop,
+            durations,
+            mode,
             output: String::new(),
             preview: None,
             playing: false,
@@ -454,7 +481,7 @@ impl SpritePanel {
         self.timing.draft = Some(draft);
         self.timing.sequence_inputs = SequenceInputs {
             id,
-            duration: "100".into(),
+            duration,
             region,
         };
         self.timing.message = None;
@@ -580,6 +607,17 @@ impl SpritePanel {
             .clicked()
         {
             let result = self.begin_sequence(editor);
+            self.report(result);
+        }
+        if ui
+            .add_enabled(
+                enabled && matches!(self.source, Source::Clip(_)),
+                egui::Button::new("Copy clip to sequence"),
+            )
+            .on_hover_text("Copy all frames, durations and playback mode into a new editable sequence. The original clip is preserved.")
+            .clicked()
+        {
+            let result = self.begin_clip_sequence(editor);
             self.report(result);
         }
         let mut export = false;
