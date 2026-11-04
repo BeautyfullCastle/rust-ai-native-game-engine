@@ -18,7 +18,12 @@ static MESH_HAZARDS_LIGHTING_MARKER: [u8; 28] = *b"ORR_MESH_HAZARDS_LIGHTING_V1"
 #[unsafe(link_section = ".orrhhud")]
 static MESH_HAZARDS_HUD_MARKER: [u8; 23] = *b"ORR_MESH_HAZARDS_HUD_V1";
 
+#[used]
+#[unsafe(link_section = ".orrhprp")]
+static MESH_HAZARDS_PROPS_MARKER: [u8; 25] = *b"ORR_MESH_HAZARDS_PROPS_V1";
+
 fn main() {
+    std::hint::black_box(&MESH_HAZARDS_PROPS_MARKER);
     std::hint::black_box(&MESH_HAZARDS_HUD_MARKER);
     std::hint::black_box(&MESH_HAZARDS_LIGHTING_MARKER);
     std::hint::black_box(&MESH_HAZARDS_ART_MARKER);

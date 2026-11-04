@@ -1,5 +1,5 @@
 //! Explicit MeshHazardsV1 bundles with optional authored camera, static art, lighting and HUD.
-//! Schemas 1–4 remain unchanged; HUD requires schema 5.
+//! Schemas 1–5 remain unchanged; static unshaded props require schema 6.
 use orr_bridge::FrameView;
 use orr_remote::mesh_navigation::{hazards, mesh_from_view};
 use serde::{Deserialize, Serialize};
@@ -25,6 +25,8 @@ const LIGHTING_FILENAME: &str = "game.scene.yaml.mesh-lighting.json";
 const MAX_LIGHTING_BYTES: u64 = crate::mesh_lighting::MAX_BYTES as u64;
 const HUD_FILENAME: &str = "game.scene.yaml.mesh-hud.json";
 const MAX_HUD_BYTES: u64 = crate::mesh_hud::MAX_BYTES as u64;
+const PROPS_FILENAME: &str = "game.scene.yaml.mesh-props.json";
+const MAX_PROPS_BYTES: u64 = crate::mesh_props::MAX_SIDECAR_BYTES;
 const MAX_SCENE_BYTES: u64 = 1024 * 1024;
 const MAX_RUNTIME_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
@@ -83,6 +85,8 @@ struct Manifest {
     lighting: Option<BundleFile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     hud: Option<BundleFile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    props: Option<BundleFile>,
     checksum: u64,
     graph_revision: [u8; 32],
 }
@@ -105,6 +109,7 @@ pub(crate) struct PreparedBundle {
     pub art_sha256: Option<String>,
     pub lighting_sha256: Option<String>,
     pub hud_sha256: Option<String>,
+    pub props_sha256: Option<String>,
     pub platform: RuntimePlatform,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -121,6 +126,7 @@ pub(crate) struct Receipt {
     pub art_sha256: Option<String>,
     pub lighting_sha256: Option<String>,
     pub hud_sha256: Option<String>,
+    pub props_sha256: Option<String>,
     pub platform: RuntimePlatform,
 }
 
@@ -146,6 +152,7 @@ pub(crate) fn export_interactive_bound(
             art: None,
             lighting: None,
             hud: None,
+            props: None,
         },
     )
 }
@@ -156,6 +163,7 @@ pub(crate) struct SourceAttachments {
     pub art: Option<Vec<u8>>,
     pub lighting: Option<Vec<u8>>,
     pub hud: Option<Vec<u8>>,
+    pub props: Option<Vec<u8>>,
 }
 
 pub(crate) fn export_interactive_sources(
@@ -178,6 +186,7 @@ fn export_with_recheck(
             art: None,
             lighting: None,
             hud: None,
+            props: None,
         },
         before_recheck,
     )
@@ -249,10 +258,30 @@ fn export_sources_with_recheck(
                 .encode(SCENE_FILENAME, graph_revision)
         })
         .transpose()?;
+    let props_bytes = expected_sources
+        .props
+        .as_deref()
+        .map(|bytes| {
+            let filename = scene
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or("scene leaf must be Unicode")?;
+            decode_static_props(bytes, filename, graph_revision)?
+                .encode(SCENE_FILENAME, graph_revision)
+        })
+        .transpose()?;
     let runtime_path =
         io::checked_existing_file(request.runtime, MAX_RUNTIME_BYTES, "hazard runtime")?;
     let runtime_bytes = io::read_bounded(&runtime_path, MAX_RUNTIME_BYTES, "hazard runtime")?;
-    let platform = if hud_bytes.is_some() {
+    let platform = if props_bytes.is_some() {
+        runtime::validate_props_runtime(
+            &runtime_bytes,
+            camera_bytes.is_some(),
+            art_bytes.is_some(),
+            lighting_bytes.is_some(),
+            hud_bytes.is_some(),
+        )?
+    } else if hud_bytes.is_some() {
         runtime::validate_hud_runtime(
             &runtime_bytes,
             camera_bytes.is_some(),
@@ -281,7 +310,9 @@ fn export_sources_with_recheck(
     );
     io::refuse_existing(&destination)?;
     let manifest = Manifest {
-        schema: if hud_bytes.is_some() {
+        schema: if props_bytes.is_some() {
+            6
+        } else if hud_bytes.is_some() {
             5
         } else if lighting_bytes.is_some() {
             4
@@ -309,6 +340,9 @@ fn export_sources_with_recheck(
         hud: hud_bytes
             .as_deref()
             .map(|bytes| record(HUD_FILENAME, bytes)),
+        props: props_bytes
+            .as_deref()
+            .map(|bytes| record(PROPS_FILENAME, bytes)),
         checksum,
         graph_revision,
     };
@@ -329,6 +363,9 @@ fn export_sources_with_recheck(
     }
     if let Some(bytes) = &hud_bytes {
         io::write_new_file(&stage.path().join(HUD_FILENAME), bytes)?;
+    }
+    if let Some(bytes) = &props_bytes {
+        io::write_new_file(&stage.path().join(PROPS_FILENAME), bytes)?;
     }
     let staged_runtime = stage.path().join(platform.runtime_filename());
     io::write_new_file(&staged_runtime, &runtime_bytes)?;
@@ -365,6 +402,7 @@ fn export_sources_with_recheck(
         art_sha256: admitted.art_sha256,
         lighting_sha256: admitted.lighting_sha256,
         hud_sha256: admitted.hud_sha256,
+        props_sha256: admitted.props_sha256,
         platform,
     })
 }
@@ -397,13 +435,19 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
     let lighting_object = shape
         .get("lighting")
         .is_some_and(serde_json::Value::is_object);
+    let has_props = shape.as_object().unwrap().contains_key("props");
+    let props_object = shape.get("props").is_some_and(serde_json::Value::is_object);
     match manifest.schema {
-        1 if !has_camera && !has_art && !has_lighting && !has_hud => {}
-        2 if camera_object && !has_art && !has_lighting && !has_hud => {}
-        3 if art_object && (!has_camera || camera_object) && !has_lighting && !has_hud => {}
-        4 if lighting_object && (!has_camera || camera_object) && (!has_art || art_object) && !has_hud => {}
-        5 if hud_object && (!has_camera || camera_object) && (!has_art || art_object) && (!has_lighting || lighting_object) => {}
-        _ => return Err("hazard schema 1 is scene-only; schema 2 requires camera only; schema 3 requires art and optional camera; schema 4 requires lighting and optional camera/art; schema 5 requires HUD and optional camera/art/lighting".into()),
+        1 if !has_props && !has_camera && !has_art && !has_lighting && !has_hud => {}
+        2 if !has_props && camera_object && !has_art && !has_lighting && !has_hud => {}
+        3 if !has_props && art_object && (!has_camera || camera_object) && !has_lighting && !has_hud => {}
+        4 if !has_props && lighting_object && (!has_camera || camera_object) && (!has_art || art_object) && !has_hud => {}
+        5 if !has_props && hud_object && (!has_camera || camera_object) && (!has_art || art_object) && (!has_lighting || lighting_object) => {}
+        6 if props_object && (!has_camera || camera_object) && (!has_art || art_object) && (!has_lighting || lighting_object) && (!has_hud || hud_object) => {}
+        _ => return Err("hazard schema 1 is scene-only; schema 2 requires camera only; schema 3 requires art and optional camera; schema 4 requires lighting and optional camera/art; schema 5 requires HUD and optional camera/art/lighting; schema 6 requires static unshaded props and optional camera/art/lighting/HUD".into()),
+    }
+    if let Some(props) = &manifest.props {
+        validate_record(props, PROPS_FILENAME, MAX_PROPS_BYTES)?;
     }
     if let Some(hud) = &manifest.hud {
         validate_record(hud, HUD_FILENAME, MAX_HUD_BYTES)?;
@@ -428,6 +472,9 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
         MANIFEST_FILENAME.to_owned(),
         manifest.platform.runtime_filename().to_owned(),
     ]);
+    if manifest.props.is_some() {
+        expected.insert(PROPS_FILENAME.to_owned());
+    }
     if manifest.camera.is_some() {
         expected.insert(CAMERA_FILENAME.to_owned());
     }
@@ -442,7 +489,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
     }
     if io::inventory_names(&root, expected.len())? != expected {
         return Err(
-            "hazard bundle must contain exactly its scene, manifest, runtime and declared camera/art/lighting/HUD"
+            "hazard bundle must contain exactly its scene, manifest, runtime and declared camera/art/lighting/HUD/props"
                 .into(),
         );
     }
@@ -517,7 +564,29 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
             Ok::<_, String>(bytes)
         })
         .transpose()?;
-    let platform = if hud_bytes.is_some() {
+    let props_bytes = manifest
+        .props
+        .as_ref()
+        .map(|record| {
+            let bytes = io::read_bounded(
+                &root.join(PROPS_FILENAME),
+                MAX_PROPS_BYTES,
+                "bundled hazard props",
+            )?;
+            verify_record(record, &bytes)?;
+            decode_static_props(&bytes, SCENE_FILENAME, manifest.graph_revision)?;
+            Ok::<_, String>(bytes)
+        })
+        .transpose()?;
+    let platform = if props_bytes.is_some() {
+        runtime::validate_props_runtime(
+            &runtime_bytes,
+            camera_bytes.is_some(),
+            art_bytes.is_some(),
+            lighting_bytes.is_some(),
+            hud_bytes.is_some(),
+        )?
+    } else if hud_bytes.is_some() {
         runtime::validate_hud_runtime(
             &runtime_bytes,
             camera_bytes.is_some(),
@@ -600,6 +669,18 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
             })
             .transpose()?
             .unwrap_or(false)
+        || props_bytes
+            .as_deref()
+            .map(|expected| {
+                io::read_bounded(
+                    &root.join(PROPS_FILENAME),
+                    MAX_PROPS_BYTES,
+                    "hazard props recheck",
+                )
+                .map(|current| current != expected)
+            })
+            .transpose()?
+            .unwrap_or(false)
         || io::inventory_names(&root, expected.len())? != expected
     {
         return Err("hazard bundle changed during admission".into());
@@ -615,8 +696,23 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
         art_sha256: manifest.art.map(|record| record.sha256),
         lighting_sha256: manifest.lighting.map(|record| record.sha256),
         hud_sha256: manifest.hud.map(|record| record.sha256),
+        props_sha256: manifest.props.map(|record| record.sha256),
         platform,
     })
+}
+
+/// Bundles currently have no shading capability: never silently strip authored shading.
+fn decode_static_props(
+    bytes: &[u8],
+    filename: &str,
+    revision: [u8; 32],
+) -> Result<crate::mesh_props::Document, String> {
+    let document = crate::mesh_props::Document::decode(bytes, filename, revision)?;
+    #[cfg(feature = "mesh-prop-shading")]
+    if document.props.iter().any(|prop| prop.shading.is_some()) {
+        return Err("hazard bundles support only static unshaded props".into());
+    }
+    Ok(document)
 }
 
 fn admit_scene(bytes: &[u8]) -> Result<(u64, [u8; 32]), String> {
@@ -636,8 +732,14 @@ fn admit_scene(bytes: &[u8]) -> Result<(u64, [u8; 32]), String> {
 #[cfg(test)]
 pub(crate) fn capture_camera_source(scene: &Path) -> Result<Option<Vec<u8>>, String> {
     let sources = capture_sources(scene)?;
-    if sources.art.is_some() || sources.lighting.is_some() || sources.hud.is_some() {
-        return Err("camera-only export cannot omit art, lighting or HUD attachments".into());
+    if sources.art.is_some()
+        || sources.lighting.is_some()
+        || sources.hud.is_some()
+        || sources.props.is_some()
+    {
+        return Err(
+            "camera-only export cannot omit art, lighting, HUD or props attachments".into(),
+        );
     }
     Ok(sources.camera)
 }
@@ -667,6 +769,7 @@ pub(crate) fn capture_sources(scene: &Path) -> Result<SourceAttachments, String>
             "hazard lighting source",
         )?,
         hud: capture("mesh-hud.json", MAX_HUD_BYTES, "hazard HUD source")?,
+        props: capture("mesh-props.json", MAX_PROPS_BYTES, "hazard props source")?,
     })
 }
 
@@ -678,6 +781,7 @@ fn reject_sidecars(scene: &Path) -> Result<(), String> {
     let prefix = format!("{leaf}.").to_lowercase();
     let camera = format!("{leaf}.mesh-camera.json");
     let art = format!("{leaf}.mesh-art.json");
+    let props = format!("{leaf}.mesh-props.json");
     let hud = format!("{leaf}.mesh-hud.json");
     let lighting = format!("{leaf}.mesh-lighting.json");
     for (index, entry) in fs::read_dir(scene.parent().ok_or("scene parent missing")?)
@@ -697,8 +801,9 @@ fn reject_sidecars(scene: &Path) -> Result<(), String> {
             && entry.file_name() != std::ffi::OsStr::new(&art)
             && entry.file_name() != std::ffi::OsStr::new(&lighting)
             && entry.file_name() != std::ffi::OsStr::new(&hud)
+            && entry.file_name() != std::ffi::OsStr::new(&props)
         {
-            return Err("hazard export supports only the exact mesh-camera, mesh-art, mesh-lighting and mesh-hud sidecars; other presentation sidecars and adjacent scene attachments are rejected".into());
+            return Err("hazard export supports only the exact mesh-camera, mesh-art, mesh-lighting, mesh-hud and mesh-props sidecars; other presentation sidecars and adjacent scene attachments are rejected".into());
         }
     }
     Ok(())
@@ -767,4 +872,9 @@ pub(crate) fn test_hud_runtime(
     lighting: bool,
 ) -> Vec<u8> {
     tests::hud_tests::hud_runtime(platform, camera, art, lighting)
+}
+
+#[cfg(test)]
+pub(crate) fn test_props_runtime(platform: RuntimePlatform) -> Vec<u8> {
+    tests::props_tests::props_runtime(platform, false, false, false, false)
 }

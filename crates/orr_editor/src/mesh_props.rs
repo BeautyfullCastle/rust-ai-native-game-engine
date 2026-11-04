@@ -17,7 +17,7 @@ const MAX_PROP_ASSETS: usize = 6;
 const MAX_PROP_DRAWS: usize = 3584;
 const SCHEMA: u32 = 1;
 const MAX_NAME_BYTES: usize = 64;
-const MAX_SIDECAR_BYTES: u64 = 16 * 1024 * 1024;
+pub(crate) const MAX_SIDECAR_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_PATH_COMPONENTS: usize = 64;
 const SIDECAR_SUFFIX: &str = ".mesh-props.json";
@@ -99,7 +99,7 @@ impl Document {
         Ok(placements)
     }
 
-    fn encode(&self, scene_filename: &str, graph_revision: [u8; 32]) -> Result<Vec<u8>, String> {
+    pub(crate) fn encode(&self, scene_filename: &str, graph_revision: [u8; 32]) -> Result<Vec<u8>, String> {
         validate_scene_filename(scene_filename)?;
         validate_prop_collection(&self.props)?;
         let mut embedded_bytes = 0usize;
@@ -138,7 +138,7 @@ impl Document {
         Ok(bytes)
     }
 
-    fn decode(
+    pub(crate) fn decode(
         bytes: &[u8],
         scene_filename: &str,
         graph_revision: [u8; 32],

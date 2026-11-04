@@ -165,7 +165,7 @@ fn invalid_or_conflicting_player_options_are_rejected() {
 fn capabilities_report_hazards_and_interactive_input_profiles() {
     assert_eq!(
         super::CAPABILITIES,
-        "ORR_MESH_HAZARDS_PLAYER_V1\nORR_MESH_INPUT_V1\nORR_MESH_HAZARDS_CAMERA_V1\nORR_MESH_HAZARDS_ART_V1\nORR_MESH_HAZARDS_LIGHTING_V1\nORR_MESH_HAZARDS_HUD_V1"
+        "ORR_MESH_HAZARDS_PLAYER_V1\nORR_MESH_INPUT_V1\nORR_MESH_HAZARDS_CAMERA_V1\nORR_MESH_HAZARDS_ART_V1\nORR_MESH_HAZARDS_LIGHTING_V1\nORR_MESH_HAZARDS_HUD_V1\nORR_MESH_HAZARDS_PROPS_V1"
     );
 }
 
@@ -226,6 +226,7 @@ fn executable_identity_checks_platform_and_actual_bytes() {
         art_sha256: None,
         lighting_sha256: None,
         hud_sha256: None,
+        props_sha256: None,
     };
     super::verify_executable(&executable, &bundle).unwrap();
     fs::write(&executable, b"changed runtime").unwrap();
@@ -494,4 +495,21 @@ fn loaded_hud_must_match_manifest_and_recheck_inventory() {
             .unwrap_err()
             .contains("bundle changed")
     );
+}
+
+#[test]
+fn loaded_props_must_match_manifest_and_recheck_inventory() {
+    let fixture = bound_bundle_fixture(false);
+    let mut loaded = Editor::open_game(&fixture.bundle.scene, EditorGame::MeshHazardsV1).unwrap();
+    loaded.sync();
+    let mut panel = crate::mesh_navigation::Panel::default();
+    panel.sync(&loaded);
+    super::verify_loaded_props_bundle(&fixture.bundle.root, &fixture.bundle, &panel, &loaded).unwrap();
+    let mut changed = fixture.bundle.clone();
+    changed.props_sha256 = Some("unloaded props".into());
+    assert!(super::verify_loaded_props_bundle(&fixture.bundle.root, &changed, &panel, &loaded)
+        .unwrap_err().contains("loaded game props"));
+    fs::write(crate::mesh_props::sidecar_path(&fixture.bundle.scene).unwrap(), b"added after load").unwrap();
+    assert!(super::verify_loaded_props_bundle(&fixture.bundle.root, &fixture.bundle, &panel, &loaded)
+        .unwrap_err().contains("bundle changed"));
 }
