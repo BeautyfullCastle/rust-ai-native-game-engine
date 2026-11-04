@@ -5,7 +5,12 @@ use orr_games::coop_defense_game as game;
 use std::collections::BTreeMap;
 
 fn just_pressed(ctx: &egui::Context, key: Key) -> bool {
-    ctx.input(|i|i.events.iter().any(|event|matches!(event,egui::Event::Key{key:pressed,pressed:true,repeat:false,..} if *pressed==key)))
+    ctx.input(|input| {
+        input.focused
+            && !input.events.iter().any(|event| matches!(event, egui::Event::WindowFocused(false)))
+            && input.events.iter().any(|event| matches!(event,
+                egui::Event::Key { key: pressed, pressed: true, repeat: false, .. } if *pressed == key))
+    })
 }
 
 // Native controls are click-to-act, not drag targets. Pin the semantic target at
@@ -16,6 +21,8 @@ fn just_pressed(ctx: &egui::Context, key: Key) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ClickTarget {
     Start,
+    Pause,
+    Continue,
     Action(u32),
     Cell(u32),
 }
@@ -41,6 +48,7 @@ impl PointerClicks {
         options: egui::InputOptions,
         screen: Rect,
         started: bool,
+        paused: bool,
         generation: u32,
     ) -> Option<ClickTarget> {
         let events = &input.events;
@@ -62,6 +70,15 @@ impl PointerClicks {
                     .rect(310.0, 590.0, 580.0, 55.0)
                     .contains(pos)
                     .then_some(ClickTarget::Start);
+            }
+            if paused {
+                return layout
+                    .rect(410.0, 490.0, 380.0, 55.0)
+                    .contains(pos)
+                    .then_some(ClickTarget::Continue);
+            }
+            if layout.rect(950.0, 740.0, 200.0, 45.0).contains(pos) {
+                return Some(ClickTarget::Pause);
             }
             for (index, action) in [game::SUMMON, game::UPGRADE, game::INVEST]
                 .into_iter()
@@ -134,9 +151,13 @@ impl PointerClicks {
                             && (0.0..=press.duration).contains(&(input.time - press.time))
                             && target_at(pos) == Some(press.target)
                         {
-                            // The UI returns one command per frame. Keep the first
-                            // eligible click, rather than reassigning it to a later release.
-                            clicked = clicked.or(Some(press.target));
+                            // Keep the first eligible gameplay click. Pause is a
+                            // safety exception: it dominates other clicks this frame.
+                            clicked = if press.target == ClickTarget::Pause {
+                                Some(ClickTarget::Pause)
+                            } else {
+                                clicked.or(Some(press.target))
+                            };
                         }
                     }
                     self.down = false;
@@ -153,6 +174,7 @@ pub struct DefenseUi {
     pub context: egui::Context,
     pub selected: Option<u32>,
     pub started: bool,
+    pub(crate) paused: bool,
     pointer_clicks: PointerClicks,
     sequence: u32,
     previous: BTreeMap<u32, game::DefenseEnemy>,
@@ -171,6 +193,7 @@ impl DefenseUi {
             context: egui::Context::default(),
             selected: None,
             started: false,
+            paused: false,
             pointer_clicks: PointerClicks::default(),
             sequence: 0,
             previous: BTreeMap::new(),
@@ -178,6 +201,12 @@ impl DefenseUi {
             observed_tick: 0,
             notice: "Summon a crew. Match identical role + tier to merge.".into(),
         }
+    }
+    pub(crate) fn pause(&mut self) {
+        self.paused = true;
+        self.selected = None;
+        // Keep `down`: a held button cannot re-arm via a duplicate press.
+        self.pointer_clicks.press = None;
     }
     fn command(&mut self, action: u32, source_cell: u32, target_cell: u32) -> game::DefenseInput {
         self.sequence = self.sequence.saturating_add(1);
@@ -190,9 +219,21 @@ impl DefenseUi {
     }
     pub fn show(
         &mut self,
-        input: egui::RawInput,
+        mut input: egui::RawInput,
         frame: &orr_ecs::Frame,
     ) -> (egui::FullOutput, Option<game::DefenseInput>) {
+        // egui recomputes repeat from its held-key set, which focus loss can clear.
+        // Preserve the native event's repeat attribution before that normalization.
+        input.events.retain(|event| {
+            !matches!(
+                event,
+                egui::Event::Key {
+                    pressed: true,
+                    repeat: true,
+                    ..
+                }
+            )
+        });
         let run = game::run(frame);
         let max_hp = frame.singleton::<game::Scenario>().reactor_hp;
         let last_wave = frame.singleton::<game::Campaign>().last_wave;
@@ -229,8 +270,14 @@ impl DefenseUi {
             let l = Layout::new(screen);
             let options = ctx.options(|o| o.input_options);
             let clicked = ctx.input(|i| {
-                self.pointer_clicks
-                    .take(i, options, screen, self.started, run.generation)
+                self.pointer_clicks.take(
+                    i,
+                    options,
+                    screen,
+                    self.started,
+                    self.paused,
+                    run.generation,
+                )
             });
             let p = ctx.layer_painter(egui::LayerId::new(
                 egui::Order::Background,
@@ -383,6 +430,49 @@ impl DefenseUi {
                     self.started = true;
                 }
                 return;
+            }
+            let pause_requested = run.phase == game::PLAYING
+                && (clicked == Some(ClickTarget::Pause)
+                    || just_pressed(ctx, Key::P)
+                    || just_pressed(ctx, Key::Escape));
+            if pause_requested {
+                self.pause();
+            }
+            if self.paused {
+                p.rect_filled(
+                    l.rect(0.0, 90.0, 1200.0, 850.0),
+                    0.0,
+                    Color32::from_black_alpha(170),
+                );
+                p.rect_filled(l.rect(300.0, 320.0, 600.0, 270.0), 12.0 * l.scale, INK);
+                l.text(&p, 410.0, 375.0, 29.0, PAPER, "DEFENSE PAUSED");
+                l.text(
+                    &p,
+                    355.0,
+                    425.0,
+                    16.0,
+                    MUTED,
+                    "Focus return does not resume the defense.",
+                );
+                let resume = l.rect(410.0, 490.0, 380.0, 55.0);
+                p.rect_filled(resume, 6.0 * l.scale, Color32::from_rgb(61, 101, 84));
+                l.text(&p, 450.0, 517.0, 18.0, PAPER, "[ENTER]  CONTINUE");
+                if !pause_requested
+                    && (just_pressed(ctx, Key::Enter) || clicked == Some(ClickTarget::Continue))
+                {
+                    self.paused = false;
+                    self.pointer_clicks.press = None;
+                }
+                // Continue consumes this frame, including Space, R and board clicks.
+                return;
+            }
+            if run.phase == game::PLAYING {
+                p.rect_filled(
+                    l.rect(950.0, 740.0, 200.0, 45.0),
+                    6.0 * l.scale,
+                    Color32::from_rgb(49, 64, 61),
+                );
+                l.text(&p, 970.0, 762.0, 14.0, PAPER, "[P / ESC] PAUSE");
             }
             for role in 0..6 {
                 let x = 160.0 + role as f32 * 175.0;

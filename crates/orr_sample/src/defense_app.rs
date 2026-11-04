@@ -20,7 +20,7 @@ use winit::{
 };
 
 type DefenseSession = Session<game::DefenseGame, LocalInputSource>;
-pub const HELP:&str="Stormglass Foundry\ncoop_defense [--scene PATH] [--headless --ticks N [--demo] [--capture NEW.png]]\nSpace summon, click your unit then empty tile to move or identical role/tier to merge, U upgrade, I invest, R restart. AI partner is local, not online. Headless capture uses a software GPU.";
+pub const HELP:&str="Stormglass Foundry\ncoop_defense [--scene PATH] [--headless --ticks N [--demo] [--capture NEW.png]]\nSpace summon, click your unit then empty tile to move or identical role/tier to merge, U upgrade, I invest, P/Escape pause, Enter continue, R restart. AI partner is local, not online. Headless capture uses a software GPU.";
 #[derive(Debug, Default)]
 pub struct Options {
     pub headless: bool,
@@ -145,6 +145,7 @@ pub fn run(options: Options) -> Result<(), String> {
         commands: VecDeque::new(),
         error: None,
         focused: true,
+        focus_lost_pending: false,
     };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())?;
     app.error.map_or(Ok(()), Err)
@@ -165,8 +166,65 @@ struct App {
     commands: VecDeque<game::DefenseInput>,
     error: Option<String>,
     focused: bool,
+    focus_lost_pending: bool,
 }
 impl App {
+    // Shared by the window redraw path and CPU-only admission tests.
+    fn process_input(&mut self, mut input: egui::RawInput, delta: f64) -> egui::FullOutput {
+        input.focused &= self.focused;
+        if std::mem::take(&mut self.focus_lost_pending) {
+            input.events.push(egui::Event::WindowFocused(false));
+        }
+        let focus_lost = !self.focused
+            || !input.focused
+            || input
+                .events
+                .iter()
+                .any(|event| matches!(event, egui::Event::WindowFocused(false)));
+        if focus_lost
+            && self.ui.started
+            && game::run(self.session.predicted_frame()).phase == game::PLAYING
+        {
+            self.ui.pause();
+        }
+        let was_started = self.ui.started;
+        let was_paused = self.ui.paused;
+        let (output, command) = self.ui.show(input, self.session.predicted_frame());
+        if focus_lost || !was_started || was_paused || self.ui.paused {
+            self.commands.clear();
+            self.accumulator = 0.0;
+            return output;
+        }
+        if let Some(command) = command.filter(|_| self.focused) {
+            if self.commands.len() < 32 {
+                self.commands.push_back(command);
+            }
+        }
+        self.accumulator += if self.ui.started && self.focused {
+            delta.clamp(0.0, 0.1)
+        } else {
+            0.0
+        };
+        while self.accumulator >= 1.0 / 60.0 {
+            let command = self.commands.pop_front().unwrap_or_default();
+            self.session.advance(command, vec![]);
+            self.accumulator -= 1.0 / 60.0;
+        }
+        output
+    }
+    fn set_focused(&mut self, focused: bool) {
+        self.focused = focused;
+        self.accumulator = 0.0;
+        self.last = Instant::now();
+        if !focused {
+            self.focus_lost_pending = true;
+            self.commands.clear();
+            if self.ui.started && game::run(self.session.predicted_frame()).phase == game::PLAYING {
+                self.ui.pause();
+            }
+        }
+    }
+
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: String) {
         self.error = Some(error);
         event_loop.exit();
@@ -179,27 +237,13 @@ impl App {
             return;
         };
         let input = gfx.state.take_egui_input(&gfx.window);
-        let (mut output, command) = self.ui.show(input, self.session.predicted_frame());
+        let mut output = self.process_input(input, delta);
+        let gfx = self.gfx.as_mut().expect("graphics initialized above");
         gfx.state
             .handle_platform_output(&gfx.window, std::mem::take(&mut output.platform_output));
-        if let Some(command) = command.filter(|_| self.focused) {
-            if self.commands.len() < 32 {
-                self.commands.push_back(command);
-            }
-        }
         if let Err(e) = gfx.pending.push(output) {
             self.fail(event_loop, e);
             return;
-        }
-        self.accumulator += if self.ui.started && self.focused {
-            delta
-        } else {
-            0.0
-        };
-        while self.accumulator >= 1.0 / 60.0 {
-            let command = self.commands.pop_front().unwrap_or_default();
-            self.session.advance(command, vec![]);
-            self.accumulator -= 1.0 / 60.0;
         }
         let result = gfx.renderer.render_with_overlay(
             &RenderList::default(),
@@ -269,12 +313,7 @@ impl ApplicationHandler for App {
                 gfx.renderer.resize(size.width, size.height);
             }
             WindowEvent::Focused(focused) => {
-                self.focused = focused;
-                self.accumulator = 0.0;
-                self.last = Instant::now();
-                if !focused {
-                    self.commands.clear();
-                }
+                self.set_focused(focused);
             }
             WindowEvent::RedrawRequested => self.frame(event_loop),
             _ => {}
@@ -481,7 +520,13 @@ mod tests {
             3
         );
         assert_eq!(game::run(native.predicted_frame()).generation, 1);
-        assert_eq!(native.predicted_frame().singleton::<game::WavePacing>().spawn_interval_ticks, 70);
+        assert_eq!(
+            native
+                .predicted_frame()
+                .singleton::<game::WavePacing>()
+                .spawn_interval_ticks,
+            70
+        );
         let active_frame_before_invalid_source = native.predicted_frame().to_bytes();
         for invalid in [
             vec![0xff],
@@ -552,5 +597,404 @@ mod tests {
         });
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod pause_tests {
+    use super::*;
+    fn app() -> App {
+        let mut ui = DefenseUi::new();
+        ui.started = true;
+        App {
+            session: session(game::DefenseConfig::default()),
+            ui,
+            gfx: None,
+            last: Instant::now(),
+            accumulator: 0.0,
+            commands: VecDeque::new(),
+            error: None,
+            focused: true,
+            focus_lost_pending: false,
+        }
+    }
+    fn key(key: egui::Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed: true,
+            repeat: false,
+            modifiers: Default::default(),
+        }
+    }
+    fn frame(app: &mut App, events: Vec<egui::Event>, delta: f64) {
+        app.process_input(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1200.0, 940.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            delta,
+        );
+    }
+    #[test]
+    fn manual_pause_keeps_actual_session_frame_unchanged() {
+        let mut app = app();
+        frame(&mut app, vec![], 1.0 / 60.0);
+        let before = app.session.predicted_frame().to_bytes();
+        frame(&mut app, vec![key(egui::Key::P)], 0.1);
+        assert_eq!(
+            app.session.predicted_frame().to_bytes(),
+            before,
+            "manual pause must freeze Session"
+        );
+    }
+    #[test]
+    fn focus_return_requires_explicit_continue() {
+        let mut app = app();
+        frame(&mut app, vec![], 1.0 / 60.0);
+        let before = app.session.predicted_frame().to_bytes();
+        app.set_focused(false);
+        app.set_focused(true);
+        frame(&mut app, vec![], 0.1);
+        assert_eq!(
+            app.session.predicted_frame().to_bytes(),
+            before,
+            "focus return must not resume Session"
+        );
+    }
+    fn pulse(key: egui::Key) -> Vec<egui::Event> {
+        let down = self::key(key);
+        let mut up = down.clone();
+        if let egui::Event::Key { pressed, .. } = &mut up {
+            *pressed = false;
+        }
+        vec![down, up]
+    }
+    fn button(x: f32, y: f32, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos: egui::pos2(x, y),
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        }
+    }
+    fn click(x: f32, y: f32) -> Vec<egui::Event> {
+        vec![
+            egui::Event::PointerMoved(egui::pos2(x, y)),
+            button(x, y, true),
+            button(x, y, false),
+        ]
+    }
+    fn unchanged(app: &App, bytes: &[u8]) {
+        assert!(
+            app.session.predicted_frame().to_bytes() == bytes,
+            "Session Frame bytes changed"
+        );
+    }
+    #[test]
+    fn long_pause_freezes_frame_tick_economy_and_resumes_without_catchup() {
+        let mut app = app();
+        frame(&mut app, vec![], 0.1);
+        frame(&mut app, pulse(egui::Key::Escape), 0.01);
+        let before = app.session.predicted_frame().to_bytes();
+        let tick = app.session.predicted_frame().tick();
+        for _ in 0..100 {
+            frame(&mut app, vec![], 3600.0);
+        }
+        unchanged(&app, &before);
+        frame(&mut app, pulse(egui::Key::Enter), 3600.0);
+        assert!(!app.ui.paused);
+        unchanged(&app, &before);
+        frame(&mut app, vec![], 1.0 / 60.0);
+        assert_eq!(app.session.predicted_frame().tick(), tick + 1);
+    }
+    #[test]
+    fn pause_clears_unsubmitted_queue_selection_and_partial_time() {
+        let mut app = app();
+        frame(&mut app, pulse(egui::Key::Space), 0.001);
+        assert_eq!(app.commands.len(), 1);
+        app.ui.selected = Some(0);
+        let before = app.session.predicted_frame().to_bytes();
+        frame(&mut app, pulse(egui::Key::P), 0.1);
+        assert!(app.commands.is_empty());
+        assert_eq!(app.accumulator, 0.0);
+        assert_eq!(app.ui.selected, None);
+        unchanged(&app, &before);
+        frame(&mut app, pulse(egui::Key::Enter), 0.1);
+        frame(&mut app, vec![], 0.1);
+        assert_eq!(game::run(app.session.predicted_frame()).gold[0], 150);
+        assert_eq!(game::run(app.session.predicted_frame()).last_sequence, 0);
+    }
+    #[test]
+    fn pause_and_continue_frames_do_not_submit_mixed_gameplay() {
+        let mut app = app();
+        let before = app.session.predicted_frame().to_bytes();
+        let mut mixed = pulse(egui::Key::Space);
+        mixed.extend(pulse(egui::Key::R));
+        mixed.extend(pulse(egui::Key::P));
+        mixed.extend(pulse(egui::Key::Enter));
+        frame(&mut app, mixed, 0.1);
+        assert!(app.ui.paused);
+        unchanged(&app, &before);
+        let mut mixed = pulse(egui::Key::Enter);
+        for key in [egui::Key::Space, egui::Key::U, egui::Key::I, egui::Key::R] {
+            mixed.extend(pulse(key));
+        }
+        mixed.extend(click(1050.0, 870.0));
+        frame(&mut app, mixed, 0.1);
+        assert!(!app.ui.paused);
+        unchanged(&app, &before);
+        frame(&mut app, vec![], 0.1);
+        let run = game::run(app.session.predicted_frame());
+        assert_eq!(
+            (run.generation, run.last_sequence, run.gold[0]),
+            (0, 0, 150)
+        );
+        let before = app.session.predicted_frame().to_bytes();
+        let mut clicks = click(350.0, 870.0); // Summon first, then genuine Pause.
+        clicks.extend(click(1050.0, 762.0));
+        clicks.extend(pulse(egui::Key::Enter));
+        frame(&mut app, clicks, 0.1);
+        assert!(app.ui.paused);
+        assert!(app.commands.is_empty());
+        unchanged(&app, &before);
+    }
+    #[test]
+    fn focus_false_dominates_continue_and_gameplay_in_any_event_order() {
+        for reverse in [false, true] {
+            let mut app = app();
+            let before = app.session.predicted_frame().to_bytes();
+            let mut events = pulse(egui::Key::Enter);
+            events.extend(pulse(egui::Key::Space));
+            events.extend(pulse(egui::Key::R));
+            events.extend(click(600.0, 517.0));
+            events.push(egui::Event::WindowFocused(false));
+            events.push(egui::Event::WindowFocused(true));
+            if reverse {
+                events.reverse();
+            }
+            frame(&mut app, events, 0.1);
+            assert!(app.ui.paused);
+            unchanged(&app, &before);
+        }
+        let mut app = app();
+        app.set_focused(false);
+        app.set_focused(true);
+        frame(&mut app, pulse(egui::Key::Enter), 0.1);
+        assert!(
+            app.ui.paused,
+            "native focus-loss latch must survive focus return before redraw"
+        );
+        frame(&mut app, pulse(egui::Key::Enter), 0.1);
+        assert!(!app.ui.paused);
+    }
+    #[test]
+    fn unfocused_raw_input_blocks_start_resume_and_commands() {
+        let mut app = app();
+        let before = app.session.predicted_frame().to_bytes();
+        app.process_input(
+            egui::RawInput {
+                focused: false,
+                events: pulse(egui::Key::Enter),
+                ..Default::default()
+            },
+            0.1,
+        );
+        assert!(app.ui.paused);
+        unchanged(&app, &before);
+        app.ui.started = false;
+        app.ui.paused = false;
+        app.process_input(
+            egui::RawInput {
+                focused: false,
+                events: pulse(egui::Key::Space),
+                ..Default::default()
+            },
+            0.1,
+        );
+        assert!(!app.ui.started);
+    }
+    #[test]
+    fn repeated_keys_do_not_pause_or_resume_and_space_remains_summon() {
+        let mut app = app();
+        let repeated = |key| {
+            let mut event = self::key(key);
+            if let egui::Event::Key { repeat, .. } = &mut event {
+                *repeat = true;
+            }
+            event
+        };
+        frame(&mut app, vec![repeated(egui::Key::P)], 0.0);
+        assert!(!app.ui.paused);
+        frame(&mut app, pulse(egui::Key::Escape), 0.0);
+        for key in [
+            egui::Key::P,
+            egui::Key::Escape,
+            egui::Key::Enter,
+            egui::Key::Space,
+        ] {
+            frame(&mut app, vec![repeated(key)], 0.1);
+            assert!(app.ui.paused);
+        }
+        frame(&mut app, pulse(egui::Key::Space), 0.1);
+        assert!(app.ui.paused);
+        let mut release_enter = self::key(egui::Key::Enter);
+        if let egui::Event::Key { pressed, .. } = &mut release_enter {
+            *pressed = false;
+        }
+        frame(&mut app, vec![release_enter], 0.0);
+        frame(&mut app, pulse(egui::Key::Enter), 0.1);
+        frame(&mut app, pulse(egui::Key::Space), 0.1);
+        assert_eq!(game::run(app.session.predicted_frame()).gold[0], 125);
+    }
+    #[test]
+    fn pause_continue_buttons_are_event_attributed_and_consume_frame() {
+        let mut app = app();
+        let mut unrelated = click(40.0, 100.0);
+        unrelated.push(egui::Event::PointerMoved(egui::pos2(1050.0, 762.0)));
+        frame(&mut app, unrelated, 0.0);
+        assert!(!app.ui.paused);
+        let mut events = click(1050.0, 762.0);
+        events.push(egui::Event::PointerMoved(egui::pos2(1050.0, 870.0)));
+        frame(&mut app, events, 0.1);
+        assert!(app.ui.paused);
+        let before = app.session.predicted_frame().to_bytes();
+        let mut unrelated = click(1050.0, 870.0);
+        unrelated.push(egui::Event::PointerMoved(egui::pos2(600.0, 517.0)));
+        frame(&mut app, unrelated, 0.1);
+        assert!(app.ui.paused);
+        let mut events = click(600.0, 517.0);
+        events.extend(click(1050.0, 870.0));
+        frame(&mut app, events, 0.1);
+        assert!(!app.ui.paused);
+        unchanged(&app, &before);
+        frame(&mut app, vec![], 0.1);
+        assert_eq!(game::run(app.session.predicted_frame()).generation, 0);
+    }
+    #[test]
+    fn held_gestures_cannot_cross_pause_or_continue() {
+        for (x, y) in [(350.0, 870.0), (1050.0, 870.0), (600.0, 517.0)] {
+            for focus_loss in [false, true] {
+                let mut app = app();
+                frame(&mut app, vec![button(x, y, true)], 0.0);
+                if focus_loss {
+                    app.set_focused(false);
+                    app.set_focused(true);
+                    frame(&mut app, vec![], 0.0);
+                } else {
+                    frame(&mut app, pulse(egui::Key::P), 0.0);
+                }
+                frame(&mut app, vec![button(x, y, false)], 0.1);
+                assert!(app.ui.paused);
+                frame(&mut app, vec![button(600.0, 517.0, true)], 0.1);
+                frame(&mut app, pulse(egui::Key::Enter), 0.1);
+                frame(&mut app, vec![button(1050.0, 870.0, false)], 0.1);
+                let run = game::run(app.session.predicted_frame());
+                assert_eq!((run.generation, run.last_sequence), (0, 0));
+            }
+        }
+    }
+    #[test]
+    fn admitted_delayed_input_is_frozen_then_completes_after_explicit_continue() {
+        let mut app = app();
+        assert_eq!(app.session.config().input_delay, 2);
+        frame(&mut app, pulse(egui::Key::Space), 1.0 / 60.0);
+        assert!(app.commands.is_empty());
+        assert_eq!(game::run(app.session.predicted_frame()).gold[0], 150);
+        frame(&mut app, pulse(egui::Key::P), 0.1);
+        let before = app.session.predicted_frame().to_bytes();
+        frame(&mut app, vec![], 100.0);
+        unchanged(&app, &before);
+        frame(&mut app, pulse(egui::Key::Enter), 100.0);
+        unchanged(&app, &before);
+        frame(&mut app, vec![], 2.0 / 60.0);
+        assert_eq!(game::run(app.session.predicted_frame()).gold[0], 125);
+        assert_eq!(game::run(app.session.predicted_frame()).last_sequence, 1);
+    }
+    #[test]
+    fn ready_terminal_and_authored_restart_contracts_survive_pause() {
+        let mut app = app();
+        app.ui.started = false;
+        let before = app.session.predicted_frame().to_bytes();
+        frame(&mut app, pulse(egui::Key::P), 0.1);
+        assert!(!app.ui.started && !app.ui.paused);
+        frame(&mut app, pulse(egui::Key::Space), 0.1);
+        assert!(app.ui.started);
+        unchanged(&app, &before);
+        let config = game::DefenseConfig {
+            scenario: game::Scenario {
+                starting_gold: 250,
+                reactor_hp: 75,
+                ..Default::default()
+            },
+            campaign: game::Campaign { last_wave: 3 },
+            ..Default::default()
+        };
+        app.session = session(config);
+        frame(&mut app, pulse(egui::Key::P), 0.1);
+        frame(&mut app, pulse(egui::Key::Enter), 0.1);
+        frame(&mut app, pulse(egui::Key::R), 0.1);
+        assert_eq!(game::run(app.session.predicted_frame()).generation, 1);
+        assert_eq!(game::run(app.session.predicted_frame()).gold, [250; 2]);
+        assert_eq!(
+            app.session
+                .predicted_frame()
+                .singleton::<game::Campaign>()
+                .last_wave,
+            3
+        );
+        // Reach the actual terminal game state through deterministic Session ticks.
+        while game::run(app.session.predicted_frame()).phase == game::PLAYING {
+            app.session.advance(Default::default(), vec![]);
+        }
+        app.set_focused(false);
+        app.set_focused(true);
+        frame(&mut app, vec![], 0.0);
+        frame(&mut app, pulse(egui::Key::P), 0.0);
+        assert!(!app.ui.paused);
+        frame(&mut app, pulse(egui::Key::R), 0.1);
+        assert_eq!(game::run(app.session.predicted_frame()).generation, 2);
+        assert_eq!(game::run(app.session.predicted_frame()).reactor_hp, 75);
+    }
+    #[test]
+    fn responsive_pause_controls_render_and_use_matching_hit_rects() {
+        for size in [
+            egui::vec2(1200.0, 940.0),
+            egui::vec2(750.0, 900.0),
+            egui::vec2(1800.0, 800.0),
+        ] {
+            let mut app = app();
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+            let layout = crate::defense_view::Layout::new(screen);
+            let draw = |app: &mut App, events| {
+                app.process_input(
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        events,
+                        ..Default::default()
+                    },
+                    0.0,
+                )
+            };
+            let has_text = |out: &egui::FullOutput, needle: &str| {
+                out.shapes.iter().any(|shape| {
+                matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text().contains(needle))
+            })
+            };
+            let active = draw(&mut app, vec![]);
+            assert!(has_text(&active, "PAUSE"));
+            let pause = layout.p(1050.0, 762.0);
+            let paused = draw(&mut app, click(pause.x, pause.y));
+            assert!(app.ui.paused);
+            assert!(has_text(&paused, "DEFENSE PAUSED"));
+            assert!(has_text(&paused, "CONTINUE"));
+            let resume = layout.p(600.0, 517.0);
+            draw(&mut app, click(resume.x, resume.y));
+            assert!(!app.ui.paused);
+        }
     }
 }
