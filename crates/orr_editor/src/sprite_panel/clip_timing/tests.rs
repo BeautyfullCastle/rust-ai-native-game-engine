@@ -823,8 +823,21 @@ fn sequence_rejects_wrong_source_play_and_installed_tamper_without_draft_changes
     assert_eq!(draft_snapshot(panel.timing.draft.as_ref().unwrap()), before);
     panel.update(&mut editor);
     assert!(!panel.timing.draft.as_ref().unwrap().playing);
-    editor.stop();
+    assert!(editor.stop().is_some());
     editor.sync();
+    // Stop acknowledges Edit before its matching view snapshot necessarily arrives.
+    // In particular, sync can see the old Play frame with the same checksum.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while !panel.editable(&editor) {
+        assert!(editor.down().is_none(), "host disconnected while stopping");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "stopped sprite editor did not reach coherent Edit state: {:?}",
+            editor.mode()
+        );
+        editor.pump();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
     panel.begin_sequence(&editor).unwrap();
     prime_sequence_preview(panel.timing.draft.as_mut().unwrap());
     let before = draft_snapshot(panel.timing.draft.as_ref().unwrap());
