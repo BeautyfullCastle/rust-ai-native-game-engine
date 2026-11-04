@@ -665,3 +665,6 @@ fn camera_fifo_source_rejects_without_blocking() {
     assert!(capture_camera_source(&fixture.scene).is_err());
     assert!(fixture.export(&fixture.root.join("out"), true).is_err());
 }
+
+#[path = "art_tests.rs"]
+pub(super) mod art_tests;

@@ -16,10 +16,9 @@ use std::{
 const MAX_PLAYER_EXE_BYTES: u64 = 256 << 20;
 const MAX_STARTUP_TICKS: u32 = 10_000;
 const MAX_CAPTURE_PIXELS: u64 = 1_048_576;
-const USAGE: &str = "orr_mesh_hazards_player [--bundle DIR] [--ticks N] [--screenshot PNG [--frames N]] [--size WxH]\n       orr_mesh_hazards_player --capabilities\n\nWithout --bundle, the validated bundle beside this executable is used.\n--ticks N starts Play and leaves the admitted simulation paused at tick N.\n--screenshot writes a bounded window PNG; --frames defaults to 30.\n--size sets the initial window dimensions in points (default 960x600).";
+const USAGE: &str = "orr_mesh_hazards_player [--bundle DIR] [--ticks N] [--screenshot PNG [--frames N]] [--size WxH]\n       orr_mesh_hazards_player [--bundle DIR] --verify-headless --ticks N\n       orr_mesh_hazards_player --capabilities\n\nWithout --bundle, the validated bundle beside this executable is used.\n--ticks N starts Play and leaves the admitted simulation paused at tick N.\n--screenshot writes a bounded window PNG; --frames defaults to 30.\n--size sets the initial window dimensions in points (default 960x600).";
 
-const CAPABILITIES: &str =
-    "ORR_MESH_HAZARDS_PLAYER_V1\nORR_MESH_INPUT_V1\nORR_MESH_HAZARDS_CAMERA_V1";
+const CAPABILITIES: &str = "ORR_MESH_HAZARDS_PLAYER_V1\nORR_MESH_INPUT_V1\nORR_MESH_HAZARDS_CAMERA_V1\nORR_MESH_HAZARDS_ART_V1";
 
 enum Request {
     Help,
@@ -28,6 +27,7 @@ enum Request {
 }
 
 struct Options {
+    verify_headless: bool,
     bundle: Option<PathBuf>,
     ticks: Option<u32>,
     screenshot: Option<PathBuf>,
@@ -39,6 +39,7 @@ impl Options {
     fn parse(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Request, String> {
         let mut arguments = arguments.into_iter();
         let mut options = Self {
+            verify_headless: false,
             bundle: None,
             ticks: None,
             screenshot: None,
@@ -54,6 +55,12 @@ impl Options {
                 .to_str()
                 .ok_or_else(|| format!("arguments must be valid UTF-8\n\n{USAGE}"))?;
             match flag {
+                "--verify-headless" => {
+                    if options.verify_headless {
+                        return Err("--verify-headless may only be supplied once".into());
+                    }
+                    options.verify_headless = true;
+                }
                 "--bundle" => {
                     if options.bundle.is_some() {
                         return Err("--bundle may only be supplied once".into());
@@ -125,7 +132,8 @@ impl Options {
             }
         }
         if capabilities {
-            if options.bundle.is_some()
+            if options.verify_headless
+                || options.bundle.is_some()
                 || options.ticks.is_some()
                 || options.screenshot.is_some()
                 || frames_was_set
@@ -137,7 +145,8 @@ impl Options {
             return Ok(Request::Capabilities);
         }
         if help {
-            if options.bundle.is_some()
+            if options.verify_headless
+                || options.bundle.is_some()
                 || options.ticks.is_some()
                 || options.screenshot.is_some()
                 || frames_was_set
@@ -146,6 +155,14 @@ impl Options {
                 return Err("--help cannot be combined with other options".into());
             }
             return Ok(Request::Help);
+        }
+        if options.verify_headless
+            && (options.ticks.is_none()
+                || options.screenshot.is_some()
+                || frames_was_set
+                || size_was_set)
+        {
+            return Err("--verify-headless requires --ticks and cannot combine with screenshot, frames or size".into());
         }
         if frames_was_set && options.screenshot.is_none() {
             return Err("--frames requires --screenshot".into());
@@ -324,6 +341,7 @@ fn launch(options: Options) -> Result<(), String> {
     let mut camera_panel = crate::mesh_camera_panel::Panel::default();
     camera_panel.sync(&mut editor);
     verify_loaded_camera_bundle(&bundle_root, &bundle, &camera_panel)?;
+    verify_loaded_art_bundle(&bundle_root, &bundle, &panel)?;
     let mut lighting_panel = crate::mesh_lighting_panel::Panel::default();
     lighting_panel.sync(&editor);
     #[cfg(feature = "mesh-animated-models")]
@@ -348,6 +366,9 @@ fn launch(options: Options) -> Result<(), String> {
             .or(animation_blocker),
     );
     start_playback(&mut editor, options.ticks, screenshot.is_some())?;
+    if options.verify_headless {
+        return verify_headless_session(editor, panel, camera_panel, &bundle);
+    }
 
     let (width, height) = options.size;
     let native_options = eframe::NativeOptions {
@@ -364,6 +385,7 @@ fn launch(options: Options) -> Result<(), String> {
         Box::new(move |creation_context| {
             let mut inner = EditorApp::new(editor, creation_context.wgpu_render_state.clone());
             inner.install_validated_hazards_camera(camera_panel);
+            inner.install_validated_hazards_navigation(panel);
             inner.set_mesh_player_input_allowed(mesh_input_allowed);
             if let Some(path) = screenshot {
                 inner = inner.with_screenshot(ScreenshotJob::new(path, frames).with_settle());
@@ -394,6 +416,56 @@ fn verify_loaded_camera_bundle(
     if current != *bundle {
         return Err("game bundle changed while the authored camera was loading".into());
     }
+    Ok(())
+}
+
+fn verify_loaded_art_bundle(
+    bundle_root: &Path,
+    bundle: &crate::mesh_hazards_export::PreparedBundle,
+    panel: &crate::mesh_navigation::Panel,
+) -> Result<(), String> {
+    if !panel.art_matches_saved_sidecar(bundle.art_sha256.as_deref()) {
+        return Err("loaded game agent art differs from the validated bundle".into());
+    }
+    let current = crate::mesh_hazards_export::open_bundle(bundle_root)
+        .map_err(|error| format!("game bundle changed while agent art was loading: {error}"))?;
+    if current != *bundle {
+        return Err("game bundle changed while agent art was loading".into());
+    }
+    Ok(())
+}
+
+fn verify_headless_session(
+    editor: Editor,
+    navigation: crate::mesh_navigation::Panel,
+    camera: crate::mesh_camera_panel::Panel,
+    bundle: &crate::mesh_hazards_export::PreparedBundle,
+) -> Result<(), String> {
+    let tick = editor.sim().head_tick;
+    let checksum = editor.checksum();
+    let snapshot = editor.snapshot().ok_or("verification has no frame")?;
+    let view = mesh_from_view(snapshot.predicted())?;
+    let position = view.agent.position.map(|value| value.raw());
+    if bundle.art_sha256.is_some() && navigation.art_model(&editor).is_none() {
+        return Err("validated agent art has no playback placement".into());
+    }
+    let mut app = EditorApp::new(editor, None);
+    app.install_validated_hazards_navigation(navigation);
+    app.install_validated_hazards_camera(camera);
+    app.verify_hazards_restart()?;
+    if app.editor.checksum() != bundle.checksum {
+        return Err("headless restart differs from the admitted initial frame".into());
+    }
+    println!(
+        "{}",
+        serde_json::json!({
+            "tick": tick, "checksum": format!("{checksum:016x}"),
+            "agent_position_raw": position, "art_sha256": bundle.art_sha256,
+            "restarted_tick": app.editor.sim().head_tick,
+            "restarted_checksum": format!("{:016x}", app.editor.checksum()),
+            "restart_parity": true
+        })
+    );
     Ok(())
 }
 
@@ -451,3 +523,7 @@ fn verify_executable(
 #[cfg(test)]
 #[path = "mesh_hazards_player/acceptance.rs"]
 mod acceptance;
+
+#[cfg(test)]
+#[path = "mesh_hazards_player/art_acceptance.rs"]
+mod art_acceptance;

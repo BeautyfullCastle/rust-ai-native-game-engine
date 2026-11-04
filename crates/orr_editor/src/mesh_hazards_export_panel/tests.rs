@@ -18,7 +18,7 @@ fn request(editor: &mut Editor, scene: &Path, runtime: &Path) -> Request {
         epoch: editor.scene_load_epoch(),
         checksum,
         scene_identity: Identity::read(scene).unwrap(),
-        camera_source: bundle::capture_camera_source(scene).unwrap(),
+        sources: bundle::capture_sources(scene).unwrap(),
         runtime: Identity::read(runtime).unwrap(),
         destination: scene.with_file_name("bundle"),
     }
@@ -80,7 +80,7 @@ fn completion_stamp_binds_optional_camera_presence_and_exact_source_bytes() {
     let runtime = temp.path().join("player");
     fs::write(&runtime, b"fixture runtime").unwrap();
     let absent = request(&mut editor, &scene, &runtime);
-    assert_eq!(absent.camera_source, None);
+    assert_eq!(absent.sources.camera, None);
     assert!(source_matches(&mut editor, None, &absent));
 
     let sidecar = crate::mesh_camera_store::sidecar_path(&scene).unwrap();
@@ -89,7 +89,7 @@ fn completion_stamp_binds_optional_camera_presence_and_exact_source_bytes() {
 
     let present = request(&mut editor, &scene, &runtime);
     assert_eq!(
-        present.camera_source.as_deref(),
+        present.sources.camera.as_deref(),
         Some(&b"camera bytes A"[..])
     );
     assert!(source_matches(&mut editor, None, &present));
@@ -98,7 +98,7 @@ fn completion_stamp_binds_optional_camera_presence_and_exact_source_bytes() {
 
     let replacement = request(&mut editor, &scene, &runtime);
     assert_eq!(
-        replacement.camera_source.as_deref(),
+        replacement.sources.camera.as_deref(),
         Some(&b"camera bytes B"[..])
     );
     fs::remove_file(&sidecar).unwrap();
@@ -113,7 +113,7 @@ fn changed_camera_marks_published_result_stale_without_removing_it() {
     let sidecar = crate::mesh_camera_store::sidecar_path(&scene).unwrap();
     fs::write(&sidecar, b"camera A").unwrap();
     let stamp = request(&mut editor, &scene, &runtime);
-    assert_eq!(stamp.camera_source.as_deref(), Some(&b"camera A"[..]));
+    assert_eq!(stamp.sources.camera.as_deref(), Some(&b"camera A"[..]));
     let root = temp.path().join("published-bundle");
     fs::create_dir(&root).unwrap();
     let marker = root.join("published-marker");
@@ -131,6 +131,7 @@ fn changed_camera_marks_published_result_stale_without_removing_it() {
         scene_sha256: "scene".into(),
         runtime_sha256: "runtime".into(),
         camera_sha256: Some("published-camera-hash".into()),
+        art_sha256: None,
         platform: bundle::RuntimePlatform::LinuxX86_64,
     };
     let (sender, receiver) = mpsc::sync_channel(1);
@@ -160,16 +161,16 @@ fn worker_admission_rejects_camera_addition_after_ui_request() {
     let runtime = temp.path().join("player");
     fs::write(&runtime, b"fixture runtime").unwrap();
     let stamp = request(&mut editor, &scene, &runtime);
-    assert_eq!(stamp.camera_source, None);
+    assert_eq!(stamp.sources.camera, None);
     fs::write(
         crate::mesh_camera_store::sidecar_path(&scene).unwrap(),
         b"added after UI request",
     )
     .unwrap();
     let error = run(&stamp).unwrap_err();
-    assert!(
-        error.contains("camera") || error.contains("sidecar"),
-        "{error}"
+    assert_eq!(
+        error,
+        "hazard attachment sources changed before export admission"
     );
     assert!(!stamp.destination.exists());
 }
@@ -183,12 +184,12 @@ fn worker_admission_rejects_equal_length_camera_replacement() {
     fs::write(&sidecar, b"camera A").unwrap();
     let stamp = request(&mut editor, &scene, &runtime);
     fs::write(&sidecar, b"camera B").unwrap();
-    assert_eq!(stamp.camera_source.as_deref(), Some(&b"camera A"[..]));
+    assert_eq!(stamp.sources.camera.as_deref(), Some(&b"camera A"[..]));
     assert_eq!(fs::metadata(&sidecar).unwrap().len(), 8);
     let error = run(&stamp).unwrap_err();
-    assert!(
-        error.contains("camera") || error.contains("sidecar"),
-        "{error}"
+    assert_eq!(
+        error,
+        "hazard attachment sources changed before export admission"
     );
     assert!(!stamp.destination.exists());
 }
@@ -457,4 +458,76 @@ fn completion_inputs_preserve_entered_path_form_and_reject_cancellation_or_chang
             true
         ));
     }
+}
+
+#[test]
+fn art_source_presence_and_bytes_are_bound_at_request_admission_and_completion() {
+    let (temp, mut editor, scene) = fixture();
+    let runtime = temp.path().join("player");
+    fs::write(&runtime, b"fixture runtime").unwrap();
+    let sidecar = crate::mesh_art::sidecar_path(&scene).unwrap();
+    let absent = request(&mut editor, &scene, &runtime);
+    assert!(absent.sources.art.is_none());
+    fs::write(&sidecar, b"art A").unwrap();
+    assert!(!source_matches(&mut editor, None, &absent));
+    assert!(run(&absent).is_err());
+    assert!(!absent.destination.exists());
+    let present = request(&mut editor, &scene, &runtime);
+    assert_eq!(present.sources.art.as_deref(), Some(&b"art A"[..]));
+    assert!(source_matches(&mut editor, None, &present));
+    fs::write(&sidecar, b"art B").unwrap();
+    assert!(!source_matches(&mut editor, None, &present));
+    assert!(run(&present).is_err());
+    let replaced = request(&mut editor, &scene, &runtime);
+    fs::remove_file(&sidecar).unwrap();
+    assert!(!source_matches(&mut editor, None, &replaced));
+    assert!(run(&replaced).is_err());
+    assert!(!replaced.destination.exists());
+}
+
+#[test]
+fn changed_art_completion_is_retained_but_never_reported_current() {
+    let (temp, mut editor, scene) = fixture();
+    let runtime = temp.path().join("player");
+    fs::write(&runtime, b"fixture runtime").unwrap();
+    let stamp = request(&mut editor, &scene, &runtime);
+    fs::create_dir(&stamp.destination).unwrap();
+    let marker = stamp.destination.join("retained");
+    fs::write(&marker, b"published").unwrap();
+    fs::write(
+        crate::mesh_art::sidecar_path(&scene).unwrap(),
+        b"art appeared",
+    )
+    .unwrap();
+    let receipt = Receipt {
+        root: stamp.destination.clone(),
+        scene: scene.clone(),
+        runtime: runtime.clone(),
+        manifest: stamp.destination.join(bundle::MANIFEST_FILENAME),
+        checksum: stamp.checksum,
+        graph_revision: [0; 32],
+        scene_sha256: "scene".into(),
+        runtime_sha256: "runtime".into(),
+        camera_sha256: None,
+        art_sha256: None,
+        platform: bundle::RuntimePlatform::LinuxX86_64,
+    };
+    let (sender, receiver) = mpsc::sync_channel(1);
+    sender
+        .send(Completion {
+            request: stamp.clone(),
+            result: Ok(receipt),
+        })
+        .ok()
+        .unwrap();
+    let mut panel = Panel {
+        runtime: runtime.display().to_string(),
+        output: stamp.destination.display().to_string(),
+        trusted_runtime: true,
+        pending: Some(receiver),
+        ..Default::default()
+    };
+    panel.poll(&mut editor, None);
+    assert!(panel.status.contains("Bundle retained"));
+    assert_eq!(fs::read(marker).unwrap(), b"published");
 }

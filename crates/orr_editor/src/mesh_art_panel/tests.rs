@@ -1,6 +1,6 @@
 use super::{
-    document_frame_ready, parse_rotation, parse_surface, parse_transform,
-    reported_scene_matches_request, Panel, MAX_HISTORY,
+    MAX_HISTORY, Panel, document_frame_ready, parse_rotation, parse_surface, parse_transform,
+    reported_scene_matches_request,
 };
 use crate::{backend::HostSpec, game::EditorGame, mesh_art::Snapshot, model::Mode};
 use orr_package::Manifest;
@@ -212,24 +212,28 @@ fn surface_parser_preserves_identity_and_validates_numeric_fields() {
             pivot: [0.5, 0.0, -1.0],
         })
     );
-    assert!(parse_surface(
-        true,
-        "-1",
-        &["0".into(), "0".into()],
-        &["1".into(), "1".into()],
-        "0",
-        &["0".into(), "0".into(), "0".into()]
-    )
-    .is_err());
-    assert!(parse_surface(
-        true,
-        "0",
-        &["NaN".into(), "0".into()],
-        &["1".into(), "1".into()],
-        "0",
-        &["0".into(), "0".into(), "0".into()]
-    )
-    .is_err());
+    assert!(
+        parse_surface(
+            true,
+            "-1",
+            &["0".into(), "0".into()],
+            &["1".into(), "1".into()],
+            "0",
+            &["0".into(), "0".into(), "0".into()]
+        )
+        .is_err()
+    );
+    assert!(
+        parse_surface(
+            true,
+            "0",
+            &["NaN".into(), "0".into()],
+            &["1".into(), "1".into()],
+            "0",
+            &["0".into(), "0".into(), "0".into()]
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -593,4 +597,80 @@ fn edit_frame_must_match_state_but_play_frame_can_advance_between_state_polls() 
         7,
         8,
     ));
+}
+
+#[cfg(feature = "mesh-hazards")]
+#[test]
+fn hazard_art_requires_exact_requested_profile_and_scene() {
+    let scene = PathBuf::from("hazards.scene.yaml");
+    let hazards = HostSpec::local_game(scene.clone(), EditorGame::MeshHazardsV1);
+    let navigation = HostSpec::local_game(scene.clone(), EditorGame::MeshNavigation);
+    assert!(reported_scene_matches_request(
+        EditorGame::MeshHazardsV1,
+        &hazards,
+        Some(&scene)
+    ));
+    assert!(!reported_scene_matches_request(
+        EditorGame::MeshHazardsV1,
+        &navigation,
+        Some(&scene)
+    ));
+    assert!(!reported_scene_matches_request(
+        EditorGame::MeshNavigation,
+        &hazards,
+        Some(&scene)
+    ));
+    assert!(!reported_scene_matches_request(
+        EditorGame::MeshHazardsV1,
+        &hazards,
+        Some(Path::new("other.yaml"))
+    ));
+}
+
+#[cfg(feature = "mesh-hazards")]
+#[test]
+fn hazard_static_art_load_apply_save_and_restart_preserve_frame_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let scene = temp.path().join("hazards.scene.yaml");
+    let mut editor =
+        crate::mesh_hazards_creator::prepare(&scene, &Default::default(), true).unwrap();
+    let initial = editor.checksum();
+    let package = static_package(temp.path());
+    let mut panel = Panel::default();
+    panel.sync(&editor);
+    assert!(panel.can_edit(&editor));
+    assert!(panel.matches_saved_sidecar(None));
+    panel.package_root = package.display().to_string();
+    panel.load_candidate();
+    assert!(panel.play_blocker(&editor).unwrap().contains("Apply"));
+    panel.license_acknowledged = true;
+    panel.apply(&editor);
+    assert!(panel.dirty());
+    assert!(panel.play_blocker(&editor).is_some());
+    panel.save(&editor);
+    assert!(panel.error.is_none(), "{:?}", panel.error);
+    let sha = panel.sidecar_sha.clone().unwrap();
+    assert!(panel.matches_saved_sidecar(Some(&sha)));
+    assert!(!panel.matches_saved_sidecar(Some("wrong")));
+    assert_eq!(editor.checksum(), initial);
+    assert!(panel.placement(&editor).is_some());
+    panel.offset[0] = "1".into();
+    assert!(panel.play_blocker(&editor).is_some());
+    assert!(!panel.matches_saved_sidecar(Some(&sha)));
+    panel.offset[0] = "0".into();
+    assert!(panel.play_blocker(&editor).is_none());
+    assert!(editor.start_play());
+    editor.step(3);
+    editor.sync();
+    panel.sync(&editor);
+    assert!(panel.placement(&editor).is_some());
+    editor.stop().unwrap();
+    editor.sync();
+    panel.sync(&editor);
+    assert!(editor.start_play());
+    editor.sync();
+    panel.sync(&editor);
+    assert_eq!(editor.checksum(), initial);
+    assert!(panel.placement(&editor).is_some());
+    assert!(panel.matches_saved_sidecar(Some(&sha)));
 }
