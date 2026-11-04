@@ -369,6 +369,16 @@ impl Panel {
         self.art.matches_saved_sidecar(expected)
     }
 
+    #[cfg(any(test, feature = "mesh-hazards-export"))]
+    pub(crate) fn props_matches_saved_sidecar(&self, editor: &Editor, expected: Option<&str>) -> bool {
+        self.props.matches_saved_sidecar(editor, expected)
+    }
+
+    #[cfg(any(test, feature = "mesh-hazards-export"))]
+    pub(crate) fn props_document_bytes(&self, editor: &Editor) -> Result<Vec<u8>, String> {
+        self.props.document_bytes(editor)
+    }
+
     pub(crate) fn art_dirty(&self) -> bool {
         self.art.dirty() || self.props.dirty()
     }
@@ -407,7 +417,9 @@ impl Panel {
     }
 
     pub fn play_blocker(&self, editor: &Editor) -> Option<String> {
-        if editor.game().is_mesh_hazards() { return self.art.play_blocker(editor); }
+        if editor.game().is_mesh_hazards() {
+            return self.art.play_blocker(editor).or_else(|| self.props.play_blocker(editor));
+        }
         if self.surface_package.busy() { return Some("Wait for the walkable model package cook before Play".into()); }
         if self.geometry_vertex_busy() { return Some("Finish or cancel viewport vertex editing before Play".into()); }
         if self.agent_pick_busy() {
@@ -634,6 +646,7 @@ impl Panel {
         if editor.game().is_mesh_hazards() {
             self.sync(editor);
             self.art.show(ui, editor);
+            self.props.show(ui, editor, false);
             return;
         }
         if editor.game() != EditorGame::MeshNavigation {

@@ -302,6 +302,11 @@ impl super::EditorApp {
             && self.mesh_lighting.applied_post_process(&self.editor) == post_process
     }
 
+    pub(crate) fn hazards_props_match(&self, expected_digest: &Option<String>, document: &[u8]) -> bool {
+        self.mesh_navigation.props_matches_saved_sidecar(&self.editor, expected_digest.as_deref())
+            && self.mesh_navigation.props_document_bytes(&self.editor).is_ok_and(|bytes| bytes == document)
+    }
+
     pub(crate) fn verify_hazards_restart(&mut self) -> Result<(), String> {
         let mut session = State::default();
         session.open_dialog(&mut self.editor);

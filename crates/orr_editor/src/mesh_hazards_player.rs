@@ -18,7 +18,7 @@ const MAX_STARTUP_TICKS: u32 = 10_000;
 const MAX_CAPTURE_PIXELS: u64 = 1_048_576;
 const USAGE: &str = "orr_mesh_hazards_player [--bundle DIR] [--ticks N] [--screenshot PNG [--frames N]] [--size WxH]\n       orr_mesh_hazards_player [--bundle DIR] --verify-headless --ticks N\n       orr_mesh_hazards_player --capabilities\n\nWithout --bundle, the validated bundle beside this executable is used.\n--ticks N starts Play and leaves the admitted simulation paused at tick N.\n--screenshot writes a bounded window PNG; --frames defaults to 30.\n--size sets the initial window dimensions in points (default 960x600).";
 
-const CAPABILITIES: &str = "ORR_MESH_HAZARDS_PLAYER_V1\nORR_MESH_INPUT_V1\nORR_MESH_HAZARDS_CAMERA_V1\nORR_MESH_HAZARDS_ART_V1\nORR_MESH_HAZARDS_LIGHTING_V1\nORR_MESH_HAZARDS_HUD_V1";
+const CAPABILITIES: &str = "ORR_MESH_HAZARDS_PLAYER_V1\nORR_MESH_INPUT_V1\nORR_MESH_HAZARDS_CAMERA_V1\nORR_MESH_HAZARDS_ART_V1\nORR_MESH_HAZARDS_LIGHTING_V1\nORR_MESH_HAZARDS_HUD_V1\nORR_MESH_HAZARDS_PROPS_V1";
 
 enum Request {
     Help,
@@ -342,6 +342,7 @@ fn launch(options: Options) -> Result<(), String> {
     camera_panel.sync(&mut editor);
     verify_loaded_camera_bundle(&bundle_root, &bundle, &camera_panel)?;
     verify_loaded_art_bundle(&bundle_root, &bundle, &panel)?;
+    verify_loaded_props_bundle(&bundle_root, &bundle, &panel, &editor)?;
     let mut lighting_panel = crate::mesh_lighting_panel::Panel::default();
     lighting_panel.sync(&editor);
     verify_loaded_lighting_bundle(&bundle_root, &bundle, &lighting_panel)?;
@@ -449,6 +450,23 @@ fn verify_loaded_art_bundle(
     Ok(())
 }
 
+fn verify_loaded_props_bundle(
+    bundle_root: &Path,
+    bundle: &crate::mesh_hazards_export::PreparedBundle,
+    panel: &crate::mesh_navigation::Panel,
+    editor: &Editor,
+) -> Result<(), String> {
+    if !panel.props_matches_saved_sidecar(editor, bundle.props_sha256.as_deref()) {
+        return Err("loaded game props differ from the validated bundle".into());
+    }
+    let current = crate::mesh_hazards_export::open_bundle(bundle_root)
+        .map_err(|error| format!("game bundle changed while props were loading: {error}"))?;
+    if current != *bundle {
+        return Err("game bundle changed while props were loading".into());
+    }
+    Ok(())
+}
+
 fn verify_loaded_lighting_bundle(
     bundle_root: &Path,
     bundle: &crate::mesh_hazards_export::PreparedBundle,
@@ -497,6 +515,8 @@ fn verify_headless_session(
     if bundle.art_sha256.is_some() && navigation.art_model(&editor).is_none() {
         return Err("validated agent art has no playback placement".into());
     }
+    let expected_props = navigation.props_document_bytes(&editor)?;
+    let prop_count = navigation.prop_models(&editor).len();
     let expected_lighting = lighting.applied_lighting(&editor);
     let expected_post_process = lighting.applied_post_process(&editor);
     if bundle.lighting_sha256.is_some() && expected_lighting.is_none() {
@@ -512,6 +532,9 @@ fn verify_headless_session(
     app.install_validated_hazards_lighting(lighting);
     app.install_validated_hazards_hud(hud);
     app.verify_hazards_restart()?;
+    if !app.hazards_props_match(&bundle.props_sha256, &expected_props) {
+        return Err("headless restart changed the admitted game props".into());
+    }
     if !app.hazards_lighting_matches(
         &bundle.lighting_sha256,
         expected_lighting,
@@ -532,6 +555,8 @@ fn verify_headless_session(
             "agent_position_raw": position, "art_sha256": bundle.art_sha256,
             "lighting_sha256": bundle.lighting_sha256, "lighting_restart_parity": true,
             "hud_sha256": bundle.hud_sha256, "hud_restart_parity": true,
+            "props_sha256": bundle.props_sha256, "props_restart_parity": true,
+            "prop_count": prop_count,
             "restarted_tick": app.editor.sim().head_tick,
             "restarted_checksum": format!("{:016x}", app.editor.checksum()),
             "restart_parity": true
@@ -606,3 +631,7 @@ mod lighting_acceptance;
 #[cfg(test)]
 #[path = "mesh_hazards_player/hud_acceptance.rs"]
 mod hud_acceptance;
+
+#[cfg(test)]
+#[path = "mesh_hazards_player/props_acceptance.rs"]
+mod props_acceptance;
