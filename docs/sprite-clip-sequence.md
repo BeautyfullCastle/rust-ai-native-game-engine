@@ -8,7 +8,10 @@ remain a separate entry point with fixed frame order and region references.
 
 Choose an admitted region for each appended frame. Repeated and noncontiguous
 region IDs are allowed. Select a frame to remove it or move it one position up or
-down; at least one frame must remain. Edit positive integer millisecond durations
+down; at least one frame must remain. **Reverse clip sequence** reverses all
+frames while keeping each region paired with its duration and following the
+selected frame to its new position. Reversing twice restores the order. A
+one-frame sequence is unchanged. Edit positive integer millisecond durations
 and explicitly apply the ID or duration field before preview/export. The sequence
 controls and export action share a bounded scrolling area. Pending text
 clears preview and blocks export until validated; invalid Apply keeps the committed
