@@ -133,17 +133,16 @@ fn changed_camera_marks_published_result_stale_without_removing_it() {
         camera_sha256: Some("published-camera-hash".into()),
         art_sha256: None,
         lighting_sha256: None,
+        hud_sha256: None,
         platform: bundle::RuntimePlatform::LinuxX86_64,
     };
     let (sender, receiver) = mpsc::sync_channel(1);
-    assert!(
-        sender
-            .send(Completion {
-                request: stamp.clone(),
-                result: Ok(receipt),
-            })
-            .is_ok()
-    );
+    assert!(sender
+        .send(Completion {
+            request: stamp.clone(),
+            result: Ok(receipt),
+        })
+        .is_ok());
     let mut panel = Panel {
         runtime: runtime.display().to_string(),
         output: stamp.destination.display().to_string(),
@@ -225,12 +224,12 @@ fn identity_and_digest_are_file_only_and_bounded() {
 #[ignore = "requires explicit self-built player and fresh UI evidence directory"]
 fn actual_editor_ui_exports_real_hazard_player_without_launching_it() {
     use crate::app::EditorApp;
-    use egui::{Key, Modifiers, accesskit::Role};
+    use egui::{accesskit::Role, Key, Modifiers};
     use egui_kittest::{
-        Harness,
         kittest::{NodeT, Queryable},
+        Harness,
     };
-    use egui_wgpu::{WgpuSetupCreateNew, wgpu};
+    use egui_wgpu::{wgpu, WgpuSetupCreateNew};
     use std::time::{Duration, Instant};
 
     fn settle(h: &mut Harness<'_, EditorApp>) {
@@ -319,20 +318,18 @@ fn actual_editor_ui_exports_real_hazard_player_without_launching_it() {
         "New output directory (must not exist)",
         &output.display().to_string(),
     );
-    assert!(
-        h.get_by_role_and_label(Role::Button, "Export hazard game")
-            .accesskit_node()
-            .is_disabled()
-    );
+    assert!(h
+        .get_by_role_and_label(Role::Button, "Export hazard game")
+        .accesskit_node()
+        .is_disabled());
     click(&mut h, "I trust this self-built, QA-tested hazard player");
     capture(&mut h, &root, "01-export-ready.png");
     h.get_by_role_and_label(Role::Button, "Export hazard game")
         .click_accesskit();
     wait_status(&mut h, "Hazard export complete at");
-    assert!(
-        h.query_by_label_contains("Player was not launched.")
-            .is_some()
-    );
+    assert!(h
+        .query_by_label_contains("Player was not launched.")
+        .is_some());
     capture(&mut h, &root, "02-export-complete.png");
     let prepared = bundle::open_bundle(&output).unwrap();
     assert_eq!(fs::read(&prepared.scene).unwrap(), source_before);
@@ -361,11 +358,10 @@ fn actual_editor_ui_exports_real_hazard_player_without_launching_it() {
         .unwrap();
     settle(&mut h);
     assert!(h.state().editor.is_dirty());
-    assert!(
-        h.get_by_role_and_label(Role::Button, "Export hazard game")
-            .accesskit_node()
-            .is_disabled()
-    );
+    assert!(h
+        .get_by_role_and_label(Role::Button, "Export hazard game")
+        .accesskit_node()
+        .is_disabled());
     capture(&mut h, &root, "04-dirty-scene-blocked.png");
     assert_eq!(fs::read(&scene).unwrap(), source_before);
     assert_eq!(digest_runtime(&runtime).unwrap(), runtime_before);
@@ -385,13 +381,11 @@ fn runtime_digest_refuses_fifo_replacement_after_panel_identity_without_blocking
     fs::write(&path, b"regular runtime").unwrap();
     let identity = Identity::read(&path).unwrap();
     fs::remove_file(&path).unwrap();
-    assert!(
-        std::process::Command::new("mkfifo")
-            .arg(&path)
-            .status()
-            .unwrap()
-            .success()
-    );
+    assert!(std::process::Command::new("mkfifo")
+        .arg(&path)
+        .status()
+        .unwrap()
+        .success());
     let (sender, receiver) = mpsc::sync_channel(1);
     let worker = std::thread::spawn(move || {
         let _ = sender.send(digest_runtime(&identity.path));
@@ -512,6 +506,7 @@ fn changed_art_completion_is_retained_but_never_reported_current() {
         camera_sha256: None,
         art_sha256: None,
         lighting_sha256: None,
+        hud_sha256: None,
         platform: bundle::RuntimePlatform::LinuxX86_64,
     };
     let (sender, receiver) = mpsc::sync_channel(1);
@@ -585,6 +580,81 @@ fn changed_lighting_completion_is_retained_but_never_reported_current() {
         camera_sha256: None,
         art_sha256: None,
         lighting_sha256: None,
+        hud_sha256: None,
+        platform: bundle::RuntimePlatform::LinuxX86_64,
+    };
+    let (sender, receiver) = mpsc::sync_channel(1);
+    sender
+        .send(Completion {
+            request: stamp.clone(),
+            result: Ok(receipt),
+        })
+        .ok()
+        .unwrap();
+    let mut panel = Panel {
+        runtime: runtime.display().to_string(),
+        output: stamp.destination.display().to_string(),
+        trusted_runtime: true,
+        pending: Some(receiver),
+        ..Default::default()
+    };
+    panel.poll(&mut editor, None);
+    assert!(panel.status.contains("Bundle retained"));
+    assert_eq!(fs::read(marker).unwrap(), b"published");
+}
+
+#[test]
+fn hud_source_presence_and_bytes_are_bound_at_request_admission_and_completion() {
+    let (temp, mut editor, scene) = fixture();
+    let runtime = temp.path().join("player");
+    fs::write(&runtime, b"fixture runtime").unwrap();
+    let sidecar = crate::mesh_hud_store::sidecar_path(&scene).unwrap();
+    let absent = request(&mut editor, &scene, &runtime);
+    assert!(absent.sources.hud.is_none());
+    fs::write(&sidecar, b"HUD A").unwrap();
+    assert!(!source_matches(&mut editor, None, &absent));
+    assert!(run(&absent).is_err());
+    assert!(!absent.destination.exists());
+    let present = request(&mut editor, &scene, &runtime);
+    assert_eq!(present.sources.hud.as_deref(), Some(&b"HUD A"[..]));
+    assert!(source_matches(&mut editor, None, &present));
+    fs::write(&sidecar, b"HUD B").unwrap();
+    assert!(!source_matches(&mut editor, None, &present));
+    assert!(run(&present).is_err());
+    let replaced = request(&mut editor, &scene, &runtime);
+    fs::remove_file(&sidecar).unwrap();
+    assert!(!source_matches(&mut editor, None, &replaced));
+    assert!(run(&replaced).is_err());
+    assert!(!replaced.destination.exists());
+}
+
+#[test]
+fn changed_hud_completion_is_retained_but_never_reported_current() {
+    let (temp, mut editor, scene) = fixture();
+    let runtime = temp.path().join("player");
+    fs::write(&runtime, b"fixture runtime").unwrap();
+    let stamp = request(&mut editor, &scene, &runtime);
+    fs::create_dir(&stamp.destination).unwrap();
+    let marker = stamp.destination.join("retained");
+    fs::write(&marker, b"published").unwrap();
+    fs::write(
+        crate::mesh_hud_store::sidecar_path(&scene).unwrap(),
+        b"HUD appeared",
+    )
+    .unwrap();
+    let receipt = Receipt {
+        root: stamp.destination.clone(),
+        scene: scene.clone(),
+        runtime: runtime.clone(),
+        manifest: stamp.destination.join(bundle::MANIFEST_FILENAME),
+        checksum: stamp.checksum,
+        graph_revision: [0; 32],
+        scene_sha256: "scene".into(),
+        runtime_sha256: "runtime".into(),
+        camera_sha256: None,
+        art_sha256: None,
+        lighting_sha256: None,
+        hud_sha256: None,
         platform: bundle::RuntimePlatform::LinuxX86_64,
     };
     let (sender, receiver) = mpsc::sync_channel(1);

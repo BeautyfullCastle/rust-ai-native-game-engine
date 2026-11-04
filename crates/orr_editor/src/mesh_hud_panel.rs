@@ -29,6 +29,7 @@ pub(crate) struct Panel {
     cursor: usize,
     next_id: u64,
     saved_id: Option<u64>,
+    profile: Option<EditorGame>,
     scene: Option<PathBuf>,
     scene_epoch: Option<u64>,
     graph_revision: Option<[u8; 32]>,
@@ -64,6 +65,7 @@ impl Default for Panel {
             cursor: 0,
             next_id: 1,
             saved_id: Some(0),
+            profile: None,
             scene: None,
             scene_epoch: None,
             graph_revision: None,
@@ -79,7 +81,7 @@ impl Default for Panel {
 
 impl Panel {
     pub(crate) fn sync(&mut self, editor: &Editor) {
-        if editor.game() != EditorGame::MeshNavigation || !editor.spec().is_local() {
+        if !supports_hud_profile(editor.game()) || !editor.spec().is_local() {
             self.document_pending = true;
             return;
         }
@@ -90,7 +92,8 @@ impl Panel {
         };
         self.document_pending = false;
         let scene_epoch = editor.scene_load_epoch();
-        if self.scene.as_ref() == Some(&scene)
+        if self.profile == Some(editor.game())
+            && self.scene.as_ref() == Some(&scene)
             && self.scene_epoch == Some(scene_epoch)
             && self.graph_revision == Some(graph_revision)
         {
@@ -98,7 +101,7 @@ impl Panel {
         }
         if self.dirty() {
             self.context_stale = true;
-            self.status = "Unsaved game HUD belongs to another scene or graph revision; explicitly discard and reload before continuing.".into();
+            self.status = "Unsaved game HUD belongs to another profile, scene or graph revision; explicitly discard and reload before continuing.".into();
             return;
         }
         self.scene = Some(scene.clone());
@@ -112,11 +115,11 @@ impl Panel {
         self.confirm_discard_changes = false;
         self.confirm_discard_invalid = false;
         self.reset_history(None, Some(0));
-        self.load_context(&scene, graph_revision, scene_epoch);
+        self.load_context(&scene, graph_revision, scene_epoch, editor.game());
     }
 
     pub(crate) fn show(&mut self, ui: &mut Ui, editor: &Editor) {
-        if editor.game() != EditorGame::MeshNavigation {
+        if !supports_hud_profile(editor.game()) {
             return;
         }
         self.sync(editor);
@@ -262,14 +265,16 @@ impl Panel {
     }
 
     pub(crate) fn play_blocker(&self, editor: &Editor) -> Option<String> {
-        if editor.game() != EditorGame::MeshNavigation {
+        if !supports_hud_profile(editor.game()) {
             return None;
         }
         if self.document_pending || current_identity(editor).is_none() {
             return Some("Wait for the requested local mesh scene and admitted graph".into());
         }
         if self.context_stale {
-            return Some("Discard or resolve HUD from the previous scene or graph revision".into());
+            return Some(
+                "Discard or resolve HUD from the previous profile, scene or graph revision".into(),
+            );
         }
         if let Some(error) = &self.sidecar_error {
             return Some(format!("Saved game HUD is invalid: {error}"));
@@ -283,6 +288,15 @@ impl Panel {
         None
     }
 
+    #[cfg(any(feature = "mesh-hazards-export", test))]
+    pub(crate) fn matches_saved_sidecar(&self, expected: Option<&str>) -> bool {
+        !self.document_pending
+            && !self.dirty()
+            && self.sidecar_error.is_none()
+            && self.sidecar_sha.as_deref() == expected
+            && self.current_document().is_some() == expected.is_some()
+    }
+
     fn history_is_dirty(&self) -> bool {
         self.history.get(self.cursor).map(|entry| entry.id) != self.saved_id
     }
@@ -292,7 +306,7 @@ impl Panel {
     }
 
     fn can_edit(&self, editor: &Editor) -> bool {
-        editor.game() == EditorGame::MeshNavigation
+        supports_hud_profile(editor.game())
             && editor.spec().is_local()
             && editor.mode() == Mode::Edit
             && editor.can_mutate()
@@ -316,7 +330,7 @@ impl Panel {
     }
 
     fn can_reload(&self, editor: &Editor) -> bool {
-        editor.game() == EditorGame::MeshNavigation
+        supports_hud_profile(editor.game())
             && editor.spec().is_local()
             && editor.mode() == Mode::Edit
             && editor.can_mutate()
@@ -332,7 +346,7 @@ impl Panel {
     }
 
     fn can_discard_invalid(&self, editor: &Editor) -> bool {
-        editor.game() == EditorGame::MeshNavigation
+        supports_hud_profile(editor.game())
             && editor.spec().is_local()
             && editor.mode() == Mode::Edit
             && editor.can_mutate()
@@ -347,7 +361,8 @@ impl Panel {
 
     fn identity_matches(&self, editor: &Editor) -> bool {
         current_identity(editor).is_some_and(|(scene, revision)| {
-            self.scene.as_ref() == Some(&scene)
+            self.profile == Some(editor.game())
+                && self.scene.as_ref() == Some(&scene)
                 && self.scene_epoch == Some(editor.scene_load_epoch())
                 && self.graph_revision == Some(revision)
         })
@@ -437,7 +452,12 @@ impl Panel {
             self.error = Some("The current mesh scene is not ready for HUD reload".into());
             return;
         };
-        self.load_context(&scene, graph_revision, editor.scene_load_epoch());
+        self.load_context(
+            &scene,
+            graph_revision,
+            editor.scene_load_epoch(),
+            editor.game(),
+        );
     }
 
     fn remove(&mut self) {
@@ -468,7 +488,12 @@ impl Panel {
         self.form_dirty = false;
         self.confirm_discard_changes = false;
         self.reset_history(None, Some(0));
-        self.load_context(&scene, graph_revision, editor.scene_load_epoch());
+        self.load_context(
+            &scene,
+            graph_revision,
+            editor.scene_load_epoch(),
+            editor.game(),
+        );
     }
 
     fn discard_invalid(&mut self) {
@@ -520,7 +545,14 @@ impl Panel {
         self.status = "Redid game HUD edit; save explicitly to persist.".into();
     }
 
-    fn load_context(&mut self, scene: &Path, graph_revision: [u8; 32], scene_epoch: u64) {
+    fn load_context(
+        &mut self,
+        scene: &Path,
+        graph_revision: [u8; 32],
+        scene_epoch: u64,
+        profile: EditorGame,
+    ) {
+        self.profile = Some(profile);
         self.scene = Some(scene.to_path_buf());
         self.scene_epoch = Some(scene_epoch);
         self.graph_revision = Some(graph_revision);
@@ -611,8 +643,12 @@ impl Panel {
     }
 }
 
+pub(crate) fn supports_hud_profile(game: EditorGame) -> bool {
+    game == EditorGame::MeshNavigation || game.is_mesh_hazards()
+}
+
 fn current_identity(editor: &Editor) -> Option<(PathBuf, [u8; 32])> {
-    if editor.game() != EditorGame::MeshNavigation
+    if !supports_hud_profile(editor.game())
         || !editor.spec().is_local()
         || editor.down().is_some()
         || editor.previewing().is_some()
@@ -620,7 +656,7 @@ fn current_identity(editor: &Editor) -> Option<(PathBuf, [u8; 32])> {
         return None;
     }
     let scene = editor.path()?;
-    if !reported_scene_matches_request(editor.spec(), &scene) {
+    if !reported_scene_matches_request(editor.spec(), &scene, editor.game()) {
         return None;
     }
     let snapshot = editor.snapshot()?;
@@ -632,14 +668,14 @@ fn current_identity(editor: &Editor) -> Option<(PathBuf, [u8; 32])> {
     Some((scene, view.graph.revision()))
 }
 
-fn reported_scene_matches_request(spec: &HostSpec, reported: &Path) -> bool {
+fn reported_scene_matches_request(spec: &HostSpec, reported: &Path, profile: EditorGame) -> bool {
     let requested = match spec {
-        HostSpec::Local { scene, .. } => scene.as_path(),
-        HostSpec::LocalGame {
-            scene,
-            game: EditorGame::MeshNavigation,
-            ..
-        } => scene.as_path(),
+        HostSpec::Local { scene, .. } if profile == EditorGame::MeshNavigation => scene.as_path(),
+        HostSpec::LocalGame { scene, game, .. }
+            if *game == profile && supports_hud_profile(*game) =>
+        {
+            scene.as_path()
+        }
         _ => return false,
     };
     if requested == reported {

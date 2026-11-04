@@ -2204,6 +2204,8 @@ impl EditorApp {
             }
         };
         let mut frame_drawn = false;
+        #[cfg(feature="mesh-navigation")]
+        let mut hud_warning_top = None;
         #[cfg(feature="room-authoring")]
         let wall_pointer_consumed = self.room_wall_pointer_owned || self.room_authoring.wall_footprint_busy() || self.room_actor_pointer_owned || self.room_authoring.actor_placement_busy() || self.room_wall_placement_pointer_owned || self.room_authoring.wall_placement_busy();
         #[cfg(not(feature="room-authoring"))]
@@ -2493,6 +2495,7 @@ impl EditorApp {
                         (rect.width() - 24.0).max(1.0));
                     let position = egui::pos2(rect.left() + 8.0,
                         (rect.bottom() - 8.0 - galley.size().y).max(rect.top() + 56.0));
+                    hud_warning_top = Some(position.y - 4.0);
                     ui.painter().rect_filled(
                         Rect::from_min_size(position - egui::vec2(4.0, 4.0), galley.size() + egui::vec2(8.0, 8.0)),
                         4.0, Color32::from_black_alpha(224));
@@ -2569,8 +2572,11 @@ impl EditorApp {
                 (Some(document), Some(snapshot)) if document.enabled => {
                     let frame = snapshot.predicted();
                     if let Ok(view) = orr_remote::mesh_navigation::mesh_from_view(frame) {
-                        document.draw(ui, rect, &view, frame.tick());
-                        true
+                        let hud_viewport = if self.editor.game().is_mesh_hazards() {
+                            crate::mesh_hud::hazards_viewport(rect, hud_warning_top)
+                        } else { rect };
+                        document.draw(ui, hud_viewport, &view, frame.tick());
+                        hud_viewport.is_positive()
                     } else { false }
                 }
                 _ => false,

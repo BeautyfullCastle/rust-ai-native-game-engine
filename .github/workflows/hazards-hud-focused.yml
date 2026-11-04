@@ -1,0 +1,101 @@
+name: Mesh hazard HUD focused Linux CI
+on:
+  push:
+    branches: [su/hazards-hud-20261104]
+permissions:
+  contents: read
+concurrency:
+  group: hazards-hud-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  hazards-hud:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      LIBGL_ALWAYS_SOFTWARE: '1'
+      EGL_PLATFORM: surfaceless
+      WGPU_BACKEND: gl
+      ORR_REQUIRE_GPU: '1'
+      EVIDENCE: ${{ github.workspace }}/ci-evidence
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Record exact source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$EVIDENCE"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git rev-parse HEAD HEAD^{tree} | tee "$EVIDENCE/source.txt"
+      - name: Install Linux build and software rendering dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q 2>&1 | tee "$EVIDENCE/dependencies.log"
+          sudo apt-get install -y -q build-essential pkg-config libasound2-dev libudev-dev libx11-dev libxkbcommon-dev libwayland-dev libegl1-mesa-dev libgl1-mesa-dev mesa-vulkan-drivers 2>&1 | tee -a "$EVIDENCE/dependencies.log"
+          runtime=$(mktemp -d "$RUNNER_TEMP/hazards-hud-xdg.XXXXXXXX")
+          echo "XDG_RUNTIME_DIR=$runtime" >> "$GITHUB_ENV"
+          mkdir "$runtime/mesa-cache"
+          echo "MESA_SHADER_CACHE_DIR=$runtime/mesa-cache" >> "$GITHUB_ENV"
+      - name: Select Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.99.1 --profile minimal --component clippy
+          rustup override set 1.99.1
+          rustc --version --verbose | tee "$EVIDENCE/rustc.txt"
+          cargo --version | tee "$EVIDENCE/cargo.txt"
+      - name: Run focused creator and player contracts
+        shell: python {0}
+        run: |
+          import hashlib, json, os, re, runpy
+          from pathlib import Path
+          evidence = Path(os.environ['EVIDENCE'])
+          helper = runpy.run_path('tools/check-authoring-controls.py')
+          features = ['--features', 'mesh-hazards-export', '--lib']
+          case_pattern = re.compile(r'^test (\S+) \.\.\. (ok|FAILED|ignored)(?:,? .*)?$', re.MULTILINE)
+          suites = [
+              ('hud', 'hud', 40, 2, []),
+              ('hazards', 'mesh_hazards', 146, 11, []),
+          ]
+          def suite(label, name, count, ignored, flags):
+              command = ['cargo', 'test', '--locked', '--release', '-p', 'orr_editor'] + features + [name, '--', '--format=pretty', '--color=never', '--test-threads=1'] + flags
+              output = helper['run_logged'](command, evidence / (label + '.log')).replace('\r\n', '\n')
+              summaries = helper['SUMMARY'].findall(output)
+              cases = case_pattern.findall(output)
+              if len(summaries) != 1 or tuple(map(int, summaries[0][:4])) != (count, 0, ignored, 0):
+                  raise RuntimeError(f'{label}: unexpected summary')
+              passed = [name for name, status in cases if status == 'ok']
+              if len(passed) != count or len(cases) != count + ignored or len({name for name, status in cases}) != count + ignored or sum(status == 'ignored' for name, status in cases) != ignored or any(status not in ('ok', 'ignored') for name, status in cases):
+                  raise RuntimeError(f'{label}: missing/duplicate/unexpected cases')
+              if '--exact' in flags and cases != [(name, 'ok')]:
+                  raise RuntimeError(f'{label}: wrong exact test name')
+              if re.findall(r'^running (\d+) tests?$', output, re.MULTILINE) != [str(count + ignored)]:
+                  raise RuntimeError(f'{label}: inconsistent execution count')
+          for args in suites:
+              suite(*args)
+          helper['run_logged'](['cargo', 'build', '--locked', '--release', '-p', 'orr_editor', '--features', 'mesh-hazards-export', '--bin', 'orr_mesh_hazards_player'], evidence / 'player-build.log')
+          runtime = Path('target/release/orr_mesh_hazards_player').resolve()
+          digest = hashlib.sha256(runtime.read_bytes()).hexdigest()
+          (evidence / 'runtime.json').write_text(json.dumps({'head': os.environ['GITHUB_SHA'], 'runtime_sha256': digest, 'runtime_bytes': runtime.stat().st_size}, indent=2))
+          os.environ['ORR_HAZARDS_HUD_RUNTIME'] = str(runtime)
+          os.environ['ORR_HAZARDS_HUD_EXPECTED_RUNTIME_SHA256'] = digest
+          os.environ['ORR_HAZARDS_HUD_EVIDENCE'] = str((evidence / 'actual').resolve())
+          suite('actual', 'mesh_hazards_player::hud_acceptance::hazards_hud_relocated_software_gl_evidence', 1, 0, ['--exact', '--ignored'])
+          helper['run_logged'](['cargo', 'clippy', '--locked', '--release', '-p', 'orr_editor', '--features', 'mesh-hazards-export', '--lib', '--tests', '--', '-D', 'warnings'], evidence / 'clippy.log')
+          helper['run_logged'](['cargo', 'check', '--locked', '--release', '-p', 'orr_editor', '--lib'], evidence / 'default-off.log')
+          helper['run_logged'](['cargo', 'check', '--locked', '--release', '-p', 'orr_editor', '--features', 'mesh-navigation', '--lib'], evidence / 'navigation-only.log')
+          helper['run_logged'](['git', 'diff', '--exit-code'], evidence / 'source-unchanged.log')
+          (evidence / 'scope.json').write_text(json.dumps({'head': os.environ['GITHUB_SHA'], 'runtime_sha256': digest, 'full_workspace': False, 'native_window': False}, indent=2))
+      - name: Preserve logs and captures including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hazards-hud-${{ github.sha }}-${{ github.run_attempt }}
+          path: ci-evidence
+          if-no-files-found: error

@@ -18,7 +18,7 @@ const MAX_STARTUP_TICKS: u32 = 10_000;
 const MAX_CAPTURE_PIXELS: u64 = 1_048_576;
 const USAGE: &str = "orr_mesh_hazards_player [--bundle DIR] [--ticks N] [--screenshot PNG [--frames N]] [--size WxH]\n       orr_mesh_hazards_player [--bundle DIR] --verify-headless --ticks N\n       orr_mesh_hazards_player --capabilities\n\nWithout --bundle, the validated bundle beside this executable is used.\n--ticks N starts Play and leaves the admitted simulation paused at tick N.\n--screenshot writes a bounded window PNG; --frames defaults to 30.\n--size sets the initial window dimensions in points (default 960x600).";
 
-const CAPABILITIES: &str = "ORR_MESH_HAZARDS_PLAYER_V1\nORR_MESH_INPUT_V1\nORR_MESH_HAZARDS_CAMERA_V1\nORR_MESH_HAZARDS_ART_V1\nORR_MESH_HAZARDS_LIGHTING_V1";
+const CAPABILITIES: &str = "ORR_MESH_HAZARDS_PLAYER_V1\nORR_MESH_INPUT_V1\nORR_MESH_HAZARDS_CAMERA_V1\nORR_MESH_HAZARDS_ART_V1\nORR_MESH_HAZARDS_LIGHTING_V1\nORR_MESH_HAZARDS_HUD_V1";
 
 enum Request {
     Help,
@@ -345,6 +345,9 @@ fn launch(options: Options) -> Result<(), String> {
     let mut lighting_panel = crate::mesh_lighting_panel::Panel::default();
     lighting_panel.sync(&editor);
     verify_loaded_lighting_bundle(&bundle_root, &bundle, &lighting_panel)?;
+    let mut hud_panel = crate::mesh_hud_panel::Panel::default();
+    hud_panel.sync(&editor);
+    verify_loaded_hud_bundle(&bundle_root, &bundle, &hud_panel)?;
     #[cfg(feature = "mesh-animated-models")]
     let mut animation_panel = crate::mesh_animation_panel::Panel::default();
     #[cfg(feature = "mesh-animated-models")]
@@ -364,11 +367,19 @@ fn launch(options: Options) -> Result<(), String> {
             .play_blocker(&editor)
             .or_else(|| camera_panel.play_blocker(&editor))
             .or_else(|| lighting_panel.play_blocker(&editor))
+            .or_else(|| hud_panel.play_blocker(&editor))
             .or(animation_blocker),
     );
     start_playback(&mut editor, options.ticks, screenshot.is_some())?;
     if options.verify_headless {
-        return verify_headless_session(editor, panel, camera_panel, lighting_panel, &bundle);
+        return verify_headless_session(
+            editor,
+            panel,
+            camera_panel,
+            lighting_panel,
+            hud_panel,
+            &bundle,
+        );
     }
 
     let (width, height) = options.size;
@@ -388,6 +399,7 @@ fn launch(options: Options) -> Result<(), String> {
             inner.install_validated_hazards_camera(camera_panel);
             inner.install_validated_hazards_navigation(panel);
             inner.install_validated_hazards_lighting(lighting_panel);
+            inner.install_validated_hazards_hud(hud_panel);
             inner.set_mesh_player_input_allowed(mesh_input_allowed);
             if let Some(path) = screenshot {
                 inner = inner.with_screenshot(ScreenshotJob::new(path, frames).with_settle());
@@ -453,11 +465,28 @@ fn verify_loaded_lighting_bundle(
     Ok(())
 }
 
+fn verify_loaded_hud_bundle(
+    bundle_root: &Path,
+    bundle: &crate::mesh_hazards_export::PreparedBundle,
+    panel: &crate::mesh_hud_panel::Panel,
+) -> Result<(), String> {
+    if !panel.matches_saved_sidecar(bundle.hud_sha256.as_deref()) {
+        return Err("loaded game HUD differs from the validated bundle".into());
+    }
+    let current = crate::mesh_hazards_export::open_bundle(bundle_root)
+        .map_err(|error| format!("game bundle changed while HUD was loading: {error}"))?;
+    if current != *bundle {
+        return Err("game bundle changed while HUD was loading".into());
+    }
+    Ok(())
+}
+
 fn verify_headless_session(
     editor: Editor,
     navigation: crate::mesh_navigation::Panel,
     camera: crate::mesh_camera_panel::Panel,
     lighting: crate::mesh_lighting_panel::Panel,
+    hud: crate::mesh_hud_panel::Panel,
     bundle: &crate::mesh_hazards_export::PreparedBundle,
 ) -> Result<(), String> {
     let tick = editor.sim().head_tick;
@@ -473,10 +502,15 @@ fn verify_headless_session(
     if bundle.lighting_sha256.is_some() && expected_lighting.is_none() {
         return Err("validated game lighting is not applied during playback".into());
     }
+    let expected_hud = hud.applied_document(&editor);
+    if bundle.hud_sha256.is_some() && expected_hud.is_none() {
+        return Err("validated game HUD is not applied during playback".into());
+    }
     let mut app = EditorApp::new(editor, None);
     app.install_validated_hazards_navigation(navigation);
     app.install_validated_hazards_camera(camera);
     app.install_validated_hazards_lighting(lighting);
+    app.install_validated_hazards_hud(hud);
     app.verify_hazards_restart()?;
     if !app.hazards_lighting_matches(
         &bundle.lighting_sha256,
@@ -484,6 +518,9 @@ fn verify_headless_session(
         expected_post_process,
     ) {
         return Err("headless restart changed the admitted game lighting".into());
+    }
+    if !app.hazards_hud_matches(&bundle.hud_sha256, &expected_hud) {
+        return Err("headless restart changed the admitted game HUD".into());
     }
     if app.editor.checksum() != bundle.checksum {
         return Err("headless restart differs from the admitted initial frame".into());
@@ -494,6 +531,7 @@ fn verify_headless_session(
             "tick": tick, "checksum": format!("{checksum:016x}"),
             "agent_position_raw": position, "art_sha256": bundle.art_sha256,
             "lighting_sha256": bundle.lighting_sha256, "lighting_restart_parity": true,
+            "hud_sha256": bundle.hud_sha256, "hud_restart_parity": true,
             "restarted_tick": app.editor.sim().head_tick,
             "restarted_checksum": format!("{:016x}", app.editor.checksum()),
             "restart_parity": true
@@ -564,3 +602,7 @@ mod art_acceptance;
 #[cfg(test)]
 #[path = "mesh_hazards_player/lighting_acceptance.rs"]
 mod lighting_acceptance;
+
+#[cfg(test)]
+#[path = "mesh_hazards_player/hud_acceptance.rs"]
+mod hud_acceptance;
