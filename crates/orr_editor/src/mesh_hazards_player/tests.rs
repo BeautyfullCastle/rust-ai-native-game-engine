@@ -1,7 +1,7 @@
 use super::{
-    MAX_CAPTURE_PIXELS, MAX_STARTUP_TICKS, Options, Request, screenshot_path, start_playback,
+    screenshot_path, start_playback, Options, Request, MAX_CAPTURE_PIXELS, MAX_STARTUP_TICKS,
 };
-use crate::{Editor, game::EditorGame};
+use crate::{game::EditorGame, Editor};
 use std::{
     ffi::OsString,
     fs,
@@ -165,7 +165,7 @@ fn invalid_or_conflicting_player_options_are_rejected() {
 fn capabilities_report_hazards_and_interactive_input_profiles() {
     assert_eq!(
         super::CAPABILITIES,
-        "ORR_MESH_HAZARDS_PLAYER_V1\nORR_MESH_INPUT_V1\nORR_MESH_HAZARDS_CAMERA_V1\nORR_MESH_HAZARDS_ART_V1\nORR_MESH_HAZARDS_LIGHTING_V1"
+        "ORR_MESH_HAZARDS_PLAYER_V1\nORR_MESH_INPUT_V1\nORR_MESH_HAZARDS_CAMERA_V1\nORR_MESH_HAZARDS_ART_V1\nORR_MESH_HAZARDS_LIGHTING_V1\nORR_MESH_HAZARDS_HUD_V1"
     );
 }
 
@@ -225,24 +225,21 @@ fn executable_identity_checks_platform_and_actual_bytes() {
         camera_sha256: None,
         art_sha256: None,
         lighting_sha256: None,
+        hud_sha256: None,
     };
     super::verify_executable(&executable, &bundle).unwrap();
     fs::write(&executable, b"changed runtime").unwrap();
-    assert!(
-        super::verify_executable(&executable, &bundle)
-            .unwrap_err()
-            .contains("hash")
-    );
+    assert!(super::verify_executable(&executable, &bundle)
+        .unwrap_err()
+        .contains("hash"));
     bundle.platform = if cfg!(windows) {
         crate::mesh_hazards_export::RuntimePlatform::LinuxX86_64
     } else {
         crate::mesh_hazards_export::RuntimePlatform::WindowsX86_64
     };
-    assert!(
-        super::verify_executable(&executable, &bundle)
-            .unwrap_err()
-            .contains("platform")
-    );
+    assert!(super::verify_executable(&executable, &bundle)
+        .unwrap_err()
+        .contains("platform"));
 }
 
 #[test]
@@ -331,19 +328,15 @@ fn player_rechecks_removed_replaced_and_new_camera_bundle_sidecars() {
     let deleted = bound_bundle_fixture(true);
     let expected_sha = deleted.bundle.camera_sha256.as_deref().unwrap();
     fs::remove_file(deleted.bundle.root.join("game.scene.yaml.mesh-camera.json")).unwrap();
-    assert!(
-        super::verify_loaded_camera_bundle(
-            &deleted.bundle.root,
-            &deleted.bundle,
-            &deleted.camera_panel
-        )
-        .is_err()
-    );
-    assert!(
-        deleted
-            .camera_panel
-            .matches_saved_sidecar(Some(expected_sha))
-    );
+    assert!(super::verify_loaded_camera_bundle(
+        &deleted.bundle.root,
+        &deleted.bundle,
+        &deleted.camera_panel
+    )
+    .is_err());
+    assert!(deleted
+        .camera_panel
+        .matches_saved_sidecar(Some(expected_sha)));
 
     let replaced = bound_bundle_fixture(true);
     let original_sha = replaced.bundle.camera_sha256.as_deref().unwrap();
@@ -361,19 +354,15 @@ fn player_rechecks_removed_replaced_and_new_camera_bundle_sidecars() {
         replaced.graph_revision,
     )
     .unwrap();
-    assert!(
-        replaced
-            .camera_panel
-            .matches_saved_sidecar(Some(original_sha))
-    );
-    assert!(
-        super::verify_loaded_camera_bundle(
-            &replaced.bundle.root,
-            &replaced.bundle,
-            &replaced.camera_panel
-        )
-        .is_err()
-    );
+    assert!(replaced
+        .camera_panel
+        .matches_saved_sidecar(Some(original_sha)));
+    assert!(super::verify_loaded_camera_bundle(
+        &replaced.bundle.root,
+        &replaced.bundle,
+        &replaced.camera_panel
+    )
+    .is_err());
 
     let added = bound_bundle_fixture(false);
     assert!(added.camera_panel.matches_saved_sidecar(None));
@@ -391,10 +380,12 @@ fn player_rechecks_removed_replaced_and_new_camera_bundle_sidecars() {
         added.graph_revision,
     )
     .unwrap();
-    assert!(
-        super::verify_loaded_camera_bundle(&added.bundle.root, &added.bundle, &added.camera_panel)
-            .is_err()
-    );
+    assert!(super::verify_loaded_camera_bundle(
+        &added.bundle.root,
+        &added.bundle,
+        &added.camera_panel
+    )
+    .is_err());
 }
 
 #[test]
@@ -473,6 +464,33 @@ fn loaded_lighting_must_match_manifest_and_recheck_inventory() {
     .unwrap();
     assert!(
         super::verify_loaded_lighting_bundle(&fixture.bundle.root, &fixture.bundle, &panel)
+            .unwrap_err()
+            .contains("bundle changed")
+    );
+}
+
+#[test]
+fn loaded_hud_must_match_manifest_and_recheck_inventory() {
+    let fixture = bound_bundle_fixture(false);
+    let mut loaded = Editor::open_game(&fixture.bundle.scene, EditorGame::MeshHazardsV1).unwrap();
+    loaded.sync();
+    let mut panel = crate::mesh_hud_panel::Panel::default();
+    panel.sync(&loaded);
+    super::verify_loaded_hud_bundle(&fixture.bundle.root, &fixture.bundle, &panel).unwrap();
+    let mut changed = fixture.bundle.clone();
+    changed.hud_sha256 = Some("unloaded HUD".into());
+    assert!(
+        super::verify_loaded_hud_bundle(&fixture.bundle.root, &changed, &panel)
+            .unwrap_err()
+            .contains("loaded game HUD")
+    );
+    fs::write(
+        crate::mesh_hud_store::sidecar_path(&fixture.bundle.scene).unwrap(),
+        b"added after load",
+    )
+    .unwrap();
+    assert!(
+        super::verify_loaded_hud_bundle(&fixture.bundle.root, &fixture.bundle, &panel)
             .unwrap_err()
             .contains("bundle changed")
     );

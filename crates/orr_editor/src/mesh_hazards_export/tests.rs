@@ -671,3 +671,6 @@ pub(super) mod art_tests;
 
 #[path = "lighting_tests.rs"]
 pub(super) mod lighting_tests;
+
+#[path = "hud_tests.rs"]
+pub(super) mod hud_tests;

@@ -13,24 +13,26 @@ pub(super) const ART_CAPABILITY_MARKER: &[u8] = b"ORR_MESH_HAZARDS_ART_V1";
 pub(super) const ART_CAPABILITY_SECTION: &str = ".orrhart";
 pub(super) const LIGHTING_CAPABILITY_MARKER: &[u8] = b"ORR_MESH_HAZARDS_LIGHTING_V1";
 pub(super) const LIGHTING_CAPABILITY_SECTION: &str = ".orrhlit";
+pub(super) const HUD_CAPABILITY_MARKER: &[u8] = b"ORR_MESH_HAZARDS_HUD_V1";
+pub(super) const HUD_CAPABILITY_SECTION: &str = ".orrhhud";
 const MAX_SECTIONS: usize = 4096;
 
 pub(super) fn validate_runtime(bytes: &[u8]) -> Result<RuntimePlatform, String> {
-    validate_runtime_capabilities(bytes, false, false, false)
+    validate_runtime_capabilities(bytes, false, false, false, false)
 }
 
 /// Validate a bounded native executable that advertises both mesh-hazard and
 /// camera support. Capability markers are producer-controlled metadata, not
 /// executable trust; callers must still apply their separate trust policy.
 pub(super) fn validate_camera_runtime(bytes: &[u8]) -> Result<RuntimePlatform, String> {
-    validate_runtime_capabilities(bytes, true, false, false)
+    validate_runtime_capabilities(bytes, true, false, false, false)
 }
 
 pub(super) fn validate_art_runtime(
     bytes: &[u8],
     require_camera: bool,
 ) -> Result<RuntimePlatform, String> {
-    validate_runtime_capabilities(bytes, require_camera, true, false)
+    validate_runtime_capabilities(bytes, require_camera, true, false, false)
 }
 
 pub(super) fn validate_lighting_runtime(
@@ -38,7 +40,16 @@ pub(super) fn validate_lighting_runtime(
     require_camera: bool,
     require_art: bool,
 ) -> Result<RuntimePlatform, String> {
-    validate_runtime_capabilities(bytes, require_camera, require_art, true)
+    validate_runtime_capabilities(bytes, require_camera, require_art, true, false)
+}
+
+pub(super) fn validate_hud_runtime(
+    bytes: &[u8],
+    require_camera: bool,
+    require_art: bool,
+    require_lighting: bool,
+) -> Result<RuntimePlatform, String> {
+    validate_runtime_capabilities(bytes, require_camera, require_art, require_lighting, true)
 }
 
 fn validate_runtime_capabilities(
@@ -46,12 +57,25 @@ fn validate_runtime_capabilities(
     require_camera: bool,
     require_art: bool,
     require_lighting: bool,
+    require_hud: bool,
 ) -> Result<RuntimePlatform, String> {
     if bytes.starts_with(b"MZ") {
-        validate_pe(bytes, require_camera, require_art, require_lighting)?;
+        validate_pe(
+            bytes,
+            require_camera,
+            require_art,
+            require_lighting,
+            require_hud,
+        )?;
         Ok(RuntimePlatform::WindowsX86_64)
     } else if bytes.starts_with(b"\x7fELF") {
-        validate_elf(bytes, require_camera, require_art, require_lighting)?;
+        validate_elf(
+            bytes,
+            require_camera,
+            require_art,
+            require_lighting,
+            require_hud,
+        )?;
         Ok(RuntimePlatform::LinuxX86_64)
     } else {
         Err("runtime must be a PE32+ or ELF64 executable".into())
@@ -128,6 +152,7 @@ fn validate_pe(
     require_camera: bool,
     require_art: bool,
     require_lighting: bool,
+    require_hud: bool,
 ) -> Result<(), String> {
     region(bytes, 0, 64)?;
     let pe = u32_at(bytes, 0x3c)? as usize;
@@ -181,6 +206,7 @@ fn validate_pe(
     let mut found_camera = false;
     let mut found_art = false;
     let mut found_lighting = false;
+    let mut found_hud = false;
     let mut raw_ranges = vec![(0, headers_size)];
     let mut virtual_ranges = Vec::new();
     for section in sections.as_chunks::<40>().0 {
@@ -218,6 +244,7 @@ fn validate_pe(
             b".orrhaz\0" => Some((&mut found_player, CAPABILITY_MARKER)),
             b".orrhart" => Some((&mut found_art, ART_CAPABILITY_MARKER)),
             b".orrhcam" => Some((&mut found_camera, CAMERA_CAPABILITY_MARKER)),
+            b".orrhhud" => Some((&mut found_hud, HUD_CAPABILITY_MARKER)),
             b".orrhlit" => Some((&mut found_lighting, LIGHTING_CAPABILITY_MARKER)),
             _ => None,
         };
@@ -241,6 +268,9 @@ fn validate_pe(
     if !found_player {
         return Err("runtime player capability section is missing".into());
     }
+    if require_hud && !found_hud {
+        return Err("runtime HUD capability section is missing".into());
+    }
     if require_lighting && !found_lighting {
         return Err("runtime lighting capability section is missing".into());
     }
@@ -258,6 +288,7 @@ fn validate_elf(
     require_camera: bool,
     require_art: bool,
     require_lighting: bool,
+    require_hud: bool,
 ) -> Result<(), String> {
     let header = region(bytes, 0, 64)?;
     if header[4] != 2
@@ -334,6 +365,7 @@ fn validate_elf(
     let mut found_camera = false;
     let mut found_art = false;
     let mut found_lighting = false;
+    let mut found_hud = false;
     let mut ranges = vec![
         (0, 64),
         (ph_offset, ph_offset + programs.len()),
@@ -373,6 +405,8 @@ fn validate_elf(
             Some((&mut found_camera, CAMERA_CAPABILITY_MARKER))
         } else if name == ART_CAPABILITY_SECTION.as_bytes() {
             Some((&mut found_art, ART_CAPABILITY_MARKER))
+        } else if name == HUD_CAPABILITY_SECTION.as_bytes() {
+            Some((&mut found_hud, HUD_CAPABILITY_MARKER))
         } else if name == LIGHTING_CAPABILITY_SECTION.as_bytes() {
             Some((&mut found_lighting, LIGHTING_CAPABILITY_MARKER))
         } else {
@@ -408,6 +442,9 @@ fn validate_elf(
     }
     if !found_player {
         return Err("runtime player capability section is missing".into());
+    }
+    if require_hud && !found_hud {
+        return Err("runtime HUD capability section is missing".into());
     }
     if require_lighting && !found_lighting {
         return Err("runtime lighting capability section is missing".into());

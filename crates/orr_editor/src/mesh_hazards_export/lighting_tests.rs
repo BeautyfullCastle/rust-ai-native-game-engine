@@ -62,7 +62,7 @@ impl Fixture {
         self.scene
             .with_file_name("source.scene.yaml.mesh-lighting.json")
     }
-    fn add_lighting(
+    pub(super) fn add_lighting(
         &self,
         platform: RuntimePlatform,
         camera: bool,

@@ -120,3 +120,20 @@ fn hud_rectangle_is_width_bounded_and_clipped_to_viewport() {
     assert!(narrow_rectangle.right() <= narrow_viewport.right());
     assert!(narrow_rectangle.bottom() <= narrow_viewport.bottom());
 }
+
+#[test]
+fn hazard_hud_layout_reserves_status_and_measured_warning() {
+    let viewport = egui::Rect::from_min_size(egui::pos2(30.0, 50.0), egui::vec2(500.0, 400.0));
+    let rect = super::hazards_viewport(viewport, Some(390.0));
+    assert_eq!(rect.min, egui::pos2(30.0, 154.0));
+    assert_eq!(rect.max, egui::pos2(530.0, 382.0));
+    assert!(rect.top() > viewport.top() + 34.0 + 62.0);
+    assert!(rect.bottom() < 390.0);
+    assert_eq!(
+        super::hazards_viewport(viewport, None).bottom(),
+        viewport.bottom()
+    );
+    let tiny = egui::Rect::from_min_size(viewport.min, egui::vec2(90.0, 80.0));
+    assert!(!super::hazards_viewport(tiny, None).is_positive());
+    assert!(!super::hazards_viewport(viewport, Some(70.0)).is_positive());
+}

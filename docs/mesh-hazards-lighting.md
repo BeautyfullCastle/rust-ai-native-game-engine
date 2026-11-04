@@ -37,7 +37,8 @@ The existing bounded lighting decoder, graph/scene binding, byte checks and
 post-processing renderer are reused. On unsupported HDR hardware, the player
 shows an explicit warning and renders without HDR for that request. Authored
 settings and bundle files remain unchanged; ordinary lighting still applies.
-Unknown attachments, props, HUD and animation remain rejected.
+Optional [authored HUD](mesh-hazards-hud.md) uses schema 5.
+Unknown attachments, props and animation remain rejected.
 
 The exporter pins lighting presence and exact bytes across asynchronous work,
 rechecks before publication and completion, and never overwrites an output.
