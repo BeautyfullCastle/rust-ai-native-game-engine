@@ -13,7 +13,7 @@ const plain = value => JSON.parse(JSON.stringify(value));
 const sceneBytes = fs.readFileSync(scenePath);
 assert.ok(sceneBytes.length <= 65536);
 async function boot() {
-  const elements = [], ui = new Map(), draws = [], imageSources = [], fetches = [], raf = [];
+  const elements = [], ui = new Map(), draws = [], imageSources = [], fetches = [], raf = [], canvasListeners = new Map();
   for (const match of html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
     const id = /\bid="([^"]*)"/.exec(match[1])?.[1];
     if (!id || id.startsWith('authored-animation-') || id === 'authored-scene' || id === 'authored-scene-receipt') continue;
@@ -28,7 +28,8 @@ async function boot() {
     {get: (object, key) => object[key] ?? (() => {})});
   for (const id of ['game','codex','scene-file','summon','upgrade','invest','again','reset','begin','pause','sound','ready','result','notice','health','healthbar','wave','campaign-intro','gold','kills','selected','detail','outcome','summary','event-status','scene-source','loading','run-save','run-file','run-status']) {
     ui.set(id, {id, style: {}, span: {}, getContext: () => context,
-      querySelector() { return this.span; }, addEventListener() {}, setAttribute() {},
+      querySelector() { return this.span; },
+      addEventListener(name, fn) { if (id === 'game') canvasListeners.set(name, fn); }, setAttribute() {},
       hasPointerCapture: () => false});
   }
   const blobs = new Map(), downloads = [], revoked = [], listeners = new Map();
@@ -69,7 +70,7 @@ async function boot() {
   assert.equal(run('state.tick'), 0);
   assert.equal(run('ready && paused'), true);
   assert.equal(ui.get('loading').hidden, true);
-  return {run, ui, draws, fetches, imageSources, raf, sandbox, blobs, downloads, revoked, listeners};
+  return {run, ui, draws, fetches, imageSources, raf, sandbox, blobs, downloads, revoked, listeners, canvasListeners};
 }
 
 function fileOf(bytes) {
@@ -243,9 +244,109 @@ for (const initialKind of ['seed', 'scene']) {
       'resume must not replay the discarded Summon');
     assert.equal(live.fetches.length, 0);
   }
+  const pointerReleaseCases = [];
+  for (const eventName of ['pointerup', 'pointercancel', 'lostpointercapture']) {
+    for (const outcome of ['failure', 'cancel', 'success', 'restart']) {
+      const live = await boot();
+      if (initialKind === 'scene') {
+        live.sandbox.testFile = fileOf(sceneBytes);
+        await live.run('loadSceneFile(testFile)');
+      }
+      live.ui.get('begin').onclick({});
+      assert.equal(live.run('command(1)'), true);
+      live.run('execute(queue.shift());');
+      const restoreText = live.run('runSaveText()');
+      const canvas = live.ui.get('game');
+      canvas.getBoundingClientRect = () => ({left:0, top:0, width:500, height:720});
+      const captured = new Set();
+      canvas.setPointerCapture = id => captured.add(id);
+      canvas.hasPointerCapture = id => captured.has(id);
+      let releases = 0;
+      const releaseStates = [];
+      canvas.releasePointerCapture = id => {
+        releases++;
+        releaseStates.push(live.run('gesture===null && hover===-1'));
+        captured.delete(id);
+        live.canvasListeners.get('lostpointercapture')({pointerId:id});
+        if (eventName === 'pointerup' && outcome === 'failure') throw Error('capture already lost');
+      };
+      const pointer = (name, id, cell, dx=0) => {
+        const [x,y] = live.run(`project(...state.cells.find(c=>c[0]===0&&c[1]===${cell}).slice(2),0)`);
+        live.canvasListeners.get(name)({pointerId:id, button:0, clientX:x+dx,
+          clientY:y, preventDefault(){}});
+      };
+      pointer('pointerdown', 7, 0);pointer('pointermove', 7, 0, 20);
+      assert.equal(live.run('gesture.drag'), true, 'real handlers create the drag');
+      assert.equal(live.run('command(1)'), true, 'unexecuted purchase must survive cleanup');
+      let finishRead;
+      live.sandbox.testFile = {name:'pending.json',size:restoreText.length,
+        arrayBuffer:()=>new Promise(resolve=>{finishRead=resolve;})};
+      const loading = live.run('loadRunFile(testFile)');
+      const prior = identity(live);
+      assert.equal(live.run('command(1)'), false, 'import still blocks gameplay commands');
+      assert.equal(identity(live), prior);
+      const transient = live.run('JSON.stringify([gesture,hover,selected])');
+      pointer(eventName, 99, 1);
+      assert.equal(live.run('JSON.stringify([gesture,hover,selected])'), transient,
+        `${eventName}: unrelated pointer cannot cancel active drag`);
+      assert.equal(releases, 0);
+      if (eventName === 'lostpointercapture') captured.delete(7);
+      pointer(eventName, 7, 1);
+      assert.equal(live.run('gesture===null && hover===-1'), true,
+        `${eventName}/${outcome}: pending import must not suppress pointer cleanup`);
+      assert.equal(identity(live), prior, 'cleanup preserves state, queue, sequence and recorder');
+      assert.equal(releases, eventName === 'lostpointercapture' ? 0 : 1);
+      assert.ok(releaseStates.every(Boolean), 'logical state clears before capture callbacks');
+      if (outcome === 'cancel') assert.equal(await load(live, '{'), false);
+      if (outcome === 'restart') live.ui.get('reset').onclick();
+      const afterLifecycle = identity(live);
+      finishRead(new TextEncoder().encode(outcome === 'failure' ? '{' : restoreText).buffer);
+      assert.equal(await loading, outcome === 'success');
+      assert.equal(live.run('runImportActive || runImportBusy'), false);
+      if (outcome !== 'success') assert.equal(identity(live), afterLifecycle);
+      assert.equal(live.run('gesture===null && hover===-1'), true);
+      if (outcome === 'restart') {
+        live.ui.get('begin').onclick({});
+        assert.equal(live.run('command(1)'), true);
+        live.run('execute(queue.shift());');
+      } else if (outcome === 'success') live.ui.get('pause').onclick();
+      // A fresh down/up with different endpoints is not a drag. Neither a new
+      // nor a recycled pointer ID can release the old drag as a phantom move.
+      for (const id of [8,7]) {
+        const beforePointer = identity(live);
+        pointer('pointerdown', id, 0);
+        assert.equal(live.run('gesture.id'), id, 'new pointer is accepted');
+        if (id === 8) {
+          const activeGesture = live.run('JSON.stringify([gesture,hover,selected])');
+          const activeState = identity(live);
+          const activeReleases = releases;
+          for (const staleEvent of ['lostpointercapture', 'pointercancel', 'pointerup']) {
+            pointer(staleEvent, 7, 1);
+            assert.equal(live.run('JSON.stringify([gesture,hover,selected])'), activeGesture,
+              `${staleEvent}: old pointer cannot cancel a new gesture outside import`);
+            assert.equal(identity(live), activeState);
+            assert.equal(releases, activeReleases);
+          }
+        }
+        pointer('pointerup', id, 1);
+        assert.equal(identity(live), beforePointer, 'no stale move command');
+        assert.equal(live.run('gesture'), null);
+      }
+      // A deliberate new drag still reaches the real game after restoration.
+      const queued = live.run('queue.length');
+      pointer('pointerdown', 9, 0);pointer('pointermove', 9, 11);pointer('pointerup', 9, 11);
+      assert.equal(live.run('queue.length'), queued + 1);
+      assert.equal(live.run('queue[queue.length-1][0]'), 2);
+      live.run('while(queue.length)execute(queue.shift());');
+      assert.equal(live.run('!!unitAt(11) && !unitAt(0)'), true, 'fresh move is consumed by WASM');
+      assert.equal(live.fetches.length, 0);
+      assert.ok(releaseStates.every(Boolean), 'all capture releases observe cleared logical state');
+      pointerReleaseCases.push({event:eventName, outcome});
+    }
+  }
   results.push({initialKind, steps: saved.steps.length, sequence: saved.sequence,
     savedChecksum, nextChecksum, networkRequests: h.fetches.length,
-    focusLossOutcomes: ['failure', 'success', 'cancel', 'restart', 'ordinary']});
+    focusLossOutcomes: ['failure', 'success', 'cancel', 'restart', 'ordinary'], pointerReleaseCases});
 }
 console.log(JSON.stringify({version:1, wasmSha256:sha(fs.readFileSync(wasmPath)),
   sceneSha256:sha(sceneBytes), results,

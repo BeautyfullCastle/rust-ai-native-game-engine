@@ -1,5 +1,6 @@
 import { CombatPresentation } from '../crates/orr_coop_defense_web/web/combat-presentation.mjs';
 import { StrictEventAdapter, applyStrictSnapshot } from '../crates/orr_coop_defense_web/web/strict-event-adapter.mjs';
+import * as RunSave from '../crates/orr_coop_defense_web/web/run-save.mjs';
 // JS adapter unit checks with a mock DOM, not browser visual/input validation.
 import fs from 'node:fs';
 import vm from 'node:vm';
@@ -10,7 +11,7 @@ const nodes=new Map(),listeners=new Map();
 const context2d=new Proxy({createLinearGradient:()=>({addColorStop(){}})}, {get:(o,p)=>o[p]||(()=>{})});
 const canvas={getContext:()=>context2d,addEventListener(){},getBoundingClientRect:()=>({left:0,top:0,width:1000,height:700})};
 const get=id=>{if(id==='game')return canvas;if(!nodes.has(id))nodes.set(id,{style:{},querySelector:()=>({}),setAttribute(k,v){this[k]=v;}});return nodes.get(id);};
-const sandbox=vm.createContext({CombatPresentation,StrictEventAdapter,applyStrictSnapshot,document:{getElementById:get,addEventListener:(name,fn)=>listeners.set(name,fn)},addEventListener(){},TextDecoder,Uint8Array,core:wasm,requestAnimationFrame(){},console});
+const sandbox=vm.createContext({CombatPresentation,StrictEventAdapter,applyStrictSnapshot,...RunSave,document:{getElementById:get,addEventListener:(name,fn)=>listeners.set(name,fn)},addEventListener(){},TextDecoder,Uint8Array,core:wasm,requestAnimationFrame(){},console});
 const source=fs.readFileSync(`${root}/game.js`,'utf8').split('try{let bytes;')[0].replace(/^import .*$/mg,'');
 const run=code=>vm.runInContext(code,sandbox);
 run(source);run('start();');get('begin').onclick();get('reset').onclick();assert.equal(run('state'),undefined,'early controls safe before WASM loads');run('wasm=core;start();');

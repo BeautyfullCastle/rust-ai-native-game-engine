@@ -19,6 +19,10 @@ combat, releases a pending gesture and clears queued inputs. A failed or cancell
 restore does not undo that pause or restore the cancelled queue. An explicit
 Continue action is required before combat resumes; a valid restore may still
 finish while unfocused and remains paused.
+Pointer release, cancellation and capture loss also retire their matching drag
+while restoration is pending, without submitting a move or clearing unrelated
+queued commands. Failed or cancelled restoration cannot revive that gesture;
+the next tap or drag starts a new interaction.
 Selecting a different file, loading a scene or restarting invalidates an
 outstanding restore. Only one candidate replay runs at a time; if another file
 is selected during validation, select it again after cancellation completes.
