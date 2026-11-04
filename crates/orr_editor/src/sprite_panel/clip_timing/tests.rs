@@ -490,6 +490,7 @@ fn sequence_remove_reorder_keep_region_duration_pairs_and_invalidate_only_real_e
     for edit in [
         SequenceEdit::MoveUp,
         SequenceEdit::MoveDown,
+        SequenceEdit::Reverse,
         SequenceEdit::Id("variant".into()),
         SequenceEdit::Duration("100".into()),
         SequenceEdit::Mode(PlaybackMode::Loop),
@@ -750,6 +751,7 @@ fn sequence_pending_fields_block_publication_and_failed_apply_keeps_committed_dr
     assert!(panel
         .edit_sequence(&editor, SequenceEdit::MoveDown)
         .is_err());
+    assert!(panel.edit_sequence(&editor, SequenceEdit::Reverse).is_err());
     assert_eq!(panel.timing.sequence_inputs.duration, "0");
     assert_eq!(draft_snapshot(panel.timing.draft.as_ref().unwrap()), before);
     assert!(!output.exists());
@@ -821,8 +823,21 @@ fn sequence_rejects_wrong_source_play_and_installed_tamper_without_draft_changes
     assert_eq!(draft_snapshot(panel.timing.draft.as_ref().unwrap()), before);
     panel.update(&mut editor);
     assert!(!panel.timing.draft.as_ref().unwrap().playing);
-    editor.stop();
+    assert!(editor.stop().is_some());
     editor.sync();
+    // Stop acknowledges Edit before its matching view snapshot necessarily arrives.
+    // In particular, sync can see the old Play frame with the same checksum.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while !panel.editable(&editor) {
+        assert!(editor.down().is_none(), "host disconnected while stopping");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "stopped sprite editor did not reach coherent Edit state: {:?}",
+            editor.mode()
+        );
+        editor.pump();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
     panel.begin_sequence(&editor).unwrap();
     prime_sequence_preview(panel.timing.draft.as_mut().unwrap());
     let before = draft_snapshot(panel.timing.draft.as_ref().unwrap());
@@ -1106,4 +1121,132 @@ fn sequence_bounded_inspector_scroll_reaches_preview_export_status_and_discard_b
         harness.run_steps(3);
         assert!(harness.state().0.timing.draft.is_none());
     }
+}
+
+#[test]
+fn sequence_reverse_pairs_selection_involution_and_runtime_boundaries() {
+    let mut draft = sequence_draft();
+    draft.kind = DraftKind::Sequence {
+        regions: vec![9, 7, 7],
+        selected: 0,
+    };
+    draft.durations = vec!["5".into(), "7".into(), "11".into()];
+    let original = draft.original_json.clone();
+    let before_kind = draft.kind.clone();
+    let before_frames = sequence_frames(&draft);
+    prime_sequence_preview(&mut draft);
+    assert!(draft.edit_sequence(SequenceEdit::Reverse).unwrap());
+    assert_eq!(
+        draft.kind,
+        DraftKind::Sequence {
+            regions: vec![7, 7, 9],
+            selected: 2
+        }
+    );
+    assert_eq!(draft.durations, ["11", "7", "5"]);
+    assert!(draft.preview.is_none());
+    assert!(!draft.playing);
+    assert_eq!((draft.started, draft.elapsed), (0.0, 0));
+    let document = draft.candidate().unwrap();
+    let clip = document.clip("variant").unwrap();
+    for (time, index, region) in [
+        (0, 0, 7),
+        (10, 0, 7),
+        (11, 1, 7),
+        (17, 1, 7),
+        (18, 2, 9),
+        (22, 2, 9),
+        (23, 0, 7),
+    ] {
+        let sample = clip.sample(time);
+        assert_eq!((sample.frame_index, sample.region), (index, region));
+    }
+    assert!(draft.edit_sequence(SequenceEdit::Reverse).unwrap());
+    assert_eq!(draft.kind, before_kind);
+    assert_eq!(sequence_frames(&draft), before_frames);
+    assert_eq!(draft.original_json, original);
+}
+
+#[test]
+fn sequence_reverse_single_frame_is_noop_and_invalid_draft_is_atomic() {
+    let mut draft = sequence_draft();
+    prime_sequence_preview(&mut draft);
+    let before = draft_snapshot(&draft);
+    assert!(!draft.edit_sequence(SequenceEdit::Reverse).unwrap());
+    assert_eq!(draft_snapshot(&draft), before);
+    draft.durations[0] = "0".into();
+    let before = draft_snapshot(&draft);
+    assert!(draft.edit_sequence(SequenceEdit::Reverse).is_err());
+    assert_eq!(draft_snapshot(&draft), before);
+}
+
+#[test]
+fn sequence_reverse_widget_exports_pairs_without_scene_mutation() {
+    use egui::accesskit::Role;
+    use egui_kittest::{kittest::Queryable, Harness};
+    let (dir, _ctx, mut panel, editor) = panel_fixture_with_clips(false);
+    panel.begin_sequence(&editor).unwrap();
+    panel
+        .edit_sequence(&editor, SequenceEdit::Duration("5".into()))
+        .unwrap();
+    panel
+        .edit_sequence(&editor, SequenceEdit::Append(20))
+        .unwrap();
+    panel
+        .edit_sequence(&editor, SequenceEdit::Duration("17".into()))
+        .unwrap();
+    let output = dir.path().join("reversed.json");
+    panel.timing.draft.as_mut().unwrap().output = output.to_string_lossy().into_owned();
+    let checksum = editor.checksum();
+    let history = editor.history().entries.len();
+    let bindings = panel.bindings.as_ref().unwrap().document().clone();
+    let mut harness = Harness::builder().with_size([600.0, 900.0]).build_ui_state(
+        |ui, state: &mut (SpritePanel, Editor)| state.0.show_timing(ui, &state.1),
+        (panel, editor),
+    );
+    harness.run_steps(3);
+    for label in [
+        "Reverse clip sequence",
+        "Preview clip sequence",
+        "Export clip sequence JSON",
+    ] {
+        harness
+            .get_by_role_and_label(Role::Button, label)
+            .scroll_to_me();
+        harness.run_steps(3);
+        harness.get_by_role_and_label(Role::Button, label).click();
+        harness.run_steps(3);
+        assert!(
+            harness.state().0.error.is_none(),
+            "{:?}",
+            harness.state().0.error
+        );
+    }
+    let source: SpriteSource = serde_json::from_slice(&std::fs::read(output).unwrap()).unwrap();
+    let frames = &source.clips.last().unwrap().frames;
+    assert_eq!(
+        frames,
+        &[
+            Frame {
+                region: 20,
+                duration_ms: 17
+            },
+            Frame {
+                region: 10,
+                duration_ms: 5
+            }
+        ]
+    );
+    let (panel, editor) = harness.state();
+    assert_eq!(panel.timing.sequence_inputs.duration, "17");
+    assert_eq!(
+        panel.timing.draft.as_ref().unwrap().kind,
+        DraftKind::Sequence {
+            regions: vec![20, 10],
+            selected: 0
+        }
+    );
+    assert_eq!(panel.bindings.as_ref().unwrap().document(), &bindings);
+    assert_eq!(editor.checksum(), checksum);
+    assert_eq!(editor.history().entries.len(), history);
 }

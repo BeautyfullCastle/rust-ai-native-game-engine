@@ -34,6 +34,7 @@ enum SequenceEdit {
     Remove,
     MoveUp,
     MoveDown,
+    Reverse,
 }
 impl SequenceInputs {
     fn matches(&self, draft: &Draft) -> bool {
@@ -234,6 +235,11 @@ impl Draft {
                 regions.swap(*selected, *selected + 1);
                 durations.swap(*selected, *selected + 1);
                 *selected += 1;
+            }
+            SequenceEdit::Reverse => {
+                regions.reverse();
+                durations.reverse();
+                *selected = regions.len() - 1 - *selected;
             }
             SequenceEdit::MoveUp | SequenceEdit::MoveDown => {}
         }
@@ -621,6 +627,7 @@ impl SpritePanel {
                         ui.horizontal_wrapped(|ui| {
                             if ui.button("Move sequence frame up").clicked() { sequence_edit = Some(SequenceEdit::MoveUp); }
                             if ui.button("Move sequence frame down").clicked() { sequence_edit = Some(SequenceEdit::MoveDown); }
+                            if ui.button("Reverse clip sequence").clicked() { sequence_edit = Some(SequenceEdit::Reverse); }
                             if ui.button("Remove sequence frame").clicked() { sequence_edit = Some(SequenceEdit::Remove); }
                         });
                         });
