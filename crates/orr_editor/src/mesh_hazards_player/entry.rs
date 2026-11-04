@@ -22,7 +22,14 @@ static MESH_HAZARDS_HUD_MARKER: [u8; 23] = *b"ORR_MESH_HAZARDS_HUD_V1";
 #[unsafe(link_section = ".orrhprp")]
 static MESH_HAZARDS_PROPS_MARKER: [u8; 25] = *b"ORR_MESH_HAZARDS_PROPS_V1";
 
+#[cfg(feature = "mesh-animated-models")]
+#[used]
+#[unsafe(link_section = ".orrhanm")]
+static MESH_HAZARDS_ANIMATION_MARKER: [u8; 29] = *b"ORR_MESH_HAZARDS_ANIMATION_V1";
+
 fn main() {
+    #[cfg(feature = "mesh-animated-models")]
+    std::hint::black_box(&MESH_HAZARDS_ANIMATION_MARKER);
     std::hint::black_box(&MESH_HAZARDS_PROPS_MARKER);
     std::hint::black_box(&MESH_HAZARDS_HUD_MARKER);
     std::hint::black_box(&MESH_HAZARDS_LIGHTING_MARKER);

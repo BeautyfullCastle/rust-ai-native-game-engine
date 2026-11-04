@@ -227,6 +227,7 @@ fn executable_identity_checks_platform_and_actual_bytes() {
         lighting_sha256: None,
         hud_sha256: None,
         props_sha256: None,
+        animation_sha256: None,
     };
     super::verify_executable(&executable, &bundle).unwrap();
     fs::write(&executable, b"changed runtime").unwrap();

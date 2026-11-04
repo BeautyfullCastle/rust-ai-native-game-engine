@@ -101,13 +101,34 @@ impl Default for Panel {
     }
 }
 
+pub(crate) fn supports_animation_profile(game: EditorGame) -> bool {
+    game.is_mesh_navigation() || game.is_mesh_hazards()
+}
+
 impl Panel {
+    #[cfg(feature = "mesh-hazards-export")]
+    pub(crate) fn matches_saved_sidecar(&self, expected: Option<&str>) -> bool {
+        !self.document_pending && !self.context_stale && !self.dirty()
+            && self.sidecar_error.is_none()
+            && self.sidecar_sha.as_deref() == expected
+            && self.current_snapshot().is_some() == expected.is_some()
+    }
+
+    #[cfg(feature = "mesh-hazards-export")]
+    pub(crate) fn initial_play_placement(&self, editor: &Editor) -> Result<Option<crate::viewport3d::AnimatedPlacement>, String> {
+        if let Some(error) = self.play_blocker(editor) { return Err(error); }
+        let Some(snapshot) = self.current_snapshot() else { return Ok(None); };
+        let frame = editor.snapshot().ok_or("Animation requires a coherent frame")?;
+        let view = mesh_from_view(frame.predicted())?;
+        snapshot.placement_for_view(&view, 0).map(Some)
+    }
+
     pub(crate) fn reset_playback(&mut self) { self.playback.reset(); }
 
     pub(crate) fn sync(&mut self, editor: &Editor) {
         import_panel::poll(self, editor);
         preview::sync(self, editor);
-        if editor.game() != EditorGame::MeshNavigation || !editor.spec().is_local() {
+        if !supports_animation_profile(editor.game()) || !editor.spec().is_local() {
             return;
         }
         let Some(scene) = editor.path() else {
@@ -185,7 +206,7 @@ impl Panel {
     }
 
     pub(crate) fn show(&mut self, ui: &mut Ui, editor: &Editor) {
-        if editor.game() != EditorGame::MeshNavigation {
+        if !supports_animation_profile(editor.game()) {
             return;
         }
         self.sync(editor);
@@ -329,7 +350,7 @@ impl Panel {
 
     pub(crate) fn workspace_save_blocker(&self, editor: &Editor) -> Option<String> {
         if self.import_busy() { return Some("Wait for the animation package import worker before saving".into()); }
-        if editor.game() != EditorGame::MeshNavigation {
+        if !supports_animation_profile(editor.game()) {
             return None;
         }
         if self.document_pending {
@@ -478,7 +499,7 @@ impl Panel {
 
     pub(crate) fn play_blocker(&self, editor: &Editor) -> Option<String> {
         if self.import_busy() { return Some("Wait for the animation package import worker before Play".into()); }
-        if editor.game() != EditorGame::MeshNavigation {
+        if !supports_animation_profile(editor.game()) {
             return None;
         }
         let Some(scene) = editor.path() else {
@@ -787,7 +808,7 @@ impl Panel {
             && !self.document_pending
             && !self.context_stale
             && self.sidecar_error.is_none()
-            && editor.game() == EditorGame::MeshNavigation
+            && supports_animation_profile(editor.game())
             && editor.spec().is_local()
             && editor.mode() == Mode::Edit
             && editor.can_mutate()
@@ -814,7 +835,7 @@ impl Panel {
 
     fn can_change_history(&self, editor: &Editor) -> bool {
         !self.import_busy()
-            && editor.game() == EditorGame::MeshNavigation
+            && supports_animation_profile(editor.game())
             && editor.spec().is_local()
             && editor.mode() == Mode::Edit
             && editor.can_mutate()
@@ -840,7 +861,7 @@ impl Panel {
     }
 
     fn current_identity(&self, editor: &Editor) -> Option<(PathBuf, [u8; 32])> {
-        if editor.game() != EditorGame::MeshNavigation || !editor.spec().is_local() {
+        if !supports_animation_profile(editor.game()) || !editor.spec().is_local() {
             return None;
         }
         let scene = editor.path()?;
@@ -956,16 +977,16 @@ fn reported_scene_matches_request(
     spec: &HostSpec,
     reported: Option<&Path>,
 ) -> bool {
-    if game != EditorGame::MeshNavigation {
+    if !supports_animation_profile(game) {
         return false;
     }
     let requested = match spec {
-        HostSpec::Local { scene, .. } => scene.as_path(),
+        HostSpec::Local { scene, .. } if game.is_mesh_navigation() => scene.as_path(),
         HostSpec::LocalGame {
             scene,
             game: requested_game,
             ..
-        } if *requested_game == EditorGame::MeshNavigation => scene.as_path(),
+        } if *requested_game == game => scene.as_path(),
         _ => return false,
     };
     let Some(reported) = reported else {

@@ -13,6 +13,9 @@ This opt-in route is separate from legacy mesh export.
    Author and save optional [game lighting and HDR](mesh-hazards-lighting.md)
    through **Mesh game lighting**.
    Optional [authored HUD](mesh-hazards-hud.md) can be applied and saved separately.
+   Optional [animated character artwork](mesh-hazards-animation.md) is available
+   with `mesh-animated-models`; save animation separately and do not combine a
+   saved static agent-art attachment with it in hazard exports.
    Optional unshaded **Mesh props** can be added from a static model package,
    transformed, undone/redone and saved independently with **Save props**.
 3. Choose **File > Export hazard game…** (or the Export guide's settings button).
@@ -51,6 +54,10 @@ needed after saving. The existing 128-prop, six-appearance, 3584-draw and 16 MiB
 limits remain. Props are cosmetic: they neither block movement nor change
 hazard/mission simulation. Scalar-shaded props are rejected in this profile.
 
+Animation-bearing schema 7 requires `game.scene.yaml.mesh-animation.json`,
+optional camera/lighting/HUD/props and the separate native animation capability.
+It rejects a simultaneous static art record. Existing schemas 1–6 are unchanged.
+
 All versions require the native `.orrhaz` player capability. Schema 2 additionally
 requires `.orrhcam` with `ORR_MESH_HAZARDS_CAMERA_V1`. Markers are bounded native
 section-format checks, **not executable trust**. Supply a player you built and
@@ -62,7 +69,7 @@ are presentation-only and do not change simulation checksums or camera-free defa
 
 ## Safety and workflow limits
 
-- Hazards must be enabled. Scalar-shaded props, animation and unknown
+- Hazards must be enabled. Scalar-shaded props, simultaneous static art and animation, and unknown
   adjacent attachments remain explicitly rejected, not silently omitted.
 - Read-only/remote hosts, Play, preview, dirty scenes or cameras, unapplied
   drafts, proposals, transactions and conflicting authoring work block export.
@@ -70,7 +77,7 @@ are presentation-only and do not change simulation checksums or camera-free defa
   and Step are blocked while it is pending. Closing the export window does not
   stop polling. Cancellation only cancels result acceptance: published output
   is retained, so inspect it before retrying.
-- Camera/art/lighting/HUD/props presence and original source bytes are captured at request time and
+- Camera/art/lighting/HUD/props/animation presence and original source bytes are captured at request time and
   checked at worker admission, before publication and on completion. Addition,
   removal or replacement invalidates the result. Scene/runtime identities and
   hashes are also checked; existing output is never overwritten.

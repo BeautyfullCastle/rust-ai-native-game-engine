@@ -459,7 +459,7 @@ impl EditorApp {
 
     #[cfg(feature="mesh-animated-models")]
     fn mesh_animation_for_frame(&mut self) -> Result<Option<crate::viewport3d::AnimatedPlacement>, String> {
-        if self.editor.game() == crate::game::EditorGame::MeshNavigation && !self.mesh_navigation.geometry_preview_active() {
+        if crate::mesh_animation_panel::supports_animation_profile(self.editor.game()) && !self.mesh_navigation.geometry_preview_active() {
             self.mesh_animation.placement(&self.editor)
         } else {
             self.mesh_animation.reset_playback();
@@ -635,7 +635,7 @@ impl EditorApp {
 
     #[cfg(feature="mesh-navigation")]
     fn mesh_animation_blocker(&self) -> Option<String> {
-        if !self.editor.game().is_mesh_navigation() { return None; }
+        if !self.editor.game().is_mesh_navigation() && !self.editor.game().is_mesh_hazards() { return None; }
         #[cfg(feature="mesh-animated-models")]
         { self.mesh_animation.play_blocker(&self.editor) }
         #[cfg(not(feature="mesh-animated-models"))]

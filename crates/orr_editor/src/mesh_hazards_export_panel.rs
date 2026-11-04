@@ -83,7 +83,7 @@ impl Panel {
         }
         let mut open = self.open;
         egui::Window::new("Export hazard game").open(&mut open).default_width(600.0).show(ctx, |ui| {
-            ui.label("MeshHazardsV1 bundle: scene, optional authored camera, static agent art, lighting, HUD and unshaded static props, and manifest, plus a PE/ELF hazard player. Enabled hazards are required; other adjacent presentation sidecars are unsupported.");
+            ui.label("MeshHazardsV1 bundle: scene, optional authored camera, static or animated agent art, lighting, HUD and unshaded static props, and manifest, plus a PE/ELF hazard player. Enabled hazards are required; other adjacent presentation sidecars are unsupported.");
             ui.label("Use only a player you built and QA-tested yourself. Format/capability validation does not establish trust. The editor never runs the copied executable.");
             if let Some(reason) = blocked { ui.label(reason); }
             ui.add_enabled_ui(!self.busy(), |ui| {
@@ -189,7 +189,7 @@ impl Panel {
                 ) && source_matches(editor, blocked, &completion.request)
                     && receipt.checksum == completion.request.checksum;
                 self.status = format!(
-                    "{} at {}. Platform: {:?}; scene checksum {:016x}; player SHA-256 {}; camera SHA-256 {}; art SHA-256 {}; lighting SHA-256 {}; HUD SHA-256 {}; props SHA-256 {}. Player was not launched.",
+                    "{} at {}. Platform: {:?}; scene checksum {:016x}; player SHA-256 {}; camera SHA-256 {}; art SHA-256 {}; lighting SHA-256 {}; HUD SHA-256 {}; props SHA-256 {}; animation SHA-256 {}. Player was not launched.",
                     if current {
                         "Hazard export complete"
                     } else {
@@ -203,7 +203,8 @@ impl Panel {
                     receipt.art_sha256.as_deref().unwrap_or("none"),
                     receipt.lighting_sha256.as_deref().unwrap_or("none"),
                     receipt.hud_sha256.as_deref().unwrap_or("none"),
-                    receipt.props_sha256.as_deref().unwrap_or("none")
+                    receipt.props_sha256.as_deref().unwrap_or("none"),
+                    receipt.animation_sha256.as_deref().unwrap_or("none")
                 );
             }
         }

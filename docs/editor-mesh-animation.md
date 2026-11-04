@@ -1,6 +1,6 @@
 # Mesh agent animation
 
-The optional `mesh-animated-models` feature adds one cosmetic animated-model workflow to local Mesh Navigation scenes. The selected package clip follows the mesh agent's entity and position using the coherent host Frame tick. It does not change the scene schema, navigation graph, simulation state, or physics.
+The optional `mesh-animated-models` feature adds one cosmetic animated-model workflow to local Mesh Navigation and MeshHazardsV1 scenes. The selected package clip follows the mesh agent's entity and position using the coherent host Frame tick. It does not change the scene schema, navigation graph, simulation state, or physics.
 
 Build the editor and matching standalone player with `cargo build --release -p orr_editor --features mesh-animated-models,mesh-export --bin orr_editor --bin orr_mesh_player`. In the editor, use **File > New mesh scene…** or **Open mesh scene…**, then create or import a navigation mesh and place its agent before loading animation. The feature is disabled by default; a build without it rejects animation sidecars instead of silently dropping them.
 
@@ -13,3 +13,8 @@ The package must declare the animation capability and the referenced license fil
 Packages must be dependency-free and declare exactly `animation`; external model resources are rejected. The embedded `<full scene filename>.mesh-animation.json` binds to that scene filename and graph revision, and preserves the original cooked model, package provenance, and license text. Source files are bounded to 16 MiB, license text to 1 MiB, sidecars to 32 MiB, and the combined geometry/image/channel byte budget to 32 MiB; this is not a total process-memory ceiling. Models are further limited to 256 nodes and 64 clips. Scale is 0.001–1000, playback rate 0.125–4, and clip duration at most one hour. These are presentation limits, not simulation values.
 
 **File > Export mesh game…** includes the saved animation sidecar and requires a trusted matching player with the dedicated `.orranim` / `ORR_MESH_ANIMATION_V1` capability section. The normal `--capabilities` response stays `ORR_MESH_PLAYER_V1`. The bundle contains its own scene, optional saved presentation sidecars, runtime, and integrity manifest; no model package is needed at runtime. Hash checks detect mismatched bytes but do not authenticate an untrusted publisher.
+
+For hazard games, use both `mesh-hazards-export` and `mesh-animated-models` and
+the hazard player. Their schema 7 bundle requires animation and forbids a
+simultaneous static agent-art sidecar. See [animated hazard game delivery](mesh-hazards-animation.md)
+for the separate export contract and acceptance boundaries.

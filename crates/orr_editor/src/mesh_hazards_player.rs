@@ -298,6 +298,8 @@ pub fn run() -> Result<(), String> {
         }
         Request::Capabilities => {
             println!("{CAPABILITIES}");
+            #[cfg(feature = "mesh-animated-models")]
+            println!("ORR_MESH_HAZARDS_ANIMATION_V1");
             Ok(())
         }
         Request::Launch(options) => launch(options),
@@ -355,6 +357,11 @@ fn launch(options: Options) -> Result<(), String> {
     animation_panel.sync(&editor);
     #[cfg(feature = "mesh-animated-models")]
     let animation_blocker = animation_panel.play_blocker(&editor);
+    #[cfg(feature = "mesh-animated-models")]
+    verify_loaded_animation_bundle(&bundle_root, &bundle, &animation_panel)?;
+    #[cfg(feature = "mesh-animated-models")]
+    let initial_animation_pose = animation_panel.initial_play_placement(&editor)?
+        .as_ref().map(animation_pose_digest);
     #[cfg(not(feature = "mesh-animated-models"))]
     let animation_blocker = match crate::mesh_animation_store::has_sidecar(&bundle.scene) {
         Ok(false) => None,
@@ -379,6 +386,8 @@ fn launch(options: Options) -> Result<(), String> {
             camera_panel,
             lighting_panel,
             hud_panel,
+            #[cfg(feature = "mesh-animated-models")]
+            (animation_panel, initial_animation_pose),
             &bundle,
         );
     }
@@ -401,6 +410,8 @@ fn launch(options: Options) -> Result<(), String> {
             inner.install_validated_hazards_navigation(panel);
             inner.install_validated_hazards_lighting(lighting_panel);
             inner.install_validated_hazards_hud(hud_panel);
+            #[cfg(feature = "mesh-animated-models")]
+            inner.install_validated_hazards_animation(animation_panel);
             inner.set_mesh_player_input_allowed(mesh_input_allowed);
             if let Some(path) = screenshot {
                 inner = inner.with_screenshot(ScreenshotJob::new(path, frames).with_settle());
@@ -499,14 +510,45 @@ fn verify_loaded_hud_bundle(
     Ok(())
 }
 
+#[cfg(feature = "mesh-animated-models")]
+fn verify_loaded_animation_bundle(
+    root: &Path,
+    bundle: &crate::mesh_hazards_export::PreparedBundle,
+    panel: &crate::mesh_animation_panel::Panel,
+) -> Result<(), String> {
+    if !panel.matches_saved_sidecar(bundle.animation_sha256.as_deref()) {
+        return Err("loaded game animation differs from the validated bundle".into());
+    }
+    if crate::mesh_hazards_export::open_bundle(root)? != *bundle {
+        return Err("game bundle changed while animation was loading".into());
+    }
+    Ok(())
+}
+
+#[cfg(feature = "mesh-animated-models")]
+pub(crate) fn animation_pose_digest(placement: &crate::viewport3d::AnimatedPlacement) -> String {
+    let mut digest = Sha256::new();
+    // Local pose excludes world movement: a changing digest proves skeletal
+    // animation, not merely translation of the agent's instance.
+    for matrix in placement.pose.global() {
+        for row in matrix {
+            for value in row { digest.update(value.to_bits().to_le_bytes()); }
+        }
+    }
+    digest.finalize().iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 fn verify_headless_session(
     editor: Editor,
     navigation: crate::mesh_navigation::Panel,
     camera: crate::mesh_camera_panel::Panel,
     lighting: crate::mesh_lighting_panel::Panel,
     hud: crate::mesh_hud_panel::Panel,
+    #[cfg(feature = "mesh-animated-models")] animation_state: (crate::mesh_animation_panel::Panel, Option<String>),
     bundle: &crate::mesh_hazards_export::PreparedBundle,
 ) -> Result<(), String> {
+    #[cfg(feature = "mesh-animated-models")]
+    let (mut animation, initial_animation_pose) = animation_state;
     let tick = editor.sim().head_tick;
     let checksum = editor.checksum();
     let snapshot = editor.snapshot().ok_or("verification has no frame")?;
@@ -526,11 +568,19 @@ fn verify_headless_session(
     if bundle.hud_sha256.is_some() && expected_hud.is_none() {
         return Err("validated game HUD is not applied during playback".into());
     }
+    #[cfg(feature = "mesh-animated-models")]
+    let played_animation_pose = animation.placement(&editor)?.as_ref().map(animation_pose_digest);
+    #[cfg(feature = "mesh-animated-models")]
+    if played_animation_pose.is_some() != bundle.animation_sha256.is_some() {
+        return Err("validated animation has no playback placement".into());
+    }
     let mut app = EditorApp::new(editor, None);
     app.install_validated_hazards_navigation(navigation);
     app.install_validated_hazards_camera(camera);
     app.install_validated_hazards_lighting(lighting);
     app.install_validated_hazards_hud(hud);
+    #[cfg(feature = "mesh-animated-models")]
+    app.install_validated_hazards_animation(animation);
     app.verify_hazards_restart()?;
     if !app.hazards_props_match(&bundle.props_sha256, &expected_props) {
         return Err("headless restart changed the admitted game props".into());
@@ -545,12 +595,18 @@ fn verify_headless_session(
     if !app.hazards_hud_matches(&bundle.hud_sha256, &expected_hud) {
         return Err("headless restart changed the admitted game HUD".into());
     }
+    #[cfg(feature = "mesh-animated-models")]
+    let restarted_animation_pose = app.hazards_animation_pose_digest()?;
+    #[cfg(feature = "mesh-animated-models")]
+    if !app.hazards_animation_matches(bundle.animation_sha256.as_deref())
+        || restarted_animation_pose != initial_animation_pose {
+        return Err("headless restart changed the admitted animation pose".into());
+    }
     if app.editor.checksum() != bundle.checksum {
         return Err("headless restart differs from the admitted initial frame".into());
     }
-    println!(
-        "{}",
-        serde_json::json!({
+    #[allow(unused_mut)]
+    let mut report = serde_json::json!({
             "tick": tick, "checksum": format!("{checksum:016x}"),
             "agent_position_raw": position, "art_sha256": bundle.art_sha256,
             "lighting_sha256": bundle.lighting_sha256, "lighting_restart_parity": true,
@@ -560,8 +616,16 @@ fn verify_headless_session(
             "restarted_tick": app.editor.sim().head_tick,
             "restarted_checksum": format!("{:016x}", app.editor.checksum()),
             "restart_parity": true
-        })
-    );
+        });
+    #[cfg(feature = "mesh-animated-models")]
+    {
+        report["animation_sha256"] = serde_json::json!(bundle.animation_sha256);
+        report["animation_pose_sha256"] = serde_json::json!(played_animation_pose);
+        report["animation_initial_pose_sha256"] = serde_json::json!(initial_animation_pose);
+        report["animation_restarted_pose_sha256"] = serde_json::json!(restarted_animation_pose);
+        report["animation_restart_parity"] = serde_json::json!(true);
+    }
+    println!("{report}");
     Ok(())
 }
 
@@ -635,3 +699,7 @@ mod hud_acceptance;
 #[cfg(test)]
 #[path = "mesh_hazards_player/props_acceptance.rs"]
 mod props_acceptance;
+
+#[cfg(all(test, feature = "mesh-animated-models"))]
+#[path = "mesh_hazards_player/animation_acceptance.rs"]
+mod animation_acceptance;

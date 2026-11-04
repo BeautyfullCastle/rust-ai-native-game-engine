@@ -684,3 +684,16 @@ fn crossfade_controls_apply_undo_redo_save_reopen_and_reject_invalid_duration() 
         assert_eq!(reopened.current_entry().unwrap().id, id);
     }
 }
+
+#[cfg(feature = "mesh-hazards")]
+#[test]
+fn hazards_animation_identity_requires_exact_requested_profile() {
+    let scene = PathBuf::from("hazards.scene.yaml");
+    let hazards = HostSpec::local_game(scene.clone(), EditorGame::MeshHazardsV1);
+    let navigation = HostSpec::local_game(scene.clone(), EditorGame::MeshNavigation);
+    assert!(frame_gate(EditorGame::MeshHazardsV1, &hazards, Some(&scene), Mode::Edit, true, 7, 7));
+    assert!(!frame_gate(EditorGame::MeshHazardsV1, &navigation, Some(&scene), Mode::Edit, true, 7, 7));
+    assert!(!frame_gate(EditorGame::MeshNavigation, &hazards, Some(&scene), Mode::Edit, true, 7, 7));
+    assert!(!frame_gate(EditorGame::MeshHazardsV1, &hazards, Some(&scene), Mode::Edit, true, 7, 8));
+    assert!(!frame_gate(EditorGame::MeshHazardsV1, &hazards, Some(Path::new("other.scene.yaml")), Mode::Play, true, 7, 7));
+}
