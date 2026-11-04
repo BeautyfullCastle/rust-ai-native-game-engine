@@ -43,21 +43,20 @@ fn image_recheck_detects_changed_snapshot_and_embedded_sources_are_exact() {
     let (temp, p) = prepared();
     std::fs::write(temp.path().join("atlas.png"), b"changed").unwrap();
     assert!(p.recheck().is_err());
+    // Downloaded test binaries can be replayed against the independently
+    // verified source tree without recreating the build machine's directories.
+    // Missing or changed files still fail the same byte-for-byte assertions.
+    let source_root = std::env::var_os("ORR_PACKAGE_TEST_SOURCE_ROOT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."));
     assert_eq!(
         VERIFIER,
-        std::fs::read(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../tools/validate_coop_defense_animation.mjs"
-        ))
-        .unwrap()
+        std::fs::read(source_root.join("tools/validate_coop_defense_animation.mjs")).unwrap()
     );
     assert_eq!(
         SAMPLER,
-        std::fs::read(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../orr_coop_defense_web/web/combat-presentation.mjs"
-        ))
-        .unwrap()
+        std::fs::read(source_root.join("crates/orr_coop_defense_web/web/combat-presentation.mjs"))
+            .unwrap()
     );
 }
 #[test]
