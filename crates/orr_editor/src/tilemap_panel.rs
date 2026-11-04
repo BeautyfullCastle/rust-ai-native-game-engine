@@ -23,12 +23,14 @@ mod copy;
 mod export;
 mod fill;
 mod rectangle;
+mod replace;
 mod resize;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ToolMode {
     Paint,
     Fill,
+    Replace,
     Rectangle,
     Copy,
     Stamp,
@@ -382,6 +384,9 @@ impl TilemapPanel {
             ToolMode::Fill => {
                 fill::candidate(&self.history.current, cell, region, &asset.document)?.0
             }
+            ToolMode::Replace => {
+                replace::candidate(&self.history.current, cell, region, &asset.document)?.0
+            }
             ToolMode::Rectangle => return Err("Rectangle requires a complete gesture".into()),
             ToolMode::Copy | ToolMode::Stamp => {
                 return Err("Copy/Stamp requires its own input gesture".into())
@@ -621,18 +626,19 @@ impl TilemapPanel {
         });
         let editable = self.editable(editor);
         ui.add_enabled_ui(editable, |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 let paint = ui.selectable_value(&mut self.mode, ToolMode::Paint, "Paint");
                 let fill = ui.selectable_value(&mut self.mode, ToolMode::Fill, "Fill");
+                let replace = ui.selectable_value(&mut self.mode, ToolMode::Replace, "Replace all");
                 let rectangle = ui.selectable_value(&mut self.mode, ToolMode::Rectangle, "Rectangle");
                 let copy = ui.selectable_value(&mut self.mode, ToolMode::Copy, "Copy");
                 let stamp = ui.selectable_value(&mut self.mode, ToolMode::Stamp, "Stamp");
                 let pick = ui.selectable_value(&mut self.mode, ToolMode::Pick, "Pick");
-                if paint.changed() || fill.changed() || rectangle.changed() || copy.changed() || stamp.changed() || pick.changed() {
+                if paint.changed() || fill.changed() || replace.changed() || rectangle.changed() || copy.changed() || stamp.changed() || pick.changed() {
                     self.cancel_gesture();
                 }
             });
-            ui.label("Paint: click or drag. Fill: click once to replace connected matching cells. Rectangle: drag, then release to apply once. Pick: click a cell to select its region or Erase.");
+            ui.label("Paint: click or drag. Fill: click once to replace connected matching cells. Replace all: click once to replace every matching cell. Rectangle: drag, then release to apply once. Pick: click a cell to select its region or Erase.");
             ui.label("Copy: drag a rectangle, then release. Stamp: click its top-left destination once; the whole pattern must fit.");
             ui.label(self.pattern.as_ref().map_or_else(|| "No copied pattern".to_string(), |p| format!("Pattern: {} × {}", p.width, p.height)));
             ui.add_enabled_ui(self.pattern.is_some() && !self.painting && self.rectangle.is_none(), |ui| {
@@ -716,7 +722,7 @@ impl TilemapPanel {
             }
         });
         if !editable {
-            ui.label("Paint, Fill, Rectangle, Copy, Stamp, Pick, Resize and Save require matching Edit viewport, without proposal, replay or disconnected host.");
+            ui.label("Paint, Fill, Replace all, Rectangle, Copy, Stamp, Pick, Resize and Save require matching Edit viewport, without proposal, replay or disconnected host.");
         }
         self.show_actors(ui, editor, sprites);
         if let Some(error) = &self.error {
@@ -752,6 +758,15 @@ impl TilemapPanel {
                 Self::picked_region(ui, &editor.camera, rect, pixels, &self.history.current)
             {
                 self.selected = region;
+            }
+            return true;
+        }
+        if self.mode == ToolMode::Replace {
+            self.cancel_gesture();
+            if let Some(cell) =
+                Self::pressed_cell(ui, &editor.camera, rect, pixels, &self.history.current)
+            {
+                self.error = self.change(cell, self.selected, sprites).err();
             }
             return true;
         }
@@ -1487,3 +1502,7 @@ mod resize_history_tests {
         assert_eq!(panel.history_snapshot(), full);
     }
 }
+
+#[cfg(test)]
+#[path = "tilemap_panel/replace_tests.rs"]
+mod replace_tests;
