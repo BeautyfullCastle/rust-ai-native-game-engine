@@ -1,0 +1,72 @@
+name: Stormglass native pause and continue CI
+# Native CPU egui/simulation evidence; no window, browser or GPU acceptance.
+on:
+  push:
+    branches: [su/stormglass-native-pause-20261104]
+permissions:
+  contents: read
+concurrency:
+  group: stormglass-native-pause-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  native-pause:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      EVIDENCE: ${{ github.workspace }}/ci-evidence
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Record exact source and tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$EVIDENCE"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git rev-parse HEAD HEAD^{tree} | tee "$EVIDENCE/source.txt"
+          rustup toolchain install 1.99.1 --profile minimal --component clippy
+          rustup override set 1.99.1
+          rustc --version --verbose | tee "$EVIDENCE/rustc.txt"
+          cargo --version | tee "$EVIDENCE/cargo.txt"
+          python3 --version | tee "$EVIDENCE/python.txt"
+      - name: Verify pause admission and production consumer
+        shell: python {0}
+        run: |
+          import hashlib, json, os, re, runpy, shutil
+          from pathlib import Path
+          evidence = Path(os.environ['EVIDENCE'])
+          helpers = runpy.run_path('tools/check-authoring-controls.py')
+          run = helpers['run_logged']
+          expected_suites = {'defense_app': ['defense_app::pause_tests::admitted_delayed_input_is_frozen_then_completes_after_explicit_continue', 'defense_app::pause_tests::focus_false_dominates_continue_and_gameplay_in_any_event_order', 'defense_app::pause_tests::focus_return_requires_explicit_continue', 'defense_app::pause_tests::held_gestures_cannot_cross_pause_or_continue', 'defense_app::pause_tests::long_pause_freezes_frame_tick_economy_and_resumes_without_catchup', 'defense_app::pause_tests::manual_pause_keeps_actual_session_frame_unchanged', 'defense_app::pause_tests::pause_and_continue_frames_do_not_submit_mixed_gameplay', 'defense_app::pause_tests::pause_clears_unsubmitted_queue_selection_and_partial_time', 'defense_app::pause_tests::pause_continue_buttons_are_event_attributed_and_consume_frame', 'defense_app::pause_tests::ready_terminal_and_authored_restart_contracts_survive_pause', 'defense_app::pause_tests::repeated_keys_do_not_pause_or_resume_and_space_remains_summon', 'defense_app::pause_tests::responsive_pause_controls_render_and_use_matching_hit_rects', 'defense_app::pause_tests::unfocused_raw_input_blocks_start_resume_and_commands', 'defense_app::tests::bounded_cli', 'defense_app::tests::bounded_scene_loading_preserves_defaults_and_authored_restart', 'defense_app::tests::campaign_only_scene_preserves_default_scenario_and_authored_campaign', 'defense_app::tests::scene_cli_is_explicit_and_available_in_both_modes', 'defense_app::tests::scene_loader_rejects_symlinks_and_fifos_before_read', 'defense_app::tests::session_tracks_scenario_build_identity', 'defense_app::tests::unreadable_scene_fails_before_startup'], 'defense_ui': ['defense_ui::authored_core_tests::health_bar_uses_authored_maximum_and_stays_bounded', 'defense_ui::click_attribution_tests::board_clicks_select_and_move_actual_unit_without_hover_retargeting', 'defense_ui::click_attribution_tests::configured_click_distance_duration_and_generation_bound_pending_press', 'defense_ui::click_attribution_tests::cross_frame_press_works_but_drag_out_return_or_bare_release_does_not', 'defense_ui::click_attribution_tests::first_eligible_click_wins_and_later_valid_click_cannot_restart', 'defense_ui::click_attribution_tests::genuine_economic_and_restart_clicks_keep_event_target_and_mutate_simulation', 'defense_ui::click_attribution_tests::keyboard_pulses_still_reach_simulation_after_pointer_cancellation', 'defense_ui::click_attribution_tests::mixed_click_and_drag_releases_do_not_borrow_eligibility', 'defense_ui::click_attribution_tests::pointer_gone_cancels_pending_and_focus_loss_cancels_entire_frame', 'defense_ui::click_attribution_tests::resized_layout_and_duplicate_press_cancel_old_gesture', 'defense_ui::click_attribution_tests::secondary_buttons_never_qualify_or_retarget_primary_click', 'defense_ui::click_attribution_tests::start_is_pinned_to_click_not_late_hover_and_does_not_spend', 'defense_ui::click_attribution_tests::unrelated_click_cannot_restart_spend_or_select_after_late_motion', 'defense_ui::tests::hud_wave_total_uses_default_and_authored_campaign', 'defense_ui::tests::pointer_select_and_move_uses_only_local_board', 'defense_ui::tests::ready_start_does_not_spend_and_summon_has_one_sequence', 'defense_ui::tests::responsive_cell_hit_is_local_and_exact'], 'defense_view': ['defense_view::tests::aspect_fit_and_clipped_hits_only_select_local_cells', 'defense_view::tests::frame_wrapper_and_readonly_view_produce_identical_clipped_shapes']}
+          for suite, expected in expected_suites.items():
+              output = run(['cargo', 'test', '--locked', '--release', '-p', 'orr_sample', '--features', 'coop-defense', '--lib', suite + '::', '--', '--format=pretty', '--color=never', '--test-threads=1'], evidence / (suite + '.log'))
+              helpers['validate_tests'](output, suite, len(expected))
+              if {name for name, _ in helpers['CASE'].findall(output)} != set(expected):
+                  raise RuntimeError('Missing exact ' + suite + ' test inventory')
+          run(['cargo', 'clippy', '--locked', '--release', '-p', 'orr_sample', '--features', 'coop-defense', '--lib', '--', '-D', 'warnings'], evidence / 'strict.log')
+          run(['cargo', 'check', '--locked', '--release', '-p', 'orr_sample', '--no-default-features', '--lib'], evidence / 'feature-off.log')
+          run(['cargo', 'build', '--locked', '--release', '-p', 'orr_sample', '--features', 'coop-defense', '--bin', 'coop_defense'], evidence / 'native-build.log')
+          binary = (Path(os.environ.get('CARGO_TARGET_DIR', 'target')) / 'release/coop_defense').resolve()
+          shipped = evidence / 'coop_defense'
+          shutil.copy2(binary, shipped)
+          scene = Path('examples/static-game-starter/scenes/stormglass-short.scene.yaml')
+          shutil.copy2(scene, evidence / scene.name)
+          smoke = run([str(shipped.resolve()), '--headless', '--scene', str((evidence / scene.name).resolve()), '--ticks', '6000', '--demo'], evidence / 'native-smoke.log')
+          rows = re.findall(r'^Stormglass tick=(\d+) wave=(\d+) phase=(\d+) reactor=(\d+) kills=(\d+) merges=(\d+) checksum=(0x[0-9a-f]{16})$', smoke, re.MULTILINE)
+          expected_smoke = ('1884', '3', '1', '75', '72', '29', '0x7f44dac0fea52bc1')
+          if rows != [expected_smoke]:
+              raise RuntimeError('Native headless result changed from verified authored baseline')
+          run(['git', 'diff', '--exit-code'], evidence / 'source-unchanged.log')
+          (evidence / 'scope.json').write_text(json.dumps({'head': os.environ['GITHUB_SHA'], 'tests': {suite: len(names) for suite, names in expected_suites.items()}, 'test_inventory': expected_suites, 'session_input_delay': 2, 'strict': True, 'feature_off': True, 'native_binary_sha256': hashlib.sha256(shipped.read_bytes()).hexdigest(), 'scene_sha256': hashlib.sha256(scene.read_bytes()).hexdigest(), 'native_smoke': rows[0], 'cpu_egui': True, 'native_window': False, 'physical_input': False, 'browser': False, 'gpu': False, 'full_workspace': False}, indent=2))
+      - name: Preserve exact source and evidence including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stormglass-native-pause-${{ github.sha }}-${{ github.run_attempt }}
+          path: ci-evidence
+          if-no-files-found: error

@@ -21,13 +21,15 @@
 
 [PR #428](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/428)은 복원 실패 뒤 해제된 드래그가 남아 새 입력을 막거나 의도치 않은 이동을 낳던 결함을 수정했다. 개발 merge f3f70b42a67ab31dd23a87be659ec297030dbf26, tree 3ada46ab934d911d2e1cc0c225c852a2e2df4ffe의 [필수 CI](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/41900065738)와 독립 산출물 검증을 완료했다. 포인터 24개·포커스 10개·관련 23개 및 기존 입력 검사 2개를 확인했으며 실제 브라우저 증거가 아니다.
 
+[PR #429](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/429)은 네이티브의 마지막 hover가 이전 클릭을 Restart·구매·보드 명령으로 잘못 바꾸던 결함을 수정했다. 개발 merge b0e7a6cf6d85c95b3b17bed432e95bb87fe7b9a8, tree 87dbc8d07a77b63eccd93a036172d9a77a97b3ea에서 [필수 CI와 독립 산출물 검증](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/429#issuecomment-6640886369)을 완료했다. UI 17개·엄격 검사·기능 제외 빌드와 다운로드한 native 실행 파일의 authored 3-wave 승리(tick 1884, reactor 75)를 확인했다. CPU egui/Session 증거이며 창·물리 입력 성공으로 확대하지 않는다.
+
 - [정확한 head의 필수 CI](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/41892258398)는 첫 실행에 성공했다. [Artifact](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/41892258398/artifacts/13354138228)의 source/tree·실행 수 8+2+1+1+1+2·runtime digest·tick 0/30/restart parity를 다운로드해 검증했다. 로컬 집중 검사와 독립 리뷰 범위는 [검증 기록](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/426#issuecomment-6639723379)에 있다. 전체 workspace 신규 실행이나 GPU/창 입력 증거는 아니다.
 - **과거 Windows 직접 플레이:** 10-wave 승리, 369 kills, 29 merges, core 8/30 및 Wave 2 패배 → R 재시작을 관측했다. [원래 증거](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94#issuecomment-6430939337)는 당시 산출물에만 적용하며 현재 소스의 Windows 재검증으로 옮기지 않는다.
 - **현재 Stormglass 실행 범위:** 실제 native/WASM consumed-input trace와 source-hidden packed 소비, mock-DOM 제어/저장 검사는 실제 브라우저 파일 선택·표시·물리 입력과 별개다. 2026-11-04 Chromium 사전 검사는 페이지 로드 전 Unix socket EPERM으로 실패했고 정식 확대 실행도 executor 초기화에서 실패했다. 실제 브라우저 플레이는 **미검증**이며 다른 환경 실행으로 이 제한을 우회하지 않았다.
 
 ## 남은 우선순위와 경계
 
-1. 실제 플레이의 입력·승패·재시작·저장복원 단절을 먼저 고친다. Native Stormglass에서 빈 곳 클릭 후 같은 프레임에 Restart/Summon으로 포인터를 옮기면 잘못된 재시작·금 소비가 발생하는 것을 CPU egui→실제 시뮬레이션으로 재현했다. [현재 수정 범위](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94#issuecomment-6640629167)는 마지막 hover와 클릭 대상을 분리하는 선택 UI 입력 계약이다. 이를 실제 창·물리 입력 성공으로 표시하거나 단순 도구 확장으로 대체하지 않는다.
+1. 실제 플레이의 입력·승패·재시작·저장복원 단절을 먼저 고친다. 현재 native에는 수동 정지·계속 조작이 없고 포커스를 되찾으면 전투가 즉시 재개된다. [현재 범위](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94#issuecomment-6641137007)는 #106의 pause/resume 목표에 맞는 선택 native 플레이 기능이다. 정지 중 실제 Session Frame 보존, 명시적 계속, 미제출 입력·옛 제스처 취소, 시간 누적 방지를 CPU UI→생산 Session 경로에서 검증한다. 이미 Session에 승인된 지연 입력의 의미와 코어 시뮬레이션은 바꾸지 않는다.
 2. 허용된 실행 환경이 있을 때 현재 산출물의 브라우저/native-window 플레이를 별도 수용한다. 화면 증거가 없으면 성공률·모바일·Windows·hardware GPU까지 확대하지 않는다.
 3. [설계 v2](design-v2.md)의 사전 고정 과제/seed/oracle·예산·실제 모델 기준선을 준비한다. 모델 호출·업로드·비용은 별도 승인 범위이며 아직 측정 결과가 없다.
 

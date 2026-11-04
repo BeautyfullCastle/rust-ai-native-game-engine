@@ -36,6 +36,16 @@ must identify the same target without a layout change; a drag, cancelled pointer
 or lost focus cannot turn into a click. At most one eligible pointer target is
 handled per frame. Board movement remains two clicks, not drag-to-move.
 
+In native play, use **P**, **Escape** or **Pause** to stop active combat. Losing
+window focus also pauses it. Returning to the window does not resume: press
+**Enter** or click **Continue**. While paused, the game frame and economy stay
+frozen; gameplay keys and board clicks are blocked. Continue only resumes and
+does not summon, move or restart. Pause and focus loss take priority over other
+controls in the same input frame. Unsubmitted UI commands and old gestures are
+cancelled, and elapsed paused time is not caught up. Inputs already admitted to
+the deterministic session retain their existing two-tick delay and may finish
+after explicit resume; pause does not rewind accepted input.
+
 ## Integration boundary
 
 `orr_games/coop-defense` is disabled by default. It contains only bounded,
