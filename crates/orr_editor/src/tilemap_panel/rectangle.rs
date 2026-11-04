@@ -889,4 +889,177 @@ mod installed_gestures {
         assert_eq!(h.panel.history_snapshot(), before);
         assert_eq!(std::fs::read(&h.panel.path).unwrap(), changed);
     }
+
+    fn install_repeat_pattern(h: &mut Harness) {
+        let (asset, texture) = h.sprites.tilemap_asset(&h.panel.key()).unwrap();
+        let mut motif = h.panel.document().document().clone();
+        // A 3x2 asymmetric motif. Holes must erase, not act as transparency.
+        motif.cells[0] = Some(10);
+        motif.cells[1] = None;
+        motif.cells[2] = Some(11);
+        motif.cells[16] = None;
+        motif.cells[17] = Some(11);
+        motif.cells[18] = Some(10);
+        let motif = motif.validate(&asset.document).unwrap();
+        h.panel.pattern = Some(crate::tilemap_panel::copy::Pattern::capture(
+            &motif,
+            CellCoord { column: 0, row: 0 },
+            CellCoord { column: 2, row: 1 },
+            h.editor.scene_load_epoch(),
+            &asset.document,
+        ).unwrap());
+        h.panel.pattern_texture = Some(texture);
+        h.panel.mode = ToolMode::Repeat;
+    }
+
+    #[test]
+    fn installed_repeat_reverse_drag_captures_pattern_and_saves_literal_runtime_output() {
+        let mut h = Harness::new();
+        install_repeat_pattern(&mut h);
+        let (asset, _) = h.sprites.tilemap_asset(&h.panel.key()).unwrap();
+        let mut occupied = h.panel.document().document().clone();
+        for index in [69,70,71,72,73,85,86,87,88,89,101,102,103,104,105] {
+            occupied.cells[index] = Some(11);
+        }
+        h.panel.history.current = occupied.validate(&asset.document).unwrap();
+        let before = h.panel.history_snapshot();
+        let disk = std::fs::read(&h.panel.path).unwrap();
+        let checksum = h.editor.checksum();
+        // Reverse drag has the same normalized top-left phase, and 5x3 clips
+        // both dimensions of the 3x2 motif rather than rejecting the edge.
+        let start = h.point(9, 6);
+        let end = h.point(5, 4);
+        h.press(start);
+        assert!(h.panel.rectangle.is_some());
+        assert_eq!(h.panel.history_snapshot(), before);
+        // The in-flight gesture owns its own immutable pattern clone.
+        h.panel.pattern.as_mut().unwrap().transform(
+            crate::tilemap_panel::copy::LayoutTransform::Vertical,
+        );
+        h.frame(vec![egui::Event::PointerMoved(end)], true);
+        assert_eq!(h.panel.history_snapshot(), before);
+        assert_eq!(std::fs::read(&h.panel.path).unwrap(), disk);
+        h.release(end);
+        assert!(h.panel.error.is_none(), "{:?}", h.panel.error);
+        assert!(h.panel.rectangle.is_none());
+        let mut expected = vec![None; 192];
+        for (index, region) in [(69,10),(71,11),(72,10),(86,11),(87,10),(89,11),(101,10),(103,11),(104,10)] {
+            expected[index] = Some(region);
+        }
+        assert_eq!(h.panel.document().document().cells, expected);
+        assert_eq!(h.panel.history.undo, vec![before.0.clone()]);
+        assert_eq!(std::fs::read(&h.panel.path).unwrap(), disk);
+        let committed = h.panel.history_snapshot();
+        h.frame(Vec::new(), true);
+        assert_eq!(h.panel.history_snapshot(), committed);
+        h.panel.undo();
+        assert_eq!(h.panel.document(), &before.0);
+        h.panel.redo();
+        assert_eq!(h.panel.history_snapshot(), committed);
+        assert_eq!(h.editor.checksum(), checksum);
+        h.panel.save(&h.editor, &h.sprites).unwrap();
+        assert!(!h.panel.dirty());
+        let reopened = PreparedProject::open_with_capabilities(
+            &h.panel.stamp.root,
+            crate::sprite_bindings::compiled_runtime(),
+            UiSupport::Unsupported,
+            TilemapSupport::Supported,
+        ).unwrap().into_presentation_parts();
+        let consumed = reopened.tilemap.unwrap();
+        assert_eq!(consumed.document.document().cells, expected);
+        let draws = orr_sample::project_tilemap::draws(&consumed, 0).unwrap();
+        assert_eq!(draws.len(), 9);
+        let doc = consumed.document.document();
+        // Literal consumer oracle, independent of repeat_candidate and capture.
+        for (draw, (column, row, region)) in draws.iter().zip([
+            (5,4,10),(7,4,11),(8,4,10),(6,5,11),(7,5,10),(9,5,11),
+            (5,6,10),(7,6,11),(8,6,10),
+        ]) {
+            assert_eq!(draw.instance.region, region);
+            assert_eq!(draw.instance.position, [
+                doc.origin[0] + (column as f32 + 0.5) * doc.tile_size[0] as f32 * doc.units_per_pixel,
+                doc.origin[1] - (row as f32 + 0.5) * doc.tile_size[1] as f32 * doc.units_per_pixel,
+            ]);
+        }
+        assert_eq!(h.editor.checksum(), checksum);
+    }
+
+    #[test]
+    fn installed_repeat_imported_transformed_pattern_uses_its_current_layout() {
+        let mut h = Harness::new();
+        install_repeat_pattern(&mut h);
+        let (asset, _) = h.sprites.tilemap_asset(&h.panel.key()).unwrap();
+        let digest = "a".repeat(64);
+        let bytes = h.panel.pattern.as_ref().unwrap().encode_asset(
+            h.panel.document(), h.editor.scene_load_epoch(), &asset.document, &digest,
+        ).unwrap();
+        h.panel.pattern = Some(crate::tilemap_panel::copy::Pattern::decode_asset(
+            &bytes, h.panel.document(), h.editor.scene_load_epoch(), &asset.document, &digest,
+        ).unwrap());
+        h.panel.transform_pattern(
+            crate::tilemap_panel::copy::LayoutTransform::Clockwise,
+            &h.editor, &h.sprites,
+        ).unwrap();
+        let before = h.panel.history_snapshot();
+        let start = h.point(4, 3);
+        let end = h.point(6, 6);
+        h.press(start);
+        h.release(end);
+        assert!(h.panel.error.is_none(), "{:?}", h.panel.error);
+        // Rotated motif is [None,10; 11,None; 10,11], repeated to 3x4.
+        let mut expected = vec![None; 192];
+        for (index, region) in [(53,10),(68,11),(70,11),(84,10),(85,11),(86,10),(101,10)] {
+            expected[index] = Some(region);
+        }
+        assert_eq!(h.panel.document().document().cells, expected);
+        assert_eq!(h.panel.history.undo, vec![before.0]);
+    }
+
+    #[test]
+    fn installed_repeat_cancellation_stale_source_and_missing_pattern_preserve_redo() {
+        for cancellation in 0..7 {
+            let mut h = Harness::new();
+            h.seed_redo();
+            install_repeat_pattern(&mut h);
+            let before = h.panel.history_snapshot();
+            let original = std::fs::read(&h.panel.path).unwrap();
+            let start = h.point(5, 4);
+            let end = h.point(9, 6);
+            if cancellation == 6 {
+                h.panel.pattern = None;
+                h.panel.pattern_texture = None;
+            }
+            h.press(start);
+            match cancellation {
+                0 => h.frame(vec![egui::Event::WindowFocused(false)], false),
+                1 => h.frame(vec![egui::Event::Key {
+                    key: egui::Key::Escape, physical_key: None, pressed: true,
+                    repeat: false, modifiers: egui::Modifiers::NONE,
+                }], true),
+                2 => h.panel.mode = ToolMode::Rectangle,
+                3 => {
+                    let mut changed = original.clone();
+                    changed.push(b'\n');
+                    std::fs::write(&h.panel.path, changed).unwrap();
+                }
+                4 => h.panel.editor_epoch = None,
+                _ => {}
+            }
+            let release = if cancellation == 5 {
+                viewport().max + egui::vec2(10.0, 10.0)
+            } else { end };
+            h.release(release);
+            assert!(h.panel.rectangle.is_none(), "case {cancellation}");
+            assert_eq!(h.panel.history_snapshot(), before, "case {cancellation}");
+            if cancellation == 3 {
+                assert!(h.panel.error.is_some());
+                let mut changed = original;
+                changed.push(b'\n');
+                assert_eq!(std::fs::read(&h.panel.path).unwrap(), changed);
+            } else {
+                assert_eq!(std::fs::read(&h.panel.path).unwrap(), original);
+            }
+        }
+    }
+
 }

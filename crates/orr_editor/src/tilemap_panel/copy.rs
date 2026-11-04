@@ -166,6 +166,34 @@ impl Pattern {
             .map_err(|_| "whole stamp must fit inside the map".to_string())?;
         Ok(end)
     }
+    /// Tile a snapshot from the normalized top-left of an inclusive rectangle.
+    /// Partial repetitions at the edges are intentional; empty cells erase.
+    pub(super) fn repeat_candidate(
+        &self,
+        source: &ValidatedDocument,
+        start: CellCoord,
+        end: CellCoord,
+        epoch: u64,
+        atlas: &SpriteDocument,
+    ) -> Result<ValidatedDocument, String> {
+        if !self.matches(source, epoch, atlas) {
+            return Err("copied pattern expired; Copy again".into());
+        }
+        source.cell(start)?;
+        source.cell(end)?;
+        let left = start.column.min(end.column);
+        let top = start.row.min(end.row);
+        let mut next = source.document().clone();
+        for row in top..=start.row.max(end.row) {
+            for column in left..=start.column.max(end.column) {
+                let pattern_row = (row - top) % self.height;
+                let pattern_column = (column - left) % self.width;
+                next.cells[(row * next.width + column) as usize] =
+                    self.cells[(pattern_row * self.width + pattern_column) as usize];
+            }
+        }
+        next.validate(atlas)
+    }
     pub(super) fn candidate(
         &self,
         source: &ValidatedDocument,

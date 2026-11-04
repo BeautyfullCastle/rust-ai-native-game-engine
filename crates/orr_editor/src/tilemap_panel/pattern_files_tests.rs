@@ -164,6 +164,7 @@ fn play_epoch_and_active_gestures_refuse_save_and_load_without_changes() {
                 panel.rectangle = Some(RectangleGesture {
                     purpose: RectanglePurpose::Copy,
                     copy_atlas: None,
+            repeat_pattern: None,
                     start: cell(0, 0),
                     end: cell(1, 0),
                     region: None,

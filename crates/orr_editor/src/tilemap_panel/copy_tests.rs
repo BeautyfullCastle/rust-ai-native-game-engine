@@ -815,3 +815,183 @@ fn layout_transform_bounds_empty_singleton_and_maximum_pins() {
         source
     );
 }
+
+#[test]
+fn repeat_literal_partial_edges_reverse_drag_and_snapshot_overlap() {
+    let source = document(
+        5,
+        3,
+        vec![
+            Some(0),
+            None,
+            Some(1),
+            Some(1),
+            Some(1),
+            Some(1),
+            Some(0),
+            None,
+            Some(1),
+            Some(1),
+            Some(1),
+            Some(1),
+            Some(1),
+            Some(1),
+            Some(1),
+        ],
+    );
+    let pattern = Pattern::capture(&source, cell(0, 0), cell(1, 1), 7, &atlas()).unwrap();
+    let expected = vec![
+        Some(0),
+        None,
+        Some(0),
+        None,
+        Some(0),
+        Some(1),
+        Some(0),
+        Some(1),
+        Some(0),
+        Some(1),
+        Some(0),
+        None,
+        Some(0),
+        None,
+        Some(0),
+    ];
+    for (start, end) in [
+        (cell(0, 0), cell(4, 2)),
+        (cell(4, 2), cell(0, 0)),
+        (cell(4, 0), cell(0, 2)),
+        (cell(0, 2), cell(4, 0)),
+    ] {
+        let next = pattern
+            .repeat_candidate(&source, start, end, 7, &atlas())
+            .unwrap();
+        assert_eq!(next.document().cells, expected);
+        let bytes = crate::tilemap_panel::encode(&next).unwrap();
+        assert_eq!(
+            Document::from_bytes(&bytes)
+                .unwrap()
+                .validate(&atlas())
+                .unwrap(),
+            next
+        );
+    }
+    assert_eq!(pattern.cells, vec![Some(0), None, Some(1), Some(0)]);
+    assert_eq!(source.document().cells[2], Some(1));
+}
+
+#[test]
+fn repeat_transformed_and_portable_pattern_with_nonzero_anchor() {
+    let source = document(
+        5,
+        3,
+        vec![
+            Some(0),
+            None,
+            Some(1),
+            None,
+            None,
+            Some(1),
+            Some(0),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ],
+    );
+    let mut pattern = Pattern::capture(&source, cell(0, 0), cell(2, 1), 7, &atlas()).unwrap();
+    pattern.transform(LayoutTransform::Clockwise);
+    let bytes = pattern
+        .encode_asset(&source, 7, &atlas(), &"a".repeat(64))
+        .unwrap();
+    let loaded = Pattern::decode_asset(&bytes, &source, 8, &atlas(), &"a".repeat(64)).unwrap();
+    let next = loaded
+        .repeat_candidate(&source, cell(1, 1), cell(4, 2), 8, &atlas())
+        .unwrap();
+    assert_eq!(
+        next.document().cells,
+        vec![
+            Some(0),
+            None,
+            Some(1),
+            None,
+            None,
+            Some(1),
+            Some(1),
+            Some(0),
+            Some(1),
+            Some(0),
+            None,
+            Some(0),
+            None,
+            Some(0),
+            None
+        ]
+    );
+    assert_eq!(
+        next.document().origin.map(f32::to_bits),
+        source.document().origin.map(f32::to_bits)
+    );
+}
+
+#[test]
+fn repeat_rejects_invalid_and_stale_inputs_without_touching_redo() {
+    let source = document(5, 3, vec![Some(0); 15]);
+    let pattern = Pattern::capture(&source, cell(0, 0), cell(1, 1), 7, &atlas()).unwrap();
+    let mut history = History::new(source.clone()).unwrap();
+    let mut erased = source.document().clone();
+    erased.cells[0] = None;
+    let erased = erased.validate(&atlas()).unwrap();
+    history.commit(erased);
+    history.undo();
+    let redo = history.redo.clone();
+    for bad in [cell(5, 0), cell(0, 3), cell(u32::MAX, u32::MAX)] {
+        assert!(
+            pattern
+                .repeat_candidate(&source, bad, cell(0, 0), 7, &atlas())
+                .is_err()
+        );
+        assert!(
+            pattern
+                .repeat_candidate(&source, cell(0, 0), bad, 7, &atlas())
+                .is_err()
+        );
+    }
+    assert!(
+        pattern
+            .repeat_candidate(&source, cell(0, 0), cell(4, 2), 8, &atlas())
+            .is_err()
+    );
+    let next = pattern
+        .repeat_candidate(&source, cell(0, 0), cell(4, 2), 7, &atlas())
+        .unwrap();
+    assert!(!history.commit(next));
+    assert_eq!(history.redo, redo);
+    assert_eq!(history.current, source);
+}
+
+#[test]
+fn repeat_maximum_map_budget_and_exact_single_transaction() {
+    let mut cells = vec![None; 4096];
+    cells[0] = Some(0);
+    let source = document(64, 64, cells);
+    let pattern = Pattern::capture(&source, cell(0, 0), cell(0, 0), 7, &atlas()).unwrap();
+    let next = pattern
+        .repeat_candidate(&source, cell(63, 63), cell(0, 0), 7, &atlas())
+        .unwrap();
+    assert_eq!(next.occupied_count(), 4096);
+    assert!(next.document().cells.iter().all(|v| *v == Some(0)));
+    assert!(TilemapPanel::budget(&next, 1).is_err());
+    TilemapPanel::budget(&next, 0).unwrap();
+    let mut history = History::new(source.clone()).unwrap();
+    assert!(history.commit(next.clone()));
+    assert_eq!(history.undo.len(), 1);
+    history.undo();
+    assert_eq!(history.current, source);
+    history.redo();
+    assert_eq!(history.current, next);
+}
