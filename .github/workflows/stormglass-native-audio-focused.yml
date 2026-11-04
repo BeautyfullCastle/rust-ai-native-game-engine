@@ -16,7 +16,6 @@ jobs:
       CARGO_BUILD_JOBS: 2
       CARGO_INCREMENTAL: 0
       CARGO_TERM_COLOR: never
-      EVIDENCE: ${{ github.workspace }}/../stormglass-native-audio-evidence
     steps:
       - uses: actions/checkout@v4
         with:
@@ -26,6 +25,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          export EVIDENCE="$RUNNER_TEMP/stormglass-native-audio-evidence"
+          printf 'EVIDENCE=%s\n' "$EVIDENCE" >> "$GITHUB_ENV"
           mkdir "$EVIDENCE"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           git rev-parse HEAD HEAD^{tree} | tee "$EVIDENCE/source.txt"
