@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 mod asset;
 mod files;
+mod transform;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Geometry {
@@ -260,6 +261,7 @@ impl TerrainPanel {
             if let Some(clipboard) = &self.patch.clipboard {
                 ui.label(format!("Copied footprint: {} vertices and cells.", clipboard.patch.footprint()));
             }
+            self.show_patch_transforms(ui, editor, writable);
             self.show_patch_files(ui, editor, writable);
             let preview = self.patch_edits(editor);
             match &preview {

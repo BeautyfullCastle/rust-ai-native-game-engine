@@ -3,7 +3,7 @@ use super::*;
 use std::path::Path;
 
 impl TerrainPanel {
-    fn bound_patch(&self, editor: &Editor) -> Result<&Clipboard, String> {
+    pub(super) fn bound_patch(&self, editor: &Editor) -> Result<&Clipboard, String> {
         self.patch_context(editor)?;
         let bound = self
             .patch
