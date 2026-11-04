@@ -20,6 +20,7 @@ use std::{path::PathBuf, sync::Arc};
 pub mod flatten;
 pub mod holes;
 pub mod offset;
+pub mod patch;
 pub mod sculpt;
 pub mod smooth;
 pub mod stamp;
@@ -32,6 +33,7 @@ pub struct TerrainPanel {
     pub flatten: flatten::Spec,
     pub holes: holes::Spec,
     pub offset: offset::Spec,
+    pub patch: patch::State,
     pub sculpt: sculpt::Spec,
     pub smooth: smooth::Spec,
     pub stamp: stamp::State,
@@ -64,6 +66,7 @@ impl Default for TerrainPanel {
             flatten: flatten::Spec::default(),
             holes: holes::Spec::default(),
             offset: offset::Spec::default(),
+            patch: patch::State::default(),
             sculpt: sculpt::Spec::default(),
             smooth: smooth::Spec::default(),
             stamp: stamp::State::default(),
@@ -635,6 +638,7 @@ impl TerrainPanel {
             self.show_sculpt(ui, editor, writable);
             self.show_smooth(ui, editor, writable);
             self.show_stamp(ui, editor, writable);
+            self.show_patch(ui, editor, writable);
             #[cfg(feature = "terrain-raw16")]
             self.show_raw16(ui, editor, writable);
             #[cfg(feature = "terrain-png16")]
