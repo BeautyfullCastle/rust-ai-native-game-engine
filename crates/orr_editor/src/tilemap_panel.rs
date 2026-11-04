@@ -24,6 +24,7 @@ mod pattern_files;
 ))]
 mod export;
 mod fill;
+mod line;
 mod rectangle;
 mod replace;
 mod resize;
@@ -34,6 +35,7 @@ enum ToolMode {
     Fill,
     Replace,
     Rectangle,
+    Line,
     Copy,
     Stamp,
     Pick,
@@ -42,6 +44,7 @@ enum ToolMode {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RectanglePurpose {
     PaintRectangle,
+    PaintLine,
     Copy,
 }
 
@@ -393,7 +396,7 @@ impl TilemapPanel {
             ToolMode::Replace => {
                 replace::candidate(&self.history.current, cell, region, &asset.document)?.0
             }
-            ToolMode::Rectangle => return Err("Rectangle requires a complete gesture".into()),
+            ToolMode::Rectangle | ToolMode::Line => return Err("Drag tool requires a complete gesture".into()),
             ToolMode::Copy | ToolMode::Stamp => {
                 return Err("Copy/Stamp requires its own input gesture".into())
             }
@@ -637,14 +640,15 @@ impl TilemapPanel {
                 let fill = ui.selectable_value(&mut self.mode, ToolMode::Fill, "Fill");
                 let replace = ui.selectable_value(&mut self.mode, ToolMode::Replace, "Replace all");
                 let rectangle = ui.selectable_value(&mut self.mode, ToolMode::Rectangle, "Rectangle");
+                let line = ui.selectable_value(&mut self.mode, ToolMode::Line, "Line");
                 let copy = ui.selectable_value(&mut self.mode, ToolMode::Copy, "Copy");
                 let stamp = ui.selectable_value(&mut self.mode, ToolMode::Stamp, "Stamp");
                 let pick = ui.selectable_value(&mut self.mode, ToolMode::Pick, "Pick");
-                if paint.changed() || fill.changed() || replace.changed() || rectangle.changed() || copy.changed() || stamp.changed() || pick.changed() {
+                if paint.changed() || fill.changed() || replace.changed() || rectangle.changed() || line.changed() || copy.changed() || stamp.changed() || pick.changed() {
                     self.cancel_gesture();
                 }
             });
-            ui.label("Paint: click or drag. Fill: click once to replace connected matching cells. Replace all: click once to replace every matching cell. Rectangle: drag, then release to apply once. Pick: click a cell to select its region or Erase.");
+            ui.label("Paint: click or drag. Fill: click once to replace connected matching cells. Replace all: click once to replace every matching cell. Rectangle/Line: drag, then release to apply once. Pick: click a cell to select its region or Erase.");
             ui.label("Copy: drag a rectangle, then release. Stamp: click its top-left destination once; the whole pattern must fit.");
             ui.label(self.pattern.as_ref().map_or_else(|| "No copied pattern".to_string(), |p| format!("Pattern: {} × {}", p.width, p.height)));
             ui.add_enabled_ui(self.pattern.is_some() && !self.painting && self.rectangle.is_none(), |ui| {
@@ -729,7 +733,7 @@ impl TilemapPanel {
             }
         });
         if !editable {
-            ui.label("Paint, Fill, Replace all, Rectangle, Copy, Stamp, Pick, Resize and Save require matching Edit viewport, without proposal, replay or disconnected host.");
+            ui.label("Paint, Fill, Replace all, Rectangle, Line, Copy, Stamp, Pick, Resize and Save require matching Edit viewport, without proposal, replay or disconnected host.");
         }
         self.show_actors(ui, editor, sprites);
         if let Some(error) = &self.error {
@@ -786,7 +790,7 @@ impl TilemapPanel {
             }
             return true;
         }
-        if matches!(self.mode, ToolMode::Rectangle | ToolMode::Copy) {
+        if matches!(self.mode, ToolMode::Rectangle | ToolMode::Line | ToolMode::Copy) {
             self.rectangle_viewport(ui, editor, sprites, rect, pixels);
             return true;
         }
@@ -906,6 +910,8 @@ impl TilemapPanel {
         self.painting = false;
         let purpose = if self.mode == ToolMode::Copy {
             RectanglePurpose::Copy
+        } else if self.mode == ToolMode::Line {
+            RectanglePurpose::PaintLine
         } else {
             RectanglePurpose::PaintRectangle
         };
@@ -1068,7 +1074,12 @@ impl TilemapPanel {
                         self.pattern_texture = Some(texture);
                         return Ok(());
                     }
-                    let next = rectangle::candidate(
+                    let candidate = if gesture.purpose == RectanglePurpose::PaintLine {
+                        line::candidate
+                    } else {
+                        rectangle::candidate
+                    };
+                    let next = candidate(
                         &self.history.current,
                         gesture.start,
                         end,
@@ -1107,32 +1118,48 @@ impl TilemapPanel {
             egui::Color32::from_rgba_unmultiplied(90, 180, 200, 100),
         );
         if let Some(gesture) = &self.rectangle {
-            let left = gesture.start.column.min(gesture.end.column);
-            let right = gesture.start.column.max(gesture.end.column) + 1;
-            let top = gesture.start.row.min(gesture.end.row);
-            let bottom = gesture.start.row.max(gesture.end.row) + 1;
-            let preview = egui::Rect::from_two_pos(
-                to_pos([
-                    d.origin[0] + left as f32 * size[0],
-                    d.origin[1] - top as f32 * size[1],
-                ]),
-                to_pos([
-                    d.origin[0] + right as f32 * size[0],
-                    d.origin[1] - bottom as f32 * size[1],
-                ]),
-            );
-            let color = if gesture.region.is_some() {
-                egui::Color32::from_rgba_unmultiplied(70, 190, 230, 55)
+            if gesture.purpose == RectanglePurpose::PaintLine {
+                let color = if gesture.region.is_some() {
+                    egui::Color32::from_rgba_unmultiplied(70, 190, 230, 55)
+                } else {
+                    egui::Color32::from_rgba_unmultiplied(230, 100, 70, 55)
+                };
+                for cell in line::cells(gesture.start, gesture.end) {
+                    let preview = egui::Rect::from_two_pos(
+                        to_pos([d.origin[0] + cell.column as f32 * size[0], d.origin[1] - cell.row as f32 * size[1]]),
+                        to_pos([d.origin[0] + (cell.column + 1) as f32 * size[0], d.origin[1] - (cell.row + 1) as f32 * size[1]]),
+                    );
+                    painter.rect_filled(preview, 0.0, color);
+                    painter.rect_stroke(preview, 0.0, egui::Stroke::new(2.0, egui::Color32::WHITE), egui::StrokeKind::Inside);
+                }
             } else {
-                egui::Color32::from_rgba_unmultiplied(230, 100, 70, 55)
-            };
-            painter.rect_filled(preview, 0.0, color);
-            painter.rect_stroke(
-                preview,
-                0.0,
-                egui::Stroke::new(2.0, egui::Color32::WHITE),
-                egui::StrokeKind::Inside,
-            );
+                let left = gesture.start.column.min(gesture.end.column);
+                let right = gesture.start.column.max(gesture.end.column) + 1;
+                let top = gesture.start.row.min(gesture.end.row);
+                let bottom = gesture.start.row.max(gesture.end.row) + 1;
+                let preview = egui::Rect::from_two_pos(
+                    to_pos([
+                        d.origin[0] + left as f32 * size[0],
+                        d.origin[1] - top as f32 * size[1],
+                    ]),
+                    to_pos([
+                        d.origin[0] + right as f32 * size[0],
+                        d.origin[1] - bottom as f32 * size[1],
+                    ]),
+                );
+                let color = if gesture.region.is_some() {
+                    egui::Color32::from_rgba_unmultiplied(70, 190, 230, 55)
+                } else {
+                    egui::Color32::from_rgba_unmultiplied(230, 100, 70, 55)
+                };
+                painter.rect_filled(preview, 0.0, color);
+                painter.rect_stroke(
+                    preview,
+                    0.0,
+                    egui::Stroke::new(2.0, egui::Color32::WHITE),
+                    egui::StrokeKind::Inside,
+                );
+            }
         }
         if self.mode == ToolMode::Stamp {
             if let (Some(pattern), Some(pos)) = (&self.pattern, ui.input(|i| i.pointer.hover_pos()))

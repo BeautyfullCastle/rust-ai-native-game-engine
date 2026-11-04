@@ -1,0 +1,76 @@
+name: tilemap-line focused Linux CI
+# Focused CI for the reviewed editor feature; existing workflows remain unchanged.
+# Additive to existing Linux-local verification and independent review.
+on:
+  push:
+    branches: [su/tilemap-line-20261104]
+permissions:
+  contents: read
+concurrency:
+  group: tilemap-line-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  tilemap-line:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      EVIDENCE: ${{ github.workspace }}/ci-evidence
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Record exact source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$EVIDENCE"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git rev-parse HEAD HEAD^{tree} | tee "$EVIDENCE/source.txt"
+      - name: Install Linux build and software rendering dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q 2>&1 | tee "$EVIDENCE/dependencies.log"
+          sudo apt-get install -y -q build-essential pkg-config libasound2-dev libudev-dev libx11-dev libxkbcommon-dev libwayland-dev libegl1-mesa-dev libgl1-mesa-dev mesa-vulkan-drivers 2>&1 | tee -a "$EVIDENCE/dependencies.log"
+          runtime=$(mktemp -d "$RUNNER_TEMP/tilemap-line-xdg.XXXXXXXX")
+          echo "XDG_RUNTIME_DIR=$runtime" >> "$GITHUB_ENV"
+      - name: Select verified Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup override set 1.99.1
+          rustc --version --verbose | tee "$EVIDENCE/rustc.txt"
+          cargo --version | tee "$EVIDENCE/cargo.txt"
+      - name: Run focused feature contracts
+        shell: python {0}
+        run: |
+          import json, os, re, runpy
+          from pathlib import Path
+          evidence = Path(os.environ['EVIDENCE'])
+          helpers = runpy.run_path('tools/check-authoring-controls.py')
+          suites = [('line', 'orr_editor', ['--features', 'tilemap,project-create', '--lib', 'tilemap_panel::line::tests::'], 4), ('rectangle', 'orr_editor', ['--features', 'tilemap,project-create', '--lib', 'tilemap_panel::rectangle::tests::'], 6), ('gestures', 'orr_editor', ['--features', 'tilemap,project-create', '--lib', 'tilemap_panel::rectangle::installed_gestures::'], 9)]
+          for label, package, args, count in suites:
+              command = ['cargo', 'test', '--locked', '--release', '-p', package] + args + ['--', '--format=pretty', '--color=never', '--test-threads=1']
+              output = helpers['run_logged'](command, evidence / (label + '.log')).replace('\r\n', '\n')
+              summaries = helpers['SUMMARY'].findall(output)
+              cases = helpers['CASE'].findall(output)
+              if len(summaries) != 1 or tuple(map(int, summaries[0][:4])) != (count, 0, 0, 0):
+                  raise RuntimeError(f'{label}: unexpected test summary')
+              passed = [name for name, status in cases if status == 'ok']
+              if len(passed) != count or len(set(passed)) != count:
+                  raise RuntimeError(f'{label}: missing or duplicate passing cases')
+              if re.findall(r'^running (\d+) tests?$', output, re.MULTILINE) != [str(count)]:
+                  raise RuntimeError(f'{label}: inconsistent executed test count')
+          (evidence / 'scope.json').write_text(json.dumps({'head': os.environ['GITHUB_SHA'], 'executed_test_counts': {suite[0]: suite[3] for suite in suites}, 'full_workspace': False}, indent=2))
+      - name: Preserve source, logs and captures including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tilemap-line-${{ github.sha }}-${{ github.run_attempt }}
+          path: ci-evidence
+          if-no-files-found: error
