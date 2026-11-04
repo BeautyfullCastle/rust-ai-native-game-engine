@@ -2,7 +2,8 @@
 
 Duplicate a small authored terrain feature, including its slope and holes, without
 repainting individual vertices. The clipboard belongs to the current terrain
-panel; it is not an operating-system clipboard or an asset export.
+panel; it is not an operating-system clipboard. Explicit JSON assets let you reuse
+a captured patch in another session or terrain.
 
 ## Use
 
@@ -19,10 +20,34 @@ heights, not the destination's previous heights. Copy takes a snapshot: overlapp
 pastes and later source edits do not change its contents. Repeated pastes reuse
 that original sample until another Copy succeeds or the context becomes invalid.
 
+## Reusable assets
+
+After Copy, enter an absolute `.json` **Terrain patch file** path and choose
+**Save terrain patch asset**. It creates a new file without overwriting anything;
+terrain Save is separate. In a fresh writable terrain, enter that path and choose
+**Load terrain patch asset**. Load replaces only the clipboard, explicitly binding
+it to the current scene and terrain. Then choose a destination, offset and Paste.
+The source and target spacing must match exactly; identity, origin and dimensions
+may differ. The complete pasted footprint still has to fit the destination.
+
+Version 1 JSON stores `format: "orr_terrain_patch"`, `version: 1`, `cells`,
+`spacing_raw`, `heights_raw` and `holes`. Heights/spacing are exact signed Q16 raw
+integers, arrays are row-major, and heights are absolute rather than offsets.
+Files contain no source paths. Unknown or duplicate fields, unsupported versions,
+invalid spacing, counts or dimensions are rejected. The 256 KiB file bound and
+4,096 combined-value footprint bound apply before import. Failed Load preserves
+the old clipboard. Save requires a valid clipboard context but ignores pending
+paste coordinates and offset. Neither action changes terrain, history or scene.
+
+File operations currently require Unix stable file identities and trusted, idle
+directories. Symlink files/ancestors are rejected; ancestry checks are not a
+hostile-filesystem sandbox. A publication warning means the output exists or may
+exist: inspect it instead of retrying.
+
 ## Contract
 
 - Source and destination use cell indices. The entire footprint must fit; no
-  clipping, scaling, rotation, interpolation, falloff, or cross-terrain transfer.
+  clipping, scaling, rotation, interpolation or falloff.
   Boundary heights are shared with adjacent cells, so changing them can reshape
   neighboring surfaces. Heights outside the vertex footprint and hole flags
   outside the cell footprint remain untouched.
@@ -45,6 +70,7 @@ reopen the written `.orrt`, and query its terrain sampler and static-model
 consumer. An asymmetric height fixture verifies coordinate order, a fractional
 offset, copied holes and restored solid cells. Additional tests cover overlapping
 snapshot reuse, raw fixed-point precision and overflow, footprint limits,
+portable save/load into a different terrain, malformed/file rejection,
 no-op/failed-paste Redo preservation, failed-Copy invalidation, context changes,
 and installed-package immutability.
 

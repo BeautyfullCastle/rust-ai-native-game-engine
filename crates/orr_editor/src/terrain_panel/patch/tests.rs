@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn settle(editor: &mut Editor) {
+pub(super) fn settle(editor: &mut Editor) {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         editor.sync();
@@ -24,7 +24,7 @@ fn settle(editor: &mut Editor) {
         std::thread::sleep(Duration::from_millis(1));
     }
 }
-fn terrain(width: u32, depth: u32) -> Terrain {
+pub(super) fn terrain(width: u32, depth: u32) -> Terrain {
     Terrain::new(
         "terrain/patch".into(),
         width,
@@ -36,7 +36,7 @@ fn terrain(width: u32, depth: u32) -> Terrain {
     )
     .unwrap()
 }
-fn fixture() -> (tempfile::TempDir, PathBuf, Editor, TerrainPanel) {
+pub(super) fn fixture() -> (tempfile::TempDir, PathBuf, Editor, TerrainPanel) {
     let temp = tempfile::tempdir().unwrap();
     let scene = temp.path().join("yard.yaml");
     fs::write(

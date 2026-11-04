@@ -290,5 +290,5 @@ mod terrain_surface_panel;
 #[cfg(all(feature = "mesh-prop-delivery", target_os = "linux", target_arch = "x86_64"))]
 pub mod mesh_prop_delivery;
 
-#[cfg(feature = "sprites")]
+#[cfg(any(feature = "sprites", feature = "terrain"))]
 mod json_output;
