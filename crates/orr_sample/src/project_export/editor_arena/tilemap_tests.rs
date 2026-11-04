@@ -2,9 +2,7 @@
 use super::*;
 use crate::project_export::admission::hash;
 use std::fs;
-#[path = "../../../tests/common/project.rs"]
-mod fixture;
-use fixture::ProjectFixture;
+use crate::project_fixture::ProjectFixture;
 const MAP: &str = "arena.tilemap.json";
 fn fixture() -> ProjectFixture {
     let f = ProjectFixture::new();

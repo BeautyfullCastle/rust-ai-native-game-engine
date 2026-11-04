@@ -1,6 +1,6 @@
 //! Create one offline, versioned Arena starter with an explicit authoring seed.
 use std::{collections::BTreeMap, ffi::OsString, path::PathBuf};
-const HELP: &str = "Usage: orr_new_arena --output ABSOLUTE_NEW_DIR --template arena-2d-v1 --seed KEY\n\nCreates one sprite-only two-player Arena starter on Linux. The parent must exist;\nall existing destinations are rejected. KEY is 1..128 ASCII letters, digits,\ndots, underscores or hyphens. Same seed/template/tool reproduces project bytes;\nchoose a different seed for fresh authored GUIDs. Runtime identity and shared\nplayer preferences do not change. No downloads, scripts or builds are executed.\n\nWith collect-dodge enabled: --template collect-dodge-2d-v1 --seed KEY --game-id UUID\nrequires an explicit canonical lowercase UUIDv4 for the new game.\nWith collect-ui enabled, collect-dodge-ui-2d-v1 also installs the authored UI and Korean font.\nA reused UUID shares high-score identity; the seed does not create or change game identity.\n\nWith room-project enabled: --template room-escape-3d-v1|room-escape-character-3d-v1 --seed KEY creates a closed static-model RoomEscapeV1 starter. No --game-id or progress/save identity is accepted.\n\nWith tilemap enabled: --template arena-tilemap-2d-v1 creates a closed installed-atlas Arena background map for tilemap-enabled editor paint/erase/Undo/Save/reopen/Play. Linux creation only. Existing-project Attach, export and package changes are unsupported.";
+const HELP: &str = "Usage: orr_new_arena --output ABSOLUTE_NEW_DIR --template arena-2d-v1 --seed KEY\n\nCreates one sprite-only two-player Arena starter on Linux. The parent must exist;\nall existing destinations are rejected. KEY is 1..128 ASCII letters, digits,\ndots, underscores or hyphens. Same seed/template/tool reproduces project bytes;\nchoose a different seed for fresh authored GUIDs. Runtime identity and shared\nplayer preferences do not change. No downloads, scripts or builds are executed.\n\nWith collect-dodge enabled: --template collect-dodge-2d-v1 --seed KEY --game-id UUID\nrequires an explicit canonical lowercase UUIDv4 for the new game.\nWith collect-ui enabled, collect-dodge-ui-2d-v1 also installs the authored UI and Korean font.\nA reused UUID shares high-score identity; the seed does not create or change game identity.\n\nWith room-project enabled: --template room-escape-3d-v1|room-escape-character-3d-v1 --seed KEY creates a closed static-model RoomEscapeV1 starter. No --game-id or progress/save identity is accepted.\n\nWith tilemap enabled: --template arena-tilemap-2d-v1 creates a closed installed-atlas Arena background map for tilemap-enabled editor paint/erase/Undo/Save/reopen/Play. Linux creation only. Existing-project Attach, export and package changes are unsupported.\n\nWith tilemap enabled: --template arena-custom-tileset-2d-v1 --tileset-package ABS_DIR --tile-width N --tile-height N creates a new empty map from a local four-file sprite package. The package requires orr.package.json, sprites.json, a PNG atlas and LICENSE.txt. Actor art is retained; source files are unchanged.";
 fn main() {
     if let Err((code, error)) = run() {
         eprintln!("error: {error}");
@@ -27,7 +27,24 @@ fn run() -> Result<(), (i32, String)> {
                 .into_string()
                 .map_err(|_| (2, "seed must be ASCII".into()))?,
         };
-        let report = if options.template == orr_sample::project_create::COLLECT_TEMPLATE
+        let custom = options.template == orr_sample::project_create::CUSTOM_TILEMAP_TEMPLATE;
+        if !custom && ["--tileset-package", "--tile-width", "--tile-height"].iter().any(|key| args.contains_key(*key)) {
+            return Err((2, "custom tileset options require arena-custom-tileset-2d-v1".into()));
+        }
+        let report = if custom {
+            if args.contains_key("--game-id") { return Err((2, "--game-id is only valid for CollectDodge".into())); }
+            let package = args.get("--tileset-package").ok_or((2, "custom tileset requires --tileset-package".into()))?;
+            let dimension = |key: &str| -> Result<u32, (i32, String)> {
+                let text = args.get(key).and_then(|v| v.to_str()).ok_or((2, format!("custom tileset requires {key}")))?;
+                if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) { return Err((2, format!("{key} must be a positive integer"))); }
+                text.parse::<u32>().ok().filter(|n| *n > 0).ok_or((2, format!("{key} must be a positive u32 integer")))
+            };
+            let tile_size = [dimension("--tile-width")?, dimension("--tile-height")?];
+            #[cfg(feature = "tilemap")]
+            { orr_sample::project_create::create_custom_tilemap(&orr_sample::project_create::CustomTilemapOptions { base: options, package: PathBuf::from(package), tile_size }) }
+            #[cfg(not(feature = "tilemap"))]
+            { let _ = (package, tile_size); Err("Arena custom tileset template requires tilemap feature".into()) }
+        } else if options.template == orr_sample::project_create::COLLECT_TEMPLATE
             || options.template == orr_sample::project_create::COLLECT_UI_TEMPLATE
         {
             let game_id = args
@@ -79,7 +96,7 @@ fn parse(args: Vec<OsString>) -> Result<BTreeMap<String, OsString>, String> {
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         let option = arg.to_str().ok_or("option names must be UTF-8")?;
-        if !matches!(option, "--output" | "--template" | "--seed" | "--game-id") {
+        if !matches!(option, "--output" | "--template" | "--seed" | "--game-id" | "--tileset-package" | "--tile-width" | "--tile-height") {
             return Err(format!("unknown option {option}; use --help for usage"));
         }
         if options.contains_key(option) {

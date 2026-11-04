@@ -1,9 +1,7 @@
 //! CPU-only closure/admission checks; no exporter smoke, window or GPU claims.
 use super::*;
 use serde_json::{json, Value};
-#[path = "../../../tests/common/project.rs"]
-mod fixture;
-use fixture::ProjectFixture;
+use crate::project_fixture::ProjectFixture;
 
 const MAP: &str = "arena.tilemap.json";
 fn map() -> Value {
