@@ -8,6 +8,8 @@ fn app(path: &std::path::Path, scene: Option<String>) -> App {
     let session = session(origin.config().unwrap());
     let journal = Journal::new(origin, &session);
     App {
+        #[cfg(feature = "coop-defense-audio")]
+        audio: Default::default(),
         session,
         ui: DefenseUi::new(),
         gfx: None,

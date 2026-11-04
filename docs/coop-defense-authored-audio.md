@@ -54,5 +54,6 @@ owner permits generation zero, a projectile with no separate attack ID, and the
 explicit successful-instance replacement boundary described above. The original
 PCM generation script, creator attribution and separate audio LICENSE were not
 found; byte lineage is not independent verification of distribution rights. Historical mock/offline Kira results are not counted as
-verification of this new integration. Native playback and actual browser/device
-listening remain separate acceptance work.
+verification of this new integration. The optional [native consumer](coop-defense-native-audio.md) reuses shared bank
+admission with the native Session and Kira mixer. Actual browser/device listening
+remains separate acceptance work.

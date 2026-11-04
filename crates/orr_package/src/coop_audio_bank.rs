@@ -10,18 +10,7 @@ use std::{
 };
 mod publish;
 
-pub const CUES: [&str; 10] = [
-    "attack-light",
-    "attack-heavy",
-    "attack-magic",
-    "impact-light",
-    "impact-heavy",
-    "summon",
-    "merge",
-    "ui-confirm",
-    "ui-reject",
-    "death",
-];
+pub use crate::coop_audio_admission::CUES;
 const MAX_PCM: usize = 96008;
 const MAX_LICENSE: usize = 64 * 1024;
 #[derive(Clone, Copy, Debug)]

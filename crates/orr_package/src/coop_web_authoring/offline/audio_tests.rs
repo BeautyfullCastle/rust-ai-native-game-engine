@@ -1,5 +1,6 @@
 use super::*;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 fn fixture() -> (Value, BTreeMap<String, Vec<u8>>) {
     let mut records = Vec::new();
     let mut objects = BTreeMap::new();
@@ -135,4 +136,37 @@ fn closed_record_identity_integer_fields_and_budgets() {
         rehash(&mut m, &objects, i);
     }
     assert!(admit(&m, &objects).is_ok());
+}
+
+#[test]
+fn shared_admission_and_embedding_agree_without_reserializing_numbers() {
+    let (mut value, objects) = fixture();
+    value["cues"].as_array_mut().unwrap().reverse();
+    let text = serde_json::to_string(&value).unwrap();
+    let text = format!("{},\"extra\":1.2500e+00}}", text.strip_suffix('}').unwrap());
+    let bank = crate::coop_audio_admission::admit(text.as_bytes(), &objects).unwrap();
+    let prepared = prepare(text.as_bytes(), &objects).unwrap();
+    assert!(prepared.embedded().contains(&text));
+    let body = prepared
+        .embedded()
+        .strip_prefix("<script type=\"application/json\" id=\"authored-audio-bank\">")
+        .unwrap()
+        .strip_suffix("</script>")
+        .unwrap();
+    let embedded: Value = serde_json::from_str(body).unwrap();
+    for record in bank.records() {
+        let file = format!("{}.pcm", record.cue());
+        assert_eq!(
+            STANDARD
+                .decode(embedded["objects"][&file].as_str().unwrap())
+                .unwrap(),
+            record.pcm_bytes()
+        );
+    }
+    let mut bad = objects;
+    bad.remove("death.pcm");
+    assert_eq!(
+        crate::coop_audio_admission::admit(text.as_bytes(), &bad).unwrap_err(),
+        prepare(text.as_bytes(), &bad).err().unwrap()
+    );
 }

@@ -20,9 +20,13 @@ use winit::{
 };
 
 pub(crate) type DefenseSession = Session<game::DefenseGame, LocalInputSource>;
-pub const HELP:&str="Stormglass Foundry\ncoop_defense [--scene PATH] [--run-directory ABSOLUTE_PRIVATE_DIRECTORY (Linux run-save feature)] [--headless --ticks N [--demo] [--capture NEW.png]]\nSpace summon, click your unit then empty tile to move or identical role/tier to merge, U upgrade, I invest, P/Escape pause, Enter continue, R restart. AI partner is local, not online. Headless capture uses a software GPU.";
+pub const HELP:&str="Stormglass Foundry\ncoop_defense [--scene PATH] [--run-directory ABSOLUTE_PRIVATE_DIRECTORY (Linux run-save feature)] [--headless --ticks N [--demo] [--capture NEW.png]]\nSpace summon, click your unit then empty tile to move or identical role/tier to merge, U upgrade, I invest, P/Escape pause, Enter continue, R restart. AI partner is local, not online. Headless capture uses a software GPU. Optional coop-defense-audio: --audio-bank ABSOLUTE_BANK_DIRECTORY --audio off|auto|required; native output additionally needs audio-native. Starts muted; Linux bank loading only.";
 #[derive(Debug, Default)]
 pub struct Options {
+    #[cfg(feature = "coop-defense-audio")]
+    pub audio_bank: Option<PathBuf>,
+    #[cfg(feature = "coop-defense-audio")]
+    pub audio: crate::arena_audio::AudioMode,
     #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
     pub run_directory: Option<PathBuf>,
     pub headless: bool,
@@ -41,6 +45,17 @@ impl Options {
                 return Err(format!("duplicate option {a}"));
             }
             match a.as_str() {
+                #[cfg(feature = "coop-defense-audio")]
+                "--audio-bank" => {
+                    out.audio_bank = Some(args.next().ok_or("--audio-bank needs PATH")?.into())
+                }
+                #[cfg(feature = "coop-defense-audio")]
+                "--audio" => {
+                    out.audio = args
+                        .next()
+                        .ok_or("--audio needs off|auto|required")?
+                        .parse()?
+                }
                 #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
                 "--run-directory" => {
                     out.run_directory =
@@ -66,6 +81,8 @@ impl Options {
         if out.headless && out.run_directory.is_some() {
             return Err("--run-directory requires the native interactive player".into());
         }
+        #[cfg(feature = "coop-defense-audio")]
+        validate_audio_options(&out)?;
         if out.ticks > 36000 {
             return Err("ticks must not exceed 36000".into());
         }
@@ -80,6 +97,46 @@ impl Options {
             return Err("capture must end in .png".into());
         }
         Ok(out)
+    }
+}
+#[cfg(feature = "coop-defense-audio")]
+fn validate_audio_options(options: &Options) -> Result<(), String> {
+    if options.audio == crate::arena_audio::AudioMode::Required {
+        if options.headless {
+            return Err("required audio needs the native interactive player".into());
+        }
+        if options.audio_bank.is_none() {
+            return Err("required audio needs --audio-bank".into());
+        }
+    }
+    Ok(())
+}
+#[cfg(feature = "coop-defense-audio")]
+fn prepare_audio(
+    options: &Options,
+) -> Result<Option<orr_package::coop_audio_admission::AdmittedBank>, String> {
+    validate_audio_options(options)?;
+    #[cfg(target_os = "linux")]
+    {
+        options
+            .audio_bank
+            .as_deref()
+            .map(orr_package::coop_audio_admission::load_bank)
+            .transpose()
+            .map_err(|e| {
+                e.chars()
+                    .take(240)
+                    .map(|c| if c.is_control() { ' ' } else { c })
+                    .collect()
+            })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        if options.audio_bank.is_some() {
+            Err("authored audio bank loading currently requires Linux".into())
+        } else {
+            Ok(None)
+        }
     }
 }
 /// Resolve and validate source before creating any window, GPU, or session.
@@ -147,6 +204,8 @@ pub(crate) fn session(config: game::DefenseConfig) -> DefenseSession {
     Session::new(config, session_config, LocalInputSource)
 }
 pub fn run(options: Options) -> Result<(), String> {
+    #[cfg(feature = "coop-defense-audio")]
+    let audio_bank = prepare_audio(&options)?;
     let scene = prepare_scene(&options)?;
     let config = match &scene {
         Some(text) => orr_games::coop_defense_scene::parse_config(text)?,
@@ -185,9 +244,13 @@ pub fn run(options: Options) -> Result<(), String> {
     } else {
         None
     };
+    #[cfg(feature = "coop-defense-audio")]
+    let audio = crate::defense_audio::DefenseAudio::open(audio_bank.as_ref(), options.audio)?;
     let event_loop = EventLoop::new().map_err(|e| e.to_string())?;
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App {
+        #[cfg(feature = "coop-defense-audio")]
+        audio,
         #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
         saves,
         session: session(config),
@@ -231,6 +294,8 @@ struct RunSaves {
     candidate: Option<crate::defense_run_save::Candidate>,
 }
 struct App {
+    #[cfg(feature = "coop-defense-audio")]
+    audio: crate::defense_audio::DefenseAudio,
     #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
     saves: Option<RunSaves>,
     session: DefenseSession,
@@ -246,6 +311,14 @@ struct App {
 impl App {
     // Shared by the window redraw path and CPU-only admission tests.
     fn process_input(&mut self, mut input: egui::RawInput, delta: f64) -> egui::FullOutput {
+        #[cfg(feature = "coop-defense-audio")]
+        {
+            if let Err(error) = self.audio.poll() {
+                self.error = Some(error);
+            }
+            self.ui.audio.enabled = self.audio.enabled();
+            self.ui.audio.status = self.audio.status().to_owned();
+        }
         input.focused &= self.focused;
         if std::mem::take(&mut self.focus_lost_pending) {
             input.events.push(egui::Event::WindowFocused(false));
@@ -275,13 +348,22 @@ impl App {
         let was_started = self.ui.started;
         let was_paused = self.ui.paused;
         let (output, command) = self.ui.show(input, self.session.predicted_frame());
-        #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
-        if self.process_saves() {
+        if self.error.is_some() {
             self.commands.clear();
             self.accumulator = 0.0;
             return output;
         }
-        if focus_lost || !was_started || was_paused || self.ui.paused {
+        #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+        if self.process_saves() {
+            #[cfg(feature = "coop-defense-audio")]
+            self.sync_audio(true);
+            self.commands.clear();
+            self.accumulator = 0.0;
+            return output;
+        }
+        #[cfg(feature = "coop-defense-audio")]
+        self.sync_audio(focus_lost || !self.ui.started || self.ui.paused);
+        if self.error.is_some() || focus_lost || !was_started || was_paused || self.ui.paused {
             self.commands.clear();
             self.accumulator = 0.0;
             return output;
@@ -298,14 +380,40 @@ impl App {
         };
         while self.accumulator >= 1.0 / 60.0 {
             let command = self.commands.pop_front().unwrap_or_default();
-            self.session.advance(command, vec![]);
+            let result = self.session.advance(command, vec![]);
+            #[cfg(feature = "coop-defense-audio")]
+            {
+                let (orr_session::AdvanceResult::Advanced { events, .. }
+                | orr_session::AdvanceResult::Stalled { events }) = &result;
+                if let Err(error) = self.audio.consume(events) {
+                    self.error = Some(error);
+                }
+            }
+            #[cfg(not(feature = "coop-defense-audio"))]
+            let _ = result;
             #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
             if let Some(saves) = &mut self.saves {
                 saves.journal.record(command);
             }
             self.accumulator -= 1.0 / 60.0;
+            if self.error.is_some() {
+                self.commands.clear();
+                self.accumulator = 0.0;
+                break;
+            }
         }
         output
+    }
+    #[cfg(feature = "coop-defense-audio")]
+    fn sync_audio(&mut self, paused: bool) {
+        if let Err(error) = self.audio.controls(
+            self.ui.audio.muted,
+            f32::from(self.ui.audio.gain_percent) / 100.0,
+            paused,
+            self.focused,
+        ) {
+            self.error = Some(error);
+        }
     }
     #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
     fn process_saves(&mut self) -> bool {
@@ -372,6 +480,13 @@ impl App {
                         self.session.predicted_frame().tick()
                     );
                     self.ui.run_save.mode = M::Closed;
+                    #[cfg(feature = "coop-defense-audio")]
+                    if let Err(error) = self.audio.replace(
+                        self.session.predicted_frame().tick(),
+                        game::run(self.session.predicted_frame()).generation,
+                    ) {
+                        self.error = Some(error);
+                    }
                 }
             }
             Ok(())
@@ -388,6 +503,8 @@ impl App {
         self.accumulator = 0.0;
         self.last = Instant::now();
         if !focused {
+            #[cfg(feature = "coop-defense-audio")]
+            self.sync_audio(true);
             self.focus_lost_pending = true;
             self.commands.clear();
             if self.ui.started && game::run(self.session.predicted_frame()).phase == game::PLAYING {
@@ -409,6 +526,10 @@ impl App {
         };
         let input = gfx.state.take_egui_input(&gfx.window);
         let mut output = self.process_input(input, delta);
+        if let Some(error) = self.error.clone() {
+            self.fail(event_loop, error);
+            return;
+        }
         let gfx = self.gfx.as_mut().expect("graphics initialized above");
         gfx.state
             .handle_platform_output(&gfx.window, std::mem::take(&mut output.platform_output));
@@ -496,7 +617,12 @@ impl ApplicationHandler for App {
         }
     }
 }
-pub fn headless(options: Options) -> Result<(), String> {
+pub fn headless(mut options: Options) -> Result<(), String> {
+    // Library callers may not have passed through CLI parsing/run admission.
+    // This entry point is headless regardless of the caller's flag value.
+    options.headless = true;
+    #[cfg(feature = "coop-defense-audio")]
+    let _audio_bank = prepare_audio(&options)?;
     let config = prepare_config(&options)?;
     headless_prepared(options, config)
 }
@@ -778,6 +904,8 @@ mod pause_tests {
         let mut ui = DefenseUi::new();
         ui.started = true;
         App {
+            #[cfg(feature = "coop-defense-audio")]
+            audio: Default::default(),
             #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
             saves: None,
             session: session(game::DefenseConfig::default()),
@@ -1189,6 +1317,8 @@ mod run_save_tests {
             &session,
         );
         App {
+            #[cfg(feature = "coop-defense-audio")]
+            audio: Default::default(),
             session,
             ui: DefenseUi::new(),
             gfx: None,
@@ -1448,3 +1578,7 @@ mod run_save_tests {
 #[cfg(all(test, feature = "coop-defense-run-save", target_os = "linux"))]
 #[path = "defense_run_save_app_tests.rs"]
 mod run_save_acceptance_tests;
+
+#[cfg(all(test, feature = "coop-defense-audio"))]
+#[path = "defense_audio_app_tests.rs"]
+pub(crate) mod audio_tests;

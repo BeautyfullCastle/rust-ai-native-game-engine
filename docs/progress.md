@@ -25,13 +25,15 @@
 
 [PR #430](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/430)은 native Pause/Continue와 포커스 복귀 후 정지 유지를 추가했다. 개발 merge 055b10c308d37ecbcf335da0777a00961b0ae4f2, tree f39beeb8d4a982891f299c72a60b6c7ab17effd6에서 [필수 CI·독립 산출물 재실행](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/430#issuecomment-6641518896)을 완료했다. App20/UI17/View2·엄격 검사·기능 제외·production 빌드와 동일한 authored 승리를 확인했다. 승인된 delay2 입력은 보존하고 미제출 UI 큐만 취소한다.
 
-- [정확한 head의 필수 CI](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/41892258398)는 첫 실행에 성공했다. [Artifact](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/41892258398/artifacts/13354138228)의 source/tree·실행 수 8+2+1+1+1+2·runtime digest·tick 0/30/restart parity를 다운로드해 검증했다. 로컬 집중 검사와 독립 리뷰 범위는 [검증 기록](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/426#issuecomment-6639723379)에 있다. 전체 workspace 신규 실행이나 GPU/창 입력 증거는 아니다.
+[PR #431](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/431)은 선택 Linux native Save Copy/Load를 추가했다. 개발 merge d62eeaad3c562c20484d1b3483606aa4f1420910, tree c7e173059dc83efb5f1c2b217777a4d47359f94e의 [필수 CI·독립 산출물 검사](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/431#issuecomment-6642870240)를 완료했다. 동일 실행 파일·제한된 입력 승인 기록으로 delay2와 미래 입력을 보존한다. 기능66/호환39·strict·별도 프로세스31 Frame 동등성과 실제 headless 승리를 확인했다. 창·장치 검증은 아니다.
+
+- #426의 [정확한 head CI·artifact](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/41892258398)와 [검증 기록](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/426#issuecomment-6639723379)은 원본 숨김 전달·재현 범위를 보존한다. 전체 workspace·GPU·창 입력 증거로 확대하지 않는다.
 - **과거 Windows 직접 플레이:** 10-wave 승리, 369 kills, 29 merges, core 8/30 및 Wave 2 패배 → R 재시작을 관측했다. [원래 증거](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94#issuecomment-6430939337)는 당시 산출물에만 적용하며 현재 소스의 Windows 재검증으로 옮기지 않는다.
 - **현재 Stormglass 실행 범위:** 실제 native/WASM consumed-input trace와 source-hidden packed 소비, mock-DOM 제어/저장 검사는 실제 브라우저 파일 선택·표시·물리 입력과 별개다. 2026-11-04 Chromium 사전 검사는 페이지 로드 전 Unix socket EPERM으로 실패했고 정식 확대 실행도 executor 초기화에서 실패했다. 실제 브라우저 플레이는 **미검증**이며 다른 환경 실행으로 이 제한을 우회하지 않았다.
 
 ## 남은 우선순위와 경계
 
-1. 실제 플레이의 입력·승패·재시작·저장복원 단절을 먼저 고친다. Native 플레이는 종료 후 진행을 복원할 수 없어 [네이티브 저장 범위](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94#issuecomment-6641920616)를 구현 중이다. Linux의 명시적 외부 저장 폴더·동일 실행 파일·제한된 입력 승인 기록을 사용하며, 기존 delay2와 미래 입력을 새 Session에서 정확히 복원한다. 실제 UI 저장/선택/취소와 별도 프로세스 Frame·후속 입력 동등성이 수용 기준이다. 웹 저장·Editor 장면 Save·일반 코어 체크포인트와 구분한다.
+1. 실제 플레이와 제작 결과의 소비 경로를 우선한다. 선택 native authored audio는 기존 엄격 bank admission과 Kira mixer로 Session 이벤트·음소거/음량·정지/포커스·재시작·저장복원을 연결한다. [구현과 수용 범위](coop-defense-native-audio.md)는 원본을 숨긴 CLI 제작 음원, 실제 App/Session Kira PCM 및 게임 상태 동등성을 검증한다. [진행·통합 증거](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94#issuecomment-6643206532)를 따르며, 물리 장치 청취를 대신하지 않는다.
 2. 허용된 실행 환경이 있을 때 현재 산출물의 브라우저/native-window 플레이를 별도 수용한다. 화면 증거가 없으면 성공률·모바일·Windows·hardware GPU까지 확대하지 않는다.
 3. [설계 v2](design-v2.md)의 사전 고정 과제/seed/oracle·예산·실제 모델 기준선을 준비한다. 모델 호출·업로드·비용은 별도 승인 범위이며 아직 측정 결과가 없다.
 
