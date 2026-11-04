@@ -21,13 +21,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn env_path(name: &str) -> PathBuf {
+pub(super) fn env_path(name: &str) -> PathBuf {
     let path = PathBuf::from(std::env::var_os(name).unwrap_or_else(|| panic!("set {name}")));
     assert!(path.is_absolute(), "{name} must be absolute");
     path
 }
 
-fn inventory(root: &Path) -> BTreeMap<String, String> {
+pub(super) fn inventory(root: &Path) -> BTreeMap<String, String> {
     fs::read_dir(root)
         .unwrap()
         .map(|entry| {
@@ -43,14 +43,14 @@ fn inventory(root: &Path) -> BTreeMap<String, String> {
         .collect()
 }
 
-fn settle(h: &mut Harness<'_, PlayerApp>) {
+pub(super) fn settle(h: &mut Harness<'_, PlayerApp>) {
     for _ in 0..3 {
         h.state_mut().inner.editor.sync();
         h.run_steps(2);
     }
 }
 
-fn click(h: &mut Harness<'_, PlayerApp>, label: &str) {
+pub(super) fn click(h: &mut Harness<'_, PlayerApp>, label: &str) {
     assert!(
         !h.get_by_role_and_label(Role::Button, label)
             .accesskit_node()
@@ -72,7 +72,7 @@ fn click(h: &mut Harness<'_, PlayerApp>, label: &str) {
     }
 }
 
-fn wait_for(h: &mut Harness<'_, PlayerApp>, description: &str, ready: impl Fn(&PlayerApp) -> bool) {
+pub(super) fn wait_for(h: &mut Harness<'_, PlayerApp>, description: &str, ready: impl Fn(&PlayerApp) -> bool) {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         if ready(h.state()) {
@@ -101,7 +101,7 @@ fn lost_app(app: &PlayerApp) -> bool {
         != 0
 }
 
-fn capture_frame<State: eframe::App>(h: &mut Harness<'_, State>, root: &Path, name: &str) {
+pub(super) fn capture_frame<State: eframe::App>(h: &mut Harness<'_, State>, root: &Path, name: &str) {
     let frame = h
         .render()
         .expect("actual software-GPU EditorApp/PlayerApp composite");
@@ -131,7 +131,7 @@ fn capture_editor(h: &mut Harness<'_, EditorApp>, root: &Path, name: &str) {
     capture_frame(h, root, name);
 }
 
-fn software_gpu_setup(backend: wgpu::Backend) -> egui_wgpu::WgpuSetupCreateNew {
+pub(super) fn software_gpu_setup(backend: wgpu::Backend) -> egui_wgpu::WgpuSetupCreateNew {
     let mut setup = WgpuSetupCreateNew::without_display_handle();
     setup.instance_descriptor.backends = match backend {
         wgpu::Backend::Vulkan => wgpu::Backends::VULKAN,
@@ -152,7 +152,7 @@ fn software_gpu_setup(backend: wgpu::Backend) -> egui_wgpu::WgpuSetupCreateNew {
     setup
 }
 
-fn click_world(h: &mut Harness<'_, PlayerApp>, point: [f32; 3]) -> [FP; 3] {
+pub(super) fn click_world(h: &mut Harness<'_, PlayerApp>, point: [f32; 3]) -> [FP; 3] {
     let app = &h.state().inner;
     let viewport = app.ui.viewport_rect.unwrap();
     let size = app.ui.viewport_px;
@@ -208,7 +208,7 @@ fn assert_authoritative_goal_near(
     }
 }
 
-fn wait_for_authoritative_goal(
+pub(super) fn wait_for_authoritative_goal(
     h: &mut Harness<'_, PlayerApp>,
     expected: [FP; 3],
     tolerance_raw: i64,
@@ -236,14 +236,14 @@ fn wait_for_authoritative_goal(
     }
 }
 
-fn settle_editor(h: &mut Harness<'_, EditorApp>) {
+pub(super) fn settle_editor(h: &mut Harness<'_, EditorApp>) {
     for _ in 0..3 {
         h.state_mut().editor.sync();
         h.run_steps(2);
     }
 }
 
-fn click_editor(h: &mut Harness<'_, EditorApp>, role: Role, label: &str) {
+pub(super) fn click_editor(h: &mut Harness<'_, EditorApp>, role: Role, label: &str) {
     assert!(
         !h.get_by_role_and_label(role, label)
             .accesskit_node()
@@ -256,7 +256,7 @@ fn click_editor(h: &mut Harness<'_, EditorApp>, role: Role, label: &str) {
     settle_editor(h);
 }
 
-fn type_editor_field(h: &mut Harness<'_, EditorApp>, label: &str, value: &str) {
+pub(super) fn type_editor_field(h: &mut Harness<'_, EditorApp>, label: &str, value: &str) {
     h.get_by_role_and_label(Role::TextInput, label)
         .scroll_to_me();
     h.run_steps(20);

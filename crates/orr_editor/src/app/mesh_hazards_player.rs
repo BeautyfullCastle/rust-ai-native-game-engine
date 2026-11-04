@@ -247,6 +247,28 @@ impl State {
 impl super::EditorApp {
     /// Keep the already admitted hazards-player camera panel bound to its
     /// validated sidecar instead of letting the first UI frame load it again.
+    pub(crate) fn install_validated_hazards_navigation(
+        &mut self,
+        panel: crate::mesh_navigation::Panel,
+    ) {
+        self.mesh_navigation = panel;
+    }
+
+    pub(crate) fn verify_hazards_restart(&mut self) -> Result<(), String> {
+        let mut session = State::default();
+        session.open_dialog(&mut self.editor);
+        if !self.restart_mesh_hazards_player(&mut session) {
+            return Err(session
+                .error
+                .unwrap_or_else(|| "Headless restart failed".into()));
+        }
+        validate_fresh_session(&self.editor)?;
+        if let Some(blocker) = self.mesh_navigation.play_blocker(&self.editor) {
+            return Err(blocker);
+        }
+        Ok(())
+    }
+
     pub(crate) fn install_validated_hazards_camera(
         &mut self,
         panel: crate::mesh_camera_panel::Panel,
@@ -491,6 +513,67 @@ mod tests {
             true,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn busy_export_disables_art_fields_and_conflicting_restart() {
+        use egui_kittest::{
+            Harness,
+            kittest::{NodeT, Queryable},
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = super::super::EditorApp::new(editor(directory.path()), None);
+        app.sync_mesh_presentation();
+        let mut harness = Harness::builder()
+            .with_size([1200.0, 1000.0])
+            .build_ui_state(
+                |ui, app: &mut super::super::EditorApp| app.inspector(ui),
+                app,
+            );
+        harness.run_steps(2);
+        harness.get_by_label("Mesh agent art").click_accesskit();
+        harness.run_steps(3);
+        let release = harness
+            .state_mut()
+            .mesh_hazards_export
+            .hold_pending_for_test();
+        harness.run_steps(2);
+        assert!(
+            harness
+                .get_by_role_and_label(
+                    egui::accesskit::Role::TextInput,
+                    "Art package source directory"
+                )
+                .accesskit_node()
+                .is_disabled()
+        );
+        let epoch = harness.state().editor.scene_load_epoch();
+        harness.state_mut().restart_from_ui();
+        assert_eq!(harness.state().editor.scene_load_epoch(), epoch);
+        assert!(
+            harness
+                .state()
+                .editor
+                .status()
+                .unwrap()
+                .text
+                .contains("export completion")
+        );
+        assert!(
+            harness
+                .state()
+                .mesh_creation_base_blocker()
+                .unwrap()
+                .contains("export completion")
+        );
+        assert!(
+            harness
+                .state()
+                .playback_start_blocker()
+                .unwrap()
+                .contains("export completion")
+        );
+        release();
     }
 
     #[test]

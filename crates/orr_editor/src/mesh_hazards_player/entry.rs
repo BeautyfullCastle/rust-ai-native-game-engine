@@ -6,7 +6,12 @@ static MESH_HAZARDS_PLAYER_MARKER: [u8; 26] = *b"ORR_MESH_HAZARDS_PLAYER_V1";
 #[unsafe(link_section = ".orrhcam")]
 static MESH_HAZARDS_CAMERA_MARKER: [u8; 26] = *b"ORR_MESH_HAZARDS_CAMERA_V1";
 
+#[used]
+#[unsafe(link_section = ".orrhart")]
+static MESH_HAZARDS_ART_MARKER: [u8; 23] = *b"ORR_MESH_HAZARDS_ART_V1";
+
 fn main() {
+    std::hint::black_box(&MESH_HAZARDS_ART_MARKER);
     std::hint::black_box(&MESH_HAZARDS_PLAYER_MARKER);
     std::hint::black_box(&MESH_HAZARDS_CAMERA_MARKER);
     if let Err(error) = orr_editor::mesh_hazards_player::run() {

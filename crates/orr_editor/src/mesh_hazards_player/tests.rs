@@ -165,7 +165,7 @@ fn invalid_or_conflicting_player_options_are_rejected() {
 fn capabilities_report_hazards_and_interactive_input_profiles() {
     assert_eq!(
         super::CAPABILITIES,
-        "ORR_MESH_HAZARDS_PLAYER_V1\nORR_MESH_INPUT_V1\nORR_MESH_HAZARDS_CAMERA_V1"
+        "ORR_MESH_HAZARDS_PLAYER_V1\nORR_MESH_INPUT_V1\nORR_MESH_HAZARDS_CAMERA_V1\nORR_MESH_HAZARDS_ART_V1"
     );
 }
 
@@ -223,6 +223,7 @@ fn executable_identity_checks_platform_and_actual_bytes() {
         runtime_sha256: super::sha256_file_bounded(&executable).unwrap(),
         platform: native,
         camera_sha256: None,
+        art_sha256: None,
     };
     super::verify_executable(&executable, &bundle).unwrap();
     fs::write(&executable, b"changed runtime").unwrap();
@@ -392,5 +393,59 @@ fn player_rechecks_removed_replaced_and_new_camera_bundle_sidecars() {
     assert!(
         super::verify_loaded_camera_bundle(&added.bundle.root, &added.bundle, &added.camera_panel)
             .is_err()
+    );
+}
+
+#[test]
+fn headless_verification_is_bounded_explicit_and_order_independent() {
+    for args in [
+        vec!["--verify-headless", "--bundle", "bundle", "--ticks", "0"],
+        vec![
+            "--bundle",
+            "bundle",
+            "--ticks",
+            "10000",
+            "--verify-headless",
+        ],
+    ] {
+        let Request::Launch(options) = parse(&args).unwrap() else {
+            panic!("launch expected")
+        };
+        assert!(options.verify_headless);
+    }
+    for args in [
+        vec!["--verify-headless"],
+        vec!["--verify-headless", "--ticks", "10001"],
+        vec!["--verify-headless", "--ticks", "0", "--size", "960x600"],
+        vec![
+            "--verify-headless",
+            "--ticks",
+            "0",
+            "--screenshot",
+            "image.png",
+        ],
+        vec!["--verify-headless", "--ticks", "0", "--frames", "2"],
+        vec!["--verify-headless", "--capabilities"],
+        vec!["--verify-headless", "--help"],
+        vec!["--verify-headless", "--verify-headless", "--ticks", "0"],
+    ] {
+        assert!(parse(&args).is_err(), "{args:?}");
+    }
+}
+
+#[test]
+fn loaded_art_must_match_manifest_even_when_bundle_on_disk_is_unchanged() {
+    let fixture = bound_bundle_fixture(false);
+    let mut loaded = Editor::open_game(&fixture.bundle.scene, EditorGame::MeshHazardsV1).unwrap();
+    loaded.sync();
+    let mut panel = crate::mesh_navigation::Panel::default();
+    panel.sync(&loaded);
+    super::verify_loaded_art_bundle(&fixture.bundle.root, &fixture.bundle, &panel).unwrap();
+    let mut changed = fixture.bundle.clone();
+    changed.art_sha256 = Some("unloaded art".into());
+    assert!(
+        super::verify_loaded_art_bundle(&fixture.bundle.root, &changed, &panel)
+            .unwrap_err()
+            .contains("loaded game agent art")
     );
 }

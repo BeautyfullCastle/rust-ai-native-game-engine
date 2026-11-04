@@ -1514,6 +1514,7 @@ impl EditorApp {
     }
 
     fn restart_from_ui(&mut self) {
+        if self.hazard_export_busy() { self.editor.error("Wait for hazard export completion before restarting"); return; }
         #[cfg(feature = "terrain-surface")]
         if self.terrain_surface.state.busy() { self.editor.error("Save or explicitly discard appearance work before Restart"); return; }
         #[cfg(feature = "tilemap")]
@@ -1903,18 +1904,19 @@ impl EditorApp {
         if self.editor.game().has_mesh_view() {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
             egui::ScrollArea::vertical().id_salt("mesh_navigation_inspector").auto_shrink([false, false]).show(ui, |ui| {
-                self.mesh_navigation.show(ui, &mut self.editor);
+                let authoring_enabled = !self.hazard_export_busy();
+                ui.add_enabled_ui(authoring_enabled, |ui| self.mesh_navigation.show(ui, &mut self.editor));
                 self.mesh_play_controls.show(ui, &mut self.editor);
                 #[cfg(feature="mesh-hazards")]
-                ui.add_enabled_ui(!self.mesh_navigation.has_unplaced_draft(), |ui| self.mesh_hazards.show(ui, &mut self.editor));
+                ui.add_enabled_ui(!self.hazard_export_busy() && !self.mesh_navigation.has_unplaced_draft(), |ui| self.mesh_hazards.show(ui, &mut self.editor));
                 let camera_editable = !self.hazard_export_busy();
                 ui.add_enabled_ui(camera_editable, |ui| self.mesh_camera.show(ui, &mut self.editor));
-                ui.add_enabled_ui(!self.mesh_navigation.has_unplaced_draft(), |ui| self.mesh_lighting.show_with_navigation(ui, &self.editor, &self.mesh_navigation));
-                ui.add_enabled_ui(!self.mesh_navigation.has_unplaced_draft(), |ui| self.mesh_hud.show(ui, &self.editor));
+                ui.add_enabled_ui(!self.hazard_export_busy() && !self.mesh_navigation.has_unplaced_draft(), |ui| self.mesh_lighting.show_with_navigation(ui, &self.editor, &self.mesh_navigation));
+                ui.add_enabled_ui(!self.hazard_export_busy() && !self.mesh_navigation.has_unplaced_draft(), |ui| self.mesh_hud.show(ui, &self.editor));
                 #[cfg(feature="mesh-mission")]
-                ui.add_enabled_ui(!self.mesh_navigation.has_unplaced_draft(), |ui| self.mesh_mission.show(ui, &mut self.editor));
+                ui.add_enabled_ui(!self.hazard_export_busy() && !self.mesh_navigation.has_unplaced_draft(), |ui| self.mesh_mission.show(ui, &mut self.editor));
                 #[cfg(feature="mesh-animated-models")]
-                self.mesh_animation.show(ui, &self.editor);
+                ui.add_enabled_ui(authoring_enabled, |ui| self.mesh_animation.show(ui, &self.editor));
                 #[cfg(not(feature="mesh-animated-models"))]
                 if let Some(blocker) = self.mesh_animation_blocker() { ui.colored_label(Color32::RED, blocker); }
             });
