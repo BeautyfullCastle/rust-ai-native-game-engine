@@ -16,7 +16,7 @@ jobs:
       CARGO_BUILD_JOBS: 2
       CARGO_INCREMENTAL: 0
       CARGO_TERM_COLOR: never
-      EVIDENCE: ${{ runner.temp }}/stormglass-native-audio-evidence
+      EVIDENCE: ${{ github.workspace }}/../stormglass-native-audio-evidence
     steps:
       - uses: actions/checkout@v4
         with:
