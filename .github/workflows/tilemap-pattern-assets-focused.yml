@@ -42,6 +42,8 @@ jobs:
           sudo apt-get install -y -q build-essential pkg-config libasound2-dev libudev-dev libx11-dev libxkbcommon-dev libwayland-dev libegl1-mesa-dev libgl1-mesa-dev mesa-vulkan-drivers 2>&1 | tee -a "$EVIDENCE/dependencies.log"
           runtime=$(mktemp -d "$RUNNER_TEMP/tilemap-pattern-assets-xdg.XXXXXXXX")
           echo "XDG_RUNTIME_DIR=$runtime" >> "$GITHUB_ENV"
+          mkdir "$runtime/mesa-cache"
+          echo "MESA_SHADER_CACHE_DIR=$runtime/mesa-cache" >> "$GITHUB_ENV"
       - name: Select verified Rust toolchain
         shell: bash
         run: |
@@ -65,7 +67,7 @@ jobs:
               ('tilemap', features + ['tilemap_panel::'], 79, 0, []),
               ('sprite-output', features + ['sprite_panel::clip_timing::output::tests'], 13, 0, []),
               ('json-output', features + ['json_output::tests'], 2, 0, []),
-              ('app', features + ['app::tilemap_pattern_asset_tests::actual_pattern_asset_save_load_stamp_reopen_play_literal_cells'], 1, 0, ['--exact', '--ignored', '--nocapture']),
+              ('app', features + ['app::tilemap_pattern_asset_tests::actual_pattern_asset_save_load_stamp_reopen_play_literal_cells'], 1, 0, ['--exact', '--ignored']),
               ('deps', ['--test', 'deps'], 8, 0, []),
           ]
           for label, args, count, ignored, flags in suites:
