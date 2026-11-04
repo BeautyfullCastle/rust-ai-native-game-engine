@@ -3604,6 +3604,10 @@ mod tilemap_actor_source_tests;
 mod tilemap_fill_tests;
 
 #[cfg(all(test, feature = "tilemap", feature = "project-create", target_os = "linux"))]
+#[path = "app/tilemap_replace_tests.rs"]
+mod tilemap_replace_tests;
+
+#[cfg(all(test, feature = "tilemap", feature = "project-create", target_os = "linux"))]
 #[path = "app/tilemap_resize_tests.rs"]
 mod tilemap_resize_tests;
 

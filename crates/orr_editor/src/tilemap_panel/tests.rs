@@ -832,3 +832,295 @@ mod installed {
         assert!(panel.dirty());
     }
 }
+
+#[test]
+fn replace_viewport_dispatch_is_press_only_guarded_and_atomic() {
+    use orr_sample::project::{PreparedProject, TilemapSupport, UiSupport};
+
+    fn copy_fixture(source: &Path, target: &Path) {
+        std::fs::create_dir_all(target).unwrap();
+        for entry in std::fs::read_dir(source).unwrap() {
+            let entry = entry.unwrap();
+            let kind = entry.file_type().unwrap();
+            assert!(!kind.is_symlink());
+            if kind.is_dir() {
+                copy_fixture(&entry.path(), &target.join(entry.file_name()));
+            } else {
+                assert!(kind.is_file());
+                std::fs::copy(entry.path(), target.join(entry.file_name())).unwrap();
+            }
+        }
+    }
+    const PIXELS: (u32, u32) = (1200, 800);
+    fn rect() -> egui::Rect {
+        egui::Rect::from_min_size(egui::pos2(80., 60.), egui::vec2(600., 400.))
+    }
+    fn frame(
+        ctx: &egui::Context,
+        panel: &mut TilemapPanel,
+        editor: &Editor,
+        sprites: &SpritePanel,
+        events: Vec<egui::Event>,
+    ) -> bool {
+        let mut reserved = false;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800., 600.),
+                )),
+                events,
+                focused: true,
+                ..Default::default()
+            },
+            |ui| {
+                reserved = panel.paint_viewport(ui, editor, sprites, rect(), PIXELS);
+            },
+        );
+        output.textures_delta.clear();
+        reserved
+    }
+    fn point(panel: &TilemapPanel, editor: &Editor, column: u32, row: u32) -> egui::Pos2 {
+        let d = panel.document().document();
+        let world = [
+            d.origin[0] + (column as f32 + 0.5) * d.tile_size[0] as f32 * d.units_per_pixel,
+            d.origin[1] - (row as f32 + 0.5) * d.tile_size[1] as f32 * d.units_per_pixel,
+        ];
+        let screen = editor.camera.world_to_screen(world, PIXELS);
+        rect().min + egui::vec2(screen[0] / 2., screen[1] / 2.)
+    }
+
+    // Copy only the checked-in installed fixture; no Linux creator, installation,
+    // arbitrary user directory, GPU, native window or network listener is used.
+    let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+    let root = temp.path().join("replace-viewport");
+    copy_fixture(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/saved_arena_project"),
+        &root,
+    );
+    let manifest_path = root.join("orr.project.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["entry"]["tilemap"] = serde_json::json!("arena.tilemap.json");
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    let map = orr_tilemap::Document {
+        version: 1,
+        sprite: orr_tilemap::SpriteRef {
+            package: "sample-sprites".into(),
+            document: "sprites.json".into(),
+        },
+        width: 3,
+        height: 2,
+        tile_size: [16, 16],
+        origin: [0., 32.],
+        units_per_pixel: 1.,
+        cells: vec![None, Some(10), None, Some(10), None, Some(11)],
+    };
+    std::fs::write(
+        root.join("arena.tilemap.json"),
+        serde_json::to_vec_pretty(&map).unwrap(),
+    )
+    .unwrap();
+    let admitted = crate::project::PreparedProject::open(&root).unwrap();
+    let spec = admitted.host_spec();
+    assert!(matches!(
+        spec,
+        crate::backend::HostSpec::PreparedArena { listen: None, .. }
+    ));
+    let mut editor = Editor::start(&spec).unwrap();
+    editor.sync();
+    editor.camera = Camera::new([24., 16.], 40.);
+    let parts = PreparedProject::open_with_capabilities(
+        &root,
+        crate::sprite_bindings::compiled_runtime(),
+        UiSupport::Unsupported,
+        TilemapSupport::Supported,
+    )
+    .unwrap()
+    .into_presentation_parts();
+    let mut panel =
+        TilemapPanel::prepare(&parts.root, parts.scene.path(), parts.tilemap.unwrap()).unwrap();
+    let ctx = egui::Context::default();
+    let mut sprites = SpritePanel::default();
+    if let Some(prepared) = parts.sprites {
+        sprites.install_prepared(
+            &ctx,
+            crate::sprite_bindings::Bindings::from_document(prepared.path, prepared.document),
+            prepared.assets,
+        );
+    }
+    sprites.install_tilemap_asset(&ctx, parts.tilemap_asset);
+    panel.install_editor_identity(&editor).unwrap();
+    panel.install_renderer(None, &sprites).unwrap();
+    assert!(panel.editable(&editor));
+
+    panel.tool = true;
+    panel.mode = ToolMode::Replace;
+    panel.selected = Some(11);
+    let before = panel.document().clone();
+    let files = [
+        "orr.project.json",
+        "orr.packages.lock.json",
+        "arena.scene.yaml",
+        "arena.sprites.json",
+        "arena.tilemap.json",
+    ];
+    let source = files.map(|name| std::fs::read(root.join(name)).unwrap());
+    let checksum = editor.checksum();
+    let host_history = editor.history().clone();
+    let inside = point(&panel, &editor, 0, 0);
+    let other = point(&panel, &editor, 1, 0);
+    let outside = egui::pos2(20., 20.);
+    frame(&ctx, &mut panel, &editor, &sprites, vec![]);
+    // Coalesced outside-origin press plus inside move still uses the press position.
+    frame(
+        &ctx,
+        &mut panel,
+        &editor,
+        &sprites,
+        vec![
+            PickHarness::button(outside, true),
+            egui::Event::PointerMoved(inside),
+        ],
+    );
+    assert_eq!(panel.document(), &before);
+    frame(
+        &ctx,
+        &mut panel,
+        &editor,
+        &sprites,
+        vec![PickHarness::button(inside, false)],
+    );
+    frame(
+        &ctx,
+        &mut panel,
+        &editor,
+        &sprites,
+        vec![
+            PickHarness::button(inside, true),
+            egui::Event::PointerMoved(other),
+        ],
+    );
+    assert_eq!(
+        panel.document().document().cells,
+        vec![Some(11), Some(10), Some(11), Some(10), Some(11), Some(11)]
+    );
+    assert_eq!(panel.history.undo.len(), 1);
+    let replaced = panel.document().clone();
+    frame(
+        &ctx,
+        &mut panel,
+        &editor,
+        &sprites,
+        vec![egui::Event::PointerMoved(other)],
+    );
+    assert_eq!(
+        panel.document(),
+        &replaced,
+        "held input cannot replace another target"
+    );
+    frame(
+        &ctx,
+        &mut panel,
+        &editor,
+        &sprites,
+        vec![PickHarness::button(other, false)],
+    );
+    panel.undo();
+    assert_eq!(panel.document(), &before);
+    let snapshot = |p: &TilemapPanel| {
+        (
+            p.document().clone(),
+            p.history.saved.clone(),
+            p.history.undo.clone(),
+            p.history.redo.clone(),
+            p.dirty(),
+        )
+    };
+    let undone = snapshot(&panel);
+    for region in [None, Some(u32::MAX)] {
+        panel.selected = region;
+        frame(
+            &ctx,
+            &mut panel,
+            &editor,
+            &sprites,
+            vec![PickHarness::button(inside, true)],
+        );
+        frame(
+            &ctx,
+            &mut panel,
+            &editor,
+            &sprites,
+            vec![PickHarness::button(inside, false)],
+        );
+        assert_eq!(
+            snapshot(&panel),
+            undone,
+            "no-op/error retains redo and saved marker"
+        );
+    }
+    panel.selected = Some(11);
+    let epoch = panel.editor_epoch.take();
+    frame(
+        &ctx,
+        &mut panel,
+        &editor,
+        &sprites,
+        vec![PickHarness::button(inside, true)],
+    );
+    assert_eq!(snapshot(&panel), undone);
+    panel.editor_epoch = epoch;
+    frame(
+        &ctx,
+        &mut panel,
+        &editor,
+        &sprites,
+        vec![PickHarness::button(inside, false)],
+    );
+    panel.tool = false;
+    assert!(!frame(
+        &ctx,
+        &mut panel,
+        &editor,
+        &sprites,
+        vec![PickHarness::button(inside, true)]
+    ));
+    assert_eq!(snapshot(&panel), undone);
+    // A coalesced press/release remains one operation at the press position.
+    panel.tool = true;
+    frame(
+        &ctx,
+        &mut panel,
+        &editor,
+        &sprites,
+        vec![PickHarness::button(inside, false)],
+    );
+    frame(
+        &ctx,
+        &mut panel,
+        &editor,
+        &sprites,
+        vec![
+            PickHarness::button(inside, true),
+            PickHarness::button(inside, false),
+            egui::Event::PointerMoved(other),
+        ],
+    );
+    assert_eq!(panel.document(), &replaced);
+    assert_eq!(panel.history.undo.len(), 1);
+    panel.undo();
+    panel.history.redo();
+    assert_eq!(panel.document(), &replaced);
+    editor.sync();
+    assert_eq!(editor.checksum(), checksum);
+    assert_eq!(editor.history(), &host_history);
+    assert_eq!(
+        files.map(|name| std::fs::read(root.join(name)).unwrap()),
+        source
+    );
+}
