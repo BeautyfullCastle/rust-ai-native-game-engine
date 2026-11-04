@@ -1,4 +1,4 @@
-// Focused Run Save v1 acceptance: actual historical WASM, bundled JS, mock DOM.
+// Focused Run Save v1 acceptance: actual supplied WASM, bundled JS, mock DOM.
 // Does not establish browser file-picker, pixels, GPU, or a preemptive WASM timeout.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -182,7 +182,6 @@ for (const initialKind of ['seed', 'scene']) {
   const stale = h.run('loadRunFile(testFile)');
   assert.equal(h.run('command(1)'), false);
   h.run('execute([0,0,0,0]);');
-  h.listeners.get('blur')?.();
   assert.equal(identity(h), before, 'pending load guards live mutation without clearing the queue');
   assert.equal(await load(h, '{'), false);
   release();
@@ -190,9 +189,64 @@ for (const initialKind of ['seed', 'scene']) {
   assert.equal(identity(h), before);
   assert.equal(h.run('wasm===originalWasm'), true);
   assert.equal(h.fetches.length, 0);
+  // Focus loss is a lifecycle event, not part of candidate admission rollback.
+  // Exercise the actual WASM with a deferred file read, never an OS/browser claim.
+  for (const outcome of ['failure', 'success', 'cancel', 'restart', 'ordinary']) {
+    const live = await boot();
+    assert.equal(await load(live, text), true);
+    live.ui.get('pause').onclick();
+    assert.equal(live.run('paused'), false);
+    assert.equal(live.run('command(1)'), true);
+    live.run('gesture={id:7};hover=1;acc=12;');
+    let releasedCapture = 0;
+    live.ui.get('game').hasPointerCapture = id => id === 7;
+    live.ui.get('game').releasePointerCapture = id => {
+      assert.equal(id, 7); releasedCapture++;
+    };
+    const authoritative = () => live.run('JSON.stringify([state,seq,runRecorder.initial,runRecorder.steps])');
+    const prior = authoritative();
+    let finishRead, loading;
+    if (outcome !== 'ordinary') {
+      const reading = new Promise(resolve => { finishRead = resolve; });
+      live.sandbox.testFile = {name:'pending.json',size:text.length,arrayBuffer:()=>reading};
+      loading = live.run('loadRunFile(testFile)');
+      assert.equal(live.run('runImportActive'), true);
+    }
+    live.listeners.get('blur')();
+    assert.equal(live.run('paused'), true, `${outcome}: focus loss must pause pending restore`);
+    assert.equal(live.run('queue.length'), 0, `${outcome}: discard pending purchase`);
+    assert.equal(live.run('gesture===null && hover===-1 && acc===0'), true);
+    assert.equal(releasedCapture, 1);
+    assert.equal(authoritative(), prior, 'blur preserves simulation, sequence and replay history');
+    if (outcome === 'cancel') assert.equal(await load(live, '{'), false);
+    if (outcome === 'restart') live.ui.get('reset').onclick();
+    const afterLifecycle = authoritative();
+    if (loading) {
+      finishRead(new TextEncoder().encode(outcome === 'failure' ? '{' : text).buffer);
+      assert.equal(await loading, outcome === 'success');
+    }
+    assert.equal(live.run('paused'), true, `${outcome}: restoration must not undo focus pause`);
+    assert.equal(live.run('queue.length'), 0);
+    assert.equal(live.run('runImportActive || runImportBusy'), false);
+    if (outcome === 'success') assert.equal(live.run('state.checksum'), savedChecksum);
+    else assert.equal(authoritative(), afterLifecycle);
+    const pausedState = live.run('JSON.stringify(state)');
+    live.run('animate(1);animate(35);');
+    assert.equal(live.run('JSON.stringify(state)'), pausedState, 'frames cannot advance before explicit resume');
+    const humanUnits = live.run('state.units.filter(u=>u[0]===0).length');
+    const tickBeforeResume = live.run('state.tick');
+    if (outcome === 'restart') live.ui.get('begin').onclick({});
+    else live.ui.get('pause').onclick();
+    live.run('animate(100);animate(135);');
+    assert.ok(live.run('state.tick') > tickBeforeResume, 'explicit resume advances combat');
+    assert.equal(live.run('state.units.filter(u=>u[0]===0).length'), humanUnits,
+      'resume must not replay the discarded Summon');
+    assert.equal(live.fetches.length, 0);
+  }
   results.push({initialKind, steps: saved.steps.length, sequence: saved.sequence,
-    savedChecksum, nextChecksum, networkRequests: h.fetches.length});
+    savedChecksum, nextChecksum, networkRequests: h.fetches.length,
+    focusLossOutcomes: ['failure', 'success', 'cancel', 'restart', 'ordinary']});
 }
 console.log(JSON.stringify({version:1, wasmSha256:sha(fs.readFileSync(wasmPath)),
   sceneSha256:sha(sceneBytes), results,
-  coverage:'actual historical source-compatible WASM + bundled JavaScript; mock DOM/Blob/File, not a real browser picker or GPU; cooperative timeout is not synchronous-call preemption'}));
+  coverage:'actual supplied WASM + bundled JavaScript; mock DOM/Blob/File, not a real browser picker or GPU; cooperative timeout is not synchronous-call preemption'}));
