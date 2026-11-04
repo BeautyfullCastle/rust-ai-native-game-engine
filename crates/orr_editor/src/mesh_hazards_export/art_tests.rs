@@ -50,10 +50,10 @@ pub(crate) fn art_runtime(platform: RuntimePlatform, camera: bool) -> Vec<u8> {
 }
 
 impl Fixture {
-    fn art_path(&self) -> PathBuf {
+    pub(super) fn art_path(&self) -> PathBuf {
         self.scene.with_file_name("source.scene.yaml.mesh-art.json")
     }
-    fn add_art(&self, platform: RuntimePlatform, camera: bool) -> Vec<u8> {
+    pub(super) fn add_art(&self, platform: RuntimePlatform, camera: bool) -> Vec<u8> {
         use std::collections::{BTreeMap, BTreeSet};
         let root = self.root.join("art-package");
         fs::create_dir(&root).unwrap();

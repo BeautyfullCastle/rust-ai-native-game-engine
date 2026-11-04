@@ -450,7 +450,7 @@ impl EditorApp {
     #[cfg(feature="models")]
     fn post_process_for_frame(&mut self) -> orr_render::PostProcessSettings {
         #[cfg(feature="mesh-navigation")]
-        if self.editor.game() == crate::game::EditorGame::MeshNavigation {
+        if crate::mesh_lighting_panel::supports_lighting_profile(self.editor.game()) {
             let requested = self.mesh_lighting.applied_post_process(&self.editor).unwrap_or_default();
             return self.mesh_post_process_runtime.select(self.editor.scene_load_epoch(), self.editor.path(), requested);
         }
@@ -1726,7 +1726,7 @@ impl EditorApp {
                 #[cfg(feature = "models")]
                 ui.menu_button("Viewport effects", |ui| {
                     #[cfg(feature="mesh-navigation")]
-                    if self.editor.game() == crate::game::EditorGame::MeshNavigation {
+                    if crate::mesh_lighting_panel::supports_lighting_profile(self.editor.game()) {
                         ui.label("Use Mesh game lighting → Saved HDR post-processing, then Apply and Save.");
                         if let Some(error) = self.mesh_post_process_runtime.warning() { ui.colored_label(Color32::RED, format!("HDR disabled for this scene request: {error}")); }
                         return;
@@ -2474,7 +2474,7 @@ impl EditorApp {
                 // Unsupported/invalid requests cannot strand the editor in a broken
                 // mode. Keep the admitted policy and working native texture.
                 #[cfg(feature="mesh-navigation")]
-                if self.editor.game() == crate::game::EditorGame::MeshNavigation { self.mesh_post_process_runtime.reject_render_error(error); }
+                if crate::mesh_lighting_panel::supports_lighting_profile(self.editor.game()) { self.mesh_post_process_runtime.reject_render_error(error); }
                 self.ui.yard_post_process = gpu.gpu().post_process_settings();
                 self.ui.yard_post_process_error = Some(error.clone());
             }
@@ -2483,12 +2483,20 @@ impl EditorApp {
                 Err(error)=>{if let Some(tex)=gpu.last_texture(){ui.painter().image(tex,rect,Rect::from_min_max(Pos2::ZERO,Pos2::new(1.0,1.0)),Color32::WHITE);}ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,error,egui::FontId::proportional(14.0),Color32::RED);}
             }
             #[cfg(feature="mesh-navigation")]
-            if self.editor.game() == crate::game::EditorGame::MeshNavigation {
+            if crate::mesh_lighting_panel::supports_lighting_profile(self.editor.game()) {
                 if let Some(warning) = self.mesh_post_process_runtime.warning() {
                     // Shared viewport: Player has no editor effects menu.
-                    ui.painter().text(rect.left_top() + egui::vec2(8.0, 8.0), egui::Align2::LEFT_TOP,
+                    // Keep fallback visible without overlapping the top-left controls legend.
+                    let galley = ui.painter().layout(
                         format!("Saved HDR unavailable; rendering without HDR: {warning}"),
-                        egui::FontId::proportional(14.0), Color32::YELLOW);
+                        egui::FontId::proportional(14.0), Color32::YELLOW,
+                        (rect.width() - 24.0).max(1.0));
+                    let position = egui::pos2(rect.left() + 8.0,
+                        (rect.bottom() - 8.0 - galley.size().y).max(rect.top() + 56.0));
+                    ui.painter().rect_filled(
+                        Rect::from_min_size(position - egui::vec2(4.0, 4.0), galley.size() + egui::vec2(8.0, 8.0)),
+                        4.0, Color32::from_black_alpha(224));
+                    ui.painter().galley(position, galley, Color32::YELLOW);
                 }
             }
         } else {

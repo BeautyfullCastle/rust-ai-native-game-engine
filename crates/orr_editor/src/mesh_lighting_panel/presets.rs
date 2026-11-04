@@ -25,7 +25,7 @@ impl Panel {
         {
             self.load_preset(editor);
         }
-        ui.weak("Apply lighting first if this scene has no applied lighting. Loading never applies or saves the scene; use Apply game lighting, then Save mesh workspace.");
+        ui.weak("Apply lighting first if this scene has no applied lighting. Loading never applies or saves the scene; use Apply game lighting, then Save game lighting.");
     }
 
     fn preset_target(&self, editor: &Editor) -> Result<Document, String> {
