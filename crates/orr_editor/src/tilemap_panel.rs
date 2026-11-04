@@ -38,6 +38,7 @@ enum ToolMode {
     Line,
     Copy,
     Stamp,
+    Repeat,
     Pick,
 }
 
@@ -45,6 +46,7 @@ enum ToolMode {
 enum RectanglePurpose {
     PaintRectangle,
     PaintLine,
+    Repeat,
     Copy,
 }
 
@@ -52,6 +54,7 @@ enum RectanglePurpose {
 struct RectangleGesture {
     purpose: RectanglePurpose,
     copy_atlas: Option<String>,
+    repeat_pattern: Option<copy::Pattern>,
     start: CellCoord,
     end: CellCoord,
     region: Option<u32>,
@@ -396,7 +399,7 @@ impl TilemapPanel {
             ToolMode::Replace => {
                 replace::candidate(&self.history.current, cell, region, &asset.document)?.0
             }
-            ToolMode::Rectangle | ToolMode::Line => return Err("Drag tool requires a complete gesture".into()),
+            ToolMode::Rectangle | ToolMode::Line | ToolMode::Repeat => return Err("Drag tool requires a complete gesture".into()),
             ToolMode::Copy | ToolMode::Stamp => {
                 return Err("Copy/Stamp requires its own input gesture".into())
             }
@@ -643,13 +646,14 @@ impl TilemapPanel {
                 let line = ui.selectable_value(&mut self.mode, ToolMode::Line, "Line");
                 let copy = ui.selectable_value(&mut self.mode, ToolMode::Copy, "Copy");
                 let stamp = ui.selectable_value(&mut self.mode, ToolMode::Stamp, "Stamp");
+                let repeat = ui.selectable_value(&mut self.mode, ToolMode::Repeat, "Repeat pattern");
                 let pick = ui.selectable_value(&mut self.mode, ToolMode::Pick, "Pick");
-                if paint.changed() || fill.changed() || replace.changed() || rectangle.changed() || line.changed() || copy.changed() || stamp.changed() || pick.changed() {
+                if paint.changed() || fill.changed() || replace.changed() || rectangle.changed() || line.changed() || copy.changed() || stamp.changed() || repeat.changed() || pick.changed() {
                     self.cancel_gesture();
                 }
             });
             ui.label("Paint: click or drag. Fill: click once to replace connected matching cells. Replace all: click once to replace every matching cell. Rectangle/Line: drag, then release to apply once. Pick: click a cell to select its region or Erase.");
-            ui.label("Copy: drag a rectangle, then release. Stamp: click its top-left destination once; the whole pattern must fit.");
+            ui.label("Copy: drag a rectangle, then release. Stamp: click its top-left destination once; the whole pattern must fit. Repeat pattern: drag a rectangle to tile from its top-left, including partial edge repeats and empty erasing cells.");
             ui.label(self.pattern.as_ref().map_or_else(|| "No copied pattern".to_string(), |p| format!("Pattern: {} × {}", p.width, p.height)));
             ui.add_enabled_ui(self.pattern.is_some() && !self.painting && self.rectangle.is_none(), |ui| {
                 for (label, transform) in [
@@ -733,7 +737,7 @@ impl TilemapPanel {
             }
         });
         if !editable {
-            ui.label("Paint, Fill, Replace all, Rectangle, Line, Copy, Stamp, Pick, Resize and Save require matching Edit viewport, without proposal, replay or disconnected host.");
+            ui.label("Paint, Fill, Replace all, Rectangle, Line, Copy, Stamp, Repeat pattern, Pick, Resize and Save require matching Edit viewport, without proposal, replay or disconnected host.");
         }
         self.show_actors(ui, editor, sprites);
         if let Some(error) = &self.error {
@@ -790,7 +794,7 @@ impl TilemapPanel {
             }
             return true;
         }
-        if matches!(self.mode, ToolMode::Rectangle | ToolMode::Line | ToolMode::Copy) {
+        if matches!(self.mode, ToolMode::Rectangle | ToolMode::Line | ToolMode::Copy | ToolMode::Repeat) {
             self.rectangle_viewport(ui, editor, sprites, rect, pixels);
             return true;
         }
@@ -910,6 +914,8 @@ impl TilemapPanel {
         self.painting = false;
         let purpose = if self.mode == ToolMode::Copy {
             RectanglePurpose::Copy
+        } else if self.mode == ToolMode::Repeat {
+            RectanglePurpose::Repeat
         } else if self.mode == ToolMode::Line {
             RectanglePurpose::PaintLine
         } else {
@@ -1016,9 +1022,25 @@ impl TilemapPanel {
                         } else {
                             None
                         };
+                        let repeat_pattern = if purpose == RectanglePurpose::Repeat {
+                            let result = (|| {
+                                let pattern = self.pattern.as_ref().ok_or("Copy or load a pattern before Repeat")?;
+                                let (asset, _) = sprites.tilemap_asset(&self.key()).ok_or("shared atlas missing")?;
+                                if !pattern.matches(&self.history.current, editor.scene_load_epoch(), &asset.document) {
+                                    return Err("copied pattern expired; Copy again".into());
+                                }
+                                self.verify_pattern_assets()?;
+                                Ok::<_, String>(pattern.clone())
+                            })();
+                            match result {
+                                Ok(pattern) => Some(pattern),
+                                Err(error) => { self.error = Some(error); return; }
+                            }
+                        } else { None };
                         self.rectangle = Some(RectangleGesture {
                             purpose,
                             copy_atlas,
+                            repeat_pattern,
                             start,
                             end: start,
                             region: self.selected,
@@ -1074,19 +1096,22 @@ impl TilemapPanel {
                         self.pattern_texture = Some(texture);
                         return Ok(());
                     }
-                    let candidate = if gesture.purpose == RectanglePurpose::PaintLine {
-                        line::candidate
+                    let next = if gesture.purpose == RectanglePurpose::Repeat {
+                        self.verify_pattern_assets()?;
+                        gesture.repeat_pattern.as_ref().ok_or("Repeat pattern missing")?.repeat_candidate(
+                            &self.history.current, gesture.start, end,
+                            editor.scene_load_epoch(), &asset.document,
+                        )?
                     } else {
-                        rectangle::candidate
+                        let candidate = if gesture.purpose == RectanglePurpose::PaintLine {
+                            line::candidate
+                        } else {
+                            rectangle::candidate
+                        };
+                        candidate(&self.history.current, gesture.start, end, gesture.region, &asset.document)?
                     };
-                    let next = candidate(
-                        &self.history.current,
-                        gesture.start,
-                        end,
-                        gesture.region,
-                        &asset.document,
-                    )?;
                     Self::budget(&next, Self::actor_count(sprites))?;
+                    self.check_stamp()?;
                     self.history.commit(next);
                     Ok::<_, String>(())
                 })()

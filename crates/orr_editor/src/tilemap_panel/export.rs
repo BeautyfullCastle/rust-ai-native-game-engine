@@ -120,6 +120,7 @@ mod tests {
         panel.rectangle = Some(RectangleGesture {
             purpose: RectanglePurpose::PaintRectangle,
             copy_atlas: None,
+            repeat_pattern: None,
             start: CellCoord { column: 0, row: 0 },
             end: CellCoord { column: 1, row: 1 },
             region: Some(10),
