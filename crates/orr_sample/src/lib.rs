@@ -148,3 +148,8 @@ pub mod defense_app;
 pub mod defense_view;
 #[cfg(feature = "coop-defense")]
 pub mod defense_ui;
+
+#[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+pub mod defense_run_save;
+#[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+pub mod defense_run_save_store;

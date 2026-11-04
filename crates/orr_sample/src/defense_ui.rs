@@ -25,6 +25,8 @@ enum ClickTarget {
     Continue,
     Action(u32),
     Cell(u32),
+    #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+    RunSave(u32),
 }
 #[derive(Clone, Copy)]
 struct Press {
@@ -47,10 +49,11 @@ impl PointerClicks {
         input: &egui::InputState,
         options: egui::InputOptions,
         screen: Rect,
-        started: bool,
-        paused: bool,
-        generation: u32,
+        state: (bool, bool, u32),
+        extra: &[(Rect, ClickTarget)],
+        modal: bool,
     ) -> Option<ClickTarget> {
+        let (started, paused, generation) = state;
         let events = &input.events;
         if !input.focused
             || events
@@ -63,6 +66,12 @@ impl PointerClicks {
         let layout = Layout::new(screen);
         let target_at = |pos| {
             if !screen.contains(pos) {
+                return None;
+            }
+            if let Some((_, target)) = extra.iter().find(|(rect, _)| rect.contains(pos)) {
+                return Some(*target);
+            }
+            if modal {
                 return None;
             }
             if !started {
@@ -153,6 +162,12 @@ impl PointerClicks {
                         {
                             // Keep the first eligible gameplay click. Pause is a
                             // safety exception: it dominates other clicks this frame.
+                            #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+                            if matches!(press.target, ClickTarget::RunSave(_))
+                                && !matches!(clicked, Some(ClickTarget::RunSave(_)))
+                            {
+                                clicked = Some(press.target);
+                            }
                             clicked = if press.target == ClickTarget::Pause {
                                 Some(ClickTarget::Pause)
                             } else {
@@ -170,6 +185,34 @@ impl PointerClicks {
     }
 }
 
+#[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum RunSaveMode {
+    #[default]
+    Closed,
+    List(Vec<String>),
+    Confirm(String),
+    Loading,
+}
+#[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RunSaveAction {
+    Open,
+    Save,
+    Select(String),
+    Confirm(String),
+    Cancel,
+}
+#[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+#[derive(Default)]
+pub(crate) struct RunSavePanel {
+    pub enabled: bool,
+    pub can_save: bool,
+    pub status: String,
+    pub mode: RunSaveMode,
+    pub action: Option<RunSaveAction>,
+}
+
 pub struct DefenseUi {
     pub context: egui::Context,
     pub selected: Option<u32>,
@@ -181,6 +224,12 @@ pub struct DefenseUi {
     impacts: Vec<(i32, i32, u32, u32)>,
     observed_tick: u32,
     notice: String,
+    #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+    pub(crate) run_save: RunSavePanel,
+    #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+    save_page: usize,
+    #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+    save_identity: Option<(RunSaveMode, bool, bool, bool, bool)>,
 }
 impl Default for DefenseUi {
     fn default() -> Self {
@@ -199,6 +248,12 @@ impl DefenseUi {
             previous: BTreeMap::new(),
             impacts: Vec::new(),
             observed_tick: 0,
+            #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+            run_save: RunSavePanel::default(),
+            #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+            save_page: 0,
+            #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+            save_identity: None,
             notice: "Summon a crew. Match identical role + tier to merge.".into(),
         }
     }
@@ -209,13 +264,223 @@ impl DefenseUi {
         self.pointer_clicks.press = None;
     }
     fn command(&mut self, action: u32, source_cell: u32, target_cell: u32) -> game::DefenseInput {
-        self.sequence = self.sequence.saturating_add(1);
+        let Some(next) = self.sequence.checked_add(1) else {
+            self.notice = "Command sequence exhausted. Load an earlier save or relaunch.".into();
+            return game::DefenseInput::default();
+        };
+        self.sequence = next;
         game::DefenseInput {
             action,
             source_cell,
             target_cell,
             sequence: self.sequence,
         }
+    }
+    #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+    pub(crate) fn high_water(&self) -> u32 {
+        self.sequence
+    }
+    #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+    pub(crate) fn restore_paused(&mut self, high_water: u32) {
+        self.started = true;
+        self.pause();
+        self.sequence = high_water;
+        self.previous.clear();
+        self.impacts.clear();
+        self.observed_tick = 0;
+        self.save_identity = None;
+        self.run_save.mode = RunSaveMode::Closed;
+        self.run_save.action = None;
+    }
+    #[cfg(not(all(feature = "coop-defense-run-save", target_os = "linux")))]
+    fn save_targets(&mut self, _: Layout) -> (Vec<(Rect, ClickTarget)>, bool) {
+        (Vec::new(), false)
+    }
+    #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+    fn save_targets(&mut self, l: Layout) -> (Vec<(Rect, ClickTarget)>, bool) {
+        let identity = (
+            self.run_save.mode.clone(),
+            self.run_save.enabled,
+            self.run_save.can_save,
+            self.started,
+            self.paused,
+        );
+        if self.save_identity.as_ref() != Some(&identity) {
+            self.pointer_clicks.press = None;
+            self.save_page = 0;
+            self.save_identity = Some(identity);
+        }
+        let mut targets = Vec::new();
+        let mut add = |id, x, y, w, h| targets.push((l.rect(x, y, w, h), ClickTarget::RunSave(id)));
+        match &self.run_save.mode {
+            RunSaveMode::Closed => {
+                if self.run_save.enabled {
+                    if !self.started {
+                        add(0, 310.0, 660.0, 580.0, 45.0);
+                    } else if self.paused {
+                        if self.run_save.can_save {
+                            add(1, 310.0, 560.0, 280.0, 45.0);
+                        }
+                        add(0, 610.0, 560.0, 280.0, 45.0);
+                    }
+                }
+                (targets, false)
+            }
+            RunSaveMode::List(names) => {
+                for (row, _) in names.iter().skip(self.save_page * 6).take(6).enumerate() {
+                    add(
+                        10 + row as u32,
+                        260.0,
+                        300.0 + row as f32 * 50.0,
+                        680.0,
+                        42.0,
+                    );
+                }
+                if self.save_page > 0 {
+                    add(4, 260.0, 620.0, 180.0, 45.0);
+                }
+                if (self.save_page + 1) * 6 < names.len() {
+                    add(5, 460.0, 620.0, 180.0, 45.0);
+                }
+                add(2, 660.0, 620.0, 280.0, 45.0);
+                (targets, true)
+            }
+            RunSaveMode::Confirm(_) => {
+                add(3, 260.0, 620.0, 380.0, 45.0);
+                add(2, 660.0, 620.0, 280.0, 45.0);
+                (targets, true)
+            }
+            RunSaveMode::Loading => {
+                add(2, 660.0, 620.0, 280.0, 45.0);
+                (targets, true)
+            }
+        }
+    }
+    #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+    fn paint_run_save(
+        &mut self,
+        _: &egui::Painter,
+        l: Layout,
+        clicked: Option<ClickTarget>,
+        ctx: &egui::Context,
+    ) -> bool {
+        let p = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("run-save"),
+        ));
+        let button = |x, y, w, label: &str| {
+            p.rect_filled(
+                l.rect(x, y, w, 45.0),
+                6.0 * l.scale,
+                Color32::from_rgb(49, 64, 61),
+            );
+            l.text(&p, x + 15.0, y + 23.0, 15.0, PAPER, label);
+        };
+        let modal = self.run_save.mode != RunSaveMode::Closed;
+        if modal {
+            p.rect_filled(l.rect(200.0, 200.0, 800.0, 550.0), 12.0 * l.scale, INK);
+            l.text(&p, 260.0, 245.0, 24.0, PAPER, "NATIVE RUN SAVES");
+            match &self.run_save.mode {
+                RunSaveMode::List(names) => {
+                    if names.is_empty() {
+                        l.text(
+                            &p,
+                            260.0,
+                            330.0,
+                            16.0,
+                            MUTED,
+                            "No saved copies in this directory.",
+                        );
+                    }
+                    for (row, name) in names.iter().skip(self.save_page * 6).take(6).enumerate() {
+                        button(260.0, 300.0 + row as f32 * 50.0, 680.0, name);
+                    }
+                    if self.save_page > 0 {
+                        button(260.0, 620.0, 180.0, "PREVIOUS");
+                    }
+                    if (self.save_page + 1) * 6 < names.len() {
+                        button(460.0, 620.0, 180.0, "NEXT");
+                    }
+                }
+                RunSaveMode::Confirm(name) => {
+                    l.text(
+                        &p,
+                        260.0,
+                        330.0,
+                        17.0,
+                        PAPER,
+                        "Replace the current run? Unsaved progress will be lost.",
+                    );
+                    l.text(&p, 260.0, 375.0, 15.0, MUTED, name);
+                    button(260.0, 620.0, 380.0, "REPLACE CURRENT RUN");
+                }
+                RunSaveMode::Loading => {
+                    l.text(
+                        &p,
+                        260.0,
+                        330.0,
+                        17.0,
+                        PAPER,
+                        "Reconstructing saved run. Current run is unchanged.",
+                    );
+                }
+                RunSaveMode::Closed => {}
+            }
+            button(660.0, 620.0, 280.0, "CANCEL");
+        } else if (!self.started || self.paused) && self.run_save.enabled {
+            if !self.started {
+                button(310.0, 660.0, 580.0, "LOAD SAVE");
+            } else {
+                button(
+                    310.0,
+                    560.0,
+                    280.0,
+                    if self.run_save.can_save {
+                        "SAVE COPY"
+                    } else {
+                        "SAVE UNAVAILABLE"
+                    },
+                );
+                button(610.0, 560.0, 280.0, "LOAD SAVE");
+            }
+        }
+        if modal || !self.started || self.paused {
+            l.text(&p, 260.0, 720.0, 13.0, MUTED, &self.run_save.status);
+        }
+        let id = if modal && just_pressed(ctx, Key::Escape) {
+            Some(2)
+        } else if let Some(ClickTarget::RunSave(id)) = clicked {
+            Some(id)
+        } else {
+            None
+        };
+        let Some(id) = id else {
+            return modal;
+        };
+        let action = match (&self.run_save.mode, id) {
+            (RunSaveMode::Closed, 0) => Some(RunSaveAction::Open),
+            (RunSaveMode::Closed, 1) if self.run_save.can_save => Some(RunSaveAction::Save),
+            (_, 2) if modal => Some(RunSaveAction::Cancel),
+            (RunSaveMode::Confirm(name), 3) => Some(RunSaveAction::Confirm(name.clone())),
+            (RunSaveMode::List(_), 4) if self.save_page > 0 => {
+                self.save_page -= 1;
+                None
+            }
+            (RunSaveMode::List(names), 5) if (self.save_page + 1) * 6 < names.len() => {
+                self.save_page += 1;
+                None
+            }
+            (RunSaveMode::List(names), id) if id >= 10 => names
+                .get(self.save_page * 6 + (id - 10) as usize)
+                .cloned()
+                .map(RunSaveAction::Select),
+            _ => None,
+        };
+        if let Some(action) = action {
+            self.run_save.action = Some(action);
+        }
+        self.pointer_clicks.press = None;
+        true
     }
     pub fn show(
         &mut self,
@@ -235,6 +500,9 @@ impl DefenseUi {
             )
         });
         let run = game::run(frame);
+        let pausable = run.phase == game::PLAYING;
+        #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+        let pausable = pausable || self.run_save.enabled;
         let max_hp = frame.singleton::<game::Scenario>().reactor_hp;
         let last_wave = frame.singleton::<game::Campaign>().last_wave;
         let units = game::units(frame);
@@ -269,14 +537,15 @@ impl DefenseUi {
             let screen = ctx.input(|i| i.content_rect());
             let l = Layout::new(screen);
             let options = ctx.options(|o| o.input_options);
+            let (extra, modal) = self.save_targets(l);
             let clicked = ctx.input(|i| {
                 self.pointer_clicks.take(
                     i,
                     options,
                     screen,
-                    self.started,
-                    self.paused,
-                    run.generation,
+                    (self.started, self.paused, run.generation),
+                    &extra,
+                    modal,
                 )
             });
             let p = ctx.layer_painter(egui::LayerId::new(
@@ -379,6 +648,10 @@ impl DefenseUi {
                     Color32::from_rgb(220, 127, 87),
                 );
             }
+            #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+            if self.paint_run_save(&p, l, clicked, ctx) {
+                return;
+            }
             if !self.started {
                 p.rect_filled(
                     l.rect(0.0, 90.0, 1200.0, 850.0),
@@ -431,7 +704,7 @@ impl DefenseUi {
                 }
                 return;
             }
-            let pause_requested = run.phase == game::PLAYING
+            let pause_requested = pausable
                 && (clicked == Some(ClickTarget::Pause)
                     || just_pressed(ctx, Key::P)
                     || just_pressed(ctx, Key::Escape));
@@ -466,7 +739,7 @@ impl DefenseUi {
                 // Continue consumes this frame, including Space, R and board clicks.
                 return;
             }
-            if run.phase == game::PLAYING {
+            if pausable {
                 p.rect_filled(
                     l.rect(950.0, 740.0, 200.0, 45.0),
                     6.0 * l.scale,
@@ -735,7 +1008,10 @@ impl DefenseUi {
                 );
             }
         });
-        (output, action)
+        (
+            output,
+            action.filter(|input| *input != game::DefenseInput::default()),
+        )
     }
 }
 fn wave_header(wave: u32, last_wave: u32, reactor_hp: u32, max_hp: u32) -> String {
@@ -1311,5 +1587,150 @@ mod click_attribution_tests {
             apply(&mut sim, command);
             assert_eq!(game::run(sim.frame()).last_sequence, 2);
         }
+    }
+}
+
+#[cfg(all(test, feature = "coop-defense-run-save", target_os = "linux"))]
+mod run_save_tests {
+    use super::*;
+    fn frame() -> orr_sim::Simulation<game::DefenseGame> {
+        orr_sim::Simulation::new(game::DefenseConfig::default(), 60, 1)
+    }
+    fn draw(
+        ui: &mut DefenseUi,
+        frame: &orr_ecs::Frame,
+        events: Vec<egui::Event>,
+    ) -> Option<game::DefenseInput> {
+        ui.show(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(1200.0, 940.0))),
+                events,
+                ..Default::default()
+            },
+            frame,
+        )
+        .1
+    }
+    fn button(x: f32, y: f32, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos: egui::pos2(x, y),
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        }
+    }
+    fn click(x: f32, y: f32) -> Vec<egui::Event> {
+        vec![button(x, y, true), button(x, y, false)]
+    }
+    fn key(key: Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed: true,
+            repeat: false,
+            modifiers: Default::default(),
+        }
+    }
+    fn ready() -> DefenseUi {
+        let mut ui = DefenseUi::new();
+        ui.run_save.enabled = true;
+        ui.run_save.can_save = true;
+        ui
+    }
+    #[test]
+    fn title_load_dominates_start_keyboard_and_pointer() {
+        let sim = frame();
+        let mut ui = ready();
+        let mut events = click(600.0, 615.0);
+        events.extend(click(600.0, 680.0));
+        events.push(key(Key::Enter));
+        assert!(draw(&mut ui, sim.frame(), events).is_none());
+        assert!(!ui.started);
+        assert_eq!(ui.run_save.action.take(), Some(RunSaveAction::Open));
+    }
+    #[test]
+    fn paused_save_load_never_continue_or_issue_commands() {
+        let sim = frame();
+        let mut ui = ready();
+        ui.restore_paused(43);
+        let mut events = click(600.0, 515.0);
+        events.extend(click(400.0, 580.0));
+        events.extend(click(700.0, 580.0));
+        events.extend([key(Key::Enter), key(Key::Space), key(Key::R)]);
+        assert!(draw(&mut ui, sim.frame(), events).is_none());
+        assert!(ui.paused);
+        assert_eq!(ui.high_water(), 43);
+        assert_eq!(ui.run_save.action.take(), Some(RunSaveAction::Save));
+    }
+    #[test]
+    fn modal_selection_pages_and_confirmation_have_explicit_targets() {
+        let sim = frame();
+        let mut ui = ready();
+        ui.run_save.mode = RunSaveMode::List((0..8).map(|i| format!("copy-{i}")).collect());
+        assert!(draw(&mut ui, sim.frame(), click(510.0, 640.0)).is_none());
+        assert!(ui.run_save.action.is_none());
+        draw(&mut ui, sim.frame(), click(400.0, 320.0));
+        assert_eq!(
+            ui.run_save.action.take(),
+            Some(RunSaveAction::Select("copy-6".into()))
+        );
+        ui.run_save.mode = RunSaveMode::Confirm("copy-6".into());
+        assert!(draw(&mut ui, sim.frame(), vec![key(Key::Enter), key(Key::Space)]).is_none());
+        assert!(ui.run_save.action.is_none());
+        draw(&mut ui, sim.frame(), click(400.0, 640.0));
+        assert_eq!(
+            ui.run_save.action.take(),
+            Some(RunSaveAction::Confirm("copy-6".into()))
+        );
+    }
+    #[test]
+    fn changed_list_cancels_press_and_loading_only_cancels() {
+        let sim = frame();
+        let mut ui = ready();
+        ui.run_save.mode = RunSaveMode::List(vec!["old".into()]);
+        draw(&mut ui, sim.frame(), vec![button(400.0, 320.0, true)]);
+        ui.run_save.mode = RunSaveMode::List(vec!["new".into()]);
+        draw(&mut ui, sim.frame(), vec![button(400.0, 320.0, false)]);
+        assert!(ui.run_save.action.is_none());
+        ui.run_save.mode = RunSaveMode::Loading;
+        let mut events = click(400.0, 580.0);
+        events.extend([key(Key::Enter), key(Key::R), key(Key::Space)]);
+        assert!(draw(&mut ui, sim.frame(), events).is_none());
+        assert!(ui.run_save.action.is_none());
+        assert!(!ui.started);
+        draw(&mut ui, sim.frame(), click(700.0, 640.0));
+        assert_eq!(ui.run_save.action.take(), Some(RunSaveAction::Cancel));
+    }
+    #[test]
+    fn focus_loss_and_restore_discard_gestures_and_exhaustion_is_safe() {
+        let sim = frame();
+        let mut ui = ready();
+        ui.restore_paused(u32::MAX);
+        draw(&mut ui, sim.frame(), vec![button(600.0, 515.0, true)]);
+        ui.restore_paused(u32::MAX);
+        draw(&mut ui, sim.frame(), vec![button(600.0, 515.0, false)]);
+        assert!(ui.paused);
+        let mut events = click(400.0, 580.0);
+        events.push(egui::Event::WindowFocused(false));
+        draw(&mut ui, sim.frame(), events);
+        assert!(ui.run_save.action.is_none());
+        ui.paused = false;
+        assert!(draw(&mut ui, sim.frame(), vec![key(Key::R)]).is_none());
+        assert_eq!(ui.high_water(), u32::MAX);
+    }
+    #[test]
+    fn terminal_run_can_pause_and_save_with_enabled_storage() {
+        let mut sim = frame();
+        sim.frame_mut().singleton_mut::<game::DefenseRun>().phase = game::WON;
+        let mut ui = ready();
+        ui.started = true;
+        assert!(draw(&mut ui, sim.frame(), click(1050.0, 762.0)).is_none());
+        assert!(ui.paused);
+        draw(&mut ui, sim.frame(), click(450.0, 582.0));
+        assert_eq!(ui.run_save.action.take(), Some(RunSaveAction::Save));
+        let mut disabled = DefenseUi::new();
+        disabled.started = true;
+        draw(&mut disabled, sim.frame(), vec![key(Key::P)]);
+        assert!(!disabled.paused);
     }
 }

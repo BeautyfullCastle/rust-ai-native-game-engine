@@ -19,10 +19,12 @@ use winit::{
     window::{Window, WindowId},
 };
 
-type DefenseSession = Session<game::DefenseGame, LocalInputSource>;
-pub const HELP:&str="Stormglass Foundry\ncoop_defense [--scene PATH] [--headless --ticks N [--demo] [--capture NEW.png]]\nSpace summon, click your unit then empty tile to move or identical role/tier to merge, U upgrade, I invest, P/Escape pause, Enter continue, R restart. AI partner is local, not online. Headless capture uses a software GPU.";
+pub(crate) type DefenseSession = Session<game::DefenseGame, LocalInputSource>;
+pub const HELP:&str="Stormglass Foundry\ncoop_defense [--scene PATH] [--run-directory ABSOLUTE_PRIVATE_DIRECTORY (Linux run-save feature)] [--headless --ticks N [--demo] [--capture NEW.png]]\nSpace summon, click your unit then empty tile to move or identical role/tier to merge, U upgrade, I invest, P/Escape pause, Enter continue, R restart. AI partner is local, not online. Headless capture uses a software GPU.";
 #[derive(Debug, Default)]
 pub struct Options {
+    #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+    pub run_directory: Option<PathBuf>,
     pub headless: bool,
     pub ticks: u32,
     pub demo: bool,
@@ -39,6 +41,11 @@ impl Options {
                 return Err(format!("duplicate option {a}"));
             }
             match a.as_str() {
+                #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+                "--run-directory" => {
+                    out.run_directory =
+                        Some(args.next().ok_or("--run-directory needs PATH")?.into())
+                }
                 "--headless" => out.headless = true,
                 "--demo" => out.demo = true,
                 "--ticks" => {
@@ -54,6 +61,10 @@ impl Options {
                 }
                 _ => return Err(format!("unknown option {a}\n{HELP}")),
             }
+        }
+        #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+        if out.headless && out.run_directory.is_some() {
+            return Err("--run-directory requires the native interactive player".into());
         }
         if out.ticks > 36000 {
             return Err("ticks must not exceed 36000".into());
@@ -72,11 +83,11 @@ impl Options {
     }
 }
 /// Resolve and validate source before creating any window, GPU, or session.
-fn prepare_config(options: &Options) -> Result<game::DefenseConfig, String> {
-    use orr_games::coop_defense_scene::{parse_config, MAX_SOURCE_BYTES};
+fn prepare_scene(options: &Options) -> Result<Option<String>, String> {
+    use orr_games::coop_defense_scene::MAX_SOURCE_BYTES;
     use std::io::Read;
     let Some(path) = &options.scene else {
-        return Ok(game::DefenseConfig::default());
+        return Ok(None);
     };
     let error = |e: std::io::Error| format!("scene {}: {e}", path.display());
     let metadata = std::fs::symlink_metadata(path).map_err(error)?;
@@ -120,23 +131,65 @@ fn prepare_config(options: &Options) -> Result<game::DefenseConfig, String> {
         return Err("scene grew beyond 64 KiB".into());
     }
     let text = std::str::from_utf8(&bytes).map_err(|_| "scene must be UTF-8".to_string())?;
-    parse_config(text)
+    Ok(Some(text.to_owned()))
+}
+fn prepare_config(options: &Options) -> Result<game::DefenseConfig, String> {
+    match prepare_scene(options)? {
+        Some(text) => orr_games::coop_defense_scene::parse_config(&text),
+        None => Ok(game::DefenseConfig::default()),
+    }
 }
 
-fn session(config: game::DefenseConfig) -> DefenseSession {
+pub(crate) fn session(config: game::DefenseConfig) -> DefenseSession {
     let mut session_config =
         SessionConfig::new(1, PlayerSlot(0), u64::from(config.seed), game::TICK_RATE);
     session_config.build_id = game::SCENARIO_BUILD_ID;
     Session::new(config, session_config, LocalInputSource)
 }
 pub fn run(options: Options) -> Result<(), String> {
-    let config = prepare_config(&options)?;
+    let scene = prepare_scene(&options)?;
+    let config = match &scene {
+        Some(text) => orr_games::coop_defense_scene::parse_config(text)?,
+        None => game::DefenseConfig::default(),
+    };
     if options.headless {
         return headless_prepared(options, config);
     }
+    #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+    let saves = if let Some(path) = &options.run_directory {
+        let mut forbidden = Vec::new();
+        if let Ok(root) = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+        {
+            forbidden.push(root);
+        }
+        if let Some(parent) = std::env::current_exe().map_err(|e| e.to_string())?.parent() {
+            forbidden.push(parent.to_owned());
+        }
+        if let Some(scene) = &options.scene {
+            let scene = scene.canonicalize().map_err(|e| e.to_string())?;
+            if let Some(parent) = scene.parent() {
+                forbidden.push(parent.to_owned());
+            }
+        }
+        Some(RunSaves {
+            store: crate::defense_run_save_store::RunStore::open(path, &forbidden)?,
+            identity: crate::defense_run_save::executable_identity()?,
+            journal: crate::defense_run_save::Journal::new(
+                crate::defense_run_save::Origin { scene },
+                &session(config),
+            ),
+            candidate: None,
+        })
+    } else {
+        None
+    };
     let event_loop = EventLoop::new().map_err(|e| e.to_string())?;
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App {
+        #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+        saves,
         session: session(config),
         ui: DefenseUi::new(),
         gfx: None,
@@ -150,6 +203,19 @@ pub fn run(options: Options) -> Result<(), String> {
     event_loop.run_app(&mut app).map_err(|e| e.to_string())?;
     app.error.map_or(Ok(()), Err)
 }
+#[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+fn bounded_save_error(error: &str) -> String {
+    let mut chars = error.chars();
+    let mut message: String = chars
+        .by_ref()
+        .take(240)
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    if chars.next().is_some() {
+        message.push('…');
+    }
+    message
+}
 struct Graphics {
     window: Arc<Window>,
     renderer: ProjectWindow,
@@ -157,7 +223,16 @@ struct Graphics {
     overlay: GpuOverlay,
     pending: PendingOverlay,
 }
+#[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+struct RunSaves {
+    store: crate::defense_run_save_store::RunStore,
+    identity: String,
+    journal: crate::defense_run_save::Journal,
+    candidate: Option<crate::defense_run_save::Candidate>,
+}
 struct App {
+    #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+    saves: Option<RunSaves>,
     session: DefenseSession,
     ui: DefenseUi,
     gfx: Option<Graphics>,
@@ -187,9 +262,25 @@ impl App {
         {
             self.ui.pause();
         }
+        #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+        {
+            self.ui.run_save.enabled = self.saves.is_some();
+            let was_saveable = self.ui.run_save.can_save;
+            self.ui.run_save.can_save = self.saves.as_ref().is_some_and(|s| s.journal.can_save());
+            if was_saveable && !self.ui.run_save.can_save {
+                self.ui.run_save.status =
+                    "Recording limit reached; gameplay continues, new saves disabled".into();
+            }
+        }
         let was_started = self.ui.started;
         let was_paused = self.ui.paused;
         let (output, command) = self.ui.show(input, self.session.predicted_frame());
+        #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+        if self.process_saves() {
+            self.commands.clear();
+            self.accumulator = 0.0;
+            return output;
+        }
         if focus_lost || !was_started || was_paused || self.ui.paused {
             self.commands.clear();
             self.accumulator = 0.0;
@@ -208,9 +299,89 @@ impl App {
         while self.accumulator >= 1.0 / 60.0 {
             let command = self.commands.pop_front().unwrap_or_default();
             self.session.advance(command, vec![]);
+            #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+            if let Some(saves) = &mut self.saves {
+                saves.journal.record(command);
+            }
             self.accumulator -= 1.0 / 60.0;
         }
         output
+    }
+    #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+    fn process_saves(&mut self) -> bool {
+        use crate::defense_ui::{RunSaveAction as A, RunSaveMode as M};
+        let action = self.ui.run_save.action.take();
+        let modal = !matches!(self.ui.run_save.mode, M::Closed);
+        let Some(saves) = &mut self.saves else {
+            return false;
+        };
+        let active = action.is_some() || modal || saves.candidate.is_some();
+        let result: Result<(), String> = (|| {
+            match action {
+                Some(A::Cancel) => {
+                    saves.candidate = None;
+                    self.ui.run_save.mode = M::Closed;
+                }
+                Some(A::Open) => {
+                    self.ui.run_save.mode = M::List(saves.store.list()?);
+                }
+                Some(A::Save) if self.ui.started && self.ui.paused => {
+                    let bytes = saves.journal.encode(
+                        &self.session,
+                        self.ui.high_water(),
+                        &saves.identity,
+                    )?;
+                    let name = saves.store.save(&bytes)?;
+                    self.ui.run_save.status = format!(
+                        "Saved {name} at tick {}",
+                        self.session.predicted_frame().tick()
+                    );
+                }
+                Some(A::Select(name)) => {
+                    if self.ui.started {
+                        self.ui.run_save.mode = M::Confirm(name);
+                    } else {
+                        saves.candidate = Some(crate::defense_run_save::Candidate::parse(
+                            &saves.store.read(&name)?,
+                            &saves.identity,
+                        )?);
+                        self.ui.run_save.mode = M::Loading;
+                    }
+                }
+                Some(A::Confirm(name)) => {
+                    saves.candidate = Some(crate::defense_run_save::Candidate::parse(
+                        &saves.store.read(&name)?,
+                        &saves.identity,
+                    )?);
+                    self.ui.run_save.mode = M::Loading;
+                }
+                _ => {}
+            }
+            if let Some(candidate) = &mut saves.candidate {
+                if candidate.step()? {
+                    let (session, journal, high_water) = saves
+                        .candidate
+                        .take()
+                        .expect("candidate present")
+                        .finish()?;
+                    self.session = session;
+                    saves.journal = journal;
+                    self.ui.restore_paused(high_water);
+                    self.ui.run_save.status = format!(
+                        "Loaded tick {}. Continue when ready.",
+                        self.session.predicted_frame().tick()
+                    );
+                    self.ui.run_save.mode = M::Closed;
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            saves.candidate = None;
+            self.ui.run_save.mode = M::Closed;
+            self.ui.run_save.status = bounded_save_error(&error);
+        }
+        active
     }
     fn set_focused(&mut self, focused: bool) {
         self.focused = focused;
@@ -607,6 +778,8 @@ mod pause_tests {
         let mut ui = DefenseUi::new();
         ui.started = true;
         App {
+            #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+            saves: None,
             session: session(game::DefenseConfig::default()),
             ui,
             gfx: None,
@@ -998,3 +1171,280 @@ mod pause_tests {
         }
     }
 }
+
+#[cfg(all(test, feature = "coop-defense-run-save", target_os = "linux"))]
+mod run_save_tests {
+    use super::*;
+    fn private_dir() -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        dir
+    }
+
+    fn app(path: &std::path::Path) -> App {
+        let session = session(game::DefenseConfig::default());
+        let journal = crate::defense_run_save::Journal::new(
+            crate::defense_run_save::Origin { scene: None },
+            &session,
+        );
+        App {
+            session,
+            ui: DefenseUi::new(),
+            gfx: None,
+            last: Instant::now(),
+            accumulator: 0.0,
+            commands: VecDeque::new(),
+            error: None,
+            focused: true,
+            focus_lost_pending: false,
+            saves: Some(RunSaves {
+                store: crate::defense_run_save_store::RunStore::open(path, &[]).unwrap(),
+                identity: crate::defense_run_save::executable_identity().unwrap(),
+                journal,
+                candidate: None,
+            }),
+        }
+    }
+    fn frame(app: &mut App, events: Vec<egui::Event>, delta: f64) {
+        app.process_input(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1200.0, 940.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            delta,
+        );
+    }
+    fn key(key: egui::Key) -> Vec<egui::Event> {
+        [true, false]
+            .into_iter()
+            .map(|pressed| egui::Event::Key {
+                key,
+                physical_key: Some(key),
+                pressed,
+                repeat: false,
+                modifiers: Default::default(),
+            })
+            .collect()
+    }
+    fn click(app: &mut App, x: f32, y: f32) {
+        let pos = egui::pos2(x, y);
+        frame(app, vec![], 0.0);
+        frame(
+            app,
+            [true, false]
+                .into_iter()
+                .map(|pressed| egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                })
+                .collect(),
+            0.0,
+        );
+    }
+    fn prepare(app: &mut App) {
+        frame(app, key(egui::Key::Enter), 0.0);
+        frame(app, key(egui::Key::Space), 1.0 / 60.0);
+        frame(app, key(egui::Key::I), 1.0 / 60.0);
+        // This issued command is never admitted; pause must preserve its high-water.
+        frame(app, key(egui::Key::U), 0.0);
+        frame(app, key(egui::Key::P), 0.0);
+        assert!(app.ui.paused);
+        assert_eq!(app.ui.high_water(), 3);
+        assert_eq!(app.session.predicted_frame().tick(), 2);
+    }
+    fn load_title(app: &mut App) {
+        click(app, 600.0, 682.0);
+        assert!(matches!(
+            app.ui.run_save.mode,
+            crate::defense_ui::RunSaveMode::List(_)
+        ));
+        click(app, 600.0, 321.0);
+        for _ in 0..302 {
+            if app.saves.as_ref().unwrap().candidate.is_none() {
+                break;
+            }
+            frame(app, vec![], 0.1);
+        }
+        assert!(
+            app.ui.started && app.ui.paused,
+            "{}",
+            app.ui.run_save.status
+        );
+    }
+    fn trace(app: &mut App) -> (Vec<u8>, Vec<(u64, u64)>) {
+        let mut checksums = vec![(
+            app.session.head_tick(),
+            app.session.predicted_frame().checksum(),
+        )];
+        let mut bytes = app.session.predicted_frame().to_bytes();
+        frame(app, key(egui::Key::Enter), 0.1);
+        assert_eq!(app.session.predicted_frame().tick(), 2);
+        for n in 0..30 {
+            frame(
+                app,
+                if n == 0 {
+                    key(egui::Key::Space)
+                } else {
+                    vec![]
+                },
+                1.0 / 60.0,
+            );
+            bytes.extend_from_slice(&app.session.predicted_frame().to_bytes());
+            checksums.push((
+                app.session.head_tick(),
+                app.session.predicted_frame().checksum(),
+            ));
+        }
+        bytes.extend_from_slice(&app.ui.high_water().to_le_bytes());
+        (bytes, checksums)
+    }
+    #[test]
+    fn actual_app_save_title_load_and_next_input_parity() {
+        let dir = private_dir();
+        let mut original = app(dir.path());
+        prepare(&mut original);
+        let saved = original.session.predicted_frame().to_bytes();
+        click(&mut original, 450.0, 582.0);
+        assert_eq!(
+            original.saves.as_ref().unwrap().store.list().unwrap().len(),
+            1,
+            "{}",
+            original.ui.run_save.status
+        );
+        assert_eq!(original.session.predicted_frame().to_bytes(), saved);
+        let mut restored = app(dir.path());
+        load_title(&mut restored);
+        assert_eq!(restored.ui.high_water(), 3);
+        assert_eq!(trace(&mut original), trace(&mut restored));
+    }
+    #[test]
+    fn actual_app_repeated_save_replace_cancel_and_focus() {
+        let dir = private_dir();
+        let mut a = app(dir.path());
+        prepare(&mut a);
+        click(&mut a, 450.0, 582.0);
+        click(&mut a, 450.0, 582.0);
+        assert_eq!(a.saves.as_ref().unwrap().store.list().unwrap().len(), 2);
+        let before = a.session.predicted_frame().to_bytes();
+        click(&mut a, 750.0, 582.0);
+        click(&mut a, 600.0, 321.0);
+        assert!(matches!(
+            a.ui.run_save.mode,
+            crate::defense_ui::RunSaveMode::Confirm(_)
+        ));
+        click(&mut a, 800.0, 642.0);
+        assert_eq!(a.session.predicted_frame().to_bytes(), before);
+        click(&mut a, 750.0, 582.0);
+        click(&mut a, 600.0, 321.0);
+        click(&mut a, 450.0, 642.0);
+        assert!(a.ui.paused);
+        assert_eq!(a.session.predicted_frame().to_bytes(), before);
+        a.set_focused(false);
+        a.set_focused(true);
+        frame(&mut a, vec![], 0.1);
+        assert_eq!(a.session.predicted_frame().to_bytes(), before);
+    }
+    #[test]
+    fn separate_process_restore() {
+        if std::env::var_os("ORR_NATIVE_SAVE_TEST_MODE").is_some() {
+            separate_process_child();
+            return;
+        }
+        let exe = std::env::current_exe().unwrap();
+        // An explicit evidence directory preserves receipts even if a child fails.
+        let evidence = std::env::var_os("ORR_NATIVE_SAVE_EVIDENCE_DIR");
+        let temp = if let Some(path) = &evidence {
+            tempfile::Builder::new()
+                .prefix("native-run-save-")
+                .tempdir_in(path)
+                .unwrap()
+        } else {
+            private_dir()
+        };
+        let (root, _temporary) = if evidence.is_some() {
+            (temp.keep(), None)
+        } else {
+            (temp.path().to_owned(), Some(temp))
+        };
+        let store = root.join("store");
+        std::fs::create_dir(&store).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o700)).unwrap();
+        for mode in ["produce", "consume"] {
+            let result = std::process::Command::new(&exe)
+                .args([
+                    "--exact",
+                    "defense_app::run_save_tests::separate_process_restore",
+                ])
+                .env("ORR_NATIVE_SAVE_TEST_MODE", mode)
+                .env("ORR_NATIVE_SAVE_TEST_ROOT", &root)
+                .output()
+                .unwrap();
+            std::fs::write(root.join(format!("{mode}.stdout.log")), &result.stdout).unwrap();
+            std::fs::write(root.join(format!("{mode}.stderr.log")), &result.stderr).unwrap();
+            assert!(
+                result.status.success(),
+                "{}: {} {}",
+                mode,
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+        assert_eq!(
+            std::fs::read(root.join("produce.trace")).unwrap(),
+            std::fs::read(root.join("consume.trace")).unwrap()
+        );
+        let read = |mode| -> serde_json::Value {
+            serde_json::from_slice(&std::fs::read(root.join(format!("{mode}.json"))).unwrap())
+                .unwrap()
+        };
+        let produce = read("produce");
+        let consume = read("consume");
+        assert_ne!(produce["pid"], consume["pid"]);
+        assert_eq!(produce["executable_sha256"], consume["executable_sha256"]);
+        assert_eq!(produce["frame_checksums"], consume["frame_checksums"]);
+        let receipt = serde_json::json!({"kind":"native CPU egui App/Session separate-process restore", "parent_pid":std::process::id(), "producer":produce,"consumer":consume,"frame_bytes_equal":true,"frame_checksums_equal":true,"os_window_physical_input_gpu_verified":false});
+        std::fs::write(
+            root.join("receipt.json"),
+            serde_json::to_vec_pretty(&receipt).unwrap(),
+        )
+        .unwrap();
+    }
+    fn separate_process_child() {
+        let Ok(mode) = std::env::var("ORR_NATIVE_SAVE_TEST_MODE") else {
+            return;
+        };
+        let root = PathBuf::from(std::env::var_os("ORR_NATIVE_SAVE_TEST_ROOT").unwrap());
+        let mut a = app(&root.join("store"));
+        if mode == "produce" {
+            prepare(&mut a);
+            click(&mut a, 450.0, 582.0);
+            assert_eq!(a.saves.as_ref().unwrap().store.list().unwrap().len(), 1);
+        } else {
+            assert_eq!(mode, "consume");
+            load_title(&mut a);
+        }
+        let saved_tick = a.session.head_tick();
+        let saved_checksum = a.session.predicted_frame().checksum();
+        let saved_high_water = a.ui.high_water();
+        let (bytes, checksums) = trace(&mut a);
+        std::fs::write(root.join(format!("{mode}.trace")), bytes).unwrap();
+        let receipt = serde_json::json!({"mode":mode,"pid":std::process::id(),"executable_sha256":a.saves.as_ref().unwrap().identity,"origin":"default", "saved_tick":saved_tick,"saved_checksum":saved_checksum,"saved_high_water":saved_high_water,"continued_high_water":a.ui.high_water(),"frame_checksums":checksums});
+        std::fs::write(
+            root.join(format!("{mode}.json")),
+            serde_json::to_vec_pretty(&receipt).unwrap(),
+        )
+        .unwrap();
+    }
+}
+
+#[cfg(all(test, feature = "coop-defense-run-save", target_os = "linux"))]
+#[path = "defense_run_save_app_tests.rs"]
+mod run_save_acceptance_tests;
