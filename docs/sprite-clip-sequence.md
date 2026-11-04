@@ -5,6 +5,12 @@ scene and sprite bindings, load an admitted sprite document, and select a Region
 source. The explicit sequence mode starts a private one-frame clip from that
 region, even if the source atlas contains no clips. Existing timing-only variants
 remain a separate entry point with fixed frame order and region references.
+Alternatively, select a Clip source and choose **Copy clip to sequence** to begin
+with its complete ordered frames, exact durations and Loop/Once mode. The first
+frame is selected and a free `sequence` ID is suggested. Reorder, remove, append
+or retime these copied frames with the same controls below. Export still appends
+one new clip and never replaces the source clip. Copying is rejected atomically
+if the added frames or clip exceed the existing document limits.
 
 Choose an admitted region for each appended frame. Repeated and noncontiguous
 region IDs are allowed. Select a frame to remove it or move it one position up or

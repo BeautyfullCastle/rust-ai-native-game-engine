@@ -179,12 +179,18 @@ fn panel_fixture() -> (tempfile::TempDir, egui::Context, SpritePanel, Editor) {
 fn panel_fixture_with_clips(
     clips: bool,
 ) -> (tempfile::TempDir, egui::Context, SpritePanel, Editor) {
+    panel_fixture_document(clips, None)
+}
+fn panel_fixture_document(
+    clips: bool,
+    replacement: Option<SpriteSource>,
+) -> (tempfile::TempDir, egui::Context, SpritePanel, Editor) {
     let dir = tempfile::tempdir().unwrap();
     let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../assets/sprite_demo")
         .canonicalize()
         .unwrap();
-    let source = if clips {
+    let source = if clips && replacement.is_none() {
         source
     } else {
         let copy = dir.path().join("clipless-source");
@@ -200,7 +206,11 @@ fn panel_fixture_with_clips(
         }
         let mut document: SpriteSource =
             serde_json::from_slice(&std::fs::read(copy.join("sprites.json")).unwrap()).unwrap();
-        document.clips.clear();
+        if let Some(replacement) = replacement {
+            document = replacement;
+        } else {
+            document.clips.clear();
+        }
         std::fs::write(
             copy.join("sprites.json"),
             SpriteDocument::new(document).unwrap().to_json().unwrap(),
@@ -1648,3 +1658,6 @@ fn sequence_uniform_duration_widget_exports_pairs_without_scene_mutation() {
     assert_eq!(editor.checksum(), checksum);
     assert_eq!(editor.history().entries.len(), history);
 }
+
+#[path = "clip_copy_tests.rs"]
+mod clip_copy_tests;
