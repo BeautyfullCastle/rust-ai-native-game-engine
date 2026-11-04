@@ -135,6 +135,7 @@ fn changed_camera_marks_published_result_stale_without_removing_it() {
         lighting_sha256: None,
         hud_sha256: None,
         props_sha256: None,
+        animation_sha256: None,
         platform: bundle::RuntimePlatform::LinuxX86_64,
     };
     let (sender, receiver) = mpsc::sync_channel(1);
@@ -509,6 +510,7 @@ fn changed_art_completion_is_retained_but_never_reported_current() {
         lighting_sha256: None,
         hud_sha256: None,
         props_sha256: None,
+        animation_sha256: None,
         platform: bundle::RuntimePlatform::LinuxX86_64,
     };
     let (sender, receiver) = mpsc::sync_channel(1);
@@ -584,6 +586,7 @@ fn changed_lighting_completion_is_retained_but_never_reported_current() {
         lighting_sha256: None,
         hud_sha256: None,
         props_sha256: None,
+        animation_sha256: None,
         platform: bundle::RuntimePlatform::LinuxX86_64,
     };
     let (sender, receiver) = mpsc::sync_channel(1);
@@ -659,6 +662,7 @@ fn changed_hud_completion_is_retained_but_never_reported_current() {
         lighting_sha256: None,
         hud_sha256: None,
         props_sha256: None,
+        animation_sha256: None,
         platform: bundle::RuntimePlatform::LinuxX86_64,
     };
     let (sender, receiver) = mpsc::sync_channel(1);

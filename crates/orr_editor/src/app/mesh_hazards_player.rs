@@ -307,6 +307,21 @@ impl super::EditorApp {
             && self.mesh_navigation.props_document_bytes(&self.editor).is_ok_and(|bytes| bytes == document)
     }
 
+    #[cfg(feature = "mesh-animated-models")]
+    pub(crate) fn install_validated_hazards_animation(&mut self, panel: crate::mesh_animation_panel::Panel) {
+        self.mesh_animation = panel;
+    }
+
+    #[cfg(feature = "mesh-animated-models")]
+    pub(crate) fn hazards_animation_matches(&self, expected: Option<&str>) -> bool {
+        self.mesh_animation.matches_saved_sidecar(expected)
+    }
+
+    #[cfg(feature = "mesh-animated-models")]
+    pub(crate) fn hazards_animation_pose_digest(&mut self) -> Result<Option<String>, String> {
+        self.mesh_animation_for_frame().map(|placement| placement.as_ref().map(crate::mesh_hazards_player::animation_pose_digest))
+    }
+
     pub(crate) fn verify_hazards_restart(&mut self) -> Result<(), String> {
         let mut session = State::default();
         session.open_dialog(&mut self.editor);
@@ -321,6 +336,7 @@ impl super::EditorApp {
             .play_blocker(&self.editor)
             .or_else(|| self.mesh_lighting.play_blocker(&self.editor))
             .or_else(|| self.mesh_hud.play_blocker(&self.editor))
+            .or_else(|| self.mesh_animation_blocker())
         {
             return Err(blocker);
         }

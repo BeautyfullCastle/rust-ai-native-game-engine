@@ -677,3 +677,6 @@ pub(super) mod hud_tests;
 
 #[path = "props_tests.rs"]
 pub(super) mod props_tests;
+
+#[path = "animation_tests.rs"]
+pub(super) mod animation_tests;

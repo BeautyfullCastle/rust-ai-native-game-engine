@@ -553,3 +553,208 @@ fn actual_native_runtime_is_admitted() {
         std::str::from_utf8(CAMERA_CAPABILITY_MARKER).unwrap()
     );
 }
+
+pub(super) fn animation_fixture(
+    platform: RuntimePlatform,
+    camera: bool,
+    lighting: bool,
+    hud: bool,
+    props: bool,
+) -> Vec<u8> {
+    let mut capabilities = vec![
+        (CAPABILITY_SECTION, CAPABILITY_MARKER),
+        (ANIMATION_CAPABILITY_SECTION, ANIMATION_CAPABILITY_MARKER),
+    ];
+    for (enabled, name, marker) in [
+        (camera, CAMERA_CAPABILITY_SECTION, CAMERA_CAPABILITY_MARKER),
+        (
+            lighting,
+            LIGHTING_CAPABILITY_SECTION,
+            LIGHTING_CAPABILITY_MARKER,
+        ),
+        (hud, HUD_CAPABILITY_SECTION, HUD_CAPABILITY_MARKER),
+        (props, PROPS_CAPABILITY_SECTION, PROPS_CAPABILITY_MARKER),
+    ] {
+        if enabled {
+            capabilities.push((name, marker));
+        }
+    }
+    match platform {
+        RuntimePlatform::WindowsX86_64 => {
+            let count = capabilities.len() + 1;
+            let mut bytes = pe();
+            bytes.resize(1024 + count * 512, 0);
+            bytes[200..].fill(0);
+            put16(&mut bytes, 70, count as u16);
+            put32(&mut bytes, 144, (count as u32 + 1) * 4096);
+            put32(&mut bytes, 148, 1024);
+            bytes[200..205].copy_from_slice(b".text");
+            put32(&mut bytes, 208, 1);
+            put32(&mut bytes, 212, 4096);
+            put32(&mut bytes, 216, 512);
+            put32(&mut bytes, 220, 1024);
+            put32(&mut bytes, 236, 0x6000_0020);
+            bytes[1024] = 0xc3;
+            for (index, (name, marker)) in capabilities.iter().enumerate() {
+                let section = 240 + index * 40;
+                let payload = 1536 + index * 512;
+                bytes[section..section + name.len()].copy_from_slice(name.as_bytes());
+                put32(&mut bytes, section + 8, marker.len() as u32);
+                put32(&mut bytes, section + 12, (index as u32 + 2) * 4096);
+                put32(&mut bytes, section + 16, 512);
+                put32(&mut bytes, section + 20, payload as u32);
+                put32(&mut bytes, section + 36, 0x4000_0040);
+                bytes[payload..payload + marker.len()].copy_from_slice(marker);
+            }
+            bytes
+        }
+        RuntimePlatform::LinuxX86_64 => {
+            let count = capabilities.len() + 3;
+            let mut bytes = elf();
+            bytes.resize(2048 + count * 64, 0);
+            bytes[288..].fill(0);
+            put64(&mut bytes, 40, 2048);
+            put16(&mut bytes, 60, count as u16);
+            put16(&mut bytes, 62, (count - 1) as u16);
+            put64(&mut bytes, 96, 1024);
+            put64(&mut bytes, 104, 1024);
+            let mut names = b"\0.text\0.shstrtab\0".to_vec();
+            let text = 2112;
+            put32(&mut bytes, text, 1);
+            put32(&mut bytes, text + 4, 1);
+            put64(&mut bytes, text + 8, 6);
+            put64(&mut bytes, text + 16, 0x400100);
+            put64(&mut bytes, text + 24, 256);
+            put64(&mut bytes, text + 32, 1);
+            for (index, (name, marker)) in capabilities.iter().enumerate() {
+                let section = 2176 + index * 64;
+                let payload = 512 + index * 64;
+                put32(&mut bytes, section, names.len() as u32);
+                names.extend_from_slice(name.as_bytes());
+                names.push(0);
+                put32(&mut bytes, section + 4, 1);
+                put64(&mut bytes, section + 8, 2);
+                put64(&mut bytes, section + 16, 0x400000 + payload as u64);
+                put64(&mut bytes, section + 24, payload as u64);
+                put64(&mut bytes, section + 32, marker.len() as u64);
+                put64(&mut bytes, section + 48, 1);
+                bytes[payload..payload + marker.len()].copy_from_slice(marker);
+            }
+            let strings = 2048 + (count - 1) * 64;
+            put32(&mut bytes, strings, 7);
+            put32(&mut bytes, strings + 4, 3);
+            put64(&mut bytes, strings + 24, 1024);
+            put64(&mut bytes, strings + 32, names.len() as u64);
+            bytes[1024..1024 + names.len()].copy_from_slice(&names);
+            bytes
+        }
+    }
+}
+
+#[test]
+fn animation_capability_preserves_legacy_and_requires_each_optional_capability() {
+    for platform in [RuntimePlatform::WindowsX86_64, RuntimePlatform::LinuxX86_64] {
+        assert!(
+            validate_animation_runtime(&fixture(platform), false, false, false, false)
+                .unwrap_err()
+                .contains("animation capability section is missing")
+        );
+        for flags in 0..16 {
+            let requested = [
+                flags & 1 != 0,
+                flags & 2 != 0,
+                flags & 4 != 0,
+                flags & 8 != 0,
+            ];
+            let bytes = animation_fixture(
+                platform,
+                requested[0],
+                requested[1],
+                requested[2],
+                requested[3],
+            );
+            assert_eq!(validate_runtime(&bytes), Ok(platform));
+            assert_eq!(
+                validate_animation_runtime(
+                    &bytes,
+                    requested[0],
+                    requested[1],
+                    requested[2],
+                    requested[3]
+                ),
+                Ok(platform)
+            );
+            for missing in 0..4 {
+                if !requested[missing] {
+                    let mut more = requested;
+                    more[missing] = true;
+                    assert!(
+                        validate_animation_runtime(&bytes, more[0], more[1], more[2], more[3])
+                            .is_err()
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn animation_metadata_is_strict_even_for_legacy_admission() {
+    for platform in [RuntimePlatform::WindowsX86_64, RuntimePlatform::LinuxX86_64] {
+        let original = animation_fixture(platform, false, false, false, false);
+        let (section, payload) = match platform {
+            RuntimePlatform::WindowsX86_64 => (280, 2048),
+            RuntimePlatform::LinuxX86_64 => (2240, 576),
+        };
+        let mut corrupt = original.clone();
+        corrupt[payload] ^= 1;
+        let mut bad_flags = original.clone();
+        let mut bad_size = original.clone();
+        let mut duplicate = original.clone();
+        match platform {
+            RuntimePlatform::WindowsX86_64 => {
+                put32(&mut bad_flags, section + 36, 0xe000_0040);
+                put32(
+                    &mut bad_size,
+                    section + 8,
+                    ANIMATION_CAPABILITY_MARKER.len() as u32 - 1,
+                );
+                duplicate[240..248].copy_from_slice(b".orrhanm");
+                put32(
+                    &mut duplicate,
+                    248,
+                    ANIMATION_CAPABILITY_MARKER.len() as u32,
+                );
+                duplicate[1536..1536 + ANIMATION_CAPABILITY_MARKER.len()]
+                    .copy_from_slice(ANIMATION_CAPABILITY_MARKER);
+            }
+            RuntimePlatform::LinuxX86_64 => {
+                put64(&mut bad_flags, section + 8, 3);
+                put64(
+                    &mut bad_size,
+                    section + 32,
+                    ANIMATION_CAPABILITY_MARKER.len() as u64 - 1,
+                );
+                let name = u32_at(&original, section).unwrap();
+                put32(&mut duplicate, 2176, name);
+                put64(
+                    &mut duplicate,
+                    2208,
+                    ANIMATION_CAPABILITY_MARKER.len() as u64,
+                );
+                duplicate[512..512 + ANIMATION_CAPABILITY_MARKER.len()]
+                    .copy_from_slice(ANIMATION_CAPABILITY_MARKER);
+            }
+        }
+        for bytes in [corrupt, bad_flags, bad_size, duplicate] {
+            assert!(validate_runtime(&bytes).is_err());
+            assert!(validate_animation_runtime(&bytes, false, false, false, false).is_err());
+        }
+        for length in 0..original.len() {
+            assert!(
+                validate_animation_runtime(&original[..length], false, false, false, false)
+                    .is_err()
+            );
+        }
+    }
+}
