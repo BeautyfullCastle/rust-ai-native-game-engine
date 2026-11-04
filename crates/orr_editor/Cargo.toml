@@ -21,7 +21,7 @@ static-gameplay = ["static-games", "dep:serde"]
 static-game-actions = ["static-games", "dep:orr_input"]
 arena-project-export = ["sprites", "orr_sample/project-export", "dep:sha2"]
 # Optional finite visual-only Arena background authoring.
-tilemap = ["sprites", "orr_sample/tilemap", "dep:orr_tilemap"]
+tilemap = ["sprites", "orr_sample/tilemap", "dep:orr_tilemap", "dep:rustix"]
 # Default-off standalone particle preset authoring; existing eframe/egui only.
 particle-preset-editor = ["dep:tempfile", "orr_sample/particle-preset"]
 # Embedded presentation-only preview; does not enable demo or imported scenes.

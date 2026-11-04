@@ -19,11 +19,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-const SOURCE: &[u8] = include_bytes!("../../../../assets/sprite_demo/lantern_keeper.rgba");
+pub(super) const SOURCE: &[u8] = include_bytes!("../../../../assets/sprite_demo/lantern_keeper.rgba");
 // Literal 7x4 states: source motif is [10, None, 11; 20, 21, 10].
 // Some(0) requires an atlas region absent from the original starter and is
 // exercised by CPU tests; this GPU gate retains the original admitted atlas.
-const BEFORE: [Option<u32>; 28] = [
+pub(super) const BEFORE: [Option<u32>; 28] = [
     Some(10),
     None,
     Some(11),
@@ -53,7 +53,7 @@ const BEFORE: [Option<u32>; 28] = [
     Some(20),
     Some(21),
 ];
-const STAMPED: [Option<u32>; 28] = [
+pub(super) const STAMPED: [Option<u32>; 28] = [
     Some(10),
     None,
     Some(11),
@@ -179,7 +179,7 @@ const WRONG_STRIDE: [Option<u32>; 28] = [
 // The production App owns all project, UI, pointer and rendering operations.
 // This wrapper adds only a real foreground egui obstruction for a release test;
 // it cannot access or manufacture a tile gesture or history entry.
-struct TestApp {
+pub(super) struct TestApp {
     app: EditorApp,
     obstruction: Option<egui::Rect>,
 }
@@ -218,7 +218,7 @@ impl eframe::App for TestApp {
         }
     }
 }
-fn fingerprint(bytes: &[u8]) -> String {
+pub(super) fn fingerprint(bytes: &[u8]) -> String {
     format!(
         "{:016x}",
         bytes
@@ -227,7 +227,7 @@ fn fingerprint(bytes: &[u8]) -> String {
                 .wrapping_mul(0x100000001b3))
     )
 }
-fn write_json(path: &Path, value: &serde_json::Value) {
+pub(super) fn write_json(path: &Path, value: &serde_json::Value) {
     fs::write(path, serde_json::to_vec_pretty(value).unwrap()).unwrap();
 }
 fn png(path: &Path, size: (u32, u32), bytes: &[u8]) {
@@ -262,14 +262,14 @@ fn retained_frame(path: &Path, live: &orr_ecs::Frame) {
     assert_eq!(decoded.tick(), live.tick());
     assert_eq!(decoded.checksum(), live.checksum());
 }
-fn drain(h: &mut Harness<'_, TestApp>, count: usize) {
+pub(super) fn drain(h: &mut Harness<'_, TestApp>, count: usize) {
     for _ in 0..count {
         h.run_steps(1);
         // Poll the real renderer every UI step, not hundreds of queued submits.
         h.render().expect("per-step actual app GPU drain");
     }
 }
-fn click(h: &mut Harness<'_, TestApp>, label: &str) {
+pub(super) fn click(h: &mut Harness<'_, TestApp>, label: &str) {
     h.get_by_label(label).scroll_to_me();
     drain(h, 3);
     assert!(
@@ -279,7 +279,7 @@ fn click(h: &mut Harness<'_, TestApp>, label: &str) {
     h.get_by_label(label).click_accesskit();
     drain(h, 3);
 }
-fn open(root: &Path) -> Harness<'static, TestApp> {
+pub(super) fn open(root: &Path) -> Harness<'static, TestApp> {
     let prepared = crate::project::PreparedProject::open(root).unwrap();
     let mut h = Harness::builder()
         .with_size([1800., 2000.])
@@ -381,7 +381,7 @@ fn authoritative_frame(h: &mut Harness<'_, TestApp>) -> orr_ecs::Frame {
         std::thread::yield_now();
     }
 }
-fn capture(
+pub(super) fn capture(
     h: &mut Harness<'_, TestApp>,
     dir: &Path,
     name: &str,
@@ -458,7 +458,7 @@ fn expected(region: Option<u32>, x: usize, y: usize) -> [u8; 4] {
     }
     [srgb(out[0]), srgb(out[1]), srgb(out[2]), 255]
 }
-fn consume_saved(
+pub(super) fn consume_saved(
     root: &Path,
     dir: &Path,
     gpu: &Wgpu,
@@ -541,7 +541,7 @@ fn begin(h: &mut Harness<'_, TestApp>, from: (u32, u32), to: (u32, u32)) -> egui
     move_to(h, end);
     end
 }
-fn rectangle(h: &mut Harness<'_, TestApp>, from: (u32, u32), to: (u32, u32)) {
+pub(super) fn rectangle(h: &mut Harness<'_, TestApp>, from: (u32, u32), to: (u32, u32)) {
     let before = h.state().tilemap.as_ref().unwrap().history_snapshot();
     let end = begin(h, from, to);
     assert_eq!(
@@ -551,7 +551,7 @@ fn rectangle(h: &mut Harness<'_, TestApp>, from: (u32, u32), to: (u32, u32)) {
     );
     button(h, end, false);
 }
-fn document(h: &Harness<'_, TestApp>, original: &orr_tilemap::Document, literal: &[Option<u32>]) {
+pub(super) fn document(h: &Harness<'_, TestApp>, original: &orr_tilemap::Document, literal: &[Option<u32>]) {
     let actual = h.state().tilemap.as_ref().unwrap().document().document();
     let mut want = original.clone();
     want.cells = literal.to_vec();
@@ -577,7 +577,7 @@ fn visible_difference(a: &[u8], b: &[u8], column: usize, row: usize) -> usize {
         .count()
 }
 
-fn files(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+pub(super) fn files(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
     fn walk(root: &Path, path: &Path, out: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>) {
         for e in fs::read_dir(path).unwrap() {
             let e = e.unwrap();
@@ -647,7 +647,7 @@ fn actor_oracle(h: &Harness<'_, TestApp>, path: &Path) -> Vec<[u8; 4]> {
     samples
 }
 
-fn stamp(h: &mut Harness<'_, TestApp>, at: (u32, u32)) {
+pub(super) fn stamp(h: &mut Harness<'_, TestApp>, at: (u32, u32)) {
     let p = point(h, at.0, at.1);
     button(h, p, true);
     button(h, p, false);
@@ -655,7 +655,7 @@ fn stamp(h: &mut Harness<'_, TestApp>, at: (u32, u32)) {
 
 // Read retained native viewport bytes, not a reconstructed compositor result.
 // Geometry and source texels are literal; no production placement/UV helper.
-fn app_play_oracle(h: &Harness<'_, TestApp>, dir: &Path, name: &str, literal: &[Option<u32>; 28]) {
+pub(super) fn app_play_oracle(h: &Harness<'_, TestApp>, dir: &Path, name: &str, literal: &[Option<u32>; 28]) {
     let size = h.state().viewport_gpu().unwrap().gpu().target().size();
     let pixels = fs::read(dir.join(format!("{name}.rgba"))).unwrap();
     assert_eq!(h.state().editor.camera, Camera::new([0., 80.], 160.));

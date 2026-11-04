@@ -15,6 +15,8 @@ use std::{
 };
 mod actors;
 mod copy;
+mod pattern_asset;
+mod pattern_files;
 #[cfg(all(
     target_os = "linux",
     target_arch = "x86_64",
@@ -179,6 +181,8 @@ pub struct TilemapPanel {
     rectangle: Option<RectangleGesture>,
     pattern: Option<copy::Pattern>,
     pattern_texture: Option<egui::TextureId>,
+    pattern_file: String,
+    pattern_notice: Option<String>,
     selected: Option<u32>,
     draft_width: String,
     draft_height: String,
@@ -256,6 +260,8 @@ impl TilemapPanel {
             rectangle: None,
             pattern: None,
             pattern_texture: None,
+            pattern_file: String::new(),
+            pattern_notice: None,
             selected: None,
             error: None,
             compositor: None,
@@ -653,6 +659,7 @@ impl TilemapPanel {
                 }
             });
             ui.label("Layout transforms rearrange copied cells only; individual tile artwork stays upright. Stamp applies the result.");
+            self.show_pattern_files(ui, editor, sprites);
             ui.horizontal(|ui| {
                 if ui
                     .add_enabled(

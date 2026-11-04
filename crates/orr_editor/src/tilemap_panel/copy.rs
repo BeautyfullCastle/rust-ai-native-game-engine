@@ -39,6 +39,44 @@ pub(super) struct Pattern {
     atlas: String,
 }
 impl Pattern {
+    /// Serialize only reusable cells and their immutable sprite provenance.
+    pub(super) fn encode_asset(
+        &self,
+        source: &ValidatedDocument,
+        epoch: u64,
+        atlas: &SpriteDocument,
+        digest: &str,
+    ) -> Result<Vec<u8>, String> {
+        if !self.matches(source, epoch, atlas) {
+            return Err("copied pattern expired; Copy again".into());
+        }
+        super::pattern_asset::Asset::encode(
+            self.width,
+            self.height,
+            &self.cells,
+            source,
+            atlas,
+            digest,
+        )
+    }
+    /// Rebind validated portable cells to this map's geometry and epoch.
+    pub(super) fn decode_asset(
+        bytes: &[u8],
+        source: &ValidatedDocument,
+        epoch: u64,
+        atlas: &SpriteDocument,
+        digest: &str,
+    ) -> Result<Self, String> {
+        let asset = super::pattern_asset::Asset::decode(bytes, source, atlas, digest)?;
+        Ok(Self {
+            width: asset.width,
+            height: asset.height,
+            cells: asset.cells,
+            geometry: Geometry::of(source),
+            epoch,
+            atlas: atlas.to_json().map_err(|e| e.to_string())?,
+        })
+    }
     pub(super) fn capture(
         source: &ValidatedDocument,
         start: CellCoord,

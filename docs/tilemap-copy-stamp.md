@@ -19,6 +19,10 @@ retain them. Resize, a geometry-changing Undo/Redo, reopening or replacing the
 project, scene reload, or atlas replacement expires them. Returning to old
 geometry does not restore an expired pattern. Copy again when no pattern exists.
 
+To reuse a layout after reopening or in another map with identical installed
+artwork, explicitly [Save and Load a reusable pattern](tilemap-pattern-assets.md).
+Loading creates a new context-bound clipboard; it does not apply or save tiles.
+
 Copy uses the same guarded rectangle gesture as Rectangle: Escape, focus loss,
 mode/tool changes, invalid release, skipped frames and changed source cancel it.
 Stamp requires an unobstructed primary press in the matching editable viewport.
@@ -32,4 +36,4 @@ orders, overlap and repeated reuse, empty versus zero, boundaries and invalid
 coordinates, maximum size, actor budgets, no-op Redo preservation, lifecycle
 invalidation and actual panel input. Platform/GPU claims require their separate
 recorded verification. This is not an OS clipboard, package edit, actor operation,
-transform, or cross-project paste. Save tilemap remains explicit.
+transform, or implicit cross-project paste. Save tilemap remains explicit.
