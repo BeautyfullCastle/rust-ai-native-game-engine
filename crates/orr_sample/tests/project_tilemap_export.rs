@@ -159,7 +159,7 @@ fn cli_exports_saved_tilemap_and_relocated_runtime_preserves_checksum() {
     assert!(!fixture.runtime.exists());
     assert!(!output.exists());
     assert_eq!(
-        PreparedRuntime::open(&moved.join("project"))
+        PreparedRuntime::open(moved.join("project"))
             .unwrap()
             .initial_frame()
             .checksum(),

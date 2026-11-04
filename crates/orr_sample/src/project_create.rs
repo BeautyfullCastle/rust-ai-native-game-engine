@@ -13,6 +13,11 @@ mod template;
 #[cfg(feature = "tilemap")]
 mod tilemap;
 #[cfg(feature = "tilemap")]
+mod custom_tilemap;
+#[cfg(feature = "tilemap")]
+pub use custom_tilemap::{create_custom_tilemap, CustomTilemapOptions};
+pub const CUSTOM_TILEMAP_TEMPLATE: &str = "arena-custom-tileset-2d-v1";
+#[cfg(feature = "tilemap")]
 pub use tilemap::create_tilemap;
 pub const TILEMAP_TEMPLATE: &str = "arena-tilemap-2d-v1";
 #[cfg(test)]
