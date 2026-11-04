@@ -16,7 +16,11 @@ interior frames with their durations: A/B/C/D becomes A/B/C/D/C/B. Loop supplies
 the return to A without repeated endpoints; Once ends on B. One/two-frame
 sequences are unchanged. Selection stays on the original frame. Each click expands
 the current sequence again, subject to the existing limits. Edit positive integer millisecond durations
-and explicitly apply the ID or duration field before preview/export. The sequence
+and explicitly apply the ID or duration field before preview/export.
+**Use selected duration for all frames** copies the selected frame's applied
+duration across the current sequence without changing regions, order or selection.
+Apply pending fields first. An overflowing total rejects the entire change; an
+already-uniform sequence is unchanged. The sequence
 controls and export action share a bounded scrolling area. Pending text
 clears preview and blocks export until validated; invalid Apply keeps the committed
 draft. Frame selection and append/remove/reorder are disabled while either field
