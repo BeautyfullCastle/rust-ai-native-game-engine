@@ -668,3 +668,6 @@ fn camera_fifo_source_rejects_without_blocking() {
 
 #[path = "art_tests.rs"]
 pub(super) mod art_tests;
+
+#[path = "lighting_tests.rs"]
+pub(super) mod lighting_tests;

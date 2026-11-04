@@ -132,6 +132,7 @@ fn changed_camera_marks_published_result_stale_without_removing_it() {
         runtime_sha256: "runtime".into(),
         camera_sha256: Some("published-camera-hash".into()),
         art_sha256: None,
+        lighting_sha256: None,
         platform: bundle::RuntimePlatform::LinuxX86_64,
     };
     let (sender, receiver) = mpsc::sync_channel(1);
@@ -510,6 +511,80 @@ fn changed_art_completion_is_retained_but_never_reported_current() {
         runtime_sha256: "runtime".into(),
         camera_sha256: None,
         art_sha256: None,
+        lighting_sha256: None,
+        platform: bundle::RuntimePlatform::LinuxX86_64,
+    };
+    let (sender, receiver) = mpsc::sync_channel(1);
+    sender
+        .send(Completion {
+            request: stamp.clone(),
+            result: Ok(receipt),
+        })
+        .ok()
+        .unwrap();
+    let mut panel = Panel {
+        runtime: runtime.display().to_string(),
+        output: stamp.destination.display().to_string(),
+        trusted_runtime: true,
+        pending: Some(receiver),
+        ..Default::default()
+    };
+    panel.poll(&mut editor, None);
+    assert!(panel.status.contains("Bundle retained"));
+    assert_eq!(fs::read(marker).unwrap(), b"published");
+}
+
+#[test]
+fn lighting_source_presence_and_bytes_are_bound_at_request_admission_and_completion() {
+    let (temp, mut editor, scene) = fixture();
+    let runtime = temp.path().join("player");
+    fs::write(&runtime, b"fixture runtime").unwrap();
+    let sidecar = crate::mesh_lighting_store::sidecar_path(&scene).unwrap();
+    let absent = request(&mut editor, &scene, &runtime);
+    assert!(absent.sources.lighting.is_none());
+    fs::write(&sidecar, b"light A").unwrap();
+    assert!(!source_matches(&mut editor, None, &absent));
+    assert!(run(&absent).is_err());
+    assert!(!absent.destination.exists());
+    let present = request(&mut editor, &scene, &runtime);
+    assert_eq!(present.sources.lighting.as_deref(), Some(&b"light A"[..]));
+    assert!(source_matches(&mut editor, None, &present));
+    fs::write(&sidecar, b"light B").unwrap();
+    assert!(!source_matches(&mut editor, None, &present));
+    assert!(run(&present).is_err());
+    let replaced = request(&mut editor, &scene, &runtime);
+    fs::remove_file(&sidecar).unwrap();
+    assert!(!source_matches(&mut editor, None, &replaced));
+    assert!(run(&replaced).is_err());
+    assert!(!replaced.destination.exists());
+}
+
+#[test]
+fn changed_lighting_completion_is_retained_but_never_reported_current() {
+    let (temp, mut editor, scene) = fixture();
+    let runtime = temp.path().join("player");
+    fs::write(&runtime, b"fixture runtime").unwrap();
+    let stamp = request(&mut editor, &scene, &runtime);
+    fs::create_dir(&stamp.destination).unwrap();
+    let marker = stamp.destination.join("retained");
+    fs::write(&marker, b"published").unwrap();
+    fs::write(
+        crate::mesh_lighting_store::sidecar_path(&scene).unwrap(),
+        b"light appeared",
+    )
+    .unwrap();
+    let receipt = Receipt {
+        root: stamp.destination.clone(),
+        scene: scene.clone(),
+        runtime: runtime.clone(),
+        manifest: stamp.destination.join(bundle::MANIFEST_FILENAME),
+        checksum: stamp.checksum,
+        graph_revision: [0; 32],
+        scene_sha256: "scene".into(),
+        runtime_sha256: "runtime".into(),
+        camera_sha256: None,
+        art_sha256: None,
+        lighting_sha256: None,
         platform: bundle::RuntimePlatform::LinuxX86_64,
     };
     let (sender, receiver) = mpsc::sync_channel(1);

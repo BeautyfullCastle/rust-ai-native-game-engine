@@ -25,7 +25,8 @@ files. Package provenance, license text and appearance remain embedded.
 Scene-only bundles retain schema 1; camera-only bundles retain schema 2.
 Art-bearing schema 3 requires `game.scene.yaml.mesh-art.json` and optionally the
 camera sidecar. File lengths and SHA-256 digests are part of the closed inventory.
-Unknown attachments, props, lighting, HUD and animation remain unsupported and
+Optional [authored lighting](mesh-hazards-lighting.md) uses schema 4.
+Unknown attachments, props, HUD and animation remain unsupported and
 are rejected rather than omitted. The player must advertise its separate
 `ORR_MESH_HAZARDS_ART_V1` native capability, and the camera capability when needed.
 Capability metadata and hashes are not signatures or executable trust.

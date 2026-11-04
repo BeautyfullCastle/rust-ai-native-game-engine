@@ -165,7 +165,7 @@ fn invalid_or_conflicting_player_options_are_rejected() {
 fn capabilities_report_hazards_and_interactive_input_profiles() {
     assert_eq!(
         super::CAPABILITIES,
-        "ORR_MESH_HAZARDS_PLAYER_V1\nORR_MESH_INPUT_V1\nORR_MESH_HAZARDS_CAMERA_V1\nORR_MESH_HAZARDS_ART_V1"
+        "ORR_MESH_HAZARDS_PLAYER_V1\nORR_MESH_INPUT_V1\nORR_MESH_HAZARDS_CAMERA_V1\nORR_MESH_HAZARDS_ART_V1\nORR_MESH_HAZARDS_LIGHTING_V1"
     );
 }
 
@@ -224,6 +224,7 @@ fn executable_identity_checks_platform_and_actual_bytes() {
         platform: native,
         camera_sha256: None,
         art_sha256: None,
+        lighting_sha256: None,
     };
     super::verify_executable(&executable, &bundle).unwrap();
     fs::write(&executable, b"changed runtime").unwrap();
@@ -447,5 +448,32 @@ fn loaded_art_must_match_manifest_even_when_bundle_on_disk_is_unchanged() {
         super::verify_loaded_art_bundle(&fixture.bundle.root, &changed, &panel)
             .unwrap_err()
             .contains("loaded game agent art")
+    );
+}
+
+#[test]
+fn loaded_lighting_must_match_manifest_and_recheck_inventory() {
+    let fixture = bound_bundle_fixture(false);
+    let mut loaded = Editor::open_game(&fixture.bundle.scene, EditorGame::MeshHazardsV1).unwrap();
+    loaded.sync();
+    let mut panel = crate::mesh_lighting_panel::Panel::default();
+    panel.sync(&loaded);
+    super::verify_loaded_lighting_bundle(&fixture.bundle.root, &fixture.bundle, &panel).unwrap();
+    let mut changed = fixture.bundle.clone();
+    changed.lighting_sha256 = Some("unloaded lighting".into());
+    assert!(
+        super::verify_loaded_lighting_bundle(&fixture.bundle.root, &changed, &panel)
+            .unwrap_err()
+            .contains("loaded game lighting")
+    );
+    fs::write(
+        crate::mesh_lighting_store::sidecar_path(&fixture.bundle.scene).unwrap(),
+        b"added after load",
+    )
+    .unwrap();
+    assert!(
+        super::verify_loaded_lighting_bundle(&fixture.bundle.root, &fixture.bundle, &panel)
+            .unwrap_err()
+            .contains("bundle changed")
     );
 }

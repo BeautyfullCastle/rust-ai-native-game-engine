@@ -254,6 +254,35 @@ impl super::EditorApp {
         self.mesh_navigation = panel;
     }
 
+    pub(crate) fn install_validated_hazards_lighting(
+        &mut self,
+        panel: crate::mesh_lighting_panel::Panel,
+    ) {
+        self.mesh_lighting = panel;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hazard_lighting_panel(&self) -> &crate::mesh_lighting_panel::Panel {
+        &self.mesh_lighting
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hazard_lighting_warning(&self) -> Option<&str> {
+        self.mesh_post_process_runtime.warning()
+    }
+
+    pub(crate) fn hazards_lighting_matches(
+        &self,
+        expected_digest: &Option<String>,
+        lighting: Option<orr_render::Lighting>,
+        post_process: Option<orr_render::PostProcessSettings>,
+    ) -> bool {
+        self.mesh_lighting
+            .matches_saved_sidecar(expected_digest.as_deref())
+            && self.mesh_lighting.applied_lighting(&self.editor) == lighting
+            && self.mesh_lighting.applied_post_process(&self.editor) == post_process
+    }
+
     pub(crate) fn verify_hazards_restart(&mut self) -> Result<(), String> {
         let mut session = State::default();
         session.open_dialog(&mut self.editor);
@@ -263,7 +292,11 @@ impl super::EditorApp {
                 .unwrap_or_else(|| "Headless restart failed".into()));
         }
         validate_fresh_session(&self.editor)?;
-        if let Some(blocker) = self.mesh_navigation.play_blocker(&self.editor) {
+        if let Some(blocker) = self
+            .mesh_navigation
+            .play_blocker(&self.editor)
+            .or_else(|| self.mesh_lighting.play_blocker(&self.editor))
+        {
             return Err(blocker);
         }
         Ok(())
@@ -572,6 +605,44 @@ mod tests {
                 .playback_start_blocker()
                 .unwrap()
                 .contains("export completion")
+        );
+        release();
+    }
+
+    #[test]
+    fn busy_hazard_export_disables_lighting_fields() {
+        use egui_kittest::{
+            Harness,
+            kittest::{NodeT, Queryable},
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = super::super::EditorApp::new(editor(directory.path()), None);
+        app.sync_mesh_presentation();
+        let mut harness = Harness::builder()
+            .with_size([1200.0, 1000.0])
+            .build_ui_state(
+                |ui, app: &mut super::super::EditorApp| app.inspector(ui),
+                app,
+            );
+        harness.run_steps(2);
+        harness.get_by_label("Mesh game lighting").click_accesskit();
+        harness.run_steps(3);
+        assert!(
+            !harness
+                .get_by_role_and_label(egui::accesskit::Role::TextInput, "Light intensity")
+                .accesskit_node()
+                .is_disabled()
+        );
+        let release = harness
+            .state_mut()
+            .mesh_hazards_export
+            .hold_pending_for_test();
+        harness.run_steps(2);
+        assert!(
+            harness
+                .get_by_role_and_label(egui::accesskit::Role::TextInput, "Light intensity")
+                .accesskit_node()
+                .is_disabled()
         );
         release();
     }
