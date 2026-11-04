@@ -14,6 +14,11 @@ restore. Files remain local and are not uploaded.
 A successful restore is paused, with no pending inputs or board selection.
 Choose **계속** to continue. Terminal runs remain terminal. A failed restore
 retains the live game, its recorded history, queued inputs and sequence counter.
+Focus loss remains a separate safety event during restoration: it pauses active
+combat, releases a pending gesture and clears queued inputs. A failed or cancelled
+restore does not undo that pause or restore the cancelled queue. An explicit
+Continue action is required before combat resumes; a valid restore may still
+finish while unfocused and remains paused.
 Selecting a different file, loading a scene or restarting invalidates an
 outstanding restore. Only one candidate replay runs at a time; if another file
 is selected during validation, select it again after cancellation completes.
