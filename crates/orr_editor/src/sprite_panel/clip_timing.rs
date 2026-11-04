@@ -35,6 +35,7 @@ enum SequenceEdit {
     MoveUp,
     MoveDown,
     Reverse,
+    PingPong,
 }
 impl SequenceInputs {
     fn matches(&self, draft: &Draft) -> bool {
@@ -202,6 +203,16 @@ impl Draft {
                 return Err("Sequence frame must reference an admitted existing region".into());
             }
         }
+        if matches!(edit, SequenceEdit::PingPong) && regions.len() > 2 {
+            Self::frame_budget(
+                &self.original,
+                regions
+                    .len()
+                    .checked_mul(2)
+                    .and_then(|count| count.checked_sub(2))
+                    .ok_or("Frame count overflow")?,
+            )?;
+        }
         let mut kind = self.kind.clone();
         let DraftKind::Sequence { regions, selected } = &mut kind else {
             unreachable!()
@@ -240,6 +251,14 @@ impl Draft {
                 regions.reverse();
                 durations.reverse();
                 *selected = regions.len() - 1 - *selected;
+            }
+            SequenceEdit::PingPong => {
+                // Only the interior returns: Loop supplies the first endpoint.
+                // Once stops at the final interior frame, as authored.
+                for index in (1..regions.len().saturating_sub(1)).rev() {
+                    regions.push(regions[index]);
+                    durations.push(durations[index].clone());
+                }
             }
             SequenceEdit::MoveUp | SequenceEdit::MoveDown => {}
         }
@@ -628,6 +647,7 @@ impl SpritePanel {
                             if ui.button("Move sequence frame up").clicked() { sequence_edit = Some(SequenceEdit::MoveUp); }
                             if ui.button("Move sequence frame down").clicked() { sequence_edit = Some(SequenceEdit::MoveDown); }
                             if ui.button("Reverse clip sequence").clicked() { sequence_edit = Some(SequenceEdit::Reverse); }
+                            if ui.button("Expand ping-pong sequence").on_hover_text("Append reversed interior frames; Loop returns to the first frame without duplicated endpoints. Each click expands the current sequence.").clicked() { sequence_edit = Some(SequenceEdit::PingPong); }
                             if ui.button("Remove sequence frame").clicked() { sequence_edit = Some(SequenceEdit::Remove); }
                         });
                         });

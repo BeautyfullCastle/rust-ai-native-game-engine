@@ -11,7 +11,11 @@ region IDs are allowed. Select a frame to remove it or move it one position up o
 down; at least one frame must remain. **Reverse clip sequence** reverses all
 frames while keeping each region paired with its duration and following the
 selected frame to its new position. Reversing twice restores the order. A
-one-frame sequence is unchanged. Edit positive integer millisecond durations
+one-frame sequence is unchanged. **Expand ping-pong sequence** appends the reversed
+interior frames with their durations: A/B/C/D becomes A/B/C/D/C/B. Loop supplies
+the return to A without repeated endpoints; Once ends on B. One/two-frame
+sequences are unchanged. Selection stays on the original frame. Each click expands
+the current sequence again, subject to the existing limits. Edit positive integer millisecond durations
 and explicitly apply the ID or duration field before preview/export. The sequence
 controls and export action share a bounded scrolling area. Pending text
 clears preview and blocks export until validated; invalid Apply keeps the committed
