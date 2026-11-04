@@ -46,6 +46,12 @@ cancelled, and elapsed paused time is not caught up. Inputs already admitted to
 the deterministic session retain their existing two-tick delay and may finish
 after explicit resume; pause does not rewind accepted input.
 
+The optional Linux `coop-defense-run-save` feature adds explicit native Save
+Copy/Load controls and a player-selected save directory. See
+[native run saves](coop-defense-native-run-save.md) for same-executable identity,
+the ten-minute journal cap and failure behavior. The web
+[Run Save v1](coop-defense-run-save.md) format is separate.
+
 ## Integration boundary
 
 `orr_games/coop-defense` is disabled by default. It contains only bounded,
@@ -72,4 +78,4 @@ oracle, not a human playtest or proof that the balance is fun.
 
 Native Linux and browser acceptance are separate. Build success alone does not
 prove browser interaction, screenshots, Windows execution or online multiplayer.
-There is no claim of networked co-op, save progression or production balance.
+There is no claim of networked co-op, cross-build save migration or production balance.
