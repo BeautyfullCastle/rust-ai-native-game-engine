@@ -811,4 +811,82 @@ mod installed_gestures {
         assert_eq!(std::fs::read(&h.panel.stamp.scene).unwrap(), changed);
         std::fs::write(&h.panel.stamp.scene, scene_bytes).unwrap();
     }
+    #[test]
+    fn installed_line_drag_preview_commit_save_and_reopen() {
+        let mut h = Harness::new();
+        h.panel.mode = ToolMode::Line;
+        let before = h.panel.history_snapshot();
+        let checksum = h.editor.checksum();
+        let start = h.point(1, 1);
+        let end = h.point(5, 3);
+        h.press(start);
+        h.panel.selected = Some(11);
+        h.frame(vec![egui::Event::PointerMoved(end)], true);
+        assert_eq!(h.panel.history_snapshot(), before);
+        h.release(end);
+        assert!(h.panel.error.is_none(), "{:?}", h.panel.error);
+        let mut expected = vec![None; 192];
+        for index in [17, 34, 35, 52, 53] {
+            expected[index] = Some(10);
+        }
+        assert_eq!(h.panel.document().document().cells, expected);
+        assert_eq!(h.panel.history.undo, vec![before.0.clone()]);
+        let committed = h.panel.history_snapshot();
+        h.panel.undo();
+        assert_eq!(h.panel.document(), &before.0);
+        h.panel.redo();
+        assert_eq!(h.panel.history_snapshot(), committed);
+        assert_eq!(h.editor.checksum(), checksum);
+        h.panel.save(&h.editor, &h.sprites).unwrap();
+        assert!(!h.panel.dirty());
+        let reopened = PreparedProject::open_with_capabilities(
+            &h.panel.stamp.root,
+            crate::sprite_bindings::compiled_runtime(),
+            UiSupport::Unsupported,
+            TilemapSupport::Supported,
+        ).unwrap().into_presentation_parts();
+        let consumed = reopened.tilemap.unwrap();
+        assert_eq!(consumed.document, *h.panel.document());
+        let draws = orr_sample::project_tilemap::draws(&consumed, 0).unwrap();
+        assert_eq!(draws.len(), 5);
+        let doc = consumed.document.document();
+        for (draw, (column, row)) in draws.iter().zip([(1,1),(2,2),(3,2),(4,3),(5,3)]) {
+            assert_eq!(draw.instance.region, 10);
+            assert_eq!(draw.instance.position, [
+                doc.origin[0] + (column as f32 + 0.5) * doc.tile_size[0] as f32 * doc.units_per_pixel,
+                doc.origin[1] - (row as f32 + 0.5) * doc.tile_size[1] as f32 * doc.units_per_pixel,
+            ]);
+        }
+    }
+
+    #[test]
+    fn installed_line_cancellation_and_stale_source_preserve_redo() {
+        let mut h = Harness::new();
+        h.panel.mode = ToolMode::Line;
+        h.seed_redo();
+        let before = h.panel.history_snapshot();
+        let start = h.point(1, 1);
+        let end = h.point(5, 3);
+        h.press(start);
+        h.frame(vec![egui::Event::WindowFocused(false)], false);
+        h.release(end);
+        assert_eq!(h.panel.history_snapshot(), before);
+        h.press(start);
+        h.release(viewport().max + egui::vec2(10.0, 10.0));
+        assert_eq!(h.panel.history_snapshot(), before);
+        h.press(start);
+        h.panel.mode = ToolMode::Rectangle;
+        h.release(end);
+        assert_eq!(h.panel.history_snapshot(), before);
+        h.panel.mode = ToolMode::Line;
+        h.press(start);
+        let original = std::fs::read(&h.panel.path).unwrap();
+        let mut changed = original.clone();
+        changed.push(b'\n');
+        std::fs::write(&h.panel.path, &changed).unwrap();
+        h.release(end);
+        assert!(h.panel.error.is_some());
+        assert_eq!(h.panel.history_snapshot(), before);
+        assert_eq!(std::fs::read(&h.panel.path).unwrap(), changed);
+    }
 }
