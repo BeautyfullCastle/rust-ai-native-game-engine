@@ -17,13 +17,15 @@
 
 이 선택 MeshHazardsV1 경로는 animation Load → Apply/Undo/Redo → Save → fresh reopen → schema 7 export → 원본을 숨긴 relocated native player를 연결한다. 별도 animation capability·bounded embedded provenance·exact inventory·runtime trust를 유지하며 schemas 1–6/default-off 동작을 보존한다. 새 interpolation 지원이나 코어 시뮬 변경이 아니다.
 
+후속 [PR #427](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/427)은 복원 중 포커스 상실 뒤 전투가 자동 재개되던 결함을 수정했다. 개발 merge e074e5510ace4c7bb24b21b9eee5de5b0a11a3ac의 tree 9771b95d161e7166befae2cf2fb2a509617557ad는 로컬·독립 리뷰·[필수 CI](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/41897428527) 후보와 같다. 관련 23개 검사와 seed/scene의 10개 lifecycle 사례가 통과했으며 실제 WASM/mock-DOM 증거다.
+
 - [정확한 head의 필수 CI](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/41892258398)는 첫 실행에 성공했다. [Artifact](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/41892258398/artifacts/13354138228)의 source/tree·실행 수 8+2+1+1+1+2·runtime digest·tick 0/30/restart parity를 다운로드해 검증했다. 로컬 집중 검사와 독립 리뷰 범위는 [검증 기록](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/426#issuecomment-6639723379)에 있다. 전체 workspace 신규 실행이나 GPU/창 입력 증거는 아니다.
 - **과거 Windows 직접 플레이:** 10-wave 승리, 369 kills, 29 merges, core 8/30 및 Wave 2 패배 → R 재시작을 관측했다. [원래 증거](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94#issuecomment-6430939337)는 당시 산출물에만 적용하며 현재 소스의 Windows 재검증으로 옮기지 않는다.
 - **현재 Stormglass 실행 범위:** 실제 native/WASM consumed-input trace와 source-hidden packed 소비, mock-DOM 제어/저장 검사는 실제 브라우저 파일 선택·표시·물리 입력과 별개다. 2026-11-04 Chromium 사전 검사는 페이지 로드 전 Unix socket EPERM으로 실패했고 정식 확대 실행도 executor 초기화에서 실패했다. 실제 브라우저 플레이는 **미검증**이며 다른 환경 실행으로 이 제한을 우회하지 않았다.
 
 ## 남은 우선순위와 경계
 
-1. 실제 플레이의 입력·승패·재시작·저장복원 단절을 먼저 고친다. Run Save 중 포커스 상실은 실제 WASM과 mock-DOM으로 별도 재현·회귀 검증하며 브라우저 성공으로 표시하지 않는다. 단순 편집 도구 수를 늘리는 것으로 플레이 검증을 대신하지 않는다.
+1. 실제 플레이의 입력·승패·재시작·저장복원 단절을 먼저 고친다. 복원 중 pointer release/cancel/capture loss가 무시되면 실패한 복원 뒤 드래그가 남아 새 터치를 막거나 의도치 않은 이동을 낳는다. [현재 수정 범위](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94#issuecomment-6640277896)는 해당 포인터의 일시적 제스처만 정리하고 게임 명령·기록은 보존한다. 실제 WASM/mock-DOM 재현을 브라우저 성공으로 표시하거나 단순 도구 확장으로 대체하지 않는다.
 2. 허용된 실행 환경이 있을 때 현재 산출물의 브라우저/native-window 플레이를 별도 수용한다. 화면 증거가 없으면 성공률·모바일·Windows·hardware GPU까지 확대하지 않는다.
 3. [설계 v2](design-v2.md)의 사전 고정 과제/seed/oracle·예산·실제 모델 기준선을 준비한다. 모델 호출·업로드·비용은 별도 승인 범위이며 아직 측정 결과가 없다.
 

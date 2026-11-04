@@ -1,8 +1,8 @@
-name: Stormglass run restore focus CI
+name: Stormglass run restore input lifecycle CI
 # Actual WASM and bundled JavaScript with mock DOM, never browser acceptance.
 on:
   push:
-    branches: [su/stormglass-run-focus-20261104]
+    branches: [su/stormglass-run-focus-20261104, su/stormglass-pointer-release-20261104]
 permissions:
   contents: read
 concurrency:
@@ -64,6 +64,11 @@ jobs:
           for key, expected in [('tests',23), ('pass',23), ('fail',0), ('cancelled',0), ('skipped',0), ('todo',0)]:
               if re.findall(r'^# ' + key + r' (\d+)$', output, re.MULTILINE) != [str(expected)]:
                   raise RuntimeError('Unexpected TAP census: ' + key)
+          for check in ['web_ui', 'gestures']:
+              output = run(['node', f'tools/check_coop_defense_{check}.mjs', str(build)], evidence / f'{check}.log')
+              command_line, _, result_json = output.partition('\n')
+              if not command_line.startswith('+ node ') or json.loads(result_json).get('passed') is not True:
+                  raise RuntimeError('Input adapter acceptance failed: ' + check)
           output = run(['node', 'tools/test_coop_defense_run_save_actual.mjs', str(offline), str(wasm), str(scene)], evidence / 'actual-restore.log')
           receipt = json.loads(output.splitlines()[-1])
           digest = hashlib.sha256(wasm.read_bytes()).hexdigest()
@@ -74,10 +79,13 @@ jobs:
           for row in receipt['results']:
               if row['focusLossOutcomes'] != ['failure','success','cancel','restart','ordinary'] or row['networkRequests'] != 0 or row['steps'] != 6 or row['sequence'] < 6:
                   raise RuntimeError('Missing focus lifecycle outcomes')
+              expected_pointer_cases = [{'event': event, 'outcome': outcome} for event in ['pointerup','pointercancel','lostpointercapture'] for outcome in ['failure','cancel','success','restart']]
+              if row['pointerReleaseCases'] != expected_pointer_cases:
+                  raise RuntimeError('Missing pointer release lifecycle outcomes')
               if not re.fullmatch('[0-9a-f]{16}', row['savedChecksum']) or not re.fullmatch('[0-9a-f]{16}', row['nextChecksum']) or row['savedChecksum'] == row['nextChecksum']:
                   raise RuntimeError('Invalid consumed-state checksums')
           run(['git', 'diff', '--exit-code'], evidence / 'source-unchanged.log')
-          (evidence / 'scope.json').write_text(json.dumps({'head': os.environ['GITHUB_SHA'], 'wasm_sha256': digest, 'related_tests': 23, 'initial_conditions': 2, 'focus_loss_cases': 10, 'mock_dom': True, 'browser': False, 'native_window': False, 'gpu': False, 'full_workspace': False, 'receipt': receipt}, indent=2))
+          (evidence / 'scope.json').write_text(json.dumps({'head': os.environ['GITHUB_SHA'], 'wasm_sha256': digest, 'related_tests': 23, 'initial_conditions': 2, 'focus_loss_cases': 10, 'pointer_release_cases': 24, 'input_adapter_checks': 2, 'mock_dom': True, 'browser': False, 'native_window': False, 'gpu': False, 'full_workspace': False, 'receipt': receipt}, indent=2))
       - name: Preserve source and evidence including failures
         if: always()
         uses: actions/upload-artifact@v4

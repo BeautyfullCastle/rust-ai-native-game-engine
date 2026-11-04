@@ -1,5 +1,6 @@
 import { CombatPresentation } from '../crates/orr_coop_defense_web/web/combat-presentation.mjs';
 import { StrictEventAdapter, applyStrictSnapshot } from '../crates/orr_coop_defense_web/web/strict-event-adapter.mjs';
+import * as RunSave from '../crates/orr_coop_defense_web/web/run-save.mjs';
 // Actual WASM plus simulated DOM PointerEvents. This is not browser/manual QA.
 import fs from 'node:fs';import vm from 'node:vm';import assert from 'node:assert/strict';
 const root=process.argv[2]||'dist/coop-defense-web',src=process.argv[3]||`${root}/game.js`;
@@ -8,14 +9,14 @@ let width=375;const nodes=new Map(),events=new Map(),globalEvents=new Map(),capt
 const ctx=new Proxy({},{get:(o,p)=>o[p]||(()=>{})});
 const canvas={width:500,height:720,getContext:()=>ctx,getBoundingClientRect:()=>({left:0,top:0,width,height:width*720/500}),addEventListener:(k,f)=>events.set(k,f),setPointerCapture:id=>captured.add(id),hasPointerCapture:id=>captured.has(id),releasePointerCapture:id=>captured.delete(id)};
 const get=id=>{if(id==='game')return canvas;if(!nodes.has(id))nodes.set(id,{style:{},span:{},querySelector(){return this.span;},setAttribute(k,v){this[k]=v;}});return nodes.get(id);};
-const sandbox=vm.createContext({CombatPresentation,StrictEventAdapter,applyStrictSnapshot,document:{getElementById:get,addEventListener:(k,f)=>globalEvents.set(k,f)},addEventListener:(k,f)=>globalEvents.set(k,f),TextDecoder,Uint8Array,HTMLButtonElement:class{},core,requestAnimationFrame(){},console});
+const sandbox=vm.createContext({CombatPresentation,StrictEventAdapter,applyStrictSnapshot,...RunSave,document:{getElementById:get,addEventListener:(k,f)=>globalEvents.set(k,f)},addEventListener:(k,f)=>globalEvents.set(k,f),TextDecoder,Uint8Array,HTMLButtonElement:class{},core,requestAnimationFrame(){},console});
 vm.runInContext(fs.readFileSync(src,'utf8').split('try{let bytes;')[0].replace(/^import .*$/mg,''),sandbox);const run=s=>vm.runInContext(s,sandbox);
 run('wasm=core;dimensions();start();');assert.equal(run('canvas.width'),500);assert.ok(68*width/500>=44,'mobile effective target >=44px');
 const event=(name,cell,extra={})=>{const p=run(`project(...state.cells.find(a=>a[0]===0&&a[1]===${cell}).slice(2),0)`);events.get(name)({pointerId:1,button:0,clientX:p[0]*width/canvas.width,clientY:p[1]*width/canvas.width,preventDefault(){},...extra});};
 assert.equal(run('command(1)'),false);get('begin').onclick();assert.equal(run('command(1)'),true);assert.equal(run('state.units.filter(u=>u[0]===0).length'),0,'input not fabricated before WASM');run('execute(queue.shift());');assert.equal(run('state.units.filter(u=>u[0]===0).length'),1);
 event('pointerdown',0);event('pointermove',1);assert.equal(run('gesture.drag'),true);assert.equal(run('queue.length'),0);event('pointerup',1);assert.equal(run('queue.length'),1);assert.equal(run('selected'),0,'selection stays source pending acceptance');run('execute(queue.shift());update();');assert.equal(run('selected'),1);assert.equal(run('unitAt(1) !== undefined'),true);assert.ok(get('selected').textContent.includes('★'),'identity shown after move');
 event('pointerdown',1);event('pointermove',2);events.get('pointerup')({pointerId:1,clientX:-100,clientY:-100});assert.equal(run('queue.length'),0);assert.equal(run('selected'),1);
-event('pointerdown',1);event('pointermove',2);events.get('pointercancel')();assert.equal(run('queue.length'),0);assert.equal(run('gesture'),null);
+event('pointerdown',1);event('pointermove',2);events.get('pointercancel')({pointerId:1});assert.equal(run('queue.length'),0);assert.equal(run('gesture'),null);
 // Tap alternative: selected unit plus destination.
 event('pointerdown',2);event('pointerup',2);assert.equal(run('queue.length'),1);run('execute(queue.shift());');assert.equal(run('selected'),2);
 run('togglePause();');event('pointerdown',2);event('pointerup',3);assert.equal(run('queue.length'),0);assert.equal(run('selected'),2);assert.equal(run('command(1)'),false);run('togglePause();');
