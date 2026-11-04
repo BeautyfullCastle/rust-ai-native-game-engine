@@ -1309,13 +1309,37 @@ mod tests {
 
     #[test]
     fn enemy_health_registered_editor_save_reopen_and_typed_play_match_canonical_frames() {
+        registered_authoring_play(false);
+    }
+
+    #[test]
+    fn wave_composition_registered_editor_save_reopen_and_typed_play_match_canonical_frames() {
+        registered_authoring_play(true);
+    }
+
+    fn registered_authoring_play(composition: bool) {
         use orr_editor::{registered_project::PreparedRegisteredProject, Editor};
-        use orr_games::coop_defense_game::{EnemyHealth, WaveCounts, WavePacing, SCENARIO_BUILD_ID};
+        use orr_games::coop_defense_game::{EnemyHealth, WaveComposition, WaveCounts, WavePacing, SCENARIO_BUILD_ID};
         use orr_games::coop_defense_scene::parse_config;
         use orr_sim::{Simulation, TickInputs};
         let fixture = include_str!("../scenes/stormglass-counts.scene.yaml");
         let mut config = parse_config(fixture).unwrap();
         config.enemy_health = EnemyHealth { multiplier: 4 };
+        if composition {
+            config.enemy_health = EnemyHealth::default();
+            config.wave_counts.pair_counts[0] = 4;
+            config.wave_composition.regular_kinds = [[3, 0, 1, 2]; 10];
+            config.wave_composition.opening_boss = [0; 10];
+            config.wave_composition.opening_boss[0] = 1;
+        }
+        let final_edit = if composition {
+            ("CoopDefense::WaveComposition", "", json!({
+                "regular_kinds":config.wave_composition.regular_kinds,
+                "opening_boss":config.wave_composition.opening_boss
+            }))
+        } else {
+            ("CoopDefense::EnemyHealth", "multiplier", json!(4))
+        };
         let directory = tempfile::tempdir().unwrap();
         let scene_path = directory.path().join("stormglass.scene.yaml");
         let manifest_path = directory.path().join("project.json");
@@ -1338,7 +1362,7 @@ mod tests {
                 "pair_counts",
                 json!(config.wave_counts.pair_counts),
             ),
-            ("CoopDefense::EnemyHealth", "multiplier", json!(4)),
+            final_edit,
         ] {
             editor
                 .host_call(
@@ -1354,12 +1378,9 @@ mod tests {
         );
         assert!(editor.undo());
         let undone = editor.host_call("scene.save", J::Null).unwrap();
-        assert_eq!(
-            parse_config(undone["text"].as_str().unwrap())
-                .unwrap()
-                .enemy_health,
-            EnemyHealth::default()
-        );
+        let undone_config = parse_config(undone["text"].as_str().unwrap()).unwrap();
+        assert_eq!(undone_config.enemy_health, EnemyHealth::default());
+        assert_eq!(undone_config.wave_composition, WaveComposition::default());
         assert!(editor.redo());
         assert_eq!(editor.host_call("scene.save", J::Null).unwrap(), authored);
         // Exercise the actual Editor Save path, not a hand-written fixture copy.
@@ -1385,6 +1406,7 @@ mod tests {
         let grant = editor
             .host_call("sim.input_claim", json!({"player":0,"replace_held":true}))
             .unwrap();
+        let mut first_wave_kinds = Vec::new();
         // CPU-only registered Editor + typed ERP input. No window/GPU claim.
         for tick in 0..460u32 {
             let value = if tick == 450 {
@@ -1416,7 +1438,12 @@ mod tests {
                 .unwrap();
             let mut inputs = TickInputs::new(expected.tick(), 1);
             inputs.set_input(PlayerSlot(0), value);
-            expected.step(&inputs);
+            let events = expected.step(&inputs);
+            if composition && tick < 450 {
+                first_wave_kinds.extend(events.iter()
+                    .filter(|event| event.payload.kind == orr_games::coop_defense_game::EVENT_ENEMY_SPAWN)
+                    .map(|event| event.payload.value));
+            }
             let stepped = editor.host_call("sim.step", json!({"n":1})).unwrap();
             assert_eq!(
                 stepped["checksum"],
@@ -1440,6 +1467,10 @@ mod tests {
         );
         assert_eq!(*expected.frame().singleton::<Campaign>(), config.campaign);
         assert_eq!(*expected.frame().singleton::<EnemyHealth>(), config.enemy_health);
+        assert_eq!(*expected.frame().singleton::<WaveComposition>(), config.wave_composition);
+        if composition {
+            assert_eq!(first_wave_kinds, vec![4, 4, 0, 0, 1, 1, 2, 2]);
+        }
         editor.host_call("sim.stop", json!({})).unwrap();
         assert_eq!(editor.host_call("scene.save", J::Null).unwrap(), saved);
         assert_eq!(editor.host_call("history.list", J::Null).unwrap(), history);

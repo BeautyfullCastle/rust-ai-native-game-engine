@@ -621,7 +621,7 @@ fn first_singleton_field_edit_uses_safe_defaults_and_bounds() {
 #[test]
 fn nonzero_replay_contract_rejects_previous_host_identity() {
     use orr_session::{replay_verify_checked, ReplayError, ReplayHeader, ReplayWriter};
-    let old_identities = [crate::default_build_id(GAME), 0x7b2a_3ab9_8f61_9dca, 0x04ee_32c4_873f_6941, 0xb2a3_336f_2969_7b0b, 0xe6f4_03d2_595b_d8cf];
+    let old_identities = [crate::default_build_id(GAME), 0x7b2a_3ab9_8f61_9dca, 0x04ee_32c4_873f_6941, 0xb2a3_336f_2969_7b0b, 0xe6f4_03d2_595b_d8cf, 0xbc11_fd6f_fd21_8902];
     for old in old_identities {
         let bytes = ReplayWriter::<DefenseGame>::new(ReplayHeader {
             format_version: 3,
@@ -1136,6 +1136,61 @@ fn enemy_health_erp_edit_undo_redo_save_reopen_and_atomic_invalids() {
     let play = c.call("sim.start", json!({})).unwrap();
     assert_eq!(play["checksum"], authored["checksum"]);
     assert!(c.call("world.singleton.patch", patch(json!(2))).is_err());
+    c.call("sim.stop", json!({})).unwrap();
+    assert_eq!(c.call("scene.save", json!({})).unwrap(), authored);
+}
+
+#[test]
+fn wave_composition_erp_nested_edit_undo_redo_save_reopen_and_atomic_invalids() {
+    use orr_games::coop_defense_game::{WaveComposition, WAVE_COMPOSITION_NAME};
+    let mut cfg = ServerConfig::new(Auth::DevNoAuth);
+    cfg.listen = false;
+    let host = spawn_host(INITIAL_SCENE.into(), None, cfg, None).unwrap();
+    let mut c = client(&host, Caps::ALL);
+    let schema = c.call("registry.schema", json!({"type":WAVE_COMPOSITION_NAME})).unwrap();
+    let kinds = &schema["schema"]["properties"]["regular_kinds"];
+    assert_eq!(kinds["minItems"], 10);
+    assert_eq!(kinds["items"]["minItems"], 4);
+    assert_eq!(kinds["items"]["items"]["maximum"], 3);
+    let original = c.call("scene.save", json!({})).unwrap();
+    let patch = |path: &str, value: J| json!({"name":WAVE_COMPOSITION_NAME,"path":path,"value":value});
+    c.call("world.singleton.patch", patch("regular_kinds[0][0]", json!(3))).unwrap();
+    let first = c.call("scene.save", json!({})).unwrap();
+    let parsed = document(first["text"].as_str().unwrap()).unwrap();
+    let mut expected = WaveComposition::default();
+    expected.regular_kinds[0][0] = 3;
+    assert_eq!(*parsed.frame().singleton::<WaveComposition>(), expected);
+    c.call("world.singleton.patch", patch("opening_boss[0]", json!(1))).unwrap();
+    expected.opening_boss[0] = 1;
+    let authored = c.call("scene.save", json!({})).unwrap();
+    c.call("history.undo", json!({})).unwrap();
+    assert_eq!(c.call("scene.save", json!({})).unwrap(), first);
+    c.call("history.undo", json!({})).unwrap();
+    assert_eq!(c.call("scene.save", json!({})).unwrap(), original);
+    let history = c.call("history.list", json!({})).unwrap();
+    for (path, value) in [
+        ("regular_kinds[9][3]", json!(4)),
+        ("regular_kinds[0][0]", json!(-1)),
+        ("regular_kinds[0][0]", json!(1.5)),
+        ("regular_kinds[10][0]", json!(1)),
+        ("regular_kinds[0][4]", json!(1)),
+        ("regular_kinds", json!([[0,1,2,3]])),
+        ("opening_boss[9]", json!(2)),
+        ("opening_boss[10]", json!(1)),
+        ("opening_boss", json!([0,1])),
+    ] {
+        assert!(c.call("world.singleton.patch", patch(path, value)).is_err(), "accepted {path}");
+        assert_eq!(c.call("scene.save", json!({})).unwrap(), original);
+        assert_eq!(c.call("history.list", json!({})).unwrap(), history);
+    }
+    c.call("history.redo", json!({})).unwrap();
+    c.call("history.redo", json!({})).unwrap();
+    assert_eq!(c.call("scene.save", json!({})).unwrap(), authored);
+    let reopened = document(authored["text"].as_str().unwrap()).unwrap();
+    assert_eq!(*reopened.frame().singleton::<WaveComposition>(), expected);
+    let play = c.call("sim.start", json!({})).unwrap();
+    assert_eq!(play["checksum"], authored["checksum"]);
+    assert!(c.call("world.singleton.patch", patch("opening_boss[0]", json!(0))).is_err());
     c.call("sim.stop", json!({})).unwrap();
     assert_eq!(c.call("scene.save", json!({})).unwrap(), authored);
 }

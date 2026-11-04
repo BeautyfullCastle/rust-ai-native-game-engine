@@ -300,13 +300,67 @@ mod tests {
         campaign_scene_abi_parity(HEALTH_SCENE);
     }
 
+    const COMPOSITION_SCENE: &str =
+        include_str!("../../../examples/static-game-starter/scenes/stormglass-composition.scene.yaml");
+
+    #[test]
+    fn composition_scene_abi_matches_literal_spawns_full_events_and_restart() {
+        campaign_scene_abi_parity(COMPOSITION_SCENE);
+    }
+
+    #[test]
+    fn rejected_composition_preserves_complete_live_client_and_source_serial() {
+        assert_eq!(load(COMPOSITION_SCENE.as_bytes()), 0);
+        defense_step(SUMMON, 0, 0, 1);
+        let before = json();
+        let frame = CLIENT.with(|slot| slot.borrow().as_ref().unwrap().sim.frame().to_bytes());
+        let serial = SOURCE.with(Cell::get);
+        let defaults = "[[1,2,3,0],[2,3,0,1],[3,0,1,2],[0,1,2,3],[1,2,3,0],[2,3,0,1],[3,0,1,2],[0,1,2,3],[1,2,3,0],[2,3,0,1]]";
+        let flags = "[0,0,0,0,1,0,0,0,0,1]";
+        let fields = format!("regular_kinds: {defaults}, opening_boss: {flags}");
+        let mut invalid = vec!["{}".to_owned(), format!("{{regular_kinds: {defaults}}}"), format!("{{opening_boss: {flags}}}"), format!("{{{fields}, extra: 1}}"), format!("{{{fields}, opening_boss: {flags}}}")];
+        for bad in ["[]", "null", "[1,2,3,0]", "[[1,2,3,0]]"] {
+            invalid.push(format!("{{regular_kinds: {bad}, opening_boss: {flags}}}"));
+        }
+        for bad in ["4", "-1", "1.5", "null", "4294967296"] {
+            invalid.push(format!("{{regular_kinds: {}, opening_boss: {flags}}}", defaults.replacen('1', bad, 1)));
+        }
+        for bad in ["[]", "null", "[0,0,0,0,0,0,0,0,0]", "[0,0,0,0,0,0,0,0,0,2]", "[0,0,0,0,0,0,0,0,0,-1]"] {
+            invalid.push(format!("{{regular_kinds: {defaults}, opening_boss: {bad}}}"));
+        }
+        for fields in invalid {
+            let bad = format!("schema: orr.scene/1\nentities: {{}}\nsingletons: {{CoopDefense::WaveComposition: {fields}}}\n");
+            assert_eq!(load(bad.as_bytes()), 3, "accepted {bad}");
+            CLIENT.with(|slot| assert_eq!(slot.borrow().as_ref().unwrap().sim.frame().to_bytes(), frame));
+            assert_eq!(SOURCE.with(Cell::get), serial);
+            assert_eq!(json(), before);
+        }
+        let source = format!("schema: orr.scene/1\nentities: {{}}\nsingletons: {{CoopDefense::WaveComposition: {{{fields}}}}}\n");
+        assert_eq!(load(source.as_bytes()), 0);
+        defense_step(RESTART, 0, 0, 1);
+        CLIENT.with(|slot| {
+            let client = slot.borrow();
+            let frame = client.as_ref().unwrap().sim.frame();
+            assert_eq!(*frame.singleton::<WaveComposition>(), WaveComposition::default());
+            assert_eq!(*frame.singleton::<Scenario>(), Scenario::default());
+            assert_eq!(*frame.singleton::<Campaign>(), Campaign::default());
+            assert_eq!(*frame.singleton::<WaveCounts>(), WaveCounts::default());
+            assert_eq!(*frame.singleton::<WavePacing>(), WavePacing::default());
+            assert_eq!(*frame.singleton::<EnemyHealth>(), EnemyHealth::default());
+        });
+    }
+
     fn campaign_scene_abi_parity(scene: &str) {
         assert_eq!(load(scene.as_bytes()), 0);
         let config = parse_config(scene).unwrap();
-        assert_eq!(
-            config.wave_counts.pair_counts,
+        let composition = scene == COMPOSITION_SCENE;
+        assert_eq!(config.wave_counts.pair_counts, if composition {
+            [5, 6, 7, 16, 18, 20, 22, 24, 26, 28]
+        } else {
             [1, 2, 3, 16, 18, 20, 22, 24, 26, 28]
-        );
+        });
+        let expected_pairs = if composition { 18 } else { 6 };
+        let mut per_wave = [0_usize; 3];
         let mut expected = Simulation::<DefenseGame>::with_build_id(
             config,
             TICK_RATE,
@@ -337,6 +391,18 @@ mod tests {
                 .iter()
                 .filter(|event| event.payload.event_kind() == Some(DefenseEventKind::EnemySpawn))
                 .count();
+            for event in &events {
+                if composition && event.payload.kind == EVENT_ENEMY_SPAWN {
+                    const KINDS: [&[u32]; 3] = [&[4, 0, 2, 1, 3], &[2, 3, 1, 0, 2, 3], &[4, 2, 3, 1, 0, 2, 3]];
+                    const HP: [&[u32]; 3] = [&[1092, 78, 156, 78, 52], &[216, 72, 108, 108, 216, 72], &[1932, 276, 92, 138, 138, 276, 92]];
+                    let wave = (run(expected.frame()).wave - 1) as usize;
+                    let ordinal = per_wave[wave] / 2;
+                    assert_eq!(event.payload.board, (per_wave[wave] % 2) as u32);
+                    assert_eq!(event.payload.value, KINDS[wave][ordinal]);
+                    assert_eq!(event.payload.hp_after, HP[wave][ordinal]);
+                    per_wave[wave] += 1;
+                }
+            }
             defense_step(
                 value.action,
                 value.source_cell,
@@ -374,8 +440,9 @@ mod tests {
         let finished = run(expected.frame());
         assert_eq!(finished.phase, WON);
         assert_eq!(finished.wave, 3);
-        assert_eq!(spawn_count, 2 * (1 + 2 + 3));
-        assert_eq!(finished.kills + finished.leaks, 12);
+        assert_eq!(spawn_count, 2 * expected_pairs);
+        if composition { assert_eq!(per_wave, [10, 12, 14]); }
+        assert_eq!(finished.kills + finished.leaks, 2 * expected_pairs as u32);
         sequence += 1;
         let mut inputs = TickInputs::new(expected.tick(), 2);
         inputs.set_input(
@@ -402,6 +469,7 @@ mod tests {
                 config.wave_pacing
             );
             assert_eq!(*client.sim.frame().singleton::<EnemyHealth>(), config.enemy_health);
+            assert_eq!(*client.sim.frame().singleton::<WaveComposition>(), config.wave_composition);
             assert_eq!(*client.sim.frame().singleton::<Campaign>(), config.campaign);
             assert_eq!(*client.sim.frame().singleton::<Scenario>(), config.scenario);
             let restarted = run(client.sim.frame());

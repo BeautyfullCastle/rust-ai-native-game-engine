@@ -291,3 +291,113 @@ fn existing_output_refused_before_any_gate() {
     assert!(create_with(&o, |_, _| panic!("must not execute gate")).is_err());
     assert_eq!(std::fs::read(&o.output).unwrap(), b"existing");
 }
+#[test]
+fn composition_defaults_counterparts_and_all_ten_options() {
+    let kinds = "3,2,1,0;0,0,0,0;1,1,1,1;2,2,2,2;3,3,3,3;0,1,2,3;1,2,3,0;2,3,0,1;3,0,1,2;0,1,2,3";
+    let bosses = "1,0,1,0,1,0,1,0,1,0";
+    assert_eq!(
+        default_wave_kinds(),
+        [
+            [1, 2, 3, 0],
+            [2, 3, 0, 1],
+            [3, 0, 1, 2],
+            [0, 1, 2, 3],
+            [1, 2, 3, 0],
+            [2, 3, 0, 1],
+            [3, 0, 1, 2],
+            [0, 1, 2, 3],
+            [1, 2, 3, 0],
+            [2, 3, 0, 1]
+        ]
+    );
+    let only_kinds = scene_text(&options(&args(&["--wave-kinds", kinds])).unwrap()).unwrap();
+    let only_bosses = scene_text(&options(&args(&["--opening-bosses", bosses])).unwrap()).unwrap();
+    assert!(String::from_utf8(only_kinds)
+        .unwrap()
+        .ends_with("    opening_boss: [0, 0, 0, 0, 1, 0, 0, 0, 0, 1]\n"));
+    assert!(String::from_utf8(only_bosses)
+        .unwrap()
+        .contains("regular_kinds: [[1, 2, 3, 0], [2, 3, 0, 1]"));
+    let all = args(&[
+        "--starting-gold",
+        "250",
+        "--reactor-hp",
+        "75",
+        "--last-wave",
+        "3",
+        "--spawn-interval-ticks",
+        "70",
+        "--wave-pairs",
+        "1,2,3,4,5,6,7,8,9,28",
+        "--enemy-health-multiplier",
+        "4",
+        "--wave-kinds",
+        kinds,
+        "--opening-bosses",
+        bosses,
+    ]);
+    assert_eq!(all.len(), 20);
+    let mut expected = scene_text(&options(&all[..16]).unwrap()).unwrap();
+    expected.extend_from_slice(b"  CoopDefense::WaveComposition:\n    regular_kinds: [[3, 2, 1, 0], [0, 0, 0, 0], [1, 1, 1, 1], [2, 2, 2, 2], [3, 3, 3, 3], [0, 1, 2, 3], [1, 2, 3, 0], [2, 3, 0, 1], [3, 0, 1, 2], [0, 1, 2, 3]]\n    opening_boss: [1, 0, 1, 0, 1, 0, 1, 0, 1, 0]\n");
+    assert_eq!(scene_text(&options(&all).unwrap()).unwrap(), expected);
+    let mut excess = all;
+    excess.extend([OsString::from("--last-wave"), OsString::from("1")]);
+    assert!(options(&excess).is_err());
+    let signed = [" +0_0 , +01 ,2,3"; 10].join(";");
+    assert_eq!(
+        options(&args(&["--wave-kinds", &signed]))
+            .unwrap()
+            .wave_kinds,
+        Some([[0, 1, 2, 3]; 10])
+    );
+}
+#[test]
+fn composition_rejects_malformed_duplicate_oversized_and_out_of_bounds() {
+    let valid_kinds = ["0,1,2,3"; 10].join(";");
+    let valid_bosses = "0,1,0,1,0,1,0,1,0,1";
+    for (key, valid) in [
+        ("--wave-kinds", valid_kinds.as_str()),
+        ("--opening-bosses", valid_bosses),
+    ] {
+        for value in [
+            "".to_owned(),
+            "1".to_owned(),
+            format!("{valid},0"),
+            format!("{valid};0,1,2,3"),
+            "9".repeat(4097),
+        ] {
+            assert!(options(&args(&[key, &value])).is_err(), "{key} {value}");
+        }
+        assert!(options(&args(&[key])).is_err());
+        assert!(options(&args(&[key, valid, key, valid])).is_err());
+        for bad in [
+            "-1",
+            "4",
+            "true",
+            "1.0",
+            "0x1",
+            "١",
+            "1__0",
+            "18446744073709551616",
+            "0\nother: 1",
+        ] {
+            assert!(options(&args(&[key, &valid.replacen('0', bad, 1)])).is_err());
+        }
+    }
+    for row in ["0,1,2", "0,1,2,3,0", "0,,2,3", "0,1,2,"] {
+        assert!(options(&args(&[
+            "--wave-kinds",
+            &format!("{row};{}", ["0,1,2,3"; 9].join(";"))
+        ]))
+        .is_err());
+    }
+    assert!(options(&args(&["--wave-kinds", &["0,1,2,3"; 9].join(";")])).is_err());
+    assert!(options(&args(&["--opening-bosses", "0,1,0,1,0,1,0,1,0"])).is_err());
+    assert!(options(&args(&["--opening-bosses", "2,1,0,1,0,1,0,1,0,1"])).is_err());
+    let mut o = options(&args(&[])).unwrap();
+    o.wave_kinds = Some([[4; 4]; 10]);
+    assert!(scene_text(&o).is_err());
+    o.wave_kinds = None;
+    o.opening_bosses = Some([2; 10]);
+    assert!(scene_text(&o).is_err());
+}

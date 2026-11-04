@@ -1,8 +1,8 @@
 # Stormglass scene authoring
 
-Author Stormglass resources, wave counts and durability through its existing scene format.
+Author resources, wave composition, counts, pacing and durability through the existing scene format. Native, registered Editor and WASM players consume the same configuration.
 
-## Contract and use
+## Contract
 
 ```yaml
 schema: orr.scene/1
@@ -11,106 +11,53 @@ singletons:
   CoopDefense::Scenario: {starting_gold: 250, reactor_hp: 75}
   CoopDefense::Campaign: {last_wave: 3}
   CoopDefense::WavePacing: {spawn_interval_ticks: 70}
-  CoopDefense::WaveCounts: {pair_counts: [1, 2, 3, 16, 18, 20, 22, 24, 26, 28]}
+  CoopDefense::WaveCounts: {pair_counts: [5, 6, 7, 16, 18, 20, 22, 24, 26, 28]}
   CoopDefense::EnemyHealth: {multiplier: 2}
+  CoopDefense::WaveComposition:
+    regular_kinds: [[3,0,2,1], [2,3,1,0], [0,2,3,1], [0,1,2,3], [1,2,3,0], [2,3,0,1], [3,0,1,2], [0,1,2,3], [1,2,3,0], [2,3,0,1]]
+    opening_boss: [1,0,1,0,0,0,0,0,0,0]
 ```
 
-`Scenario.starting_gold` is an integer 0–10000 (default 150 per board);
-`reactor_hp` is 1–1000 (default 30). `Campaign.last_wave` is 1–10 (default 10):
-it selects a prefix of the existing ten waves, not arbitrary enemy/wave editing.
-`WavePacing.spawn_interval_ticks` is an integer 35–350 (default 35), at 60
-simulation ticks/second. It slows the existing paired-lane spawns, not game
-speed, movement, attacks, counts, bosses or enemy composition. Spawns retain
-wave-tick alignment: the first interval multiple at/after tick 180, then every
-interval. For example 70 starts at tick 210, then 280; 350 starts at 350.
-`WaveCounts.pair_counts` is exactly ten integers, each 1–28. Each entry is
-one wave's number of paired-lane spawns: total enemies are twice the entry.
-Defaults are [10,12,14,16,18,20,22,24,26,28]. All ten entries are validated even
-outside the selected campaign. Zero/skipped waves and kind/order overrides
-are unsupported. Existing family HP is computed first, then scaled below.
-`EnemyHealth.multiplier` is one global integer 1–4, default 1. It multiplies
-historical family HP with checked integer arithmetic and sets both `hp` and
-`max_hp`, including bosses and both lanes (maximum 9744). No rounding,
-percentages, per-wave values or family exceptions are introduced. Kind/order,
-counts and configured spawn intervals remain unchanged; longer-lived enemies
-can alter kills, leaks, wave completion, later spawn times and the outcome.
-Missing singletons default independently; old scenes remain valid.
-A present singleton in source YAML requires all its fields. `{}`, unknown
-fields, invalid ranges, entities, prefab links and runtime pools are rejected.
-Seed and other enemy/wave formulas remain fixed. Play-mode edits are rejected.
+- `Scenario`: starting gold 0–10000 per board (default 150); reactor HP 1–1000 (default 30).
+- `Campaign.last_wave`: 1–10 (default 10), selecting a prefix of the campaign.
+- `WavePacing.spawn_interval_ticks`: 35–350 (default 35), at 60 simulation ticks/second. The first spawn occurs at the first interval multiple at/after wave tick 180. Interval 70 starts at 210, then 280; interval 350 starts at 350. Movement and attacks retain their speeds.
+- `WaveCounts.pair_counts`: exactly ten integers 1–28, defaults `[10,12,14,16,18,20,22,24,26,28]`. Each pair spawns one enemy per lane.
+- `EnemyHealth.multiplier`: integer 1–4, default 1, applied after family HP arithmetic, including bosses. Maximum HP remains 9744. Counts and timing stay independently configured.
+- `WaveComposition.regular_kinds`: exactly ten rows of four integers. Codes are `0=normal`, `1=fast`, `2=armored`, `3=horde`. Wave 1 uses row 0, wave 10 uses row 9. Each row repeats every four paired spawns, identically in both lanes.
+- `WaveComposition.opening_boss`: exactly ten flags 0/1. A 1 replaces that wave's first pair with bosses. It does not shift the pattern: the second pair uses row index 1. For `[3,0,2,1]` with boss enabled, the first five pairs are boss, normal, armored, fast, horde. Boss-off waves use row index 0 normally.
 
-In Edit mode use existing ERP `world.singleton.patch`:
+Default composition rows rotate by wave: `[1,2,3,0]`, `[2,3,0,1]`, `[3,0,1,2]`, `[0,1,2,3]`, repeating. Only waves 5/10 default to opening bosses. This preserves historical gameplay. Authoring can change difficulty and outcomes; it does not guarantee victory.
+
+Missing singletons default independently. Present YAML singletons require all fields, with exact array dimensions and integer bounds, including waves beyond `last_wave`. Unknown fields, entities, prefab links and runtime pools are rejected. Seed, formulas, enemy movement and pools remain fixed.
+
+## Edit, save and play
+
+Existing ERP `world.singleton.patch` accepts nested paths, for example:
 
 ```json
-{"name":"CoopDefense::Campaign","path":"last_wave","value":3}
+{"name":"CoopDefense::WaveComposition","path":"regular_kinds[0][0]","value":3}
 ```
 
-First-field edits use reflected defaults; whole-singleton edits and YAML remain strict. Undo/redo, save and reopen retain all settings.
-Play and RESTART use the same rollback/checksummed Frame. Victory requires the
-last authored wave to finish with no surviving enemies; reactor depletion takes
-priority. Terminal gameplay stops until restart, which retains the campaign.
-HUDs and ready-screen instructions show the authored wave count.
+First-field edits use reflected defaults. Undo/Redo, Save/reopen and RESTART retain the settings; Play-mode edits are rejected. Victory requires the last authored wave to finish with no surviving enemies; reactor depletion takes priority.
 
-The default scene remains empty; `stormglass-short.scene.yaml` is the 250-gold/75-HP/three-wave fixture.
-`stormglass-training.scene.yaml` additionally sets the interval to 70.
-`stormglass-counts.scene.yaml` supplies 1/2/3 pairs for its three waves.
-`stormglass-health.scene.yaml` uses those counts with 4× enemy health.
+`stormglass-composition.scene.yaml` is a three-wave example with different patterns and bosses on waves 1/3. The short/training/counts/health fixtures remain available.
 
-EnemyHealth appends game Frame state and changes the Stormglass identity from
-v4 to v5. Default 1× preserves historical gameplay/events, not Frame bytes or
-checksums. Old nonzero build-identity replays are rejected rather than silently
-migrated; the existing generic zero-header compatibility policy is unchanged.
-Restart retains the authored multiplier. This is a game-specific contract, not
-a global scene or engine format change.
-
-## Saved-scene playback and delivery
-
-Save through existing ERP/CLI, then run `coop_defense --scene PATH` or
-`coop_defense --scene PATH --headless --ticks 120`. Native admission requires a
-regular, non-symlink UTF-8 file no larger than 64 KiB, before any window/session.
-Omit `--scene` for defaults. Browser file import uses the same strict parser and
-a fixed 64 KiB staging buffer. Invalid input preserves the current client; newer
-selections or restart supersede pending reads. Successful import starts ready at
-tick zero with the canonical seed, and restart retains all authored singletons.
+Create a validated scene with trusted local WASM/Node:
 
 ```sh
-python3 tools/pack_coop_defense_offline.py dist/coop-defense-web \
-  --scene examples/static-game-starter/scenes/stormglass-short.scene.yaml \
-  --output short-game.html
-python3 tools/check_coop_defense_offline.py dist/coop-defense-web short-game.html
+orr_pkg create-coop-scene --wasm game.wasm --output new.scene.yaml \
+  --wave-kinds '3,0,2,1;2,3,1,0;0,2,3,1;0,1,2,3;1,2,3,0;2,3,0,1;3,0,1,2;0,1,2,3;1,2,3,0;2,3,0,1' \
+  --opening-bosses '1,0,1,0,0,0,0,0,0,0'
 ```
 
-The no-replace packer uses trusted local WASM/Node. Receipts bind scene/WASM
-bytes and initial checksum, not authorship. Startup verifies the payload offline.
+Either option fills the omitted counterpart with defaults. Omitting both preserves the prior generated YAML bytes. Creator output is no-replace and validated before publication.
 
-## Identity and migration
+Run `coop_defense --scene PATH`, optionally `--headless --ticks 120`. Native input must be regular non-symlink UTF-8, at most 64 KiB. Browser import uses the same strict parser and bounded staging; invalid input preserves the client. Pack a saved scene with `tools/pack_coop_defense_offline.py BUILD --scene PATH --output NEW.html`; verify with `tools/check_coop_defense_offline.py BUILD NEW.html`.
 
-EnemyHealth v5 appends a 4-byte checksummed singleton after WaveCounts v4.
-Frame bytes, registry fingerprint and checksums change even at 1×.
-`SCENARIO_BUILD_ID` is `0xbc11fd6ffd218902`; host, starter manifest, native and
-browser must agree. Prior v4 (`0xe6f403d2595bd8cf`), v3, v2, v1 and other
-mismatching nonzero replay identities are rejected. There is no migration.
-Global frame/protocol/package formats and WASM function ABI are unchanged;
-rebuild matching WASM rather than reusing old binary receipts.
+## Identity and acceptance
 
-`coop-defense-scene` remains optional; simulation-only `coop-defense` does not
-enable YAML or Editor/ERP dependencies. `DefenseConfig` carries the five authored
-singletons; use `..Default::default()` for unchanged settings. Typed setup rejects
-invalid values before ticking; source admission returns an error.
+WaveComposition v6 appends 200 bytes of checksummed Frame state. Build ID is `0x7e9825f4e2a74229`; rebuild host/starter/native/WASM together. Defaults preserve gameplay/events, not Frame bytes/checksums. Prior nonzero replay identities, including v5 `0xbc11fd6ffd218902`, are rejected without migration. Existing zero-header wildcard policy and global formats/WASM function ABI are unchanged.
 
-## Acceptance and limits
+`coop-defense-scene` stays optional; simulation-only use gains no YAML/Editor dependencies. `DefenseConfig` now carries six authored singletons; use `..Default::default()` for unchanged settings.
 
-Focused tests cover strict/atomic admission, independent defaults, Editor/ERP
-Undo/Redo/Save/reopen, combat, restart and replay. The native trace accepts
-`--health`, `--counts` or `--training`; default selects the original short scene.
-Pass matching scene, WASM and trace to `tools/check_coop_defense_wasm.mjs`.
-Offline/source-hidden consumption is checked separately.
-
-Historical v4 evidence remains separate: 1,794-input count trace through two
-wins/restart, relocated embedded-WASM replay, and 12,001 default v3/v4 snapshots
-and events (checksum excluded). Its old-header rejection was synthetic, not an
-archived gameplay replay. Preserve those receipts and original failures; they
-do not substitute for v5 checks.
-
-Linux verification and integration remain separate gates.
-CPU/WASM and mock-DOM results do not establish browser/GPU or other-platform acceptance.
+Focused acceptance covers strict/atomic admission, ERP and registered Editor edit/history/save/play, literal spawn order/HP, restart/replay, native/WASM traces and relocated source-hidden packed consumption. Native trace accepts `--composition` alongside existing modes. CPU/WASM/mock-DOM evidence is not browser/GPU/native-window or Windows acceptance. Preserve earlier evidence and original failures separately.

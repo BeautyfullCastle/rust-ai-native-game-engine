@@ -1,0 +1,126 @@
+name: Stormglass wave composition focused CI
+# Real native/WASM and relocated offline package consumption; additive to mandatory local review/checks.
+on:
+  push:
+    branches: [su/next-gameplay-authoring-20261103]
+permissions:
+  contents: read
+concurrency:
+  group: stormglass-wave-composition-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  native-wasm-authoring:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      ORR_PKG_BIN: ${{ github.workspace }}/target/release/orr_pkg
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Prepare exact source and tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          export EVIDENCE="$RUNNER_TEMP/wave-composition-evidence"
+          export ORR_COOP_WEB_BUILD_DIR="$EVIDENCE/web-build"
+          for name in EVIDENCE ORR_COOP_WEB_BUILD_DIR; do
+            printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
+          done
+          mkdir "$EVIDENCE"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git rev-parse HEAD HEAD^{tree} | tee "$EVIDENCE/source.txt"
+          rustup toolchain install 1.99.1 --profile minimal --target wasm32-unknown-unknown
+          rustup override set 1.99.1
+          rustc --version --verbose | tee "$EVIDENCE/rustc.txt"
+          cargo --version | tee "$EVIDENCE/cargo.txt"
+          node --version | tee "$EVIDENCE/node.txt"
+          python3 -m venv "$RUNNER_TEMP/wave-composition-python"
+          "$RUNNER_TEMP/wave-composition-python/bin/pip" install Pillow==11.3.0 2>&1 | tee "$EVIDENCE/python-dependencies.log"
+          echo "$RUNNER_TEMP/wave-composition-python/bin" >> "$GITHUB_PATH"
+      - name: Build immutable baseline and candidate; verify focused contracts
+        shell: python {0}
+        run: |
+          import hashlib, json, os, re, runpy, subprocess
+          from pathlib import Path
+          evidence = Path(os.environ['EVIDENCE'])
+          helpers = runpy.run_path('tools/check-authoring-controls.py')
+          run = helpers['run_logged']
+          def run_json(command, path):
+              output = run(command, path)
+              prefix = '+ ' + ' '.join(command) + '\n'
+              if not output.startswith(prefix):
+                  raise RuntimeError('Unexpected evidence log command prefix')
+              return json.loads(output[len(prefix):])
+          base = 'b82738101415ac9ccdba428f20cfa19419474f6d'
+          baseline = Path(os.environ['RUNNER_TEMP']) / 'wave-composition-baseline'
+          run(['git', 'worktree', 'add', '--detach', str(baseline), base], evidence / 'baseline-worktree.log')
+          source = subprocess.check_output(['git', '-C', str(baseline), 'rev-parse', 'HEAD', 'HEAD^{tree}'], text=True)
+          if source.splitlines()[0] != base:
+              raise RuntimeError('Incorrect baseline source')
+          (evidence / 'baseline-source.txt').write_text(source)
+          import shutil
+          old_prefix = ['cargo', '+1.99.1', 'build', '--locked', '--manifest-path', str(baseline / 'Cargo.toml'), '--target-dir', str(baseline / 'target')]
+          run(old_prefix + ['--release', '-p', 'orr_games', '--features', 'coop-defense-scene', '--example', 'coop_defense_campaign_trace'], evidence / 'baseline-native-build.log')
+          run(old_prefix + ['-p', 'orr_coop_defense_web', '--target', 'wasm32-unknown-unknown', '--profile', 'web'], evidence / 'baseline-wasm-build.log')
+          old_wasm = evidence / 'v5.wasm'
+          shutil.copy2(baseline / 'target/wasm32-unknown-unknown/web/orr_coop_defense_web.wasm', old_wasm)
+          old_trace = evidence / 'v5-campaign-trace.json'
+          old_trace.write_text(json.dumps(run_json([str(baseline / 'target/release/examples/coop_defense_campaign_trace')], evidence / 'baseline-trace.log')))
+          suite = 'coop_defense_game::wave_composition_tests'
+          output = run(['cargo', 'test', '--locked', '--release', '-p', 'orr_games', '--features', 'coop-defense-scene', '--lib', suite + '::', '--', '--format=pretty', '--color=never', '--test-threads=1'], evidence / 'composition-core.log')
+          helpers['validate_tests'](output, suite, 6)
+          run(['cargo', 'build', '--locked', '--release', '-p', 'orr_games', '--features', 'coop-defense-scene', '--example', 'coop_defense_campaign_trace'], evidence / 'candidate-native-build.log')
+          traces = {}
+          for mode in ['default', 'health', 'composition']:
+              command = ['target/release/examples/coop_defense_campaign_trace'] + ([] if mode == 'default' else ['--' + mode])
+              trace = run_json(command, evidence / (mode + '-trace.log'))
+              rows = trace.get('rows', [])
+              if not 0 < len(rows) <= 20000 or trace.get('lastWave') != 3:
+                  raise RuntimeError('Expected bounded, complete native input and event trace: ' + mode)
+              if mode != 'default' and len(trace.get('eventRows', [])) != len(rows):
+                  raise RuntimeError('Expected complete native event rows: ' + mode)
+              if bool(trace.get('compositionOracle')) != (mode == 'composition'):
+                  raise RuntimeError('Wrong native composition oracle mode: ' + mode)
+              path = evidence / (mode + '-trace.json')
+              path.write_text(json.dumps(trace))
+              traces[mode] = path
+          run(['cargo', 'build', '--locked', '-p', 'orr_coop_defense_web', '--target', 'wasm32-unknown-unknown', '--profile', 'web'], evidence / 'wasm-build.log')
+          wasm = evidence / 'v6.wasm'
+          shutil.copy2('target/wasm32-unknown-unknown/web/orr_coop_defense_web.wasm', wasm)
+          for mode, trace in traces.items():
+              scene = 'examples/static-game-starter/scenes/stormglass-' + ('short' if mode == 'default' else mode) + '.scene.yaml'
+              result = run_json(['node', 'tools/check_coop_defense_wasm.mjs', str(wasm), str(trace), scene], evidence / (mode + '-wasm-consumer.log'))
+              if result.get('passed') is not True:
+                  raise RuntimeError('Actual WASM native parity failed: ' + mode)
+          baseline_result = run_json(['node', str(baseline / 'tools/check_coop_defense_wasm.mjs'), str(old_wasm), str(old_trace), str(baseline / 'examples/static-game-starter/scenes/stormglass-short.scene.yaml')], evidence / 'baseline-wasm-consumer.log')
+          if baseline_result.get('passed') is not True:
+              raise RuntimeError('Pristine v5 native/WASM baseline parity failed')
+          # Compare complete live gameplay/events, normalizing only checksum and source identity.
+          parity = run_json(['node', 'tools/check_coop_defense_presentation.mjs', str(wasm), str(old_wasm)], evidence / 'default-migration-parity.log')
+          if parity.get('passed') is not True or parity.get('gameplayBaselineCompared') is not True or parity.get('nativeParity') != '39e69afcafc482ce' or parity.get('leakTicks', 0) <= 0 or parity.get('maximumBatch', 0) <= 0:
+              raise RuntimeError('Expected actual v5/v6 full gameplay/event parity and nonzero event census')
+          run(['cargo', 'build', '--locked', '--release', '-p', 'orr_package', '--features', 'coop-web-authoring', '--bin', 'orr_pkg'], evidence / 'candidate-producer-build.log')
+          run([os.environ['ORR_PKG_BIN'], 'copy-coop-web-assets', '--source-dir', str(Path.cwd() / 'crates/orr_coop_defense_web/web'), '--output', os.environ['ORR_COOP_WEB_BUILD_DIR'], '--wasm', str(wasm)], evidence / 'web-assets.log')
+          outputs = [old_wasm, wasm, old_trace, *traces.values(), Path(os.environ['ORR_PKG_BIN'])]
+          (evidence / 'binary-trace-hashes.json').write_text(json.dumps({str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in outputs}, indent=2))
+          output = run(['python3', '-B', '-m', 'unittest', 'discover', '-s', 'tools', '-p', 'test_rust_coop_web_scene.py', '-v'], evidence / 'actual-driver.log')
+          cases = re.findall(r'^(test_\w+) \([^\n]+\) \.\.\. ok$', output, re.MULTILINE)
+          if len(cases) != 16 or len(set(cases)) != 16 or not re.search(r'^Ran 16 tests in ', output, re.MULTILINE) or not re.search(r'^OK$', output, re.MULTILINE) or re.search(r'\bskipped\b|^FAILED', output, re.MULTILINE):
+              raise RuntimeError('Expected sixteen distinct successful delivery tests without skips')
+          (evidence / 'scope.json').write_text(json.dumps({'head': os.environ['GITHUB_SHA'], 'baseline': base, 'cpu': 6, 'actual_delivery': 16, 'native_trace_rows': {mode: len(json.loads(path.read_text())['rows']) for mode, path in traces.items()}, 'migration': parity, 'mock_dom': False, 'gpu': False, 'full_workspace': False}, indent=2))
+      - name: Preserve logs, original source identity and actual delivery
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stormglass-wave-composition-${{ github.sha }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          path: ${{ runner.temp }}/wave-composition-evidence

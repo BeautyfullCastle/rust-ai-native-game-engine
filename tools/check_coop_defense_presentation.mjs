@@ -17,6 +17,17 @@ async function load(path) {
 const game = await load(binary);
 const peer = await load(binary);
 const baseline = process.argv[3] && await load(process.argv[3]);
+const completeGameplay = s => {
+  const {checksum, ...state} = s;
+  return {...state, presentation: {...state.presentation, source: '<source>'}};
+};
+const compareBaseline = (current, old, message) => {
+  // v5 has the full ABI: compare every gameplay field and complete event payload.
+  // The legacy projection remains only for genuinely older presentation-less builds.
+  if (old.presentation && old.maxHp !== undefined && old.lastWave !== undefined)
+    assert.deepEqual(completeGameplay(current), completeGameplay(old), message);
+  else assert.deepEqual(legacy(current), legacy(old), message);
+};
 const legacy = s => {
   // maxHp and lastWave are additive authoring metadata absent in older ABI snapshots.
   const { presentation, checksum, maxHp, lastWave, ...state } = s;
@@ -97,6 +108,7 @@ assert.equal(game.read().presentation.generation, 0);
 // Native parity fixture and real producer replay at every tick, not just final state.
 for (const g of [game, peer, baseline].filter(Boolean)) g.init(71825);
 shots.clear();
+if (baseline) compareBaseline(game.read(), baseline.read(), 'initial complete gameplay state');
 let sequence = 0;
 for (let tick = 0; tick < 1200; tick++) {
   const input = tick % 30 === 0 ? [1, 0, 0, ++sequence] : [0, 0, 0, 0];
@@ -106,7 +118,7 @@ for (let tick = 0; tick < 1200; tick++) {
   const other = peer.read();
   const canonical = x => ({ ...x, presentation: { ...x.presentation, source: '<new-source>' } });
   assert.deepEqual(canonical(s), canonical(other));
-  if (baseline) assert.deepEqual(legacy(s), legacy(baseline.read()), `gameplay changed at tick ${tick + 1}`);
+  if (baseline) compareBaseline(s, baseline.read(), `gameplay changed at tick ${tick + 1}`);
 }
 // Historical pre-Scenario identity fixture was da0ca42edf9cf8a2; Scenario-v1 golden
 // was 9056df75782da6ab before Campaign became a checksummed singleton.
@@ -114,8 +126,10 @@ for (let tick = 0; tick < 1200; tick++) {
 // WavePacing-v3 appends the singleton; independently executed native 1200-tick
 // oracle and rebuilt actual WASM agree on the new checksum below.
 // Historical WavePacing-v3: 41a0cf5eb1436a07; new Frame schema intentionally differs.
-// WaveCounts-v4 historical: fe7ec338439dce34. Native EnemyHealth-v5 oracle:
-assert.equal(s.checksum, '5f42bc7d8e18cc35', 'independently reproduced native EnemyHealth-v5 fixture');
+// WaveCounts-v4 historical: fe7ec338439dce34; EnemyHealth-v5: 5f42bc7d8e18cc35.
+// WaveComposition-v6 singleton changes schema identity. Native
+// legacy_seed_trace_matches_native_simulation printed this on 2026-11-03 (02-web.log).
+assert.equal(s.checksum, '39e69afcafc482ce', 'independently reproduced native WaveComposition-v6 fixture');
 assert.ok(coverage.has('release') && coverage.has('hit') && coverage.has('death'));
 const parityChecksum = s.checksum;
 // Real leaks must not become death events, including later terminal ticks.
@@ -126,10 +140,21 @@ for (let tick = 0; tick < 10000; tick++) {
   for (const g of [game, baseline].filter(Boolean)) g.step(0, 0, 0, 0);
   s = game.read();
   validate(s);
-  if (baseline) assert.deepEqual(legacy(s), legacy(baseline.read()));
+  if (baseline) compareBaseline(s, baseline.read(), `idle gameplay changed at tick ${tick + 1}`);
   if (s.presentation.events.some(e => e.kind === 'leak')) leakTicks++;
   if (s.phase !== 0) break;
 }
 assert.ok(leakTicks > 0);
 assert.equal(s.phase, 2);
+// Preserve full default snapshot and event equivalence across terminal restart too.
+for (const g of [game, baseline].filter(Boolean)) g.step(5, 0, 0, 1);
+s = game.read();
+assert.equal(s.tick, 0);assert.equal(s.presentation.generation, 1);
+if (baseline) compareBaseline(s, baseline.read(), 'terminal restart complete state/events');
+shots.clear();
+for (let tick = 0; tick < 210; tick++) {
+  for (const g of [game, baseline].filter(Boolean)) g.step(0, 0, 0, 0);
+  s = game.read();validate(s);
+  if (baseline) compareBaseline(s, baseline.read(), `post-restart complete state/events ${tick + 1}`);
+}
 console.log(JSON.stringify({ passed: true, nativeParity: parityChecksum, gameplayBaselineCompared: !!baseline, maximumBatch, leakTicks, observedKinds: [...coverage].sort(), checks: ['stable move ID', 'distinct restart/source namespace', 'immutable duplicate read', 'duplicate input', 'exact EventKey forwarding', 'source/projectile/victim attribution', 'replayed event equality', 'no fabricated windup', 'leak is not death'] }, null, 2));

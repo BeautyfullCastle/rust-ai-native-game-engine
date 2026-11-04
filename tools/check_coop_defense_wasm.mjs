@@ -43,6 +43,22 @@ for(const multiplier of [1,2,3,4]){
  const spawned=read().presentation.events.filter(e=>e.kind==='enemy_spawn');
  assert.equal(spawned.length,2);assert.ok(spawned.every(e=>e.value===1&&e.hpAfter===39*multiplier),'restart keeps authored multiplier on both lanes');
 }
+// Composition-only admission is independent and invalid nested arrays are atomic.
+const regular='[[1,2,3,0],[2,3,0,1],[3,0,1,2],[0,1,2,3],[1,2,3,0],[2,3,0,1],[3,0,1,2],[0,1,2,3],[1,2,3,0],[2,3,0,1]]';
+const flags='[0,0,0,0,1,0,0,0,0,1]';
+const compositionScene=fields=>`schema: orr.scene/1\nentities: {}\nsingletons: {CoopDefense::WaveComposition: ${fields}}\n`;
+const compositionFields=`regular_kinds: ${regular}, opening_boss: ${flags}`;
+assert.equal(load(compositionScene(`{${compositionFields}}`)),0);
+s=read();assert.equal(s.hp,30);assert.equal(s.lastWave,10);assert.deepEqual(s.gold,[150,150]);
+w.defense_step(1,0,0,1);const beforeComposition=read();
+const malformed=['{}',`{regular_kinds: ${regular}}`,`{opening_boss: ${flags}}`,`{${compositionFields}, extra: 1}`,`{${compositionFields}, opening_boss: ${flags}}`];
+for(const bad of ['[]','null','[1,2,3,0]','[[1,2,3,0]]'])malformed.push(`{regular_kinds: ${bad}, opening_boss: ${flags}}`);
+for(const bad of ['4','-1','1.5','null','4294967296'])malformed.push(`{regular_kinds: ${regular.replace('1',bad)}, opening_boss: ${flags}}`);
+for(const bad of ['[]','null','[0,0,0,0,0,0,0,0,0]','[0,0,0,0,0,0,0,0,0,2]','[0,0,0,0,0,0,0,0,0,-1]'])malformed.push(`{regular_kinds: ${regular}, opening_boss: ${bad}}`);
+for(const fields of malformed){assert.equal(load(compositionScene(fields)),3);assert.deepEqual(read(),beforeComposition,'invalid composition preserves complete live client');}
+w.defense_step(5,0,0,2);
+for(let tick=0;tick<210;tick++)w.defense_step(0,0,0,0);
+assert.deepEqual(read().presentation.events.filter(e=>e.kind==='enemy_spawn').map(e=>[e.board,e.value,e.hpAfter]),[[0,1,39],[1,1,39]],'default composition survives restart');
 w.defense_init(71825);s=read();
 w.defense_step(1,0,0,1);s=read();assert.equal(s.gold[0],125);assert.equal(s.units.filter(u=>u[0]===0).length,1);
 w.defense_step(1,0,0,1);assert.equal(read().gold[0],125,'held sample spends only once');
@@ -64,8 +80,10 @@ w.defense_init(71825);let sequence=0;for(let t=0;t<1200;t++)w.defense_step(t%30=
 // independently reproduced 41a0cf5eb1436a07, then fresh actual WASM matched it.
 // Same seed71825/default settings, two input slots, 1200 consumed ticks.
 // WaveCounts-v4 native ABI test independently produced fe7ec338439dce34.
-// EnemyHealth-v5 independently printed by native legacy_seed_trace_matches_native_simulation.
-assert.equal(s.checksum,'5f42bc7d8e18cc35','native EnemyHealth-v5 schema parity fixture');
+// EnemyHealth-v5 historical: 5f42bc7d8e18cc35. WaveComposition-v6 appends its
+// checksummed singleton; native legacy_seed_trace_matches_native_simulation
+// independently printed 39e69afcafc482ce on 2026-11-03 (02-web.log).
+assert.equal(s.checksum,'39e69afcafc482ce','native WaveComposition-v6 schema parity fixture');
 assert.equal(s.wave,2);assert.equal(s.hp,30);assert.ok(s.projectiles.length>0);assert.ok(s.units.some(u=>u[0]===1));
 if(campaignTracePath){
  // Replay only exact consumed inputs from the native seeded strategy. No frame state
@@ -74,10 +92,22 @@ if(campaignTracePath){
  if(trace.eventRows)assert.equal(trace.eventRows.length,trace.rows.length);
  assert.equal(trace.lastWave,3);assert.match(trace.buildId,/^[0-9a-f]{16}$/);
  const scene=fs.readFileSync(campaignScenePath);
+ assert.equal(!!trace.compositionOracle,scene.toString().includes('CoopDefense::WaveComposition:'),'composition source requires its explicit literal oracle');
  assert.equal(w.defense_scene_capacity(),65536);
  new Uint8Array(w.memory.buffer,w.defense_scene_buffer(),scene.length).set(scene);
  assert.equal(w.defense_init_scene(scene.length),0);s=read();
  assert.equal(s.checksum,trace.initialChecksum,'same authored scene starts from native checksum');assert.equal(s.lastWave,3);
+ const compositionKinds=[[4,0,2,1,3],[2,3,1,0,2,3],[4,2,3,1,0,2,3]];
+ const compositionHp=[[1092,78,156,78,52],[216,72,108,108,216,72],[1932,276,92,138,138,276,92]];
+ const compositionSpawns=[[0,0,0],[0,0,0]];
+ if(trace.compositionOracle){
+  assert.ok(trace.eventRows,'composition requires complete native event rows');
+  const source=scene.toString();
+  assert.match(source,/pair_counts: \[5, 6, 7, 16, 18, 20, 22, 24, 26, 28\]/);
+  assert.match(source,/multiplier: 2/);
+  assert.match(source,/regular_kinds: \[\[3, 0, 2, 1\], \[2, 3, 1, 0\], \[0, 2, 3, 1\]/);
+  assert.match(source,/opening_boss: \[1, 0, 1, 0, 0, 0, 0, 0, 0, 0\]/);
+ }
  let victories=0,previousPhase=s.phase,restarts=0;
  for(let i=0;i<trace.rows.length;i++){
   const row=trace.rows[i];assert.equal(row.length,9);
@@ -86,6 +116,13 @@ if(campaignTracePath){
   w.defense_step(action,source,target,sequence);s=read();
   assert.equal(s.checksum,checksum,`native consumed-input checksum at trace row ${i}`);
   if(trace.eventRows)assert.deepEqual(s.presentation.events.map(e=>[e.tick,e.system,e.seq,e.kind,e.generation,e.unitId,e.otherUnitId,e.enemyId,e.projectileId,e.board,e.role,e.value,e.hpAfter,e.x,e.y]),trace.eventRows[i],`native complete event payloads at trace row ${i}`);
+  if(trace.compositionOracle)for(const e of s.presentation.events.filter(e=>e.kind==='enemy_spawn')){
+   assert.ok(restarts<2&&wave>=1&&wave<=3);
+   const count=compositionSpawns[restarts][wave-1],ordinal=Math.floor(count/2);
+   assert.equal(e.board,count%2);assert.equal(e.value,compositionKinds[wave-1][ordinal]);
+   assert.equal(e.hpAfter,compositionHp[wave-1][ordinal],'independent literal family HP oracle');
+   compositionSpawns[restarts][wave-1]++;
+  }
   assert.equal(s.wave,wave);assert.equal(s.phase,phase);assert.equal(s.tick,tick);
   assert.equal(s.presentation.generation,generation);assert.equal(s.lastWave,3);
   assert.ok(s.wave<=3,'short authored campaign never spawns wave four');
@@ -95,5 +132,6 @@ if(campaignTracePath){
  }
  assert.equal(victories,2,'one uninterrupted win before and after restart');assert.equal(restarts,1);
  assert.equal(s.phase,1);assert.equal(s.wave,3);
+ if(trace.compositionOracle)assert.deepEqual(compositionSpawns,[[10,12,14],[10,12,14]],'same authored composition after terminal restart');
 }
 console.log(JSON.stringify({passed:true,checksum:s.checksum,tick:s.tick,wave:s.wave,hp:s.hp,kills:s.kills,coverage:['Campaign default10','Campaign-only Scenario defaults','Campaign validation atomicity','authored max-wave HUD source','summon','sequence deduplication','move','merge','loss','terminal restart','upgrade','invest','restart','AI partner','projectiles','1200-tick native parity',...(campaignTracePath?['complete native-consumed 3-wave victory/restart parity']:[])]},null,2));

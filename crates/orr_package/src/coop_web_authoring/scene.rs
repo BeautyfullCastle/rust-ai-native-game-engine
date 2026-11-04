@@ -9,7 +9,7 @@ const VALIDATOR: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../tools/validate_coop_defense_scene.mjs"
 ));
-const USAGE:&str="orr_pkg create-coop-scene --wasm TRUSTED_LOCAL_WASM --output NEW_SCENE [--starting-gold 0..10000] [--reactor-hp 1..1000] [--last-wave 1..10] [--spawn-interval-ticks 35..350] [--wave-pairs N1,N2,N3,N4,N5,N6,N7,N8,N9,N10] [--enemy-health-multiplier 1..4]\nWave pairs require exactly ten integers, each 1..28; each pair spawns one enemy in each lane. Enemy health defaults to 1 when omitted. Executes trusted local WASM in trusted Node on PATH; not a sandbox. No fetch or build. Integers accept ASCII decimal digits, optional sign, whitespace and single underscores between digits; Unicode digits are not accepted. Duplicate options are refused.";
+const USAGE:&str="orr_pkg create-coop-scene --wasm TRUSTED_LOCAL_WASM --output NEW_SCENE [--starting-gold 0..10000] [--reactor-hp 1..1000] [--last-wave 1..10] [--spawn-interval-ticks 35..350] [--wave-pairs N1,N2,N3,N4,N5,N6,N7,N8,N9,N10] [--enemy-health-multiplier 1..4] [--wave-kinds ROW1;ROW2;...;ROW10] [--opening-bosses B1,B2,...,B10]\nWave pairs require exactly ten integers, each 1..28; each pair spawns one enemy in each lane. Enemy health defaults to 1 when omitted. Wave kinds require ten semicolon-separated rows of four comma-separated integers in 0..3; opening bosses require ten comma-separated flags in 0..1. Supplying either composition option writes both fields, defaulting the other to the original rotation or bosses on waves 5 and 10. Executes trusted local WASM in trusted Node on PATH; not a sandbox. No fetch or build. Integers accept ASCII decimal digits, optional sign, whitespace and single underscores between digits; Unicode digits are not accepted. Duplicate options are refused.";
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(super) struct Receipt {
@@ -41,6 +41,8 @@ struct Options {
     pacing: Option<i64>,
     wave_pairs: Option<[u32; 10]>,
     enemy_health: Option<i64>,
+    wave_kinds: Option<[[u32; 4]; 10]>,
+    opening_bosses: Option<[u32; 10]>,
 }
 fn integer(value: &OsString) -> Result<i64, String> {
     let raw = value
@@ -83,8 +85,42 @@ fn wave_pairs(value: &OsString) -> Result<[u32; 10], String> {
     }
     Ok(counts)
 }
+fn bounded_array<const N: usize>(raw: &str, maximum: i64) -> Result<[u32; N], String> {
+    let mut parts = raw.split(',');
+    let mut values = [0; N];
+    for value in &mut values {
+        let part = parts.next().ok_or("composition array has wrong length")?;
+        let n = integer(&OsString::from(part))?;
+        if !(0..=maximum).contains(&n) {
+            return Err("composition integer outside authored bounds".into());
+        }
+        *value = n as u32;
+    }
+    if parts.next().is_some() {
+        return Err("composition array has wrong length".into());
+    }
+    Ok(values)
+}
+fn wave_kinds(value: &OsString) -> Result<[[u32; 4]; 10], String> {
+    let raw = value
+        .to_str()
+        .ok_or("wave kinds must be UTF-8 ASCII decimals")?;
+    let mut rows = raw.split(';');
+    let mut kinds = [[0; 4]; 10];
+    for row in &mut kinds {
+        *row = bounded_array(rows.next().ok_or("wave kinds require exactly ten rows")?, 3)?;
+    }
+    if rows.next().is_some() {
+        return Err("wave kinds require exactly ten rows".into());
+    }
+    Ok(kinds)
+}
+fn default_wave_kinds() -> [[u32; 4]; 10] {
+    std::array::from_fn(|wave| std::array::from_fn(|ordinal| ((wave + 1 + ordinal) % 4) as u32))
+}
+const DEFAULT_OPENING_BOSSES: [u32; 10] = [0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
 fn options(args: &[OsString]) -> Result<Options, String> {
-    if args.len() > 16
+    if args.len() > 20
         || args.len() % 2 != 0
         || args.iter().any(|s| {
             s.is_empty() || s.as_encoded_bytes().len() > 4096 || s.as_encoded_bytes().contains(&0)
@@ -96,6 +132,8 @@ fn options(args: &[OsString]) -> Result<Options, String> {
     let (mut gold, mut hp, mut wave, mut pacing) = (150, 30, 10, None);
     let mut pairs = None;
     let mut enemy_health = None;
+    let mut kinds = None;
+    let mut bosses = None;
     let mut seen = BTreeSet::new();
     for pair in args.chunks_exact(2) {
         let key = pair[0].to_str().ok_or("invalid option")?;
@@ -111,6 +149,15 @@ fn options(args: &[OsString]) -> Result<Options, String> {
             "--spawn-interval-ticks" => pacing = Some(integer(&pair[1])?),
             "--wave-pairs" => pairs = Some(wave_pairs(&pair[1])?),
             "--enemy-health-multiplier" => enemy_health = Some(integer(&pair[1])?),
+            "--wave-kinds" => kinds = Some(wave_kinds(&pair[1])?),
+            "--opening-bosses" => {
+                bosses = Some(bounded_array(
+                    pair[1]
+                        .to_str()
+                        .ok_or("opening bosses must be UTF-8 ASCII decimals")?,
+                    1,
+                )?)
+            }
             _ => return Err("unknown option".into()),
         }
     }
@@ -123,6 +170,8 @@ fn options(args: &[OsString]) -> Result<Options, String> {
         pacing,
         wave_pairs: pairs,
         enemy_health,
+        wave_kinds: kinds,
+        opening_bosses: bosses,
     };
     scene_text(&o)?;
     Ok(o)
@@ -135,6 +184,10 @@ fn scene_text(o: &Options) -> Result<Vec<u8>, String> {
         || o.pacing.is_some_and(|p| !(35..=350).contains(&p))
         || o.wave_pairs
             .is_some_and(|counts| counts.iter().any(|n| !(1..=28).contains(n)))
+        || o.wave_kinds
+            .is_some_and(|rows| rows.iter().flatten().any(|n| *n > 3))
+        || o.opening_bosses
+            .is_some_and(|flags| flags.iter().any(|n| *n > 1))
     {
         return Err("scene integer outside authored bounds".into());
     }
@@ -153,6 +206,21 @@ fn scene_text(o: &Options) -> Result<Vec<u8>, String> {
     if let Some(multiplier) = o.enemy_health {
         text.push_str(&format!(
             "  CoopDefense::EnemyHealth:\n    multiplier: {multiplier}\n"
+        ));
+    }
+    if o.wave_kinds.is_some() || o.opening_bosses.is_some() {
+        let rows = o
+            .wave_kinds
+            .unwrap_or_else(default_wave_kinds)
+            .map(|row| format!("[{}]", row.map(|n| n.to_string()).join(", ")))
+            .join(", ");
+        let bosses = o
+            .opening_bosses
+            .unwrap_or(DEFAULT_OPENING_BOSSES)
+            .map(|n| n.to_string())
+            .join(", ");
+        text.push_str(&format!(
+            "  CoopDefense::WaveComposition:\n    regular_kinds: [{rows}]\n    opening_boss: [{bosses}]\n"
         ));
     }
     Ok(text.into_bytes())
@@ -216,7 +284,7 @@ fn create_with(
     Ok((verified, warning))
 }
 pub(super) fn run_cli(args: impl IntoIterator<Item = OsString>) -> u8 {
-    let args: Vec<_> = args.into_iter().take(18).collect();
+    let args: Vec<_> = args.into_iter().take(22).collect();
     if args.len() == 1 && (args[0] == "--help" || args[0] == "-h") {
         println!("{USAGE}");
         return 0;

@@ -22,11 +22,12 @@ test('actual WASM authored Scene, native trace parity, maxHp and restart',{skip:
  // Historical Scenario-v1: ccfc379122860c2e; Campaign-v2: 7400c35f6c84178e.
  // WavePacing-v3 four-action checksum: c62add69c518309c; 1200 ticks: 41a0cf5eb1436a07.
  // Historical WaveCounts-v4: f5ed72e9e27c2e15 / fe7ec338439dce34.
- // EnemyHealth-v5 native Rust independently reproduced both updated fixtures.
- s=snapshot(w);assert.equal(s.checksum,'fd45f6a6201d57d2','native Rust independently consumed same trace (EnemyHealth singleton schema)');assert.equal(s.hp,75);assert.equal(s.maxHp,75);assert.equal(s.lastWave,10);assert.equal(s.gold[0],225);
+ // Historical EnemyHealth-v5: fd45f6a6201d57d2 / 5f42bc7d8e18cc35.
+ // WaveComposition-v6 native Rust independently reproduced both fixtures (2026-11-03, 02-web.log).
+ s=snapshot(w);assert.equal(s.checksum,'79574c9eb4a5880b','native Rust independently consumed same trace (WaveComposition singleton schema)');assert.equal(s.hp,75);assert.equal(s.maxHp,75);assert.equal(s.lastWave,10);assert.equal(s.gold[0],225);
  const source=s.presentation.source;assert.equal(load(w,encode(authored)),0);assert.notEqual(snapshot(w).presentation.source,source);
  w.defense_init(0x0c002026);const canonical=snapshot(w).checksum;assert.equal(load(w,encode('schema: orr.scene/1\nentities: {}\n')),0);assert.equal(snapshot(w).checksum,canonical);
- w.defense_init(71825);for(let t=0,seq=0;t<1200;t++)w.defense_step(t%30===0?1:0,0,0,t%30===0?++seq:0);assert.equal(snapshot(w).checksum,'5f42bc7d8e18cc35','native EnemyHealth schema parity fixture');
+ w.defense_init(71825);for(let t=0,seq=0;t<1200;t++)w.defense_step(t%30===0?1:0,0,0,t%30===0?++seq:0);assert.equal(snapshot(w).checksum,'39e69afcafc482ce','native WaveComposition schema parity fixture');
 });
 test('actual WASM Campaign-only source defaults Scenario, displays max and survives restart',{skip:!binary},async()=>{
  const w=await core();w.defense_init(71825);assert.equal(snapshot(w).lastWave,10);
