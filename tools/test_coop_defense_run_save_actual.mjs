@@ -1,5 +1,5 @@
 // Focused Run Save v1 acceptance: actual supplied WASM, bundled JS, mock DOM.
-// Does not establish browser file-picker, pixels, GPU, or a preemptive WASM timeout.
+// Does not establish browser keyboard dispatch, file-picker, pixels, GPU, or a preemptive WASM timeout.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
@@ -84,6 +84,122 @@ async function load(h, text) {
   return await h.run('loadRunFile(testFile)');
 }
 const identity = h => h.run('JSON.stringify([state,seq,queue,runRecorder.initial,runRecorder.steps,paused,ready])');
+function keydown(h, code, extra={}) {
+  let prevented = 0;
+  h.listeners.get('keydown')({code, repeat:false, ctrlKey:false, metaKey:false,
+    altKey:false, shiftKey:false, isComposing:false, keyCode:0, target:{tagName:'CANVAS'},
+    ...extra, preventDefault() { prevented++; }});
+  return prevented;
+}
+async function keyboardGame(initialKind) {
+  const h = await boot();
+  if (initialKind === 'scene') {
+    h.sandbox.testFile = fileOf(sceneBytes);
+    await h.run('loadSceneFile(testFile)');
+  }
+  h.ui.get('begin').onclick({});
+  return h;
+}
+function beginKeyboardDrag(h) {
+  // Establish real gameplay and pointer state through the installed handlers.
+  assert.equal(keydown(h, 'KeyQ'), 1);
+  h.run('animate(1);animate(35);');
+  assert.equal(h.run('!!unitAt(0)'), true);
+  const canvas = h.ui.get('game'), captured = new Set();
+  canvas.getBoundingClientRect = () => ({left:0, top:0, width:500, height:720});
+  canvas.setPointerCapture = id => captured.add(id);
+  canvas.hasPointerCapture = id => captured.has(id);
+  canvas.releasePointerCapture = id => captured.delete(id);
+  const [x,y] = h.run('project(...state.cells.find(c=>c[0]===0&&c[1]===0).slice(2),0)');
+  h.canvasListeners.get('pointerdown')({pointerId:17, button:0, clientX:x, clientY:y, preventDefault(){}});
+  h.canvasListeners.get('pointermove')({pointerId:17, clientX:x+20, clientY:y, preventDefault(){}});
+  assert.equal(h.run('gesture.drag && selected===0'), true);
+}
+async function checkKeyboardInput(initialKind) {
+  const cases = [], controls = ['KeyR','KeyQ','KeyE','Space','Escape'];
+  for (const modifier of ['ctrlKey','metaKey','altKey']) {
+    for (const code of controls) cases.push({id:`${modifier}:${code}`, code, extra:{[modifier]:true}});
+  }
+  for (const modifier of ['ctrlKey','metaKey','altKey']) {
+    cases.push({id:`${modifier}+shiftKey:KeyR`, code:'KeyR', extra:{[modifier]:true, shiftKey:true}});
+  }
+  for (const code of controls) cases.push({id:`keyCode229:${code}`, code, extra:{keyCode:229}});
+  for (const guard of ['isComposing','repeat']) {
+    for (const code of controls) cases.push({id:`${guard}:${code}`, code, extra:{[guard]:true}});
+  }
+  for (const tagName of ['INPUT','TEXTAREA','SELECT']) {
+    for (const code of controls) cases.push({id:`${tagName}:${code}`, code, extra:{target:{tagName}}});
+  }
+  for (const code of ['Space','Enter']) cases.push({id:`BUTTON:${code}`, code, button:true});
+  const live = await keyboardGame(initialKind), idle = await keyboardGame(initialKind);
+  beginKeyboardDrag(live);beginKeyboardDrag(idle);
+  const inputIdentity = h => h.run('JSON.stringify([state,seq,queue,runRecorder.initial,runRecorder.steps,paused,ready,selected,gesture,hover,acc,lastNotice])');
+  const spending = h => plain(h.run('({gold:state.gold[0],investment:state.investment[0],sequence:seq,queue,steps:runRecorder.steps})'));
+  let time = 35;
+  for (const test of cases) {
+    const prior = inputIdentity(live), before = spending(live);
+    const extra = test.button ? {target:new live.sandbox.HTMLButtonElement()} : test.extra;
+    const prevented = keydown(live, test.code, extra);
+    const afterEvent = inputIdentity(live), afterHandling = spending(live);
+    // Equal ordinary frames distinguish keyboard neutrality from a frozen game.
+    time += 34;
+    live.run(`animate(${time});`);idle.run(`animate(${time});`);
+    if (prevented || afterEvent !== prior || inputIdentity(live) !== inputIdentity(idle)) {
+      console.error(JSON.stringify({keyboardFailure:test.id, initialKind, prevented,
+        before, afterHandling, afterAnimate:spending(live), idleAfterAnimate:spending(idle)}));
+    }
+    assert.equal(prevented, 0, `${initialKind}/${test.id}: leave default behavior available`);
+    assert.equal(afterEvent, prior, `${initialKind}/${test.id}: preserve state, queue, sequence, recorder and input state`);
+    assert.equal(inputIdentity(live), inputIdentity(idle), `${initialKind}/${test.id}: ordinary frames match idle WASM control`);
+    assert.equal(live.fetches.length, 0);
+  }
+  const passed = cases.map(test => test.id);
+  for (const [code, action, extra, id] of [
+    ['KeyQ',1,{},'plain:KeyQ'], ['KeyE',3,{},'plain:KeyE'],
+    ['KeyR',4,{},'plain:KeyR'], ['KeyR',4,{shiftKey:true},'shiftKey:KeyR'],
+  ]) {
+    const h = await keyboardGame(initialKind), before = plain(h.run('state'));
+    const cost = before.costs[action===1 ? 0 : action===3 ? 1 : 2];
+    assert.equal(keydown(h, code, extra), 1, `${id}: game shortcut consumes default`);
+    assert.equal(h.run('state.checksum'), before.checksum, 'keydown only enqueues');
+    assert.equal(h.run('runRecorder.steps.length'), 0);
+    assert.deepEqual(plain(h.run('queue')), [[action,0,0,1]]);
+    assert.equal(h.run('seq'), 1);
+    h.run('animate(1);animate(35);');
+    assert.equal(h.run('queue.length'), 0);
+    assert.equal(h.run('seq'), 1);
+    assert.equal(h.run('state.gold[0]'), before.gold[0]-cost, `${id}: actual WASM spends exact cost`);
+    if (action===1) assert.equal(h.run('state.units.filter(u=>u[0]===0).length'), 1);
+    if (action===3) assert.equal(h.run('state.upgrades[0]'), before.upgrades[0]+1);
+    if (action===4) assert.equal(h.run('state.investment[0]'), before.investment[0]+1);
+    assert.deepEqual(plain(h.run('runRecorder.steps')), [[action,0,0,1],[0,0,0,0]], 'ordinary animate records one action and one idle tick');
+    assert.notEqual(h.run('state.checksum'), before.checksum);
+    assert.equal(h.fetches.length, 0);
+    passed.push(id);
+  }
+  const pause = await keyboardGame(initialKind), beforePause = identity(pause);
+  assert.equal(keydown(pause, 'Space'), 1);
+  assert.equal(pause.run('paused'), true);
+  pause.run('animate(1);animate(35);');
+  assert.equal(pause.run('state.tick'), 0);
+  assert.equal(pause.run('runRecorder.steps.length'), 0);
+  assert.equal(keydown(pause, 'Space'), 1);
+  assert.equal(identity(pause), beforePause, 'Space resumes without a command or sequence');
+  pause.run('animate(69);');
+  assert.equal(pause.run('state.tick'), 2);
+  assert.deepEqual(plain(pause.run('runRecorder.steps')), [[0,0,0,0],[0,0,0,0]]);
+  passed.push('plain:Space');
+  const escape = await keyboardGame(initialKind);
+  beginKeyboardDrag(escape);
+  const beforeEscape = identity(escape);
+  assert.equal(keydown(escape, 'Escape'), 0);
+  assert.equal(escape.run('selected===-1 && gesture===null && hover===-1'), true);
+  assert.equal(identity(escape), beforeEscape, 'Escape only clears pointer selection');
+  assert.equal(escape.ui.get('game').hasPointerCapture(17), false);
+  passed.push('plain:Escape');
+  assert.equal(idle.fetches.length + pause.fetches.length + escape.fetches.length, 0);
+  return passed;
+}
 const results = [];
 for (const initialKind of ['seed', 'scene']) {
   const h = await boot();
@@ -344,10 +460,11 @@ for (const initialKind of ['seed', 'scene']) {
       pointerReleaseCases.push({event:eventName, outcome});
     }
   }
+  const keyboardInputCases = await checkKeyboardInput(initialKind);
   results.push({initialKind, steps: saved.steps.length, sequence: saved.sequence,
     savedChecksum, nextChecksum, networkRequests: h.fetches.length,
-    focusLossOutcomes: ['failure', 'success', 'cancel', 'restart', 'ordinary'], pointerReleaseCases});
+    focusLossOutcomes: ['failure', 'success', 'cancel', 'restart', 'ordinary'], pointerReleaseCases, keyboardInputCases});
 }
 console.log(JSON.stringify({version:1, wasmSha256:sha(fs.readFileSync(wasmPath)),
   sceneSha256:sha(sceneBytes), results,
-  coverage:'actual supplied WASM + bundled JavaScript; mock DOM/Blob/File, not a real browser picker or GPU; cooperative timeout is not synchronous-call preemption'}));
+  coverage:'actual supplied WASM + bundled JavaScript; mock DOM/Blob/File, not real browser keyboard dispatch, picker, pixels or GPU; cooperative timeout is not synchronous-call preemption'}));
