@@ -36,10 +36,10 @@ jobs:
       run:
         shell: bash
     steps:
-      - name: Initialize failure-preserving evidence and reviewed wrapper
+      - name: Write reviewed wrapper (part 1)
         run: |
           set -euo pipefail
-          cat > "$RUNNER_TEMP/stormglass-full-linux-harness.py" <<'PYHARNESS'
+          cat > "$RUNNER_TEMP/stormglass-full-linux-harness.py" <<'PYHARNESS_PART1'
           import datetime
           import hashlib
           import json
@@ -272,6 +272,12 @@ jobs:
               return 0 if report['valid'] else 1
           
           
+          PYHARNESS_PART1
+
+      - name: Complete reviewed wrapper and initialize failure-preserving evidence
+        run: |
+          set -euo pipefail
+          cat >> "$RUNNER_TEMP/stormglass-full-linux-harness.py" <<'PYHARNESS_PART2'
           def setup():
               commands = [
                   ('rustup-install', ['rustup', 'toolchain', 'install', '1.99.1', '--profile', 'minimal', '--component', 'rustfmt', '--component', 'clippy']),
@@ -452,7 +458,7 @@ jobs:
                   print(error, file=sys.stderr)
                   code = 1
               sys.exit(0 if code is None or code == 0 else 1)
-          PYHARNESS
+          PYHARNESS_PART2
           python3 -B "$RUNNER_TEMP/stormglass-full-linux-harness.py" initialize
           cp "$RUNNER_TEMP/stormglass-full-linux-harness.py" "$EVIDENCE/harness.py"
 
