@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "name": "stormglass-pixelfx-zap-hit",
+  "version": "0.1.0",
+  "engine": "^0.0.1",
+  "capabilities": [
+    "sprite"
+  ],
+  "dependencies": {},
+  "files": [
+    "sprites.json",
+    "zap-hit.png",
+    "LICENSE.txt"
+  ]
+}

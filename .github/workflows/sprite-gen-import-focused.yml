@@ -1,7 +1,7 @@
 name: Sprite-gen import CPU CI
 on:
   push:
-    branches: [su/sprite-gen-adapter-20261105]
+    branches: [su/sprite-gen-adapter-20261105, su/stormglass-pixelfx-native-20261105, su/stormglass-pixeloe-demo-20261105]
 permissions:
   contents: read
 concurrency:

@@ -20,6 +20,9 @@ use winit::{
 };
 
 pub(crate) type DefenseSession = Session<game::DefenseGame, LocalInputSource>;
+/// MIT terms and upstream notices travel with the compiled optional assets.
+#[cfg(feature = "coop-defense-pixelfx")]
+pub const PIXELFX_LICENSES: &str = include_str!("../assets/stormglass-pixelfx/hit-spark/LICENSE.txt");
 pub const HELP:&str="Stormglass Foundry\ncoop_defense [--scene PATH] [--run-directory ABSOLUTE_PRIVATE_DIRECTORY (Linux run-save feature)] [--headless --ticks N [--demo] [--capture NEW.png]]\nSpace summon, click your unit then empty tile to move or identical role/tier to merge, U upgrade, I invest, P/Escape pause, Enter continue, R restart. AI partner is local, not online. Headless capture uses a software GPU. Optional coop-defense-audio: --audio-bank ABSOLUTE_BANK_DIRECTORY --audio off|auto|required; native output additionally needs audio-native. Starts muted; Linux bank loading only.";
 #[derive(Debug, Default)]
 pub struct Options {
@@ -264,6 +267,8 @@ pub fn run(options: Options) -> Result<(), String> {
         focus_lost_pending: false,
         board: PendingBoard::default(),
     };
+    #[cfg(feature = "coop-defense-pixelfx")]
+    app.ui.vfx.prepare(&app.ui.context)?;
     event_loop.run_app(&mut app).map_err(|e| e.to_string())?;
     app.error.map_or(Ok(()), Err)
 }
@@ -500,7 +505,16 @@ impl App {
                     self.error = Some(error);
                 }
             }
-            #[cfg(not(feature = "coop-defense-audio"))]
+            #[cfg(feature = "coop-defense-pixelfx")]
+            {
+                let (orr_session::AdvanceResult::Advanced { events, .. }
+                | orr_session::AdvanceResult::Stalled { events }) = &result;
+                if let Err(error) = self.ui.vfx.consume(events) {
+                    self.error = Some(error);
+                }
+                self.ui.vfx.advance_to(self.session.predicted_frame().tick());
+            }
+            #[cfg(not(any(feature = "coop-defense-audio", feature = "coop-defense-pixelfx")))]
             let _ = result;
             #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
             if let Some(saves) = &mut self.saves {
@@ -591,6 +605,11 @@ impl App {
                     };
                     saves.journal = journal;
                     self.ui.restore_paused(high_water);
+                    #[cfg(feature = "coop-defense-pixelfx")]
+                    self.ui.vfx.replace(
+                        self.session.predicted_frame().tick(),
+                        game::run(self.session.predicted_frame()).generation,
+                    );
                     self.ui.run_save.status = format!(
                         "Loaded tick {}. Continue when ready.",
                         self.session.predicted_frame().tick()
@@ -744,6 +763,8 @@ pub fn headless(mut options: Options) -> Result<(), String> {
 }
 fn headless_prepared(options: Options, config: game::DefenseConfig) -> Result<(), String> {
     let mut session = session(config);
+    #[cfg(feature = "coop-defense-pixelfx")]
+    let mut vfx = crate::defense_vfx::DefenseVfx::default();
     let mut sequence = 0;
     for tick in 0..options.ticks {
         let input = if options.demo && tick % 45 == 0 {
@@ -757,10 +778,24 @@ fn headless_prepared(options: Options, config: game::DefenseConfig) -> Result<()
         } else {
             game::DefenseInput::default()
         };
-        session.advance(input, vec![]);
+        let result = session.advance(input, vec![]);
+        #[cfg(feature = "coop-defense-pixelfx")]
+        {
+            let (orr_session::AdvanceResult::Advanced { events, .. }
+            | orr_session::AdvanceResult::Stalled { events }) = &result;
+            vfx.consume(events)?;
+            vfx.advance_to(session.predicted_frame().tick());
+        }
+        #[cfg(not(feature = "coop-defense-pixelfx"))]
+        let _ = result;
     }
     let frame = session.predicted_frame();
     let run = game::run(frame);
+    #[cfg(feature = "coop-defense-pixelfx")]
+    {
+        let (active, started, dropped, canceled) = vfx.summary();
+        println!("Stormglass pixelfx active={active} started={started} dropped={dropped} canceled={canceled}");
+    }
     println!(
         "Stormglass tick={} wave={} phase={} reactor={} kills={} merges={} checksum=0x{:016x}",
         run.tick,
@@ -790,6 +825,11 @@ fn headless_prepared(options: Options, config: game::DefenseConfig) -> Result<()
         )?;
         let mut overlay = GpuOverlay::new(&gpu, TextureFormat::Rgba8UnormSrgb);
         let mut ui = DefenseUi::new();
+        #[cfg(feature = "coop-defense-pixelfx")]
+        {
+            vfx.prepare(&ui.context)?;
+            ui.vfx = vfx;
+        }
         ui.started = options.demo || options.ticks > 0;
         for _ in 0..2 {
             let input = egui::RawInput {
@@ -1803,3 +1843,7 @@ pub(crate) mod audio_tests;
 #[cfg(test)]
 #[path = "defense_pending_board_tests.rs"]
 mod pending_board_tests;
+
+#[cfg(all(test, feature = "coop-defense-pixelfx"))]
+#[path = "defense_vfx_app_tests.rs"]
+mod vfx_tests;

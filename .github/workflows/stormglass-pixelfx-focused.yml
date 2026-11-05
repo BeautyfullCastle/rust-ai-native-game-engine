@@ -1,0 +1,47 @@
+name: Stormglass native pixelfx CI
+# Latest user direction retains exact-head focused remote CI, additive to
+# Linux-local aggregate verification and independent review. CPU/CLI only.
+on:
+  push:
+    branches: [su/stormglass-pixelfx-native-20261105]
+permissions:
+  contents: read
+concurrency:
+  group: stormglass-pixelfx-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  native-pixelfx:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Select pinned toolchain and Linux dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "EVIDENCE=$RUNNER_TEMP/stormglass-pixelfx-evidence" >> "$GITHUB_ENV"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          rustup toolchain install 1.99.1 --profile minimal --component clippy
+          rustup override set 1.99.1
+          sudo apt-get update -q
+          sudo apt-get install -y -q build-essential pkg-config libasound2-dev libudev-dev libx11-dev libxkbcommon-dev libwayland-dev libegl1-mesa-dev libgl1-mesa-dev
+      - name: Execute exact inventories and native event delivery
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B tools/check_stormglass_pixelfx.py --self-test
+          python3 -B tools/check_stormglass_pixelfx.py --evidence "$EVIDENCE"
+      - name: Preserve exact source and verification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stormglass-pixelfx-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ env.EVIDENCE }}
+          if-no-files-found: error
