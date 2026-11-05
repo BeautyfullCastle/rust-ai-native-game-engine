@@ -1,0 +1,88 @@
+{
+  "characterId": "handcrafted-collect-fixture",
+  "engine": "component-row",
+  "game_input": "original-atlas.png",
+  "degraded_static_fallback": false,
+  "curation_applied": true,
+  "frame_variant": "pixel",
+  "sprite_sheet_alpha": "original-atlas.png",
+  "sprite_sheet_alpha_report": "not-used.report.json",
+  "base_image": null,
+  "cell": {
+    "width": 2,
+    "height": 1
+  },
+  "chroma_key": "#00ff00",
+  "animation": {
+    "cellWidth": 2,
+    "cellHeight": 1,
+    "columns": 2,
+    "rows": {
+      "once": {
+        "row": 1,
+        "frames": 2,
+        "fps": 99,
+        "durations_ms": [
+          150,
+          250
+        ],
+        "loop": false,
+        "frame_variant": "pixel"
+      },
+      "idle": {
+        "row": 0,
+        "frames": 3,
+        "fps": 1,
+        "durations_ms": [
+          100,
+          200,
+          300
+        ],
+        "loop": true,
+        "frame_variant": "pixel"
+      }
+    }
+  },
+  "frame_layout": {
+    "sheetWidth": 4,
+    "sheetHeight": 2,
+    "cellWidth": 2,
+    "cellHeight": 1,
+    "rows": {
+      "idle": [
+        {
+          "x": 2,
+          "y": 0,
+          "w": 2,
+          "h": 1
+        },
+        {
+          "x": 0,
+          "y": 0,
+          "w": 2,
+          "h": 1
+        },
+        {
+          "x": 2,
+          "y": 0,
+          "w": 2,
+          "h": 1
+        }
+      ],
+      "once": [
+        {
+          "x": 2,
+          "y": 1,
+          "w": 2,
+          "h": 1
+        },
+        {
+          "x": 0,
+          "y": 1,
+          "w": 2,
+          "h": 1
+        }
+      ]
+    }
+  }
+}
