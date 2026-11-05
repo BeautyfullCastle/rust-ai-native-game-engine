@@ -3,11 +3,12 @@ use serde::Serialize;
 use std::{collections::BTreeMap, ffi::OsString, path::PathBuf};
 pub mod authoring;
 
-pub const USAGE: &str = "orr_pkg create-sprite --png FILE --license FILE --name NAME --version VERSION --out NEW_DIRECTORY (--json FILE | --atlas-size WIDTH HEIGHT [--region ID X Y WIDTH HEIGHT]... [--clip ID loop|once REGION:DURATION_MS,...]...)\nRequires Linux sprite-authoring build. Existing strict PNG/SpriteDocument admission; no --packer, fps or pivot option, shell, install, rendering or rights verification. No overwrite. Publication is visible-partial, not crash-atomic; on write failure inspect the partial output manually, do not retry/remove blindly.";
+pub const USAGE: &str = "orr_pkg create-sprite --png FILE --license FILE --name NAME --version VERSION --out NEW_DIRECTORY (--json FILE | --sprite-gen MANIFEST | --atlas-size WIDTH HEIGHT [--region ID X Y WIDTH HEIGHT]... [--clip ID loop|once REGION:DURATION_MS,...]...)\nRequires Linux sprite-authoring build. Existing strict PNG/SpriteDocument admission; sprite-gen requires explicit durations_ms; no --packer, fps or pivot option, shell, install, rendering or rights verification. No overwrite. Publication is visible-partial, not crash-atomic; on write failure inspect the partial output manually, do not retry/remove blindly.";
 const MAX_ARGS: usize = authoring::MAX_JSON_BYTES;
 pub struct Options {
     pub request: authoring::Request,
     generated: Option<Vec<u8>>,
+    sprite_gen: bool,
 }
 #[derive(Serialize)]
 struct Document {
@@ -79,7 +80,7 @@ impl Options {
             let flag = text(&args[i])?;
             i += 1;
             let n=match flag { "--region"=>5,"--clip"=>3,"--atlas-size"=>2,
-                "--png"|"--json"|"--license"|"--name"|"--version"|"--out"=>1,
+                "--png"|"--json"|"--sprite-gen"|"--license"|"--name"|"--version"|"--out"=>1,
                 _=>return Err(format!("unknown or obsolete option {flag}; no external executable, fps or pivot options")), };
             let values = args.get(i..i + n).ok_or("missing option values")?;
             i += n;
@@ -137,7 +138,12 @@ impl Options {
                 }
             }
         }
-        let direct = unique.remove("--json");
+        let sprite_gen_path = unique.remove("--sprite-gen");
+        let sprite_gen = sprite_gen_path.is_some();
+        if sprite_gen && unique.contains_key("--json") {
+            return Err("choose exactly --json, --sprite-gen or --atlas-size".into());
+        }
+        let direct = unique.remove("--json").or(sprite_gen_path);
         let size = unique.remove("--atlas-size");
         let (json,generated)=match (direct,size) {
             (Some(path),None) if regions.is_empty() && clips.is_empty()=>(PathBuf::from(&path[0]),None),
@@ -147,7 +153,7 @@ impl Options {
                 if bytes.len()>authoring::MAX_JSON_BYTES{return Err("sprite JSON exceeds 4 MiB".into());}
                 (PathBuf::new(),Some(bytes))
             }
-            _=>return Err("choose exactly --json or --atlas-size with explicit regions/clips; modes cannot be mixed".into()),
+            _=>return Err("choose exactly --json, --sprite-gen or --atlas-size with explicit regions/clips; modes cannot be mixed".into()),
         };
         let mut take = |name: &str| {
             unique
@@ -167,10 +173,13 @@ impl Options {
                 .map_err(|_| "version must be UTF-8")?,
             out: take("--out")?.into(),
         };
-        Ok(Self { request, generated })
+        Ok(Self { request, generated, sprite_gen })
     }
 }
 pub fn create(options: &Options) -> Result<authoring::Report, String> {
+    if options.sprite_gen {
+        return authoring::import_sprite_gen_package(&options.request);
+    }
     match &options.generated {
         Some(json) => authoring::import_package_bytes(&options.request, json),
         None => authoring::import_package(&options.request),

@@ -92,3 +92,16 @@ fn allocation_and_collection_limits_fail_before_publication() {
     )
     .is_ok());
 }
+
+#[test]
+fn sprite_gen_input_is_explicit_and_exclusive() {
+    let mut a = args()[..10].to_vec();
+    a.extend([OsString::from("--sprite-gen"), OsString::from("manifest.json")]);
+    let o = Options::parse(a.clone()).unwrap();
+    assert!(o.sprite_gen && o.generated.is_none());
+    assert_eq!(o.request.json, PathBuf::from("manifest.json"));
+    for additional in [vec!["--json","source.json"],vec!["--sprite-gen","other.json"],vec!["--atlas-size","2","2"],vec!["--region","0","0","0","1","1"],vec!["--clip","idle","loop","0:50"]] {
+        let mut invalid=a.clone(); invalid.extend(additional.into_iter().map(OsString::from));
+        assert!(Options::parse(invalid).is_err());
+    }
+}

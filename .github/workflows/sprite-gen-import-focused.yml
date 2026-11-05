@@ -1,0 +1,37 @@
+name: Sprite-gen import CPU CI
+on:
+  push:
+    branches: [su/sprite-gen-adapter-20261105, su/stormglass-pixelfx-native-20261105, su/stormglass-pixeloe-demo-20261105]
+permissions:
+  contents: read
+concurrency:
+  group: sprite-gen-import-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  sprite-gen-import:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      RUSTUP_TOOLCHAIN: 1.99.1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Select supported compiler
+        run: rustup toolchain install 1.99.1 --profile minimal --component clippy
+      - name: Verify materialized import and actual Collect playback
+        env:
+          EVIDENCE: ${{ runner.temp }}/sprite-gen-import-evidence
+          EXPECTED_HEAD: ${{ github.sha }}
+        run: bash tools/check-sprite-gen-import.sh
+      - name: Preserve original evidence including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprite-gen-import-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sprite-gen-import-evidence
+          if-no-files-found: error
