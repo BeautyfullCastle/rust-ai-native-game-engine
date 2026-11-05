@@ -1,0 +1,497 @@
+name: Stormglass full Linux verification
+
+# Verification-only branch: the workflow commit is NOT the tested product commit.
+# Product SHA/tree are deliberately frozen in the reviewed inline harness below.
+on:
+  push:
+    branches:
+      - su/stormglass-linux-verification-20261105
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stormglass-full-linux-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  full-linux:
+    name: Full Linux aggregate (pinned product 578810ac)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      WORKFLOW_SHA: ${{ github.workflow_sha }}
+      EVIDENCE: ${{ runner.temp }}/stormglass-full-linux-${{ github.run_id }}-${{ github.run_attempt }}
+      CARGO_TARGET_DIR: ${{ runner.temp }}/stormglass-target-${{ github.run_id }}-${{ github.run_attempt }}
+      CARGO_HOME: ${{ runner.temp }}/stormglass-cargo-${{ github.run_id }}-${{ github.run_attempt }}
+      RUSTUP_TOOLCHAIN: '1.99.1'
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      PYTHONDONTWRITEBYTECODE: '1'
+      DEBIAN_FRONTEND: noninteractive
+      LC_ALL: C.UTF-8
+      TZ: UTC
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Initialize failure-preserving evidence and reviewed wrapper
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/stormglass-full-linux-harness.py" <<'PYHARNESS'
+          import datetime
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import shutil
+          import signal
+          import stat
+          import subprocess
+          import sys
+          import time
+          import traceback
+          
+          EXPECTED_SHA = '578810ac2d1fa2c9cbf1f955e88b572e70b14296'
+          EXPECTED_TREE = 'e4453dac47f4eba072b2883635480880775fffda'
+          WORKFLOW_PATH = '.github/workflows/stormglass-full-linux-verification.yml'
+          ROOT = Path(os.environ['GITHUB_WORKSPACE']) / 'product'
+          HARNESS_ROOT = Path(os.environ['GITHUB_WORKSPACE']) / 'workflow-source'
+          EVIDENCE = Path(os.environ['EVIDENCE'])
+          TARGET = Path(os.environ['CARGO_TARGET_DIR'])
+          COMMANDS = EVIDENCE / 'commands'
+          CHILD = None
+          
+          
+          def now():
+              return datetime.datetime.now(datetime.timezone.utc).isoformat()
+          
+          
+          def write(name, value):
+              path = EVIDENCE / name
+              path.parent.mkdir(parents=True, exist_ok=True)
+              temporary = path.with_name(path.name + '.tmp')
+              temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + '\n')
+              temporary.replace(path)
+          
+          
+          def read(name, fallback=None):
+              path = EVIDENCE / name
+              return json.loads(path.read_text()) if path.is_file() else fallback
+          
+          
+          def digest(path):
+              h = hashlib.sha256()
+              with path.open('rb') as stream:
+                  for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                      h.update(chunk)
+              return h.hexdigest()
+          
+          
+          def git(*args, root=ROOT):
+              return subprocess.check_output(['git', '-C', str(root), *args])
+          
+          
+          def snapshot(label):
+              report = {'utc': now(), 'expected_commit': EXPECTED_SHA,
+                        'expected_tree': EXPECTED_TREE, 'valid': False, 'files': [], 'errors': []}
+              try:
+                  report['commit'] = git('rev-parse', 'HEAD').decode().strip()
+                  report['tree'] = git('rev-parse', 'HEAD^{tree}').decode().strip()
+                  report['status'] = git('status', '--porcelain=v1', '-z', '--untracked-files=all').decode().split('\0')[:-1]
+                  if report['commit'] != EXPECTED_SHA or report['tree'] != EXPECTED_TREE:
+                      report['errors'].append('HEAD or tree does not equal the pinned product identity')
+                  if report['status']:
+                      report['errors'].append('Product checkout is not clean')
+                  entries = git('ls-tree', '-r', '-z', 'HEAD').split(b'\0')
+                  for entry in filter(None, entries):
+                      metadata, raw_path = entry.split(b'\t', 1)
+                      mode, kind, oid = metadata.decode().split()
+                      relative = raw_path.decode('utf-8')
+                      record = {'path': relative, 'git_mode': mode, 'git_blob': oid}
+                      try:
+                          path = ROOT / relative
+                          info = path.lstat()
+                          if kind != 'blob':
+                              raise ValueError('Submodules or non-file tracked objects are unsupported')
+                          if stat.S_ISLNK(info.st_mode):
+                              if mode != '120000':
+                                  raise ValueError('Unexpected symlink')
+                              data = os.fsencode(os.readlink(path))
+                              record['sha256'] = hashlib.sha256(data).hexdigest()
+                              actual_blob = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+                              record['bytes'] = len(data)
+                          else:
+                              if not stat.S_ISREG(info.st_mode):
+                                  raise ValueError('Tracked object is not a regular file')
+                              actual_mode = '100755' if info.st_mode & 0o111 else '100644'
+                              if mode != actual_mode:
+                                  raise ValueError('Tracked executable mode differs from Git')
+                              sha256 = hashlib.sha256()
+                              blob = hashlib.sha1(b'blob ' + str(info.st_size).encode() + b'\0')
+                              with path.open('rb') as stream:
+                                  for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                                      sha256.update(chunk)
+                                      blob.update(chunk)
+                              record['sha256'] = sha256.hexdigest()
+                              actual_blob = blob.hexdigest()
+                              record['bytes'] = info.st_size
+                          if actual_blob != oid:
+                              raise ValueError('Working bytes differ from the committed Git blob')
+                      except Exception as exc:
+                          record['error'] = str(exc)
+                          report['errors'].append(relative + ': ' + str(exc))
+                      report['files'].append(record)
+                  if not report['files']:
+                      report['errors'].append('No tracked files were hashed')
+                  report['valid'] = not report['errors']
+              except Exception as exc:
+                  report['errors'].append(type(exc).__name__ + ': ' + str(exc))
+              write('source-' + label + '.json', report)
+              return report
+          
+          
+          def interrupted(number, _frame):
+              if CHILD is not None and CHILD.poll() is None:
+                  os.killpg(CHILD.pid, signal.SIGTERM)
+              raise KeyboardInterrupt('Received signal ' + str(number))
+          
+          
+          def run_command(label, argv, cwd=ROOT):
+              global CHILD
+              record = {'argv': argv, 'cwd': str(cwd), 'started_utc': now(), 'exit_code': None,
+                        'status': 'running', 'log': 'commands/' + label + '.log'}
+              write('commands/' + label + '.json', record)
+              exit_code = 125
+              try:
+                  with (EVIDENCE / record['log']).open('wb') as log:
+                      CHILD = subprocess.Popen(argv, cwd=cwd, stdout=log, stderr=subprocess.STDOUT,
+                                               start_new_session=True)
+                      exit_code = CHILD.wait()
+                  record['status'] = 'passed' if exit_code == 0 else 'failed'
+              except BaseException as exc:
+                  record['error'] = type(exc).__name__ + ': ' + str(exc)
+                  record['status'] = 'interrupted' if isinstance(exc, KeyboardInterrupt) else 'failed'
+                  if CHILD is not None:
+                      if CHILD.poll() is None:
+                          os.killpg(CHILD.pid, signal.SIGTERM)
+                          try:
+                              CHILD.wait(timeout=10)
+                          except subprocess.TimeoutExpired:
+                              os.killpg(CHILD.pid, signal.SIGKILL)
+                              CHILD.wait()
+                      exit_code = CHILD.returncode
+              finally:
+                  CHILD = None
+                  record.update(exit_code=exit_code, finished_utc=now())
+                  write('commands/' + label + '.json', record)
+                  (COMMANDS / (label + '.exit-status')).write_text(str(exit_code) + '\n')
+              print(label + ': ' + record['status'] + ', exit=' + str(exit_code), flush=True)
+              return exit_code
+          
+          
+          def initialize():
+              EVIDENCE.mkdir(parents=True, exist_ok=False)
+              COMMANDS.mkdir()
+              write('receipt.json', {
+                  'schema': 1, 'status': 'not_started', 'created_utc': now(),
+                  'workflow_commit': os.environ['WORKFLOW_SHA'],
+                  'event_commit': os.environ['GITHUB_SHA'],
+                  'tested_commit': EXPECTED_SHA, 'tested_tree': EXPECTED_TREE,
+                  'workflow_is_separate_from_tested_commit': True,
+                  'command': ['bash', 'tools/check-linux-local.sh'],
+                  'execution_environment': 'GitHub-hosted ubuntu-24.04 Linux',
+                  'local_baseline': {
+                      'status': 'RESOURCE_STOP, not passed',
+                      'commit': '30e9276a315d4134d918b688e2029163de8ac3c0',
+                      'tree': EXPECTED_TREE, 'stage': 'workspace release build',
+                      'reason': 'free disk fell below the 2.5 GiB resource reserve',
+                      'existing_evidence': 'dev-vfx-01/result.json (preserved separately)'},
+                  'limitations': ['Not browser, window, hardware/GPU, or audio certification',
+                                 'Not Windows, macOS, Android, or ignored-test certification',
+                                 'Focused PR 442 CI is separate from this aggregate run',
+                                 'Abrupt runner loss can prevent final evidence upload; missing evidence is never a pass'],
+              })
+          
+          
+          def preflight():
+              report = {'started_utc': now(), 'valid': False}
+              try:
+                  temp = Path(os.environ['RUNNER_TEMP']).resolve()
+                  for path in (EVIDENCE, TARGET, Path(os.environ['CARGO_HOME'])):
+                      if not path.resolve().is_relative_to(temp) or path.resolve() == temp:
+                          raise ValueError('Evidence and build paths must be descendants of runner.temp')
+                  if TARGET.exists():
+                      raise ValueError('Refusing a pre-existing build target directory')
+                  TARGET.mkdir(parents=True)
+                  Path(os.environ['CARGO_HOME']).mkdir(parents=True, exist_ok=False)
+                  report['target_initially_empty'] = True
+                  # Only explicit nonsecret fields are recorded. Never dump the environment.
+                  keys = ['GITHUB_REPOSITORY', 'GITHUB_REF', 'GITHUB_SHA', 'GITHUB_RUN_ID',
+                          'GITHUB_RUN_ATTEMPT', 'GITHUB_WORKFLOW_REF', 'WORKFLOW_SHA',
+                          'RUNNER_OS', 'RUNNER_ARCH', 'ImageOS', 'ImageVersion',
+                          'RUSTUP_TOOLCHAIN', 'CARGO_BUILD_JOBS', 'CARGO_INCREMENTAL',
+                          'CARGO_PROFILE_DEV_DEBUG', 'CARGO_TARGET_DIR', 'CARGO_HOME',
+                          'PYTHONDONTWRITEBYTECODE', 'LC_ALL', 'TZ']
+                  report['environment'] = {key: os.environ.get(key) for key in keys}
+                  forbidden = [key for key, value in os.environ.items() if value and (
+                      key.startswith(('CARGO_PROFILE_RELEASE_', 'CARGO_PROFILE_TEST_')) or
+                      (key.startswith('CARGO_PROFILE_DEV_') and key != 'CARGO_PROFILE_DEV_DEBUG') or
+                      key in ('RUSTFLAGS', 'RUSTDOCFLAGS', 'CARGO_ENCODED_RUSTFLAGS',
+                              'CARGO_ENCODED_RUSTDOCFLAGS', 'CARGO_BUILD_RUSTFLAGS',
+                              'RUSTC', 'RUSTDOC', 'RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER',
+                              'CARGO_BUILD_RUSTC', 'CARGO_BUILD_RUSTDOC', 'CARGO_BUILD_RUSTC_WRAPPER',
+                              'CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER', 'CARGO_BUILD_TARGET',
+                              'ORR_STATIC_MODEL_ASSEMBLE_BIN', 'ORR_LOCAL_POLICY_RECEIPTS') or
+                      (key.startswith('CARGO_TARGET_') and key.endswith('_RUSTFLAGS')))]
+                  if forbidden:
+                      raise ValueError('Unsupported inherited override names: ' + ', '.join(sorted(forbidden)))
+                  if os.environ['GITHUB_REF'] != 'refs/heads/su/stormglass-linux-verification-20261105':
+                      raise ValueError('Unexpected workflow branch')
+                  workflow_head = git('rev-parse', 'HEAD', root=HARNESS_ROOT).decode().strip()
+                  if workflow_head != os.environ['WORKFLOW_SHA'] or workflow_head != os.environ['GITHUB_SHA']:
+                      raise ValueError('Workflow checkout does not match this push workflow/event commit')
+                  if git('status', '--porcelain=v1', root=HARNESS_ROOT):
+                      raise ValueError('Workflow checkout is not clean')
+                  workflow = HARNESS_ROOT / WORKFLOW_PATH
+                  shutil.copyfile(workflow, EVIDENCE / 'executed-workflow.yml')
+                  report['workflow_commit'] = workflow_head
+                  report['workflow_tree'] = git('rev-parse', 'HEAD^{tree}', root=HARNESS_ROOT).decode().strip()
+                  report['workflow_sha256'] = digest(workflow)
+                  report['product_source'] = snapshot('before')['valid']
+                  if not report['product_source']:
+                      raise ValueError('Pre-source fence failed')
+                  report['release_profile'] = 'Repository profile unchanged; no release environment overrides'
+                  report['dev_clippy_debug_info'] = '0 (CARGO_PROFILE_DEV_DEBUG); no release-profile change'
+                  report['valid'] = True
+              except Exception as exc:
+                  report['error'] = type(exc).__name__ + ': ' + str(exc)
+              write('preflight.json', report)
+              return 0 if report['valid'] else 1
+          
+          
+          def setup():
+              commands = [
+                  ('rustup-install', ['rustup', 'toolchain', 'install', '1.99.1', '--profile', 'minimal', '--component', 'rustfmt', '--component', 'clippy']),
+                  ('apt-update', ['sudo', 'apt-get', 'update', '-q']),
+                  ('apt-install', ['sudo', 'apt-get', 'install', '-y', '-q', 'build-essential', 'pkg-config',
+                                   'libasound2-dev', 'libudev-dev', 'libx11-dev', 'libxkbcommon-dev',
+                                   'libwayland-dev', 'libegl1-mesa-dev', 'libgl1-mesa-dev']),
+                  ('rustc-version', ['rustc', '--version', '--verbose']),
+                  ('cargo-version', ['cargo', '--version']),
+                  ('rustfmt-version', ['rustfmt', '--version']),
+                  ('clippy-version', ['cargo', 'clippy', '--version']),
+                  ('rust-components', ['rustup', 'component', 'list', '--installed', '--toolchain', '1.99.1']),
+                  ('python-version', ['python3', '--version']),
+                  ('compiler-version', ['cc', '--version']),
+                  ('pkg-config-version', ['pkg-config', '--version']),
+                  ('system', ['uname', '-a']),
+                  ('disk-before', ['df', '-h', str(TARGET)]),
+                  ('memory-before', ['free', '-h']),
+                  ('apt-versions', ['dpkg-query', '-W', 'build-essential', 'pkg-config', 'libasound2-dev',
+                                    'libudev-dev', 'libx11-dev', 'libxkbcommon-dev', 'libwayland-dev',
+                                    'libegl1-mesa-dev', 'libgl1-mesa-dev']),
+              ]
+              for label, argv in commands:
+                  code = run_command(label, argv)
+                  if code != 0:
+                      write('setup.json', {'valid': False, 'failed_command': label, 'exit_code': code})
+                      return 1
+              rust = (COMMANDS / 'rustc-version.log').read_text()
+              valid = bool(re.search(r'^release: 1\.99\.1$', rust, re.M))
+              write('setup.json', {'valid': valid, 'pinned_rust': '1.99.1'})
+              return 0 if valid else 1
+          
+          
+          def verify():
+              if not read('preflight.json', {}).get('valid') or not read('setup.json', {}).get('valid'):
+                  raise ValueError('Preflight and setup must both pass before the original gate starts')
+              write('gate-start.json', {'utc': now(), 'unix_seconds': time.time(),
+                    'preexisting_assemble_json': sorted(str(path) for path in Path('/tmp').glob('orr-linux-assemble.*.jsonl'))})
+              try:
+                  return run_command('linux-aggregate', ['bash', 'tools/check-linux-local.sh'])
+              finally:
+                  snapshot('after-gate')
+          
+          
+          def collect_assemble(gate):
+              report = {'status': 'not_emitted', 'valid': False}
+              log_path = COMMANDS / 'linux-aggregate.log'
+              if not log_path.is_file():
+                  report['reason'] = 'Aggregate did not start'
+                  return report
+              log = log_path.read_text(errors='replace')
+              markers = re.findall(r'^Fresh assemble build messages: (\S+)\s*$', log, re.M)
+              if not markers:
+                  report['reason'] = 'Aggregate stopped before the assemble build marker'
+                  return report
+              if len(markers) != 1:
+                  raise ValueError('Expected one actual assemble build marker, got ' + str(len(markers)))
+              source = Path(markers[0])
+              start = read('gate-start.json', {})
+              if not re.fullmatch(r'/tmp/orr-linux-assemble\.[A-Za-z0-9]{8}\.jsonl', str(source)):
+                  raise ValueError('Assemble JSON marker is outside the original script mktemp contract')
+              if str(source) in start.get('preexisting_assemble_json', []):
+                  raise ValueError('Assemble JSON existed before this aggregate run')
+              info = source.lstat()
+              if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mtime < start['unix_seconds'] - 2:
+                  raise ValueError('Assemble JSON is not a newly emitted regular file owned by this runner')
+              directory = EVIDENCE / 'assemble'
+              directory.mkdir(exist_ok=True)
+              copied = directory / 'build.jsonl'
+              shutil.copyfile(source, copied)
+              report.update(status='build_json_preserved', emitted_json_path=str(source),
+                            build_json_sha256=digest(copied), build_json_bytes=copied.stat().st_size)
+              if digest(source) != report['build_json_sha256']:
+                  raise ValueError('Assemble JSON changed during collection')
+              # Persist the actual JSON even if the compile failed or emitted incomplete JSON.
+              write('assemble.json', report)
+              records = [json.loads(line) for line in copied.read_text().splitlines() if line.strip()]
+              artifacts = [item for item in records if item.get('reason') == 'compiler-artifact'
+                           and item.get('target', {}).get('name') == 'static_model_assemble'
+                           and item.get('executable')]
+              if not artifacts and gate.get('exit_code') != 0:
+                  report['reason'] = 'Build JSON was emitted but the assemble executable was not produced'
+                  return report
+              if len(artifacts) != 1:
+                  raise ValueError('Expected exactly one emitted assemble executable')
+              artifact = artifacts[0]
+              if artifact['target'].get('kind') != ['example'] or artifact.get('profile', {}).get('test') is not False:
+                  raise ValueError('Emitted artifact is not the production example')
+              if Path(artifact.get('manifest_path', '')).resolve() != ROOT / 'crates/orr_model/Cargo.toml':
+                  raise ValueError('Assemble manifest is not from the pinned product checkout')
+              if Path(artifact['target'].get('src_path', '')).resolve() != ROOT / 'crates/orr_model/examples/static_model_assemble.rs':
+                  raise ValueError('Assemble target source is not from the pinned product checkout')
+              executable = Path(artifact['executable'])
+              executable_info = executable.lstat()
+              if not executable.is_absolute() or not stat.S_ISREG(executable_info.st_mode):
+                  raise ValueError('Emitted assemble path is not an absolute regular file')
+              if not executable.resolve().is_relative_to((TARGET / 'release/examples').resolve()):
+                  raise ValueError('Emitted assemble path is outside this run’s fresh release/examples target')
+              if not executable_info.st_mode & 0o111:
+                  raise ValueError('Emitted assemble file is not executable')
+              copied_executable = directory / 'static_model_assemble'
+              shutil.copyfile(executable, copied_executable)
+              copied_executable.chmod(0o755)
+              sha = digest(copied_executable)
+              if sha != digest(executable):
+                  raise ValueError('Assemble executable changed during collection')
+              finished = [item for item in records if item.get('reason') == 'build-finished']
+              completed_build = len(finished) == 1 and finished[0].get('success') is True
+              report.update(status='preserved' if completed_build else 'preserved_incomplete_build',
+                            valid=completed_build, build_finished=finished, executable_path=str(executable),
+                            executable_sha256=sha, executable_bytes=copied_executable.stat().st_size,
+                            executable_mode=oct(stat.S_IMODE(executable_info.st_mode)),
+                            cargo_compiler_artifact=artifact)
+              return report
+          
+          
+          def finalize():
+              receipt = read('receipt.json', {})
+              errors = []
+              after = snapshot('after')
+              before = read('source-before.json', {})
+              source_valid = bool(before.get('valid') and after.get('valid') and before.get('files') == after.get('files'))
+              if not source_valid:
+                  errors.append('Pre/post product identity, cleanliness, or tracked-file SHA256 fence failed or is missing')
+              gate = read('commands/linux-aggregate.json', {'status': 'not_started', 'exit_code': None})
+              if gate.get('exit_code') != 0 or gate.get('status') != 'passed':
+                  errors.append('Original aggregate did not finish with exit code 0')
+              for name in ('preflight', 'setup'):
+                  if not read(name + '.json', {}).get('valid'):
+                      errors.append(name + ' failed or did not finish')
+              try:
+                  assemble = collect_assemble(gate)
+                  if not assemble['valid']:
+                      errors.append('Actual emitted assemble JSON/executable evidence is incomplete')
+              except Exception as exc:
+                  assemble = read('assemble.json', {})
+                  assemble.update(valid=False, error=type(exc).__name__ + ': ' + str(exc))
+                  errors.append('Assemble collection failed: ' + str(exc))
+              write('assemble.json', assemble)
+              log_path = COMMANDS / 'linux-aggregate.log'
+              log = log_path.read_text(errors='replace') if log_path.is_file() else ''
+              fmt = [int(value) for value in re.findall(r'^Advisory rustfmt exit status: (\d+)', log, re.M)]
+              if not fmt or any(value not in (0, 1) for value in fmt) or len(set(fmt)) != 1:
+                  errors.append('Rustfmt advisory status is missing, inconsistent, or outside allowed 0/1')
+              if gate.get('exit_code') == 0 and 'Linux-local build/test baseline passed. Report any additional native/UI checks separately.' not in log:
+                  errors.append('Original aggregate completion marker is missing')
+              receipt.update(finished_utc=now(), status='passed' if not errors else 'failed',
+                             gate=gate, source_fence_valid=source_valid, rustfmt_advisory_exit_codes=fmt,
+                             assemble=assemble, errors=errors,
+                             hosted_result_label='Hosted Linux aggregate only; local aggregate remains RESOURCE_STOP')
+              write('receipt.json', receipt)
+              # Final artifact inventory covers all evidence files except this inventory itself.
+              inventory = []
+              for path in sorted(EVIDENCE.rglob('*')):
+                  if path.is_file() and path.name != 'evidence-sha256.json':
+                      inventory.append({'path': str(path.relative_to(EVIDENCE)), 'bytes': path.stat().st_size, 'sha256': digest(path)})
+              write('evidence-sha256.json', inventory)
+              print(json.dumps({'status': receipt['status'], 'tested_commit': EXPECTED_SHA,
+                                'workflow_commit': receipt.get('workflow_commit'), 'errors': errors}, indent=2))
+              return 0 if not errors else 1
+          
+          
+          if __name__ == '__main__':
+              signal.signal(signal.SIGTERM, interrupted)
+              signal.signal(signal.SIGINT, interrupted)
+              operation = sys.argv[1]
+              try:
+                  code = {'initialize': initialize, 'preflight': preflight, 'setup': setup,
+                          'verify': verify, 'finalize': finalize}[operation]()
+              except BaseException:
+                  error = traceback.format_exc()
+                  if EVIDENCE.is_dir():
+                      write(operation + '-exception.json', {'utc': now(), 'traceback': error})
+                      if operation == 'finalize':
+                          receipt = read('receipt.json', {})
+                          receipt.update(status='failed', finalization_error=error, finished_utc=now())
+                          write('receipt.json', receipt)
+                  print(error, file=sys.stderr)
+                  code = 1
+              sys.exit(0 if code is None or code == 0 else 1)
+          PYHARNESS
+          python3 -B "$RUNNER_TEMP/stormglass-full-linux-harness.py" initialize
+          cp "$RUNNER_TEMP/stormglass-full-linux-harness.py" "$EVIDENCE/harness.py"
+
+      - name: Check out the exact workflow commit (sparse, not the product)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: workflow-source
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: .github/workflows/stormglass-full-linux-verification.yml
+          sparse-checkout-cone-mode: false
+
+      - name: Check out the frozen product commit
+        uses: actions/checkout@v4
+        with:
+          ref: 578810ac2d1fa2c9cbf1f955e88b572e70b14296
+          path: product
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify product tree, every tracked file, and separate workflow identity
+        run: python3 -B "$RUNNER_TEMP/stormglass-full-linux-harness.py" preflight
+
+      - name: Install and record pinned Rust and official Linux dependencies
+        run: python3 -B "$RUNNER_TEMP/stormglass-full-linux-harness.py" setup
+
+      - name: Run the original complete Linux aggregate without modification
+        run: python3 -B "$RUNNER_TEMP/stormglass-full-linux-harness.py" verify
+
+      - name: Always record final source fence, actual artifact provenance, and result
+        if: ${{ always() }}
+        run: python3 -B "$RUNNER_TEMP/stormglass-full-linux-harness.py" finalize
+
+      - name: Always preserve all evidence, including failed or interrupted runs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: stormglass-full-linux-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.EVIDENCE }}/
+          if-no-files-found: error
+          compression-level: 6
