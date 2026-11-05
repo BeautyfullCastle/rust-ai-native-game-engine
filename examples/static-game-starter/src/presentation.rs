@@ -12,6 +12,10 @@ use serde_json::{json, Value};
 
 /// Application-owned adapter, shared by editor and native player. Not a game VM.
 pub trait StandaloneGame: Starter {
+    /// Optional view-only legend, separate from input and host lifecycle controls.
+    fn presentation_hint() -> &'static str {
+        ""
+    }
     fn held_input(keys: HeldKeys) -> Self::Input;
     /// Opt-in bounded controls. Existing games retain their legacy input path.
     #[cfg(feature = "static-game-actions")]
@@ -81,6 +85,9 @@ impl StandaloneGame for DeliveryGame {
     }
 }
 impl StandaloneGame for SwitchGame {
+    fn presentation_hint() -> &'static str {
+        "Upper target squares; lower current circles; green on, gray off; match each column"
+    }
     fn held_input(k: HeldKeys) -> SwitchInput {
         SwitchInput {
             selection: FP::from_int(i32::from(k.x.clamp(-1, 1))),
@@ -109,6 +116,21 @@ impl StandaloneGame for SwitchGame {
                     [0.3, 0.3, 0.3, 1.0]
                 },
             ));
+        }
+        // Keep the current-lamp row and cursor unchanged. The authored objective
+        // is a separate upper row, aligned left-to-right by the same bit index.
+        for i in 0..4 {
+            let mut target = circle(
+                Entity::NONE,
+                FPVec2::new(FP::from_raw(i * (2 << 16)), FP::from_raw(4 << 16)),
+                if b.target & (1 << i) != 0 {
+                    [0.2, 1.0, 0.2, 1.0]
+                } else {
+                    [0.3, 0.3, 0.3, 1.0]
+                },
+            );
+            target.style.shape = Shape::Quad;
+            out.push(target);
         }
     }
     fn state_value(f: FrameView<'_>) -> Value {

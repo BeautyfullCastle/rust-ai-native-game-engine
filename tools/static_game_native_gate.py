@@ -129,6 +129,32 @@ def screen(capture, world):
     return f32(x+viewport['min'][0]), f32(y+viewport['min'][1])
 
 
+def switchboard_target_pixels(pixels, width, height, project, target):
+    """Fixed authored y=4 row, not receipt-supplied geometry or current lamps.
+
+    Center coverage plus four inset corners distinguishes the 0.4 half-extent
+    squares from the current row's radius-0.4 circles. Counts are independently
+    decoded from framebuffer bytes, never producer claims.
+    """
+    def count(world, radius, on):
+        x, y = map(round, project(world))
+        require(radius <= x < width-radius and radius <= y < height-radius,
+                'target oracle outside framebuffer')
+        total = 0
+        for yy in range(y-radius, y+radius+1):
+            for xx in range(x-radius, x+radius+1):
+                r, g, b = pixels[(yy*width+xx)*4:(yy*width+xx)*4+3]
+                total += (g-r > 40 and g-b > 40) if on else (max(r,g,b)-min(r,g,b) < 6 and 80 < r < 200)
+        return total
+    for index in range(4):
+        on = bool(target & (1 << index))
+        require(count([index*2, 4], 8, on) > 20, 'missing/wrong authored target pattern')
+        for dx in (-0.33, 0.33):
+            for dy in (-0.33, 0.33):
+                require(count([index*2+dx, 4+dy], 1, on) > 4,
+                        'target must be a distinct square row')
+
+
 def pixel_counts(pixels, capture, alias):
     def color(x, y, kind):
         r, g, b = pixels[(y*1400+x)*4:(y*1400+x)*4+3]
@@ -143,6 +169,11 @@ def pixel_counts(pixels, capture, alias):
         result = {'courier_origin_blue': count([2, 2], 'blue'), 'goal_gold': count([3, 3], 'gold')}
     else:
         result = {'cursor_origin_blue': count([2, 0], 'blue'), 'target_lamp_green': count([4, 2], 'green')}
+    if alias == 'switchboard':
+        # editor fixture authors target=4; native_window stage9 deliberately
+        # authors target=15 for the nonterminal release/neutral scenario.
+        switchboard_target_pixels(pixels, 1400, 1000, lambda world: screen(capture, world),
+                                  15 if capture['phase'] == 'neutral' else 4)
     # Independent circular selection oracle. Float-boundary count may differ by one pixel
     # from Rust; require the actual ring, rather than trusting producer boolean/count.
     result['selection_outline'] = 0

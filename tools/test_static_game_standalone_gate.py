@@ -15,14 +15,16 @@ def write(path, value):
     path.write_text(json.dumps(value,separators=(',',':')))
 
 
-def image(path, alias, phase):
+def image(path, alias, phase, target=1, target_y=4, target_shape="square", current=True, camera=None):
     w,h = 640,480
     pixels = bytearray([0,0,0,255])*(w*h)
-    def paint(world,color):
-        camera=gate.expected_camera(alias)
-        x,y = round(w/2+(world[0]-camera['center'][0])*min(w,h)/(2*camera['half_extent'])),round(h/2-(world[1]-camera['center'][1])*min(w,h)/(2*camera['half_extent']))
-        for yy in range(y-10,y+11):
-            for xx in range(x-10,x+11):
+    def paint(world,color, extent=10, circle=False):
+        view=camera or gate.expected_camera(alias)
+        x,y = round(w/2+(world[0]-view['center'][0])*min(w,h)/(2*view['half_extent'])),round(h/2-(world[1]-view['center'][1])*min(w,h)/(2*view['half_extent']))
+        for yy in range(y-extent,y+extent+1):
+            for xx in range(x-extent,x+extent+1):
+                if circle and (xx-x)**2+(yy-y)**2 > extent**2:
+                    continue
                 pixels[(yy*w+xx)*4:(yy*w+xx)*4+4] = bytes((*color,255))
     if alias == 'delivery':
         paint([2,2],[255,210,80])
@@ -30,7 +32,12 @@ def image(path, alias, phase):
             paint([0,0],[80,150,255])
     else:
         paint([0,0],[80,150,255])
-        paint([0,2],[80,255,80] if phase == 'won' else [150,150,150])
+        if current:
+            paint([0,2],[80,255,80] if phase == 'won' else [150,150,150])
+        if target is not None:
+            extent=int(0.4*min(w,h)/(2*(camera or gate.expected_camera(alias))['half_extent']))
+            for index in range(4):
+                paint([2*index,target_y],[80,255,80] if target & (1 << index) else [150,150,150],extent,target_shape=='circle')
     def chunk(kind,data):
         return struct.pack('>I',len(data))+kind+data+struct.pack('>I',zlib.crc32(kind+data))
     raw = b''.join(b'\0'+pixels[y*w*4:(y+1)*w*4] for y in range(h))
@@ -264,6 +271,44 @@ class ValidatorTests(unittest.TestCase):
         for text in ('test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out',
                      'test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 3 filtered out'):
             with self.assertRaises(ValueError):gate.test_summary(text,1,4)
+
+
+class TargetPixelTests(unittest.TestCase):
+    def test_independent_camera_includes_target_row(self):
+        self.assertAlmostEqual(gate.expected_camera('switchboard')['center'][1], 2.0, places=5)
+
+    def test_target_row_and_current_transition(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'frame.png'
+            for phase in ('initial','won','restarted'):
+                capture={'phase':phase,'observation':{'size':[640,480], 'camera':gate.expected_camera('switchboard')}}
+                image(path,'switchboard',phase)
+                gate.pixel_oracle(path,capture,'switchboard')
+                for change in ({'target':None}, {'target':4}, {'target_y':2}, {'target_shape':'circle'}, {'current':False}):
+                    with self.subTest(phase=phase, change=change):
+                        image(path,'switchboard',phase,**change)
+                        with self.assertRaises(ValueError):gate.pixel_oracle(path,capture,'switchboard')
+
+    def test_target_row_does_not_mask_wrong_current_transition(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'frame.png'
+            for expected,actual in (('won','initial'),('initial','won'),('restarted','won')):
+                image(path,'switchboard',actual)
+                capture={'phase':expected,'observation':{'size':[640,480], 'camera':gate.expected_camera('switchboard')}}
+                with self.subTest(expected=expected,actual=actual):
+                    with self.assertRaisesRegex(ValueError,'native lamp transition missing'):
+                        gate.pixel_oracle(path,capture,'switchboard')
+
+    def test_wrong_camera_and_producer_geometry_spoof(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'frame.png'
+            old={'center':[3,1], 'half_extent':gate.expected_camera('switchboard')['half_extent']}
+            image(path,'switchboard','initial',camera=old)
+            capture={'phase':'initial','observation':{'size':[640,480], 'camera':old}}
+            with self.assertRaisesRegex(ValueError,'unexpected fixture camera'):
+                gate.pixel_oracle(path,capture,'switchboard')
+            capture['observation']['camera']=gate.expected_camera('switchboard')
+            with self.assertRaises(ValueError):gate.pixel_oracle(path,capture,'switchboard')
 
 
 class CommandBounds(unittest.TestCase):
