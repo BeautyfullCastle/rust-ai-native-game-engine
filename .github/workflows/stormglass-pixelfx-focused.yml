@@ -3,7 +3,7 @@ name: Stormglass native pixelfx CI
 # Linux-local aggregate verification and independent review. CPU/CLI only.
 on:
   push:
-    branches: [su/stormglass-pixelfx-native-20261105]
+    branches: [su/stormglass-pixelfx-native-20261105, su/stormglass-pixeloe-demo-20261105]
 permissions:
   contents: read
 concurrency:

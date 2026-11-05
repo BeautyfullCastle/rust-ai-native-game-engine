@@ -23,6 +23,9 @@ pub(crate) type DefenseSession = Session<game::DefenseGame, LocalInputSource>;
 /// MIT terms and upstream notices travel with the compiled optional assets.
 #[cfg(feature = "coop-defense-pixelfx")]
 pub const PIXELFX_LICENSES: &str = include_str!("../assets/stormglass-pixelfx/hit-spark/LICENSE.txt");
+/// Generated-art provenance and upstream tool notices, not an artwork license.
+#[cfg(feature = "coop-defense-pixel-motion")]
+pub const PIXEL_MOTION_LICENSES: &str = include_str!("../assets/stormglass-pixel-motion/LICENSE.txt");
 pub const HELP:&str="Stormglass Foundry\ncoop_defense [--scene PATH] [--run-directory ABSOLUTE_PRIVATE_DIRECTORY (Linux run-save feature)] [--headless --ticks N [--demo] [--capture NEW.png]]\nSpace summon, click your unit then empty tile to move or identical role/tier to merge, U upgrade, I invest, P/Escape pause, Enter continue, R restart. AI partner is local, not online. Headless capture uses a software GPU. Optional coop-defense-audio: --audio-bank ABSOLUTE_BANK_DIRECTORY --audio off|auto|required; native output additionally needs audio-native. Starts muted; Linux bank loading only.";
 #[derive(Debug, Default)]
 pub struct Options {
@@ -269,6 +272,8 @@ pub fn run(options: Options) -> Result<(), String> {
     };
     #[cfg(feature = "coop-defense-pixelfx")]
     app.ui.vfx.prepare(&app.ui.context)?;
+    #[cfg(feature = "coop-defense-pixel-motion")]
+    app.ui.pixel_motion.prepare(&app.ui.context)?;
     event_loop.run_app(&mut app).map_err(|e| e.to_string())?;
     app.error.map_or(Ok(()), Err)
 }
@@ -830,6 +835,8 @@ fn headless_prepared(options: Options, config: game::DefenseConfig) -> Result<()
             vfx.prepare(&ui.context)?;
             ui.vfx = vfx;
         }
+        #[cfg(feature = "coop-defense-pixel-motion")]
+        ui.pixel_motion.prepare(&ui.context)?;
         ui.started = options.demo || options.ticks > 0;
         for _ in 0..2 {
             let input = egui::RawInput {
@@ -1847,3 +1854,7 @@ mod pending_board_tests;
 #[cfg(all(test, feature = "coop-defense-pixelfx"))]
 #[path = "defense_vfx_app_tests.rs"]
 mod vfx_tests;
+
+#[cfg(all(test, feature = "coop-defense-pixel-motion"))]
+#[path = "defense_pixel_motion_app_tests.rs"]
+mod pixel_motion_tests;

@@ -273,6 +273,8 @@ pub struct DefenseUi {
     pub context: egui::Context,
     #[cfg(feature = "coop-defense-pixelfx")]
     pub(crate) vfx: crate::defense_vfx::DefenseVfx,
+    #[cfg(feature = "coop-defense-pixel-motion")]
+    pub(crate) pixel_motion: crate::defense_pixel_motion::PixelMotion,
     pub selected: Option<u32>,
     pub(crate) board_pending: bool,
     pub started: bool,
@@ -305,6 +307,8 @@ impl DefenseUi {
             context: egui::Context::default(),
             #[cfg(feature = "coop-defense-pixelfx")]
             vfx: crate::defense_vfx::DefenseVfx::default(),
+            #[cfg(feature = "coop-defense-pixel-motion")]
+            pixel_motion: crate::defense_pixel_motion::PixelMotion::default(),
             selected: None,
             board_pending: false,
             started: false,
@@ -724,9 +728,25 @@ impl DefenseUi {
                 egui::Id::new("foundry"),
             ));
             p.rect_filled(screen, 0.0, INK);
+            #[cfg(not(feature = "coop-defense-pixel-motion"))]
             view::paint(&p, l, frame, self.selected);
+            #[cfg(feature = "coop-defense-pixel-motion")]
+            view::paint_view_with_unit_skin(
+                &p,
+                l,
+                orr_bridge::FrameView::of(frame),
+                self.selected,
+                |p, center, scale, unit| {
+                    self.pixel_motion.paint_unit(p, center, scale, unit, &run, self.started)
+                },
+            );
             #[cfg(feature = "coop-defense-pixelfx")]
             self.vfx.paint(&p.with_clip_rect(l.rect(30.0, 90.0, 1140.0, 730.0).intersect(screen)), l);
+            #[cfg(feature = "coop-defense-pixel-motion")]
+            l.text(
+                &p, 42.0, 805.0, 12.0, PAPER,
+                "OPTIONAL PIXELOE VISUAL DEMO · RIVET SKIN · NOT ATTACK-SYNCHRONIZED",
+            );
             l.text(&p, 40.0, 37.0, 27.0, PAPER, "STORMGLASS  /  FOUNDRY");
             l.text(
                 &p,

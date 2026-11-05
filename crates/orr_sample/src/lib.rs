@@ -159,3 +159,6 @@ pub mod defense_audio;
 
 #[cfg(feature = "coop-defense-pixelfx")]
 pub(crate) mod defense_vfx;
+
+#[cfg(feature = "coop-defense-pixel-motion")]
+pub(crate) mod defense_pixel_motion;
