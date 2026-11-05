@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   full-linux:
-    name: Full Linux aggregate (pinned product 578810ac)
+    name: Full Linux aggregate (PR443 pinned product e9d54348)
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     env:
@@ -57,8 +57,8 @@ jobs:
           import time
           import traceback
           
-          EXPECTED_SHA = '578810ac2d1fa2c9cbf1f955e88b572e70b14296'
-          EXPECTED_TREE = 'e4453dac47f4eba072b2883635480880775fffda'
+          EXPECTED_SHA = 'e9d54348f427f18f0ad7148601f8d183aa7bda46'
+          EXPECTED_TREE = '531505f00c4fd974c81bfdd856feae586bf5f011'
           WORKFLOW_PATH = '.github/workflows/stormglass-full-linux-verification.yml'
           ROOT = Path(os.environ['GITHUB_WORKSPACE']) / 'product'
           HARNESS_ROOT = Path(os.environ['GITHUB_WORKSPACE']) / 'workflow-source'
@@ -207,14 +207,19 @@ jobs:
                   'command': ['bash', 'tools/check-linux-local.sh'],
                   'execution_environment': 'GitHub-hosted ubuntu-24.04 Linux',
                   'local_baseline': {
+                      'status': 'UNRUN, not passed',
+                      'commit': '1a413f531de7852c3ab5dc2f5d49f7b4aa28cbd2',
+                      'tree': EXPECTED_TREE,
+                      'reason': 'approximately 2.4 GiB free disk is below the 2.5 GiB resource reserve'},
+                  'historical_pr442_local_baseline': {
                       'status': 'RESOURCE_STOP, not passed',
                       'commit': '30e9276a315d4134d918b688e2029163de8ac3c0',
-                      'tree': EXPECTED_TREE, 'stage': 'workspace release build',
+                      'tree': 'e4453dac47f4eba072b2883635480880775fffda', 'stage': 'workspace release build',
                       'reason': 'free disk fell below the 2.5 GiB resource reserve',
                       'existing_evidence': 'dev-vfx-01/result.json (preserved separately)'},
                   'limitations': ['Not browser, window, hardware/GPU, or audio certification',
                                  'Not Windows, macOS, Android, or ignored-test certification',
-                                 'Focused PR 442 CI is separate from this aggregate run',
+                                 'Focused PR 443 CI is separate from this aggregate run',
                                  'Abrupt runner loss can prevent final evidence upload; missing evidence is never a pass'],
               })
           
@@ -430,7 +435,7 @@ jobs:
               receipt.update(finished_utc=now(), status='passed' if not errors else 'failed',
                              gate=gate, source_fence_valid=source_valid, rustfmt_advisory_exit_codes=fmt,
                              assemble=assemble, errors=errors,
-                             hosted_result_label='Hosted Linux aggregate only; local aggregate remains RESOURCE_STOP')
+                             hosted_result_label='Hosted Linux aggregate only; final Pixel product local aggregate remains UNRUN; historical PR442 local aggregate remains RESOURCE_STOP')
               write('receipt.json', receipt)
               # Final artifact inventory covers all evidence files except this inventory itself.
               inventory = []
@@ -478,7 +483,7 @@ jobs:
       - name: Check out the frozen product commit
         uses: actions/checkout@v4
         with:
-          ref: 578810ac2d1fa2c9cbf1f955e88b572e70b14296
+          ref: e9d54348f427f18f0ad7148601f8d183aa7bda46
           path: product
           fetch-depth: 1
           persist-credentials: false
