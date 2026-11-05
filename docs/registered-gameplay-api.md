@@ -95,12 +95,14 @@ without adding an engine game enum or another simulation. Launch it with
 `cargo run -p orr_static_starter --features stormglass --bin editor -- --project
 examples/static-game-starter/scenes/stormglass.project.json`. Delivery and
 Switchboard remain registered. Stormglass supports authored starting gold and
-reactor HP through the reflected Scenario singleton, with legacy empty-scene
-defaults, but not authored waves or arbitrary scene entities. See
-[authoring and identity migration](stormglass-authoring.md). Its readonly
+reactor HP, bounded campaign/wave pacing/counts and enemy health/composition through
+six authored singletons, retaining legacy empty-scene defaults and forbidding
+arbitrary runtime entities. See [authoring and identity migration](stormglass-authoring.md). Its readonly
 presenter emits the typed `act` intent (action 1–5, source/target cell 0–11).
 Consumption tracks the accepted input sequence; it does not promise a successful
-purchase or merge. Sequence exhaustion fails closed rather than wrapping.
+purchase or merge. The same host offers [readonly live observation](stormglass-live-observation.md)
+through existing OVS; it complements status without adding epoch-fenced receipts.
+Sequence exhaustion fails closed rather than wrapping.
 
 Startup selection is currently an SDK/CLI API. The existing `HostSpec` listener
 configuration exposes ERP with the existing authentication model. With the

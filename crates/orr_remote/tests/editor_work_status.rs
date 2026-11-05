@@ -7,7 +7,9 @@ mod common;
 use common::demo_doc;
 use orr_remote::{Auth, Cap, Caps, ErpClient, ErpServer, LocalHost, ServerConfig};
 use orr_sample::physics_game::PhysGame;
-use serde_json::{json, Value as J};
+use serde_json::json;
+#[cfg(feature = "sample-host")]
+use serde_json::Value as J;
 
 const METHOD: &str = "editor.work_status";
 

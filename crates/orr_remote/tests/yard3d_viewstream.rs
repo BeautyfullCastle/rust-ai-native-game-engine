@@ -4,6 +4,7 @@
 //! 3D snapshot, timeline discontinuities, replay, and the two ERP transports.
 //! Local ERP play is a single authoritative session; it does not exercise the
 //! multiplayer client's late-input rollback path.
+#![cfg(feature = "sample-host")]
 
 // Socket deadlines and decoded view floats belong to this integration test,
 // not to the deterministic simulation or its serialized state.

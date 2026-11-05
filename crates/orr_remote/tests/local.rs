@@ -4,18 +4,25 @@
 
 mod common;
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(feature = "sample-host")]
+use std::time::Instant;
 
 use common::*;
+#[cfg(feature = "sample-host")]
 use orr_bridge::{Bridge, SimControl};
+#[cfg(feature = "sample-host")]
 use orr_remote::sample::spawn_phys_host;
-use orr_remote::{Auth, Caps, ErpClient, LocalHost, RemoteBridge, RemoteConfig, ServerConfig, Transport, USER_CLIENT};
+use orr_remote::{Auth, Caps, ErpClient, ServerConfig, Transport};
+#[cfg(feature = "sample-host")]
+use orr_remote::{LocalHost, RemoteBridge, RemoteConfig, USER_CLIENT};
 use orr_sample::physics_game::PhysGame;
 use serde_json::{json, Value as J};
 
 const BODY: &str = "orr_physics::Body";
 
 /// A local-only host (no socket unless `listen`).
+#[cfg(feature = "sample-host")]
 fn host(listen: bool) -> LocalHost {
     let mut cfg = ServerConfig::new(Auth::DevNoAuth);
     cfg.listen = listen;
@@ -23,10 +30,12 @@ fn host(listen: bool) -> LocalHost {
     spawn_phys_host(demo_text(), None, cfg).expect("start the host thread")
 }
 
+#[cfg(feature = "sample-host")]
 fn local_client(h: &LocalHost, name: &str) -> ErpClient {
     ErpClient::with_transport(Box::new(h.connector().connect(name, Caps::ALL).expect("connect")))
 }
 
+#[cfg(feature = "sample-host")]
 fn wait_snapshot(b: &RemoteBridge<PhysGame>, pred: impl Fn(&orr_bridge::Snapshot) -> bool) -> orr_bridge::Snapshot {
     let end = Instant::now() + Duration::from_secs(10);
     loop {
@@ -41,6 +50,7 @@ fn wait_snapshot(b: &RemoteBridge<PhysGame>, pred: impl Fn(&orr_bridge::Snapshot
 }
 
 #[test]
+#[cfg(feature = "sample-host")]
 fn an_in_process_client_serves_the_same_methods_without_a_socket() {
     let h = host(false);
     assert!(h.url().is_none(), "no socket");
@@ -73,6 +83,7 @@ fn an_in_process_client_serves_the_same_methods_without_a_socket() {
 }
 
 #[test]
+#[cfg(feature = "sample-host")]
 fn a_socket_agent_and_the_in_process_view_edit_one_document() {
     let h = host(true);
     let url = h.url().expect("listening").to_string();
@@ -97,6 +108,7 @@ fn a_socket_agent_and_the_in_process_view_edit_one_document() {
 }
 
 #[test]
+#[cfg(feature = "sample-host")]
 fn dev_mode_clients_may_say_they_are_the_user() {
     let h = host(true);
     let url = h.url().unwrap().to_string();
@@ -115,6 +127,7 @@ fn dev_mode_clients_may_say_they_are_the_user() {
 }
 
 #[test]
+#[cfg(feature = "sample-host")]
 fn frames_reach_an_in_process_bridge_as_shared_copies_and_follow_edits() {
     let h = host(false);
     let mut view = local_client(&h, "user");
@@ -151,6 +164,7 @@ fn frames_reach_an_in_process_bridge_as_shared_copies_and_follow_edits() {
 }
 
 #[test]
+#[cfg(feature = "sample-host")]
 fn a_proposal_preview_frame_is_a_frame_source() {
     let h = host(false);
     let mut view = local_client(&h, "user");
@@ -184,6 +198,7 @@ fn a_proposal_preview_frame_is_a_frame_source() {
 }
 
 #[test]
+#[cfg(feature = "sample-host")]
 fn a_panic_in_the_host_thread_is_caught_and_reported() {
     let h = host(true);
     let url = h.url().unwrap().to_string();
@@ -202,6 +217,7 @@ fn a_panic_in_the_host_thread_is_caught_and_reported() {
 }
 
 #[test]
+#[cfg(feature = "sample-host")]
 fn debug_hooks_are_off_by_default() {
     let mut cfg = ServerConfig::new(Auth::DevNoAuth);
     cfg.listen = false;
@@ -212,6 +228,7 @@ fn debug_hooks_are_off_by_default() {
 }
 
 #[test]
+#[cfg(feature = "sample-host")]
 fn pause_and_speed_reach_the_view_even_though_the_tick_does_not_change() {
     let h = host(false);
     let mut view = local_client(&h, "user");
