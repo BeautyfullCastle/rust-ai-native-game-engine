@@ -262,6 +262,7 @@ pub fn run(options: Options) -> Result<(), String> {
         error: None,
         focused: true,
         focus_lost_pending: false,
+        board: PendingBoard::default(),
     };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())?;
     app.error.map_or(Ok(()), Err)
@@ -307,8 +308,86 @@ struct App {
     error: Option<String>,
     focused: bool,
     focus_lost_pending: bool,
+    board: PendingBoard,
+}
+// Presentation-only admission state. Session ticks never reset on Restart.
+#[derive(Default)]
+struct PendingBoard {
+    through: Option<u64>,
+    selection: Option<ExpectedSelection>,
+}
+struct ExpectedSelection {
+    generation: u32,
+    cell: u32,
+    id: u32,
+    role: u32,
+    tier: u32,
+    consumed_source: Option<u32>,
+}
+fn affects_board(command: &game::DefenseInput) -> bool {
+    command.sequence != 0
+        && matches!(
+            command.action,
+            game::SUMMON | game::MOVE_OR_MERGE | game::RESTART
+        )
+}
+impl ExpectedSelection {
+    fn capture(frame: &orr_ecs::Frame, command: game::DefenseInput) -> Option<Self> {
+        let units = game::units(frame);
+        let source = units
+            .iter()
+            .find(|u| u.board == 0 && u.cell == command.source_cell && u.active != 0)?;
+        let target = units
+            .iter()
+            .find(|u| u.board == 0 && u.cell == command.target_cell)?;
+        let merge = target.active != 0;
+        Some(Self {
+            generation: game::run(frame).generation,
+            cell: command.target_cell,
+            id: if merge { target.id } else { source.id },
+            role: source.role,
+            tier: source.tier + u32::from(merge),
+            consumed_source: merge.then_some(source.id),
+        })
+    }
+    fn matches(&self, frame: &orr_ecs::Frame) -> bool {
+        let units = game::units(frame);
+        game::run(frame).generation == self.generation
+            && units.iter().any(|u| {
+                u.board == 0
+                    && u.active != 0
+                    && u.cell == self.cell
+                    && u.id == self.id
+                    && u.role == self.role
+                    && u.tier == self.tier
+            })
+            && self
+                .consumed_source
+                .is_none_or(|id| !units.iter().any(|u| u.active != 0 && u.id == id))
+    }
 }
 impl App {
+    fn refresh_board(&mut self) {
+        let frame = self.session.predicted_frame();
+        if self.board.through.is_some_and(|tick| frame.tick() >= tick) {
+            self.board.through = None;
+        }
+        let pending = self.board.through.is_some() || self.commands.iter().any(affects_board);
+        if !pending {
+            if let Some(expected) = self.board.selection.take() {
+                self.ui.selected = expected.matches(frame).then_some(expected.cell);
+            }
+        }
+        self.ui.set_board_pending(pending);
+    }
+    fn cancel_board_intent(&mut self) {
+        self.commands.clear();
+        self.ui.selected = None;
+        self.board.selection = None;
+        // Capture once at cancellation, not on each redraw after resuming.
+        self.board.through = Some(self.session.next_send_tick().saturating_sub(1));
+        self.refresh_board();
+    }
     // Shared by the window redraw path and CPU-only admission tests.
     fn process_input(&mut self, mut input: egui::RawInput, delta: f64) -> egui::FullOutput {
         #[cfg(feature = "coop-defense-audio")]
@@ -345,6 +424,8 @@ impl App {
                     "Recording limit reached; gameplay continues, new saves disabled".into();
             }
         }
+        self.refresh_board();
+        let previous_selection = self.ui.selected;
         let was_started = self.ui.started;
         let was_paused = self.ui.paused;
         let (output, command) = self.ui.show(input, self.session.predicted_frame());
@@ -364,13 +445,27 @@ impl App {
         #[cfg(feature = "coop-defense-audio")]
         self.sync_audio(focus_lost || !self.ui.started || self.ui.paused);
         if self.error.is_some() || focus_lost || !was_started || was_paused || self.ui.paused {
-            self.commands.clear();
+            if focus_lost || (!was_paused && self.ui.paused) || !was_started {
+                self.cancel_board_intent();
+            } else {
+                self.commands.clear();
+                self.board.selection = None;
+                self.refresh_board();
+            }
             self.accumulator = 0.0;
             return output;
         }
         if let Some(command) = command.filter(|_| self.focused) {
-            if self.commands.len() < 32 {
+            if self.commands.len() < 32 && command.action != 0 && command.sequence != 0 {
+                if command.action == game::MOVE_OR_MERGE {
+                    self.board.selection =
+                        ExpectedSelection::capture(self.session.predicted_frame(), command);
+                } else if command.action == game::RESTART {
+                    self.board.selection = None;
+                }
                 self.commands.push_back(command);
+            } else {
+                self.ui.selected = previous_selection;
             }
         }
         self.accumulator += if self.ui.started && self.focused {
@@ -380,6 +475,9 @@ impl App {
         };
         while self.accumulator >= 1.0 / 60.0 {
             let command = self.commands.pop_front().unwrap_or_default();
+            if affects_board(&command) {
+                self.board.through = Some(self.session.next_send_tick());
+            }
             let result = self.session.advance(command, vec![]);
             #[cfg(feature = "coop-defense-audio")]
             {
@@ -402,6 +500,7 @@ impl App {
                 break;
             }
         }
+        self.refresh_board();
         output
     }
     #[cfg(feature = "coop-defense-audio")]
@@ -473,6 +572,10 @@ impl App {
                         .expect("candidate present")
                         .finish()?;
                     self.session = session;
+                    self.board = PendingBoard {
+                        through: Some(self.session.next_send_tick().saturating_sub(1)),
+                        selection: None,
+                    };
                     saves.journal = journal;
                     self.ui.restore_paused(high_water);
                     self.ui.run_save.status = format!(
@@ -506,7 +609,7 @@ impl App {
             #[cfg(feature = "coop-defense-audio")]
             self.sync_audio(true);
             self.focus_lost_pending = true;
-            self.commands.clear();
+            self.cancel_board_intent();
             if self.ui.started && game::run(self.session.predicted_frame()).phase == game::PLAYING {
                 self.ui.pause();
             }
@@ -900,7 +1003,7 @@ mod tests {
 #[cfg(test)]
 mod pause_tests {
     use super::*;
-    fn app() -> App {
+    pub(super) fn app() -> App {
         let mut ui = DefenseUi::new();
         ui.started = true;
         App {
@@ -917,6 +1020,7 @@ mod pause_tests {
             error: None,
             focused: true,
             focus_lost_pending: false,
+            board: PendingBoard::default(),
         }
     }
     fn key(key: egui::Key) -> egui::Event {
@@ -928,7 +1032,7 @@ mod pause_tests {
             modifiers: Default::default(),
         }
     }
-    fn frame(app: &mut App, events: Vec<egui::Event>, delta: f64) {
+    pub(super) fn frame(app: &mut App, events: Vec<egui::Event>, delta: f64) {
         app.process_input(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
@@ -967,7 +1071,7 @@ mod pause_tests {
             "focus return must not resume Session"
         );
     }
-    fn pulse(key: egui::Key) -> Vec<egui::Event> {
+    pub(super) fn pulse(key: egui::Key) -> Vec<egui::Event> {
         let down = self::key(key);
         let mut up = down.clone();
         if let egui::Event::Key { pressed, .. } = &mut up {
@@ -983,7 +1087,7 @@ mod pause_tests {
             modifiers: Default::default(),
         }
     }
-    fn click(x: f32, y: f32) -> Vec<egui::Event> {
+    pub(super) fn click(x: f32, y: f32) -> Vec<egui::Event> {
         vec![
             egui::Event::PointerMoved(egui::pos2(x, y)),
             button(x, y, true),
@@ -995,6 +1099,105 @@ mod pause_tests {
             app.session.predicted_frame().to_bytes() == bytes,
             "Session Frame bytes changed"
         );
+    }
+    #[test]
+    fn rapid_board_click_preserves_selection_across_input_delay() {
+        let mut app = app();
+        assert_eq!(app.session.config().input_delay, 2);
+        let tick = 1.0 / 60.0;
+        let layout = crate::defense_view::Layout::new(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1200.0, 940.0),
+        ));
+        let cell_click = |cell| {
+            let center = layout.cell(0, cell).center();
+            click(center.x, center.y)
+        };
+
+        // Establish the unit through the production egui -> App -> Session path.
+        frame(&mut app, pulse(egui::Key::Space), tick);
+        for _ in 0..2 {
+            frame(&mut app, vec![], tick);
+        }
+        let units = game::units(app.session.predicted_frame());
+        let unit = units
+            .iter()
+            .find(|unit| unit.board == 0 && unit.cell == 0 && unit.active != 0)
+            .expect("the consumed summon must occupy cell 0");
+        let unit_id = unit.id;
+        assert!(units
+            .iter()
+            .filter(|unit| unit.board == 0 && matches!(unit.cell, 1 | 2))
+            .all(|unit| unit.active == 0));
+        let summon_sequence = game::run(app.session.predicted_frame()).last_sequence;
+        let unit_cell = |app: &App| {
+            game::units(app.session.predicted_frame())
+                .into_iter()
+                .find(|unit| unit.board == 0 && unit.id == unit_id && unit.active != 0)
+                .expect("the original unit must survive the move chain")
+                .cell
+        };
+
+        frame(&mut app, cell_click(0), 0.0);
+        assert_eq!(app.ui.selected, Some(0));
+        frame(&mut app, cell_click(1), 0.0);
+        let first_move = *app.commands.front().expect("first move must be queued");
+        assert_eq!(app.commands.len(), 1);
+        assert_eq!(
+            (
+                first_move.action,
+                first_move.source_cell,
+                first_move.target_cell
+            ),
+            (game::MOVE_OR_MERGE, 0, 1)
+        );
+        assert!(first_move.sequence > summon_sequence);
+
+        // App has submitted the move, but delay2 has not consumed it. An empty
+        // App queue alone must not make the stale board safe for the next click.
+        frame(&mut app, vec![], tick);
+        assert!(app.commands.is_empty());
+        assert_eq!(app.ui.selected, Some(1));
+        assert_eq!(unit_cell(&app), 0);
+        assert_eq!(
+            game::run(app.session.predicted_frame()).last_sequence,
+            summon_sequence
+        );
+        frame(&mut app, cell_click(2), 0.0);
+        assert_eq!(app.ui.selected, Some(1));
+        assert!(app.ui.board_pending);
+        assert!(
+            app.commands.is_empty(),
+            "pending clicks must not be retained"
+        );
+
+        // The already submitted first move must still reach its destination.
+        // Pending clicks are ignored, never automatically replayed.
+        for _ in 0..2 {
+            frame(&mut app, vec![], tick);
+        }
+        assert_eq!(
+            unit_cell(&app),
+            1,
+            "the original unit's already submitted move must be consumed"
+        );
+        assert_eq!(
+            game::run(app.session.predicted_frame()).last_sequence,
+            first_move.sequence
+        );
+        assert!(!app.ui.board_pending);
+        assert_eq!(app.ui.selected, Some(1));
+        frame(&mut app, vec![], 0.1);
+        assert_eq!(unit_cell(&app), 1);
+        frame(&mut app, cell_click(2), tick);
+        assert!(app.ui.board_pending);
+        for _ in 0..2 {
+            frame(&mut app, vec![], tick);
+        }
+        assert_eq!(unit_cell(&app), 2);
+        assert_eq!(app.ui.selected, Some(2));
+        assert!(!app.ui.board_pending);
+        assert!(app.error.is_none());
     }
     #[test]
     fn long_pause_freezes_frame_tick_economy_and_resumes_without_catchup() {
@@ -1328,6 +1531,7 @@ mod run_save_tests {
             error: None,
             focused: true,
             focus_lost_pending: false,
+            board: PendingBoard::default(),
             saves: Some(RunSaves {
                 store: crate::defense_run_save_store::RunStore::open(path, &[]).unwrap(),
                 identity: crate::defense_run_save::executable_identity().unwrap(),
@@ -1582,3 +1786,7 @@ mod run_save_acceptance_tests;
 #[cfg(all(test, feature = "coop-defense-audio"))]
 #[path = "defense_audio_app_tests.rs"]
 pub(crate) mod audio_tests;
+
+#[cfg(test)]
+#[path = "defense_pending_board_tests.rs"]
+mod pending_board_tests;

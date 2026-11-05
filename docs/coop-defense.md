@@ -36,6 +36,11 @@ must identify the same target without a layout change; a drag, cancelled pointer
 or lost focus cannot turn into a click. At most one eligible pointer target is
 handled per frame. Board movement remains two clicks, not drag-to-move.
 
+Native board clicks pause briefly while a board action is queued or awaiting its
+existing two-tick consumption. The pending message asks you to click again
+afterward; clicks are not buffered. A pending click cannot clear selection or
+become a later action.
+
 In native play, use **P**, **Escape** or **Pause** to stop active combat. Losing
 window focus also pauses it. Returning to the window does not resume: press
 **Enter** or click **Continue**. While paused, the game frame and economy stay
