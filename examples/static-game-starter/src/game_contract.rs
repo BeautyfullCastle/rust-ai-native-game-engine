@@ -43,6 +43,50 @@ impl HeldKeys {
     }
 }
 
+/// Exact coordinate compatibility with Delivery's integer-unit movement only.
+/// This does not establish command readiness, a win, or a bounded solution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeliveryReachability {
+    pub current_to_goal: bool,
+    pub origin_to_goal: bool,
+}
+impl DeliveryReachability {
+    fn from_raw(position: [i64; 2], goal: [i64; 2]) -> Self {
+        let position = position.map(|raw| raw.rem_euclid(65536));
+        let goal = goal.map(|raw| raw.rem_euclid(65536));
+        Self {
+            current_to_goal: position == goal,
+            origin_to_goal: goal == [0, 0],
+        }
+    }
+
+    /// At most two constant-size warnings, shared by every presentation surface.
+    pub fn warnings(self) -> Vec<&'static str> {
+        let mut warnings = Vec::with_capacity(2);
+        if !self.current_to_goal {
+            warnings.push("Goal unreachable from the current position. Match the courier and goal fractional coordinates on both axes; whole-unit coordinates work.");
+        }
+        if !self.origin_to_goal {
+            warnings.push("Goal unreachable after restart at the origin. Use whole-unit goal coordinates for origin restart.");
+        }
+        warnings
+    }
+}
+
+/// Separate diagnostic envelope; never part of semantic identity or game state.
+fn reachability_report<G: Starter>(reachability: Option<DeliveryReachability>) -> Value {
+    json!({
+        "schema": "orr.delivery-reachability/1",
+        "game": G::ID,
+        "scope": "admitted_initial_scene",
+        "analysis": "integer_unit_exact_position",
+        "supported": reachability.is_some(),
+        "current_to_goal": reachability.map(|r| r.current_to_goal),
+        "origin_to_goal": reachability.map(|r| r.origin_to_goal),
+        "warnings": reachability.map(|r| r.warnings()).unwrap_or_default(),
+    })
+}
+
 pub trait Starter:
     Game<Config = (), Event = u32, Command = crate::NoCommand, Input: Reflect>
 {
@@ -55,6 +99,9 @@ pub trait Starter:
     fn validate(frame: &orr_ecs::Frame) -> bool;
     fn valid_input(input: &Self::Input) -> bool;
     fn won(frame: &orr_ecs::Frame) -> bool;
+    fn reachability(_frame: orr_bridge::FrameView<'_>) -> Option<DeliveryReachability> {
+        None
+    }
 }
 impl Starter for DeliveryGame {
     const ID: &'static str = "StarterDelivery";
@@ -72,6 +119,18 @@ impl Starter for DeliveryGame {
     }
     fn won(f: &orr_ecs::Frame) -> bool {
         f.singleton::<Delivery>().won != 0
+    }
+    fn reachability(frame: orr_bridge::FrameView<'_>) -> Option<DeliveryReachability> {
+        let couriers = frame.dense::<Courier>().1;
+        if couriers.len() != 1 {
+            return None;
+        }
+        let position = couriers[0].position;
+        let goal = frame.singleton::<Delivery>().goal;
+        Some(DeliveryReachability::from_raw(
+            [position.x.raw(), position.y.raw()],
+            [goal.x.raw(), goal.y.raw()],
+        ))
     }
     fn validate(f: &orr_ecs::Frame) -> bool {
         let d = f.singleton::<Delivery>();
@@ -289,6 +348,15 @@ pub fn admit<G: Starter>(text: &str) -> Result<Admitted<G>, String> {
 impl<G: Starter> Admitted<G> {
     pub fn identity(&self) -> &Value {
         &self.identity
+    }
+
+    /// Analysis of the immutable admitted tick-zero scene, not a live session.
+    pub fn reachability(&self) -> Option<DeliveryReachability> {
+        G::reachability(orr_bridge::FrameView::of(self.document.frame()))
+    }
+
+    pub fn reachability_report(&self) -> Value {
+        reachability_report::<G>(self.reachability())
     }
 
     pub fn session(&self) -> Result<PlaySession<G>, String> {
@@ -603,3 +671,67 @@ mod file_read_tests {
 #[cfg(test)]
 #[path = "navigation_pulse_tests.rs"]
 mod navigation_pulse_tests;
+
+#[cfg(test)]
+mod reachability_tests {
+    use super::*;
+    use orr_bridge::FrameView;
+
+    #[test]
+    fn exact_coordinate_residues_cover_all_outcomes_axes_and_extremes() {
+        for (position, goal, current, origin) in [
+            ([0, 0], [4 * 65536, 0], true, true),
+            ([-32768, 16384], [4 * 65536, 0], false, true),
+            ([98304, -16384], [229376, 114688], true, false),
+            ([0, 0], [294912, 0], false, false),
+            ([-1, 0], [65535, 0], true, false),
+            ([0, -1], [0, 65535], true, false),
+            ([0, 0], [1, 0], false, false),
+            ([0, 0], [0, 1], false, false),
+            ([i64::MIN, 0], [0, i64::MIN], true, true),
+            ([i64::MAX, -1], [-1, i64::MAX], true, false),
+            ([i64::MIN, i64::MAX], [i64::MAX, i64::MIN], false, false),
+        ] {
+            let report = DeliveryReachability::from_raw(position, goal);
+            assert_eq!(report.current_to_goal, current, "{position:?} -> {goal:?}");
+            assert_eq!(report.origin_to_goal, origin);
+            assert_eq!(
+                report.warnings().len(),
+                usize::from(!current) + usize::from(!origin)
+            );
+            assert!(report.warnings().iter().all(|warning| warning.len() < 200));
+        }
+    }
+
+    #[test]
+    fn admitted_report_is_separate_read_only_and_unsupported_is_explicit() {
+        let scene = DeliveryGame::SCENE.replace("goal: [4, 0]", "goal: [0.5, 0]");
+        let admitted = admit::<DeliveryGame>(&scene).unwrap();
+        let identity = admitted.identity().clone();
+        let session = admitted.session().unwrap();
+        let checksum = session.frame().checksum();
+        let report = admitted.reachability_report();
+        assert_eq!(report["schema"], "orr.delivery-reachability/1");
+        assert_eq!(report["scope"], "admitted_initial_scene");
+        assert_eq!(report["analysis"], "integer_unit_exact_position");
+        assert_eq!(report["supported"], true);
+        assert_eq!(report["current_to_goal"], false);
+        assert_eq!(report["origin_to_goal"], false);
+        assert_eq!(report["warnings"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            DeliveryGame::reachability(FrameView::of(session.frame())),
+            admitted.reachability()
+        );
+        assert_eq!(session.frame().checksum(), checksum);
+        assert_eq!(*admitted.identity(), identity);
+        assert!(identity.get("reachability").is_none());
+        let unsupported = admit::<SwitchGame>(SwitchGame::SCENE).unwrap();
+        assert_eq!(unsupported.reachability(), None);
+        let report = unsupported.reachability_report();
+        assert_eq!(report["game"], "StarterSwitchboard");
+        assert_eq!(report["supported"], false);
+        assert!(report["current_to_goal"].is_null());
+        assert!(report["origin_to_goal"].is_null());
+        assert_eq!(report["warnings"], json!([]));
+    }
+}

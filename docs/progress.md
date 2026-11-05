@@ -23,12 +23,14 @@ Native [#429](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pul
 
 [PR #437](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/437)은 같은 등록 Stormglass 세션에 읽기 전용 OVS 관측을 연결했다. 개발 merge 2c8be46d, tree 21ac7e52의 [정확 head CI](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/41974416216)와 [독립 다운로드 수용](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/437#issuecomment-6650833158)이 통과했다. 159개 CPU 테스트와 6개 strict 구성을 확인했다. 스트림은 최신 상태이며 epoch-fenced 명령 영수증이 아니다. 원래 실패와 기능 경계 수정·산출물 감사 실패를 보존한다.
 
+[PR #438](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/438)은 작성한 Switchboard 목표를 상단 사각형 행과 native/editor 안내로 표시한다. 기존 현재 원형·규칙·입력·build identity는 유지한다. 개발 merge e145c2a9, tree ef02e10b의 [정확 head CI](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/41985042770)와 [독립 다운로드 재실행](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/438#issuecomment-6652514909)이 통과했다. 187개 CPU·58개 Python 테스트와 7개 strict 구성을 확인했으며 원래 재현·lint 실패와 실제 창 가독성 미검증 범위를 보존한다.
+
 - **과거 Windows 직접 플레이:** 10-wave 승리, 369 kills, 29 merges, core 8/30 및 Wave 2 패배 → R 재시작을 관측했다. [원래 증거](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94#issuecomment-6430939337)는 당시 산출물에만 적용하며 현재 소스의 Windows 재검증으로 옮기지 않는다.
 - **현재 Stormglass 실행 범위:** 실제 native/WASM consumed-input trace와 source-hidden packed 소비, mock-DOM 제어/저장 검사는 실제 브라우저 파일 선택·표시·물리 입력과 별개다. 2026-11-04 Chromium 사전 검사는 페이지 로드 전 Unix socket EPERM으로 실패했고 정식 확대 실행도 executor 초기화에서 실패했다. 실제 브라우저 플레이는 **미검증**이며 다른 환경 실행으로 이 제한을 우회하지 않았다.
 
 ## 남은 우선순위와 경계
 
-1. 실제 제작·완주 경로를 우선한다. [작성한 Switchboard 목표가 플레이어에 보이지 않는 공백](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94#issuecomment-6651054198)을 실제 CPU 컨트롤러로 재현했다. 목표 3/5가 시작 전과 같은 입력 소비 후에도 동일한 렌더 항목을 만든다. 기존 현재 스위치는 보존하고 별도 목표 행과 native/editor 안내를 추가하며, 규칙·입력·build identity는 바꾸지 않는다. 구현·검증 중이고 실제 창의 가독성·완료·병합을 주장하지 않는다.
+1. 실제 제작·완주 경로를 우선한다. [Delivery 좌표 도달성 안내 공백](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94#issuecomment-6652942278)을 실제 편집·저장·재개방과 CPU editor presenter로 재현했다. 정수 단위 이동·원점 재시작·소수 좌표 허용은 기존 계약이므로 바꾸지 않는다. 현재 위치와 재시작 이후 목표 도달성 경고를 분리하고 native 조회·bundle 분석에 연결한다. 입장/배포 성공을 완주 보장으로 해석하지 않으며 구현·검증 중이다.
 2. 허용된 실행 환경이 있을 때 현재 산출물의 브라우저/native-window 플레이를 별도 수용한다. 화면 증거가 없으면 성공률·모바일·Windows·hardware GPU까지 확대하지 않는다.
 3. [설계 v2](design-v2.md)의 사전 고정 과제/seed/oracle·예산·실제 모델 기준선을 준비한다. 모델 호출·업로드·비용은 별도 승인 범위이며 아직 측정 결과가 없다.
 
