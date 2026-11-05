@@ -13,7 +13,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
-      CARGO_TARGET_DIR: ${{ runner.temp }}/stormglass-browser-input-target
       PYTHONDONTWRITEBYTECODE: 1
       CARGO_BUILD_JOBS: 2
       CARGO_INCREMENTAL: 0
@@ -28,6 +27,8 @@ jobs:
         with:
           node-version: '22'
       - name: Verify exact-source actual WASM browser input lifecycle
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/stormglass-browser-input-target
         shell: python {0}
         run: |
           import hashlib, json, os, re, runpy, shutil, subprocess, sys
