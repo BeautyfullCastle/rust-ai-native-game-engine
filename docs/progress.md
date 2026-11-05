@@ -13,9 +13,7 @@
 
 ## 확인한 개발 통합과 실제 증거
 
-[PR #426](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/426)은 개발 브랜치 su/engine-correctness-hardening에 정상 병합됐다. 확인한 merge는 ffccd8ae999b0852df7977c3ccbd49ea433a277a, tree는 21f955a3aaabdcf3dcd479b070b5ea45628586b2다. 검토·로컬 검증·필수 hosted CI가 같은 tree를 사용했다. Main 및 PR #1은 병합하지 않았다.
-
-이 선택 MeshHazardsV1 경로는 animation Load → Apply/Undo/Redo → Save → fresh reopen → schema 7 export → 원본을 숨긴 relocated native player를 연결한다. 별도 animation capability·bounded embedded provenance·exact inventory·runtime trust를 유지하며 schemas 1–6/default-off 동작을 보존한다. 새 interpolation 지원이나 코어 시뮬 변경이 아니다.
+[PR #426](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/426)은 선택 MeshHazardsV1 animation Load → Apply/Undo/Redo → Save/reopen → schema 7 export → 원본 숨김 native 소비를 개발 브랜치에 통합했다. 별도 capability·bounded provenance·runtime trust와 schemas 1–6/default-off를 보존했다. [정확한 CI·산출물](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/41892258398)과 [수용 기록](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/426#issuecomment-6639723379)은 당시 tree에 한정된다.
 
 후속 [PR #427](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/427)은 복원 중 포커스 상실 뒤 전투가 자동 재개되던 결함을 수정했다. 개발 merge e074e5510ace4c7bb24b21b9eee5de5b0a11a3ac의 tree 9771b95d161e7166befae2cf2fb2a509617557ad는 로컬·독립 리뷰·[필수 CI](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/41897428527) 후보와 같다. 관련 23개 검사와 seed/scene의 10개 lifecycle 사례가 통과했으며 실제 WASM/mock-DOM 증거다.
 
@@ -29,13 +27,14 @@
 
 [PR #432](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/432)은 선택 Linux native authored audio를 추가했다. 개발 merge 9625fcc9479ca055bcf0b2900258e156a4bdfdaa, tree ecf8a9eda1d2bb3fb8925bfbb72380105448fda9의 [필수 CI·독립 산출물 재실행](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/432#issuecomment-6644273066)을 완료했다. 원본을 숨긴 CLI bank → 실제 App/Session Kira PCM과 음소거·정지·재시작·저장복원을 확인했다. 산출물의 source-path 회귀도 원래 byte 검사를 보존해 수정했다. 실제 스피커 청취는 미검증이다.
 
-- #426의 [정확한 head CI·artifact](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/41892258398)와 [검증 기록](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/426#issuecomment-6639723379)은 원본 숨김 전달·재현 범위를 보존한다. 전체 workspace·GPU·창 입력 증거로 확대하지 않는다.
+[PR #433](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/433)은 native delay2 소비 전 다음 셀 클릭이 선택을 잃던 결함을 수정했다. 개발 merge 40cfab12a873ef196f4995dd4044bafc7943c2f4, tree 9890f9c4cab20b9f174c2d634db6a67b13b9c525의 [필수 CI](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/41944029205)와 독립 산출물 재실행을 완료했다. Pending 표시·선택 보존·소비 후 새 클릭·pause/focus/restore 경계를 검증했으며 클릭을 자동 버퍼링하지 않는다.
+
 - **과거 Windows 직접 플레이:** 10-wave 승리, 369 kills, 29 merges, core 8/30 및 Wave 2 패배 → R 재시작을 관측했다. [원래 증거](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94#issuecomment-6430939337)는 당시 산출물에만 적용하며 현재 소스의 Windows 재검증으로 옮기지 않는다.
 - **현재 Stormglass 실행 범위:** 실제 native/WASM consumed-input trace와 source-hidden packed 소비, mock-DOM 제어/저장 검사는 실제 브라우저 파일 선택·표시·물리 입력과 별개다. 2026-11-04 Chromium 사전 검사는 페이지 로드 전 Unix socket EPERM으로 실패했고 정식 확대 실행도 executor 초기화에서 실패했다. 실제 브라우저 플레이는 **미검증**이며 다른 환경 실행으로 이 제한을 우회하지 않았다.
 
 ## 남은 우선순위와 경계
 
-1. 실제 플레이를 우선한다. Native delay2 입력의 소비 전에 다음 셀을 누르면 선택이 사라지는 결함을 실제 CPU App/egui 경로로 재현했다. [후속 수용 기록](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94#issuecomment-6645948863)에 따라 pending 표시와 선택 보존, 소비 후 새 클릭, pause/focus/restore 경계를 검증한다. 자동 클릭 연쇄나 코어 시뮬 변경이 아니다.
+1. 실제 플레이를 우선한다. [Ctrl+R이 Invest로 소비되는 결함](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94#issuecomment-6646877293)을 실제 WASM에서 재현했다(gold 125→65, investment 0→1). Ctrl/Meta/Alt 조합과 IME composition 이벤트가 구매·정지·선택 해제를 일으키지 않도록 일반 keydown 경로를 검증한다. Plain Q/E/R/Space/Escape와 Shift 입력, 기존 폼·버튼 접근성 계약을 보존한다. 실제 WASM/mock-DOM 증거를 실제 브라우저 단축키 수용으로 확대하지 않는다.
 2. 허용된 실행 환경이 있을 때 현재 산출물의 브라우저/native-window 플레이를 별도 수용한다. 화면 증거가 없으면 성공률·모바일·Windows·hardware GPU까지 확대하지 않는다.
 3. [설계 v2](design-v2.md)의 사전 고정 과제/seed/oracle·예산·실제 모델 기준선을 준비한다. 모델 호출·업로드·비용은 별도 승인 범위이며 아직 측정 결과가 없다.
 

@@ -3,22 +3,24 @@
 An original, optional cooperative tower-defense sample for Orrery. Two foundry
 terraces defend one reactor through ten waves, including bosses on waves 5 and
 10. The second board is controlled by a **local AI ally**, not an online player.
-The design takes broad genre inspiration from randomized cooperative defense;
-names, industrial-garden presentation, rules, costs and balance are original.
+Names, industrial-garden presentation, rules and balance are original.
 
 ## Play
 
 Enable `orr_sample/coop-defense` and run the `coop_defense` binary. The browser
 adapter in `orr_coop_defense_web` runs the same Rust simulation, not a JavaScript
 reimplementation; use `tools/build_coop_defense_web.sh` for its web distribution.
-The native and browser frontends provide their current controls on screen.
+Both frontends show their current controls on screen.
+Browser shortcuts use **Q** (Summon), **E** (Upgrade), **R** (Invest),
+**Space** (Pause/Continue) and **Escape** (clear selection). Ctrl, Meta, Alt
+and text-composition events are left to the browser or input method without
+changing game inputs. Shift alone preserves these controls.
 
 - Summon costs 25 gold, randomly chooses a role and fills the first empty tile
   on your board.
 - Select a unit, then an empty tile to move it. Select an occupied tile with
   the same role and tier to combine **two** units into the next tier, up to V.
-  An incompatible occupied tile is not a merge. This is our rule, not a claim
-  about another game's exact merge recipe.
+  An incompatible occupied tile is not a merge.
 - Upgrade improves your board's attack strength. Invest increases periodic
   income. Both have increasing prices and capped levels.
 - Rivet tripods fire rapidly; kiln mortars splash groups; prism towers bypass
@@ -37,8 +39,7 @@ or lost focus cannot turn into a click. At most one eligible pointer target is
 handled per frame. Board movement remains two clicks, not drag-to-move.
 
 Native board clicks pause briefly while a board action is queued or awaiting its
-existing two-tick consumption. The pending message asks you to click again
-afterward; clicks are not buffered. A pending click cannot clear selection or
+two-tick consumption. Click again afterward; clicks are not buffered. A pending click cannot clear selection or
 become a later action.
 
 In native play, use **P**, **Escape** or **Pause** to stop active combat. Losing
@@ -85,6 +86,7 @@ all decisions to the ally is not enough. Use `--seed N` and `--cadence N` to var
 the seed and the human action interval in ticks. This is an automated gameplay
 oracle, not a human playtest or proof that the balance is fun.
 
-Native Linux and browser acceptance are separate. Build success alone does not
-prove browser interaction, screenshots, Windows execution or online multiplayer.
+Native Linux and browser acceptance are separate. Actual-WASM/mock-DOM tests
+check shortcut dispatch and resource/recording neutrality, not real browser
+shortcut handling, pixels, physical input or Windows execution.
 There is no claim of networked co-op, cross-build save migration or production balance.
