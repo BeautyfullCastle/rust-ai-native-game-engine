@@ -21,6 +21,7 @@ fn app() -> App {
         error: None,
         focused: true,
         focus_lost_pending: false,
+        board: PendingBoard::default(),
     }
 }
 fn frame(a: &mut App, events: Vec<egui::Event>, delta: f64) {

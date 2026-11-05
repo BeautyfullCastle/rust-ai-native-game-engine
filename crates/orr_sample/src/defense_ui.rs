@@ -64,11 +64,11 @@ impl PointerClicks {
         input: &egui::InputState,
         options: egui::InputOptions,
         screen: Rect,
-        state: (bool, bool, u32),
+        state: (bool, bool, u32, bool),
         extra: &[(Rect, ClickTarget)],
         modal: bool,
     ) -> Option<ClickTarget> {
-        let (started, paused, generation) = state;
+        let (started, paused, generation, board_pending) = state;
         let events = &input.events;
         if !input.focused
             || events
@@ -118,7 +118,11 @@ impl PointerClicks {
             if layout.rect(950.0, 842.0, 200.0, 55.0).contains(pos) {
                 return Some(ClickTarget::Action(game::RESTART));
             }
-            layout.hit_cell(pos).map(ClickTarget::Cell)
+            if board_pending {
+                None
+            } else {
+                layout.hit_cell(pos).map(ClickTarget::Cell)
+            }
         };
         if self
             .press
@@ -268,6 +272,7 @@ impl Default for AudioPanel {
 pub struct DefenseUi {
     pub context: egui::Context,
     pub selected: Option<u32>,
+    pub(crate) board_pending: bool,
     pub started: bool,
     pub(crate) paused: bool,
     pointer_clicks: PointerClicks,
@@ -297,6 +302,7 @@ impl DefenseUi {
         Self {
             context: egui::Context::default(),
             selected: None,
+            board_pending: false,
             started: false,
             paused: false,
             pointer_clicks: PointerClicks::default(),
@@ -316,6 +322,18 @@ impl DefenseUi {
             save_identity: None,
             notice: "Summon a crew. Match identical role + tier to merge.".into(),
         }
+    }
+    #[cfg(feature = "coop-defense")]
+    pub(crate) fn set_board_pending(&mut self, pending: bool) {
+        if (pending || self.board_pending)
+            && self
+                .pointer_clicks
+                .press
+                .is_some_and(|p| matches!(p.target, ClickTarget::Cell(_)))
+        {
+            self.pointer_clicks.press = None;
+        }
+        self.board_pending = pending;
     }
     pub(crate) fn pause(&mut self) {
         self.paused = true;
@@ -687,7 +705,12 @@ impl DefenseUi {
                     i,
                     options,
                     screen,
-                    (self.started, self.paused, run.generation),
+                    (
+                        self.started,
+                        self.paused,
+                        run.generation,
+                        self.board_pending,
+                    ),
                     &extra,
                     modal,
                 )
@@ -913,7 +936,16 @@ impl DefenseUi {
             // Hover previews never change the authoritative state.
             let pointer = ctx.input(|i| i.pointer.interact_pos());
             let hover = pointer.and_then(|p| l.hit_cell(p));
-            if let Some(source) = self.selected.and_then(|c| {
+            if self.board_pending {
+                l.text(
+                    &p,
+                    45.0,
+                    795.0,
+                    14.0,
+                    TEAL,
+                    "Board action pending. Click again when ready.",
+                );
+            } else if let Some(source) = self.selected.and_then(|c| {
                 units
                     .iter()
                     .find(|u| u.active != 0 && u.board == 0 && u.cell == c)
@@ -1081,7 +1113,7 @@ impl DefenseUi {
                 self.selected = None;
                 action = Some(self.command(game::RESTART, 0, 0));
             }
-            if run.phase == game::PLAYING {
+            if run.phase == game::PLAYING && !self.board_pending && action.is_none() {
                 if let Some(ClickTarget::Cell(cell)) = clicked {
                     if let Some(source) = self.selected {
                         if source == cell {
@@ -1097,8 +1129,11 @@ impl DefenseUi {
                                         && a.tier == b.tier
                                         && b.tier < game::MAX_TIER)
                             }) {
-                                action = Some(self.command(game::MOVE_OR_MERGE, source, cell));
-                                self.selected = Some(cell);
+                                let command = self.command(game::MOVE_OR_MERGE, source, cell);
+                                if command.action != 0 {
+                                    action = Some(command);
+                                    self.selected = Some(cell);
+                                }
                             } else {
                                 self.selected = units
                                     .iter()

@@ -19,6 +19,7 @@ fn app(path: &std::path::Path, scene: Option<String>) -> App {
         error: None,
         focused: true,
         focus_lost_pending: false,
+        board: PendingBoard::default(),
         saves: Some(RunSaves {
             store: crate::defense_run_save_store::RunStore::open(path, &[]).unwrap(),
             // Process identity/parity has separate tests; avoid repeatedly hashing here.
@@ -127,6 +128,7 @@ fn detached_loading_cancel_busy_mixed_input_and_focus_preserve_live_state() {
     frame(&mut a, key(egui::Key::U), 0.0); // discarded high-water must survive cancellation
     frame(&mut a, key(egui::Key::P), 0.0);
     let before = snapshot(&mut a);
+    let board_frontier = a.board.through;
     begin_replace(&mut a);
     assert!(matches!(a.ui.run_save.mode, RunSaveMode::Loading));
     assert!(a.saves.as_ref().unwrap().candidate.is_some());
@@ -151,6 +153,7 @@ fn detached_loading_cancel_busy_mixed_input_and_focus_preserve_live_state() {
     assert!(a.commands.is_empty());
     assert_eq!(a.accumulator, 0.0);
     assert_eq!(snapshot(&mut a), before);
+    assert_eq!(a.board.through, board_frontier);
 }
 
 #[test]
@@ -163,6 +166,7 @@ fn replay_checksum_error_is_atomic_after_multiple_detached_batches() {
     }
     frame(&mut a, key(egui::Key::P), 0.0);
     let before = snapshot(&mut a);
+    let board_frontier = a.board.through;
     let mut damaged: serde_json::Value = serde_json::from_slice(&before.1).unwrap();
     let checksum = damaged["final_checksum"].as_u64().unwrap();
     damaged["final_checksum"] = serde_json::json!(checksum ^ 1);
@@ -183,6 +187,7 @@ fn replay_checksum_error_is_atomic_after_multiple_detached_batches() {
         a.ui.run_save.status
     );
     assert_eq!(snapshot(&mut a), before);
+    assert_eq!(a.board.through, board_frontier);
     assert!(a.commands.is_empty());
     assert_eq!(a.accumulator, 0.0);
 }
@@ -356,4 +361,40 @@ fn hostile_parse_errors_are_bounded_sanitized_and_survive_redraw() {
         assert_eq!(a.ui.run_save.status, error);
         assert_eq!(snapshot(&mut a), before);
     }
+}
+
+#[test]
+fn restoring_earlier_pending_tail_replaces_live_board_frontier() {
+    let dir = private_dir();
+    let mut a = app(dir.path(), None);
+    frame(&mut a, key(egui::Key::Enter), 0.0);
+    frame(&mut a, key(egui::Key::Space), 1.0 / 60.0);
+    assert!(a.ui.board_pending);
+    frame(&mut a, key(egui::Key::P), 0.0);
+    click(&mut a, 450.0, 582.0);
+    let saved_tick = a.session.predicted_frame().tick();
+    let saved_tail = a.session.next_send_tick().saturating_sub(1);
+    frame(&mut a, key(egui::Key::Enter), 0.0);
+    for _ in 0..20 {
+        frame(&mut a, vec![], 0.1);
+    }
+    frame(&mut a, key(egui::Key::Space), 1.0 / 60.0);
+    frame(&mut a, key(egui::Key::P), 0.0);
+    assert!(a.board.through.unwrap() > saved_tail);
+    begin_replace(&mut a);
+    finish_load(&mut a);
+    assert_eq!(a.session.predicted_frame().tick(), saved_tick);
+    assert_eq!(a.board.through, Some(saved_tail));
+    assert!(a.ui.paused);
+    assert_eq!(a.ui.selected, None);
+    frame(&mut a, key(egui::Key::Enter), 0.0);
+    assert!(a.ui.board_pending);
+    for _ in 0..2 {
+        frame(&mut a, vec![], 1.0 / 60.0);
+    }
+    assert!(!a.ui.board_pending);
+    assert!(game::units(a.session.predicted_frame())
+        .iter()
+        .any(|u| u.board == 0 && u.active != 0));
+    assert_eq!(a.ui.selected, None);
 }
