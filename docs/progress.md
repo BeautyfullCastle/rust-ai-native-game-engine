@@ -15,9 +15,7 @@
 
 [PR #426](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/426)은 선택 MeshHazardsV1 animation Load → Apply/Undo/Redo → Save/reopen → schema 7 export → 원본 숨김 native 소비를 개발 브랜치에 통합했다. 별도 capability·bounded provenance·runtime trust와 schemas 1–6/default-off를 보존했다. [정확한 CI·산출물](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/41892258398)과 [수용 기록](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/426#issuecomment-6639723379)은 당시 tree에 한정된다.
 
-후속 [PR #427](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/427)은 복원 중 포커스 상실 뒤 전투가 자동 재개되던 결함을 수정했다. 개발 merge e074e5510ace4c7bb24b21b9eee5de5b0a11a3ac의 tree 9771b95d161e7166befae2cf2fb2a509617557ad는 로컬·독립 리뷰·[필수 CI](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/41897428527) 후보와 같다. 관련 23개 검사와 seed/scene의 10개 lifecycle 사례가 통과했으며 실제 WASM/mock-DOM 증거다.
-
-[PR #428](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/428)은 복원 실패 뒤 해제된 드래그가 남아 새 입력을 막거나 의도치 않은 이동을 낳던 결함을 수정했다. 개발 merge f3f70b42a67ab31dd23a87be659ec297030dbf26, tree 3ada46ab934d911d2e1cc0c225c852a2e2df4ffe의 [필수 CI](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/41900065738)와 독립 산출물 검증을 완료했다. 포인터 24개·포커스 10개·관련 23개 및 기존 입력 검사 2개를 확인했으며 실제 브라우저 증거가 아니다.
+[PR #427](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/427)과 [#428](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/428)은 복원 중 포커스 상실 뒤 자동 재개와 해제된 드래그의 부활을 수정했다. 개발 통합의 [포커스 CI](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/41897428527)·[포인터 CI](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/41900065738) 및 독립 산출물 검증으로 관련23·포커스10·포인터24·입력 검사2를 확인했다. 실제 WASM/mock-DOM 증거이며 실제 브라우저 수용이 아니다.
 
 [PR #429](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/429)은 네이티브의 마지막 hover가 이전 클릭을 Restart·구매·보드 명령으로 잘못 바꾸던 결함을 수정했다. 개발 merge b0e7a6cf6d85c95b3b17bed432e95bb87fe7b9a8, tree 87dbc8d07a77b63eccd93a036172d9a77a97b3ea에서 [필수 CI와 독립 산출물 검증](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/429#issuecomment-6640886369)을 완료했다. UI 17개·엄격 검사·기능 제외 빌드와 다운로드한 native 실행 파일의 authored 3-wave 승리(tick 1884, reactor 75)를 확인했다. CPU egui/Session 증거이며 창·물리 입력 성공으로 확대하지 않는다.
 
@@ -29,12 +27,14 @@
 
 [PR #433](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/433)은 native delay2 소비 전 다음 셀 클릭이 선택을 잃던 결함을 수정했다. 개발 merge 40cfab12a873ef196f4995dd4044bafc7943c2f4, tree 9890f9c4cab20b9f174c2d634db6a67b13b9c525의 [필수 CI](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/41944029205)와 독립 산출물 재실행을 완료했다. Pending 표시·선택 보존·소비 후 새 클릭·pause/focus/restore 경계를 검증했으며 클릭을 자동 버퍼링하지 않는다.
 
+[PR #434](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/434)은 Ctrl/Cmd+R이 Invest로 소비되던 결함을 수정했다. 개발 merge 125d95e99b2c17a92ecca903ea904416cfca9e14, tree ed9eefb33e4e1089cefead8c2370cec22afe8e07의 [필수 CI](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/41947729478)와 독립 산출물 재실행이 통과했다. 키보드112·기존 포커스10/포인터24·관련23(건너뜀0)을 확인하고 plain/Shift 입력을 보존했다.
+
 - **과거 Windows 직접 플레이:** 10-wave 승리, 369 kills, 29 merges, core 8/30 및 Wave 2 패배 → R 재시작을 관측했다. [원래 증거](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94#issuecomment-6430939337)는 당시 산출물에만 적용하며 현재 소스의 Windows 재검증으로 옮기지 않는다.
 - **현재 Stormglass 실행 범위:** 실제 native/WASM consumed-input trace와 source-hidden packed 소비, mock-DOM 제어/저장 검사는 실제 브라우저 파일 선택·표시·물리 입력과 별개다. 2026-11-04 Chromium 사전 검사는 페이지 로드 전 Unix socket EPERM으로 실패했고 정식 확대 실행도 executor 초기화에서 실패했다. 실제 브라우저 플레이는 **미검증**이며 다른 환경 실행으로 이 제한을 우회하지 않았다.
 
 ## 남은 우선순위와 경계
 
-1. 실제 플레이를 우선한다. [Ctrl+R이 Invest로 소비되는 결함](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94#issuecomment-6646877293)을 실제 WASM에서 재현했다(gold 125→65, investment 0→1). Ctrl/Meta/Alt 조합과 IME composition 이벤트가 구매·정지·선택 해제를 일으키지 않도록 일반 keydown 경로를 검증한다. Plain Q/E/R/Space/Escape와 Shift 입력, 기존 폼·버튼 접근성 계약을 보존한다. 실제 WASM/mock-DOM 증거를 실제 브라우저 단축키 수용으로 확대하지 않는다.
+1. 실제 플레이를 우선한다. [Native 종료 후 대기 중인 Restart가 포커스 복귀만으로 진행되는 결함](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94#issuecomment-6647177137)을 CPU App에서 재현했다. 창 callback·focus event·raw input 모두 Continue 없이 LOST/generation0에서 PLAYING/generation1로 바뀌었다. 기존 Session 미래 입력을 조회하는 App 조건만 수정하고 정상 종료·미제출 취소·반복 focus·저장복원 경계를 검증한다.
 2. 허용된 실행 환경이 있을 때 현재 산출물의 브라우저/native-window 플레이를 별도 수용한다. 화면 증거가 없으면 성공률·모바일·Windows·hardware GPU까지 확대하지 않는다.
 3. [설계 v2](design-v2.md)의 사전 고정 과제/seed/oracle·예산·실제 모델 기준선을 준비한다. 모델 호출·업로드·비용은 별도 승인 범위이며 아직 측정 결과가 없다.
 

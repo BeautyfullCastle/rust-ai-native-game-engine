@@ -29,7 +29,7 @@ changing game inputs. Shift alone preserves these controls.
 - Enemy families have different movement, armor and health. All escaped enemies
   damage the shared reactor. Projectiles apply damage when they arrive, not
   when their firing animation starts.
-- A terminal run shows victory or defeat and can restart from the same seed.
+- Victory or defeat can restart from the same seed.
   Replaying identical actions with that seed gives an identical checksum.
 
 Native pointer actions use the control or board cell where a primary press and
@@ -43,7 +43,8 @@ two-tick consumption. Click again afterward; clicks are not buffered. A pending 
 become a later action.
 
 In native play, use **P**, **Escape** or **Pause** to stop active combat. Losing
-window focus also pauses it. Returning to the window does not resume: press
+window focus also pauses combat or a terminal run with an admitted Restart
+still waiting to start play. Returning does not resume: press
 **Enter** or click **Continue**. While paused, the game frame and economy stay
 frozen; gameplay keys and board clicks are blocked. Continue only resumes and
 does not summon, move or restart. Pause and focus loss take priority over other
@@ -83,8 +84,7 @@ service is needed for this local cooperative slice.
 contracts. The `coop_defense_run` example exercises legal strategy inputs to
 completion and replays the exact input history; `--afk` verifies that leaving
 all decisions to the ally is not enough. Use `--seed N` and `--cadence N` to vary
-the seed and the human action interval in ticks. This is an automated gameplay
-oracle, not a human playtest or proof that the balance is fun.
+the seed and the human action interval in ticks. This automated oracle is not a human playtest.
 
 Native Linux and browser acceptance are separate. Actual-WASM/mock-DOM tests
 check shortcut dispatch and resource/recording neutrality, not real browser

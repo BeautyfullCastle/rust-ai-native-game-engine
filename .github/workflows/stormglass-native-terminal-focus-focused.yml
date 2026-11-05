@@ -1,0 +1,54 @@
+name: Stormglass native terminal focus CI
+# CPU App/Session/Kira PCM and native compile only; no device/window/browser/GPU execution.
+on:
+  push:
+    branches: [su/stormglass-native-terminal-focus-20261105]
+permissions:
+  contents: read
+concurrency:
+  group: stormglass-native-terminal-focus-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  native-terminal-focus:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Record exact source and build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          export EVIDENCE="$RUNNER_TEMP/stormglass-native-terminal-focus-evidence"
+          printf 'EVIDENCE=%s\n' "$EVIDENCE" >> "$GITHUB_ENV"
+          mkdir "$EVIDENCE"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git rev-parse HEAD HEAD^{tree} | tee "$EVIDENCE/source.txt"
+          rustup toolchain install 1.99.1 --profile minimal --component clippy
+          rustup override set 1.99.1
+          rustc --version --verbose | tee "$EVIDENCE/rustc.txt"
+          cargo --version | tee "$EVIDENCE/cargo.txt"
+          python3 --version | tee "$EVIDENCE/python.txt"
+          sudo apt-get update > "$EVIDENCE/apt-update.log" 2>&1
+          sudo apt-get install -y libasound2-dev pkg-config > "$EVIDENCE/apt-install.log" 2>&1
+          pkg-config --modversion alsa | tee "$EVIDENCE/alsa-version.txt"
+          dpkg-query -W libasound2-dev pkg-config | tee "$EVIDENCE/dependency-packages.txt"
+      - name: Check terminal focus and prior board/audio/save contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/check_stormglass_native_audio.py --self-test
+          python3 tools/check_stormglass_native_audio.py
+      - name: Preserve exact candidate and evidence including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stormglass-native-terminal-focus-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ env.EVIDENCE }}
+          if-no-files-found: error
