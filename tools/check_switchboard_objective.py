@@ -29,13 +29,17 @@ def source_module(path, name):
 
 h = source_module(ROOT / 'tools/check_stormglass_live_observation.py', 'objective_shared')
 g = h.g
-SCHEMA = 'orr.switchboard-objective/1'
+SCHEMA = 'orr.delivery-reachability-focused/1'
 INVENTORY = 'tools/switchboard_objective_inventory.json'
 PACKAGE = 'orr_static_starter'
 STARTER = 'examples/static-game-starter'
 SELF = 'tools/check_switchboard_objective.py'
 SCOPE = dict(h.SCOPE, native_identity_query=True, native_harness_compile_only=True,
-             synthetic_pixel_oracles=True, genuine_visual_acceptance=False)
+             synthetic_pixel_oracles=True, genuine_visual_acceptance=False,
+             cpu_in_process=False, cpu_filesystem=True, controlled_fixture_subprocesses=True,
+             subprocess_scope=("copied headless-player acceptance cases; copied native provenance, identity and "
+                               "reachability queries; reviewed bundle launcher, timeout and process-group shell fixtures"),
+             native_reachability_query=True, reachability_scope="admitted_initial_scene")
 
 
 def suite(features, target=None):
@@ -52,6 +56,9 @@ def suite(features, target=None):
 
 
 SUITES = {
+    'reachability-core': suite('', 'delivery_authored_reachability'),
+    'reachability-gameplay': suite('gameplay', 'delivery_authored_reachability'),
+    'bundle-lib': suite('bundle'), 'bundle-contract': suite('bundle', 'bundle'),
     'core': suite(''), 'standalone': suite('standalone'),
     'standalone-actions': suite('standalone,static-game-actions'),
     'gameplay': suite('gameplay'),
@@ -70,10 +77,53 @@ PLAYERS = {alias + '-player': dict(suite('standalone'), target=['--bin', alias +
 HEADLESS = {'player': dict(suite(''), target=['--bin', 'player'])}
 BUILDS = dict(SUITES, **NATIVE, **PLAYERS, **HEADLESS)
 BINARY_PATHS = {role: 'bin/' + role for role in BUILDS}
+ASSET_SOURCES = {alias: STARTER + '/scenes/' + alias + '.scene.yaml' for alias in g.GAMES}
 ASSET_PATHS = dict(g.ASSET_PATHS)
+for fixture in ['current-unreachable', 'restart-unreachable', 'both-unreachable']:
+    role = 'delivery-' + fixture
+    ASSET_SOURCES[role] = STARTER + '/tests/fixtures/delivery-reachability/' + fixture + '.scene.yaml'
+    ASSET_PATHS[role] = 'scenes/' + role + '.scene.yaml'
+
+# Independently derived residue cases: (current, origin) TT, FT, TF, FF.
+# Negative -0.25 has Euclidean residue 49152, matching goal 1.75.
+CURRENT_WARNING = ('Goal unreachable from the current position. Match the courier and goal '
+                   'fractional coordinates on both axes; whole-unit coordinates work.')
+ORIGIN_WARNING = ('Goal unreachable after restart at the origin. Use whole-unit goal '
+                  'coordinates for origin restart.')
+QUERY_CASES = {
+    'delivery-stock': ('delivery', 'delivery', True, True),
+    'delivery-current-unreachable': ('delivery', 'delivery-current-unreachable', False, True),
+    'delivery-restart-unreachable': ('delivery', 'delivery-restart-unreachable', True, False),
+    'delivery-both-unreachable': ('delivery', 'delivery-both-unreachable', False, False),
+    'switchboard-unsupported': ('switchboard', 'switchboard', None, None),
+}
+
+
+def report_expectations():
+    return {case: {'schema': 'orr.delivery-reachability/1', 'game': g.GAMES[alias][0],
+                   'scope': 'admitted_initial_scene', 'analysis': 'integer_unit_exact_position',
+                   'supported': alias == 'delivery', 'current_to_goal': current, 'origin_to_goal': origin,
+                   'warnings': ([CURRENT_WARNING] if current is False else []) +
+                               ([ORIGIN_WARNING] if origin is False else [])}
+            for case, (alias, _, current, origin) in QUERY_CASES.items()}
+
+
+def validate_report(case, actual):
+    g.require(case in QUERY_CASES, 'Unreviewed reachability query')
+    g.require(json.dumps(actual, sort_keys=True, separators=(',', ':')) ==
+              json.dumps(report_expectations()[case], sort_keys=True, separators=(',', ':')),
+              'Reachability report differs from independent expectation: ' + case)
+
+
+def validate_asset_sources(source, assets):
+    g.require(set(assets) == set(ASSET_SOURCES), 'Changed scene source roles')
+    for role, entry in assets.items():
+        g.require(entry['sha256'] == source['files'][ASSET_SOURCES[role]],
+                  'Scene asset differs from reviewed source: ' + role)
+
 PYTHON_MODULES = ['test_static_game_native_gate', 'test_static_game_standalone_gate',
                   'test_static_game_native_ui_settle_gate']
-STRICT = {'core': '', 'standalone': 'standalone', 'standalone-actions': 'standalone,static-game-actions',
+STRICT = {'bundle': 'bundle', 'core': '', 'standalone': 'standalone', 'standalone-actions': 'standalone,static-game-actions',
           'editor': 'editor', 'gameplay': 'gameplay'}
 
 
@@ -85,6 +135,9 @@ def inventory(value=None):
     for names in value['suites'].values():
         g.validate_names(names)
         g.require(not any('ws_acceptance::' in n or 'gpu_api_acceptance::' in n for n in names), 'Non-CPU test')
+    g.require(json.dumps(value.get('reports'), sort_keys=True, separators=(',', ':')) ==
+              json.dumps(report_expectations(), sort_keys=True, separators=(',', ':')),
+              'Changed independent report pins')
     validate_identity_expectations(value.get('identities'))
     names = value['python_tests']
     g.require(isinstance(names, list) and names and len(names) == len(set(names)), 'Invalid Python inventory')
@@ -143,9 +196,12 @@ def artifact(output, spec):
             continue
         value = g.strict_json(line)
         actual = value.get('target', {})
-        if value.get('reason') != 'compiler-artifact' or actual.get('name') != name or not value.get('executable'):
+        # Cargo can emit a same-name bin while building an integration test.
+        # Only the exact requested target kind participates in producer selection.
+        if (value.get('reason') != 'compiler-artifact' or actual.get('name') != name
+                or actual.get('kind') != [kind] or not value.get('executable')):
             continue
-        g.require(actual.get('kind') == [kind] and actual.get('src_path') == str(ROOT / source), 'Wrong target kind/source')
+        g.require(actual.get('src_path') == str(ROOT / source), 'Wrong target source')
         g.require(value.get('profile', {}).get('test') is (kind != 'bin'), 'Wrong test profile')
         g.require(value.get('manifest_path') == str(ROOT / STARTER / 'Cargo.toml'), 'Wrong package manifest')
         g.require(value.get('package_id') == 'path+' + (ROOT / STARTER).as_uri() + '#orr_static_starter@0.0.1', 'Wrong package identity')
@@ -185,6 +241,9 @@ def command_contract(root, directory, expected, replay, python):
         binary = str(directory / BINARY_PATHS[alias + '-player'])
         commands[alias + '-provenance'] = ([binary, '--provenance'], 30)
         commands[alias + '-identity'] = ([binary, '--identity', '--scene', str(directory / ASSET_PATHS[alias])], 30)
+    for case, (alias, asset, _, _) in QUERY_CASES.items():
+        commands[case + '-reachability'] = ([str(directory / BINARY_PATHS[alias + '-player']),
+                                            '--reachability', '--scene', str(directory / ASSET_PATHS[asset])], 30)
     return commands
 
 
@@ -202,6 +261,8 @@ def validate_commands(directory, expected, replay, source_root, evidence_root, p
         g.require(provenance == {'source_sha': head}, 'Native provenance differs from candidate')
         validate_identity(alias, identity, g.read_json(ROOT / INVENTORY)['identities'])
         g.require(source.get('files'), 'Missing source identity')
+    for case in QUERY_CASES:
+        validate_report(case, g.json_output((directory / (case + '-reachability.log')).read_text()))
     python_log = (directory / 'python-oracle-tests.log').read_text()
     names = g.read_json(ROOT / INVENTORY)['python_tests']
     g.require('SOURCE_PYTHON_INVENTORY=' + json.dumps(names, separators=(',', ':')) + '\n' in python_log,
@@ -232,8 +293,7 @@ def replay_contract(origin, source, head, expected):
     validate_roles(binaries, assets)
     g.verify_bindings(origin, binaries)
     g.verify_bindings(origin, assets)
-    for alias, entry in assets.items():
-        g.require(entry['sha256'] == source['files'][STARTER + '/scenes/' + alias + '.scene.yaml'], 'Scene asset differs from reviewed source')
+    validate_asset_sources(source, assets)
     labels = validate_commands(origin, expected, False, scope.get('source_directory'), scope.get('evidence_directory'), scope.get('python_executable'))
     g.require(scope.get('command_labels') == labels, 'Changed producer command inventory')
     return binaries, assets
@@ -298,7 +358,7 @@ def main(args):
         else:
             g.reject_ancestor_config(ROOT)
             for alias, relative in ASSET_PATHS.items():
-                assets[alias] = {'path': relative, 'sha256': g.copy_file(ROOT / STARTER / 'scenes' / (alias + '.scene.yaml'), directory / relative)}
+                assets[alias] = {'path': relative, 'sha256': g.copy_file(ROOT / ASSET_SOURCES[alias], directory / relative)}
         for label, (command, timeout) in commands.items():
             if binaries and all(k in binaries for k in BINARY_PATHS):
                 g.verify_bindings(directory, binaries)
@@ -316,6 +376,7 @@ def main(args):
             elif label.endswith('-tests') and label.removesuffix('-tests') in SUITES:
                 g.validate_tests(output, expected[label.removesuffix('-tests')])
         validate_roles(binaries, assets)
+        validate_asset_sources(source, assets)
         g.verify_bindings(directory, binaries)
         g.verify_bindings(directory, assets)
         scope['command_labels'] = validate_commands(directory, expected, bool(args.replay), str(ROOT), str(directory), sys.executable)
@@ -344,9 +405,13 @@ class GateTests(unittest.TestCase):
         expected = {k: ['test_case'] for k in SUITES}
         producer = command_contract(ROOT, Path('/tmp/evidence'), expected, False, sys.executable)
         replay = command_contract(ROOT, Path('/tmp/evidence'), expected, True, sys.executable)
-        self.assertEqual(len(SUITES), 11)
-        self.assertEqual(len(producer), 54)
-        self.assertEqual(len(replay), 28)
+        self.assertEqual(len(SUITES), 15)
+        self.assertEqual(len(BUILDS), 20)
+        self.assertEqual(len(STRICT) + len(NATIVE), 8)
+        self.assertEqual(len(ASSET_PATHS), 5)
+        self.assertEqual(set(ASSET_PATHS), set(ASSET_SOURCES))
+        self.assertEqual(len(producer), 72)
+        self.assertEqual(len(replay), 41)
         build_roles = [label.removesuffix('-build') for label in producer if label.endswith('-build')]
         self.assertEqual(set(build_roles), set(BUILDS))
         self.assertEqual([BUILDS[role]['features'] for role in build_roles],
@@ -355,11 +420,14 @@ class GateTests(unittest.TestCase):
         self.assertFalse(any('cargo' == argv[0] for argv, _ in replay.values()))
         for role in NATIVE:
             self.assertNotIn(role + '-tests', producer)
+            self.assertNotIn(role + '-inventory', producer)
+            self.assertNotIn(role + '-inventory', replay)
+            self.assertNotIn(role + '-tests', replay)
             self.assertIn('--no-run', producer[role + '-build'][0])
 
     def test_inventory_fail_closed(self):
         good = {'schema': SCHEMA, 'reviewed': True, 'suites': {k: ['case'] for k in SUITES},
-                'python_tests': ['test_static_game_native_gate.NativeGateTests.test_case'],
+                'python_tests': ['test_static_game_native_gate.NativeGateTests.test_case'], 'reports': report_expectations(),
                 'identities': g.read_json(ROOT / INVENTORY)['identities'],
                 'excluded': {k: v['excluded'] for k, v in SUITES.items()}}
         inventory(good)
@@ -388,6 +456,24 @@ class GateTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     artifact(json.dumps(value) + '\n' + json.dumps(value), spec)
 
+    def test_same_name_bin_does_not_shadow_integration_test_producer(self):
+        spec = BUILDS['bundle-contract']
+        test = {'reason': 'compiler-artifact',
+                'target': {'name': 'bundle', 'kind': ['test'],
+                           'src_path': str(ROOT / STARTER / 'tests/bundle.rs')},
+                'manifest_path': str(ROOT / STARTER / 'Cargo.toml'),
+                'package_id': 'path+' + (ROOT / STARTER).as_uri() + '#orr_static_starter@0.0.1',
+                'profile': {'test': True}, 'features': ['bundle'], 'executable': '/tmp/bundle-test'}
+        binary = dict(test, target={'name': 'bundle', 'kind': ['bin'],
+                                   'src_path': str(ROOT / STARTER / 'src/bin/bundle.rs')},
+                      profile={'test': False}, executable='/tmp/bundle-bin')
+        for stream in [[binary, test], [test, binary]]:
+            self.assertEqual(artifact('\n'.join(json.dumps(v) for v in stream), spec), Path('/tmp/bundle-test'))
+        wrong_source = dict(test, target=dict(test['target'], src_path='/wrong/tests/bundle.rs'))
+        for stream in [[binary], [], [binary, wrong_source], [binary, test, test]]:
+            with self.assertRaises(ValueError):
+                artifact('\n'.join(json.dumps(v) for v in stream), spec)
+
     def test_replay_rejects_missing_commands_failed_commands_and_changed_artifacts(self):
         with tempfile.TemporaryDirectory() as temp:
             origin = Path(temp)
@@ -396,7 +482,7 @@ class GateTests(unittest.TestCase):
             head = 'a' * 40
             expected = {k: ['cpu_case'] for k in SUITES}
             document = {'schema': SCHEMA, 'reviewed': True, 'suites': expected,
-                        'python_tests': ['test_static_game_native_gate.NativeGateTests.test_case'],
+                        'python_tests': ['test_static_game_native_gate.NativeGateTests.test_case'], 'reports': report_expectations(),
                 'identities': g.read_json(ROOT / INVENTORY)['identities'],
                 'excluded': {k: v['excluded'] for k, v in SUITES.items()}}
             source = {'head': head, 'tree': 'b' * 40, 'files': {}}
@@ -406,7 +492,7 @@ class GateTests(unittest.TestCase):
                     (origin / relative).write_text(role)
                     entries[role] = {'path': relative, 'sha256': g.sha(origin / relative)}
                     if entries is assets:
-                        source['files'][STARTER + '/scenes/' + role + '.scene.yaml'] = entries[role]['sha256']
+                        source['files'][ASSET_SOURCES[role]] = entries[role]['sha256']
             g.write_json(origin / 'source.json', source)
             g.write_json(origin / 'inventory.json', document)
             scope = dict(SCOPE, schema=SCHEMA, status='passed', mode='producer', head=head, tree=source['tree'],
@@ -431,6 +517,8 @@ class GateTests(unittest.TestCase):
                 elif label.endswith('-identity'):
                     alias = label.removesuffix('-identity')
                     log += json.dumps(document['identities'][alias]) + '\n'
+                elif label.endswith('-reachability'):
+                    log += json.dumps(report_expectations()[label.removesuffix('-reachability')]) + '\n'
                 elif label == 'python-oracle-tests':
                     log += 'SOURCE_PYTHON_INVENTORY=' + json.dumps(document['python_tests'], separators=(',', ':')) + '\nRan 1 tests in 0.01s\n\nOK\n'
                 (origin / (label + '.log')).write_text(log + '\nEXIT_CODE=0\n')
@@ -441,6 +529,54 @@ class GateTests(unittest.TestCase):
             with patch.object(g, 'read_json', side_effect=read):
                 g.seal(origin)
                 replay_contract(origin, source, head, expected)
+                # Re-sealing cannot turn tampered reports, scope or source binding into proof.
+                for case in QUERY_CASES:
+                    log_path = origin / (case + '-reachability.log')
+                    original_log = log_path.read_text()
+                    for changed in [dict(report_expectations()[case], supported=1),
+                                    dict(report_expectations()[case], scope='live_frame'),
+                                    dict(report_expectations()[case], current_to_goal='true')]:
+                        log_path.write_text(original_log.replace(json.dumps(report_expectations()[case]), json.dumps(changed)))
+                        g.seal(origin)
+                        with self.assertRaises(ValueError):
+                            replay_contract(origin, source, head, expected)
+                    log_path.write_text(original_log)
+                for change in [dict(cpu_in_process=True), dict(window=True),
+                               dict(reachability_scope='all_game_states'),
+                               dict(subprocess_scope='arbitrary executables')]:
+                    g.write_json(origin / 'scope.json', dict(scope, **change))
+                    g.seal(origin)
+                    with self.assertRaises(ValueError):
+                        replay_contract(origin, source, head, expected)
+                g.write_json(origin / 'scope.json', scope)
+                source_path = origin / 'source.json'
+                changed_source = json.loads(json.dumps(source))
+                changed_source['files'][ASSET_SOURCES['delivery-current-unreachable']] = 'f' * 64
+                g.write_json(source_path, changed_source)
+                changed_scope = dict(scope, source_sha256=g.sha(source_path))
+                g.write_json(origin / 'scope.json', changed_scope)
+                g.seal(origin)
+                with self.assertRaises(ValueError):
+                    replay_contract(origin, source, head, expected)
+                g.write_json(source_path, source)
+                g.write_json(origin / 'scope.json', scope)
+                query_command = origin / 'delivery-stock-reachability.command.json'
+                original_query = original_read(query_command)
+                changed_query = dict(original_query, argv=[str(origin / BINARY_PATHS['delivery-player']),
+                                                          '--identity', '--scene', str(origin / ASSET_PATHS['delivery'])])
+                g.write_json(query_command, changed_query)
+                g.seal(origin)
+                with self.assertRaises(ValueError):
+                    replay_contract(origin, source, head, expected)
+                g.write_json(query_command, original_query)
+                query_log = origin / 'switchboard-unsupported-reachability.log'
+                saved_log = query_log.read_text()
+                query_log.unlink()
+                g.seal(origin)
+                with self.assertRaises(ValueError):
+                    replay_contract(origin, source, head, expected)
+                query_log.write_text(saved_log)
+                g.seal(origin)
                 command_path = origin / 'feature-off-check.command.json'
                 good = original_read(command_path)
                 for change in [dict(argv=['cargo', 'check']), dict(exit_code=1), dict(status='running'), dict(timeout_seconds=1)]:
@@ -458,6 +594,66 @@ class GateTests(unittest.TestCase):
                 (origin / BINARY_PATHS['core']).write_text('changed')
                 with self.assertRaises(ValueError):
                     replay_contract(origin, source, head, expected)
+
+    def test_reports_reject_partial_extra_wrong_game_boolean_and_warning_contracts(self):
+        for case, original in report_expectations().items():
+            validate_report(case, original)
+            for mutate in [lambda v: v.pop('warnings'), lambda v: v.update(extra='unreviewed'),
+                           lambda v: v.update(supported=int(v['supported'])),
+                           lambda v: v.update(game='OtherGame'),
+                           lambda v: v.update(schema='orr.delivery-reachability/2'),
+                           lambda v: v.update(scope='current_frame'),
+                           lambda v: v.update(analysis='bounded_path_search'),
+                           lambda v: v.update(warnings=['success']),
+                           lambda v: v.update(current_to_goal='false'),
+                           lambda v: v.update(origin_to_goal='true')]:
+                value = json.loads(json.dumps(original))
+                mutate(value)
+                with self.subTest(case=case, value=value), self.assertRaises(ValueError):
+                    validate_report(case, value)
+        unsupported = report_expectations()['switchboard-unsupported']
+        self.assertIs(unsupported['supported'], False)
+        self.assertIsNone(unsupported['current_to_goal'])
+        self.assertIsNone(unsupported['origin_to_goal'])
+        self.assertEqual(unsupported['warnings'], [])
+        with self.assertRaises(ValueError):
+            validate_report('unknown', unsupported)
+
+    def test_custom_scene_source_bindings_reject_mixed_missing_and_wrong_assets(self):
+        source = {'files': {path: str(i) * 64 for i, path in enumerate(ASSET_SOURCES.values())}}
+        assets = {role: {'path': ASSET_PATHS[role], 'sha256': source['files'][path]}
+                  for role, path in ASSET_SOURCES.items()}
+        validate_asset_sources(source, assets)
+        mixed = json.loads(json.dumps(assets))
+        a, b = 'delivery-current-unreachable', 'delivery-restart-unreachable'
+        mixed[a]['sha256'], mixed[b]['sha256'] = mixed[b]['sha256'], mixed[a]['sha256']
+        with self.assertRaises(ValueError):
+            validate_asset_sources(source, mixed)
+        for role in ASSET_SOURCES:
+            changed = json.loads(json.dumps(assets))
+            changed.pop(role)
+            with self.assertRaises(ValueError):
+                validate_asset_sources(source, changed)
+            changed = json.loads(json.dumps(assets))
+            changed[role]['sha256'] = 'f' * 64
+            with self.assertRaises(ValueError):
+                validate_asset_sources(source, changed)
+
+    def test_query_commands_are_separate_read_only_copied_artifact_queries(self):
+        directory = Path('/tmp/copied evidence')
+        commands = command_contract(ROOT, directory, {k: ['case'] for k in SUITES}, True, sys.executable)
+        for case, (alias, asset, _, _) in QUERY_CASES.items():
+            argv, timeout = commands[case + '-reachability']
+            self.assertEqual(argv, [str(directory / BINARY_PATHS[alias + '-player']), '--reachability',
+                                    '--scene', str(directory / ASSET_PATHS[asset])])
+            self.assertEqual(timeout, 30)
+            self.assertNotIn('--reachability', commands[alias + '-identity'][0])
+            self.assertNotIn('--reachability', commands[alias + '-provenance'][0])
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch.dict(os.environ, {'DISPLAY': ':99', 'WAYLAND_DISPLAY': 'fake-display'}):
+                env = execution_environment(Path(temporary), 'a' * 40)
+            self.assertNotIn('DISPLAY', env)
+            self.assertNotIn('WAYLAND_DISPLAY', env)
 
     def test_identity_rejects_checksum_schema_input_domain_and_partial_contract(self):
         identities = g.read_json(ROOT / INVENTORY)['identities']
@@ -512,5 +708,5 @@ if __name__ == '__main__':
             parser.add_argument('--replay', type=Path)
             main(parser.parse_args())
     except Exception as error:
-        print('Switchboard objective gate FAILED: ' + str(error), file=sys.stderr)
+        print('Delivery reachability gate FAILED: ' + str(error), file=sys.stderr)
         sys.exit(1)

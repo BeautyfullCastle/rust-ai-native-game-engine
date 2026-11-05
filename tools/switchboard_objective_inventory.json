@@ -1,6 +1,8 @@
 {
   "excluded": {
     "action-compatibility": [],
+    "bundle-contract": [],
+    "bundle-lib": [],
     "controller": [],
     "controller-actions": [],
     "core": [],
@@ -12,6 +14,8 @@
     "gameplay-acceptance": [],
     "objectives": [],
     "objectives-actions": [],
+    "reachability-core": [],
+    "reachability-gameplay": [],
     "standalone": [],
     "standalone-actions": []
   },
@@ -460,13 +464,117 @@
     "test_static_game_native_ui_settle_gate.NativeUiSettleTests.test_play_waits_for_a_post_transition_ui_frame",
     "test_static_game_native_ui_settle_gate.NativeUiSettleTests.test_previous_frame_interaction_model"
   ],
+  "reports": {
+    "delivery-both-unreachable": {
+      "analysis": "integer_unit_exact_position",
+      "current_to_goal": false,
+      "game": "StarterDelivery",
+      "origin_to_goal": false,
+      "schema": "orr.delivery-reachability/1",
+      "scope": "admitted_initial_scene",
+      "supported": true,
+      "warnings": [
+        "Goal unreachable from the current position. Match the courier and goal fractional coordinates on both axes; whole-unit coordinates work.",
+        "Goal unreachable after restart at the origin. Use whole-unit goal coordinates for origin restart."
+      ]
+    },
+    "delivery-current-unreachable": {
+      "analysis": "integer_unit_exact_position",
+      "current_to_goal": false,
+      "game": "StarterDelivery",
+      "origin_to_goal": true,
+      "schema": "orr.delivery-reachability/1",
+      "scope": "admitted_initial_scene",
+      "supported": true,
+      "warnings": [
+        "Goal unreachable from the current position. Match the courier and goal fractional coordinates on both axes; whole-unit coordinates work."
+      ]
+    },
+    "delivery-restart-unreachable": {
+      "analysis": "integer_unit_exact_position",
+      "current_to_goal": true,
+      "game": "StarterDelivery",
+      "origin_to_goal": false,
+      "schema": "orr.delivery-reachability/1",
+      "scope": "admitted_initial_scene",
+      "supported": true,
+      "warnings": [
+        "Goal unreachable after restart at the origin. Use whole-unit goal coordinates for origin restart."
+      ]
+    },
+    "delivery-stock": {
+      "analysis": "integer_unit_exact_position",
+      "current_to_goal": true,
+      "game": "StarterDelivery",
+      "origin_to_goal": true,
+      "schema": "orr.delivery-reachability/1",
+      "scope": "admitted_initial_scene",
+      "supported": true,
+      "warnings": []
+    },
+    "switchboard-unsupported": {
+      "analysis": "integer_unit_exact_position",
+      "current_to_goal": null,
+      "game": "StarterSwitchboard",
+      "origin_to_goal": null,
+      "schema": "orr.delivery-reachability/1",
+      "scope": "admitted_initial_scene",
+      "supported": false,
+      "warnings": []
+    }
+  },
   "reviewed": true,
-  "schema": "orr.switchboard-objective/1",
+  "schema": "orr.delivery-reachability-focused/1",
   "suites": {
     "action-compatibility": [
       "frozen_domain_lifecycle_and_replay_are_exact",
       "invalid_typed_domain_and_mismatched_json_are_rejected",
       "nonneutral_and_oversized_profiles_are_rejected_before_play"
+    ],
+    "bundle-contract": [
+      "launcher_rejects_overrides_unknowns_duplicates_and_relative_outputs",
+      "launcher_relocates_with_spaces_and_preserves_exact_argument_boundaries",
+      "linked_runtime_rejected_without_changing_input_or_output",
+      "untrusted_runtime_is_not_executed"
+    ],
+    "bundle-lib": [
+      "bundle::tests::bounded_process_rejects_overflow_timeout_and_failure",
+      "bundle::tests::deterministic_receipt_and_exact_inventory_without_source_paths",
+      "bundle::tests::existing_and_racing_destinations_remain_untouched",
+      "bundle::tests::fractional_scene_exports_successfully_with_analysis_of_copied_scene",
+      "bundle::tests::process_group_cleanup_covers_inherited_redirected_and_timeout_descendants",
+      "bundle::tests::snapshots_reject_symlinks_hardlinks_special_files_and_bounds",
+      "bundle::tests::source_mutation_dirty_stage_and_staged_mutation_rejected",
+      "bundle::tests::stage_symlink_and_added_empty_directory_rejected",
+      "bundle::tests::unsupported_bundle_omits_optional_analysis",
+      "bundle::tests::wrong_hash_mode_architecture_and_invalid_initial_scene_rejected",
+      "bundle::tests::wrong_identity_or_compile_revision_never_publishes",
+      "editor_args::tests::explicit_loopback_only",
+      "editor_args::tests::malformed_tokens_and_legacy_listener_are_rejected",
+      "editor_args::tests::old_launch_has_no_listener",
+      "editor_args::tests::rejects_ambiguous_or_incomplete_options",
+      "editor_args::tests::supplied_tokens_and_bind_are_preserved_in_either_order",
+      "editor_args::tests::token_caps_preserved_and_errors_redacted",
+      "game_contract::file_read_tests::bounded_reader_accepts_exact_cap_and_rejects_over_cap",
+      "game_contract::file_read_tests::bounded_reader_accepts_regular_content_and_empty_files",
+      "game_contract::file_read_tests::bounded_reader_rejects_fifo_without_waiting_for_a_writer",
+      "game_contract::file_read_tests::bounded_reader_rejects_leaf_symlinks_even_at_guarded_open",
+      "game_contract::file_read_tests::scene_reader_enforces_utf8_and_256_kib_cap",
+      "game_contract::file_read_tests::unix_snapshot_rejects_same_length_file_replacement",
+      "game_contract::navigation_pulse_tests::both_games_mixed_legacy_and_navigation_replays_and_seeks_are_byte_exact",
+      "game_contract::navigation_pulse_tests::delivery_legacy_modes_keep_per_tick_axes_action_edges_and_custom_scene_reset",
+      "game_contract::navigation_pulse_tests::delivery_navigation_never_delivers_or_restarts_and_primary_retains_origin_reset",
+      "game_contract::navigation_pulse_tests::delivery_navigation_overflow_is_atomic_and_consumes_the_latch",
+      "game_contract::navigation_pulse_tests::delivery_navigation_pulse_moves_once_with_diagonals_and_shared_boolean_latch",
+      "game_contract::navigation_pulse_tests::invalid_raw_modes_are_deterministic_noops_without_releasing_existing_latches",
+      "game_contract::navigation_pulse_tests::navigation_builds_reject_old_mode_zero_one_replay_headers",
+      "game_contract::navigation_pulse_tests::navigation_mode_two_is_reflected_and_finite_but_three_plus_is_rejected",
+      "game_contract::navigation_pulse_tests::navigation_modes_preserve_input_layouts_and_reflected_field_sets",
+      "game_contract::navigation_pulse_tests::switch_legacy_axes_resume_without_new_edges_across_primary_navigation_transitions",
+      "game_contract::navigation_pulse_tests::switch_navigation_normalizes_raw_selection_without_overflow",
+      "game_contract::navigation_pulse_tests::switch_navigation_wraps_once_canonicalizes_x_preserves_y_and_board_after_solved",
+      "game_contract::reachability_tests::admitted_report_is_separate_read_only_and_unsupported_is_explicit",
+      "game_contract::reachability_tests::exact_coordinate_residues_cover_all_outcomes_axes_and_extremes"
     ],
     "controller": [
       "both_games_all_eighteen_held_values_round_trip_through_the_typed_trace_decoder",
@@ -516,7 +624,9 @@
       "game_contract::navigation_pulse_tests::navigation_modes_preserve_input_layouts_and_reflected_field_sets",
       "game_contract::navigation_pulse_tests::switch_legacy_axes_resume_without_new_edges_across_primary_navigation_transitions",
       "game_contract::navigation_pulse_tests::switch_navigation_normalizes_raw_selection_without_overflow",
-      "game_contract::navigation_pulse_tests::switch_navigation_wraps_once_canonicalizes_x_preserves_y_and_board_after_solved"
+      "game_contract::navigation_pulse_tests::switch_navigation_wraps_once_canonicalizes_x_preserves_y_and_board_after_solved",
+      "game_contract::reachability_tests::admitted_report_is_separate_read_only_and_unsupported_is_explicit",
+      "game_contract::reachability_tests::exact_coordinate_residues_cover_all_outcomes_axes_and_extremes"
     ],
     "editor-acceptance": [
       "both_games_use_managed_keyboard_mapping_and_focus_loss_neutral",
@@ -555,6 +665,8 @@
       "game_contract::navigation_pulse_tests::switch_legacy_axes_resume_without_new_edges_across_primary_navigation_transitions",
       "game_contract::navigation_pulse_tests::switch_navigation_normalizes_raw_selection_without_overflow",
       "game_contract::navigation_pulse_tests::switch_navigation_wraps_once_canonicalizes_x_preserves_y_and_board_after_solved",
+      "game_contract::reachability_tests::admitted_report_is_separate_read_only_and_unsupported_is_explicit",
+      "game_contract::reachability_tests::exact_coordinate_residues_cover_all_outcomes_axes_and_extremes",
       "gameplay::cpu_api_acceptance::stock_registered_projects_complete_via_semantic_erp_and_do_not_replay",
       "gameplay::cpu_api_acceptance::two_saved_games_support_api_only_authoring_commands_and_reconnect_fences",
       "gameplay::navigation_tests::act_receipts_prove_fractional_delivery_win_origin_restart_and_switch_reset",
@@ -604,6 +716,17 @@
       "objective_presentation_does_not_opt_legacy_games_into_static_action_profiles",
       "objective_survives_win_release_restart_and_focus_pause_without_hidden_ticks"
     ],
+    "reachability-core": [
+      "authored_integer_scene_wins_and_wins_again_after_restart",
+      "every_legal_direction_mode_and_latch_preserves_position_residues_before_win"
+    ],
+    "reachability-gameplay": [
+      "authored_integer_scene_wins_and_wins_again_after_restart",
+      "diagnostics::authored_incompatible_goal_shows_current_position_warning",
+      "diagnostics::compatible_fractional_scene_shows_restart_warning_through_lifecycle",
+      "diagnostics::integer_scene_has_no_unreachable_warning_before_or_after_restart",
+      "every_legal_direction_mode_and_latch_preserves_position_residues_before_win"
+    ],
     "standalone": [
       "editor_args::tests::explicit_loopback_only",
       "editor_args::tests::malformed_tokens_and_legacy_listener_are_rejected",
@@ -629,11 +752,15 @@
       "game_contract::navigation_pulse_tests::switch_legacy_axes_resume_without_new_edges_across_primary_navigation_transitions",
       "game_contract::navigation_pulse_tests::switch_navigation_normalizes_raw_selection_without_overflow",
       "game_contract::navigation_pulse_tests::switch_navigation_wraps_once_canonicalizes_x_preserves_y_and_board_after_solved",
+      "game_contract::reachability_tests::admitted_report_is_separate_read_only_and_unsupported_is_explicit",
+      "game_contract::reachability_tests::exact_coordinate_residues_cover_all_outcomes_axes_and_extremes",
       "standalone::tests::controls_status_preserves_legacy_pause_active_and_win",
       "standalone::tests::empty_presentation_hint_preserves_legacy_titles",
       "standalone::tests::objective_hint_survives_pause_active_and_win_titles",
       "standalone::tests::output_creation_never_clobbers_existing_files_or_symlinks",
       "standalone::tests::outputs_stay_outside_runtime_bundle_and_normalize_parents",
+      "standalone::tests::reachability_query_requires_scene_and_excludes_runtime_or_other_queries",
+      "standalone::tests::reachability_title_is_dynamic_and_preserves_controls_and_hints",
       "standalone::view_clock::tests::delayed_wake_schedules_one_frame_without_catch_up_burst",
       "standalone::view_clock::tests::redraw_wakes_do_not_schedule_another_frame_before_deadline"
     ],
@@ -662,6 +789,8 @@
       "game_contract::navigation_pulse_tests::switch_legacy_axes_resume_without_new_edges_across_primary_navigation_transitions",
       "game_contract::navigation_pulse_tests::switch_navigation_normalizes_raw_selection_without_overflow",
       "game_contract::navigation_pulse_tests::switch_navigation_wraps_once_canonicalizes_x_preserves_y_and_board_after_solved",
+      "game_contract::reachability_tests::admitted_report_is_separate_read_only_and_unsupported_is_explicit",
+      "game_contract::reachability_tests::exact_coordinate_residues_cover_all_outcomes_axes_and_extremes",
       "standalone::tests::action_controls_status_never_invents_restart_or_hides_pause",
       "standalone::tests::controls_status_preserves_legacy_pause_active_and_win",
       "standalone::tests::empty_presentation_hint_preserves_legacy_titles",
@@ -669,6 +798,8 @@
       "standalone::tests::output_creation_never_clobbers_existing_files_or_symlinks",
       "standalone::tests::outputs_stay_outside_runtime_bundle_and_normalize_parents",
       "standalone::tests::presentation_hint_preserves_action_titles_without_inventing_restart",
+      "standalone::tests::reachability_query_requires_scene_and_excludes_runtime_or_other_queries",
+      "standalone::tests::reachability_title_is_dynamic_and_preserves_controls_and_hints",
       "standalone::view_clock::tests::delayed_wake_schedules_one_frame_without_catch_up_burst",
       "standalone::view_clock::tests::redraw_wakes_do_not_schedule_another_frame_before_deadline"
     ]

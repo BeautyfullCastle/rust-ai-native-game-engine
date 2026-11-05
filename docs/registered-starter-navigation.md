@@ -30,6 +30,26 @@ requires the expected exact game state; completion additionally requires a newer
 frame after neutral admission. Neither a queued request nor an input ACK proves
 that the requested game action happened.
 
+## Authored Delivery reachability
+
+The registered project presenter warns separately when the goal cannot be reached
+from the current courier position or after the existing restart at the origin.
+Movement preserves each axis’s fractional coordinate. Match `Courier.position`
+and `Delivery.goal` fractional coordinates for the first delivery; use whole-unit
+coordinates for both to support repeated deliveries with origin restart.
+
+For example, `[0,0]` to `[4.5,0]` is unreachable in both phases. A start at
+`[1.5,-0.25]` can reach `[3.5,1.75]` once, but the unchanged origin restart cannot.
+The warnings never snap coordinates, disable commands, reject admitted scenes or
+change input/replay identity. They establish coordinate reachability, not a win
+within a particular time or recording budget.
+
+Concrete native players show compact live warnings and provide
+`--reachability --scene PATH` as a separate non-window JSON query. Delivery bundle
+receipts carry the same admitted-scene analysis outside immutable identity; it is
+exporter analysis, not a runtime-play receipt. Other games report unsupported
+analysis rather than success. See the [starter guide](../examples/static-game-starter/README.md).
+
 ## Versioned input behavior
 
 The existing `deliver` and `toggle` fields now have three named modes:

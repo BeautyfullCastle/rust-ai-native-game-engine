@@ -104,6 +104,11 @@ impl<G: StandaloneGame> EmbeddedGameplayView for StarterView<G> {
         } else {
             ui.label("Controls require exactly one actor");
         }
+        if let Some(reachability) = G::reachability(frame) {
+            for warning in reachability.warnings() {
+                ui.add(egui::Label::new(warning).wrap());
+            }
+        }
         let ready = context.phase == GameplayViewPhase::Live && context.input_ready;
         let mut intent = None;
         ui.horizontal_wrapped(|ui| {

@@ -110,7 +110,11 @@ pauses without secretly advancing the simulation. Focus regain never resumes.
 In live play, the first naturally consumed tick after explicit resume is neutral;
 a fresh, non-repeat key press after that boundary is needed. Replay viewing
 consumes the recorded inputs unchanged. Synthetic/repeated presses cannot
-re-arm controls. The window title reports pause/win/control instructions.
+re-arm controls. The window title reports pause/win/control instructions and coordinate-reachability
+warnings for authored Delivery scenes. Whole-unit movement preserves fractional
+coordinates: a goal can be unreachable now, after the existing origin restart,
+or both. The registered project presenter shows the same distinction. These
+read-only warnings do not reject scenes, snap positions or change game rules.
 
 `--record /absolute/new.orrp` saves the actual input recording on normal window
 close. `--replay /absolute/existing.orrp` opens a read-only viewer. These options
@@ -130,10 +134,19 @@ one admitted scene, a fixed launcher and a deterministic receipt. The selected
 runtime must be compiled with `ORR_STATIC_STANDALONE_BUILD_SHA` set to the exact
 reviewed 40-hex source revision. `--provenance` fails when that stamp is absent or
 malformed; `--identity --scene PATH` queries full admission without a window.
+`--reachability --scene PATH` separately reports coordinate analysis without a
+window; it cannot be combined with identity, provenance, replay, record or observe.
+The report does not guarantee completion within recording/trace budgets. Games
+without this analysis report `supported: false`, not successful reachability.
 Inputs must be regular single-link files; copy a Cargo-produced hard-linked
 executable into a fresh staging path before packaging. The packager requires matching source stamp and executable SHA-256, then runs
 bounded identity/provenance checks before no-clobber publication. A supplied
 hash/stamp is a mix-up guard, not authentication of arbitrary executable code.
+For Delivery, `bundle.json` includes optional `reachability` analysis of its exact
+admitted scene, separate from immutable identity. This is exporter analysis, not
+a runtime play test; fractional scenes still export. The fixed launcher is
+unchanged. Query a relocated bundle directly with
+`bin/standalone --reachability --scene scene/game.scene.yaml` from its directory.
 
 ```sh
 cargo run -p orr_static_starter --no-default-features --features bundle --bin bundle -- delivery --runtime /absolute/delivery-player --runtime-sha256 HEX64 --scene /absolute/delivery.scene.yaml --output /absolute/new-bundle --source-sha HEX40 --trusted-runtime
