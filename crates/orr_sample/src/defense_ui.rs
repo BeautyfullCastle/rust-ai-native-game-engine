@@ -271,6 +271,8 @@ impl Default for AudioPanel {
 
 pub struct DefenseUi {
     pub context: egui::Context,
+    #[cfg(feature = "coop-defense-pixelfx")]
+    pub(crate) vfx: crate::defense_vfx::DefenseVfx,
     pub selected: Option<u32>,
     pub(crate) board_pending: bool,
     pub started: bool,
@@ -301,6 +303,8 @@ impl DefenseUi {
     pub fn new() -> Self {
         Self {
             context: egui::Context::default(),
+            #[cfg(feature = "coop-defense-pixelfx")]
+            vfx: crate::defense_vfx::DefenseVfx::default(),
             selected: None,
             board_pending: false,
             started: false,
@@ -721,6 +725,8 @@ impl DefenseUi {
             ));
             p.rect_filled(screen, 0.0, INK);
             view::paint(&p, l, frame, self.selected);
+            #[cfg(feature = "coop-defense-pixelfx")]
+            self.vfx.paint(&p.with_clip_rect(l.rect(30.0, 90.0, 1140.0, 730.0).intersect(screen)), l);
             l.text(&p, 40.0, 37.0, 27.0, PAPER, "STORMGLASS  /  FOUNDRY");
             l.text(
                 &p,

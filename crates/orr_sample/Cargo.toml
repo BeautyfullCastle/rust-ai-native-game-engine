@@ -11,6 +11,8 @@ default-run = "arena"
 workspace = true
 
 [features]
+# Embedded, licensed pixelfx atlases driven only by actual combat events.
+coop-defense-pixelfx = ["coop-defense"]
 # Opt-in authored native presentation; hardware output additionally needs audio-native.
 coop-defense-audio = ["coop-defense", "audio", "orr_package/coop-audio-load"]
 # Optional Linux native admission-journal run saves, never enabled by web/default.

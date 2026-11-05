@@ -156,3 +156,6 @@ pub mod defense_run_save_store;
 
 #[cfg(feature = "coop-defense-audio")]
 pub mod defense_audio;
+
+#[cfg(feature = "coop-defense-pixelfx")]
+pub(crate) mod defense_vfx;
