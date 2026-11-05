@@ -21,8 +21,8 @@ SCHEMA = 'orr.static-standalone-native/1'
 TEST = 'source_hidden_standalone_windows'
 DECODERS = {'little_and_big_endian_pixels', 'rgb565_masks_and_scanline_padding',
             'swapped_masks_and_packed24', 'reject_bad_bounds_masks_and_lengths'}
-GAMES = {'delivery': ('StarterDelivery', '0x5354415254455201'),
-         'switchboard': ('StarterSwitchboard', '0x5354415254455202')}
+GAMES = {'delivery': ('StarterDelivery', '0x5354415254563201'),
+         'switchboard': ('StarterSwitchboard', '0x5354415254563202')}
 
 
 def strict_json(text):

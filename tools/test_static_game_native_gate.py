@@ -120,6 +120,12 @@ class NativeGateTests(unittest.TestCase):
         with self.assertRaises((ValueError, KeyError)):
             gate.validate(self.root, PROVENANCE)
 
+    def test_current_navigation_build_identities(self):
+        self.assertEqual(gate.GAMES, {
+            'delivery': ('StarterDelivery', '0x5354415254563201'),
+            'switchboard': ('StarterSwitchboard', '0x5354415254563202'),
+        })
+
     def test_positive_complete_both_games(self):
         self.assertEqual(gate.validate(self.root, PROVENANCE)['captures'], 8)
 

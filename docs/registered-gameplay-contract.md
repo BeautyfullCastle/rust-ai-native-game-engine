@@ -94,6 +94,12 @@ opaque evidence. Focus/lifecycle/source changes reset presentation. The new
 generic startup supports Commands only; unsupported Held combinations are
 rejected while legacy registered held/action/spatial games remain supported.
 
+The starter's command-mode Delivery and Switchboard projects expose their stock
+navigation and Act controls through project-owned codecs and presenters. Their
+versioned navigation pulse makes a move/select independent of observation delay;
+see [controls and compatibility](registered-starter-navigation.md). This adds no
+game-specific state to the shared router.
+
 ## Verification and completion
 
 CPU tests cover legacy spatial/held compatibility, embedded admission,

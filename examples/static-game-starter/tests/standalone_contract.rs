@@ -604,7 +604,7 @@ fn both_games_reject_inputs_outside_the_finite_held_contract() {
         DeliveryInput {
             dx: 0,
             dy: 0,
-            deliver: 2,
+            deliver: 3,
         },
     ] {
         assert!(!DeliveryGame::valid_input(&input));
@@ -625,7 +625,7 @@ fn both_games_reject_inputs_outside_the_finite_held_contract() {
         },
         SwitchInput {
             selection: FP::ZERO,
-            toggle: 2,
+            toggle: 3,
             pad: 0,
         },
         // Reserved bytes are not another input channel. Both the physical
