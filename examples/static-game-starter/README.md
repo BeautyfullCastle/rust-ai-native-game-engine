@@ -25,6 +25,10 @@ uses a fixed-point selection input and a four-bit Board singleton instead of
 courier motion: left/right selects a switch, Space toggles, matching target wins.
 Holding directions repeats each tick; Space is edge-triggered. Default target 5
 means switches zero and two. Edit Board.target before Play to change the puzzle.
+The upper square row shows the authored target; the lower circle row shows the
+current switches, both ordered zero to three from left to right. Green means on
+and gray means off. The native title and editor hint explain this read-only cue;
+pausing, winning or restarting does not replace the authored target.
 
 The saved `--project` command-mode route instead supplies one-shot Move/Select
 buttons and the same semantic ERP intents. It can complete both unchanged stock

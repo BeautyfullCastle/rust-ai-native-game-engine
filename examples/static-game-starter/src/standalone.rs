@@ -40,6 +40,17 @@ fn controls_status(paused: bool, won: bool, legend: Option<&str>) -> std::borrow
     }
 }
 
+// Presentation hints never replace the host lifecycle or action-profile legend.
+fn window_title<G: StandaloneGame>(paused: bool, won: bool, legend: Option<&str>) -> String {
+    let status = controls_status(paused, won, legend);
+    let hint = G::presentation_hint();
+    if hint.is_empty() {
+        format!("{} | {status}", G::ID)
+    } else {
+        format!("{} | {status} | {hint}", G::ID)
+    }
+}
+
 // This clock only schedules the view-side bridge pump. It never enters game state.
 #[allow(clippy::disallowed_types)]
 mod view_clock {
@@ -630,12 +641,11 @@ impl<G: StandaloneGame> Native<G> {
         let action_legend = self.controller.action_legend.as_deref();
         #[cfg(not(feature = "static-game-actions"))]
         let action_legend = None;
-        let status = controls_status(
+        gfx.window.set_title(&window_title::<G>(
             self.controller.paused(),
             state["won"].as_u64() == Some(1),
             action_legend,
-        );
-        gfx.window.set_title(&format!("{} | {status}", G::ID));
+        ));
         if let Some(observer) = &mut self.observer {
             let size = gfx.renderer.size();
             observer.write(&json!({"schema":"orr.static-standalone-observation/1","sequence":self.sequence,"reason":self.reason,
@@ -825,17 +835,24 @@ pub fn run<G: StandaloneGame + 'static>(options: Options) -> Result<(), String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game_contract::Starter;
 
     #[test]
     fn controls_status_preserves_legacy_pause_active_and_win() {
         for won in [false, true] {
-            assert_eq!(controls_status(true, won, None), "paused: Enter starts/resumes");
+            assert_eq!(
+                controls_status(true, won, None),
+                "paused: Enter starts/resumes"
+            );
         }
         assert_eq!(
             controls_status(false, false, None),
             "WASD/arrows move; Space acts; Escape pauses"
         );
-        assert_eq!(controls_status(false, true, None), "won: release then Space restarts");
+        assert_eq!(
+            controls_status(false, true, None),
+            "won: release then Space restarts"
+        );
     }
 
     #[cfg(feature = "static-game-actions")]
@@ -848,7 +865,10 @@ mod tests {
         .unwrap();
         let legend = profile.controls_legend();
         for won in [false, true] {
-            assert_eq!(controls_status(true, won, Some(&legend)), "paused: Enter starts/resumes");
+            assert_eq!(
+                controls_status(true, won, Some(&legend)),
+                "paused: Enter starts/resumes"
+            );
             let status = controls_status(false, won, Some(&legend));
             assert!(status.contains("jump: Space"));
             assert!(status.ends_with("Escape pauses"));
@@ -862,6 +882,74 @@ mod tests {
             controls_status(false, true, Some(&legend)),
             "won; WASD/arrows move; jump: Space; Escape pauses"
         );
+    }
+
+    #[test]
+    fn empty_presentation_hint_preserves_legacy_titles() {
+        use crate::delivery::DeliveryGame;
+        assert_eq!(DeliveryGame::presentation_hint(), "");
+        for paused in [false, true] {
+            for won in [false, true] {
+                assert_eq!(
+                    window_title::<DeliveryGame>(paused, won, None),
+                    format!(
+                        "{} | {}",
+                        DeliveryGame::ID,
+                        controls_status(paused, won, None)
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn objective_hint_survives_pause_active_and_win_titles() {
+        use crate::switchboard::SwitchGame;
+        let hint = SwitchGame::presentation_hint();
+        assert!(!hint.is_empty());
+        for paused in [false, true] {
+            for won in [false, true] {
+                assert_eq!(
+                    window_title::<SwitchGame>(paused, won, None),
+                    format!(
+                        "{} | {} | {hint}",
+                        SwitchGame::ID,
+                        controls_status(paused, won, None)
+                    )
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "static-game-actions")]
+    #[test]
+    fn presentation_hint_preserves_action_titles_without_inventing_restart() {
+        use crate::{delivery::DeliveryGame, switchboard::SwitchGame};
+        let profile = orr_input::HeldActionProfile::new(vec![Action {
+            name: "jump".into(),
+            bindings: vec![Button::Keyboard { key: Key::Space }],
+        }])
+        .unwrap();
+        let legend = profile.controls_legend();
+        for paused in [false, true] {
+            for won in [false, true] {
+                let status = controls_status(paused, won, Some(&legend));
+                assert_eq!(
+                    window_title::<DeliveryGame>(paused, won, Some(&legend)),
+                    format!("{} | {status}", DeliveryGame::ID)
+                );
+                let title = window_title::<SwitchGame>(paused, won, Some(&legend));
+                assert_eq!(
+                    title,
+                    format!(
+                        "{} | {status} | {}",
+                        SwitchGame::ID,
+                        SwitchGame::presentation_hint()
+                    )
+                );
+                assert!(!title.contains("restart"));
+            }
+        }
     }
 
     #[test]
