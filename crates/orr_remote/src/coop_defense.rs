@@ -11,7 +11,9 @@ use orr_reflect::{Scene, SceneIndex};
 use orr_sim::Simulation;
 use serde_json::json;
 
-use crate::{GameHooks, HostLimits, LocalHost, ServerConfig};
+use crate::{GameHooks, HostLimits, LocalHost, ServerConfig, ViewStreamHook};
+
+mod stream;
 
 pub const GAME: &str = "CoopDefense";
 pub const INITIAL_SCENE: &str = "schema: orr.scene/1\nentities: {}\n";
@@ -50,14 +52,14 @@ pub fn document(text: &str) -> Result<EditorDoc, String> {
     .map_err(|e| e.to_string())
 }
 
-/// Set this preset's simulation identity and scene location.
+/// Set this preset's simulation identity, scene location and readonly view stream.
 pub fn configure(limits: &mut HostLimits, path: Option<PathBuf>) {
     limits.player_count = 1;
     limits.tick_rate = TICK_RATE;
     limits.scene_path = path;
     limits.build_id = SCENARIO_BUILD_ID;
     limits.game = GameHooks::new(GAME);
-    limits.view_stream = None;
+    limits.view_stream = Some(ViewStreamHook::new(stream::DefenseStreamProducer::new()));
 }
 
 /// Start the existing local host lifecycle with typed managed input.

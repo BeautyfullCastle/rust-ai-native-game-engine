@@ -415,6 +415,10 @@ pub fn registry() -> &'static GameplayContracts {
 }
 
 #[cfg(test)]
+#[path = "stormglass_observation_acceptance.rs"]
+mod observation_acceptance;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use orr_editor::static_adapter::CommandScope;
