@@ -25,12 +25,14 @@ Native [#429](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pul
 
 [PR #438](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/438)은 작성한 Switchboard 목표를 상단 사각형 행과 native/editor 안내로 표시한다. 기존 현재 원형·규칙·입력·build identity는 유지한다. 개발 merge e145c2a9, tree ef02e10b의 [정확 head CI](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/41985042770)와 [독립 다운로드 재실행](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/438#issuecomment-6652514909)이 통과했다. 187개 CPU·58개 Python 테스트와 7개 strict 구성을 확인했으며 원래 재현·lint 실패와 실제 창 가독성 미검증 범위를 보존한다.
 
+[PR #439](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/439)은 Delivery의 현재 위치·원점 재시작 이후 좌표 도달성 경고를 실제 editor presenter, native 제목/조회와 bundle 분석에 연결했다. 소수 좌표 허용·기존 규칙·identity는 유지한다. 개발 merge 1c75e650, tree 5b8fd9e1의 [정확 head CI](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/42000508082)와 [독립 원본 산출물 재실행](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/439#issuecomment-6654700721)이 통과했다. 최초 경고 재현 실패·gate discovery 실패·형식 advisory를 보존하며 좌표 호환성을 완주 보장으로 확대하지 않는다.
+
 - **과거 Windows 직접 플레이:** 10-wave 승리, 369 kills, 29 merges, core 8/30 및 Wave 2 패배 → R 재시작을 관측했다. [원래 증거](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94#issuecomment-6430939337)는 당시 산출물에만 적용하며 현재 소스의 Windows 재검증으로 옮기지 않는다.
 - **현재 Stormglass 실행 범위:** 실제 native/WASM consumed-input trace와 source-hidden packed 소비, mock-DOM 제어/저장 검사는 실제 브라우저 파일 선택·표시·물리 입력과 별개다. 2026-11-04 Chromium 사전 검사는 페이지 로드 전 Unix socket EPERM으로 실패했고 정식 확대 실행도 executor 초기화에서 실패했다. 실제 브라우저 플레이는 **미검증**이며 다른 환경 실행으로 이 제한을 우회하지 않았다.
 
 ## 남은 우선순위와 경계
 
-1. 실제 제작·완주 경로를 우선한다. [Delivery 좌표 도달성 안내 공백](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94#issuecomment-6652942278)을 실제 편집·저장·재개방과 CPU editor presenter로 재현했다. 정수 단위 이동·원점 재시작·소수 좌표 허용은 기존 계약이므로 바꾸지 않는다. 현재 위치와 재시작 이후 목표 도달성 경고를 분리하고 native 조회·bundle 분석에 연결한다. 입장/배포 성공을 완주 보장으로 해석하지 않으며 구현·검증 중이다.
+1. 실제 제작·완주 경로를 우선한다. [Stormglass browser의 오래된 드래그 취소](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94#issuecomment-6655007764)가 먼저 승인된 이동의 목적지 선택을 빈 옛 칸으로 덮는 문제를 실제 WASM·모의 DOM으로 재현했다. 승인된 이동/합성 때 이전 보드 기준 제스처를 정리하는 좁은 UI 수정을 검증 중이다. 캠페인 설정·승패, native 저장/복원, browser authored import/offline 전달 조사에서는 추가 결함을 확인하지 않아 변경하지 않았다.
 2. 허용된 실행 환경이 있을 때 현재 산출물의 브라우저/native-window 플레이를 별도 수용한다. 화면 증거가 없으면 성공률·모바일·Windows·hardware GPU까지 확대하지 않는다.
 3. [설계 v2](design-v2.md)의 사전 고정 과제/seed/oracle·예산·실제 모델 기준선을 준비한다. 모델 호출·업로드·비용은 별도 승인 범위이며 아직 측정 결과가 없다.
 
