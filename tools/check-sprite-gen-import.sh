@@ -60,6 +60,7 @@ run strict-sprite cargo clippy --locked --release -p orr_sprite --all-features -
 run strict-package cargo clippy --locked --release -p orr_package --features sprite-authoring --all-targets -- -D warnings
 run strict-playback cargo clippy --locked --release -p orr_sample --features collect-sprites,project-create --test sprite_gen_playback -- -D warnings
 run feature-off cargo check --locked --release -p orr_package --no-default-features --bin orr_pkg
+run editor-deps cargo test --locked --release -p orr_editor --test deps
 python3 - "$EVIDENCE" <<'PY'
 import hashlib,json,sys
 from pathlib import Path
