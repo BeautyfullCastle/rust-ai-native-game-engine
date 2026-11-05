@@ -198,6 +198,20 @@ pub fn import_package(request: &Request) -> Result<Report, String> {
     })
 }
 
+/// Convert a materialized sprite-gen manifest. The explicit PNG is copied byte
+/// for byte; upstream path metadata is never opened or executed.
+pub fn import_sprite_gen_package(request: &Request) -> Result<Report, String> {
+    import_package_with(request, || {
+        let bytes = read_regular(&request.json, MAX_JSON_BYTES)
+            .map_err(|e| format!("sprite-gen manifest: {e}"))?;
+        let json = std::str::from_utf8(&bytes).map_err(|e| e.to_string())?;
+        let document = orr_sprite::sprite_gen::from_json(json).map_err(|e| e.to_string())?;
+        let mut bytes = document.to_json().map_err(|e| e.to_string())?.into_bytes();
+        bytes.push(b'\n');
+        Ok(bytes)
+    })
+}
+
 /// Admit generated JSON through the same bounded document and PNG checks.
 /// The request's JSON path is not opened by this in-memory entry point.
 pub fn import_package_bytes(request: &Request, json: &[u8]) -> Result<Report, String> {

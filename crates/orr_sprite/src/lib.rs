@@ -8,6 +8,8 @@ use std::{collections::BTreeSet, fmt};
 #[cfg(feature = "png-import")]
 pub mod png_import;
 
+pub mod sprite_gen;
+
 pub const FORMAT: &str = "orr_sprite";
 pub const VERSION: u32 = 1;
 /// Conservative version-1 resource limits, checked before runtime indexing.
