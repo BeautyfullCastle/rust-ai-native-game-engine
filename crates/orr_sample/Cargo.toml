@@ -11,6 +11,8 @@ default-run = "arena"
 workspace = true
 
 [features]
+# Optional generated character skin: visual idle/charge loop, never attack timing.
+coop-defense-pixel-motion = ["coop-defense"]
 # Embedded, licensed pixelfx atlases driven only by actual combat events.
 coop-defense-pixelfx = ["coop-defense"]
 # Opt-in authored native presentation; hardware output additionally needs audio-native.

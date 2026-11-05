@@ -233,6 +233,18 @@ fn ordered<T: orr_ecs::Component + Copy>(frame: FrameView<'_>) -> Vec<T> {
 /// Draw the same vector scene from the registered presenter's readonly snapshot.
 /// The caller owns clipping and selection; no commands or simulation mutations.
 pub fn paint_view(p: &Painter, l: Layout, frame: FrameView<'_>, selected: Option<u32>) {
+    paint_view_with_unit_skin(p, l, frame, selected, |_, _, _, _| false);
+}
+
+// The native opt-in skin can replace only the unit silhouette. Shared/default
+// presentation keeps the original vector path and all board/combat feedback.
+pub(crate) fn paint_view_with_unit_skin(
+    p: &Painter,
+    l: Layout,
+    frame: FrameView<'_>,
+    selected: Option<u32>,
+    skin: impl Fn(&Painter, Pos2, f32, &game::DefenseUnit) -> bool,
+) {
     let run = frame.singleton::<game::DefenseRun>();
     p.rect_filled(l.rect(0.0, 0.0, 1200.0, 940.0), 0.0, INK);
     // Slate floor, hand-laid garden edges, and fine brass conduit work.
@@ -363,14 +375,16 @@ pub fn paint_view(p: &Painter, l: Layout, frame: FrameView<'_>, selected: Option
                 && (s.x - x).abs() + (s.y - y).abs() < 25
         });
         let c = l.cell(unit.board, unit.cell).center();
-        turret(
-            p,
-            c + vec2(0.0, if firing { 3.0 } else { 0.0 }) * l.scale,
-            l.scale,
-            unit.role,
-            unit.tier,
-            run.tick,
-        );
+        if !skin(p, c, l.scale, &unit) {
+            turret(
+                p,
+                c + vec2(0.0, if firing { 3.0 } else { 0.0 }) * l.scale,
+                l.scale,
+                unit.role,
+                unit.tier,
+                run.tick,
+            );
+        }
         if firing {
             p.circle_stroke(
                 c - vec2(0.0, 25.0) * l.scale,

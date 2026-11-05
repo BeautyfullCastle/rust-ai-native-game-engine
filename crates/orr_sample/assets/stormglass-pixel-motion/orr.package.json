@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "name": "stormglass-sentry-charge-pixeloe",
+  "version": "0.1.0",
+  "engine": "^0.0.1",
+  "capabilities": [
+    "sprite"
+  ],
+  "dependencies": {},
+  "files": [
+    "sprites.json",
+    "atlas.png",
+    "LICENSE.txt"
+  ]
+}
