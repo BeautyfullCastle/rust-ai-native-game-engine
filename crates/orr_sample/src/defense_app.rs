@@ -367,6 +367,22 @@ impl ExpectedSelection {
     }
 }
 impl App {
+    fn should_pause_on_focus_loss(&self) -> bool {
+        let frame = self.session.predicted_frame();
+        let run = game::run(frame);
+        self.ui.started
+            && (run.phase == game::PLAYING
+                // A terminal frame can still become a live run when an already
+                // admitted Restart reaches its delayed Session tick. Inspect
+                // that tail, not queued intent or the neutral board frontier.
+                || self.session.authored_since(frame.tick()).iter().any(|pending| {
+                    pending.slot == PlayerSlot(0)
+                        && pending.input.action == game::RESTART
+                        && pending.input.sequence > run.last_sequence
+                        && pending.input.source_cell < game::CELLS_PER_BOARD
+                        && pending.input.target_cell < game::CELLS_PER_BOARD
+                }))
+    }
     fn refresh_board(&mut self) {
         let frame = self.session.predicted_frame();
         if self.board.through.is_some_and(|tick| frame.tick() >= tick) {
@@ -408,10 +424,7 @@ impl App {
                 .events
                 .iter()
                 .any(|event| matches!(event, egui::Event::WindowFocused(false)));
-        if focus_lost
-            && self.ui.started
-            && game::run(self.session.predicted_frame()).phase == game::PLAYING
-        {
+        if focus_lost && self.should_pause_on_focus_loss() {
             self.ui.pause();
         }
         #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
@@ -610,7 +623,7 @@ impl App {
             self.sync_audio(true);
             self.focus_lost_pending = true;
             self.cancel_board_intent();
-            if self.ui.started && game::run(self.session.predicted_frame()).phase == game::PLAYING {
+            if self.should_pause_on_focus_loss() {
                 self.ui.pause();
             }
         }

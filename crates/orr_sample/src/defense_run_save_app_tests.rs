@@ -398,3 +398,226 @@ fn restoring_earlier_pending_tail_replaces_live_board_frontier() {
         .any(|u| u.board == 0 && u.active != 0));
     assert_eq!(a.ui.selected, None);
 }
+
+mod terminal_focus {
+    use super::*;
+
+    const TICK: f64 = 1.0 / 60.0;
+
+    fn lost(path: &std::path::Path) -> App {
+        let source = "schema: orr.scene/1\nentities: {}\nsingletons:\n  CoopDefense::Scenario: {starting_gold: 0, reactor_hp: 1}\n  CoopDefense::EnemyHealth: {multiplier: 4}\n  CoopDefense::WaveCounts: {pair_counts: [28,28,28,28,28,28,28,28,28,28]}\n";
+        let mut a = app(path, Some(source.into()));
+        frame(&mut a, key(egui::Key::Enter), 0.0);
+        for _ in 0..5000 {
+            if game::run(a.session.predicted_frame()).phase != game::PLAYING {
+                break;
+            }
+            frame(&mut a, vec![], 0.1);
+        }
+        assert_eq!(game::run(a.session.predicted_frame()).phase, game::LOST);
+        assert!(a.session.predicted_frame().tick() > 120);
+        a
+    }
+
+    fn tail(a: &App) -> Vec<(u64, PlayerSlot, game::DefenseInput)> {
+        a.session
+            .authored_since(a.session.predicted_frame().tick())
+            .into_iter()
+            .map(|entry| {
+                assert!(entry.commands.is_empty());
+                assert!(!entry.disconnected);
+                (entry.tick, entry.slot, entry.input)
+            })
+            .collect()
+    }
+
+    fn admit_restart_and_pause(a: &mut App) {
+        frame(a, key(egui::Key::R), TICK);
+        assert!(a.commands.is_empty());
+        assert_eq!(game::run(a.session.predicted_frame()).phase, game::LOST);
+        let admitted = tail(a);
+        assert_eq!(
+            admitted
+                .iter()
+                .filter(|(_, _, input)| input.action == game::RESTART)
+                .count(),
+            1
+        );
+        frame(a, key(egui::Key::P), 0.0);
+        assert!(a.ui.paused);
+        assert_eq!(tail(a), admitted);
+    }
+
+    // Continuing a restore is not enough: losing focus before the admitted
+    // Restart arrives must require another Continue without changing its tail.
+    fn continue_blur_and_consume_once(a: &mut App) {
+        assert!(a.ui.paused);
+        let before = snapshot(a);
+        let admitted = tail(a);
+        let tick = a.session.predicted_frame().tick();
+        let generation = game::run(a.session.predicted_frame()).generation;
+        let last_sequence = game::run(a.session.predicted_frame()).last_sequence;
+        let restart = admitted
+            .iter()
+            .find(|(_, _, input)| input.action == game::RESTART)
+            .unwrap();
+        assert_eq!(restart.0, tick + 2);
+        assert_eq!(restart.1, PlayerSlot(0));
+        assert!(restart.2.sequence > last_sequence);
+
+        frame(a, key(egui::Key::Enter), 0.0);
+        assert!(!a.ui.paused);
+        assert_eq!(snapshot(a), before);
+        assert_eq!(tail(a), admitted);
+        a.set_focused(false);
+        a.set_focused(true);
+        for delta in [0.0, 0.1, 3600.0] {
+            frame(a, vec![], delta);
+            assert!(a.ui.paused);
+            assert_eq!(snapshot(a), before);
+            assert_eq!(tail(a), admitted);
+            assert_eq!(a.board.through, Some(restart.0));
+            assert!(a.ui.board_pending);
+            assert!(a.commands.is_empty());
+            assert_eq!(a.accumulator, 0.0);
+        }
+
+        frame(a, key(egui::Key::Enter), 0.0);
+        assert!(!a.ui.paused);
+        assert_eq!(snapshot(a), before);
+        assert_eq!(tail(a), admitted);
+        frame(a, vec![], TICK);
+        assert_eq!(a.session.predicted_frame().tick(), tick + 1);
+        let run = game::run(a.session.predicted_frame());
+        assert_eq!((run.phase, run.generation), (game::LOST, generation));
+        assert_eq!(run.last_sequence, last_sequence);
+        assert!(tail(a).contains(restart));
+        frame(a, vec![], TICK);
+        assert_eq!(a.session.predicted_frame().tick(), restart.0);
+        let run = game::run(a.session.predicted_frame());
+        assert_eq!((run.phase, run.generation), (game::PLAYING, generation + 1));
+        assert_eq!(run.last_sequence, restart.2.sequence);
+        assert!(!a.ui.board_pending);
+        assert!(tail(a)
+            .iter()
+            .all(|(_, _, input)| input.action != game::RESTART));
+        frame(a, vec![], 0.1);
+        assert_eq!(
+            game::run(a.session.predicted_frame()).generation,
+            generation + 1
+        );
+        assert_eq!(a.ui.high_water(), restart.2.sequence);
+        assert!(a.error.is_none());
+    }
+
+    #[test]
+    fn restored_terminal_restart_waits_for_second_continue_after_focus_return() {
+        let dir = private_dir();
+        let mut original = lost(dir.path());
+        admit_restart_and_pause(&mut original);
+        click(&mut original, 450.0, 582.0);
+        let saved = snapshot(&mut original);
+        let admitted = tail(&original);
+        let mut restored = app(dir.path(), None);
+        click(&mut restored, 600.0, 682.0);
+        click(&mut restored, 600.0, 321.0);
+        finish_load(&mut restored);
+        assert_eq!(snapshot(&mut restored), saved);
+        assert_eq!(tail(&restored), admitted);
+        continue_blur_and_consume_once(&mut restored);
+    }
+
+    #[test]
+    fn restoring_idle_terminal_clears_live_pending_restart_focus_guard() {
+        let dir = private_dir();
+        let mut a = lost(dir.path());
+        frame(&mut a, key(egui::Key::P), 0.0);
+        click(&mut a, 450.0, 582.0);
+        let idle = snapshot(&mut a);
+        let idle_tail = tail(&a);
+        assert!(idle_tail
+            .iter()
+            .all(|(_, _, input)| *input == game::DefenseInput::default()));
+        frame(&mut a, key(egui::Key::Enter), 0.0);
+        admit_restart_and_pause(&mut a);
+        begin_replace(&mut a);
+        finish_load(&mut a);
+        assert_eq!(snapshot(&mut a), idle);
+        assert_eq!(tail(&a), idle_tail);
+        frame(&mut a, key(egui::Key::Enter), 0.0);
+        assert!(!a.ui.paused);
+        assert!(
+            a.ui.board_pending,
+            "restored neutral tail still has a frontier"
+        );
+        a.set_focused(false);
+        a.set_focused(true);
+        frame(&mut a, vec![], 0.0);
+        assert!(
+            !a.ui.paused,
+            "neutral frontier must not retain Restart evidence"
+        );
+        assert_eq!(snapshot(&mut a), idle);
+        assert_eq!(tail(&a), idle_tail);
+        frame(&mut a, vec![], 0.1);
+        assert!(!a.ui.paused);
+        assert!(!a.ui.board_pending);
+        let run = game::run(a.session.predicted_frame());
+        assert_eq!((run.phase, run.generation), (game::LOST, 0));
+        assert_eq!(run.last_sequence, 0);
+    }
+
+    fn replacement_preserves_pending_restart(cancel: bool) {
+        let dir = private_dir();
+        let mut a = lost(dir.path());
+        frame(&mut a, key(egui::Key::P), 0.0);
+        click(&mut a, 450.0, 582.0);
+        if !cancel {
+            let mut damaged: serde_json::Value = serde_json::from_slice(&encoded(&mut a)).unwrap();
+            let checksum = damaged["final_checksum"].as_u64().unwrap();
+            damaged["final_checksum"] = serde_json::json!(checksum ^ 1);
+            a.saves
+                .as_ref()
+                .unwrap()
+                .store
+                .save(&crate::defense_run_save::resign_test_payload(
+                    &serde_json::to_vec(&damaged).unwrap(),
+                ))
+                .unwrap();
+        }
+        frame(&mut a, key(egui::Key::Enter), 0.0);
+        admit_restart_and_pause(&mut a);
+        let before = snapshot(&mut a);
+        let admitted = tail(&a);
+        begin_replace(&mut a);
+        assert!(a.saves.as_ref().unwrap().candidate.is_some());
+        assert!(matches!(a.ui.run_save.mode, RunSaveMode::Loading));
+        assert_eq!(snapshot(&mut a), before);
+        assert_eq!(tail(&a), admitted);
+        if cancel {
+            click(&mut a, 800.0, 642.0);
+            assert!(a.saves.as_ref().unwrap().candidate.is_none());
+        } else {
+            finish_load(&mut a);
+            assert!(
+                a.ui.run_save.status.contains("checksum"),
+                "{}",
+                a.ui.run_save.status
+            );
+        }
+        assert!(matches!(a.ui.run_save.mode, RunSaveMode::Closed));
+        assert_eq!(snapshot(&mut a), before);
+        assert_eq!(tail(&a), admitted);
+        continue_blur_and_consume_once(&mut a);
+    }
+
+    #[test]
+    fn cancelled_terminal_replacement_preserves_pending_restart_focus_guard() {
+        replacement_preserves_pending_restart(true);
+    }
+
+    #[test]
+    fn failed_terminal_replacement_preserves_pending_restart_focus_guard() {
+        replacement_preserves_pending_restart(false);
+    }
+}
