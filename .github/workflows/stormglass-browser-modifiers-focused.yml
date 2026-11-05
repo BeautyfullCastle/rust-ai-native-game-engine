@@ -1,18 +1,19 @@
-name: Stormglass browser keyboard ownership CI
+name: Stormglass browser input ownership CI
 # Actual WASM and bundled JavaScript with mock DOM, never browser acceptance.
 on:
   push:
-    branches: [su/stormglass-browser-modifiers-20261105]
+    branches: [su/stormglass-browser-modifiers-20261105, su/stormglass-browser-board-frontier-20261105]
 permissions:
   contents: read
 concurrency:
-  group: stormglass-browser-modifiers-${{ github.ref }}
+  group: stormglass-browser-input-${{ github.ref }}
   cancel-in-progress: false
 jobs:
-  browser-keyboard-ownership:
+  browser-input-ownership:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
+      PYTHONDONTWRITEBYTECODE: 1
       CARGO_BUILD_JOBS: 2
       CARGO_INCREMENTAL: 0
       CARGO_TERM_COLOR: never
@@ -25,26 +26,52 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Record exact source and tools
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir "$EVIDENCE"
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          git rev-parse HEAD HEAD^{tree} | tee "$EVIDENCE/source.txt"
-          rustup toolchain install 1.99.1 --profile minimal --target wasm32-unknown-unknown
-          rustup override set 1.99.1
-          rustc --version --verbose | tee "$EVIDENCE/rustc.txt"
-          cargo --version | tee "$EVIDENCE/cargo.txt"
-          node --version | tee "$EVIDENCE/node.txt"
-          python3 --version | tee "$EVIDENCE/python.txt"
-      - name: Verify actual WASM keyboard and restore lifecycle
+      - name: Verify exact-source actual WASM browser input lifecycle
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/stormglass-browser-input-target
         shell: python {0}
         run: |
-          import hashlib, json, os, re, runpy, shutil, sys
+          import hashlib, json, os, re, runpy, shutil, subprocess, sys
           from pathlib import Path
           evidence = Path(os.environ['EVIDENCE'])
-          run = runpy.run_path('tools/check-authoring-controls.py')['run_logged']
+          evidence.mkdir()
+          run_logged = runpy.run_path('tools/check-authoring-controls.py')['run_logged']
+          def run(command, path):
+              record = {'argv': command, 'cwd': str(Path.cwd()), 'log': str(path.relative_to(evidence)), 'exit_code': None}
+              try:
+                  output = run_logged(command, path)
+                  record['exit_code'] = 0
+                  return output
+              except Exception as error:
+                  record['error'] = str(error)
+                  match = re.search(r'Command exited (-?\d+);', str(error))
+                  if match:
+                      record['exit_code'] = int(match.group(1))
+                  raise
+              finally:
+                  with (evidence / 'commands.jsonl').open('a') as ledger:
+                      ledger.write(json.dumps(record) + '\n')
+          def source_snapshot():
+              head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+              tree = subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip()
+              paths = subprocess.check_output(['git', 'ls-files', '-z']).decode().split('\0')
+              untracked = subprocess.check_output(['git', 'ls-files', '--others', '-z']).decode().split('\0')
+              return {'head': head, 'tree': tree,
+                      'tracked_sha256': {p: hashlib.sha256(Path(p).read_bytes()).hexdigest() for p in paths if p},
+                      'untracked': [p for p in untracked if p and not p.startswith('ci-evidence/')]}
+          before = source_snapshot()
+          (evidence / 'source-before.json').write_text(json.dumps(before, indent=2))
+          if before['head'] != os.environ['GITHUB_SHA'] or before['untracked']:
+              raise RuntimeError('Unexpected source head or untracked input')
+          run(['git', 'diff', '--exit-code'], evidence / 'worktree-before.log')
+          run(['git', 'diff', '--cached', '--exit-code'], evidence / 'index-before.log')
+          run(['git', 'archive', '--format=tar', '--output=' + str(evidence / 'source.tar'), 'HEAD'], evidence / 'source-archive.log')
+          run(['rustup', 'toolchain', 'install', '1.99.1', '--profile', 'minimal', '--target', 'wasm32-unknown-unknown'], evidence / 'toolchain-install.log')
+          os.environ['RUSTUP_TOOLCHAIN'] = '1.99.1'
+          for tool, command in [('rustc', ['rustc', '--version', '--verbose']), ('cargo', ['cargo', '--version']), ('node', ['node', '--version']), ('python', ['python3', '--version'])]:
+              run(command, evidence / f'{tool}.log')
+          for label, path in [('game', 'crates/orr_coop_defense_web/web/game.js'), ('gestures', 'tools/check_coop_defense_gestures.mjs')]:
+              run(['node', '--check', path], evidence / f'{label}-syntax.log')
           run(['cargo', 'build', '--locked', '-p', 'orr_coop_defense_web', '--target', 'wasm32-unknown-unknown', '--profile', 'web'], evidence / 'wasm-build.log')
           wasm = (Path(os.environ.get('CARGO_TARGET_DIR', 'target')) / 'wasm32-unknown-unknown/web/orr_coop_defense_web.wasm').resolve()
           os.environ['ORR_DEFENSE_WASM'] = str(wasm)
@@ -64,13 +91,35 @@ jobs:
           for key, expected in [('tests',23), ('pass',23), ('fail',0), ('cancelled',0), ('skipped',0), ('todo',0)]:
               if re.findall(r'^# ' + key + r' (\d+)$', output, re.MULTILINE) != [str(expected)]:
                   raise RuntimeError('Unexpected TAP census: ' + key)
+          expected_gesture_cases = [
+              'cancel before consumption then acceptance selects destination',
+              'fresh offboard cancellation retains destination',
+              'fresh destination tap intentionally deselects',
+              'obsolete offboard cancellation preserves accepted destination',
+              'accepted move retires drag before stale pointermove and fresh move works',
+              'accepted move retires tap with obsolete selectedBefore',
+              'accepted merge retires gesture on source and fresh upgraded unit move works',
+              'accepted merge retires gesture on target and fresh upgraded unit move works',
+              'failed move preserves still-valid usable gesture',
+              'idle preserves still-valid usable gesture',
+              'summon preserves still-valid usable gesture',
+              'upgrade preserves still-valid usable gesture',
+              'invest preserves still-valid usable gesture',
+          ]
+          expected_gesture_coverage = ['ready gate', 'deferred acceptance', 'drag move', 'selection follows accepted command', 'offboard cancellation', 'pointercancel', 'tap move', 'pause rejection', 'invalid merge retains selection', 'actual core merge', 'keyboard/button parity', 'blur cancels drag', 'reset', 'desktop/mobile rendering paths']
           for check in ['web_ui', 'gestures']:
+              receipt_path = evidence / f'{check}-receipt.json'
               output = run(['node', f'tools/check_coop_defense_{check}.mjs', str(build)], evidence / f'{check}.log')
               command_line, _, result_json = output.partition('\n')
-              if not command_line.startswith('+ node ') or json.loads(result_json).get('passed') is not True:
+              adapter_receipt = json.loads(result_json)
+              receipt_path.write_text(result_json)
+              if not command_line.startswith('+ node ') or adapter_receipt.get('passed') is not True:
                   raise RuntimeError('Input adapter acceptance failed: ' + check)
+              if check == 'gestures' and (adapter_receipt.get('cancellationCases') != expected_gesture_cases or adapter_receipt.get('coverage') != expected_gesture_coverage):
+                  raise RuntimeError('Missing gesture ownership or original adapter cases')
           output = run(['node', 'tools/test_coop_defense_run_save_actual.mjs', str(offline), str(wasm), str(scene)], evidence / 'actual-restore.log')
           receipt = json.loads(output.splitlines()[-1])
+          (evidence / 'actual-restore-receipt.json').write_text(json.dumps(receipt, indent=2))
           digest = hashlib.sha256(wasm.read_bytes()).hexdigest()
           if receipt['version'] != 1 or receipt['wasmSha256'] != digest or receipt['sceneSha256'] != hashlib.sha256(scene.read_bytes()).hexdigest():
               raise RuntimeError('Actual restore source identity mismatch')
@@ -96,11 +145,40 @@ jobs:
               if not re.fullmatch('[0-9a-f]{16}', row['savedChecksum']) or not re.fullmatch('[0-9a-f]{16}', row['nextChecksum']) or row['savedChecksum'] == row['nextChecksum']:
                   raise RuntimeError('Invalid consumed-state checksums')
           run(['git', 'diff', '--exit-code'], evidence / 'source-unchanged.log')
-          (evidence / 'scope.json').write_text(json.dumps({'head': os.environ['GITHUB_SHA'], 'wasm_sha256': digest, 'related_tests': 23, 'initial_conditions': 2, 'focus_loss_cases': 10, 'pointer_release_cases': 24, 'keyboard_input_cases': 112, 'input_adapter_checks': 2, 'mock_dom': True, 'browser': False, 'native_window': False, 'gpu': False, 'full_workspace': False, 'receipt': receipt}, indent=2))
+          (evidence / 'scope.json').write_text(json.dumps({'head': os.environ['GITHUB_SHA'], 'wasm_sha256': digest, 'related_tests': 23, 'initial_conditions': 2, 'focus_loss_cases': 10, 'pointer_release_cases': 24, 'keyboard_input_cases': 112, 'input_adapter_checks': 2, 'gesture_cancellation_cases': 13, 'gesture_adapter_cases': 14, 'mock_dom': True, 'browser': False, 'native_window': False, 'gpu': False, 'full_workspace': False, 'receipt': receipt}, indent=2))
+      - name: Verify unchanged source and seal evidence even after failure
+        if: always()
+        shell: python {0}
+        run: |
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          evidence = Path(os.environ['EVIDENCE'])
+          evidence.mkdir(exist_ok=True)
+          try:
+              paths = subprocess.check_output(['git', 'ls-files', '-z']).decode().split('\0')
+              untracked = subprocess.check_output(['git', 'ls-files', '--others', '-z']).decode().split('\0')
+              after = {'head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+                       'tree': subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip(),
+                       'tracked_sha256': {p: hashlib.sha256(Path(p).read_bytes()).hexdigest() for p in paths if p},
+                       'untracked': [p for p in untracked if p and not p.startswith('ci-evidence/')]}
+              (evidence / 'source-after.json').write_text(json.dumps(after, indent=2))
+              statuses = []
+              for label, command in [('worktree-after', ['git', 'diff', '--exit-code']), ('index-after', ['git', 'diff', '--cached', '--exit-code'])]:
+                  result = subprocess.run(command, capture_output=True, text=True)
+                  (evidence / f'{label}.log').write_text('+ ' + ' '.join(command) + '\n' + result.stdout + result.stderr)
+                  statuses.append(result.returncode)
+                  with (evidence / 'commands.jsonl').open('a') as ledger:
+                      ledger.write(json.dumps({'argv': command, 'cwd': str(Path.cwd()), 'log': f'{label}.log', 'exit_code': result.returncode}) + '\n')
+              if after != json.loads((evidence / 'source-before.json').read_text()) or after['head'] != os.environ['GITHUB_SHA'] or after['untracked'] or any(statuses):
+                  raise RuntimeError('Source changed during verification')
+          finally:
+              manifest = {str(p.relative_to(evidence)): hashlib.sha256(p.read_bytes()).hexdigest()
+                          for p in sorted(evidence.rglob('*')) if p.is_file() and p.name != 'manifest.json'}
+              (evidence / 'manifest.json').write_text(json.dumps({'head': os.environ['GITHUB_SHA'], 'run_id': os.environ['GITHUB_RUN_ID'], 'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'], 'sha256': manifest}, indent=2))
       - name: Preserve source and evidence including failures
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: stormglass-browser-modifiers-${{ github.sha }}-${{ github.run_attempt }}
+          name: stormglass-browser-input-${{ github.sha }}-${{ github.run_attempt }}
           path: ci-evidence
           if-no-files-found: error

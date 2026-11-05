@@ -32,6 +32,10 @@ changing game inputs. Shift alone preserves these controls.
 - Victory or defeat can restart from the same seed.
   Replaying identical actions with that seed gives an identical checksum.
 
+An accepted browser move or merge ends any pointer gesture that began against
+the previous board state. Its destination stays selected; start a fresh gesture
+to move again. Cancelling an old drag cannot select its now-empty source.
+
 Native pointer actions use the control or board cell where a primary press and
 release occurred, not the final hover position of a rendered frame. Both ends
 must identify the same target without a layout change; a drag, cancelled pointer
