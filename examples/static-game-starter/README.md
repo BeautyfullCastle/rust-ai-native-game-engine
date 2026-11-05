@@ -26,6 +26,12 @@ courier motion: left/right selects a switch, Space toggles, matching target wins
 Holding directions repeats each tick; Space is edge-triggered. Default target 5
 means switches zero and two. Edit Board.target before Play to change the puzzle.
 
+The saved `--project` command-mode route instead supplies one-shot Move/Select
+buttons and the same semantic ERP intents. It can complete both unchanged stock
+scenes without relying on keyboard hold duration. See the
+[registered navigation contract](../../docs/registered-starter-navigation.md)
+for controls, interruption handling and the required build-identity migration.
+
 The source `player` binary is deliberately HEADLESS, not a native
 standalone game or packaged export. Both it and the editor host load exactly the
 same scene through `document<G>`, initial-state admission, seed 42, tick rate 60
@@ -53,7 +59,7 @@ and `input`. Example delivery win:
 
 The complete trace is validated before running: maximum 64 KiB, 64 steps and
 600 total ticks; positive integer tick counts; exact reflected fields; finite
-held-key input domain only. No scripts or arbitrary commands. Without a trace,
+bounded held-key/navigation-pulse input domain only. No scripts or arbitrary commands. Without a trace,
 the player runs 60 idle ticks. Acceptance launches the actual headless player binary for both games from a
 scene-only temporary working directory and compares nonzero win traces and idle
 checksums. The editor is exercised through its CPU library APIs, not launched as

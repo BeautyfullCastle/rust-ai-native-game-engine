@@ -1,11 +1,11 @@
-//! Project-owned command capabilities for two existing, unchanged games.
+//! Project-owned semantic command capabilities for two starter games.
 //!
 //! One compiled registry serves saved projects and the shared editor/router.
 //! The project owns its readonly presenter and intent payloads; the engine has
 //! no game-name branches and never copies these games' simulation rules.
 use orr_bridge::FrameView;
 use orr_editor::static_adapter::{
-    CodecOutput, CommandContext, CommandContract, Consumption, EmbeddedGameplayView,
+    CodecOutput, CommandContext, CommandContract, CommandScope, Consumption, EmbeddedGameplayView,
     GameplayContracts, GameplayDescriptor, GameplaySchema, GameplayViewContext, GameplayViewPhase,
     InputCapability, IntentRequest, IntentSchema, PresentationCapability,
 };
@@ -15,10 +15,10 @@ use serde_json::{json, Value as J};
 use std::{marker::PhantomData, sync::OnceLock};
 
 use crate::{
-    delivery::{Delivery, DeliveryGame},
+    delivery::{Courier, Delivery, DeliveryGame},
     game_contract::{inputs, Starter},
     presentation::StandaloneGame,
-    switchboard::{Board, Cursor},
+    switchboard::{Board, Cursor, SwitchGame},
 };
 
 #[repr(C)]
@@ -27,10 +27,52 @@ struct Act {
     #[reflect(range = "1..=1")]
     press: u32,
 }
-fn intent_types() -> TypeRegistry {
+#[repr(C)]
+#[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable, Reflect)]
+struct Move {
+    #[reflect(range = "-1..=1")]
+    dx: i32,
+    #[reflect(range = "-1..=1")]
+    dy: i32,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable, Reflect)]
+struct Select {
+    #[reflect(range = "-1..=1")]
+    delta: i32,
+}
+fn act_types() -> TypeRegistry {
     let mut types = TypeRegistry::new();
     types.register_component::<Act>("Act");
     types
+}
+fn move_types() -> TypeRegistry {
+    let mut types = TypeRegistry::new();
+    types.register_component::<Move>("Move");
+    types
+}
+fn select_types() -> TypeRegistry {
+    let mut types = TypeRegistry::new();
+    types.register_component::<Select>("Select");
+    types
+}
+
+fn controls(delivery: bool) -> Vec<(&'static str, &'static str, J)> {
+    let mut controls = vec![("Act", "act", json!({"press":1}))];
+    if delivery {
+        controls.extend([
+            ("Left", "move", json!({"dx":-1,"dy":0})),
+            ("Right", "move", json!({"dx":1,"dy":0})),
+            ("Up", "move", json!({"dx":0,"dy":1})),
+            ("Down", "move", json!({"dx":0,"dy":-1})),
+        ]);
+    } else {
+        controls.extend([
+            ("Previous", "select", json!({"delta":-1})),
+            ("Next", "select", json!({"delta":1})),
+        ]);
+    }
+    controls
 }
 
 struct StarterView<G>(PhantomData<fn() -> G>);
@@ -42,18 +84,54 @@ impl<G: StandaloneGame> EmbeddedGameplayView for StarterView<G> {
         frame: FrameView<'_>,
         context: GameplayViewContext,
     ) -> Result<Option<IntentRequest>, String> {
-        let state = G::state_value(frame);
-        ui.heading(G::ID);
-        ui.label(if state["won"] == 1 {
-            "Victory — Act restarts"
+        let delivery = G::ID == DeliveryGame::ID;
+        let actor_count = if delivery {
+            frame.count::<Courier>()
         } else {
-            "Act uses this game's existing action input"
-        });
-        ui.monospace(state.to_string());
+            frame.count::<Cursor>()
+        };
+        ui.heading(G::ID);
+        if actor_count == 1 {
+            let state = G::state_value(frame);
+            ui.label(if state["won"] != 0 {
+                "Victory: Act restarts"
+            } else if delivery {
+                "Move to the goal, then Act to deliver"
+            } else {
+                "Select a switch, then Act to toggle it"
+            });
+            ui.monospace(state.to_string());
+        } else {
+            ui.label("Controls require exactly one actor");
+        }
         let ready = context.phase == GameplayViewPhase::Live && context.input_ready;
-        let action = ui.add_enabled(ready, egui::Button::new("Act")).clicked();
+        let mut intent = None;
+        ui.horizontal_wrapped(|ui| {
+            for (label, name, payload) in controls(delivery) {
+                // The same read-only preflight gates both human buttons and AI
+                // commands, including held latches, victory, and raw overflow.
+                let command = CommandContext {
+                    sequence: 1,
+                    scope: CommandScope {
+                        scene_epoch: 0,
+                        play_epoch: 0,
+                    },
+                    player: 0,
+                };
+                let enabled = ready
+                    && if delivery {
+                        delivery_encode(name, &payload, command, frame).is_ok()
+                    } else {
+                        switch_encode(name, &payload, command, frame).is_ok()
+                    };
+                let response = ui.add_enabled(enabled, egui::Button::new(label));
+                if response.clicked() && intent.is_none() {
+                    intent = Some(IntentRequest::new(name, payload));
+                }
+            }
+        });
         if !ready {
-            ui.label("Play and Take control to use the project command");
+            ui.label("Play and Take control to use the project commands");
         }
 
         let available = ui.available_size();
@@ -78,11 +156,7 @@ impl<G: StandaloneGame> EmbeddedGameplayView for StarterView<G> {
             .into();
             painter.circle_filled(point, (item.style.size * scale).clamp(3.0, 32.0), color);
         }
-        if action {
-            IntentRequest::new("act", json!({"press":1})).map(Some)
-        } else {
-            Ok(None)
-        }
+        intent.transpose()
     }
     fn reset(&mut self) {}
 }
@@ -90,68 +164,223 @@ fn view<G: StandaloneGame>() -> Box<dyn EmbeddedGameplayView> {
     Box::new(StarterView::<G>(PhantomData))
 }
 
+fn exact_fields(value: &J, fields: &[&str]) -> bool {
+    value.as_object().is_some_and(|object| {
+        object.len() == fields.len() && fields.iter().all(|field| object.contains_key(*field))
+    })
+}
+fn integer_number(value: &J) -> Option<i64> {
+    if !value.is_number() {
+        return None;
+    }
+    // Match the reflected integer-value contract: clients may spell 1 as 1.0.
+    // The existing parser uses decimal text, never a floating-point conversion.
+    match orr_remote::json::json_to_value(&i64::describe(), value, false).ok()? {
+        orr_reflect::Value::Int(value) => i64::try_from(value).ok(),
+        _ => None,
+    }
+}
+fn axis(value: &J) -> Result<i64, String> {
+    integer_number(value)
+        .filter(|value| (-1..=1).contains(value))
+        .ok_or_else(|| "navigation requires integer axes in -1..=1".into())
+}
+fn primary_payload(payload: &J) -> bool {
+    exact_fields(payload, &["press"]) && integer_number(&payload["press"]) == Some(1)
+}
+fn delivery_state(courier: &Courier, state: &Delivery) -> J {
+    json!({"position":[courier.position.x.raw(),courier.position.y.raw()],
+        "goal":[state.goal.x.raw(),state.goal.y.raw()],"won":state.won})
+}
+fn switch_state(cursor: &Cursor, board: &Board) -> J {
+    json!({"position":[cursor.position.x.raw(),cursor.position.y.raw()],
+        "selected":cursor.selected,"bits":board.bits,"target":board.target,
+        "solved":board.solved,"moves":board.moves})
+}
 fn delivery_encode(
-    _: &str,
-    _: &J,
+    name: &str,
+    payload: &J,
     context: CommandContext,
     frame: FrameView<'_>,
 ) -> Result<CodecOutput, String> {
-    if context.player != 0 || frame.singleton::<Delivery>().action_held != 0 {
-        return Err("delivery action requires the neutral player-zero frame".into());
+    let (actors, couriers) = frame.dense::<Courier>();
+    let state = frame.singleton::<Delivery>();
+    if context.player != 0 || couriers.len() != 1 || state.action_held != 0 {
+        return Err("delivery command requires one released player-zero courier".into());
     }
+    let courier = &couriers[0];
+    let before = delivery_state(courier, state);
+    let mut expected = before.clone();
+    let input = match name {
+        "act" if primary_payload(payload) => {
+            if state.won != 0 {
+                expected["position"] = json!([0, 0]);
+                expected["won"] = json!(0);
+            } else if courier.position == state.goal {
+                expected["won"] = json!(1);
+            }
+            json!({"dx":0,"dy":0,"deliver":crate::delivery::MODE_PRIMARY})
+        }
+        "move" if exact_fields(payload, &["dx", "dy"]) => {
+            let dx = axis(&payload["dx"])?;
+            let dy = axis(&payload["dy"])?;
+            if (dx == 0 && dy == 0) || state.won != 0 {
+                return Err("move requires a nonzero direction before victory".into());
+            }
+            let x = courier.position.x.raw().checked_add(dx * (1 << 16));
+            let y = courier.position.y.raw().checked_add(dy * (1 << 16));
+            let (Some(x), Some(y)) = (x, y) else {
+                return Err("move exceeds the fixed-point position range".into());
+            };
+            expected["position"] = json!([x, y]);
+            json!({"dx":dx,"dy":dy,"deliver":crate::delivery::MODE_NAVIGATION_PULSE})
+        }
+        _ => return Err("invalid delivery intent or payload".into()),
+    };
     Ok(CodecOutput {
-        input: json!({"dx":0,"dy":0,"deliver":1}),
-        receipt: json!({"player":context.player}),
+        input,
+        receipt: json!({"kind":name,"player":context.player,
+            "actor":[actors[0].index,actors[0].version],"before":before,"expected":expected}),
     })
+}
+fn switch_encode(
+    name: &str,
+    payload: &J,
+    context: CommandContext,
+    frame: FrameView<'_>,
+) -> Result<CodecOutput, String> {
+    let (actors, cursors) = frame.dense::<Cursor>();
+    if context.player != 0 || cursors.len() != 1 || cursors[0].held != 0 {
+        return Err("switch command requires one released player-zero cursor".into());
+    }
+    let cursor = &cursors[0];
+    let board = frame.singleton::<Board>();
+    let before = switch_state(cursor, board);
+    let mut expected = before.clone();
+    let input = match name {
+        "act" if primary_payload(payload) && cursor.selected < 4 => {
+            expected["position"][0] = json!(i64::from(cursor.selected) * (2 << 16));
+            if board.solved != 0 {
+                expected["bits"] = json!(0);
+                expected["solved"] = json!(0);
+                expected["moves"] = json!(0);
+            } else {
+                let bits = board.bits ^ (1 << cursor.selected);
+                expected["bits"] = json!(bits);
+                expected["moves"] = json!(board.moves.saturating_add(1));
+                expected["solved"] = json!(u32::from(bits == board.target));
+            }
+            json!({"selection":0,"toggle":crate::switchboard::MODE_PRIMARY})
+        }
+        "select" if exact_fields(payload, &["delta"]) => {
+            let delta = axis(&payload["delta"])?;
+            if delta == 0 {
+                return Err("select requires a nonzero direction".into());
+            }
+            let selected = (i64::from(cursor.selected) + delta).rem_euclid(4);
+            expected["selected"] = json!(selected);
+            expected["position"][0] = json!(selected * (2 << 16));
+            json!({"selection":delta,"toggle":crate::switchboard::MODE_NAVIGATION_PULSE})
+        }
+        _ => return Err("invalid switch intent or payload".into()),
+    };
+    Ok(CodecOutput {
+        input,
+        receipt: json!({"kind":name,"player":context.player,
+            "actor":[actors[0].index,actors[0].version],"before":before,"expected":expected}),
+    })
+}
+
+fn raw_pair(value: &J) -> bool {
+    value
+        .as_array()
+        .is_some_and(|pair| pair.len() == 2 && pair.iter().all(|v| v.as_i64().is_some()))
+}
+fn counter(value: &J) -> bool {
+    value.as_u64().is_some_and(|v| u32::try_from(v).is_ok())
+}
+fn delivery_state_valid(value: &J) -> bool {
+    exact_fields(value, &["position", "goal", "won"])
+        && raw_pair(&value["position"])
+        && raw_pair(&value["goal"])
+        && counter(&value["won"])
+}
+fn switch_state_valid(value: &J) -> bool {
+    exact_fields(
+        value,
+        &["position", "selected", "bits", "target", "solved", "moves"],
+    ) && raw_pair(&value["position"])
+        && ["selected", "bits", "target", "solved", "moves"]
+            .iter()
+            .all(|key| counter(&value[*key]))
+}
+fn observe_receipt(
+    receipt: &J,
+    context: CommandContext,
+    kinds: &[&str],
+    actor: orr_ecs::Entity,
+    held: u32,
+    current: J,
+    valid: fn(&J) -> bool,
+) -> Consumption {
+    if !exact_fields(receipt, &["kind", "player", "actor", "before", "expected"])
+        || context.player != 0
+        || receipt["player"].as_u64() != Some(u64::from(context.player))
+        || !receipt["kind"]
+            .as_str()
+            .is_some_and(|kind| kinds.contains(&kind))
+        || receipt["actor"] != json!([actor.index, actor.version])
+        || !valid(&receipt["before"])
+        || !valid(&receipt["expected"])
+    {
+        return Consumption::Invalid;
+    }
+    match held {
+        1 if current == receipt["expected"] => Consumption::Consumed,
+        0 if current == receipt["before"] => Consumption::Pending,
+        // A held but contradictory frame is not evidence that this command ran.
+        // A release after lost observation likewise cannot manufacture proof.
+        _ => Consumption::Invalid,
+    }
 }
 fn delivery_observe(
     frame: FrameView<'_>,
     receipt: &J,
     context: CommandContext,
 ) -> Result<Consumption, String> {
-    if receipt["player"] != context.player || context.player != 0 {
+    let (actors, couriers) = frame.dense::<Courier>();
+    if couriers.len() != 1 {
         return Ok(Consumption::Invalid);
     }
-    Ok(if frame.singleton::<Delivery>().action_held == 1 {
-        Consumption::Consumed
-    } else {
-        Consumption::Pending
-    })
-}
-fn switch_encode(
-    _: &str,
-    _: &J,
-    context: CommandContext,
-    frame: FrameView<'_>,
-) -> Result<CodecOutput, String> {
-    let cursors = frame.dense::<Cursor>().1;
-    if context.player != 0 || cursors.len() != 1 || cursors[0].held != 0 {
-        return Err("switch action requires the neutral player-zero frame".into());
-    }
-    let board = frame.singleton::<Board>();
-    Ok(CodecOutput {
-        input: json!({"selection":0,"toggle":1}),
-        receipt: json!({"player":context.player,"bits":board.bits,"moves":board.moves,"solved":board.solved}),
-    })
+    let state = frame.singleton::<Delivery>();
+    Ok(observe_receipt(
+        receipt,
+        context,
+        &["act", "move"],
+        actors[0],
+        state.action_held,
+        delivery_state(&couriers[0], state),
+        delivery_state_valid,
+    ))
 }
 fn switch_observe(
     frame: FrameView<'_>,
     receipt: &J,
     context: CommandContext,
 ) -> Result<Consumption, String> {
-    if receipt["player"] != context.player || context.player != 0 {
+    let (actors, cursors) = frame.dense::<Cursor>();
+    if cursors.len() != 1 {
         return Ok(Consumption::Invalid);
     }
-    let cursors = frame.dense::<Cursor>().1;
-    let board = frame.singleton::<Board>();
-    let changed = receipt["bits"] != board.bits
-        || receipt["moves"] != board.moves
-        || receipt["solved"] != board.solved;
-    Ok(if cursors.len() == 1 && cursors[0].held == 1 && changed {
-        Consumption::Consumed
-    } else {
-        Consumption::Pending
-    })
+    Ok(observe_receipt(
+        receipt,
+        context,
+        &["act", "select"],
+        actors[0],
+        cursors[0].held,
+        switch_state(&cursors[0], frame.singleton::<Board>()),
+        switch_state_valid,
+    ))
 }
 
 /// The application supplies callbacks and exact compiled identities; the engine
@@ -177,7 +406,7 @@ pub fn descriptors() -> Vec<GameplayDescriptor> {
                     create: if delivery {
                         view::<DeliveryGame>
                     } else {
-                        view::<crate::switchboard::SwitchGame>
+                        view::<SwitchGame>
                     },
                 },
                 input: InputCapability::Commands(CommandContract {
@@ -186,19 +415,28 @@ pub fn descriptors() -> Vec<GameplayDescriptor> {
                         types: if delivery {
                             inputs::<DeliveryGame>
                         } else {
-                            inputs::<crate::switchboard::SwitchGame>
+                            inputs::<SwitchGame>
                         },
                     },
                     max_players: 1,
                     neutral: (existing.input.held)(Default::default()),
                     max_sequence: u64::MAX,
-                    intents: vec![IntentSchema {
-                        name: "act",
-                        payload: GameplaySchema {
-                            type_name: "Act",
-                            types: intent_types,
+                    intents: vec![
+                        IntentSchema {
+                            name: "act",
+                            payload: GameplaySchema {
+                                type_name: "Act",
+                                types: act_types,
+                            },
                         },
-                    }],
+                        IntentSchema {
+                            name: if delivery { "move" } else { "select" },
+                            payload: GameplaySchema {
+                                type_name: if delivery { "Move" } else { "Select" },
+                                types: if delivery { move_types } else { select_types },
+                            },
+                        },
+                    ],
                     encode: if delivery {
                         delivery_encode
                     } else {
@@ -224,19 +462,29 @@ pub fn registry() -> &'static GameplayContracts {
     })
 }
 
-#[cfg(all(test, feature = "api-acceptance"))]
+#[cfg(test)]
 #[path = "gameplay_cpu_api_acceptance.rs"]
 mod cpu_api_acceptance;
-#[cfg(test)]
-#[path = "gameplay_ws_acceptance.rs"]
-#[allow(clippy::disallowed_types, reason = "Wall-clock deadlines bound host transport tests, not simulation")]
-mod ws_acceptance;
 #[cfg(all(test, feature = "api-acceptance"))]
 #[path = "gameplay_api_acceptance.rs"]
 mod gpu_api_acceptance;
+#[cfg(test)]
+#[path = "gameplay_ws_acceptance.rs"]
+#[allow(
+    clippy::disallowed_types,
+    reason = "Wall-clock deadlines bound host transport tests, not simulation"
+)]
+mod ws_acceptance;
 
 #[cfg(test)]
-#[allow(clippy::disallowed_types, reason = "Wall-clock deadlines bound host lifecycle tests, not simulation")]
+#[path = "gameplay_navigation_tests.rs"]
+mod navigation_tests;
+
+#[cfg(test)]
+#[allow(
+    clippy::disallowed_types,
+    reason = "Wall-clock deadlines bound host lifecycle tests, not simulation"
+)]
 mod tests {
     use super::*;
     use orr_editor::editor::input::{CommandStatus, GameplayRouter};
@@ -785,4 +1033,5 @@ mod tests {
                 .is_err());
         }
     }
+    include!("gameplay_stock_controls_tests.rs");
 }

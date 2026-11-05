@@ -165,6 +165,12 @@ class ValidatorTests(unittest.TestCase):
         result=gate.json_file(self.root/'result.json')
         result['games'][0]['receipt_sha256']=gate.digest(path)
         write(self.root/'result.json',result)
+    def test_current_navigation_build_identities(self):
+        self.assertEqual(gate.GAMES, {
+            'delivery': ('StarterDelivery', '0x5354415254563201'),
+            'switchboard': ('StarterSwitchboard', '0x5354415254563202'),
+        })
+
     def test_checker_fixture_only(self):
         self.assertTrue(gate.validate(self.root,self.provenance)['source_hidden'])
     def test_editor_checker_fixture_only(self):

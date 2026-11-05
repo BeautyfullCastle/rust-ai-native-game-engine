@@ -29,12 +29,14 @@
 
 [PR #434](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/434)은 Ctrl/Cmd+R이 Invest로 소비되던 결함을 수정했다. 개발 merge 125d95e99b2c17a92ecca903ea904416cfca9e14, tree ed9eefb33e4e1089cefead8c2370cec22afe8e07의 [필수 CI](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/41947729478)와 독립 산출물 재실행이 통과했다. 키보드112·기존 포커스10/포인터24·관련23(건너뜀0)을 확인하고 plain/Shift 입력을 보존했다.
 
+[PR #435](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/435)은 승인된 종료 후 Restart가 포커스 복귀만으로 실행되던 결함을 수정했다. 개발 merge c16efdd3c9df767277aadc4a03e65bcfae3409c0, tree 043dcceaa7f0f930480ae6800062ee7d98e7a2cf의 [필수 CI·독립 산출물 재실행](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/435#issuecomment-6647819957)이 통과했다. 기존 미래 입력을 보존하며 명시적 Continue를 기다리고, LOST/WON·반복 포커스·저장복원 경계를 검증했다.
+
 - **과거 Windows 직접 플레이:** 10-wave 승리, 369 kills, 29 merges, core 8/30 및 Wave 2 패배 → R 재시작을 관측했다. [원래 증거](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94#issuecomment-6430939337)는 당시 산출물에만 적용하며 현재 소스의 Windows 재검증으로 옮기지 않는다.
 - **현재 Stormglass 실행 범위:** 실제 native/WASM consumed-input trace와 source-hidden packed 소비, mock-DOM 제어/저장 검사는 실제 브라우저 파일 선택·표시·물리 입력과 별개다. 2026-11-04 Chromium 사전 검사는 페이지 로드 전 Unix socket EPERM으로 실패했고 정식 확대 실행도 executor 초기화에서 실패했다. 실제 브라우저 플레이는 **미검증**이며 다른 환경 실행으로 이 제한을 우회하지 않았다.
 
 ## 남은 우선순위와 경계
 
-1. 실제 플레이를 우선한다. [Native 종료 후 대기 중인 Restart가 포커스 복귀만으로 진행되는 결함](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94#issuecomment-6647177137)을 CPU App에서 재현했다. 창 callback·focus event·raw input 모두 Continue 없이 LOST/generation0에서 PLAYING/generation1로 바뀌었다. 기존 Session 미래 입력을 조회하는 App 조건만 수정하고 정상 종료·미제출 취소·반복 focus·저장복원 경계를 검증한다.
+1. 실제 제작·완주 경로를 우선한다. [등록된 starter 기본 장면의 이동 제어 공백](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94#issuecomment-6648286419)을 재현했다. Command-mode 경로는 Act만 제공해 Delivery의 원래 목표와 Switchboard의 target 5에 도달하지 못한다. 기존 일반 입력은 두 장면을 완주한다. [프로젝트 소유 단발 이동·선택 계약](registered-starter-navigation.md)과 입력 build migration을 구현하고, 지연 관찰·중단·기록 재생까지 검증한다. 아직 최종 검증·병합 완료가 아니다.
 2. 허용된 실행 환경이 있을 때 현재 산출물의 브라우저/native-window 플레이를 별도 수용한다. 화면 증거가 없으면 성공률·모바일·Windows·hardware GPU까지 확대하지 않는다.
 3. [설계 v2](design-v2.md)의 사전 고정 과제/seed/oracle·예산·실제 모델 기준선을 준비한다. 모델 호출·업로드·비용은 별도 승인 범위이며 아직 측정 결과가 없다.
 

@@ -66,7 +66,9 @@ impl Starter for DeliveryGame {
         crate::delivery::types()
     }
     fn valid_input(i: &DeliveryInput) -> bool {
-        (-1..=1).contains(&i.dx) && (-1..=1).contains(&i.dy) && i.deliver <= 1
+        (-1..=1).contains(&i.dx)
+            && (-1..=1).contains(&i.dy)
+            && i.deliver <= crate::delivery::MODE_NAVIGATION_PULSE
     }
     fn won(f: &orr_ecs::Frame) -> bool {
         f.singleton::<Delivery>().won != 0
@@ -87,7 +89,7 @@ impl Starter for SwitchGame {
     }
     fn valid_input(i: &SwitchInput) -> bool {
         [orr_fp::FP::ZERO, orr_fp::FP::ONE, -orr_fp::FP::ONE].contains(&i.selection)
-            && i.toggle <= 1
+            && i.toggle <= crate::switchboard::MODE_NAVIGATION_PULSE
             && i.pad == 0
     }
     fn won(f: &orr_ecs::Frame) -> bool {
@@ -498,7 +500,7 @@ pub fn trace<G: Starter>(bytes: &[u8]) -> Result<Vec<(u32, G::Input)>, String> {
         let input =
             bytemuck::try_pod_read_unaligned::<G::Input>(&bytes).map_err(|e| e.to_string())?;
         if !G::valid_input(&input) {
-            return Err("trace input is outside the finite held-key domain".into());
+            return Err("trace input is outside the finite input domain".into());
         }
         out.push((ticks, input));
     }
@@ -597,3 +599,7 @@ mod file_read_tests {
         assert_eq!(file.metadata().unwrap().len(), 3);
     }
 }
+
+#[cfg(test)]
+#[path = "navigation_pulse_tests.rs"]
+mod navigation_pulse_tests;

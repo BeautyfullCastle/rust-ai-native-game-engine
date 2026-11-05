@@ -57,6 +57,11 @@ credentials and cannot be reused. Mailboxes retain at most 64 records, 16 pendin
 requests and 16 connections. Admission timeouts are at most five seconds;
 expiration is observed at the next service boundary.
 
+Delivery advertises `move {"dx":1,"dy":0}` and Switchboard advertises
+`select {"delta":1}`, alongside `act {"press":1}`. Complete each command before
+submitting the next. Their project-owned pulse modes make navigation stable while
+waiting for observation; see [stock scene paths and input versioning](registered-starter-navigation.md).
+
 Physical window focus is human input context, not API authorization. Focus-only
 cleanup must preserve a live, explicitly claimed API controller's existing lease
 while human widgets remain disabled. Human/legacy focus cleanup, explicit Escape,

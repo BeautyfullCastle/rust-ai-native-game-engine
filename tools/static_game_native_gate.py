@@ -20,8 +20,8 @@ except ImportError:  # Import-only validator fixtures also run on Windows.
 import zlib
 
 SCHEMA = 'orr.static-game-native/1'
-GAMES = {'delivery': ('StarterDelivery', '0x5354415254455201'),
-         'switchboard': ('StarterSwitchboard', '0x5354415254455202')}
+GAMES = {'delivery': ('StarterDelivery', '0x5354415254563201'),
+         'switchboard': ('StarterSwitchboard', '0x5354415254563202')}
 PHASES = ['edit', 'won', 'neutral', 'reopened']
 TEST = 'registered_games_native_window'
 CONTEXT_TESTS = {'acceptance_context::tests::'+name for name in (

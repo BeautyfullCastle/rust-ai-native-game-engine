@@ -2344,7 +2344,7 @@ impl Editor {
     pub(crate) fn mesh_navigation_mark_edited(&mut self) { self.mark_edited(); }
     #[cfg(feature = "mesh-navigation")]
     pub fn set_mesh_navigation_blocker(&mut self, blocker: Option<String>) { self.mesh_navigation_blocker = blocker; }
-    #[cfg(any(feature = "sprites", feature = "static-gameplay", feature = "static-game-actions", feature = "arena-project-export", feature = "terrain", feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
+    #[cfg(any(feature = "sprites", feature = "static-game-actions", feature = "arena-project-export", feature = "terrain", feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
     pub(crate) fn scene_load_epoch(&self) -> u64 { self.scene_load_epoch }
     #[cfg(feature = "tilemap")]
     pub(crate) fn admitted_tilemap_scene_matches(&self, expected: &crate::project::PreparedArenaScene) -> bool {
