@@ -21,9 +21,6 @@ jobs:
     timeout-minutes: 360
     env:
       WORKFLOW_SHA: ${{ github.workflow_sha }}
-      EVIDENCE: ${{ runner.temp }}/stormglass-full-linux-${{ github.run_id }}-${{ github.run_attempt }}
-      CARGO_TARGET_DIR: ${{ runner.temp }}/stormglass-target-${{ github.run_id }}-${{ github.run_attempt }}
-      CARGO_HOME: ${{ runner.temp }}/stormglass-cargo-${{ github.run_id }}-${{ github.run_attempt }}
       RUSTUP_TOOLCHAIN: '1.99.1'
       CARGO_BUILD_JOBS: '2'
       CARGO_INCREMENTAL: '0'
@@ -39,6 +36,12 @@ jobs:
       - name: Write reviewed wrapper (part 1)
         run: |
           set -euo pipefail
+          # Runtime runner paths are propagated to subsequent steps, not job-env expressions.
+          {
+            printf 'EVIDENCE=%s/stormglass-full-linux-%s-%s\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+            printf 'CARGO_TARGET_DIR=%s/stormglass-target-%s-%s\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+            printf 'CARGO_HOME=%s/stormglass-cargo-%s-%s\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+          } >> "$GITHUB_ENV"
           cat > "$RUNNER_TEMP/stormglass-full-linux-harness.py" <<'PYHARNESS_PART1'
           import datetime
           import hashlib
