@@ -512,3 +512,74 @@ fn repeated_reset_does_not_restart_an_already_detached_fade() {
         "15 ms fade must finish despite repeated resets"
     );
 }
+
+#[test]
+fn initial_gain_bounds_first_block_and_setter_transitions_stay_bounded() {
+    let dc = Clip::from_stereo(RATE, vec![[0.25, 0.25]; 4800]).unwrap();
+    let mut audio =
+        OfflineAudio::new_offline_with_gain(AudioConfig::default(), RATE, 0.25).unwrap();
+    send(&mut audio, 1, EventStatus::Predicted(()), &dc);
+    let pcm = render(&mut audio, 512);
+    assert!(pcm.iter().all(|v| v.abs() <= 0.062501));
+    assert!(pcm.iter().any(|v| (*v - 0.0625).abs() < 0.000001));
+    for gain in [0.0, 0.25, 0.1, 0.0, 0.25] {
+        audio.set_gain(gain).unwrap();
+        let pcm = render(&mut audio, 256);
+        assert!(pcm.iter().all(|v| v.abs() <= 0.062501));
+        if gain == 0.0 {
+            assert!(silent(&pcm[256..]));
+        }
+    }
+    let mut silent_initial =
+        OfflineAudio::new_offline_with_gain(AudioConfig::default(), RATE, 0.0).unwrap();
+    send(&mut silent_initial, 1, EventStatus::Predicted(()), &dc);
+    assert!(silent(&render(&mut silent_initial, 256)));
+    for invalid in [f32::NAN, f32::INFINITY, -0.1, 1.1] {
+        assert!(
+            OfflineAudio::new_offline_with_gain(AudioConfig::default(), RATE, invalid).is_err()
+        );
+    }
+}
+
+#[test]
+fn invalid_gain_leaves_control_mix_unchanged_and_pause_matches_lifecycle() {
+    let sound = clip();
+    let mut direct =
+        OfflineAudio::new_offline_with_gain(AudioConfig::default(), RATE, 0.25).unwrap();
+    let mut control =
+        OfflineAudio::new_offline_with_gain(AudioConfig::default(), RATE, 0.25).unwrap();
+    send(&mut direct, 1, EventStatus::Predicted(()), &sound);
+    send(&mut control, 1, EventStatus::Predicted(()), &sound);
+    for invalid in [f32::NAN, f32::NEG_INFINITY, -0.01, 1.01] {
+        assert!(direct.set_gain(invalid).is_err());
+    }
+    assert_eq!(render(&mut direct, 256), render(&mut control, 256));
+    direct.set_paused(true);
+    direct.set_paused(true);
+    control.update(
+        0,
+        &update(vec![lifecycle(Lifecycle::Paused { tick: 1 })]),
+        |_| Some(sound.clone()),
+    );
+    send(&mut direct, 2, EventStatus::Predicted(()), &sound);
+    send(&mut control, 2, EventStatus::Predicted(()), &sound);
+    assert_eq!(render(&mut direct, 2048), render(&mut control, 2048));
+    direct.set_paused(false);
+    control.update(
+        0,
+        &update(vec![lifecycle(Lifecycle::Resumed { tick: 2 })]),
+        |_| Some(sound.clone()),
+    );
+    send(&mut direct, 2, EventStatus::Verified(()), &sound);
+    send(&mut control, 2, EventStatus::Verified(()), &sound);
+    assert_eq!(render(&mut direct, 512), render(&mut control, 512));
+    assert_eq!(direct.stats(), control.stats());
+    direct.reset();
+    control.reset();
+    direct.set_paused(true);
+    control.set_paused(true);
+    send(&mut direct, 3, EventStatus::Verified(()), &sound);
+    send(&mut control, 3, EventStatus::Verified(()), &sound);
+    assert_eq!(render(&mut direct, 512), render(&mut control, 512));
+    assert_eq!(direct.stats(), control.stats());
+}

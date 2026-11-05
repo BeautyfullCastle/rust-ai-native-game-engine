@@ -52,6 +52,10 @@ Copy/Load controls and a player-selected save directory. See
 the ten-minute journal cap and failure behavior. The web
 [Run Save v1](coop-defense-run-save.md) format is separate.
 
+The optional Linux [native audio consumer](coop-defense-native-audio.md) uses
+the existing authored bank with real Session events. Device output is explicit;
+muted startup and offline mixer checks do not prove physical audibility.
+
 ## Integration boundary
 
 `orr_games/coop-defense` is disabled by default. It contains only bounded,

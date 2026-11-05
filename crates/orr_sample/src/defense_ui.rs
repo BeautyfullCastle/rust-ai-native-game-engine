@@ -25,8 +25,23 @@ enum ClickTarget {
     Continue,
     Action(u32),
     Cell(u32),
+    #[cfg(feature = "coop-defense-audio")]
+    AudioMute,
+    #[cfg(feature = "coop-defense-audio")]
+    AudioGainDown,
+    #[cfg(feature = "coop-defense-audio")]
+    AudioGainUp,
     #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
     RunSave(u32),
+}
+#[cfg(feature = "coop-defense-audio")]
+impl ClickTarget {
+    fn is_audio(self) -> bool {
+        matches!(
+            self,
+            Self::AudioMute | Self::AudioGainDown | Self::AudioGainUp
+        )
+    }
 }
 #[derive(Clone, Copy)]
 struct Press {
@@ -168,6 +183,24 @@ impl PointerClicks {
                             {
                                 clicked = Some(press.target);
                             }
+                            // Audio consumes the frame rather than leaking a second
+                            // click into gameplay. Pause and save retain priority.
+                            #[cfg(feature = "coop-defense-audio")]
+                            if press.target.is_audio()
+                                && !clicked.is_some_and(ClickTarget::is_audio)
+                                && !matches!(clicked, Some(ClickTarget::Pause))
+                            {
+                                #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+                                let save_clicked = matches!(clicked, Some(ClickTarget::RunSave(_)));
+                                #[cfg(not(all(
+                                    feature = "coop-defense-run-save",
+                                    target_os = "linux"
+                                )))]
+                                let save_clicked = false;
+                                if !save_clicked {
+                                    clicked = Some(press.target);
+                                }
+                            }
                             clicked = if press.target == ClickTarget::Pause {
                                 Some(ClickTarget::Pause)
                             } else {
@@ -213,12 +246,35 @@ pub(crate) struct RunSavePanel {
     pub action: Option<RunSaveAction>,
 }
 
+#[cfg(feature = "coop-defense-audio")]
+pub(crate) struct AudioPanel {
+    pub(crate) enabled: bool,
+    pub(crate) muted: bool,
+    pub(crate) gain_percent: u8,
+    pub(crate) status: String,
+}
+#[cfg(feature = "coop-defense-audio")]
+impl Default for AudioPanel {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            muted: true,
+            gain_percent: 100,
+            status: String::new(),
+        }
+    }
+}
+
 pub struct DefenseUi {
     pub context: egui::Context,
     pub selected: Option<u32>,
     pub started: bool,
     pub(crate) paused: bool,
     pointer_clicks: PointerClicks,
+    #[cfg(feature = "coop-defense-audio")]
+    pub(crate) audio: AudioPanel,
+    #[cfg(feature = "coop-defense-audio")]
+    audio_enabled: bool,
     sequence: u32,
     previous: BTreeMap<u32, game::DefenseEnemy>,
     impacts: Vec<(i32, i32, u32, u32)>,
@@ -244,6 +300,10 @@ impl DefenseUi {
             started: false,
             paused: false,
             pointer_clicks: PointerClicks::default(),
+            #[cfg(feature = "coop-defense-audio")]
+            audio: AudioPanel::default(),
+            #[cfg(feature = "coop-defense-audio")]
+            audio_enabled: false,
             sequence: 0,
             previous: BTreeMap::new(),
             impacts: Vec::new(),
@@ -482,6 +542,84 @@ impl DefenseUi {
         self.pointer_clicks.press = None;
         true
     }
+    #[cfg(feature = "coop-defense-audio")]
+    fn audio_targets(&mut self, l: Layout, modal: bool, extra: &mut Vec<(Rect, ClickTarget)>) {
+        if self.audio_enabled != self.audio.enabled {
+            self.pointer_clicks.press = None;
+            self.audio_enabled = self.audio.enabled;
+        }
+        if self.audio.enabled && !modal {
+            extra.extend([
+                (l.rect(520.0, 15.0, 140.0, 30.0), ClickTarget::AudioMute),
+                (l.rect(670.0, 15.0, 45.0, 30.0), ClickTarget::AudioGainDown),
+                (l.rect(725.0, 15.0, 45.0, 30.0), ClickTarget::AudioGainUp),
+            ]);
+        }
+    }
+    #[cfg(feature = "coop-defense-audio")]
+    fn paint_audio(
+        &mut self,
+        l: Layout,
+        clicked: Option<ClickTarget>,
+        modal: bool,
+        ctx: &egui::Context,
+    ) -> bool {
+        let consumed = self.audio.enabled && !modal && clicked.is_some_and(ClickTarget::is_audio);
+        if consumed {
+            match clicked {
+                Some(ClickTarget::AudioMute) => self.audio.muted = !self.audio.muted,
+                Some(ClickTarget::AudioGainDown) => {
+                    self.audio.gain_percent = self.audio.gain_percent.saturating_sub(10).min(100)
+                }
+                Some(ClickTarget::AudioGainUp) => {
+                    self.audio.gain_percent = self.audio.gain_percent.saturating_add(10).min(100)
+                }
+                _ => {}
+            }
+            self.pointer_clicks.press = None;
+        }
+        let p = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("defense-audio"),
+        ));
+        let color = if self.audio.enabled && !modal {
+            PAPER
+        } else {
+            MUTED
+        };
+        for (x, width, label) in [
+            (
+                520.0,
+                140.0,
+                if self.audio.muted {
+                    "AUDIO: MUTED"
+                } else {
+                    "AUDIO: ON"
+                },
+            ),
+            (670.0, 45.0, "−"),
+            (725.0, 45.0, "+"),
+        ] {
+            p.rect_filled(
+                l.rect(x, 15.0, width, 30.0),
+                5.0 * l.scale,
+                Color32::from_rgb(49, 64, 61),
+            );
+            l.text(&p, x + 10.0, 30.0, 12.0, color, label);
+        }
+        l.text(
+            &p,
+            520.0,
+            65.0,
+            12.0,
+            color,
+            format!("GAIN {}%", self.audio.gain_percent),
+        );
+        // Footer remains outside the board, game actions and save modal.
+        let status: String = self.audio.status.chars().take(130).collect();
+        l.text(&p, 42.0, 928.0, 12.0, MUTED, status);
+        consumed
+    }
     pub fn show(
         &mut self,
         mut input: egui::RawInput,
@@ -538,6 +676,12 @@ impl DefenseUi {
             let l = Layout::new(screen);
             let options = ctx.options(|o| o.input_options);
             let (extra, modal) = self.save_targets(l);
+            #[cfg(feature = "coop-defense-audio")]
+            let extra = {
+                let mut extra = extra;
+                self.audio_targets(l, modal, &mut extra);
+                extra
+            };
             let clicked = ctx.input(|i| {
                 self.pointer_clicks.take(
                     i,
@@ -648,6 +792,13 @@ impl DefenseUi {
                     Color32::from_rgb(220, 127, 87),
                 );
             }
+            #[cfg(feature = "coop-defense-audio")]
+            let audio_consumed = self.paint_audio(l, clicked, modal, ctx);
+            // An audio click consumes keyboard gameplay input in the same frame.
+            #[cfg(feature = "coop-defense-audio")]
+            let just_pressed = |ctx: &egui::Context, key| {
+                (!audio_consumed || matches!(key, Key::P | Key::Escape)) && just_pressed(ctx, key)
+            };
             #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
             if self.paint_run_save(&p, l, clicked, ctx) {
                 return;
@@ -1734,3 +1885,7 @@ mod run_save_tests {
         assert!(!disabled.paused);
     }
 }
+
+#[cfg(all(test, feature = "coop-defense-audio"))]
+#[path = "defense_audio_ui_tests.rs"]
+mod audio_ui_tests;

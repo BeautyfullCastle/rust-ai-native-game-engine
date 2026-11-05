@@ -11,6 +11,8 @@ default-run = "arena"
 workspace = true
 
 [features]
+# Opt-in authored native presentation; hardware output additionally needs audio-native.
+coop-defense-audio = ["coop-defense", "audio", "orr_package/coop-audio-load"]
 # Optional Linux native admission-journal run saves, never enabled by web/default.
 coop-defense-run-save = ["coop-defense", "dep:sha2"]
 coop-defense-presentation = ["dep:egui", "orr_games/coop-defense"]
@@ -93,6 +95,7 @@ winit = "0.30"
 rustix = { version = "1.1.5", features = ["fs", "process"], optional = true }
 
 [dev-dependencies]
+sha2 = "0.11"
 tempfile = "3"
 # Compile-check browser and native sample identities together.
 orr_web = { path = "../orr_web" }

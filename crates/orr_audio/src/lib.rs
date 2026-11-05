@@ -147,6 +147,7 @@ pub type NativeAudio = EventAudio<kira::backend::cpal::CpalBackend>;
 fn settings<B: Backend>(
     config: AudioConfig,
     backend_settings: B::Settings,
+    initial_gain: kira::Decibels,
 ) -> AudioManagerSettings<B> {
     AudioManagerSettings {
         // This vertical slice uses only the main track. No hidden unbounded resources.
@@ -157,16 +158,39 @@ fn settings<B: Backend>(
             modulator_capacity: 0,
             listener_capacity: 0,
         },
-        main_track_builder: MainTrackBuilder::new().sound_capacity(config.max_voices),
+        main_track_builder: MainTrackBuilder::new()
+            .volume(initial_gain)
+            .sound_capacity(config.max_voices),
         internal_buffer_size: 128,
         backend_settings,
     }
 }
 
+fn linear_gain(gain: f32) -> Result<kira::Decibels, AudioError> {
+    if !gain.is_finite() || !(0.0..=1.0).contains(&gain) {
+        return Err(AudioError("gain must be finite and within 0..=1".into()));
+    }
+    Ok(if gain == 0.0 {
+        kira::Decibels::SILENCE
+    } else {
+        kira::Decibels(20.0 * gain.log10())
+    })
+}
+
 impl OfflineAudio {
     pub fn new_offline(config: AudioConfig, sample_rate: u32) -> Result<Self, AudioError> {
+        Self::new_offline_with_gain(config, sample_rate, 1.0)
+    }
+
+    /// Initialize the track at a bounded linear gain before its first PCM block.
+    pub fn new_offline_with_gain(
+        config: AudioConfig,
+        sample_rate: u32,
+        gain: f32,
+    ) -> Result<Self, AudioError> {
+        let gain = linear_gain(gain)?;
         let config = config.validate()?;
-        let manager = AudioManager::new(settings(config, sample_rate))?;
+        let manager = AudioManager::new(settings(config, sample_rate, gain))?;
         Ok(Self::from_manager(manager, config))
     }
 
@@ -182,8 +206,14 @@ impl OfflineAudio {
 impl NativeAudio {
     /// Success means CPAL opened a stream, not that a human heard sound.
     pub fn new_native(config: AudioConfig) -> Result<Self, AudioError> {
+        Self::new_native_with_gain(config, 1.0)
+    }
+
+    /// Validate gain before opening output, and initialize it before the first block.
+    pub fn new_native_with_gain(config: AudioConfig, gain: f32) -> Result<Self, AudioError> {
+        let gain = linear_gain(gain)?;
         let config = config.validate()?;
-        let manager = AudioManager::new(settings(config, Default::default()))
+        let manager = AudioManager::new(settings(config, Default::default(), gain))
             .map_err(|e| AudioError(format!("native audio unavailable: {e}")))?;
         Ok(Self::from_manager(manager, config))
     }
@@ -234,6 +264,29 @@ impl<B: Backend> EventAudio<B> {
             .stats
             .completed
             .saturating_add((before - self.voices.len()) as u64);
+    }
+
+    /// Presentation suppression stops transients but retains their tombstones.
+    pub fn set_paused(&mut self, paused: bool) {
+        if paused && !self.paused {
+            self.stop_voices();
+        }
+        self.paused = paused;
+    }
+
+    /// Set bounded linear master amplitude. Kira accepts decibels, not amplitude.
+    /// Kira interpolates the old/new values over one internal block even with a
+    /// zero-duration tween. Use the gain-aware constructor for a first-block bound.
+    pub fn set_gain(&mut self, gain: f32) -> Result<(), AudioError> {
+        let volume = linear_gain(gain)?;
+        self.manager.main_track().set_volume(
+            volume,
+            Tween {
+                duration: Duration::ZERO,
+                ..Tween::default()
+            },
+        );
+        Ok(())
     }
 
     /// Stop all owned voices with the short cancel fade, forget identity history.
@@ -288,10 +341,9 @@ impl<B: Backend> EventAudio<B> {
                         self.reset_at(source, u64::MAX);
                     }
                     Lifecycle::Paused { .. } => {
-                        self.stop_voices();
-                        self.paused = true;
+                        self.set_paused(true);
                     }
-                    Lifecycle::Resumed { .. } => self.paused = false,
+                    Lifecycle::Resumed { .. } => self.set_paused(false),
                     _ => {}
                 },
             }
@@ -314,7 +366,7 @@ impl<B: Backend> EventAudio<B> {
                 }
                 Lifecycle::Disconnected => self.disconnected = true,
                 Lifecycle::Paused { .. } => self.paused = true,
-                Lifecycle::Resumed { .. } => self.paused = false,
+                Lifecycle::Resumed { .. } => self.set_paused(false),
                 _ => {}
             }
         }
