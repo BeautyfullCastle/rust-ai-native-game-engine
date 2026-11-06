@@ -234,7 +234,6 @@ fn simulation_move_and_merge_preserve_only_the_destination_identity() {
                 sequence: tick as u32 + 1,
                 source_cell,
                 target_cell,
-                ..Default::default()
             },
         );
         sim.step(&inputs);

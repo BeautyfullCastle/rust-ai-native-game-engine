@@ -9,6 +9,8 @@ mod publish;
 mod recipe;
 mod sampler;
 mod scene;
+#[cfg(feature = "coop-native-authoring")]
+mod native_scene;
 use std::{
     collections::BTreeSet,
     ffi::OsString,
@@ -264,3 +266,9 @@ pub fn run_copy_cli(args: impl IntoIterator<Item = OsString>) -> u8 {
 #[cfg(test)]
 #[path = "coop_web_authoring/cli_tests.rs"]
 mod cli_tests;
+
+/// Create Scene YAML through the compiled native admission, without Node or WASM.
+#[cfg(feature = "coop-native-authoring")]
+pub fn run_native_scene_cli(args: impl IntoIterator<Item = OsString>) -> u8 {
+    native_scene::run_cli(args)
+}
