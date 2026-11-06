@@ -1493,7 +1493,6 @@ mod pause_tests {
             scenario: game::Scenario {
                 starting_gold: 250,
                 reactor_hp: 75,
-                ..Default::default()
             },
             campaign: game::Campaign { last_wave: 3 },
             ..Default::default()
