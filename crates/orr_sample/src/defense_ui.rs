@@ -744,7 +744,15 @@ impl DefenseUi {
                 orr_bridge::FrameView::of(frame),
                 self.selected,
                 |p, center, scale, unit| {
-                    #[cfg(feature = "coop-defense-pixelfx")]
+                    #[cfg(feature = "coop-defense-attack-clip")]
+                    if self.started {
+                        if let Some(age) = self.vfx.unit_release_age(unit, &run) {
+                            if self.pixel_motion.paint_release(p, center, scale, unit, age) {
+                                return true;
+                            }
+                        }
+                    }
+                    #[cfg(all(feature = "coop-defense-pixelfx", not(feature = "coop-defense-attack-clip")))]
                     let center = center + vec2(0.0, if self.started {
                         self.vfx.unit_recoil(unit, &run)
                     } else { 0.0 }) * scale;
@@ -756,7 +764,9 @@ impl DefenseUi {
             #[cfg(feature = "coop-defense-pixel-motion")]
             l.text(
                 &p, 42.0, 805.0, 12.0, PAPER,
-                if cfg!(feature = "coop-defense-pixelfx") {
+                if cfg!(feature = "coop-defense-attack-clip") {
+                    "OPTIONAL RIVET: RELEASE-TRIGGERED SHOT CLIP · FIXED DIRECTION"
+                } else if cfg!(feature = "coop-defense-pixelfx") {
                     "OPTIONAL PIXELOE: IDLE LOOP + SHOT RECOIL (NOT AN AUTHORED ATTACK CLIP)"
                 } else {
                     "OPTIONAL PIXELOE VISUAL DEMO · RIVET SKIN · NOT ATTACK-SYNCHRONIZED"

@@ -7,6 +7,9 @@ Build the native player with `--features coop-defense-pixel-motion` and run
 tool licenses without opening a window. No generator, external file or network
 is needed at runtime.
 
+The separate [attack-clip option](stormglass-attack-clip.md) adds dedicated
+post-release frames without changing this idle artwork or its timing.
+
 ## Contract
 
 Only placed, active Rivet units receive this optional visual skin. Mortar,
