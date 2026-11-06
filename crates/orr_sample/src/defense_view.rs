@@ -363,6 +363,11 @@ pub(crate) fn paint_view_with_unit_skin(
     } else {
         Vec::new()
     };
+    let move_targets = if run.phase == game::PLAYING {
+        available_move_cells(&units, selected)
+    } else {
+        Vec::new()
+    };
     if let Some(unit) = selected.and_then(|cell| {
         units
             .iter()
@@ -525,10 +530,67 @@ pub(crate) fn paint_view_with_unit_skin(
     diamond(p, c, 20.0 * l.scale, TEAL);
     l.text(p, 520.0, 755.0, 13.0, MUTED, "SHARED STORMGLASS CORE");
     // Keep guides above both vector and custom unit skins, clipped to local cells.
+    for cell in move_targets {
+        paint_move_guide(p, l, cell);
+    }
     for cell in merge_targets {
         paint_merge_guide(p, l, cell);
     }
 }
+
+// Moves preserve a unit at any tier, including MAX_TIER. Missing slots aren't inferred
+// empty, and conflicting duplicate occupied slots conservatively suppress the guide.
+fn available_move_cells(units: &[game::DefenseUnit], selected: Option<u32>) -> Vec<u32> {
+    let Some(source) = selected
+        .filter(|cell| *cell < game::CELLS_PER_BOARD)
+        .and_then(|cell| {
+            units.iter().find(|u| u.board == 0 && u.cell == cell && u.active != 0)
+        })
+    else {
+        return Vec::new();
+    };
+    (0..game::CELLS_PER_BOARD)
+        .filter(|cell| {
+            *cell != source.cell
+                && units.iter().any(|u| u.board == 0 && u.cell == *cell && u.active == 0)
+                && !units.iter().any(|u| u.board == 0 && u.cell == *cell && u.active != 0)
+        })
+        .collect()
+}
+
+fn paint_move_guide(p: &Painter, l: Layout, cell: u32) {
+    let rect = l.cell(0, cell);
+    let clip = p.clip_rect().intersect(rect);
+    if !clip.is_positive() {
+        return;
+    }
+    let p = p.with_clip_rect(clip);
+    let inset = rect.shrink(7.0 * l.scale);
+    for (corner, x, y) in [
+        (inset.left_top(), 1.0, 1.0),
+        (inset.right_top(), -1.0, 1.0),
+        (inset.left_bottom(), 1.0, -1.0),
+        (inset.right_bottom(), -1.0, -1.0),
+    ] {
+        for axis in [vec2(x, 0.0), vec2(0.0, y)] {
+            p.line_segment(
+                [corner, corner + axis * 8.0 * l.scale],
+                Stroke::new(1.5 * l.scale, BRONZE),
+            );
+        }
+    }
+    p.text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        "MOVE",
+        FontId::proportional(11.0 * l.scale),
+        PAPER,
+    );
+}
+
+#[cfg(test)]
+#[path = "defense_view_move_tests.rs"]
+mod move_guide_tests;
 
 // Advisory matches from this snapshot only; actual MOVE_OR_MERGE admission still owns
 // sequence, phase and changed-state checks. Empty cells are moves, not merge partners.
