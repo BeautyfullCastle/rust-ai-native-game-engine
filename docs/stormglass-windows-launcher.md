@@ -54,8 +54,9 @@ launcher never creates them, chooses an environment/cwd fallback, or rewrites
 the supplied paths. Runtime checks remain authoritative for NTFS ownership/ACLs,
 reparse points, aliases, forbidden roots and atomic persistence. Use the existing
 [controls](stormglass-controls.md) and [audio settings](stormglass-audio-settings.md)
-guides for provisioning and Save behavior. Audio remains initially muted until
-explicitly enabled in the game. Moving the game folder does not move user data.
+guides for provisioning and Save behavior. There is no playback before Start;
+saved gain/mute follow the existing runtime rules. Moving the game folder does
+not move user data.
 
 Fixed runtime/scene reparse points are refused. This convenience check is not a
 security boundary against modification of a trusted folder; native scene/bank

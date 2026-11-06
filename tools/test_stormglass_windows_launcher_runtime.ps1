@@ -27,6 +27,12 @@ $records=for($i=0;$i -lt $cues.Count;$i++){
     @{cue=$cues[$i];frames=2;assetId=('a_000000005444{0:x4}' -f ($i+1));file=$file;bytes=$pcm.Length;sha256=$digest}
 }
 [IO.File]::WriteAllText((Join-Path $bank 'bank.json'),(@{version=1;sampleRate=48000;cues=@($records)} | ConvertTo-Json -Depth 5))
+function Snapshot([string]$Directory){
+    @(Get-ChildItem -LiteralPath $Directory -File -Recurse | ForEach-Object {
+        $_.FullName.Substring($Directory.Length) + ':' + (Get-FileHash -LiteralPath $_.FullName).Hash
+    } | Sort-Object) -join "`n"
+}
+$original=Snapshot $game
 $script:caseNumber=0
 function Run([string]$Executable,[string[]]$Arguments){
     $script:caseNumber++
@@ -50,6 +56,7 @@ foreach($hostPath in $hosts){
     $run=Run $hostPath @('-NoProfile','-NonInteractive','-File',(Join-Path $game 'run-game.ps1'),'-Headless','-Ticks','60','-WithAudioBank')
     if($run.Code -ne 0 -or $run.Output -cne $direct.Output){throw "Copied launcher differs from direct runtime: $($run.Error)"}
 }
+if((Snapshot $game) -cne $original){throw 'Normal copied execution modified the game folder'}
 # Both absolute targets are checked descendants of our fresh evidence directory.
 $moved=Join-Path $root 'relocated game'
 foreach($path in @($game,$moved)){
@@ -61,10 +68,11 @@ foreach($hostPath in $hosts){
     $run=Run $hostPath @('-NoProfile','-NonInteractive','-File',(Join-Path $game 'run-game.ps1'),'-Headless','-Ticks','60','-WithAudioBank')
     if($run.Code -ne 0 -or $run.Output -cne $direct.Output){throw "Relocated launcher differs: $($run.Error)"}
 }
+if((Snapshot $game) -cne $original){throw 'Normal relocated execution modified the game folder'}
 # Explicit selection while Off must still reach real native bank admission.
 [IO.File]::WriteAllText((Join-Path $game 'audio-bank/bank.json'),'invalid test manifest')
 $bad=Run $hosts[0] @('-NoProfile','-NonInteractive','-File',(Join-Path $game 'run-game.ps1'),'-Headless','-WithAudioBank')
 if($bad.Code -eq 0){throw 'Explicit invalid bank accepted while Off'}
-[pscustomobject]@{schema=1;kind='real runtime CPU/headless';cases=$script:caseNumber;hosts=$hosts;runtime_sha256=(Get-FileHash -LiteralPath $Runtime).Hash;summary=$direct.Output;window_device='UNRUN';settings_persistence='UNRUN by launcher smoke'} |
+[pscustomobject]@{schema=1;kind='real runtime CPU/headless';cases=$script:caseNumber;hosts=$hosts;runtime_sha256=(Get-FileHash -LiteralPath $Runtime).Hash;summary=$direct.Output;normal_game_inventory_hashes_unchanged=$true;window_device='UNRUN';settings_persistence='UNRUN by launcher smoke'} |
     ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $root 'result.json') -Encoding utf8
 Write-Output "PASS real runtime cases=$script:caseNumber; copied/relocated headless 60; invalid selected bank refused; window/device UNRUN."
