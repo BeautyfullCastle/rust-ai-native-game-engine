@@ -342,3 +342,7 @@ mod sphere_fit_export;
 #[cfg(all(feature = "windows-export", target_os = "linux", target_arch = "x86_64"))]
 #[path = "room_model_admission/rotation_export.rs"]
 mod rotation_export;
+
+#[cfg(target_os = "linux")]
+#[path = "room_model_admission/orphan_cleanup.rs"]
+mod orphan_cleanup;

@@ -668,3 +668,7 @@ mod sphere_fit;
 #[cfg(target_os = "linux")]
 #[path = "yard3d_animated/rotation.rs"]
 mod rotation;
+
+#[cfg(target_os = "linux")]
+#[path = "yard3d_animated/orphan_cleanup.rs"]
+mod orphan_cleanup;

@@ -178,6 +178,7 @@ fn actual_widgets_assign_remove_undo_save_reopen_and_disable_mutation_in_play() 
         "Save model bindings",
         "Reload verified models",
         "Use selected model settings",
+        "Remove orphan model bindings",
         "Fit rest model to box",
         "Fit rest model to sphere",
         "Rotate X -90", "Rotate X +90", "Rotate Y -90", "Rotate Y +90", "Rotate Z -90", "Rotate Z +90", "Reset model rotation",
@@ -914,3 +915,6 @@ mod sphere_fit;
 
 #[path = "yard3d_models/rotation.rs"]
 mod rotation;
+
+#[path = "yard3d_models/orphan_cleanup.rs"]
+mod orphan_cleanup;

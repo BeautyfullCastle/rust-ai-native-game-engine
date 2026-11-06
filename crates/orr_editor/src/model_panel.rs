@@ -675,6 +675,30 @@ impl ModelPanel {
         self.retire_character_playback();
         Ok(())
     }
+    fn orphaned_guids(&self, editor: &Editor) -> Result<Vec<orr_reflect::Guid>, String> {
+        if !self.scene_matches(editor) || !editor.yard_rows_coherent() {
+            return Err("Orphan cleanup requires matching bindings and a coherent GUID snapshot".into());
+        }
+        let bindings = self.bindings.as_ref().ok_or("Open model bindings first")?;
+        let present: std::collections::BTreeSet<_> = editor.rows().iter()
+            .filter_map(|row| row.guid.as_ref()).map(ToString::to_string).collect();
+        bindings.document().bindings.keys().filter(|guid| !present.contains(*guid))
+            .map(|guid| orr_reflect::Guid::parse(guid)).collect()
+    }
+    /// Remove only absent persistent GUIDs as one explicit model-history edit.
+    /// The scene, installed assets and surviving cached model objects stay intact.
+    pub fn remove_orphaned(&mut self, editor: &Editor) -> Result<usize, String> {
+        if !self.editable(editor) { return Err("Orphan cleanup requires coherent local Edit mode".into()); }
+        let orphaned = self.orphaned_guids(editor)?;
+        if orphaned.is_empty() { return Ok(0); }
+        let mut candidate = self.bindings.as_ref().ok_or("Open model bindings first")?.document().clone();
+        for guid in &orphaned { candidate.bindings.remove(&guid.to_string()); }
+        let mut loaded = self.loaded.clone(); loaded.retain(|guid, _| candidate.bindings.contains_key(guid));
+        Self::validate_candidate(editor, &candidate, &loaded, self.reserved_scene_models)?;
+        self.bindings.as_mut().ok_or("Open model bindings first")?.remove(&orphaned)?;
+        self.loaded = loaded; self.retire_character_playback();
+        Ok(orphaned.len())
+    }
     /// Validate the complete proposed state before touching document or history.
     pub fn remove(&mut self, editor: &Editor) -> Result<(), String> {
         if !self.editable(editor) {
@@ -1359,6 +1383,7 @@ impl ModelPanel {
             self.kind = ModelKind::Static;
             self.candidate = None;
         }
+        let orphaned = self.orphaned_guids(editor).map_or(0, |guids| guids.len());
         ui.collapsing("Static model binding", |ui| {
             ui.weak("Presentation only · scene and model saves/undo are separate");
             if !editor.spec().is_local() { ui.label("Remote host paths are not local asset authority"); return; }
@@ -1377,7 +1402,6 @@ impl ModelPanel {
                             );
                             ui.label(label);
                         }
-                        let orphaned = bindings.document().bindings.keys().filter(|guid| !editor.rows().iter().any(|row| row.guid.as_ref().is_some_and(|g| g.to_string() == **guid))).count();
                         if orphaned > 0 { ui.colored_label(egui::Color32::YELLOW, format!("{orphaned} orphan GUID binding(s); no handle rebinding")); }
                     }
                     if !self.scene_matches(editor) { ui.colored_label(egui::Color32::YELLOW, "Bindings belong to a different scene; save/discard before opening this scene's bindings"); }
@@ -1388,6 +1412,9 @@ impl ModelPanel {
                                 bindings.document().bindings.contains_key(&guid.to_string())
                             })
                         });
+                        if ui.add_enabled(orphaned > 0, egui::Button::new("Remove orphan model bindings")).clicked() {
+                            self.error = self.remove_orphaned(editor).map(|_| ()).err();
+                        }
                         if ui.add_enabled(has_binding, egui::Button::new("Use selected model settings")).clicked() {
                             self.error = self.use_selected_settings(editor).err();
                         }
