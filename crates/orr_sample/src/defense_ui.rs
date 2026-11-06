@@ -4,12 +4,19 @@ use egui::{vec2, Color32, Key, Rect, Stroke};
 use orr_games::coop_defense_game as game;
 use std::collections::BTreeMap;
 
+// Shortcut ownership belongs to each key event, not the final modifier state.
+// Keep Shift-only controls and ordinary pointer handling unchanged.
 fn just_pressed(ctx: &egui::Context, key: Key) -> bool {
     ctx.input(|input| {
         input.focused
             && !input.events.iter().any(|event| matches!(event, egui::Event::WindowFocused(false)))
             && input.events.iter().any(|event| matches!(event,
-                egui::Event::Key { key: pressed, pressed: true, repeat: false, .. } if *pressed == key))
+                egui::Event::Key { key: pressed, pressed: true, repeat: false, modifiers, .. }
+                    if *pressed == key
+                        && !modifiers.ctrl
+                        && !modifiers.alt
+                        && !modifiers.command
+                        && !modifiers.mac_cmd))
     })
 }
 
@@ -1950,3 +1957,7 @@ mod run_save_tests {
 #[cfg(all(test, feature = "coop-defense-audio"))]
 #[path = "defense_audio_ui_tests.rs"]
 mod audio_ui_tests;
+
+#[cfg(test)]
+#[path = "defense_ui/modifier_tests.rs"]
+mod modifier_tests;

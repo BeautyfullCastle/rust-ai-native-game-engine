@@ -36,6 +36,11 @@ An accepted browser move or merge ends any pointer gesture that began against
 the previous board state. Its destination stays selected; start a fresh gesture
 to move again. Cancelling an old drag cannot select its now-empty source.
 
+Native keyboard shortcuts also ignore Ctrl, Alt and Command-modified key
+presses, including Start, Continue, Pause, Restart and economy actions. Plain
+and Shift-only keys retain their behavior. Modifier changes later in a frame
+cannot retarget an earlier key press; pointer controls remain independent.
+
 Native pointer actions use the control or board cell where a primary press and
 release occurred, not the final hover position of a rendered frame. Both ends
 must identify the same target without a layout change; a drag, cancelled pointer
