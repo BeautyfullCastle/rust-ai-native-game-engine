@@ -10,6 +10,9 @@ mod room_template;
 #[cfg(feature = "room-character")]
 mod character_template;
 mod template;
+mod custom_sprites;
+pub use custom_sprites::{create_custom_sprites, CustomSpriteOptions};
+pub const CUSTOM_SPRITE_TEMPLATE: &str = "arena-custom-sprites-2d-v1";
 #[cfg(feature = "tilemap")]
 mod tilemap;
 #[cfg(feature = "tilemap")]
