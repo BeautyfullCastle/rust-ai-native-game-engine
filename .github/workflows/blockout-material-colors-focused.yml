@@ -34,6 +34,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cargo test --locked -p orr_editor --features models --lib blockout_panel::tests::material_color_controls_fit_narrow_inspector -- --exact 2>&1 | tee ci-evidence/narrow-layout.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' ci-evidence/narrow-layout.log
           cargo test --locked -p orr_editor --features models --test blockout_material_colors -- --test-threads=1 2>&1 | tee ci-evidence/material-contract.log
           grep -F 'test result: ok. 4 passed; 0 failed; 0 ignored;' ci-evidence/material-contract.log
           cargo test --locked -p orr_editor --features models --test blockout malformed_versions_duplicates_records_and_numeric_inputs_are_rejected -- --exact 2>&1 | tee ci-evidence/legacy-strict.log

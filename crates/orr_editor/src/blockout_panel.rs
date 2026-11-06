@@ -22,6 +22,16 @@ impl Default for BlockoutPanel {
             error: None, last_bake: None, discard: false }
     }
 }
+fn material_color_controls(ui: &mut egui::Ui, color: &mut [f32; 3]) -> egui::Response {
+    for (name, value) in ["Material red", "Material green", "Material blue"].into_iter().zip(color) {
+        ui.horizontal(|ui| {
+            let label = ui.label(name);
+            ui.add(egui::DragValue::new(value).speed(0.01).range(0.0..=1.0)).labelled_by(label.id);
+        });
+    }
+    ui.button("Apply material color")
+}
+
 impl BlockoutPanel {
     pub fn error(&self) -> Option<&str> { self.error.as_deref() }
     pub fn last_bake(&self) -> Option<&BakeResult> { self.last_bake.as_ref() }
@@ -88,15 +98,9 @@ impl BlockoutPanel {
                     if previous_material != self.material {
                         self.color = self.document.as_ref().expect("document").recipe().colors()[usize::from(self.material)];
                     }
-                    ui.horizontal(|ui| {
-                        for (label, value) in ["Material red", "Material green", "Material blue"].into_iter().zip(&mut self.color) {
-                            let label = ui.label(label);
-                            ui.add(egui::DragValue::new(value).speed(0.01).range(0.0..=1.0)).labelled_by(label.id);
-                        }
-                        if ui.button("Apply material color").clicked() {
-                            self.error = self.document.as_mut().expect("document").set_material_color(self.material, self.color).err();
-                        }
-                    });
+                    if material_color_controls(ui, &mut self.color).clicked() {
+                        self.error = self.document.as_mut().expect("document").set_material_color(self.material, self.color).err();
+                    }
                     ui.weak("Color multiplies the checker on every face using this material slot; Save then Bake to apply in game.");
                     self.preview(ui);
                     ui.horizontal(|ui| {
@@ -143,5 +147,28 @@ impl BlockoutPanel {
             let min = rect.min + egui::vec2(col as f32 * 5.0, row as f32 * 5.0);
             ui.painter().rect_filled(egui::Rect::from_min_size(min, egui::vec2(5.0,5.0)), 0.0, color);
         }}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn material_color_controls_fit_narrow_inspector() {
+        for width in [240.0, 340.0] {
+            let context = egui::Context::default(); let mut color = [0.8,0.2,0.1];
+            let mut observed = None;
+            let mut output = context.run_ui(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width,400.0))),
+                ..Default::default()
+            }, |ui| {
+                let clip = ui.clip_rect(); let response = super::material_color_controls(ui, &mut color);
+                observed = Some((clip,response.rect));
+            });
+            output.textures_delta.clear(); // CPU layout only.
+            let (clip,button) = observed.unwrap();
+            assert!(button.left() >= clip.left() && button.right() <= clip.right(), "width {width}: {button:?} outside {clip:?}");
+            assert!(button.top() >= clip.top() && button.bottom() <= clip.bottom());
+            assert_eq!(color,[0.8,0.2,0.1]);
+        }
     }
 }
