@@ -39,7 +39,7 @@ jobs:
           cargo test --locked -p orr_sample --features "$features" --lib audio_settings -- --test-threads=1 2>&1 | tee ci-evidence/settings.log
           grep -F 'test result: ok. 11 passed; 0 failed; 0 ignored;' ci-evidence/settings.log
           cargo test --locked -p orr_sample --features "$features" --lib defense_ui::audio_ui_tests -- --test-threads=1 2>&1 | tee ci-evidence/ui.log
-          grep -F 'test result: ok. 6 passed; 0 failed; 0 ignored;' ci-evidence/ui.log
+          grep -F 'test result: ok. 7 passed; 0 failed; 0 ignored;' ci-evidence/ui.log
           cargo test --locked -p orr_sample --features "$features" --lib defense_app::audio_tests -- --test-threads=1 2>&1 | tee ci-evidence/app.log
           grep -F 'test result: ok. 11 passed; 0 failed; 0 ignored;' ci-evidence/app.log
           cargo test --locked -p orr_sample --features "$features" --lib defense_audio::tests -- --test-threads=1 2>&1 | tee ci-evidence/pcm.log
