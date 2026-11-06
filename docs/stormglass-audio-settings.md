@@ -50,8 +50,9 @@ directory-fsync or power-loss durability. A reported rename error is checked
 against the visible file identity: known publication reports uncertain durability;
 an unrecognized outcome disables further saves until restart. Cleanup marks only
 the verified staging handle for deletion, never a subsequently resolved pathname.
-Windows persistence works even with output disabled; authored audio-bank admission
-remains Linux-only. No Windows hardware-audio playback is established here.
+Windows persistence works even with output disabled. Authored banks also have a
+[Windows loader](stormglass-windows-audio-bank.md); native output additionally needs
+`audio-native`. No Windows hardware-audio playback is established here.
 
 Focused acceptance covers strict schema admission, zero-write startup, explicit
 save/reopen, rejected links and permissions, stale writers, busy/stable locks,

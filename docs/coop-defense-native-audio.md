@@ -1,6 +1,6 @@
 # Native Stormglass authored audio
 
-The optional Linux `coop-defense-audio` player consumes the existing fixed
+The optional Linux/Windows `coop-defense-audio` player consumes the existing fixed
 CoopDefense soundbank. It uses real Session events and the existing Kira mixer.
 It does not change combat, save journals, replay identity or the web audio policy.
 
@@ -25,6 +25,8 @@ filenames. Linux admission uses bounded no-follow reads and a held directory;
 use trusted, stable ancestor directories. No downloads, arbitrary manifest paths,
 Node, browser packaging or codec execution occur in the native consumer.
 An explicitly supplied invalid bank is an error, even with audio off.
+Windows uses fixed local NTFS paths and held read-sharing reservations; see the
+[Windows bank loading contract](stormglass-windows-audio-bank.md) and its focused gate.
 
 `--audio off` never opens a device. `auto` reports unavailable output and continues
 silently. `required` fails rather than silently substituting an offline mixer;
@@ -32,7 +34,8 @@ it requires a bank and a build with native output. Headless required output is
 not supported. A successful CPAL stream open is not proof that a listener heard it.
 
 The game starts muted. Use the top-bar mute/unmute control and minus/plus gain
-controls. Gain is bounded and presentation-only; settings are not saved. Mute,
+controls. Gain is bounded and presentation-only. Optional explicit
+[audio settings](stormglass-audio-settings.md) can remember both controls. Mute,
 pause and focus loss stop transients, with a short bounded fade. Focus return
 still requires explicit Continue, and unmuting does not replay missed sounds.
 
@@ -81,7 +84,8 @@ seam; native-output wiring is compiled, not opened by these tests.
 
 Independent source review, exact-head required CI and downloaded-artifact
 re-execution precede development integration. Offline PCM is not physical-device
-listening, native-window, browser, GPU, Windows or full-workspace acceptance.
+listening, native-window, browser, GPU or full-workspace acceptance. The original
+Linux gate does not establish Windows coverage; use the separate Windows gate.
 
 The reproducible gate is `python3 tools/check_stormglass_native_audio.py` with
 `EVIDENCE` set to a fresh directory outside the checkout and genuine ALSA

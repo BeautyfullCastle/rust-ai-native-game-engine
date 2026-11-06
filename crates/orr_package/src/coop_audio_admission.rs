@@ -157,3 +157,13 @@ pub fn load_bank(path: &std::path::Path) -> Result<AdmittedBank, String> {
 #[cfg(test)]
 #[path = "coop_audio_admission_tests.rs"]
 mod tests;
+
+/// Read a bounded fixed bank on a local Windows NTFS drive, without reparse traversal.
+/// Holds directory and file sharing reservations through the existing pure admission.
+#[cfg(all(feature = "coop-audio-load", windows))]
+pub fn load_bank(path: &std::path::Path) -> Result<AdmittedBank, String> {
+    windows::load(path)
+}
+#[cfg(all(feature = "coop-audio-load", windows))]
+#[path = "coop_audio_windows.rs"]
+mod windows;
