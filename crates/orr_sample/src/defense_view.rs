@@ -236,6 +236,24 @@ pub fn paint_view(p: &Painter, l: Layout, frame: FrameView<'_>, selected: Option
     paint_view_with_unit_skin(p, l, frame, selected, |_, _, _, _| false);
 }
 
+/// A live projectile from this logical actor is still near its current cell.
+/// This readonly cue is not a firing-history or attack-animation clock.
+fn unit_has_nearby_projectile(
+    unit: &game::DefenseUnit,
+    shots: &[game::DefenseProjectile],
+) -> bool {
+    let (x, y) = game::board_cell_position(unit.board, unit.cell);
+    unit.active != 0
+        && unit.id != 0
+        && shots.iter().any(|s| {
+            s.active != 0
+                && s.source_unit_id == unit.id
+                && s.board == unit.board
+                && s.role == unit.role
+                && (s.x - x).abs() + (s.y - y).abs() < 25
+        })
+}
+
 // The native opt-in skin can replace only the unit silhouette. Shared/default
 // presentation keeps the original vector path and all board/combat feedback.
 pub(crate) fn paint_view_with_unit_skin(
@@ -367,13 +385,7 @@ pub(crate) fn paint_view_with_unit_skin(
         }
     }
     for unit in units.into_iter().filter(|u| u.active != 0) {
-        let (x, y) = game::board_cell_position(unit.board, unit.cell);
-        let firing = shots.iter().any(|s| {
-            s.active != 0
-                && s.board == unit.board
-                && s.role == unit.role
-                && (s.x - x).abs() + (s.y - y).abs() < 25
-        });
+        let firing = unit_has_nearby_projectile(&unit, &shots);
         let c = l.cell(unit.board, unit.cell).center();
         if !skin(p, c, l.scale, &unit) {
             turret(
@@ -597,3 +609,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "defense_view/firing_tests.rs"]
+mod firing_tests;
