@@ -671,6 +671,8 @@ impl DefenseUi {
             )
         });
         let run = game::run(frame);
+        #[cfg(feature = "coop-defense-attack-clip")]
+        self.vfx.resolve_attack_facing(frame);
         let pausable = run.phase == game::PLAYING;
         #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
         let pausable = pausable || self.run_save.enabled;
@@ -746,8 +748,8 @@ impl DefenseUi {
                 |p, center, scale, unit| {
                     #[cfg(feature = "coop-defense-attack-clip")]
                     if self.started {
-                        if let Some(age) = self.vfx.unit_release_age(unit, &run) {
-                            if self.pixel_motion.paint_release(p, center, scale, unit, age) {
+                        if let Some((age, flip_x)) = self.vfx.unit_release_pose(unit, &run) {
+                            if self.pixel_motion.paint_release(p, center, scale, unit, age, flip_x) {
                                 return true;
                             }
                         }
@@ -765,7 +767,7 @@ impl DefenseUi {
             l.text(
                 &p, 42.0, 805.0, 12.0, PAPER,
                 if cfg!(feature = "coop-defense-attack-clip") {
-                    "OPTIONAL RIVET: RELEASE-TRIGGERED SHOT CLIP · FIXED DIRECTION"
+                    "OPTIONAL RIVET: RELEASE-TRIGGERED SHOT CLIP · LEFT/RIGHT FACING"
                 } else if cfg!(feature = "coop-defense-pixelfx") {
                     "OPTIONAL PIXELOE: IDLE LOOP + SHOT RECOIL (NOT AN AUTHORED ATTACK CLIP)"
                 } else {

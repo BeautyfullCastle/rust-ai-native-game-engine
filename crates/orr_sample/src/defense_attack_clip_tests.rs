@@ -106,7 +106,7 @@ fn attack_clip_uses_post_release_session_ticks_once_and_fixed_pivot() {
             },
             |ui| {
                 assert_eq!(
-                    skin.paint_release(ui.painter(), pos2(250.0, 400.0), 1.0, &unit(), age),
+                    skin.paint_release(ui.painter(), pos2(250.0, 400.0), 1.0, &unit(), age, false),
                     age < 20
                 );
             },
@@ -153,11 +153,66 @@ fn attack_clip_rejects_missing_asset_inactive_other_roles_and_expired_age() {
                 ..unit()
             },
         ] {
-            assert!(!skin.paint_release(ui.painter(), Pos2::ZERO, 1.0, &value, 0));
+            assert!(!skin.paint_release(ui.painter(), Pos2::ZERO, 1.0, &value, 0, false));
         }
-        assert!(!PixelMotion::default().paint_release(ui.painter(), Pos2::ZERO, 1.0, &unit(), 0));
-        assert!(!skin.paint_release(ui.painter(), Pos2::ZERO, 1.0, &unit(), u64::MAX));
+        assert!(!PixelMotion::default().paint_release(
+            ui.painter(),
+            Pos2::ZERO,
+            1.0,
+            &unit(),
+            0,
+            false
+        ));
+        assert!(!skin.paint_release(ui.painter(), Pos2::ZERO, 1.0, &unit(), u64::MAX, false));
     });
     assert!(!output.shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Mesh(m) if m.texture_id == skin.test_attack_texture_id())));
     output.textures_delta.clear();
+}
+
+#[test]
+fn attack_clip_mirrors_uv_about_the_same_foot_anchor_for_every_frame() {
+    let (ctx, skin) = ready();
+    let asset = skin.attack.as_ref().unwrap();
+    for (region_index, age) in [0, 3, 5, 8, 10, 12, 15, 17].into_iter().enumerate() {
+        let region = asset.document.region(region_index as u32).unwrap();
+        let uv = asset.document.uv_rect(region_index as u32).unwrap();
+        for flip in [false, true] {
+            let mut output = ctx.run_ui(Default::default(), |ui| {
+                assert!(skin.paint_release(
+                    ui.painter(),
+                    pos2(250.0, 400.0),
+                    1.0,
+                    &unit(),
+                    age,
+                    flip
+                ));
+            });
+            let mesh = output
+                .shapes
+                .iter()
+                .find_map(|s| match &s.shape {
+                    egui::Shape::Mesh(m) if m.texture_id == skin.test_attack_texture_id() => {
+                        Some(m)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(
+                mesh.vertices[0].uv,
+                pos2(if flip { uv[2] } else { uv[0] }, uv[1])
+            );
+            assert_eq!(
+                mesh.vertices[1].uv,
+                pos2(if flip { uv[0] } else { uv[2] }, uv[1])
+            );
+            let pivot = if flip {
+                region.width as f32 - 222.0
+            } else {
+                222.0
+            };
+            assert!((mesh.vertices[0].pos.x + pivot * 0.184 - 250.0).abs() < 0.001);
+            assert!((mesh.vertices[0].pos.y + 362.0 * 0.184 - 420.0).abs() < 0.001);
+            output.textures_delta.clear();
+        }
+    }
 }

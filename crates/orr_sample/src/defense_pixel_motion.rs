@@ -114,7 +114,15 @@ impl PixelMotion {
         let Some(asset) = &self.asset else {
             return false; // A caller without prepared assets retains vector art.
         };
-        Self::paint_asset(p, center, scale, unit, asset, Self::elapsed(run, started))
+        Self::paint_asset(
+            p,
+            center,
+            scale,
+            unit,
+            asset,
+            Self::elapsed(run, started),
+            false,
+        )
     }
 
     fn paint_asset(
@@ -124,6 +132,7 @@ impl PixelMotion {
         unit: &game::DefenseUnit,
         asset: &Asset,
         elapsed: u64,
+        flip_x: bool,
     ) -> bool {
         let sample = asset.document.clips()[0].sample(elapsed);
         let Some(region) = asset.document.region(sample.region) else {
@@ -131,14 +140,22 @@ impl PixelMotion {
         };
         let anchor = center + vec2(0.0, 20.0) * scale;
         let sprite_scale = scale * asset.scale;
+        let pivot_x = if flip_x {
+            region.width as f32 - asset.pivot[0]
+        } else {
+            asset.pivot[0]
+        };
         let rect = Rect::from_min_size(
-            anchor - vec2(asset.pivot[0], asset.pivot[1]) * sprite_scale,
+            anchor - vec2(pivot_x, asset.pivot[1]) * sprite_scale,
             vec2(region.width as f32, region.height as f32) * sprite_scale,
         );
-        let [u0, v0, u1, v1] = asset
+        let [mut u0, v0, mut u1, v1] = asset
             .document
             .uv_rect(sample.region)
             .expect("validated region");
+        if flip_x {
+            std::mem::swap(&mut u0, &mut u1);
+        }
         p.add(egui::Shape::ellipse_filled(
             center + vec2(0.0, 19.0) * scale,
             vec2(21.0, 5.0) * scale,

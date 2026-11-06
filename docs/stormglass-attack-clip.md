@@ -22,11 +22,20 @@ scale are used. No per-frame recentering or resampling occurs. Original idle
 assets are unchanged. Generation prompts, notices and SHA-256 provenance are in
 `crates/orr_sample/assets/stormglass-attack-clip/`.
 
-The built-in image generator created the new sheet using the original idle
-robot as an identity reference, then corrected its reactor to cyan. This is a
-fixed forward-facing shooting pose; it does not aim toward individual targets.
-Small pose redraw differences remain, and it is not a polished directional
-animation set.
+The built-in image generator created the sheet using the original idle robot
+as an identity reference, then corrected its reactor to cyan. The source art
+has one forward-facing pose; the renderer adds horizontal mirroring without
+modifying those original pixels or provenance.
+
+Each shot locks left/right facing when its exact live target first appears in
+a coherent presented frame, using the release position as its origin. A target
+that moves across the shooter or disappears does not flip an already resolved
+shot. Missing targets keep the original orientation until they can be resolved;
+another enemy is never substituted. Restart, cancellation and corrected events
+discard old facing through the existing ledger. Mirroring reflects both the UVs
+and the foot pivot, including the one-pixel region-width differences; the badge
+and shadow stay anchored. This is horizontal facing, not full vertical/angle
+aiming. Small artwork redraw differences remain.
 
 CPU checks cover exact asset hashes/alpha/uploads, all eight regions, fixed
 pivot, tick sampling, one-shot expiry, invalid-role fallback and actual native

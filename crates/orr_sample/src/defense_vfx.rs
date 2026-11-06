@@ -37,6 +37,8 @@ struct Active {
     event: DefenseEvent,
     asset: usize,
     born: u64,
+    #[cfg(feature = "coop-defense-attack-clip")]
+    facing_left: Option<bool>,
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct State {
@@ -193,11 +195,21 @@ impl DefenseVfx {
     /// Age of the latest retained Release by the exact current actor, in
     /// absolute session ticks. Missing, canceled and future shots are absent.
     #[cfg(feature = "coop-defense-pixel-motion")]
+    #[cfg(any(test, not(feature = "coop-defense-attack-clip")))]
     pub(crate) fn unit_release_age(
         &self,
         unit: &orr_games::coop_defense_game::DefenseUnit,
         run: &orr_games::coop_defense_game::DefenseRun,
     ) -> Option<u64> {
+        self.latest_release(unit, run)
+            .and_then(|effect| self.state.tick.checked_sub(effect.born))
+    }
+    #[cfg(feature = "coop-defense-pixel-motion")]
+    fn latest_release(
+        &self,
+        unit: &orr_games::coop_defense_game::DefenseUnit,
+        run: &orr_games::coop_defense_game::DefenseRun,
+    ) -> Option<&Active> {
         if unit.active == 0
             || unit.id == 0
             || run.phase != orr_games::coop_defense_game::PLAYING
@@ -215,8 +227,56 @@ impl DefenseVfx {
                     && effect.event.role == unit.role
                     && effect.event.generation == run.generation
             })
-            .filter_map(|effect| self.state.tick.checked_sub(effect.born))
-            .min()
+            .filter_map(|effect| {
+                self.state
+                    .tick
+                    .checked_sub(effect.born)
+                    .map(|age| (effect, age))
+            })
+            .min_by_key(|(_, age)| *age)
+            .map(|(effect, _)| effect)
+    }
+    /// Lock a shot's horizontal facing on its first coherent presented target.
+    /// Never retarget a missing enemy or revise a shot after target movement.
+    #[cfg(feature = "coop-defense-attack-clip")]
+    pub(crate) fn resolve_attack_facing(&mut self, frame: &orr_ecs::Frame) {
+        use orr_games::coop_defense_game as game;
+        let run = game::run(frame);
+        if frame.tick() != self.state.tick
+            || run.generation != self.state.generation
+            || run.phase != game::PLAYING
+        {
+            return;
+        }
+        let enemies = game::enemies(frame);
+        let tick = self.state.tick;
+        for effect in self.state.active.values_mut().filter(|effect| {
+            effect.facing_left.is_none()
+                && effect.born <= tick
+                && effect.event.generation == run.generation
+                && effect.event.event_kind() == Some(Kind::Release)
+        }) {
+            if let Some(enemy) = enemies
+                .iter()
+                .find(|enemy| enemy.active != 0 && enemy.id == effect.event.enemy_id)
+            {
+                let target_x = game::enemy_position(enemy.lane, enemy.progress).0;
+                effect.facing_left = Some(target_x < effect.event.x);
+            }
+        }
+    }
+    /// Session age plus locked facing; an unresolved target keeps original art.
+    #[cfg(feature = "coop-defense-attack-clip")]
+    pub(crate) fn unit_release_pose(
+        &self,
+        unit: &orr_games::coop_defense_game::DefenseUnit,
+        run: &orr_games::coop_defense_game::DefenseRun,
+    ) -> Option<(u64, bool)> {
+        let effect = self.latest_release(unit, run)?;
+        Some((
+            self.state.tick.checked_sub(effect.born)?,
+            effect.facing_left.unwrap_or(false),
+        ))
     }
     pub(crate) fn summary(&self) -> (usize, u64, u64, u64) {
         (
@@ -297,6 +357,8 @@ impl State {
                         event,
                         asset,
                         born: key.tick,
+                        #[cfg(feature = "coop-defense-attack-clip")]
+                        facing_left: None,
                     },
                 );
                 self.started += 1;
@@ -323,3 +385,7 @@ mod tests;
 #[cfg(all(test, feature = "coop-defense-pixel-motion"))]
 #[path = "defense_release_recoil_tests.rs"]
 mod release_recoil_tests;
+
+#[cfg(all(test, feature = "coop-defense-attack-clip"))]
+#[path = "defense_attack_facing_tests.rs"]
+mod attack_facing_tests;
