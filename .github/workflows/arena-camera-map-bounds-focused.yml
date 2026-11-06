@@ -1,0 +1,50 @@
+name: arena-camera-map-bounds focused Linux CI
+on:
+  push:
+    branches: [codex/arena-camera-map-bounds-20261106]
+permissions:
+  contents: read
+concurrency:
+  group: arena-camera-map-bounds-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  arena-camera-map-bounds:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record exact source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir ci-evidence
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git rev-parse HEAD HEAD^{tree} | tee ci-evidence/source.txt
+      - name: Select Rust toolchain
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal --component clippy
+          rustup override set 1.99.1
+          rustc --version --verbose | tee ci-evidence/rustc.txt
+      - name: Test actual Arena sprite presentation and feature boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p orr_sample --features sprites --lib sprite_scene::tests:: -- --test-threads=1 2>&1 | tee ci-evidence/arena-sprites.log
+          grep -F 'test result: ok. 9 passed; 0 failed; 0 ignored;' ci-evidence/arena-sprites.log
+          cargo clippy --locked -p orr_sample --features sprites --lib -- -D warnings 2>&1 | tee ci-evidence/clippy.log
+          cargo check --locked -p orr_sample --lib 2>&1 | tee ci-evidence/default-check.log
+      - name: Preserve results including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arena-camera-map-bounds-${{ github.sha }}
+          path: ci-evidence
+          if-no-files-found: error
