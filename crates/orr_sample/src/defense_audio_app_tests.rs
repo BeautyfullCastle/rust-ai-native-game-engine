@@ -25,17 +25,24 @@ fn app() -> App {
     }
 }
 
-#[cfg(all(feature = "coop-defense-audio-settings", target_os = "linux"))]
+#[cfg(all(feature = "coop-defense-audio-settings", any(target_os = "linux", windows)))]
 #[test]
 fn audio_settings_explicit_click_restores_without_starting_or_advancing_game() {
     use crate::defense_audio_settings::{self as settings, Preferences, Store, Outcome};
+    #[cfg(target_os = "linux")]
     use std::os::unix::fs::PermissionsExt;
+    #[cfg(target_os = "linux")]
     let dir = tempfile::tempdir().unwrap();
+    #[cfg(target_os = "linux")]
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    let mut store = Store::open(dir.path(), &[]).unwrap().store;
+    #[cfg(target_os = "linux")]
+    let path = dir.path().to_owned();
+    #[cfg(windows)]
+    let (_dir, path) = settings::windows_test_directory();
+    let mut store = Store::open(&path, &[]).unwrap().store;
     assert!(matches!(store.save(&Preferences::new(40, false).unwrap()), Outcome::Saved));
     let mut a = app();
-    settings::install(&mut a.ui, Store::open(dir.path(), &[]).unwrap());
+    settings::install(&mut a.ui, Store::open(&path, &[]).unwrap());
     let before = a.session.predicted_frame().to_bytes();
     frame(&mut a, vec![], 0.0);
     silence(a.audio.offline_owner());
@@ -43,9 +50,9 @@ fn audio_settings_explicit_click_restores_without_starting_or_advancing_game() {
     assert_eq!((a.ui.audio.gain_percent, a.ui.audio.muted), (40, false));
     click(&mut a, 690.0, 30.0);
     assert_eq!(a.ui.audio.gain_percent, 30);
-    assert_eq!(Store::open(dir.path(), &[]).unwrap().preferences.gain_percent, 40);
+    assert_eq!(Store::open(&path, &[]).unwrap().preferences.gain_percent, 40);
     click(&mut a, 840.0, 30.0);
-    assert_eq!(Store::open(dir.path(), &[]).unwrap().preferences.gain_percent, 30);
+    assert_eq!(Store::open(&path, &[]).unwrap().preferences.gain_percent, 30);
     assert!(a.ui.audio_settings.status.contains("saved"));
     assert!(!a.ui.started);
     assert_eq!(a.session.predicted_frame().to_bytes(), before);
@@ -54,7 +61,7 @@ fn audio_settings_explicit_click_restores_without_starting_or_advancing_game() {
     assert!(render(a.audio.offline_owner(), 256).iter().any(|v| v.abs() > 0.00001));
 }
 
-#[cfg(all(feature = "coop-defense-audio-settings", target_os = "linux"))]
+#[cfg(all(feature = "coop-defense-audio-settings", any(target_os = "linux", windows)))]
 #[test]
 fn audio_settings_cli_and_direct_headless_api_refuse_without_filesystem_effects() {
     let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();

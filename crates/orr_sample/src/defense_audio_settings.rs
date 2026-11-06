@@ -46,7 +46,7 @@ impl Preferences {
 }
 
 #[derive(Default)]
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 pub(crate) struct Panel {
     pub(crate) configured: bool,
     pub(crate) writable: bool,
@@ -354,7 +354,15 @@ mod linux {
 #[cfg(target_os = "linux")]
 pub(crate) use linux::{Loaded, Outcome, Store};
 
-#[cfg(target_os = "linux")]
+#[cfg(windows)]
+#[path = "defense_audio_settings_windows.rs"]
+mod windows;
+#[cfg(windows)]
+pub(crate) use windows::{Loaded, Outcome, Store};
+#[cfg(all(test, windows))]
+pub(crate) use windows::tests::private_directory as windows_test_directory;
+
+#[cfg(any(target_os = "linux", windows))]
 pub(crate) fn install(ui: &mut crate::defense_ui::DefenseUi, loaded: Loaded) {
     ui.audio.gain_percent = loaded.preferences.gain_percent;
     ui.audio.muted = loaded.preferences.muted;
@@ -367,7 +375,7 @@ pub(crate) fn install(ui: &mut crate::defense_ui::DefenseUi, loaded: Loaded) {
     ui.audio_settings_store = Some(loaded.store);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 pub(crate) fn process_save(ui: &mut crate::defense_ui::DefenseUi) {
     if !std::mem::take(&mut ui.audio_settings.save_requested) {
         return;
@@ -383,6 +391,8 @@ pub(crate) fn process_save(ui: &mut crate::defense_ui::DefenseUi) {
         Outcome::Saved => "Audio settings saved".into(),
         Outcome::NotSaved(e) => format!("Not saved: {e}"),
         Outcome::PublishedUncertain(e) => format!("Published; durability uncertain: {e}"),
+        #[cfg(windows)]
+        Outcome::Uncertain(e) => format!("Save outcome uncertain; restart to inspect: {e}"),
     }
     .chars()
     .take(240)
