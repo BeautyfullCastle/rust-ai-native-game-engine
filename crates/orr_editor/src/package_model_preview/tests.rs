@@ -14,13 +14,16 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Self::with_asset(ASSET, &triangle().to_bytes().unwrap())
+    }
+    fn with_asset(asset: &str, bytes: &[u8]) -> Self {
         let temporary = tempfile::tempdir().unwrap();
         let base = temporary.path().canonicalize().unwrap();
         let root = base.join("project");
         let source = base.join("source");
         fs::create_dir(&root).unwrap();
         fs::create_dir(&source).unwrap();
-        fs::write(source.join(ASSET), triangle().to_bytes().unwrap()).unwrap();
+        fs::write(source.join(asset), bytes).unwrap();
         fs::write(source.join("LICENSE.txt"), b"Original test fixture.\n").unwrap();
         let manifest = orr_package::Manifest {
             schema: 1,
@@ -29,7 +32,7 @@ impl Fixture {
             engine: "*".into(),
             capabilities: BTreeSet::from(["models".into()]),
             dependencies: BTreeMap::new(),
-            files: BTreeSet::from([ASSET.into(), "LICENSE.txt".into()]),
+            files: BTreeSet::from([asset.into(), "LICENSE.txt".into()]),
         };
         fs::write(
             source.join("orr.package.json"),
@@ -41,7 +44,7 @@ impl Fixture {
         let request = PreviewRequest {
             project_root: root.clone(),
             package_id: PACKAGE.into(),
-            asset_path: ASSET.into(),
+            asset_path: asset.into(),
             digest: lock.packages[PACKAGE].digest.clone(),
             generation: 7,
             kind: ModelKind::Static,
@@ -439,3 +442,7 @@ fn animated_preview_requires_explicit_room_feature_even_with_unified_animation_s
         .unwrap_err_message()
         .contains("requires room-animated-models"));
 }
+
+#[cfg(target_os = "linux")]
+#[path = "cooked_model_tests.rs"]
+mod cooked_model_tests;

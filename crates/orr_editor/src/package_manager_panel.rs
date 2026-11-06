@@ -1338,6 +1338,9 @@ fn preview_kind_allowed(
     capabilities: &std::collections::BTreeSet<String>,
     asset: &str,
 ) -> bool {
+    if !crate::package_model_preview::supports_asset(kind, asset) {
+        return false;
+    }
     match kind {
         ModelKind::Static => capabilities.contains("models"),
         ModelKind::Animated => {
@@ -1389,14 +1392,7 @@ fn model_asset_buttons(
     let mut shown = 0;
     for (package_name, package) in &browser.lock.packages {
         for asset in &package.manifest.files {
-            let supported = Path::new(asset)
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .is_some_and(|extension| {
-                    extension.eq_ignore_ascii_case("glb")
-                        || extension.eq_ignore_ascii_case("gltf")
-                        || extension.eq_ignore_ascii_case("orrmodel")
-                });
+            let supported = crate::package_model_preview::supports_asset(ModelKind::Static, asset);
             if !supported {
                 continue;
             }
@@ -1412,7 +1408,7 @@ fn model_asset_buttons(
             for kind in kinds {
                 if kind == ModelKind::Animated
                     && (!package.manifest.capabilities.contains("animation")
-                        || asset.to_ascii_lowercase().ends_with(".orrmodel"))
+                        || !crate::package_model_preview::supports_asset(kind, asset))
                 {
                     continue;
                 }
@@ -2554,3 +2550,8 @@ mod update_tests {
         assert_eq!(fs::read(&path).unwrap(), before);
     }
 }
+
+
+#[cfg(test)]
+#[path = "package_manager_panel/cooked_model_tests.rs"]
+mod cooked_model_tests;
