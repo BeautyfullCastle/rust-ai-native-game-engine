@@ -27,6 +27,7 @@ fn cooked_package_preview_assignment_save_and_reopen_use_installed_bytes() {
         model_bindings::Bindings::create(path.clone(), "scene.scene.yaml".into(), ".".into())
             .unwrap();
     let guid = orr_reflect::Guid::parse("e_00000001").unwrap();
+    let guid_key = guid.to_string();
     bindings
         .assign_validated(&[guid], &binding, &ready.loaded)
         .unwrap();
@@ -38,7 +39,7 @@ fn cooked_package_preview_assignment_save_and_reopen_use_installed_bytes() {
         orr_sample::room_project::compiled_runtime(),
     )
     .unwrap();
-    let saved = &reopened.document().bindings[&guid.to_string()];
+    let saved = &reopened.document().bindings[&guid_key];
     let loaded = model_bindings::load_binding_from_project(&project, saved).unwrap();
     assert_eq!(loaded.static_model().unwrap().to_bytes().unwrap(), bytes);
     assert!(!fixture.source.exists());
