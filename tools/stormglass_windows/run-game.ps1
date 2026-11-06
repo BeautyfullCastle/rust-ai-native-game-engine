@@ -5,6 +5,7 @@ param(
     [ValidatePattern('^[0-9]{1,5}$')][string]$Ticks = '0',
     [ValidateSet('off','auto','required')][string]$Audio = 'off',
     [switch]$WithAudioBank,
+    [string]$AudioBankDirectory,
     [string]$ControlsDirectory,
     [string]$AudioSettingsDirectory
 )
@@ -14,6 +15,11 @@ try {
     if ([int]$Ticks -gt 36000) { throw 'Ticks must be in 0..36000.' }
     if (-not $Headless -and $PSBoundParameters.ContainsKey('Ticks')) { throw 'Ticks requires Headless.' }
     $audioMode = $Audio.ToLowerInvariant()
+    $externalBank = $PSBoundParameters.ContainsKey('AudioBankDirectory')
+    if ($externalBank -and $WithAudioBank) { throw 'Choose AudioBankDirectory or WithAudioBank, not both.' }
+    if ($externalBank -and ([string]::IsNullOrWhiteSpace($AudioBankDirectory) -or $AudioBankDirectory -notmatch '^[A-Za-z]:\\')) {
+        throw 'AudioBankDirectory needs an explicit absolute local drive directory.'
+    }
     if ($Headless -and $audioMode -eq 'required') { throw 'Headless does not support required audio.' }
     if ($Headless -and ($PSBoundParameters.ContainsKey('ControlsDirectory') -or $PSBoundParameters.ContainsKey('AudioSettingsDirectory'))) {
         throw 'User settings require interactive play.'
@@ -28,7 +34,11 @@ try {
         }
     }
     $nativeArgs = @('--scene',$scene,'--audio',$audioMode)
-    if ($WithAudioBank -or $audioMode -ne 'off') {
+    if ($externalBank) {
+        # Forward the literal selection, including missing/invalid paths and Off mode.
+        # Do not normalize aliases, create/copy files, or fall back to the sibling bank.
+        $nativeArgs += @('--audio-bank',$AudioBankDirectory)
+    } elseif ($WithAudioBank -or $audioMode -ne 'off') {
         # Always forward an explicitly selected bank, even when missing/invalid or audio is Off.
         # The native bounded admission remains authoritative; it never follows manifest paths.
         $nativeArgs += @('--audio-bank',(Join-Path $root 'audio-bank'))

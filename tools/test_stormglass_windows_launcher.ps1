@@ -55,6 +55,16 @@ foreach($hostPath in $hosts) {
     Equal-Arguments $result.Args @('--scene',(Join-Path $game 'game.scene.yaml'),'--audio','auto','--audio-bank',(Join-Path $game 'audio-bank'))
     $controlPath=Join-Path $root 'private & $(throw 123) [controls]'
     $audioPath=Join-Path $root 'private audio'
+    $externalBank=Join-Path $root 'shared & $(throw 123) [bank]'
+    foreach($mode in @('off','auto','required')) {
+        $arguments=@('-AudioBankDirectory',$externalBank,'-Audio',$mode)
+        if($mode -eq 'off'){$arguments+=@('-Headless')}
+        $result=Run-Launcher $hostPath $arguments
+        $expected=@('--scene',(Join-Path $game 'game.scene.yaml'),'--audio',$mode,'--audio-bank',$externalBank)
+        if($mode -eq 'off'){$expected+=@('--headless','--ticks','0')}
+        Equal-Arguments $result.Args $expected
+    }
+    if(Test-Path -LiteralPath $externalBank){throw 'Launcher created the external bank implicitly.'}
     $result=Run-Launcher $hostPath @('-ControlsDirectory',$controlPath,'-AudioSettingsDirectory',$audioPath)
     Equal-Arguments $result.Args @('--scene',(Join-Path $game 'game.scene.yaml'),'--audio','off','--controls-directory',$controlPath,'--audio-settings-directory',$audioPath)
     if((Test-Path -LiteralPath $controlPath) -or (Test-Path -LiteralPath $audioPath)){throw 'Launcher created user settings implicitly.'}
@@ -67,7 +77,10 @@ foreach($hostPath in $hosts) {
         @('-Ticks','1'),@('-Headless','-Ticks','36001'),@('-Headless','-Ticks','-1'),@('-Headless','-Ticks','1.5'),
         @('-Headless','-Audio','required'),@('-Headless','-ControlsDirectory',$controlPath),@('-Headless','-AudioSettingsDirectory',$audioPath),
         @('-ControlsDirectory','relative'),@('-AudioSettingsDirectory','C:relative'),@('-ControlsDirectory',$game),
-        @('-ControlsDirectory',(Join-Path $game 'nested')),@('-Audio','unknown'),@('-UnknownOption'),@('-Headless','-Ticks','1','-Ticks','2')
+        @('-ControlsDirectory',(Join-Path $game 'nested')),@('-Audio','unknown'),@('-UnknownOption'),@('-Headless','-Ticks','1','-Ticks','2'),
+        @('-AudioBankDirectory','relative'),@('-AudioBankDirectory','C:relative'),@('-AudioBankDirectory','\\server\share\bank'),
+        @('-AudioBankDirectory',''),@('-AudioBankDirectory',$externalBank,'-WithAudioBank'),
+        @('-AudioBankDirectory',$externalBank,'-AudioBankDirectory',$externalBank)
     )) { Refused (Run-Launcher $hostPath $bad) }
     $scene=Join-Path $game 'game.scene.yaml';Move-Item -LiteralPath $scene -Destination (Join-Path $game 'scene.hidden')
     Refused (Run-Launcher $hostPath @('-Headless'))

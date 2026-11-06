@@ -57,6 +57,9 @@ foreach($hostPath in $hosts){
     if($run.Code -ne 0 -or $run.Output -cne $direct.Output){throw "Copied launcher differs from direct runtime: $($run.Error)"}
 }
 if((Snapshot $game) -cne $original){throw 'Normal copied execution modified the game folder'}
+$externalBank=Join-Path $root 'shared & [bank]'
+Copy-Item -LiteralPath $bank -Destination $externalBank -Recurse
+$externalOriginal=Snapshot $externalBank
 # Both absolute targets are checked descendants of our fresh evidence directory.
 $moved=Join-Path $root 'relocated game'
 foreach($path in @($game,$moved)){
@@ -69,10 +72,26 @@ foreach($hostPath in $hosts){
     if($run.Code -ne 0 -or $run.Output -cne $direct.Output){throw "Relocated launcher differs: $($run.Error)"}
 }
 if((Snapshot $game) -cne $original){throw 'Normal relocated execution modified the game folder'}
+foreach($hostPath in $hosts){
+    $run=Run $hostPath @('-NoProfile','-NonInteractive','-File',(Join-Path $game 'run-game.ps1'),'-Headless','-Ticks','60','-AudioBankDirectory',$externalBank)
+    if($run.Code -ne 0 -or $run.Output -cne $direct.Output){throw "External bank differs after game relocation: $($run.Error)"}
+    $missing=Join-Path $root 'missing-bank'
+    $run=Run $hostPath @('-NoProfile','-NonInteractive','-File',(Join-Path $game 'run-game.ps1'),'-Headless','-AudioBankDirectory',$missing)
+    if($run.Code -eq 0 -or (Test-Path -LiteralPath $missing)){throw 'Missing external bank accepted or created'}
+}
+if((Snapshot $externalBank) -cne $externalOriginal -or (Snapshot $game) -cne $original){throw 'External bank execution modified inputs'}
+# A valid sibling bank must never mask an explicitly selected invalid external bank.
+[IO.File]::WriteAllText((Join-Path $externalBank 'bank.json'),'invalid external test manifest')
+foreach($hostPath in $hosts){
+    $bad=Run $hostPath @('-NoProfile','-NonInteractive','-File',(Join-Path $game 'run-game.ps1'),'-Headless','-AudioBankDirectory',$externalBank)
+    if($bad.Code -eq 0){throw 'Invalid external bank silently fell back to valid sibling bank'}
+}
+$fixed=Run $hosts[0] @('-NoProfile','-NonInteractive','-File',(Join-Path $game 'run-game.ps1'),'-Headless','-Ticks','60','-WithAudioBank')
+if($fixed.Code -ne 0 -or $fixed.Output -cne $direct.Output){throw 'External corruption changed the valid sibling bank'}
 # Explicit selection while Off must still reach real native bank admission.
 [IO.File]::WriteAllText((Join-Path $game 'audio-bank/bank.json'),'invalid test manifest')
 $bad=Run $hosts[0] @('-NoProfile','-NonInteractive','-File',(Join-Path $game 'run-game.ps1'),'-Headless','-WithAudioBank')
 if($bad.Code -eq 0){throw 'Explicit invalid bank accepted while Off'}
-[pscustomobject]@{schema=1;kind='real runtime CPU/headless';cases=$script:caseNumber;hosts=$hosts;runtime_sha256=(Get-FileHash -LiteralPath $Runtime).Hash;summary=$direct.Output;normal_game_inventory_hashes_unchanged=$true;window_device='UNRUN';settings_persistence='UNRUN by launcher smoke'} |
+[pscustomobject]@{schema=1;kind='real runtime CPU/headless';cases=$script:caseNumber;hosts=$hosts;runtime_sha256=(Get-FileHash -LiteralPath $Runtime).Hash;summary=$direct.Output;normal_game_inventory_hashes_unchanged=$true;normal_external_bank_hashes_unchanged=$true;window_device='UNRUN';settings_persistence='UNRUN by launcher smoke'} |
     ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $root 'result.json') -Encoding utf8
-Write-Output "PASS real runtime cases=$script:caseNumber; copied/relocated headless 60; invalid selected bank refused; window/device UNRUN."
+Write-Output "PASS real runtime cases=$script:caseNumber; copied/relocated/external-bank headless 60; missing/invalid selected banks refused without fallback; window/device UNRUN."
