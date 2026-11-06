@@ -66,6 +66,7 @@ impl PixelMotion {
         scale: f32,
         unit: &game::DefenseUnit,
         age: u64,
+        flip_x: bool,
     ) -> bool {
         if unit.active == 0 || unit.role != game::RIVET {
             return false;
@@ -77,7 +78,7 @@ impl PixelMotion {
         if elapsed >= ATTACK_DURATION_MS {
             return false;
         }
-        Self::paint_asset(p, center, scale, unit, asset, elapsed)
+        Self::paint_asset(p, center, scale, unit, asset, elapsed, flip_x)
     }
 
     #[cfg(test)]

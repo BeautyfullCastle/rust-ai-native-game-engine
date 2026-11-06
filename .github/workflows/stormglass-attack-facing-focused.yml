@@ -1,0 +1,58 @@
+name: stormglass-attack-facing focused Linux CI
+on:
+  push:
+    branches: [codex/stormglass-attack-facing-20261106]
+permissions:
+  contents: read
+concurrency:
+  group: stormglass-attack-facing-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  attack-facing:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record exact source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir ci-evidence
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git rev-parse HEAD HEAD^{tree} | tee ci-evidence/source.txt
+      - name: Select Rust toolchain
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal --component clippy
+          rustup override set 1.99.1
+          rustc --version --verbose | tee ci-evidence/rustc.txt
+      - name: Verify facing, lifecycle and preserved presentation paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          features=coop-defense-attack-clip,coop-defense-run-save,coop-defense-audio
+          python3 -B tools/check_stormglass_pixel_motion.py --self-test 2>&1 | tee ci-evidence/parser.log
+          cargo test --locked -p orr_sample --features "$features" --lib defense_vfx:: -- --test-threads=1 2>&1 | tee ci-evidence/events.log
+          grep -F 'test result: ok. 20 passed; 0 failed; 0 ignored;' ci-evidence/events.log
+          cargo test --locked -p orr_sample --features "$features" --lib pixel_motion -- --test-threads=1 2>&1 | tee ci-evidence/facing.log
+          grep -F 'test result: ok. 16 passed; 0 failed; 0 ignored;' ci-evidence/facing.log
+          cargo clippy --locked -p orr_sample --features "$features" --lib --bin coop_defense -- -D warnings 2>&1 | tee ci-evidence/clippy.log
+          cargo test --locked -p orr_sample --features coop-defense-pixel-motion,coop-defense-pixelfx --lib defense_app::pixel_motion_tests -- --test-threads=1 2>&1 | tee ci-evidence/recoil.log
+          grep -F 'test result: ok. 3 passed; 0 failed; 0 ignored;' ci-evidence/recoil.log
+          cargo test --locked -p orr_sample --features coop-defense-pixel-motion --lib pixel_motion -- --test-threads=1 2>&1 | tee ci-evidence/idle.log
+          grep -F 'test result: ok. 9 passed; 0 failed; 0 ignored;' ci-evidence/idle.log
+          cargo check --locked -p orr_sample --features coop-defense --lib 2>&1 | tee ci-evidence/default-check.log
+      - name: Preserve results including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stormglass-attack-facing-${{ github.sha }}
+          path: ci-evidence
+          if-no-files-found: error

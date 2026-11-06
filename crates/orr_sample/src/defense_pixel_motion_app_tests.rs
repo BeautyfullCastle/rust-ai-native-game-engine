@@ -246,17 +246,24 @@ fn actual_attack_clip_release_pause_idle_fallback_and_restart_keep_frame_bytes()
             1.0 / 60.0,
         );
         let run = game::run(app.session.predicted_frame());
+        let before = app.session.predicted_frame().to_bytes();
+        let actual = attack_uv(&mut app);
         let mut units = game::units(app.session.predicted_frame());
         units.sort_by_key(|u| (u.board, u.cell));
         let expected: Vec<_> = units
             .iter()
             .filter(|u| u.active != 0 && u.role == game::RIVET)
-            .filter_map(|u| app.ui.vfx.unit_release_age(u, &run))
-            .filter(|age| *age < 20)
-            .map(|age| {
+            .filter_map(|u| app.ui.vfx.unit_release_pose(u, &run))
+            .filter(|(age, _)| *age < 20)
+            .map(|(age, flip)| {
                 let region = (age * 1000 / 60 / 40) as usize;
                 egui::pos2(
-                    [0, 444, 887, 1330][region % 4] as f32 / 1774.0,
+                    if flip {
+                        [444, 887, 1330, 1774][region % 4]
+                    } else {
+                        [0, 444, 887, 1330][region % 4]
+                    } as f32
+                        / 1774.0,
                     if region < 4 { 0.0 } else { 444.0 / 887.0 },
                 )
             })
@@ -264,8 +271,39 @@ fn actual_attack_clip_release_pause_idle_fallback_and_restart_keep_frame_bytes()
         if expected.is_empty() {
             continue;
         }
-        let before = app.session.predicted_frame().to_bytes();
-        assert_eq!(attack_uv(&mut app), expected);
+        assert_eq!(actual, expected);
+        let shots = game::projectiles(app.session.predicted_frame());
+        let enemies = game::enemies(app.session.predicted_frame());
+        let mut checked_target = false;
+        for unit in units
+            .iter()
+            .filter(|u| u.active != 0 && u.role == game::RIVET)
+        {
+            let Some((0, flip)) = app.ui.vfx.unit_release_pose(unit, &run) else {
+                continue;
+            };
+            if let Some(enemy) = shots
+                .iter()
+                .filter(|s| s.active != 0 && s.source_unit_id == unit.id)
+                .max_by_key(|s| s.id)
+                .and_then(|shot| {
+                    enemies
+                        .iter()
+                        .find(|enemy| enemy.active != 0 && enemy.id == shot.target_id)
+                })
+            {
+                assert_eq!(
+                    flip,
+                    game::enemy_position(enemy.lane, enemy.progress).0
+                        < game::board_cell_position(unit.board, unit.cell).0
+                );
+                checked_target = true;
+            }
+        }
+        assert!(
+            checked_target,
+            "first displayed shot has a live independently resolved target"
+        );
         let vfx = std::mem::take(&mut app.ui.vfx);
         assert!(attack_uv(&mut app).is_empty());
         assert!(
