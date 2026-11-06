@@ -29,6 +29,7 @@ fn cleanup_widget_preserves_live_model_recycled_slot_scene_and_single_undo_step(
         app.models.assign(&app.editor).unwrap();
         app.models.save(&app.editor).unwrap();
     }
+    let survivor_guid = h.state().editor.selected_guid().unwrap();
     let survivor = h
         .state()
         .editor
@@ -65,6 +66,7 @@ fn cleanup_widget_preserves_live_model_recycled_slot_scene_and_single_undo_step(
     if h.query_by_label("Remove orphan model bindings").is_none() {
         click(&mut h, "Static model binding");
     }
+    let survivor = h.state().editor.rows().iter().find(|row| row.guid.as_ref() == Some(&survivor_guid)).unwrap().entity;
     let checksum = h.state().editor.checksum();
     let history = h.state().editor.history().entries.len();
     click(&mut h, "Remove orphan model bindings");
