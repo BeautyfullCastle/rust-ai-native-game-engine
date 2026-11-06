@@ -78,8 +78,12 @@ function Write-PrivateFixture([string]$Path,[string]$Text){
     $fileAcl=[Security.AccessControl.FileSecurity]::new()
     # Create a fresh fixture with a private DACL from the outset, without Set-Acl.
     $fileAcl.SetSecurityDescriptorSddlForm($before,[Security.AccessControl.AccessControlSections]::Access)
+    # Elevated Windows tokens may default ownership to Administrators. Match production's
+    # explicit current-user owner at creation, rather than weakening native admission.
+    $fileAcl.SetOwner([Security.Principal.WindowsIdentity]::GetCurrent().User)
     $stream=[IO.FileSystemAclExtensions]::Create([IO.FileInfo]::new($Path),[IO.FileMode]::CreateNew,[Security.AccessControl.FileSystemRights]::FullControl,[IO.FileShare]::Read,4096,[IO.FileOptions]::None,$fileAcl)
     try {$bytes=[Text.Encoding]::UTF8.GetBytes($Text);$stream.Write($bytes,0,$bytes.Length)} finally {$stream.Dispose()}
+    if((Get-Acl -LiteralPath $Path).GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $user){throw 'Fixture owner does not match current user'}
 }
 $audioFile=Join-Path $settings 'audio-settings.json'
 Write-PrivateFixture $audioFile '{"schema":1,"profile":"stormglass-audio-v1","gain_percent":37,"muted":false}'
