@@ -180,17 +180,30 @@ impl DefenseVfx {
     /// event ledger owns deduplication, cancellation and epoch changes. This
     /// view offset neither anticipates release nor changes projectile timing.
     #[cfg(feature = "coop-defense-pixel-motion")]
+    #[cfg(any(test, not(feature = "coop-defense-attack-clip")))]
     pub(crate) fn unit_recoil(
         &self,
         unit: &orr_games::coop_defense_game::DefenseUnit,
         run: &orr_games::coop_defense_game::DefenseRun,
     ) -> f32 {
+        self.unit_release_age(unit, run)
+            .filter(|age| *age < 8)
+            .map_or(0.0, |age| (8 - age) as f32 * 0.75)
+    }
+    /// Age of the latest retained Release by the exact current actor, in
+    /// absolute session ticks. Missing, canceled and future shots are absent.
+    #[cfg(feature = "coop-defense-pixel-motion")]
+    pub(crate) fn unit_release_age(
+        &self,
+        unit: &orr_games::coop_defense_game::DefenseUnit,
+        run: &orr_games::coop_defense_game::DefenseRun,
+    ) -> Option<u64> {
         if unit.active == 0
             || unit.id == 0
             || run.phase != orr_games::coop_defense_game::PLAYING
             || run.generation != self.state.generation
         {
-            return 0.0;
+            return None;
         }
         self.state
             .active
@@ -204,8 +217,6 @@ impl DefenseVfx {
             })
             .filter_map(|effect| self.state.tick.checked_sub(effect.born))
             .min()
-            .filter(|age| *age < 8)
-            .map_or(0.0, |age| (8 - age) as f32 * 0.75)
     }
     pub(crate) fn summary(&self) -> (usize, u64, u64, u64) {
         (

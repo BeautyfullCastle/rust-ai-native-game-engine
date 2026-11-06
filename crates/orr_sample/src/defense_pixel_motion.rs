@@ -1,5 +1,5 @@
-//! Optional generated Rivet skin. The accepted charge motion is a visual loop,
-//! not anticipation, attack synchronization or an event producer.
+//! Optional generated Rivet skin. The idle/charge motion remains a visual loop;
+//! the separate attack-clip feature can replace it after actual shot releases.
 use crate::defense_view::{BRONZE, INK, PAPER};
 use egui::{
     pos2, vec2, Align2, Color32, ColorImage, FontId, Painter, Pos2, Rect, TextureHandle,
@@ -17,10 +17,14 @@ const CYCLE_MS: u64 = 1400;
 struct Asset {
     document: SpriteDocument,
     texture: TextureHandle,
+    pivot: [f32; 2],
+    scale: f32,
 }
 #[derive(Default)]
 pub(crate) struct PixelMotion {
     asset: Option<Asset>,
+    #[cfg(feature = "coop-defense-attack-clip")]
+    attack: Option<Asset>,
 }
 impl PixelMotion {
     #[cfg(test)]
@@ -70,7 +74,18 @@ impl PixelMotion {
             &rgba,
         );
         let texture = ctx.load_texture("stormglass-pixel-motion", image, TextureOptions::NEAREST);
-        self.asset = Some(Asset { document, texture });
+        #[cfg(feature = "coop-defense-attack-clip")]
+        let attack = Self::prepare_attack(ctx)?;
+        self.asset = Some(Asset {
+            document,
+            texture,
+            pivot: PIVOT,
+            scale: SCALE,
+        });
+        #[cfg(feature = "coop-defense-attack-clip")]
+        {
+            self.attack = Some(attack);
+        }
         Ok(())
     }
 
@@ -99,14 +114,25 @@ impl PixelMotion {
         let Some(asset) = &self.asset else {
             return false; // A caller without prepared assets retains vector art.
         };
-        let sample = asset.document.clips()[0].sample(Self::elapsed(run, started));
+        Self::paint_asset(p, center, scale, unit, asset, Self::elapsed(run, started))
+    }
+
+    fn paint_asset(
+        p: &Painter,
+        center: Pos2,
+        scale: f32,
+        unit: &game::DefenseUnit,
+        asset: &Asset,
+        elapsed: u64,
+    ) -> bool {
+        let sample = asset.document.clips()[0].sample(elapsed);
         let Some(region) = asset.document.region(sample.region) else {
             return false;
         };
         let anchor = center + vec2(0.0, 20.0) * scale;
-        let sprite_scale = scale * SCALE;
+        let sprite_scale = scale * asset.scale;
         let rect = Rect::from_min_size(
-            anchor - vec2(PIVOT[0], PIVOT[1]) * sprite_scale,
+            anchor - vec2(asset.pivot[0], asset.pivot[1]) * sprite_scale,
             vec2(region.width as f32, region.height as f32) * sprite_scale,
         );
         let [u0, v0, u1, v1] = asset
@@ -149,3 +175,7 @@ impl PixelMotion {
 #[cfg(test)]
 #[path = "defense_pixel_motion_tests.rs"]
 mod tests;
+
+#[cfg(feature = "coop-defense-attack-clip")]
+#[path = "defense_attack_clip.rs"]
+mod attack_clip;
