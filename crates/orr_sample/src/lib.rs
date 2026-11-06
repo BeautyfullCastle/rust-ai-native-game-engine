@@ -16,6 +16,32 @@
 /// Existing objects are never changed. Runtime admission still applies at launch.
 #[cfg(all(windows, feature = "coop-defense-controls"))]
 pub fn prepare_stormglass_settings_directory(path: &std::path::Path) -> Result<(), String> {
+    defense_audio_settings::prepare(path, &stormglass_settings_forbidden_roots()?)
+}
+
+/// Point-in-time admission result; neither a write probe nor a future Save guarantee.
+#[cfg(all(windows, feature = "coop-defense-controls"))]
+#[derive(Debug, PartialEq, Eq)]
+pub struct StormglassSettingsStatus {
+    pub audio_saved: bool,
+    pub controls_saved: bool,
+}
+
+/// Check both profiles using native startup admission without creating or changing data.
+#[cfg(all(windows, feature = "coop-defense-controls"))]
+pub fn check_stormglass_settings_directory(
+    path: &std::path::Path,
+) -> Result<StormglassSettingsStatus, String> {
+    let (audio_saved, controls_saved) =
+        defense_audio_settings::check(path, &stormglass_settings_forbidden_roots()?)?;
+    Ok(StormglassSettingsStatus {
+        audio_saved,
+        controls_saved,
+    })
+}
+
+#[cfg(all(windows, feature = "coop-defense-controls"))]
+fn stormglass_settings_forbidden_roots() -> Result<Vec<std::path::PathBuf>, String> {
     let executable = std::env::current_exe().map_err(|e| e.to_string())?;
     let parent = executable.parent().ok_or("missing executable parent")?;
     let mut forbidden = vec![parent.to_owned()];
@@ -23,7 +49,7 @@ pub fn prepare_stormglass_settings_directory(path: &std::path::Path) -> Result<(
     if source.exists() {
         forbidden.push(source);
     }
-    defense_audio_settings::prepare(path, &forbidden)
+    Ok(forbidden)
 }
 
 pub mod app;
