@@ -1,0 +1,56 @@
+name: Model orphan cleanup focused CI
+on:
+  push:
+    branches: [codex/model-orphan-cleanup-20261107]
+permissions:
+  contents: read
+jobs:
+  model-orphans:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record exact source and prepare toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir ci-evidence
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git rev-parse HEAD HEAD^{tree} | tee ci-evidence/source.txt
+          rustup toolchain install 1.99.1 --profile minimal --component clippy
+          rustup override set 1.99.1
+          rustc --version --verbose | tee ci-evidence/rustc.txt
+          sudo apt-get update -q 2>&1 | tee ci-evidence/dependencies.log
+          sudo apt-get install -y -q pkg-config libasound2-dev libudev-dev libx11-dev libxkbcommon-dev libwayland-dev 2>&1 | tee -a ci-evidence/dependencies.log
+      - name: Explicit orphan cleanup and saved runtime consumption
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p orr_editor --features models --test yard3d_models orphan_cleanup:: -- --test-threads=1 2>&1 | tee ci-evidence/static-cleanup.log
+          grep -F 'test result: ok. 4 passed; 0 failed; 0 ignored;' ci-evidence/static-cleanup.log
+          cargo test --locked -p orr_editor --features animated-models --test yard3d_animated orphan_cleanup:: -- --test-threads=1 2>&1 | tee ci-evidence/animated-cleanup.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' ci-evidence/animated-cleanup.log
+          cargo test --locked -p orr_editor --features room-project --test room_model_admission orphan_cleanup:: -- --test-threads=1 2>&1 | tee ci-evidence/room-cleanup.log
+          grep -F 'test result: ok. 2 passed; 0 failed; 0 ignored;' ci-evidence/room-cleanup.log
+          cargo test --locked -p orr_editor --features models --test yard3d_models actual_widgets_assign_remove_undo_save_reopen_and_disable_mutation_in_play -- --test-threads=1 2>&1 | tee ci-evidence/play-guard.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' ci-evidence/play-guard.log
+          cargo test --locked -p orr_editor --features models --test yard3d_models failed_assignment_preserves_renderable_state_and_recycled_body_gets_no_binding -- --test-threads=1 2>&1 | tee ci-evidence/recycled-guid.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' ci-evidence/recycled-guid.log
+          cargo clippy --locked -p orr_editor --features models --lib -- -D warnings 2>&1 | tee ci-evidence/clippy-static.log
+          cargo clippy --locked -p orr_editor --features animated-models --lib -- -D warnings 2>&1 | tee ci-evidence/clippy-animated.log
+          cargo clippy --locked -p orr_editor --features room-project --lib -- -D warnings 2>&1 | tee ci-evidence/clippy-room.log
+      - name: Preserve results including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-orphan-cleanup-${{ github.sha }}
+          path: ci-evidence
+          if-no-files-found: error
