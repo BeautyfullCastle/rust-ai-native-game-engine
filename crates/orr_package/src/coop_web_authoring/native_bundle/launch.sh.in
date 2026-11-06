@@ -25,7 +25,9 @@ done
 [ -z "$ticks" ] || [ -n "$headless" ] || fail '--ticks requires --headless'
 [ -z "$headless" ] || [ -z "$run_directory" ] || fail '--run-directory requires interactive play'
 case "$0" in */*) parent=${0%/*};; *) parent=.;; esac
-root=$(CDPATH= cd -- "$parent" && pwd -P) || fail 'cannot locate bundle'
+# A sentinel preserves trailing newlines in otherwise valid relocated paths.
+root=$(CDPATH= cd -- "$parent" && pwd -P && printf '.') || fail 'cannot locate bundle'
+root=${root%??}
 cd -- "$root"
 [ -f coop_defense ] && [ ! -L coop_defense ] && [ -x coop_defense ] || fail 'invalid bundled executable'
 [ -f game.scene.yaml ] && [ ! -L game.scene.yaml ] || fail 'invalid bundled scene'
@@ -39,7 +41,8 @@ if [ -n "$headless" ]; then
 fi
 if [ -n "$run_directory" ]; then
     # The native store independently enforces private, no-follow external storage.
-    saves=$(CDPATH= cd -- "$run_directory" && pwd -P) || fail 'save directory must already exist'
+    saves=$(CDPATH= cd -- "$run_directory" && pwd -P && printf '.') || fail 'save directory must already exist'
+    saves=${saves%??}
     case "$saves/" in "$root/"*) fail 'save directory must be outside the bundle';; esac
     set -- "$@" --run-directory "$run_directory"
 fi

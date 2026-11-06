@@ -28,7 +28,9 @@ Move or copy the entire four-file directory, preserving executable permissions.
 The runtime and scene are directly at its root, beside `run-game` and
 `bundle.json`. No engine registry, asset download or compilation happens.
 Optional assets already embedded in the supplied executable travel with it;
-external audio banks are not packaged or accepted by this launcher.
+external audio banks are not packaged or accepted by this launcher. Packaging does
+not collect third-party license notices or grant redistribution rights; supply
+the notices required for your chosen executable before sharing a release.
 
 ## Trust and verification
 

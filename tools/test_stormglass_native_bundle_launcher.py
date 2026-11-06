@@ -25,7 +25,7 @@ class LauncherTests(unittest.TestCase):
         self.launcher = self.bundle / "launch.sh"
         self.marker = self.bundle / "fixture-invoked"
         self.runtime.write_text(
-            '#!/bin/sh\nset -eu\nprintf "%s\\n" "$@" > "${0%/*}/fixture-invoked"\n',
+            '#!/bin/sh\nset -eu\nprintf "%s\\0" "$@" > "${0%/*}/fixture-invoked"\n',
             encoding="utf-8",
         )
         self.runtime.chmod(0o755)
@@ -51,7 +51,8 @@ class LauncherTests(unittest.TestCase):
         result = self.invoke(*args)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(self.marker.exists())
-        forwarded = self.marker.read_text(encoding="utf-8").splitlines()
+        forwarded = self.marker.read_bytes().decode("utf-8").split("\0")
+        self.assertEqual(forwarded.pop(), "")
         self.assertEqual(forwarded[:2], ["--scene", str(self.scene)])
         return forwarded[2:]
 
@@ -93,6 +94,34 @@ class LauncherTests(unittest.TestCase):
                 alias.symlink_to(target, target_is_directory=True)
                 self.rejected("--run-directory", str(alias))
                 alias.unlink()
+
+    def test_newline_ending_bundle_path_is_preserved(self):
+        moved = self.home / "bundle with trailing newline\n\n"
+        self.bundle.rename(moved)
+        self.bundle = moved
+        self.runtime = moved / "coop_defense"
+        self.scene = moved / "game.scene.yaml"
+        self.launcher = moved / "launch.sh"
+        self.marker = moved / "fixture-invoked"
+        self.assertEqual(self.admitted("--headless", "--ticks", "1"),
+                         ["--headless", "--ticks", "1"])
+        nested = moved / "private saves\n"
+        nested.mkdir(mode=0o700)
+        self.rejected("--run-directory", str(nested))
+        alias = self.home / "outside newline-bundle alias"
+        alias.symlink_to(nested, target_is_directory=True)
+        self.rejected("--run-directory", str(alias))
+
+    def test_newline_save_path_is_preserved_and_bundle_alias_refused(self):
+        external = self.home / "external saves\n\n"
+        external.mkdir(mode=0o700)
+        self.assertEqual(self.admitted("--run-directory", str(external)),
+                         ["--run-directory", str(external)])
+        nested = self.bundle / "private saves\n\n"
+        nested.mkdir(mode=0o700)
+        alias = self.home / "outside alias\n"
+        alias.symlink_to(nested, target_is_directory=True)
+        self.rejected("--run-directory", str(alias))
 
     def test_bad_flags_never_execute(self):
         cases = [
