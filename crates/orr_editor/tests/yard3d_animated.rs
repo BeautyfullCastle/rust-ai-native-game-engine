@@ -652,3 +652,7 @@ fn assignment_rejects_invalid_external_rest_bounds_even_when_clip_zero_is_valid(
     assert!(app.models.assign(&app.editor).is_err());
     assert_eq!(app.models.bindings.as_ref().unwrap().document(), &before);
 }
+
+#[cfg(target_os = "linux")]
+#[path = "yard3d_animated/settings_copy.rs"]
+mod settings_copy;

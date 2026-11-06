@@ -479,6 +479,39 @@ impl ModelPanel {
             self.kind,
         )
     }
+    /// Fill the authoring form from one coherent assigned binding. Assignment
+    /// still reloads/revalidates installed bytes; this cached candidate is not
+    /// permission to apply stale package content.
+    pub fn use_selected_settings(&mut self, editor: &Editor) -> Result<(), String> {
+        if !self.editable(editor) {
+            return Err("Reading selected model settings requires coherent local Edit mode".into());
+        }
+        let guid = editor.selected_guid().ok_or("Select an assigned model")?;
+        if !editor.rows().iter().any(|row| row.guid.as_ref() == Some(&guid)) {
+            return Err("Selected GUID no longer exists".into());
+        }
+        let key = guid.to_string();
+        let binding = self.bindings.as_ref().and_then(|bindings| {
+            bindings.document().bindings.get(&key)
+        }).ok_or("Selected entity has no model binding")?.clone();
+        let loaded = self.loaded.get(&key).ok_or("Reload the selected model before reading its settings")?.clone();
+        binding.validate(&loaded)?;
+        // Commit all form values only after identity/kind validation succeeds.
+        self.package = binding.package.clone();
+        self.asset = binding.asset.clone();
+        self.kind = binding.kind;
+        self.transform = binding.transform;
+        #[cfg(feature = "animated-models")]
+        {
+            self.animation = binding.animation.unwrap_or(AnimationDescriptor {
+                clip_index: 0,
+                playback: PlaybackMode::Once,
+            });
+        }
+        self.candidate = Some((binding.package, binding.asset, binding.kind, loaded));
+        Ok(())
+    }
+
     pub fn assign(&mut self, editor: &Editor) -> Result<(), String> {
         if !self.editable(editor) {
             return Err(
@@ -1258,6 +1291,14 @@ impl ModelPanel {
                     if !self.scene_matches(editor) { ui.colored_label(egui::Color32::YELLOW, "Bindings belong to a different scene; save/discard before opening this scene's bindings"); }
                     let editable = self.editable(editor);
                     ui.add_enabled_ui(editable, |ui| {
+                        let has_binding = editor.selected_guid().is_some_and(|guid| {
+                            self.bindings.as_ref().is_some_and(|bindings| {
+                                bindings.document().bindings.contains_key(&guid.to_string())
+                            })
+                        });
+                        if ui.add_enabled(has_binding, egui::Button::new("Use selected model settings")).clicked() {
+                            self.error = self.use_selected_settings(editor).err();
+                        }
                         ui.horizontal(|ui| {
                             ui.label("Model kind");
                             ui.selectable_value(&mut self.kind, ModelKind::Static, "Static");

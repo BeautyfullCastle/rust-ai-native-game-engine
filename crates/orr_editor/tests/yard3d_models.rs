@@ -177,6 +177,7 @@ fn actual_widgets_assign_remove_undo_save_reopen_and_disable_mutation_in_play() 
         "Redo model",
         "Save model bindings",
         "Reload verified models",
+        "Use selected model settings",
         "Discard model bindings",
     ] {
         assert!(
@@ -898,3 +899,6 @@ fn scene_owned_reservation_rejects_model_assignment_before_history_or_cache_chan
     app.models.assign(&app.editor).unwrap();
     assert_eq!(app.models.bindings.as_ref().unwrap().document(), &before);
 }
+
+#[path = "yard3d_models/settings_copy.rs"]
+mod settings_copy;
