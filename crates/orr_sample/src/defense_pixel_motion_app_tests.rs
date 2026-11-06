@@ -131,7 +131,10 @@ fn actual_app_prestart_is_neutral_and_restart_uses_new_run_clock() {
     summon_rivet(&mut app);
     assert_eq!(game::run(app.session.predicted_frame()).generation, 1);
 }
-#[cfg(feature = "coop-defense-pixelfx")]
+#[cfg(all(
+    feature = "coop-defense-pixelfx",
+    not(feature = "coop-defense-attack-clip")
+))]
 #[test]
 fn actual_release_moves_only_its_skin_and_pause_freezes_recovery() {
     fn positions(app: &mut App) -> Vec<egui::Pos2> {
@@ -201,6 +204,92 @@ fn actual_release_moves_only_its_skin_and_pause_freezes_recovery() {
         break;
     }
     assert!(found, "actual App must produce a Rivet Release event");
+}
+
+#[cfg(feature = "coop-defense-attack-clip")]
+#[test]
+fn actual_attack_clip_release_pause_idle_fallback_and_restart_keep_frame_bytes() {
+    fn attack_uv(app: &mut App) -> Vec<egui::Pos2> {
+        let texture = app.ui.pixel_motion.test_attack_texture_id();
+        let mut output = app.process_input(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1200.0, 940.0),
+                )),
+                ..Default::default()
+            },
+            0.0,
+        );
+        assert!(app.error.is_none(), "{:?}", app.error);
+        let result = output
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Mesh(m) if m.texture_id == texture => Some(m.vertices[0].uv),
+                _ => None,
+            })
+            .collect();
+        output.textures_delta.clear();
+        result
+    }
+    let mut app = ready();
+    assert!(attack_uv(&mut app).is_empty());
+    for tick in 0..1800 {
+        frame(
+            &mut app,
+            if tick % 45 == 0 {
+                pulse(egui::Key::Space)
+            } else {
+                vec![]
+            },
+            1.0 / 60.0,
+        );
+        let run = game::run(app.session.predicted_frame());
+        let mut units = game::units(app.session.predicted_frame());
+        units.sort_by_key(|u| (u.board, u.cell));
+        let expected: Vec<_> = units
+            .iter()
+            .filter(|u| u.active != 0 && u.role == game::RIVET)
+            .filter_map(|u| app.ui.vfx.unit_release_age(u, &run))
+            .filter(|age| *age < 20)
+            .map(|age| {
+                let region = (age * 1000 / 60 / 40) as usize;
+                egui::pos2(
+                    [0, 444, 887, 1330][region % 4] as f32 / 1774.0,
+                    if region < 4 { 0.0 } else { 444.0 / 887.0 },
+                )
+            })
+            .collect();
+        if expected.is_empty() {
+            continue;
+        }
+        let before = app.session.predicted_frame().to_bytes();
+        assert_eq!(attack_uv(&mut app), expected);
+        let vfx = std::mem::take(&mut app.ui.vfx);
+        assert!(attack_uv(&mut app).is_empty());
+        assert!(
+            !frame(&mut app, vec![], 0.0).is_empty(),
+            "no shot uses original idle texture"
+        );
+        app.ui.vfx = vfx;
+        frame(&mut app, pulse(egui::Key::P), 0.0);
+        frame(&mut app, vec![], 10.0);
+        assert_eq!(attack_uv(&mut app), expected);
+        assert_eq!(app.session.predicted_frame().to_bytes(), before);
+        frame(&mut app, pulse(egui::Key::Enter), 0.0);
+        frame(&mut app, pulse(egui::Key::R), 1.0 / 60.0);
+        for _ in 0..3 {
+            frame(&mut app, vec![], 1.0 / 60.0);
+        }
+        assert_eq!(
+            game::run(app.session.predicted_frame()).generation,
+            run.generation + 1
+        );
+        assert!(attack_uv(&mut app).is_empty());
+        return;
+    }
+    panic!("real native App must produce a Rivet shot clip");
 }
 
 #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]

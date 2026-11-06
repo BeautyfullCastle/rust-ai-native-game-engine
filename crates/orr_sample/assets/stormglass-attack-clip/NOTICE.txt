@@ -1,0 +1,3 @@
+AI-generated Rivet shooting and recovery artwork, created with the OpenAI built-in image generation tool on 2026-11-06.
+Reference: the project's existing AI-generated Rivet idle sheet. No upstream motion or pixel-processing tools were used for this new sheet.
+This notice records provenance; it does not grant or imply third-party artwork rights.

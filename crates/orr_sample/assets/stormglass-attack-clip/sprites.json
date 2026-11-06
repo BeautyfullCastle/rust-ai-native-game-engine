@@ -1,0 +1,107 @@
+{
+  "format": "orr_sprite",
+  "version": 1,
+  "atlas": {
+    "image": "attack.png",
+    "width": 1774,
+    "height": 887
+  },
+  "regions": [
+    {
+      "id": 0,
+      "x": 0,
+      "y": 0,
+      "width": 444,
+      "height": 444
+    },
+    {
+      "id": 1,
+      "x": 444,
+      "y": 0,
+      "width": 443,
+      "height": 444
+    },
+    {
+      "id": 2,
+      "x": 887,
+      "y": 0,
+      "width": 443,
+      "height": 444
+    },
+    {
+      "id": 3,
+      "x": 1330,
+      "y": 0,
+      "width": 444,
+      "height": 444
+    },
+    {
+      "id": 4,
+      "x": 0,
+      "y": 444,
+      "width": 444,
+      "height": 443
+    },
+    {
+      "id": 5,
+      "x": 444,
+      "y": 444,
+      "width": 443,
+      "height": 443
+    },
+    {
+      "id": 6,
+      "x": 887,
+      "y": 444,
+      "width": 443,
+      "height": 443
+    },
+    {
+      "id": 7,
+      "x": 1330,
+      "y": 444,
+      "width": 444,
+      "height": 443
+    }
+  ],
+  "clips": [
+    {
+      "id": "rivet-shot",
+      "mode": "once",
+      "frames": [
+        {
+          "region": 0,
+          "duration_ms": 40
+        },
+        {
+          "region": 1,
+          "duration_ms": 40
+        },
+        {
+          "region": 2,
+          "duration_ms": 40
+        },
+        {
+          "region": 3,
+          "duration_ms": 40
+        },
+        {
+          "region": 4,
+          "duration_ms": 40
+        },
+        {
+          "region": 5,
+          "duration_ms": 40
+        },
+        {
+          "region": 6,
+          "duration_ms": 40
+        },
+        {
+          "region": 7,
+          "duration_ms": 40
+        }
+      ]
+    }
+  ]
+}
