@@ -358,6 +358,11 @@ pub(crate) fn paint_view_with_unit_skin(
     let mut units = ordered::<game::DefenseUnit>(frame);
     units.sort_by_key(|unit| (unit.board, unit.cell));
     let shots = ordered::<game::DefenseProjectile>(frame);
+    let merge_targets = if run.phase == game::PLAYING {
+        compatible_merge_cells(&units, selected)
+    } else {
+        Vec::new()
+    };
     if let Some(unit) = selected.and_then(|cell| {
         units
             .iter()
@@ -519,7 +524,65 @@ pub(crate) fn paint_view_with_unit_skin(
     }
     diamond(p, c, 20.0 * l.scale, TEAL);
     l.text(p, 520.0, 755.0, 13.0, MUTED, "SHARED STORMGLASS CORE");
+    // Keep guides above both vector and custom unit skins, clipped to local cells.
+    for cell in merge_targets {
+        paint_merge_guide(p, l, cell);
+    }
 }
+
+// Advisory matches from this snapshot only; actual MOVE_OR_MERGE admission still owns
+// sequence, phase and changed-state checks. Empty cells are moves, not merge partners.
+fn compatible_merge_cells(units: &[game::DefenseUnit], selected: Option<u32>) -> Vec<u32> {
+    let Some(source) = selected
+        .filter(|cell| *cell < game::CELLS_PER_BOARD)
+        .and_then(|cell| {
+            units.iter().find(|u| u.board == 0 && u.cell == cell && u.active != 0)
+        })
+    else {
+        return Vec::new();
+    };
+    if source.tier >= game::MAX_TIER {
+        return Vec::new();
+    }
+    let mut cells: Vec<_> = units
+        .iter()
+        .filter(|u| {
+            u.board == 0 && u.cell < game::CELLS_PER_BOARD && u.cell != source.cell
+                && u.active != 0 && u.role == source.role && u.tier == source.tier
+        })
+        .map(|u| u.cell)
+        .collect();
+    cells.sort_unstable();
+    cells.dedup();
+    cells
+}
+
+fn paint_merge_guide(p: &Painter, l: Layout, cell: u32) {
+    let rect = l.cell(0, cell);
+    let clip = p.clip_rect().intersect(rect);
+    if !clip.is_positive() {
+        return;
+    }
+    let p = p.with_clip_rect(clip);
+    p.rect_stroke(
+        rect.shrink(6.0 * l.scale),
+        3.0 * l.scale,
+        Stroke::new(2.0 * l.scale, TEAL),
+        egui::StrokeKind::Inside,
+    );
+    let badge = rect.right_top() + vec2(-10.0, 10.0) * l.scale;
+    p.circle_filled(badge, 6.0 * l.scale, INK);
+    for axis in [vec2(3.5, 0.0), vec2(0.0, 3.5)] {
+        p.line_segment(
+            [badge - axis * l.scale, badge + axis * l.scale],
+            Stroke::new(1.5 * l.scale, TEAL),
+        );
+    }
+}
+
+#[cfg(test)]
+#[path = "defense_view_merge_tests.rs"]
+mod merge_guide_tests;
 
 #[cfg(test)]
 mod tests {
