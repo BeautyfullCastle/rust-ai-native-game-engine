@@ -21,6 +21,7 @@ My Game/
   coop_defense.exe
   game.scene.yaml
   run-game.ps1
+  orr_prepare_stormglass_settings.exe  optional explicit first-use helper
   audio-bank/          optional existing validated fixed bank
     bank.json
     attack-light.pcm   and the other nine fixed cue files
@@ -64,7 +65,8 @@ Settings are opt-in and interactive only:
 ```
 
 These must be existing private local directories outside the game folder. The
-launcher never creates them, chooses an environment/cwd fallback, or rewrites
+launcher never creates them unless explicitly preparing a new shared directory
+as described below. It never chooses an environment/cwd fallback or rewrites
 the supplied paths. Runtime checks remain authoritative for NTFS ownership/ACLs,
 reparse points, aliases, forbidden roots and atomic persistence. Use the existing
 [controls](stormglass-controls.md) and [audio settings](stormglass-audio-settings.md)
@@ -87,13 +89,36 @@ a protected ACL allowing only that user, SYSTEM and Administrators. Ancestors
 are checked without following reparse points and pinned against rename/deletion
 while creation uses the opened volume's GUID. Source/executable roots are refused.
 There is no cwd/environment fallback, recursive parent creation, settings-file
-write, automatic invocation, or modification of existing ACLs/data. If the name
+write, implicit invocation, or modification of existing ACLs/data. If the name
 already exists, choose a new dedicated path or inspect it manually; the helper
 does not repair permissions. A rare post-creation verification failure explicitly
 reports that a directory was created and leaves it for inspection, without
 automatic deletion or retry. Runtime admission at launch remains authoritative,
 including the selected scene/audio-bank exclusions unknown to the helper.
 The helper supports Windows only and opens no game window or audio device.
+
+For one shared controls/audio directory, use `-UserSettingsDirectory` instead of
+the two individual directory options. It cannot be combined with either one and
+is interactive-only. Without the preparation switch, this only forwards the
+literal directory to both existing native stores; it never creates or repairs it.
+
+```powershell
+# Existing private settings:
+& 'C:\Games\My Game\run-game.ps1' -UserSettingsDirectory 'C:\Users\me\StormglassSettings'
+# Explicit first use: prepare a NEW directory, then launch with both settings paths:
+& 'C:\Games\My Game\run-game.ps1' -UserSettingsDirectory 'C:\Users\me\NewStormglassSettings' -PrepareUserSettings
+```
+
+`-PrepareUserSettings` requires the fixed sibling preparation executable and the
+shared directory option. Runtime/scene and option checks happen first. Helper
+failure preserves its stderr/exit status and stops before starting the game;
+existing directories are refused. Successful preparation is followed by normal
+native admission and launch with both settings options. If the game subsequently
+fails, the new directory remains for inspection and the game's exit status is
+returned; there is no cleanup or automatic retry. Runtime scene/bank/privacy
+admission can still refuse a prepared path. Build the game with
+`coop-defense-controls` to support both settings options. Preferences are only
+saved using **SAVE** in KEYS or **SAVE AUDIO**; preparation creates no preferences.
 
 Fixed runtime/scene reparse points are refused. This convenience check is not a
 security boundary against modification of a trusted folder; native scene/bank
@@ -110,10 +135,18 @@ Run from PowerShell 7 in a normal Windows user session, with Rust available:
   -Runtime "$PWD/target/debug/coop_defense.exe" -EvidenceDirectory C:\Temp\fresh-runtime
 ```
 
-The 62 contract assertions use an explicitly named Rust **probe**, not the game.
+The 88 contract assertions use explicitly named Rust **probes**, not the game or
+real directory creator.
 They cover both PowerShell versions, literal argument boundaries, special paths,
 relocation, settings forwarding, refusals, exit/stderr and failed process startup.
 Focused CI records the exact source head and these contracts on Windows.
+
+The separate `tools/test_stormglass_settings_launch_windows.ps1` accepts
+`-PreparationHelper ABSOLUTE_HELPER_EXE -EvidenceDirectory FRESH_DIRECTORY`.
+It uses the actual native preparation executable with a game argv/exit probe:
+PS7/5.1 private creation and routing, existing ACL/data preservation, no implicit
+creation, helper/input/start failures stopping the game, and retention after game
+failure. This filesystem bridge check is not native window or UI-save acceptance.
 
 The separate runtime smoke uses the actual built executable, a minimal scene and
 an original synthetic two-frame test bank. It compares copied and relocated
