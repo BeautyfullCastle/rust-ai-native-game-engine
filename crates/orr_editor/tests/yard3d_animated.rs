@@ -656,3 +656,7 @@ fn assignment_rejects_invalid_external_rest_bounds_even_when_clip_zero_is_valid(
 #[cfg(target_os = "linux")]
 #[path = "yard3d_animated/settings_copy.rs"]
 mod settings_copy;
+
+#[cfg(target_os = "linux")]
+#[path = "yard3d_animated/box_fit.rs"]
+mod box_fit;

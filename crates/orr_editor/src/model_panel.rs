@@ -15,6 +15,8 @@ use crate::{
 use egui::Ui;
 use std::{collections::BTreeMap, path::PathBuf};
 
+mod fit;
+
 pub struct ModelPanel {
     pub blockout: crate::blockout_panel::BlockoutPanel,
     pub bindings: Option<Bindings>,
@@ -512,6 +514,33 @@ impl ModelPanel {
         Ok(())
     }
 
+    /// Center and uniformly fit verified rest geometry inside the selected box.
+    /// Only the authoring draft changes; Assign and Save remain explicit.
+    pub fn fit_selected_box(&mut self, editor: &Editor) -> Result<(), String> {
+        if !self.editable(editor) {
+            return Err("Fitting a model requires coherent local Edit mode".into());
+        }
+        let guid = editor.selected_guid().ok_or("Select a box collider first")?;
+        let row = editor.rows().iter().find(|row| row.guid.as_ref() == Some(&guid))
+            .ok_or("Selected GUID no longer exists")?;
+        let snapshot = editor.snapshot().ok_or("Current snapshot is unavailable")?;
+        let half = orr_sample::yard3d_view::editor_box_half(snapshot.predicted(), row.entity)
+            .ok_or("Fit rest model requires a current box collider and body")?;
+        let (_, _, _, candidate) = self.candidate.as_ref()
+            .filter(|(package, asset, kind, _)| package == &self.package && asset == &self.asset && *kind == self.kind)
+            .ok_or("Load the current model asset before fitting")?;
+        // A form candidate does not authorize stale installed bytes. Keep the
+        // draft and cache unchanged on any freshness or arithmetic failure.
+        let loaded = self.load_requested()?;
+        if loaded.package_digest() != candidate.package_digest()
+            || loaded.source_hash() != candidate.source_hash()
+        {
+            return Err("Model asset changed; load it again before fitting".into());
+        }
+        let fitted = fit::loaded(&loaded, half.map(f64::from))?;
+        self.transform = fitted;
+        Ok(())
+    }
     pub fn assign(&mut self, editor: &Editor) -> Result<(), String> {
         if !self.editable(editor) {
             return Err(
@@ -1334,6 +1363,9 @@ impl ModelPanel {
                                 }
                             }
                         }
+                        if ui.add_enabled(editor.selected_guid().is_some(), egui::Button::new("Fit rest model to box"))
+                            .on_hover_text("Center verified rest geometry and scale uniformly with 1% space. Resets local rotation; changes the draft only.")
+                            .clicked() { self.error = self.fit_selected_box(editor).err(); }
                         for (label, values) in [("Offset", &mut self.transform.translation), ("Scale", &mut self.transform.scale)] {
                             ui.horizontal(|ui| { ui.label(label); for value in values { ui.add(egui::DragValue::new(value).speed(0.05)); } });
                         }
