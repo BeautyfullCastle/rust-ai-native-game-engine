@@ -16,6 +16,7 @@ use egui::Ui;
 use std::{collections::BTreeMap, path::PathBuf};
 
 mod fit;
+mod rotation;
 
 #[cfg(feature = "room-character")]
 #[derive(Clone, Debug, PartialEq)]
@@ -562,6 +563,19 @@ impl ModelPanel {
             fit::loaded_sphere(&loaded, f64::from(dimensions[0]))?
         } else { fit::loaded(&loaded, dimensions.map(f64::from))? };
         self.transform = fitted;
+        Ok(())
+    }
+    /// Postmultiply the form quaternion: rotate about the model's local axis.
+    pub fn rotate_local_quarter(&mut self, editor: &Editor, axis: usize, direction: i8) -> Result<(), String> {
+        if !self.editable(editor) { return Err("Model rotation requires coherent local Edit mode".into()); }
+        let next = rotation::quarter_turn(self.transform.rotation, axis, direction)?;
+        self.transform.rotation = next;
+        Ok(())
+    }
+    /// Recover an invalid quaternion without altering offset, scale or history.
+    pub fn reset_local_rotation(&mut self, editor: &Editor) -> Result<(), String> {
+        if !self.editable(editor) { return Err("Model rotation requires coherent local Edit mode".into()); }
+        self.transform.rotation = [0.0, 0.0, 0.0, 1.0];
         Ok(())
     }
     pub fn assign(&mut self, editor: &Editor) -> Result<(), String> {
@@ -1421,6 +1435,16 @@ impl ModelPanel {
                         for (label, values) in [("Offset", &mut self.transform.translation), ("Scale", &mut self.transform.scale)] {
                             ui.horizontal(|ui| { ui.label(label); for value in values { ui.add(egui::DragValue::new(value).speed(0.05)); } });
                         }
+                        ui.weak("Local axis quarter turns (degrees); draft only");
+                        for (axis, name) in ["X", "Y", "Z"].into_iter().enumerate() {
+                            ui.horizontal_wrapped(|ui| {
+                                for direction in [-1_i8, 1] {
+                                    let label = format!("Rotate {name} {:+}", i16::from(direction) * 90);
+                                    if ui.button(label).clicked() { self.error = self.rotate_local_quarter(editor, axis, direction).err(); }
+                                }
+                            });
+                        }
+                        if ui.button("Reset model rotation").clicked() { self.error = self.reset_local_rotation(editor).err(); }
                         ui.horizontal(|ui| { ui.label("Local quaternion xyzw"); for value in &mut self.transform.rotation { ui.add(egui::DragValue::new(value).speed(0.01)); } });
                         let assign_label = if self.kind == ModelKind::Static { "Assign static model" } else { "Assign animated model" };
                         if ui.add_enabled(editor.selected_guid().is_some(), egui::Button::new(assign_label)).clicked() { self.error = self.assign(editor).err(); }
