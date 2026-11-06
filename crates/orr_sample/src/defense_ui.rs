@@ -744,6 +744,10 @@ impl DefenseUi {
                 orr_bridge::FrameView::of(frame),
                 self.selected,
                 |p, center, scale, unit| {
+                    #[cfg(feature = "coop-defense-pixelfx")]
+                    let center = center + vec2(0.0, if self.started {
+                        self.vfx.unit_recoil(unit, &run)
+                    } else { 0.0 }) * scale;
                     self.pixel_motion.paint_unit(p, center, scale, unit, &run, self.started)
                 },
             );
@@ -752,7 +756,11 @@ impl DefenseUi {
             #[cfg(feature = "coop-defense-pixel-motion")]
             l.text(
                 &p, 42.0, 805.0, 12.0, PAPER,
-                "OPTIONAL PIXELOE VISUAL DEMO · RIVET SKIN · NOT ATTACK-SYNCHRONIZED",
+                if cfg!(feature = "coop-defense-pixelfx") {
+                    "OPTIONAL PIXELOE: IDLE LOOP + SHOT RECOIL (NOT AN AUTHORED ATTACK CLIP)"
+                } else {
+                    "OPTIONAL PIXELOE VISUAL DEMO · RIVET SKIN · NOT ATTACK-SYNCHRONIZED"
+                },
             );
             l.text(&p, 40.0, 37.0, 27.0, PAPER, "STORMGLASS  /  FOUNDRY");
             l.text(
