@@ -11,6 +11,8 @@ mod sampler;
 mod scene;
 #[cfg(feature = "coop-native-authoring")]
 mod native_scene;
+#[cfg(feature = "coop-native-authoring")]
+mod native_bundle;
 use std::{
     collections::BTreeSet,
     ffi::OsString,
@@ -271,4 +273,10 @@ mod cli_tests;
 #[cfg(feature = "coop-native-authoring")]
 pub fn run_native_scene_cli(args: impl IntoIterator<Item = OsString>) -> u8 {
     native_scene::run_cli(args)
+}
+
+/// Package one explicitly trusted native player and admitted scene, without source/toolchain at runtime.
+#[cfg(feature = "coop-native-authoring")]
+pub fn run_native_bundle_cli(args: impl IntoIterator<Item = OsString>) -> u8 {
+    native_bundle::run_cli(args)
 }
