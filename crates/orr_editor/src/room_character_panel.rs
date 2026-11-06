@@ -160,7 +160,25 @@ impl Panel {
         Ok(())
     }
     pub fn dirty(&self) -> bool {
-        self.document != self.saved
+        self.document != self.saved || self.has_unapplied_changes()
+    }
+    pub fn has_unapplied_changes(&self) -> bool {
+        self.candidate != self.document
+    }
+    /// Discard only the form draft; applied unsaved edits and history remain.
+    pub fn reset_draft(
+        &mut self,
+        editor: &crate::Editor,
+        models: &crate::model_panel::ModelPanel,
+    ) -> Result<(), String> {
+        self.ensure_source(editor)?;
+        if editor.mode() != crate::model::Mode::Edit || !editor.can_mutate()
+            || editor.previewing().is_some()
+        { return Err("Reset character draft requires local Edit mode".into()); }
+        models.character_clips(editor)?;
+        self.candidate = self.document.clone();
+        self.error = None;
+        Ok(())
     }
     pub fn document(&self) -> &Document {
         &self.document
@@ -237,6 +255,9 @@ impl Panel {
         mut check: impl FnMut(SaveStage) -> std::io::Result<()>,
     ) -> Result<(), String> {
         self.ensure_source(editor)?;
+        if self.has_unapplied_changes() {
+            return Err("Apply or reset the character draft before saving".into());
+        }
         models.validate_save(editor)?;
         if editor.room_character() != Some(&self.document) {
             return Err("Character document detached from current editor".into());
@@ -334,11 +355,11 @@ impl Panel {
             && editor.yard_rows_coherent();
         ui.collapsing("Room character", |ui| {
             ui.label(format!("Player {}", self.document.player));
-            ui.label(if self.document != self.saved {
-                "Character (unsaved)"
+            if self.has_unapplied_changes() {
+                ui.colored_label(egui::Color32::YELLOW, "Character draft has unapplied changes: Apply or Reset character draft before saving");
             } else {
-                "Character saved"
-            });
+                ui.label(if self.document != self.saved { "Character (unsaved)" } else { "Character saved" });
+            }
             ui.label("Loop clips use absolute simulation ticks; Edit/Stop shows rest");
             if let Err(error) = &clips { ui.colored_label(egui::Color32::LIGHT_RED, error); }
             let clips = clips.as_deref().unwrap_or(&[]);
@@ -392,6 +413,9 @@ impl Panel {
                         .apply_document(self.candidate.clone(), editor, models)
                         .err();
                 }
+                if ui.add_enabled(self.has_unapplied_changes(), egui::Button::new("Reset character draft")).clicked() {
+                    self.error = self.reset_draft(editor, models).err();
+                }
                 if ui
                     .add_enabled(
                         !self.undo.is_empty(),
@@ -410,7 +434,7 @@ impl Panel {
                 {
                     self.error = self.redo(editor, models).err();
                 }
-                if ui.button("Save character and model bindings").clicked() {
+                if ui.add_enabled(!self.has_unapplied_changes(), egui::Button::new("Save character and model bindings")).clicked() {
                     self.error = self.save_all(editor, models).err();
                 }
             });
@@ -559,6 +583,52 @@ mod tests {
             self.panel.redo(&mut self.editor, &mut self.models).unwrap();
             assert_eq!(self.models.bindings.as_ref().unwrap().document(), edited);
         }
+    }
+
+    #[test]
+    fn draft_guard_blocks_pair_save_before_any_persistence_and_reset_keeps_applied_history() {
+        let mut f = Fixture::new(); let saved = f.panel.document.clone(); let files = f.pair_bytes();
+        f.panel.candidate.searching = 31;
+        assert!(f.panel.has_unapplied_changes()); assert!(f.panel.dirty());
+        let mut persistence_reached = false;
+        let error = f.panel.save_with_check(&f.editor, &mut f.models, |_| {
+            persistence_reached = true; Ok(())
+        }).unwrap_err();
+        assert!(error.contains("Apply or reset")); assert!(!persistence_reached);
+        assert_eq!(f.pair_bytes(), files); assert_eq!(f.panel.document, saved);
+        f.panel.reset_draft(&f.editor, &f.models).unwrap();
+        assert!(!f.panel.dirty()); assert_eq!(f.panel.candidate, saved);
+        let edited = f.edit_searching();
+        let undo_len = f.panel.undo.len(); let redo_len = f.panel.redo.len();
+        f.panel.candidate = saved.clone(); // Looks saved, but the applied value is still unsaved.
+        assert!(f.panel.has_unapplied_changes()); assert!(f.panel.dirty());
+        f.panel.reset_draft(&f.editor, &f.models).unwrap();
+        assert_eq!(f.panel.candidate, edited); assert!(f.panel.dirty());
+        assert_eq!((f.panel.undo.len(),f.panel.redo.len()), (undo_len,redo_len));
+        f.panel.undo(&mut f.editor, &mut f.models).unwrap(); assert_eq!(f.panel.document, saved);
+        assert!(!f.panel.dirty()); assert_eq!(f.pair_bytes(), files);
+    }
+    #[test]
+    fn draft_guard_reset_rejects_play_and_retired_source_without_changing_candidate() {
+        let mut f = Fixture::new(); f.panel.candidate.carrying = 0;
+        let candidate = f.panel.candidate.clone(); let files = f.pair_bytes();
+        assert!(f.editor.start_play()); f.editor.sync();
+        assert!(f.panel.reset_draft(&f.editor, &f.models).is_err());
+        assert_eq!(f.panel.candidate, candidate); assert_eq!(f.pair_bytes(), files);
+        let mut f = Fixture::new(); f.panel.candidate.carrying = 0;
+        let candidate = f.panel.candidate.clone(); let files = f.pair_bytes();
+        f.panel.retired = true;
+        assert!(f.panel.reset_draft(&f.editor, &f.models).is_err());
+        assert_eq!(f.panel.candidate, candidate); assert_eq!(f.pair_bytes(), files);
+    }
+    #[test]
+    fn draft_guard_apply_save_reopen_preserves_requested_state_mapping() {
+        let mut f = Fixture::new(); f.panel.candidate.searching = 1; f.panel.candidate.carrying = 2; f.panel.candidate.escaped = 0;
+        let expected = f.panel.candidate.clone(); assert!(f.panel.dirty());
+        f.panel.apply_document(expected.clone(), &mut f.editor, &mut f.models).unwrap();
+        assert!(!f.panel.has_unapplied_changes()); assert!(f.panel.dirty());
+        f.panel.save_all(&f.editor, &mut f.models).unwrap(); assert!(!f.panel.dirty());
+        f.reopen(&expected);
     }
 
     #[test]

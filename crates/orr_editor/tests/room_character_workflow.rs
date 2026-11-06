@@ -284,8 +284,33 @@ fn workflow(gpu: bool) {
         h.get_by_label(format!("{label} {choice}").as_str()).click();
         h.run_steps(2);
     }
+    assert!(h.state().room_character.as_ref().unwrap().has_unapplied_changes());
+    assert!(h.state().room_character.as_ref().unwrap().dirty());
+    let pair = (fs::read(fixture.root.join("room.character.json")).unwrap(), fs::read(fixture.root.join("room.models.json")).unwrap());
+    {
+        let app = h.state_mut();
+        assert!(app.room_character.as_mut().unwrap().save_all(&app.editor, &mut app.models).unwrap_err().contains("Apply or reset"));
+    }
+    assert_eq!((fs::read(fixture.root.join("room.character.json")).unwrap(), fs::read(fixture.root.join("room.models.json")).unwrap()), pair);
+    assert!(h.get_by_label("Save character and model bindings").accesskit_node().is_disabled());
+    assert!(!h.get_by_label("Reset character draft").accesskit_node().is_disabled());
+    assert_eq!(h.state().editor.room_character().unwrap(), &original);
+    h.get_by_label("Reset character draft").click(); settle(&mut h);
+    assert!(!h.state().room_character.as_ref().unwrap().dirty());
+    assert!(!h.state().room_character.as_ref().unwrap().has_unapplied_changes());
+    assert!(!h.get_by_label("Save character and model bindings").accesskit_node().is_disabled());
+    assert!(h.get_by_label("Reset character draft").accesskit_node().is_disabled());
+    for (label, choice) in [
+        ("Searching clip", "1: carrying_key (1.50s)"),
+        ("Carrying key clip", "2: escaped (1.00s)"),
+        ("Escaped clip", "0: searching (2.00s)"),
+    ] {
+        h.get_by_label(label).click(); h.run_steps(2);
+        h.get_by_label(format!("{label} {choice}").as_str()).click(); h.run_steps(2);
+    }
     h.get_by_label("Apply character settings").click();
     settle(&mut h);
+    assert!(!h.get_by_label("Save character and model bindings").accesskit_node().is_disabled());
     assert_eq!(h.state().editor.room_character().unwrap().searching, 1);
     assert_eq!(h.state().editor.room_character().unwrap().carrying, 2);
     assert_eq!(h.state().editor.room_character().unwrap().escaped, 0);
