@@ -1,5 +1,5 @@
 //! Windows local-NTFS backend. Ancestor handles prohibit pathname replacement.
-use super::Preferences;
+use super::{Preferences, StorageProfile};
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Write},
@@ -11,7 +11,9 @@ use windows_sys::Win32::{Foundation::*, Storage::FileSystem::*};
 #[path = "defense_audio_settings_windows_security.rs"]
 mod security;
 use security::{Security, READ_SECURITY};
+#[cfg(test)]
 const PRIMARY: &str = "audio-settings.json";
+#[cfg(test)]
 const LOCK: &str = "audio-settings.lock";
 static NEXT: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,6 +45,7 @@ pub(crate) struct Store {
     security: Security,
     baseline: Option<Snapshot>,
     writable: bool,
+    profile: StorageProfile,
 }
 pub(crate) struct Loaded {
     pub(crate) store: Store,
@@ -167,6 +170,32 @@ fn validate_path(path: &Path) -> Result<Vec<PathBuf>, String> {
 }
 impl Store {
     pub(crate) fn open(path: &Path, forbidden_roots: &[PathBuf]) -> Result<Loaded, String> {
+        let (store, bytes) = Self::open_profile(path, forbidden_roots, StorageProfile::Audio)?;
+        let (preferences, status) = match bytes {
+            Some(bytes) => (
+                Preferences::decode(&bytes)?,
+                "Saved audio settings restored".into(),
+            ),
+            None if store.writable => (
+                Preferences::default(),
+                "Session only until SAVE AUDIO".into(),
+            ),
+            None => (
+                Preferences::default(),
+                "Audio settings unreadable or unsupported; muted defaults, Save disabled".into(),
+            ),
+        };
+        Ok(Loaded {
+            store,
+            preferences,
+            status,
+        })
+    }
+    pub(crate) fn open_profile(
+        path: &Path,
+        forbidden_roots: &[PathBuf],
+        profile: StorageProfile,
+    ) -> Result<(Self, Option<Vec<u8>>), String> {
         let paths = validate_path(path)?;
         let root = security::wide(paths[0].as_os_str());
         // SAFETY: root is a NUL-terminated drive root.
@@ -215,31 +244,18 @@ impl Store {
             security,
             baseline: None,
             writable: true,
+            profile,
         };
         match store.read() {
             Ok(Some(snapshot)) => {
-                let preferences = Preferences::decode(&snapshot.bytes)?;
+                let bytes = snapshot.bytes.clone();
                 store.baseline = Some(snapshot);
-                Ok(Loaded {
-                    store,
-                    preferences,
-                    status: "Saved audio settings restored".into(),
-                })
+                Ok((store, Some(bytes)))
             }
-            Ok(None) => Ok(Loaded {
-                store,
-                preferences: Preferences::default(),
-                status: "Session only until SAVE AUDIO".into(),
-            }),
+            Ok(None) => Ok((store, None)),
             Err(_) => {
                 store.writable = false;
-                Ok(Loaded {
-                    store,
-                    preferences: Preferences::default(),
-                    status:
-                        "Audio settings unreadable or unsupported; muted defaults, Save disabled"
-                            .into(),
-                })
+                Ok((store, None))
             }
         }
     }
@@ -270,16 +286,19 @@ impl Store {
             .access_mode(GENERIC_READ | READ_SECURITY)
             .share_mode(FILE_SHARE_READ)
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(self.path.join(PRIMARY))
+            .open(self.path.join(self.profile.primary()))
         {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(error(e)),
         };
-        let id = self.file_ok(&file, 1024)?;
+        let id = self.file_ok(&file, self.profile.limit())?;
         let mut bytes = Vec::new();
-        (&file).take(1025).read_to_end(&mut bytes).map_err(error)?;
-        Preferences::decode(&bytes)?;
+        (&file)
+            .take(u64::from(self.profile.limit()) + 1)
+            .read_to_end(&mut bytes)
+            .map_err(error)?;
+        self.profile.validate(&bytes)?;
         Ok(Some(Snapshot {
             identity: id,
             bytes,
@@ -301,10 +320,40 @@ impl Store {
         mut hook: impl FnMut(Stage) -> Result<(), String>,
         mut move_file: impl FnMut(&Path, &Path) -> Result<(), String>,
     ) -> Outcome {
+        let bytes = match serde_json::to_vec(preferences) {
+            Ok(bytes) => bytes,
+            Err(e) => return Outcome::NotSaved(error(e)),
+        };
+        self.save_bytes_with_move(bytes, &mut hook, &mut move_file)
+    }
+    #[cfg(feature = "coop-defense-controls")]
+    pub(crate) fn save_bytes(&mut self, bytes: Vec<u8>) -> Outcome {
+        self.save_bytes_with_move(bytes, |_| Ok(()), move_primary)
+    }
+    #[cfg(all(test, feature = "coop-defense-controls"))]
+    pub(crate) fn test_fail_publication(&mut self, bytes: Vec<u8>, after: bool) -> Outcome {
+        self.save_bytes_with_move(
+            bytes,
+            |stage| {
+                if (stage == Stage::Published) == after {
+                    Err("injected controls publication failure".into())
+                } else {
+                    Ok(())
+                }
+            },
+            move_primary,
+        )
+    }
+    fn save_bytes_with_move(
+        &mut self,
+        bytes: Vec<u8>,
+        mut hook: impl FnMut(Stage) -> Result<(), String>,
+        mut move_file: impl FnMut(&Path, &Path) -> Result<(), String>,
+    ) -> Outcome {
         let mut published = false;
         let mut uncertain = false;
         let result = self.publish(
-            preferences,
+            bytes,
             &mut hook,
             &mut move_file,
             &mut published,
@@ -319,7 +368,7 @@ impl Store {
     }
     fn publish(
         &mut self,
-        preferences: &Preferences,
+        bytes: Vec<u8>,
         hook: &mut impl FnMut(Stage) -> Result<(), String>,
         move_file: &mut impl FnMut(&Path, &Path) -> Result<(), String>,
         published: &mut bool,
@@ -328,11 +377,11 @@ impl Store {
         if !self.writable {
             return Err(error("Save disabled for this session"));
         }
-        preferences.validate()?;
+        self.profile.validate(&bytes)?;
         self.security
             .private(self.anchors.last().unwrap())
             .map_err(error)?;
-        let lock = match self.security.create(&self.path.join(LOCK)) {
+        let lock = match self.security.create(&self.path.join(self.profile.lock())) {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => OpenOptions::new()
                 .read(true)
@@ -340,7 +389,7 @@ impl Store {
                 .access_mode(GENERIC_READ | GENERIC_WRITE | READ_SECURITY)
                 .share_mode(0)
                 .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-                .open(self.path.join(LOCK))
+                .open(self.path.join(self.profile.lock()))
                 .map_err(error)?,
             Err(e) => return Err(error(e)),
         };
@@ -348,11 +397,11 @@ impl Store {
         if self.read()? != self.baseline {
             return Err(error("settings changed on disk; restart to reload"));
         }
-        let bytes = serde_json::to_vec(preferences).map_err(error)?;
         let mut created = None;
         for _ in 0..32 {
             let name = self.path.join(format!(
-                ".audio-settings-pending-{}-{}",
+                "{}{}-{}",
+                self.profile.prefix(),
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
@@ -368,10 +417,10 @@ impl Store {
         let (name, mut stage) = created.ok_or_else(|| error("staging name budget exhausted"))?;
         let stage_id = identity(&info(&stage)?);
         let result = (|| {
-            self.file_ok(&stage, 1024)?;
+            self.file_ok(&stage, self.profile.limit())?;
             stage.write_all(&bytes).map_err(error)?;
             stage.sync_all().map_err(error)?;
-            self.file_ok(&stage, 1024)?;
+            self.file_ok(&stage, self.profile.limit())?;
             // Windows rename requires closing handles that deny delete sharing.
             drop(stage);
             hook(Stage::Prepared)?;
@@ -384,14 +433,14 @@ impl Store {
                 .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
                 .open(&name)
                 .map_err(error)?;
-            if self.file_ok(&check, 1024)? != stage_id {
+            if self.file_ok(&check, self.profile.limit())? != stage_id {
                 return Err(error("staging file identity changed"));
             }
             drop(check);
             if self.read()? != self.baseline {
                 return Err(error("settings changed before publication"));
             }
-            if let Err(e) = move_file(&name, &self.path.join(PRIMARY)) {
+            if let Err(e) = move_file(&name, &self.path.join(self.profile.primary())) {
                 match self.read() {
                     Ok(Some(current)) if current.identity == stage_id => {
                         *published = true;

@@ -14,7 +14,7 @@ pub(crate) fn private_directory() -> (tempfile::TempDir, PathBuf) {
     );
     (root, path)
 }
-fn write_private(path: &Path, bytes: &[u8]) {
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) {
     let mut file = Security::new().unwrap().create(path).unwrap();
     file.write_all(bytes).unwrap();
 }

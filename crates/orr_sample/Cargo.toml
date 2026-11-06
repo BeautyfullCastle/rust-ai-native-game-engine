@@ -11,6 +11,8 @@ default-run = "arena"
 workspace = true
 
 [features]
+# Optional physical gameplay keys and independent explicit settings, reusing private storage.
+coop-defense-controls = ["coop-defense-audio-settings"]
 # Explicit native audio preference storage, independent of game run journals.
 coop-defense-audio-settings = ["coop-defense-audio", "dep:windows-sys"]
 # Dedicated post-release artwork, selected only by the actual combat ledger.

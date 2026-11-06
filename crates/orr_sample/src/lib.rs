@@ -160,6 +160,9 @@ pub mod defense_audio;
 #[cfg(all(feature = "coop-defense-audio-settings", any(test, target_os = "linux", windows)))]
 pub(crate) mod defense_audio_settings;
 
+#[cfg(all(feature = "coop-defense-controls", any(target_os = "linux", windows)))]
+pub(crate) mod defense_controls;
+
 #[cfg(feature = "coop-defense-pixelfx")]
 pub(crate) mod defense_vfx;
 
