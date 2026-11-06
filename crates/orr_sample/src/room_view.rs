@@ -87,6 +87,42 @@ struct FramePlacements {
     animated_models: Vec<AnimatedPlacement>,
 }
 
+/// Visible placements successfully validated by the native rendering path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelPoseCounts {
+    pub static_models: usize,
+    pub animated_models: usize,
+}
+
+/// Validate this frame's actual model placements and sampled poses without a GPU.
+/// Collected keys are validated but excluded from visible counts, as in rendering.
+pub fn check_model_poses(
+    frame: FrameView<'_>,
+    index: &SceneIndex,
+    models: &PreparedModels,
+    #[cfg(feature = "room-character")] playback: Option<&crate::room_character::PlaybackCursor>,
+) -> Result<ModelPoseCounts, String> {
+    #[cfg(feature = "room-animated-models")]
+    {
+        let placed = frame_placements_with_playback(
+            frame,
+            index,
+            models,
+            #[cfg(feature = "room-character")]
+            playback,
+        )?;
+        Ok(ModelPoseCounts {
+            static_models: placed.static_models.len(),
+            animated_models: placed.animated_models.len(),
+        })
+    }
+    #[cfg(not(feature = "room-animated-models"))]
+    Ok(ModelPoseCounts {
+        static_models: placements(frame, index, models)?.len(),
+        animated_models: 0,
+    })
+}
+
 /// Body-to-world × binding-local TRS, identical to the editor model placement
 /// convention. Collider extents never scale or displace the imported model.
 fn instance(body: Transform3, local: LocalTransform) -> StaticInstance {
