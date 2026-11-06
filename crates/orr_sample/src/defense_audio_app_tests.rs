@@ -70,7 +70,7 @@ fn audio_settings_cli_and_direct_headless_api_refuse_without_filesystem_effects(
     assert!(prepare_audio_settings(&Options::default()).unwrap().is_none());
 }
 fn frame(a: &mut App, events: Vec<egui::Event>, delta: f64) {
-    a.process_input(
+    let mut output = a.process_input(
         egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -81,6 +81,7 @@ fn frame(a: &mut App, events: Vec<egui::Event>, delta: f64) {
         },
         delta,
     );
+    output.textures_delta.clear(); // CPU-only harness has no renderer to consume uploads.
 }
 fn key(k: egui::Key) -> Vec<egui::Event> {
     [true, false]

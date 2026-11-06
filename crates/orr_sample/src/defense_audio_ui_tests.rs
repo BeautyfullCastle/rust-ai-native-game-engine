@@ -34,7 +34,8 @@ fn draw_input(ui: &mut DefenseUi, sim: &Sim, mut input: egui::RawInput) {
     input
         .screen_rect
         .get_or_insert(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 940.0)));
-    let (_, action) = ui.show(input, sim.frame());
+    let (mut output, action) = ui.show(input, sim.frame());
+    output.textures_delta.clear(); // CPU-only harness has no renderer to consume uploads.
     assert!(
         action.is_none(),
         "audio input must never emit a game command"
