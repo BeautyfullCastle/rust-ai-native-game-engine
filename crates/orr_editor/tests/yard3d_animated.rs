@@ -664,3 +664,7 @@ mod box_fit;
 #[cfg(target_os = "linux")]
 #[path = "yard3d_animated/sphere_fit.rs"]
 mod sphere_fit;
+
+#[cfg(target_os = "linux")]
+#[path = "yard3d_animated/rotation.rs"]
+mod rotation;

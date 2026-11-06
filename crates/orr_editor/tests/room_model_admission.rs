@@ -338,3 +338,7 @@ fn fitted_room_binding_saves_and_reopens_in_actual_runtime_pose_path() {
 #[cfg(all(feature = "windows-export", target_os = "linux", target_arch = "x86_64"))]
 #[path = "room_model_admission/sphere_fit_export.rs"]
 mod sphere_fit_export;
+
+#[cfg(all(feature = "windows-export", target_os = "linux", target_arch = "x86_64"))]
+#[path = "room_model_admission/rotation_export.rs"]
+mod rotation_export;
