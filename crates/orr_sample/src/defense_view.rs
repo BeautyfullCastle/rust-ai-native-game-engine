@@ -415,6 +415,7 @@ pub(crate) fn paint_view_with_unit_skin(
             );
         }
     }
+    let mut core_approach = Vec::new();
     for enemy in ordered::<game::DefenseEnemy>(frame)
         .into_iter()
         .filter(|e| e.active != 0)
@@ -424,6 +425,9 @@ pub(crate) fn paint_view_with_unit_skin(
         let s = l.scale;
         let boss = enemy.kind == game::BOSS;
         let r = if boss { 24.0 } else { 12.0 } * s;
+        if run.phase == game::PLAYING && on_core_approach(&enemy) {
+            core_approach.push((c, r));
+        }
         let color = match enemy.kind {
             0 => C::from_rgb(199, 121, 100),
             1 => C::from_rgb(220, 172, 103),
@@ -528,7 +532,22 @@ pub(crate) fn paint_view_with_unit_skin(
         );
     }
     diamond(p, c, 20.0 * l.scale, TEAL);
-    l.text(p, 520.0, 755.0, 13.0, MUTED, "SHARED STORMGLASS CORE");
+    l.text(
+        p,
+        520.0,
+        755.0,
+        13.0,
+        if core_approach.is_empty() { MUTED } else { C::LIGHT_RED },
+        if core_approach.is_empty() {
+            "SHARED STORMGLASS CORE"
+        } else {
+            "CORE APPROACH"
+        },
+    );
+    // The core shell must not cover a warning when an enemy converges on it.
+    for (center, radius) in core_approach {
+        paint_core_approach(p, l, center, radius);
+    }
     // Keep guides above both vector and custom unit skins, clipped to local cells.
     for cell in move_targets {
         paint_move_guide(p, l, cell);
@@ -537,6 +556,33 @@ pub(crate) fn paint_view_with_unit_skin(
         paint_merge_guide(p, l, cell);
     }
 }
+
+// Presentation landmark: enemy_position enters its final shared-core leg at 1600,
+// while the simulation removes a leaking enemy at 2000. This is not a speed/ETA rule.
+fn on_core_approach(enemy: &game::DefenseEnemy) -> bool {
+    enemy.active != 0 && (1600..2000).contains(&enemy.progress)
+}
+
+fn paint_core_approach(p: &Painter, l: Layout, center: Pos2, radius: f32) {
+    p.circle_stroke(
+        center,
+        radius * 1.6 + 5.0 * l.scale,
+        Stroke::new(2.0 * l.scale, C::LIGHT_RED),
+    );
+    let badge = center + vec2(radius + 10.0 * l.scale, -radius - 10.0 * l.scale);
+    p.circle_filled(badge, 7.0 * l.scale, INK);
+    p.text(
+        badge,
+        Align2::CENTER_CENTER,
+        "!",
+        FontId::proportional(14.0 * l.scale),
+        C::LIGHT_RED,
+    );
+}
+
+#[cfg(test)]
+#[path = "defense_view_core_approach_tests.rs"]
+mod core_approach_tests;
 
 // Moves preserve a unit at any tier, including MAX_TIER. Missing slots aren't inferred
 // empty, and conflicting duplicate occupied slots conservatively suppress the guide.
