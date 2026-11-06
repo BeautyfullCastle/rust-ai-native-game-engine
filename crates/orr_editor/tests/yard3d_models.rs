@@ -178,6 +178,7 @@ fn actual_widgets_assign_remove_undo_save_reopen_and_disable_mutation_in_play() 
         "Save model bindings",
         "Reload verified models",
         "Use selected model settings",
+        "Fit rest model to box",
         "Discard model bindings",
     ] {
         assert!(
@@ -902,3 +903,6 @@ fn scene_owned_reservation_rejects_model_assignment_before_history_or_cache_chan
 
 #[path = "yard3d_models/settings_copy.rs"]
 mod settings_copy;
+
+#[path = "yard3d_models/box_fit.rs"]
+mod box_fit;

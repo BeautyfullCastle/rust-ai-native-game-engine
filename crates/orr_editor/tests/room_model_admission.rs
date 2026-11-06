@@ -304,3 +304,33 @@ fn unknown_guid_open_rejection_preserves_document_cache_and_redo() {
         bytes
     );
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn fitted_room_binding_saves_and_reopens_in_actual_runtime_pose_path() {
+    let fixture = Fixture::new(false);
+    let (mut editor, mut panel) = fixture.panel();
+    let wall = editor.rows().iter().find(|row| {
+        editor.snapshot().unwrap().predicted().get::<RoomActor>(row.entity)
+            .is_some_and(|actor| actor.kind == orr_sample::room_game::WALL)
+    }).unwrap().guid.clone().unwrap();
+    editor.select(Some(Target::Guid(wall.clone())));
+    panel.package = "admission-models".into(); panel.asset = "one.glb".into();
+    panel.load_candidate(&editor).unwrap();
+    let before = panel.bindings.as_ref().unwrap().document().clone();
+    let checksum = editor.checksum();
+    let bytes = fs::read(fixture.root.join("room.models.json")).unwrap();
+    panel.fit_selected_box(&editor).unwrap();
+    let fit = panel.transform;
+    assert_eq!(panel.bindings.as_ref().unwrap().document(), &before);
+    assert_eq!(editor.checksum(), checksum);
+    assert_eq!(fs::read(fixture.root.join("room.models.json")).unwrap(), bytes);
+    panel.assign(&editor).unwrap(); panel.save(&editor).unwrap();
+    let prepared = PreparedProject::open(&fixture.root).unwrap();
+    assert_eq!(prepared.models().document.bindings[&wall.to_string()].transform, fit);
+    let counts = orr_sample::room_view::check_model_poses(
+        orr_bridge::FrameView::of(prepared.scene().frame()), prepared.scene().index(), prepared.models(),
+        #[cfg(feature = "room-character")] None,
+    ).unwrap();
+    assert_eq!(counts.static_models, 2);
+}

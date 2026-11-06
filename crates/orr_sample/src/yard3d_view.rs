@@ -40,6 +40,14 @@ pub fn editor_body_poses(frame: FrameView<'_>) -> Vec<(Entity, orr_view::Transfo
     frame.iter::<Body>().map(|(entity, body)| (entity, fp_to_transform3(body.pos, body.rot))).collect()
 }
 
+/// Exact body-local box dimensions for presentation fitting. Ground boxes retain
+/// their collider thickness even when their procedural style is a plane.
+pub fn editor_box_half(frame: FrameView<'_>, entity: Entity) -> Option<[f32; 3]> {
+    frame.get::<Body>(entity)?;
+    let shape = frame.get::<Collider>(entity)?.shape;
+    (shape.kind == SHAPE_BOX).then(|| fp_to_vec3(shape.half).to_array())
+}
+
 /// Read-only classification for static presentation baking. Classification,
 /// exact body placement, and the rendered procedural style all come from the
 /// same immutable frame; interpolation policy is deliberately not a body kind.
@@ -260,6 +268,31 @@ pub fn input_for(keys: YardKeys, camera: &Camera3D, cursor: [f32; 2], viewport: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn editor_box_dimensions_keep_ground_thickness_and_exact_entity_generation() {
+        use orr_ecs::{ComponentRegistryBuilder, Frame};
+        use orr_fp::{fp, FPVec3};
+        use orr_physics3d::Shape;
+        let mut registry = ComponentRegistryBuilder::new();
+        orr_physics3d::register(&mut registry);
+        let mut frame = Frame::new(registry.build());
+        let entity = frame.spawn();
+        frame.add(entity, Body::new_static(FPVec3::ZERO));
+        frame.add(entity, Collider::new(Shape::cuboid(fp!(24), fp!(0.5), fp!(24))));
+        let before = frame.checksum();
+        assert_eq!(editor_box_half(FrameView::of(&frame), entity), Some([24.0, 0.5, 24.0]));
+        assert_eq!(frame.checksum(), before);
+        frame.despawn(entity);
+        let replacement = frame.spawn();
+        frame.add(replacement, Body::new_static(FPVec3::ZERO));
+        frame.add(replacement, Collider::new(Shape::sphere(fp!(1))));
+        assert!(editor_box_half(FrameView::of(&frame), entity).is_none());
+        assert!(editor_box_half(FrameView::of(&frame), replacement).is_none());
+        let orphan = frame.spawn();
+        frame.add(orphan, Collider::new(Shape::cuboid(fp!(1), fp!(1), fp!(1))));
+        assert!(editor_box_half(FrameView::of(&frame), orphan).is_none());
+    }
 
     #[test]
     fn bake_classification_uses_body_kind_and_exact_same_frame_mesh() {
