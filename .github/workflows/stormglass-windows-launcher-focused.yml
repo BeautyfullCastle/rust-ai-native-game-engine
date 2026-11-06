@@ -1,7 +1,7 @@
 name: stormglass Windows launcher focused CI
 on:
   push:
-    branches: [codex/stormglass-windows-launcher-20261106]
+    branches: [codex/stormglass-windows-launcher-20261106, codex/stormglass-external-bank-20261107]
 permissions:
   contents: read
 jobs:
@@ -22,7 +22,7 @@ jobs:
           rustc --version | Set-Content ci-evidence/rustc.txt
           & ./tools/test_stormglass_windows_launcher.ps1 -EvidenceDirectory "$PWD/ci-evidence/contracts" *>&1 | Tee-Object ci-evidence/contracts.log
           $result = Get-Content ci-evidence/contracts/result.json -Raw | ConvertFrom-Json
-          if ($result.contract_assertions -ne 44 -or $result.hosts.Count -ne 2) { throw 'Incomplete contract coverage' }
+          if ($result.contract_assertions -ne 62 -or $result.hosts.Count -ne 2) { throw 'Incomplete contract coverage' }
       - name: Preserve results including failures
         if: always()
         uses: actions/upload-artifact@v4

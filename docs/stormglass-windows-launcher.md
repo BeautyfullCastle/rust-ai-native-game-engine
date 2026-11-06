@@ -34,8 +34,22 @@ Use Windows PowerShell 5.1 or PowerShell 7 with the normal machine execution pol
 & 'C:\Games\My Game\run-game.ps1' -Headless -Ticks 60 -WithAudioBank
 ```
 
-Default audio is `off`. `-Audio auto|required` selects the fixed `audio-bank`
-subfolder; `-WithAudioBank` also selects it while audio is Off. Missing or invalid
+Default audio is `off`. Without an external selection, `-Audio auto|required`
+selects the fixed `audio-bank` subfolder; `-WithAudioBank` also selects it while
+audio is Off. To share an existing bank outside the game folder, supply an
+explicit absolute local drive path:
+
+```powershell
+& 'C:\Games\My Game\run-game.ps1' -Audio auto -AudioBankDirectory 'C:\GameAudio\My Bank'
+& 'C:\Games\My Game\run-game.ps1' -Headless -Ticks 60 -AudioBankDirectory 'C:\GameAudio\My Bank'
+```
+
+`-AudioBankDirectory` selects that literal path even with Off and cannot be
+combined with `-WithAudioBank`. It never creates/copies a bank or falls back to
+the sibling bank; moving the game folder leaves this explicit selection
+unchanged. Native Windows NTFS/no-reparse bank admission remains authoritative;
+the launcher only rejects non-absolute, UNC and drive-relative selections early.
+Missing or invalid
 selected banks fail native admission even with Off. Headless mode never opens
 an audio device or window and rejects Required audio. Ticks are decimal 0..36000
 and require Headless. Unknown/duplicate options fail. The launcher preserves the
@@ -73,15 +87,17 @@ Run from PowerShell 7 in a normal Windows user session, with Rust available:
   -Runtime "$PWD/target/debug/coop_defense.exe" -EvidenceDirectory C:\Temp\fresh-runtime
 ```
 
-The 44 contract assertions use an explicitly named Rust **probe**, not the game.
+The 62 contract assertions use an explicitly named Rust **probe**, not the game.
 They cover both PowerShell versions, literal argument boundaries, special paths,
 relocation, settings forwarding, refusals, exit/stderr and failed process startup.
 Focused CI records the exact source head and these contracts on Windows.
 
 The separate runtime smoke uses the actual built executable, a minimal scene and
 an original synthetic two-frame test bank. It compares copied and relocated
-60-tick summaries with direct execution and checks invalid bank refusal with
-Off. It does not validate the Linux authoring CLI, settings UI/persistence,
+60-tick summaries with direct execution, including a shared external bank after
+game relocation. Missing/invalid external banks fail with Off even when the
+sibling bank is valid; normal input inventory/hashes remain unchanged. It does
+not validate the Linux authoring CLI, settings UI/persistence,
 interactive rendering, device playback or a full distributable. Actual playtests
 need separate video evidence. Earlier blocked window-control evidence is retained;
 this task makes no new window-control attempt.
