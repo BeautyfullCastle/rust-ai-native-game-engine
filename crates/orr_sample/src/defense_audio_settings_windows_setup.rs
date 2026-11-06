@@ -1,6 +1,22 @@
 //! Explicit one-directory provisioning; never modifies an existing ACL or settings file.
 use super::*;
 
+/// Read-only startup admission. This does not attempt or promise a future save.
+pub(crate) fn check(path: &Path, forbidden_roots: &[PathBuf]) -> Result<(bool, bool), String> {
+    let (audio, audio_bytes) = Store::open_profile(path, forbidden_roots, StorageProfile::Audio)
+        .map_err(|e| format!("audio settings admission failed: {e}"))?;
+    if !audio.writable() {
+        return Err("audio settings unreadable or unsupported; existing data preserved".into());
+    }
+    let (controls, controls_bytes) =
+        Store::open_profile(path, forbidden_roots, StorageProfile::Controls)
+            .map_err(|e| format!("controls settings admission failed: {e}"))?;
+    if !controls.writable() {
+        return Err("controls settings unreadable or unsupported; existing data preserved".into());
+    }
+    Ok((audio_bytes.is_some(), controls_bytes.is_some()))
+}
+
 pub(crate) fn prepare(path: &Path, forbidden_roots: &[PathBuf]) -> Result<(), String> {
     let paths = validate_path(path)?;
     let leaf = paths
@@ -110,6 +126,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("settings [shared] & space");
         prepare(&path, &[]).unwrap();
+        assert_eq!(check(&path, &[]).unwrap(), (false, false));
         assert_eq!(std::fs::read_dir(&path).unwrap().count(), 0);
         let mut audio = Store::open(&path, &[]).unwrap();
         let (mut controls, bytes) =
@@ -132,6 +149,47 @@ mod tests {
                 .unwrap(),
             controls_bytes
         );
+        let count = std::fs::read_dir(&path).unwrap().count();
+        assert_eq!(check(&path, &[]).unwrap(), (true, true));
+        assert_eq!(std::fs::read_dir(&path).unwrap().count(), count);
+    }
+
+    #[test]
+    fn check_rejects_invalid_profiles_without_creating_locks_or_changing_data_or_acl() {
+        let root = tempfile::tempdir().unwrap();
+        for (profile, filename) in [
+            ("audio", "audio-settings.json"),
+            ("controls", "controls-settings.json"),
+        ] {
+            let path = root.path().join(profile);
+            prepare(&path, &[]).unwrap();
+            let original = b"{malformed profile data";
+            super::super::tests::write_private(&path.join(filename), original);
+            let before = acl(&open_directory(&path).unwrap());
+            let error = check(&path, &[]).unwrap_err();
+            assert!(error.contains(profile), "{error}");
+            assert_eq!(std::fs::read(path.join(filename)).unwrap(), original);
+            assert_eq!(acl(&open_directory(&path).unwrap()), before);
+            assert_eq!(std::fs::read_dir(path).unwrap().count(), 1);
+        }
+    }
+
+    #[test]
+    fn check_never_creates_missing_directory_or_repairs_broad_acl() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("missing");
+        assert!(check(&missing, &[]).is_err());
+        assert!(!missing.exists());
+        let broad = root.path().join("broad");
+        let security = Security::test_acl("D:P(A;;FA;;;WD)");
+        let attributes = security.attributes();
+        let name = security::wide(broad.as_os_str());
+        // SAFETY: valid owned descriptor and NUL-terminated fresh test path.
+        assert_ne!(unsafe { CreateDirectoryW(name.as_ptr(), &attributes) }, 0);
+        let before = acl(&open_directory(&broad).unwrap());
+        assert!(check(&broad, &[]).is_err());
+        assert_eq!(acl(&open_directory(&broad).unwrap()), before);
+        assert_eq!(std::fs::read_dir(broad).unwrap().count(), 0);
     }
 
     #[test]

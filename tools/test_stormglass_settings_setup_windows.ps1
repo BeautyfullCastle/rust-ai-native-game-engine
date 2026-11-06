@@ -32,6 +32,9 @@ if((Run @('--help')) -ne 0){throw 'Help failed'}
 $settings=Join-Path $root 'private & [controls]'
 if((Run @('--directory',$settings)) -ne 0){throw 'Private creation failed'}
 if(@(Get-ChildItem -LiteralPath $settings -Force).Count -ne 0){throw 'Setup created settings data'}
+if((Run @('--check',$settings)) -ne 0){throw 'Empty private settings admission failed'}
+if(-not ([IO.File]::ReadAllText((Join-Path $root "case-$script:caseNumber.stdout"))).Contains('audio=defaults controls=defaults')){throw 'Default profile report missing'}
+if(@(Get-ChildItem -LiteralPath $settings -Force).Count -ne 0){throw 'Read-only check created files'}
 $acl=Get-Acl -LiteralPath $settings
 $user=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $owner=$acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
@@ -47,14 +50,21 @@ $before=$acl.Sddl
 [IO.File]::WriteAllText((Join-Path $settings 'sentinel.txt'),'preserve existing bytes')
 if((Run @('--directory',$settings)) -eq 0){throw 'Existing directory accepted'}
 if((Get-Acl -LiteralPath $settings).Sddl -cne $before -or [IO.File]::ReadAllText((Join-Path $settings 'sentinel.txt')) -cne 'preserve existing bytes'){throw 'Existing directory modified'}
+if((Run @('--check',$settings)) -ne 0 -or (Get-Acl -LiteralPath $settings).Sddl -cne $before -or [IO.File]::ReadAllText((Join-Path $settings 'sentinel.txt')) -cne 'preserve existing bytes'){throw 'Read-only check modified unrelated data/ACL'}
 $existing=Join-Path $root 'existing broad directory'
 New-Item -ItemType Directory -Path $existing | Out-Null
+$world=[Security.Principal.SecurityIdentifier]::new('S-1-1-0')
+$broad=Get-Acl -LiteralPath $existing
+$broad.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($world,[Security.AccessControl.FileSystemRights]::FullControl,[Security.AccessControl.AccessControlType]::Allow))
+Set-Acl -LiteralPath $existing -AclObject $broad
 $broadAcl=(Get-Acl -LiteralPath $existing).Sddl
 if((Run @('--directory',$existing)) -eq 0 -or (Get-Acl -LiteralPath $existing).Sddl -cne $broadAcl){throw 'Existing broad ACL repaired'}
+if((Run @('--check',$existing)) -eq 0 -or (Get-Acl -LiteralPath $existing).Sddl -cne $broadAcl){throw 'Broad ACL admitted or repaired by check'}
 $file=Join-Path $root 'existing-file'
 [IO.File]::WriteAllText($file,'unchanged')
 if((Run @('--directory',$file)) -eq 0 -or [IO.File]::ReadAllText($file) -cne 'unchanged'){throw 'Existing file modified'}
 $missing=Join-Path $root 'missing'
+if((Run @('--check',$missing)) -eq 0 -or (Test-Path -LiteralPath $missing)){throw 'Check created a missing directory'}
 $inside=Join-Path $game 'must-not-create'
 foreach($argsForCase in @(
     @('--directory','relative'),@('--directory','C:relative'),@('--directory',([IO.Path]::GetPathRoot($root))),
@@ -64,6 +74,31 @@ foreach($argsForCase in @(
     if((Run $argsForCase) -eq 0){throw 'Invalid request accepted'}
 }
 if((Test-Path -LiteralPath $missing) -or (Test-Path -LiteralPath $inside)){throw 'Refused request created a directory'}
+function Write-PrivateFixture([string]$Path,[string]$Text){
+    $fileAcl=[Security.AccessControl.FileSecurity]::new()
+    # Create a fresh fixture with a private DACL from the outset, without Set-Acl.
+    $fileAcl.SetSecurityDescriptorSddlForm($before,[Security.AccessControl.AccessControlSections]::Access)
+    $stream=[IO.FileSystemAclExtensions]::Create([IO.FileInfo]::new($Path),[IO.FileMode]::CreateNew,[Security.AccessControl.FileSystemRights]::FullControl,[IO.FileShare]::Read,4096,[IO.FileOptions]::None,$fileAcl)
+    try {$bytes=[Text.Encoding]::UTF8.GetBytes($Text);$stream.Write($bytes,0,$bytes.Length)} finally {$stream.Dispose()}
+}
+$audioFile=Join-Path $settings 'audio-settings.json'
+Write-PrivateFixture $audioFile '{"schema":1,"profile":"stormglass-audio-v1","gain_percent":37,"muted":false}'
+$validHash=(Get-FileHash -LiteralPath $audioFile).Hash
+if((Run @('--check',$settings)) -ne 0 -or (Get-FileHash -LiteralPath $audioFile).Hash -cne $validHash){throw 'Valid saved audio admission failed or modified file'}
+if(-not ([IO.File]::ReadAllText((Join-Path $root "case-$script:caseNumber.stdout"))).Contains('audio=valid-file controls=defaults')){throw 'Saved/default distinction missing'}
+Move-Item -LiteralPath $audioFile -Destination (Join-Path $settings 'audio-valid.retained')
+foreach($profile in @('audio','controls')){
+    $path=Join-Path $settings "$profile-settings.json"
+    Write-PrivateFixture $path '{malformed private profile'
+    $oldHash=(Get-FileHash -LiteralPath $path).Hash;$oldAcl=(Get-Acl -LiteralPath $path).Sddl
+    $oldNames=@(Get-ChildItem -LiteralPath $settings -Force | Select-Object -ExpandProperty Name | Sort-Object) -join "`n"
+    if((Run @('--check',$settings)) -eq 0){throw 'Malformed profile accepted'}
+    if(-not ([IO.File]::ReadAllText((Join-Path $root "case-$script:caseNumber.stderr"))).Contains($profile)){throw 'Invalid profile not identified'}
+    $newNames=@(Get-ChildItem -LiteralPath $settings -Force | Select-Object -ExpandProperty Name | Sort-Object) -join "`n"
+    if((Get-FileHash -LiteralPath $path).Hash -cne $oldHash -or (Get-Acl -LiteralPath $path).Sddl -cne $oldAcl -or $newNames -cne $oldNames){throw 'Read-only check changed bytes/ACL/inventory'}
+    # Preserve deliberate malformed fixtures under unrelated names before the next profile.
+    Move-Item -LiteralPath $path -Destination (Join-Path $settings "$profile-malformed.retained")
+}
 [pscustomobject]@{schema=1;cases=$script:caseNumber;kind='real Windows CLI and private NTFS ACL';executable_sha256=(Get-FileHash -LiteralPath $Executable).Hash;private_owner=$owner;acl=$before;window_device='UNRUN'} |
     ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'result.json') -Encoding utf8
-Write-Output "PASS settings setup CLI cases=$script:caseNumber; private empty creation and existing ACL/data preserved; window/device UNRUN."
+Write-Output "PASS settings setup/check CLI cases=$script:caseNumber; private creation and read-only saved/default admission, ACL/data preservation; window/device UNRUN."
