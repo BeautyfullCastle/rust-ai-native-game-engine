@@ -9,7 +9,7 @@ path. Matching is case-insensitive; every whitespace-separated word must occur
 in the combined `package/path`. For example, `characters hero` narrows a large
 library to matching character models. Search uses literal text, not globs.
 
-The result count counts GLB, glTF and Orrmodel assets once each, even when an
+The result count counts GLB, glTF, Orrmodel and cooked `*.model.json` assets once each, even when an
 asset offers both static and animated actions. **Clear model filter** restores
 all models. Changing projects clears the filter and the verified inventory.
 
