@@ -24,6 +24,51 @@ fn app() -> App {
         board: PendingBoard::default(),
     }
 }
+
+#[cfg(all(feature = "coop-defense-audio-settings", target_os = "linux"))]
+#[test]
+fn audio_settings_explicit_click_restores_without_starting_or_advancing_game() {
+    use crate::defense_audio_settings::{self as settings, Preferences, Store, Outcome};
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut store = Store::open(dir.path(), &[]).unwrap().store;
+    assert!(matches!(store.save(&Preferences::new(40, false).unwrap()), Outcome::Saved));
+    let mut a = app();
+    settings::install(&mut a.ui, Store::open(dir.path(), &[]).unwrap());
+    let before = a.session.predicted_frame().to_bytes();
+    frame(&mut a, vec![], 0.0);
+    silence(a.audio.offline_owner());
+    assert!(!a.ui.started);
+    assert_eq!((a.ui.audio.gain_percent, a.ui.audio.muted), (40, false));
+    click(&mut a, 690.0, 30.0);
+    assert_eq!(a.ui.audio.gain_percent, 30);
+    assert_eq!(Store::open(dir.path(), &[]).unwrap().preferences.gain_percent, 40);
+    click(&mut a, 840.0, 30.0);
+    assert_eq!(Store::open(dir.path(), &[]).unwrap().preferences.gain_percent, 30);
+    assert!(a.ui.audio_settings.status.contains("saved"));
+    assert!(!a.ui.started);
+    assert_eq!(a.session.predicted_frame().to_bytes(), before);
+    start(&mut a);
+    summon(&mut a);
+    assert!(render(a.audio.offline_owner(), 256).iter().any(|v| v.abs() > 0.00001));
+}
+
+#[cfg(all(feature = "coop-defense-audio-settings", target_os = "linux"))]
+#[test]
+fn audio_settings_cli_and_direct_headless_api_refuse_without_filesystem_effects() {
+    let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    for input in [vec!["--audio-settings-directory"],
+        vec!["--audio-settings-directory", "/missing", "--audio-settings-directory", "/missing"],
+        vec!["--headless", "--audio-settings-directory", "/missing"]] {
+        assert!(Options::parse(args(&input)).is_err());
+    }
+    let options = Options { audio_settings_directory: Some("/missing".into()), ..Default::default() };
+    assert!(headless(options).unwrap_err().contains("native interactive"));
+    let options = Options { audio_settings_directory: Some("relative".into()), ..Default::default() };
+    assert!(prepare_audio_settings(&options).is_err());
+    assert!(prepare_audio_settings(&Options::default()).unwrap().is_none());
+}
 fn frame(a: &mut App, events: Vec<egui::Event>, delta: f64) {
     a.process_input(
         egui::RawInput {

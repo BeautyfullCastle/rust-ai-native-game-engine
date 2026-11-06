@@ -26,9 +26,11 @@ pub const PIXELFX_LICENSES: &str = include_str!("../assets/stormglass-pixelfx/hi
 /// Generated-art provenance and upstream tool notices, not an artwork license.
 #[cfg(feature = "coop-defense-pixel-motion")]
 pub const PIXEL_MOTION_LICENSES: &str = include_str!("../assets/stormglass-pixel-motion/LICENSE.txt");
-pub const HELP:&str="Stormglass Foundry\ncoop_defense [--scene PATH] [--run-directory ABSOLUTE_PRIVATE_DIRECTORY (Linux run-save feature)] [--headless --ticks N [--demo] [--capture NEW.png]]\nSpace summon, click your unit then empty tile to move or identical role/tier to merge, U upgrade, I invest, P/Escape pause, Enter continue, R restart. AI partner is local, not online. Headless capture uses a software GPU. Optional coop-defense-audio: --audio-bank ABSOLUTE_BANK_DIRECTORY --audio off|auto|required; native output additionally needs audio-native. Starts muted; Linux bank loading only.";
+pub const HELP:&str="Stormglass Foundry\ncoop_defense [--scene PATH] [--run-directory ABSOLUTE_PRIVATE_DIRECTORY (Linux run-save feature)] [--headless --ticks N [--demo] [--capture NEW.png]]\nSpace summon, click your unit then empty tile to move or identical role/tier to merge, U upgrade, I invest, P/Escape pause, Enter continue, R restart. AI partner is local, not online. Headless capture uses a software GPU. Optional coop-defense-audio: --audio-bank ABSOLUTE_BANK_DIRECTORY --audio off|auto|required; native output additionally needs audio-native. Starts muted; Linux bank loading only. Optional Linux coop-defense-audio-settings: --audio-settings-directory ABSOLUTE_PRIVATE_DIRECTORY; SAVE AUDIO remembers volume and mute.";
 #[derive(Debug, Default)]
 pub struct Options {
+    #[cfg(all(feature = "coop-defense-audio-settings", target_os = "linux"))]
+    pub audio_settings_directory: Option<PathBuf>,
     #[cfg(feature = "coop-defense-audio")]
     pub audio_bank: Option<PathBuf>,
     #[cfg(feature = "coop-defense-audio")]
@@ -51,6 +53,10 @@ impl Options {
                 return Err(format!("duplicate option {a}"));
             }
             match a.as_str() {
+                #[cfg(all(feature = "coop-defense-audio-settings", target_os = "linux"))]
+                "--audio-settings-directory" => {
+                    out.audio_settings_directory = Some(args.next().ok_or("--audio-settings-directory needs PATH")?.into())
+                }
                 #[cfg(feature = "coop-defense-audio")]
                 "--audio-bank" => {
                     out.audio_bank = Some(args.next().ok_or("--audio-bank needs PATH")?.into())
@@ -89,6 +95,10 @@ impl Options {
         }
         #[cfg(feature = "coop-defense-audio")]
         validate_audio_options(&out)?;
+        #[cfg(all(feature = "coop-defense-audio-settings", target_os = "linux"))]
+        if out.headless && out.audio_settings_directory.is_some() {
+            return Err("--audio-settings-directory requires the native interactive player".into());
+        }
         if out.ticks > 36000 {
             return Err("ticks must not exceed 36000".into());
         }
@@ -196,6 +206,22 @@ fn prepare_scene(options: &Options) -> Result<Option<String>, String> {
     let text = std::str::from_utf8(&bytes).map_err(|_| "scene must be UTF-8".to_string())?;
     Ok(Some(text.to_owned()))
 }
+#[cfg(all(feature = "coop-defense-audio-settings", target_os = "linux"))]
+fn prepare_audio_settings(options: &Options) -> Result<Option<crate::defense_audio_settings::Loaded>, String> {
+    let Some(path) = &options.audio_settings_directory else { return Ok(None); };
+    if options.headless { return Err("--audio-settings-directory requires the native interactive player".into()); }
+    let mut forbidden = Vec::new();
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    if source.exists() { forbidden.push(source); }
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    if let Some(parent) = exe.parent() { forbidden.push(parent.to_owned()); }
+    if let Some(scene) = &options.scene {
+        let scene = std::fs::canonicalize(scene).map_err(|e| e.to_string())?;
+        if let Some(parent) = scene.parent() { forbidden.push(parent.to_owned()); }
+    }
+    if let Some(bank) = &options.audio_bank { forbidden.push(bank.clone()); }
+    crate::defense_audio_settings::Store::open(path, &forbidden).map(Some)
+}
 fn prepare_config(options: &Options) -> Result<game::DefenseConfig, String> {
     match prepare_scene(options)? {
         Some(text) => orr_games::coop_defense_scene::parse_config(&text),
@@ -210,6 +236,8 @@ pub(crate) fn session(config: game::DefenseConfig) -> DefenseSession {
     Session::new(config, session_config, LocalInputSource)
 }
 pub fn run(options: Options) -> Result<(), String> {
+    #[cfg(all(feature = "coop-defense-audio-settings", target_os = "linux"))]
+    let audio_settings = prepare_audio_settings(&options)?;
     #[cfg(feature = "coop-defense-audio")]
     let audio_bank = prepare_audio(&options)?;
     let scene = prepare_scene(&options)?;
@@ -272,6 +300,8 @@ pub fn run(options: Options) -> Result<(), String> {
     };
     #[cfg(feature = "coop-defense-pixelfx")]
     app.ui.vfx.prepare(&app.ui.context)?;
+    #[cfg(all(feature = "coop-defense-audio-settings", target_os = "linux"))]
+    if let Some(loaded) = audio_settings { crate::defense_audio_settings::install(&mut app.ui, loaded); }
     #[cfg(feature = "coop-defense-pixel-motion")]
     app.ui.pixel_motion.prepare(&app.ui.context)?;
     event_loop.run_app(&mut app).map_err(|e| e.to_string())?;
@@ -457,6 +487,8 @@ impl App {
             self.accumulator = 0.0;
             return output;
         }
+        #[cfg(all(feature = "coop-defense-audio-settings", target_os = "linux"))]
+        crate::defense_audio_settings::process_save(&mut self.ui);
         #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
         if self.process_saves() {
             #[cfg(feature = "coop-defense-audio")]
@@ -761,6 +793,8 @@ pub fn headless(mut options: Options) -> Result<(), String> {
     // Library callers may not have passed through CLI parsing/run admission.
     // This entry point is headless regardless of the caller's flag value.
     options.headless = true;
+    #[cfg(all(feature = "coop-defense-audio-settings", target_os = "linux"))]
+    let _settings = prepare_audio_settings(&options)?;
     #[cfg(feature = "coop-defense-audio")]
     let _audio_bank = prepare_audio(&options)?;
     let config = prepare_config(&options)?;

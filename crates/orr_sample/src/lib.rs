@@ -157,6 +157,9 @@ pub mod defense_run_save_store;
 #[cfg(feature = "coop-defense-audio")]
 pub mod defense_audio;
 
+#[cfg(all(feature = "coop-defense-audio-settings", any(test, target_os = "linux")))]
+pub(crate) mod defense_audio_settings;
+
 #[cfg(feature = "coop-defense-pixelfx")]
 pub(crate) mod defense_vfx;
 
