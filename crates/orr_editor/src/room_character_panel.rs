@@ -590,8 +590,8 @@ mod tests {
         let models = f.models.bindings.as_ref().unwrap().document().clone();
         f.panel.candidate.searching = 31;
         let context = egui::Context::default();
-        let mut output = context.run(Default::default(), |context| {
-            egui::CentralPanel::default().show(context, |ui| f.panel.show(ui, &mut f.editor, &mut f.models));
+        let mut output = context.run_ui(Default::default(), |ui| {
+            f.panel.show(ui, &mut f.editor, &mut f.models);
         });
         output.textures_delta.clear(); // This authoring check has no GPU.
         assert_eq!(f.panel.candidate.searching, 31);
