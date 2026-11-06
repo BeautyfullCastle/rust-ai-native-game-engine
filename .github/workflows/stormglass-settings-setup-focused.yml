@@ -1,7 +1,7 @@
 name: stormglass settings setup focused Windows CI
 on:
   push:
-    branches: [codex/stormglass-settings-setup-20261107]
+    branches: [codex/stormglass-settings-setup-20261107, codex/stormglass-settings-check-20261107]
 permissions:
   contents: read
 jobs:
@@ -32,7 +32,7 @@ jobs:
           $ErrorActionPreference='Stop'
           cargo test --locked -p orr_sample --features coop-defense-controls --lib defense_audio_settings:: -- --test-threads=1 *>&1 | Tee-Object ci-evidence/storage.log
           if ($LASTEXITCODE -ne 0) { throw 'Storage test failure' }
-          if (-not ((Get-Content ci-evidence/storage.log -Raw).Contains('test result: ok. 25 passed; 0 failed; 0 ignored;'))) { throw 'Incomplete storage inventory' }
+          if (-not ((Get-Content ci-evidence/storage.log -Raw).Contains('test result: ok. 27 passed; 0 failed; 0 ignored;'))) { throw 'Incomplete storage inventory' }
           cargo test --locked -p orr_sample --features coop-defense-controls --bin orr_prepare_stormglass_settings *>&1 | Tee-Object ci-evidence/cli-unit.log
           if ($LASTEXITCODE -ne 0) { throw 'CLI unit failure' }
           if (-not ((Get-Content ci-evidence/cli-unit.log -Raw).Contains('test result: ok. 2 passed; 0 failed; 0 ignored;'))) { throw 'Incomplete CLI unit inventory' }
@@ -44,7 +44,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'CLI build failure' }
           & ./tools/test_stormglass_settings_setup_windows.ps1 -Executable "$PWD/target/debug/orr_prepare_stormglass_settings.exe" -EvidenceDirectory "$PWD/../ci-setup-cases" *>&1 | Tee-Object ci-evidence/cli-smoke.log
           Copy-Item -LiteralPath ../ci-setup-cases -Destination ci-evidence/cases -Recurse
-          if ((Get-Content ci-evidence/cases/result.json -Raw | ConvertFrom-Json).cases -ne 12) { throw 'Incomplete CLI inventory' }
+          if ((Get-Content ci-evidence/cases/result.json -Raw | ConvertFrom-Json).cases -ne 19) { throw 'Incomplete CLI inventory' }
       - name: Collect partial CLI failures
         if: always()
         shell: pwsh
