@@ -12,6 +12,10 @@ pub mod import;
 #[path = "authoring/static_assemble.rs"]
 pub mod static_assemble;
 
+#[cfg(feature = "import")]
+#[path = "authoring/static_uv.rs"]
+pub mod static_uv;
+
 #[cfg(all(feature = "animation", feature = "import"))]
 #[path = "authoring/animation_sequence.rs"]
 pub mod animation_sequence;

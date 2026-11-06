@@ -1,0 +1,61 @@
+name: UV model package focused CI
+on:
+  push:
+    branches: [codex/uv-model-package-20261107]
+permissions:
+  contents: read
+jobs:
+  uv-package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record exact source and toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir ci-evidence
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git rev-parse HEAD HEAD^{tree} | tee ci-evidence/source.txt
+          rustup toolchain install 1.99.1 --profile minimal --component clippy
+          rustup override set 1.99.1
+          rustc --version --verbose | tee ci-evidence/rustc.txt
+      - name: Focused UV, saved package and source-hidden loading checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p orr_model --features import --test static_model_uv -- --test-threads=1 2>&1 | tee ci-evidence/model-uv.log
+          grep -F 'test result: ok. 33 passed; 0 failed; 0 ignored;' ci-evidence/model-uv.log
+          cargo test --locked -p orr_package --features animation-authoring --test uv_model_package -- --test-threads=1 2>&1 | tee ci-evidence/package-flow.log
+          grep -F 'test result: ok. 5 passed; 0 failed; 0 ignored;' ci-evidence/package-flow.log
+          cargo test --locked -p orr_package --features animation-authoring --lib assembled_package:: -- --test-threads=1 2>&1 | tee ci-evidence/publisher-regression.log
+          grep -F 'test result: ok. 10 passed; 0 failed; 0 ignored;' ci-evidence/publisher-regression.log
+          cargo clippy --locked -p orr_model --features import --lib --example static_model_uv -- -D warnings 2>&1 | tee ci-evidence/clippy-model.log
+          cargo clippy --locked -p orr_package --features animation-authoring --lib --bin orr_pkg --test uv_model_package -- -D warnings 2>&1 | tee ci-evidence/clippy-package.log
+      - name: Feature-off CLI refuses before opening inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          if cargo run --locked -p orr_package --no-default-features --bin orr_pkg -- create-uv-model --help >ci-evidence/feature-off.log 2>&1; then
+            echo 'Unexpected feature-off success'; exit 1
+          else
+            code=$?
+            test "$code" -eq 2
+          fi
+          grep -F 'no input or output opened' ci-evidence/feature-off.log
+      - name: Preserve results including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: uv-model-package-${{ github.sha }}
+          path: ci-evidence
+          if-no-files-found: error
+
