@@ -8,7 +8,7 @@
 ))]
 #![allow(clippy::disallowed_types, clippy::float_arithmetic)]
 
-use egui_kittest::{kittest::Queryable, Harness};
+use egui_kittest::{kittest::{NodeT, Queryable}, Harness};
 
 use orr_editor::{
     editor::input::Phase, game::EditorGame, Editor, EditorApp, HostSpec, Mode, Target,
@@ -273,14 +273,15 @@ fn workflow(gpu: bool) {
     }
     h.get_by_label("Room character").click();
     settle(&mut h);
-    for (label, clip) in [
-        ("Searching clip", 1),
-        ("Carrying key clip", 2),
-        ("Escaped clip", 0),
+    for (label, choice) in [
+        ("Searching clip", "1: carrying_key (1.50s)"),
+        ("Carrying key clip", "2: escaped (1.00s)"),
+        ("Escaped clip", "0: searching (2.00s)"),
     ] {
         h.get_by_label(label).click();
         h.run_steps(2);
-        h.get_by_label(format!("{label} {clip}").as_str()).click();
+        assert!(h.query_by_label(format!("{label} 31").as_str()).is_none());
+        h.get_by_label(format!("{label} {choice}").as_str()).click();
         h.run_steps(2);
     }
     h.get_by_label("Apply character settings").click();
@@ -756,6 +757,10 @@ fn stale_room_character_binding_does_not_mutate_the_verified_cache() {
         &stale
     );
     assert_eq!(frame_bytes(&mut h.state_mut().editor), frame);
+    h.get_by_label("Room character").click(); settle(&mut h);
+    for label in ["Searching clip", "Apply character settings", "Save character and model bindings"] {
+        assert!(h.get_by_label(label).accesskit_node().is_disabled(), "{label}");
+    }
     h.state_mut().models.bindings =
         Some(orr_editor::model_bindings::Bindings::from_document(path, original).unwrap());
     let restored = h
@@ -764,6 +769,8 @@ fn stale_room_character_binding_does_not_mutate_the_verified_cache() {
         .animated_placements(&h.state().editor)
         .unwrap();
     assert!(std::sync::Arc::ptr_eq(&model, &restored[0].model));
+    settle(&mut h);
+    assert!(!h.get_by_label("Apply character settings").accesskit_node().is_disabled());
 }
 
 fn crossfade_step(h: &mut Harness<'_, EditorApp>, interact: bool, ticks: u32) {

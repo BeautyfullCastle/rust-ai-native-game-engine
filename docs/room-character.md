@@ -17,6 +17,12 @@ Open it in an editor built with `room-character` using `--room-project PATH`.
 The Room character panel assigns searching, carrying-key and escaped clips and
 per-state playback speeds: 1/4x, 1/2x, 1x, 2x or 4x. Changing a speed upgrades
 the candidate to schema 2; Apply, Undo/Redo and paired Save include these speeds.
+Selectors list only clips from the active, admitted player model, with index,
+name and duration. Duplicate names retain distinct indices; unnamed clips have
+a fallback label. Missing or stale model metadata disables editing. An
+unavailable draft index is shown explicitly without resetting it. Apply and
+paired Save keep their existing validation.
+
 Apply validates all three clips and the complete reachable presentation before
 changing either in-memory document. Undo/Redo character edit coordinates the
 model binding's default searching clip with the character map. Use **Save
