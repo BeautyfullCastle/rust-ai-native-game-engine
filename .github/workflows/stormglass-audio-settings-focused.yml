@@ -1,7 +1,7 @@
 name: stormglass-audio-settings focused Linux CI
 on:
   push:
-    branches: [codex/stormglass-audio-preferences-20261106]
+    branches: [codex/stormglass-audio-preferences-20261106, codex/stormglass-windows-audio-settings-20261106]
 permissions:
   contents: read
 concurrency:

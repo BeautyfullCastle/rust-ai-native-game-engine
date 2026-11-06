@@ -3569,6 +3569,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "ttf-parser",
+ "windows-sys 0.61.2",
  "winit",
 ]
 

@@ -38,7 +38,7 @@ enum ClickTarget {
     AudioGainDown,
     #[cfg(feature = "coop-defense-audio")]
     AudioGainUp,
-    #[cfg(all(feature = "coop-defense-audio-settings", target_os = "linux"))]
+    #[cfg(all(feature = "coop-defense-audio-settings", any(target_os = "linux", windows)))]
     AudioSave,
     #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
     RunSave(u32),
@@ -48,7 +48,7 @@ impl ClickTarget {
     fn is_audio(self) -> bool {
         match self {
             Self::AudioMute | Self::AudioGainDown | Self::AudioGainUp => true,
-            #[cfg(all(feature = "coop-defense-audio-settings", target_os = "linux"))]
+            #[cfg(all(feature = "coop-defense-audio-settings", any(target_os = "linux", windows)))]
             Self::AudioSave => true,
             _ => false,
         }
@@ -293,9 +293,9 @@ pub struct DefenseUi {
     pointer_clicks: PointerClicks,
     #[cfg(feature = "coop-defense-audio")]
     pub(crate) audio: AudioPanel,
-    #[cfg(all(feature = "coop-defense-audio-settings", target_os = "linux"))]
+    #[cfg(all(feature = "coop-defense-audio-settings", any(target_os = "linux", windows)))]
     pub(crate) audio_settings: crate::defense_audio_settings::Panel,
-    #[cfg(all(feature = "coop-defense-audio-settings", target_os = "linux"))]
+    #[cfg(all(feature = "coop-defense-audio-settings", any(target_os = "linux", windows)))]
     pub(crate) audio_settings_store: Option<crate::defense_audio_settings::Store>,
     #[cfg(feature = "coop-defense-audio")]
     audio_enabled: bool,
@@ -331,9 +331,9 @@ impl DefenseUi {
             pointer_clicks: PointerClicks::default(),
             #[cfg(feature = "coop-defense-audio")]
             audio: AudioPanel::default(),
-            #[cfg(all(feature = "coop-defense-audio-settings", target_os = "linux"))]
+            #[cfg(all(feature = "coop-defense-audio-settings", any(target_os = "linux", windows)))]
             audio_settings: crate::defense_audio_settings::Panel::default(),
-            #[cfg(all(feature = "coop-defense-audio-settings", target_os = "linux"))]
+            #[cfg(all(feature = "coop-defense-audio-settings", any(target_os = "linux", windows)))]
             audio_settings_store: None,
             #[cfg(feature = "coop-defense-audio")]
             audio_enabled: false,
@@ -589,7 +589,7 @@ impl DefenseUi {
     }
     #[cfg(feature = "coop-defense-audio")]
     fn audio_controls_available(&self) -> bool {
-        #[cfg(all(feature = "coop-defense-audio-settings", target_os = "linux"))]
+        #[cfg(all(feature = "coop-defense-audio-settings", any(target_os = "linux", windows)))]
         if self.audio_settings.configured { return true; }
         self.audio.enabled
     }
@@ -606,7 +606,7 @@ impl DefenseUi {
                 (l.rect(670.0, 15.0, 45.0, 30.0), ClickTarget::AudioGainDown),
                 (l.rect(725.0, 15.0, 45.0, 30.0), ClickTarget::AudioGainUp),
             ]);
-            #[cfg(all(feature = "coop-defense-audio-settings", target_os = "linux"))]
+            #[cfg(all(feature = "coop-defense-audio-settings", any(target_os = "linux", windows)))]
             if self.audio_settings.configured && self.audio_settings.writable {
                 extra.push((l.rect(780.0, 15.0, 125.0, 30.0), ClickTarget::AudioSave));
             }
@@ -631,12 +631,12 @@ impl DefenseUi {
                 Some(ClickTarget::AudioGainUp) => {
                     self.audio.gain_percent = self.audio.gain_percent.saturating_add(10).min(100)
                 }
-                  #[cfg(all(feature = "coop-defense-audio-settings", target_os = "linux"))]
+                  #[cfg(all(feature = "coop-defense-audio-settings", any(target_os = "linux", windows)))]
                   Some(ClickTarget::AudioSave) => self.audio_settings.save_requested = true,
                 _ => {}
             }
             self.pointer_clicks.press = None;
-            #[cfg(all(feature = "coop-defense-audio-settings", target_os = "linux"))]
+            #[cfg(all(feature = "coop-defense-audio-settings", any(target_os = "linux", windows)))]
             if self.audio_settings.configured && clicked != Some(ClickTarget::AudioSave) {
                 self.audio_settings.status = if self.audio_settings.writable {
                     "Session change; SAVE AUDIO to remember"
@@ -680,7 +680,7 @@ impl DefenseUi {
             color,
             format!("GAIN {}%", self.audio.gain_percent),
         );
-        #[cfg(all(feature = "coop-defense-audio-settings", target_os = "linux"))]
+        #[cfg(all(feature = "coop-defense-audio-settings", any(target_os = "linux", windows)))]
         if self.audio_settings.configured {
             p.rect_filled(l.rect(780.0, 15.0, 125.0, 30.0), 5.0 * l.scale, Color32::from_rgb(49, 64, 61));
             l.text(&p, 790.0, 30.0, 12.0, if self.audio_settings.writable && !modal { PAPER } else { MUTED }, "SAVE AUDIO");

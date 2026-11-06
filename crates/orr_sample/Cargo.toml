@@ -11,8 +11,8 @@ default-run = "arena"
 workspace = true
 
 [features]
-# Explicit Linux audio preference storage, independent of game run journals.
-coop-defense-audio-settings = ["coop-defense-audio"]
+# Explicit native audio preference storage, independent of game run journals.
+coop-defense-audio-settings = ["coop-defense-audio", "dep:windows-sys"]
 # Dedicated post-release artwork, selected only by the actual combat ledger.
 coop-defense-attack-clip = ["coop-defense-pixel-motion", "coop-defense-pixelfx"]
 # Optional generated character skin: visual idle/charge loop, never attack timing.
@@ -101,6 +101,9 @@ winit = "0.30"
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1.5", features = ["fs", "process"], optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", optional = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
 
 [dev-dependencies]
 sha2 = "0.11"
