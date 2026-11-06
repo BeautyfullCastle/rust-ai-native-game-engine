@@ -324,6 +324,7 @@ impl PreviewWindow {
                     }
                     close |= ui.button(close_label).clicked();
                 });
+                changed |= horizontal_camera_controls(ui, &mut self.camera);
                 if close {
                     return;
                 }
@@ -447,6 +448,29 @@ impl PreviewWindow {
         }
     }
 }
+
+fn horizontal_camera_controls(ui: &mut egui::Ui, camera: &mut PreviewCamera) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        for (quarter_turn, label) in ["Front view", "Right view", "Back view", "Left view"]
+            .into_iter()
+            .enumerate()
+        {
+            if ui
+                .button(label)
+                .on_hover_text("Look toward the model center and restore fitted zoom")
+                .clicked()
+            {
+                changed |= camera.horizontal_view(quarter_turn);
+            }
+        }
+    });
+    changed
+}
+
+#[cfg(test)]
+#[path = "package_model_preview/axis_tests.rs"]
+mod axis_tests;
 
 impl EditorApp {
     pub(super) fn sync_package_model_preview(&mut self) {
