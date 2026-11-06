@@ -12,13 +12,16 @@ Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'stormglass_windows/run-game.ps1
 $runtime=Join-Path $game 'coop_defense.exe'
 & rustc --edition=2021 (Join-Path $PSScriptRoot 'stormglass_windows/launcher_probe.rs') -o $runtime
 if ($LASTEXITCODE -ne 0) { throw 'Probe compilation failed.' }
+$helper=Join-Path $game 'orr_prepare_stormglass_settings.exe'
+Copy-Item -LiteralPath $runtime -Destination $helper
 [IO.File]::WriteAllText((Join-Path $game 'game.scene.yaml'),'test-only scene; probe never parses it')
 $hosts=@((Get-Process -Id $PID).Path,(Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe')) | Select-Object -Unique
 $script:caseNumber=0
 $script:successCount=0
-function Run-Launcher([string]$HostPath,[string[]]$Arguments,[int]$ProbeExit=0,[string]$ProbeError='') {
+function Run-Launcher([string]$HostPath,[string[]]$Arguments,[int]$ProbeExit=0,[string]$ProbeError='',[int]$HelperExit=0,[string]$HelperError='') {
     $script:caseNumber++
     $record=Join-Path $root ("argv-{0}.bin" -f $script:caseNumber)
+    $helperRecord=Join-Path $root ("helper-argv-{0}.bin" -f $script:caseNumber)
     $start=[Diagnostics.ProcessStartInfo]::new()
     $start.FileName=$HostPath;$start.WorkingDirectory=$elsewhere;$start.UseShellExecute=$false;$start.CreateNoWindow=$true
     $start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
@@ -26,6 +29,9 @@ function Run-Launcher([string]$HostPath,[string[]]$Arguments,[int]$ProbeExit=0,[
     $start.Environment['ORR_LAUNCHER_PROBE_RECORD']=$record
     $start.Environment['ORR_LAUNCHER_PROBE_EXIT']=[string]$ProbeExit
     $start.Environment['ORR_LAUNCHER_PROBE_STDERR']=$ProbeError
+    $start.Environment['ORR_LAUNCHER_HELPER_RECORD']=$helperRecord
+    $start.Environment['ORR_LAUNCHER_HELPER_EXIT']=[string]$HelperExit
+    $start.Environment['ORR_LAUNCHER_HELPER_STDERR']=$HelperError
     $process=[Diagnostics.Process]::new();$process.StartInfo=$start
     if (-not $process.Start()) {throw 'Could not start PowerShell test process.'}
     $stdout=$process.StandardOutput.ReadToEndAsync();$stderr=$process.StandardError.ReadToEndAsync()
@@ -35,14 +41,15 @@ function Run-Launcher([string]$HostPath,[string[]]$Arguments,[int]$ProbeExit=0,[
     [IO.File]::WriteAllText((Join-Path $root ("case-{0}.stderr" -f $script:caseNumber)),$err)
     $received=if(Test-Path -LiteralPath $record){@([IO.File]::ReadAllText($record).Split([char]0))}else{$null}
     if($null -ne $received -and $code -ne $ProbeExit){throw "Launcher exit $code differs from probe $ProbeExit."}
-    [pscustomobject]@{Code=$code;Args=$received;Error=$err}
+    $helperArgs=if(Test-Path -LiteralPath $helperRecord){@([IO.File]::ReadAllText($helperRecord).Split([char]0))}else{$null}
+    [pscustomobject]@{Code=$code;Args=$received;HelperArgs=$helperArgs;Error=$err}
 }
 function Equal-Arguments($Actual,[string[]]$Expected) {
     if ($null -eq $Actual -or ($Actual -join [char]0) -cne ($Expected -join [char]0)) {throw "Argument boundary mismatch: $($Actual -join ' | ')"}
     $script:successCount++
 }
 function Refused($Result) {
-    if ($Result.Code -eq 0 -or $null -ne $Result.Args) {throw 'Invalid launch reached the runtime or returned success.'}
+    if ($Result.Code -eq 0 -or $null -ne $Result.Args -or $null -ne $Result.HelperArgs) {throw 'Invalid launch reached the runtime/helper or returned success.'}
     $script:successCount++
 }
 foreach($hostPath in $hosts) {
@@ -55,6 +62,21 @@ foreach($hostPath in $hosts) {
     Equal-Arguments $result.Args @('--scene',(Join-Path $game 'game.scene.yaml'),'--audio','auto','--audio-bank',(Join-Path $game 'audio-bank'))
     $controlPath=Join-Path $root 'private & $(throw 123) [controls]'
     $audioPath=Join-Path $root 'private audio'
+    $shared=Join-Path $root 'shared & $(throw 123) [settings]'
+    $expectedShared=@('--scene',(Join-Path $game 'game.scene.yaml'),'--audio','off','--controls-directory',$shared,'--audio-settings-directory',$shared)
+    $result=Run-Launcher $hostPath @('-UserSettingsDirectory',$shared)
+    Equal-Arguments $result.Args $expectedShared
+    if($null -ne $result.HelperArgs){throw 'Shared settings were prepared without opt-in.'}
+    $result=Run-Launcher $hostPath @('-UserSettingsDirectory',$shared,'-PrepareUserSettings') -HelperError 'helper diagnostic'
+    Equal-Arguments $result.Args $expectedShared
+    Equal-Arguments $result.HelperArgs @('--directory',$shared)
+    if(-not $result.Error.Contains('helper diagnostic')){throw 'Helper stderr lost.'}
+    $result=Run-Launcher $hostPath @('-UserSettingsDirectory',$shared,'-PrepareUserSettings') -HelperExit 37 -HelperError 'helper refuses'
+    if($result.Code -ne 37 -or $null -ne $result.Args -or $null -eq $result.HelperArgs -or -not $result.Error.Contains('helper refuses')){throw 'Helper failure launched game or lost status.'}
+    $script:successCount++
+    Move-Item -LiteralPath $helper -Destination (Join-Path $game 'helper.hidden')
+    Refused (Run-Launcher $hostPath @('-UserSettingsDirectory',$shared,'-PrepareUserSettings'))
+    Move-Item -LiteralPath (Join-Path $game 'helper.hidden') -Destination $helper
     $externalBank=Join-Path $root 'shared & $(throw 123) [bank]'
     foreach($mode in @('off','auto','required')) {
         $arguments=@('-AudioBankDirectory',$externalBank,'-Audio',$mode)
@@ -80,7 +102,11 @@ foreach($hostPath in $hosts) {
         @('-ControlsDirectory',(Join-Path $game 'nested')),@('-Audio','unknown'),@('-UnknownOption'),@('-Headless','-Ticks','1','-Ticks','2'),
         @('-AudioBankDirectory','relative'),@('-AudioBankDirectory','C:relative'),@('-AudioBankDirectory','\\server\share\bank'),
         @('-AudioBankDirectory',''),@('-AudioBankDirectory',$externalBank,'-WithAudioBank'),
-        @('-AudioBankDirectory',$externalBank,'-AudioBankDirectory',$externalBank)
+        @('-AudioBankDirectory',$externalBank,'-AudioBankDirectory',$externalBank),
+        @('-PrepareUserSettings'),@('-Headless','-UserSettingsDirectory',$shared),
+        @('-Headless','-UserSettingsDirectory',$shared,'-PrepareUserSettings'),@('-UserSettingsDirectory',''),
+        @('-UserSettingsDirectory','relative'),@('-UserSettingsDirectory',$shared,'-ControlsDirectory',$controlPath),
+        @('-UserSettingsDirectory',$shared,'-AudioSettingsDirectory',$audioPath),@('-UserSettingsDirectory',$game,'-PrepareUserSettings')
     )) { Refused (Run-Launcher $hostPath $bad) }
     $scene=Join-Path $game 'game.scene.yaml';Move-Item -LiteralPath $scene -Destination (Join-Path $game 'scene.hidden')
     Refused (Run-Launcher $hostPath @('-Headless'))

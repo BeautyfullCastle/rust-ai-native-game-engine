@@ -201,3 +201,8 @@ name = "coop_defense"
 path = "src/bin/coop_defense.rs"
 required-features = ["coop-defense"]
 test = false
+
+[[bin]]
+name = "orr_prepare_stormglass_settings"
+path = "src/bin/orr_prepare_stormglass_settings.rs"
+required-features = ["coop-defense-controls"]

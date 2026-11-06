@@ -6,6 +6,8 @@ param(
     [ValidateSet('off','auto','required')][string]$Audio = 'off',
     [switch]$WithAudioBank,
     [string]$AudioBankDirectory,
+    [string]$UserSettingsDirectory,
+    [switch]$PrepareUserSettings,
     [string]$ControlsDirectory,
     [string]$AudioSettingsDirectory
 )
@@ -15,13 +17,18 @@ try {
     if ([int]$Ticks -gt 36000) { throw 'Ticks must be in 0..36000.' }
     if (-not $Headless -and $PSBoundParameters.ContainsKey('Ticks')) { throw 'Ticks requires Headless.' }
     $audioMode = $Audio.ToLowerInvariant()
+    $sharedSettings = $PSBoundParameters.ContainsKey('UserSettingsDirectory')
+    if ($PrepareUserSettings -and -not $sharedSettings) { throw 'PrepareUserSettings requires UserSettingsDirectory.' }
+    if ($sharedSettings -and ($PSBoundParameters.ContainsKey('ControlsDirectory') -or $PSBoundParameters.ContainsKey('AudioSettingsDirectory'))) {
+        throw 'Choose UserSettingsDirectory or the individual settings directories, not both.'
+    }
     $externalBank = $PSBoundParameters.ContainsKey('AudioBankDirectory')
     if ($externalBank -and $WithAudioBank) { throw 'Choose AudioBankDirectory or WithAudioBank, not both.' }
     if ($externalBank -and ([string]::IsNullOrWhiteSpace($AudioBankDirectory) -or $AudioBankDirectory -notmatch '^[A-Za-z]:\\')) {
         throw 'AudioBankDirectory needs an explicit absolute local drive directory.'
     }
     if ($Headless -and $audioMode -eq 'required') { throw 'Headless does not support required audio.' }
-    if ($Headless -and ($PSBoundParameters.ContainsKey('ControlsDirectory') -or $PSBoundParameters.ContainsKey('AudioSettingsDirectory'))) {
+    if ($Headless -and ($sharedSettings -or $PSBoundParameters.ContainsKey('ControlsDirectory') -or $PSBoundParameters.ContainsKey('AudioSettingsDirectory'))) {
         throw 'User settings require interactive play.'
     }
     $root = [IO.Path]::GetFullPath($PSScriptRoot)
@@ -44,8 +51,8 @@ try {
         $nativeArgs += @('--audio-bank',(Join-Path $root 'audio-bank'))
     }
     foreach ($setting in @(@('ControlsDirectory','--controls-directory'),@('AudioSettingsDirectory','--audio-settings-directory'))) {
-        if ($PSBoundParameters.ContainsKey($setting[0])) {
-            $value = [string]$PSBoundParameters[$setting[0]]
+        if ($sharedSettings -or $PSBoundParameters.ContainsKey($setting[0])) {
+            $value = if ($sharedSettings) { $UserSettingsDirectory } else { [string]$PSBoundParameters[$setting[0]] }
             if ([string]::IsNullOrWhiteSpace($value) -or $value -notmatch '^[A-Za-z]:\\') {
                 throw 'User settings need an explicit absolute local drive directory.'
             }
@@ -57,6 +64,25 @@ try {
             # Do not rewrite the supplied path: the runtime checks privacy, aliases and no-follow ancestry.
             $nativeArgs += @($setting[1],$value)
         }
+    }
+    if ($PrepareUserSettings) {
+        # This explicit opt-in is the only creation path. The helper never repairs an existing object.
+        $helper = Join-Path $root 'orr_prepare_stormglass_settings.exe'
+        $item = Get-Item -LiteralPath $helper -Force
+        if ($null -eq $item -or $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw 'The settings helper must be a regular sibling executable, not a reparse point.'
+        }
+        $priorErrorPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            $PSNativeCommandUseErrorActionPreference = $false
+            $global:LASTEXITCODE = $null
+            & $helper '--directory' $UserSettingsDirectory
+            $setupExit = $global:LASTEXITCODE
+        } finally { $ErrorActionPreference = $priorErrorPreference }
+        if ($null -eq $setupExit) { throw 'The settings helper could not be started.' }
+        if ($setupExit -ne 0) { exit $setupExit }
+        # Creation is not rolled back if native admission or the game subsequently fails.
     }
     if ($Headless) { $nativeArgs += @('--headless','--ticks',$Ticks) }
     # Literal executable path plus an argument array. No command-string evaluation or cwd changes.

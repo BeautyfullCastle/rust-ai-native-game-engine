@@ -12,6 +12,20 @@
 #![allow(clippy::float_arithmetic)]
 #![allow(clippy::disallowed_types)]
 
+/// Explicitly create one new private Windows Stormglass settings directory.
+/// Existing objects are never changed. Runtime admission still applies at launch.
+#[cfg(all(windows, feature = "coop-defense-controls"))]
+pub fn prepare_stormglass_settings_directory(path: &std::path::Path) -> Result<(), String> {
+    let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+    let parent = executable.parent().ok_or("missing executable parent")?;
+    let mut forbidden = vec![parent.to_owned()];
+    let source = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    if source.exists() {
+        forbidden.push(source);
+    }
+    defense_audio_settings::prepare(path, &forbidden)
+}
+
 pub mod app;
 pub mod arena_view;
 pub mod editor_view;
