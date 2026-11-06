@@ -45,6 +45,56 @@ impl Preferences {
     }
 }
 
+// Closed, host-selected contracts. Neither filenames nor validation are supplied by user data.
+#[cfg(any(target_os = "linux", windows))]
+#[derive(Clone, Copy)]
+pub(crate) enum StorageProfile {
+    Audio,
+    #[cfg(feature = "coop-defense-controls")]
+    Controls,
+}
+#[cfg(any(target_os = "linux", windows))]
+impl StorageProfile {
+    fn primary(self) -> &'static str {
+        match self {
+            Self::Audio => "audio-settings.json",
+            #[cfg(feature = "coop-defense-controls")]
+            Self::Controls => "controls-settings.json",
+        }
+    }
+    fn lock(self) -> &'static str {
+        match self {
+            Self::Audio => "audio-settings.lock",
+            #[cfg(feature = "coop-defense-controls")]
+            Self::Controls => "controls-settings.lock",
+        }
+    }
+    fn prefix(self) -> &'static str {
+        match self {
+            Self::Audio => ".audio-settings-pending-",
+            #[cfg(feature = "coop-defense-controls")]
+            Self::Controls => ".controls-settings-pending-",
+        }
+    }
+    fn limit(self) -> u32 {
+        match self {
+            Self::Audio => 1024,
+            #[cfg(feature = "coop-defense-controls")]
+            Self::Controls => 8192,
+        }
+    }
+    fn validate(self, bytes: &[u8]) -> Result<(), String> {
+        if bytes.len() > self.limit() as usize {
+            return Err("settings exceed profile byte budget".into());
+        }
+        match self {
+            Self::Audio => Preferences::decode(bytes).map(|_| ()),
+            #[cfg(feature = "coop-defense-controls")]
+            Self::Controls => crate::defense_controls::Document::decode(bytes).map(|_| ()),
+        }
+    }
+}
+
 #[derive(Default)]
 #[cfg(any(target_os = "linux", windows))]
 pub(crate) struct Panel {
@@ -67,7 +117,9 @@ mod linux {
         sync::atomic::{AtomicU64, Ordering},
     };
 
+    #[cfg(test)]
     const PRIMARY: &str = "audio-settings.json";
+    #[cfg(test)]
     const LOCK: &str = "audio-settings.lock";
     static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -96,6 +148,7 @@ mod linux {
         directory: OwnedFd,
         baseline: Option<Snapshot>,
         writable: bool,
+        profile: StorageProfile,
     }
     pub(crate) struct Loaded {
         pub(crate) store: Store,
@@ -149,6 +202,33 @@ mod linux {
     }
     impl Store {
         pub(crate) fn open(path: &Path, forbidden_roots: &[PathBuf]) -> Result<Loaded, String> {
+            let (store, bytes) = Self::open_profile(path, forbidden_roots, StorageProfile::Audio)?;
+            let (preferences, status) = match bytes {
+                Some(bytes) => (
+                    Preferences::decode(&bytes)?,
+                    "Saved audio settings restored".into(),
+                ),
+                None if store.writable => (
+                    Preferences::default(),
+                    "Session only until SAVE AUDIO".into(),
+                ),
+                None => (
+                    Preferences::default(),
+                    "Audio settings unreadable or unsupported; muted defaults, Save disabled"
+                        .into(),
+                ),
+            };
+            Ok(Loaded {
+                store,
+                preferences,
+                status,
+            })
+        }
+        pub(crate) fn open_profile(
+            path: &Path,
+            forbidden_roots: &[PathBuf],
+            profile: StorageProfile,
+        ) -> Result<(Self, Option<Vec<u8>>), String> {
             let bytes = path.as_os_str().as_bytes();
             if !path.is_absolute()
                 || path.parent().is_none()
@@ -181,25 +261,18 @@ mod linux {
                 directory,
                 baseline: None,
                 writable: true,
+                profile,
             };
             match store.read() {
                 Ok(Some(snapshot)) => {
-                    let preferences = Preferences::decode(&snapshot.bytes)?;
+                    let bytes = snapshot.bytes.clone();
                     store.baseline = Some(snapshot);
-                    Ok(Loaded {
-                        store,
-                        preferences,
-                        status: "Saved audio settings restored".into(),
-                    })
+                    Ok((store, Some(bytes)))
                 }
-                Ok(None) => Ok(Loaded {
-                    store,
-                    preferences: Preferences::default(),
-                    status: "Session only until SAVE AUDIO".into(),
-                }),
+                Ok(None) => Ok((store, None)),
                 Err(_) => {
                     store.writable = false;
-                    Ok(Loaded { store, preferences: Preferences::default(), status: "Audio settings unreadable or unsupported; muted defaults, Save disabled".into() })
+                    Ok((store, None))
                 }
             }
         }
@@ -210,7 +283,7 @@ mod linux {
             directory_ok(&self.directory)?;
             let fd = match fs::openat(
                 &self.directory,
-                PRIMARY,
+                self.profile.primary(),
                 OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
                 Mode::empty(),
             ) {
@@ -219,11 +292,14 @@ mod linux {
                 Err(e) => return Err(error(e)),
             };
             let file: File = fd.into();
-            let stat = file_ok(&file, 1024)?;
+            let stat = file_ok(&file, u64::from(self.profile.limit()))?;
             let mut bytes = Vec::new();
-            (&file).take(1025).read_to_end(&mut bytes).map_err(error)?;
-            Preferences::decode(&bytes)?;
-            let after = file_ok(&file, 1024)?;
+            (&file)
+                .take(u64::from(self.profile.limit()) + 1)
+                .read_to_end(&mut bytes)
+                .map_err(error)?;
+            self.profile.validate(&bytes)?;
+            let after = file_ok(&file, u64::from(self.profile.limit()))?;
             if stat.st_size != after.st_size
                 || stat.st_mtime != after.st_mtime
                 || stat.st_mtime_nsec != after.st_mtime_nsec
@@ -243,7 +319,32 @@ mod linux {
             preferences: &Preferences,
             mut hook: impl FnMut(Stage) -> Result<(), String>,
         ) -> Outcome {
-            match self.publish(preferences, &mut hook) {
+            let bytes = match serde_json::to_vec(preferences) {
+                Ok(bytes) => bytes,
+                Err(e) => return Outcome::NotSaved(error(e)),
+            };
+            self.save_bytes_with(bytes, &mut hook)
+        }
+        #[cfg(feature = "coop-defense-controls")]
+        pub(crate) fn save_bytes(&mut self, bytes: Vec<u8>) -> Outcome {
+            self.save_bytes_with(bytes, |_| Ok(()))
+        }
+        #[cfg(all(test, feature = "coop-defense-controls"))]
+        pub(crate) fn test_fail_publication(&mut self, bytes: Vec<u8>, after: bool) -> Outcome {
+            self.save_bytes_with(bytes, |stage| {
+                if (stage == Stage::Published) == after {
+                    Err("injected controls publication failure".into())
+                } else {
+                    Ok(())
+                }
+            })
+        }
+        fn save_bytes_with(
+            &mut self,
+            bytes: Vec<u8>,
+            mut hook: impl FnMut(Stage) -> Result<(), String>,
+        ) -> Outcome {
+            match self.publish(bytes, &mut hook) {
                 Ok(()) => Outcome::Saved,
                 Err((true, e)) => Outcome::PublishedUncertain(e),
                 Err((false, e)) => Outcome::NotSaved(e),
@@ -251,18 +352,18 @@ mod linux {
         }
         fn publish(
             &mut self,
-            preferences: &Preferences,
+            bytes: Vec<u8>,
             hook: &mut impl FnMut(Stage) -> Result<(), String>,
         ) -> Result<(), (bool, String)> {
             let before = |e| (false, e);
             if !self.writable {
                 return Err(before(error("Save disabled for this session")));
             }
-            preferences.validate().map_err(before)?;
+            self.profile.validate(&bytes).map_err(before)?;
             directory_ok(&self.directory).map_err(before)?;
             let lock: File = fs::openat(
                 &self.directory,
-                LOCK,
+                self.profile.lock(),
                 OFlags::RDWR
                     | OFlags::CREATE
                     | OFlags::NOFOLLOW
@@ -277,17 +378,15 @@ mod linux {
             fs::flock(&lock, FlockOperation::NonBlockingLockExclusive)
                 .map_err(error)
                 .map_err(before)?;
-            link_is(&self.directory, LOCK, lock_id).map_err(before)?;
+            link_is(&self.directory, self.profile.lock(), lock_id).map_err(before)?;
             if self.read().map_err(before)? != self.baseline {
                 return Err(before(error("settings changed on disk; restart to reload")));
             }
-            let bytes = serde_json::to_vec(preferences)
-                .map_err(error)
-                .map_err(before)?;
             let mut created = None;
             for _ in 0..32 {
                 let name = format!(
-                    ".audio-settings-pending-{}-{}",
+                    "{}{}-{}",
+                    self.profile.prefix(),
                     std::process::id(),
                     NEXT.fetch_add(1, Ordering::Relaxed)
                 );
@@ -313,20 +412,25 @@ mod linux {
                 created.ok_or_else(|| before(error("staging name budget exhausted")))?;
             let stage_id = identity(&fs::fstat(&stage).map_err(error).map_err(before)?);
             let result = (|| {
-                file_ok(&stage, 1024).map_err(before)?;
+                file_ok(&stage, u64::from(self.profile.limit())).map_err(before)?;
                 stage.write_all(&bytes).map_err(error).map_err(before)?;
                 stage.sync_all().map_err(error).map_err(before)?;
                 hook(Stage::Prepared).map_err(before)?;
-                file_ok(&stage, 1024).map_err(before)?;
+                file_ok(&stage, u64::from(self.profile.limit())).map_err(before)?;
                 directory_ok(&self.directory).map_err(before)?;
-                link_is(&self.directory, LOCK, lock_id).map_err(before)?;
+                link_is(&self.directory, self.profile.lock(), lock_id).map_err(before)?;
                 link_is(&self.directory, &name, stage_id).map_err(before)?;
                 if self.read().map_err(before)? != self.baseline {
                     return Err(before(error("settings changed before publication")));
                 }
-                fs::renameat(&self.directory, name.as_str(), &self.directory, PRIMARY)
-                    .map_err(error)
-                    .map_err(before)?;
+                fs::renameat(
+                    &self.directory,
+                    name.as_str(),
+                    &self.directory,
+                    self.profile.primary(),
+                )
+                .map_err(error)
+                .map_err(before)?;
                 self.baseline = Some(Snapshot {
                     identity: stage_id,
                     bytes,
@@ -357,10 +461,12 @@ pub(crate) use linux::{Loaded, Outcome, Store};
 #[cfg(windows)]
 #[path = "defense_audio_settings_windows.rs"]
 mod windows;
-#[cfg(windows)]
-pub(crate) use windows::{Loaded, Outcome, Store};
 #[cfg(all(test, windows))]
 pub(crate) use windows::tests::private_directory as windows_test_directory;
+#[cfg(all(test, windows, feature = "coop-defense-controls"))]
+pub(crate) use windows::tests::write_private as windows_test_write;
+#[cfg(windows)]
+pub(crate) use windows::{Loaded, Outcome, Store};
 
 #[cfg(any(target_os = "linux", windows))]
 pub(crate) fn install(ui: &mut crate::defense_ui::DefenseUi, loaded: Loaded) {

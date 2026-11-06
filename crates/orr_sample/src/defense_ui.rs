@@ -11,13 +11,20 @@ fn just_pressed(ctx: &egui::Context, key: Key) -> bool {
         input.focused
             && !input.events.iter().any(|event| matches!(event, egui::Event::WindowFocused(false)))
             && input.events.iter().any(|event| matches!(event,
-                egui::Event::Key { key: pressed, pressed: true, repeat: false, modifiers, .. }
-                    if *pressed == key
+                egui::Event::Key { key: pressed, physical_key, pressed: true, repeat: false, modifiers, .. }
+                    if shortcut_key(*pressed, *physical_key) == key
                         && !modifiers.ctrl
                         && !modifiers.alt
                         && !modifiers.command
                         && !modifiers.mac_cmd))
     })
+}
+
+fn shortcut_key(key: Key, physical: Option<Key>) -> Key {
+    #[cfg(all(feature = "coop-defense-controls", any(target_os = "linux", windows)))]
+    { crate::defense_controls::event_key(key, physical) }
+    #[cfg(not(all(feature = "coop-defense-controls", any(target_os = "linux", windows))))]
+    { let _ = physical; key }
 }
 
 // Native controls are click-to-act, not drag targets. Pin the semantic target at
@@ -27,6 +34,8 @@ fn just_pressed(ctx: &egui::Context, key: Key) -> bool {
 // distance/duration settings; leaving the radius cancels even on return.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ClickTarget {
+    #[cfg(all(feature = "coop-defense-controls", any(target_os = "linux", windows)))]
+    Controls(u8),
     Start,
     Pause,
     Continue,
@@ -282,6 +291,8 @@ impl Default for AudioPanel {
 
 pub struct DefenseUi {
     pub context: egui::Context,
+    #[cfg(all(feature = "coop-defense-controls", any(target_os = "linux", windows)))]
+    pub(crate) controls: crate::defense_controls::Controls,
     #[cfg(feature = "coop-defense-pixelfx")]
     pub(crate) vfx: crate::defense_vfx::DefenseVfx,
     #[cfg(feature = "coop-defense-pixel-motion")]
@@ -320,6 +331,8 @@ impl DefenseUi {
     pub fn new() -> Self {
         Self {
             context: egui::Context::default(),
+            #[cfg(all(feature = "coop-defense-controls", any(target_os = "linux", windows)))]
+            controls: crate::defense_controls::Controls::default(),
             #[cfg(feature = "coop-defense-pixelfx")]
             vfx: crate::defense_vfx::DefenseVfx::default(),
             #[cfg(feature = "coop-defense-pixel-motion")]
@@ -697,6 +710,8 @@ impl DefenseUi {
         mut input: egui::RawInput,
         frame: &orr_ecs::Frame,
     ) -> (egui::FullOutput, Option<game::DefenseInput>) {
+        #[cfg(all(feature = "coop-defense-controls", any(target_os = "linux", windows)))]
+        self.controls.observe(&input);
         // egui recomputes repeat from its held-key set, which focus loss can clear.
         // Preserve the native event's repeat attribution before that normalization.
         input.events.retain(|event| {
@@ -750,6 +765,8 @@ impl DefenseUi {
             let l = Layout::new(screen);
             let options = ctx.options(|o| o.input_options);
             let (extra, modal) = self.save_targets(l);
+            #[cfg(all(feature = "coop-defense-controls", any(target_os = "linux", windows)))]
+            let (extra, modal) = self.controls_targets(l, extra, modal);
             #[cfg(feature = "coop-defense-audio")]
             let extra = {
                 let mut extra = extra;
@@ -907,6 +924,8 @@ impl DefenseUi {
                     Color32::from_rgb(220, 127, 87),
                 );
             }
+            #[cfg(all(feature = "coop-defense-controls", any(target_os = "linux", windows)))]
+            if self.paint_controls(&p, l, clicked, modal) { return; }
             #[cfg(feature = "coop-defense-audio")]
             let audio_consumed = self.paint_audio(l, clicked, modal, ctx);
             // An audio click consumes keyboard gameplay input in the same frame.
@@ -914,6 +933,10 @@ impl DefenseUi {
             let just_pressed = |ctx: &egui::Context, key| {
                 (!audio_consumed || matches!(key, Key::P | Key::Escape)) && just_pressed(ctx, key)
             };
+            #[cfg(all(feature = "coop-defense-controls", any(target_os = "linux", windows)))]
+            let blocked_keys = self.controls.blocked_keys();
+            #[cfg(all(feature = "coop-defense-controls", any(target_os = "linux", windows)))]
+            let just_pressed = |ctx: &egui::Context, key| !blocked_keys.contains(&key) && just_pressed(ctx,key);
             #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
             if self.paint_run_save(&p, l, clicked, ctx) {
                 return;
@@ -943,6 +966,13 @@ impl DefenseUi {
                 .iter()
                 .enumerate()
                 {
+                    #[cfg(all(feature = "coop-defense-controls", any(target_os = "linux", windows)))]
+                    let rule = match i {
+                        0 => format!("1   {} or SUMMON: recruit a random turret for 25 brass.", self.controls.hint(0,false)),
+                        2 => format!("3   {} / FORGE increases the damage of your entire board.", self.controls.hint(1,false)),
+                        3 => format!("4   {} / INVEST adds passive income. Protect the shared core.", self.controls.hint(2,false)),
+                        _ => (*rule).to_owned(),
+                    };
                     l.text(&p, 310.0, 398.0 + i as f32 * 34.0, 15.0, PAPER, rule);
                 }
                 l.text(
@@ -1134,6 +1164,8 @@ impl DefenseUi {
                 ),
             ];
             for (i, (a, label, cost)) in buttons.iter().enumerate() {
+                #[cfg(all(feature = "coop-defense-controls", any(target_os = "linux", windows)))]
+                let label = format!("[{}]{}", self.controls.hint(i,false), label.split_once(']').unwrap().1);
                 let r = l.rect(270.0 + i as f32 * 220.0, 842.0, 205.0, 55.0);
                 let allowed = run.phase == game::PLAYING
                     && run.gold[0] >= *cost
@@ -1189,19 +1221,34 @@ impl DefenseUi {
                         }
                     ),
                 );
+                #[cfg(not(all(feature = "coop-defense-controls", any(target_os = "linux", windows))))]
                 let key = match *a {
                     game::SUMMON => Key::Space,
                     game::UPGRADE => Key::U,
                     _ => Key::I,
                 };
-                if allowed && (clicked == Some(ClickTarget::Action(*a)) || just_pressed(ctx, key)) {
+                #[cfg(all(feature = "coop-defense-controls", any(target_os = "linux", windows)))]
+                let key = self.controls.key(*a);
+                #[cfg(all(feature = "coop-defense-controls", any(target_os = "linux", windows)))]
+                let blocked = self.controls.blocked(key);
+                #[cfg(not(all(feature = "coop-defense-controls", any(target_os = "linux", windows))))]
+                let blocked = false;
+                if allowed && (clicked == Some(ClickTarget::Action(*a)) || (!blocked && just_pressed(ctx, key))) {
                     action = Some(self.command(*a, 0, 0));
                 }
             }
             let restart = l.rect(950.0, 842.0, 200.0, 55.0);
             p.rect_filled(restart, 6.0 * l.scale, Color32::from_rgb(49, 64, 61));
-            l.text(&p, 970.0, 868.0, 14.0, PAPER, "[R] RESTART");
-            if just_pressed(ctx, Key::R) || clicked == Some(ClickTarget::Action(game::RESTART)) {
+            #[cfg(all(feature = "coop-defense-controls", any(target_os = "linux", windows)))]
+            let restart_key = self.controls.key(game::RESTART);
+            #[cfg(not(all(feature = "coop-defense-controls", any(target_os = "linux", windows))))]
+            let restart_key = Key::R;
+            l.text(&p, 970.0, 868.0, 14.0, PAPER, format!("[{restart_key:?}] RESTART").to_uppercase());
+            #[cfg(all(feature = "coop-defense-controls", any(target_os = "linux", windows)))]
+            let blocked = self.controls.blocked(restart_key);
+            #[cfg(not(all(feature = "coop-defense-controls", any(target_os = "linux", windows))))]
+            let blocked = false;
+            if (!blocked && just_pressed(ctx, restart_key)) || clicked == Some(ClickTarget::Action(game::RESTART)) {
                 self.selected = None;
                 action = Some(self.command(game::RESTART, 0, 0));
             }
@@ -2016,6 +2063,13 @@ mod run_save_tests {
 #[cfg(all(test, feature = "coop-defense-audio"))]
 #[path = "defense_audio_ui_tests.rs"]
 mod audio_ui_tests;
+
+#[cfg(all(feature = "coop-defense-controls", any(target_os = "linux", windows)))]
+#[path = "defense_controls_ui.rs"]
+mod controls_ui;
+#[cfg(all(test, feature = "coop-defense-controls", any(target_os = "linux", windows)))]
+#[path = "defense_controls_ui_tests.rs"]
+mod controls_ui_tests;
 
 #[cfg(test)]
 #[path = "defense_ui/modifier_tests.rs"]

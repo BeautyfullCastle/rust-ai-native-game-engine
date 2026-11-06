@@ -20,15 +20,16 @@ fn draw(
     final_modifiers: Modifiers,
 ) -> Option<game::DefenseInput> {
     events.push(Event::ModifiersChanged(final_modifiers));
-    ui.show(
+    let (mut output, command) = ui.show(
         egui::RawInput {
             screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(1200.0, 940.0))),
             events,
             ..Default::default()
         },
         sim.frame(),
-    )
-    .1
+    );
+    output.textures_delta.clear(); // CPU-only fixture preserves commands, consumes uploads.
+    command
 }
 
 fn apply(sim: &mut Sim, command: game::DefenseInput) {
@@ -327,7 +328,7 @@ fn focus_loss_and_explicit_repeat_still_block_plain_shortcuts() {
             if blocked_by == 1 {
                 events.push(Event::WindowFocused(false));
             }
-            let action = ui
+            let (mut output, action) = ui
                 .show(
                     egui::RawInput {
                         screen_rect: Some(Rect::from_min_size(
@@ -339,8 +340,8 @@ fn focus_loss_and_explicit_repeat_still_block_plain_shortcuts() {
                         ..Default::default()
                     },
                     sim.frame(),
-                )
-                .1;
+                );
+            output.textures_delta.clear();
             assert!(action.is_none());
             assert_eq!(ui.sequence, 7);
             assert!(ui.started);
