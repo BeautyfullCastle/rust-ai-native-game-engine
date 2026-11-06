@@ -18,20 +18,21 @@ const MAX_MODEL: usize = 64 * 1024 * 1024;
 pub(crate) enum PackageKind {
     Static,
     StaticUv,
+    StaticRetexture,
     #[cfg(feature = "animation-authoring")]
     AnimatedSequence,
 }
 impl PackageKind {
     fn model_name(self) -> &'static str {
         match self {
-            Self::Static | Self::StaticUv => "model.model.json",
+            Self::Static | Self::StaticUv | Self::StaticRetexture => "model.model.json",
             #[cfg(feature = "animation-authoring")]
             Self::AnimatedSequence => "model.animated.json",
         }
     }
     fn capabilities(self) -> BTreeSet<String> {
         match self {
-            Self::Static | Self::StaticUv => ["models".into()].into(),
+            Self::Static | Self::StaticUv | Self::StaticRetexture => ["models".into()].into(),
             #[cfg(feature = "animation-authoring")]
             Self::AnimatedSequence => ["models".into(), "animation".into()].into(),
         }
@@ -156,6 +157,9 @@ pub(crate) fn create_kind(options: &Options, kind: PackageKind) -> Result<Report
         PackageKind::StaticUv => {
             orr_model::static_uv::transform_recipe(&options.recipe, &options.asset_id)?
         }
+        PackageKind::StaticRetexture => {
+            orr_model::static_retexture::transform_recipe(&options.recipe, &options.asset_id)?
+        }
         #[cfg(feature = "animation-authoring")]
         PackageKind::AnimatedSequence => {
             orr_model::animation_sequence::sequence_recipe(&options.recipe, &options.asset_id)?
@@ -168,7 +172,7 @@ pub(crate) fn create_kind(options: &Options, kind: PackageKind) -> Result<Report
         return Err("recipe changed during assembly".into());
     }
     match kind {
-        PackageKind::Static | PackageKind::StaticUv => {
+        PackageKind::Static | PackageKind::StaticUv | PackageKind::StaticRetexture => {
             publish::publish(&options.output, &model, &license, &options.metadata)
         }
         #[cfg(feature = "animation-authoring")]
