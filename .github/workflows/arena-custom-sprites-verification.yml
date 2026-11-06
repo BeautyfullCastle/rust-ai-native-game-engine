@@ -1,0 +1,74 @@
+name: Arena custom sprites exact integration Linux verification
+on:
+  push:
+    branches: [su/arena-custom-sprites-verification-20261107-r2]
+permissions:
+  contents: read
+concurrency:
+  group: arena-custom-sprites-verification-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  verify:
+    name: Exact integration ${{ matrix.mode }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [focused, aggregate]
+    env:
+      RUSTUP_TOOLCHAIN: '1.99.1'
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      PYTHONDONTWRITEBYTECODE: '1'
+      LC_ALL: C.UTF-8
+      TZ: UTC
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out verification definition
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: verification
+          persist-credentials: false
+      - name: Check out exact product integration
+        uses: actions/checkout@v4
+        with:
+          ref: 99e28fe611957b9fb2c85f678fd7afcb42563996
+          path: product
+          persist-credentials: false
+      - name: Record source and install official prerequisites
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/arena-sprites-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-${{ matrix.mode }}"
+          mkdir "$evidence"
+          printf 'EVIDENCE=%s\n' "$evidence" >> "$GITHUB_ENV"
+          printf 'CARGO_TARGET_DIR=%s/target-%s-%s-%s\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" '${{ matrix.mode }}' >> "$GITHUB_ENV"
+          test "$(git -C verification rev-parse HEAD)" = "$GITHUB_SHA"
+          git -C product rev-parse HEAD HEAD^{tree} | tee "$evidence/source.txt"
+          cp verification/.github/workflows/arena-custom-sprites-verification.yml "$evidence/workflow.yml"
+          cp verification/.github/scripts/verify_arena_sprites.py "$evidence/runner.py"
+          rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy 2>&1 | tee "$evidence/rustup.log"
+          rustc --version --verbose | tee "$evidence/rustc.txt"
+          cargo --version | tee "$evidence/cargo.txt"
+          python3 --version | tee "$evidence/python.txt"
+          uname -a | tee "$evidence/system.txt"
+          sudo apt-get update -q 2>&1 | tee "$evidence/apt-update.log"
+          sudo apt-get install -y -q build-essential pkg-config libasound2-dev libudev-dev libx11-dev libxkbcommon-dev libwayland-dev libegl1-mesa-dev libgl1-mesa-dev mesa-vulkan-drivers 2>&1 | tee "$evidence/apt-install.log"
+          df -h "$RUNNER_TEMP" | tee "$evidence/disk-before.txt"
+          free -h | tee "$evidence/memory-before.txt"
+      - name: Execute unchanged product gates and preserve receipts
+        run: python3 -B verification/.github/scripts/verify_arena_sprites.py '${{ matrix.mode }}'
+      - name: Preserve original results including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arena-sprites-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.EVIDENCE }}/
+          if-no-files-found: error
+          compression-level: 6
