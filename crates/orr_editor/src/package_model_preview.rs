@@ -275,6 +275,8 @@ pub(crate) fn supports_asset(kind: ModelKind, asset: &str) -> bool {
         || (kind == ModelKind::Static
             && (extension.is_some_and(|value| value.eq_ignore_ascii_case("orrmodel"))
                 || asset.to_ascii_lowercase().ends_with(".model.json")))
+        || (kind == ModelKind::Animated
+            && asset.to_ascii_lowercase().ends_with(".animated.json"))
 }
 
 fn load(request: &PreviewRequest) -> Result<Ready, String> {

@@ -1,8 +1,5 @@
 use super::*;
-use egui_kittest::{
-    kittest::Queryable,
-    Harness,
-};
+use egui_kittest::{kittest::Queryable, Harness};
 use std::collections::BTreeMap;
 
 #[test]
@@ -103,8 +100,13 @@ fn production_browser_shows_cooked_static_actions_and_preserves_request_guards()
             panel,
         );
     harness.run_steps(2);
+    let count = if cfg!(feature = "room-animated-models") {
+        3
+    } else {
+        2
+    };
     assert!(harness
-        .query_by_label("Showing 2 of 2 verified model assets")
+        .query_by_label(&format!("Showing {count} of {count} verified model assets"))
         .is_some());
     assert!(harness
         .query_by_label("Use animated model variants/model.model.json")
@@ -149,4 +151,3 @@ fn production_browser_shows_cooked_static_actions_and_preserves_request_guards()
         .remove("models");
     assert!(harness.state_mut().take_preview_request().is_none());
 }
-
