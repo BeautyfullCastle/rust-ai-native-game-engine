@@ -517,15 +517,28 @@ impl ModelPanel {
     /// Center and uniformly fit verified rest geometry inside the selected box.
     /// Only the authoring draft changes; Assign and Save remain explicit.
     pub fn fit_selected_box(&mut self, editor: &Editor) -> Result<(), String> {
+        self.fit_selected_collider(editor, false)
+    }
+    /// Fit the rest bounding box inside the selected sphere, as a draft only.
+    pub fn fit_selected_sphere(&mut self, editor: &Editor) -> Result<(), String> {
+        self.fit_selected_collider(editor, true)
+    }
+    fn fit_selected_collider(&mut self, editor: &Editor, sphere: bool) -> Result<(), String> {
         if !self.editable(editor) {
             return Err("Fitting a model requires coherent local Edit mode".into());
         }
-        let guid = editor.selected_guid().ok_or("Select a box collider first")?;
+        let guid = editor.selected_guid().ok_or("Select a collider first")?;
         let row = editor.rows().iter().find(|row| row.guid.as_ref() == Some(&guid))
             .ok_or("Selected GUID no longer exists")?;
         let snapshot = editor.snapshot().ok_or("Current snapshot is unavailable")?;
-        let half = orr_sample::yard3d_view::editor_box_half(snapshot.predicted(), row.entity)
-            .ok_or("Fit rest model requires a current box collider and body")?;
+        let dimensions = if sphere {
+            let radius = orr_sample::yard3d_view::editor_sphere_radius(snapshot.predicted(), row.entity)
+                .ok_or("Fit rest model to sphere requires a current sphere collider and body")?;
+            [radius; 3]
+        } else {
+            orr_sample::yard3d_view::editor_box_half(snapshot.predicted(), row.entity)
+                .ok_or("Fit rest model to box requires a current box collider and body")?
+        };
         let (_, _, _, candidate) = self.candidate.as_ref()
             .filter(|(package, asset, kind, _)| package == &self.package && asset == &self.asset && *kind == self.kind)
             .ok_or("Load the current model asset before fitting")?;
@@ -537,7 +550,9 @@ impl ModelPanel {
         {
             return Err("Model asset changed; load it again before fitting".into());
         }
-        let fitted = fit::loaded(&loaded, half.map(f64::from))?;
+        let fitted = if sphere {
+            fit::loaded_sphere(&loaded, f64::from(dimensions[0]))?
+        } else { fit::loaded(&loaded, dimensions.map(f64::from))? };
         self.transform = fitted;
         Ok(())
     }
@@ -1366,6 +1381,9 @@ impl ModelPanel {
                         if ui.add_enabled(editor.selected_guid().is_some(), egui::Button::new("Fit rest model to box"))
                             .on_hover_text("Center verified rest geometry and scale uniformly with 1% space. Resets local rotation; changes the draft only.")
                             .clicked() { self.error = self.fit_selected_box(editor).err(); }
+                        if ui.add_enabled(editor.selected_guid().is_some(), egui::Button::new("Fit rest model to sphere"))
+                            .on_hover_text("Center the rest bounds inside a sphere with uniform scale and 1% space. Resets local rotation; draft only.")
+                            .clicked() { self.error = self.fit_selected_sphere(editor).err(); }
                         for (label, values) in [("Offset", &mut self.transform.translation), ("Scale", &mut self.transform.scale)] {
                             ui.horizontal(|ui| { ui.label(label); for value in values { ui.add(egui::DragValue::new(value).speed(0.05)); } });
                         }

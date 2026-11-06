@@ -179,6 +179,7 @@ fn actual_widgets_assign_remove_undo_save_reopen_and_disable_mutation_in_play() 
         "Reload verified models",
         "Use selected model settings",
         "Fit rest model to box",
+        "Fit rest model to sphere",
         "Discard model bindings",
     ] {
         assert!(
@@ -906,3 +907,6 @@ mod settings_copy;
 
 #[path = "yard3d_models/box_fit.rs"]
 mod box_fit;
+
+#[path = "yard3d_models/sphere_fit.rs"]
+mod sphere_fit;

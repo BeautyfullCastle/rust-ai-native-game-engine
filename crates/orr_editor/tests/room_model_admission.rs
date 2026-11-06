@@ -334,3 +334,7 @@ fn fitted_room_binding_saves_and_reopens_in_actual_runtime_pose_path() {
     ).unwrap();
     assert_eq!(counts.static_models, 2);
 }
+
+#[cfg(all(feature = "windows-export", target_os = "linux", target_arch = "x86_64"))]
+#[path = "room_model_admission/sphere_fit_export.rs"]
+mod sphere_fit_export;
