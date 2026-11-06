@@ -400,7 +400,7 @@ fn authored_box_widgets_six_face_gpu_and_source_hidden_room_export() {
         click(&mut h,turn); let before=recipe(&h); click(&mut h,"Apply face UV"); let after=recipe(&h);
         assert_ne!(before.faces[i].uv,after.faces[i].uv); for other in 0..6 {if other!=i {assert_eq!(before.faces[other],after.faces[other]);}}
         if i==0 {click(&mut h,"Undo blockout");assert_eq!(recipe(&h),before);click(&mut h,"Redo blockout");assert_eq!(recipe(&h),after);}
-        click(&mut h,if i%2==0 {"Checker white"} else {"Checker blue"}); click(&mut h,"Apply face material"); assert_eq!(recipe(&h).faces[i].material,(i%2) as u8);
+        click(&mut h,if i%2==0 {"Material slot 0"} else {"Material slot 1"}); click(&mut h,"Apply face material"); assert_eq!(recipe(&h).faces[i].material,(i%2) as u8);
     }
     let original_recipe=recipe(&h);
     for label in ["New box recipe","Open box recipe"] {click(&mut h,label);assert!(h.state().models.blockout.error().unwrap().contains("Save or explicitly discard"));assert_eq!(recipe(&h),original_recipe);}
@@ -422,7 +422,7 @@ fn authored_box_widgets_six_face_gpu_and_source_hidden_room_export() {
     let uv_pixels=six_views(&mut h,&evidence,"editor-uv-only"); assert_isolated_difference(&first,&uv_pixels,0);
     let composed_after=composed_positive_x(&mut h,&evidence.join("editor-uv-only-composed.png")); assert!(composed_change(&composed_before,&composed_after)>100,"UV pixels must reach the composed main viewport, excluding controls and status text");
     click(&mut h,"Undo model"); assert_views_equal(&six_views(&mut h,&evidence,"editor-model-undo"),&first,"editor-model-undo"); click(&mut h,"Redo model"); assert_views_equal(&six_views(&mut h,&evidence,"editor-model-redo"),&uv_pixels,"editor-model-redo");
-    click(&mut h,"+Z"); click(&mut h,"Checker blue"); click(&mut h,"Apply face material");
+    click(&mut h,"+Z"); click(&mut h,"Material slot 1"); click(&mut h,"Apply face material");
     let package3=bake_assign(&mut h); let bytes3=fs::read(fixture.root.join(RECIPE)).unwrap(); assert_ne!(package2,package3); assert_oracle(&fixture,&package3,&bytes3,true,true);
     let final_pixels=six_views(&mut h,&evidence,"editor-material-only"); assert_isolated_difference(&uv_pixels,&final_pixels,4);
     // Replace the oracle in a fresh project, avoiding a mutable model cache or
@@ -453,3 +453,7 @@ fn authored_box_widgets_six_face_gpu_and_source_hidden_room_export() {
     fs::write(evidence.join("acceptance-source.json"),serde_json::to_vec_pretty(&serde_json::json!({"test":TEST,"source_sha256":digest(include_bytes!("blockout_gpu.rs")),"recipe_sha256":digest(&bytes3),"retained_revisions":[package1,package2,package3],"gpu_views":VIEWS.map(|(name,_,_)|name),"oracle":"independently literal 24 positions/normals/UVs, both materials and 16 unique image colors","host_initial_frame_sha256":digest(&authored_frame),"host_play_frame_sha256":digest(&live)})).unwrap()).unwrap();
     fs::write(evidence.join("capture-inventory.json"),serde_json::to_vec_pretty(&tree(&evidence)).unwrap()).unwrap();
 }
+
+#[cfg(feature = "windows-export")]
+#[path = "blockout_material_colors/room.rs"]
+mod material_colors;

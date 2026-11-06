@@ -10,6 +10,7 @@ pub struct BlockoutPanel {
     pub move_distance: f32,
     pub uv: FaceUv,
     pub material: u8,
+    pub color: [f32; 3],
     error: Option<String>,
     last_bake: Option<BakeResult>,
     discard: bool,
@@ -17,7 +18,7 @@ pub struct BlockoutPanel {
 impl Default for BlockoutPanel {
     fn default() -> Self {
         Self { document: None, path: "box.blockout.json".into(), face: Face::PosX,
-            move_distance: 0.25, uv: FaceUv::default(), material: 0,
+            move_distance: 0.25, uv: FaceUv::default(), material: 0, color: [1.0; 3],
             error: None, last_bake: None, discard: false }
     }
 }
@@ -25,7 +26,7 @@ impl BlockoutPanel {
     pub fn error(&self) -> Option<&str> { self.error.as_deref() }
     pub fn last_bake(&self) -> Option<&BakeResult> { self.last_bake.as_ref() }
     fn sync_face(&mut self) {
-        if let Some(doc) = &self.document { let settings = doc.recipe().faces[self.face.index()]; self.uv = settings.uv; self.material = settings.material; }
+        if let Some(doc) = &self.document { let settings = doc.recipe().faces[self.face.index()]; self.uv = settings.uv; self.material = settings.material; self.color = doc.recipe().colors()[usize::from(self.material)]; }
     }
     fn replace(&mut self, root: &std::path::Path, create: bool) -> Result<(), String> {
         if self.document.as_ref().is_some_and(Blockout::dirty) { return Err("Save or explicitly discard recipe changes before New/Open".into()); }
@@ -78,11 +79,25 @@ impl BlockoutPanel {
                         for turn in 0..4 { ui.selectable_value(&mut self.uv.quarter_turn, turn, format!("{} degrees", u16::from(turn) * 90)); }
                         if ui.button("Apply face UV").clicked() { self.error = self.document.as_mut().expect("document").set_uv(self.face, self.uv).err(); }
                     });
+                    let previous_material = self.material;
                     ui.horizontal(|ui| {
-                        ui.selectable_value(&mut self.material, 0, "Checker white");
-                        ui.selectable_value(&mut self.material, 1, "Checker blue");
+                        ui.selectable_value(&mut self.material, 0, "Material slot 0");
+                        ui.selectable_value(&mut self.material, 1, "Material slot 1");
                         if ui.button("Apply face material").clicked() { self.error = self.document.as_mut().expect("document").set_material(self.face, self.material).err(); }
                     });
+                    if previous_material != self.material {
+                        self.color = self.document.as_ref().expect("document").recipe().colors()[usize::from(self.material)];
+                    }
+                    ui.horizontal(|ui| {
+                        for (label, value) in ["Material red", "Material green", "Material blue"].into_iter().zip(&mut self.color) {
+                            let label = ui.label(label);
+                            ui.add(egui::DragValue::new(value).speed(0.01).range(0.0..=1.0)).labelled_by(label.id);
+                        }
+                        if ui.button("Apply material color").clicked() {
+                            self.error = self.document.as_mut().expect("document").set_material_color(self.material, self.color).err();
+                        }
+                    });
+                    ui.weak("Color multiplies the checker on every face using this material slot; Save then Bake to apply in game.");
                     self.preview(ui);
                     ui.horizontal(|ui| {
                         if ui.button("Undo blockout").clicked() { self.document.as_mut().expect("document").undo(); self.sync_face(); }
@@ -119,7 +134,7 @@ impl BlockoutPanel {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(160.0, 160.0), egui::Sense::hover());
         let image = crate::blockout::checker();
         let material = recipe.faces[self.face.index()].material;
-        let factor = if material == 0 { [1.0, 1.0, 1.0] } else { [0.3, 0.65, 1.0] };
+        let factor = recipe.colors()[usize::from(material)];
         for row in 0..32 { for col in 0..32 {
             let (s,t) = ((col as f32 + 0.5) / 32.0, (row as f32 + 0.5) / 32.0);
             let (u,v) = (uv[0][0] + s * (uv[1][0] - uv[0][0]) + t * (uv[3][0] - uv[0][0]), uv[0][1] + s * (uv[1][1] - uv[0][1]) + t * (uv[3][1] - uv[0][1]));

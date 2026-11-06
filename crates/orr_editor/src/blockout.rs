@@ -44,13 +44,21 @@ pub struct Recipe {
     pub bounds: Bounds,
     /// Stable order: +X, -X, +Y, -Y, +Z, -Z. Topology cannot change.
     pub faces: [FaceSettings; 6],
+    /// Version 2 only: opaque RGB multipliers for the two existing materials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material_colors: Option<[[f32; 3]; 2]>,
 }
 impl Default for Recipe {
-    fn default() -> Self { Self { format: "orr_box_blockout".into(), version: 1, bounds: Bounds { min: [-0.5; 3], max: [0.5; 3] }, faces: [FaceSettings { uv: FaceUv::default(), material: 0 }; 6] } }
+    fn default() -> Self { Self { format: "orr_box_blockout".into(), version: 1, bounds: Bounds { min: [-0.5; 3], max: [0.5; 3] }, faces: [FaceSettings { uv: FaceUv::default(), material: 0 }; 6], material_colors: None } }
 }
 impl Recipe {
     pub fn validate(&self) -> Result<()> {
-        if self.format != "orr_box_blockout" || self.version != 1 { return Err("Unsupported box recipe format/version".into()); }
+        if self.format != "orr_box_blockout" || !matches!((self.version, self.material_colors.is_some()), (1, false) | (2, true)) {
+            return Err("Box recipe version 1 uses default colors; version 2 requires material_colors".into());
+        }
+        if self.colors().iter().flatten().any(|v| !v.is_finite() || !(0.0..=1.0).contains(v)) {
+            return Err("Material RGB colors must be finite and between 0 and 1".into());
+        }
         for axis in 0..3 {
             let (min, max) = (self.bounds.min[axis], self.bounds.max[axis]);
             if !min.is_finite() || !max.is_finite() || min.abs() > 100.0 || max.abs() > 100.0 || max - min < 0.001 {
@@ -72,12 +80,18 @@ impl Recipe {
         // rejected before any Value conversion could erase duplicate keys.
         let recipe: Self = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
         let shape: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+        if shape.get("material_colors").is_some_and(serde_json::Value::is_null) {
+            return Err("material_colors cannot be null".into());
+        }
         if !shape.is_object() || !shape["bounds"].is_object()
             || shape["faces"].as_array().is_none_or(|faces| faces.iter().any(|f| !f.is_object() || !f["uv"].is_object())) {
             return Err("Recipe, bounds, face and UV records must be JSON objects".into());
         }
         recipe.validate()?;
         Ok(recipe)
+    }
+    pub fn colors(&self) -> [[f32; 3]; 2] {
+        self.material_colors.unwrap_or([[1.0, 1.0, 1.0], [0.3, 0.65, 1.0]])
     }
     pub fn to_bytes(&self) -> Result<Vec<u8>> { self.validate()?; serde_json::to_vec_pretty(self).map_err(|e| e.to_string()) }
     /// Unit planar coordinates are scaled, then quarter-turned counterclockwise
@@ -111,7 +125,7 @@ impl Recipe {
             format: "orr_static_model".into(), version: 1, asset_id: RECIPE_ASSET.into(),
             dependencies: vec![Dependency { uri: "$source".into(), sha256: digest(exact_recipe_bytes) }],
             primitives,
-            materials: [[1.0,1.0,1.0,1.0],[0.3,0.65,1.0,1.0]].into_iter().map(|base_color| Material { base_color, image: 0, linear_filter: false, wrap_s: Wrap::Repeat, wrap_t: Wrap::Repeat }).collect(),
+            materials: self.colors().into_iter().map(|rgb| Material { base_color: [rgb[0], rgb[1], rgb[2], 1.0], image: 0, linear_filter: false, wrap_s: Wrap::Repeat, wrap_t: Wrap::Repeat }).collect(),
             images: vec![checker()],
         }).map_err(|e| e.to_string())
     }
@@ -217,6 +231,14 @@ impl Blockout {
     }
     pub fn set_uv(&mut self, face: Face, uv: FaceUv) -> Result<()> { self.edit(|r| r.faces[face.index()].uv = uv) }
     pub fn set_material(&mut self, face: Face, material: u8) -> Result<()> { self.edit(|r| r.faces[face.index()].material = material) }
+    pub fn set_material_color(&mut self, material: u8, color: [f32; 3]) -> Result<()> {
+        if material > 1 { return Err("Material slot must be 0 or 1".into()); }
+        if self.recipe.colors()[usize::from(material)] == color { return Ok(()); }
+        self.edit(|recipe| {
+            let mut colors = recipe.colors(); colors[usize::from(material)] = color;
+            recipe.version = 2; recipe.material_colors = Some(colors);
+        })
+    }
     pub fn undo(&mut self) { if let Some(old) = self.undo.pop() { self.redo.push(std::mem::replace(&mut self.recipe, old)); } }
     pub fn redo(&mut self) { if let Some(next) = self.redo.pop() { self.undo.push(std::mem::replace(&mut self.recipe, next)); } }
     fn unchanged_file(&self) -> Result<()> {
