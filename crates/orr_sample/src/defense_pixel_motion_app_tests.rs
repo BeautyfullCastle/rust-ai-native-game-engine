@@ -131,6 +131,78 @@ fn actual_app_prestart_is_neutral_and_restart_uses_new_run_clock() {
     summon_rivet(&mut app);
     assert_eq!(game::run(app.session.predicted_frame()).generation, 1);
 }
+#[cfg(feature = "coop-defense-pixelfx")]
+#[test]
+fn actual_release_moves_only_its_skin_and_pause_freezes_recovery() {
+    fn positions(app: &mut App) -> Vec<egui::Pos2> {
+        let texture = app.ui.pixel_motion.test_texture_id();
+        let mut output = app.process_input(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1200.0, 940.0),
+                )),
+                ..Default::default()
+            },
+            0.0,
+        );
+        assert!(app.error.is_none(), "{:?}", app.error);
+        let points = output
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Mesh(m) if m.texture_id == texture => Some(m.vertices[0].pos),
+                _ => None,
+            })
+            .collect();
+        output.textures_delta.clear();
+        points
+    }
+    let mut app = ready();
+    let mut found = false;
+    for tick in 0..1800 {
+        frame(
+            &mut app,
+            if tick % 45 == 0 {
+                pulse(egui::Key::Space)
+            } else {
+                vec![]
+            },
+            1.0 / 60.0,
+        );
+        let run = game::run(app.session.predicted_frame());
+        let mut units = game::units(app.session.predicted_frame());
+        units.sort_by_key(|unit| (unit.board, unit.cell));
+        let offsets: Vec<_> = units
+            .iter()
+            .filter(|unit| unit.active != 0 && unit.role == game::RIVET)
+            .map(|unit| app.ui.vfx.unit_recoil(unit, &run))
+            .collect();
+        if !offsets.iter().any(|offset| *offset > 0.0) {
+            continue;
+        }
+        let before = app.session.predicted_frame().to_bytes();
+        let animated = positions(&mut app);
+        let vfx = std::mem::take(&mut app.ui.vfx);
+        let neutral = positions(&mut app);
+        app.ui.vfx = vfx;
+        assert_eq!(animated.len(), offsets.len());
+        assert_eq!(neutral.len(), offsets.len());
+        for ((animated, neutral), offset) in animated.iter().zip(neutral.iter()).zip(offsets) {
+            assert!((animated.x - neutral.x).abs() < 0.001);
+            assert!((animated.y - neutral.y - offset).abs() < 0.001);
+        }
+        assert_eq!(app.session.predicted_frame().to_bytes(), before);
+        frame(&mut app, pulse(egui::Key::P), 0.0);
+        frame(&mut app, vec![], 10.0);
+        assert_eq!(positions(&mut app), animated);
+        assert_eq!(app.session.predicted_frame().to_bytes(), before);
+        found = true;
+        break;
+    }
+    assert!(found, "actual App must produce a Rivet Release event");
+}
+
 #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
 #[test]
 fn actual_app_loaded_save_restores_pixel_frame_without_backlog_or_catchup() {

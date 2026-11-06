@@ -28,6 +28,7 @@ APP = [
     "actual_app_prestart_is_neutral_and_restart_uses_new_run_clock",
 ]
 RESTORE = "actual_app_loaded_save_restores_pixel_frame_without_backlog_or_catchup"
+RECOIL = "actual_release_moves_only_its_skin_and_pause_freezes_recovery"
 IGNORED = ["defense_audio::tests::cli_authored_bank_source_hidden"]
 ASSET_HASH = "efcfb8bc0acbffb76c230846c111ba561d74cd6970ac4e2a721d4e981b6c5b56"
 ASSETS = ROOT / "crates/orr_sample/assets/stormglass-pixel-motion"
@@ -95,7 +96,7 @@ def main():
     run("cargo", ["cargo", "--version"])
     executed = {}
     for configuration, features in CONFIGURATIONS.items():
-        suites = {"defense_pixel_motion::tests": CORE, "defense_app::pixel_motion_tests": APP + ([RESTORE] if configuration == "combined" else [])}
+        suites = {"defense_pixel_motion::tests": CORE, "defense_app::pixel_motion_tests": APP + ([RESTORE, RECOIL] if configuration == "combined" else [])}
         for suite, names in suites.items():
             label = configuration + "-" + suite.replace("::", "-")
             output = run(label, ["cargo", "test", "--locked", "--release", "-p", "orr_sample", "--no-default-features", "--features", features, "--lib", suite, "--", "--test-threads=1", "--color=never"])

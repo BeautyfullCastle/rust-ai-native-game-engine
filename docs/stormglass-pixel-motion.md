@@ -40,6 +40,21 @@ The visible HUD explicitly labels the scope. Neither processing nor integration
 claims production animation polish or independent generated-art rights review.
 The preserved upstream tool licenses do not relicense the generated artwork.
 
+When both `coop-defense-pixel-motion` and `coop-defense-pixelfx` are enabled,
+real `Release` events additionally produce a six-pixel downward skin recoil
+that returns to neutral over eight session ticks (about 133 ms). The existing
+VFX ledger matches the exact actor ID, board, role and run generation; passing
+projectiles or other actors cannot trigger it. Prediction/verification do not
+restart one shot, cancellation removes it, pause freezes recovery, and restart
+or save replacement clears old shots. The skin follows a moved logical actor;
+another actor reusing the cell does not inherit its motion. The shared 64-effect
+budget can drop cosmetic feedback during extreme bursts.
+
+This procedural shot response is separate from the unchanged idle/charge cycle;
+it is not an authored attack clip or pre-release anticipation. Skin-only builds
+retain their prior presentation. CPU acceptance includes actual native-App mesh
+displacement against a neutral control, pause and unchanged simulation bytes.
+
 ## Acceptance
 
 `python3 -B tools/check_stormglass_pixel_motion.py --self-test` validates the

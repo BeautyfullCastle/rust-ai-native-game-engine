@@ -176,6 +176,37 @@ impl DefenseVfx {
             painter.image(asset.texture.id(), rect, uv, Color32::WHITE);
         }
     }
+    /// Recovery from a real shot by this exact actor. The existing bounded
+    /// event ledger owns deduplication, cancellation and epoch changes. This
+    /// view offset neither anticipates release nor changes projectile timing.
+    #[cfg(feature = "coop-defense-pixel-motion")]
+    pub(crate) fn unit_recoil(
+        &self,
+        unit: &orr_games::coop_defense_game::DefenseUnit,
+        run: &orr_games::coop_defense_game::DefenseRun,
+    ) -> f32 {
+        if unit.active == 0
+            || unit.id == 0
+            || run.phase != orr_games::coop_defense_game::PLAYING
+            || run.generation != self.state.generation
+        {
+            return 0.0;
+        }
+        self.state
+            .active
+            .values()
+            .filter(|effect| {
+                effect.event.event_kind() == Some(Kind::Release)
+                    && effect.event.unit_id == unit.id
+                    && effect.event.board == unit.board
+                    && effect.event.role == unit.role
+                    && effect.event.generation == run.generation
+            })
+            .filter_map(|effect| self.state.tick.checked_sub(effect.born))
+            .min()
+            .filter(|age| *age < 8)
+            .map_or(0.0, |age| (8 - age) as f32 * 0.75)
+    }
     pub(crate) fn summary(&self) -> (usize, u64, u64, u64) {
         (
             self.state.active.len(),
@@ -277,3 +308,7 @@ impl State {
 #[cfg(test)]
 #[path = "defense_vfx_tests.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "coop-defense-pixel-motion"))]
+#[path = "defense_release_recoil_tests.rs"]
+mod release_recoil_tests;

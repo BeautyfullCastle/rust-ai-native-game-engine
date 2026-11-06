@@ -24,6 +24,7 @@
 #![allow(clippy::disallowed_types)]
 
 pub mod camera;
+mod camera_bounds;
 pub mod camera3d;
 pub mod extract;
 pub mod list;
