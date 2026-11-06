@@ -1858,3 +1858,7 @@ mod vfx_tests;
 #[cfg(all(test, feature = "coop-defense-pixel-motion"))]
 #[path = "defense_pixel_motion_app_tests.rs"]
 mod pixel_motion_tests;
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "defense_app/native_scene_tests.rs"]
+mod native_scene_tests;

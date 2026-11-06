@@ -32,6 +32,13 @@ pub(super) fn publish_scene(
 ) -> Result<Option<String>, String> {
     write(path, verified.bytes(), |_, _| Ok(()))
 }
+#[cfg(feature = "coop-native-authoring")]
+pub(super) fn publish_native_scene(
+    path: &Path,
+    verified: &super::native_scene::Verified,
+) -> Result<Option<String>, String> {
+    write(path, verified.bytes(), |_, _| Ok(()))
+}
 pub(super) fn publish_offline(
     path: &Path,
     verified: &super::offline::OfflineHtml,

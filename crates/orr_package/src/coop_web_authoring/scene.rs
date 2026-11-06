@@ -32,9 +32,9 @@ impl Verified {
     }
 }
 #[derive(Debug)]
-struct Options {
-    wasm: PathBuf,
-    output: PathBuf,
+pub(super) struct Options {
+    wasm: Option<PathBuf>,
+    pub(super) output: PathBuf,
     gold: i64,
     hp: i64,
     wave: i64,
@@ -120,6 +120,9 @@ fn default_wave_kinds() -> [[u32; 4]; 10] {
 }
 const DEFAULT_OPENING_BOSSES: [u32; 10] = [0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
 fn options(args: &[OsString]) -> Result<Options, String> {
+    options_for(args, false)
+}
+pub(super) fn options_for(args: &[OsString], native: bool) -> Result<Options, String> {
     if args.len() > 20
         || args.len() % 2 != 0
         || args.iter().any(|s| {
@@ -141,7 +144,7 @@ fn options(args: &[OsString]) -> Result<Options, String> {
             return Err("duplicate option".into());
         }
         match key {
-            "--wasm" => wasm = Some(PathBuf::from(&pair[1])),
+            "--wasm" if !native => wasm = Some(PathBuf::from(&pair[1])),
             "--output" => output = Some(PathBuf::from(&pair[1])),
             "--starting-gold" => gold = integer(&pair[1])?,
             "--reactor-hp" => hp = integer(&pair[1])?,
@@ -162,7 +165,11 @@ fn options(args: &[OsString]) -> Result<Options, String> {
         }
     }
     let o = Options {
-        wasm: wasm.ok_or("--wasm required")?,
+        wasm: if native {
+            None
+        } else {
+            Some(wasm.ok_or("--wasm required")?)
+        },
         output: output.ok_or("--output required")?,
         gold,
         hp,
@@ -176,7 +183,7 @@ fn options(args: &[OsString]) -> Result<Options, String> {
     scene_text(&o)?;
     Ok(o)
 }
-fn scene_text(o: &Options) -> Result<Vec<u8>, String> {
+pub(super) fn scene_text(o: &Options) -> Result<Vec<u8>, String> {
     if !(0..=10000).contains(&o.gold)
         || !(1..=1000).contains(&o.hp)
         || !(1..=10).contains(&o.wave)
@@ -274,10 +281,11 @@ fn create_with(
 ) -> Result<(Verified, Option<String>), String> {
     let bytes = scene_text(o)?;
     publish::preflight(&o.output)?;
-    let wasm = snapshot(&o.wasm, 64 * 1024 * 1024)?;
+    let wasm_path = o.wasm.as_deref().ok_or("--wasm required")?;
+    let wasm = snapshot(wasm_path, 64 * 1024 * 1024)?;
     let output = gate(&wasm, &bytes)?;
     let verified = admit(bytes, &wasm, &output)?;
-    if snapshot(&o.wasm, 64 * 1024 * 1024)? != wasm {
+    if snapshot(wasm_path, 64 * 1024 * 1024)? != wasm {
         return Err("trusted WASM changed during verification".into());
     }
     let warning = publish::publish_scene(&o.output, &verified)?;

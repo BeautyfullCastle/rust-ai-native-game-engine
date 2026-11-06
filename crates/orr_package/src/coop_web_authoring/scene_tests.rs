@@ -267,7 +267,7 @@ fn failed_gate_and_changed_original_wasm_never_publish() {
         std::fs::write(&wasm, b"original").unwrap();
         let output = temp.path().join("scene.yaml");
         let mut o = options(&args(&[])).unwrap();
-        o.wasm = wasm.clone();
+        o.wasm = Some(wasm.clone());
         o.output = output.clone();
         let result = create_with(&o, |bytes, scene| {
             if change {
