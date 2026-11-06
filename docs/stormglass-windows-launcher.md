@@ -72,6 +72,29 @@ guides for provisioning and Save behavior. There is no playback before Start;
 saved gain/mute follow the existing runtime rules. Moving the game folder does
 not move user data.
 
+To provision a **new** shared controls/audio directory without editing ACLs in
+Explorer, build the optional helper and copy its executable beside the launcher:
+
+```powershell
+cargo build --locked -p orr_sample --features coop-defense-controls --bin orr_prepare_stormglass_settings
+& 'C:\Games\My Game\orr_prepare_stormglass_settings.exe' --directory 'C:\Users\me\StormglassSettings'
+& 'C:\Games\My Game\run-game.ps1' -ControlsDirectory 'C:\Users\me\StormglassSettings' -AudioSettingsDirectory 'C:\Users\me\StormglassSettings'
+```
+
+Use an existing parent directory and a new final name on a fixed local NTFS drive.
+The helper creates exactly one empty directory with current-user ownership and
+a protected ACL allowing only that user, SYSTEM and Administrators. Ancestors
+are checked without following reparse points and pinned against rename/deletion
+while creation uses the opened volume's GUID. Source/executable roots are refused.
+There is no cwd/environment fallback, recursive parent creation, settings-file
+write, automatic invocation, or modification of existing ACLs/data. If the name
+already exists, choose a new dedicated path or inspect it manually; the helper
+does not repair permissions. A rare post-creation verification failure explicitly
+reports that a directory was created and leaves it for inspection, without
+automatic deletion or retry. Runtime admission at launch remains authoritative,
+including the selected scene/audio-bank exclusions unknown to the helper.
+The helper supports Windows only and opens no game window or audio device.
+
 Fixed runtime/scene reparse points are refused. This convenience check is not a
 security boundary against modification of a trusted folder; native scene/bank
 admission remains unchanged. External scene/capture overrides and arbitrary

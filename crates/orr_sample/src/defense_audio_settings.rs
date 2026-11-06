@@ -467,6 +467,8 @@ pub(crate) use windows::tests::private_directory as windows_test_directory;
 pub(crate) use windows::tests::write_private as windows_test_write;
 #[cfg(windows)]
 pub(crate) use windows::{Loaded, Outcome, Store};
+#[cfg(all(windows, feature = "coop-defense-controls"))]
+pub(crate) use windows::prepare;
 
 #[cfg(any(target_os = "linux", windows))]
 pub(crate) fn install(ui: &mut crate::defense_ui::DefenseUi, loaded: Loaded) {

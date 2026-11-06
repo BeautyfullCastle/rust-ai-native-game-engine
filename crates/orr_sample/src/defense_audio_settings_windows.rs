@@ -11,6 +11,11 @@ use windows_sys::Win32::{Foundation::*, Storage::FileSystem::*};
 #[path = "defense_audio_settings_windows_security.rs"]
 mod security;
 use security::{Security, READ_SECURITY};
+#[cfg(feature = "coop-defense-controls")]
+#[path = "defense_audio_settings_windows_setup.rs"]
+mod setup;
+#[cfg(feature = "coop-defense-controls")]
+pub(crate) use setup::prepare;
 #[cfg(test)]
 const PRIMARY: &str = "audio-settings.json";
 #[cfg(test)]
