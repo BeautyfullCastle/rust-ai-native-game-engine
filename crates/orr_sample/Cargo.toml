@@ -11,6 +11,8 @@ default-run = "arena"
 workspace = true
 
 [features]
+# Explicit Linux audio preference storage, independent of game run journals.
+coop-defense-audio-settings = ["coop-defense-audio"]
 # Dedicated post-release artwork, selected only by the actual combat ledger.
 coop-defense-attack-clip = ["coop-defense-pixel-motion", "coop-defense-pixelfx"]
 # Optional generated character skin: visual idle/charge loop, never attack timing.

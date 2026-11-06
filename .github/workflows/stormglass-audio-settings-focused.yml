@@ -1,0 +1,55 @@
+name: stormglass-audio-settings focused Linux CI
+on:
+  push:
+    branches: [codex/stormglass-audio-preferences-20261106]
+permissions:
+  contents: read
+concurrency:
+  group: stormglass-audio-settings-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  audio-settings:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record exact source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir ci-evidence
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git rev-parse HEAD HEAD^{tree} | tee ci-evidence/source.txt
+          rustup toolchain install 1.99.1 --profile minimal --component clippy
+          rustup override set 1.99.1
+          rustc --version --verbose | tee ci-evidence/rustc.txt
+      - name: Verify preferences and preserved audio paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          features=coop-defense-audio-settings,coop-defense-attack-clip,coop-defense-run-save
+          cargo test --locked -p orr_sample --features "$features" --lib audio_settings -- --test-threads=1 2>&1 | tee ci-evidence/settings.log
+          grep -F 'test result: ok. 11 passed; 0 failed; 0 ignored;' ci-evidence/settings.log
+          cargo test --locked -p orr_sample --features "$features" --lib defense_ui::audio_ui_tests -- --test-threads=1 2>&1 | tee ci-evidence/ui.log
+          grep -F 'test result: ok. 7 passed; 0 failed; 0 ignored;' ci-evidence/ui.log
+          cargo test --locked -p orr_sample --features "$features" --lib defense_app::audio_tests -- --test-threads=1 2>&1 | tee ci-evidence/app.log
+          grep -F 'test result: ok. 11 passed; 0 failed; 0 ignored;' ci-evidence/app.log
+          cargo test --locked -p orr_sample --features "$features" --lib defense_audio::tests -- --test-threads=1 2>&1 | tee ci-evidence/pcm.log
+          grep -F 'test result: ok. 5 passed; 0 failed; 1 ignored;' ci-evidence/pcm.log
+          cargo clippy --locked -p orr_sample --features "$features" --lib --bin coop_defense -- -D warnings 2>&1 | tee ci-evidence/clippy.log
+          cargo check --locked -p orr_sample --features coop-defense --lib 2>&1 | tee ci-evidence/default-check.log
+      - name: Preserve results including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stormglass-audio-settings-${{ github.sha }}
+          path: ci-evidence
+          if-no-files-found: error
