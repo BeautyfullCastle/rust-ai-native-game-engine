@@ -1,6 +1,6 @@
 use super::*;
 use serde_json::{json, Value};
-fn fixture() -> (Value, BTreeMap<String, Vec<u8>>) {
+pub(super) fn fixture() -> (Value, BTreeMap<String, Vec<u8>>) {
     let mut records = Vec::new();
     let mut objects = BTreeMap::new();
     for (index, cue) in CUES.iter().enumerate() {
@@ -166,6 +166,12 @@ mod loader {
         assert_eq!(bank.records().len(), CUES.len());
         assert_eq!(bank.records()[9].cue(), "death");
         assert_eq!(&bank.records()[0].pcm_bytes()[8..], &[0, 224, 0, 32]);
+        let (manifest, objects) = fixture();
+        let expected = admit_value(&manifest, &objects).unwrap();
+        for (actual, expected) in bank.records().iter().zip(expected.records()) {
+            assert_eq!((actual.cue(), actual.frames(), actual.pcm_bytes()),
+                (expected.cue(), expected.frames(), expected.pcm_bytes()));
+        }
         assert!(load_bank(std::path::Path::new("relative")).is_err());
         assert!(load_bank(&dir.path().join("..")).is_err());
     }

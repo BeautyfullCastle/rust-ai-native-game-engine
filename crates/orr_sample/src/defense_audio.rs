@@ -93,7 +93,7 @@ pub(crate) struct Consumer<S: AudioOutput> {
     paused: bool,
     focused: bool,
     gain: f32,
-    #[cfg(any(test, feature = "coop-defense-run-save"))]
+    #[cfg(any(test, all(feature = "coop-defense-run-save", target_os = "linux")))]
     pub(crate) bindings: u64,
 }
 #[cfg(any(test, all(feature = "audio-native", not(target_arch = "wasm32"))))]
@@ -126,7 +126,7 @@ impl<S: AudioOutput> Consumer<S> {
             paused: true,
             focused: true,
             gain: 1.0,
-            #[cfg(any(test, feature = "coop-defense-run-save"))]
+            #[cfg(any(test, all(feature = "coop-defense-run-save", target_os = "linux")))]
             bindings: 0,
         })
     }
@@ -155,7 +155,7 @@ impl<S: AudioOutput> Consumer<S> {
             self.gain / MAX_VOICES as f32
         })
     }
-    #[cfg(any(test, feature = "coop-defense-run-save"))]
+    #[cfg(any(test, all(feature = "coop-defense-run-save", target_os = "linux")))]
     pub(crate) fn replace(&mut self, tick: u64, generation: u32) -> Result<(), String> {
         self.output.reset();
         self.paused = true;

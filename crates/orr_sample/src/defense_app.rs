@@ -26,7 +26,7 @@ pub const PIXELFX_LICENSES: &str = include_str!("../assets/stormglass-pixelfx/hi
 /// Generated-art provenance and upstream tool notices, not an artwork license.
 #[cfg(feature = "coop-defense-pixel-motion")]
 pub const PIXEL_MOTION_LICENSES: &str = include_str!("../assets/stormglass-pixel-motion/LICENSE.txt");
-pub const HELP:&str="Stormglass Foundry\ncoop_defense [--scene PATH] [--run-directory ABSOLUTE_PRIVATE_DIRECTORY (Linux run-save feature)] [--headless --ticks N [--demo] [--capture NEW.png]]\nSpace summon, click your unit then empty tile to move or identical role/tier to merge, U upgrade, I invest, P/Escape pause, Enter continue, R restart. AI partner is local, not online. Headless capture uses a software GPU. Optional coop-defense-audio: --audio-bank ABSOLUTE_BANK_DIRECTORY --audio off|auto|required; native output additionally needs audio-native. Starts muted; Linux bank loading only. Optional Linux/Windows coop-defense-audio-settings: --audio-settings-directory ABSOLUTE_PRIVATE_DIRECTORY; SAVE AUDIO remembers volume and mute.";
+pub const HELP:&str="Stormglass Foundry\ncoop_defense [--scene PATH] [--run-directory ABSOLUTE_PRIVATE_DIRECTORY (Linux run-save feature)] [--headless --ticks N [--demo] [--capture NEW.png]]\nSpace summon, click your unit then empty tile to move or identical role/tier to merge, U upgrade, I invest, P/Escape pause, Enter continue, R restart. AI partner is local, not online. Headless capture uses a software GPU. Optional coop-defense-audio: --audio-bank ABSOLUTE_BANK_DIRECTORY --audio off|auto|required; native output additionally needs audio-native. Starts muted; bank loading on Linux or fixed local Windows NTFS. Optional Linux/Windows coop-defense-audio-settings: --audio-settings-directory ABSOLUTE_PRIVATE_DIRECTORY; SAVE AUDIO remembers volume and mute.";
 #[derive(Debug, Default)]
 pub struct Options {
     #[cfg(all(feature = "coop-defense-audio-settings", any(target_os = "linux", windows)))]
@@ -132,7 +132,7 @@ fn prepare_audio(
     options: &Options,
 ) -> Result<Option<orr_package::coop_audio_admission::AdmittedBank>, String> {
     validate_audio_options(options)?;
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     {
         options
             .audio_bank
@@ -146,10 +146,10 @@ fn prepare_audio(
                     .collect()
             })
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", windows)))]
     {
         if options.audio_bank.is_some() {
-            Err("authored audio bank loading currently requires Linux".into())
+            Err("authored audio bank loading currently requires Linux or Windows".into())
         } else {
             Ok(None)
         }
@@ -1879,6 +1879,10 @@ mod run_save_acceptance_tests;
 #[cfg(all(test, feature = "coop-defense-audio"))]
 #[path = "defense_audio_app_tests.rs"]
 pub(crate) mod audio_tests;
+
+#[cfg(all(test, feature = "coop-defense-audio", windows))]
+#[path = "defense_windows_bank_tests.rs"]
+mod windows_bank_tests;
 
 #[cfg(test)]
 #[path = "defense_pending_board_tests.rs"]

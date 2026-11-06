@@ -7,7 +7,7 @@ use crate::{
         DefenseAudio,
     },
 };
-fn app() -> App {
+pub(super) fn app() -> App {
     App {
         audio: DefenseAudio::offline(&bank(), AudioMode::Required),
         #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
@@ -76,7 +76,7 @@ fn audio_settings_cli_and_direct_headless_api_refuse_without_filesystem_effects(
     assert!(prepare_audio_settings(&options).is_err());
     assert!(prepare_audio_settings(&Options::default()).unwrap().is_none());
 }
-fn frame(a: &mut App, events: Vec<egui::Event>, delta: f64) {
+pub(super) fn frame(a: &mut App, events: Vec<egui::Event>, delta: f64) {
     let mut output = a.process_input(
         egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -117,11 +117,11 @@ fn click(a: &mut App, x: f32, y: f32) {
         0.0,
     )
 }
-fn start(a: &mut App) {
+pub(super) fn start(a: &mut App) {
     frame(a, key(egui::Key::Enter), 0.0);
     assert!(a.ui.started);
 }
-fn summon(a: &mut App) {
+pub(super) fn summon(a: &mut App) {
     frame(a, key(egui::Key::Space), 1.0 / 60.0);
     for _ in 0..2 {
         frame(a, vec![], 1.0 / 60.0);
