@@ -26,7 +26,7 @@ use winit::{
     window::{Window, WindowId},
 };
 
-pub const HELP: &str = "room_escape --project PATH [--headless [--ticks 0..6000] [--hold left,right,up,down,interact] [--capture NEW.png]]\nWASD/arrows: world X/Z movement; E: interact; R: restart; Escape: quit.\nMouse left drag: orbit; right/middle drag: pan; wheel: zoom (view only).\nHeadless defaults to zero ticks; capture requires an available GPU adapter.";
+pub const HELP: &str = "room_escape --project PATH [--headless [--ticks 0..6000] [--hold left,right,up,down,interact] [--capture NEW.png] [--check-model-poses]]\nWASD/arrows: world X/Z movement; E: interact; R: restart; Escape: quit.\nMouse left drag: orbit; right/middle drag: pan; wheel: zoom (view only).\nHeadless defaults to zero ticks; capture requires an available GPU adapter.\n--check-model-poses validates every simulated model pose on the CPU, including tick zero.";
 
 #[derive(Debug)]
 pub struct Options {
@@ -35,6 +35,7 @@ pub struct Options {
     pub ticks: u32,
     pub held: RoomInput,
     pub capture: Option<PathBuf>,
+    pub check_model_poses: bool,
 }
 impl Options {
     pub fn parse(args: Vec<String>) -> Result<Self, String> {
@@ -43,6 +44,7 @@ impl Options {
         let mut ticks = 0;
         let mut held = RoomInput::default();
         let mut capture = None;
+        let mut check_model_poses = false;
         let mut seen = HashSet::new();
         let mut args = args.into_iter();
         while let Some(flag) = args.next() {
@@ -56,6 +58,7 @@ impl Options {
                     ))
                 }
                 "--headless" => headless = true,
+                "--check-model-poses" => check_model_poses = true,
                 "--ticks" => {
                     ticks = args
                         .next()
@@ -98,8 +101,15 @@ impl Options {
                 _ => return Err(format!("unknown option: {flag}\n{HELP}")),
             }
         }
-        if !headless && (seen.contains("--ticks") || seen.contains("--hold") || capture.is_some()) {
-            return Err("--ticks, --hold and --capture require --headless".into());
+        if !headless
+            && (seen.contains("--ticks")
+                || seen.contains("--hold")
+                || capture.is_some()
+                || check_model_poses)
+        {
+            return Err(
+                "--ticks, --hold, --capture and --check-model-poses require --headless".into(),
+            );
         }
         Ok(Self {
             project: project.ok_or("--project is required; no fallback room is created")?,
@@ -107,6 +117,7 @@ impl Options {
             ticks,
             held,
             capture,
+            check_model_poses,
         })
     }
 }
@@ -130,11 +141,12 @@ pub fn run(options: Options) -> Result<(), String> {
         support,
     )?;
     if options.headless {
-        headless(
+        headless_checked(
             &project,
             options.ticks,
             options.held,
             options.capture.as_deref(),
+            options.check_model_poses,
         )
     } else {
         run_window(project)
@@ -145,6 +157,16 @@ pub fn headless(
     ticks: u32,
     held: RoomInput,
     capture: Option<&Path>,
+) -> Result<(), String> {
+    headless_checked(project, ticks, held, capture, false)
+}
+
+fn headless_checked(
+    project: &PreparedProject,
+    ticks: u32,
+    held: RoomInput,
+    capture: Option<&Path>,
+    check_model_poses: bool,
 ) -> Result<(), String> {
     if ticks > 6000 {
         return Err("--ticks must be between 0 and 6000".into());
@@ -160,6 +182,27 @@ pub fn headless(
         project.models(),
         room_view::PresentationTime::default(),
     )?;
+    let check_poses = |sim: &Simulation<RoomEscapeV1>,
+                       #[cfg(feature = "room-character")]
+                       playback: &crate::room_character::PlaybackCursor|
+     -> Result<room_view::ModelPoseCounts, String> {
+        room_view::check_model_poses(
+            FrameView::of(sim.frame()),
+            project.scene().index(),
+            project.models(),
+            #[cfg(feature = "room-character")]
+            Some(playback),
+        )
+        .map_err(|error| format!("room model pose check at tick {}: {error}", sim.tick()))
+    };
+    let mut pose_counts = None;
+    if check_model_poses {
+        pose_counts = Some(check_poses(
+            &sim,
+            #[cfg(feature = "room-character")]
+            &character_playback,
+        )?);
+    }
     println!("room initial checksum: 0x{:016x}", sim.frame().checksum());
     for _ in 0..ticks {
         step(&mut sim, held);
@@ -171,6 +214,21 @@ pub fn headless(
             project.models(),
             room_view::PresentationTime::default(),
         )?;
+        if check_model_poses {
+            pose_counts = Some(check_poses(
+                &sim,
+                #[cfg(feature = "room-character")]
+                &character_playback,
+            )?);
+        }
+    }
+    if let Some(counts) = pose_counts {
+        println!(
+            "room model poses: {} frames checked; final static: {} animated: {}",
+            ticks + 1,
+            counts.static_models,
+            counts.animated_models
+        );
     }
     let run = sim.frame().singleton::<RoomRun>();
     println!(
@@ -669,6 +727,26 @@ mod tests {
             "left,right,up,interact",
         ]))
         .unwrap();
+        assert!(!options.check_model_poses);
+        assert!(Options::parse(args(&["--project", "x", "--check-model-poses"])).is_err());
+        assert!(Options::parse(args(&[
+            "--project",
+            "x",
+            "--headless",
+            "--check-model-poses",
+            "--check-model-poses"
+        ]))
+        .is_err());
+        assert!(
+            Options::parse(args(&[
+                "--project",
+                "x",
+                "--headless",
+                "--check-model-poses"
+            ]))
+            .unwrap()
+            .check_model_poses
+        );
         assert_eq!(options.ticks, 0);
         assert_eq!(options.held.move_x, 0);
         assert_eq!(options.held.move_z, -1);
@@ -704,6 +782,11 @@ mod tests {
 #[path = "room_character_app_tests.rs"]
 mod character_tests;
 
-#[cfg(all(test, feature = "room-progress", feature = "project-create", target_os = "linux"))]
+#[cfg(all(
+    test,
+    feature = "room-progress",
+    feature = "project-create",
+    target_os = "linux"
+))]
 #[path = "room_progress_app_tests.rs"]
 mod progress_tests;

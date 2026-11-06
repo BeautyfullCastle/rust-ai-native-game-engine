@@ -238,3 +238,7 @@ fn room_animated_project_admits_and_rechecks_selected_clip_without_writes() {
     assert!(room_project::PreparedProject::open(&fixture.root).is_err());
     assert_eq!(invalid_bytes, fixture.bytes());
 }
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[path = "room_pose_checks/room_animated_project.rs"]
+mod pose_checks;
