@@ -1474,3 +1474,32 @@ fn cli_windows_nonlocal_prefixes_reject() {
     assert!(!fixture.output.exists());
     fixture.assert_unchanged();
 }
+
+#[test]
+fn shared_file_recipe_matches_memory_retexture_without_publishing() {
+    let fixture = CliFixture::new();
+    let expected = retexture_model(&fixture.recipe, RECIPE_ID, |path| {
+        if path == SOURCE_PATH {
+            Ok(fixture.source.clone())
+        } else {
+            assert_eq!(path, TEXTURE_PATH);
+            Ok(fixture.png.clone())
+        }
+    })
+    .unwrap()
+    .to_bytes()
+    .unwrap();
+    let actual = authoring::transform_recipe(&fixture.input, RECIPE_ID).unwrap();
+    assert_eq!(actual, expected);
+    fixture.assert_unchanged();
+    assert!(!fixture.output.exists());
+}
+
+#[test]
+fn shared_file_recipe_rejects_corrupt_texture_without_publishing() {
+    let fixture = CliFixture::new();
+    fs::write(fixture.temp.join(TEXTURE_PATH), b"invalid PNG").unwrap();
+    assert!(authoring::transform_recipe(&fixture.input, RECIPE_ID).is_err());
+    assert!(!fixture.output.exists());
+    assert_eq!(fs::read(&fixture.input).unwrap(), fixture.recipe);
+}

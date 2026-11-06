@@ -16,6 +16,10 @@ pub mod static_assemble;
 #[path = "authoring/static_uv.rs"]
 pub mod static_uv;
 
+#[cfg(feature = "import")]
+#[path = "authoring/static_retexture.rs"]
+pub mod static_retexture;
+
 #[cfg(all(feature = "animation", feature = "import"))]
 #[path = "authoring/animation_sequence.rs"]
 pub mod animation_sequence;
