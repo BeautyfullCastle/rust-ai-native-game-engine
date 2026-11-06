@@ -15,6 +15,7 @@ use crate::{
 use egui::Ui;
 use std::{collections::BTreeMap, path::PathBuf};
 
+mod batch;
 mod fit;
 mod rotation;
 
@@ -27,6 +28,7 @@ pub(crate) struct CharacterClip {
 }
 
 pub struct ModelPanel {
+    batch: batch::Targets,
     pub blockout: crate::blockout_panel::BlockoutPanel,
     pub bindings: Option<Bindings>,
     pub project: String,
@@ -54,6 +56,7 @@ pub struct ModelPanel {
 impl Default for ModelPanel {
     fn default() -> Self {
         Self {
+            batch: Default::default(),
             blockout: crate::blockout_panel::BlockoutPanel::default(),
             bindings: None,
             project: ".".into(),
@@ -133,6 +136,7 @@ impl ModelPanel {
             .unwrap_or(std::path::Path::new("."))
             .display()
             .to_string();
+        self.batch = Default::default();
         self.bindings = Some(bindings);
         self.loaded = loaded;
         self.retire_character_playback();
@@ -318,6 +322,7 @@ impl ModelPanel {
             &loaded,
             self.reserved_scene_models,
         )?;
+        self.batch = Default::default();
         self.bindings = Some(candidate);
         self.loaded = loaded;
         self.retire_character_playback();
@@ -579,27 +584,16 @@ impl ModelPanel {
         Ok(())
     }
     pub fn assign(&mut self, editor: &Editor) -> Result<(), String> {
+        let guid = editor.selected_guid().ok_or("Select a persistent body GUID")?;
+        self.assign_targets(editor, &[guid])
+    }
+    /// Apply one verified model draft to explicit persistent body GUIDs as one
+    /// model-history edit. Every target and the complete result admit together.
+    pub fn assign_targets(&mut self, editor: &Editor, guids: &[orr_reflect::Guid]) -> Result<(), String> {
         if !self.editable(editor) {
-            return Err(
-                "Model assignment is disabled during Play, previews and remote sessions".into(),
-            );
+            return Err("Model assignment is disabled during Play, previews and remote sessions".into());
         }
-        let guid = editor
-            .selected_guid()
-            .ok_or("Select a persistent body GUID")?;
-        let row = editor
-            .rows()
-            .iter()
-            .find(|r| r.guid.as_ref() == Some(&guid))
-            .ok_or("Selected GUID no longer exists")?;
-        if !editor
-            .yard_frame()
-            .poses
-            .iter()
-            .any(|(entity, _)| *entity == row.entity)
-        {
-            return Err("Selected entity has no Yard3D body pose".into());
-        }
+        batch::validate_targets(editor, guids)?;
         let loaded = self.load_requested()?;
         if self
             .candidate
@@ -654,15 +648,12 @@ impl ModelPanel {
             }
         };
         let bindings = self.bindings.as_mut().ok_or("Open model bindings first")?;
-        if bindings.document().bindings.len() >= 256
-            && !bindings.document().bindings.contains_key(&guid.to_string())
-        {
-            return Err("Viewport model binding limit reached".into());
-        }
         let mut candidate = bindings.document().clone();
-        candidate.bindings.insert(guid.to_string(), binding.clone());
         let mut candidate_loaded = self.loaded.clone();
-        candidate_loaded.insert(guid.to_string(), loaded.clone());
+        for guid in guids {
+            candidate.bindings.insert(guid.to_string(), binding.clone());
+            candidate_loaded.insert(guid.to_string(), loaded.clone());
+        }
         candidate_loaded.retain(|guid, _| candidate.bindings.contains_key(guid));
         Self::validate_candidate(
             editor,
@@ -670,7 +661,7 @@ impl ModelPanel {
             &candidate_loaded,
             self.reserved_scene_models,
         )?;
-        bindings.assign_validated(std::slice::from_ref(&guid), &binding, &loaded)?;
+        bindings.assign_validated(guids, &binding, &loaded)?;
         self.loaded = candidate_loaded;
         self.retire_character_playback();
         Ok(())
@@ -1355,6 +1346,7 @@ impl ModelPanel {
         }
     }
     fn discard_bindings(&mut self) {
+        self.batch = Default::default();
         self.bindings = None;
         self.loaded.clear();
         self.retire_character_playback();
@@ -1475,6 +1467,7 @@ impl ModelPanel {
                         ui.horizontal(|ui| { ui.label("Local quaternion xyzw"); for value in &mut self.transform.rotation { ui.add(egui::DragValue::new(value).speed(0.01)); } });
                         let assign_label = if self.kind == ModelKind::Static { "Assign static model" } else { "Assign animated model" };
                         if ui.add_enabled(editor.selected_guid().is_some(), egui::Button::new(assign_label)).clicked() { self.error = self.assign(editor).err(); }
+                        self.show_batch(ui, editor);
                         ui.horizontal(|ui| {
                             if ui.button("Remove model").clicked() {
                                 self.error = self.remove(editor).err();

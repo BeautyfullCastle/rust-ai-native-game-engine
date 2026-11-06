@@ -346,3 +346,7 @@ mod rotation_export;
 #[cfg(target_os = "linux")]
 #[path = "room_model_admission/orphan_cleanup.rs"]
 mod orphan_cleanup;
+
+#[cfg(target_os = "linux")]
+#[path = "room_model_admission/batch.rs"]
+mod batch;

@@ -672,3 +672,7 @@ mod rotation;
 #[cfg(target_os = "linux")]
 #[path = "yard3d_animated/orphan_cleanup.rs"]
 mod orphan_cleanup;
+
+#[cfg(target_os = "linux")]
+#[path = "yard3d_animated/batch.rs"]
+mod batch;
