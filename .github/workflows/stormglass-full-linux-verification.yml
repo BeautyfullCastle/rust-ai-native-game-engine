@@ -1,0 +1,965 @@
+name: Stormglass native scene Linux verification
+
+# Verification-only branch. The workflow commit is separate from the pinned product.
+on:
+  push:
+    branches:
+      - su/stormglass-native-scene-verification-20261106
+permissions:
+  contents: read
+concurrency:
+  group: stormglass-native-scene-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  full-linux:
+    name: Exact native scene source 8315125f
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      WORKFLOW_SHA: ${{ github.workflow_sha }}
+      RUSTUP_TOOLCHAIN: '1.99.1'
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      PYTHONDONTWRITEBYTECODE: '1'
+      DEBIAN_FRONTEND: noninteractive
+      LC_ALL: C.UTF-8
+      TZ: UTC
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Write reviewed aggregate wrapper part one
+        run: |
+          set -euo pipefail
+          {
+            printf 'EVIDENCE=%s/stormglass-full-linux-%s-%s\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+            printf 'CARGO_TARGET_DIR=%s/stormglass-target-%s-%s\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+            printf 'CARGO_HOME=%s/stormglass-cargo-%s-%s\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+          } >> "$GITHUB_ENV"
+          cat > "$RUNNER_TEMP/stormglass-full-linux-harness.py" <<'PYHARNESS_PART1'
+          import datetime
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import shutil
+          import signal
+          import stat
+          import subprocess
+          import sys
+          import time
+          import traceback
+          
+          EXPECTED_SHA = '8315125ffeadc8c1bbde452ac1d5c2472234f058'
+          EXPECTED_TREE = '23a4852c5c3700425b4e7d3b8038cbfcfcfaea97'
+          WORKFLOW_PATH = '.github/workflows/stormglass-full-linux-verification.yml'
+          ROOT = Path(os.environ['GITHUB_WORKSPACE']) / 'product'
+          HARNESS_ROOT = Path(os.environ['GITHUB_WORKSPACE']) / 'workflow-source'
+          EVIDENCE = Path(os.environ['EVIDENCE'])
+          TARGET = Path(os.environ['CARGO_TARGET_DIR'])
+          COMMANDS = EVIDENCE / 'commands'
+          CHILD = None
+          
+          
+          def now():
+              return datetime.datetime.now(datetime.timezone.utc).isoformat()
+          
+          
+          def write(name, value):
+              path = EVIDENCE / name
+              path.parent.mkdir(parents=True, exist_ok=True)
+              temporary = path.with_name(path.name + '.tmp')
+              temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + '\n')
+              temporary.replace(path)
+          
+          
+          def read(name, fallback=None):
+              path = EVIDENCE / name
+              return json.loads(path.read_text()) if path.is_file() else fallback
+          
+          
+          def digest(path):
+              h = hashlib.sha256()
+              with path.open('rb') as stream:
+                  for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                      h.update(chunk)
+              return h.hexdigest()
+          
+          
+          def git(*args, root=ROOT):
+              return subprocess.check_output(['git', '-C', str(root), *args])
+          
+          
+          def snapshot(label):
+              report = {'utc': now(), 'expected_commit': EXPECTED_SHA,
+                        'expected_tree': EXPECTED_TREE, 'valid': False, 'files': [], 'errors': []}
+              try:
+                  report['commit'] = git('rev-parse', 'HEAD').decode().strip()
+                  report['tree'] = git('rev-parse', 'HEAD^{tree}').decode().strip()
+                  report['status'] = git('status', '--porcelain=v1', '-z', '--untracked-files=all').decode().split('\0')[:-1]
+                  if report['commit'] != EXPECTED_SHA or report['tree'] != EXPECTED_TREE:
+                      report['errors'].append('HEAD or tree does not equal the pinned product identity')
+                  if report['status']:
+                      report['errors'].append('Product checkout is not clean')
+                  entries = git('ls-tree', '-r', '-z', 'HEAD').split(b'\0')
+                  for entry in filter(None, entries):
+                      metadata, raw_path = entry.split(b'\t', 1)
+                      mode, kind, oid = metadata.decode().split()
+                      relative = raw_path.decode('utf-8')
+                      record = {'path': relative, 'git_mode': mode, 'git_blob': oid}
+                      try:
+                          path = ROOT / relative
+                          info = path.lstat()
+                          if kind != 'blob':
+                              raise ValueError('Submodules or non-file tracked objects are unsupported')
+                          if stat.S_ISLNK(info.st_mode):
+                              if mode != '120000':
+                                  raise ValueError('Unexpected symlink')
+                              data = os.fsencode(os.readlink(path))
+                              record['sha256'] = hashlib.sha256(data).hexdigest()
+                              actual_blob = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+                              record['bytes'] = len(data)
+                          else:
+                              if not stat.S_ISREG(info.st_mode):
+                                  raise ValueError('Tracked object is not a regular file')
+                              actual_mode = '100755' if info.st_mode & 0o111 else '100644'
+                              if mode != actual_mode:
+                                  raise ValueError('Tracked executable mode differs from Git')
+                              sha256 = hashlib.sha256()
+                              blob = hashlib.sha1(b'blob ' + str(info.st_size).encode() + b'\0')
+                              with path.open('rb') as stream:
+                                  for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                                      sha256.update(chunk)
+                                      blob.update(chunk)
+                              record['sha256'] = sha256.hexdigest()
+                              actual_blob = blob.hexdigest()
+                              record['bytes'] = info.st_size
+                          if actual_blob != oid:
+                              raise ValueError('Working bytes differ from the committed Git blob')
+                      except Exception as exc:
+                          record['error'] = str(exc)
+                          report['errors'].append(relative + ': ' + str(exc))
+                      report['files'].append(record)
+                  if not report['files']:
+                      report['errors'].append('No tracked files were hashed')
+                  report['valid'] = not report['errors']
+              except Exception as exc:
+                  report['errors'].append(type(exc).__name__ + ': ' + str(exc))
+              write('source-' + label + '.json', report)
+              return report
+          
+          
+          def interrupted(number, _frame):
+              if CHILD is not None and CHILD.poll() is None:
+                  os.killpg(CHILD.pid, signal.SIGTERM)
+              raise KeyboardInterrupt('Received signal ' + str(number))
+          
+          
+          def run_command(label, argv, cwd=None, env=None, timeout=7200):
+              import selectors
+              global CHILD
+              cwd = ROOT if cwd is None else cwd
+              env = {} if env is None else env
+              if set(env) - {'ORR_NATIVE_SCENE_WASM', 'ORR_NATIVE_SCENE_CREATOR_BIN', 'ORR_NATIVE_SCENE_PLAYER_BIN'}:
+                  raise ValueError('Unreviewed command environment override')
+              if not re.fullmatch('[a-z0-9-]+', label) or (COMMANDS / (label + '.json')).exists():
+                  raise ValueError('Invalid or reused command label; prior failures are immutable')
+              record = {'argv': argv, 'cwd': str(cwd), 'env_overrides': env,
+                        'started_utc': now(), 'exit_code': None, 'status': 'running',
+                        'timeout_seconds': timeout, 'log': 'commands/' + label + '.log',
+                        'stdout': 'commands/' + label + '.stdout', 'stderr': 'commands/' + label + '.stderr'}
+              write('commands/' + label + '.json', record)
+              exit_code = 125
+              started = time.monotonic()
+              try:
+                  with (EVIDENCE / record['log']).open('xb') as log, \
+                       (EVIDENCE / record['stdout']).open('xb') as stdout, \
+                       (EVIDENCE / record['stderr']).open('xb') as stderr:
+                      CHILD = subprocess.Popen(argv, cwd=cwd, env={**os.environ, **env},
+                                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                               start_new_session=True)
+                      with selectors.DefaultSelector() as selector:
+                          selector.register(CHILD.stdout, selectors.EVENT_READ, stdout)
+                          selector.register(CHILD.stderr, selectors.EVENT_READ, stderr)
+                          while selector.get_map():
+                              if time.monotonic() - started > timeout:
+                                  raise TimeoutError('Command exceeded bounded timeout')
+                              for key, _ in selector.select(timeout=0.2):
+                                  data = os.read(key.fileobj.fileno(), 65536)
+                                  if data:
+                                      key.data.write(data)
+                                      log.write(data)
+                                  else:
+                                      selector.unregister(key.fileobj)
+                                      key.fileobj.close()
+                      exit_code = CHILD.wait(timeout=max(1, timeout - (time.monotonic() - started)))
+                  record['status'] = 'passed' if exit_code == 0 else 'failed'
+              except BaseException as exc:
+                  record['error'] = type(exc).__name__ + ': ' + str(exc)
+                  record['status'] = 'interrupted' if isinstance(exc, KeyboardInterrupt) else 'failed'
+                  if CHILD is not None:
+                      # The leader may exit while descendants still hold stdout/stderr open.
+                      try:
+                          os.killpg(CHILD.pid, signal.SIGTERM)
+                      except ProcessLookupError:
+                          pass
+                      if CHILD.poll() is None:
+                          try:
+                              CHILD.wait(timeout=10)
+                          except subprocess.TimeoutExpired:
+                              os.killpg(CHILD.pid, signal.SIGKILL)
+                              CHILD.wait()
+                      # A reaped leader does not imply the process group has no descendants.
+                      try:
+                          os.killpg(CHILD.pid, signal.SIGKILL)
+                      except ProcessLookupError:
+                          pass
+                      exit_code = CHILD.returncode
+                      if exit_code == 0:
+                          exit_code = 125
+              finally:
+                  if CHILD is not None:
+                      for stream in (CHILD.stdout, CHILD.stderr):
+                          if stream is not None:
+                              stream.close()
+                  CHILD = None
+                  record.update(exit_code=exit_code, finished_utc=now())
+                  for field in ('log', 'stdout', 'stderr'):
+                      path = EVIDENCE / record[field]
+                      if path.is_file():
+                          record[field + '_sha256'] = digest(path)
+                  write('commands/' + label + '.json', record)
+                  (COMMANDS / (label + '.exit-status')).write_text(str(exit_code) + '\n')
+              print(label + ': ' + record['status'] + ', exit=' + str(exit_code), flush=True)
+              return exit_code
+          
+          
+          def initialize():
+              EVIDENCE.mkdir(parents=True, exist_ok=False)
+              COMMANDS.mkdir()
+              write('receipt.json', {
+                  'schema': 2, 'status': 'not_started', 'created_utc': now(),
+                  'workflow_commit': os.environ['WORKFLOW_SHA'], 'event_commit': os.environ['GITHUB_SHA'],
+                  'tested_commit': EXPECTED_SHA, 'tested_tree': EXPECTED_TREE,
+                  'workflow_is_separate_from_tested_commit': True,
+                  'command': ['bash', 'tools/check-linux-local.sh'],
+                  'execution_environment': 'GitHub-hosted ubuntu-24.04 Linux',
+                  'local_baseline': {'status': 'UNRUN, not passed', 'tree': EXPECTED_TREE,
+                                     'reason': 'Available local disk below the 2.5 GiB reserve'},
+                  'historical_evidence': 'No previous product result is evidence for this pinned source',
+                  'limitations': ['CPU/CLI only; no browser, window, physical input, hardware/GPU or audio certification',
+                                 'Not Windows, macOS or Android certification',
+                                 'Ignored tests are not passed unless separately explicitly executed',
+                                 'Abrupt runner loss can prevent final upload; missing evidence is never a pass'],
+              })
+          
+          
+          def original_preflight():
+              report = {'started_utc': now(), 'valid': False}
+              try:
+                  temp = Path(os.environ['RUNNER_TEMP']).resolve()
+                  for path in (EVIDENCE, TARGET, Path(os.environ['CARGO_HOME'])):
+                      if not path.resolve().is_relative_to(temp) or path.resolve() == temp:
+                          raise ValueError('Evidence and build paths must be descendants of runner.temp')
+                  if TARGET.exists():
+                      raise ValueError('Refusing a pre-existing build target directory')
+                  TARGET.mkdir(parents=True)
+                  Path(os.environ['CARGO_HOME']).mkdir(parents=True, exist_ok=False)
+                  report['target_initially_empty'] = True
+                  # Only explicit nonsecret fields are recorded. Never dump the environment.
+                  keys = ['GITHUB_REPOSITORY', 'GITHUB_REF', 'GITHUB_SHA', 'GITHUB_RUN_ID',
+                          'GITHUB_RUN_ATTEMPT', 'GITHUB_WORKFLOW_REF', 'WORKFLOW_SHA',
+                          'RUNNER_OS', 'RUNNER_ARCH', 'ImageOS', 'ImageVersion',
+                          'RUSTUP_TOOLCHAIN', 'CARGO_BUILD_JOBS', 'CARGO_INCREMENTAL',
+                          'CARGO_PROFILE_DEV_DEBUG', 'CARGO_TARGET_DIR', 'CARGO_HOME',
+                          'PYTHONDONTWRITEBYTECODE', 'LC_ALL', 'TZ']
+                  report['environment'] = {key: os.environ.get(key) for key in keys}
+                  forbidden = [key for key, value in os.environ.items() if value and (
+                      key.startswith(('CARGO_PROFILE_RELEASE_', 'CARGO_PROFILE_TEST_')) or
+                      (key.startswith('CARGO_PROFILE_DEV_') and key != 'CARGO_PROFILE_DEV_DEBUG') or
+                      key in ('RUSTFLAGS', 'RUSTDOCFLAGS', 'CARGO_ENCODED_RUSTFLAGS',
+                              'CARGO_ENCODED_RUSTDOCFLAGS', 'CARGO_BUILD_RUSTFLAGS',
+                              'RUSTC', 'RUSTDOC', 'RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER',
+                              'CARGO_BUILD_RUSTC', 'CARGO_BUILD_RUSTDOC', 'CARGO_BUILD_RUSTC_WRAPPER',
+                              'CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER', 'CARGO_BUILD_TARGET',
+                              'ORR_STATIC_MODEL_ASSEMBLE_BIN', 'ORR_LOCAL_POLICY_RECEIPTS') or
+                      (key.startswith('CARGO_TARGET_') and key.endswith('_RUSTFLAGS')))]
+                  if forbidden:
+                      raise ValueError('Unsupported inherited override names: ' + ', '.join(sorted(forbidden)))
+                  if os.environ['GITHUB_REF'] != 'refs/heads/su/stormglass-native-scene-verification-20261106':
+                      raise ValueError('Unexpected workflow branch')
+                  workflow_head = git('rev-parse', 'HEAD', root=HARNESS_ROOT).decode().strip()
+                  if workflow_head != os.environ['WORKFLOW_SHA'] or workflow_head != os.environ['GITHUB_SHA']:
+                      raise ValueError('Workflow checkout does not match this push workflow/event commit')
+                  if git('status', '--porcelain=v1', root=HARNESS_ROOT):
+                      raise ValueError('Workflow checkout is not clean')
+                  workflow = HARNESS_ROOT / WORKFLOW_PATH
+                  shutil.copyfile(workflow, EVIDENCE / 'executed-workflow.yml')
+                  report['workflow_commit'] = workflow_head
+                  report['workflow_tree'] = git('rev-parse', 'HEAD^{tree}', root=HARNESS_ROOT).decode().strip()
+                  report['workflow_sha256'] = digest(workflow)
+                  report['product_source'] = snapshot('before')['valid']
+                  if not report['product_source']:
+                      raise ValueError('Pre-source fence failed')
+                  report['release_profile'] = 'Repository profile unchanged; no release environment overrides'
+                  report['dev_clippy_debug_info'] = '0 (CARGO_PROFILE_DEV_DEBUG); no release-profile change'
+                  report['valid'] = True
+              except Exception as exc:
+                  report['error'] = type(exc).__name__ + ': ' + str(exc)
+              write('preflight.json', report)
+              return 0 if report['valid'] else 1
+          
+          
+          def original_setup():
+              commands = [
+                  ('rustup-install', ['rustup', 'toolchain', 'install', '1.99.1', '--profile', 'minimal', '--component', 'rustfmt', '--component', 'clippy']),
+                  ('apt-update', ['sudo', 'apt-get', 'update', '-q']),
+                  ('apt-install', ['sudo', 'apt-get', 'install', '-y', '-q', 'build-essential', 'pkg-config',
+                                   'libasound2-dev', 'libudev-dev', 'libx11-dev', 'libxkbcommon-dev',
+                                   'libwayland-dev', 'libegl1-mesa-dev', 'libgl1-mesa-dev']),
+                  ('rustc-version', ['rustc', '--version', '--verbose']),
+                  ('cargo-version', ['cargo', '--version']),
+                  ('rustfmt-version', ['rustfmt', '--version']),
+                  ('clippy-version', ['cargo', 'clippy', '--version']),
+                  ('rust-components', ['rustup', 'component', 'list', '--installed', '--toolchain', '1.99.1']),
+                  ('python-version', ['python3', '--version']),
+                  ('compiler-version', ['cc', '--version']),
+                  ('pkg-config-version', ['pkg-config', '--version']),
+                  ('system', ['uname', '-a']),
+                  ('disk-before', ['df', '-h', str(TARGET)]),
+                  ('memory-before', ['free', '-h']),
+                  ('apt-versions', ['dpkg-query', '-W', 'build-essential', 'pkg-config', 'libasound2-dev',
+                                    'libudev-dev', 'libx11-dev', 'libxkbcommon-dev', 'libwayland-dev',
+                                    'libegl1-mesa-dev', 'libgl1-mesa-dev']),
+              ]
+              for label, argv in commands:
+                  code = run_command(label, argv)
+                  if code != 0:
+                      write('setup.json', {'valid': False, 'failed_command': label, 'exit_code': code})
+                      return 1
+              rust = (COMMANDS / 'rustc-version.log').read_text()
+              valid = bool(re.search(r'^release: 1\.99\.1$', rust, re.M))
+              write('setup.json', {'valid': valid, 'pinned_rust': '1.99.1'})
+              return 0 if valid else 1
+          
+          
+          def verify():
+              if not read('preflight.json', {}).get('valid') or not read('setup.json', {}).get('valid'):
+                  raise ValueError('Preflight and setup must both pass before the original gate starts')
+              validate_guard_files()
+              write('gate-start.json', {'utc': now(), 'unix_seconds': time.time(),
+                    'preexisting_assemble_json': sorted(str(path) for path in Path('/tmp').glob('orr-linux-assemble.*.jsonl'))})
+              try:
+                  return run_command('linux-aggregate', ['bash', 'tools/check-linux-local.sh'])
+              finally:
+                  snapshot('after-gate')
+          
+          
+          PYHARNESS_PART1
+
+      - name: Finish reviewed wrapper and initialize failure receipt
+        run: |
+          set -euo pipefail
+          cat >> "$RUNNER_TEMP/stormglass-full-linux-harness.py" <<'PYHARNESS_PART2'
+          def collect_assemble(gate):
+              report = {'status': 'not_emitted', 'valid': False}
+              log_path = COMMANDS / 'linux-aggregate.log'
+              if not log_path.is_file():
+                  report['reason'] = 'Aggregate did not start'
+                  return report
+              log = log_path.read_text(errors='replace')
+              markers = re.findall(r'^Fresh assemble build messages: (\S+)\s*$', log, re.M)
+              if not markers:
+                  report['reason'] = 'Aggregate stopped before the assemble build marker'
+                  return report
+              if len(markers) != 1:
+                  raise ValueError('Expected one actual assemble build marker, got ' + str(len(markers)))
+              source = Path(markers[0])
+              start = read('gate-start.json', {})
+              if not re.fullmatch(r'/tmp/orr-linux-assemble\.[A-Za-z0-9]{8}\.jsonl', str(source)):
+                  raise ValueError('Assemble JSON marker is outside the original script mktemp contract')
+              if str(source) in start.get('preexisting_assemble_json', []):
+                  raise ValueError('Assemble JSON existed before this aggregate run')
+              info = source.lstat()
+              if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mtime < start['unix_seconds'] - 2:
+                  raise ValueError('Assemble JSON is not a newly emitted regular file owned by this runner')
+              directory = EVIDENCE / 'assemble'
+              directory.mkdir(exist_ok=True)
+              copied = directory / 'build.jsonl'
+              shutil.copyfile(source, copied)
+              report.update(status='build_json_preserved', emitted_json_path=str(source),
+                            build_json_sha256=digest(copied), build_json_bytes=copied.stat().st_size)
+              if digest(source) != report['build_json_sha256']:
+                  raise ValueError('Assemble JSON changed during collection')
+              # Persist the actual JSON even if the compile failed or emitted incomplete JSON.
+              write('assemble.json', report)
+              records = [json.loads(line) for line in copied.read_text().splitlines() if line.strip()]
+              artifacts = [item for item in records if item.get('reason') == 'compiler-artifact'
+                           and item.get('target', {}).get('name') == 'static_model_assemble'
+                           and item.get('executable')]
+              if not artifacts and gate.get('exit_code') != 0:
+                  report['reason'] = 'Build JSON was emitted but the assemble executable was not produced'
+                  return report
+              if len(artifacts) != 1:
+                  raise ValueError('Expected exactly one emitted assemble executable')
+              artifact = artifacts[0]
+              if artifact['target'].get('kind') != ['example'] or artifact.get('profile', {}).get('test') is not False:
+                  raise ValueError('Emitted artifact is not the production example')
+              if Path(artifact.get('manifest_path', '')).resolve() != ROOT / 'crates/orr_model/Cargo.toml':
+                  raise ValueError('Assemble manifest is not from the pinned product checkout')
+              if Path(artifact['target'].get('src_path', '')).resolve() != ROOT / 'crates/orr_model/examples/static_model_assemble.rs':
+                  raise ValueError('Assemble target source is not from the pinned product checkout')
+              executable = Path(artifact['executable'])
+              executable_info = executable.lstat()
+              if not executable.is_absolute() or not stat.S_ISREG(executable_info.st_mode):
+                  raise ValueError('Emitted assemble path is not an absolute regular file')
+              if not executable.resolve().is_relative_to((TARGET / 'release/examples').resolve()):
+                  raise ValueError('Emitted assemble path is outside this run’s fresh release/examples target')
+              if not executable_info.st_mode & 0o111:
+                  raise ValueError('Emitted assemble file is not executable')
+              copied_executable = directory / 'static_model_assemble'
+              shutil.copyfile(executable, copied_executable)
+              copied_executable.chmod(0o755)
+              sha = digest(copied_executable)
+              if sha != digest(executable):
+                  raise ValueError('Assemble executable changed during collection')
+              finished = [item for item in records if item.get('reason') == 'build-finished']
+              completed_build = len(finished) == 1 and finished[0].get('success') is True
+              report.update(status='preserved' if completed_build else 'preserved_incomplete_build',
+                            valid=completed_build, build_finished=finished, executable_path=str(executable),
+                            executable_sha256=sha, executable_bytes=copied_executable.stat().st_size,
+                            executable_mode=oct(stat.S_IMODE(executable_info.st_mode)),
+                            cargo_compiler_artifact=artifact)
+              return report
+          
+          
+          def finalize():
+              receipt = read('receipt.json', {})
+              errors = []
+              after = snapshot('after')
+              before = read('source-before.json', {})
+              source_valid = bool(before.get('valid') and after.get('valid') and before.get('files') == after.get('files'))
+              if not source_valid:
+                  errors.append('Pre/post product identity, cleanliness, or tracked-file SHA256 fence failed or is missing')
+              gate = read('commands/linux-aggregate.json', {'status': 'not_started', 'exit_code': None})
+              if gate.get('exit_code') != 0 or gate.get('status') != 'passed':
+                  errors.append('Original aggregate did not finish with exit code 0')
+              for name in ('preflight', 'setup'):
+                  if not read(name + '.json', {}).get('valid'):
+                      errors.append(name + ' failed or did not finish')
+              try:
+                  assemble = collect_assemble(gate)
+                  if not assemble['valid']:
+                      errors.append('Actual emitted assemble JSON/executable evidence is incomplete')
+              except Exception as exc:
+                  assemble = read('assemble.json', {})
+                  assemble.update(valid=False, error=type(exc).__name__ + ': ' + str(exc))
+                  errors.append('Assemble collection failed: ' + str(exc))
+              write('assemble.json', assemble)
+              log_path = COMMANDS / 'linux-aggregate.log'
+              log = log_path.read_text(errors='replace') if log_path.is_file() else ''
+              fmt = [int(value) for value in re.findall(r'^Advisory rustfmt exit status: (\d+)', log, re.M)]
+              if not fmt or any(value not in (0, 1) for value in fmt) or len(set(fmt)) != 1:
+                  errors.append('Rustfmt advisory status is missing, inconsistent, or outside allowed 0/1')
+              if gate.get('exit_code') == 0 and 'Linux-local build/test baseline passed. Report any additional native/UI checks separately.' not in log:
+                  errors.append('Original aggregate completion marker is missing')
+              receipt.update(finished_utc=now(), status='passed' if not errors else 'failed',
+                             gate=gate, source_fence_valid=source_valid, rustfmt_advisory_exit_codes=fmt,
+                             assemble=assemble, errors=errors,
+                             hosted_result_label='Hosted Linux aggregate; this exact product local aggregate remains UNRUN')
+              write('receipt.json', receipt)
+              # Final artifact inventory covers all evidence files except this inventory itself.
+              inventory = []
+              for path in sorted(EVIDENCE.rglob('*')):
+                  if path.is_file() and path.name != 'evidence-sha256.json':
+                      inventory.append({'path': str(path.relative_to(EVIDENCE)), 'bytes': path.stat().st_size, 'sha256': digest(path)})
+              write('evidence-sha256.json', inventory)
+              print(json.dumps({'status': receipt['status'], 'tested_commit': EXPECTED_SHA,
+                                'workflow_commit': receipt.get('workflow_commit'), 'errors': errors}, indent=2))
+              return 0 if not errors else 1
+          
+          
+          GUARD_FILES = {'tools/check-linux-local.sh': '313168bcb7fb86396352cf4ff4228cd6f62a1aceae0f3996f5bf5626c6aef790', 'crates/orr_package/Cargo.toml': 'bcc606387320d57231290de00643f3624c8e8ab1ba45d9c0d9da9c0fdae85cf3', 'Cargo.lock': '85e45b55c4e66645be0e2c491594442b5ed4e5ef126c71a0d92f92cc06b4737b', 'crates/orr_package/src/main.rs': 'd4e3b6dacefa70d4449515984f841a2feb052ccc113c9e623f4cda92f6779391', 'crates/orr_package/src/coop_web_authoring.rs': 'e83883dd63d48b896e9df70ac22cb25c13f1fdfc820c8ab06772dcfea2030666', 'crates/orr_package/src/coop_web_authoring/native_scene.rs': '23b58b758d5c7e721dba349677a49331ece3b8120021825800d27cd622d1b39a', 'crates/orr_package/src/coop_web_authoring/native_scene_tests.rs': '1f56c20866e119c6e400e797382debaabc4453cd1554c9012e8cebd2a5948b4c', 'crates/orr_package/src/coop_web_authoring/scene.rs': '0041ccfaeaac29231a9ea05dfa04196f87fec009c293b9c63ba21236bad9a8ef', 'crates/orr_package/src/coop_web_authoring/scene_tests.rs': '7b246baf0fe2e95b912dcd56466e4b4c36af7f36ab7ae4f55293ffefe1c43ea6', 'crates/orr_package/src/coop_web_authoring/publish.rs': '4e7018979a5ae66d896c8eacf95215457364d8aa9d1b01e0eeb3e54d0af84ac4', 'crates/orr_package/tests/native_scene_cli.rs': 'f3ed0af37ed4418eb134fae4ae5e75f99ee14f512c8dfc3232569b2ee11eaca4', 'crates/orr_sample/src/defense_app.rs': '024c49239b65d820c0471793348321de6a432976971abcba5a55c89255cc3771', 'crates/orr_sample/src/defense_app/native_scene_tests.rs': '1432ca34a21ce1d8361b0087a93e354790fc5e476dba5f3d30bc54dc1f18cc6a', 'crates/orr_coop_defense_web/Cargo.toml': '9f99050686b32bbfd8eee24dcbeebbf8f6e71a579cae8445e6b564c5689a1a7b'}
+          
+          def validate_guard_files():
+              for relative, expected in GUARD_FILES.items():
+                  if digest(ROOT / relative) != expected:
+                      raise ValueError('Reviewed gate/source bytes differ: ' + relative)
+          
+          def forbidden_environment(environment):
+              allowed_cargo = {'CARGO_HOME', 'CARGO_TARGET_DIR', 'CARGO_BUILD_JOBS', 'CARGO_INCREMENTAL', 'CARGO_PROFILE_DEV_DEBUG'}
+              allowed_rust = {'RUSTUP_TOOLCHAIN', 'RUSTUP_HOME'}
+              native = {'CC', 'CXX', 'AR', 'CFLAGS', 'CXXFLAGS', 'CPPFLAGS', 'LDFLAGS', 'LD',
+                        'HOST_CC', 'HOST_CXX', 'HOST_AR', 'HOST_CFLAGS', 'HOST_CXXFLAGS', 'HOST_LDFLAGS',
+                        'LD_PRELOAD', 'LD_LIBRARY_PATH', 'LIBRARY_PATH', 'COMPILER_PATH', 'CPATH', 'C_INCLUDE_PATH', 'CPLUS_INCLUDE_PATH'}
+              return sorted(k for k in environment if (
+                  k.startswith('ORR_') or k.startswith('CARGO_') and k not in allowed_cargo or
+                  k.startswith('RUST') and k not in allowed_rust or k.startswith('NODE_') or k in native or
+                  k.startswith(('CC_', 'CXX_', 'AR_', 'CFLAGS_', 'CXXFLAGS_', 'LDFLAGS_', 'PKG_CONFIG_'))))
+          
+          def hardened_preflight():
+              result = original_preflight()
+              report = read('preflight.json', {})
+              try:
+                  if result:
+                      raise ValueError('Original preflight failed')
+                  if os.environ.get('GITHUB_REPOSITORY') != 'BeautyfullCastle/rust-ai-native-game-engine':
+                      raise ValueError('Unexpected repository')
+                  if os.environ.get('WORKFLOW_SHA') == EXPECTED_SHA:
+                      raise ValueError('Workflow must be separate from tested product commit')
+                  inherited = forbidden_environment(os.environ)
+                  if inherited:
+                      raise ValueError('Unsupported inherited override names: ' + ', '.join(sorted(inherited)))
+                  if not all(Path(os.environ[k]).is_absolute() for k in ('CARGO_HOME', 'CARGO_TARGET_DIR')):
+                      raise ValueError('Cargo home/target paths must be absolute')
+                  validate_guard_files()
+                  # Checked-out workflow must contain these exact runtime bytes, not an arbitrary helper.
+                  import ast
+                  workflow = (HARNESS_ROOT / WORKFLOW_PATH).read_text()
+                  embedded = []
+                  for tag in ('PYHARNESS_PART1', 'PYHARNESS_PART2'):
+                      embedded.extend(workflow.split("<<'" + tag + "'\n", 1)[1].split('          ' + tag + '\n', 1)[0].splitlines())
+                  code = '\n'.join(line[10:] for line in embedded) + '\n'
+                  if ast.dump(ast.parse(code)) != ast.dump(ast.parse(Path(__file__).read_text())):
+                      raise ValueError('Executed aggregate wrapper does not match workflow bytes')
+                  report['wrapper_sha256'] = digest(Path(__file__))
+                  report['guard_files'] = GUARD_FILES
+                  report['valid'] = True
+              except Exception as exc:
+                  report.update(valid=False, hardening_error=type(exc).__name__ + ': ' + str(exc))
+              write('preflight.json', report)
+              return 0 if report['valid'] else 1
+          
+          def extended_setup():
+              if original_setup():
+                  return 1
+              commands = [
+                  ('wasm-target-install', ['rustup', 'target', 'add', 'wasm32-unknown-unknown', '--toolchain', '1.99.1']),
+                  ('wasm-targets', ['rustup', 'target', 'list', '--installed', '--toolchain', '1.99.1']),
+                  ('node-version', ['node', '--version']),
+              ]
+              for label, argv in commands:
+                  code = run_command(label, argv)
+                  if code:
+                      write('setup.json', {'valid': False, 'failed_command': label, 'exit_code': code})
+                      return 1
+              valid = 'wasm32-unknown-unknown' in (COMMANDS / 'wasm-targets.stdout').read_text().splitlines()
+              write('setup.json', {'valid': valid, 'pinned_rust': '1.99.1', 'wasm_target': 'wasm32-unknown-unknown',
+                                  'node_version': (COMMANDS / 'node-version.stdout').read_text().strip()})
+              return 0 if valid else 1
+          
+          preflight = hardened_preflight
+          setup = extended_setup
+          
+          if __name__ == '__main__':
+              signal.signal(signal.SIGTERM, interrupted)
+              signal.signal(signal.SIGINT, interrupted)
+              operation = sys.argv[1]
+              try:
+                  code = {'initialize': initialize, 'preflight': preflight, 'setup': setup,
+                          'verify': verify, 'finalize': finalize}[operation]()
+              except BaseException:
+                  error = traceback.format_exc()
+                  if EVIDENCE.is_dir():
+                      write(operation + '-exception.json', {'utc': now(), 'traceback': error})
+                      if operation == 'finalize':
+                          receipt = read('receipt.json', {})
+                          receipt.update(status='failed', finalization_error=error, finished_utc=now())
+                          write('receipt.json', receipt)
+                  print(error, file=sys.stderr)
+                  code = 1
+              sys.exit(0 if code is None or code == 0 else 1)
+          PYHARNESS_PART2
+          python3 -B "$RUNNER_TEMP/stormglass-full-linux-harness.py" initialize
+          cp "$RUNNER_TEMP/stormglass-full-linux-harness.py" "$EVIDENCE/harness.py"
+
+      - name: Check out exact workflow commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: workflow-source
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: .github/workflows/stormglass-full-linux-verification.yml
+          sparse-checkout-cone-mode: false
+
+      - name: Check out frozen product
+        uses: actions/checkout@v4
+        with:
+          ref: 8315125ffeadc8c1bbde452ac1d5c2472234f058
+          path: product
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Fence exact source and workflow identity
+        run: python3 -B "$RUNNER_TEMP/stormglass-full-linux-harness.py" preflight
+
+      - name: Install pinned official toolchain and record environment
+        run: python3 -B "$RUNNER_TEMP/stormglass-full-linux-harness.py" setup
+
+      - name: Run unchanged full Linux aggregate
+        run: python3 -B "$RUNNER_TEMP/stormglass-full-linux-harness.py" verify
+
+      - name: Write native scene focused wrapper even after aggregate failure
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/stormglass-focused.py" <<'PYFOCUSED_PART1'
+          """Fresh exact-source native scene gates. No replacement parser/game/runtime logic."""
+          import importlib.util
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import shutil
+          import signal
+          import stat
+          import sys
+          import traceback
+          
+          PACKAGE_TESTS = ['coop_audio_admission::tests::closed_record_identity_integer_fields_and_budgets', 'coop_audio_admission::tests::excessive_nesting_and_trailing_json_are_rejected', 'coop_audio_admission::tests::late_pcm_failure_hash_header_and_peak_cannot_publish', 'coop_audio_admission::tests::ordered_immutable_admission_preserves_samples_and_input_policy', 'coop_audio_admission::tests::strict_json_unknown_duplicates_nonfinite_and_size_refused', 'coop_web_authoring::cli_tests::attack_timing_is_optional_and_does_not_require_clip_settings', 'coop_web_authoring::cli_tests::attack_timing_rejects_duplicate_missing_extra_and_malformed_arguments', 'coop_web_authoring::cli_tests::attack_timing_requires_attack_frames_and_is_not_a_compose_flag', 'coop_web_authoring::cli_tests::attack_timing_supports_options_and_any_flag_order', 'coop_web_authoring::copy_assets::tests::all_source_inputs_are_admitted_before_output_creation_or_replacement', 'coop_web_authoring::copy_assets::tests::changed_destination_after_preflight_is_never_replaced', 'coop_web_authoring::copy_assets::tests::existing_regular_target_changed_after_preflight_is_preserved', 'coop_web_authoring::copy_assets::tests::explicit_wasm_copies_exact_bytes_and_rejects_source_or_destination_symlinks', 'coop_web_authoring::copy_assets::tests::failure_after_replace_reports_visible_uncertain_batch_without_rollback', 'coop_web_authoring::copy_assets::tests::injected_midbatch_failure_reports_partial_publication_and_preserves_foreign_files', 'coop_web_authoring::copy_assets::tests::late_invalid_destination_is_rejected_before_any_write', 'coop_web_authoring::copy_assets::tests::overlaps_symlink_ancestors_and_wasm_output_sources_are_refused', 'coop_web_authoring::copy_assets::tests::oversized_input_and_deep_assets_fail_before_any_output', 'coop_web_authoring::copy_assets::tests::repeat_copy_overwrites_only_intended_bytes_and_retains_empty_directories', 'coop_web_authoring::manifest::tests::ascii_sorted_encoding_and_numeric_semantics', 'coop_web_authoring::manifest::tests::closed_role_fields_paths_and_boolean_numbers', 'coop_web_authoring::manifest::tests::compose_receipts_preserve_input_order_and_refuse_duplicate_roles', 'coop_web_authoring::manifest::tests::create_attack_timing_admits_independent_inclusive_durations', 'coop_web_authoring::manifest::tests::create_attack_timing_preserves_defaults_options_and_other_clips', 'coop_web_authoring::manifest::tests::create_attack_timing_rejects_missing_attack_and_invalid_each_duration', 'coop_web_authoring::manifest::tests::create_omitted_timing_preserves_configured_attack_bytes', 'coop_web_authoring::manifest::tests::create_preserves_omitted_defaults_and_configured_frame_order', 'coop_web_authoring::manifest::tests::duplicate_keys_and_nonfinite_json_fail_before_admission', 'coop_web_authoring::manifest::tests::fractional_bounds_attack_timing_and_per_frame_pivots', 'coop_web_authoring::native_scene::tests::native_and_web_authoring_share_exact_bytes_and_omission', 'coop_web_authoring::native_scene::tests::native_cannot_accept_wasm_and_web_cannot_omit_it', 'coop_web_authoring::native_scene::tests::native_publication_is_no_replace_and_refuses_symlink_ancestry', 'coop_web_authoring::native_scene::tests::native_receipt_requires_real_strict_admission', 'coop_web_authoring::offline::audio::tests::closed_record_identity_integer_fields_and_budgets', 'coop_web_authoring::offline::audio::tests::late_pcm_failure_hash_header_and_peak_cannot_publish', 'coop_web_authoring::offline::audio::tests::preserved_unknown_fields_order_and_script_safe_embedding', 'coop_web_authoring::offline::audio::tests::shared_admission_and_embedding_agree_without_reserializing_numbers', 'coop_web_authoring::offline::audio::tests::strict_json_unknown_duplicates_nonfinite_and_size_refused', 'coop_web_authoring::offline::bundle::tests::all_keyword_occurrences_and_script_closing_fail_closed', 'coop_web_authoring::offline::bundle::tests::exact_closed_graph_transform_and_order', 'coop_web_authoring::offline::bundle::tests::exact_edges_utf8_and_line_start_exports', 'coop_web_authoring::offline::html_template::tests::anchors_must_be_real_tags_not_comments_or_raw_text', 'coop_web_authoring::offline::html_template::tests::comments_and_only_script_style_raw_text_are_not_scanned_as_tags', 'coop_web_authoring::offline::html_template::tests::ids_are_case_sensitive_but_attribute_names_fold_and_entities_decode', 'coop_web_authoring::offline::html_template::tests::malformed_empty_nul_and_missing_values_fail_closed', 'coop_web_authoring::offline::html_template::tests::real_template_and_render_preserve_source_outside_exact_anchors', 'coop_web_authoring::offline::html_template::tests::rendering_never_replaces_an_anchor_inside_generated_content', 'coop_web_authoring::offline::tests::bounded_snapshots_recheck_and_budget_count', 'coop_web_authoring::offline::tests::embedded_json_and_binary_preserve_raw_bytes_without_script_breakout', 'coop_web_authoring::offline::tests::explicit_output_and_closed_options_required', 'coop_web_authoring::offline::tests::fixed_build_snapshot_opaque_bytes_and_changed_source_refused', 'coop_web_authoring::png::tests::bounded_bytes_and_unknown_ancillary_contract', 'coop_web_authoring::png::tests::envelope_rejects_apng_crc_trailing_unknown_critical_and_bad_order', 'coop_web_authoring::png::tests::valid_chunk_crc_does_not_substitute_for_pixel_decode', 'coop_web_authoring::png::tests::valid_color_variants_fully_decode_without_changing_source', 'coop_web_authoring::png::tests::web_dimensions_do_not_inherit_the_sprite_policy', 'coop_web_authoring::publish::tests::atomic_output_preserves_existing_and_mutated_stage', 'coop_web_authoring::publish::tests::collision_and_postpublish_uncertainty_do_not_rollback', 'coop_web_authoring::publish::tests::offline_size_policy_does_not_relax_existing_manifest_publisher', 'coop_web_authoring::recipe::tests::canonical_relative_paths_and_kind_must_match', 'coop_web_authoring::recipe::tests::closed_schema_types_duplicates_and_bounds_fail_without_output', 'coop_web_authoring::recipe::tests::explicit_flags_only_and_bounded_arguments', 'coop_web_authoring::recipe::tests::minimal_all_options_and_original_bytes_recheck', 'coop_web_authoring::recipe::tests::moved_tree_resolves_from_recipe_not_current_directory', 'coop_web_authoring::recipe::tests::symlink_recipe_directory_leaf_and_output_parent_refused', 'coop_web_authoring::sampler::tests::bounded_runner_missing_failure_timeout_and_pipe_caps', 'coop_web_authoring::sampler::tests::exact_receipt_gate_rejects_extra_duplicate_missing_wrong_hash', 'coop_web_authoring::sampler::tests::image_recheck_detects_changed_snapshot_and_embedded_sources_are_exact', 'coop_web_authoring::scene::tests::all_eight_options_emit_health_after_existing_fields', 'coop_web_authoring::scene::tests::composition_defaults_counterparts_and_all_ten_options', 'coop_web_authoring::scene::tests::composition_rejects_malformed_duplicate_oversized_and_out_of_bounds', 'coop_web_authoring::scene::tests::enemy_health_is_optional_bounded_and_uses_existing_integer_grammar', 'coop_web_authoring::scene::tests::exact_default_yaml_and_pacing_omission', 'coop_web_authoring::scene::tests::existing_output_refused_before_any_gate', 'coop_web_authoring::scene::tests::explicit_wave_pairs_emit_exact_array_without_changing_omitted_bytes', 'coop_web_authoring::scene::tests::failed_gate_and_changed_original_wasm_never_publish', 'coop_web_authoring::scene::tests::malformed_or_duplicate_wave_pairs_are_usage_errors', 'coop_web_authoring::scene::tests::receipt_requires_exact_fields_types_hashes_and_checksum', 'coop_web_authoring::scene::tests::strict_options_bounds_and_decimal_compatibility', 'preview::tests::planners_reject_oversized_candidate_before_any_publication', 'project_identity::tests::canonical_roundtrip', 'project_identity::tests::fork_is_explicit_distinct_validated_and_pure', 'project_identity::tests::rejects_duplicate_unknown_missing_null_and_invalid_types', 'project_identity::tests::rejects_noncanonical_and_unsafe_identities', 'project_identity::tests::rejects_unsupported_schema_and_profiles', 'tests::ancestor_links_and_reserved_manifest_subtrees_are_rejected', 'tests::bounds_reject_before_large_reads_and_graph_walks', 'tests::candidate_dependencies_are_transitive_and_pruned', 'tests::canonical_paths_check_root_and_each_existing_component', 'tests::checked_install_injected_failures_keep_old_lock', 'tests::checked_install_requires_both_exact_locks_and_keeps_callback_failures_atomic', 'tests::competing_writer_cannot_modify_authority', 'tests::dependency_conflict_cycle_and_failure_preserve_lock', 'tests::digest_ignores_json_layout_and_source_location', 'tests::exact_versions_and_engine_rejected_before_mutation', 'tests::fifo_inputs_fail_without_blocking', 'tests::forged_lock_digest_file_map_and_unreachable_package_are_rejected', 'tests::host_capability_inventory_is_required_for_asset_reads', 'tests::install_load_remove_reinstall_identity_and_source_isolation', 'tests::lighting_preserves_legacy_positions_and_requires_manifest_objects', 'tests::project_entry_contract_rejects_ambiguous_unsupported_and_unsafe_metadata', 'tests::project_schemas_preserve_metadata_and_only_describe_entry_content', 'tests::project_ui_is_strict_optional_metadata_without_activation_authority', 'tests::reject_nonportable_colliding_and_hook_manifests', 'tests::room_progress_closed_pair_preserves_presentation_and_collect_contract', 'tests::schema_three_requires_valid_explicit_collect_progress', 'tests::sha256_uses_canonical_lowercase_hex', 'tests::staged_object_and_lock_publish_failures_preserve_active_state', 'tests::symlinks_at_source_object_and_lock_are_rejected', 'tests::tamper_and_writer_failure_preserve_authority', 'tests::tilemap_added_inside_checked_callback_cannot_publish', 'tests::tilemap_declaration_and_all_lock_writers_fail_closed']
+          GATE_HASH = '313168bcb7fb86396352cf4ff4228cd6f62a1aceae0f3996f5bf5626c6aef790'
+          FIFO = 'tests::fifo_inputs_fail_without_blocking'
+          CLI = 'native_scene_command_feature_contract'
+          REJECTION = 'native_cli_rejects_invalid_duplicate_and_web_flags_without_publication'
+          WASM = 'existing_web_command_executes_real_wasm_and_matches_native_yaml'
+          DELIVERY = 'defense_app::native_scene_tests::relocated_native_creator_scene_reaches_player_session_and_restart'
+          SAMPLE_IGNORED = [DELIVERY, 'app::project_ui_tests::relocated_bundle_real_widgets_restart_original_scene']
+          SAMPLE_REQUIRED = ['defense_app::tests::bounded_cli', 'defense_app::tests::bounded_scene_loading_preserves_defaults_and_authored_restart', 'defense_app::tests::campaign_only_scene_preserves_default_scenario_and_authored_campaign', 'defense_app::tests::scene_cli_is_explicit_and_available_in_both_modes', 'defense_app::tests::scene_loader_rejects_symlinks_and_fifos_before_read', 'defense_app::tests::session_tracks_scenario_build_identity', 'defense_app::tests::unreadable_scene_fails_before_startup', 'defense_ui::modifier_tests::ctrl_restart_cannot_reset_a_started_run', 'defense_ui::modifier_tests::focus_loss_and_explicit_repeat_still_block_plain_shortcuts', 'defense_ui::modifier_tests::mixed_frame_uses_each_events_modifiers_without_masking_plain_action', 'defense_ui::modifier_tests::modified_economy_and_restart_preserve_real_simulation_and_sequence', 'defense_ui::modifier_tests::modified_keyboard_does_not_cancel_valid_pointer_action', 'defense_ui::modifier_tests::modified_start_pause_and_continue_do_not_change_local_state', 'defense_ui::modifier_tests::modifier_release_does_not_replay_old_key_and_fresh_press_still_works', 'defense_ui::modifier_tests::plain_and_shift_actions_still_reach_simulation', 'defense_ui::modifier_tests::plain_and_shift_start_pause_continue_are_preserved', 'defense_view::firing_tests::absent_or_inactive_actor_never_fires_even_with_matching_source', 'defense_view::firing_tests::merge_destination_keeps_only_its_own_projectile_cue', 'defense_view::firing_tests::moved_actor_requires_its_projectile_near_its_present_cell', 'defense_view::firing_tests::neighboring_actor_projectile_passing_through_does_not_fire_this_actor', 'defense_view::firing_tests::own_live_projectile_requires_role_board_and_strict_manhattan_proximity', 'defense_view::firing_tests::simulation_move_and_merge_preserve_only_the_destination_identity', 'defense_view::firing_tests::snapshot_restore_and_both_skin_paths_are_readonly_and_share_the_cue']
+          
+          
+          def require(value, reason):
+              if not value:
+                  raise ValueError(reason)
+          
+          
+          def inventory(text, expected, ignored=(), fifo=False, filtered=0):
+              """Validate one serial libtest suite, plus precisely the known FIFO child."""
+              expected, ignored = sorted(expected), sorted(ignored)
+              require(expected and len(expected) == len(set(expected)), 'Invalid or empty required parent inventory')
+              require(not set(expected) & set(ignored), 'Passed and ignored inventory overlaps')
+              require(not re.search(r'(?m)^test result: FAILED|^test \S+ \.\.\. FAILED$|^FAILED$', text), 'Explicit failed test')
+              nested = None
+              if fifo:
+                  require(FIFO in expected, 'FIFO not required by parent')
+                  # --test-threads=1 emits the parent prefix, then the child suite, then bare parent ok.
+                  pattern = (r'(?m)^test ' + re.escape(FIFO) + r' \.\.\. \nrunning 1 test\n'
+                             r'test ' + re.escape(FIFO) + r' \.\.\. ok\n\n'
+                             r'test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; '
+                             + str(len(expected) + len(ignored) - 1) + r' filtered out; finished in [0-9.]+s\n\nok$')
+                  matches = list(re.finditer(pattern, text))
+                  require(len(matches) == 1, 'Missing, duplicate or malformed expected FIFO nesting')
+                  nested = matches[0].group(0)
+                  text = text[:matches[0].start()] + 'test ' + FIFO + ' ... ok' + text[matches[0].end():]
+              summaries = re.findall(r'(?m)^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out;', text)
+              passed = re.findall(r'(?m)^test (\S+) \.\.\. ok$', text)
+              skips = re.findall(r'(?m)^test (\S+) \.\.\. ignored(?:,.*)?$', text)
+              running = re.findall(r'(?m)^running (\d+) tests?$', text)
+              require(sorted(passed) == expected, 'Missing, extra, duplicate or wrong passed parent tests')
+              require(sorted(skips) == ignored, 'Unexpected or missing ignored parent tests')
+              require(summaries == [tuple(str(n) for n in (len(expected), 0, len(ignored), 0, filtered))], 'Parent test summary mismatch')
+              require(running == [str(len(expected) + len(ignored))], 'Parent running count mismatch')
+              require(len(re.findall(r'(?m)^test (?!result:)', text)) == len(expected) + len(ignored), 'Unrecognized parent test line')
+              return {'passed': expected, 'ignored': ignored, 'nested_fifo_child': bool(nested), 'filtered': filtered}
+          
+          
+          def listed(text):
+              names = re.findall(r'(?m)^(\S+): test$', text)
+              counts = re.findall(r'(?m)^(\d+) tests?, 0 benchmarks?$', text)
+              require(names and len(names) == len(set(names)) and counts == [str(len(names))], 'Invalid full test listing')
+              return sorted(names)
+          
+          
+          def cargo(action, package, features=None):
+              args = ['cargo', action, '--locked', '--release', '-p', package, '--no-default-features']
+              return args + (['--features', features] if features else [])
+          
+          
+          def test_args(package, features, target, exact=None, ignored=False, listing=False):
+              args = cargo('test', package, features) + target
+              if exact:
+                  args += [exact]
+              args += ['--', '--test-threads=1', '--color=never']
+              if exact:
+                  args += ['--exact']
+              if ignored:
+                  args += ['--ignored', '--nocapture']
+              if listing:
+                  args += ['--list']
+              return args
+          
+          
+          def plan():
+              native = 'coop-native-authoring'
+              sample = 'coop-defense'
+              result = [
+                  ('package-native-tests', test_args('orr_package', native, ['--lib'])),
+                  ('native-cli-tests', test_args('orr_package', native, ['--test', 'native_scene_cli'])),
+                  ('creator-build', cargo('build', 'orr_package', native) + ['--bin', 'orr_pkg', '--message-format=json']),
+                  ('player-build', cargo('build', 'orr_sample', sample) + ['--bin', 'coop_defense', '--message-format=json']),
+                  ('wasm-build', ['cargo', 'build', '--locked', '-p', 'orr_coop_defense_web', '--target', 'wasm32-unknown-unknown', '--profile', 'web', '--message-format=json']),
+                  ('wasm-parity', test_args('orr_package', native, ['--test', 'native_scene_cli'], WASM, True)),
+                  ('native-delivery', test_args('orr_sample', sample, ['--lib'], DELIVERY, True)),
+                  ('sample-list', test_args('orr_sample', sample, ['--lib'], listing=True)),
+                  ('sample-native-tests', test_args('orr_sample', sample, ['--lib'])),
+                  ('default-cli-tests', test_args('orr_package', None, ['--test', 'native_scene_cli'])),
+                  ('web-only-cli-tests', test_args('orr_package', 'coop-web-authoring', ['--test', 'native_scene_cli'])),
+              ]
+              for label, feature in [('native', native), ('web-only', 'coop-web-authoring'), ('default', None)]:
+                  result.append((label + '-package-clippy', cargo('clippy', 'orr_package', feature) + ['--lib', '--bins', '--tests', '--', '-D', 'warnings']))
+              result += [
+                  ('sample-native-clippy', cargo('clippy', 'orr_sample', sample) + ['--lib', '--bin', 'coop_defense', '--tests', '--', '-D', 'warnings']),
+                  ('sample-feature-off', cargo('check', 'orr_sample') + ['--lib']),
+              ]
+              for label, feature in [('default', None), ('web-only', 'coop-web-authoring')]:
+                  args = ['cargo', 'tree', '--locked', '-p', 'orr_package', '--no-default-features', '--edges', 'normal,build', '--prefix', 'none', '--format', '{p}']
+                  result.append((label + '-package-boundary', args + (['--features', feature] if feature else [])))
+              return result
+          
+          
+          ARTIFACTS = {
+              'creator-build': ('orr_package', 'orr_pkg', 'src/main.rs', ['bin'], 'release', 'creator', ['coop-native-authoring', 'coop-web-authoring']),
+              'player-build': ('orr_sample', 'coop_defense', 'src/bin/coop_defense.rs', ['bin'], 'release', 'player', ['coop-defense']),
+              'wasm-build': ('orr_coop_defense_web', 'orr_coop_defense_web', 'src/lib.rs', ['cdylib', 'rlib'], 'wasm32-unknown-unknown/web', 'game.wasm', []),
+          }
+          
+          
+          PYFOCUSED_PART1
+
+      - name: Finish focused wrapper and run fresh native scene gates
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          cat >> "$RUNNER_TEMP/stormglass-focused.py" <<'PYFOCUSED_PART2'
+          def select_artifact(records, label, root, target, inspect=True):
+              package, name, src, kinds, directory, dest, features = ARTIFACTS[label]
+              selected = [r for r in records if r.get('reason') == 'compiler-artifact' and r.get('target', {}).get('name') == name]
+              require(len(selected) == 1, 'Missing or ambiguous Cargo production artifact')
+              a = selected[0]
+              manifest = root / 'crates' / package / 'Cargo.toml'
+              require(a.get('manifest_path') == str(manifest), 'Artifact manifest differs from exact checkout')
+              require(a.get('package_id', '').startswith(manifest.parent.as_uri() .replace('file:', 'path+file:', 1) + '#'), 'Artifact package identifier differs')
+              require(a['target'].get('src_path') == str(manifest.parent / src) and a['target'].get('kind') == kinds, 'Artifact source/target mismatch')
+              require(a.get('profile', {}).get('test') is False, 'Test executable cannot stand in for production')
+              require(set(features) <= set(a.get('features', [])), 'Required features absent from artifact')
+              require([r for r in records if r.get('reason') == 'build-finished'] == [{'reason': 'build-finished', 'success': True}], 'Cargo build is incomplete')
+              filenames = a.get('filenames', [])
+              if label == 'wasm-build':
+                  paths = [p for p in filenames if p.endswith('.wasm')]
+                  require(len(paths) == 1 and a.get('executable') is None, 'Expected one production WASM')
+                  path = Path(paths[0])
+              else:
+                  require(a.get('executable') in filenames, 'Executable absent from Cargo filenames')
+                  path = Path(a['executable'])
+              require(path.is_absolute() and path.parent == target / directory, 'Artifact is outside the run fresh target/profile')
+              require('..' not in path.parts, 'Noncanonical artifact path')
+              if inspect:
+                  require(path.resolve() == path and stat.S_ISREG(path.lstat().st_mode), 'Artifact is not a direct regular file')
+                  with path.open('rb') as f:
+                      magic = f.read(8)
+                  require(magic == b'\x00asm\x01\x00\x00\x00' if label == 'wasm-build' else magic.startswith(b'\x7fELF'), 'Wrong artifact format')
+                  if label != 'wasm-build':
+                      require(path.stat().st_mode & 0o111, 'Artifact is not executable')
+              return a, path, dest
+          
+          
+          def collect(h, label):
+              records = [json.loads(line) for line in (h.COMMANDS / (label + '.stdout')).read_text().splitlines() if line.strip()]
+              record, source, name = select_artifact(records, label, h.ROOT, h.TARGET)
+              destination = h.EVIDENCE / 'bin' / name
+              destination.parent.mkdir(exist_ok=True)
+              before = h.digest(source)
+              with source.open('rb') as src, destination.open('xb') as out:
+                  shutil.copyfileobj(src, out)
+              destination.chmod(0o644 if label == 'wasm-build' else 0o755)
+              require(before == h.digest(source) == h.digest(destination), 'Artifact changed while copied')
+              return {'path': str(destination), 'source_path': str(source), 'sha256': before,
+                      'bytes': destination.stat().st_size, 'cargo_compiler_artifact': record,
+                      'build_command': label, 'build_stdout_sha256': h.digest(h.COMMANDS / (label + '.stdout'))}
+          
+          
+          def validate_report(h, report, offline=False):
+              """Reconstruct required successes from raw receipts/logs, never trust status alone.
+          
+              Offline audit maps retained copied files under EVIDENCE; original source/target
+              paths remain literal provenance and are not expected to exist on the auditor.
+              """
+              require(report.get('status') == 'passed' and report.get('tested_commit') == h.EXPECTED_SHA and report.get('tested_tree') == h.EXPECTED_TREE, 'Focused receipt failed/missing/wrong source')
+              require(report.get('commands') == dict(plan()), 'Required command plan absent or changed')
+              require(set(report.get('artifacts', {})) == set(ARTIFACTS), 'Required fresh artifact set absent or changed')
+              artifacts = report['artifacts']
+              inventories = {}
+              boundaries = {}
+              full_sample = listed((h.COMMANDS / 'sample-list.stdout').read_text())
+              require(set(SAMPLE_REQUIRED + SAMPLE_IGNORED) <= set(full_sample), 'Required sample regressions absent')
+              require(report.get('sample_list') == full_sample, 'Sample listing receipt mismatch')
+              for label, argv in plan():
+                  r = h.read('commands/' + label + '.json', {})
+                  env = {}
+                  if label == 'wasm-parity':
+                      env = {'ORR_NATIVE_SCENE_WASM': artifacts['wasm-build']['path']}
+                  elif label == 'native-delivery':
+                      env = {'ORR_NATIVE_SCENE_CREATOR_BIN': artifacts['creator-build']['path'],
+                             'ORR_NATIVE_SCENE_PLAYER_BIN': artifacts['player-build']['path']}
+                  require(r.get('status') == 'passed' and r.get('exit_code') == 0 and r.get('argv') == argv and r.get('env_overrides') == env and r.get('cwd') == str(h.ROOT), 'Required command receipt mismatch: ' + label)
+                  require((h.COMMANDS / (label + '.exit-status')).read_text() == '0\n', 'Command exit receipt mismatch: ' + label)
+                  for field, suffix in [('log', '.log'), ('stdout', '.stdout'), ('stderr', '.stderr')]:
+                      relative = 'commands/' + label + suffix
+                      require(r.get(field) == relative and r.get(field + '_sha256') == h.digest(h.EVIDENCE / relative), 'Command output hash mismatch: ' + relative)
+                  text = (h.COMMANDS / (label + '.stdout')).read_text()
+                  if label in ARTIFACTS:
+                      records = [json.loads(line) for line in text.splitlines() if line.strip()]
+                      # Cargo may subsequently rebuild the same target/<profile>/<bin> for
+                      # the off/web-only matrix. The exclusively copied artifact is stable;
+                      # source_path is build-time provenance, verified during collect().
+                      a, source, name = select_artifact(records, label, h.ROOT, h.TARGET, inspect=False)
+                      saved = artifacts[label]
+                      expected_original = str(h.ORIGINAL_EVIDENCE / 'bin' / name) if offline else str(h.EVIDENCE / 'bin' / name)
+                      require(saved.get('path') == expected_original and saved.get('source_path') == str(source), 'Artifact copy/source path mismatch')
+                      require(saved.get('cargo_compiler_artifact') == a and saved.get('build_command') == label and saved.get('build_stdout_sha256') == h.digest(h.COMMANDS / (label + '.stdout')), 'Artifact build provenance mismatch')
+                      copied = h.EVIDENCE / 'bin' / name
+                      require(copied.is_file() and not copied.is_symlink() and saved.get('bytes') == copied.stat().st_size and saved.get('sha256') == h.digest(copied), 'Retained artifact hash mismatch')
+                      with copied.open('rb') as stream:
+                          magic = stream.read(8)
+                      require(magic == b'\x00asm\x01\x00\x00\x00' if label == 'wasm-build' else magic.startswith(b'\x7fELF'), 'Retained artifact format mismatch')
+                  elif label == 'package-native-tests':
+                      inventories[label] = inventory(text, PACKAGE_TESTS, fifo=True)
+                  elif label == 'native-cli-tests':
+                      inventories[label] = inventory(text, [CLI, REJECTION], [WASM])
+                  elif label == 'wasm-parity':
+                      inventories[label] = inventory(text, [WASM], filtered=2)
+                  elif label == 'native-delivery':
+                      inventories[label] = inventory(text, [DELIVERY], filtered=len(full_sample) - 1)
+                  elif label == 'sample-native-tests':
+                      inventories[label] = inventory(text, sorted(set(full_sample) - set(SAMPLE_IGNORED)), SAMPLE_IGNORED)
+                  elif label in ('default-cli-tests', 'web-only-cli-tests'):
+                      inventories[label] = inventory(text, [CLI])
+                  elif label.endswith('-package-boundary'):
+                      names = re.findall(r'(?m)^(\S+) v\S+', text)
+                      require(names and names[0] == 'orr_package' and 'orr_games' not in names, 'Default/web-only dependency boundary failed')
+                      boundaries[label] = sorted(set(names))
+              require(report.get('inventories') == inventories and report.get('boundaries') == boundaries, 'Reconstructed inventory/boundary receipts differ')
+              return {'inventories': inventories, 'boundaries': boundaries}
+          
+          
+          def run(h):
+              report = {'status': 'failed', 'tested_commit': h.EXPECTED_SHA, 'tested_tree': h.EXPECTED_TREE,
+                        'commands': dict(plan()), 'inventories': {}, 'artifacts': {},
+                        'limitations': ['Fresh CPU/CLI gates only, no hardware/window/browser certification',
+                                        'Known source-hidden Arena UI test remains ignored; native delivery is explicit']}
+              h.write('focused.json', report)
+              try:
+                  require(h.read('preflight.json', {}).get('valid') and h.read('setup.json', {}).get('valid'), 'Preflight/setup not passed')
+                  require(h.snapshot('before-focused')['valid'], 'Focused pre-source fence failed')
+                  require(h.digest(h.ROOT / 'tools/check-linux-local.sh') == GATE_HASH, 'Original aggregate changed')
+                  h.validate_guard_files()
+                  full_sample = None
+                  for label, argv in plan():
+                      env = {}
+                      if label == 'wasm-parity':
+                          env = {'ORR_NATIVE_SCENE_WASM': report['artifacts']['wasm-build']['path']}
+                      if label == 'native-delivery':
+                          env = {'ORR_NATIVE_SCENE_CREATOR_BIN': report['artifacts']['creator-build']['path'],
+                                 'ORR_NATIVE_SCENE_PLAYER_BIN': report['artifacts']['player-build']['path']}
+                      require(h.run_command(label, argv, env=env) == 0, 'Required command failed: ' + label)
+                      text = (h.COMMANDS / (label + '.stdout')).read_text()
+                      if label in ARTIFACTS:
+                          report['artifacts'][label] = collect(h, label)
+                      elif label == 'package-native-tests':
+                          report['inventories'][label] = inventory(text, PACKAGE_TESTS, fifo=True)
+                      elif label == 'native-cli-tests':
+                          report['inventories'][label] = inventory(text, [CLI, REJECTION], [WASM])
+                      elif label == 'wasm-parity':
+                          report['inventories'][label] = inventory(text, [WASM], filtered=2)
+                      elif label == 'native-delivery':
+                          # Cross-check this count against the full compiled listing in the next command.
+                          summaries = re.findall(r'(?m)^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; (\d+) filtered out;', text)
+                          require(len(summaries) == 1 and int(summaries[0]) >= len(SAMPLE_REQUIRED), 'Invalid filtered sample count')
+                          report['inventories'][label] = inventory(text, [DELIVERY], filtered=int(summaries[0]))
+                      elif label == 'sample-list':
+                          full_sample = listed(text)
+                          require(set(SAMPLE_REQUIRED + SAMPLE_IGNORED) <= set(full_sample), 'Required sample regressions absent')
+                          require(report['inventories']['native-delivery']['filtered'] == len(full_sample) - 1, 'Explicit delivery count differs from full sample binary')
+                          report['sample_list'] = full_sample
+                      elif label == 'sample-native-tests':
+                          report['inventories'][label] = inventory(text, sorted(set(full_sample) - set(SAMPLE_IGNORED)), SAMPLE_IGNORED)
+                      elif label in ('default-cli-tests', 'web-only-cli-tests'):
+                          report['inventories'][label] = inventory(text, [CLI])
+                      elif label.endswith('-package-boundary'):
+                          names = re.findall(r'(?m)^(\S+) v\S+', text)
+                          require(names and names[0] == 'orr_package', 'Empty or incorrect package dependency tree')
+                          require('orr_games' not in names, 'Native game dependency leaked into default or web-only package')
+                          report.setdefault('boundaries', {})[label] = sorted(set(names))
+                      h.write('focused.json', report)
+                  report['status'] = 'passed'
+              except BaseException:
+                  report['error'] = traceback.format_exc()
+              finally:
+                  try:
+                      require(h.snapshot('after-focused')['valid'], 'Focused post-source fence failed')
+                      for artifact in report['artifacts'].values():
+                          require(h.digest(Path(artifact['path'])) == artifact['sha256'], 'Copied fresh artifact changed during verification')
+                  except BaseException:
+                      report.update(status='failed', final_error=traceback.format_exc())
+                  h.write('focused.json', report)
+              return 0 if report['status'] == 'passed' else 1
+          
+          
+          def seal(h):
+              receipt = h.read('receipt.json', {})
+              require(not (h.EVIDENCE / 'aggregate-receipt.json').exists(), 'Cannot overwrite previous aggregate receipt')
+              h.write('aggregate-receipt.json', receipt)
+              errors = list(receipt.get('errors', []))
+              report = h.read('focused.json', {'status': 'not_started'})
+              try:
+                  require(receipt.get('status') == 'passed', 'Original aggregate did not pass')
+                  validate_report(h, report)
+                  require(h.snapshot('combined-seal')['valid'], 'Final source fence failed')
+                  h.validate_guard_files()
+                  for a in report['artifacts'].values():
+                      require(h.digest(Path(a['path'])) == a['sha256'], 'Retained artifact final hash changed')
+              except BaseException:
+                  errors.append(traceback.format_exc())
+              receipt.update(status='failed' if errors else 'passed', errors=errors, focused=report,
+                             combined_sealed_utc=h.now(), result_scope='Unchanged full Linux aggregate and fresh native scene focused gates')
+              h.write('receipt.json', receipt)
+              h.write('evidence-sha256.json', [{'path': str(p.relative_to(h.EVIDENCE)), 'bytes': p.stat().st_size, 'sha256': h.digest(p)}
+                                             for p in sorted(h.EVIDENCE.rglob('*')) if p.is_file() and p.name != 'evidence-sha256.json'])
+              return 1 if errors else 0
+          
+          
+          if __name__ == '__main__':
+              spec = importlib.util.spec_from_file_location('aggregate', Path(os.environ['RUNNER_TEMP']) / 'stormglass-full-linux-harness.py')
+              h = importlib.util.module_from_spec(spec)
+              spec.loader.exec_module(h)
+              signal.signal(signal.SIGTERM, h.interrupted)
+              signal.signal(signal.SIGINT, h.interrupted)
+              try:
+                  code = {'run': run, 'seal': seal}[sys.argv[1]](h)
+              except BaseException:
+                  if h.EVIDENCE.is_dir():
+                      h.write('focused-' + sys.argv[1] + '-exception.json', {'traceback': traceback.format_exc()})
+                  raise
+              sys.exit(code)
+          PYFOCUSED_PART2
+          cp "$RUNNER_TEMP/stormglass-focused.py" "$EVIDENCE/focused-harness.py"
+          python3 -B "$RUNNER_TEMP/stormglass-focused.py" run
+
+      - name: Always preserve aggregate status and source fence
+        if: ${{ always() }}
+        run: python3 -B "$RUNNER_TEMP/stormglass-full-linux-harness.py" finalize
+
+      - name: Require both results and seal all evidence
+        if: ${{ always() }}
+        run: python3 -B "$RUNNER_TEMP/stormglass-focused.py" seal
+
+      - name: Always upload original failures and receipts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: stormglass-native-scene-linux-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.EVIDENCE }}/
+          if-no-files-found: error
+          compression-level: 6
