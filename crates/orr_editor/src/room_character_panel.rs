@@ -12,6 +12,16 @@ use std::{
 
 const MAX_UNDO: usize = 32;
 
+fn clip_text(clip: &crate::model_panel::CharacterClip) -> String {
+    let name = if clip.name.trim().is_empty() { "Unnamed clip" } else { &clip.name };
+    format!("{}: {} ({:.2}s)", clip.index, name, clip.seconds)
+}
+fn selected_clip_text(clips: &[crate::model_panel::CharacterClip], index: u32) -> String {
+    clips.iter().find(|clip| clip.index == index).map(clip_text)
+        .unwrap_or_else(|| format!("Unavailable clip {index}"))
+}
+
+
 // Private failure-injection boundary. Checks may fail an operation but never
 // replace it: production Save always executes the real persistence operations.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -315,7 +325,9 @@ impl Panel {
                 false
             }
         };
-        let editable = source_ok
+        let clips = if source_ok { models.character_clips(editor) }
+            else { Err("Reopen the complete character project".into()) };
+        let editable = source_ok && clips.is_ok()
             && editor.mode() == crate::model::Mode::Edit
             && editor.can_mutate()
             && editor.previewing().is_none()
@@ -328,6 +340,8 @@ impl Panel {
                 "Character saved"
             });
             ui.label("Loop clips use absolute simulation ticks; Edit/Stop shows rest");
+            if let Err(error) = &clips { ui.colored_label(egui::Color32::LIGHT_RED, error); }
+            let clips = clips.as_deref().unwrap_or(&[]);
             ui.add_enabled_ui(editable, |ui| {
                 for (label, value) in [
                     ("Searching clip", &mut self.candidate.searching),
@@ -335,10 +349,10 @@ impl Panel {
                     ("Escaped clip", &mut self.candidate.escaped),
                 ] {
                     egui::ComboBox::from_label(label)
-                        .selected_text(format!("Clip {}", *value))
+                        .selected_text(selected_clip_text(clips, *value))
                         .show_ui(ui, |ui| {
-                            for clip in 0..32 {
-                                ui.selectable_value(value, clip, format!("{label} {clip}"));
+                            for clip in clips {
+                                ui.selectable_value(value, clip.index, format!("{label} {}", clip_text(clip)));
                             }
                         });
                 }
@@ -404,6 +418,22 @@ impl Panel {
                 ui.colored_label(egui::Color32::LIGHT_RED, error);
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod clip_catalog_labels {
+    use super::*;
+    #[test]
+    fn indices_names_durations_and_missing_drafts_are_unambiguous() {
+        use crate::model_panel::CharacterClip;
+        let clips = vec![CharacterClip { index: 0, name: "walk".into(), seconds: 1.5 },
+            CharacterClip { index: 1, name: "walk".into(), seconds: 2.0 },
+            CharacterClip { index: 2, name: " ".into(), seconds: 0.0 }];
+        assert_eq!(selected_clip_text(&clips, 0), "0: walk (1.50s)");
+        assert_eq!(selected_clip_text(&clips, 1), "1: walk (2.00s)");
+        assert_eq!(selected_clip_text(&clips, 2), "2: Unnamed clip (0.00s)");
+        assert_eq!(selected_clip_text(&clips, 31), "Unavailable clip 31");
     }
 }
 
@@ -529,6 +559,80 @@ mod tests {
             self.panel.redo(&mut self.editor, &mut self.models).unwrap();
             assert_eq!(self.models.bindings.as_ref().unwrap().document(), edited);
         }
+    }
+
+    #[test]
+    fn clip_catalog_matches_admitted_names_without_changing_documents_or_files() {
+        let f = Fixture::new(); let before = f.pair_bytes(); let checksum = f.editor.checksum();
+        let document = f.models.bindings.as_ref().unwrap().document().clone();
+        let clips = f.models.character_clips(&f.editor).unwrap();
+        assert_eq!(clips.iter().map(|c| (c.index, c.name.as_str(), c.seconds)).collect::<Vec<_>>(),
+            vec![(0,"searching",2.0),(1,"carrying_key",1.5),(2,"escaped",1.0)]);
+        assert_eq!(f.pair_bytes(), before); assert_eq!(f.editor.checksum(), checksum);
+        assert_eq!(f.models.bindings.as_ref().unwrap().document(), &document);
+    }
+    #[test]
+    fn clip_catalog_rejects_missing_and_stale_bindings_without_replacing_cache() {
+        let mut f = Fixture::new(); let bytes = f.pair_bytes();
+        let bindings = f.models.bindings.take().unwrap();
+        assert!(f.models.character_clips(&f.editor).is_err());
+        let mut stale = bindings.document().clone();
+        stale.bindings.get_mut(&f.panel.document.player).unwrap().source_hash = "0".repeat(64);
+        f.models.bindings = Some(crate::model_bindings::Bindings::from_document(bindings.path.clone(), stale).unwrap());
+        assert!(f.models.character_clips(&f.editor).is_err());
+        f.models.bindings = Some(bindings);
+        assert_eq!(f.models.character_clips(&f.editor).unwrap().len(), 3);
+        assert_eq!(f.pair_bytes(), bytes);
+    }
+    #[test]
+    fn clip_catalog_does_not_rewrite_unavailable_draft_or_allow_invalid_apply() {
+        let mut f = Fixture::new(); let before = f.pair_bytes(); let original = f.panel.document.clone();
+        let models = f.models.bindings.as_ref().unwrap().document().clone();
+        f.panel.candidate.searching = 31;
+        let context = egui::Context::default();
+        let mut output = context.run_ui(Default::default(), |ui| {
+            f.panel.show(ui, &mut f.editor, &mut f.models);
+        });
+        output.textures_delta.clear(); // This authoring check has no GPU.
+        assert_eq!(f.panel.candidate.searching, 31);
+        assert!(f.panel.apply_document(f.panel.candidate.clone(), &mut f.editor, &mut f.models).is_err());
+        assert_eq!(f.panel.document, original); assert_eq!(f.models.bindings.as_ref().unwrap().document(), &models);
+        assert_eq!(f.pair_bytes(), before);
+    }
+
+    #[cfg(feature = "windows-export")]
+    #[test]
+    fn clip_catalog_mapping_saves_into_source_hidden_real_export() {
+        use sha2::{Digest, Sha256};
+        let mut f = Fixture::new();
+        let clips = f.models.character_clips(&f.editor).unwrap();
+        let named = |name: &str| clips.iter().find(|clip| clip.name == name).unwrap().index;
+        let mut document = f.panel.document.clone();
+        document.searching = named("carrying_key"); document.carrying = named("escaped"); document.escaped = named("searching");
+        f.panel.apply_document(document.clone(), &mut f.editor, &mut f.models).unwrap();
+        f.panel.save_all(&f.editor, &mut f.models).unwrap();
+        let character_bytes = fs::read(&f.panel.path).unwrap(); let model_bytes = fs::read(f.model_path()).unwrap();
+        let built = PathBuf::from(std::env::var_os("ORR_CHARACTER_CLIP_RUNTIME").expect("focused export requires explicit built runtime")).canonicalize().unwrap();
+        let runtime = f._temp.path().join("trusted character runtime"); fs::copy(built, &runtime).unwrap();
+        let hash: String = Sha256::digest(fs::read(&runtime).unwrap()).iter().map(|b| format!("{b:02x}")).collect();
+        let bundle = f._temp.path().join("deployed character game");
+        orr_sample::project_export::export_room(&orr_sample::project_export::ExportOptions {
+            project: f.root.clone(), runtime: runtime.clone(), runtime_sha256: hash, output: bundle.clone(), trusted_runtime: true, source_revision: None,
+        }).unwrap();
+        assert_eq!(fs::read(bundle.join("project/room.character.json")).unwrap(), character_bytes);
+        assert_eq!(fs::read(bundle.join("project/room.models.json")).unwrap(), model_bytes);
+        fs::rename(&f.root, f.root.with_extension("hidden")).unwrap(); fs::rename(&runtime, runtime.with_extension("hidden")).unwrap();
+        let prepared = PreparedProject::open_with_capabilities(&bundle.join("project"),
+            orr_sample::room_project::RoomProjectCapabilities { lighting: false, character: true }).unwrap();
+        assert_eq!(prepared.character().unwrap().document, document);
+        assert_eq!(prepared.models().document.bindings[&document.player].animation.unwrap().clip_index, document.searching);
+        let output = std::process::Command::new(bundle.join("run-room-escape")).current_dir(f._temp.path())
+            .args(["--headless","--ticks","8","--hold","interact","--check-model-poses"])
+            .env_remove("DISPLAY").env_remove("WAYLAND_DISPLAY").output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let output = String::from_utf8(output.stdout).unwrap();
+        assert!(output.contains("room model poses: 9 frames checked;")); assert!(output.contains("animated: 1"));
+        assert!(output.contains("room key: 1"));
     }
 
     #[test]

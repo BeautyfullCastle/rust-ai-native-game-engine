@@ -17,6 +17,14 @@ use std::{collections::BTreeMap, path::PathBuf};
 
 mod fit;
 
+#[cfg(feature = "room-character")]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct CharacterClip {
+    pub index: u32,
+    pub name: String,
+    pub seconds: f32,
+}
+
 pub struct ModelPanel {
     pub blockout: crate::blockout_panel::BlockoutPanel,
     pub bindings: Option<Bindings>,
@@ -1083,6 +1091,32 @@ impl ModelPanel {
             })
             .collect()
     }
+    /// Read clip metadata from the currently admitted character binding/cache.
+    /// This is not a filesystem reload or a mutation of the authoring draft.
+    #[cfg(feature = "room-character")]
+    pub(crate) fn character_clips(&self, editor: &Editor) -> Result<Vec<CharacterClip>, String> {
+        if !editor.game().is_room() || !editor.spec().is_local()
+            || !self.scene_matches(editor) || !editor.yard_rows_coherent()
+        { return Err("Character clips require the coherent local Room model source".into()); }
+        let character = editor.room_character().ok_or("Room character is unavailable")?;
+        let binding = self.bindings.as_ref().and_then(|bindings| bindings.document().bindings.get(&character.player))
+            .ok_or("Character model binding is unavailable")?;
+        let loaded = self.loaded.get(&character.player).ok_or("Reload verified character model assets")?;
+        binding.validate(loaded)?;
+        if binding.animation != Some(AnimationDescriptor { clip_index: character.searching, playback: PlaybackMode::Loop }) {
+            return Err("Character searching clip and model binding differ".into());
+        }
+        let model = loaded.animated_model().ok_or("Character model is not animated")?;
+        if [character.searching, character.carrying, character.escaped].iter()
+            .any(|index| model.source().clips.get(*index as usize).is_none()) {
+            return Err("Character mapping refers to an unavailable clip".into());
+        }
+        model.source().clips.iter().enumerate().map(|(index, clip)| {
+            Ok(CharacterClip { index: u32::try_from(index).map_err(|_| "Character clip index exceeds u32")?,
+                name: clip.name.clone(), seconds: clip.duration() })
+        }).collect()
+    }
+
     /// Validate both presentation documents before committing a character edit.
     #[cfg(feature="room-character")]
     pub fn apply_character_mapping(&mut self, editor: &mut Editor, character: &orr_sample::room_character::Document) -> Result<(), String> {
