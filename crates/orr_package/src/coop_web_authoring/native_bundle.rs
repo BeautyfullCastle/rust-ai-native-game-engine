@@ -225,6 +225,9 @@ struct StagedFile {
     mode: u32,
     dev: u64,
     ino: u64,
+    // Pin the inode until publication, including across unlink/recreate attacks.
+    // This must be read-only: a retained writer would prevent executing the player.
+    handle: File,
 }
 fn write_file(stage: &File, name: &str, bytes: Vec<u8>, mode: u32) -> Result<StagedFile, String> {
     let mut file = File::from(
@@ -241,11 +244,25 @@ fn write_file(stage: &File, name: &str, bytes: Vec<u8>, mode: u32) -> Result<Sta
         .map_err(error)?;
     file.sync_all().map_err(error)?;
     let info = file.metadata().map_err(error)?;
+    let handle = File::from(
+        unix::openat(
+            stage,
+            name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+            Mode::empty(),
+        )
+        .map_err(error)?,
+    );
+    let pinned = handle.metadata().map_err(error)?;
+    if !pinned.is_file() || pinned.dev() != info.dev() || pinned.ino() != info.ino() {
+        return Err("staged identity changed while pinning file".into());
+    }
     Ok(StagedFile {
         bytes,
         mode,
         dev: info.dev(),
         ino: info.ino(),
+        handle,
     })
 }
 fn verify_stage(
@@ -275,8 +292,13 @@ fn verify_stage(
         return Err("missing staged entry".into());
     }
     for (name, file) in files {
+        let pinned = file.handle.metadata().map_err(error)?;
         let current = unix::statat(stage, *name, AtFlags::SYMLINK_NOFOLLOW).map_err(error)?;
-        if current.st_dev != file.dev
+        if pinned.dev() != file.dev
+            || pinned.ino() != file.ino
+            || pinned.nlink() != 1
+            || pinned.mode() & 0o7777 != file.mode
+            || current.st_dev != file.dev
             || current.st_ino != file.ino
             || current.st_nlink != 1
             || current.st_mode & 0o7777 != file.mode

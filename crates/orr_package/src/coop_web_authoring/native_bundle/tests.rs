@@ -282,9 +282,38 @@ fn staged_addition_tamper_permissions_and_identity_change_rejected() {
             },
             |_, _| Ok(()),
         );
-        assert!(result.is_err());
-        assert!(!f.options.output.exists());
+        assert!(result.is_err(), "staged defect {defect} was accepted");
+        assert!(
+            !f.options.output.exists(),
+            "staged defect {defect} published"
+        );
     }
+}
+#[test]
+fn staged_read_only_handle_pins_unlinked_inode_without_preventing_execution() {
+    let root = tempfile::tempdir().unwrap();
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let stage = directory(root.path()).unwrap();
+    let bytes = b"#!/bin/sh\nexit 0\n".to_vec();
+    let pinned = write_file(&stage, "player", bytes.clone(), 0o755).unwrap();
+    assert!(Command::new(root.path().join("player"))
+        .status()
+        .unwrap()
+        .success());
+    fs::remove_file(root.path().join("player")).unwrap();
+    fs::write(root.path().join("player"), bytes).unwrap();
+    fs::set_permissions(
+        root.path().join("player"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    assert_eq!(pinned.handle.metadata().unwrap().nlink(), 0);
+    assert_ne!(
+        fs::metadata(root.path().join("player")).unwrap().ino(),
+        pinned.ino
+    );
+    let files = BTreeMap::from([("player", pinned)]);
+    assert!(verify_stage(root.path(), &stage, &files).is_err());
 }
 #[test]
 fn source_mutation_destination_race_and_symlink_output_do_not_replace_objects() {
