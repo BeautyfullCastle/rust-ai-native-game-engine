@@ -1,0 +1,68 @@
+name: Native bundle combined-head compile checks
+on:
+  push:
+    branches: [su/stormglass-native-bundle-integration-20261106]
+permissions:
+  contents: read
+concurrency:
+  group: native-bundle-integration-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_TERM_COLOR: never
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      RUSTUP_TOOLCHAIN: '1.99.1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 900b269f7dcd22c34cbb5a9c431e1d69f6a7b818
+          persist-credentials: false
+      - name: Record exact combined source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir ci-evidence
+          test "$(git rev-parse HEAD)" = 900b269f7dcd22c34cbb5a9c431e1d69f6a7b818
+          test "$(git rev-parse HEAD^{tree})" = 0cb17b42705ed1055e6fe0fd6d4b501da8d1f98f
+          git rev-parse HEAD HEAD^{tree} | tee ci-evidence/source-before.txt
+          printf '%s\n' '${{ github.workflow_sha }}' | tee ci-evidence/workflow-commit.txt
+          printf 'CARGO_TARGET_DIR=%s/native-bundle-integration-%s-%s\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+      - name: Select Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.99.1 --profile minimal
+          rustc --version --verbose | tee ci-evidence/rustc.txt
+          cargo --version --verbose | tee ci-evidence/cargo.txt
+      - name: Check plain delivery configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo check --locked -p orr_sample --features coop-defense --lib --bin coop_defense 2>&1 | tee ci-evidence/plain-check.log
+      - name: Check save-enabled delivery configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo check --locked -p orr_sample --features coop-defense-run-save --lib --bin coop_defense 2>&1 | tee ci-evidence/save-check.log
+      - name: Verify source unchanged
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 900b269f7dcd22c34cbb5a9c431e1d69f6a7b818
+          test "$(git rev-parse HEAD^{tree})" = 0cb17b42705ed1055e6fe0fd6d4b501da8d1f98f
+          git diff --exit-code
+          git diff --cached --exit-code
+          git rev-parse HEAD HEAD^{tree} | tee ci-evidence/source-after.txt
+          sha256sum Cargo.lock crates/orr_sample/Cargo.toml | tee ci-evidence/input-sha256.txt
+      - name: Preserve checks including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-bundle-integration-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-evidence
+          if-no-files-found: error
