@@ -46,6 +46,11 @@ fn character_crossfade_cpu_check_preserves_game_output_and_all_project_files() {
         orr_sample::room_character::Document::parse(&fs::read(&path).unwrap()).unwrap();
     document.schema = 3;
     document.crossfade_ticks = Some(120);
+    document.speeds = Some(orr_sample::room_character::PlaybackRates {
+        searching: orr_sample::room_character::PlaybackRate::Half,
+        carrying: orr_sample::room_character::PlaybackRate::Double,
+        escaped: orr_sample::room_character::PlaybackRate::Quarter,
+    });
     fs::write(path, document.to_bytes().unwrap()).unwrap();
     let before = snapshot(&root);
     for ticks in [0, 8] {
