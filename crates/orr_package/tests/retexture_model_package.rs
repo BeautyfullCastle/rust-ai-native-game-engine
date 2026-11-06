@@ -167,10 +167,10 @@ fn cli_creates_installs_and_loads_source_hidden_retextured_model() {
         assert_eq!(actual.material, old.material);
     }
     use sha2::{Digest, Sha256};
-    let hash = format!(
-        "{:x}",
-        Sha256::digest(include_bytes!("../../orr_model/tests/fixtures/marker.png"))
-    );
+    let hash: String = Sha256::digest(include_bytes!("../../orr_model/tests/fixtures/marker.png"))
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     assert!(loaded
         .source()
         .dependencies
