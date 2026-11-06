@@ -1346,13 +1346,6 @@ fn preview_kind_allowed(
         ModelKind::Animated => {
             cfg!(feature = "room-animated-models")
                 && capabilities.contains("animation")
-                && Path::new(asset)
-                    .extension()
-                    .and_then(|extension| extension.to_str())
-                    .is_some_and(|extension| {
-                        extension.eq_ignore_ascii_case("glb")
-                            || extension.eq_ignore_ascii_case("gltf")
-                    })
         }
     }
 }
@@ -1393,6 +1386,8 @@ fn model_asset_buttons(
     for (package_name, package) in &browser.lock.packages {
         for asset in &package.manifest.files {
             let supported = crate::package_model_preview::supports_asset(ModelKind::Static, asset);
+            let supported = supported
+                || preview_kind_allowed(ModelKind::Animated, &package.manifest.capabilities, asset);
             if !supported {
                 continue;
             }
@@ -1406,6 +1401,9 @@ fn model_asset_buttons(
             #[cfg(feature = "room-animated-models")]
             let kinds = [ModelKind::Static, ModelKind::Animated];
             for kind in kinds {
+                if !crate::package_model_preview::supports_asset(kind, asset) {
+                    continue;
+                }
                 if kind == ModelKind::Animated
                     && (!package.manifest.capabilities.contains("animation")
                         || !crate::package_model_preview::supports_asset(kind, asset))
@@ -2555,3 +2553,7 @@ mod update_tests {
 #[cfg(test)]
 #[path = "package_manager_panel/cooked_model_tests.rs"]
 mod cooked_model_tests;
+
+#[cfg(test)]
+#[path = "package_manager_panel/cooked_animation_tests.rs"]
+mod cooked_animation_tests;

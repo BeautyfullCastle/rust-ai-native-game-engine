@@ -5,7 +5,7 @@ features. Open a saved local Room project in Edit mode, save its scene/model/
 camera edits, and choose **File > Content packages… > Verify installed packages**.
 
 Packages declaring `animation` offer **Preview animated model {package}/{asset}**
-for declared GLB/glTF assets. A models-only package or a static Orrmodel does not
+for declared GLB/glTF and cooked `*.animated.json` assets. A models-only package or a static Orrmodel does not
 offer this action. The normal animated loader and compiled package capabilities
 remain authoritative; previewing does not convert or activate content.
 
@@ -79,3 +79,12 @@ poses during playback, pause pixel freeze, restart/endpoint and lifecycle/error
 handling without mutating the game or project. Software-WGPU evidence does not
 certify native hardware GPU behavior. Run affected transport tests and this
 acceptance for audition changes; unchanged historical coverage may be reused.
+
+Cooked packages from `create-animated-sequence` contain `model.animated.json`.
+After installing and verifying them, the same animated Preview/Use actions are
+available. Cooked animation is not offered as a static model. Recipes and other
+JSON remain hidden. Save model bindings explicitly; a reopened binding loads the
+installed clips without the original source package. Previewing clip 1 leaves a
+new assignment's default clip 0/Loop unchanged. New cooked-file acceptance covers
+CPU widgets and Linux source-hidden sampling, assignment/save/reopen; native
+window/GPU display remains unverified.

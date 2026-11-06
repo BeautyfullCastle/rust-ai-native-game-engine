@@ -27,13 +27,16 @@ impl Fixture {
     }
 
     fn with_model(model: AnimatedModel, capabilities: &[&str]) -> Self {
+        Self::with_asset(model, capabilities, ASSET)
+    }
+    fn with_asset(model: AnimatedModel, capabilities: &[&str], asset: &str) -> Self {
         let temporary = tempfile::tempdir().unwrap();
         let base = temporary.path().canonicalize().unwrap();
         let root = base.join("project");
         let source = base.join("source");
         fs::create_dir(&root).unwrap();
         fs::create_dir(&source).unwrap();
-        fs::write(source.join(ASSET), model.to_bytes().unwrap()).unwrap();
+        fs::write(source.join(asset), model.to_bytes().unwrap()).unwrap();
         fs::write(source.join("LICENSE.txt"), b"Original animation fixture\n").unwrap();
         fs::write(
             source.join("orr.package.json"),
@@ -44,7 +47,7 @@ impl Fixture {
                 engine: "*".into(),
                 capabilities: capabilities.iter().map(|value| (*value).into()).collect(),
                 dependencies: BTreeMap::new(),
-                files: BTreeSet::from([ASSET.into(), "LICENSE.txt".into()]),
+                files: BTreeSet::from([asset.into(), "LICENSE.txt".into()]),
             })
             .unwrap(),
         )
@@ -54,7 +57,7 @@ impl Fixture {
         let request = PreviewRequest {
             project_root: root.clone(),
             package_id: PACKAGE.into(),
-            asset_path: ASSET.into(),
+            asset_path: asset.into(),
             digest: lock.packages[PACKAGE].digest.clone(),
             generation: 9,
             kind: ModelKind::Animated,
@@ -470,3 +473,7 @@ fn nonzero_first_key_clamps_without_shifting_the_seconds_timeline() {
     assert_eq!(end.pose.local()[0].translation, [2.0, 0.0, 0.0]);
     assert!(sample(&model, 0, 4.01).is_err());
 }
+
+#[cfg(target_os = "linux")]
+#[path = "cooked_animation_tests.rs"]
+mod cooked_animation_tests;

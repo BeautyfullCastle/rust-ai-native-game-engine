@@ -21,3 +21,5 @@ bypass the normal edit-mode and compiled-capability restrictions.
 To inspect an asset without selecting an entity, use its **Preview static model**
 action. The separate viewer offers orbit, zoom, Reset and Close without changing
 bindings or project files. See [Static package preview](editor-package-preview.md).
+
+With `room-animated-models`, verified animation packages also list cooked `*.animated.json` assets once each, with explicit animated Preview/Use actions.
