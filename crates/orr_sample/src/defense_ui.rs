@@ -837,7 +837,11 @@ impl DefenseUi {
                 67.0,
                 12.0,
                 MUTED,
-                "A COOPERATIVE DEFENSE OF THE LIVING ENGINE",
+                if self.started {
+                    wave_pressure_label(&run, frame.singleton::<game::WaveCounts>(), &enemies)
+                } else {
+                    "A COOPERATIVE DEFENSE OF THE LIVING ENGINE".into()
+                },
             );
             l.text(&p, 805.0, 32.0, 13.0, TEAL, "LOCAL CO-OP  ·  AI PARTNER");
             l.text(
@@ -1341,6 +1345,31 @@ impl DefenseUi {
 }
 fn wave_header(wave: u32, last_wave: u32, reactor_hp: u32, max_hp: u32) -> String {
     format!("WAVE {wave:02} / {last_wave}     CORE {reactor_hp} / {max_hp}")
+}
+
+// Display the current snapshot, not a timer/prediction: queued enemies have not spawned,
+// while active enemies include both lanes. Deaths/leaks are not counted as still on route.
+fn wave_pressure_label(
+    run: &game::DefenseRun,
+    counts: &game::WaveCounts,
+    enemies: &[game::DefenseEnemy],
+) -> String {
+    match run.phase {
+        game::WON => return "CAMPAIGN CLEARED".into(),
+        game::LOST => return "CORE LOST".into(),
+        game::PLAYING => {}
+        _ => return "WAVE STATUS UNAVAILABLE".into(),
+    }
+    let Some(pairs) = run
+        .wave
+        .checked_sub(1)
+        .and_then(|i| counts.pair_counts.get(i as usize))
+    else {
+        return "WAVE STATUS UNAVAILABLE".into();
+    };
+    let queued = pairs.saturating_mul(2).saturating_sub(run.spawned);
+    let active = enemies.iter().filter(|enemy| enemy.active != 0).count();
+    format!("INCOMING {queued}  /  ON ROUTE {active}")
 }
 
 fn campaign_intro(last_wave: u32) -> String {
@@ -2074,3 +2103,7 @@ mod controls_ui_tests;
 #[cfg(test)]
 #[path = "defense_ui/modifier_tests.rs"]
 mod modifier_tests;
+
+#[cfg(test)]
+#[path = "defense_ui_wave_pressure_tests.rs"]
+mod wave_pressure_tests;
