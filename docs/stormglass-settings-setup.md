@@ -6,7 +6,10 @@ Explorer ACL step for a **new** Stormglass controls/audio directory. Build it wi
 See the [Windows launcher guide](stormglass-windows-launcher.md) for commands.
 
 The caller supplies exactly `--directory ABSOLUTE_NEW_DIRECTORY`, or `--help`.
-Parents must exist; startup never invokes this tool automatically. It creates one
+Parents must exist; ordinary startup never invokes this tool automatically. The
+launcher can invoke it only with explicit `-PrepareUserSettings` together with
+`-UserSettingsDirectory`; helper failure stops the game. Without the preparation
+switch, a shared directory is only forwarded to both stores. The helper creates one
 empty directory, with current-user owner and protected private ACL from the first
 creation operation. It does not choose defaults, read/write preferences, repair
 permissions, replace an existing object, or migrate old settings. Pass the result
