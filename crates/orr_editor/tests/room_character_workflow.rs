@@ -1224,3 +1224,6 @@ mod motion;
 
 #[path = "room_character_workflow/follow_camera.rs"]
 mod follow_camera;
+
+#[path = "room_character_workflow/camera_limits.rs"]
+mod camera_limits;

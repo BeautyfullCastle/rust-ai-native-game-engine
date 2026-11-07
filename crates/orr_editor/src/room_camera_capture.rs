@@ -84,6 +84,7 @@ pub(crate) fn from_view(applied: &Document, live: &OrbitCamera) -> Result<Docume
         distance: live.distance,
         projection,
         follow_player: applied.follow_player,
+        target_bounds: applied.target_bounds,
     };
     // A valid session zoom can exceed the authored half-height range. Refuse it
     // instead of clamping and silently changing the requested framing.
