@@ -78,8 +78,13 @@ fn actual_remove_widgets_restore_all_previous_transforms_and_preserve_survivor_s
     let scene_bytes = std::fs::read(&scene).unwrap();
     let sidecar = binding_path(h.state());
     let bytes = std::fs::read(&sidecar).unwrap();
-    click(&mut h, "Static model binding");
-    click(&mut h, "Batch model targets");
+    settle(&mut h);
+    if h.query_by_label("Batch model targets").is_none() {
+        click(&mut h, "Static model binding");
+    }
+    if h.query_by_label("Clear model targets").is_none() {
+        click(&mut h, "Batch model targets");
+    }
     let targets = guids(h.state());
     for (name, guid) in ["box_left", "box_right"].iter().zip(&targets) {
         click(&mut h, &format!("Model target: {name} [{guid}]"));
@@ -201,8 +206,13 @@ fn marked_removal_is_disabled_for_deleted_recycled_target_and_rejected_in_play()
     settle(&mut h);
     assert!(h.state_mut().editor.select_named("box_right"));
     assign_direct(h.state_mut());
-    click(&mut h, "Static model binding");
-    click(&mut h, "Batch model targets");
+    settle(&mut h);
+    if h.query_by_label("Batch model targets").is_none() {
+        click(&mut h, "Static model binding");
+    }
+    if h.query_by_label("Clear model targets").is_none() {
+        click(&mut h, "Batch model targets");
+    }
     let targets = guids(h.state());
     for (name, guid) in ["box_left", "box_right"].iter().zip(&targets) {
         click(&mut h, &format!("Model target: {name} [{guid}]"));
