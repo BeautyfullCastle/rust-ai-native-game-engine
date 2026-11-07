@@ -215,7 +215,7 @@ mod actual {
         wait(&mut h);
         click(&mut h, "Create trimmed animation clip");
         click(&mut h, "Trim source clip");
-        click(&mut h, "Trim source clip 0: searching (1.000s)");
+        click(&mut h, "Trim source clip 0: searching (2.000s)");
         text(&mut h, "Trim start seconds", "0.25");
         text(&mut h, "Trim end seconds", "0.75");
         (dir, h)
