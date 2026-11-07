@@ -1,0 +1,58 @@
+name: Model batch removal focused CI
+on:
+  push:
+    branches: [codex/model-batch-removal-20261107]
+permissions:
+  contents: read
+jobs:
+  model-batch-removal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record exact source and prepare toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir ci-evidence
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git rev-parse HEAD HEAD^{tree} | tee ci-evidence/source.txt
+          rustup toolchain install 1.99.1 --profile minimal --component clippy
+          rustup override set 1.99.1
+          rustc --version --verbose | tee ci-evidence/rustc.txt
+          sudo apt-get update -q 2>&1 | tee ci-evidence/dependencies.log
+          sudo apt-get install -y -q pkg-config libasound2-dev libudev-dev libx11-dev libxkbcommon-dev libwayland-dev 2>&1 | tee -a ci-evidence/dependencies.log
+      - name: Atomic marked model removal and saved game consumption
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p orr_editor --features models --test yard3d_models batch_remove:: -- --test-threads=1 2>&1 | tee ci-evidence/static-removal.log
+          grep -F 'test result: ok. 4 passed; 0 failed; 0 ignored;' ci-evidence/static-removal.log
+          cargo test --locked -p orr_editor --features animated-models --test yard3d_animated batch_remove:: -- --test-threads=1 2>&1 | tee ci-evidence/animated-removal.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' ci-evidence/animated-removal.log
+          cargo test --locked -p orr_editor --features room-project --test room_model_admission batch_remove:: -- --test-threads=1 2>&1 | tee ci-evidence/room-removal.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' ci-evidence/room-removal.log
+          cargo test --locked -p orr_editor --features room-character,project-create --test room_character_workflow character_batch_removal_rejects_player_and_optional_targets_together_without_partial_commit -- --test-threads=1 2>&1 | tee ci-evidence/character-guard.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' ci-evidence/character-guard.log
+          cargo test --locked -p orr_editor --features models --test yard3d_models batch::actual_marked_widgets_assign_two_bodies_one_undo_and_save_reopen -- --test-threads=1 2>&1 | tee ci-evidence/batch-assign-regression.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' ci-evidence/batch-assign-regression.log
+          cargo test --locked -p orr_editor --features models --test yard3d_models actual_widgets_assign_remove_undo_save_reopen_and_disable_mutation_in_play -- --test-threads=1 2>&1 | tee ci-evidence/single-play-regression.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' ci-evidence/single-play-regression.log
+          cargo clippy --locked -p orr_editor --features models --lib -- -D warnings 2>&1 | tee ci-evidence/clippy-static.log
+          cargo clippy --locked -p orr_editor --features animated-models --lib -- -D warnings 2>&1 | tee ci-evidence/clippy-animated.log
+          cargo clippy --locked -p orr_editor --features room-character,project-create --lib -- -D warnings 2>&1 | tee ci-evidence/clippy-character.log
+      - name: Preserve results including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-batch-removal-${{ github.sha }}
+          path: ci-evidence
+          if-no-files-found: error

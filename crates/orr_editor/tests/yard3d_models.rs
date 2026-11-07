@@ -921,3 +921,6 @@ mod orphan_cleanup;
 
 #[path = "yard3d_models/batch.rs"]
 mod batch;
+
+#[path = "yard3d_models/batch_remove.rs"]
+mod batch_remove;
