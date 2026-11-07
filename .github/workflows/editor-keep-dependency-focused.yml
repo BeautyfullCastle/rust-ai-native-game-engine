@@ -1,0 +1,58 @@
+name: Editor keep dependency focused CI
+on:
+  push:
+    branches: [codex/editor-keep-dependency-20261107]
+permissions:
+  contents: read
+jobs:
+  editor-keep:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record exact source and prepare toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir ci-evidence
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git rev-parse HEAD HEAD^{tree} | tee ci-evidence/source.txt
+          rustup toolchain install 1.99.1 --profile minimal --component clippy
+          rustup override set 1.99.1
+          rustc --version --verbose | tee ci-evidence/rustc.txt
+          sudo apt-get update -q 2>&1 | tee ci-evidence/dependencies.log
+          sudo apt-get install -y -q pkg-config libasound2-dev libudev-dev libx11-dev libxkbcommon-dev libwayland-dev 2>&1 | tee -a ci-evidence/dependencies.log
+      - name: Editor installed dependency keep and game use
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p orr_editor --features package-manager,project-create --lib package_manager::keep_tests:: -- --test-threads=1 2>&1 | tee ci-evidence/backend-off.log
+          grep -F 'test result: ok. 3 passed; 0 failed; 0 ignored;' ci-evidence/backend-off.log
+          cargo test --locked -p orr_editor --features package-manager,project-create,room-character,room-lighting,windows-export --lib package_manager::keep_tests:: -- --test-threads=1 2>&1 | tee ci-evidence/backend-on.log
+          grep -F 'test result: ok. 4 passed; 0 failed; 0 ignored;' ci-evidence/backend-on.log
+          cargo test --locked -p orr_editor --features package-manager,project-create,room-character,room-lighting,windows-export --lib package_manager_panel::keep::tests:: -- --test-threads=1 2>&1 | tee ci-evidence/panel.log
+          grep -F 'test result: ok. 6 passed; 0 failed; 1 ignored;' ci-evidence/panel.log
+          cargo test --locked -p orr_editor --features package-manager,project-create,room-character,room-lighting,windows-export --lib package_manager_panel::update_tests::update_disconnect_discards_inventory_and_reports_publication_uncertainty -- --exact 2>&1 | tee ci-evidence/legacy-disconnect.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' ci-evidence/legacy-disconnect.log
+          cargo test --locked -p orr_editor --features package-manager,project-create,room-character,room-lighting,windows-export --lib package_manager_panel::update_tests::update_pending_and_completion_freeze_entire_editor_frame -- --exact 2>&1 | tee ci-evidence/legacy-frame-fence.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' ci-evidence/legacy-frame-fence.log
+          cargo build --locked -p orr_sample --features room-lighting,room-character --bin room_escape 2>&1 | tee ci-evidence/runtime-build.log
+          ORR_EDITOR_KEEP_RUNTIME="$PWD/target/debug/room_escape" cargo test --locked -p orr_editor --features package-manager,project-create,room-character,room-lighting,windows-export --lib package_manager_panel::keep::tests::advanced_profile_widgets_keep_dependency_and_source_hidden_export_runs_actual_game -- --ignored --exact 2>&1 | tee ci-evidence/deployed-game.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' ci-evidence/deployed-game.log
+          cargo clippy --locked -p orr_editor --features package-manager --lib -- -D warnings 2>&1 | tee ci-evidence/clippy-off.log
+          cargo clippy --locked -p orr_editor --features package-manager,project-create,room-character,room-lighting,windows-export --lib -- -D warnings 2>&1 | tee ci-evidence/clippy-on.log
+      - name: Preserve results including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: editor-keep-dependency-${{ github.sha }}
+          path: ci-evidence
+          if-no-files-found: error

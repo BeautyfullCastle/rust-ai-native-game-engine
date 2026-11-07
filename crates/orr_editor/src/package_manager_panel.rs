@@ -1,3 +1,4 @@
+mod keep;
 mod dependency_add;
 mod dependency_update;
 mod update_impact;
@@ -13,6 +14,8 @@ use std::{
 };
 
 enum Completion {
+    KeepPreviewed {identity:keep::Identity,result:Result<package_manager::KeepPlan,String>},
+    Kept {identity:keep::Identity,result:Result<Lock,String>},
     DependenciesUpdatePreviewed {
         identity: dependency_update::Identity,
         result: Result<package_manager::DependencyUpdatePlan, String>,
@@ -140,6 +143,8 @@ pub struct Panel {
     updating_dependencies: bool,
     installing_dependencies: bool,
     usage: usage::State,
+    keep: keep::State,
+    keeping: bool,
     update_impact: update_impact::State,
     preview: Option<PreviewedPlan>,
     update_preview: Option<PreviewedUpdate>,
@@ -159,7 +164,7 @@ pub struct Panel {
 impl Panel {
     pub(crate) fn removal_busy(&self) -> bool {
         // The host uses this existing hook for its whole-frame mutation fence.
-        (self.removing || self.updating || self.installing_dependencies || self.updating_dependencies) && self.pending.is_some()
+        (self.removing || self.updating || self.installing_dependencies || self.updating_dependencies || self.keeping) && self.pending.is_some()
     }
     pub fn busy(&self) -> bool {
         self.pending.is_some() || self.model_import.busy()
@@ -242,6 +247,7 @@ impl Panel {
         // Invalidate before polling: a completed saved-state query must not
         // reappear after dirty authoring, a modal, or closing this panel.
         if blocked_reason.is_some() || !self.open {
+            self.keep.invalidate();
             self.usage.invalidate();
             self.update_impact.invalidate();
             self.dependency_add.invalidate();
@@ -405,6 +411,7 @@ impl Panel {
                         (self.project_generation, self.source_generation),
                     );
                 }
+                self.show_keep(ui,can_operate);
                 self.show_usage(ui, can_operate);
                 ui.horizontal(|ui| {
                     ui.label(format!("Removal selection: {}", self.removal_name));
@@ -505,7 +512,9 @@ impl Panel {
             Err(TryRecvError::Disconnected) => {
                 self.pending = None;
                 self.removing = false;
-                self.status = if self.updating_dependencies {
+                self.status = if self.keeping {
+                    "Dependency keep worker disconnected; publication outcome is uncertain. Verify installed packages; no automatic retry or rollback was performed.".into()
+                } else if self.updating_dependencies {
                     "Dependency Update worker disconnected; publication outcome is uncertain. Verify installed packages; no automatic retry or rollback was performed.".into()
                 } else if self.installing_dependencies {
                     "Dependency Add worker disconnected; publication outcome is uncertain. Verify installed packages; no automatic retry or rollback was performed.".into()
@@ -514,9 +523,10 @@ impl Panel {
                 } else {
                     "Package worker disconnected before returning a result.".into()
                 };
-                if self.updating || self.installing_dependencies || self.updating_dependencies {
+                if self.updating || self.installing_dependencies || self.updating_dependencies || self.keeping {
                     self.invalidate_package_cache();
                 }
+                self.keeping = false;
                 self.updating = false;
                 self.installing_dependencies = false;
                 self.updating_dependencies = false;
@@ -524,11 +534,14 @@ impl Panel {
             }
         };
         self.pending = None;
+        self.keeping = false;
         self.removing = false;
         self.updating = false;
         self.installing_dependencies = false;
         self.updating_dependencies = false;
         match completion {
+            Completion::KeepPreviewed {identity,result}=>self.finish_keep_preview(identity,result),
+            Completion::Kept {identity,result}=>self.finish_keep(identity,result),
             Completion::DependenciesUpdatePreviewed { identity, result } => {
                 self.finish_dependencies_update_preview(identity, result);
             }
@@ -829,6 +842,7 @@ impl Panel {
     }
 
     fn invalidate_package_cache(&mut self) {
+        self.keep.invalidate();
         self.usage.invalidate();
         self.update_impact.invalidate();
         self.dependency_add.invalidate();
