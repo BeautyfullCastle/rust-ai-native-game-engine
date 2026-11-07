@@ -141,7 +141,28 @@ impl PreviewWindow {
                 let camera=self.camera.camera(accepted.bounds,size);let frame=self.frame.as_ref().unwrap();let gpu=self.gpu.get_or_insert_with(||GpuViewport3d::new(state,size));
                 match gpu.render_mixed(size,&orr_render::RenderList3D::default(),&camera,&[],&[crate::viewport3d::AnimatedPlacement{entity:orr_ecs::Entity::NONE,model:frame.prepared.model.clone(),instance:orr_render::math3::Mat4::IDENTITY.0,pose:accepted.pose.clone()}]) {Ok(texture)=>{self.texture=Some(texture);self.size=size;},Err(error)=>{self.texture=None;self.error=Some(error);}}
             }
-            if let Some(texture)=self.texture {let response=ui.add(egui::Image::new((texture,display)).sense(egui::Sense::drag()).alt_text("Animated variant preview canvas"));let mut moved=false;if response.dragged_by(egui::PointerButton::Primary) {let delta=ctx.input(|input|input.pointer.delta());moved|=self.camera.orbit([delta.x,delta.y]);}if response.hovered() {let scroll=ctx.input(|input|input.smooth_scroll_delta.y);if scroll!=0.0 {moved|=self.camera.zoom(scroll/50.0);}}if moved {self.texture=None;ctx.request_repaint();}}
+            if let Some(texture) = self.texture {
+                let response = ui.add(
+                    egui::Image::new((texture, display))
+                        .sense(egui::Sense::drag())
+                        .alt_text("Animated variant preview canvas"),
+                );
+                let mut moved = false;
+                if response.dragged_by(egui::PointerButton::Primary) {
+                    let delta = ctx.input(|input| input.pointer.delta());
+                    moved |= self.camera.orbit([delta.x, delta.y]);
+                }
+                if response.hovered() {
+                    let scroll = ctx.input(|input| input.smooth_scroll_delta.y);
+                    if scroll != 0.0 {
+                        moved |= self.camera.zoom(scroll / 50.0);
+                    }
+                }
+                if moved {
+                    self.texture = None;
+                    ctx.request_repaint();
+                }
+            }
         });
         if close || !open {
             self.close();
