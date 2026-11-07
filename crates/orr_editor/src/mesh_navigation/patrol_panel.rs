@@ -3,6 +3,9 @@
 use super::*;
 use orr_remote::mesh_navigation::patrol::{self, MeshPatrol};
 const MAX_POINTS: usize = 8;
+fn supported_profile(game: EditorGame) -> bool {
+    game.is_mesh_navigation() || game.is_mesh_hazards()
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Context {
     scene: PathBuf,
@@ -170,7 +173,7 @@ impl Panel {
         &self,
         editor: &Editor,
     ) -> Result<(Context, orr_remote::mesh_navigation::MeshView), String> {
-        if !editor.game().is_mesh_navigation()
+        if !supported_profile(editor.game())
             || !editor.spec().is_local()
             || editor.mode() != Mode::Edit
             || !editor.can_mutate()
@@ -179,7 +182,8 @@ impl Panel {
             || !editor.proposals().is_empty()
         {
             return Err(
-                "Patrol requires a coherent writable local MeshNavigation Edit host".into(),
+                "Patrol requires a coherent writable local MeshNavigation or MeshHazards Edit host"
+                    .into(),
             );
         }
         if self.geometry.dirty()

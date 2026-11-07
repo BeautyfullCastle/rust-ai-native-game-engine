@@ -24,11 +24,44 @@ pub fn from_view(frame: FrameView<'_>) -> Result<Option<PatrolView>, String> {
         && (view.pin.goal != config.points[run.cursor as usize]
             || view.agent.spec.goal != view.pin.goal
             || ((run.arrived == 1 || run.completed == 1)
-                && view.agent.status != orr_navigation::NavigationStatus::Arrived))
+                && view.agent.status != orr_navigation::NavigationStatus::Arrived
+                && !terminal_hazard_stop(frame, &view)))
     {
         return Err("Patrol runtime goal or arrival does not match cursor".into());
     }
     Ok(Some(PatrolView { config, run }))
+}
+// A stopped agent only explains an old arrival flag after a coherent hazard loss.
+fn terminal_hazard_stop(frame: FrameView<'_>, view: &MeshView) -> bool {
+    #[cfg(feature = "mesh-hazards")]
+    {
+        use orr_games::mesh_navigation_game::{hazards, mission};
+        let proof = || -> Result<bool, String> {
+            let Some(config) = frame.try_singleton::<hazards::MeshHazards>() else {
+                return Ok(false);
+            };
+            let Some(run) = frame.try_singleton::<hazards::MeshHazardRun>() else {
+                return Ok(false);
+            };
+            let Some(mission_run) = frame.try_singleton::<mission::MeshMissionRun>() else {
+                return Ok(false);
+            };
+            hazards::validate_config(config, &view.pin)?;
+            hazards::validate_run(config, run)?;
+            Ok(
+                view.agent.status == orr_navigation::NavigationStatus::Stopped
+                    && run.lost == 1
+                    && run.lost_tick <= frame.tick()
+                    && mission_run.won == 0,
+            )
+        };
+        proof().unwrap_or(false)
+    }
+    #[cfg(not(feature = "mesh-hazards"))]
+    {
+        let _ = (frame, view);
+        false
+    }
 }
 pub fn patch_request(config: &MeshPatrol, view: &MeshView) -> Result<JsonValue, String> {
     if view.pin.graph_revision != view.graph.revision() {

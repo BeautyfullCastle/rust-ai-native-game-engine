@@ -654,6 +654,8 @@ impl Panel {
     pub fn show(&mut self, ui: &mut Ui, editor: &mut Editor) {
         if editor.game().is_mesh_hazards() {
             self.sync(editor);
+            #[cfg(feature="mesh-patrol")]
+            self.show_patrol(ui,editor);
             self.art.show(ui, editor);
             self.props.show(ui, editor, false);
             return;
@@ -1527,3 +1529,7 @@ mod route_diagnostics_overlay_integration_tests;
 #[cfg(all(test,target_os="linux",feature="mesh-patrol"))]
 #[path="mesh_navigation/patrol_integration_tests.rs"]
 mod patrol_integration_tests;
+
+#[cfg(all(test,target_os="linux",feature="mesh-patrol",feature="mesh-hazards"))]
+#[path="mesh_navigation/patrol_hazards_integration_tests.rs"]
+mod patrol_hazards_integration_tests;

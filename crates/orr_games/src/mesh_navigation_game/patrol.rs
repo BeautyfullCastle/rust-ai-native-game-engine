@@ -144,11 +144,36 @@ pub fn validate_frame(frame: &Frame, pin: MeshScenePin) -> Result<(), String> {
     if r.paused == 0
         && (pin.goal != c.points[r.cursor as usize]
             || a.spec.goal != pin.goal
-            || ((r.arrived == 1 || r.completed == 1) && a.status != NavigationStatus::Arrived))
+            || ((r.arrived == 1 || r.completed == 1)
+                && a.status != NavigationStatus::Arrived
+                && !terminal_hazard_stop(frame, pin, a.status)))
     {
         return Err("MeshPatrol runtime goal or arrival does not match patrol cursor".into());
     }
     Ok(())
+}
+// A hazard hit preserves the pre-tick cursor/wait/arrival exactly, then stops
+// the agent. Only a valid terminal loss may explain this arrival/status pair.
+fn terminal_hazard_stop(frame: &Frame, pin: MeshScenePin, status: NavigationStatus) -> bool {
+    #[cfg(feature = "mesh-hazards")]
+    {
+        let proof = || -> Result<bool, String> {
+            let config = super::hazards::read_config(frame)?;
+            let run = super::hazards::read_run(frame)?;
+            super::hazards::validate_config(&config, &pin)?;
+            super::hazards::validate_run(&config, &run)?;
+            Ok(status == NavigationStatus::Stopped
+                && run.lost == 1
+                && run.lost_tick <= frame.tick()
+                && super::mission::read_run(frame)?.won == 0)
+        };
+        proof().unwrap_or(false)
+    }
+    #[cfg(not(feature = "mesh-hazards"))]
+    {
+        let _ = (frame, pin, status);
+        false
+    }
 }
 /// Called after the ordinary runtime is admitted. Authored runtime state must be zero.
 pub fn admit(frame: &mut Frame, pin: &mut MeshScenePin) -> Result<(), String> {

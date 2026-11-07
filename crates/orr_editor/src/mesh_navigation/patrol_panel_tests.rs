@@ -142,3 +142,13 @@ fn dirty_context_change_requires_explicit_reload_and_never_revives_old_draft() {
         assert!(!state.stale && !state.dirty);
     }
 }
+
+#[test]
+fn patrol_profile_gate_accepts_navigation_and_hazards_only() {
+    assert!(supported_profile(EditorGame::MeshNavigation));
+    #[cfg(feature = "mesh-hazards")]
+    assert!(supported_profile(EditorGame::MeshHazardsV1));
+    for game in [EditorGame::PhysGame, EditorGame::Arena, EditorGame::Yard3D] {
+        assert!(!supported_profile(game));
+    }
+}

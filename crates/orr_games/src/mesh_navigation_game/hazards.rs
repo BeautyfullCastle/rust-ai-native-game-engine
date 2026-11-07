@@ -240,8 +240,15 @@ fn step(
     let mut candidate = frame.clone();
     let mut next_pin = pin;
     apply_goal_requests(&mut candidate, inputs, &mut next_pin);
+    #[cfg(feature = "mesh-patrol")]
+    let move_agent = super::patrol::pre_step(&mut candidate, &mut next_pin)?;
     let before =
         MeshRuntime::agent(&candidate, next_pin.binding()).map_err(|error| error.to_string())?;
+    #[cfg(feature = "mesh-patrol")]
+    if move_agent {
+        MeshRuntime::step(&mut candidate, next_pin.binding()).map_err(|error| error.to_string())?;
+    }
+    #[cfg(not(feature = "mesh-patrol"))]
     MeshRuntime::step(&mut candidate, next_pin.binding()).map_err(|error| error.to_string())?;
     let after =
         MeshRuntime::agent(&candidate, next_pin.binding()).map_err(|error| error.to_string())?;
@@ -267,6 +274,8 @@ fn step(
             return Ok(());
         }
     }
+    #[cfg(feature = "mesh-patrol")]
+    super::patrol::post_step(&mut candidate, next_pin)?;
     mission::update(&mut candidate, &next_pin)?;
     validate_frame(&candidate, next_pin)?;
     *frame = candidate;
@@ -276,3 +285,7 @@ fn step(
 #[cfg(test)]
 #[path = "hazards/tests.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "mesh-patrol"))]
+#[path = "hazards/patrol_tests.rs"]
+mod patrol_tests;

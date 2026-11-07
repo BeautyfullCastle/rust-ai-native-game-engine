@@ -24,7 +24,7 @@ pub use orr_games::mesh_navigation_game::hazards::{
 #[cfg(not(feature = "mesh-patrol"))]
 pub const MESH_HAZARDS_BUILD_ID: u64 = 0x4d48_415a_0000_0001;
 #[cfg(feature = "mesh-patrol")]
-pub const MESH_HAZARDS_BUILD_ID: u64 = 0x4d48_415a_0000_0002;
+pub const MESH_HAZARDS_BUILD_ID: u64 = 0x4d48_415a_0000_0003;
 pub const MESH_HAZARDS_GAME: &str = "MeshHazardsV1";
 
 pub fn hazards_types() -> TypeRegistry {
@@ -38,15 +38,14 @@ pub struct MeshHazardsAdmission;
 
 impl BakeAdmission for MeshHazardsAdmission {
     fn admit(&self, scene: &Scene, frame: &mut Frame, index: &SceneIndex) -> Result<(), EditError> {
-        #[cfg(feature = "mesh-patrol")]
-        if !frame.singleton::<orr_games::mesh_navigation_game::patrol::MeshPatrol>().disabled() {
-            return Err(EditError::Invalid("MeshHazards does not support automatic waypoint patrol; use MeshNavigation".into()));
-        }
-        let pin = *frame.singleton::<MeshScenePin>();
-        MeshNavigationAdmission.admit(scene, frame, index)?;
+        // Derived runtime admission may replan the patrol's first goal. Publish
+        // that frame only after the hazard profile has accepted the same pin.
+        let mut candidate = frame.clone();
+        MeshNavigationAdmission.admit(scene, &mut candidate, index)?;
+        let pin = *candidate.singleton::<MeshScenePin>();
         if pin.is_empty() {
-            let config = hazards::read_config(frame).map_err(EditError::Invalid)?;
-            let run = hazards::read_run(frame).map_err(EditError::Invalid)?;
+            let config = hazards::read_config(&candidate).map_err(EditError::Invalid)?;
+            let run = hazards::read_run(&candidate).map_err(EditError::Invalid)?;
             hazards::validate_config(&config, &pin).map_err(EditError::Invalid)?;
             hazards::validate_run(&config, &run).map_err(EditError::Invalid)?;
             if bytemuck::bytes_of(&run).iter().any(|byte| *byte != 0) {
@@ -54,10 +53,13 @@ impl BakeAdmission for MeshHazardsAdmission {
                     "runtime hazard loss cannot be authored".into(),
                 ));
             }
+            *frame = candidate;
             return Ok(());
         }
-        hazards::admit(frame, pin)
-            .map_err(|error| EditError::Invalid(format!("mesh hazards admission: {error}")))
+        hazards::admit(&candidate, pin)
+            .map_err(|error| EditError::Invalid(format!("mesh hazards admission: {error}")))?;
+        *frame = candidate;
+        Ok(())
     }
 
     fn allow_play_edits(&self) -> bool {
