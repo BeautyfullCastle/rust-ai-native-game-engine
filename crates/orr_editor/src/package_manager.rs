@@ -1,3 +1,5 @@
+#[cfg(feature = "package-upgrade-copy")]
+pub mod referenced_copy;
 mod keep;
 pub use keep::{plan_keep,apply_keep,KeepPlan};
 mod dependency_update;
