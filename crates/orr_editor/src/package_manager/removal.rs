@@ -287,7 +287,7 @@ pub(super) fn admit_candidate(
     })
 }
 
-fn read_room_files(project: &Project) -> Result<BTreeMap<PathBuf, Vec<u8>>, String> {
+pub(super) fn read_room_files(project: &Project) -> Result<BTreeMap<PathBuf, Vec<u8>>, String> {
     let manifest_path = project.root().join("orr.project.json");
     let manifest_bytes = read_regular(&manifest_path, 1024 * 1024)?;
     let manifest: ProjectManifest = serde_json::from_slice(&manifest_bytes)
