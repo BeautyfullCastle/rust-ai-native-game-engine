@@ -1,0 +1,45 @@
+name: Package pointer diagnosis
+on:
+  push:
+    branches: [codex/package-pointer-diagnosis-20261107]
+permissions:
+  contents: read
+jobs:
+  editor-keep:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record exact source and prepare toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir ci-evidence
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git rev-parse HEAD HEAD^{tree} | tee ci-evidence/source.txt
+          rustup toolchain install 1.99.1 --profile minimal --component clippy
+          rustup override set 1.99.1
+          rustc --version --verbose | tee ci-evidence/rustc.txt
+          sudo apt-get update -q 2>&1 | tee ci-evidence/dependencies.log
+          sudo apt-get install -y -q pkg-config libasound2-dev libudev-dev libx11-dev libxkbcommon-dev libwayland-dev 2>&1 | tee -a ci-evidence/dependencies.log
+      - name: Diagnose original pointer route once
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p orr_editor --features package-manager,project-create --lib package_manager_panel::keep::tests::pointer_route_diagnoses_each_keep_stage -- --exact --nocapture 2>&1 | tee ci-evidence/pointer.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' ci-evidence/pointer.log
+      - name: Preserve results including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: editor-keep-dependency-${{ github.sha }}
+          path: ci-evidence
+          if-no-files-found: error
