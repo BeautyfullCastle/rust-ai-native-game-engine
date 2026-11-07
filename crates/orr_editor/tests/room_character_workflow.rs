@@ -1121,3 +1121,25 @@ fn character_crossfade_actual_editor_gpu() {
     assert_eq!(std::env::var("ORR_REQUIRE_GPU").as_deref(), Ok("1"));
     crossfade_workflow(true);
 }
+
+#[test]
+fn character_batch_cannot_copy_player_animation_to_another_actor_or_partially_commit() {
+    let fixture = Fixture::new();
+    let mut h = fixture.app(false);
+    settle(&mut h);
+    wait(&mut h, "coherent character batch source", |app| app.editor.yard_rows_coherent());
+    let app = h.state_mut();
+    app.editor.select(Some(Target::Guid(fixture.guids[&PLAYER].clone())));
+    app.models.use_selected_settings(&app.editor).unwrap();
+    let original = app.models.bindings.as_ref().unwrap().document().clone();
+    let path = app.models.bindings.as_ref().unwrap().path.clone();
+    let bytes = fs::read(path).unwrap();
+    let old = app.models.animated_placements(&app.editor).unwrap()[0].model.clone();
+    let checksum = app.editor.checksum();
+    assert!(app.models.assign_targets(&app.editor, &[fixture.guids[&PLAYER].clone(), fixture.guids[&KEY].clone()]).is_err());
+    assert_eq!(app.models.bindings.as_ref().unwrap().document(), &original);
+    assert!(!app.models.bindings.as_ref().unwrap().dirty());
+    assert!(std::sync::Arc::ptr_eq(&old, &app.models.animated_placements(&app.editor).unwrap()[0].model));
+    assert_eq!(app.editor.checksum(), checksum);
+    assert_eq!(fs::read(&app.models.bindings.as_ref().unwrap().path).unwrap(), bytes);
+}

@@ -918,3 +918,6 @@ mod rotation;
 
 #[path = "yard3d_models/orphan_cleanup.rs"]
 mod orphan_cleanup;
+
+#[path = "yard3d_models/batch.rs"]
+mod batch;
