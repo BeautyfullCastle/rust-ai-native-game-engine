@@ -21,6 +21,7 @@ mod project_identity;
 pub use project_identity::{format_game_id, ProgressProfile, ProjectProgress};
 mod cached_revision;
 mod checked_remove;
+mod keep_dependency;
 mod restore_removed;
 mod verification;
 pub use verification::PackageVerification;
