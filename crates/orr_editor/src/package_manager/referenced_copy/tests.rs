@@ -281,3 +281,11 @@ fn actual_cli_new_copy_success_and_collision_preserve_originals() {
 }
 #[path = "adversarial_tests.rs"]
 mod adversarial_tests;
+
+#[cfg(feature="package-upgrade-animated")]
+#[path="animated_tests.rs"]
+mod animated_tests;
+
+#[cfg(feature="package-upgrade-animated")]
+#[path="animated_cli_tests.rs"]
+mod animated_cli_tests;
