@@ -11,6 +11,10 @@ use orr_terrain::Terrain;
 
 use crate::yard3d_game::{NoCommand, NoEvent, YardInput};
 
+#[cfg(feature="terrain-patrol")]
+pub mod patrol;
+pub const TERRAIN_PATROL_ENABLED:bool=cfg!(feature="terrain-patrol");
+
 pub const PIN_NAME: &str = "NavigationScenePin";
 
 /// The one point agent authored with this scene. Only slope is configurable:
@@ -131,6 +135,8 @@ pub fn validate_scene_frame(frame: &Frame) -> Result<(), String> {
         return Err("NavigationYard3D rejects all physics bodies and colliders".into());
     }
     NavigationRuntime::validate(frame).map_err(|e| e.to_string())?;
+    #[cfg(feature="terrain-patrol")]
+    patrol::validate_frame(frame,*frame.singleton::<NavigationScenePin>())?;
     if frame.alive_count() != 1 {
         return Err("NavigationYard3D admits exactly one derived agent".into());
     }
@@ -142,6 +148,8 @@ pub fn register_reflect(types: &mut TypeRegistry) {
     orr_physics3d::register_reflect(types);
     types.register_singleton::<NavigationScenePin>(PIN_NAME);
     types.register_singleton::<NavigationStepStatus>("NavigationStepStatus");
+    #[cfg(feature="terrain-patrol")]
+    patrol::register_reflect(types);
 }
 impl Game for NavigationYard3D {
     type Input = YardInput;
@@ -154,6 +162,8 @@ impl Game for NavigationYard3D {
         NavigationRuntime::register(builder);
         builder.register_singleton::<NavigationScenePin>(PIN_NAME);
         builder.register_singleton::<NavigationStepStatus>("NavigationStepStatus");
+        #[cfg(feature="terrain-patrol")]
+        patrol::register(builder);
     }
     fn setup(_: &mut Frame, _: &()) {
         // Empty means authoring only. Admission owns the sole agent and full route.
@@ -173,7 +183,11 @@ impl System<NavigationYard3D> for NavigationStep {
             return;
         }
         let pin = *ctx.frame.singleton::<NavigationScenePin>();
+        #[cfg(not(feature="terrain-patrol"))]
         let state = *ctx.frame.singleton::<RuntimeState>();
+        #[cfg(feature="terrain-patrol")]
+        let result = patrol::tick(ctx.frame,pin);
+        #[cfg(not(feature="terrain-patrol"))]
         let result = (|| {
             if !state.is_active() {
                 return Err("NavigationYard3D requires an admitted navigation route".into());

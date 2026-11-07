@@ -15,6 +15,9 @@ pub struct SavedSource {
 }
 impl SavedSource {
     pub fn capture(scene: &Path) -> Result<Self, String> {
+        if orr_games::navigation_yard3d_game::TERRAIN_PATROL_ENABLED {
+            return Err("legacy surface navigation bundle does not support terrain patrol profile".into());
+        }
         let path = checked_path(scene)?;
         let scene = Snapshot::read(&path, super::MAX_SCENE)?;
         let player = SurfacePlayer::open(&path)?;

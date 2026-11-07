@@ -289,3 +289,6 @@ pub mod surface_player;
 #[cfg(all(feature = "authored-surface-bundle", target_os = "linux", target_arch = "x86_64"))]
 #[path = "surface_bundle/mod.rs"]
 pub mod surface_bundle;
+
+#[cfg(all(test, feature="authored-surface-bundle", target_os="linux", target_arch="x86_64"))]
+mod terrain_patrol_tests;
