@@ -165,3 +165,119 @@ fn fifo_lighting_input_is_rejected_without_waiting_for_a_writer() {
         .success());
     assert!(read_lighting(&fifo).unwrap_err().contains("regular file"));
 }
+
+#[cfg(not(feature = "room-character"))]
+#[test]
+fn character_request_requires_feature_before_validating_or_opening_output() {
+    let mut invalid = light();
+    invalid.point_light = None;
+    let error = create_with_character(
+        Path::new("relative/no-parent/game"),
+        "invalid seed",
+        &invalid,
+        true,
+    )
+    .unwrap_err();
+    assert!(error.contains("requires room-character feature"));
+    let t = tempfile::tempdir().unwrap();
+    let out = root(&t, "not created");
+    assert!(create_with_character(&out, "seed", &light(), true).is_err());
+    assert_eq!(fs::read_dir(t.path()).unwrap().count(), 0);
+}
+#[cfg(feature = "room-character")]
+#[test]
+fn character_lit_starter_preserves_character_baseline_and_requires_both_consents() {
+    use crate::room_project::{PreparedProject, RoomProjectCapabilities};
+    let t = tempfile::tempdir().unwrap();
+    let a = root(&t, "first animated light room");
+    let b = root(&t, "second animated light room");
+    let base = root(&t, "original character room");
+    let d = light();
+    let first = create_with_character(&a, "lit-character-test", &d, true).unwrap();
+    let second = create_with_character(&b, "lit-character-test", &d, true).unwrap();
+    assert_eq!(first.template, CHARACTER_TEMPLATE);
+    assert_eq!(first.initial_checksum, second.initial_checksum);
+    assert_eq!(snapshot(&a).unwrap(), snapshot(&b).unwrap());
+    let original = project_create::create(&CreateOptions {
+        output: base.clone(),
+        template: project_create::ROOM_CHARACTER_TEMPLATE.into(),
+        seed: "lit-character-test".into(),
+    })
+    .unwrap();
+    assert_eq!(first.entity_guids, original.entity_guids);
+    assert_eq!(first.initial_checksum, original.initial_checksum);
+    let mut lit = snapshot(&a).unwrap();
+    let mut unlit = snapshot(&base).unwrap();
+    for path in ["orr.project.json", "README.md", "room.lighting.json"] {
+        lit.remove(Path::new(path));
+        unlit.remove(Path::new(path));
+    }
+    assert_eq!(
+        lit, unlit,
+        "character document, animated model/package and complete base game retained"
+    );
+    for capabilities in [
+        RoomProjectCapabilities {
+            lighting: false,
+            character: false,
+        },
+        RoomProjectCapabilities {
+            lighting: true,
+            character: false,
+        },
+        RoomProjectCapabilities {
+            lighting: false,
+            character: true,
+        },
+    ] {
+        assert!(PreparedProject::open_with_capabilities(&a, capabilities).is_err());
+    }
+    let prepared = PreparedProject::open_with_capabilities(
+        &a,
+        RoomProjectCapabilities {
+            lighting: true,
+            character: true,
+        },
+    )
+    .unwrap();
+    assert_eq!(prepared.lighting().unwrap().document, d);
+    assert!(prepared.character().is_some());
+    assert_eq!(prepared.scene().frame().checksum(), first.initial_checksum);
+    let legacy = root(&t, "legacy create");
+    let explicit = root(&t, "explicit static");
+    create(&legacy, "same-static", &d).unwrap();
+    let static_report = create_with_character(&explicit, "same-static", &d, false).unwrap();
+    assert_eq!(static_report.template, TEMPLATE);
+    assert_eq!(snapshot(&legacy).unwrap(), snapshot(&explicit).unwrap());
+}
+#[cfg(feature = "room-character")]
+#[test]
+fn character_sidecar_tampering_rejects_before_publication_without_touching_existing_output() {
+    let t = tempfile::tempdir().unwrap();
+    let out = root(&t, "never published");
+    let error = create_profile(
+        &out,
+        "seed",
+        &light(),
+        true,
+        |name, root| {
+            if name == "before-publish" {
+                let path = root.join("room.character.json");
+                let mut bytes = fs::read(&path).map_err(err)?;
+                bytes.push(b' ');
+                fs::write(path, bytes).map_err(err)?;
+            }
+            Ok(())
+        },
+        crate::project_publish::publish_no_replace,
+    )
+    .unwrap_err();
+    assert!(error.contains("bytes changed"));
+    assert!(!out.exists());
+    assert_eq!(fs::read_dir(t.path()).unwrap().count(), 0);
+    fs::create_dir(&out).unwrap();
+    fs::write(out.join("sentinel"), b"existing game").unwrap();
+    assert!(create_with_character(&out, "seed", &light(), true).is_err());
+    assert_eq!(fs::read(out.join("sentinel")).unwrap(), b"existing game");
+    assert_eq!(fs::read_dir(&out).unwrap().count(), 1);
+}
