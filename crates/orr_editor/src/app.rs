@@ -2427,6 +2427,11 @@ impl EditorApp {
         #[cfg(not(feature="models"))]
         let hidden=Vec::new();
         let mut list=self.editor.yard_frame().list(&hidden,None);
+        #[cfg(feature="room-lighting")]
+        if let Err(error) = self.editor.apply_room_environment_for_presentation(&mut list.lighting) {
+            ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,error,egui::FontId::proportional(14.0),Color32::RED);
+            return;
+        }
         if let Some(item) = self.editor.yard_frame().items.iter().find(|item| Some(item.entity) == selected) {
             selection_outline::append(&mut list, item);
         }

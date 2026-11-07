@@ -27,6 +27,21 @@ use std::{collections::BTreeSet, sync::Arc};
 
 pub const TARGET_FORMAT: TextureFormat = TextureFormat::Rgba8Unorm;
 
+/// Shared Room procedural/imported base lighting. Environment authoring never
+/// changes shadow policy or the independent point-light settings.
+pub fn presentation_lighting(
+    #[cfg(feature = "room-lighting")] environment: Option<&crate::room_lighting::Environment>,
+) -> Result<orr_render::Lighting, String> {
+    let mut lighting = yard3d_view::yard_lighting();
+    lighting.shadows = false;
+    #[cfg(feature = "room-lighting")]
+    if let Some(environment) = environment {
+        environment.apply_to(&mut lighting)?;
+    }
+    Ok(lighting)
+}
+
+
 /// Exact current-frame collider presentation. The collected key remains in the
 /// simulation and GUID index, but is absent from both presentation paths.
 pub fn items(frame: FrameView<'_>) -> Vec<RenderItem3> {
@@ -604,6 +619,7 @@ pub struct RoomRenderer {
 }
 
 struct RoomRenderCore {
+    lighting: orr_render::Lighting,
     point_light: PointLightSettings,
     format: TextureFormat,
     procedural: Renderer3D<Wgpu>,
@@ -689,8 +705,10 @@ impl RoomRenderer {
             .map(|(model, instances)| (model.as_ref(), instances.as_slice()))
             .collect();
         let mut empty = RenderList3D::new();
-        empty.lighting = yard3d_view::yard_lighting();
-        empty.lighting.shadows = false;
+        empty.lighting = presentation_lighting(
+            #[cfg(feature = "room-lighting")]
+            None,
+        )?;
         #[cfg(feature = "room-animated-models")]
         {
             let animated_prepared: Vec<_> = animated_admission
@@ -763,6 +781,7 @@ impl RoomRenderer {
         Ok(Self {
             target: OffscreenTarget::new(rhi, size.0, size.1, format),
             core: RoomRenderCore {
+                lighting: empty.lighting,
                 point_light: PointLightSettings::default(),
                 format,
                 procedural: Renderer3D::with_settings(rhi.clone(), format, Settings3D::LOW),
@@ -772,6 +791,14 @@ impl RoomRenderer {
                 animated_models: animated_cache,
             },
         })
+    }
+    /// Validate an authored environment before replacing the active base light.
+    /// None restores the exact legacy Room lighting; no assets are reread.
+    #[cfg(feature = "room-lighting")]
+    pub fn set_environment(&mut self, environment: Option<crate::room_lighting::Environment>) -> Result<(), String> {
+        let lighting = presentation_lighting(environment.as_ref())?;
+        self.core.lighting = lighting;
+        Ok(())
     }
     pub fn set_point_light_settings(&mut self, settings: PointLightSettings) -> Result<(), String> {
         settings.validate().map_err(|e| e.to_string())?;
@@ -987,8 +1014,7 @@ impl RoomRenderCore {
             .filter(|item| !bound.contains(&item.entity))
             .collect();
         let mut list = RenderList3D::new();
-        list.lighting = yard3d_view::yard_lighting();
-        list.lighting.shadows = false;
+        list.lighting = self.lighting;
         yard3d_view::fill_list(&visible, &mut list);
         let prepared: Vec<_> = self
             .models
@@ -1276,4 +1302,29 @@ pub fn character_placement(
         pose,
         transform: placed.transform,
     }))
+}
+
+#[cfg(all(test, feature = "room-lighting"))]
+mod environment_consumer_tests {
+    use super::*;
+    #[test]
+    fn absent_environment_keeps_exact_legacy_room_light_and_shadow_policy() {
+        let mut legacy = yard3d_view::yard_lighting();
+        legacy.shadows = false;
+        assert_eq!(presentation_lighting(None).unwrap(), legacy);
+    }
+    #[test]
+    fn environment_reaches_shared_base_without_changing_shadow_output_or_point_settings() {
+        let environment = crate::room_lighting::Environment {
+            direction: [-0.25, -0.75, 0.5], color: [0.2, 0.4, 0.7], intensity: 0.8,
+            sky: [0.1, 0.2, 0.3], ground: [0.04, 0.08, 0.12], ambient: 0.3,
+        };
+        let mut expected = presentation_lighting(None).unwrap();
+        environment.apply_to(&mut expected).unwrap();
+        assert_eq!(presentation_lighting(Some(&environment)).unwrap(), expected);
+        let mut invalid = environment;
+        invalid.intensity = f32::NAN;
+        assert!(presentation_lighting(Some(&invalid)).is_err());
+        assert!(!presentation_lighting(None).unwrap().shadows);
+    }
 }

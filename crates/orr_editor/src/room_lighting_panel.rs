@@ -10,6 +10,7 @@ use std::{
 const MAX_UNDO: usize = 32;
 
 mod viewport_pick;
+mod environment_ui;
 
 // Private failure-injection boundary. Checks may fail an operation but never
 // replace it: production Save always executes the real persistence operations.
@@ -454,7 +455,9 @@ impl Panel {
             ui.add_enabled_ui(can_edit, |ui| {
                 let mut enabled = self.candidate.point_light.is_some();
                 if ui.checkbox(&mut enabled, "Point light enabled").changed() {
+                    let environment=self.candidate.environment.clone();
                     self.candidate = if enabled { Document::enabled_default() } else { Document::default() };
+                    self.candidate.environment=environment;
                 }
                 if let Some(light) = &mut self.candidate.point_light {
                     for (axis, value) in ["X", "Y", "Z"].into_iter().zip(&mut light.position) {
@@ -486,6 +489,8 @@ impl Panel {
                         ui.weak("Play uses PLAYER position plus offset. Position above remains the Edit fallback. No shadows or light collision are added.");
                     }
                 }
+
+                self.show_environment_controls(ui);
 
                 if ui
                     .add_enabled(self.candidate != self.document, egui::Button::new("Discard lighting draft"))
@@ -1090,3 +1095,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(all(test,target_os="linux",feature="project-create"))]
+#[path="room_lighting_panel/environment_integration_tests.rs"]
+mod environment_integration_tests;

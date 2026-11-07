@@ -2402,6 +2402,14 @@ impl Editor {
             self.room_lighting.as_ref()
         } else { None }
     }
+    #[cfg(feature = "room-lighting")]
+    pub fn apply_room_environment_for_presentation(&self, lighting: &mut orr_render::Lighting) -> Result<(), String> {
+        if let Some(document) = self.room_lighting_document() {
+            document.validate()?;
+            if let Some(environment) = &document.environment { environment.apply_to(lighting)?; }
+        }
+        Ok(())
+    }
     #[cfg(feature = "models")]
     pub fn room_point_light_settings_for_presentation(&self) -> Result<orr_render::PointLightSettings,String> {
         #[cfg(feature = "room-lighting")]
