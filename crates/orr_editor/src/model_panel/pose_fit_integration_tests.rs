@@ -100,7 +100,6 @@ fn fixture(sphere: bool) -> (tempfile::TempDir, Harness<'static, (ModelPanel, Ed
     panel.transform.scale = [0.25; 3];
     panel.assign(&editor).unwrap();
     panel.save(&editor).unwrap();
-    panel.load_candidate(&editor).unwrap();
     let mut h = Harness::builder()
         .with_size([1400.0, 2000.0])
         .build_ui_state(
@@ -110,6 +109,33 @@ fn fixture(sphere: bool) -> (tempfile::TempDir, Harness<'static, (ModelPanel, Ed
     h.run_steps(3);
     h.get_by_label("Static model binding").click_accesskit();
     h.run_steps(3);
+    // First show synchronizes the scene identity and reopens its saved sidecar,
+    // deliberately retiring any candidate loaded before that refresh.
+    h.get_by_label("Use selected model settings")
+        .click_accesskit();
+    h.run_steps(3);
+    h.get_by_label("Load model asset").click_accesskit();
+    h.run_steps(3);
+    assert!(h.state().0.error.is_none(), "{:?}", h.state().0.error);
+    assert_eq!(h.state().0.package, "pose-fit");
+    assert_eq!(h.state().0.asset, "model.animated.json");
+    assert_eq!(h.state().0.kind, ModelKind::Animated);
+    let selected = h.state().1.selected_guid().unwrap().to_string();
+    let binding = &h.state().0.bindings.as_ref().unwrap().document().bindings[&selected];
+    assert_eq!(binding.package, "pose-fit");
+    assert_eq!(binding.kind, ModelKind::Animated);
+    let (package, asset, kind, loaded) = h
+        .state()
+        .0
+        .candidate
+        .as_ref()
+        .expect("actual Load model asset must retain the selected animated candidate");
+    assert_eq!(
+        (package.as_str(), asset.as_str(), *kind),
+        ("pose-fit", "model.animated.json", ModelKind::Animated)
+    );
+    assert_eq!(loaded.source_hash(), binding.source_hash);
+    assert!(loaded.animated_model().is_some());
     (temp, h)
 }
 fn stage(h: &mut Harness<'_, (ModelPanel, Editor)>, sphere: bool, time: &str) {
