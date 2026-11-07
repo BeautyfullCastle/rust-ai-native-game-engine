@@ -46,6 +46,9 @@ mod geometry_vertex_viewport;
 mod route_diagnostics;
 #[path = "mesh_navigation/route_diagnostics_panel.rs"]
 mod route_diagnostics_panel;
+#[cfg(feature="mesh-patrol")]
+#[path="mesh_navigation/patrol_panel.rs"]
+mod patrol_panel;
 #[cfg(feature = "mesh-mission")]
 #[path = "mesh_navigation/mission_view.rs"]
 mod mission_view;
@@ -106,6 +109,8 @@ pub struct Panel {
     geometry_preview_visible: bool,
     geometry_vertex: geometry_vertex_viewport::State,
     route_diagnostics: route_diagnostics_panel::State,
+    #[cfg(feature="mesh-patrol")]
+    patrol: patrol_panel::State,
     #[cfg(feature = "mesh-mission")]
     mission_bound: bool,
     #[cfg(feature = "mesh-mission")]
@@ -151,6 +156,8 @@ impl Default for Panel {
             geometry_preview_visible: false,
             geometry_vertex: geometry_vertex_viewport::State::default(),
             route_diagnostics: route_diagnostics_panel::State::default(),
+            #[cfg(feature="mesh-patrol")]
+            patrol: Default::default(),
             #[cfg(feature = "mesh-mission")]
             mission_bound: false,
             #[cfg(feature = "mesh-mission")]
@@ -162,6 +169,8 @@ impl Default for Panel {
 impl Panel {
     pub fn sync(&mut self, editor: &Editor) {
         self.sync_host(editor);
+        #[cfg(feature="mesh-patrol")]
+        self.sync_patrol(editor);
         if let Some(report) = self.surface_package.poll(editor.path().as_deref(), editor.scene_load_epoch(), self.graph.as_ref().map(StaticMeshGraph::revision)) {
             self.geometry.select_import_package(&report);
         }
@@ -783,6 +792,8 @@ impl Panel {
             self.draft_dirty |= field(ui, "Maximum vertical projection", &mut self.max_vertical);
             self.draft_dirty |= field(ui, "Distance per tick", &mut self.distance_per_tick);
             self.show_route_diagnostics(ui, editor);
+            #[cfg(feature="mesh-patrol")]
+            self.show_patrol(ui,editor);
             self.show_agent_picking(ui, editor);
             if let Some(reason) = self.authoring_blocker(editor) {
                 ui.label(reason);
@@ -1512,3 +1523,7 @@ mod route_diagnostics_overlay;
 #[cfg(all(test,target_os="linux"))]
 #[path="mesh_navigation/route_diagnostics_overlay_integration_tests.rs"]
 mod route_diagnostics_overlay_integration_tests;
+
+#[cfg(all(test,target_os="linux",feature="mesh-patrol"))]
+#[path="mesh_navigation/patrol_integration_tests.rs"]
+mod patrol_integration_tests;

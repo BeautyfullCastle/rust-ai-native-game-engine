@@ -11,6 +11,8 @@ use orr_viewstream::{FrameMeta, Schema, StreamProducer};
 use std::{io::Read, path::PathBuf, sync::Arc};
 
 pub mod authoring;
+#[cfg(feature = "mesh-patrol")]
+pub mod patrol;
 #[cfg(feature = "mesh-hazards")]
 pub mod hazards;
 #[cfg(feature = "mesh-mission")]
@@ -31,10 +33,14 @@ pub use mission::{
 pub use orr_navigation_runtime::mesh::AgentSpec as RuntimeAgentSpec;
 pub use orr_navigation_runtime::mesh::{decode_asset, AgentSpec};
 
-#[cfg(not(feature = "mesh-mission"))]
+#[cfg(all(not(feature = "mesh-patrol"), not(feature = "mesh-mission")))]
 pub const MESH_NAVIGATION_BUILD_ID: u64 = 0x4d45_5348_0000_0002;
-#[cfg(feature = "mesh-mission")]
+#[cfg(all(not(feature = "mesh-patrol"), feature = "mesh-mission"))]
 pub const MESH_NAVIGATION_BUILD_ID: u64 = 0x4d45_5348_0000_0003;
+#[cfg(all(feature = "mesh-patrol", not(feature = "mesh-mission")))]
+pub const MESH_NAVIGATION_BUILD_ID: u64 = 0x4d45_5348_0000_0004;
+#[cfg(all(feature = "mesh-patrol", feature = "mesh-mission"))]
+pub const MESH_NAVIGATION_BUILD_ID: u64 = 0x4d45_5348_0000_0005;
 const MAX_SCENE_YAML_BYTES: u64 = 1 << 20;
 
 pub fn mesh_navigation_types() -> TypeRegistry {
@@ -50,6 +56,9 @@ impl BakeAdmission for MeshNavigationAdmission {
     fn admit(&self, scene: &Scene, frame: &mut Frame, _: &SceneIndex) -> Result<(), EditError> {
         if orr_games::mesh_navigation_game::MESH_MISSION_ENABLED != cfg!(feature = "mesh-mission") {
             return Err(EditError::Invalid("MeshNavigation mission feature profile differs between game and host; rebuild with coherent mesh-mission features".into()));
+        }
+        if orr_games::mesh_navigation_game::MESH_PATROL_ENABLED != cfg!(feature = "mesh-patrol") {
+            return Err(EditError::Invalid("MeshNavigation patrol feature profile differs between game and host; rebuild with coherent mesh-patrol features".into()));
         }
         let fail =
             |message: String| EditError::Invalid(format!("mesh navigation admission: {message}"));
@@ -68,15 +77,24 @@ impl BakeAdmission for MeshNavigationAdmission {
         }
 
         let pin = *frame.singleton::<MeshScenePin>();
+        #[cfg(feature = "mesh-patrol")]
+        let mut pin = pin;
         #[cfg(feature = "mesh-mission")]
         orr_games::mesh_navigation_game::mission::admit(frame, pin).map_err(fail)?;
         if pin.is_empty() {
+            #[cfg(feature = "mesh-patrol")]
+            orr_games::mesh_navigation_game::patrol::admit(frame, &mut pin).map_err(fail)?;
             return Ok(());
         }
 
         let graph = pin.graph().map_err(fail)?;
         MeshRuntime::admit(frame, &graph, pin.binding(), pin.spec())
             .map_err(|error| fail(error.to_string()))?;
+        #[cfg(feature = "mesh-patrol")]
+        {
+            orr_games::mesh_navigation_game::patrol::admit(frame, &mut pin).map_err(fail)?;
+            frame.set_singleton(pin);
+        }
         orr_games::mesh_navigation_game::validate_scene_frame(frame).map_err(fail)
     }
 

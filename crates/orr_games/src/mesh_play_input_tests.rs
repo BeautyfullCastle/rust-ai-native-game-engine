@@ -155,7 +155,7 @@ fn replaying_the_same_goal_input_sequence_has_identical_frame_checksums() {
     }
 }
 
-#[cfg(feature = "mesh-mission")]
+#[cfg(all(feature = "mesh-mission", not(feature = "mesh-patrol")))]
 #[test]
 fn legacy_mesh_mission_checksum_is_unchanged_by_hazard_feature() {
     let mut sim = simulation(53);

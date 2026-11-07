@@ -21,7 +21,10 @@ pub use orr_games::mesh_navigation_game::hazards::{
     HazardSphere, MeshHazardNavigation, MeshHazardRun, MeshHazards, HAZARDS_NAME, RUN_NAME,
 };
 
+#[cfg(not(feature = "mesh-patrol"))]
 pub const MESH_HAZARDS_BUILD_ID: u64 = 0x4d48_415a_0000_0001;
+#[cfg(feature = "mesh-patrol")]
+pub const MESH_HAZARDS_BUILD_ID: u64 = 0x4d48_415a_0000_0002;
 pub const MESH_HAZARDS_GAME: &str = "MeshHazardsV1";
 
 pub fn hazards_types() -> TypeRegistry {
@@ -35,6 +38,10 @@ pub struct MeshHazardsAdmission;
 
 impl BakeAdmission for MeshHazardsAdmission {
     fn admit(&self, scene: &Scene, frame: &mut Frame, index: &SceneIndex) -> Result<(), EditError> {
+        #[cfg(feature = "mesh-patrol")]
+        if !frame.singleton::<orr_games::mesh_navigation_game::patrol::MeshPatrol>().disabled() {
+            return Err(EditError::Invalid("MeshHazards does not support automatic waypoint patrol; use MeshNavigation".into()));
+        }
         let pin = *frame.singleton::<MeshScenePin>();
         MeshNavigationAdmission.admit(scene, frame, index)?;
         if pin.is_empty() {
@@ -156,3 +163,7 @@ pub fn patch_request(config: &MeshHazards, view: &MeshView) -> Result<JsonValue,
 #[cfg(test)]
 #[path = "hazards/tests.rs"]
 mod tests;
+
+#[cfg(all(test,feature="mesh-patrol"))]
+#[path="hazards/patrol_profile_tests.rs"]
+mod patrol_profile_tests;
