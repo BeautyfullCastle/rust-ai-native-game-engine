@@ -178,14 +178,25 @@ fn focus_loss_with_same_batch_regain_owns_press_through_release() {
 #[test]
 fn draft_aba_and_host_frame_change_irreversibly_retire_armed_row() {
     let (_temp, mut h) = fixture(EditorGame::MeshNavigation);
-    click(&mut h, "Pick patrol waypoint 1");
-    assert!(h.state().0.patrol_pick_busy());
-    text(&mut h, "Patrol wait ticks", "1");
-    assert!(!h.state().0.patrol_pick_busy());
-    text(&mut h, "Patrol wait ticks", "0");
-    assert!(!h.state().0.patrol_pick_busy());
     let (panel, editor) = h.state_mut();
     focused(panel, editor, quiet());
+    let ticket = panel.patrol_pick_token(editor, 0).unwrap();
+    let same_point =
+        orr_remote::mesh_navigation::mesh_from_view(editor.snapshot().unwrap().predicted())
+            .unwrap()
+            .pin
+            .goal;
+    panel.begin_patrol_pick(editor, 0).unwrap();
+    assert!(panel.patrol_pick_busy());
+    // Armed UI controls are deliberately read-only. Exercise a competing,
+    // validated draft stage instead: identical coordinates still retire row identity.
+    panel
+        .with_agent_viewport(|_state, panel| panel.stage_patrol_pick(editor, &ticket, same_point))
+        .unwrap();
+    focused(panel, editor, quiet());
+    assert!(!panel.patrol_pick_busy());
+    focused(panel, editor, quiet());
+    assert!(!panel.patrol_pick_busy());
     panel.begin_patrol_pick(editor, 0).unwrap();
     let view = orr_remote::mesh_navigation::mesh_from_view(editor.snapshot().unwrap().predicted())
         .unwrap();
