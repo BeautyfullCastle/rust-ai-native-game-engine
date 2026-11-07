@@ -100,7 +100,10 @@ fn legacy_controls_preserve_pickup_and_explicit_optout_keeps_idle_policy() {
     click(&mut h, "Play escaped clip once");
     assert_eq!(h.state().panel.candidate.schema, 6);
     assert_eq!(pickup(&h.state().panel.candidate), initial);
-    let (target_node, target_tree) = h.get_by_label("Crossfade ticks").accesskit_node().locate();
+    let (target_node, target_tree) = h
+        .get_by_role_and_label(egui::accesskit::Role::Slider, "Crossfade ticks")
+        .accesskit_node()
+        .locate();
     h.event(egui::Event::AccessKitActionRequest(
         egui::accesskit::ActionRequest {
             target_node,
