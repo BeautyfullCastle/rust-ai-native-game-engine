@@ -15,6 +15,7 @@ authored-surface-bundle = ["authored-bundle", "orr_terrain_view/surface"]
 authored-bundle = ["authored", "dep:orr_sample", "dep:rustix", "dep:sha2"]
 authored = ["dep:orr_remote", "dep:orr_sim", "dep:orr_ecs", "dep:orr_bridge", "dep:orr_games"]
 terrain-patrol = ["authored", "orr_remote/terrain-patrol"]
+terrain-patrol-bundle = ["terrain-patrol", "authored-bundle"]
 gpu = ["dep:orr_render", "dep:png"]
 
 [dependencies]

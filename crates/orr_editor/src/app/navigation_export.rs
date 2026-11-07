@@ -194,6 +194,8 @@ impl EditorApp {
         Ok(())
     }
     pub(super) fn show_navigation_export(&mut self, ui: &mut egui::Ui) {
+        #[cfg(feature = "terrain-patrol-export")]
+        ui.label("Terrain waypoint patrol bundle: saved route, loop and wait settings are included. Supply a matching patrol-capable trusted player.");
         ui.label("Linux x86-64 · saved NavigationYard3D scene + pinned terrain; headless point agent only. No automatic Save or Build route.");
         ui.label("Verification executes supplied code. SHA256 checks identity, not trust. Supply a matching, known trusted, already-built Navigation player.");
         egui::Grid::new("navigation_export_form").show(ui, |ui| {
@@ -264,3 +266,7 @@ impl EditorApp {
 #[cfg(test)]
 #[path = "navigation_export_tests.rs"]
 mod tests;
+
+#[cfg(all(test, target_os = "linux", feature = "terrain-patrol-export"))]
+#[path = "navigation_export_patrol_tests.rs"]
+mod patrol_tests;

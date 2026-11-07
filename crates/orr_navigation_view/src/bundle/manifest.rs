@@ -30,6 +30,14 @@ pub(super) struct Payload {
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 enum Profile {
     NavigationYard3DPointV1,
+    NavigationYard3DPatrolV1,
+}
+impl Profile {
+    fn compiled()->Result<Self,String>{match super::compiled_profile()? {
+        "NavigationYard3DPointV1"=>Ok(Self::NavigationYard3DPointV1),
+        "NavigationYard3DPatrolV1"=>Ok(Self::NavigationYard3DPatrolV1),
+        _=>Err("unsupported compiled navigation bundle profile".into()),
+    }}
 }
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 enum Target {
@@ -82,6 +90,7 @@ impl Manifest {
         source_revision: Option<String>,
         player: &AuthoredPlayer,
     ) -> Result<Self, String> {
+        let profile=Profile::compiled()?;
         checked_relative(terrain_relative)?;
         if terrain_relative.len() > 256 || !terrain_relative.ends_with(".orrt") {
             return Err("terrain pin must be confined .orrt path".into());
@@ -91,6 +100,14 @@ impl Manifest {
             .singleton::<orr_remote::navigation_yard3d::NavigationScenePin>();
         if pin.source()? != terrain_relative || player.tick() != 0 {
             return Err("bundle requires admitted initial scene and unchanged terrain pin".into());
+        }
+        #[cfg(feature="terrain-patrol-bundle")]
+        {
+            use orr_games::navigation_yard3d_game::patrol;
+            if patrol::read_run(player.frame())? != patrol::TerrainPatrolRun::default() {
+                return Err("patrol bundle requires canonical zero initial runtime progress".into());
+            }
+            patrol::validate_frame(player.frame(),*pin)?;
         }
         let view = player.view()?;
         let loaded = orr_terrain::Terrain::load(&terrain.bytes).map_err(|e| e.to_string())?;
@@ -109,7 +126,7 @@ impl Manifest {
         let source_revision = source_revision.map(|s| s.trim().to_owned());
         let payload = Payload {
             version: 1,
-            profile: Profile::NavigationYard3DPointV1,
+            profile,
             target: Target::LinuxX86_64,
             source_revision,
             initial_checksum: player.checksum(),
@@ -156,7 +173,7 @@ impl Manifest {
             .get("payload")
             .and_then(|v| v.as_object())
             .ok_or("payload must be an object")?;
-        if payload.get("profile").and_then(|v| v.as_str()) != Some("NavigationYard3DPointV1")
+        if payload.get("profile").and_then(|v| v.as_str()) != Some(super::compiled_profile()?)
             || payload.get("target").and_then(|v| v.as_str()) != Some("linux-x86_64")
             || !payload
                 .get("files")
@@ -176,7 +193,8 @@ impl Manifest {
     }
     fn validate(&self) -> Result<(), String> {
         let p = &self.payload;
-        if p.version != 1
+        if p.profile != Profile::compiled()?
+            || p.version != 1
             || p.files.len() != 4
             || p.terrain_asset_id.is_empty()
             || p.terrain_asset_id.len() > 256
@@ -252,3 +270,7 @@ pub(super) fn hex_revision(value: [u8; 32]) -> String {
 #[cfg(test)]
 #[path = "manifest_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "profile_tests.rs"]
+mod profile_tests;

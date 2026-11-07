@@ -34,6 +34,9 @@ before reading the source. Matching readers advertise only the direct-scene
 patrol capability and reject legacy bundle commands. Use editor Play or a matching authored reader; this
 change does not add a patrol bundle format.
 
+For the separately enabled native delivery profile, build with
+`terrain-patrol-export` and follow [native patrol bundles](terrain-patrol-native-bundle.md).
+
 Acceptance covers exact waits, loops/completion, slope/unreachable routes, atomic
 rejection, source-bound UI Apply/Undo/Redo/Save/reopen, same-path epoch retirement,
 source-hidden replay/restart and stable entity/list handles across many loops.
