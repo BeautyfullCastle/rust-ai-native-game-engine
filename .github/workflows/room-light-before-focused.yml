@@ -46,6 +46,8 @@ jobs:
           grep -F 'test result: ok. 2 passed; 0 failed; 2 ignored;' ci-evidence/widgets.log
           ORR_LIGHT_ACTIVATION_RUNTIME="$PWD/target/debug/room_escape" cargo test --locked -p orr_editor --features room-lighting,room-character,project-create,windows-export --test room_lighting activation::before_outcome_saved_export_consumes_conditions_without_authoring_sources -- --ignored --exact 2>&1 | tee ci-evidence/deployed-before.log
           grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' ci-evidence/deployed-before.log
+          cargo test --locked -p orr_editor --features package-manager,room-lighting,room-character,project-create,windows-export --lib package_manager_panel::keep::tests::pointer_route_diagnoses_each_keep_stage -- --exact --nocapture 2>&1 | tee ci-evidence/pointer-settled.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' ci-evidence/pointer-settled.log
           cargo clippy --locked -p orr_sample --features room-project,project-export --lib -- -D warnings 2>&1 | tee ci-evidence/clippy-default-off.log
           cargo clippy --locked -p orr_editor --features room-lighting,room-character,project-create,windows-export --lib -- -D warnings 2>&1 | tee ci-evidence/clippy-editor.log
       - name: Preserve results including failures
