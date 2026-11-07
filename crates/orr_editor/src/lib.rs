@@ -292,3 +292,6 @@ pub mod mesh_prop_delivery;
 
 #[cfg(any(feature = "sprites", feature = "terrain"))]
 mod json_output;
+
+#[cfg(any(feature="mesh-patrol",feature="terrain-patrol"))]
+pub(crate) mod waypoint_order;
