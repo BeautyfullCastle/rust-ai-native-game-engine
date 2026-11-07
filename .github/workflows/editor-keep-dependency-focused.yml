@@ -40,9 +40,9 @@ jobs:
           grep -F 'test result: ok. 4 passed; 0 failed; 0 ignored;' ci-evidence/backend-on.log
           cargo test --locked -p orr_editor --features package-manager,project-create,room-character,room-lighting,windows-export --lib package_manager_panel::keep::tests:: -- --test-threads=1 2>&1 | tee ci-evidence/panel.log
           grep -F 'test result: ok. 6 passed; 0 failed; 1 ignored;' ci-evidence/panel.log
-          cargo test --locked -p orr_editor --features package-manager,project-create,room-character,room-lighting,windows-export --lib package_manager_panel::tests::update_disconnect_discards_inventory_and_reports_publication_uncertainty -- --exact 2>&1 | tee ci-evidence/legacy-disconnect.log
+          cargo test --locked -p orr_editor --features package-manager,project-create,room-character,room-lighting,windows-export --lib package_manager_panel::update_tests::update_disconnect_discards_inventory_and_reports_publication_uncertainty -- --exact 2>&1 | tee ci-evidence/legacy-disconnect.log
           grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' ci-evidence/legacy-disconnect.log
-          cargo test --locked -p orr_editor --features package-manager,project-create,room-character,room-lighting,windows-export --lib package_manager_panel::tests::update_pending_and_completion_freeze_entire_editor_frame -- --exact 2>&1 | tee ci-evidence/legacy-frame-fence.log
+          cargo test --locked -p orr_editor --features package-manager,project-create,room-character,room-lighting,windows-export --lib package_manager_panel::update_tests::update_pending_and_completion_freeze_entire_editor_frame -- --exact 2>&1 | tee ci-evidence/legacy-frame-fence.log
           grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' ci-evidence/legacy-frame-fence.log
           cargo build --locked -p orr_sample --features room-lighting,room-character --bin room_escape 2>&1 | tee ci-evidence/runtime-build.log
           ORR_EDITOR_KEEP_RUNTIME="$PWD/target/debug/room_escape" cargo test --locked -p orr_editor --features package-manager,project-create,room-character,room-lighting,windows-export --lib package_manager_panel::keep::tests::advanced_profile_widgets_keep_dependency_and_source_hidden_export_runs_actual_game -- --ignored --exact 2>&1 | tee ci-evidence/deployed-game.log

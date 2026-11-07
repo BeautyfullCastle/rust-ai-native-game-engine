@@ -22,6 +22,6 @@ These are ordinary trusted-directory checks, not hostile concurrent filesystem i
 
 ## Validation scope
 
-Focused CPU cases cover opaque plan preservation, stale saved profile/lock/writer rejection, explicit editor consent, actual panel buttons, blocked/closed preview discard, stale completions, pending mutation fences and uncertain disconnection. Advanced acceptance authors the keep and separate parent removal through the panel, verifies unchanged presentation, exports, hides the original project/runtime and launches actual native headless gameplay with model poses and conditional carried light.
+Focused CPU cases cover opaque plan preservation, stale saved profile/lock/writer rejection, explicit editor consent, actual panel accessibility actions, blocked/closed preview discard, stale completions, pending mutation fences and uncertain disconnection. Advanced acceptance authors the keep and separate parent removal through the panel, verifies unchanged presentation, exports, hides the original project/runtime and launches actual native headless gameplay with model poses and conditional carried light.
 
 This is not physical OS input, native-window, GPU pixel, audio-device or video coverage. Existing Windows error5 installation/publication paths remain unverified and are not retried. Windows compilation is separate from runtime proof.
