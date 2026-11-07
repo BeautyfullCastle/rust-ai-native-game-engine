@@ -925,3 +925,6 @@ mod draft_acceptance {
 
 #[path="room_lighting/carried.rs"]
 mod carried;
+
+#[path="room_lighting/activation.rs"]
+mod activation;

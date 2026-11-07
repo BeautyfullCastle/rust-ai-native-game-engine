@@ -40,6 +40,6 @@ fn offset_limits_and_disabled_or_invalid_policy_fail_closed() {
     let frame=orr_ecs::Frame::new(orr_ecs::ComponentRegistryBuilder::new().build());let fixed=Document::enabled_default();assert_eq!(fixed.settings_for_frame(FrameView::of(&frame)).unwrap(),fixed.settings());
     let sim=sim();
     for value in [f32::NAN,f32::INFINITY,33.0,-33.0] {let mut d=doc();d.follow_player.as_mut().unwrap()[0]=value;assert!(d.to_bytes().is_err());assert!(d.settings_for_frame(FrameView::of(sim.frame())).is_err());}
-    let invalid=Document {point_light:None,follow_player:Some([0.0;3])};assert!(invalid.validate().is_err());assert!(invalid.settings_for_frame(FrameView::of(sim.frame())).is_err());
+    let invalid=Document {point_light:None,follow_player:Some([0.0;3]),activation:None};assert!(invalid.validate().is_err());assert!(invalid.settings_for_frame(FrameView::of(sim.frame())).is_err());
     for offset in [[-32.0;3],[32.0;3]] {let mut d=doc();d.follow_player=Some(offset);let settings=d.settings_for_frame(FrameView::of(sim.frame())).unwrap();settings.validate().unwrap();assert_eq!(settings.point_light.unwrap().position,[offset[0],offset[1]+0.5,offset[2]]);}
 }

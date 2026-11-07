@@ -443,6 +443,14 @@ impl Panel {
                 }
 
                 if self.candidate.point_light.is_some() {
+                    egui::ComboBox::from_label("Light activation")
+                        .selected_text(match self.candidate.activation {None=>"Always",Some(orr_sample::room_lighting::Activation::KeyCollected)=>"Key collected",Some(orr_sample::room_lighting::Activation::Escaped)=>"Escaped"})
+                        .show_ui(ui,|ui| {
+                            ui.selectable_value(&mut self.candidate.activation,None,"Always");
+                            ui.selectable_value(&mut self.candidate.activation,Some(orr_sample::room_lighting::Activation::KeyCollected),"Key collected");
+                            ui.selectable_value(&mut self.candidate.activation,Some(orr_sample::room_lighting::Activation::Escaped),"Escaped");
+                        });
+                    ui.weak("Edit previews the light; Play enables it only after the selected actual game state. Key collected also remains active after escape.");
                     let mut follow=self.candidate.follow_player.is_some();
                     if ui.checkbox(&mut follow,"Carry light with player").changed() {self.candidate.follow_player=follow.then_some([0.0,2.0,0.0]);}
                     if let Some(offset)=self.candidate.follow_player.as_mut() {
@@ -621,6 +629,11 @@ mod tests {
                 manifest_bytes,
             },
         )
+    }
+    #[test]
+    fn conditional_light_save_and_invalid_policy_preserve_history_and_baseline() {
+        let (_dir,prepared)=fixture();let mut panel=Panel::new(prepared);let original=panel.saved_bytes.clone();let mut conditional=panel.document().clone();conditional.activation=Some(orr_sample::room_lighting::Activation::Escaped);panel.apply_document(conditional.clone()).unwrap();let history=panel.undo.clone();let mut invalid=conditional.clone();invalid.point_light=None;
+        assert!(panel.apply_document(invalid).is_err());assert_eq!(panel.document(),&conditional);assert_eq!(panel.undo,history);assert_eq!(std::fs::read(&panel.path).unwrap(),original);panel.save().unwrap();assert_eq!(Document::parse(&std::fs::read(&panel.path).unwrap()).unwrap(),conditional);assert!(panel.undo());assert!(panel.redo());assert_eq!(panel.document(),&conditional);
     }
     #[test]
     fn invalid_carried_light_preserves_applied_history_and_disk_baseline() {

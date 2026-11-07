@@ -1,8 +1,8 @@
 use super::*;
-fn click(h:&mut Harness<'_,EditorApp>,label:&str) {h.get_by_label(label).scroll_to_me();h.run_steps(2);h.get_by_label(label).click();settle(h);}
-fn wait(h:&mut Harness<'_,EditorApp>,label:&str,ready:impl Fn(&EditorApp)->bool) {let deadline=Instant::now()+Duration::from_secs(8);loop {settle(h);if ready(h.state()) {return;}assert!(Instant::now()<deadline,"{label}: {:?}",h.state().editor.log());std::thread::sleep(Duration::from_millis(5));}}
-fn key(h:&mut Harness<'_,EditorApp>,key:egui::Key,pressed:bool) {h.event(egui::Event::Key {key,physical_key:Some(key),pressed,repeat:false,modifiers:egui::Modifiers::NONE});}
-fn player_position(app:&EditorApp)->[f32;3] {
+pub(super) fn click(h:&mut Harness<'_,EditorApp>,label:&str) {h.get_by_label(label).scroll_to_me();h.run_steps(2);h.get_by_label(label).click();settle(h);}
+pub(super) fn wait(h:&mut Harness<'_,EditorApp>,label:&str,ready:impl Fn(&EditorApp)->bool) {let deadline=Instant::now()+Duration::from_secs(8);loop {settle(h);if ready(h.state()) {return;}assert!(Instant::now()<deadline,"{label}: {:?}",h.state().editor.log());std::thread::sleep(Duration::from_millis(5));}}
+pub(super) fn key(h:&mut Harness<'_,EditorApp>,key:egui::Key,pressed:bool) {h.event(egui::Event::Key {key,physical_key:Some(key),pressed,repeat:false,modifiers:egui::Modifiers::NONE});}
+pub(super) fn player_position(app:&EditorApp)->[f32;3] {
     use orr_sample::room_game::{RoomActor,PLAYER};
     let snapshot=app.editor.snapshot().unwrap();let frame=snapshot.predicted();let (e,_)=frame.iter::<RoomActor>().find(|(_,actor)|actor.kind==PLAYER).unwrap();let poses=orr_sample::yard3d_view::editor_body_poses(frame);poses.into_iter().find(|(entity,_)|*entity==e).unwrap().1.pos.to_array()
 }
