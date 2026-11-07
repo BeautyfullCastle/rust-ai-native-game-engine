@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 mod presets;
 #[path = "mesh_lighting_panel/shadow_fit.rs"]
 mod shadow_fit;
+#[path="mesh_lighting_panel/point_light_ui.rs"]
+mod point_light_ui;
 
 const MAX_HISTORY: usize = 16;
 
@@ -32,6 +34,7 @@ pub(crate) struct Panel {
     exposure: String,
     post_process: orr_render::PostProcessSettings,
     post_process_authored: bool,
+    point_light: Option<orr_render::PointLight>,
     form_dirty: bool,
     presets: presets::Controls,
     confirm_remove: bool,
@@ -70,6 +73,7 @@ impl Default for Panel {
             exposure: format_number(defaults.exposure),
             post_process: Default::default(),
             post_process_authored: false,
+            point_light: None,
             form_dirty: false,
             presets: presets::Controls::default(),
             confirm_remove: false,
@@ -207,6 +211,7 @@ impl Panel {
                     effects_changed |= ui.add(egui::Slider::new(&mut self.post_process.radius, 1..=8).text("Bloom radius")).changed();
                     effects_changed |= ui.add(egui::Slider::new(&mut self.post_process.iterations, 1..=4).text("Bloom iterations")).changed();
                 });
+                changed |= self.show_point_light_controls(ui);
                 if effects_changed {
                     self.post_process_authored = true;
                     changed = true;
@@ -293,6 +298,11 @@ impl Panel {
     ) -> Option<orr_render::PostProcessSettings> {
         self.applied_lighting(editor)?;
         self.current_document().map(Document::post_process_settings)
+    }
+
+    pub(crate) fn applied_point_light_settings(&self,editor:&Editor)->Option<orr_render::PointLightSettings> {
+        self.applied_lighting(editor)?;
+        self.current_document().and_then(|document|document.point_light_settings().ok())
     }
 
     pub(crate) fn play_blocker(&self, editor: &Editor) -> Option<String> {
@@ -541,6 +551,9 @@ impl Panel {
         } else {
             document
         };
+        let mut document=document;
+        document.point_light=self.point_light;
+        document.point_light_settings()?;
         let filename = scene
             .file_name()
             .and_then(|value| value.to_str())
@@ -764,6 +777,7 @@ impl Panel {
         self.copy_lighting_fields(document.lighting()?);
         self.post_process = document.post_process_settings();
         self.post_process_authored = document.has_post_process();
+        self.point_light = document.point_light_settings()?.point_light;
         Ok(())
     }
 
@@ -781,6 +795,7 @@ impl Panel {
     fn copy_lighting_fields(&mut self, lighting: orr_render::Lighting) {
         self.post_process = Default::default();
         self.post_process_authored = false;
+        self.point_light = None;
         self.direction = lighting.direction.map(format_number);
         self.color = lighting.color.map(format_number);
         self.intensity = format_number(lighting.intensity);
@@ -906,3 +921,7 @@ mod shadow_fit_panel_tests;
 #[cfg(all(test,feature="mesh-mission"))]
 #[path="mesh_lighting_panel/preset_effects_integration_tests.rs"]
 mod preset_effects_integration_tests;
+
+#[cfg(all(test,target_os="linux",feature="mesh-mission"))]
+#[path="mesh_lighting_panel/point_light_integration_tests.rs"]
+mod point_light_integration_tests;

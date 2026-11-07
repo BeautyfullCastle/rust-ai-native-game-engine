@@ -307,6 +307,15 @@ impl super::EditorApp {
             && self.mesh_navigation.props_document_bytes(&self.editor).is_ok_and(|bytes| bytes == document)
     }
 
+    pub(crate) fn hazards_point_light_matches(
+        &self,
+        expected: Option<&orr_render::PointLightSettings>,
+    ) -> bool {
+        let applied = self.mesh_lighting.applied_point_light_settings(&self.editor);
+        applied.as_ref() == expected
+            && self.point_light_settings_for_frame().ok() == Some(expected.cloned().unwrap_or_default())
+    }
+
     #[cfg(feature = "mesh-animated-models")]
     pub(crate) fn install_validated_hazards_animation(&mut self, panel: crate::mesh_animation_panel::Panel) {
         self.mesh_animation = panel;

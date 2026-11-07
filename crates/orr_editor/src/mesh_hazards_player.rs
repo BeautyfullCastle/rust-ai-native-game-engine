@@ -561,6 +561,7 @@ fn verify_headless_session(
     let prop_count = navigation.prop_models(&editor).len();
     let expected_lighting = lighting.applied_lighting(&editor);
     let expected_post_process = lighting.applied_post_process(&editor);
+    let expected_point_light = lighting.applied_point_light_settings(&editor);
     if bundle.lighting_sha256.is_some() && expected_lighting.is_none() {
         return Err("validated game lighting is not applied during playback".into());
     }
@@ -592,6 +593,9 @@ fn verify_headless_session(
     ) {
         return Err("headless restart changed the admitted game lighting".into());
     }
+    if !app.hazards_point_light_matches(expected_point_light.as_ref()) {
+        return Err("headless restart changed the admitted game point light".into());
+    }
     if !app.hazards_hud_matches(&bundle.hud_sha256, &expected_hud) {
         return Err("headless restart changed the admitted game HUD".into());
     }
@@ -610,6 +614,7 @@ fn verify_headless_session(
             "tick": tick, "checksum": format!("{checksum:016x}"),
             "agent_position_raw": position, "art_sha256": bundle.art_sha256,
             "lighting_sha256": bundle.lighting_sha256, "lighting_restart_parity": true,
+            "point_light": expected_point_light.and_then(|settings| settings.point_light), "point_light_restart_parity": true,
             "hud_sha256": bundle.hud_sha256, "hud_restart_parity": true,
             "props_sha256": bundle.props_sha256, "props_restart_parity": true,
             "prop_count": prop_count,
@@ -703,3 +708,7 @@ mod props_acceptance;
 #[cfg(all(test, feature = "mesh-animated-models"))]
 #[path = "mesh_hazards_player/animation_acceptance.rs"]
 mod animation_acceptance;
+
+#[cfg(all(test,target_os="linux"))]
+#[path="mesh_hazards_player/point_light_acceptance.rs"]
+mod point_light_acceptance;

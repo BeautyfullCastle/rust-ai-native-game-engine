@@ -61,11 +61,12 @@ impl Preset {
     /// Construct a new draft; this never mutates the target or writes a sidecar.
     pub(crate) fn merge_into(&self, target: &Document) -> Result<Document, String> {
         let merged = self.with_shadow_bounds(target.shadow_center, target.shadow_radius);
-        let merged = if !self.includes_post_process() && target.has_post_process() {
+        let mut merged = if !self.includes_post_process() && target.has_post_process() {
             merged.with_post_process(target.post_process_settings())?
         } else {
             merged
         };
+        merged.point_light = target.point_light;
         merged.validate()?;
         Ok(merged)
     }
@@ -183,6 +184,7 @@ impl Preset {
             tonemap: self.tonemap,
             exposure: self.exposure,
             post_process: self.post_process,
+            point_light: None,
         }
     }
 }

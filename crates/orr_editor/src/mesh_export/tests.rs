@@ -1585,3 +1585,5 @@ fn surface_marker_composes_with_all_existing_player_sections() {
 
 #[path = "prop_shading_tests.rs"]
 mod prop_shading_tests;
+#[path = "point_light_tests.rs"]
+mod point_light_tests;
