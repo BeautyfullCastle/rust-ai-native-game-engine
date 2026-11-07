@@ -105,7 +105,8 @@ fn actual_row_pick_stages_only_then_explicit_apply_admits_chosen_cell_center() {
         p.config.points[0],
         [FP::from_raw(-32768), FP::from_raw(32768)]
     );
-    assert_eq!(p.config.points[1], [FP::ZERO; 2]);
+    // Adding a waypoint copies the authored goal; picking row 1 must preserve row 2.
+    assert_eq!(p.config.points[1], [FP::from_raw(32768); 2]);
     assert_eq!(p.config.count, 2);
 }
 #[test]
@@ -113,9 +114,9 @@ fn changed_row_generation_and_missing_fresh_frame_retire_without_retargeting() {
     let (_root, mut h) = setup();
     click(&mut h, "Pick terrain patrol waypoint 1");
     assert!(h.state().navigation_endpoint.armed().is_some());
-    text(&mut h, "Terrain patrol waypoint 2 X", "0.5");
+    text(&mut h, "Terrain patrol waypoint 2 X", "0.75");
     assert!(h.state().navigation_endpoint.armed().is_none());
-    text(&mut h, "Terrain patrol waypoint 2 X", "0");
+    text(&mut h, "Terrain patrol waypoint 2 X", "0.5");
     assert!(
         h.state().navigation_endpoint.armed().is_none(),
         "A-B-A must not revive retired row identity"

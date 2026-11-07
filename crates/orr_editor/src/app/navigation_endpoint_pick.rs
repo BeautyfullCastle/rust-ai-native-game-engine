@@ -280,7 +280,7 @@ impl EditorApp {
         })();
         match result {
             Ok(center) => {
-                let staged = match endpoint {
+                let staged: Result<(), String> = match endpoint {
                     Endpoint::Start => { self.navigation.start = center.map(format_fixed); Ok(()) },
                     Endpoint::Goal => { self.navigation.goal = center.map(format_fixed); Ok(()) },
                     #[cfg(feature="terrain-patrol")]
