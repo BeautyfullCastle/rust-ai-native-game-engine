@@ -36,6 +36,8 @@ fn pointer_route_diagnoses_each_keep_stage() {
     let f=fixture(false);let mut h=harness(&f);settle(&mut h);
     for label in ["Verify installed packages".to_owned(),format!("Select keep {}",f.name),"Preview dependency keep".to_owned(),"Keep previewed dependency".to_owned()] {
         h.get_by_label(&label).scroll_to_me();h.run_steps(2);
+        let early=h.get_by_label(&label).rect();h.run_steps(30);
+        eprintln!("scroll settled stage={label} early={early:?} final={:?}",h.get_by_label(&label).rect());
         let rect=h.get_by_label(&label).rect();
         eprintln!("pointer stage={label} rect={rect:?} status={}",h.state().0.status);
         assert!(!h.get_by_label(&label).accesskit_node().is_disabled(),"disabled: {label}");

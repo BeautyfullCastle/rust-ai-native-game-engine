@@ -1,6 +1,7 @@
 name: Package pointer diagnosis
 on:
-  workflow_dispatch:
+  push:
+    branches: [codex/package-pointer-diagnosis-20261107]
 permissions:
   contents: read
 jobs:
