@@ -173,7 +173,7 @@ fn authored_waypoints_apply_undo_redo_save_reopen_and_play_loop_then_manual_goal
             serde_json::json!({"player":0,"replace_held":true}),
         )
         .unwrap();
-    editor.host_call("sim.input_value",serde_json::json!({"player":0,"grant":grant["grant"],"generation":grant["generation"],"sequence":"1","value":{"buttons":orr_remote::mesh_navigation::MESH_SET_GOAL,"_pad":0,"origin":[0,0,0],"dir":[0,0,0]}})).unwrap();
+    editor.host_call("sim.input_value",serde_json::json!({"player":0,"grant":grant["grant"],"generation":grant["generation"],"sequence":"1","value":{"buttons":orr_remote::mesh_navigation::MESH_SET_GOAL,"origin":[0,0,0],"dir":[0,0,0]}})).unwrap();
     advance(&mut editor);
     assert_eq!(read(&editor).run.paused, 1);
     for _ in 0..5 {
