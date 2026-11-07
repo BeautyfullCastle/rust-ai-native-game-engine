@@ -99,6 +99,9 @@ pub enum Command {
     Capabilities,
 }
 pub fn capabilities() -> &'static str {
+    if orr_games::navigation_yard3d_game::TERRAIN_PATROL_ENABLED {
+        return "ORR_TERRAIN_PATROL_SCENE_PLAYER_V1";
+    }
     if cfg!(all(feature = "authored-bundle", target_arch = "x86_64")) {
         "ORR_NAVIGATION_PLAYER_V1\nORR_NAVIGATION_BUNDLE_V1"
     } else {
@@ -124,6 +127,9 @@ pub fn parse_command(args: impl IntoIterator<Item = OsString>) -> Result<Option<
     let mut i = 0;
     while i < bounded.len() {
         if bounded[i] == "--bundle" {
+            if orr_games::navigation_yard3d_game::TERRAIN_PATROL_ENABLED {
+                return Err("legacy navigation bundle does not support terrain patrol profile".into());
+            }
             if !cfg!(all(feature = "authored-bundle", target_arch = "x86_64")) {
                 return Err("--bundle requires authored-bundle".into());
             }
@@ -151,6 +157,9 @@ pub fn parse_command(args: impl IntoIterator<Item = OsString>) -> Result<Option<
         .transpose()
 }
 pub fn run_bundle(options: Options) -> Result<serde_json::Value, String> {
+    if orr_games::navigation_yard3d_game::TERRAIN_PATROL_ENABLED {
+        return Err("legacy navigation bundle does not support terrain patrol profile".into());
+    }
     if options.capture.is_some() {
         return Err("bundle mode does not support capture".into());
     }

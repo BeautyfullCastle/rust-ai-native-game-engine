@@ -30,7 +30,8 @@ unchanged; patrol uses a distinct build identity.
 
 The legacy point and surface bundle formats do not support this compiled patrol
 profile, including scenes where patrol is disabled. Their capture APIs reject it
-before reading the source. Use editor Play or a matching authored reader; this
+before reading the source. Matching readers advertise only the direct-scene
+patrol capability and reject legacy bundle commands. Use editor Play or a matching authored reader; this
 change does not add a patrol bundle format.
 
 Acceptance covers exact waits, loops/completion, slope/unreachable routes, atomic

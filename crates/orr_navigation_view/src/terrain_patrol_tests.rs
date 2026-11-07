@@ -79,3 +79,59 @@ fn authored_reader_restarts_from_frame_after_source_is_hidden() {
         assert_eq!(reader.checksum(), expected);
     }
 }
+#[test]
+fn runtime_capabilities_and_bundle_commands_match_compiled_profile() {
+    let enabled = orr_games::navigation_yard3d_game::TERRAIN_PATROL_ENABLED;
+    if enabled {
+        assert_eq!(
+            crate::player::capabilities(),
+            "ORR_TERRAIN_PATROL_SCENE_PLAYER_V1"
+        );
+        assert_eq!(
+            crate::surface_player::capabilities(),
+            "ORR_TERRAIN_PATROL_SURFACE_SCENE_PLAYER_V1"
+        );
+    } else {
+        assert_eq!(
+            crate::player::capabilities(),
+            "ORR_NAVIGATION_PLAYER_V1\nORR_NAVIGATION_BUNDLE_V1"
+        );
+        assert_eq!(
+            crate::surface_player::capabilities(),
+            if cfg!(feature = "gpu") {
+                "ORR_NAVIGATION_SURFACE_PLAYER_V2\nORR_NAVIGATION_SURFACE_CAPTURE_V2"
+            } else {
+                "ORR_NAVIGATION_SURFACE_PLAYER_V2"
+            }
+        );
+    }
+    let args = || {
+        ["--bundle", "/missing-terrain-patrol-bundle", "--ticks", "0"]
+            .into_iter()
+            .map(std::ffi::OsString::from)
+    };
+    assert_eq!(crate::player::parse_command(args()).is_err(), enabled);
+    assert_eq!(
+        crate::surface_player::parse_command(args()).is_err(),
+        enabled
+    );
+    let scene_args = || {
+        ["--scene", "/missing-terrain-patrol-bundle", "--ticks", "0"]
+            .into_iter()
+            .map(std::ffi::OsString::from)
+    };
+    let plain = crate::player::parse(scene_args()).unwrap().unwrap();
+    let surface = crate::surface_player::parse(scene_args()).unwrap().unwrap();
+    assert_eq!(
+        crate::player::run_bundle(plain)
+            .unwrap_err()
+            .contains("does not support terrain patrol profile"),
+        enabled
+    );
+    assert_eq!(
+        crate::surface_player::run_bundle(surface)
+            .unwrap_err()
+            .contains("does not support terrain patrol profile"),
+        enabled
+    );
+}

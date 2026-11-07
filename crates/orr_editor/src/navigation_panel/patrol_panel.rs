@@ -259,7 +259,7 @@ impl NavigationPanel {
             "Terrain patrol applied as one scene edit; save the scene explicitly.".into();
         Ok(())
     }
-    fn show_patrol(&mut self, ui: &mut Ui, editor: &mut Editor, terrain: &TerrainPanel) {
+    pub(super) fn show_patrol(&mut self, ui: &mut Ui, editor: &mut Editor, terrain: &TerrainPanel) {
         self.sync_patrol(editor, terrain);
         ui.collapsing("Terrain waypoint patrol",|ui|{
             ui.weak("Point routes on the admitted terrain; no radius, headroom or step-clearance guarantee. Staging never moves the agent.");

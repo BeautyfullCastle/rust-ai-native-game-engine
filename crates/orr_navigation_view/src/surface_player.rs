@@ -200,6 +200,9 @@ pub enum Command {
     Capabilities,
 }
 pub fn capabilities() -> &'static str {
+    if orr_games::navigation_yard3d_game::TERRAIN_PATROL_ENABLED {
+        return "ORR_TERRAIN_PATROL_SURFACE_SCENE_PLAYER_V1";
+    }
     if cfg!(feature = "gpu") {
         "ORR_NAVIGATION_SURFACE_PLAYER_V2\nORR_NAVIGATION_SURFACE_CAPTURE_V2"
     } else {
@@ -225,6 +228,9 @@ pub fn parse_command(args: impl IntoIterator<Item = OsString>) -> Result<Option<
     let mut i = 0;
     while i < bounded.len() {
         if bounded[i] == "--bundle" {
+            if orr_games::navigation_yard3d_game::TERRAIN_PATROL_ENABLED {
+                return Err("legacy surface navigation bundle does not support terrain patrol profile".into());
+            }
             if !cfg!(all(
                 feature = "authored-surface-bundle",
                 target_arch = "x86_64"
@@ -252,6 +258,9 @@ pub fn parse_command(args: impl IntoIterator<Item = OsString>) -> Result<Option<
         .transpose()
 }
 pub fn run_bundle(options: Options) -> Result<serde_json::Value, String> {
+    if orr_games::navigation_yard3d_game::TERRAIN_PATROL_ENABLED {
+        return Err("legacy surface navigation bundle does not support terrain patrol profile".into());
+    }
     validate_options(&options)?;
     let root = crate::surface_bundle::io::checked_path(&options.scene)?;
     let capture = options.capture.as_deref().map(capture_path).transpose()?;
