@@ -26,6 +26,53 @@ use winit::{
     window::{Window, WindowId},
 };
 
+/// Stable CPU presentation receipt: hashes the observed pose, including skin palettes.
+#[cfg(feature = "room-character")]
+pub fn character_pose_digest(pose: &orr_model::animation::Pose) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(b"orr-room-observed-character-pose-v1\0");
+    hash.update((pose.local().len() as u64).to_le_bytes());
+    for trs in pose.local() {
+        for value in trs.translation.iter().chain(&trs.rotation).chain(&trs.scale) {
+            hash.update(value.to_bits().to_le_bytes());
+        }
+    }
+    hash.update((pose.global().len() as u64).to_le_bytes());
+    for matrix in pose.global() {
+        for value in matrix.iter().flatten() { hash.update(value.to_bits().to_le_bytes()); }
+    }
+    hash.update((pose.skin_matrices().len() as u64).to_le_bytes());
+    for palette in pose.skin_matrices() {
+        hash.update((palette.len() as u64).to_le_bytes());
+        for matrix in palette {
+            for value in matrix.iter().flatten() { hash.update(value.to_bits().to_le_bytes()); }
+        }
+    }
+    hash.finalize().iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(feature = "room-character")]
+fn observed_character_digest(
+    project: &PreparedProject,
+    frame: FrameView<'_>,
+    playback: &crate::room_character::PlaybackCursor,
+) -> Result<Option<String>, String> {
+    let Some(character) = project.character() else { return Ok(None); };
+    // Keep the export smoke protocol and all legacy schema receipts unchanged.
+    if character.document.motion.and_then(|motion| motion.pickup).is_none() { return Ok(None); }
+    let document = &character.document;
+    let entity = project.scene().index().entity(&orr_reflect::Guid::parse(&document.player)?)
+        .ok_or("character receipt PLAYER missing")?;
+    let binding = &project.models().document.bindings[&document.player];
+    let model = project.models().assets[&(binding.package.clone(), binding.asset.clone())]
+        .animated_model().ok_or("character receipt model missing")?;
+    let pose = playback.pose(document, model, frame, crate::room_character::PlaybackContext {
+        entity, tick_rate: TICK_RATE, rest: false, revision: 0,
+    })?;
+    Ok(Some(character_pose_digest(pose)))
+}
+
 pub const HELP: &str = "room_escape --project PATH [--headless [--ticks 0..6000] [--hold left,right,up,down,interact] [--capture NEW.png] [--check-model-poses]]\nWASD/arrows: world X/Z movement; E: interact; R: restart; Escape: quit.\nMouse left drag: orbit; right/middle drag: pan; wheel: zoom (view only).\nHeadless defaults to zero ticks; capture requires an available GPU adapter.\n--check-model-poses validates every simulated model pose on the CPU, including tick zero.";
 
 #[derive(Debug)]
@@ -229,6 +276,12 @@ fn headless_checked(
             counts.static_models,
             counts.animated_models
         );
+    }
+    #[cfg(feature = "room-character")]
+    if check_model_poses {
+        if let Some(digest) = observed_character_digest(project, FrameView::of(sim.frame()), &character_playback)? {
+            println!("room character observed pose sha256: {digest}");
+        }
     }
     if let Some(camera) = project.camera().filter(|camera| camera.document.follow_player.is_some()) {
         let resolved = camera.document.camera_for_frame(&camera.document.orbit(),(800,600),FrameView::of(sim.frame()))?;
@@ -814,3 +867,7 @@ mod character_tests;
 ))]
 #[path = "room_progress_app_tests.rs"]
 mod progress_tests;
+
+#[cfg(all(test, feature = "room-character", feature = "project-create", target_os = "linux"))]
+#[path = "room_character_pickup_app_tests.rs"]
+mod pickup_tests;

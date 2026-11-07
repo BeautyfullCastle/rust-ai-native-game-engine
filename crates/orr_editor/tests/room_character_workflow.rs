@@ -1227,3 +1227,6 @@ mod follow_camera;
 
 #[path = "room_character_workflow/camera_limits.rs"]
 mod camera_limits;
+
+#[path = "room_character_workflow/pickup_once.rs"]
+mod pickup_once;

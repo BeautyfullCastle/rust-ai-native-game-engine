@@ -6,6 +6,8 @@
 //! Schema 3 adds a bounded view-only crossfade observed on simulation ticks.
 //! Schema 4 additionally plays the escaped clip once from its observed entry
 //! tick, then holds its endpoint; earlier schemas keep absolute looping.
+//! Schema 6 adds an optional motion.pickup clip on a known consecutive key-entry.
+//! Its once phase resumes Carrying at elapsed >= clip duration (no held endpoint).
 //! State is derived from the same immutable frame as body placement. No animation
 //! state is written into ECS, replay, input, or checkpoints.
 
@@ -68,19 +70,21 @@ pub struct Motion {
     pub searching_idle: u32,
     pub carrying_idle: u32,
     pub escaped_once: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pickup: Option<Pickup>,
 }
 impl<'de> Deserialize<'de> for Motion {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
-        struct Wire { searching_idle: u32, carrying_idle: u32, escaped_once: bool }
+        struct Wire { searching_idle: u32, carrying_idle: u32, escaped_once: bool, #[serde(default,deserialize_with="present_pickup")] pickup:Option<Pickup> }
         struct Object;
         impl<'de> serde::de::Visitor<'de> for Object {
             type Value = Motion;
             fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("a complete room motion JSON object") }
             fn visit_map<M: serde::de::MapAccess<'de>>(self, map: M) -> Result<Motion, M::Error> {
                 let wire = Wire::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
-                Ok(Motion { searching_idle: wire.searching_idle, carrying_idle: wire.carrying_idle, escaped_once: wire.escaped_once })
+                Ok(Motion { searching_idle: wire.searching_idle, carrying_idle: wire.carrying_idle, escaped_once: wire.escaped_once, pickup:wire.pickup })
             }
         }
         deserializer.deserialize_map(Object)
@@ -89,6 +93,23 @@ impl<'de> Deserialize<'de> for Motion {
 fn present_motion<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Motion>, D::Error> {
     Motion::deserialize(deserializer).map(Some)
 }
+
+/// Optional observed key-pickup one-shot. Shared clips are permitted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct Pickup { pub clip:u32, pub speed:PlaybackRate }
+impl<'de> Deserialize<'de> for Pickup {
+ fn deserialize<D:serde::Deserializer<'de>>(d:D)->Result<Self,D::Error> {
+  #[derive(Deserialize)] #[serde(deny_unknown_fields)] struct Wire {clip:u32,speed:PlaybackRate}
+  struct Object;
+  impl<'de> serde::de::Visitor<'de> for Object {
+   type Value=Pickup;
+   fn expecting(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {f.write_str("a pickup animation object")}
+   fn visit_map<M:serde::de::MapAccess<'de>>(self,map:M)->Result<Pickup,M::Error> {let w=Wire::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;Ok(Pickup{clip:w.clip,speed:w.speed})}
+  }
+  d.deserialize_map(Object)
+ }
+}
+fn present_pickup<'de,D:serde::Deserializer<'de>>(d:D)->Result<Option<Pickup>,D::Error> {Pickup::deserialize(d).map(Some)}
 
 // Distinguish an absent schema-1 field from an explicitly null invalid value.
 fn present_speeds<'de, D: serde::Deserializer<'de>>(
@@ -205,10 +226,10 @@ impl Document {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        match (self.schema, self.speeds, self.crossfade_ticks, self.motion) {
-            (1, None, None, None) | (2, Some(_), None, None) => {}
-            (3 | 4, Some(_), Some(ticks), None) | (5, Some(_), Some(ticks), Some(_)) if ticks <= MAX_CROSSFADE_TICKS => {}
-            _ => return Err("room character schema 1 requires legacy fields, schema 2 requires speeds, and schemas 3/4 require speeds plus crossfade_ticks 0..120, and schema 5 additionally requires motion".into()),
+        match (self.schema, self.speeds, self.crossfade_ticks, self.motion, self.motion.and_then(|m|m.pickup)) {
+            (1, None, None, None, None) | (2, Some(_), None, None, None) => {}
+            (3 | 4, Some(_), Some(ticks), None, None) | (5, Some(_), Some(ticks), Some(_), None) | (6, Some(_), Some(ticks), Some(_), Some(_)) if ticks <= MAX_CROSSFADE_TICKS => {}
+            _ => return Err("room character schema 1 requires legacy fields, schema 2 requires speeds, and schemas 3/4 require speeds plus crossfade_ticks 0..120, and schema 5 additionally requires motion; schema 6 requires motion and pickup".into()),
         }
         let player =
             Guid::parse(&self.player).map_err(|e| format!("room character player GUID: {e}"))?;
@@ -231,7 +252,7 @@ impl Document {
     pub fn escaped_once(&self) -> bool { self.schema == 4 || self.motion.is_some_and(|motion| motion.escaped_once) }
 
     pub fn mapped_clips(&self) -> impl Iterator<Item = u32> + '_ {
-        [self.searching, self.carrying, self.escaped].into_iter().chain(self.motion.into_iter().flat_map(|motion| [motion.searching_idle, motion.carrying_idle]))
+        [self.searching, self.carrying, self.escaped].into_iter().chain(self.motion.into_iter().flat_map(|motion| [motion.searching_idle, motion.carrying_idle])).chain(self.motion.and_then(|m|m.pickup).map(|pickup|pickup.clip))
     }
     fn selected_clip(&self, state: State, moving: bool) -> u32 {
         match (self.motion, state, moving) {
@@ -451,6 +472,8 @@ struct ObservedPose {
     context: PlaybackContext,
     tick: u64,
     escaped_start: u64,
+    pickup_start: Option<u64>,
+    pickup_active: bool,
     position: Option<orr_fp::FPVec3>,
     clip: u32,
     state: State,
@@ -508,13 +531,29 @@ impl PlaybackCursor {
         } else { tick };
         let moving = matching.filter(|old| old.tick < tick).and_then(|old| old.position)
             .zip(position).is_some_and(|(old, current)| old.x != current.x || old.z != current.z);
-        let clip = document.selected_clip(state, moving);
-        let target = sample_pose_at_tick(document, model, frame, context.tick_rate, context.rest, phase_tick, clip)?;
+        let pickup_start = if document.motion.and_then(|m|m.pickup).is_some() && !context.rest && state == State::Carrying {
+            matching.filter(|old| !old.context.rest && old.tick < tick).and_then(|old| {
+                if old.state == State::Searching && old.tick.checked_add(1) == Some(tick) { Some(tick) }
+                else if old.state == State::Carrying { old.pickup_start } else { None }
+            })
+        } else { None };
+        let pickup_sample = document.motion.and_then(|m|m.pickup).zip(pickup_start).map(|(pickup,start)| {
+            let duration=model.source().clips[pickup.clip as usize].duration();
+            sample_clip_time_at_rate(tick-start,context.tick_rate,duration,PlaybackMode::Once,pickup.speed)
+                .map(|time|(pickup.clip,time,duration))
+        }).transpose()?;
+        // Completion, including zero-duration clips, immediately resumes the role loop.
+        let active_pickup=pickup_sample.filter(|(_,time,duration)|time<duration);
+        let clip = active_pickup.map_or_else(||document.selected_clip(state,moving),|(clip,_,_)|clip);
+        let target = if let Some((clip,time,_))=active_pickup {
+            let pose=model.sample_clip(clip,time).map_err(|e|format!("room pickup pose: {e}"))?;
+            validate_pose(model,&pose)?;pose
+        } else {sample_pose_at_tick(document, model, frame, context.tick_rate, context.rest, phase_tick, clip)?};
         let duration = document.crossfade_ticks.unwrap_or(0);
         let continuous = matching
             .filter(|old| !context.rest && duration != 0 && old.tick.checked_add(1) == Some(tick));
         let (current, outgoing) = if let Some(old) = continuous {
-            if old.state != state || old.clip != clip {
+            if old.state != state || old.clip != clip || old.pickup_active != active_pickup.is_some() {
                 (old.current.clone(), Some((tick, old.current.clone())))
             } else if let Some((start, outgoing)) = &old.outgoing {
                 let elapsed = tick - start;
@@ -540,6 +579,8 @@ impl PlaybackCursor {
             context,
             tick,
             escaped_start,
+            pickup_start,
+            pickup_active: active_pickup.is_some(),
             position,
             clip,
             state,
@@ -1459,7 +1500,7 @@ mod tests {
     mod motion_tests {
         use super::*;
         fn doc(ticks: u32) -> Document {
-            Document { schema: 5, motion: Some(Motion { searching_idle: 2, carrying_idle: 0, escaped_once: true }), ..crossfade_document(ticks) }
+            Document { schema: 5, motion: Some(Motion { searching_idle: 2, carrying_idle: 0, escaped_once: true, pickup:None }), ..crossfade_document(ticks) }
         }
         fn observed_frame(tick: u64, x: i32, key: u32, won: u32) -> (Frame, PlaybackContext) {
             use crate::room_game::{RoomConfig, RoomEscapeV1};
@@ -1559,5 +1600,7 @@ mod tests {
             assert_eq!(sample_pose(&doc,&model,FrameView::of(&changed),60,true).unwrap(),model.rest_pose().unwrap());
         }
     }
+
+    mod pickup_tests { include!("room_character/pickup_tests.rs"); }
 
 }

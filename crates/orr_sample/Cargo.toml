@@ -27,7 +27,7 @@ coop-defense-audio = ["coop-defense", "audio", "orr_package/coop-audio-load"]
 coop-defense-run-save = ["coop-defense", "dep:sha2"]
 coop-defense-presentation = ["dep:egui", "orr_games/coop-defense"]
 coop-defense = ["coop-defense-presentation", "project", "game-ui", "orr_games/coop-defense-scene", "dep:rustix"]
-room-character = ["room-animated-models"]
+room-character = ["room-animated-models", "dep:sha2"]
 room-lighting = ["room-project"]
 # Optional finite visual-only Arena background authoring.
 tilemap = ["project", "dep:orr_tilemap"]
