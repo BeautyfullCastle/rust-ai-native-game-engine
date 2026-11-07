@@ -2403,6 +2403,20 @@ impl Editor {
         } else { None }
     }
     #[cfg(feature = "models")]
+    pub fn room_point_light_settings_for_presentation(&self) -> Result<orr_render::PointLightSettings,String> {
+        #[cfg(feature = "room-lighting")]
+        if let Some(document)=self.room_lighting_document() {
+            if self.mode()==Mode::Play {
+                if !self.yard_rows_coherent() {return Err("carried lighting requires coherent presentation snapshot".into());}
+                let snapshot=self.snapshot().ok_or("lighting presentation snapshot unavailable")?;
+                return document.settings_for_frame(snapshot.predicted());
+            }
+            document.validate()?;
+            return Ok(document.settings());
+        }
+        Ok(orr_render::PointLightSettings::default())
+    }
+    #[cfg(feature = "models")]
     pub fn room_point_light_settings(&self) -> orr_render::PointLightSettings {
         #[cfg(feature = "room-lighting")]
         if let Some(document) = self.room_lighting_document() { return document.settings(); }

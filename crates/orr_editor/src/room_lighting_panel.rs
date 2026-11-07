@@ -442,6 +442,15 @@ impl Panel {
                     number_bounded(ui, "Range", &mut light.range, 1e-6, 1e9);
                 }
 
+                if self.candidate.point_light.is_some() {
+                    let mut follow=self.candidate.follow_player.is_some();
+                    if ui.checkbox(&mut follow,"Carry light with player").changed() {self.candidate.follow_player=follow.then_some([0.0,2.0,0.0]);}
+                    if let Some(offset)=self.candidate.follow_player.as_mut() {
+                        for (axis,value) in ["X","Y","Z"].into_iter().zip(offset) {number_bounded(ui,&format!("Carried offset {axis}"),value,-32.0,32.0);}
+                        ui.weak("Play uses PLAYER position plus offset. Position above remains the Edit fallback. No shadows or light collision are added.");
+                    }
+                }
+
                 if ui
                     .add_enabled(self.candidate != self.document, egui::Button::new("Discard lighting draft"))
                     .clicked()
@@ -612,6 +621,14 @@ mod tests {
                 manifest_bytes,
             },
         )
+    }
+    #[test]
+    fn invalid_carried_light_preserves_applied_history_and_disk_baseline() {
+        let (_dir,prepared)=fixture();let mut panel=Panel::new(prepared);let original=panel.saved_bytes.clone();
+        let mut carried=panel.document().clone();carried.follow_player=Some([1.0,2.0,-1.0]);panel.apply_document(carried.clone()).unwrap();
+        let undo=panel.undo.clone();let saved=panel.saved.clone();let mut invalid=carried.clone();invalid.follow_player.as_mut().unwrap()[0]=33.0;
+        assert!(panel.apply_document(invalid).is_err());assert_eq!(panel.document(),&carried);assert_eq!(panel.undo,undo);assert!(panel.redo.is_empty());assert_eq!(panel.saved,saved);assert_eq!(std::fs::read(&panel.path).unwrap(),original);
+        panel.save().unwrap();assert_eq!(Document::parse(&std::fs::read(&panel.path).unwrap()).unwrap(),carried);assert!(panel.undo());assert!(panel.redo());assert_eq!(panel.document(),&carried);
     }
     #[test]
     fn invalid_candidate_is_atomic_and_history_is_bounded() {

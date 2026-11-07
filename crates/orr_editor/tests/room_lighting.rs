@@ -922,3 +922,6 @@ mod draft_acceptance {
         .unwrap();
     }
 }
+
+#[path="room_lighting/carried.rs"]
+mod carried;

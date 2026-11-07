@@ -236,6 +236,12 @@ fn headless_checked(
         // Emit extra tracking diagnostics only under the explicit pose check.
         if check_model_poses { println!("room follow camera target: {:?}",resolved.target); }
     }
+    let lighting=project.point_light_settings_for_frame(FrameView::of(sim.frame()))?;
+    #[cfg(feature = "room-lighting")]
+    if check_model_poses && project.lighting().is_some_and(|lighting|lighting.document.follow_player.is_some()) {
+        println!("room carried light position: {:?}",lighting.point_light.expect("validated carried light").position);
+    }
+    let _=lighting;
     let run = sim.frame().singleton::<RoomRun>();
     println!(
         "room tick: {} checksum: 0x{:016x}\nroom key: {} won: {}",
@@ -255,7 +261,7 @@ fn headless_checked(
         let gpu = Wgpu::headless(WgpuOptions::default())?;
         let size = (1024, 768);
         let mut renderer = RoomRenderer::new(&gpu, size, project.models())?;
-        renderer.set_point_light_settings(project.point_light_settings())?;
+        renderer.set_point_light_settings(project.point_light_settings_for_frame(FrameView::of(sim.frame()))?)?;
         #[cfg(feature = "room-character")]
         let render = RoomRenderer::render_with_playback;
         #[cfg(not(feature = "room-character"))]
@@ -482,6 +488,7 @@ impl App {
         #[cfg(all(feature = "room-progress", target_os = "linux"))]
         let title = format!("{title} | {}", self.progress.status());
         g.window.set_title(&title);
+        g.renderer.set_point_light_settings(self.project.point_light_settings_for_frame(FrameView::of(self.sim.frame()))?)?;
         // The backend reconfigures lost/outdated surfaces and returns Skip.
         if let Acquire::Frame(surface_frame) = g.rhi.acquire_frame(&mut g.surface) {
             let view = g.rhi.frame_view(&surface_frame);
@@ -542,7 +549,7 @@ impl ApplicationHandler for App {
             let format = rhi.surface_format(&surface);
             let mut renderer =
                 RoomRenderer::new_with_format(&rhi, size, self.project.models(), format)?;
-            renderer.set_point_light_settings(self.project.point_light_settings())?;
+            renderer.set_point_light_settings(self.project.point_light_settings_for_frame(FrameView::of(self.sim.frame()))?)?;
             Ok::<_, String>(Graphics {
                 window,
                 rhi,
