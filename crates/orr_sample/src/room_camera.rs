@@ -20,6 +20,8 @@ pub struct Document {
     pub pitch: f32,
     pub distance: f32,
     pub projection: Projection,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub follow_player: Option<[f32; 3]>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
@@ -54,6 +56,9 @@ where
 
 impl<'de> Deserialize<'de> for Document {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        fn present_offset<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<[f32; 3]>, D::Error> {
+            <[f32; 3]>::deserialize(deserializer).map(Some)
+        }
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Wire {
@@ -63,6 +68,8 @@ impl<'de> Deserialize<'de> for Document {
             pitch: f32,
             distance: f32,
             projection: Projection,
+            #[serde(default, deserialize_with = "present_offset")]
+            follow_player: Option<[f32; 3]>,
         }
         let wire: Wire = deserialize_object(deserializer)?;
         Ok(Self {
@@ -72,6 +79,7 @@ impl<'de> Deserialize<'de> for Document {
             pitch: wire.pitch,
             distance: wire.distance,
             projection: wire.projection,
+            follow_player: wire.follow_player,
         })
     }
 }
@@ -146,8 +154,10 @@ impl Document {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema != 1 {
-            return Err("room camera schema must be 1".into());
+        match (self.schema, self.follow_player) {
+            (1, None) => {},
+            (2, Some(offset)) => { for value in offset { bounded("follow_player offset", value, -32.0, 32.0)?; } },
+            _ => return Err("room camera schema 1 forbids follow_player; schema 2 requires its offset".into()),
         }
         validate_pose(self.target, self.yaw, self.pitch, self.distance)?;
         match self.projection {
@@ -169,6 +179,7 @@ impl Document {
             pitch: 1.02,
             distance: 24.0,
             projection: Projection::Orthographic { half_height: 8.0 },
+            follow_player: None,
         }
     }
 
@@ -183,6 +194,26 @@ impl Document {
                 Projection::Orthographic { .. } => 50.0,
             },
         }
+    }
+
+    /// Requires a RoomEscapeV1 Frame with its registered component types.
+    /// Play camera from the same immutable Frame as rendering. Session pan is
+    /// a relative bias; it never changes the saved offset or source document.
+    pub fn camera_for_frame(&self, orbit: &OrbitCamera, size: (u32,u32), frame: orr_bridge::FrameView<'_>) -> Result<Camera3D,String> {
+        use orr_games::room_escape_game::{RoomActor,PLAYER};
+        let Some(offset) = self.follow_player else { return self.camera(orbit,size); };
+        self.camera(orbit,size)?; // Validate caller session/dimensions before resolving a body.
+        let mut players = frame.iter::<RoomActor>().filter(|(_,actor)| actor.kind==PLAYER);
+        let (entity,_) = players.next().ok_or("follow camera requires one current PLAYER")?;
+        if players.next().is_some() { return Err("follow camera requires exactly one PLAYER".into()); }
+        let body = frame.get::<orr_physics3d::Body>(entity).ok_or("follow camera PLAYER has no current body generation")?;
+        let position = [body.pos.x.to_f32(),body.pos.y.to_f32(),body.pos.z.to_f32()];
+        let mut resolved = *orbit;
+        for axis in 0..3 {
+            bounded("PLAYER position",position[axis],-32.0,32.0)?;
+            resolved.target[axis] = (position[axis] as f64 + offset[axis] as f64 + orbit.target[axis] as f64 - self.target[axis] as f64).clamp(-64.0,64.0) as f32;
+        }
+        self.camera(&resolved,size)
     }
 
     /// Reject invalid dimensions instead of silently changing the capture aspect.
@@ -652,4 +683,62 @@ mod tests {
         doc.zoom(&mut invalid, 1.0);
         assert_eq!(invalid, before);
     }
+    mod follow_tests {
+        use super::*;
+        use orr_bridge::FrameView;
+        use crate::room_game::{RoomActor,RoomConfig,RoomEscapeV1,RoomInput,PLAYER,KEY};
+        fn doc() -> Document { Document {schema:2,follow_player:Some([1.0,2.0,-1.0]),..Document::readable_default()} }
+        fn sim() -> orr_sim::Simulation<RoomEscapeV1> {orr_sim::Simulation::new(RoomConfig,60,42)}
+        fn player(frame:&orr_ecs::Frame)->orr_ecs::Entity {frame.entities().find(|&entity|frame.get::<RoomActor>(entity).is_some_and(|actor|actor.kind==PLAYER)).unwrap()}
+        #[test]
+        fn strict_schema2_offset_roundtrip_and_legacy_bytes_are_preserved() {
+            let legacy=Document::readable_default();let old=legacy.to_bytes().unwrap();assert!(!String::from_utf8(old.clone()).unwrap().contains("follow_player"));assert_eq!(Document::parse(&old).unwrap().to_bytes().unwrap(),old);
+            let good=doc();assert_eq!(Document::parse(&good.to_bytes().unwrap()).unwrap(),good);
+            for value in [serde_json::json!(null),serde_json::json!([0,1]),serde_json::json!([0,1,2,3]),serde_json::json!([0,33,0]),serde_json::json!({"x":0,"y":1,"z":0})] {
+                let mut bad=serde_json::to_value(&good).unwrap();bad["follow_player"]=value;assert!(Document::parse(&serde_json::to_vec(&bad).unwrap()).is_err());
+            }
+            for schema in [1,3] {let mut bad=good.clone();bad.schema=schema;assert!(bad.validate().is_err());}
+            let mut missing=serde_json::to_value(&good).unwrap();missing.as_object_mut().unwrap().remove("follow_player");assert!(Document::parse(&serde_json::to_vec(&missing).unwrap()).is_err());
+            let text=String::from_utf8(good.to_bytes().unwrap()).unwrap();assert!(Document::parse(text.replace("\"schema\": 2","\"schema\": 2, \"follow_player\": [0,0,0]").as_bytes()).is_err());
+            for value in [f32::NAN,f32::INFINITY] {let mut bad=good.clone();bad.follow_player.as_mut().unwrap()[0]=value;assert!(bad.to_bytes().is_err());}
+        }
+        #[test]
+        fn real_input_motion_follows_player_plus_offset_without_frame_or_session_writes() {
+            use orr_sim::{PlayerSlot,TickInputs};
+            let doc=doc();let orbit=doc.orbit();let mut sim=sim();
+            for _ in 0..10 {let mut input=TickInputs::new(sim.tick()+1,1);input.set_input(PlayerSlot(0),RoomInput {move_x:1,move_z:-1,..Default::default()});sim.step(&input);}
+            let before=sim.frame().to_bytes();let pos=sim.frame().get::<orr_physics3d::Body>(player(sim.frame())).unwrap().pos;
+            let camera=doc.camera_for_frame(&orbit,(800,600),FrameView::of(sim.frame())).unwrap();
+            assert_eq!(camera.target,[pos.x.to_f32()+1.0,pos.y.to_f32()+2.0,pos.z.to_f32()-1.0]);assert_ne!(camera.target,doc.target);
+            assert_eq!(sim.frame().to_bytes(),before);assert_eq!(orbit,doc.orbit());
+        }
+        #[test]
+        fn session_pan_bias_zoom_orbit_and_bounded_extreme_targets_stay_finite() {
+            let mut doc=doc();let sim=sim();
+            for projection in [Projection::Perspective {fov_y_degrees:55.0},Projection::Orthographic {half_height:8.0}] {
+                doc.projection=projection;let mut orbit=doc.orbit();doc.pan(&mut orbit,[15.0,-10.0],(800,600));doc.zoom(&mut orbit,1.0);doc.orbit_delta(&mut orbit,[10.0,5.0]);
+                let camera=doc.camera_for_frame(&orbit,(800,600),FrameView::of(sim.frame())).unwrap();
+                for axis in 0..3 {let pos=if axis==1 {0.5}else{0.0};assert!((camera.target[axis]-(pos+doc.follow_player.unwrap()[axis]+orbit.target[axis]-doc.target[axis])).abs()<0.0001);}
+                for size in [(1,16384),(16384,1),(800,600)] {let c=doc.camera_for_frame(&orbit,size,FrameView::of(sim.frame())).unwrap();assert!(c.view_proj(size.0 as f32/size.1 as f32).0.iter().flatten().all(|v|v.is_finite()));}
+            }
+            doc.target=[-64.0;3];let mut orbit=doc.orbit();orbit.target=[64.0;3];let camera=doc.camera_for_frame(&orbit,(800,600),FrameView::of(sim.frame())).unwrap();assert_eq!(camera.target,[64.0;3]);
+        }
+        #[test]
+        fn absent_duplicate_missing_body_or_out_of_range_player_fails_without_mutation() {
+            let doc=doc();let orbit=doc.orbit();let original=sim();let base=original.frame().clone();
+            let mut missing=base.clone();missing.despawn(player(&base));
+            assert!(doc.camera_for_frame(&orbit,(800,600),FrameView::of(&missing)).is_err());
+            let mut duplicate=base.clone();let key=duplicate.entities().find(|&entity|duplicate.get::<RoomActor>(entity).is_some_and(|actor|actor.kind==KEY)).unwrap();duplicate.get_mut::<RoomActor>(key).unwrap().kind=PLAYER;
+            assert!(doc.camera_for_frame(&orbit,(800,600),FrameView::of(&duplicate)).is_err());
+            let mut no_body=base.clone();no_body.remove::<orr_physics3d::Body>(player(&base));assert!(doc.camera_for_frame(&orbit,(800,600),FrameView::of(&no_body)).is_err());
+            let mut large=base.clone();large.get_mut::<orr_physics3d::Body>(player(&base)).unwrap().pos.x=orr_fp::FP::from_int(33);let bytes=large.to_bytes();assert!(doc.camera_for_frame(&orbit,(800,600),FrameView::of(&large)).is_err());assert_eq!(large.to_bytes(),bytes);assert_eq!(orbit,doc.orbit());
+        }
+        #[test]
+        fn fixed_legacy_camera_ignores_game_frame_and_bad_session_is_rejected_atomically() {
+            let doc=Document::readable_default();let orbit=doc.orbit();let frame=orr_ecs::Frame::new(orr_ecs::ComponentRegistryBuilder::new().build());
+            assert_eq!(doc.camera_for_frame(&orbit,(800,600),FrameView::of(&frame)).unwrap(),doc.camera(&orbit,(800,600)).unwrap());
+            let follow=super::follow_tests::doc();let sim=sim();let mut invalid=follow.orbit();invalid.distance=0.0;let before=invalid;assert!(follow.camera_for_frame(&invalid,(800,600),FrameView::of(sim.frame())).is_err());assert_eq!(invalid,before);
+        }
+    }
+
 }

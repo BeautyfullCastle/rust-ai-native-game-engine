@@ -1221,3 +1221,6 @@ fn escaped_once_widgets_save_reopen_real_input_win_hold_and_seek_stop() {
 
 #[path = "room_character_workflow/motion.rs"]
 mod motion;
+
+#[path = "room_character_workflow/follow_camera.rs"]
+mod follow_camera;

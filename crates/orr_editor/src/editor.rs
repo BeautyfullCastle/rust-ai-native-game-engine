@@ -2467,7 +2467,14 @@ impl Editor {
     }
     pub fn presentation_camera3d(&self, size:(u32,u32)) -> Result<orr_render::Camera3D,String> {
         #[cfg(feature="room-project")]
-        if self.has_room_camera() { return self.room_camera.as_ref().unwrap().camera(&self.camera3d,size); }
+        if self.has_room_camera() {
+            let document = self.room_camera.as_ref().unwrap();
+            if self.mode()==Mode::Play {
+                let snapshot=self.snapshot().ok_or("Room follow camera requires a current Frame")?;
+                return document.camera_for_frame(&self.camera3d,size,snapshot.predicted());
+            }
+            return document.camera(&self.camera3d,size);
+        }
         #[cfg(feature = "mesh-navigation")]
         if self.has_mesh_camera() {
             let snapshot = self.snapshot().ok_or("Mesh game camera requires an authoritative Frame")?;
