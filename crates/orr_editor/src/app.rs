@@ -93,6 +93,9 @@ mod package_model_preview;
 #[cfg(all(feature="package-manager",feature="room-animated-models"))]
 #[path="app/variant_model_preview.rs"]
 mod variant_model_preview;
+
+#[cfg(feature="models")]
+mod draft_model_preview;
 #[cfg(all(feature="package-manager",feature="room-animated-models"))]
 #[path="app/variant_preview_host.rs"]
 mod variant_preview_host;
@@ -2378,6 +2381,8 @@ impl EditorApp {
         let prop_pointer_consumed = false;
         let selected=if self.editor.yard_rows_coherent(){self.editor.selection().and_then(|t|self.editor.row_of(t)).map(|r|r.entity)}else{None};
         #[cfg(feature="models")]
+        let model_draft = self.models.draft_placement(&self.editor);
+        #[cfg(feature="models")]
         let placements=self.models.placements(&self.editor);
         #[cfg(feature="animated-models")]
         let animated_placements = match self.models.animated_placements(&self.editor) {
@@ -2404,6 +2409,17 @@ impl EditorApp {
             }
             placements
         };
+        #[cfg(feature="models")]
+        let mut placements = placements;
+        #[cfg(feature="animated-models")]
+        let mut animated_placements = animated_placements;
+        #[cfg(feature="models")]
+        draft_model_preview::compose(
+            &mut placements,
+            #[cfg(feature="animated-models")]
+            &mut animated_placements,
+            model_draft,
+        );
         #[cfg(all(feature="models", feature="animated-models"))]
         let hidden:Vec<_>=placements.iter().map(|p|p.entity).chain(animated_placements.iter().map(|p|p.entity)).collect();
         #[cfg(all(feature="models", not(feature="animated-models")))]
