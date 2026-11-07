@@ -3,6 +3,10 @@
 use super::*;
 use orr_remote::mesh_navigation::patrol::{self, MeshPatrol};
 const MAX_POINTS: usize = 8;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PatrolPickRequest { Pick(usize), Cancel }
+#[path="patrol_pick.rs"]
+pub(crate) mod patrol_pick;
 fn supported_profile(game: EditorGame) -> bool {
     game.is_mesh_navigation() || game.is_mesh_hazards()
 }
@@ -38,6 +42,7 @@ pub(super) struct State {
     stale: bool,
     status: String,
     generation: u64,
+    pick_request: Option<(PatrolPickRequest, Form, u64)>,
     inspection: Option<(InspectionPin, Result<super::patrol_routes::Report, String>)>,
     show_inspection: bool,
     retired: std::cell::Cell<bool>,
@@ -99,6 +104,7 @@ impl State {
     fn load(&mut self, context: Context, config: Option<MeshPatrol>, goal: [FP; 3]) {
         self.generation = self.generation.saturating_add(1);
         self.clear_inspection();
+        self.pick_request = None;
         self.form = match config {
             Some(config) if config.enabled == 1 => Form {
                 enabled: true,
@@ -129,7 +135,7 @@ impl State {
         self.retired.set(false);
     }
     fn sync_context(&mut self, current: Option<&Context>) {
-        if self.context.as_ref() != current { self.retired.set(true); }
+        if self.context.as_ref() != current { self.retired.set(true); self.pick_request = None; }
         if self.context.as_ref() != current && self.dirty {
             self.stale = true;
             self.status="Patrol draft is stale after a scene or graph change; reload fields before applying.".into();
@@ -138,15 +144,19 @@ impl State {
     fn controls(&mut self, ui: &mut Ui, editable: bool) -> bool {
         let before = self.form.clone();
         let mut apply = false;
+        let focused = ui.ctx().input(|input| input.focused && !input.events.iter().any(|event| matches!(event, egui::Event::WindowFocused(false))));
         ui.add_enabled_ui(editable && !self.stale, |ui| {
             ui.checkbox(&mut self.form.enabled, "Enable waypoint patrol");
             if self.form.enabled {
                 let mut remove = None;
+                let mut pick = None;
                 let can_remove = self.form.points.len() > 1;
                 for (index, point) in self.form.points.iter_mut().enumerate() {
                     for (axis, value) in ["X", "Y", "Z"].into_iter().zip(point) {
                         field(ui, &format!("Patrol waypoint {} {axis}", index + 1), value);
                     }
+                    let pick_ready = editable && !self.stale && focused && self.context.is_some() && self.generation < u64::MAX;
+                    if ui.add_enabled(pick_ready, egui::Button::new(format!("Pick patrol waypoint {}", index + 1))).clicked() && pick_ready { pick = Some(index); }
                     if ui
                         .add_enabled(
                             can_remove,
@@ -157,6 +167,7 @@ impl State {
                         remove = Some(index);
                     }
                 }
+                if let Some(index) = pick { self.pick_request = Some((PatrolPickRequest::Pick(index), self.form.clone(), self.generation)); }
                 if let Some(index) = remove {
                     self.form.points.remove(index);
                 }
@@ -181,13 +192,21 @@ impl State {
             if self.form != before {
                 self.generation = self.generation.saturating_add(1);
                 self.clear_inspection();
+                self.pick_request = None;
                 self.dirty = true;
             }
             apply = ui
                 .add_enabled(self.dirty, egui::Button::new("Apply waypoint patrol"))
                 .clicked();
         });
+        if ui.button("Cancel patrol waypoint pick").clicked() { self.pick_request = Some((PatrolPickRequest::Cancel, self.form.clone(), self.generation)); }
         apply
+    }
+    fn take_pick_request(&mut self) -> Option<PatrolPickRequest> {
+        let (request, form, generation) = self.pick_request.take()?;
+        if request == PatrolPickRequest::Cancel { return Some(request); }
+        if self.stale || self.context.is_none() || !self.form.enabled || self.form != form || generation != self.generation || self.generation == u64::MAX { return Some(PatrolPickRequest::Cancel); }
+        match request { PatrolPickRequest::Pick(row) if row < self.form.points.len() => Some(request), _ => Some(PatrolPickRequest::Cancel) }
     }
     fn inspection_controls(&mut self, ui: &mut Ui, ready: bool) -> bool {
         let focused = ui.ctx().input(|input| input.focused && !input.events.iter().any(|event| matches!(event, egui::Event::WindowFocused(false))));
@@ -215,6 +234,7 @@ impl State {
     }
 }
 impl Panel {
+    pub(crate) fn take_patrol_pick_request(&mut self) -> Option<PatrolPickRequest> { self.patrol.take_pick_request() }
     fn patrol_inspection_context(&self, editor: &Editor) -> Result<(InspectionPin, orr_remote::mesh_navigation::MeshView), String> {
         let (context, view) = self.patrol_context(editor)?;
         if self.patrol.stale || self.patrol.context.as_ref() != Some(&context) || !self.patrol.form.enabled || self.patrol.generation == u64::MAX {
@@ -313,6 +333,9 @@ impl Panel {
         ))
     }
     pub(super) fn sync_patrol(&mut self, editor: &Editor) {
+        // The owning viewport adapter validates its full ticket every frame.
+        // Its temporary input ownership must not mark the same draft stale.
+        if self.patrol_pick_busy() { return; }
         let current = self.patrol_context(editor).ok();
         self.patrol.sync_context(current.as_ref().map(|v| &v.0));
         if !self.patrol.dirty {
@@ -372,3 +395,7 @@ mod tests;
 #[cfg(test)]
 #[path = "patrol_preview_panel_tests.rs"]
 mod preview_tests;
+
+#[cfg(test)]
+#[path="patrol_pick_panel_tests.rs"]
+mod pick_panel_tests;

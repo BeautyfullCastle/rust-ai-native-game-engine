@@ -1178,6 +1178,19 @@ impl EditorApp {
         self.terrain_ramp_sync(&ctx);
         #[cfg(feature="navigation")]
         self.navigation_endpoint_sync(&ctx);
+        #[cfg(feature = "mesh-patrol")]
+        {
+            let blocked = self.ui.dialog.is_some() || self.package_work_pending() || self.hazard_export_busy()
+                || self.mesh_navigation.art_import_busy() || self.mesh_animation_import_busy()
+                || self.mesh_mission_pick_busy() || self.hazard_pick_busy()
+                || self.mesh_navigation.geometry_vertex_busy() || self.mesh_navigation.prop_gesture_busy()
+                || self.shot.is_some() || self.remote_capture.is_some() || self.encoder.is_some();
+            #[cfg(feature = "mesh-export")]
+            let blocked = blocked || self.mesh_export.busy();
+            #[cfg(feature = "mesh-mission")]
+            let blocked = blocked || self.mesh_game_creator.busy();
+            self.mesh_navigation.sync_patrol_picking(&self.editor, &ctx, blocked);
+        }
         #[cfg(feature = "terrain-patrol")]
         self.navigation.sync_patrol_inspection_focus(&self.editor, &self.terrain, &ctx);
         #[cfg(feature = "mesh-patrol")]
@@ -1207,6 +1220,8 @@ impl EditorApp {
             #[cfg(feature="mesh-navigation")]
             let cancelling_gesture = {
                 let moving = self.mesh_navigation.prop_gesture_busy() || self.mesh_navigation.agent_pick_busy() || self.mesh_navigation.geometry_vertex_busy() || self.mesh_mission_pick_busy() || self.hazard_pick_busy();
+                #[cfg(feature = "mesh-patrol")]
+                let moving = moving || self.mesh_navigation.patrol_pick_owns_input();
                 #[cfg(feature="mesh-hazards")]
                 let moving = moving || self.mesh_hazard_pointer_owned;
                 self.mesh_navigation.cancel_prop_gesture();
@@ -1942,6 +1957,15 @@ impl EditorApp {
             egui::ScrollArea::vertical().id_salt("mesh_navigation_inspector").auto_shrink([false, false]).show(ui, |ui| {
                 let authoring_enabled = !self.hazard_export_busy();
                 ui.add_enabled_ui(authoring_enabled, |ui| self.mesh_navigation.show(ui, &mut self.editor));
+                #[cfg(feature = "mesh-patrol")]
+                if let Some(request) = self.mesh_navigation.take_patrol_pick_request() {
+                    match request {
+                        crate::mesh_navigation::PatrolPickRequest::Pick(row) => {
+                            if let Err(error) = self.mesh_navigation.begin_patrol_pick(&self.editor, row) { self.editor.error(error); }
+                        }
+                        crate::mesh_navigation::PatrolPickRequest::Cancel => self.mesh_navigation.cancel_patrol_pick(),
+                    }
+                }
                 self.mesh_play_controls.show(ui, &mut self.editor);
                 #[cfg(feature="mesh-hazards")]
                 ui.add_enabled_ui(!self.hazard_export_busy() && !self.mesh_navigation.has_unplaced_draft(), |ui| self.mesh_hazards.show(ui, &mut self.editor));
@@ -2172,6 +2196,8 @@ impl EditorApp {
             let picking = self.navigation_endpoint_owns_input();
             #[cfg(not(feature="navigation"))]
             let picking = false;
+            #[cfg(feature = "mesh-patrol")]
+            let picking = picking || self.mesh_navigation.patrol_pick_owns_input();
             if !picking { self.frame_selection_button(ui); }
         }
         #[cfg(feature="terrain")]
@@ -2234,7 +2260,13 @@ impl EditorApp {
         #[cfg(not(feature="navigation"))]
         let navigation_pointer_owned = false;
         #[cfg(feature="models")]
-        if !navigation_pointer_owned { self.frame_selection_shortcut(ui, &resp, px); }
+        if !navigation_pointer_owned {
+            #[cfg(feature = "mesh-patrol")]
+            let mesh_owned = self.mesh_navigation.patrol_pick_owns_input();
+            #[cfg(not(feature = "mesh-patrol"))]
+            let mesh_owned = false;
+            if !mesh_owned { self.frame_selection_shortcut(ui, &resp, px); }
+        }
         #[cfg(feature="mesh-navigation")]
         let prop_moving = self.mesh_navigation.prop_gesture_busy() || self.mesh_navigation.geometry_vertex_dragging();
         #[cfg(not(feature="mesh-navigation"))]
@@ -2242,6 +2274,8 @@ impl EditorApp {
         #[cfg(feature="room-lighting")]
         let prop_moving = prop_moving || self.room_light_pick_owns_input();
         let prop_moving = prop_moving || navigation_pointer_owned;
+        #[cfg(feature = "mesh-patrol")]
+        let prop_moving = prop_moving || self.mesh_navigation.patrol_pick_owns_input();
         if !prop_moving {
             if resp.dragged_by(PointerButton::Secondary){let delta=resp.drag_delta();self.editor.orbit3d([delta.x*ppp,delta.y*ppp]);}
             if resp.dragged_by(PointerButton::Middle){let delta=resp.drag_delta();self.editor.pan3d([delta.x*ppp,delta.y*ppp],px);}
@@ -2257,6 +2291,8 @@ impl EditorApp {
                 if let Some(tex)=self.gpu3d.as_ref().and_then(|gpu|gpu.last_texture()) { ui.painter().image(tex,rect,Rect::from_min_max(Pos2::ZERO,Pos2::new(1.0,1.0)),Color32::WHITE); }
                 ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,error,egui::FontId::proportional(14.0),Color32::RED); #[cfg(feature="terrain-patrol")]
                 self.navigation_patrol_frame_drawn(false);
+                #[cfg(feature = "mesh-patrol")]
+                self.mesh_navigation.cancel_patrol_pick();
                 return;
             }
         };
@@ -2421,6 +2457,8 @@ impl EditorApp {
                 ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,error,egui::FontId::proportional(14.0),Color32::RED);
                 #[cfg(feature="terrain-patrol")]
                 self.navigation_patrol_frame_drawn(false);
+                #[cfg(feature = "mesh-patrol")]
+                self.mesh_navigation.cancel_patrol_pick();
                 return;
             }
         };
@@ -2435,6 +2473,8 @@ impl EditorApp {
                     ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,error,egui::FontId::proportional(14.0),Color32::RED);
                     #[cfg(feature="terrain-patrol")]
                 self.navigation_patrol_frame_drawn(false);
+                #[cfg(feature = "mesh-patrol")]
+                self.mesh_navigation.cancel_patrol_pick();
                 return;
                 }
             }
@@ -2463,6 +2503,8 @@ impl EditorApp {
             ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,error,egui::FontId::proportional(14.0),Color32::RED);
             #[cfg(feature="terrain-patrol")]
                 self.navigation_patrol_frame_drawn(false);
+                #[cfg(feature = "mesh-patrol")]
+                self.mesh_navigation.cancel_patrol_pick();
                 return;
         }
         if let Some(item) = self.editor.yard_frame().items.iter().find(|item| Some(item.entity) == selected) {
@@ -2548,6 +2590,8 @@ impl EditorApp {
                 ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, error, egui::FontId::proportional(14.0), Color32::RED);
                 #[cfg(feature="terrain-patrol")]
                 self.navigation_patrol_frame_drawn(false);
+                #[cfg(feature = "mesh-patrol")]
+                self.mesh_navigation.cancel_patrol_pick();
                 return;
             }
             #[cfg(all(feature="animated-models", not(feature="irradiance-probes"), not(any(feature="terrain", feature="mesh-navigation"))))]
@@ -2614,6 +2658,22 @@ impl EditorApp {
         self.room_wall_placement_input(ui, &resp, &camera, px, rect, ppp, frame_drawn);
         #[cfg(feature="terrain-patrol")]
         self.navigation_patrol_frame_drawn(frame_drawn);
+        #[cfg(feature = "mesh-patrol")]
+        let agent_pointer_consumed = {
+            let content_busy = self.package_work_pending() || self.hazard_export_busy()
+                || self.mesh_navigation.art_import_busy() || self.mesh_animation_import_busy()
+                || self.shot.is_some() || self.remote_capture.is_some() || self.encoder.is_some();
+            #[cfg(feature = "mesh-export")]
+            let content_busy = content_busy || self.mesh_export.busy();
+            #[cfg(feature = "mesh-mission")]
+            let content_busy = content_busy || self.mesh_game_creator.busy();
+            let consumed = self.mesh_navigation.patrol_viewport_input(&self.editor, &camera, px, crate::mesh_navigation::AgentViewInput {
+                pixel: resp.interact_pointer_pos().or_else(||resp.hover_pos()).map(|at|[(at.x-rect.min.x)*ppp,(at.y-rect.min.y)*ppp]),
+                clicked: !hazard_pointer_consumed && !mission_pointer_consumed && !vertex_pointer_consumed && resp.clicked_by(PointerButton::Primary),
+                cancel: content_busy || hazard_pointer_consumed || mission_pointer_consumed || vertex_pointer_consumed || self.ui.dialog.is_some() || !ui.input(|input|input.focused),
+            }, frame_drawn);
+            agent_pointer_consumed || consumed
+        };
         if !hazard_pointer_consumed && !mission_pointer_consumed && !mesh_play_pointer_consumed && !agent_pointer_consumed && !prop_pointer_consumed && (frame_drawn || !self.editor.has_room_camera()) && resp.clicked_by(PointerButton::Primary) && self.editor.previewing().is_none() {
             if let Some(at) = resp.interact_pointer_pos() {
                 let pixel = [(at.x-rect.min.x)*ppp, (at.y-rect.min.y)*ppp];
