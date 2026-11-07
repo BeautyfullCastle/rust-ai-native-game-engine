@@ -17,6 +17,8 @@ pub(crate) struct ViewInput {
 enum Endpoint {
     Start,
     Goal,
+    #[cfg(feature = "mesh-patrol")]
+    Patrol(usize),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,9 +34,139 @@ pub(crate) struct State {
     pending: Option<Endpoint>,
     context: Option<PickContext>,
     status: String,
+    #[cfg(feature = "mesh-patrol")]
+    patrol_ticket: Option<super::PatrolPickToken>,
+    #[cfg(feature = "mesh-patrol")]
+    owned_release: bool,
+    #[cfg(feature = "mesh-patrol")]
+    waiting_release: bool,
+    #[cfg(feature = "mesh-patrol")]
+    focused: bool,
 }
 
 impl Panel {
+    #[cfg(feature = "mesh-patrol")]
+    pub(crate) fn patrol_pick_busy(&self) -> bool {
+        matches!(self.agent_viewport.pending, Some(Endpoint::Patrol(_)))
+    }
+    #[cfg(feature = "mesh-patrol")]
+    pub(crate) fn patrol_pick_owns_input(&self) -> bool {
+        self.patrol_pick_busy() || self.agent_viewport.owned_release
+    }
+    #[cfg(feature = "mesh-patrol")]
+    pub(crate) fn cancel_patrol_pick(&mut self) {
+        if self.patrol_pick_busy() {
+            self.cancel_agent_pick();
+        }
+    }
+    #[cfg(feature = "mesh-patrol")]
+    pub(crate) fn begin_patrol_pick(&mut self, editor: &Editor, row: usize) -> Result<(), String> {
+        self.with_agent_viewport(|state, panel| {
+            if !state.focused || state.owned_release || state.pending.is_some() {
+                return Err(
+                    "Finish the current viewport gesture before picking a patrol waypoint".into(),
+                );
+            }
+            let ticket = panel.patrol_pick_token(editor, row)?;
+            state.patrol_ticket = Some(ticket);
+            state.pending = Some(Endpoint::Patrol(row));
+            state.status = format!(
+                "Pick patrol waypoint {} on a walkable mesh surface",
+                row + 1
+            );
+            Ok(())
+        })
+    }
+    #[cfg(feature = "mesh-patrol")]
+    pub(crate) fn sync_patrol_picking(
+        &mut self,
+        editor: &Editor,
+        ctx: &egui::Context,
+        blocked: bool,
+    ) {
+        self.with_agent_viewport(|state, panel| {
+            let (down, released, explicit_press, explicit_release) = ctx.input(|input| {
+                (
+                    input.pointer.primary_down(),
+                    input.pointer.primary_released(),
+                    input.events.iter().any(|event| {
+                        matches!(
+                            event,
+                            egui::Event::PointerButton {
+                                button: egui::PointerButton::Primary,
+                                pressed: true,
+                                ..
+                            }
+                        )
+                    }),
+                    input.events.iter().any(|event| {
+                        matches!(
+                            event,
+                            egui::Event::PointerButton {
+                                button: egui::PointerButton::Primary,
+                                pressed: false,
+                                ..
+                            }
+                        )
+                    }),
+                )
+            });
+            if (down || explicit_press)
+                && (matches!(state.pending, Some(Endpoint::Patrol(_))) || state.owned_release)
+            {
+                state.waiting_release = true;
+            }
+            if explicit_release {
+                state.waiting_release = false;
+            }
+            // Focus loss may clear egui's held state without a physical release.
+            if !down && !released && !state.waiting_release {
+                state.owned_release = false;
+            }
+            state.focused = !blocked
+                && ctx.input(|input| {
+                    input.focused
+                        && !input
+                            .events
+                            .iter()
+                            .any(|event| matches!(event, egui::Event::WindowFocused(false)))
+                });
+            if matches!(state.pending, Some(Endpoint::Patrol(_))) {
+                if !state.focused
+                    || blocked
+                    || ctx.input(|input| input.key_pressed(egui::Key::Escape))
+                {
+                    state.cancel();
+                } else {
+                    state.sync(panel, editor);
+                }
+            }
+        });
+    }
+    #[cfg(feature = "mesh-patrol")]
+    pub(crate) fn patrol_viewport_input(
+        &mut self,
+        editor: &Editor,
+        camera: &Camera3D,
+        size: (u32, u32),
+        input: ViewInput,
+        frame_available: bool,
+    ) -> bool {
+        let owned = self.patrol_pick_owns_input();
+        if !owned {
+            return false;
+        }
+        if !frame_available {
+            self.cancel_patrol_pick();
+            return true;
+        }
+        self.with_agent_viewport(|state, panel| {
+            if state.pending.is_none() {
+                return state.owned_release;
+            }
+            state.input(panel, editor, camera, size, input)
+        })
+    }
     pub(crate) fn agent_pick_busy(&self) -> bool {
         self.agent_viewport.pending.is_some()
     }
@@ -86,6 +218,8 @@ impl Panel {
                 ui.label(match endpoint {
                     Endpoint::Start => "Click a walkable surface for the start point.",
                     Endpoint::Goal => "Click a walkable surface for the goal point.",
+                    #[cfg(feature = "mesh-patrol")]
+                    Endpoint::Patrol(_) => "Click a walkable surface for the chosen patrol waypoint.",
                 });
             }
             if !self.agent_viewport.status.is_empty() {
@@ -108,6 +242,10 @@ impl Panel {
         size: (u32, u32),
         input: ViewInput,
     ) -> bool {
+        #[cfg(feature = "mesh-patrol")]
+        if self.patrol_pick_owns_input() {
+            return true;
+        }
         self.sync_agent_picking(editor);
         self.with_agent_viewport(|state, panel| state.input(panel, editor, camera, size, input))
     }
@@ -211,6 +349,8 @@ impl State {
                 self.status = match endpoint {
                     Endpoint::Start => "Picking start endpoint; click a walkable surface.".into(),
                     Endpoint::Goal => "Picking goal endpoint; click a walkable surface.".into(),
+                    #[cfg(feature = "mesh-patrol")]
+                    Endpoint::Patrol(_) => "Picking patrol waypoint.".into(),
                 };
             }
             Err(reason) => self.status = format!("Cannot pick endpoint: {reason}"),
@@ -232,17 +372,30 @@ impl State {
             self.cancel();
             return true;
         }
-        match self.pick_context(panel, editor, false) {
-            Ok(context) if self.context.as_ref() == Some(&context) => {}
-            Ok(_) => {
-                self.cancel_with_status(
-                    "Endpoint picking canceled because the scene or graph changed.",
-                );
+        #[cfg(feature = "mesh-patrol")]
+        if let Endpoint::Patrol(row) = endpoint {
+            if self.patrol_ticket.as_ref() != panel.patrol_pick_token(editor, row).ok().as_ref() {
+                self.cancel_with_status("Patrol waypoint context changed; pick again");
                 return true;
             }
-            Err(reason) => {
-                self.cancel_with_status(&format!("Endpoint picking canceled: {reason}"));
-                return true;
+        }
+        #[cfg(feature = "mesh-patrol")]
+        let patrol = matches!(endpoint, Endpoint::Patrol(_));
+        #[cfg(not(feature = "mesh-patrol"))]
+        let patrol = false;
+        if !patrol {
+            match self.pick_context(panel, editor, false) {
+                Ok(context) if self.context.as_ref() == Some(&context) => {}
+                Ok(_) => {
+                    self.cancel_with_status(
+                        "Endpoint picking canceled because the scene or graph changed.",
+                    );
+                    return true;
+                }
+                Err(reason) => {
+                    self.cancel_with_status(&format!("Endpoint picking canceled: {reason}"));
+                    return true;
+                }
             }
         }
         if !input.clicked {
@@ -273,9 +426,25 @@ impl State {
         let (origin, direction) = camera.screen_ray(pixel, size);
         match crate::mesh_agent_view::pick(graph, origin, direction, max_vertical) {
             Ok(Some(hit)) => {
+                #[cfg(feature = "mesh-patrol")]
+                if matches!(endpoint, Endpoint::Patrol(_)) {
+                    let result = self
+                        .patrol_ticket
+                        .clone()
+                        .ok_or("Patrol pick ticket expired".to_owned())
+                        .and_then(|ticket| panel.stage_patrol_pick(editor, &ticket, hit.position));
+                    self.cancel();
+                    self.status = match result {
+                        Ok(()) => "Patrol waypoint staged; Apply and Save remain explicit".into(),
+                        Err(error) => format!("Patrol pick rejected: {error}"),
+                    };
+                    return true;
+                }
                 let target = match endpoint {
                     Endpoint::Start => &mut panel.start,
                     Endpoint::Goal => &mut panel.goal,
+                    #[cfg(feature = "mesh-patrol")]
+                    Endpoint::Patrol(_) => unreachable!(),
                 };
                 *target = hit.position.map(super::format_fixed);
                 panel.draft_dirty = true;
@@ -283,11 +452,19 @@ impl State {
                 self.context = None;
                 self.status = match endpoint {
                     Endpoint::Start => {
-                        format!("Start endpoint staged on triangle {}; Place mesh agent to apply it to the host.", hit.triangle)
+                        format!(
+                            "Start endpoint staged on triangle {}; Place mesh agent to apply it to the host.",
+                            hit.triangle
+                        )
                     }
                     Endpoint::Goal => {
-                        format!("Goal endpoint staged on triangle {}; Place mesh agent to apply it to the host.", hit.triangle)
+                        format!(
+                            "Goal endpoint staged on triangle {}; Place mesh agent to apply it to the host.",
+                            hit.triangle
+                        )
                     }
+                    #[cfg(feature = "mesh-patrol")]
+                    Endpoint::Patrol(_) => unreachable!(),
                 };
             }
             Ok(None) => {
@@ -300,6 +477,13 @@ impl State {
     }
 
     fn sync(&mut self, panel: &Panel, editor: &Editor) {
+        #[cfg(feature = "mesh-patrol")]
+        if let Some(Endpoint::Patrol(row)) = self.pending {
+            if self.patrol_ticket.as_ref() != panel.patrol_pick_token(editor, row).ok().as_ref() {
+                self.cancel_with_status("Patrol waypoint context changed; pick again");
+            }
+            return;
+        }
         match self.pick_context(panel, editor, false) {
             Ok(context) if self.context.as_ref() == Some(&context) => {}
             Ok(_) => self.cancel_with_status(
@@ -310,6 +494,11 @@ impl State {
     }
 
     fn cancel(&mut self) {
+        #[cfg(feature = "mesh-patrol")]
+        if matches!(self.pending, Some(Endpoint::Patrol(_))) {
+            self.owned_release = true;
+            self.patrol_ticket = None;
+        }
         if self.pending.take().is_some() {
             self.context = None;
             self.status = "Endpoint picking canceled; staged coordinates were preserved.".into();
@@ -346,3 +535,11 @@ fn parse_endpoint(values: &[String; 3]) -> Option<[f32; 3]> {
 #[cfg(test)]
 #[path = "agent_viewport/tests.rs"]
 mod tests;
+
+#[cfg(all(test, target_os = "linux", feature = "mesh-patrol"))]
+#[path = "agent_viewport/patrol_tests.rs"]
+mod patrol_tests;
+
+#[cfg(all(test, target_os = "linux", feature = "mesh-patrol"))]
+#[path = "agent_viewport/patrol_ui_tests.rs"]
+mod patrol_ui_tests;

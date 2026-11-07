@@ -1,0 +1,88 @@
+name: Mesh patrol waypoint picking focused CI
+on:
+  push:
+    branches: [codex/mesh-patrol-waypoint-pick-20261107]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: mesh-patrol-pick-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  mesh-patrol-pick:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Record exact source and prepare Linux toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir ci-evidence
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git rev-parse HEAD HEAD^{tree} | tee ci-evidence/source.txt
+          git status --porcelain=v1 > ci-evidence/source-status.txt
+          git archive --format=tar HEAD > ci-evidence/source.tar
+          rustup toolchain install 1.99.1 --profile minimal --component clippy
+          rustup override set 1.99.1
+          rustc --version --verbose | tee ci-evidence/rustc.txt
+          sudo apt-get update -q 2>&1 | tee ci-evidence/dependencies.log
+          sudo apt-get install -y -q pkg-config libasound2-dev libudev-dev libx11-dev libxkbcommon-dev libwayland-dev 2>&1 | tee -a ci-evidence/dependencies.log
+      - name: Collect focused mesh waypoint checks
+        shell: python {0}
+        run: |
+          import json, re, subprocess
+          from pathlib import Path
+          evidence=Path('ci-evidence'); results=[]
+          minimal='mesh-navigation'
+          full='mesh-patrol,mesh-hazards-export,project-create,package-manager,room-character,room-lighting,navigation-export,terrain-patrol'
+          def run(label, command, count=None):
+              with (evidence/(label+'.log')).open('w') as log:
+                  process=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+                  lines=[]
+                  for line in process.stdout:
+                      print(line,end='',flush=True); log.write(line); log.flush(); lines.append(line)
+                  code=process.wait()
+              text=''.join(lines); ok=code==0
+              if count is not None:
+                  summary=re.findall(r'^test result: (\w+)\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured;',text,re.M)
+                  names=re.findall(r'^test (\S+) \.\.\. ok$',text,re.M)
+                  ok=ok and summary==[('ok',str(count),'0','0','0')] and len(names)==len(set(names))==count
+              results.append(dict(label=label,command=command,exit=code,ok=ok,expected=count))
+              (evidence/'results.json').write_text(json.dumps(results,indent=2))
+          def tests(label,selector,count,features=full,exact=False):
+              args=['cargo','test','--locked','-p','orr_editor','--features',features,'--lib',selector,'--']
+              if exact: args+=['--exact']
+              run(label,args+['--test-threads=1'],count)
+          tests('patrol-row-tokens','mesh_navigation::patrol_panel::patrol_pick::tests::',5)
+          tests('patrol-row-widgets','mesh_navigation::patrol_panel::pick_panel_tests::',4)
+          tests('patrol-picking-adapter','mesh_navigation::agent_viewport::patrol_tests::',3)
+          tests('actual-row-pick-save','mesh_navigation::agent_viewport::patrol_ui_tests::',2)
+          tests('mesh-ray-projection','mesh_agent_view::tests::',8,minimal)
+          tests('legacy-agent-picker','mesh_navigation::agent_viewport::tests::',1,minimal)
+          tests('existing-patrol-widgets','mesh_navigation::patrol_panel::tests::',6)
+          tests('existing-route-preview-widgets','mesh_navigation::patrol_panel::preview_tests::',5)
+          tests('existing-inspect-overlay-save','mesh_navigation::patrol_route_overlay_integration_tests::',3)
+          tests('navigation-runtime','mesh_navigation::patrol_integration_tests::',2)
+          tests('hazards-runtime','mesh_navigation::patrol_hazards_integration_tests::',2)
+          for label,features in [('minimal',minimal),('combined',full)]:
+              run('strict-'+label,['cargo','clippy','--locked','-p','orr_editor','--features',features,'--lib','--','-D','warnings'])
+          run('feature-off',['cargo','check','--locked','-p','orr_editor','--lib'])
+          (evidence/'scope.txt').write_text('41 CPU executions required, zero failed/ignored. New patrol hit tests explicitly supply the completed-frame gate to the production adapter; GPU pixels/window/physicalplay/video/Windows execution UNRUN. No new native export; no full-workspace validation.')
+          if not all(item['ok'] for item in results): raise SystemExit('Focused mesh waypoint checks failed')
+      - name: Preserve every original result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mesh-patrol-pick-${{ github.sha }}-${{ github.run_attempt }}
+          path: ci-evidence
+          if-no-files-found: error
