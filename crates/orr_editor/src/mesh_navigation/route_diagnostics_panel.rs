@@ -17,16 +17,20 @@ struct Context {
 #[derive(Default)]
 pub(super) struct State {
     observation: Option<(Context, Result<route_diagnostics::RouteReport, String>)>,
+    show_route: bool,
+    retired: std::cell::Cell<bool>,
 }
 
 impl State {
     fn sync(&mut self, context: Option<&Context>) {
-        if self
-            .observation
-            .as_ref()
-            .is_some_and(|(old, _)| Some(old) != context)
+        if self.retired.replace(false)
+            || self
+                .observation
+                .as_ref()
+                .is_some_and(|(old, _)| Some(old) != context)
         {
             self.observation = None;
+            self.show_route = false;
         }
     }
 
@@ -43,12 +47,27 @@ impl State {
             .clicked()
         {
             if let (Some(graph), Ok(context)) = (graph, context.as_ref()) {
+                self.retired.set(false);
+                self.show_route = false;
                 self.observation = Some((context.clone(), inspect_fields(graph, context)));
             }
         }
         if let Err(reason) = context {
             ui.weak(reason);
         }
+        let ready = self.observation.as_ref().is_some_and(|(_, result)| {
+            matches!(
+                result,
+                Ok(route_diagnostics::RouteReport {
+                    route: route_diagnostics::RouteOutcome::Ready { .. },
+                    ..
+                })
+            )
+        });
+        ui.add_enabled(
+            ready,
+            egui::Checkbox::new(&mut self.show_route, "Show inspected draft route"),
+        );
         let Some((_, result)) = &self.observation else {
             return;
         };
@@ -80,6 +99,7 @@ impl State {
                     route_diagnostics::RouteOutcome::Ready {
                         corridor_triangles,
                         length,
+                        ..
                     } => {
                         ui.label(format!(
                             "Route found: {corridor_triangles} corridor triangles; path length {}",
@@ -186,6 +206,28 @@ impl Panel {
         })
     }
 
+    pub(super) fn inspected_route_points(&self, editor: &Editor) -> Option<&[[FP; 3]]> {
+        let current = match self.route_context(editor) {
+            Ok(context) => context,
+            Err(_) => {
+                self.route_diagnostics.retired.set(true);
+                return None;
+            }
+        };
+        let (inspected, result) = self.route_diagnostics.observation.as_ref()?;
+        if inspected != &current {
+            self.route_diagnostics.retired.set(true);
+            return None;
+        }
+        if self.route_diagnostics.retired.get() || !self.route_diagnostics.show_route {
+            return None;
+        }
+        match &result.as_ref().ok()?.route {
+            route_diagnostics::RouteOutcome::Ready { path, .. } => Some(path.points.as_slice()),
+            _ => None,
+        }
+    }
+
     pub(super) fn show_route_diagnostics(&mut self, ui: &mut Ui, editor: &Editor) {
         let context = self.route_context(editor);
         self.route_diagnostics
@@ -196,3 +238,7 @@ impl Panel {
 #[cfg(test)]
 #[path = "route_diagnostics_panel/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "route_diagnostics_panel/overlay_tests.rs"]
+mod overlay_tests;

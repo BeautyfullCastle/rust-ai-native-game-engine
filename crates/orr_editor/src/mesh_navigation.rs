@@ -1506,3 +1506,9 @@ fn normalize(vector: [f32; 3]) -> Option<[f32; 3]> {
 fn hex_revision(revision: [u8; 32]) -> String {
     revision.iter().map(|byte| format!("{byte:02x}")).collect()
 }
+#[path = "mesh_navigation/route_diagnostics_overlay.rs"]
+mod route_diagnostics_overlay;
+
+#[cfg(all(test,target_os="linux"))]
+#[path="mesh_navigation/route_diagnostics_overlay_integration_tests.rs"]
+mod route_diagnostics_overlay_integration_tests;

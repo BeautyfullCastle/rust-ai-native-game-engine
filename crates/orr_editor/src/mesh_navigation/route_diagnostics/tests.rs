@@ -75,7 +75,15 @@ fn same_triangle_length_and_zero_length_need_no_search_expansions() {
             report.route,
             RouteOutcome::Ready {
                 corridor_triangles: 1,
-                length
+                length,
+                path: graph
+                    .find_path(
+                        point(1, 0, 1),
+                        goal,
+                        FP::ZERO,
+                        SearchBudget { max_expansions: 0 }
+                    )
+                    .unwrap(),
             }
         );
     }
@@ -98,7 +106,8 @@ fn valid_corridor_uses_validated_core_length_and_is_deterministic_read_only() {
         expected.route,
         RouteOutcome::Ready {
             corridor_triangles: 2,
-            length: graph.path_length(&path).unwrap()
+            length: graph.path_length(&path).unwrap(),
+            path: path.clone()
         }
     );
     for _ in 0..4 {
@@ -166,7 +175,10 @@ fn vertical_tolerance_projects_but_does_not_claim_clearance() {
         admitted.route,
         RouteOutcome::Ready {
             corridor_triangles: 1,
-            length: FP::ONE
+            length: FP::ONE,
+            path: graph
+                .find_path(start, goal, FP::ONE, SearchBudget::default())
+                .unwrap(),
         }
     );
 }

@@ -1,7 +1,7 @@
 //! Read-only, bounded point-agent route diagnostics; not clearance validation.
 use orr_fp::FP;
 use orr_navigation::{
-    mesh::{MeshProjection, StaticMeshGraph},
+    mesh::{MeshPath, MeshProjection, StaticMeshGraph},
     NavigationError, SearchBudget,
 };
 
@@ -19,6 +19,7 @@ pub(super) enum RouteOutcome {
     Ready {
         corridor_triangles: usize,
         length: FP,
+        path: MeshPath,
     },
     Failed(NavigationError),
 }
@@ -41,6 +42,7 @@ pub(super) fn inspect_route(
                 Ok(length) => RouteOutcome::Ready {
                     corridor_triangles: path.corridor.len(),
                     length,
+                    path,
                 },
                 Err(error) => RouteOutcome::Failed(error),
             },

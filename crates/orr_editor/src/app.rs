@@ -2409,6 +2409,7 @@ impl EditorApp {
                 if let Some(lighting) = self.mesh_lighting.applied_lighting(&self.editor) { list.lighting = lighting; }
             }
             self.mesh_navigation.paint_geometry_vertices(&self.editor, &mut list);
+            self.mesh_navigation.paint_draft_route(&self.editor, &mut list);
             if !self.mesh_navigation.geometry_preview_active() {
                 self.mesh_navigation.paint_agent_endpoints(&self.editor, &mut list);
                 if let Some(bounds) = self.mesh_navigation.selected_prop_bounds(&self.editor) {
