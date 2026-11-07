@@ -7,7 +7,7 @@ fn sim()->Simulation<RoomEscapeV1> {Simulation::new(RoomConfig,60,42)}
 fn step(sim:&mut Simulation<RoomEscapeV1>,input:RoomInput) {let mut tick=TickInputs::new(sim.tick()+1,1);tick.set_input(PlayerSlot(0),input);sim.step(&tick);}
 #[test]
 fn conditional_codec_is_strict_and_preserves_legacy_bytes() {
-    for follow in [None,Some([1.0,2.0,-1.0])] {for activation in [Activation::KeyCollected,Activation::Escaped] {let d=Document {follow_player:follow,..conditional(activation)};let bytes=d.to_bytes().unwrap();assert_eq!(Document::parse(&bytes).unwrap(),d);
+    for follow in [None,Some([1.0,2.0,-1.0])] {for activation in [Activation::KeyCollected,Activation::Escaped,Activation::KeyMissing,Activation::BeforeEscape] {let d=Document {follow_player:follow,..conditional(activation)};let bytes=d.to_bytes().unwrap();assert_eq!(Document::parse(&bytes).unwrap(),d);
         let good:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
         for value in [serde_json::json!(null),serde_json::json!({"key_collected":null}),serde_json::json!(["escaped"]),serde_json::json!("always"),serde_json::json!("won")] {let mut bad=good.clone();bad["activation"]=value;assert!(Document::parse(&serde_json::to_vec(&bad).unwrap()).is_err());}
         for version in [1,2,4] {let mut bad=good.clone();bad["version"]=serde_json::json!(version);assert!(Document::parse(&serde_json::to_vec(&bad).unwrap()).is_err());}
@@ -39,4 +39,23 @@ fn disabled_or_invalid_conditional_light_cannot_be_saved_or_hidden_by_inactive_s
     let sim=sim();let mut d=conditional(Activation::Escaped);d.point_light=None;assert!(d.validate().is_err());assert!(d.to_bytes().is_err());assert!(d.settings_for_frame(FrameView::of(sim.frame())).is_err());
     let mut d=conditional(Activation::Escaped);d.point_light.as_mut().unwrap().intensity=f32::NAN;assert!(d.settings_for_frame(FrameView::of(sim.frame())).is_err());
     let empty=orr_ecs::Frame::new(orr_ecs::ComponentRegistryBuilder::new().build());let d=Document::enabled_default();assert_eq!(d.settings_for_frame(FrameView::of(&empty)).unwrap(),d.settings());
+}
+
+#[test]
+fn before_conditions_turn_off_at_actual_outcomes_and_restore_on_seek() {
+    for follow in [None,Some([1.0,2.0,-1.0])] {
+        let key=Document {follow_player:follow,..conditional(Activation::KeyMissing)};
+        let exit=Document {follow_player:follow,..conditional(Activation::BeforeEscape)};
+        let mut sim=sim();let initial=sim.frame().clone();
+        for d in [&key,&exit] {assert!(d.settings_for_frame(FrameView::of(&initial)).unwrap().point_light.is_some());}
+        step(&mut sim,RoomInput {buttons:INTERACT,..Default::default()});
+        assert_eq!(sim.frame().singleton::<RoomRun>().key_collected,1);
+        assert_eq!(key.settings_for_frame(FrameView::of(sim.frame())).unwrap().point_light,None);
+        assert!(exit.settings_for_frame(FrameView::of(sim.frame())).unwrap().point_light.is_some());
+        for _ in 0..40 {step(&mut sim,RoomInput {move_x:1,..Default::default()});}
+        step(&mut sim,RoomInput {buttons:INTERACT,..Default::default()});assert_eq!(sim.frame().singleton::<RoomRun>().won,1);
+        let before=sim.frame().to_bytes();
+        for d in [&key,&exit] {assert_eq!(d.settings_for_frame(FrameView::of(sim.frame())).unwrap().point_light,None);assert!(d.settings_for_frame(FrameView::of(&initial)).unwrap().point_light.is_some());}
+        assert_eq!(sim.frame().to_bytes(),before);
+    }
 }
