@@ -1162,3 +1162,59 @@ fn character_batch_removal_rejects_player_and_optional_targets_together_without_
     assert_eq!(app.editor.checksum(), checksum);
     assert_eq!(fs::read(&app.models.bindings.as_ref().unwrap().path).unwrap(), bytes);
 }
+
+#[test]
+fn escaped_once_widgets_save_reopen_real_input_win_hold_and_seek_stop() {
+    fn click(h: &mut Harness<'_, EditorApp>, label: &str) {
+        h.get_by_label(label).scroll_to_me(); h.run_steps(2); h.get_by_label(label).click(); settle(h);
+    }
+    let fixture = Fixture::new(); let mut h = fixture.app(false); settle(&mut h);
+    wait(&mut h, "coherent once editor", |app| app.editor.yard_rows_coherent());
+    let before = frame_bytes(&mut h.state_mut().editor);
+    let original = h.state().editor.room_character().unwrap().clone();
+    if h.query_by_label("Play escaped clip once").is_none() { click(&mut h, "Room character"); }
+    click(&mut h, "Play escaped clip once");
+    assert!(h.state().room_character.as_ref().unwrap().has_unapplied_changes());
+    assert_eq!(h.state().editor.room_character(), Some(&original));
+    click(&mut h, "Escaped speed");
+    click(&mut h, "Escaped speed 2x");
+    click(&mut h, "Apply character settings");
+    assert_eq!(h.state().editor.room_character().unwrap().schema, 4);
+    assert_eq!(h.state().editor.room_character().unwrap().speed(orr_sample::room_character::State::Escaped), orr_sample::room_character::PlaybackRate::Double);
+    click(&mut h, "Undo character edit"); assert_eq!(h.state().editor.room_character(), Some(&original));
+    click(&mut h, "Redo character edit"); assert!(h.state().editor.room_character().unwrap().escaped_once());
+    click(&mut h, "Save character and model bindings");
+    assert_eq!(frame_bytes(&mut h.state_mut().editor), before);
+    drop(h); let mut h = fixture.app(false); settle(&mut h);
+    assert!(h.state().editor.room_character().unwrap().escaped_once());
+    for kind in [PLAYER, KEY, EXIT] { move_actor(&mut h, &fixture.guids[&kind], FPVec3::new(FP::ZERO, FP::HALF, FP::ZERO)); }
+    assert!(h.state_mut().editor.save()); settle(&mut h);
+    let rest = poses(&h);
+    click(&mut h, orr_editor::app::LBL_PLAY);
+    wait(&mut h, "once control available", |app| app.editor.can_take_control());
+    click(&mut h, "Take control"); wait(&mut h, "once active input", |app| app.editor.input_phase() == Phase::Active);
+    key(&mut h, egui::Key::E, true); wait(&mut h, "once actual key pickup", |app| run(app).key_collected == 1);
+    key(&mut h, egui::Key::E, false); wait(&mut h, "once released interact consumed", |app| run(app).previous_buttons == 0);
+    key(&mut h, egui::Key::E, true); wait(&mut h, "once actual win", |app| run(app).won == 1);
+    key(&mut h, egui::Key::E, false);
+    h.state_mut().editor.pause(); settle(&mut h);
+    let _escaped_first = poses(&h); // CPU presentation observes the winning snapshot before stepping.
+    let start = h.state().editor.snapshot().unwrap().tick();
+    h.state_mut().editor.step(120);
+    wait(&mut h, "once endpoint tick", |app| app.editor.snapshot().is_some_and(|snapshot| snapshot.tick() >= start + 120));
+    let placed = h.state().models.animated_placements(&h.state().editor).unwrap();
+    let document = h.state().editor.room_character().unwrap();
+    let endpoint = placed[0].model.sample_clip(document.escaped, placed[0].model.source().clips[document.escaped as usize].duration()).unwrap();
+    assert_eq!(placed[0].pose, endpoint);
+    h.state_mut().editor.step(30);
+    wait(&mut h, "once endpoint held", |app| app.editor.snapshot().is_some_and(|snapshot| snapshot.tick() >= start + 150));
+    assert_eq!(h.state().models.animated_placements(&h.state().editor).unwrap()[0].pose, endpoint);
+    h.state_mut().editor.seek(0);
+    wait(&mut h, "once seek resets state", |app| app.editor.timeline().is_some_and(|timeline| timeline.tick == 0));
+    assert_eq!(run(h.state()), RoomRun::default());
+    let placed = h.state().models.animated_placements(&h.state().editor).unwrap();
+    assert_eq!(placed[0].pose, placed[0].model.sample_clip(h.state().editor.room_character().unwrap().searching, 0.0).unwrap());
+    click(&mut h, orr_editor::app::LBL_STOP);
+    wait(&mut h, "once stop restores rest", |app| app.editor.mode() == Mode::Edit && app.editor.snapshot().is_some_and(|snapshot| snapshot.timeline().is_none()));
+    assert_eq!(poses(&h), rest);
+}

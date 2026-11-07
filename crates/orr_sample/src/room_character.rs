@@ -4,6 +4,8 @@
 //! map selects three distinct clips for its one PLAYER binding. Schema 1 keeps
 //! fixed 1x; schema 2 explicitly authors a closed playback rate for every state.
 //! Schema 3 adds a bounded view-only crossfade observed on simulation ticks.
+//! Schema 4 additionally plays the escaped clip once from its observed entry
+//! tick, then holds its endpoint; earlier schemas keep absolute looping.
 //! State is derived from the same immutable frame as body placement. No animation
 //! state is written into ECS, replay, input, or checkpoints.
 
@@ -172,8 +174,8 @@ impl Document {
     pub fn validate(&self) -> Result<(), String> {
         match (self.schema, self.speeds, self.crossfade_ticks) {
             (1, None, None) | (2, Some(_), None) => {}
-            (3, Some(_), Some(ticks)) if ticks <= MAX_CROSSFADE_TICKS => {}
-            _ => return Err("room character schema 1 requires legacy fields, schema 2 requires speeds, and schema 3 requires speeds plus crossfade_ticks 0..120".into()),
+            (3 | 4, Some(_), Some(ticks)) if ticks <= MAX_CROSSFADE_TICKS => {}
+            _ => return Err("room character schema 1 requires legacy fields, schema 2 requires speeds, and schemas 3/4 require speeds plus crossfade_ticks 0..120".into()),
         }
         let player =
             Guid::parse(&self.player).map_err(|e| format!("room character player GUID: {e}"))?;
@@ -192,6 +194,9 @@ impl Document {
         }
         Ok(())
     }
+
+    /// Schema 4 explicitly opts into an observed-entry escaped one-shot.
+    pub fn escaped_once(&self) -> bool { self.schema == 4 }
 
     pub fn clip(&self, state: State) -> u32 {
         match state {
@@ -336,8 +341,8 @@ impl Document {
     }
 }
 
-/// Absolute frame tick at the state's authored rate (legacy 1x); state changes
-/// never reset or offset phase.
+/// Stateless absolute looping at the authored rate (legacy 1x). Schema-4
+/// escaped playback requires PlaybackCursor to establish its entry tick.
 /// `rest` explicitly distinguishes Edit/Stop from Play at tick zero. No call
 /// mutates the frame, descriptor, asset, or any prior presentation state.
 pub fn sample_pose(
@@ -346,6 +351,19 @@ pub fn sample_pose(
     frame: FrameView<'_>,
     tick_rate: u32,
     rest: bool,
+) -> Result<Pose, String> {
+    if document.escaped_once() && !rest && state(frame) == State::Escaped {
+        return Err("escaped one-shot requires an observed playback cursor".into());
+    }
+    sample_pose_at_tick(document, model, frame, tick_rate, rest, frame.tick())
+}
+fn sample_pose_at_tick(
+    document: &Document,
+    model: &AnimatedModel,
+    frame: FrameView<'_>,
+    tick_rate: u32,
+    rest: bool,
+    phase_tick: u64,
 ) -> Result<Pose, String> {
     if tick_rate == 0 {
         return Err("room character cannot sample a zero tick rate".into());
@@ -358,10 +376,10 @@ pub fn sample_pose(
         let clip = document.clip(state);
         let duration = model.source().clips[clip as usize].duration();
         let time = sample_clip_time_at_rate(
-            frame.tick(),
+            phase_tick,
             tick_rate,
             duration,
-            PlaybackMode::Loop,
+            if document.escaped_once() && state == State::Escaped { PlaybackMode::Once } else { PlaybackMode::Loop },
             document.speed(state),
         )?;
         model.sample_clip(clip, time)
@@ -386,6 +404,7 @@ struct ObservedPose {
     model: Arc<AnimatedModel>,
     context: PlaybackContext,
     tick: u64,
+    escaped_start: u64,
     state: State,
     current: Pose,
     outgoing: Option<(u64, Pose)>,
@@ -422,7 +441,15 @@ impl PlaybackCursor {
         if matching.is_some_and(|old| old.tick == tick && old.state == state) {
             return Ok(&self.observed.as_ref().unwrap().current);
         }
-        let target = sample_pose(document, model, frame, context.tick_rate, context.rest)?;
+        // A forward gap in the monotonic Escaped state keeps a known entry.
+        // New source/context, backward time, or first observed win starts here;
+        // unknown transition history is never inferred from absolute run time.
+        let escaped_start = matching.filter(|old| old.state == State::Escaped && old.tick <= tick)
+            .map_or(tick, |old| old.escaped_start);
+        let phase_tick = if document.escaped_once() && state == State::Escaped {
+            tick - escaped_start
+        } else { tick };
+        let target = sample_pose_at_tick(document, model, frame, context.tick_rate, context.rest, phase_tick)?;
         let duration = document.crossfade_ticks.unwrap_or(0);
         let continuous = matching
             .filter(|old| !context.rest && duration != 0 && old.tick.checked_add(1) == Some(tick));
@@ -452,6 +479,7 @@ impl PlaybackCursor {
             model: model.clone(),
             context,
             tick,
+            escaped_start,
             state,
             current,
             outgoing,
@@ -996,7 +1024,7 @@ mod tests {
             bad.as_object_mut().unwrap().remove(field);
             assert!(Document::parse(&serde_json::to_vec(&bad).unwrap()).is_err());
         }
-        for schema in [1, 2, 4] {
+        for schema in [1, 2, 5] {
             let mut bad = valid.clone();
             bad["schema"] = serde_json::json!(schema);
             assert!(Document::parse(&serde_json::to_vec(&bad).unwrap()).is_err());
@@ -1282,4 +1310,85 @@ mod tests {
             .is_ok()
         );
     }
+    mod once {
+        use super::*;
+        fn enabled(ticks: u32) -> Document {
+            let mut doc = crossfade_document(ticks); doc.schema = 4; doc
+        }
+        #[test]
+        fn schema4_round_trip_is_strict_and_legacy_bytes_stay_unchanged() {
+            let doc = enabled(12);
+            assert!(Document::parse(&doc.to_bytes().unwrap()).unwrap().escaped_once());
+            for field in ["speeds", "crossfade_ticks"] {
+                let mut bad = serde_json::to_value(&doc).unwrap();
+                bad.as_object_mut().unwrap().remove(field);
+                assert!(Document::parse(&serde_json::to_vec(&bad).unwrap()).is_err());
+            }
+            let mut bad = serde_json::to_value(&doc).unwrap(); bad["schema"] = 5.into();
+            assert!(Document::parse(&serde_json::to_vec(&bad).unwrap()).is_err());
+            for legacy in [document(), Document { schema: 2, speeds: Some(Default::default()), ..document() }, crossfade_document(12)] {
+                let bytes = legacy.to_bytes().unwrap();
+                assert!(!legacy.escaped_once());
+                assert_eq!(Document::parse(&bytes).unwrap().to_bytes().unwrap(), bytes);
+            }
+        }
+        #[test]
+        fn late_escape_starts_at_zero_advances_and_holds_endpoint_without_frame_writes() {
+            let doc = enabled(0); let model = Arc::new(model()); let mut cursor = PlaybackCursor::default();
+            observe(&mut cursor, &doc, &model, 7000, 1, 0);
+            assert_eq!(observe(&mut cursor, &doc, &model, 7001, 1, 1), model.sample_clip(2, 0.0).unwrap());
+            assert_eq!(observe(&mut cursor, &doc, &model, 7031, 1, 1), model.sample_clip(2, 0.5).unwrap());
+            assert_eq!(observe(&mut cursor, &doc, &model, 9000, 1, 1), model.sample_clip(2, 6.0).unwrap());
+            assert_eq!(observe(&mut cursor, &doc, &model, u64::MAX, 1, 1), model.sample_clip(2, 6.0).unwrap());
+            let f = frame(u64::MAX, 1, 1);
+            assert_eq!(cursor.pose(&doc, &model, FrameView::of(&f), context()).unwrap(), &model.sample_clip(2, 6.0).unwrap());
+        }
+        #[test]
+        fn authored_rate_applies_to_entry_elapsed_ticks_and_legacy_keeps_looping() {
+            let mut doc = enabled(0); doc.speeds.as_mut().unwrap().escaped = PlaybackRate::Double;
+            let model = Arc::new(model()); let mut cursor = PlaybackCursor::default();
+            observe(&mut cursor, &doc, &model, 1000, 1, 1);
+            assert_eq!(observe(&mut cursor, &doc, &model, 1030, 1, 1), model.sample_clip(2, 1.0).unwrap());
+            assert_eq!(observe(&mut cursor, &doc, &model, 1180, 1, 1), model.sample_clip(2, 6.0).unwrap());
+            doc.schema = 3;
+            let f = frame(1180, 1, 1);
+            assert_eq!(observe(&mut cursor, &doc, &model, 1180, 1, 1), sample_pose(&doc, &model, FrameView::of(&f), 60, false).unwrap());
+        }
+        #[test]
+        fn first_unknown_escape_backward_time_reset_and_revision_restart_the_once_clock() {
+            let doc = enabled(0); let model = Arc::new(model()); let mut cursor = PlaybackCursor::default();
+            observe(&mut cursor, &doc, &model, 40, 1, 0);
+            assert_eq!(observe(&mut cursor, &doc, &model, 1000, 1, 1), model.sample_clip(2, 0.0).unwrap());
+            observe(&mut cursor, &doc, &model, 1060, 1, 1);
+            assert_eq!(observe(&mut cursor, &doc, &model, 1001, 1, 1), model.sample_clip(2, 0.0).unwrap());
+            let f = frame(1002, 1, 1); let mut revision = context(); revision.revision = 1;
+            assert_eq!(cursor.observe(&doc, &model, FrameView::of(&f), revision).unwrap(), &model.sample_clip(2, 0.0).unwrap());
+            cursor.reset();
+            assert_eq!(observe(&mut cursor, &doc, &model, 5000, 1, 1), model.sample_clip(2, 0.0).unwrap());
+        }
+        #[test]
+        fn crossfade_targets_the_entry_clock_and_then_holds_the_final_pose() {
+            let doc = enabled(2); let model = Arc::new(model()); let mut cursor = PlaybackCursor::default();
+            let old = observe(&mut cursor, &doc, &model, 1000, 1, 0);
+            assert_eq!(observe(&mut cursor, &doc, &model, 1001, 1, 1), old);
+            let target = model.sample_clip(2, 1.0 / 60.0).unwrap();
+            assert_eq!(observe(&mut cursor, &doc, &model, 1002, 1, 1), model.blend_poses(&old, &target, 0.5).unwrap());
+            assert_eq!(observe(&mut cursor, &doc, &model, 1003, 1, 1), model.sample_clip(2, 2.0 / 60.0).unwrap());
+            assert_eq!(observe(&mut cursor, &doc, &model, 2000, 1, 1), model.sample_clip(2, 6.0).unwrap());
+        }
+        #[test]
+        fn stateless_escape_fails_closed_rest_and_repeated_draws_keep_their_contract() {
+            let doc = enabled(0); let model = Arc::new(model()); let mut cursor = PlaybackCursor::default();
+            let f = frame(1000, 1, 1);
+            assert!(sample_pose(&doc, &model, FrameView::of(&f), 60, false).unwrap_err().contains("observed playback cursor"));
+            assert_eq!(sample_pose(&doc, &model, FrameView::of(&f), 60, true).unwrap(), model.rest_pose().unwrap());
+            assert!(cursor.pose(&doc, &model, FrameView::of(&f), context()).is_err());
+            let first = observe(&mut cursor, &doc, &model, 1000, 1, 1);
+            assert_eq!(observe(&mut cursor, &doc, &model, 1000, 1, 1), first);
+            let mut invalid = doc.clone(); invalid.escaped = 31;
+            assert!(cursor.observe(&invalid, &model, FrameView::of(&f), context()).is_err());
+            assert_eq!(cursor.pose(&doc, &model, FrameView::of(&f), context()).unwrap(), &first);
+        }
+    }
+
 }
