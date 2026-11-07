@@ -69,9 +69,20 @@ pub(crate) struct TextureVariant {
     pub asset_id: String,
 }
 
+/// Append a source clip segment without changing any existing clip index.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TrimVariant {
+    pub clip: u32,
+    pub start_seconds: f64,
+    pub end_seconds: f64,
+    pub name: String,
+    pub asset_id: String,
+}
+
 enum AuthoringVariant {
     Color(ColorVariant),
     Texture(TextureVariant),
+    Trim(TrimVariant),
 }
 
 pub(crate) struct Report {
@@ -160,6 +171,58 @@ pub(crate) fn import_texture_variant_checked(
         Some(AuthoringVariant::Texture(variant)),
         expected_source_sha256,
     )
+}
+
+pub(crate) fn import_trim_variant(request: Request, variant: TrimVariant) -> Result<Report, String> {
+    import_trim_variant_checked(request, variant, None)
+}
+
+pub(crate) fn import_trim_variant_checked(
+    request: Request, variant: TrimVariant, expected_source_sha256: Option<String>,
+) -> Result<Report, String> {
+    validate_expected_source_hash(expected_source_sha256.as_deref())?;
+    if !request.license_acknowledged { return Err("explicit license acknowledgement is required".into()); }
+    if request.source_format != SourceFormat::CookedAnimated || request.kind != ModelKind::Animated {
+        return Err("clip trim requires CookedAnimated source and Animated model mode".into());
+    }
+    if !cfg!(feature = "room-animated-models") {
+        return Err("clip trim requires room-animated-models; no input or destination opened".into());
+    }
+    validate_trim_variant(&variant)?;
+    import_package_inner(request, Some(AuthoringVariant::Trim(variant)), expected_source_sha256)
+}
+
+fn validate_trim_variant(variant: &TrimVariant) -> Result<(), String> {
+    validate_variant_identity(&variant.asset_id, ".trim.json")?;
+    if variant.name.trim().is_empty() || variant.name.len() > 128 || variant.name.chars().any(char::is_control) {
+        return Err("trim clip name must be nonempty, at most 128 UTF-8 bytes, without controls".into());
+    }
+    if !variant.start_seconds.is_finite() || !variant.end_seconds.is_finite()
+        || variant.start_seconds < 0.0 || variant.end_seconds <= variant.start_seconds || variant.end_seconds > 3600.0
+        || (variant.end_seconds as f32) <= (variant.start_seconds as f32) {
+        return Err("trim range must be finite 0 <= start < end <= 3600 and distinct after f32 conversion".into());
+    }
+    #[cfg(feature = "room-animated-models")]
+    if variant.clip as usize >= orr_model::animation::MAX_CLIPS { return Err("trim clip index exceeds the model clip limit".into()); }
+    Ok(())
+}
+
+fn trim_variant_bytes(source: &[u8], variant: &TrimVariant) -> Result<Vec<u8>, String> {
+    validate_trim_variant(variant)?;
+    #[cfg(feature = "room-animated-models")]
+    {
+        let recipe = serde_json::to_vec(&serde_json::json!({
+            "format":"orr_animation_clip_trim", "version":1, "source":"input.animated.json",
+            "clip":variant.clip, "start_seconds":variant.start_seconds, "end_seconds":variant.end_seconds,"name":variant.name,
+        })).map_err(|error|format!("clip trim recipe: {error}"))?;
+        let model = orr_model::animation_trim::trim_clip(&recipe,&variant.asset_id,|path| {
+            if path != "input.animated.json" { return Err("unexpected clip trim dependency".into()); }
+            Ok(source.to_vec())
+        })?;
+        model.to_bytes().map_err(|error|format!("clip trim cook: {error}"))
+    }
+    #[cfg(not(feature = "room-animated-models"))]
+    { let _ = source; Err("clip trim requires room-animated-models".into()) }
 }
 
 fn validate_texture_variant(variant: &TextureVariant) -> Result<(), String> {
@@ -359,6 +422,7 @@ fn import_package_inner(
     if let Some(variant) = variant {
         let bytes = match variant {
             AuthoringVariant::Color(spec) => color_variant_bytes(&source.bytes, &spec)?,
+            AuthoringVariant::Trim(spec) => trim_variant_bytes(&source.bytes, &spec)?,
             AuthoringVariant::Texture(spec) => {
                 let path = checked_file_path(&spec.texture, "PNG texture")?;
                 let png = read_bounded_file(&path, MAX_SOURCE_BYTES, "PNG texture")?;
@@ -796,3 +860,7 @@ mod source_inspection_tests;
 #[cfg(feature = "room-animated-models")]
 #[path = "model_package_import/variant_preview.rs"]
 pub(crate) mod variant_preview;
+
+#[cfg(test)]
+#[path = "model_package_import/animation_trim.rs"]
+mod animation_trim_tests;

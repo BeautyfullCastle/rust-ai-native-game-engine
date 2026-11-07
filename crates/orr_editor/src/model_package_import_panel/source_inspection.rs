@@ -18,6 +18,7 @@ pub(super) struct State {
     status: String,
 }
 impl State {
+    pub(super) fn catalog(&self) -> Option<&Catalog> { self.catalog.as_ref() }
     pub(super) fn busy(&self) -> bool {
         self.pending.is_some()
     }

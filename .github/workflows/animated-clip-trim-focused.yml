@@ -1,0 +1,109 @@
+name: Animated clip trimming focused CI
+on:
+  push:
+    branches: [codex/animated-clip-trim-20261107]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: animated-clip-trim-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  animated-clip-trim:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Record exact source and prepare Linux toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir ci-evidence
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git rev-parse HEAD HEAD^{tree} | tee ci-evidence/source.txt
+          git status --porcelain=v1 > ci-evidence/source-status.txt
+          git archive --format=tar HEAD > ci-evidence/source.tar
+          rustup toolchain install 1.99.1 --profile minimal --component clippy
+          rustup override set 1.99.1
+          rustc --version --verbose | tee ci-evidence/rustc.txt
+          sudo apt-get update -q 2>&1 | tee ci-evidence/dependencies.log
+          sudo apt-get install -y -q pkg-config libasound2-dev libudev-dev libx11-dev libxkbcommon-dev libwayland-dev 2>&1 | tee -a ci-evidence/dependencies.log
+      - name: Collect trim, GUI and native results
+        shell: python {0}
+        run: |
+          import hashlib,json,os,re,shutil,subprocess
+          from pathlib import Path
+          evidence=Path('ci-evidence');results=[]
+          full='package-manager,room-character,room-lighting,project-create,windows-export'
+          minimal='package-manager'
+          def run(label,command,count=None):
+              with (evidence/(label+'.log')).open('w') as log:
+                  p=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+                  lines=[]
+                  for line in p.stdout:
+                      print(line,end='',flush=True);log.write(line);log.flush();lines.append(line)
+                  code=p.wait()
+              text=''.join(lines);ok=code==0
+              if count is not None:
+                  summary=re.findall(r'^test result: (\w+)\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured;',text,re.M)
+                  names=re.findall(r'^test (\S+) \.\.\. ok$',text,re.M)
+                  running=re.findall(r'^running (\d+) tests?$',text,re.M)
+                  ok=ok and summary==[('ok',str(count),'0','0','0')] and len(names)==len(set(names))==count and running==[str(count)]
+              results.append(dict(label=label,command=command,exit=code,ok=ok,expected=count))
+              (evidence/'results.json').write_text(json.dumps(results,indent=2))
+              return ok
+          def tests(label,selector,count,features=full,crate='orr_editor',extra=()):
+              run(label,['cargo','test','--locked','-p',crate,'--features',features,'--lib',selector,'--']+list(extra)+['--test-threads=1'],count)
+          tests('trim-core','animation_trim::tests::',7,'animation,import','orr_model')
+          tests('trim-backend-off','model_package_import::animation_trim_tests::',3,minimal)
+          tests('trim-ui-off','model_package_import_panel::trim_ui::tests::',1,minimal)
+          checks=[
+            ('trim-backend','model_package_import::animation_trim_tests::',6),
+            ('variant-preview-backend','model_package_import::variant_preview::tests::',8),
+            ('trim-ui','model_package_import_panel::trim_ui::tests::',5),
+            ('actual-trim-room','package_manager_panel::editor_animation_trim_tests::',1),
+            ('legacy-color-backend','model_package_import::animated_color_tests::',5),
+            ('legacy-png-backend','model_package_import::animated_texture_tests::',5),
+            ('legacy-color-ui','model_package_import_panel::animated_color_tests::',5),
+            ('legacy-png-ui','model_package_import_panel::animated_texture_tests::',4),
+            ('legacy-preview-identity','model_package_import_panel::variant_preview::tests::',6),
+            ('legacy-preview-app','app::variant_model_preview::tests::',5),
+            ('legacy-preview-workers','package_manager_panel::variant_preview_integration_tests::',1),
+            ('legacy-preview-parent','package_manager_panel::variant_preview_parent_tests::',1),
+            ('legacy-png-room','package_manager_panel::editor_animated_texture_tests::actual_editor_texture_widgets_import_install_assign_save_and_reopen',1),
+            ('legacy-catalog-room','package_manager_panel::editor_material_catalog_tests::catalog_selected_material_imports_installs_assigns_and_reopens',1),
+          ]
+          assert 7+3+1+sum(n for _,_,n in checks)+1==66
+          for label,selector,count in checks: tests(label,selector,count)
+          built=run('native-build',['cargo','build','--locked','-p','orr_sample','--features','room-character,room-lighting,project-export','--bin','room_escape'])
+          if built:
+              tool=evidence.resolve()/'trim-room-runtime'
+              shutil.copy2('target/debug/room_escape',tool);tool.chmod(0o755)
+              os.environ['ORR_TRIM_ROOM_RUNTIME']=str(tool)
+              (evidence/'runtime.sha256').write_text(hashlib.sha256(tool.read_bytes()).hexdigest()+'  '+str(tool)+'\n')
+              tests('actual-trim-native','package_manager_panel::editor_animation_trim_native_tests::actual_trimmed_package_room_export_native_pose_and_fresh_restart',1,extra=['--exact','--ignored'])
+          else: results.append(dict(label='actual-trim-native',ok=False,expected=1,unrun='native build failed'))
+          run('strict-model',['cargo','clippy','--locked','-p','orr_model','--features','animation,import','--lib','--','-D','warnings'])
+          for label,features in [('minimal',minimal),('full',full)]:
+              run('strict-editor-'+label,['cargo','clippy','--locked','-p','orr_editor','--features',features,'--lib','--','-D','warnings'])
+          run('off-model',['cargo','check','--locked','-p','orr_model','--lib'])
+          run('off-editor',['cargo','check','--locked','-p','orr_editor','--lib'])
+          (evidence/'results.json').write_text(json.dumps(results,indent=2))
+          (evidence/'scope.txt').write_text('66 focused CPU executions, zero failed/ignored, including explicit source-hidden native acceptance at six phases twice. Windows/GPU/window/physicalplay/video UNRUN; no full-workspace validation.')
+          if not all(r['ok'] for r in results):raise SystemExit('Focused clip trimming checks failed')
+      - name: Preserve every original result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: animated-clip-trim-${{ github.sha }}-${{ github.run_attempt }}
+          path: ci-evidence
+          if-no-files-found: error
