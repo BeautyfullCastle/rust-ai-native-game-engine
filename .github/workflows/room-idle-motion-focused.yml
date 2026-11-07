@@ -1,0 +1,59 @@
+name: Room idle moving animation focused CI
+on:
+  push:
+    branches: [codex/room-idle-motion-20261107]
+permissions:
+  contents: read
+jobs:
+  idle-motion:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record exact source and prepare toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir ci-evidence
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git rev-parse HEAD HEAD^{tree} | tee ci-evidence/source.txt
+          rustup toolchain install 1.99.1 --profile minimal --component clippy
+          rustup override set 1.99.1
+          rustc --version --verbose | tee ci-evidence/rustc.txt
+          sudo apt-get update -q 2>&1 | tee ci-evidence/dependencies.log
+          sudo apt-get install -y -q pkg-config libasound2-dev libudev-dev libx11-dev libxkbcommon-dev libwayland-dev 2>&1 | tee -a ci-evidence/dependencies.log
+      - name: Observed idle moving states and deployed game
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p orr_sample --features room-character --lib room_character::tests -- --test-threads=1 2>&1 | tee ci-evidence/core.log
+          grep -F 'test result: ok. 26 passed; 0 failed; 0 ignored;' ci-evidence/core.log
+          cargo test --locked -p orr_sample --features room-character,project-export --test room_character_export --no-run 2>&1 | tee ci-evidence/legacy-export-compile.log
+          cargo build --locked -p orr_sample --features room-character --bin room_escape 2>&1 | tee ci-evidence/runtime-build.log
+          cargo test --locked -p orr_editor --features room-character,project-create,windows-export --lib room_character_panel::tests::motion_tests::motion_policy_save_reopen_history_and_all_mapped_clip_admission_are_atomic -- --exact 2>&1 | tee ci-evidence/motion-history.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' ci-evidence/motion-history.log
+          cargo test --locked -p orr_editor --features room-character,project-create,windows-export --test room_character_workflow motion::idle_motion_widgets_save_reopen_and_actual_keyboard_move_stop_seek_use_authored_clips -- --exact 2>&1 | tee ci-evidence/motion-widgets.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' ci-evidence/motion-widgets.log
+          cargo test --locked -p orr_editor --features room-character,project-create,windows-export --test room_character_workflow escaped_once_widgets_save_reopen_real_input_win_hold_and_seek_stop -- --exact 2>&1 | tee ci-evidence/once-regression.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' ci-evidence/once-regression.log
+          cargo test --locked -p orr_editor --features room-character,project-create,windows-export --lib room_character_panel::tests::pair_save_second_file_failure_restores_both_files_and_dirty_history_then_retries -- --exact 2>&1 | tee ci-evidence/paired-rollback.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' ci-evidence/paired-rollback.log
+          ORR_MOTION_RUNTIME="$PWD/target/debug/room_escape" cargo test --locked -p orr_editor --features room-character,project-create,windows-export --lib room_character_panel::tests::motion_tests::motion_policy_deployed_game_switches_idle_move_carry_and_victory_without_source -- --ignored --exact 2>&1 | tee ci-evidence/deployed-motion.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' ci-evidence/deployed-motion.log
+          cargo clippy --locked -p orr_sample --features room-character,project-export --lib -- -D warnings 2>&1 | tee ci-evidence/clippy-sample.log
+          cargo clippy --locked -p orr_editor --features room-character,project-create,windows-export --lib -- -D warnings 2>&1 | tee ci-evidence/clippy-editor.log
+      - name: Preserve results including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: room-idle-motion-${{ github.sha }}
+          path: ci-evidence
+          if-no-files-found: error

@@ -397,24 +397,40 @@ impl Panel {
                         });
                 }
                 if speeds != original_speeds {
-                    self.candidate.schema = if self.candidate.escaped_once() { 4 } else if self.candidate.crossfade_ticks.is_some() { 3 } else { 2 };
+                    self.candidate.schema = if self.candidate.motion.is_some() { 5 } else if self.candidate.escaped_once() { 4 } else if self.candidate.crossfade_ticks.is_some() { 3 } else { 2 };
                     self.candidate.speeds = Some(speeds);
                 }
                 let mut ticks = self.candidate.crossfade_ticks.unwrap_or(0);
                 let previous_ticks = ticks;
                 ui.add(egui::Slider::new(&mut ticks, 0..=orr_sample::room_character::MAX_CROSSFADE_TICKS).text("Crossfade ticks"));
                 if ticks != previous_ticks {
-                    self.candidate.schema = if self.candidate.escaped_once() { 4 } else { 3 };
+                    self.candidate.schema = if self.candidate.motion.is_some() { 5 } else if self.candidate.escaped_once() { 4 } else { 3 };
                     self.candidate.speeds = Some(speeds);
                     self.candidate.crossfade_ticks = Some(ticks);
                 }
                 let mut escaped_once = self.candidate.escaped_once();
                 if ui.checkbox(&mut escaped_once, "Play escaped clip once").changed() {
-                    self.candidate.schema = if escaped_once { 4 } else { 3 };
+                    self.candidate.schema = if let Some(motion) = self.candidate.motion.as_mut() { motion.escaped_once = escaped_once; 5 } else if escaped_once { 4 } else { 3 };
                     self.candidate.speeds = Some(speeds);
                     self.candidate.crossfade_ticks = Some(ticks);
                 }
                 ui.weak("Once starts on the first observed escaped tick and holds the final pose. Seek/restart/source replacement resets it.");
+                let mut idle = self.candidate.motion.is_some();
+                if ui.checkbox(&mut idle, "Use idle clips").changed() {
+                    self.candidate.motion = if idle { Some(orr_sample::room_character::Motion {
+                        searching_idle: self.candidate.searching, carrying_idle: self.candidate.carrying, escaped_once,
+                    }) } else { None };
+                    self.candidate.schema = if idle { 5 } else if escaped_once { 4 } else { 3 };
+                    self.candidate.speeds = Some(speeds); self.candidate.crossfade_ticks = Some(ticks);
+                }
+                if let Some(motion) = self.candidate.motion.as_mut() {
+                    for (label, value) in [("Searching idle clip", &mut motion.searching_idle), ("Carrying idle clip", &mut motion.carrying_idle)] {
+                        egui::ComboBox::from_label(label).selected_text(selected_clip_text(clips, *value)).show_ui(ui, |ui| {
+                            for clip in clips { ui.selectable_value(value, clip.index, format!("{label} {}", clip_text(clip))); }
+                        });
+                    }
+                    ui.weak("Actual XZ displacement selects moving clips; stationary/first snapshots select idle. Forward gaps use observed net displacement.");
+                }
                 if ui.button("Apply character settings").clicked() {
                     self.error = self
                         .apply_document(self.candidate.clone(), editor, models)
@@ -1149,6 +1165,76 @@ mod tests {
         let output = std::process::Command::new(bundle.join("run-room-escape")).current_dir(f._temp.path()).args(["--headless", "--ticks", "8", "--hold", "interact", "--check-model-poses"]).env_remove("DISPLAY").env_remove("WAYLAND_DISPLAY").output().unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         assert!(String::from_utf8(output.stdout).unwrap().contains("room model poses: 9 frames checked;"));
+    }
+
+    mod motion_tests {
+        use super::*;
+        mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/room_motion.rs")); }
+        fn install(f: &mut Fixture) {
+            fixture::install(&f.root,&f._temp.path().join("idle source"));
+            f.editor.select(Some(crate::Target::Guid(orr_reflect::Guid::parse(&f.panel.document.player).unwrap())));
+            f.models.package=fixture::PACKAGE.into();f.models.asset=fixture::ASSET.into();f.models.kind=crate::model_bindings::ModelKind::Animated;
+            f.models.animation=crate::model_bindings::AnimationDescriptor {clip_index:f.panel.document.searching,playback:crate::model_bindings::PlaybackMode::Loop};
+            f.models.assign(&f.editor).unwrap();
+        }
+        fn document(f: &Fixture) -> Document {
+            Document {schema:5,speeds:Some(Default::default()),crossfade_ticks:Some(0),motion:Some(orr_sample::room_character::Motion { searching_idle:fixture::IDLE,carrying_idle:fixture::IDLE,escaped_once:true }),..f.panel.document.clone()}
+        }
+        #[test]
+        fn motion_policy_save_reopen_history_and_all_mapped_clip_admission_are_atomic() {
+            let mut f=Fixture::new();install(&mut f);let original=f.panel.document.clone();let doc=document(&f);
+            let before=f.pair_bytes();let checksum=f.editor.checksum();
+            f.panel.apply_document(doc.clone(),&mut f.editor,&mut f.models).unwrap();
+            assert_eq!(f.pair_bytes(),before);assert_eq!(f.editor.checksum(),checksum);
+            f.panel.undo(&mut f.editor,&mut f.models).unwrap();assert_eq!(f.panel.document(),&original);
+            f.panel.redo(&mut f.editor,&mut f.models).unwrap();assert_eq!(f.panel.document(),&doc);
+            let models=f.models.bindings.as_ref().unwrap().document().clone();let mut invalid=doc.clone();invalid.motion.as_mut().unwrap().carrying_idle=31;
+            assert!(f.panel.apply_document(invalid,&mut f.editor,&mut f.models).is_err());
+            assert_eq!(f.panel.document(),&doc);assert_eq!(f.models.bindings.as_ref().unwrap().document(),&models);assert_eq!(f.pair_bytes(),before);
+            f.panel.save_all(&f.editor,&mut f.models).unwrap();f.reopen(&doc);
+        }
+        #[cfg(feature="windows-export")]
+        #[test]
+        #[ignore="explicit CPU deployed simulation requires ORR_MOTION_RUNTIME"]
+        fn motion_policy_deployed_game_switches_idle_move_carry_and_victory_without_source() {
+            use orr_sample::{room_character::{PlaybackCursor,PlaybackContext},room_game::{RoomActor,RoomInput,RoomRun,PLAYER,KEY,EXIT,INTERACT},room_view::{self,PresentationTime}};
+            use orr_bridge::FrameView;use orr_fp::{FPVec3,FP};use orr_sim::{PlayerSlot,TickInputs};use sha2::{Digest,Sha256};
+            let mut f=Fixture::new();install(&mut f);let doc=document(&f);
+            f.panel.apply_document(doc.clone(),&mut f.editor,&mut f.models).unwrap();f.panel.save_all(&f.editor,&mut f.models).unwrap();
+            for kind in [PLAYER,KEY,EXIT] {
+                let guid=f.editor.rows().iter().find(|row| f.editor.snapshot().unwrap().predicted().get::<RoomActor>(row.entity).is_some_and(|actor|actor.kind==kind)).unwrap().guid.clone().unwrap();
+                f.editor.select(Some(crate::Target::Guid(guid)));assert!(f.editor.set_yard_transform(FPVec3::new(FP::ZERO,FP::HALF,FP::ZERO),[FP::ZERO,FP::ZERO,FP::ZERO,FP::ONE]));
+                for attempt in 0..1600 {f.editor.sync();if f.editor.yard_rows_coherent(){break;}assert!(attempt<1599);std::thread::sleep(Duration::from_millis(5));}
+            }
+            assert!(f.editor.save());
+            let built=PathBuf::from(std::env::var_os("ORR_MOTION_RUNTIME").expect("explicit runtime required")).canonicalize().unwrap();
+            let runtime=f._temp.path().join("trusted motion runtime");fs::copy(built,&runtime).unwrap();let hash:String=Sha256::digest(fs::read(&runtime).unwrap()).iter().map(|b|format!("{b:02x}")).collect();
+            let bundle=f._temp.path().join("deployed motion game");
+            orr_sample::project_export::export_room(&orr_sample::project_export::ExportOptions {project:f.root.clone(),runtime:runtime.clone(),runtime_sha256:hash,output:bundle.clone(),trusted_runtime:true,source_revision:None}).unwrap();
+            assert_eq!(fs::read(bundle.join("project/room.character.json")).unwrap(),doc.to_bytes().unwrap());
+            fs::rename(&f.root,f.root.with_extension("hidden")).unwrap();fs::rename(&runtime,runtime.with_extension("hidden")).unwrap();
+            fs::rename(f._temp.path().join("idle source"),f._temp.path().join("idle source hidden")).unwrap();
+            let prepared=PreparedProject::open_with_capabilities(&bundle.join("project"),orr_sample::room_project::RoomProjectCapabilities {lighting:false,character:true}).unwrap();
+            assert_eq!(prepared.character().unwrap().document,doc);
+            let models=prepared.models();let index=prepared.scene().index();let binding=&models.document.bindings[&doc.player];
+            let model=models.assets[&(binding.package.clone(),binding.asset.clone())].animated_model().unwrap();
+            let entity=index.entity(&orr_reflect::Guid::parse(&doc.player).unwrap()).unwrap();let context=PlaybackContext {entity,tick_rate:60,rest:false,revision:0};
+            let mut sim=prepared.scene().simulation().unwrap();let mut cursor=PlaybackCursor::default();
+            room_view::observe_character(&mut cursor,FrameView::of(sim.frame()),index,models,PresentationTime::default()).unwrap();
+            assert_eq!(cursor.pose(&doc,model,FrameView::of(sim.frame()),context).unwrap(),&model.sample_clip(fixture::IDLE,0.0).unwrap());
+            for tick in 1..=100 {
+                let mut inputs=TickInputs::new(sim.tick()+1,1);inputs.set_input(PlayerSlot(0),RoomInput {move_x:if tick==2 || tick==5 {1}else{0},buttons:if tick==4 || tick==7 {INTERACT}else{0},..Default::default()});sim.step(&inputs);
+                let before=sim.frame().to_bytes();room_view::observe_character(&mut cursor,FrameView::of(sim.frame()),index,models,PresentationTime::default()).unwrap();assert_eq!(sim.frame().to_bytes(),before);
+                assert_eq!(room_view::check_model_poses(FrameView::of(sim.frame()),index,models,Some(&cursor)).unwrap().animated_models,1);
+                let pose=cursor.pose(&doc,model,FrameView::of(sim.frame()),context).unwrap();
+                if tick<7 {let clip=match tick {2=>doc.searching,5=>doc.carrying,_=>fixture::IDLE};assert_eq!(pose,&model.sample_clip(clip,tick as f32/60.0).unwrap());}
+                if tick==4 {assert_eq!(sim.frame().singleton::<RoomRun>().key_collected,1);}
+                if tick==7 {assert_eq!(sim.frame().singleton::<RoomRun>().won,1);assert_eq!(pose,&model.sample_clip(doc.escaped,0.0).unwrap());}
+                if tick>=67 {assert_eq!(pose,&model.sample_clip(doc.escaped,1.0).unwrap());}
+            }
+            let output=std::process::Command::new(bundle.join("run-room-escape")).current_dir(f._temp.path()).args(["--headless","--ticks","8","--hold","right","--check-model-poses"]).env_remove("DISPLAY").env_remove("WAYLAND_DISPLAY").output().unwrap();
+            assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));assert!(String::from_utf8(output.stdout).unwrap().contains("room model poses: 9 frames checked;"));
+        }
     }
 
 }

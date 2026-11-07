@@ -62,6 +62,34 @@ impl<'de> Deserialize<'de> for PlaybackRates {
     }
 }
 
+/// Schema-5 policy for observed idle/moving clips and escaped completion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct Motion {
+    pub searching_idle: u32,
+    pub carrying_idle: u32,
+    pub escaped_once: bool,
+}
+impl<'de> Deserialize<'de> for Motion {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire { searching_idle: u32, carrying_idle: u32, escaped_once: bool }
+        struct Object;
+        impl<'de> serde::de::Visitor<'de> for Object {
+            type Value = Motion;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("a complete room motion JSON object") }
+            fn visit_map<M: serde::de::MapAccess<'de>>(self, map: M) -> Result<Motion, M::Error> {
+                let wire = Wire::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+                Ok(Motion { searching_idle: wire.searching_idle, carrying_idle: wire.carrying_idle, escaped_once: wire.escaped_once })
+            }
+        }
+        deserializer.deserialize_map(Object)
+    }
+}
+fn present_motion<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Motion>, D::Error> {
+    Motion::deserialize(deserializer).map(Some)
+}
+
 // Distinguish an absent schema-1 field from an explicitly null invalid value.
 fn present_speeds<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -86,6 +114,8 @@ pub struct Document {
     pub speeds: Option<PlaybackRates>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub crossfade_ticks: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub motion: Option<Motion>,
 }
 
 // A derived struct also accepts positional arrays. Route exclusively through
@@ -104,6 +134,8 @@ impl<'de> Deserialize<'de> for Document {
             speeds: Option<PlaybackRates>,
             #[serde(default, deserialize_with = "present_crossfade_ticks")]
             crossfade_ticks: Option<u32>,
+            #[serde(default, deserialize_with = "present_motion")]
+            motion: Option<Motion>,
         }
         struct Object;
         impl<'de> serde::de::Visitor<'de> for Object {
@@ -121,6 +153,7 @@ impl<'de> Deserialize<'de> for Document {
                     escaped: wire.escaped,
                     speeds: wire.speeds,
                     crossfade_ticks: wire.crossfade_ticks,
+                    motion: wire.motion,
                 };
                 document.validate().map_err(serde::de::Error::custom)?;
                 Ok(document)
@@ -172,18 +205,17 @@ impl Document {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        match (self.schema, self.speeds, self.crossfade_ticks) {
-            (1, None, None) | (2, Some(_), None) => {}
-            (3 | 4, Some(_), Some(ticks)) if ticks <= MAX_CROSSFADE_TICKS => {}
-            _ => return Err("room character schema 1 requires legacy fields, schema 2 requires speeds, and schemas 3/4 require speeds plus crossfade_ticks 0..120".into()),
+        match (self.schema, self.speeds, self.crossfade_ticks, self.motion) {
+            (1, None, None, None) | (2, Some(_), None, None) => {}
+            (3 | 4, Some(_), Some(ticks), None) | (5, Some(_), Some(ticks), Some(_)) if ticks <= MAX_CROSSFADE_TICKS => {}
+            _ => return Err("room character schema 1 requires legacy fields, schema 2 requires speeds, and schemas 3/4 require speeds plus crossfade_ticks 0..120, and schema 5 additionally requires motion".into()),
         }
         let player =
             Guid::parse(&self.player).map_err(|e| format!("room character player GUID: {e}"))?;
         if player.to_string() != self.player {
             return Err("room character player GUID must be canonical".into());
         }
-        let clips = [self.searching, self.carrying, self.escaped];
-        if clips.iter().any(|&clip| clip as usize >= MAX_CLIPS) {
+        if self.mapped_clips().any(|clip| clip as usize >= MAX_CLIPS) {
             return Err("room character clip index exceeds the supported clip limit".into());
         }
         if self.searching == self.carrying
@@ -196,7 +228,18 @@ impl Document {
     }
 
     /// Schema 4 explicitly opts into an observed-entry escaped one-shot.
-    pub fn escaped_once(&self) -> bool { self.schema == 4 }
+    pub fn escaped_once(&self) -> bool { self.schema == 4 || self.motion.is_some_and(|motion| motion.escaped_once) }
+
+    pub fn mapped_clips(&self) -> impl Iterator<Item = u32> + '_ {
+        [self.searching, self.carrying, self.escaped].into_iter().chain(self.motion.into_iter().flat_map(|motion| [motion.searching_idle, motion.carrying_idle]))
+    }
+    fn selected_clip(&self, state: State, moving: bool) -> u32 {
+        match (self.motion, state, moving) {
+            (Some(motion), State::Searching, false) => motion.searching_idle,
+            (Some(motion), State::Carrying, false) => motion.carrying_idle,
+            _ => self.clip(state),
+        }
+    }
 
     pub fn clip(&self, state: State) -> u32 {
         match state {
@@ -218,7 +261,7 @@ impl Document {
     /// Validate every mapped slot, including states not yet reached by the run.
     pub fn validate_clips(&self, model: &AnimatedModel) -> Result<(), String> {
         self.validate()?;
-        for clip in [self.searching, self.carrying, self.escaped] {
+        for clip in self.mapped_clips() {
             let duration = model
                 .source()
                 .clips
@@ -302,7 +345,7 @@ impl Document {
         self.validate_clips(model)?;
         // Every selectable state must fit the current generic Room per-frame budget,
         // including clips not initially active. Only one is sampled per frame.
-        for clip_index in [self.searching, self.carrying, self.escaped] {
+        for clip_index in self.mapped_clips() {
             let mut selected = binding.clone();
             selected.animation = Some(AnimationDescriptor {
                 clip_index,
@@ -330,7 +373,7 @@ impl Document {
         validate_pose(model, &model.rest_pose().map_err(|e| e.to_string())?)?;
         // Admission probes all mapped states, not only the initial searching
         // clip. Each runtime sample is independently validated as well.
-        for clip in [self.searching, self.carrying, self.escaped] {
+        for clip in self.mapped_clips() {
             let duration = model.source().clips[clip as usize].duration();
             for time in [0.0, duration * 0.5, duration] {
                 let pose = model.sample_clip(clip, time).map_err(|e| e.to_string())?;
@@ -355,7 +398,10 @@ pub fn sample_pose(
     if document.escaped_once() && !rest && state(frame) == State::Escaped {
         return Err("escaped one-shot requires an observed playback cursor".into());
     }
-    sample_pose_at_tick(document, model, frame, tick_rate, rest, frame.tick())
+    if document.motion.is_some() && !rest && frame.tick() != 0 {
+        return Err("idle/moving animation requires an observed playback cursor".into());
+    }
+    sample_pose_at_tick(document, model, frame, tick_rate, rest, frame.tick(), document.selected_clip(if rest { State::Searching } else { state(frame) }, false))
 }
 fn sample_pose_at_tick(
     document: &Document,
@@ -364,6 +410,7 @@ fn sample_pose_at_tick(
     tick_rate: u32,
     rest: bool,
     phase_tick: u64,
+    clip: u32,
 ) -> Result<Pose, String> {
     if tick_rate == 0 {
         return Err("room character cannot sample a zero tick rate".into());
@@ -373,7 +420,6 @@ fn sample_pose_at_tick(
         model.rest_pose()
     } else {
         let state = state(frame);
-        let clip = document.clip(state);
         let duration = model.source().clips[clip as usize].duration();
         let time = sample_clip_time_at_rate(
             phase_tick,
@@ -405,6 +451,8 @@ struct ObservedPose {
     context: PlaybackContext,
     tick: u64,
     escaped_start: u64,
+    position: Option<orr_fp::FPVec3>,
+    clip: u32,
     state: State,
     current: Pose,
     outgoing: Option<(u64, Pose)>,
@@ -416,6 +464,14 @@ struct ObservedPose {
 #[derive(Default)]
 pub struct PlaybackCursor {
     observed: Option<ObservedPose>,
+}
+fn observed_position(document: &Document, frame: FrameView<'_>, context: PlaybackContext) -> Result<Option<orr_fp::FPVec3>, String> {
+    if document.motion.is_none() { return Ok(None); }
+    if !frame.get::<RoomActor>(context.entity).is_some_and(|actor| actor.kind == PLAYER) {
+        return Err("idle/moving animation context must name the current PLAYER role".into());
+    }
+    frame.get::<orr_physics3d::Body>(context.entity).map(|body| Some(body.pos))
+        .ok_or_else(|| "idle/moving animation requires the current PLAYER body generation".into())
 }
 impl PlaybackCursor {
     pub fn reset(&mut self) {
@@ -434,11 +490,12 @@ impl PlaybackCursor {
         }
         let tick = frame.tick();
         let state = state(frame);
+        let position = observed_position(document, frame, context)?;
         let matching = self.observed.as_ref().filter(|old| {
             old.document == *document && Arc::ptr_eq(&old.model, model) && old.context == context
         });
         // Repeated draws do not even resample a pose or mutate transition state.
-        if matching.is_some_and(|old| old.tick == tick && old.state == state) {
+        if matching.is_some_and(|old| old.tick == tick && old.state == state && old.position == position) {
             return Ok(&self.observed.as_ref().unwrap().current);
         }
         // A forward gap in the monotonic Escaped state keeps a known entry.
@@ -449,12 +506,15 @@ impl PlaybackCursor {
         let phase_tick = if document.escaped_once() && state == State::Escaped {
             tick - escaped_start
         } else { tick };
-        let target = sample_pose_at_tick(document, model, frame, context.tick_rate, context.rest, phase_tick)?;
+        let moving = matching.filter(|old| old.tick < tick).and_then(|old| old.position)
+            .zip(position).is_some_and(|(old, current)| old.x != current.x || old.z != current.z);
+        let clip = document.selected_clip(state, moving);
+        let target = sample_pose_at_tick(document, model, frame, context.tick_rate, context.rest, phase_tick, clip)?;
         let duration = document.crossfade_ticks.unwrap_or(0);
         let continuous = matching
             .filter(|old| !context.rest && duration != 0 && old.tick.checked_add(1) == Some(tick));
         let (current, outgoing) = if let Some(old) = continuous {
-            if old.state != state {
+            if old.state != state || old.clip != clip {
                 (old.current.clone(), Some((tick, old.current.clone())))
             } else if let Some((start, outgoing)) = &old.outgoing {
                 let elapsed = tick - start;
@@ -480,6 +540,8 @@ impl PlaybackCursor {
             context,
             tick,
             escaped_start,
+            position,
+            clip,
             state,
             current,
             outgoing,
@@ -494,6 +556,7 @@ impl PlaybackCursor {
         frame: FrameView<'_>,
         context: PlaybackContext,
     ) -> Result<&Pose, String> {
+        let position = observed_position(document, frame, context)?;
         self.observed
             .as_ref()
             .filter(|old| {
@@ -502,6 +565,7 @@ impl PlaybackCursor {
                     && old.context == context
                     && old.tick == frame.tick()
                     && old.state == state(frame)
+                    && old.position == position
             })
             .map(|old| &old.current)
             .ok_or_else(|| "room character playback has not observed this source and tick".into())
@@ -583,6 +647,7 @@ mod tests {
             escaped: 2,
             speeds: None,
             crossfade_ticks: None,
+            motion: None,
         }
     }
     fn frame(tick: u64, key: u32, won: u32) -> Frame {
@@ -1024,7 +1089,7 @@ mod tests {
             bad.as_object_mut().unwrap().remove(field);
             assert!(Document::parse(&serde_json::to_vec(&bad).unwrap()).is_err());
         }
-        for schema in [1, 2, 5] {
+        for schema in [1, 2, 6] {
             let mut bad = valid.clone();
             bad["schema"] = serde_json::json!(schema);
             assert!(Document::parse(&serde_json::to_vec(&bad).unwrap()).is_err());
@@ -1324,7 +1389,7 @@ mod tests {
                 bad.as_object_mut().unwrap().remove(field);
                 assert!(Document::parse(&serde_json::to_vec(&bad).unwrap()).is_err());
             }
-            let mut bad = serde_json::to_value(&doc).unwrap(); bad["schema"] = 5.into();
+            let mut bad = serde_json::to_value(&doc).unwrap(); bad["schema"] = 6.into();
             assert!(Document::parse(&serde_json::to_vec(&bad).unwrap()).is_err());
             for legacy in [document(), Document { schema: 2, speeds: Some(Default::default()), ..document() }, crossfade_document(12)] {
                 let bytes = legacy.to_bytes().unwrap();
@@ -1388,6 +1453,110 @@ mod tests {
             let mut invalid = doc.clone(); invalid.escaped = 31;
             assert!(cursor.observe(&invalid, &model, FrameView::of(&f), context()).is_err());
             assert_eq!(cursor.pose(&doc, &model, FrameView::of(&f), context()).unwrap(), &first);
+        }
+    }
+
+    mod motion_tests {
+        use super::*;
+        fn doc(ticks: u32) -> Document {
+            Document { schema: 5, motion: Some(Motion { searching_idle: 2, carrying_idle: 0, escaped_once: true }), ..crossfade_document(ticks) }
+        }
+        fn observed_frame(tick: u64, x: i32, key: u32, won: u32) -> (Frame, PlaybackContext) {
+            use crate::room_game::{RoomConfig, RoomEscapeV1};
+            let sim = orr_sim::Simulation::<RoomEscapeV1>::new(RoomConfig, 60, 42);
+            let mut frame = sim.frame().clone();
+            let entity = frame.entities().find(|&entity| frame.get::<RoomActor>(entity).is_some_and(|actor| actor.kind == PLAYER)).unwrap();
+            frame.get_mut::<orr_physics3d::Body>(entity).unwrap().pos.x = orr_fp::FP::from_int(x);
+            frame.set_tick(tick); frame.set_singleton(RoomRun { key_collected: key, won, ..Default::default() });
+            (frame, PlaybackContext { entity, ..context() })
+        }
+
+        fn observe_motion(cursor: &mut PlaybackCursor, doc: &Document, model: &Arc<AnimatedModel>, tick: u64, x: i32, key: u32, won: u32) -> Pose {
+            let (frame, context) = observed_frame(tick, x, key, won); let before = frame.to_bytes();
+            let pose = cursor.observe(doc, model, FrameView::of(&frame), context).unwrap().clone();
+            assert_eq!(frame.to_bytes(), before); pose
+        }
+        #[test]
+        fn schema5_requires_strict_complete_motion_and_preserves_legacy_serialization() {
+            let document = doc(0); let bytes = document.to_bytes().unwrap();
+            assert_eq!(Document::parse(&bytes).unwrap(), document);
+            for value in [serde_json::json!(null), serde_json::json!([]), serde_json::json!({"searching_idle":2,"carrying_idle":0}), serde_json::json!({"searching_idle":2,"carrying_idle":0,"escaped_once":null}), serde_json::json!({"searching_idle":32,"carrying_idle":0,"escaped_once":true}), serde_json::json!({"searching_idle":2,"carrying_idle":0,"escaped_once":true,"other":0})] {
+                let mut bad = serde_json::to_value(&document).unwrap(); bad["motion"] = value;
+                assert!(Document::parse(&serde_json::to_vec(&bad).unwrap()).is_err());
+            }
+            let text = String::from_utf8(bytes).unwrap();
+            assert!(Document::parse(text.replace("\"escaped_once\": true", "\"escaped_once\": true, \"escaped_once\": false").as_bytes()).is_err());
+            for schema in [1,2,3,4] {
+                let mut legacy = if schema == 1 { super::document() } else if schema == 2 { Document { schema: 2, speeds: Some(Default::default()), ..super::document() } } else { crossfade_document(0) };
+                legacy.schema = schema; let old = legacy.to_bytes().unwrap();
+                assert!(!String::from_utf8(old.clone()).unwrap().contains("motion"));
+                assert_eq!(Document::parse(&old).unwrap().to_bytes().unwrap(), old);
+                legacy.motion = document.motion; assert!(legacy.validate().is_err());
+            }
+            let mut missing = serde_json::to_value(&document).unwrap(); missing.as_object_mut().unwrap().remove("motion");
+            assert!(Document::parse(&serde_json::to_vec(&missing).unwrap()).is_err());
+        }
+        #[test]
+        fn observed_displacement_and_stop_select_both_role_clips_and_repeated_draw_keeps_moving_pose() {
+            let doc = doc(0); let model = Arc::new(model()); let mut cursor = PlaybackCursor::default();
+            assert_eq!(observe_motion(&mut cursor,&doc,&model,0,0,0,0),model.sample_clip(2,0.0).unwrap());
+            let moving = observe_motion(&mut cursor,&doc,&model,1,1,0,0);
+            assert_eq!(moving,model.sample_clip(0,1.0/60.0).unwrap());
+            assert_eq!(observe_motion(&mut cursor,&doc,&model,1,1,0,0),moving);
+            assert_eq!(observe_motion(&mut cursor,&doc,&model,2,1,0,0),model.sample_clip(2,2.0/60.0).unwrap());
+            assert_eq!(observe_motion(&mut cursor,&doc,&model,3,2,1,0),model.sample_clip(1,3.0/60.0).unwrap());
+            assert_eq!(observe_motion(&mut cursor,&doc,&model,4,2,1,0),model.sample_clip(0,4.0/60.0).unwrap());
+            assert_eq!(observe_motion(&mut cursor,&doc,&model,5,2,1,1),model.sample_clip(2,0.0).unwrap());
+            assert_eq!(observe_motion(&mut cursor,&doc,&model,500,2,1,1),model.sample_clip(2,6.0).unwrap());
+        }
+        #[test]
+        fn crossfade_triggers_on_motion_clip_change_without_a_game_state_change() {
+            let doc = doc(2); let model = Arc::new(model()); let mut cursor = PlaybackCursor::default();
+            let idle = observe_motion(&mut cursor,&doc,&model,0,0,0,0);
+            assert_eq!(observe_motion(&mut cursor,&doc,&model,1,1,0,0),idle);
+            let target = model.sample_clip(0,2.0/60.0).unwrap();
+            assert_eq!(observe_motion(&mut cursor,&doc,&model,2,2,0,0),model.blend_poses(&idle,&target,0.5).unwrap());
+            let moving = observe_motion(&mut cursor,&doc,&model,3,3,0,0);
+            assert_eq!(moving,model.sample_clip(0,3.0/60.0).unwrap());
+            assert_eq!(observe_motion(&mut cursor,&doc,&model,4,3,0,0),moving);
+        }
+        #[test]
+        fn forward_gaps_use_net_displacement_backwards_or_new_context_starts_idle() {
+            let doc = doc(0); let model = Arc::new(model()); let mut cursor = PlaybackCursor::default();
+            observe_motion(&mut cursor,&doc,&model,10,0,0,0);
+            assert_eq!(observe_motion(&mut cursor,&doc,&model,100,1,0,0),model.sample_clip(0,100.0/60.0).unwrap());
+            assert_eq!(observe_motion(&mut cursor,&doc,&model,101,1,0,0),model.sample_clip(2,101.0/60.0).unwrap());
+            assert_eq!(observe_motion(&mut cursor,&doc,&model,50,2,0,0),model.sample_clip(2,50.0/60.0).unwrap());
+            let (frame,mut context) = observed_frame(51,3,0,0); context.revision=1;
+            assert_eq!(cursor.observe(&doc,&model,FrameView::of(&frame),context).unwrap(),&model.sample_clip(2,51.0/60.0).unwrap());
+        }
+        #[test]
+        fn missing_or_stale_body_and_unavailable_idle_clip_keep_previous_cursor() {
+            let doc = doc(0); let model=Arc::new(model()); let mut cursor=PlaybackCursor::default();
+            let old=observe_motion(&mut cursor,&doc,&model,0,0,0,0);
+            let (frame,context)=observed_frame(1,1,0,0);
+            let mut stale=context; stale.entity.version+=1;
+            assert!(cursor.observe(&doc,&model,FrameView::of(&frame),stale).is_err());
+            assert_eq!(cursor.observed.as_ref().unwrap().current,old);
+            let mut wrong=context; wrong.entity=frame.entities().find(|&entity| frame.get::<RoomActor>(entity).is_some_and(|actor|actor.kind==orr_games::room_escape_game::KEY)).unwrap();
+            assert!(cursor.observe(&doc,&model,FrameView::of(&frame),wrong).is_err());
+            assert_eq!(cursor.observed.as_ref().unwrap().current,old);
+            let mut invalid=doc.clone(); invalid.motion.as_mut().unwrap().searching_idle=31;
+            assert!(invalid.validate_clips(&model).is_err());
+            assert!(cursor.observe(&invalid,&model,FrameView::of(&frame),context).is_err());
+            assert_eq!(cursor.observed.as_ref().unwrap().current,old);
+            assert_eq!(doc.mapped_clips().collect::<Vec<_>>(),vec![0,1,2,2,0]);
+        }
+        #[test]
+        fn stateless_initial_idle_rest_and_exact_observed_position_are_required() {
+            let doc=doc(0); let model=Arc::new(model()); let mut cursor=PlaybackCursor::default();
+            let (initial,_)=observed_frame(0,0,0,0);
+            assert_eq!(sample_pose(&doc,&model,FrameView::of(&initial),60,false).unwrap(),model.sample_clip(2,0.0).unwrap());
+            observe_motion(&mut cursor,&doc,&model,1,1,0,0);
+            let (changed,context)=observed_frame(1,2,0,0);
+            assert!(cursor.pose(&doc,&model,FrameView::of(&changed),context).is_err());
+            assert!(sample_pose(&doc,&model,FrameView::of(&changed),60,false).is_err());
+            assert_eq!(sample_pose(&doc,&model,FrameView::of(&changed),60,true).unwrap(),model.rest_pose().unwrap());
         }
     }
 

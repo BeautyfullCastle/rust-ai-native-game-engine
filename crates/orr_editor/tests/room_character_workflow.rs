@@ -1218,3 +1218,6 @@ fn escaped_once_widgets_save_reopen_real_input_win_hold_and_seek_stop() {
     wait(&mut h, "once stop restores rest", |app| app.editor.mode() == Mode::Edit && app.editor.snapshot().is_some_and(|snapshot| snapshot.timeline().is_none()));
     assert_eq!(poses(&h), rest);
 }
+
+#[path = "room_character_workflow/motion.rs"]
+mod motion;

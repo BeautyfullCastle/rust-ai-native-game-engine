@@ -285,6 +285,7 @@ impl Work {
             escaped: 2,
             speeds: None,
             crossfade_ticks: None,
+        motion: None,
         };
         fs::write(
             project.join("room.character.json"),

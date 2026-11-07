@@ -282,7 +282,7 @@ pub fn admit_presentation(
                     #[cfg(feature = "room-character")]
                     let clips = match &models.character {
                         Some(character) if &character.player == guid => {
-                            vec![character.searching, character.carrying, character.escaped]
+                            character.mapped_clips().collect()
                         }
                         _ => clips,
                     };

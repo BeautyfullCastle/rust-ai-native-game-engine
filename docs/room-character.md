@@ -1,6 +1,6 @@
 # Optional Room character animation
 
-`room-character` is default-off in `orr_sample` and `orr_editor`. It adds one presentation-only skinned PLAYER to RoomEscapeV1. The CC0 Key Courier fixture has six joints and three named clips.
+`room-character` is default-off in `orr_sample` and `orr_editor`. It adds one presentation-only skinned PLAYER to RoomEscapeV1. The CC0 Key Courier fixture has six joints and three named clips. Idle authoring also accepts imported models with dedicated idle clips; the built-in fixture is unchanged.
 
 ## Create, author, save and run
 
@@ -10,11 +10,11 @@ Build the creator with `room-character,project-create`:
 orr_new_arena --output /absolute/new-project --template room-escape-character-3d-v1 --seed courier
 ```
 
-Open an editor built with `room-character` using `--room-project PATH`. The Room character panel selects searching, carrying-key and escaped clips, per-state speeds (1/4x, 1/2x, 1x, 2x, 4x), bounded crossfade ticks and **Play escaped clip once**. Selectors show admitted index, name and duration; duplicate names retain indices and blank names have a fallback. Stale metadata disables editing; unavailable draft indices remain explicit.
+Open an editor built with `room-character` using `--room-project PATH`. The panel selects three state clips, five playback speeds (1/4x..4x), crossfade ticks, **Play escaped clip once**, and **Use idle clips**. Selectors show admitted index, name and duration; duplicate names retain indices and blank names have a fallback. Stale metadata disables editing; unavailable draft indices remain explicit.
 
 Apply validates every mapped clip and reachable presentation before changing either in-memory document. Character Undo/Redo coordinates the model binding's searching default. Use **Save character and model bindings**. Unapplied choices count as unsaved work and block paired Save/package/export; Apply or Reset character draft first. Reset preserves applied unsaved edits/history.
 
-Run `room_escape --project PATH` built with `room-character`. Export through `orr_export_room` built with `room-character,project-export`, using a trusted runtime with that capability. Export owns exact character/model/scene documents and their installed package closure; source paths, generator and HOME are not runtime dependencies. Plain Room/Yard consumers require explicit character capability rather than Cargo feature unification.
+Run `room_escape --project PATH` built with `room-character`. Export through `orr_export_room` built with `room-character,project-export`, using a trusted runtime with that capability. Export includes exact documents and installed package closure; no generator/source-path dependency. Plain Room/Yard consumers remain explicitly capability-gated.
 
 ## Document and timing contract
 
@@ -31,9 +31,12 @@ State comes from the same immutable Frame as placement: won takes precedence, th
 - Schema 1 retains exact original fields and 1x looping.
 - Schema 2 requires complete strict `speeds`, such as `{"searching":"1/4x","carrying":"2x","escaped":"4x"}`.
 - Schema 3 additionally requires `crossfade_ticks` in 0..120.
+- Schema 5 requires schema 3's fields plus strict `motion`: `{"searching_idle":3,"carrying_idle":3,"escaped_once":true}`. Both idle indices and the boolean are required; nulls, arrays, duplicates and unknown fields reject. **Use idle clips** selects these slots from the admitted model catalog. Idle slots may share a clip. Disabling idle clips restores schema 3 or 4 while preserving once policy.
 - Schema 4 uses exactly schema 3's fields and opts into escaped one-shot playback. The checkbox upgrades to 4; disabling returns to 3. Changing speed/crossfade preserves enabled one-shot policy. The creator still emits schema 1.
 
-Schemas 1..3 keep absolute tick/rate looping. Schema 4 keeps searching/carrying looping, but escaped starts at time zero on its first observed win tick, advances at the escaped speed and clamps to the final pose. Crossfade blends toward this entry-relative target. Repeated draws do not advance time; forward gaps in a known escaped state retain entry. First observation after an unknown transition, backward time, seek/restart/source/document/model/context replacement starts a fresh observed entry; it does not reconstruct an unseen event tick. Native playback observes simulation ticks; editor sampling observes received snapshots. Stateless escaped sampling rejects without an observed cursor, rather than inventing an entry time.
+Schema 5 chooses idle on first observation or unchanged PLAYER XZ position, and searching/carrying moving clips when FP displacement is observed. Forward gaps use net displacement, not unseen input intent; returning to the same position appears idle. Repeated draws retain the sampled clip. New source/context/backward time resets movement history. Clip changes within the same game state can crossfade. Every mapped idle clip receives package, workload, pose and placement admission. Native/editor consumers validate the exact sole PLAYER GUID; the cursor additionally checks its current role/body generation. Stateless tick-zero idle/rest is allowed; later motion sampling requires the observed cursor.
+
+Schemas 1..3 keep absolute tick/rate looping. Schema 4 (or schema 5 with `escaped_once:true`) keeps searching/carrying looping, but escaped starts at time zero on its first observed win tick, advances at the escaped speed and clamps to the final pose. Crossfade blends toward this entry-relative target. Repeated draws do not advance time; forward gaps in a known escaped state retain entry. First observation after an unknown transition, backward time, seek/restart/source/document/model/context replacement starts a fresh observed entry; it does not reconstruct an unseen event tick. Native playback observes simulation ticks; editor sampling observes received snapshots. Stateless escaped sampling rejects without an observed cursor, rather than inventing an entry time.
 
 Edit/Stop shows rest; Play/Seek zero samples clip zero time. No clock is written into ECS, checkpoints or replay. Crossfade retains bounded poses and snaps on discontinuity.
 
@@ -45,4 +48,4 @@ Paired Save preflights both files and manifest, prepares replacements/rollback, 
 
 ## Verification scope
 
-Focused CPU tests cover strict/legacy documents, late victory start/hold/rates/crossfade/discontinuities, actual editor keyboard interaction, Save/reopen/history, and source-hidden exported game simulation through key pickup and victory. Exported CLI startup checks model poses; its held-input option does not synthesize a second interaction press. These checks do not establish native-window/GPU/audio coverage. Existing Windows positive publication access errors remain unresolved and are not retried. Locomotion, root motion, IK, retargeting and general animation graphs remain outside this feature.
+Focused CPU tests cover strict/legacy documents, late victory start/hold/rates/crossfade/discontinuities, actual editor keyboard interaction, Save/reopen/history, and source-hidden exported game simulation through key pickup and victory. Exported CLI startup checks model poses; its held-input option does not synthesize a second interaction press. These checks do not establish native-window/GPU/audio coverage. Existing Windows positive publication access errors remain unresolved and are not retried. Root motion, IK, retargeting and general animation graphs remain outside this feature.
