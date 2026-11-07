@@ -2452,7 +2452,7 @@ impl EditorApp {
         if let Some(rs)=&self.render_state {
             let gpu=self.gpu3d.get_or_insert_with(||crate::viewport3d::GpuViewport3d::with_hdr_support(rs,px,!self.viewport_hdr_disabled));
             #[cfg(feature = "models")]
-            if let Err(error) = gpu.set_point_light_settings(self.editor.room_point_light_settings()) {
+            if let Err(error) = self.editor.room_point_light_settings_for_presentation().and_then(|settings|gpu.set_point_light_settings(settings)) {
                 ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, error, egui::FontId::proportional(14.0), Color32::RED);
                 return;
             }

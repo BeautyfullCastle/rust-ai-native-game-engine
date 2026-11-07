@@ -353,6 +353,11 @@ impl PreparedProject {
     pub fn lighting(&self) -> Option<&PreparedRoomLighting> { self.lighting.as_ref() }
     #[cfg(feature = "room-lighting")]
     pub fn take_lighting(&mut self) -> Option<PreparedRoomLighting> { self.lighting.take() }
+    pub fn point_light_settings_for_frame(&self, _frame:orr_bridge::FrameView<'_>) -> Result<orr_render::PointLightSettings,String> {
+        #[cfg(feature = "room-lighting")]
+        if let Some(lighting)=&self.lighting {return lighting.document.settings_for_frame(_frame);}
+        Ok(orr_render::PointLightSettings::default())
+    }
     pub fn point_light_settings(&self) -> orr_render::PointLightSettings {
         #[cfg(feature = "room-lighting")]
         if let Some(lighting) = &self.lighting { return lighting.document.settings(); }

@@ -1,61 +1,37 @@
-# Saved Room point lighting
+# Saved Room fixed and carried point lighting
 
-The optional `room-lighting` feature adds one saved, presentation-only point light
-for schema-2 `room-escape-v1` projects. It is disabled by default in `orr_sample`
-and `orr_editor`. It does not alter Frame state, simulation, gameplay or checksums.
+The optional `room-lighting` feature adds one presentation-only, unshadowed point light for schema-2 `room-escape-v1` projects. It is default-off in `orr_sample` and `orr_editor`; simulation, input, replay, Frame bytes and checksums are unchanged. The native light illuminates imported model receivers through the existing renderer; procedural proxies retain their existing shading. This adds no additional lights or new shader.
 
-## Project contract
+## Declare and author
 
-Add `"lighting": "room.lighting.json"` to the existing manifest's `entry` object.
-Create the referenced root-level regular file:
+Add `"lighting":"room.lighting.json"` to the manifest entry and create that distinct root-level regular file:
 
 ```json
 {"version":1,"point_light":{"position":[0,4,0],"color":[1,0.9,0.7],"intensity":3,"range":12}}
 ```
 
-The document is at most 4096 bytes. `point_light` is required; `null` disables the
-light. Position is finite within ±1e9 world units, linear RGB and intensity are
-0..=1e4, and range is 1e-6..=1e9. Unknown/duplicate fields, positional objects,
-trailing values, invalid versions, null manifest paths, symlinks and aliases of
-other project files are rejected. A lighting declaration requires object-shaped
-manifest and entry; existing field order and non-lighting decoding are preserved.
-Undeclared sidecars are ignored. Legacy `PreparedProject::open` remains an
-unsupported consumer; actual lighting routes explicitly use
-`open_with_lighting(root, true)`. A unified Cargo feature alone is not consent.
+Open the complete project in an editor built with `room-lighting`. Enable **Point light enabled**, edit its position/linear RGB/intensity/range and choose **Apply lighting**, then **Save lighting**. Undo/Redo retain32 applied changes. Reopen restores saved settings.
 
-## Authoring and delivery
+For a carried light enable **Carry light with player** and edit **Carried offset X/Y/Z** before Apply/Save. The document becomes version2:
 
-Open the complete project in an editor built with `room-lighting`. The Lighting
-panel stages edits; Apply updates presentation, Undo/Redo retain up to 32 steps,
-and Save replaces the sidecar. **Discard lighting draft** restores fields from
-the currently applied light, including unsaved applied values. It does not Apply,
-change Undo/Redo, reset the viewport, or write files. Invalid draft fields can be
-discarded; Play and stale-source restrictions still apply. Reopen to load saved values. Editing requires a
-coherent local Edit snapshot. Play, remote editing, stale/replaced sources and
-changed on-disk manifest/sidecar bytes refuse authoring. Source replacement or a
-successful restart retires existing panel drafts, even before their first frame.
-Saving another scene path requires reopening the complete project.
+```json
+{"version":2,"point_light":{"position":[0,4,0],"color":[1,0.9,0.7],"intensity":3,"range":12},"follow_player":[0,2,0]}
+```
 
-A failed write before replacement leaves saved bytes and authoring history intact.
-If replacement succeeds but directory syncing fails, the panel reports uncertain
-durability and advances its own saved baseline; it does not report full success.
-These checks detect ordinary changes, not hostile concurrent filesystem races.
+In Play, editor presentation, native drawing and captures resolve the sole current PLAYER/body from the same immutable rendering Frame. Light position is current world PLAYER position plus saved offset; color, intensity and range remain authored. Offset is in world axes, independent of player rotation/model-local transforms. **Position X/Y/Z** remains the fixed Edit fallback; Edit/Stop shows it. Seek uses the sought Frame directly without motion history. Runtime restart resumes the saved policy at the restarted player position. Disabling carry returns version1 while retaining fallback/appearance; disabling the point light clears the carry policy.
 
-The Room runtime and exporter built with `room-lighting` consume the declaration.
-Exports retain exact lighting bytes. Rendering applies the light to imported
-models through the existing renderer; this adds no shadow lights or gameplay
-behaviour. Existing optional animated-model routes remain compatible, without
-adding character-driven lighting.
+**Discard lighting draft** restores the currently applied settings, including unsaved applied values, without applying, changing history or writing. Invalid drafts can be discarded. Editing requires coherent local Edit mode; Play, remote editing, stale/replaced sources or changed manifest/sidecar bytes refuse authoring. Replacement/restart retires old source tokens. Save As requires reopening the complete project.
 
-## Acceptance
+## Admission and persistence
 
-Run package tests, sample `room_lighting` and editor `room_lighting` tests with
-`room-lighting,project-create`; run default-off admission separately. Editor panel
-unit tests cover transactional failures and lifecycle guards. The ignored editor
-GPU test requires `ORR_REQUIRE_GPU=1`. The ignored sample
-`room_lighting_export` test additionally needs `project-export`, absolute
-`ORR_ROOM_RUNTIME` / `ORR_ROOM_EXPORTER` paths and
-`ORR_REQUIRE_PROJECT_ISOLATION=1`. It runs production binaries with source paths
-hidden and exported files read-only, checks exact PNG/sidecar parity and unchanged
-simulation. Missing GPU or isolation is a failure, not successful coverage.
-Linux software Vulkan evidence does not certify hardware GPUs or other platforms.
+The limit is4096 bytes. Version1 requires `point_light` (null disables it) and forbids follow data; its original renderer-compatible bytes are preserved. Version2 requires an enabled point light and `follow_player`, exactly three finite offsets within -32..32. Missing/null/duplicate/unknown fields, positional objects, unsupported versions and invalid numeric values reject. The followed PLAYER position must also be within -32..32 per axis; missing/duplicate roles or missing current Body generation fail closed. Canonical Room scene admission still owns gameplay's narrower spatial contract. Frame APIs require registered Room component types.
+
+Light fallback position is finite within ±1e9; linear RGB/intensity0..1e4; range1e-6..1e9. Paths must be distinct contained regular files, with existing symlink/alias restrictions. Undeclared sidecars are ignored. Feature compilation is not consumer consent: callers use explicit Room lighting capabilities; ordinary `PreparedProject::open` rejects declared lighting.
+
+A failed pre-replacement write preserves bytes/baseline/history. Replacement followed by directory-sync failure reports uncertain durability and advances the saved baseline. This detects ordinary external edits, not hostile filesystem races.
+
+## Use and verification
+
+Run `room_escape` with `room-lighting` or export through `orr_export_room` with `room-lighting,project-export` and a trusted lighting-capable runtime. Export retains exact document bytes and verified package closure. Headless execution validates resolved lighting; explicit `--check-model-poses` additionally prints the carried light position. Normal stdout retains the exact export smoke protocol.
+
+Focused CPU acceptance covers strict/legacy documents, real movement, immutable failures, limits, editor controls/history/Save/reopen/Seek/Stop, source retirement and source-hidden exported native headless position parity against deployed model placement. Existing GPU acceptance is separate and requires its explicit adapter/isolation flags. CPU checks do not establish native-window, GPU pixels, audio-device or Windows positive-publication success. Existing Windows publication access failures remain unresolved and are not retried. This adds no shadows, light occlusion, flashlight cone, probes or general light attachment graph.
