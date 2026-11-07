@@ -7,6 +7,7 @@ use std::sync::Arc;
 pub(crate) enum Spec {
     Color(ColorVariant),
     Texture(TextureVariant),
+    Trim(TrimVariant),
 }
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Request {
@@ -26,6 +27,7 @@ fn validate(request: &Request) -> Result<(), String> {
     match &request.spec {
         Spec::Color(spec) => validate_color_variant(spec)?,
         Spec::Texture(spec) => validate_texture_variant(spec)?,
+        Spec::Trim(spec) => validate_trim_variant(spec)?,
     }
     validate_path_shape(&request.source, "animated preview source")?;
     if !request
@@ -53,7 +55,7 @@ pub(crate) fn prepare(request: Request) -> Result<Prepared, String> {
                 "preview PNG texture",
             )?)
         }
-        Spec::Color(_) => None,
+        Spec::Color(_) | Spec::Trim(_) => None,
     };
     from_captured(
         &request,
@@ -77,6 +79,7 @@ fn from_captured(request: &Request, source: &[u8], png: Option<&[u8]>) -> Result
     check_source_hash(request, &source_sha256)?;
     let bytes = match &request.spec {
         Spec::Color(spec) => color_variant_bytes(source, spec)?,
+        Spec::Trim(spec) => trim_variant_bytes(source, spec)?,
         Spec::Texture(spec) => {
             texture_variant_bytes(source, png.ok_or("preview PNG snapshot missing")?, spec)?
         }
@@ -91,7 +94,7 @@ fn from_captured(request: &Request, source: &[u8], png: Option<&[u8]>) -> Result
         asset_sha256: digest(&bytes),
         source_sha256,
         png_sha256: match &request.spec {
-            Spec::Color(_) => None,
+            Spec::Color(_) | Spec::Trim(_) => None,
             Spec::Texture(_) => png.map(digest),
         },
     })

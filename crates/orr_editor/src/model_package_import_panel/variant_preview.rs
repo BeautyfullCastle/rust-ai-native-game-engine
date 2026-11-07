@@ -12,6 +12,7 @@ struct Identity {
     root: PathBuf,
     project: u64,
     generation: u64,
+    authoring_generation: u64,
     request: backend::Request,
 }
 struct Completion {
@@ -41,12 +42,13 @@ impl Panel {
         {
             return Err("Choose a cooked animated source before previewing".into());
         }
-        let spec = match (self.color_request()?, self.texture_request()?) {
-            (Some(color), None) => Spec::Color(color),
-            (None, Some(texture)) => Spec::Texture(texture),
+        let spec = match (self.color_request()?, self.texture_request()?, self.trim_request()?) {
+            (Some(color), None, None) => Spec::Color(color),
+            (None, Some(texture), None) => Spec::Texture(texture),
+            (None, None, Some(trim)) => Spec::Trim(trim),
             _ => {
                 return Err(
-                    "Choose one animated color variant or PNG skin before previewing".into(),
+                    "Choose one animated color variant, PNG skin or clip trim before previewing".into(),
                 )
             }
         };
@@ -62,10 +64,12 @@ impl Panel {
         project: u64,
         generation: u64,
     ) -> Option<Identity> {
+        if self.authoring_generation == u64::MAX { return None; }
         Some(Identity {
             root: root?.into(),
             project,
             generation,
+            authoring_generation: self.authoring_generation,
             request: self.preview_request().ok()?,
         })
     }
@@ -75,7 +79,7 @@ impl Panel {
             .variant_preview
             .identity
             .as_ref()
-            .is_some_and(|id| Some(&id.request) != request.as_ref())
+            .is_some_and(|id| Some(&id.request) != request.as_ref() || id.authoring_generation != self.authoring_generation)
         {
             self.close_variant_preview();
         }
@@ -185,6 +189,7 @@ impl Panel {
         self.source_format = SourceFormat::CookedAnimated;
         self.kind = ModelKind::Animated;
         self.source = "/held-preview.animated.json".into();
+        self.trim = Default::default();
         self.color_variant_enabled = true;
         self.texture_variant_enabled = false;
         self.color_variant = super::default_color_variant();

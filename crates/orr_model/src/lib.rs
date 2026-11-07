@@ -25,6 +25,10 @@ pub mod static_retexture;
 pub mod animation_sequence;
 
 #[cfg(all(feature = "animation", feature = "import"))]
+#[path = "authoring/animation_trim.rs"]
+pub mod animation_trim;
+
+#[cfg(all(feature = "animation", feature = "import"))]
 #[path = "authoring/animated_recolor.rs"]
 pub mod animated_recolor;
 
