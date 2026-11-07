@@ -23,6 +23,7 @@ fn edit(f: &Fixture) {
         document(&h).activation,
         Some(orr_sample::room_lighting::Activation::KeyMissing)
     );
+    click(&mut h, "Room lighting");
     type_number(&mut h, "Intensity", "7");
     click(&mut h, "Apply lighting");
     click(&mut h, "Save lighting");
