@@ -49,7 +49,7 @@ jobs:
           cases profile-on 2 cargo test --locked -p orr_remote --features terrain-patrol --test terrain_patrol_profile
           cases profile-mismatch 2 cargo test --locked -p orr_remote --features navigation,orr_games/terrain-patrol --test terrain_patrol_profile
           cases reader-profile 4 cargo test --locked -p orr_navigation_view --features authored-surface-bundle,terrain-patrol --lib terrain_patrol_tests:: -- --test-threads=1
-          cases panel 5 cargo test --locked -p orr_editor --features "$EDITOR_FEATURES" --lib navigation_panel::patrol_panel::tests:: -- --test-threads=1
+          cases panel 6 cargo test --locked -p orr_editor --features "$EDITOR_FEATURES" --lib navigation_panel::patrol_panel::tests:: -- --test-threads=1
           cases integration 2 cargo test --locked -p orr_editor --features "$EDITOR_FEATURES" --lib navigation_panel::patrol_integration_tests:: -- --test-threads=1
           cases projection 3 cargo test --locked -p orr_editor --features "$EDITOR_FEATURES" --lib navigation_view::tests:: -- --test-threads=1
           cargo check --locked -p orr_editor --features navigation --lib 2>&1 | tee ci-evidence/feature-off-editor.log

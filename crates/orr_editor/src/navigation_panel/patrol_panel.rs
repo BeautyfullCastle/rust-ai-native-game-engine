@@ -114,7 +114,14 @@ impl State {
     fn controls(&mut self, ui: &mut Ui, editable: bool) -> bool {
         let before = self.form.clone();
         let mut apply = false;
-        let editable = editable && ui.ctx().input(|input| input.focused);
+        let editable = editable
+            && ui.ctx().input(|input| {
+                input.focused
+                    && !input
+                        .events
+                        .iter()
+                        .any(|event| matches!(event, egui::Event::WindowFocused(false)))
+            });
         ui.add_enabled_ui(editable && !self.stale, |ui| {
             ui.checkbox(&mut self.form.enabled, "Enable terrain waypoint patrol");
             if self.form.enabled {

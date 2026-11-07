@@ -70,13 +70,21 @@ fn readonly_and_stale_form_disables_all_mutation_requests() {
         let mut h = harness(editable);
         h.state_mut().0.stale = stale;
         if !focused {
+            h.input_mut().focused = false;
             h.event(egui::Event::WindowFocused(false));
         }
         h.run_steps(2);
-        assert!(h
-            .get_by_label("Enable terrain waypoint patrol")
-            .accesskit_node()
-            .is_disabled());
+        assert_eq!(
+            h.ctx.input(|input| input.focused),
+            focused,
+            "case editable={editable} stale={stale} focused={focused}"
+        );
+        assert!(
+            h.get_by_label("Enable terrain waypoint patrol")
+                .accesskit_node()
+                .is_disabled(),
+            "case editable={editable} stale={stale} focused={focused}"
+        );
         h.get_by_label("Enable terrain waypoint patrol")
             .click_accesskit();
         h.run_steps(2);
@@ -165,4 +173,33 @@ fn dirty_scene_epoch_checksum_terrain_graph_source_and_agent_changes_require_rel
         state.load(original.clone(), None);
         assert!(!state.dirty && !state.stale);
     }
+}
+
+#[test]
+fn focus_loss_event_blocks_current_frame_even_when_raw_focus_is_still_true() {
+    let mut h = harness(true);
+    h.run_steps(2);
+    assert!(h.ctx.input(|input| input.focused));
+    assert!(!h
+        .get_by_label("Enable terrain waypoint patrol")
+        .accesskit_node()
+        .is_disabled());
+    h.get_by_label("Enable terrain waypoint patrol")
+        .click_accesskit();
+    h.event(egui::Event::WindowFocused(false));
+    h.run_steps(1);
+    assert!(
+        h.ctx.input(|input| input.focused),
+        "raw focus deliberately stays true in this transient-event case"
+    );
+    assert!(h.ctx.input(|input| input
+        .events
+        .iter()
+        .any(|event| matches!(event, egui::Event::WindowFocused(false)))));
+    assert!(h
+        .get_by_label("Enable terrain waypoint patrol")
+        .accesskit_node()
+        .is_disabled());
+    assert!(!h.state().0.form.enabled);
+    assert_eq!(h.state().1, 0);
 }
