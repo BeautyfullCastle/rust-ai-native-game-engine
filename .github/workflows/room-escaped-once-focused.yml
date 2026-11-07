@@ -1,0 +1,58 @@
+name: Room escaped one-shot focused CI
+on:
+  push:
+    branches: [codex/room-escape-once-20261107]
+permissions:
+  contents: read
+jobs:
+  escaped-once:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record exact source and prepare toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir ci-evidence
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git rev-parse HEAD HEAD^{tree} | tee ci-evidence/source.txt
+          rustup toolchain install 1.99.1 --profile minimal --component clippy
+          rustup override set 1.99.1
+          rustc --version --verbose | tee ci-evidence/rustc.txt
+          sudo apt-get update -q 2>&1 | tee ci-evidence/dependencies.log
+          sudo apt-get install -y -q pkg-config libasound2-dev libudev-dev libx11-dev libxkbcommon-dev libwayland-dev 2>&1 | tee -a ci-evidence/dependencies.log
+      - name: Observed escaped one-shot and authored deployed game
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p orr_sample --features room-character --lib room_character::tests -- --test-threads=1 2>&1 | tee ci-evidence/core.log
+          grep -F 'test result: ok. 20 passed; 0 failed; 0 ignored;' ci-evidence/core.log
+          cargo build --locked -p orr_sample --features room-character --bin room_escape 2>&1 | tee ci-evidence/runtime-build.log
+          cargo test --locked -p orr_editor --features room-character,project-create,windows-export --lib room_character_panel::tests::once_policy_apply_history_and_paired_save_reopen_keep_model_default_and_frame -- --exact 2>&1 | tee ci-evidence/paired-history.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' ci-evidence/paired-history.log
+          cargo test --locked -p orr_editor --features room-character,project-create,windows-export --test room_character_workflow escaped_once_widgets_save_reopen_real_input_win_hold_and_seek_stop -- --exact 2>&1 | tee ci-evidence/once-widgets.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' ci-evidence/once-widgets.log
+          cargo test --locked -p orr_editor --features room-character,project-create,windows-export --test room_character_workflow character_crossfade_authoring_and_explicit_lifecycle_resets -- --exact 2>&1 | tee ci-evidence/legacy-crossfade.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' ci-evidence/legacy-crossfade.log
+          cargo test --locked -p orr_editor --features room-character,project-create,windows-export --lib room_character_panel::tests::pair_save_second_file_failure_restores_both_files_and_dirty_history_then_retries -- --exact 2>&1 | tee ci-evidence/paired-rollback.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' ci-evidence/paired-rollback.log
+          ORR_ESCAPE_ONCE_RUNTIME="$PWD/target/debug/room_escape" cargo test --locked -p orr_editor --features room-character,project-create,windows-export --lib room_character_panel::tests::once_policy_source_hidden_export_reaches_real_escape_and_holds_endpoint -- --ignored --exact 2>&1 | tee ci-evidence/deployed-once.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' ci-evidence/deployed-once.log
+          cargo clippy --locked -p orr_sample --features room-character --lib -- -D warnings 2>&1 | tee ci-evidence/clippy-sample.log
+          cargo clippy --locked -p orr_editor --features room-character,project-create,windows-export --lib -- -D warnings 2>&1 | tee ci-evidence/clippy-editor.log
+      - name: Preserve results including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: room-escaped-once-${{ github.sha }}
+          path: ci-evidence
+          if-no-files-found: error
