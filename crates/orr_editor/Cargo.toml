@@ -39,6 +39,7 @@ room-animated-models = ["room-project", "animated-models", "orr_sample/room-anim
 room-authoring = ["room-project"]
 package-manager = ["room-project"]
 package-upgrade-copy = ["package-manager", "orr_sample/runtime-export-support"]
+package-upgrade-animated = ["package-upgrade-copy", "room-character"]
 windows-export = ["room-project", "orr_sample/project-export"]
 windows-projects = ["windows-export", "room-authoring", "package-manager", "orr_sample/project-create"]
 image-reimport = ["sprites", "orr_sample/image-reimport"]

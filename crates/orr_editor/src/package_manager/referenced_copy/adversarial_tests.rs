@@ -178,7 +178,10 @@ fn progress_identity_projects_are_rejected_instead_of_duplicating_saved_identity
     assert_eq!(files(f.temp.path()), before);
     no_stages(f.temp.path());
 }
-#[cfg(feature = "room-animated-models")]
+#[cfg(all(
+    feature = "room-animated-models",
+    not(feature = "package-upgrade-animated")
+))]
 #[test]
 fn selected_animated_bindings_require_explicit_future_support() {
     let f = Fixture::new();

@@ -1,9 +1,12 @@
-//! Explicit static-binding revision adoption into a new closed Room project.
+//! Explicit model-binding revision adoption into a new closed Room project.
 //! The original lock and model sidecar are never written. Trusted quiescent
 //! ancestry is required; observations are not a hostile-concurrency sandbox.
 use serde::Serialize;
 use std::{ffi::OsString, path::PathBuf};
+#[cfg(not(feature = "package-upgrade-animated"))]
 pub const USAGE: &str = "orr_room_package_upgrade --project ABS_ROOM --source ABS_PACKAGE --output NEW_ABS_ROOM --acknowledge-model-changes\nLinux x86_64 only. Creates a new closed Room project with explicitly adopted static model bindings; original project is unchanged. Not an arbitrary directory clone or a license determination.";
+#[cfg(feature = "package-upgrade-animated")]
+pub const USAGE: &str = "orr_room_package_upgrade --project ABS_ROOM --source ABS_PACKAGE --output NEW_ABS_ROOM --acknowledge-model-changes\nLinux x86_64 only. Creates a new closed Room project with explicitly adopted static or animated model bindings; original project is unchanged. Not an arbitrary directory clone or a license determination.";
 #[derive(Debug, Serialize)]
 pub struct BindingChange {
     pub guid: String,
@@ -195,6 +198,7 @@ mod linux {
         if affected.is_empty() {
             return Err("copy requires at least one saved binding to the selected package".into());
         }
+        #[cfg(not(feature = "package-upgrade-animated"))]
         if affected.iter().any(|b| b.kind != ModelKind::Static) {
             return Err(
                 "selected animated bindings are not supported by static upgrade copy".into(),
@@ -394,14 +398,18 @@ mod linux {
             if binding.package != plan.package {
                 continue;
             }
-            let loaded = match loaded_assets.entry(binding.asset.clone()) {
+            // The same logical asset can be requested under different binding
+            // kinds. Never reuse a static decode as an animated admission (or
+            // vice versa); each binding keeps its own authored descriptor/TRS.
+            let key = (binding.asset.clone(), binding.kind == ModelKind::Animated);
+            let loaded = match loaded_assets.entry(key) {
                 std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
                 std::collections::btree_map::Entry::Vacant(entry) => {
                     entry.insert(model_bindings::load_asset_from_project(
                         &project,
                         &binding.package,
                         &binding.asset,
-                        ModelKind::Static,
+                        binding.kind,
                     )?)
                 }
             };
