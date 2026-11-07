@@ -22,6 +22,36 @@ pub struct Document {
     pub projection: Projection,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub follow_player: Option<[f32; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_bounds: Option<TargetBounds>,
+}
+
+/// Authored inclusive limits on the tracking target, not the view frustum.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct TargetBounds {
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+}
+impl<'de> Deserialize<'de> for TargetBounds {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire { min: [f32; 3], max: [f32; 3] }
+        let wire: Wire = deserialize_object(deserializer)?;
+        Ok(Self { min: wire.min, max: wire.max })
+    }
+}
+impl TargetBounds {
+    fn validate(self) -> Result<(), String> {
+        for axis in 0..3 {
+            bounded("target_bounds min", self.min[axis], -64.0, 64.0)?;
+            bounded("target_bounds max", self.max[axis], -64.0, 64.0)?;
+            if self.min[axis] > self.max[axis] {
+                return Err("target_bounds min must not exceed max on any axis".into());
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
@@ -59,6 +89,9 @@ impl<'de> Deserialize<'de> for Document {
         fn present_offset<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<[f32; 3]>, D::Error> {
             <[f32; 3]>::deserialize(deserializer).map(Some)
         }
+        fn present_bounds<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<TargetBounds>, D::Error> {
+            TargetBounds::deserialize(deserializer).map(Some)
+        }
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Wire {
@@ -70,6 +103,8 @@ impl<'de> Deserialize<'de> for Document {
             projection: Projection,
             #[serde(default, deserialize_with = "present_offset")]
             follow_player: Option<[f32; 3]>,
+            #[serde(default, deserialize_with = "present_bounds")]
+            target_bounds: Option<TargetBounds>,
         }
         let wire: Wire = deserialize_object(deserializer)?;
         Ok(Self {
@@ -80,6 +115,7 @@ impl<'de> Deserialize<'de> for Document {
             distance: wire.distance,
             projection: wire.projection,
             follow_player: wire.follow_player,
+            target_bounds: wire.target_bounds,
         })
     }
 }
@@ -154,10 +190,14 @@ impl Document {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        match (self.schema, self.follow_player) {
-            (1, None) => {},
-            (2, Some(offset)) => { for value in offset { bounded("follow_player offset", value, -32.0, 32.0)?; } },
-            _ => return Err("room camera schema 1 forbids follow_player; schema 2 requires its offset".into()),
+        match (self.schema, self.follow_player, self.target_bounds) {
+            (1, None, None) => {},
+            (2, Some(_), None) => {},
+            (3, Some(_), Some(bounds)) => bounds.validate()?,
+            _ => return Err("camera schema 1 is fixed; schema 2 requires only follow_player; schema 3 requires follow_player and target_bounds".into()),
+        }
+        if let Some(offset) = self.follow_player {
+            for value in offset { bounded("follow_player offset", value, -32.0, 32.0)?; }
         }
         validate_pose(self.target, self.yaw, self.pitch, self.distance)?;
         match self.projection {
@@ -180,6 +220,7 @@ impl Document {
             distance: 24.0,
             projection: Projection::Orthographic { half_height: 8.0 },
             follow_player: None,
+            target_bounds: None,
         }
     }
 
@@ -211,7 +252,8 @@ impl Document {
         let mut resolved = *orbit;
         for axis in 0..3 {
             bounded("PLAYER position",position[axis],-32.0,32.0)?;
-            resolved.target[axis] = (position[axis] as f64 + offset[axis] as f64 + orbit.target[axis] as f64 - self.target[axis] as f64).clamp(-64.0,64.0) as f32;
+            let (min,max) = self.target_bounds.map_or((-64.0,64.0), |bounds| (bounds.min[axis],bounds.max[axis]));
+            resolved.target[axis] = (position[axis] as f64 + offset[axis] as f64 + orbit.target[axis] as f64 - self.target[axis] as f64).clamp(min as f64,max as f64) as f32;
         }
         self.camera(&resolved,size)
     }
@@ -742,3 +784,7 @@ mod tests {
     }
 
 }
+
+#[cfg(test)]
+#[path = "room_camera/limits_tests.rs"]
+mod limits_tests;

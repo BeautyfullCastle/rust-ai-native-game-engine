@@ -290,10 +290,23 @@ impl Panel {
                 if ui.checkbox(&mut follow,"Follow player during play").changed() {
                     self.candidate.schema = if follow { 2 } else { 1 };
                     self.candidate.follow_player = if follow { Some([0.0;3]) } else { None };
+                    self.candidate.target_bounds = None;
                 }
                 if let Some(offset) = self.candidate.follow_player.as_mut() {
                     for (axis,value) in ["X","Y","Z"].into_iter().zip(offset) { number(ui,&format!("Follow offset {axis}"),value); }
                     ui.weak("Play follows the PLAYER plus offset. Pan adjusts a session bias; Reset view clears it. Edit/capture keeps the authored target and preserves this offset.");
+                    let mut limited = self.candidate.target_bounds.is_some();
+                    if ui.checkbox(&mut limited,"Limit tracking target").changed() {
+                        self.candidate.schema = if limited { 3 } else { 2 };
+                        self.candidate.target_bounds = limited.then_some(orr_sample::room_camera::TargetBounds {min:[-8.0,0.0,-6.0],max:[8.0,4.0,6.0]});
+                    }
+                    if let Some(bounds) = self.candidate.target_bounds.as_mut() {
+                        for (axis,index) in ["X","Y","Z"].into_iter().zip(0..3) {
+                            number(ui,&format!("Target min {axis}"),&mut bounds.min[index]);
+                            number(ui,&format!("Target max {axis}"),&mut bounds.max[index]);
+                        }
+                        ui.weak("Inclusive target limits apply after offset and pan. Equal endpoints lock an axis. This does not confine the whole view or avoid walls.");
+                    }
                 }
                 if ui.button("Apply camera").clicked() {
                     match self.apply_document(self.candidate.clone()) {
@@ -368,6 +381,18 @@ mod tests {
                 manifest_bytes,
             },
         )
+    }
+    #[test]
+    fn invalid_tracking_limits_preserve_applied_history_and_saved_bytes() {
+        let (_dir, prepared)=fixture();let path=prepared.path.clone();let original=prepared.bytes.clone();
+        let mut panel=Panel::new(prepared);let mut valid=panel.document().clone();valid.schema=3;valid.follow_player=Some([0.0;3]);
+        valid.target_bounds=Some(orr_sample::room_camera::TargetBounds {min:[-1.0;3],max:[1.0;3]});
+        panel.apply_document(valid.clone()).unwrap();
+        let undo=panel.undo.clone();let redo=panel.redo.clone();let saved=panel.saved.clone();
+        let mut invalid=valid.clone();invalid.target_bounds.as_mut().unwrap().min[0]=2.0;
+        assert!(panel.apply_document(invalid).is_err());
+        assert_eq!(panel.document(),&valid);assert_eq!(panel.undo,undo);assert_eq!(panel.redo,redo);assert_eq!(panel.saved,saved);
+        assert_eq!(std::fs::read(path).unwrap(),original);
     }
     #[test]
     fn widgets_stage_apply_undo_save_reopen() {
