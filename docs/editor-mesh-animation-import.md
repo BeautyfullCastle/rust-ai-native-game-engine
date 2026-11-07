@@ -2,7 +2,7 @@
 
 Build the editor with the existing optional `mesh-animated-models` feature. Open
 an admitted local MeshNavigation scene with a saved graph and agent. Under
-**Mesh agent animation**, expand **Import raw animation GLB** and provide a local
+**Mesh agent animation**, expand **Import animation source** and provide a local
 self-contained animated `.glb`, a nonempty UTF-8 license file, an unused package
 directory, a package name and version. Explicitly acknowledge rights before
 choosing **Import animation package**. A license file and acknowledgement are not
@@ -19,8 +19,10 @@ The new package preserves the original GLB and license bytes as `animated.glb`
 and `LICENSE.txt`, plus `orr.package.json`. It declares exactly `animation`, no
 package dependencies, and passes the unchanged Mesh animation Snapshot admission.
 It does not install into a project or relax the separate Room models+animation
-profile. Only source-bound animation provenance is accepted; this is not a way
-to strip provenance from generated animation sequences.
+profile. The raw GLB path keeps its existing external-resource restrictions. Fully embedded
+`.animated.json` and `.orrmodel.json` sources can retain bounded provenance metadata;
+see [cooked variants](mesh-cooked-animation.md). Historical inputs are never read
+and their declared hashes are not independently verified.
 
 Import runs on a retained worker. Scene, scene-load epoch, graph revision and
 request fields are captured at dispatch. A stale completion never replaces the

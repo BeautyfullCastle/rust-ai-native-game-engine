@@ -1120,3 +1120,7 @@ fn format_number(value: f32) -> String {
 #[cfg(test)]
 #[path = "mesh_animation_panel/tests.rs"]
 mod tests;
+
+#[cfg(all(test,target_os="linux"))]
+#[path="mesh_animation_panel/cooked_integration_tests.rs"]
+mod cooked_integration_tests;

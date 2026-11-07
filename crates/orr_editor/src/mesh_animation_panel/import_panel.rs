@@ -10,6 +10,13 @@ use std::{
     thread::JoinHandle,
 };
 
+fn supported_source(path: &str) -> bool {
+    let path = path.trim().to_ascii_lowercase();
+    [".glb", ".animated.json", ".orrmodel.json"]
+        .iter()
+        .any(|suffix| path.ends_with(suffix))
+}
+
 #[derive(Clone, Default, PartialEq, Eq)]
 struct Inputs {
     source: String,
@@ -121,33 +128,73 @@ fn context(panel: &Panel, editor: &Editor) -> Option<Context> {
     })
 }
 
+fn show_inputs(ui: &mut egui::Ui, state: &mut State, editable: bool) -> bool {
+    let mut launch = false;
+    ui.add_enabled_ui(editable, |ui| {
+        let source_changed =
+            text_field(
+                ui,
+                "Animation source (.glb or cooked JSON)",
+                &mut state.inputs.source,
+            ) | text_field(ui, "Animation source license", &mut state.inputs.license);
+        let changed = text_field(
+            ui,
+            "New animation package directory",
+            &mut state.inputs.destination,
+        ) | text_field(ui, "Animation package name", &mut state.inputs.name)
+            | text_field(ui, "Animation package version", &mut state.inputs.version);
+        if source_changed || changed {
+            state.changed(source_changed);
+        }
+        if ui
+            .checkbox(
+                &mut state.inputs.acknowledged,
+                "I have reviewed rights to import this animation",
+            )
+            .changed()
+        {
+            state.changed(false);
+        }
+        let inputs = &state.inputs;
+        let ready = inputs.acknowledged
+            && supported_source(&inputs.source)
+            && [
+                &inputs.source,
+                &inputs.license,
+                &inputs.destination,
+                &inputs.name,
+                &inputs.version,
+            ]
+            .iter()
+            .all(|v| !v.trim().is_empty());
+        launch = ui
+            .add_enabled(ready, egui::Button::new("Import animation package"))
+            .clicked();
+    });
+    launch
+}
 pub(super) fn show(ui: &mut egui::Ui, panel: &mut Panel, editor: &Editor) {
-    ui.collapsing("Import raw animation GLB", |ui| {
-        ui.label("Create a new local animation package from a self-contained GLB and a separate UTF-8 license. Existing destinations are never replaced.");
-        ui.add_enabled_ui(panel.can_edit(editor), |ui| {
-            let source_changed = text_field(ui, "Raw animation GLB", &mut panel.import.inputs.source)
-                | text_field(ui, "Raw animation license", &mut panel.import.inputs.license);
-            let changed = text_field(ui, "New animation package directory", &mut panel.import.inputs.destination)
-                | text_field(ui, "Animation package name", &mut panel.import.inputs.name)
-                | text_field(ui, "Animation package version", &mut panel.import.inputs.version);
-            if source_changed || changed { panel.import.changed(source_changed); }
-            if ui.checkbox(&mut panel.import.inputs.acknowledged, "I have reviewed rights to import this animation").changed() {
-                panel.import.changed(false);
-            }
-            let inputs = &panel.import.inputs;
-            let ready = inputs.acknowledged && [&inputs.source, &inputs.license, &inputs.destination, &inputs.name, &inputs.version].iter().all(|value| !value.trim().is_empty());
-            if ui.add_enabled(ready, egui::Button::new("Import animation package")).clicked() { launch(panel, editor); }
-        });
+    // Source suffix selects the existing importer; no implicit format fallback.
+    ui.collapsing("Import animation source", |ui| {
+        ui.label("Create a new local animation package from a self-contained GLB or a fully embedded cooked .animated.json model, with a separate UTF-8 license. Use .glb for raw input or .animated.json/.orrmodel.json for cooked input. Existing destinations are never replaced.");
+        ui.weak("Cooked import preserves animation bytes; it does not resolve historical dependencies, scripts or external resources. Apply and Save remain explicit.");
+        let editable=panel.can_edit(editor);
+        if show_inputs(ui,&mut panel.import,editable) {launch(panel,editor);}
         if panel.import.busy() {
             ui.label("Importing animation package; waiting for the worker to finish. Closing and workspace changes are blocked.");
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
         }
-        if !panel.import.status.is_empty() { ui.label(&panel.import.status); }
+        if !panel.import.status.is_empty() {ui.label(&panel.import.status);}
     });
 }
 
 fn launch(panel: &mut Panel, editor: &Editor) {
     if !panel.can_edit(editor) || !panel.import.inputs.acknowledged {
+        return;
+    }
+    if !supported_source(&panel.import.inputs.source) {
+        panel.import.status =
+            "Choose a .glb, .animated.json or .orrmodel.json source; no worker was started.".into();
         return;
     }
     let Some(context) = context(panel, editor) else {
@@ -252,3 +299,7 @@ pub(super) fn start_blocked_for_test(panel: &mut Panel, editor: &Editor) -> mpsc
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "import_panel/cooked_ui_tests.rs"]
+mod cooked_ui_tests;

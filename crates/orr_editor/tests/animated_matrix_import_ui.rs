@@ -219,8 +219,8 @@ fn start_import(
     name: &str,
 ) {
     for (label, value) in [
-        ("Raw animation GLB", raw_model.display().to_string()),
-        ("Raw animation license", license.display().to_string()),
+        ("Animation source (.glb or cooked JSON)", raw_model.display().to_string()),
+        ("Animation source license", license.display().to_string()),
         (
             "New animation package directory",
             package.display().to_string(),
@@ -362,7 +362,7 @@ fn run_twin(
     let history = h.state().editor.history().clone();
     let baseline = evidence.capture(&mut h, &format!("{variant}/01-baseline.png"));
     click(&mut h, "Mesh agent animation");
-    click(&mut h, "Import raw animation GLB");
+    click(&mut h, "Import animation source");
     start_import(&mut h, &raw_model, &raw_license, &package, &name);
     await_import(&mut h, true);
     let loaded = evidence.capture(&mut h, &format!("{variant}/02-imported-not-applied.png"));
