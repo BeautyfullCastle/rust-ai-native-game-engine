@@ -45,7 +45,7 @@ jobs:
           evidence = Path('ci-evidence')
           results = []
           base = 'package-upgrade-copy'
-          full = base + ',room-animated-models,room-character,room-lighting'
+          full = base + ',room-animated-models,room-character,room-lighting,terrain-patrol-export'
           namespace = 'package_manager::referenced_copy::tests::'
           actual = namespace + 'actual_cli_new_copy_success_and_collision_preserve_originals'
           tool = evidence.resolve() / 'orr_room_package_upgrade'
