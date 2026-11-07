@@ -12,6 +12,8 @@ use std::{
     sync::Arc,
 };
 
+pub(crate) mod cooked_provenance;
+
 const SIDECAR_SCHEMA: u32 = 1;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_PATH_COMPONENTS: usize = 64;
@@ -164,17 +166,8 @@ impl Snapshot {
         let model = import_static_asset(asset, &asset_bytes)?;
         let model_bytes = model.to_bytes().map_err(|error| error.to_string())?;
         validate_source_budget(model.source())?;
-        if model_bytes.len() > MAX_SIDE_CAR_BYTES
-            || model
-                .source()
-                .dependencies
-                .iter()
-                .any(|dependency| dependency.uri != "$source")
-        {
-            return Err(
-                "mesh art model exceeds the embedded snapshot limits or has external dependencies"
-                    .into(),
-            );
+        if model_bytes.len() > MAX_SIDE_CAR_BYTES {
+            return Err("mesh art model exceeds the embedded snapshot limits".into());
         }
         let locked_again = orr_package::inspect(&package_root, &runtime)
             .map_err(|error| format!("recheck model package: {error}"))?;
@@ -480,15 +473,8 @@ impl Snapshot {
         let tint = crate::mesh_material::validate(sidecar.tint)?;
         let model = Arc::new(model);
         let model_bytes = model.to_bytes().map_err(|error| error.to_string())?;
-        if model_bytes.len() > MAX_SIDE_CAR_BYTES
-            || digest(&model_bytes) != sidecar.cooked_sha256
-            || model
-                .source()
-                .dependencies
-                .iter()
-                .any(|dependency| dependency.uri != "$source")
-        {
-            return Err("embedded model exceeds limits or has external dependencies".into());
+        if model_bytes.len() > MAX_SIDE_CAR_BYTES || digest(&model_bytes) != sidecar.cooked_sha256 {
+            return Err("embedded model exceeds limits or has an invalid digest".into());
         }
         let surface = sidecar
             .surface
@@ -722,35 +708,11 @@ pub(crate) fn save(
 }
 
 fn import_static_asset(asset: &str, bytes: &[u8]) -> Result<StaticModel, String> {
-    let extension = Path::new(asset)
-        .extension()
-        .and_then(|value| value.to_str())
-        .ok_or("model asset must be a .glb or .orrmodel")?;
-    let model = if extension.eq_ignore_ascii_case("glb") {
-        orr_model::import::import_with_resolver(asset, bytes, |_| {
-            Err(orr_model::Error::message(
-                "external model resources are not supported",
-            ))
-        })
-        .map_err(|error| format!("import self-contained GLB: {error}"))?
-    } else if extension.eq_ignore_ascii_case("orrmodel") {
-        StaticModel::from_bytes(bytes)
-            .map_err(|error| format!("load cooked static model: {error}"))?
-    } else {
-        return Err("model asset must be a .glb or .orrmodel".into());
-    };
-    if model
-        .source()
-        .dependencies
-        .iter()
-        .any(|dependency| dependency.uri != "$source")
-    {
-        return Err("model asset contains external dependencies".into());
-    }
-    Ok(model)
+    cooked_provenance::decode(asset, bytes)
 }
 
 fn validate_source_budget(source: &ModelSource) -> Result<(), String> {
+    cooked_provenance::validate_metadata(source)?;
     if source.primitives.is_empty()
         || source.primitives.len() > 256
         || source.materials.len() > 256

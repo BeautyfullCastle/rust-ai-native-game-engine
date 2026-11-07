@@ -1,0 +1,66 @@
+name: Mesh cooked static models focused CI
+on:
+  push:
+    branches: [codex/mesh-cooked-static-20261107]
+permissions:
+  contents: read
+jobs:
+  mesh-cooked-static:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record exact source and prepare toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir ci-evidence
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git rev-parse HEAD HEAD^{tree} | tee ci-evidence/source.txt
+          rustup toolchain install 1.99.1 --profile minimal --component clippy
+          rustup override set 1.99.1
+          rustc --version --verbose | tee ci-evidence/rustc.txt
+          sudo apt-get update -q 2>&1 | tee ci-evidence/dependencies.log
+          sudo apt-get install -y -q pkg-config libasound2-dev libudev-dev libx11-dev libxkbcommon-dev libwayland-dev 2>&1 | tee -a ci-evidence/dependencies.log
+      - name: Authored static models to agent art and level props
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo check --locked -p orr_editor --features models --lib 2>&1 | tee ci-evidence/feature-off.log
+          cargo check --locked -p orr_editor --features mesh-navigation --lib 2>&1 | tee ci-evidence/minimal-static.log
+          cargo test --locked -p orr_editor --features package-manager,room-character,room-lighting,project-create,windows-export,mesh-hazards-export,mesh-animated-models,mesh-patrol,mesh-prop-shading --lib mesh_art::cooked_provenance::tests:: -- --test-threads=1 2>&1 | tee ci-evidence/provenance.log
+          grep -F 'test result: ok. 4 passed; 0 failed; 0 ignored;' ci-evidence/provenance.log
+          cargo test --locked -p orr_editor --features package-manager,room-character,room-lighting,project-create,windows-export,mesh-hazards-export,mesh-animated-models,mesh-patrol,mesh-prop-shading --lib mesh_art_import_panel::cooked_ui_tests:: -- --test-threads=1 2>&1 | tee ci-evidence/panel.log
+          grep -F 'test result: ok. 4 passed; 0 failed; 0 ignored;' ci-evidence/panel.log
+          cargo test --locked -p orr_editor --features package-manager,room-character,room-lighting,project-create,windows-export,mesh-hazards-export,mesh-animated-models,mesh-patrol,mesh-prop-shading --lib mesh_art_import::cooked_tests:: -- --test-threads=1 2>&1 | tee ci-evidence/cooked-import.log
+          grep -F 'test result: ok. 4 passed; 0 failed; 0 ignored;' ci-evidence/cooked-import.log
+          cargo test --locked -p orr_editor --features package-manager,room-character,room-lighting,project-create,windows-export,mesh-hazards-export,mesh-animated-models,mesh-patrol,mesh-prop-shading --lib mesh_art_import::tests:: -- --test-threads=1 2>&1 | tee ci-evidence/raw-import.log
+          grep -F 'test result: ok. 5 passed; 0 failed; 0 ignored;' ci-evidence/raw-import.log
+          cargo test --locked -p orr_editor --features package-manager,room-character,room-lighting,project-create,windows-export,mesh-hazards-export,mesh-animated-models,mesh-patrol,mesh-prop-shading --lib mesh_art::tests:: -- --test-threads=1 2>&1 | tee ci-evidence/legacy-snapshot.log
+          grep -F 'test result: ok. 19 passed; 0 failed; 0 ignored;' ci-evidence/legacy-snapshot.log
+          cargo test --locked -p orr_editor --features package-manager,room-character,room-lighting,project-create,windows-export,mesh-hazards-export,mesh-animated-models,mesh-patrol,mesh-prop-shading --lib mesh_props::tests:: -- --test-threads=1 2>&1 | tee ci-evidence/props.log
+          grep -F 'test result: ok. 11 passed; 0 failed; 0 ignored;' ci-evidence/props.log
+          cargo test --locked -p orr_editor --features package-manager,room-character,room-lighting,project-create,windows-export,mesh-hazards-export,mesh-animated-models,mesh-patrol,mesh-prop-shading --lib mesh_art_panel::cooked_integration_tests:: -- --test-threads=1 2>&1 | tee ci-evidence/integration.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' ci-evidence/integration.log
+          cargo clippy --locked -p orr_editor --features package-manager,room-character,room-lighting,project-create,windows-export,mesh-hazards-export,mesh-animated-models,mesh-patrol,mesh-prop-shading --lib -- -D warnings 2>&1 | tee ci-evidence/clippy-editor.log
+      - name: Compile GPU acceptance without running its opt-in body
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s\n' 'Legacy mesh_art_import_ui GPU/export acceptance is compile-only and UNRUN. Its environment-guarded early return is not counted as a pass.' | tee ci-evidence/gpu-scope.txt
+          cargo test --locked -p orr_editor --features package-manager,room-character,room-lighting,project-create,windows-export,mesh-hazards-export,mesh-animated-models,mesh-patrol,mesh-prop-shading --test mesh_art_import_ui --no-run 2>&1 | tee ci-evidence/gpu-compile-only.log
+      - name: Preserve results including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mesh-cooked-static-${{ github.sha }}
+          path: ci-evidence
+          if-no-files-found: error
