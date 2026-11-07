@@ -1,3 +1,5 @@
+mod keep;
+pub use keep::{plan_keep,apply_keep,KeepPlan};
 mod dependency_update;
 pub use dependency_update::{
     apply_update_with_dependencies, plan_update_with_dependencies, DependencyUpdatePlan,
@@ -551,3 +553,7 @@ mod tests {
 #[cfg(all(test,feature="project-create",target_os="linux"))]
 #[path="package_manager/presentation_tests.rs"]
 pub(crate) mod presentation_tests;
+
+#[cfg(all(test,feature="project-create",target_os="linux"))]
+#[path="package_manager/keep_tests.rs"]
+pub(crate) mod keep_tests;
