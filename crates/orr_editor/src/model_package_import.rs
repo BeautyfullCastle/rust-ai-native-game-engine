@@ -22,6 +22,7 @@ pub(crate) enum SourceFormat {
     #[default]
     RawGlb,
     CookedStatic,
+    CookedAnimated,
 }
 
 impl SourceFormat {
@@ -29,6 +30,7 @@ impl SourceFormat {
         match self {
             Self::RawGlb => "model.glb",
             Self::CookedStatic => "model.orrmodel",
+            Self::CookedAnimated => "model.animated.json",
         }
     }
 
@@ -36,6 +38,7 @@ impl SourceFormat {
         match self {
             Self::RawGlb => "GLB source",
             Self::CookedStatic => "cooked static model source",
+            Self::CookedAnimated => "cooked animated model source",
         }
     }
 }
@@ -69,6 +72,14 @@ pub(crate) fn import_package(request: Request) -> Result<Report, String> {
     if !request.license_acknowledged {
         return Err("explicit license acknowledgement is required".into());
     }
+    if request.source_format == SourceFormat::CookedAnimated {
+        if request.kind != ModelKind::Animated {
+            return Err("cooked animated model import requires Animated model mode".into());
+        }
+        if !cfg!(feature = "room-animated-models") {
+            return Err("cooked animated model import requires room-animated-models; no input or destination opened".into());
+        }
+    }
     validate_destination_policy(&request.destination)?;
     let (destination_parent, destination) = checked_new_directory(&request.destination)?;
     validate_destination_policy(&destination)?;
@@ -87,6 +98,15 @@ pub(crate) fn import_package(request: Request) -> Result<Report, String> {
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("glb"))
             {
                 return Err("source must be a self-contained .glb file".into());
+            }
+        }
+        SourceFormat::CookedAnimated => {
+            if !source_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.to_ascii_lowercase().ends_with(".animated.json"))
+            {
+                return Err("cooked animated source must be a .animated.json file".into());
             }
         }
         SourceFormat::CookedStatic => {
@@ -110,6 +130,7 @@ pub(crate) fn import_package(request: Request) -> Result<Report, String> {
     }
     match request.source_format {
         SourceFormat::RawGlb => validate_glb(&source.bytes, request.kind)?,
+        SourceFormat::CookedAnimated => validate_cooked_animated(&source.bytes)?,
         SourceFormat::CookedStatic => {
             // Validate the cooked payload directly. Dependency digests describe its
             // history; they are neither resolver inputs nor package dependencies.
@@ -184,6 +205,23 @@ fn package_manifest(request: &Request, asset_name: &str) -> Result<Manifest, Str
         files: BTreeSet::from(["LICENSE.txt".into(), asset_name.into()]),
     };
     Ok(manifest)
+}
+
+fn validate_cooked_animated(bytes: &[u8]) -> Result<(), String> {
+    #[cfg(feature = "room-animated-models")]
+    {
+        let model = orr_model::animation::AnimatedModel::from_bytes(bytes)
+            .map_err(|error| format!("cooked animated model import: {error}"))?;
+        if model.source().clips.is_empty() {
+            return Err("cooked animated model must contain at least one animation clip".into());
+        }
+        Ok(())
+    }
+    #[cfg(not(feature = "room-animated-models"))]
+    {
+        let _ = bytes;
+        Err("cooked animated model import requires room-animated-models".into())
+    }
 }
 
 fn validate_glb(bytes: &[u8], kind: ModelKind) -> Result<(), String> {
@@ -493,3 +531,7 @@ fn digest(bytes: &[u8]) -> String {
 #[cfg(test)]
 #[path = "model_package_import/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "model_package_import/cooked_animated_tests.rs"]
+mod cooked_animated_tests;
