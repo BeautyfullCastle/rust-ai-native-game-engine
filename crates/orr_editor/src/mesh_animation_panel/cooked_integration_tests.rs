@@ -179,7 +179,7 @@ fn four_authored_variants_actual_import_apply_save_source_hidden_reopen_and_move
         assert!(panel.error.is_none(), "{name}: {:?}", panel.error);
         assert!(panel.current_snapshot().is_some());
         let mut baseline =
-            orr_sim::Simulation::<orr_games::mesh_navigation_game::MeshNavigation>::from_frame(
+            orr_sim::Simulation::<orr_remote::mesh_navigation::MeshNavigation>::from_frame(
                 document.frame(),
                 orr_remote::mesh_navigation::YARD_TICK_RATE,
                 orr_remote::mesh_navigation::MESH_NAVIGATION_BUILD_ID,
