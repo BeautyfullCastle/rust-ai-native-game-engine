@@ -41,6 +41,8 @@ pub struct ModelPanel {
     #[cfg(feature = "animated-models")]
     /// Persisted clip choice and once/loop policy for animated bindings.
     pub animation: AnimationDescriptor,
+    #[cfg(feature = "animated-models")]
+    sample_seconds: String,
     loaded: BTreeMap<String, LoadedAsset>,
     candidate: Option<(String, String, ModelKind, LoadedAsset)>,
     confirm_discard: bool,
@@ -69,6 +71,8 @@ impl Default for ModelPanel {
                 clip_index: 0,
                 playback: PlaybackMode::Once,
             },
+            #[cfg(feature = "animated-models")]
+            sample_seconds: "0".into(),
             loaded: BTreeMap::new(),
             candidate: None,
             confirm_discard: false,
@@ -531,30 +535,45 @@ impl ModelPanel {
     /// Center and uniformly fit verified rest geometry inside the selected box.
     /// Only the authoring draft changes; Assign and Save remain explicit.
     pub fn fit_selected_box(&mut self, editor: &Editor) -> Result<(), String> {
-        self.fit_selected_collider(editor, false)
+        self.fit_selected_collider(editor, false, None)
     }
     /// Fit the rest bounding box inside the selected sphere, as a draft only.
     pub fn fit_selected_sphere(&mut self, editor: &Editor) -> Result<(), String> {
-        self.fit_selected_collider(editor, true)
+        self.fit_selected_collider(editor, true, None)
     }
-    fn fit_selected_collider(&mut self, editor: &Editor, sphere: bool) -> Result<(), String> {
+    fn fit_selected_collider(
+        &mut self,
+        editor: &Editor,
+        sphere: bool,
+        pose_seconds: Option<&str>,
+    ) -> Result<(), String> {
         if !self.editable(editor) {
             return Err("Fitting a model requires coherent local Edit mode".into());
         }
         let guid = editor.selected_guid().ok_or("Select a collider first")?;
-        let row = editor.rows().iter().find(|row| row.guid.as_ref() == Some(&guid))
+        let row = editor
+            .rows()
+            .iter()
+            .find(|row| row.guid.as_ref() == Some(&guid))
             .ok_or("Selected GUID no longer exists")?;
         let snapshot = editor.snapshot().ok_or("Current snapshot is unavailable")?;
         let dimensions = if sphere {
-            let radius = orr_sample::yard3d_view::editor_sphere_radius(snapshot.predicted(), row.entity)
-                .ok_or("Fit rest model to sphere requires a current sphere collider and body")?;
+            let radius =
+                orr_sample::yard3d_view::editor_sphere_radius(snapshot.predicted(), row.entity)
+                    .ok_or(
+                        "Fit rest model to sphere requires a current sphere collider and body",
+                    )?;
             [radius; 3]
         } else {
             orr_sample::yard3d_view::editor_box_half(snapshot.predicted(), row.entity)
                 .ok_or("Fit rest model to box requires a current box collider and body")?
         };
-        let (_, _, _, candidate) = self.candidate.as_ref()
-            .filter(|(package, asset, kind, _)| package == &self.package && asset == &self.asset && *kind == self.kind)
+        let (_, _, _, candidate) = self
+            .candidate
+            .as_ref()
+            .filter(|(package, asset, kind, _)| {
+                package == &self.package && asset == &self.asset && *kind == self.kind
+            })
             .ok_or("Load the current model asset before fitting")?;
         // A form candidate does not authorize stale installed bytes. Keep the
         // draft and cache unchanged on any freshness or arithmetic failure.
@@ -564,11 +583,97 @@ impl ModelPanel {
         {
             return Err("Model asset changed; load it again before fitting".into());
         }
-        let fitted = if sphere {
-            fit::loaded_sphere(&loaded, f64::from(dimensions[0]))?
-        } else { fit::loaded(&loaded, dimensions.map(f64::from))? };
+        let fitted = match pose_seconds {
+            None => {
+                if sphere {
+                    fit::loaded_sphere(&loaded, f64::from(dimensions[0]))?
+                } else {
+                    fit::loaded(&loaded, dimensions.map(f64::from))?
+                }
+            }
+            Some(seconds) => {
+                #[cfg(feature = "animated-models")]
+                {
+                    let model = loaded
+                        .animated_model()
+                        .ok_or("Sampled pose fitting requires an animated model")?;
+                    let clip = model
+                        .source()
+                        .clips
+                        .get(self.animation.clip_index as usize)
+                        .ok_or("Select a valid animation clip before fitting")?;
+                    let seconds = parse_pose_seconds(seconds, clip.duration())?;
+                    if sphere {
+                        fit::loaded_pose_sphere(
+                            &loaded,
+                            self.animation.clip_index,
+                            seconds,
+                            f64::from(dimensions[0]),
+                        )?
+                    } else {
+                        fit::loaded_pose(
+                            &loaded,
+                            self.animation.clip_index,
+                            seconds,
+                            dimensions.map(f64::from),
+                        )?
+                    }
+                }
+                #[cfg(not(feature = "animated-models"))]
+                {
+                    let _ = seconds;
+                    return Err("Sampled pose fitting requires animated-models".into());
+                }
+            }
+        };
         self.transform = fitted;
         Ok(())
+    }
+    #[cfg(feature = "animated-models")]
+    pub fn fit_selected_pose_box(&mut self, editor: &Editor) -> Result<(), String> {
+        let seconds = self.sample_seconds.clone();
+        self.fit_selected_collider(editor, false, Some(&seconds))
+    }
+    #[cfg(feature = "animated-models")]
+    pub fn fit_selected_pose_sphere(&mut self, editor: &Editor) -> Result<(), String> {
+        let seconds = self.sample_seconds.clone();
+        self.fit_selected_collider(editor, true, Some(&seconds))
+    }
+    #[cfg(feature = "animated-models")]
+    fn pose_fit_candidate_matches(&self) -> bool {
+        self.kind == ModelKind::Animated
+            && self
+                .candidate
+                .as_ref()
+                .is_some_and(|(package, asset, kind, loaded)| {
+                    package == &self.package
+                        && asset == &self.asset
+                        && *kind == self.kind
+                        && loaded.animated_model().is_some_and(|model| {
+                            model
+                                .source()
+                                .clips
+                                .get(self.animation.clip_index as usize)
+                                .is_some()
+                        })
+                })
+    }
+    #[cfg(feature = "animated-models")]
+    fn show_pose_fit_controls(
+        &mut self,
+        ui: &mut Ui,
+        eligible: bool,
+        editable: bool,
+    ) -> Option<bool> {
+        let mut requested = None;
+        ui.add_enabled_ui(editable,|ui| {
+            let label=ui.label("Fit pose seconds");
+            ui.add(egui::TextEdit::singleline(&mut self.sample_seconds).char_limit(64)).labelled_by(label.id);
+            ui.weak("Fits only the selected clip at one sampled time, not an envelope for the whole animation. Resets local rotation; changes only the transform draft.");
+            if ui.add_enabled(eligible,egui::Button::new("Fit sampled pose to box")).clicked() {requested=Some(false);}
+            if ui.add_enabled(eligible,egui::Button::new("Fit sampled pose to sphere")).clicked() {requested=Some(true);}
+        });
+        requested
     }
     /// Postmultiply the form quaternion: rotate about the model's local axis.
     pub fn rotate_local_quarter(&mut self, editor: &Editor, axis: usize, direction: i8) -> Result<(), String> {
@@ -1444,6 +1549,13 @@ impl ModelPanel {
                                 }
                             }
                         }
+                        #[cfg(feature="animated-models")]
+                        {
+                            let eligible=editor.selected_guid().is_some() && self.pose_fit_candidate_matches();
+                            if let Some(sphere)=self.show_pose_fit_controls(ui,eligible,self.editable(editor)) {
+                                self.error=if sphere {self.fit_selected_pose_sphere(editor)} else {self.fit_selected_pose_box(editor)}.err();
+                            }
+                        }
                         if ui.add_enabled(editor.selected_guid().is_some(), egui::Button::new("Fit rest model to box"))
                             .on_hover_text("Center verified rest geometry and scale uniformly with 1% space. Resets local rotation; changes the draft only.")
                             .clicked() { self.error = self.fit_selected_box(editor).err(); }
@@ -1495,3 +1607,24 @@ impl ModelPanel {
         });
     }
 }
+
+#[cfg(feature = "animated-models")]
+fn parse_pose_seconds(text: &str, duration: f32) -> Result<f32, String> {
+    let seconds = text.trim().parse::<f64>().map_err(|_| {
+        "Fit pose seconds must be a finite time within the selected clip".to_owned()
+    })?;
+    if !seconds.is_finite()
+        || seconds < 0.0
+        || !duration.is_finite()
+        || seconds > f64::from(duration)
+    {
+        return Err("Fit pose seconds must be finite and within 0..selected clip duration".into());
+    }
+    Ok(seconds as f32)
+}
+#[cfg(all(test, feature = "animated-models"))]
+#[path = "model_panel/pose_fit_panel_tests.rs"]
+mod pose_fit_panel_tests;
+#[cfg(all(test,target_os="linux",feature="animated-models"))]
+#[path="model_panel/pose_fit_integration_tests.rs"]
+mod pose_fit_integration_tests;
