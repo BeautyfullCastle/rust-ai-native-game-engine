@@ -49,6 +49,9 @@ mod route_diagnostics_panel;
 #[cfg(feature="mesh-patrol")]
 #[path="mesh_navigation/patrol_panel.rs"]
 mod patrol_panel;
+#[cfg(feature="mesh-patrol")]
+#[path="mesh_navigation/patrol_routes.rs"]
+mod patrol_routes;
 #[cfg(feature = "mesh-mission")]
 #[path = "mesh_navigation/mission_view.rs"]
 mod mission_view;
@@ -1533,3 +1536,10 @@ mod patrol_integration_tests;
 #[cfg(all(test,target_os="linux",feature="mesh-patrol",feature="mesh-hazards"))]
 #[path="mesh_navigation/patrol_hazards_integration_tests.rs"]
 mod patrol_hazards_integration_tests;
+
+#[cfg(feature="mesh-patrol")]
+#[path="mesh_navigation/patrol_route_overlay.rs"]
+mod patrol_route_overlay;
+#[cfg(all(test,target_os="linux",feature="mesh-patrol"))]
+#[path="mesh_navigation/patrol_route_overlay_integration_tests.rs"]
+mod patrol_route_overlay_integration_tests;
