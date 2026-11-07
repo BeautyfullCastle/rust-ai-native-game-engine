@@ -17,10 +17,17 @@ fn wait(panel: &mut Panel) {
 }
 
 fn imported_player() -> crate::package_manager::presentation_tests::Fixture {
+    imported_player_with_source(include_bytes!(
+        "../../../../assets/room_character_demo/courier.orrmodel.json"
+    ))
+}
+
+pub(super) fn imported_player_with_source(
+    bytes: &[u8],
+) -> crate::package_manager::presentation_tests::Fixture {
     use crate::model_package_import::{import_package, Request, SourceFormat};
     let f = crate::package_manager::presentation_tests::fixture(true, true);
     let source = f.temp.path().join("author.model.animated.json");
-    let bytes = include_bytes!("../../../../assets/room_character_demo/courier.orrmodel.json");
     fs::write(&source, bytes).unwrap();
     let license = f.temp.path().join("author-LICENSE.txt");
     fs::write(&license, "Acceptance fixture: redistribution acknowledged").unwrap();

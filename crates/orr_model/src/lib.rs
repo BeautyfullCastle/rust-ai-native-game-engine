@@ -24,6 +24,10 @@ pub mod static_retexture;
 #[path = "authoring/animation_sequence.rs"]
 pub mod animation_sequence;
 
+#[cfg(all(feature = "animation", feature = "import"))]
+#[path = "authoring/animated_recolor.rs"]
+pub mod animated_recolor;
+
 pub const MAX_FILE_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_DECODED_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_VERTICES: usize = 250_000;

@@ -111,7 +111,7 @@ fn reserved(segment: &str) -> bool {
             && (stem.starts_with("COM") || stem.starts_with("LPT"))
             && stem.as_bytes()[3].is_ascii_digit())
 }
-fn logical_path(path: &str, suffix: &str) -> Result<(), String> {
+pub(crate) fn logical_path(path: &str, suffix: &str) -> Result<(), String> {
     if path.is_empty()
         || path.len() > 240
         || !path.ends_with(suffix)
@@ -150,7 +150,7 @@ fn parse_recipe(bytes: &[u8], asset_id: &str) -> Result<Recipe, String> {
     }
     Ok(r)
 }
-fn digest(bytes: &[u8]) -> String {
+pub(crate) fn digest(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
         .map(|b| format!("{b:02x}"))
@@ -230,7 +230,7 @@ impl Write for BoundedBytes {
         Ok(())
     }
 }
-fn cooked(model: &AnimatedModel) -> Result<Vec<u8>, String> {
+pub(crate) fn cooked(model: &AnimatedModel) -> Result<Vec<u8>, String> {
     let mut out = BoundedBytes(Vec::new());
     serde_json::to_writer(&mut out, model.source())
         .map_err(|e| format!("bounded cooked output: {e}"))?;
@@ -373,7 +373,7 @@ pub fn sequence_clips(
     Ok(reloaded)
 }
 
-fn checked_path(path: &Path, output: bool) -> Result<PathBuf, String> {
+pub(crate) fn checked_path(path: &Path, output: bool) -> Result<PathBuf, String> {
     if path.as_os_str().is_empty()
         || path
             .components()
@@ -456,7 +456,7 @@ fn safe_open(path: &Path) -> Result<File, String> {
 fn safe_open(_path: &Path) -> Result<File, String> {
     Err("safe nofollow/nonblocking file operations currently require Linux x86_64; pure sequence API is portable".into())
 }
-fn read_input(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
+pub(crate) fn read_input(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
     let path = checked_path(path, false)?;
     let before = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
     if !before.file_type().is_file() || before.len() > limit as u64 {
@@ -487,7 +487,7 @@ fn read_input(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
     owned_path(&path, bounded.get_ref())?;
     Ok(bytes)
 }
-fn output_path(path: &Path) -> Result<PathBuf, String> {
+pub(crate) fn output_path(path: &Path) -> Result<PathBuf, String> {
     let name = path
         .file_name()
         .and_then(|s| s.to_str())
@@ -503,7 +503,7 @@ fn output_path(path: &Path) -> Result<PathBuf, String> {
         Err(e) => Err(e.to_string()),
     }
 }
-fn publish(output: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn publish(output: &Path, bytes: &[u8]) -> Result<(), String> {
     if bytes.len() > MAX_FILE_BYTES {
         return Err("output exceeds 64 MiB limit".into());
     }

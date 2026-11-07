@@ -2575,3 +2575,7 @@ mod cooked_animation_tests;
 #[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="room-lighting",feature="windows-export"))]
 #[path="package_manager_panel/cooked_animated_import_tests.rs"]
 mod cooked_animated_import_tests;
+
+#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="room-lighting",feature="windows-export"))]
+#[path="package_manager_panel/animated_recolor_import_tests.rs"]
+mod animated_recolor_import_tests;
