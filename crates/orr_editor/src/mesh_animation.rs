@@ -23,6 +23,7 @@ const MAX_RATE: f32 = 4.0;
 const SCHEMA: u32 = 1;
 const CROSSFADE_SCHEMA: u32 = 2;
 pub(crate) mod playback;
+pub(crate) mod cooked_provenance;
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -160,16 +161,8 @@ impl Snapshot {
         let model = load_animated_asset(asset, &asset_bytes)?;
         validate_model(&model)?;
         let cooked = model.to_bytes().map_err(|error| error.to_string())?;
-        if cooked.len() > MAX_SIDECAR_BYTES
-            || model
-                .source()
-                .dependencies
-                .iter()
-                .any(|dependency| dependency.uri != "$source")
-        {
-            return Err(
-                "animated model exceeds the embedded bounds or has external dependencies".into(),
-            );
+        if cooked.len() > MAX_SIDECAR_BYTES {
+            return Err("animated model exceeds the embedded bounds".into());
         }
         let locked_again = orr_package::inspect(&package_root, &runtime)
             .map_err(|error| format!("recheck animation package: {error}"))?;
@@ -484,18 +477,11 @@ impl Snapshot {
 }
 
 fn load_animated_asset(asset: &str, bytes: &[u8]) -> Result<AnimatedModel, String> {
-    if let Ok(model) = AnimatedModel::from_bytes(bytes) {
-        return Ok(model);
-    }
-    orr_model::animation_import::import_with_resolver(asset, bytes, |_| {
-        Err(ModelError::message(
-            "mesh animation snapshots do not read external resources",
-        ))
-    })
-    .map_err(|error| format!("import animated asset: {error}"))
+    cooked_provenance::decode(asset, bytes)
 }
 
 fn validate_model(model: &AnimatedModel) -> Result<(), String> {
+    cooked_provenance::validate_metadata(model)?;
     let source = model.source();
     if source.nodes.len() > MAX_NODES || source.clips.is_empty() || source.clips.len() > MAX_CLIPS {
         return Err("animated mesh exceeds node or clip limits".into());

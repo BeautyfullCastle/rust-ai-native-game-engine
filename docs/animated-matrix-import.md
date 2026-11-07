@@ -2,7 +2,7 @@
 
 The optional `orr_model` `animation,import` path accepts a bounded subset of
 static matrix-transform nodes in animated glTF/GLB assets. This connects to the
-existing Mesh **Import raw animation GLB** workflow: provide the self-contained
+existing Mesh **Import animation source** workflow: provide the self-contained
 GLB, license and new package destination, inspect the staged candidate, then
 explicitly Apply and Save. Importing never automatically changes the scene.
 

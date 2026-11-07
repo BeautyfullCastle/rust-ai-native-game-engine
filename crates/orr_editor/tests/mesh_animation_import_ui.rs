@@ -259,10 +259,10 @@ fn raw_animation_import_preview_apply_save_and_source_free_reopen() {
     let history = h.state().editor.history().clone();
     let baseline = viewport_pixels(&mut h, "01-baseline.png");
     click(&mut h, "Mesh agent animation");
-    click(&mut h, "Import raw animation GLB");
+    click(&mut h, "Import animation source");
     for (label, value) in [
-        ("Raw animation GLB", raw_model.display().to_string()),
-        ("Raw animation license", raw_license.display().to_string()),
+        ("Animation source (.glb or cooked JSON)", raw_model.display().to_string()),
+        ("Animation source license", raw_license.display().to_string()),
         (
             "New animation package directory",
             package.display().to_string(),
