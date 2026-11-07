@@ -7,7 +7,7 @@ use egui_kittest::{
     Harness,
 };
 use orr_remote::mesh_navigation::{hazards, patrol, YARD_PLAYERS, YARD_TICK_RATE};
-fn p(x: i64) -> [FP; 3] {
+fn p(x: i32) -> [FP; 3] {
     [FP::from_int(x), FP::ZERO, FP::ZERO]
 }
 fn fixture(collision: bool) -> (tempfile::TempDir, Harness<'static, (Panel, Editor)>) {
