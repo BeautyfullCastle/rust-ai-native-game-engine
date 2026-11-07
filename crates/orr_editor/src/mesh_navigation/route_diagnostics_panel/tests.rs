@@ -53,6 +53,7 @@ fn stale_fields_graph_scene_and_epoch_clear_report_without_reinspection() {
     for change in 0..12 {
         let mut state = State {
             observation: Some((context.clone(), inspect_fields(&graph, &context))),
+            ..Default::default()
         };
         let mut changed = context.clone();
         match change {
@@ -107,6 +108,7 @@ fn blocked_draft_disables_button_and_discards_prior_report() {
     let (graph, context) = fixture();
     let state = State {
         observation: Some((context.clone(), inspect_fields(&graph, &context))),
+        ..Default::default()
     };
     let mut harness = Harness::builder().build_ui_state(
         move |ui, state: &mut State| {
