@@ -50,6 +50,8 @@ mod route_diagnostics_panel;
 #[path="mesh_navigation/patrol_panel.rs"]
 mod patrol_panel;
 #[cfg(feature="mesh-patrol")]
+pub(crate) use patrol_panel::{PatrolPickRequest, patrol_pick::Token as PatrolPickToken};
+#[cfg(feature="mesh-patrol")]
 #[path="mesh_navigation/patrol_routes.rs"]
 mod patrol_routes;
 #[cfg(feature = "mesh-mission")]
