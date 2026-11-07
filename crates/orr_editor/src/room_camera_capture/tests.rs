@@ -162,3 +162,12 @@ fn failed_initial_stage_keeps_state_empty() {
         .is_err());
     assert!(!state.busy());
 }
+
+#[test]
+fn follow_policy_capture_preserves_offset_and_exact_edit_projection() {
+    let mut applied=Document::readable_default();applied.schema=2;applied.follow_player=Some([1.0,2.0,-1.0]);
+    let mut live=applied.orbit();live.target=[3.0,1.0,-2.0];live.yaw=-0.8;live.distance=20.0;
+    let captured=from_view(&applied,&live).unwrap();
+    assert_eq!(captured.schema,2);assert_eq!(captured.follow_player,applied.follow_player);
+    assert_projection_parity(&applied,&live,&captured);
+}

@@ -286,6 +286,15 @@ impl Panel {
                         number(ui, "Orthographic half-height", half_height)
                     }
                 }
+                let mut follow = self.candidate.follow_player.is_some();
+                if ui.checkbox(&mut follow,"Follow player during play").changed() {
+                    self.candidate.schema = if follow { 2 } else { 1 };
+                    self.candidate.follow_player = if follow { Some([0.0;3]) } else { None };
+                }
+                if let Some(offset) = self.candidate.follow_player.as_mut() {
+                    for (axis,value) in ["X","Y","Z"].into_iter().zip(offset) { number(ui,&format!("Follow offset {axis}"),value); }
+                    ui.weak("Play follows the PLAYER plus offset. Pan adjusts a session bias; Reset view clears it. Edit/capture keeps the authored target and preserves this offset.");
+                }
                 if ui.button("Apply camera").clicked() {
                     match self.apply_document(self.candidate.clone()) {
                         Ok(()) => {

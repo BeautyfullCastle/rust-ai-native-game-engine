@@ -1,85 +1,40 @@
-# Authored Room presentation camera (first bounded slice)
+# Authored Room camera and PLAYER tracking
 
-A schema-2 `room-escape-v1` entry can name a root-level `camera` JSON sidecar.
-This optional profile is owned by the Room presentation consumer, not the
-simulation. It does not change Frame bytes, checksums, replay/build identity,
-physics, movement, or model transforms. Camera bytes do affect export content
-identity. Arena/Collect entries cannot declare it.
+A schema-2 `room-escape-v1` project entry may name a root-level camera sidecar. Camera data belongs to presentation, affects exported content identity, and never changes Frame bytes, checksums, physics, input or replay. Arena/Collect cannot declare this profile. Generated Room projects include `room.camera.json`; older projects with no camera retain their previous native/capture/editor defaults.
 
-`room-escape-3d-v1` generated projects explicitly include `room.camera.json`.
-Projects with no camera field preserve the previous defaults: native Room uses
-perspective distance 60, headless capture uses the old orthographic distance 50
-and portrait-fit half-height 24, and the editor uses its old perspective view.
-There is no silent retrofit of older project files.
+## Data contract
 
-## Schema
+Schema 1 requires `schema`, `target:[x,y,z]`, `yaw`, `pitch`, `distance` and `projection`. It remains a fixed camera with byte-compatible serialization. Schema 2 requires the same fields plus `follow_player:[offset_x,offset_y,offset_z]`. Missing/null/wrong-sized offsets, schema 1 with an offset, unknown/duplicate fields and invalid numeric values reject.
 
-The strict JSON document requires `schema: 1`, `target: [x,y,z]`, `yaw`, `pitch`,
-`distance`, and `projection`. Angles use radians except perspective vertical FOV
-which uses degrees. Unknown, duplicate, null, or missing fields are errors.
+- Authored/session target components: finite -64..64.
+- Follow offset components: finite -32..32.
+- Yaw: -pi..pi; pitch: -1.4..1.4 radians; distance: 1..128.
+- Perspective: `{"type":"perspective","fov_y_degrees":20..100}`.
+- Orthographic: `{"type":"orthographic","half_height":1..64}`. Vertical half-height is `half_height * session_distance / authored_distance / min(aspect,1)`.
+- Dimensions: 1..16384 per axis; document limit:4096 bytes.
 
-- Target components: finite -64 through 64
-- Yaw: finite -pi through pi; pitch: finite -1.4 through 1.4
-- Distance: finite 1 through 128
-- Projection: `{ "type": "perspective", "fov_y_degrees": 20..100 }` or
-  `{ "type": "orthographic", "half_height": 1..64 }`
-- Orthographic half-height fits the shorter viewport axis. Actual vertical
-  half-height is `half_height * session_distance / authored_distance / min(aspect,1)`
-- Dimensions are positive and at most 16384 each; exact aspect is retained
-- Maximum document size is 4096 bytes
+Projection shapes are closed: fields for the other projection, nulls, arrays instead of objects and missing/duplicate fields reject. Matrices and screen rays must remain finite. These fixed clipping planes suit bounded Room levels, not a general large-world rig.
 
-The same resolved camera is used for authored native runtime, capture, editor
-rendering, picking, and overlays. Matrices and rays must remain finite. Manual
-orbit wraps yaw and clamps pitch; pan uses the actual projection extent and
-clamps target; wheel zoom saturates distance. Non-finite gestures are ignored.
-Navigation changes are session-only and never silently persisted. Fixed camera
-clipping planes are appropriate for this bounded Room profile; this is not a
-general large-world camera rig.
+## Author and use
 
-## Authoring and lifecycle
+In the **Room camera** panel, enable **Follow player during play**, set the three follow offsets and choose **Apply camera**, then **Save camera**. Apply/Undo/Redo reset the session view to the applied profile. History holds32 applied changes, independent of scene/model history. A different successful Apply clears Redo; invalid or identical Apply preserves it. Save preserves history; reopening starts empty. Invalid Apply leaves the applied camera and preview intact. Editing is disabled in Play or incoherent local snapshots.
 
-The Room camera panel stages candidate values until **Apply camera**. Accepted
-changes and **Undo camera** reset the live preview to the applied profile. The
-panel has its own bounded history, separate from scene transactions. Invalid
-Apply leaves the profile, history, and live preview intact. Controls are disabled
-while playing or when the local scene snapshot is incoherent.
+Edit displays the authored `target`. During Play, the camera resolves the sole current PLAYER and its current Body from the same immutable Frame used for rendering. Its target is:
 
-**Save camera** replaces only the camera sidecar. It does not save scene/model
-edits or change the manifest. It pins the project directory, compares the exact
-admitted manifest and last-saved camera bytes, rejects changed/nonregular/symlink
-paths, writes and syncs a same-directory temporary file, atomically replaces the
-camera file, and syncs the directory on Unix. Failure after replacement but during
-directory sync is reported as uncertain durability, with the saved baseline
-updated to the bytes actually replaced. This is bounded ordinary filesystem
-validation, not hostile concurrent-filesystem isolation or a multi-file transaction.
+`PLAYER position + saved follow offset + (session target - authored target)`
 
-Runtime Restart restores the admitted initial Frame and authored camera without
-reopening files. Editor Restart room restores the currently applied camera,
-including unsaved camera Apply changes. Opening a scene (even the same path)
-clears project camera admission; reopen the complete project to reload its
-sidecar. Successful Save As to a different scene clears camera admission;
-failed Open/Save As preserves it. Authored profiles cannot reactivate merely by
-returning to an old scene path.
+Resolved target components clamp to -64..64, so extreme valid session pans stay finite as the player moves. Missing/duplicate PLAYER, missing current Body, invalid session or player positions outside the camera's -32..32 numeric envelope fail closed. Normal Room scene admission remains responsible for gameplay's narrower spatial contract.
 
-If camera projection or GPU rendering fails, the last successful image can stay
-visible with an error, but picking and overlays are disabled for that failed
-presentation. No new-size camera is used to pick retained old-size pixels.
+Pan changes a transient bias relative to the moving player; it does not suspend tracking. Orbit and zoom retain their projection-aware behavior. Reset view clears the bias and restores authored angles/distance. **Reset camera defaults** restores the fixed default profile. Stop returns to the Edit view. Seek follows the player in the sought Frame; no motion history or smoothing clock is needed. Runtime Restart restores the admitted profile/session.
+
+Viewport capture records Edit framing and preserves the saved follow offset/policy. It does not convert a transient Play tracking target into authored data. Source/capture/native/editor camera construction uses the shared resolver; picking and overlays use the camera for the same presentation. A failed presentation may retain its last image, while picking/overlays are disabled rather than using new-size rays on old-size pixels.
+
+## Saving and source lifetime
+
+Save replaces only the camera sidecar, not scene/model files or manifest. It pins the project directory, compares exact admitted manifest and saved bytes, rejects changed/nonregular/symlink paths, writes and syncs a same-directory temporary file, then atomically replaces. Unix directory-sync failure reports uncertain durability and advances the baseline to the already replaced bytes. This is ordinary filesystem validation, not hostile-race isolation or a multi-file crash transaction.
+
+Opening a scene, even at the same path, clears project camera admission; reopen the complete project. Successful Save As elsewhere clears it; failed Open/Save As preserves it. Returning to an old path cannot silently reactivate admission.
 
 ## Verification scope
 
-Focused acceptance covers strict schema and bounds, aspect extremes, projection-
-aware gestures, actual editor Apply/Undo/Save/reopen widgets, scene lifecycle,
-Frame identity preservation, explicit software-GPU render/pick, and exact
-production-tool source-hidden read-only export. OS-window interaction, physical
-GPU, Windows local, camera follow, cutscenes, a generic rig system, and richer HUD
-are separate work. This slice does not complete roadmap #94 or #104.
-
-### Redo an authored camera edit
-
-Use **Undo camera edit** and **Redo camera edit** to compare applied camera
-compositions. Both restore all authored camera fields and reset the live view;
-they discard an un-applied camera draft. Transient viewport navigation is not
-camera history. A different successful Apply (including Reset defaults) clears
-the redo branch; invalid or unchanged Apply preserves it. The bounded history
-holds 32 applied changes. Save remains explicit and preserves Undo/Redo, while
-reopening starts with empty history. These controls are disabled during Play.
+Follow-camera acceptance covers strict/legacy data, real game movement, finite projection/rays/aspect extremes, read-only Frame/session behavior, policy-preserving capture, actual headless editor input/Save/reopen/pan/reset/Seek/Stop and source-hidden deployed game/native headless target parity. Old GPU test targets are compile-only in this focused workflow. No current native-window, GPU pixel, audio-device or positive Windows publication claim is made. Existing Windows publication access failures remain unresolved and are not retried. Damping, collision avoidance, cutscenes and generic camera rigs remain outside this feature.

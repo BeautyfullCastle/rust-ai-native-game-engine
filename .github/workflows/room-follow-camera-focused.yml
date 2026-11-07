@@ -1,0 +1,59 @@
+name: Room PLAYER follow camera focused CI
+on:
+  push:
+    branches: [codex/room-follow-camera-20261107]
+permissions:
+  contents: read
+jobs:
+  follow-camera:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record exact source and prepare toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir ci-evidence
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git rev-parse HEAD HEAD^{tree} | tee ci-evidence/source.txt
+          rustup toolchain install 1.99.1 --profile minimal --component clippy
+          rustup override set 1.99.1
+          rustc --version --verbose | tee ci-evidence/rustc.txt
+          sudo apt-get update -q 2>&1 | tee ci-evidence/dependencies.log
+          sudo apt-get install -y -q pkg-config libasound2-dev libudev-dev libx11-dev libxkbcommon-dev libwayland-dev 2>&1 | tee -a ci-evidence/dependencies.log
+      - name: Authored follow camera and deployed PLAYER motion
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p orr_sample --features room-project --lib room_camera::tests -- --test-threads=1 2>&1 | tee ci-evidence/core.log
+          grep -F 'test result: ok. 14 passed; 0 failed; 0 ignored;' ci-evidence/core.log
+          cargo build --locked -p orr_sample --features room-character --bin room_escape 2>&1 | tee ci-evidence/runtime-build.log
+          cargo test --locked -p orr_editor --features room-character,project-create,windows-export --test room_camera_redo_ui --test room_camera_capture_ui --no-run 2>&1 | tee ci-evidence/legacy-gpu-targets-compile.log
+          cargo test --locked -p orr_editor --features room-character,project-create,windows-export --lib room_camera_capture::tests -- --test-threads=1 2>&1 | tee ci-evidence/capture.log
+          grep -F 'test result: ok. 7 passed; 0 failed; 0 ignored;' ci-evidence/capture.log
+          cargo test --locked -p orr_editor --features room-character,project-create,windows-export --lib room_camera_panel::tests::widgets_stage_apply_undo_save_reopen -- --exact 2>&1 | tee ci-evidence/legacy-widgets.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' ci-evidence/legacy-widgets.log
+          cargo test --locked -p orr_editor --features room-character,project-create,windows-export --lib room_camera_panel::tests::failed_pre_persist_preserves_file_baseline_history_and_dirty_state -- --exact 2>&1 | tee ci-evidence/save-failure.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' ci-evidence/save-failure.log
+          cargo test --locked -p orr_editor --features room-character,project-create,windows-export --test room_character_workflow follow_camera::follow_camera_widgets_save_reopen_real_movement_pan_reset_seek_and_stop -- --exact 2>&1 | tee ci-evidence/follow-widgets.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' ci-evidence/follow-widgets.log
+          ORR_FOLLOW_CAMERA_RUNTIME="$PWD/target/debug/room_escape" cargo test --locked -p orr_editor --features room-character,project-create,windows-export --test room_character_workflow follow_camera::follow_camera_source_hidden_export_and_native_headless_consume_saved_offset_and_movement -- --ignored --exact 2>&1 | tee ci-evidence/deployed-follow.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' ci-evidence/deployed-follow.log
+          cargo clippy --locked -p orr_sample --features room-project,project-export --lib -- -D warnings 2>&1 | tee ci-evidence/clippy-sample.log
+          cargo clippy --locked -p orr_editor --features room-character,project-create,windows-export --lib -- -D warnings 2>&1 | tee ci-evidence/clippy-editor.log
+      - name: Preserve results including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: room-follow-camera-${{ github.sha }}
+          path: ci-evidence
+          if-no-files-found: error

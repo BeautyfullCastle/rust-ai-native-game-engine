@@ -230,6 +230,10 @@ fn headless_checked(
             counts.animated_models
         );
     }
+    if let Some(camera) = project.camera().filter(|camera| camera.document.follow_player.is_some()) {
+        let resolved = camera.document.camera_for_frame(&camera.document.orbit(),(800,600),FrameView::of(sim.frame()))?;
+        println!("room follow camera target: {:?}",resolved.target);
+    }
     let run = sim.frame().singleton::<RoomRun>();
     println!(
         "room tick: {} checksum: 0x{:016x}\nroom key: {} won: {}",
@@ -260,7 +264,7 @@ fn headless_checked(
             project.scene().index(),
             project.models(),
             &match project.camera() {
-                Some(camera) => camera.document.camera(&camera.document.orbit(), size)?,
+                Some(camera) => camera.document.camera_for_frame(&camera.document.orbit(), size, FrameView::of(sim.frame()))?,
                 None => room_view::camera(size),
             },
             #[cfg(feature = "room-character")]
@@ -489,7 +493,7 @@ impl App {
                 self.project.scene().index(),
                 self.project.models(),
                 &match self.project.camera() {
-                    Some(camera) => camera.document.camera(&self.orbit, g.size)?,
+                    Some(camera) => camera.document.camera_for_frame(&self.orbit, g.size, FrameView::of(self.sim.frame()))?,
                     None => self.orbit.camera(),
                 },
                 orr_render::ImportedSceneTarget {
