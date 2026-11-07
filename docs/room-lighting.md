@@ -1,6 +1,6 @@
 # Saved Room fixed and carried point lighting
 
-The optional `room-lighting` feature adds one presentation-only, unshadowed point light for schema-2 `room-escape-v1` projects. It is default-off in `orr_sample` and `orr_editor`; simulation, input, replay, Frame bytes and checksums are unchanged. This uses the existing point-light renderer, not additional lights or a new shader.
+The optional `room-lighting` feature adds one presentation-only, unshadowed point light for schema-2 `room-escape-v1` projects. It is default-off in `orr_sample` and `orr_editor`; simulation, input, replay, Frame bytes and checksums are unchanged. The native light illuminates imported model receivers through the existing renderer; procedural proxies retain their existing shading. This adds no additional lights or new shader.
 
 ## Declare and author
 
