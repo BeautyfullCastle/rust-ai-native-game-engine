@@ -149,7 +149,7 @@ fn charge(total: usize, bytes: usize) -> Result<usize, String> {
         .filter(|&sum| sum <= MAX_FILE_BYTES)
         .ok_or_else(|| "recipe plus cooked source plus PNG exceeds 64 MiB input budget".into())
 }
-fn decode_png(bytes: &[u8], remaining: usize) -> Result<Image, String> {
+pub(crate) fn decode_png(bytes: &[u8], remaining: usize) -> Result<Image, String> {
     // Same admission policy as the existing importer, without changing its API.
     let mut decoder = png::Decoder::new(Cursor::new(bytes));
     decoder.set_limits(png::Limits {
