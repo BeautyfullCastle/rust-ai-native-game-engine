@@ -461,6 +461,14 @@ pub struct EditorApp {
 }
 
 impl EditorApp {
+    #[cfg(feature="models")]
+    fn point_light_settings_for_frame(&self) -> Result<orr_render::PointLightSettings, String> {
+        #[cfg(feature="mesh-navigation")]
+        if crate::mesh_lighting_panel::supports_lighting_profile(self.editor.game()) {
+            return Ok(self.mesh_lighting.applied_point_light_settings(&self.editor).unwrap_or_default());
+        }
+        self.editor.room_point_light_settings_for_presentation()
+    }
     /// An app on `editor`. `render_state` is eframe's wgpu state (None without
     /// a GPU: the viewport then shows a notice, everything else works).
     #[cfg(feature="models")]
@@ -2500,10 +2508,12 @@ impl EditorApp {
         };
         #[cfg(feature="models")]
         let post_process = self.post_process_for_frame();
+        #[cfg(feature="models")]
+        let point_light = self.point_light_settings_for_frame();
         if let Some(rs)=&self.render_state {
             let gpu=self.gpu3d.get_or_insert_with(||crate::viewport3d::GpuViewport3d::with_hdr_support(rs,px,!self.viewport_hdr_disabled));
             #[cfg(feature = "models")]
-            if let Err(error) = self.editor.room_point_light_settings_for_presentation().and_then(|settings|gpu.set_point_light_settings(settings)) {
+            if let Err(error) = point_light.and_then(|settings|gpu.set_point_light_settings(settings)) {
                 ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, error, egui::FontId::proportional(14.0), Color32::RED);
                 return;
             }
@@ -3695,6 +3705,10 @@ mod tilemap_copy_stamp_tests;
 #[cfg(all(test, feature = "mesh-mission"))]
 #[path = "app/post_process_tests.rs"]
 mod post_process_tests;
+
+#[cfg(all(test, target_os="linux", feature="mesh-mission"))]
+#[path="app/point_light_tests.rs"]
+mod point_light_tests;
 
 #[cfg(all(test, feature="mesh-mission", feature="mesh-animated-models"))]
 #[path="app/mesh_crossfade_tests.rs"]

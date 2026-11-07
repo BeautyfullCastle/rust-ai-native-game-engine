@@ -3,6 +3,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 #[path = "mesh_lighting/post_process.rs"]
 pub(crate) mod post_process;
+#[path = "mesh_lighting/point_light.rs"]
+mod point_light;
 #[path = "mesh_lighting/post_process_runtime.rs"]
 pub(crate) mod post_process_runtime;
 
@@ -24,6 +26,8 @@ pub(crate) struct Document {
     pub(crate) exposure: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) post_process: Option<post_process::Settings>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) point_light: Option<orr_render::PointLight>,
 }
 
 fn deserialize_object<'de, DeserializerType, ValueType>(
@@ -73,6 +77,8 @@ impl<'de> Deserialize<'de> for Document {
             exposure: f32,
             #[serde(default, deserialize_with = "post_process::deserialize_present")]
             post_process: Option<post_process::Settings>,
+            #[serde(default, deserialize_with = "point_light::deserialize_present")]
+            point_light: Option<orr_render::PointLight>,
         }
 
         let wire: Wire = deserialize_object(deserializer)?;
@@ -89,6 +95,7 @@ impl<'de> Deserialize<'de> for Document {
             tonemap: wire.tonemap,
             exposure: wire.exposure,
             post_process: wire.post_process,
+            point_light: wire.point_light,
         })
     }
 }
@@ -117,6 +124,7 @@ impl Document {
             tonemap: lighting.tonemap,
             exposure: lighting.exposure,
             post_process: None,
+            point_light: None,
         };
         document.validate()?;
         Ok(document)
@@ -147,7 +155,7 @@ impl Document {
         self.validate()?;
         validate_scene_filename(scene_filename)?;
         let mut bytes = serde_json::to_vec_pretty(&BoundDocument {
-            schema: if self.has_post_process() { 2 } else { 1 },
+            schema: self.schema(),
             identity: IDENTITY,
             scene_filename,
             graph_revision,
@@ -186,12 +194,7 @@ impl Document {
         deserializer
             .end()
             .map_err(|error| format!("mesh lighting JSON: {error}"))?;
-        if bound.schema
-            != if bound.lighting.has_post_process() {
-                2
-            } else {
-                1
-            }
+        if bound.schema != bound.lighting.schema()
             || bound.identity != IDENTITY
             || bound.scene_filename != scene_filename
             || bound.graph_revision != graph_revision
@@ -202,6 +205,14 @@ impl Document {
         Ok(bound.lighting)
     }
 
+    fn schema(&self) -> u32 {
+        if self.point_light.is_some() { 3 } else if self.has_post_process() { 2 } else { 1 }
+    }
+    pub(crate) fn point_light_settings(&self) -> Result<orr_render::PointLightSettings, String> {
+        let settings = orr_render::PointLightSettings { point_light: self.point_light };
+        settings.validate().map_err(|e|e.to_string())?;
+        Ok(settings)
+    }
     pub(crate) fn has_post_process(&self) -> bool {
         self.post_process.is_some()
     }
@@ -221,6 +232,7 @@ impl Document {
     }
 
     pub(crate) fn validate(&self) -> Result<(), String> {
+        self.point_light_settings()?;
         self.post_process_settings()
             .validate()
             .map_err(|error| error.to_string())?;

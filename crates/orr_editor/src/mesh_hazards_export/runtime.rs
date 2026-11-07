@@ -108,6 +108,19 @@ pub(super) fn validate_animation_runtime(
     )
 }
 
+pub(super) fn validate_point_light_runtime(bytes: &[u8], required: bool) -> Result<(), String> {
+    if !required {
+        return Ok(());
+    }
+    if bytes.starts_with(b"MZ") {
+        validate_pe(bytes, false, false, false, false, false, (false, true))
+    } else if bytes.starts_with(b"\x7fELF") {
+        validate_elf(bytes, false, false, false, false, false, (false, true))
+    } else {
+        Err("runtime must be a PE32+ or ELF64 executable".into())
+    }
+}
+
 fn validate_runtime_capabilities(
     bytes: &[u8],
     require_camera: bool,
@@ -125,7 +138,7 @@ fn validate_runtime_capabilities(
             require_lighting,
             require_hud,
             require_props,
-            require_animation,
+            (require_animation, false),
         )?;
         Ok(RuntimePlatform::WindowsX86_64)
     } else if bytes.starts_with(b"\x7fELF") {
@@ -136,7 +149,7 @@ fn validate_runtime_capabilities(
             require_lighting,
             require_hud,
             require_props,
-            require_animation,
+            (require_animation, false),
         )?;
         Ok(RuntimePlatform::LinuxX86_64)
     } else {
@@ -216,8 +229,9 @@ fn validate_pe(
     require_lighting: bool,
     require_hud: bool,
     require_props: bool,
-    require_animation: bool,
+    animation_and_point_light: (bool, bool),
 ) -> Result<(), String> {
+    let (require_animation, require_point_light) = animation_and_point_light;
     region(bytes, 0, 64)?;
     let pe = u32_at(bytes, 0x3c)? as usize;
     if pe < 64 || region(bytes, pe, 24)?[..4] != *b"PE\0\0" {
@@ -273,6 +287,7 @@ fn validate_pe(
     let mut found_hud = false;
     let mut found_props = false;
     let mut found_animation = false;
+    let mut found_point_light = false;
     let mut raw_ranges = vec![(0, headers_size)];
     let mut virtual_ranges = Vec::new();
     for section in sections.as_chunks::<40>().0 {
@@ -310,6 +325,7 @@ fn validate_pe(
             b".orrhaz\0" => Some((&mut found_player, CAPABILITY_MARKER)),
             b".orrhart" => Some((&mut found_art, ART_CAPABILITY_MARKER)),
             b".orrhcam" => Some((&mut found_camera, CAMERA_CAPABILITY_MARKER)),
+            b".orrpntl" => Some((&mut found_point_light, b"ORR_MESH_POINT_LIGHT_V1".as_slice())),
             b".orrhanm" => Some((&mut found_animation, ANIMATION_CAPABILITY_MARKER)),
             b".orrhprp" => Some((&mut found_props, PROPS_CAPABILITY_MARKER)),
             b".orrhhud" => Some((&mut found_hud, HUD_CAPABILITY_MARKER)),
@@ -335,6 +351,9 @@ fn validate_pe(
     }
     if !found_player {
         return Err("runtime player capability section is missing".into());
+    }
+    if require_point_light && !found_point_light {
+        return Err("runtime point-light capability section is missing".into());
     }
     if require_animation && !found_animation {
         return Err("runtime animation capability section is missing".into());
@@ -364,8 +383,9 @@ fn validate_elf(
     require_lighting: bool,
     require_hud: bool,
     require_props: bool,
-    require_animation: bool,
+    animation_and_point_light: (bool, bool),
 ) -> Result<(), String> {
+    let (require_animation, require_point_light) = animation_and_point_light;
     let header = region(bytes, 0, 64)?;
     if header[4] != 2
         || header[5] != 1
@@ -444,6 +464,7 @@ fn validate_elf(
     let mut found_hud = false;
     let mut found_props = false;
     let mut found_animation = false;
+    let mut found_point_light = false;
     let mut ranges = vec![
         (0, 64),
         (ph_offset, ph_offset + programs.len()),
@@ -483,6 +504,8 @@ fn validate_elf(
             Some((&mut found_camera, CAMERA_CAPABILITY_MARKER))
         } else if name == ART_CAPABILITY_SECTION.as_bytes() {
             Some((&mut found_art, ART_CAPABILITY_MARKER))
+        } else if name == b".orrpntl" {
+            Some((&mut found_point_light, b"ORR_MESH_POINT_LIGHT_V1".as_slice()))
         } else if name == ANIMATION_CAPABILITY_SECTION.as_bytes() {
             Some((&mut found_animation, ANIMATION_CAPABILITY_MARKER))
         } else if name == PROPS_CAPABILITY_SECTION.as_bytes() {
@@ -524,6 +547,9 @@ fn validate_elf(
     }
     if !found_player {
         return Err("runtime player capability section is missing".into());
+    }
+    if require_point_light && !found_point_light {
+        return Err("runtime point-light capability section is missing".into());
     }
     if require_animation && !found_animation {
         return Err("runtime animation capability section is missing".into());

@@ -1,4 +1,8 @@
 #[used]
+#[unsafe(link_section = ".orrpntl")]
+static MESH_POINT_LIGHT_MARKER: [u8; 23] = *b"ORR_MESH_POINT_LIGHT_V1";
+
+#[used]
 #[unsafe(link_section = ".orrmesh")]
 static MESH_PLAYER_MARKER: [u8; 18] = *b"ORR_MESH_PLAYER_V1";
 
@@ -70,6 +74,7 @@ static MESH_MISSION_MARKER: [u8; 19] = *b"ORR_MESH_MISSION_V1";
 static MESH_DENSE_PROPS_MARKER: [u8; 23] = *b"ORR_MESH_DENSE_PROPS_V1";
 
 fn main() {
+    std::hint::black_box(&MESH_POINT_LIGHT_MARKER);
     std::hint::black_box(&MESH_PLAYER_MARKER);
     std::hint::black_box(&MESH_PROPS_MARKER);
     std::hint::black_box(&MESH_ROTATION_MARKER);

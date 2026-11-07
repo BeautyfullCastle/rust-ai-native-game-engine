@@ -332,6 +332,10 @@ fn export_sources_with_recheck(
     } else {
         runtime::validate_runtime(&runtime_bytes)?
     };
+    runtime::validate_point_light_runtime(
+        &runtime_bytes,
+        lighting_requires_point_light(lighting_bytes.as_deref(), SCENE_FILENAME, graph_revision)?,
+    )?;
     let parent = io::checked_output_parent(request.destination)?;
     let destination = parent.join(
         request
@@ -679,6 +683,10 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
     } else {
         runtime::validate_runtime(&runtime_bytes)?
     };
+    runtime::validate_point_light_runtime(
+        &runtime_bytes,
+        lighting_requires_point_light(lighting_bytes.as_deref(), SCENE_FILENAME, manifest.graph_revision)?,
+    )?;
     if platform != manifest.platform {
         return Err("hazard runtime platform does not match manifest".into());
     }
@@ -991,4 +999,16 @@ pub(crate) fn test_props_runtime(platform: RuntimePlatform) -> Vec<u8> {
 #[cfg(all(test, feature = "mesh-animated-models"))]
 pub(crate) fn test_animation_runtime(platform: RuntimePlatform) -> Vec<u8> {
     runtime::valid_test_animation_runtime(platform, false, false, false, false)
+}
+
+fn lighting_requires_point_light(
+    bytes: Option<&[u8]>,
+    scene: &str,
+    revision: [u8; 32],
+) -> Result<bool, String> {
+    bytes
+        .map(|bytes| crate::mesh_lighting::Document::decode(bytes, scene, revision)
+            .map(|document| document.point_light.is_some()))
+        .transpose()
+        .map(|present| present.unwrap_or(false))
 }

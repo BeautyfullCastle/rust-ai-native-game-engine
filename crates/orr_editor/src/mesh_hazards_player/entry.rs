@@ -1,4 +1,8 @@
 #[used]
+#[unsafe(link_section = ".orrpntl")]
+static MESH_POINT_LIGHT_MARKER: [u8; 23] = *b"ORR_MESH_POINT_LIGHT_V1";
+
+#[used]
 #[unsafe(link_section = ".orrhaz")]
 static MESH_HAZARDS_PLAYER_MARKER: [u8; 26] = *b"ORR_MESH_HAZARDS_PLAYER_V1";
 
@@ -28,6 +32,7 @@ static MESH_HAZARDS_PROPS_MARKER: [u8; 25] = *b"ORR_MESH_HAZARDS_PROPS_V1";
 static MESH_HAZARDS_ANIMATION_MARKER: [u8; 29] = *b"ORR_MESH_HAZARDS_ANIMATION_V1";
 
 fn main() {
+    std::hint::black_box(&MESH_POINT_LIGHT_MARKER);
     #[cfg(feature = "mesh-animated-models")]
     std::hint::black_box(&MESH_HAZARDS_ANIMATION_MARKER);
     std::hint::black_box(&MESH_HAZARDS_PROPS_MARKER);

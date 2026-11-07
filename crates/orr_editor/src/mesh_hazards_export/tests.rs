@@ -680,3 +680,5 @@ pub(super) mod props_tests;
 
 #[path = "animation_tests.rs"]
 pub(super) mod animation_tests;
+#[path = "point_light_tests.rs"]
+mod point_light_tests;

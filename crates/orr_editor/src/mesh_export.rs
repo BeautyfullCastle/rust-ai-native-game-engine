@@ -340,6 +340,7 @@ fn export_with_profile(
     };
     let lighting_path = crate::mesh_lighting_store::sidecar_path(&scene_path)?;
     let mut requires_post_process = false;
+    let mut requires_point_light = false;
     let lighting_bytes = match read_optional_bounded(
         &lighting_path,
         crate::mesh_lighting::MAX_BYTES as u64,
@@ -361,6 +362,7 @@ fn export_with_profile(
                 return Err("mesh lighting sidecar changed during admission".into());
             }
             requires_post_process = document.has_post_process();
+            requires_point_light = document.point_light.is_some();
             Some(bytes)
         }
         None => None,
@@ -399,6 +401,7 @@ fn export_with_profile(
         },
     )?;
     validate_runtime_post_process(&runtime_bytes, requires_post_process)?;
+    validate_runtime_point_light(&runtime_bytes, requires_point_light)?;
     validate_runtime_crossfade(&runtime_bytes, requires_crossfade)?;
     requires_facing |= optional_facing_present(props_bytes.as_deref(), true)?
         || optional_facing_present(animation_bytes.as_deref(), false)?;
@@ -856,6 +859,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
     }
     let lighting_path = canonical_root.join(&lighting_name);
     let mut requires_post_process = false;
+    let mut requires_point_light = false;
     match (
         &manifest.lighting,
         read_optional_bounded(
@@ -883,6 +887,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
                 );
             }
             requires_post_process = document.has_post_process();
+            requires_point_light = document.point_light.is_some();
         }
         (None, None) => {}
         _ => {
@@ -929,6 +934,7 @@ pub(crate) fn open_bundle(root: &Path) -> Result<PreparedBundle, String> {
         },
     )?;
     validate_runtime_post_process(&runtime_bytes, requires_post_process)?;
+    validate_runtime_point_light(&runtime_bytes, requires_point_light)?;
     validate_runtime_crossfade(&runtime_bytes, requires_crossfade)?;
     validate_runtime_facing(&runtime_bytes, requires_facing)?;
     validate_runtime_dense_props(&runtime_bytes, requires_dense_props)?;
@@ -1827,6 +1833,15 @@ fn validate_runtime_crossfade(bytes: &[u8], required: bool) -> Result<(), String
             .is_none()
     {
         return Err("mesh player runtime does not advertise mesh crossfade support".into());
+    }
+    Ok(())
+}
+
+fn validate_runtime_point_light(bytes: &[u8], required: bool) -> Result<(), String> {
+    if required
+        && validate_runtime_section(bytes, b".orrpntl", b"ORR_MESH_POINT_LIGHT_V1")?.is_none()
+    {
+        return Err("mesh player runtime does not advertise mesh point-light support".into());
     }
     Ok(())
 }
