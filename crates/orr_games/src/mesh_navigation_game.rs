@@ -15,8 +15,12 @@ pub mod hazards;
 #[cfg(feature = "mesh-mission")]
 pub mod mission;
 
+#[cfg(feature = "mesh-patrol")]
+pub mod patrol;
+
 pub const PIN_NAME: &str = "MeshScenePin";
 pub const MESH_MISSION_ENABLED: bool = cfg!(feature = "mesh-mission");
+pub const MESH_PATROL_ENABLED: bool = cfg!(feature = "mesh-patrol");
 pub const MAX_EMBEDDED_GRAPH_BYTES: usize = 8_192;
 pub const MESH_SET_GOAL: u32 = 1 << 31;
 const MAX_TARGET_COORDINATE_RAW: i64 = 256 * FP::SCALE;
@@ -136,6 +140,8 @@ pub fn register_reflect(types: &mut TypeRegistry) {
     types.register_singleton::<MeshStepStatus>("MeshStepStatus");
     #[cfg(feature = "mesh-mission")]
     mission::register_reflect(types);
+    #[cfg(feature = "mesh-patrol")]
+    patrol::register_reflect(types);
 }
 
 impl Game for MeshNavigation {
@@ -151,6 +157,8 @@ impl Game for MeshNavigation {
         builder.register_singleton::<MeshStepStatus>("MeshStepStatus");
         #[cfg(feature = "mesh-mission")]
         mission::register(builder);
+        #[cfg(feature = "mesh-patrol")]
+        patrol::register(builder);
     }
 
     fn setup(_: &mut Frame, _: &()) {}
@@ -186,6 +194,8 @@ pub fn validate_scene_frame(frame: &Frame) -> Result<(), String> {
         ));
     }
     validate_runtime(frame, *frame.singleton::<MeshScenePin>())?;
+    #[cfg(feature = "mesh-patrol")]
+    patrol::validate_frame(frame,*frame.singleton::<MeshScenePin>())?;
     #[cfg(feature = "mesh-mission")]
     mission::validate_frame(frame, *frame.singleton::<MeshScenePin>())?;
     Ok(())
@@ -212,12 +222,22 @@ impl System<MeshNavigation> for MeshStep {
                 return;
             }
         }
+        #[cfg(feature = "mesh-patrol")]
+        let rollback = context.frame.clone();
         let mut pin = *context.frame.singleton::<MeshScenePin>();
         let result = validate_runtime(context.frame, pin).and_then(|()| {
             apply_goal_input(context, &mut pin);
-            MeshRuntime::step(context.frame, pin.binding()).map_err(|error| error.to_string())
+            #[cfg(feature = "mesh-patrol")]
+            {
+                if patrol::pre_step(context.frame,&mut pin)? {MeshRuntime::step(context.frame,pin.binding()).map_err(|e|e.to_string())?;}
+                patrol::post_step(context.frame,pin)
+            }
+            #[cfg(not(feature = "mesh-patrol"))]
+            {MeshRuntime::step(context.frame, pin.binding()).map_err(|error| error.to_string())}
         });
         if let Err(message) = result {
+            #[cfg(feature = "mesh-patrol")]
+            { *context.frame = rollback; }
             record_failure(context.frame, context.tick, &message);
         }
     }
@@ -252,6 +272,8 @@ fn apply_goal_requests(
         if goal == initial_agent.spec.goal
             && initial_agent.status != orr_navigation::NavigationStatus::Stopped
         {
+            #[cfg(feature = "mesh-patrol")]
+            { let _ = patrol::pause(frame); }
             return;
         }
         if MeshRuntime::replan(
@@ -267,6 +289,8 @@ fn apply_goal_requests(
             pin.start = initial_agent.position;
             pin.goal = goal;
             frame.set_singleton(*pin);
+            #[cfg(feature = "mesh-patrol")]
+            { let _ = patrol::pause(frame); }
             return;
         }
     }
@@ -310,6 +334,10 @@ fn ensure_scene_schema(frame: &Frame) -> Result<(), String> {
         || registry.singleton_id::<mission::MeshMissionRun>().is_none()
     {
         return Err("MeshNavigation frame registry is missing mission singletons".into());
+    }
+    #[cfg(feature = "mesh-patrol")]
+    if registry.singleton_id::<patrol::MeshPatrol>().is_none() || registry.singleton_id::<patrol::MeshPatrolRun>().is_none() {
+        return Err("MeshNavigation frame registry is missing patrol singletons".into());
     }
     Ok(())
 }
