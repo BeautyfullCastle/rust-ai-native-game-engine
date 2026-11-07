@@ -68,7 +68,7 @@ impl Panel {
                 self.pending = None;
                 self.license_acknowledged = false;
                 self.destination_identity = None;
-                self.status = "Model import worker disconnected before returning a result.".into();
+                self.status = "Model import worker disconnected before returning a result. Publication may have completed; inspect the destination before retrying. No automatic retry.".into();
                 return None;
             }
         };
@@ -143,8 +143,8 @@ impl Panel {
         egui::CollapsingHeader::new("Import a model package")
             .default_open(false)
             .show(ui, |ui| {
-                ui.label("Import a local self-contained GLB or cooked static model and a license file into a new package folder.");
-                ui.label("Cooked .model.json files retain their exact bytes and historical dependency digests; those dependencies are not loaded or added to the package.");
+                ui.label("Import a local self-contained GLB, cooked static model or cooked animated model and a license file into a new package folder.");
+                ui.label("Cooked models retain their exact bytes and historical dependency digests; those dependencies are not loaded or added to the package.");
                 ui.label("External resources, scripts, network access and package activation are not supported.");
                 ui.label("A supplied license file is metadata only; its presence is not legal review or a rights determination.");
                 let fields_enabled = enabled && !self.busy();
@@ -154,11 +154,15 @@ impl Panel {
                         ui.label("Source format");
                         ui.radio_value(&mut source_format, SourceFormat::RawGlb, "Raw GLB");
                         ui.radio_value(&mut source_format, SourceFormat::CookedStatic, "Cooked static model");
+                        ui.add_enabled_ui(cfg!(feature = "room-animated-models"), |ui| {
+                            ui.radio_value(&mut source_format, SourceFormat::CookedAnimated, "Cooked animated model");
+                        });
                     });
                     self.set_source_format(source_format);
                     let source_label = match self.source_format {
                         SourceFormat::RawGlb => "Raw GLB file",
                         SourceFormat::CookedStatic => "Cooked static model file (.model.json)",
+                        SourceFormat::CookedAnimated => "Cooked animated model file (.animated.json)",
                     };
                     let source_changed = path_field(ui, source_label, &mut self.source);
                     let license_changed = path_field(ui, "License file", &mut self.license);
@@ -169,9 +173,11 @@ impl Panel {
                     text_field(ui, "Package name", &mut self.name, 128);
                     text_field(ui, "Package version", &mut self.version, 128);
                     ui.horizontal(|ui| {
-                        ui.radio_value(&mut self.kind, ModelKind::Static, "Static model");
+                        ui.add_enabled_ui(self.source_format != SourceFormat::CookedAnimated, |ui| {
+                            ui.radio_value(&mut self.kind, ModelKind::Static, "Static model");
+                        });
                         #[cfg(feature = "room-animated-models")]
-                        ui.add_enabled_ui(self.source_format == SourceFormat::RawGlb, |ui| {
+                        ui.add_enabled_ui(self.source_format != SourceFormat::CookedStatic, |ui| {
                             ui.radio_value(&mut self.kind, ModelKind::Animated, "Animated model");
                         });
                         #[cfg(not(feature = "room-animated-models"))]
@@ -187,6 +193,14 @@ impl Panel {
                 if self.source_format == SourceFormat::CookedStatic {
                     ui.small("Cooked import requires Static model mode and never falls back to GLB parsing.");
                 }
+                if self.source_format == SourceFormat::CookedAnimated {
+                    ui.small("Cooked animated import requires Animated model mode and room-animated-models support; it never falls back to GLB or static parsing.");
+                }
+                let compatible_kind = match self.source_format {
+                    SourceFormat::RawGlb => self.kind == ModelKind::Static || cfg!(feature = "room-animated-models"),
+                    SourceFormat::CookedStatic => self.kind == ModelKind::Static,
+                    SourceFormat::CookedAnimated => self.kind == ModelKind::Animated && cfg!(feature = "room-animated-models"),
+                };
                 let request_ready = fields_enabled
                     && project_root.is_some()
                     && self.license_acknowledged
@@ -195,12 +209,11 @@ impl Panel {
                     && !self.destination.trim().is_empty()
                     && !self.name.trim().is_empty()
                     && !self.version.trim().is_empty()
-                    && (self.kind == ModelKind::Static
-                        || (self.source_format == SourceFormat::RawGlb
-                            && cfg!(feature = "room-animated-models")));
+                    && compatible_kind;
                 let import_label = match self.source_format {
                     SourceFormat::RawGlb => "Import raw GLB package",
                     SourceFormat::CookedStatic => "Import cooked static package",
+                    SourceFormat::CookedAnimated => "Import cooked animated package",
                 };
                 if ui
                     .add_enabled(request_ready, egui::Button::new(import_label))
@@ -263,6 +276,9 @@ impl Panel {
                     SourceFormat::RawGlb => {
                         "Importing and validating the self-contained GLB on a worker…"
                     }
+                    SourceFormat::CookedAnimated => {
+                        "Importing and validating the cooked animated model on a worker..."
+                    }
                     SourceFormat::CookedStatic => {
                         "Importing and validating the cooked static model on a worker…"
                     }
@@ -281,8 +297,10 @@ impl Panel {
     fn set_source_format(&mut self, source_format: SourceFormat) {
         if self.source_format != source_format {
             self.source_format = source_format;
-            if source_format == SourceFormat::CookedStatic {
-                self.kind = ModelKind::Static;
+            match source_format {
+                SourceFormat::CookedStatic => self.kind = ModelKind::Static,
+                SourceFormat::CookedAnimated => self.kind = ModelKind::Animated,
+                SourceFormat::RawGlb => {}
             }
             self.source_inputs_changed();
         }
@@ -311,6 +329,7 @@ fn format_label(source_format: SourceFormat) -> &'static str {
     match source_format {
         SourceFormat::RawGlb => "Raw GLB",
         SourceFormat::CookedStatic => "Cooked static model",
+        SourceFormat::CookedAnimated => "Cooked animated model",
     }
 }
 
@@ -349,3 +368,7 @@ fn text_field(ui: &mut Ui, label: &str, value: &mut String, limit: usize) {
 #[cfg(test)]
 #[path = "model_package_import_panel/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "model_package_import_panel/cooked_animated_tests.rs"]
+mod cooked_animated_tests;
