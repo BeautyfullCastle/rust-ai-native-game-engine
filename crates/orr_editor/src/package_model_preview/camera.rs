@@ -32,7 +32,7 @@ impl PreviewBounds {
     }
 
     #[cfg(feature = "room-animated-models")]
-    pub(super) fn from_animation(bounds: orr_model::animation::Bounds) -> Result<Self, String> {
+    pub(crate) fn from_animation(bounds: orr_model::animation::Bounds) -> Result<Self, String> {
         if (0..3).any(|axis| bounds.min[axis] > bounds.max[axis]) {
             return Err("animated preview bounds are inverted".into());
         }

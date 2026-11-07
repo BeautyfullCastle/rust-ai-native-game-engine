@@ -1,3 +1,8 @@
+#[cfg(feature = "room-animated-models")]
+#[path = "model_package_import_panel/variant_preview.rs"]
+mod variant_preview;
+#[cfg(feature = "room-animated-models")]
+pub(crate) use variant_preview::PreviewFrame;
 #[path = "model_package_import_panel/source_inspection.rs"]
 mod source_inspection;
 use crate::model_package_import::{
@@ -40,6 +45,8 @@ pub struct Panel {
     inspection: source_inspection::State,
     inspected_hash: Option<String>,
     submitted_inspected_hash: Option<Option<String>>,
+    #[cfg(feature = "room-animated-models")]
+    variant_preview: variant_preview::State,
 }
 
 impl Default for Panel {
@@ -65,13 +72,23 @@ impl Default for Panel {
             inspection: Default::default(),
             inspected_hash: None,
             submitted_inspected_hash: None,
+            #[cfg(feature = "room-animated-models")]
+            variant_preview: Default::default(),
         }
     }
 }
 
 impl Panel {
     pub fn busy(&self) -> bool {
-        self.pending.is_some() || self.inspection.busy()
+        let busy = self.pending.is_some() || self.inspection.busy();
+        #[cfg(feature = "room-animated-models")]
+        {
+            busy || self.variant_preview.busy()
+        }
+        #[cfg(not(feature = "room-animated-models"))]
+        {
+            busy
+        }
     }
 
     pub fn poll(
@@ -81,6 +98,8 @@ impl Panel {
         source_generation: u64,
     ) -> Option<Report> {
         self.sync_inspection(project_root, project_generation, source_generation);
+        #[cfg(feature = "room-animated-models")]
+        self.service_variant_preview(project_root, project_generation, source_generation);
         let Some(receiver) = &self.pending else {
             return None;
         };
@@ -182,6 +201,8 @@ impl Panel {
         source_generation: u64,
     ) {
         self.sync_inspection(project_root, project_generation, source_generation);
+        #[cfg(feature = "room-animated-models")]
+        self.service_variant_preview(project_root, project_generation, source_generation);
         egui::CollapsingHeader::new("Import a model package")
             .default_open(false)
             .show(ui, |ui| {
@@ -259,6 +280,8 @@ impl Panel {
                         "I have reviewed rights to distribute this content",
                     );
                 });
+                #[cfg(feature="room-animated-models")]
+                self.show_variant_preview(ui,enabled,project_root,project_generation,source_generation);
                 #[cfg(not(feature = "room-animated-models"))]
                 ui.small("Animated import requires the room-animated-models feature; it never falls back to static.");
                 if self.source_format == SourceFormat::CookedStatic {
@@ -427,6 +450,8 @@ impl Panel {
 
     fn reset_color_variant(&mut self) {
         self.inspected_hash = None;
+        #[cfg(feature = "room-animated-models")]
+        self.close_variant_preview();
         self.inspection.invalidate();
         self.color_variant_enabled = false;
         self.color_variant = default_color_variant();
@@ -565,3 +590,7 @@ fn default_texture_variant() -> TextureVariant {
 #[cfg(test)]
 #[path = "model_package_import_panel/animated_texture_tests.rs"]
 mod animated_texture_tests;
+
+#[cfg(all(test, not(feature = "room-animated-models")))]
+#[path = "model_package_import_panel/variant_preview_tests.rs"]
+mod variant_preview_disabled_tests;

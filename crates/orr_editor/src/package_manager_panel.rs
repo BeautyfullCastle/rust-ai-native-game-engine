@@ -2603,3 +2603,19 @@ mod editor_animated_texture_tests;
 #[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="room-lighting",feature="windows-export"))]
 #[path="package_manager_panel/editor_material_catalog_tests.rs"]
 mod editor_material_catalog_tests;
+
+#[cfg(feature="room-animated-models")]
+impl Panel {
+    pub(crate) fn variant_preview_frame(&mut self) -> Option<crate::model_package_import_panel::PreviewFrame> {
+        self.model_import.preview_frame()
+    }
+    pub(crate) fn close_variant_preview(&mut self) {
+        self.model_import.close_variant_preview();
+    }
+}
+#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="room-lighting",feature="windows-export"))]
+#[path="package_manager_panel/variant_preview_integration_tests.rs"]
+mod variant_preview_integration_tests;
+#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="room-lighting",feature="windows-export"))]
+#[path="package_manager_panel/variant_preview_parent_tests.rs"]
+mod variant_preview_parent_tests;
