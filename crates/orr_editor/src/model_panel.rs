@@ -15,6 +15,8 @@ use crate::{
 use egui::Ui;
 use std::{collections::BTreeMap, path::PathBuf};
 
+mod draft_preview;
+pub(crate) use draft_preview::DraftPlacement;
 mod batch;
 mod fit;
 mod rotation;
@@ -29,6 +31,7 @@ pub(crate) struct CharacterClip {
 
 pub struct ModelPanel {
     batch: batch::Targets,
+    draft_preview: draft_preview::State,
     pub blockout: crate::blockout_panel::BlockoutPanel,
     pub bindings: Option<Bindings>,
     pub project: String,
@@ -59,6 +62,7 @@ impl Default for ModelPanel {
     fn default() -> Self {
         Self {
             batch: Default::default(),
+            draft_preview: Default::default(),
             blockout: crate::blockout_panel::BlockoutPanel::default(),
             bindings: None,
             project: ".".into(),
@@ -1450,6 +1454,7 @@ impl ModelPanel {
         }
     }
     fn discard_bindings(&mut self) {
+        self.cancel_draft_preview();
         self.batch = Default::default();
         self.bindings = None;
         self.loaded.clear();
@@ -1460,10 +1465,16 @@ impl ModelPanel {
     }
 
     pub fn show(&mut self, ui: &mut Ui, editor: &Editor) {
+        // Cancellation is safe even when the host is read-only or has changed game.
+        if draft_preview_cancel_button(ui,self.draft_preview_active()) {self.cancel_draft_preview();}
         if editor.game() != EditorGame::Yard3D && !editor.game().is_room() {
             return;
         }
         self.sync_scene(editor);
+        let preview_eligible = self.editable(editor) && editor.selected_guid().is_some()
+            && self.bindings.is_some() && self.candidate.as_ref().is_some_and(|(package,asset,kind,_)|package==&self.package && asset==&self.asset && *kind==self.kind);
+        if draft_preview_start_button(ui,preview_eligible) {self.error=self.begin_draft_preview(editor).err();}
+        ui.weak("Model draft preview is temporary. Assign and Save remain explicit; colliders and game state are unchanged.");
         let blockout_editable = self.editable(editor);
         let blockout_root = if self.scene_matches(editor) {
             self.bindings
@@ -1628,3 +1639,17 @@ mod pose_fit_panel_tests;
 #[cfg(all(test,target_os="linux",feature="animated-models"))]
 #[path="model_panel/pose_fit_integration_tests.rs"]
 mod pose_fit_integration_tests;
+
+fn draft_preview_start_button(ui:&mut Ui,enabled:bool)->bool {
+    ui.add_enabled(enabled,egui::Button::new("Preview model draft on selected object")).clicked()
+}
+fn draft_preview_cancel_button(ui:&mut Ui,active:bool)->bool {
+    active && ui.button("Cancel model draft preview").clicked()
+}
+#[cfg(test)]
+#[path="model_panel/draft_preview_panel_tests.rs"]
+mod draft_preview_panel_tests;
+
+#[cfg(all(test,target_os="linux",feature="animated-models"))]
+#[path="model_panel/draft_preview_integration_tests.rs"]
+mod draft_preview_integration_tests;
