@@ -78,7 +78,18 @@ fn read(editor: &Editor) -> patrol::PatrolView {
 }
 fn advance(editor: &mut Editor) -> orr_remote::mesh_navigation::MeshView {
     let target = editor.snapshot().unwrap().predicted().tick() + 1;
-    editor.step(1);
+    if editor.mode() == Mode::Play {
+        // Editor.step deliberately sends Pause first, which revokes managed
+        // held-input grants. This host is already paused: use its public Step
+        // endpoint so a newly accepted manual input survives until consumption.
+        let receipt = editor
+            .host_call("sim.step", serde_json::json!({"n": 1}))
+            .unwrap();
+        assert_eq!(receipt["head_tick"].as_u64(), Some(target), "{receipt}");
+        assert_eq!(receipt["playing"], serde_json::json!(false));
+    } else {
+        editor.step(1);
+    }
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         editor.sync();
@@ -173,8 +184,19 @@ fn authored_waypoints_apply_undo_redo_save_reopen_and_play_loop_then_manual_goal
             serde_json::json!({"player":0,"replace_held":true}),
         )
         .unwrap();
-    editor.host_call("sim.input_value",serde_json::json!({"player":0,"grant":grant["grant"],"generation":grant["generation"],"sequence":"1","value":{"buttons":orr_remote::mesh_navigation::MESH_SET_GOAL,"origin":[0,0,0],"dir":[0,0,0]}})).unwrap();
+    let admitted_tick = editor.snapshot().unwrap().predicted().tick();
+    assert_eq!(grant["accepted_head_tick"].as_u64(), Some(admitted_tick));
+    let receipt = editor.host_call("sim.input_value",serde_json::json!({"player":0,"grant":grant["grant"],"generation":grant["generation"],"sequence":"1","value":{"buttons":orr_remote::mesh_navigation::MESH_SET_GOAL,"origin":[0,0,0],"dir":[0,0,0]}})).unwrap();
+    assert_eq!(receipt["ok"], serde_json::json!(true));
+    assert_eq!(receipt["grant"], grant["grant"]);
+    assert_eq!(receipt["generation"], grant["generation"]);
+    assert_eq!(receipt["sequence"], serde_json::json!("1"));
+    assert_eq!(receipt["accepted_head_tick"].as_u64(), Some(admitted_tick));
     advance(&mut editor);
+    assert_eq!(
+        editor.snapshot().unwrap().predicted().tick(),
+        admitted_tick + 1
+    );
     assert_eq!(read(&editor).run.paused, 1);
     for _ in 0..5 {
         let view = advance(&mut editor);
