@@ -8,6 +8,10 @@ use orr_remote::navigation_yard3d::{
 };
 use std::path::PathBuf;
 const MAX_POINTS: usize = 8;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PatrolPickRequest { Pick(usize), Cancel }
+#[path = "patrol_pick.rs"]
+pub(crate) mod patrol_pick;
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Context {
     scene: PathBuf,
@@ -39,6 +43,8 @@ pub(super) struct State {
     pub(super) dirty: bool,
     pub(super) stale: bool,
     status: String,
+    pick_generation: u64,
+    pick_request: Option<(PatrolPickRequest, Form, u64)>,
 }
 fn parse(form: &Form, revision: [u8; 32]) -> Result<TerrainPatrol, String> {
     let mut config = TerrainPatrol {
@@ -83,6 +89,7 @@ fn parse(form: &Form, revision: [u8; 32]) -> Result<TerrainPatrol, String> {
 }
 impl State {
     fn load(&mut self, context: Context, config: Option<TerrainPatrol>) {
+        self.pick_generation = self.pick_generation.saturating_add(1);
         self.form = match config {
             Some(c) if c.enabled == 1 => Form {
                 enabled: true,
@@ -100,13 +107,16 @@ impl State {
                 ..Default::default()
             },
         };
+        self.pick_request = None;
         self.context = Some(context);
         self.dirty = false;
         self.stale = false;
         self.status="Terrain patrol fields match the current admitted source. Apply, then save the scene explicitly.".into();
     }
     fn sync_context(&mut self, current: Option<&Context>) {
+        if self.context.as_ref() != current { self.pick_request = None; }
         if self.dirty && self.context.as_ref() != current {
+            self.pick_request = None;
             self.stale = true;
             self.status="Terrain patrol draft is stale after scene, epoch, terrain or route changes; reload before applying.".into();
         }
@@ -127,6 +137,7 @@ impl State {
             if self.form.enabled {
                 let can_remove = self.form.points.len() > 1;
                 let mut remove = None;
+                let mut pick = None;
                 for (index, point) in self.form.points.iter_mut().enumerate() {
                     for (axis, value) in ["X", "Z"].into_iter().zip(point) {
                         field(
@@ -134,6 +145,9 @@ impl State {
                             &format!("Terrain patrol waypoint {} {axis}", index + 1),
                             value,
                         );
+                    }
+                    if ui.add_enabled(self.context.is_some() && self.pick_generation < u64::MAX, egui::Button::new(format!("Pick terrain patrol waypoint {}", index + 1))).clicked() && editable && !self.stale && self.context.is_some() {
+                        pick = Some(index);
                     }
                     if ui
                         .add_enabled(
@@ -147,6 +161,9 @@ impl State {
                     {
                         remove = Some(index);
                     }
+                }
+                if let Some(index) = pick {
+                    self.pick_request = Some((PatrolPickRequest::Pick(index), self.form.clone(), self.pick_generation));
                 }
                 if let Some(index) = remove {
                     self.form.points.remove(index);
@@ -170,6 +187,7 @@ impl State {
                 field(ui, "Terrain patrol wait ticks", &mut self.form.wait);
             }
             if self.form != before {
+                self.pick_generation = self.pick_generation.saturating_add(1);
                 self.dirty = true;
             }
             apply = ui
@@ -179,10 +197,27 @@ impl State {
                 )
                 .clicked();
         });
+        if ui.button("Cancel terrain patrol waypoint pick").clicked() {
+            self.pick_request = Some((PatrolPickRequest::Cancel, self.form.clone(), self.pick_generation));
+        }
         apply
+    }
+    fn take_pick_request(&mut self) -> Option<PatrolPickRequest> {
+        let (request, form, generation) = self.pick_request.take()?;
+        if request == PatrolPickRequest::Cancel { return Some(request); }
+        if self.stale || self.context.is_none() || self.form != form || !self.form.enabled || generation != self.pick_generation || self.pick_generation == u64::MAX {
+            return Some(PatrolPickRequest::Cancel);
+        }
+        match request {
+            PatrolPickRequest::Pick(index) if index < self.form.points.len() => Some(request),
+            _ => Some(PatrolPickRequest::Cancel),
+        }
     }
 }
 impl NavigationPanel {
+    pub(crate) fn take_patrol_pick_request(&mut self) -> Option<PatrolPickRequest> {
+        self.patrol.take_pick_request()
+    }
     fn patrol_context(
         &self,
         editor: &Editor,
@@ -280,3 +315,7 @@ impl NavigationPanel {
 #[cfg(test)]
 #[path = "patrol_panel_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "patrol_pick_panel_tests.rs"]
+mod pick_panel_tests;

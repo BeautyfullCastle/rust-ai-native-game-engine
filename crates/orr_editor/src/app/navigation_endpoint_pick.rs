@@ -18,6 +18,9 @@ use std::path::PathBuf;
 struct Pin {
     scene_epoch: u64,
     host_epoch: u64,
+    checksum: u64,
+    #[cfg(feature="terrain-patrol")]
+    patrol: Option<crate::navigation_panel::PatrolPickToken>,
     scene: PathBuf,
     document_scene: PathBuf,
     source: TerrainSource,
@@ -96,7 +99,7 @@ fn graph(terrain: &Terrain, slope: &str) -> Result<TerrainGraph, String> {
 
 impl EditorApp {
     /// In-memory context only: no graph construction, hashing or filesystem work.
-    fn navigation_endpoint_pin(&self) -> Option<Pin> {
+    fn navigation_endpoint_pin(&self, endpoint: Option<Endpoint>) -> Option<Pin> {
         let editor = &self.editor;
         let document = &self.terrain.document;
         if !self.navigation_endpoint.focused
@@ -113,6 +116,10 @@ impl EditorApp {
             || document.dirty()
             || document.read_only()
             || self.terrain_ramp.active()
+            || self.package_work_pending()
+            || self.hazard_export_busy()
+            || self.navigation_export_busy()
+            || self.shot.is_some() || self.remote_capture.is_some() || self.encoder.is_some()
         {
             return None;
         }
@@ -125,7 +132,18 @@ impl EditorApp {
         if editor.sim().scene_path.as_deref() != scene.to_str() {
             return None;
         }
+        if document.scene()? != scene { return None; }
+        #[cfg(feature="terrain-patrol")]
+        let patrol = match endpoint {
+            Some(Endpoint::Patrol(row)) => Some(self.navigation.patrol_pick_token(editor, &self.terrain, row).ok()?),
+            _ => None,
+        };
+        #[cfg(not(feature="terrain-patrol"))]
+        let _ = endpoint;
         Some(Pin {
+            checksum: editor.snapshot()?.predicted().checksum(),
+            #[cfg(feature="terrain-patrol")]
+            patrol,
             scene_epoch: editor.scene_load_epoch(),
             host_epoch: editor.sim().epoch,
             scene,
@@ -145,8 +163,8 @@ impl EditorApp {
 
     pub(crate) fn navigation_endpoint_validate(&mut self) {
         if self.navigation_endpoint.armed().is_some()
-            && (self.navigation_endpoint_pin().is_none()
-                || self.navigation_endpoint_pin().as_ref() != self.navigation_endpoint.pin.as_ref())
+            && (self.navigation_endpoint_pin(self.navigation_endpoint.armed()).is_none()
+                || self.navigation_endpoint_pin(self.navigation_endpoint.armed()).as_ref() != self.navigation_endpoint.pin.as_ref())
         {
             self.navigation_endpoint.cancel(
                 "Navigation pick cancelled: terrain, route settings or editing context changed",
@@ -161,7 +179,9 @@ impl EditorApp {
         }) {
             self.navigation_endpoint.consume_cancelled = false;
         }
-        self.navigation_endpoint.focused = ctx.input(|i| i.focused);
+        self.navigation_endpoint.focused = ctx.input(|input| {
+            input.focused && !input.events.iter().any(|event| matches!(event,egui::Event::WindowFocused(false)))
+        });
         if ctx.input(|i| i.key_pressed(egui::Key::Escape))
             && self.navigation_endpoint.armed().is_some()
         {
@@ -187,7 +207,7 @@ impl EditorApp {
 
     pub(crate) fn navigation_endpoint_arm(&mut self, endpoint: Endpoint) -> Result<(), String> {
         let result: Result<(), String> = (|| {
-            let pin = self.navigation_endpoint_pin().ok_or("Navigation picking requires focused, saved local terrain in Edit mode; finish or cancel any ramp first")?;
+            let pin = self.navigation_endpoint_pin(Some(endpoint)).ok_or("Navigation picking requires focused, saved local terrain in Edit mode; finish or cancel any ramp first")?;
             let terrain = self.navigation_endpoint_source()?;
             graph(terrain, &self.navigation.max_slope)?;
             self.navigation_endpoint.pin = Some(pin);
@@ -195,10 +215,11 @@ impl EditorApp {
             self.navigation_endpoint.consume_cancelled = false;
             self.navigation_endpoint.status = format!(
                 "Click a terrain cell for navigation {} (draft only)",
-                if endpoint == Endpoint::Start {
-                    "start"
-                } else {
-                    "goal"
+                match endpoint {
+                    Endpoint::Start => "start".to_owned(),
+                    Endpoint::Goal => "goal".to_owned(),
+                    #[cfg(feature="terrain-patrol")]
+                    Endpoint::Patrol(row) => format!("patrol waypoint {}", row+1),
                 }
             );
             Ok(())
@@ -207,6 +228,28 @@ impl EditorApp {
             self.navigation_endpoint.cancel(error);
         }
         result
+    }
+
+    pub(crate) fn navigation_endpoint_owns_input(&self) -> bool {
+        self.navigation_endpoint.armed().is_some() || self.navigation_endpoint.consume_cancelled
+    }
+    #[cfg(feature="terrain-patrol")]
+    pub(crate) fn navigation_patrol_request(&mut self) {
+        match self.navigation.take_patrol_pick_request() {
+            Some(crate::navigation_panel::PatrolPickRequest::Pick(row)) => {let _ = self.navigation_endpoint_arm(Endpoint::Patrol(row));},
+            Some(crate::navigation_panel::PatrolPickRequest::Cancel) => {
+                if matches!(self.navigation_endpoint.armed(),Some(Endpoint::Patrol(_))) {
+                    self.navigation_endpoint.cancel("Terrain patrol waypoint pick cancelled");
+                }
+            },
+            None => {},
+        }
+    }
+    #[cfg(feature="terrain-patrol")]
+    pub(crate) fn navigation_patrol_frame_drawn(&mut self, drawn: bool) {
+        if !drawn && matches!(self.navigation_endpoint.armed(),Some(Endpoint::Patrol(_))) {
+            self.navigation_endpoint.cancel("Terrain patrol pick cancelled: no fresh rendered viewport");
+        }
     }
 
     /// An owned miss or rejected/stale click is consumed, never entity selection.
@@ -225,7 +268,7 @@ impl EditorApp {
         let Some(endpoint) = self.navigation_endpoint.armed() else {
             return true;
         };
-        let result = (|| -> Result<[String; 2], String> {
+        let result = (|| -> Result<[FP; 2], String> {
             let terrain = self.navigation_endpoint_source()?;
             let cell = terrain_pick::pick_cell(terrain, camera, pixel, size)
                 .ok_or("No terrain cell at this pointer")?;
@@ -233,15 +276,22 @@ impl EditorApp {
             graph(terrain, &self.navigation.max_slope)?
                 .project(terrain, center)
                 .map_err(|e| e.to_string())?;
-            Ok(center.map(format_fixed))
+            Ok(center)
         })();
         match result {
             Ok(center) => {
-                match endpoint {
-                    Endpoint::Start => self.navigation.start = center,
-                    Endpoint::Goal => self.navigation.goal = center,
+                let staged: Result<(), String> = match endpoint {
+                    Endpoint::Start => { self.navigation.start = center.map(format_fixed); Ok(()) },
+                    Endpoint::Goal => { self.navigation.goal = center.map(format_fixed); Ok(()) },
+                    #[cfg(feature="terrain-patrol")]
+                    Endpoint::Patrol(_) => self.navigation_endpoint.pin.as_ref()
+                        .and_then(|pin|pin.patrol.clone()).ok_or("Terrain patrol pick token expired".to_owned())
+                        .and_then(|token|self.navigation.stage_patrol_pick(&self.editor,&self.terrain,&token,center)),
+                };
+                match staged {
+                    Ok(()) => self.navigation_endpoint.cancel("Navigation point captured in draft; explicitly apply the route and save the scene"),
+                    Err(error) => self.navigation_endpoint.cancel(&format!("Navigation pick rejected: {error}; arm a pick again")),
                 }
-                self.navigation_endpoint.cancel("Navigation endpoint captured in draft; Build route to validate connectivity and apply");
             }
             Err(error) => {
                 self.navigation_endpoint.cancel(&format!(
@@ -329,7 +379,7 @@ mod tests {
         assert!(graph(&steep, "bad").is_err());
     }
 
-    fn fixture() -> (tempfile::TempDir, EditorApp) {
+    pub(super) fn fixture() -> (tempfile::TempDir, EditorApp) {
         let root = tempfile::tempdir().unwrap();
         let scene = root.path().join("scene.yaml");
         std::fs::write(
@@ -358,7 +408,7 @@ mod tests {
         app.navigation.sync_from_editor(&app.editor);
         (root, app)
     }
-    fn camera() -> Camera3D {
+    pub(super) fn camera() -> Camera3D {
         let mut camera = Camera3D::orthographic([0.0, 10.0, 0.0], [0.0, 0.0, 0.0], 2.0);
         camera.up = [0.0, 0.0, -1.0];
         camera
@@ -658,3 +708,7 @@ mod tests {
         assert!(!h.state().terrain.document.dirty());
     }
 }
+
+#[cfg(all(test,target_os="linux",feature="terrain-patrol"))]
+#[path="navigation_patrol_pick_tests.rs"]
+mod patrol_tests;
