@@ -1,0 +1,59 @@
+name: Editor animated color variant focused CI
+on:
+  push:
+    branches: [codex/editor-animated-color-20261107]
+permissions:
+  contents: read
+jobs:
+  editor-animated-color:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record exact source and prepare toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir ci-evidence
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git rev-parse HEAD HEAD^{tree} | tee ci-evidence/source.txt
+          rustup toolchain install 1.99.1 --profile minimal --component clippy
+          rustup override set 1.99.1
+          rustc --version --verbose | tee ci-evidence/rustc.txt
+          sudo apt-get update -q 2>&1 | tee ci-evidence/dependencies.log
+          sudo apt-get install -y -q pkg-config libasound2-dev libudev-dev libx11-dev libxkbcommon-dev libwayland-dev 2>&1 | tee -a ci-evidence/dependencies.log
+      - name: Editor color authoring through actual import and saved game use
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p orr_editor --features package-manager --lib model_package_import::animated_color_tests:: -- --test-threads=1 2>&1 | tee ci-evidence/feature-off-backend.log
+          grep -F 'test result: ok. 3 passed; 0 failed; 0 ignored;' ci-evidence/feature-off-backend.log
+          cargo test --locked -p orr_editor --features package-manager --lib model_package_import_panel::animated_color_tests:: -- --test-threads=1 2>&1 | tee ci-evidence/feature-off-ui.log
+          grep -F 'test result: ok. 2 passed; 0 failed; 0 ignored;' ci-evidence/feature-off-ui.log
+          cargo test --locked -p orr_editor --features package-manager,room-animated-models,room-character,room-lighting,project-create,windows-export --lib model_package_import::animated_color_tests:: -- --test-threads=1 2>&1 | tee ci-evidence/backend.log
+          grep -F 'test result: ok. 5 passed; 0 failed; 0 ignored;' ci-evidence/backend.log
+          cargo test --locked -p orr_editor --features package-manager,room-animated-models,room-character,room-lighting,project-create,windows-export --lib model_package_import_panel::animated_color_tests:: -- --test-threads=1 2>&1 | tee ci-evidence/ui.log
+          grep -F 'test result: ok. 5 passed; 0 failed; 0 ignored;' ci-evidence/ui.log
+          cargo test --locked -p orr_editor --features package-manager,room-animated-models,room-character,room-lighting,project-create,windows-export --lib model_package_import_panel::cooked_animated_tests::actual_cooked_animated_widgets_create_exact_payload_package_without_activation -- --exact 2>&1 | tee ci-evidence/legacy-import.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' ci-evidence/legacy-import.log
+          cargo test --locked -p orr_editor --features package-manager,room-animated-models,room-character,room-lighting,project-create,windows-export --lib package_manager_panel::editor_animated_color_tests:: -- --test-threads=1 2>&1 | tee ci-evidence/integration.log
+          grep -F 'test result: ok. 2 passed; 0 failed; 1 ignored;' ci-evidence/integration.log
+          cargo build --locked -p orr_sample --features room-lighting,room-character --bin room_escape 2>&1 | tee ci-evidence/runtime-build.log
+          ORR_EDITOR_ANIMATED_COLOR_RUNTIME="$PWD/target/debug/room_escape" cargo test --locked -p orr_editor --features package-manager,room-animated-models,room-character,room-lighting,project-create,windows-export --lib package_manager_panel::editor_animated_color_tests::editor_authored_color_survives_source_hidden_native_export -- --ignored --exact 2>&1 | tee ci-evidence/deployed.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' ci-evidence/deployed.log
+          cargo clippy --locked -p orr_editor --features package-manager,room-animated-models,room-character,room-lighting,project-create,windows-export --lib -- -D warnings 2>&1 | tee ci-evidence/clippy-editor.log
+      - name: Preserve results including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: editor-animated-color-${{ github.sha }}
+          path: ci-evidence
+          if-no-files-found: error

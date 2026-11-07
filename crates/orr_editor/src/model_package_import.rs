@@ -54,11 +54,20 @@ pub(crate) struct Request {
     pub license_acknowledged: bool,
 }
 
+/// Explicit, immutable authoring request. Source data and installed assets stay unchanged.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ColorVariant {
+    pub material: u32,
+    pub linear_rgb: [f64; 3],
+    pub asset_id: String,
+}
+
 pub(crate) struct Report {
     pub root: PathBuf,
     pub package: String,
     pub asset: String,
     pub kind: ModelKind,
+    /// SHA-256 of the published model payload (the cooked variant when authored).
     pub source_sha256: String,
     pub license_sha256: String,
 }
@@ -69,6 +78,94 @@ struct InputBytes {
 }
 
 pub(crate) fn import_package(request: Request) -> Result<Report, String> {
+    import_package_inner(request, None)
+}
+
+pub(crate) fn import_color_variant(
+    request: Request,
+    variant: ColorVariant,
+) -> Result<Report, String> {
+    // All option/feature/license admission precedes any filesystem access.
+    if !request.license_acknowledged {
+        return Err("explicit license acknowledgement is required".into());
+    }
+    if request.source_format != SourceFormat::CookedAnimated || request.kind != ModelKind::Animated
+    {
+        return Err("color variant requires CookedAnimated source and Animated model mode".into());
+    }
+    if !cfg!(feature = "room-animated-models") {
+        return Err(
+            "color variant requires room-animated-models; no input or destination opened".into(),
+        );
+    }
+    validate_color_variant(&variant)?;
+    import_package_inner(request, Some(variant))
+}
+
+fn validate_color_variant(variant: &ColorVariant) -> Result<(), String> {
+    if !variant
+        .linear_rgb
+        .iter()
+        .all(|v| v.is_finite() && (0.0..=1.0).contains(v))
+    {
+        return Err("linear_rgb must contain three finite linear-light values in 0..=1".into());
+    }
+    let id = &variant.asset_id;
+    if id.is_empty()
+        || id.len() > 240
+        || !id.ends_with(".recolor.json")
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-._/".contains(&b))
+    {
+        return Err("variant identity must be a portable relative ASCII .recolor.json path of at most 240 bytes".into());
+    }
+    for part in id.split('/') {
+        let device = part.split('.').next().unwrap_or("").to_ascii_uppercase();
+        if part.is_empty()
+            || part.starts_with('.')
+            || part.ends_with('.')
+            || ["CON", "PRN", "AUX", "NUL"].contains(&device.as_str())
+            || (device.len() == 4
+                && (device.starts_with("COM") || device.starts_with("LPT"))
+                && device.as_bytes()[3].is_ascii_digit())
+        {
+            return Err(
+                "variant identity contains an empty, hidden, traversal or reserved segment".into(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn color_variant_bytes(source: &[u8], variant: &ColorVariant) -> Result<Vec<u8>, String> {
+    #[cfg(feature = "room-animated-models")]
+    {
+        let recipe = serde_json::to_vec(&serde_json::json!({
+            "format":"orr_animated_material_color", "version":1,
+            "source":"input.animated.json", "material":variant.material,
+            "linear_rgb":variant.linear_rgb
+        }))
+        .map_err(|e| format!("color recipe: {e}"))?;
+        let model =
+            orr_model::animated_recolor::recolor_model(&recipe, &variant.asset_id, |path| {
+                if path != "input.animated.json" {
+                    return Err("unexpected color variant dependency".into());
+                }
+                Ok(source.to_vec())
+            })?;
+        model
+            .to_bytes()
+            .map_err(|e| format!("color variant cook: {e}"))
+    }
+    #[cfg(not(feature = "room-animated-models"))]
+    {
+        let _ = (source, variant);
+        Err("color variant requires room-animated-models".into())
+    }
+}
+
+fn import_package_inner(request: Request, variant: Option<ColorVariant>) -> Result<Report, String> {
     if !request.license_acknowledged {
         return Err("explicit license acknowledgement is required".into());
     }
@@ -120,7 +217,7 @@ pub(crate) fn import_package(request: Request) -> Result<Report, String> {
         }
     }
 
-    let source = read_bounded_file(&source_path, MAX_SOURCE_BYTES, source_label)?;
+    let mut source = read_bounded_file(&source_path, MAX_SOURCE_BYTES, source_label)?;
     let license = read_bounded_file(&license_path, MAX_LICENSE_BYTES, "license source")?;
     if std::str::from_utf8(&license.bytes)
         .ok()
@@ -137,6 +234,17 @@ pub(crate) fn import_package(request: Request) -> Result<Report, String> {
             orr_model::StaticModel::from_bytes(&source.bytes)
                 .map_err(|error| format!("cooked static model import: {error}"))?;
         }
+    }
+
+    if let Some(variant) = variant {
+        let bytes = color_variant_bytes(&source.bytes, &variant)?;
+        if bytes.len() as u64 > MAX_SOURCE_BYTES {
+            return Err("color variant cooked output exceeds 64 MiB limit".into());
+        }
+        source = InputBytes {
+            digest: digest(&bytes),
+            bytes,
+        };
     }
 
     let stage = tempfile::Builder::new()
@@ -535,3 +643,7 @@ mod tests;
 #[cfg(test)]
 #[path = "model_package_import/cooked_animated_tests.rs"]
 mod cooked_animated_tests;
+
+#[cfg(test)]
+#[path = "model_package_import/animated_color_tests.rs"]
+mod animated_color_tests;

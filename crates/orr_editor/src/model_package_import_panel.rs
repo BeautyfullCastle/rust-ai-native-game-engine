@@ -1,4 +1,4 @@
-use crate::model_package_import::{self, Report, Request, SourceFormat};
+use crate::model_package_import::{self, ColorVariant, Report, Request, SourceFormat};
 use egui::Ui;
 use orr_model_bindings::model_bindings::ModelKind;
 use std::{
@@ -27,6 +27,9 @@ pub struct Panel {
     pending: Option<Receiver<Completion>>,
     destination_identity: Option<PathBuf>,
     status: String,
+    color_variant_enabled: bool,
+    color_variant: ColorVariant,
+    submitted_color: Option<Option<ColorVariant>>,
 }
 
 impl Default for Panel {
@@ -43,6 +46,9 @@ impl Default for Panel {
             pending: None,
             destination_identity: None,
             status: String::new(),
+            color_variant_enabled: false,
+            color_variant: default_color_variant(),
+            submitted_color: None,
         }
     }
 }
@@ -66,6 +72,7 @@ impl Panel {
             Err(TryRecvError::Empty) => return None,
             Err(TryRecvError::Disconnected) => {
                 self.pending = None;
+                self.submitted_color = None;
                 self.license_acknowledged = false;
                 self.destination_identity = None;
                 self.status = "Model import worker disconnected before returning a result. Publication may have completed; inspect the destination before retrying. No automatic retry.".into();
@@ -74,7 +81,13 @@ impl Panel {
         };
         self.pending = None;
         self.license_acknowledged = false;
-        let is_current = project_root == Some(completion.project_root.as_path())
+        let submitted_color = self.submitted_color.take().unwrap_or(None);
+        let color_is_current = self
+            .color_request()
+            .ok()
+            .is_some_and(|color| color == submitted_color);
+        let is_current = color_is_current
+            && project_root == Some(completion.project_root.as_path())
             && project_generation == completion.project_generation
             && source_generation == completion.source_generation
             && self.source_format == completion.source_format;
@@ -84,7 +97,7 @@ impl Panel {
             {
                 self.destination_identity = Some(report.root.clone());
                 self.status = format!(
-                    "Imported {}/{} ({:?}). Source SHA-256: {}; license SHA-256: {}. The package is not installed or assigned; preview and add it explicitly.",
+                    "Imported {}/{} ({:?}). Asset SHA-256: {}; license SHA-256: {}. The package is not installed or assigned; preview and add it explicitly.",
                     report.package,
                     report.asset,
                     report.kind,
@@ -144,7 +157,7 @@ impl Panel {
             .default_open(false)
             .show(ui, |ui| {
                 ui.label("Import a local self-contained GLB, cooked static model or cooked animated model and a license file into a new package folder.");
-                ui.label("Cooked models retain their exact bytes and historical dependency digests; those dependencies are not loaded or added to the package.");
+                ui.label("Cooked import preserves exact bytes unless you explicitly create an animated color variant. Historical dependencies are not loaded or added to the package.");
                 ui.label("External resources, scripts, network access and package activation are not supported.");
                 ui.label("A supplied license file is metadata only; its presence is not legal review or a rights determination.");
                 let fields_enabled = enabled && !self.busy();
@@ -172,6 +185,7 @@ impl Panel {
                     path_field(ui, "Package destination directory", &mut self.destination);
                     text_field(ui, "Package name", &mut self.name, 128);
                     text_field(ui, "Package version", &mut self.version, 128);
+                    let old_kind = self.kind;
                     ui.horizontal(|ui| {
                         ui.add_enabled_ui(self.source_format != SourceFormat::CookedAnimated, |ui| {
                             ui.radio_value(&mut self.kind, ModelKind::Static, "Static model");
@@ -183,6 +197,22 @@ impl Panel {
                         #[cfg(not(feature = "room-animated-models"))]
                         ui.add_enabled(false, egui::RadioButton::new(false, "Animated model"));
                     });
+                    if old_kind != self.kind { self.reset_color_variant(); self.source_inputs_changed(); }
+                    if cfg!(feature = "room-animated-models") && self.source_format == SourceFormat::CookedAnimated && self.kind == ModelKind::Animated {
+                        let old = (self.color_variant_enabled, self.color_variant.clone());
+                        ui.checkbox(&mut self.color_variant_enabled, "Create animated color variant");
+                        if self.color_variant_enabled {
+                            ui.weak("Replace one material's linear-light RGB factor (0..1). Texture, alpha and animation stay unchanged; this is not an sRGB color picker.");
+                            ui.horizontal(|ui| { let label=ui.label("Variant material index");
+                                ui.add(egui::DragValue::new(&mut self.color_variant.material)).labelled_by(label.id); });
+                            // Stable labels let keyboard/accessibility editing use the actual numeric fields.
+                            for (index,label) in ["Variant linear R (0..1)","Variant linear G (0..1)","Variant linear B (0..1)"].into_iter().enumerate() {
+                                ui.horizontal(|ui| { let label=ui.label(label); ui.add(egui::DragValue::new(&mut self.color_variant.linear_rgb[index]).speed(0.01).range(0.0..=1.0)).labelled_by(label.id); });
+                            }
+                            text_field(ui,"Variant asset ID",&mut self.color_variant.asset_id,240);
+                        }
+                        if old != (self.color_variant_enabled,self.color_variant.clone()) { self.source_inputs_changed(); }
+                    }
                     ui.checkbox(
                         &mut self.license_acknowledged,
                         "I have reviewed rights to distribute this content",
@@ -209,7 +239,8 @@ impl Panel {
                     && !self.destination.trim().is_empty()
                     && !self.name.trim().is_empty()
                     && !self.version.trim().is_empty()
-                    && compatible_kind;
+                    && compatible_kind
+                    && self.color_request().is_ok();
                 let import_label = match self.source_format {
                     SourceFormat::RawGlb => "Import raw GLB package",
                     SourceFormat::CookedStatic => "Import cooked static package",
@@ -252,6 +283,14 @@ impl Panel {
         if self.busy() {
             return;
         }
+        let color = match self.color_request() {
+            Ok(color) => color,
+            Err(error) => {
+                self.status = error;
+                return;
+            }
+        };
+        let submitted_color = color.clone();
         let request = self.request();
         let source_format = request.source_format;
         let (sender, receiver) = mpsc::channel();
@@ -259,7 +298,10 @@ impl Panel {
             .name("orr-model-package-import".into())
             .spawn(move || {
                 let expected_destination = request_destination(&request.destination);
-                let result = model_package_import::import_package(request);
+                let result = match color {
+                    Some(color) => model_package_import::import_color_variant(request, color),
+                    None => model_package_import::import_package(request),
+                };
                 let _ = sender.send(Completion {
                     source_format,
                     project_root,
@@ -272,6 +314,7 @@ impl Panel {
             Ok(_) => {
                 self.destination_identity = None;
                 self.pending = Some(receiver);
+                self.submitted_color = Some(submitted_color);
                 self.status = match source_format {
                     SourceFormat::RawGlb => {
                         "Importing and validating the self-contained GLB on a worker…"
@@ -302,6 +345,7 @@ impl Panel {
                 SourceFormat::CookedAnimated => self.kind = ModelKind::Animated,
                 SourceFormat::RawGlb => {}
             }
+            self.reset_color_variant();
             self.source_inputs_changed();
         }
     }
@@ -309,6 +353,33 @@ impl Panel {
     fn source_inputs_changed(&mut self) {
         self.license_acknowledged = false;
         self.destination_identity = None;
+    }
+
+    fn reset_color_variant(&mut self) {
+        self.color_variant_enabled = false;
+        self.color_variant = default_color_variant();
+    }
+
+    fn color_request(&self) -> Result<Option<ColorVariant>, String> {
+        if !self.color_variant_enabled {
+            return Ok(None);
+        }
+        if !cfg!(feature = "room-animated-models")
+            || self.source_format != SourceFormat::CookedAnimated
+            || self.kind != ModelKind::Animated
+        {
+            return Err("Animated color variants require Cooked animated model mode and room-animated-models support".into());
+        }
+        if self.color_variant.asset_id.trim().is_empty()
+            || !self
+                .color_variant
+                .linear_rgb
+                .iter()
+                .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
+        {
+            return Err("Provide a variant asset ID and finite linear RGB values in 0..1".into());
+        }
+        Ok(Some(self.color_variant.clone()))
     }
 
     fn request(&self) -> Request {
@@ -372,3 +443,15 @@ mod tests;
 #[cfg(test)]
 #[path = "model_package_import_panel/cooked_animated_tests.rs"]
 mod cooked_animated_tests;
+
+fn default_color_variant() -> ColorVariant {
+    ColorVariant {
+        material: 0,
+        linear_rgb: [1.0; 3],
+        asset_id: "variants/color.recolor.json".into(),
+    }
+}
+
+#[cfg(test)]
+#[path = "model_package_import_panel/animated_color_tests.rs"]
+mod animated_color_tests;
