@@ -444,13 +444,15 @@ impl Panel {
 
                 if self.candidate.point_light.is_some() {
                     egui::ComboBox::from_label("Light activation")
-                        .selected_text(match self.candidate.activation {None=>"Always",Some(orr_sample::room_lighting::Activation::KeyCollected)=>"Key collected",Some(orr_sample::room_lighting::Activation::Escaped)=>"Escaped"})
+                        .selected_text(match self.candidate.activation {None=>"Always",Some(orr_sample::room_lighting::Activation::KeyCollected)=>"Key collected",Some(orr_sample::room_lighting::Activation::Escaped)=>"Escaped",Some(orr_sample::room_lighting::Activation::KeyMissing)=>"Before key pickup",Some(orr_sample::room_lighting::Activation::BeforeEscape)=>"Before escape"})
                         .show_ui(ui,|ui| {
                             ui.selectable_value(&mut self.candidate.activation,None,"Always");
                             ui.selectable_value(&mut self.candidate.activation,Some(orr_sample::room_lighting::Activation::KeyCollected),"Key collected");
                             ui.selectable_value(&mut self.candidate.activation,Some(orr_sample::room_lighting::Activation::Escaped),"Escaped");
+                            ui.selectable_value(&mut self.candidate.activation,Some(orr_sample::room_lighting::Activation::KeyMissing),"Before key pickup");
+                            ui.selectable_value(&mut self.candidate.activation,Some(orr_sample::room_lighting::Activation::BeforeEscape),"Before escape");
                         });
-                    ui.weak("Edit previews the light; Play enables it only after the selected actual game state. Key collected also remains active after escape.");
+                    ui.weak("Edit previews the light; Play uses the selected actual game state. Before choices turn off at pickup or escape; Key collected remains active after escape.");
                     let mut follow=self.candidate.follow_player.is_some();
                     if ui.checkbox(&mut follow,"Carry light with player").changed() {self.candidate.follow_player=follow.then_some([0.0,2.0,0.0]);}
                     if let Some(offset)=self.candidate.follow_player.as_mut() {

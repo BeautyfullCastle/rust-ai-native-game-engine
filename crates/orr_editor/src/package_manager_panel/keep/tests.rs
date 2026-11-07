@@ -29,3 +29,28 @@ fn advanced_profile_widgets_keep_dependency_and_source_hidden_export_runs_actual
     let mut sim=prepared.scene().simulation().unwrap();for _ in 0..8 {let mut inputs=orr_sim::TickInputs::new(sim.tick()+1,1);inputs.set_input(orr_sim::PlayerSlot(0),orr_sample::room_game::RoomInput {move_x:1,buttons:orr_sample::room_game::INTERACT,..Default::default()});sim.step(&inputs);}let expected=format!("room tick: 8 checksum: 0x{:016x}",sim.frame().checksum());
     let runtime=f.base.temp.path().join("trusted keep runtime");std::fs::copy(PathBuf::from(std::env::var_os("ORR_EDITOR_KEEP_RUNTIME").expect("explicit runtime")),&runtime).unwrap();let hash:String=Sha256::digest(std::fs::read(&runtime).unwrap()).iter().map(|b|format!("{b:02x}")).collect();let bundle=f.base.temp.path().join("retained dependency game");orr_sample::project_export::export_room(&orr_sample::project_export::ExportOptions {project:f.base.root.clone(),runtime:runtime.clone(),runtime_sha256:hash,output:bundle.clone(),trusted_runtime:true,source_revision:None}).unwrap();std::fs::rename(&f.base.root,f.base.root.with_extension("hidden")).unwrap();std::fs::rename(&runtime,runtime.with_extension("hidden")).unwrap();let output=Command::new(bundle.join("run-room-escape")).current_dir(f.base.temp.path()).args(["--headless","--ticks","8","--hold","right,interact","--check-model-poses"]).env_remove("DISPLAY").env_remove("WAYLAND_DISPLAY").output().unwrap();assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));let text=String::from_utf8(output.stdout).unwrap();assert!(text.contains(&expected));assert!(text.contains("room model poses: 9 frames checked;"));assert!(text.contains("room lighting active: 1"));
 }
+
+// Preserve the original pointer route separately from accessibility acceptance.
+#[test]
+fn pointer_route_diagnoses_each_keep_stage() {
+    let f=fixture(false);let mut h=harness(&f);settle(&mut h);
+    for label in ["Verify installed packages".to_owned(),format!("Select keep {}",f.name),"Preview dependency keep".to_owned(),"Keep previewed dependency".to_owned()] {
+        h.get_by_label(&label).scroll_to_me();h.run_steps(2);
+        let early=h.get_by_label(&label).rect();h.run_steps(30);
+        eprintln!("scroll settled stage={label} early={early:?} final={:?}",h.get_by_label(&label).rect());
+        let rect=h.get_by_label(&label).rect();
+        eprintln!("pointer stage={label} rect={rect:?} status={}",h.state().0.status);
+        assert!(!h.get_by_label(&label).accesskit_node().is_disabled(),"disabled: {label}");
+        h.get_by_label(&label).click();settle(&mut h);
+        if label.starts_with("Select keep") {assert_eq!(h.state().0.keep.name,f.name,"pointer selection failed at {rect:?}");}
+        else {
+            let end=Instant::now()+Duration::from_secs(10);
+            loop {settle(&mut h);let p=&h.state().0;
+                let ready=match label.as_str() {"Verify installed packages"=>!p.busy()&&p.verified.is_some(),"Preview dependency keep"=>!p.busy()&&p.keep_ready(),_=>!p.busy()&&p.status.contains(" kept for ")};
+                if ready {break;}
+                assert!(Instant::now()<end,"pointer stage={label} rect={rect:?} pending={} verified={} selected={} ready={}: {}",p.busy(),p.verified.is_some(),p.keep.name,p.keep.ready.is_some(),p.status);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+}

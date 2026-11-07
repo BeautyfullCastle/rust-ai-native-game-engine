@@ -24,9 +24,9 @@ In Play, editor presentation, native drawing and captures resolve the sole curre
 
 ## Activate from actual gameplay
 
-With the light enabled, **Light activation** selects **Always**, **Key collected** or **Escaped**. Apply and Save the choice. Conditional documents use version3 with required `"activation":"key_collected"` or `"activation":"escaped"`; the existing optional `follow_player` array combines with either condition. **Always** removes the condition and returns to version1 (fixed) or2 (carried).
+With the light enabled, **Light activation** selects **Always**, **Key collected**, **Escaped**, **Before key pickup** or **Before escape**. Apply and Save the choice. Conditional documents use version3 with required `"activation":"key_collected"` or `"activation":"escaped"` (the Before choices use `"key_missing"` and `"before_escape"`); the existing optional `follow_player` array combines with any condition. **Always** removes the condition and returns to version1 (fixed) or2 (carried).
 
-Edit/Stop previews the authored light. Play reads actual `RoomRun` from the same rendering Frame: Key collected enables once `key_collected != 0` and remains enabled after escape; Escaped requires `won != 0`. No interaction key or elapsed tick substitutes for those outcomes. Seek/restart to before pickup/victory disables it again, without an event journal. Invalid settings and carried body data still reject while inactive. Disabling the light clears both carry and activation.
+Edit/Stop previews the authored light. Play reads actual `RoomRun` from the same rendering Frame: Key collected enables once `key_collected != 0` and remains enabled after escape; Escaped requires `won != 0`. Before key pickup stays active while `key_collected == 0`; Before escape stays active while `won == 0`, including after pickup. Seeking/restarting before the outcome restores these lights. No interaction key or elapsed tick substitutes for those outcomes. Seek/restart to before pickup/victory disables Key collected/Escaped again, without an event journal. Invalid settings and carried body data still reject while inactive. Disabling the light clears both carry and activation.
 
 ## Admission and persistence
 

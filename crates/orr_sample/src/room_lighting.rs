@@ -14,12 +14,13 @@ pub struct Document {
 /// Gates actual Play lighting. Edit always previews the authored light.
 #[derive(Clone,Copy,Debug,PartialEq,Eq,Serialize)]
 #[serde(rename_all="snake_case")]
-pub enum Activation { KeyCollected, Escaped }
+pub enum Activation { KeyCollected, Escaped, KeyMissing, BeforeEscape }
 impl<'de> Deserialize<'de> for Activation {
     fn deserialize<D:Deserializer<'de>>(d:D)->Result<Self,D::Error> {
         match String::deserialize(d)?.as_str() {
             "key_collected"=>Ok(Self::KeyCollected),"escaped"=>Ok(Self::Escaped),
-            _=>Err(serde::de::Error::custom("activation must be key_collected or escaped")),
+            "key_missing"=>Ok(Self::KeyMissing),"before_escape"=>Ok(Self::BeforeEscape),
+            _=>Err(serde::de::Error::custom("activation must be key_collected, escaped, key_missing or before_escape")),
         }
     }
 }
@@ -100,7 +101,7 @@ impl Document {
         }
         if let Some(activation)=self.activation {
             let run=frame.singleton::<crate::room_game::RoomRun>();
-            let active=match activation {Activation::KeyCollected=>run.key_collected!=0,Activation::Escaped=>run.won!=0};
+            let active=match activation {Activation::KeyCollected=>run.key_collected!=0,Activation::Escaped=>run.won!=0,Activation::KeyMissing=>run.key_collected==0,Activation::BeforeEscape=>run.won==0};
             if !active {settings.point_light=None;}
         }
         settings.validate().map_err(|e|e.to_string())?;
