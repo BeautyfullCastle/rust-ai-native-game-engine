@@ -1,4 +1,6 @@
-use crate::model_package_import::{self, ColorVariant, Report, Request, SourceFormat};
+use crate::model_package_import::{
+    self, ColorVariant, Report, Request, SourceFormat, TextureVariant,
+};
 use egui::Ui;
 use orr_model_bindings::model_bindings::ModelKind;
 use std::{
@@ -30,6 +32,9 @@ pub struct Panel {
     color_variant_enabled: bool,
     color_variant: ColorVariant,
     submitted_color: Option<Option<ColorVariant>>,
+    texture_variant_enabled: bool,
+    texture_variant: TextureVariant,
+    submitted_texture: Option<Option<TextureVariant>>,
 }
 
 impl Default for Panel {
@@ -49,6 +54,9 @@ impl Default for Panel {
             color_variant_enabled: false,
             color_variant: default_color_variant(),
             submitted_color: None,
+            texture_variant_enabled: false,
+            texture_variant: default_texture_variant(),
+            submitted_texture: None,
         }
     }
 }
@@ -73,6 +81,7 @@ impl Panel {
             Err(TryRecvError::Disconnected) => {
                 self.pending = None;
                 self.submitted_color = None;
+                self.submitted_texture = None;
                 self.license_acknowledged = false;
                 self.destination_identity = None;
                 self.status = "Model import worker disconnected before returning a result. Publication may have completed; inspect the destination before retrying. No automatic retry.".into();
@@ -86,7 +95,13 @@ impl Panel {
             .color_request()
             .ok()
             .is_some_and(|color| color == submitted_color);
-        let is_current = color_is_current
+        let submitted_texture = self.submitted_texture.take().unwrap_or(None);
+        let texture_is_current = self
+            .texture_request()
+            .ok()
+            .is_some_and(|texture| texture == submitted_texture);
+        let is_current = texture_is_current
+            && color_is_current
             && project_root == Some(completion.project_root.as_path())
             && project_generation == completion.project_generation
             && source_generation == completion.source_generation
@@ -157,7 +172,7 @@ impl Panel {
             .default_open(false)
             .show(ui, |ui| {
                 ui.label("Import a local self-contained GLB, cooked static model or cooked animated model and a license file into a new package folder.");
-                ui.label("Cooked import preserves exact bytes unless you explicitly create an animated color variant. Historical dependencies are not loaded or added to the package.");
+                ui.label("Cooked import preserves exact bytes unless you explicitly create an animated color variant or PNG skin. Historical dependencies are not loaded or added to the package.");
                 ui.label("External resources, scripts, network access and package activation are not supported.");
                 ui.label("A supplied license file is metadata only; its presence is not legal review or a rights determination.");
                 let fields_enabled = enabled && !self.busy();
@@ -179,6 +194,7 @@ impl Panel {
                     };
                     let source_changed = path_field(ui, source_label, &mut self.source);
                     let license_changed = path_field(ui, "License file", &mut self.license);
+                    if source_changed { self.reset_color_variant(); }
                     if source_changed || license_changed {
                         self.source_inputs_changed();
                     }
@@ -199,8 +215,9 @@ impl Panel {
                     });
                     if old_kind != self.kind { self.reset_color_variant(); self.source_inputs_changed(); }
                     if cfg!(feature = "room-animated-models") && self.source_format == SourceFormat::CookedAnimated && self.kind == ModelKind::Animated {
-                        let old = (self.color_variant_enabled, self.color_variant.clone());
-                        ui.checkbox(&mut self.color_variant_enabled, "Create animated color variant");
+                        let old = (self.color_variant_enabled, self.color_variant.clone(), self.texture_variant_enabled, self.texture_variant.clone());
+                        if ui.checkbox(&mut self.color_variant_enabled, "Create animated color variant").changed() && self.color_variant_enabled { self.texture_variant_enabled=false; }
+                        if ui.checkbox(&mut self.texture_variant_enabled, "Create animated PNG skin").changed() && self.texture_variant_enabled { self.color_variant_enabled=false; }
                         if self.color_variant_enabled {
                             ui.weak("Replace one material's linear-light RGB factor (0..1). Texture, alpha and animation stay unchanged; this is not an sRGB color picker.");
                             ui.horizontal(|ui| { let label=ui.label("Variant material index");
@@ -211,7 +228,15 @@ impl Panel {
                             }
                             text_field(ui,"Variant asset ID",&mut self.color_variant.asset_id,240);
                         }
-                        if old != (self.color_variant_enabled,self.color_variant.clone()) { self.source_inputs_changed(); }
+                        if self.texture_variant_enabled {
+                            let mut texture = self.texture_variant.texture.to_string_lossy().into_owned();
+                            path_field(ui,"Variant PNG file",&mut texture);
+                            self.texture_variant.texture=PathBuf::from(texture);
+                            ui.horizontal(|ui| { let label=ui.label("Variant material index");ui.add(egui::DragValue::new(&mut self.texture_variant.material)).labelled_by(label.id); });
+                            text_field(ui,"Variant asset ID",&mut self.texture_variant.asset_id,240);
+                            ui.weak("Replace one material's embedded PNG image. The rights acknowledgement below covers this PNG as well as the model and license.");
+                        }
+                        if old != (self.color_variant_enabled,self.color_variant.clone(),self.texture_variant_enabled,self.texture_variant.clone()) { self.source_inputs_changed(); }
                     }
                     ui.checkbox(
                         &mut self.license_acknowledged,
@@ -240,7 +265,8 @@ impl Panel {
                     && !self.name.trim().is_empty()
                     && !self.version.trim().is_empty()
                     && compatible_kind
-                    && self.color_request().is_ok();
+                    && self.color_request().is_ok()
+                    && self.texture_request().is_ok();
                 let import_label = match self.source_format {
                     SourceFormat::RawGlb => "Import raw GLB package",
                     SourceFormat::CookedStatic => "Import cooked static package",
@@ -290,6 +316,14 @@ impl Panel {
                 return;
             }
         };
+        let texture = match self.texture_request() {
+            Ok(texture) => texture,
+            Err(error) => {
+                self.status = error;
+                return;
+            }
+        };
+        let submitted_texture = texture.clone();
         let submitted_color = color.clone();
         let request = self.request();
         let source_format = request.source_format;
@@ -298,9 +332,15 @@ impl Panel {
             .name("orr-model-package-import".into())
             .spawn(move || {
                 let expected_destination = request_destination(&request.destination);
-                let result = match color {
-                    Some(color) => model_package_import::import_color_variant(request, color),
-                    None => model_package_import::import_package(request),
+                let result = match (color, texture) {
+                    (Some(color), None) => {
+                        model_package_import::import_color_variant(request, color)
+                    }
+                    (None, Some(texture)) => {
+                        model_package_import::import_texture_variant(request, texture)
+                    }
+                    (None, None) => model_package_import::import_package(request),
+                    _ => Err("Select only one animated authoring operation".into()),
                 };
                 let _ = sender.send(Completion {
                     source_format,
@@ -315,6 +355,7 @@ impl Panel {
                 self.destination_identity = None;
                 self.pending = Some(receiver);
                 self.submitted_color = Some(submitted_color);
+                self.submitted_texture = Some(submitted_texture);
                 self.status = match source_format {
                     SourceFormat::RawGlb => {
                         "Importing and validating the self-contained GLB on a worker…"
@@ -358,9 +399,36 @@ impl Panel {
     fn reset_color_variant(&mut self) {
         self.color_variant_enabled = false;
         self.color_variant = default_color_variant();
+        self.texture_variant_enabled = false;
+        self.texture_variant = default_texture_variant();
+    }
+
+    fn texture_request(&self) -> Result<Option<TextureVariant>, String> {
+        if !self.texture_variant_enabled {
+            return Ok(None);
+        }
+        if self.color_variant_enabled
+            || !cfg!(feature = "room-animated-models")
+            || self.source_format != SourceFormat::CookedAnimated
+            || self.kind != ModelKind::Animated
+        {
+            return Err(
+                "PNG skins require only Cooked animated PNG mode and room-animated-models support"
+                    .into(),
+            );
+        }
+        if self.texture_variant.texture.as_os_str().is_empty()
+            || self.texture_variant.asset_id.trim().is_empty()
+        {
+            return Err("Provide a variant PNG file and asset ID".into());
+        }
+        Ok(Some(self.texture_variant.clone()))
     }
 
     fn color_request(&self) -> Result<Option<ColorVariant>, String> {
+        if self.texture_variant_enabled && self.color_variant_enabled {
+            return Err("Select only one animated authoring operation".into());
+        }
         if !self.color_variant_enabled {
             return Ok(None);
         }
@@ -455,3 +523,14 @@ fn default_color_variant() -> ColorVariant {
 #[cfg(test)]
 #[path = "model_package_import_panel/animated_color_tests.rs"]
 mod animated_color_tests;
+
+fn default_texture_variant() -> TextureVariant {
+    TextureVariant {
+        material: 0,
+        texture: PathBuf::new(),
+        asset_id: "variants/skin.retexture.json".into(),
+    }
+}
+#[cfg(test)]
+#[path = "model_package_import_panel/animated_texture_tests.rs"]
+mod animated_texture_tests;

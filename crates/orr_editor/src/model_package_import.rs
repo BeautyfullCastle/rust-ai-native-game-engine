@@ -62,6 +62,18 @@ pub(crate) struct ColorVariant {
     pub asset_id: String,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TextureVariant {
+    pub material: u32,
+    pub texture: PathBuf,
+    pub asset_id: String,
+}
+
+enum AuthoringVariant {
+    Color(ColorVariant),
+    Texture(TextureVariant),
+}
+
 pub(crate) struct Report {
     pub root: PathBuf,
     pub package: String,
@@ -99,7 +111,74 @@ pub(crate) fn import_color_variant(
         );
     }
     validate_color_variant(&variant)?;
-    import_package_inner(request, Some(variant))
+    import_package_inner(request, Some(AuthoringVariant::Color(variant)))
+}
+
+pub(crate) fn import_texture_variant(
+    request: Request,
+    variant: TextureVariant,
+) -> Result<Report, String> {
+    if !request.license_acknowledged {
+        return Err("explicit license acknowledgement is required".into());
+    }
+    if request.source_format != SourceFormat::CookedAnimated || request.kind != ModelKind::Animated
+    {
+        return Err(
+            "texture variant requires CookedAnimated source and Animated model mode".into(),
+        );
+    }
+    if !cfg!(feature = "room-animated-models") {
+        return Err(
+            "texture variant requires room-animated-models; no input or destination opened".into(),
+        );
+    }
+    validate_texture_variant(&variant)?;
+    import_package_inner(request, Some(AuthoringVariant::Texture(variant)))
+}
+
+fn validate_texture_variant(variant: &TextureVariant) -> Result<(), String> {
+    validate_variant_identity(&variant.asset_id, ".retexture.json")?;
+    validate_path_shape(&variant.texture, "PNG texture")?;
+    if !variant
+        .texture
+        .extension()
+        .and_then(|v| v.to_str())
+        .is_some_and(|v| v.eq_ignore_ascii_case("png"))
+    {
+        return Err("texture variant requires a .png file".into());
+    }
+    Ok(())
+}
+
+fn texture_variant_bytes(
+    source: &[u8],
+    png: &[u8],
+    variant: &TextureVariant,
+) -> Result<Vec<u8>, String> {
+    #[cfg(feature = "room-animated-models")]
+    {
+        let recipe = serde_json::to_vec(
+            &serde_json::json!({"format":"orr_animated_material_texture","version":1,
+            "source":"input.animated.json","texture":"input.png","material":variant.material}),
+        )
+        .map_err(|e| format!("texture recipe: {e}"))?;
+        let model =
+            orr_model::animated_retexture::retexture_model(&recipe, &variant.asset_id, |path| {
+                match path {
+                    "input.animated.json" => Ok(source.to_vec()),
+                    "input.png" => Ok(png.to_vec()),
+                    _ => Err("unexpected texture variant dependency".into()),
+                }
+            })?;
+        model
+            .to_bytes()
+            .map_err(|e| format!("texture variant cook: {e}"))
+    }
+    #[cfg(not(feature = "room-animated-models"))]
+    {
+        let _ = (source, png, variant);
+        Err("texture variant requires room-animated-models".into())
+    }
 }
 
 fn validate_color_variant(variant: &ColorVariant) -> Result<(), String> {
@@ -110,15 +189,20 @@ fn validate_color_variant(variant: &ColorVariant) -> Result<(), String> {
     {
         return Err("linear_rgb must contain three finite linear-light values in 0..=1".into());
     }
-    let id = &variant.asset_id;
+    validate_variant_identity(&variant.asset_id, ".recolor.json")
+}
+
+fn validate_variant_identity(id: &str, suffix: &str) -> Result<(), String> {
     if id.is_empty()
         || id.len() > 240
-        || !id.ends_with(".recolor.json")
+        || !id.ends_with(suffix)
         || !id
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"-._/".contains(&b))
     {
-        return Err("variant identity must be a portable relative ASCII .recolor.json path of at most 240 bytes".into());
+        return Err(format!(
+            "variant identity must be a portable relative ASCII {suffix} path of at most 240 bytes"
+        ));
     }
     for part in id.split('/') {
         let device = part.split('.').next().unwrap_or("").to_ascii_uppercase();
@@ -165,7 +249,10 @@ fn color_variant_bytes(source: &[u8], variant: &ColorVariant) -> Result<Vec<u8>,
     }
 }
 
-fn import_package_inner(request: Request, variant: Option<ColorVariant>) -> Result<Report, String> {
+fn import_package_inner(
+    request: Request,
+    variant: Option<AuthoringVariant>,
+) -> Result<Report, String> {
     if !request.license_acknowledged {
         return Err("explicit license acknowledgement is required".into());
     }
@@ -237,9 +324,16 @@ fn import_package_inner(request: Request, variant: Option<ColorVariant>) -> Resu
     }
 
     if let Some(variant) = variant {
-        let bytes = color_variant_bytes(&source.bytes, &variant)?;
+        let bytes = match variant {
+            AuthoringVariant::Color(spec) => color_variant_bytes(&source.bytes, &spec)?,
+            AuthoringVariant::Texture(spec) => {
+                let path = checked_file_path(&spec.texture, "PNG texture")?;
+                let png = read_bounded_file(&path, MAX_SOURCE_BYTES, "PNG texture")?;
+                texture_variant_bytes(&source.bytes, &png.bytes, &spec)?
+            }
+        };
         if bytes.len() as u64 > MAX_SOURCE_BYTES {
-            return Err("color variant cooked output exceeds 64 MiB limit".into());
+            return Err("authored variant cooked output exceeds 64 MiB limit".into());
         }
         source = InputBytes {
             digest: digest(&bytes),
@@ -647,3 +741,7 @@ mod cooked_animated_tests;
 #[cfg(test)]
 #[path = "model_package_import/animated_color_tests.rs"]
 mod animated_color_tests;
+
+#[cfg(test)]
+#[path = "model_package_import/animated_texture_tests.rs"]
+mod animated_texture_tests;
