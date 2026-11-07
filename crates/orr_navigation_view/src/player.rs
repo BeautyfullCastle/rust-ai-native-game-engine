@@ -100,6 +100,9 @@ pub enum Command {
 }
 pub fn capabilities() -> &'static str {
     if orr_games::navigation_yard3d_game::TERRAIN_PATROL_ENABLED {
+        if cfg!(all(feature = "terrain-patrol-bundle", target_arch = "x86_64")) {
+            return "ORR_TERRAIN_PATROL_SCENE_PLAYER_V1\nORR_TERRAIN_PATROL_BUNDLE_V1";
+        }
         return "ORR_TERRAIN_PATROL_SCENE_PLAYER_V1";
     }
     if cfg!(all(feature = "authored-bundle", target_arch = "x86_64")) {
@@ -127,7 +130,9 @@ pub fn parse_command(args: impl IntoIterator<Item = OsString>) -> Result<Option<
     let mut i = 0;
     while i < bounded.len() {
         if bounded[i] == "--bundle" {
-            if orr_games::navigation_yard3d_game::TERRAIN_PATROL_ENABLED {
+            if orr_games::navigation_yard3d_game::TERRAIN_PATROL_ENABLED
+                && !cfg!(feature = "terrain-patrol-bundle")
+            {
                 return Err("legacy navigation bundle does not support terrain patrol profile".into());
             }
             if !cfg!(all(feature = "authored-bundle", target_arch = "x86_64")) {
@@ -157,7 +162,9 @@ pub fn parse_command(args: impl IntoIterator<Item = OsString>) -> Result<Option<
         .transpose()
 }
 pub fn run_bundle(options: Options) -> Result<serde_json::Value, String> {
-    if orr_games::navigation_yard3d_game::TERRAIN_PATROL_ENABLED {
+    if orr_games::navigation_yard3d_game::TERRAIN_PATROL_ENABLED
+        && !cfg!(feature = "terrain-patrol-bundle")
+    {
         return Err("legacy navigation bundle does not support terrain patrol profile".into());
     }
     if options.capture.is_some() {
@@ -305,6 +312,24 @@ fn run_player(
         "limitations":"terrain-triangle point agent; no radius clearance, dynamic avoidance, physics collision or window input",
         "capture":capture_receipt
     });
+    #[cfg(feature = "terrain-patrol")]
+    let result = {
+        let mut result = result;
+        let patrol = orr_remote::navigation_yard3d::patrol::from_view(
+            orr_bridge::FrameView::of(player.frame()),
+        )?;
+        result["profile"] = "NavigationYard3DPatrolV1".into();
+        result["patrol"] = match patrol {
+            Some(patrol) => serde_json::json!({
+                "enabled":patrol.config.enabled,"count":patrol.config.count,
+                "looped":patrol.config.looped,"wait_ticks":patrol.config.wait_ticks,
+                "cursor":patrol.run.cursor,"wait_remaining":patrol.run.wait_remaining,
+                "completed":patrol.run.completed,"arrived":patrol.run.arrived,"cycled":patrol.run.cycled,
+            }),
+            None => serde_json::Value::Null,
+        };
+        result
+    };
     Ok(result)
 }
 
@@ -370,3 +395,7 @@ fn capture_png(
         serde_json::json!({"path":path,"width":size.0,"height":size.1,"rgba_bytes":pixels.len(),"png_bytes":encoded.len(),"adapter":gpu.adapter_name(),"software":gpu.is_software(),"offscreen":true}),
     )
 }
+
+#[cfg(all(test,feature="terrain-patrol-bundle",target_arch="x86_64"))]
+#[path="player/patrol_bundle_tests.rs"]
+mod patrol_bundle_tests;

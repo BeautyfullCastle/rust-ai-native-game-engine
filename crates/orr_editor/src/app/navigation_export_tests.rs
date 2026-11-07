@@ -197,9 +197,12 @@ fn outer_early_return_poll_and_normal_teardown_join() {
     let until = Instant::now() + Duration::from_secs(10);
     while app.navigation_export.busy() {
         assert!(Instant::now() < until);
-        let _ = ctx.run_ui(Default::default(), |ui| {
+        let mut output = ctx.run_ui(Default::default(), |ui| {
             app.with_close_review(ui, |_, _| {});
         });
+        // This CPU lifecycle test has no renderer to consume font textures.
+        // Explicitly discard the delta before FullOutput is dropped.
+        output.textures_delta.clear();
         thread::sleep(Duration::from_millis(1));
     }
     let release = synthetic_job(&mut app, dir.path());
