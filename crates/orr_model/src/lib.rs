@@ -32,6 +32,10 @@ pub mod animated_recolor;
 #[path = "authoring/animated_retexture.rs"]
 pub mod animated_retexture;
 
+#[cfg(all(feature = "animation", feature = "import"))]
+#[path = "authoring/animated_sampler.rs"]
+pub mod animated_sampler;
+
 pub const MAX_FILE_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_DECODED_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_VERTICES: usize = 250_000;
