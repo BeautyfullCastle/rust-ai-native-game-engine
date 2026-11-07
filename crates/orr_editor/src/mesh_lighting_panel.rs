@@ -902,3 +902,7 @@ mod post_process_tests;
 #[cfg(test)]
 #[path = "mesh_lighting_panel/shadow_fit_panel_tests.rs"]
 mod shadow_fit_panel_tests;
+
+#[cfg(all(test,feature="mesh-mission"))]
+#[path="mesh_lighting_panel/preset_effects_integration_tests.rs"]
+mod preset_effects_integration_tests;

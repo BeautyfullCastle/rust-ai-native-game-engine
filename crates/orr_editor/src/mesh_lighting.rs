@@ -2,7 +2,7 @@ use orr_render::Lighting;
 use serde::{Deserialize, Deserializer, Serialize};
 
 #[path = "mesh_lighting/post_process.rs"]
-mod post_process;
+pub(crate) mod post_process;
 #[path = "mesh_lighting/post_process_runtime.rs"]
 pub(crate) mod post_process_runtime;
 
