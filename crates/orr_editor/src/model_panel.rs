@@ -1136,8 +1136,7 @@ impl ModelPanel {
             return Err("Character searching clip and model binding differ".into());
         }
         let model = loaded.animated_model().ok_or("Character model is not animated")?;
-        if [character.searching, character.carrying, character.escaped].iter()
-            .any(|index| model.source().clips.get(*index as usize).is_none()) {
+        if character.mapped_clips().any(|index| model.source().clips.get(index as usize).is_none()) {
             return Err("Character mapping refers to an unavailable clip".into());
         }
         model.source().clips.iter().enumerate().map(|(index, clip)| {
