@@ -99,7 +99,7 @@ pub fn apply_add(plan: &Plan) -> Result<Lock, String> {
                         "Room project path identity changed before package publication".into(),
                     );
                 }
-                let prepared = orr_sample::room_project::PreparedProject::open(&root)?;
+                let prepared = open_room_project(&root)?;
                 if prepared.root() != root {
                     return Err("Room project root changed before package publication".into());
                 }
@@ -108,7 +108,7 @@ pub fn apply_add(plan: &Plan) -> Result<Lock, String> {
         )
         .map_err(|error| error.to_string())?;
 
-    let prepared = orr_sample::room_project::PreparedProject::open(&root).map_err(|error| {
+    let prepared = open_room_project(&root).map_err(|error| {
         format!(
             "package was installed at {} but Room re-admission failed; the package lock is retained: {error}",
             root.display()
@@ -138,12 +138,26 @@ pub fn apply_add(plan: &Plan) -> Result<Lock, String> {
 }
 
 fn room_runtime() -> Runtime {
-    orr_sample::room_project::compiled_runtime()
+    // Consent belongs to this editor, not unified dependency features.
+    let mut runtime=Runtime::content_only();runtime.capabilities.insert("models".into());
+    #[cfg(feature="room-animated-models")]
+    runtime.capabilities.insert("animation".into());
+    runtime
+}
+fn open_room_project(root:&Path)->Result<orr_sample::room_project::PreparedProject,String> {
+    // Validate the entire lock's editor-local inventory before decoding content.
+    Project::open(root,room_runtime()).and_then(|project|project.list()).map_err(|e|e.to_string())?;
+    let prepared=orr_sample::room_project::PreparedProject::open_with_capabilities(root,orr_sample::room_project::RoomProjectCapabilities {
+        lighting:cfg!(feature="room-lighting"),character:cfg!(feature="room-character"),
+    })?;
+    #[cfg(not(feature="room-animated-models"))]
+    if prepared.models().document.bindings.values().any(|binding|binding.kind==orr_model_bindings::model_bindings::ModelKind::Animated) {return Err("animated bindings require this editor's room-animated-models route".into());}
+    Ok(prepared)
 }
 
 fn open_room(root: &Path) -> Result<(PathBuf, Lock), String> {
     let root = checked_directory(root, "Room project")?;
-    let prepared = orr_sample::room_project::PreparedProject::open(&root)?;
+    let prepared = open_room_project(&root)?;
     if prepared.root() != root {
         return Err("Room project root changed during admission".into());
     }
@@ -462,7 +476,7 @@ mod tests {
         let root = room_root(temporary.path(), "room");
         let source = package_source(temporary.path(), "local-art", &["models"]);
         let before = inspect(&root).unwrap();
-        let prepared_before = orr_sample::room_project::PreparedProject::open(&root).unwrap();
+        let prepared_before = open_room_project(&root).unwrap();
         let checksum = prepared_before.scene().frame().checksum();
         let plan = plan_add(&root, &source).unwrap();
         assert_eq!(plan.preview.previous, before);
@@ -477,7 +491,7 @@ mod tests {
         }
         assert_eq!(installed.direct.get("local-art"), Some(&"1.0.0".to_owned()));
         assert_eq!(
-            orr_sample::room_project::PreparedProject::open(&root)
+            open_room_project(&root)
                 .unwrap()
                 .scene()
                 .frame()
@@ -533,3 +547,7 @@ mod tests {
         assert_eq!(inspect(&root).unwrap(), current);
     }
 }
+
+#[cfg(all(test,feature="project-create",target_os="linux"))]
+#[path="package_manager/presentation_tests.rs"]
+pub(crate) mod presentation_tests;

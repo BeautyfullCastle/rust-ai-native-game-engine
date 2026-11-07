@@ -607,3 +607,11 @@ fn failure_and_worker_disconnect_leave_no_report_or_mutation_authority() {
             .contains(if disconnect { "disconnected" } else { "failed" }));
     }
 }
+
+#[cfg(all(feature="project-create",feature="room-character",feature="room-lighting"))]
+#[test]
+fn saved_usage_explicitly_admits_character_and_lighting_without_widening_cli_defaults() {
+    let f=crate::package_manager::presentation_tests::fixture(true,true);let prepared=PreparedProject::open_with_capabilities(&f.root,orr_sample::room_project::RoomProjectCapabilities {lighting:true,character:true}).unwrap();let character=prepared.character().unwrap();let package=prepared.models().document.bindings[&character.document.player].package.clone();let lock=package_manager::inspect(&f.root).unwrap();let digest=lock.packages[&package].digest.clone();let expected=prepared.models().document.bindings.values().filter(|binding|binding.package==package).count();let before=snapshot(&f.root);
+    let identity=Identity {root:f.root.clone(),project_generation:1,generation:1,package:package.clone(),digest:digest.clone()};let report=inspect(&identity).unwrap();assert_eq!(report.bindings.len(),expected);assert_eq!(report.package.digest,digest);assert!(report.bindings.iter().all(|binding|binding.kind==ModelKind::Animated));assert_eq!(snapshot(&f.root),before);
+    let request=authoring::Request {project:f.root.clone(),package,digest};assert!(authoring::inspect_usage(&request).is_err());assert_eq!(snapshot(&f.root),before);
+}
