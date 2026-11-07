@@ -1,0 +1,58 @@
+name: Room lit character starter focused CI
+on:
+  push:
+    branches: [codex/room-lit-character-starter-20261107]
+permissions:
+  contents: read
+jobs:
+  light-activation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record exact source and prepare toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir ci-evidence
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git rev-parse HEAD HEAD^{tree} | tee ci-evidence/source.txt
+          rustup toolchain install 1.99.1 --profile minimal --component clippy
+          rustup override set 1.99.1
+          rustc --version --verbose | tee ci-evidence/rustc.txt
+          sudo apt-get update -q 2>&1 | tee ci-evidence/dependencies.log
+          sudo apt-get install -y -q pkg-config libasound2-dev libudev-dev libx11-dev libxkbcommon-dev libwayland-dev 2>&1 | tee -a ci-evidence/dependencies.log
+      - name: Complete animated lit Room creation to deployed game
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p orr_sample --features project-create,room-lighting --lib room_lit_starter::tests:: -- --test-threads=1 2>&1 | tee ci-evidence/creator-off.log
+          grep -F 'test result: ok. 6 passed; 0 failed; 0 ignored;' ci-evidence/creator-off.log
+          cargo test --locked -p orr_sample --features project-create,room-lighting --test room_lit_starter_cli -- --test-threads=1 2>&1 | tee ci-evidence/cli-off.log
+          grep -F 'test result: ok. 4 passed; 0 failed; 0 ignored;' ci-evidence/cli-off.log
+          cargo test --locked -p orr_sample --features project-create,room-lighting,room-character --lib room_lit_starter::tests:: -- --test-threads=1 2>&1 | tee ci-evidence/creator-on.log
+          grep -F 'test result: ok. 7 passed; 0 failed; 0 ignored;' ci-evidence/creator-on.log
+          cargo test --locked -p orr_sample --features project-create,room-lighting,room-character --test room_lit_starter_cli -- --test-threads=1 2>&1 | tee ci-evidence/cli-on.log
+          grep -F 'test result: ok. 4 passed; 0 failed; 0 ignored;' ci-evidence/cli-on.log
+          cargo build --locked -p orr_sample --features room-lighting,room-character --bin room_escape 2>&1 | tee ci-evidence/runtime-build.log
+          cargo test --locked -p orr_editor --features room-lighting,room-character,project-create,windows-export --test room_lighting lit_character_starter:: -- --test-threads=1 2>&1 | tee ci-evidence/editor.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 1 ignored;' ci-evidence/editor.log
+          ORR_LIT_CHARACTER_RUNTIME="$PWD/target/debug/room_escape" cargo test --locked -p orr_editor --features room-lighting,room-character,project-create,windows-export --test room_lighting lit_character_starter::lit_character_saved_export_runs_actual_animated_game_with_sources_hidden -- --ignored --exact 2>&1 | tee ci-evidence/deployed.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' ci-evidence/deployed.log
+          cargo clippy --locked -p orr_sample --features project-create,room-lighting --lib --bin orr_new_lit_room -- -D warnings 2>&1 | tee ci-evidence/clippy-off.log
+          cargo clippy --locked -p orr_sample --features project-create,room-lighting,room-character --lib --bin orr_new_lit_room -- -D warnings 2>&1 | tee ci-evidence/clippy-on.log
+      - name: Preserve results including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: room-lit-character-${{ github.sha }}
+          path: ci-evidence
+          if-no-files-found: error

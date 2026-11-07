@@ -75,3 +75,128 @@ fn malformed_cli_and_light_fail_before_destination_creation() {
     assert!(run(&["--help".as_ref()]).status.success());
     assert!(!out.exists());
 }
+
+#[cfg(not(feature = "room-character"))]
+#[test]
+fn character_request_without_feature_rejects_before_opening_the_lighting_input() {
+    let t = tempfile::tempdir().unwrap();
+    let source = t.path().join("never-open.fifo");
+    assert!(Command::new("mkfifo")
+        .arg(&source)
+        .status()
+        .unwrap()
+        .success());
+    let out = t.path().join("never created");
+    let result = run(&[
+        "--character".as_ref(),
+        "--output".as_ref(),
+        out.as_os_str(),
+        "--seed".as_ref(),
+        "feature-gate".as_ref(),
+        "--lighting".as_ref(),
+        source.as_os_str(),
+    ]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("room-character"));
+    assert!(!out.exists());
+    assert_eq!(
+        fs::read_dir(t.path()).unwrap().count(),
+        1,
+        "no staging directory or output created"
+    );
+}
+#[cfg(feature = "room-character")]
+#[test]
+fn character_cli_creates_both_profiles_by_value_and_requires_both_consents() {
+    use orr_sample::room_project::{PreparedProject, RoomProjectCapabilities};
+    let t = tempfile::tempdir().unwrap();
+    let source = t.path().join("light.json");
+    fs::write(
+        &source,
+        orr_sample::room_lighting::Document::enabled_default()
+            .to_bytes()
+            .unwrap(),
+    )
+    .unwrap();
+    let out = t.path().join("lit character game");
+    let result = run(&[
+        "--output".as_ref(),
+        out.as_os_str(),
+        "--seed".as_ref(),
+        "both-profiles".as_ref(),
+        "--lighting".as_ref(),
+        source.as_os_str(),
+        "--character".as_ref(),
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(String::from_utf8(result.stdout)
+        .unwrap()
+        .contains("room-escape-lit-character-3d-v1"));
+    fs::remove_file(source).unwrap();
+    let full = RoomProjectCapabilities {
+        lighting: true,
+        character: true,
+    };
+    let p = PreparedProject::open_with_capabilities(&out, full).unwrap();
+    assert!(p.character().is_some());
+    assert!(p.lighting().unwrap().document.point_light.is_some());
+    for caps in [
+        RoomProjectCapabilities {
+            lighting: false,
+            character: true,
+        },
+        RoomProjectCapabilities {
+            lighting: true,
+            character: false,
+        },
+        RoomProjectCapabilities {
+            lighting: false,
+            character: false,
+        },
+    ] {
+        assert!(PreparedProject::open_with_capabilities(&out, caps).is_err());
+    }
+}
+#[test]
+fn character_flag_rejects_duplicates_values_and_missing_required_options() {
+    let t = tempfile::tempdir().unwrap();
+    let out = t.path().join("never created");
+    let absent = t.path().join("absent-light.json");
+    for args in [
+        vec![
+            "--character".as_ref(),
+            "--character".as_ref(),
+            "--output".as_ref(),
+            out.as_os_str(),
+            "--seed".as_ref(),
+            "seed".as_ref(),
+            "--lighting".as_ref(),
+            absent.as_os_str(),
+        ],
+        vec![
+            "--character".as_ref(),
+            "true".as_ref(),
+            "--output".as_ref(),
+            out.as_os_str(),
+            "--seed".as_ref(),
+            "seed".as_ref(),
+            "--lighting".as_ref(),
+            absent.as_os_str(),
+        ],
+        vec![
+            "--character".as_ref(),
+            "--output".as_ref(),
+            out.as_os_str(),
+            "--lighting".as_ref(),
+            absent.as_os_str(),
+        ],
+    ] {
+        assert!(!run(&args).status.success());
+        assert!(!out.exists());
+    }
+    assert_eq!(fs::read_dir(t.path()).unwrap().count(), 0);
+}

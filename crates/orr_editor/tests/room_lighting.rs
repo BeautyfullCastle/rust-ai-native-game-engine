@@ -931,3 +931,7 @@ mod activation;
 
 #[path="room_lighting/lit_starter.rs"]
 mod lit_starter;
+
+#[cfg(feature="room-character")]
+#[path="room_lighting/lit_character_starter.rs"]
+mod lit_character_starter;

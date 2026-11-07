@@ -10,6 +10,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 pub const TEMPLATE: &str = "room-escape-lit-3d-v1";
+pub const CHARACTER_TEMPLATE: &str = "room-escape-lit-character-3d-v1";
 
 pub fn read_lighting(path: &Path) -> Result<Document, String> {
     let file = OpenOptions::new()
@@ -39,13 +40,52 @@ pub fn create(output: &Path, seed: &str, lighting: &Document) -> Result<CreateRe
         crate::project_publish::publish_no_replace,
     )
 }
+/// Character animation is an explicit opt-in, requiring the room-character feature.
+/// Disabled requests preserve the existing static lit starter exactly.
+pub fn create_with_character(
+    output: &Path,
+    seed: &str,
+    lighting: &Document,
+    character: bool,
+) -> Result<CreateReport, String> {
+    create_profile(
+        output,
+        seed,
+        lighting,
+        character,
+        |_, _| Ok(()),
+        crate::project_publish::publish_no_replace,
+    )
+}
 fn create_with(
     output: &Path,
     seed: &str,
     lighting: &Document,
+    checkpoint: impl FnMut(&str, &Path) -> Result<(), String>,
+    publish: impl FnOnce(&Path, &Path) -> Result<(), String>,
+) -> Result<CreateReport, String> {
+    create_profile(output, seed, lighting, false, checkpoint, publish)
+}
+fn create_profile(
+    output: &Path,
+    seed: &str,
+    lighting: &Document,
+    character: bool,
     mut checkpoint: impl FnMut(&str, &Path) -> Result<(), String>,
     publish: impl FnOnce(&Path, &Path) -> Result<(), String>,
 ) -> Result<CreateReport, String> {
+    if character && !cfg!(feature = "room-character") {
+        return Err("character starter requires room-character feature; no project opened".into());
+    }
+    let capabilities = crate::room_project::RoomProjectCapabilities {
+        lighting: true,
+        character,
+    };
+    let template = if character {
+        CHARACTER_TEMPLATE
+    } else {
+        TEMPLATE
+    };
     let bytes = lighting.to_bytes()?;
     let output = destination(output)?;
     let parent = output.parent().ok_or("output parent required")?;
@@ -56,7 +96,12 @@ fn create_with(
     let root = transaction.path().join("project");
     let mut report = project_create::create(&CreateOptions {
         output: root.clone(),
-        template: project_create::ROOM_TEMPLATE.into(),
+        template: if character {
+            project_create::ROOM_CHARACTER_TEMPLATE
+        } else {
+            project_create::ROOM_TEMPLATE
+        }
+        .into(),
         seed: seed.into(),
     })?;
     checkpoint("base-created", &root)?;
@@ -90,11 +135,15 @@ fn create_with(
         .append(true)
         .open(root.join("README.md"))
         .map_err(err)?;
-    writeln!(readme,"\nLit starter: {TEMPLATE}. This project declares room.lighting.json. Build the editor/runtime/exporter with room-lighting; an unconsenting consumer rejects this project. The supplied validated light policy is copied by value; its source file is not needed. Edit Room lighting, Apply and Save independently. No shadows or extra lights are added.").map_err(err)?;
+    writeln!(readme,"\nLit starter: {template}. This project declares room.lighting.json. Build the editor/runtime/exporter with room-lighting; an unconsenting consumer rejects this project. The supplied validated light policy is copied by value; its source file is not needed. Edit Room lighting, Apply and Save independently. No shadows or extra lights are added.").map_err(err)?;
+    if character {
+        writeln!(readme, "Animated character is declared in room.character.json. Build the editor/runtime/exporter with both room-character and room-lighting, and explicitly admit both capabilities. Character policy and installed animated model remain the existing closed character starter.").map_err(err)?;
+    }
     readme.sync_all().map_err(err)?;
     let expected = snapshot(&root)?;
     checkpoint("before-validation", &root)?;
-    let prepared = crate::room_project::PreparedProject::open_with_lighting(&root, true)?;
+    let prepared =
+        crate::room_project::PreparedProject::open_with_capabilities(&root, capabilities)?;
     if prepared.lighting().map(|v| &v.document) != Some(lighting)
         || prepared.scene().frame().checksum() != report.initial_checksum
     {
@@ -105,13 +154,13 @@ fn create_with(
         return Err("lit starter bytes changed before publication".into());
     }
     // Re-admit after the final checkpoint, before publishing the complete closure.
-    crate::room_project::PreparedProject::open_with_lighting(&root, true)?;
+    crate::room_project::PreparedProject::open_with_capabilities(&root, capabilities)?;
     if destination(&output)? != output {
         return Err("output parent changed".into());
     }
     publish(&root, &output)?;
     report.output = output;
-    report.template = TEMPLATE.into();
+    report.template = template.into();
     Ok(report)
 }
 fn snapshot(root: &Path) -> Result<std::collections::BTreeMap<PathBuf, Option<Vec<u8>>>, String> {
