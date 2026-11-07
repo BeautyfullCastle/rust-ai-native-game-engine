@@ -676,3 +676,7 @@ mod orphan_cleanup;
 #[cfg(target_os = "linux")]
 #[path = "yard3d_animated/batch.rs"]
 mod batch;
+
+#[cfg(target_os = "linux")]
+#[path = "yard3d_animated/batch_remove.rs"]
+mod batch_remove;

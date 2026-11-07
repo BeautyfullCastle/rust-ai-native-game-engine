@@ -350,3 +350,7 @@ mod orphan_cleanup;
 #[cfg(target_os = "linux")]
 #[path = "room_model_admission/batch.rs"]
 mod batch;
+
+#[cfg(target_os = "linux")]
+#[path = "room_model_admission/batch_remove.rs"]
+mod batch_remove;

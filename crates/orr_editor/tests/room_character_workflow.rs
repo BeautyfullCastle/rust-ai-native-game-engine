@@ -1143,3 +1143,22 @@ fn character_batch_cannot_copy_player_animation_to_another_actor_or_partially_co
     assert_eq!(app.editor.checksum(), checksum);
     assert_eq!(fs::read(&app.models.bindings.as_ref().unwrap().path).unwrap(), bytes);
 }
+
+#[test]
+fn character_batch_removal_rejects_player_and_optional_targets_together_without_partial_commit() {
+    let fixture = Fixture::new();
+    let mut h = fixture.app(false);
+    settle(&mut h);
+    wait(&mut h, "coherent character removal source", |app| app.editor.yard_rows_coherent());
+    let app = h.state_mut();
+    let before = app.models.bindings.as_ref().unwrap().document().clone();
+    let bytes = fs::read(&app.models.bindings.as_ref().unwrap().path).unwrap();
+    let old = app.models.animated_placements(&app.editor).unwrap()[0].model.clone();
+    let checksum = app.editor.checksum();
+    assert!(app.models.remove_targets(&app.editor, &[fixture.guids[&PLAYER].clone(), fixture.guids[&KEY].clone()]).is_err());
+    assert_eq!(app.models.bindings.as_ref().unwrap().document(), &before);
+    assert!(!app.models.bindings.as_ref().unwrap().dirty());
+    assert!(std::sync::Arc::ptr_eq(&old, &app.models.animated_placements(&app.editor).unwrap()[0].model));
+    assert_eq!(app.editor.checksum(), checksum);
+    assert_eq!(fs::read(&app.models.bindings.as_ref().unwrap().path).unwrap(), bytes);
+}
