@@ -8,7 +8,22 @@ pub const MAX_BYTES: usize = orr_render::point_light::MAX_POINT_LIGHT_SETTINGS_B
 pub struct Document {
     pub point_light: Option<PointLight>,
     pub follow_player: Option<[f32;3]>,
+    pub activation: Option<Activation>,
 }
+
+/// Gates actual Play lighting. Edit always previews the authored light.
+#[derive(Clone,Copy,Debug,PartialEq,Eq,Serialize)]
+#[serde(rename_all="snake_case")]
+pub enum Activation { KeyCollected, Escaped }
+impl<'de> Deserialize<'de> for Activation {
+    fn deserialize<D:Deserializer<'de>>(d:D)->Result<Self,D::Error> {
+        match String::deserialize(d)?.as_str() {
+            "key_collected"=>Ok(Self::KeyCollected),"escaped"=>Ok(Self::Escaped),
+            _=>Err(serde::de::Error::custom("activation must be key_collected or escaped")),
+        }
+    }
+}
+fn present_activation<'de,D:Deserializer<'de>>(d:D)->Result<Option<Activation>,D::Error> {Activation::deserialize(d).map(Some)}
 
 // Derived struct decoding accepts positional sequences. Require maps explicitly
 // at both object boundaries while preserving duplicate and unknown-field errors.
@@ -47,6 +62,8 @@ struct Wire {
     point_light: Option<Light>,
     #[serde(default,deserialize_with="present_offset")]
     follow_player:Option<[f32;3]>,
+    #[serde(default,deserialize_with="present_activation")]
+    activation:Option<Activation>,
 }
 impl Document {
     pub fn enabled_default() -> Self {
@@ -58,6 +75,7 @@ impl Document {
                 range: 12.0,
             }),
             follow_player:None,
+            activation:None,
         }
     }
     pub fn settings(&self) -> PointLightSettings {
@@ -69,7 +87,8 @@ impl Document {
     /// Edit uses settings() and the authored fallback position instead.
     pub fn settings_for_frame(&self,frame:orr_bridge::FrameView<'_>)->Result<PointLightSettings,String> {
         self.validate()?;
-        let Some(offset)=self.follow_player else {return Ok(self.settings());};
+        let mut settings=self.settings();
+        if let Some(offset)=self.follow_player {
         use crate::room_game::{RoomActor,PLAYER};
         let mut players=frame.iter::<RoomActor>().filter(|(_,actor)|actor.kind==PLAYER);
         let (entity,_)=players.next().ok_or("carried light requires one current PLAYER")?;
@@ -77,12 +96,18 @@ impl Document {
         let body=frame.get::<orr_physics3d::Body>(entity).ok_or("carried light PLAYER has no current body generation")?;
         let position=[body.pos.x.to_f32(),body.pos.y.to_f32(),body.pos.z.to_f32()];
         if !position.iter().all(|v|v.is_finite() && v.abs()<=32.0) {return Err("carried light PLAYER position exceeds ±32".into());}
-        let mut settings=self.settings();
         settings.point_light.as_mut().expect("validated light").position=std::array::from_fn(|axis|(position[axis] as f64+offset[axis] as f64) as f32);
+        }
+        if let Some(activation)=self.activation {
+            let run=frame.singleton::<crate::room_game::RoomRun>();
+            let active=match activation {Activation::KeyCollected=>run.key_collected!=0,Activation::Escaped=>run.won!=0};
+            if !active {settings.point_light=None;}
+        }
         settings.validate().map_err(|e|e.to_string())?;
         Ok(settings)
     }
     pub fn validate(&self) -> Result<(), String> {
+        if self.activation.is_some() && self.point_light.is_none() {return Err("conditional room light requires an enabled point light".into());}
         if let Some(offset)=self.follow_player {
             if self.point_light.is_none() || !offset.iter().all(|v|v.is_finite() && v.abs()<=32.0) {
                 return Err("carried room light requires enabled light and finite follow offset within ±32".into());
@@ -99,19 +124,26 @@ impl Document {
         let mut decoder = serde_json::Deserializer::from_slice(bytes);
         let wire: Wire = object(&mut decoder).map_err(|e| format!("room lighting: {e}"))?;
         decoder.end().map_err(|e| format!("room lighting: {e}"))?;
-        match (wire.version,wire.follow_player) {
-            (1,None)|(2,Some(_))=>{},
-            _=>return Err("room lighting version1 is fixed; version2 requires follow_player offset".into()),
+        match (wire.version,wire.follow_player,wire.activation) {
+            (1,None,None)|(2,Some(_),None)|(3,_,Some(_))=>{},
+            _=>return Err("room lighting version1 is fixed; version2 requires follow_player; version3 requires activation".into()),
         }
         let document = Self {
             point_light: wire.point_light.map(|light| light.0),
             follow_player: wire.follow_player,
+            activation: wire.activation,
         };
         document.validate()?;
         Ok(document)
     }
     pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
         self.validate()?;
+        if let Some(activation)=self.activation {
+            #[derive(Serialize)]
+            struct Conditional {version:u32,point_light:Option<PointLight>,#[serde(skip_serializing_if="Option::is_none")]follow_player:Option<[f32;3]>,activation:Activation}
+            let bytes=serde_json::to_vec_pretty(&Conditional {version:3,point_light:self.point_light,follow_player:self.follow_player,activation}).map_err(|e|e.to_string())?;
+            if bytes.len()>MAX_BYTES {return Err("room lighting exceeds 4096 bytes".into());}return Ok(bytes);
+        }
         if self.follow_player.is_none() { return self.settings().to_bytes().map_err(|e|format!("room lighting: {e}")); }
         #[derive(Serialize)]
         struct Output { version:u32,point_light:Option<PointLight>,follow_player:[f32;3] }
@@ -164,3 +196,7 @@ mod tests {
 #[cfg(test)]
 #[path="room_lighting/carried_tests.rs"]
 mod carried_tests;
+
+#[cfg(test)]
+#[path="room_lighting/activation_tests.rs"]
+mod activation_tests;

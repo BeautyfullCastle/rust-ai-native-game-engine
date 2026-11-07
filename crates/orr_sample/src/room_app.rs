@@ -238,8 +238,13 @@ fn headless_checked(
     }
     let lighting=project.point_light_settings_for_frame(FrameView::of(sim.frame()))?;
     #[cfg(feature = "room-lighting")]
-    if check_model_poses && project.lighting().is_some_and(|lighting|lighting.document.follow_player.is_some()) {
-        println!("room carried light position: {:?}",lighting.point_light.expect("validated carried light").position);
+    if check_model_poses {
+        if project.lighting().is_some_and(|light|light.document.activation.is_some()) {
+            println!("room lighting active: {}",u8::from(lighting.point_light.is_some()));
+        }
+        if project.lighting().is_some_and(|light|light.document.follow_player.is_some()) {
+            if let Some(light)=lighting.point_light {println!("room carried light position: {:?}",light.position);}
+        }
     }
     let _=lighting;
     let run = sim.frame().singleton::<RoomRun>();
