@@ -15,6 +15,18 @@ fn point_light_survives_source_hidden_native_export_and_restart() {
     let scene = root.join("source.scene.yaml");
     let (_, pin, mission) =
         crate::mesh_workspace::mission::configured_scene(&Default::default()).unwrap();
+    let mut hazards = orr_remote::mesh_navigation::hazards::MeshHazards {
+        enabled: 1,
+        count: 1,
+        graph_revision: pin.graph_revision,
+        ..Default::default()
+    };
+    // This enabled volume is above the route, keeping lighting acceptance
+    // independent of collision while satisfying the exported game profile.
+    hazards.spheres[0] = orr_remote::mesh_navigation::hazards::HazardSphere {
+        center: [orr_fp::FP::ZERO, orr_fp::FP::from_int(16), orr_fp::FP::ZERO],
+        radius: orr_fp::FP::ONE,
+    };
     let types = orr_remote::mesh_navigation::hazards::hazards_types();
     let mut singletons = serde_json::Map::new();
     for (name, bytes) in [
@@ -25,6 +37,10 @@ fn point_light_survives_source_hidden_native_export_and_restart() {
         (
             orr_remote::mesh_navigation::MISSION_NAME,
             bytemuck::bytes_of(&mission),
+        ),
+        (
+            orr_remote::mesh_navigation::hazards::HAZARDS_NAME,
+            bytemuck::bytes_of(&hazards),
         ),
     ] {
         singletons.insert(
