@@ -42,6 +42,7 @@ pub(super) struct State {
     stale: bool,
     status: String,
     generation: u64,
+    order_busy: bool,
     pick_request: Option<(PatrolPickRequest, Form, u64)>,
     inspection: Option<(InspectionPin, Result<super::patrol_routes::Report, String>)>,
     show_inspection: bool,
@@ -144,16 +145,27 @@ impl State {
     fn controls(&mut self, ui: &mut Ui, editable: bool) -> bool {
         let before = self.form.clone();
         let mut apply = false;
+        let mut structural_changed = false;
         let focused = ui.ctx().input(|input| input.focused && !input.events.iter().any(|event| matches!(event, egui::Event::WindowFocused(false))));
         ui.add_enabled_ui(editable && !self.stale, |ui| {
             ui.checkbox(&mut self.form.enabled, "Enable waypoint patrol");
             if self.form.enabled {
                 let mut remove = None;
                 let mut pick = None;
+                let mut order = None;
+                let count = self.form.points.len();
+                let can_order = editable && !self.stale && !self.order_busy && focused && self.context.is_some() && self.generation < u64::MAX;
                 let can_remove = self.form.points.len() > 1;
                 for (index, point) in self.form.points.iter_mut().enumerate() {
                     for (axis, value) in ["X", "Y", "Z"].into_iter().zip(point) {
                         field(ui, &format!("Patrol waypoint {} {axis}", index + 1), value);
+                    }
+                    for (edit, enabled, label) in [
+                        (crate::waypoint_order::Edit::InsertBefore(index), count < MAX_POINTS, format!("Insert before patrol waypoint {}", index + 1)),
+                        (crate::waypoint_order::Edit::MoveUp(index), index > 0, format!("Move patrol waypoint {} up", index + 1)),
+                        (crate::waypoint_order::Edit::MoveDown(index), index + 1 < count, format!("Move patrol waypoint {} down", index + 1)),
+                    ] {
+                        if ui.add_enabled(can_order && enabled, egui::Button::new(label)).clicked() && can_order && enabled { order = Some(edit); }
                     }
                     let pick_ready = editable && !self.stale && focused && self.context.is_some() && self.generation < u64::MAX;
                     if ui.add_enabled(pick_ready, egui::Button::new(format!("Pick patrol waypoint {}", index + 1))).clicked() && pick_ready { pick = Some(index); }
@@ -168,7 +180,9 @@ impl State {
                     }
                 }
                 if let Some(index) = pick { self.pick_request = Some((PatrolPickRequest::Pick(index), self.form.clone(), self.generation)); }
-                if let Some(index) = remove {
+                if let Some(edit) = order {
+                    structural_changed = crate::waypoint_order::apply(&mut self.form.points, edit, MAX_POINTS);
+                } else if let Some(index) = remove {
                     self.form.points.remove(index);
                 }
                 if ui
@@ -189,7 +203,7 @@ impl State {
                 ui.checkbox(&mut self.form.looped, "Loop patrol");
                 field(ui, "Patrol wait ticks", &mut self.form.wait);
             }
-            if self.form != before {
+            if self.form != before || structural_changed {
                 self.generation = self.generation.saturating_add(1);
                 self.clear_inspection();
                 self.pick_request = None;
@@ -376,6 +390,7 @@ impl Panel {
         Ok(())
     }
     pub(super) fn show_patrol(&mut self, ui: &mut Ui, editor: &mut Editor) {
+        self.patrol.order_busy = self.patrol_pick_owns_input();
         self.sync_patrol(editor);
         ui.collapsing("Waypoint patrol",|ui| {
             ui.weak("Point-agent waypoints; radius, headroom and clearance are not checked. Staging does not change game state.");
@@ -399,3 +414,7 @@ mod preview_tests;
 #[cfg(test)]
 #[path="patrol_pick_panel_tests.rs"]
 mod pick_panel_tests;
+
+#[cfg(test)]
+#[path="patrol_order_ui_tests.rs"]
+mod order_ui_tests;

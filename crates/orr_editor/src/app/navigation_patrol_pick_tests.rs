@@ -20,7 +20,7 @@ fn settle(app: &mut EditorApp) {
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
 }
-fn setup() -> (tempfile::TempDir, Harness<'static, EditorApp>) {
+pub(super) fn setup() -> (tempfile::TempDir, Harness<'static, EditorApp>) {
     let (root, mut app) = super::tests::fixture();
     app.navigation.start = ["-0.5".into(), "-0.5".into()];
     app.navigation.goal = ["0.5".into(), "0.5".into()];

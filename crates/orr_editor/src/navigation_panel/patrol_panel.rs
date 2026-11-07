@@ -48,6 +48,7 @@ pub(super) struct State {
     inspection: Option<(InspectionPin, Result<super::patrol_routes::Report, String>)>,
     show_inspection: bool,
     retired: std::cell::Cell<bool>,
+    order_busy: bool,
 }
 #[derive(Clone)]
 struct InspectionPin {
@@ -146,6 +147,7 @@ impl State {
     fn controls(&mut self, ui: &mut Ui, editable: bool) -> bool {
         let before = self.form.clone();
         let mut apply = false;
+        let mut structural_changed = false;
         let editable = editable
             && ui.ctx().input(|input| {
                 input.focused
@@ -160,6 +162,9 @@ impl State {
                 let can_remove = self.form.points.len() > 1;
                 let mut remove = None;
                 let mut pick = None;
+                let mut order = None;
+                let count = self.form.points.len();
+                let order_ready = editable && !self.stale && !self.order_busy && self.context.is_some() && self.pick_generation < u64::MAX;
                 for (index, point) in self.form.points.iter_mut().enumerate() {
                     for (axis, value) in ["X", "Z"].into_iter().zip(point) {
                         field(
@@ -167,6 +172,14 @@ impl State {
                             &format!("Terrain patrol waypoint {} {axis}", index + 1),
                             value,
                         );
+                    }
+                    for (label, command, enabled) in [
+                        (format!("Insert before patrol waypoint {}",index+1),crate::waypoint_order::Edit::InsertBefore(index),count < MAX_POINTS),
+                        (format!("Move patrol waypoint {} up",index+1),crate::waypoint_order::Edit::MoveUp(index),index > 0),
+                        (format!("Move patrol waypoint {} down",index+1),crate::waypoint_order::Edit::MoveDown(index),index+1 < count),
+                    ] {
+                        let ready = order_ready && enabled;
+                        if ui.add_enabled(ready,egui::Button::new(label)).clicked() && ready { order = Some(command); }
                     }
                     if ui.add_enabled(self.context.is_some() && self.pick_generation < u64::MAX, egui::Button::new(format!("Pick terrain patrol waypoint {}", index + 1))).clicked() && editable && !self.stale && self.context.is_some() {
                         pick = Some(index);
@@ -184,6 +197,7 @@ impl State {
                         remove = Some(index);
                     }
                 }
+                structural_changed = order.filter(|_|order_ready).is_some_and(|command|crate::waypoint_order::apply(&mut self.form.points,command,MAX_POINTS));
                 if let Some(index) = pick {
                     self.pick_request = Some((PatrolPickRequest::Pick(index), self.form.clone(), self.pick_generation));
                 }
@@ -208,7 +222,8 @@ impl State {
                 ui.checkbox(&mut self.form.looped, "Loop terrain patrol");
                 field(ui, "Terrain patrol wait ticks", &mut self.form.wait);
             }
-            if self.form != before {
+            if self.form != before || structural_changed {
+                if structural_changed { self.pick_request = None; }
                 self.pick_generation = self.pick_generation.saturating_add(1);
                 self.clear_inspection();
                 self.dirty = true;
@@ -262,6 +277,8 @@ impl State {
     }
 }
 impl NavigationPanel {
+    /// UI input ownership supplied by the viewport adapter; never scene state.
+    pub(crate) fn set_patrol_order_busy(&mut self, busy: bool) { self.patrol.order_busy = busy; }
     fn patrol_inspection_context(&self, editor: &Editor, terrain: &TerrainPanel) -> Result<(InspectionPin, NavigationView), String> {
         let (context, view) = self.patrol_context(editor, terrain)?;
         if self.patrol.stale || self.patrol.context.as_ref() != Some(&context) || !self.patrol.form.enabled || self.patrol.pick_generation == u64::MAX {
@@ -404,3 +421,7 @@ mod pick_panel_tests;
 #[cfg(test)]
 #[path="patrol_preview_panel_tests.rs"]
 mod preview_tests;
+
+#[cfg(test)]
+#[path="patrol_order_ui_tests.rs"]
+mod order_ui_tests;

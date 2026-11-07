@@ -188,6 +188,11 @@ impl EditorApp {
             self.navigation_endpoint.cancel("Navigation pick cancelled");
         }
         self.navigation_endpoint_validate();
+        #[cfg(feature = "terrain-patrol")]
+        {
+            let busy = self.navigation_endpoint_owns_input();
+            self.navigation.set_patrol_order_busy(busy);
+        }
     }
 
     /// Re-admit the actual saved local source at operation boundaries, using
@@ -712,3 +717,7 @@ mod tests {
 #[cfg(all(test,target_os="linux",feature="terrain-patrol"))]
 #[path="navigation_patrol_pick_tests.rs"]
 mod patrol_tests;
+
+#[cfg(all(test, target_os = "linux", feature = "terrain-patrol"))]
+#[path = "navigation_patrol_order_tests.rs"]
+mod patrol_order_tests;
