@@ -1,8 +1,8 @@
 //! GPU-free staged form tests. Source/Editor transaction acceptance is Linux-only.
 use super::*;
 use egui_kittest::{
-    kittest::{NodeT, Queryable},
     Harness,
+    kittest::{NodeT, Queryable},
 };
 fn harness(editable: bool) -> Harness<'static, (State, usize)> {
     Harness::builder()
@@ -141,10 +141,11 @@ fn disabled_form_is_canonical_zero_and_eight_point_form_disables_add() {
     h.state_mut().0.form.enabled = true;
     h.state_mut().0.form.points = vec![["0".into(), "0".into()]; 8];
     h.run_steps(2);
-    assert!(h
-        .get_by_label("Add terrain patrol waypoint")
-        .accesskit_node()
-        .is_disabled());
+    assert!(
+        h.get_by_label("Add terrain patrol waypoint")
+            .accesskit_node()
+            .is_disabled()
+    );
 }
 #[test]
 fn dirty_scene_epoch_checksum_terrain_graph_source_and_agent_changes_require_reload() {
@@ -180,26 +181,47 @@ fn focus_loss_event_blocks_current_frame_even_when_raw_focus_is_still_true() {
     let mut h = harness(true);
     h.run_steps(2);
     assert!(h.ctx.input(|input| input.focused));
-    assert!(!h
+    assert!(
+        !h.get_by_label("Enable terrain waypoint patrol")
+            .accesskit_node()
+            .is_disabled()
+    );
+    let (target_node, target_tree) = h
         .get_by_label("Enable terrain waypoint patrol")
         .accesskit_node()
-        .is_disabled());
-    h.get_by_label("Enable terrain waypoint patrol")
-        .click_accesskit();
-    h.event(egui::Event::WindowFocused(false));
-    h.run_steps(1);
+        .locate();
+    // Harness::step runs each queued event in a separate frame. Put both in
+    // RawInput instead so the click and focus loss genuinely share one frame.
+    h.input_mut().events.extend([
+        egui::Event::AccessKitActionRequest(egui::accesskit::ActionRequest {
+            target_node,
+            target_tree,
+            action: egui::accesskit::Action::Click,
+            data: None,
+        }),
+        egui::Event::WindowFocused(false),
+    ]);
+    assert_eq!(h.input_mut().events.len(), 2);
+    assert!(
+        !h.state().0.form.enabled,
+        "input has not been processed yet"
+    );
+    h.step();
     assert!(
         h.ctx.input(|input| input.focused),
         "raw focus deliberately stays true in this transient-event case"
     );
-    assert!(h.ctx.input(|input| input
-        .events
-        .iter()
-        .any(|event| matches!(event, egui::Event::WindowFocused(false)))));
-    assert!(h
-        .get_by_label("Enable terrain waypoint patrol")
-        .accesskit_node()
-        .is_disabled());
+    assert!(h.ctx.input(|input| {
+        input
+            .events
+            .iter()
+            .any(|event| matches!(event, egui::Event::WindowFocused(false)))
+    }));
+    assert!(
+        h.get_by_label("Enable terrain waypoint patrol")
+            .accesskit_node()
+            .is_disabled()
+    );
     assert!(!h.state().0.form.enabled);
     assert_eq!(h.state().1, 0);
 }
