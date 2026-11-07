@@ -208,3 +208,6 @@ pub(crate) mod defense_vfx;
 
 #[cfg(feature = "coop-defense-pixel-motion")]
 pub(crate) mod defense_pixel_motion;
+
+#[cfg(all(target_os="linux",feature="project-create",feature="room-lighting"))]
+pub mod room_lit_starter;

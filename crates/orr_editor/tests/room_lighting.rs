@@ -928,3 +928,5 @@ mod carried;
 
 #[path="room_lighting/activation.rs"]
 mod activation;
+
+mod lit_starter;
