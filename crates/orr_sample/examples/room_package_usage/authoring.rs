@@ -78,6 +78,10 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Option<Req
 }
 
 pub fn inspect_usage(request: &Request) -> Result<UsageReport, String> {
+    inspect_usage_with_capabilities(request,orr_sample::room_project::RoomProjectCapabilities {lighting:false,character:false})
+}
+/// Explicit consuming-route consent; dependency features alone grant nothing.
+pub fn inspect_usage_with_capabilities(request:&Request,capabilities:orr_sample::room_project::RoomProjectCapabilities)->Result<UsageReport,String> {
     if request.digest.len() != 64
         || !request
             .digest
@@ -107,7 +111,7 @@ pub fn inspect_usage(request: &Request) -> Result<UsageReport, String> {
     let manifest = project.manifest().ok_or("Room project manifest missing")?;
     let entry = manifest.entry.as_ref().ok_or("Room entry missing")?;
     let model_path = entry.models.as_ref().ok_or("Room models missing")?;
-    let prepared = PreparedProject::open(project.root())?;
+    let prepared = PreparedProject::open_with_capabilities(project.root(),capabilities)?;
     if prepared.root() != project.root()
         || prepared.path() != project.root().join(&entry.scene)
         || prepared.models().path != project.root().join(model_path)

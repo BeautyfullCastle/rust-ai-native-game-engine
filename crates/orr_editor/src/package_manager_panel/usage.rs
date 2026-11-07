@@ -182,11 +182,11 @@ fn verified_lock(identity: &Identity) -> Result<Lock, String> {
 
 fn inspect(identity: &Identity) -> Result<UsageReport, String> {
     let before = verified_lock(identity)?;
-    let report = authoring::inspect_usage(&authoring::Request {
+    let report = authoring::inspect_usage_with_capabilities(&authoring::Request {
         project: identity.root.clone(),
         package: identity.package.clone(),
         digest: identity.digest.clone(),
-    })?;
+    },orr_sample::room_project::RoomProjectCapabilities {lighting:cfg!(feature="room-lighting"),character:cfg!(feature="room-character")})?;
     if report.package.name != identity.package
         || report.package.digest != identity.digest
         || report.bindings.iter().any(|binding| {

@@ -1,0 +1,56 @@
+name: Room package presentation focused CI
+on:
+  push:
+    branches: [codex/package-room-presentation-20261107]
+permissions:
+  contents: read
+jobs:
+  package-presentation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record exact source and prepare toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir ci-evidence
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git rev-parse HEAD HEAD^{tree} | tee ci-evidence/source.txt
+          rustup toolchain install 1.99.1 --profile minimal --component clippy
+          rustup override set 1.99.1
+          rustc --version --verbose | tee ci-evidence/rustc.txt
+          sudo apt-get update -q 2>&1 | tee ci-evidence/dependencies.log
+          sudo apt-get install -y -q pkg-config libasound2-dev libudev-dev libx11-dev libxkbcommon-dev libwayland-dev 2>&1 | tee -a ci-evidence/dependencies.log
+      - name: Saved Room presentation package operations
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p orr_editor --features package-manager,project-create,orr_sample/room-character,orr_sample/room-lighting --lib package_manager::presentation_tests:: -- --test-threads=1 2>&1 | tee ci-evidence/feature-isolation.log
+          grep -F 'test result: ok. 2 passed; 0 failed; 0 ignored;' ci-evidence/feature-isolation.log
+          cargo test --locked -p orr_editor --features package-manager,project-create,room-character,room-lighting,windows-export --lib package_manager:: -- --test-threads=1 2>&1 | tee ci-evidence/package-manager.log
+          grep -F 'test result: ok. 59 passed; 0 failed; 1 ignored;' ci-evidence/package-manager.log
+          cargo test --locked -p orr_editor --features package-manager,project-create,room-character,room-lighting,windows-export --lib package_manager_panel::usage::tests:: -- --test-threads=1 2>&1 | tee ci-evidence/usage.log
+          grep -F 'test result: ok. 15 passed; 0 failed; 0 ignored;' ci-evidence/usage.log
+          cargo test --locked -p orr_sample --features room-character,room-lighting,project-create --example room_package_usage -- --test-threads=1 2>&1 | tee ci-evidence/legacy-usage-cli.log
+          grep -F 'test result: ok. 13 passed; 0 failed; 0 ignored;' ci-evidence/legacy-usage-cli.log
+          cargo build --locked -p orr_sample --features room-lighting,room-character --bin room_escape 2>&1 | tee ci-evidence/runtime-build.log
+          ORR_PRESENTATION_PACKAGE_RUNTIME="$PWD/target/debug/room_escape" cargo test --locked -p orr_editor --features package-manager,project-create,room-character,room-lighting,windows-export --lib package_manager::presentation_tests::saved_character_and_light_survive_package_lifecycle_and_source_hidden_native_export -- --ignored --exact 2>&1 | tee ci-evidence/deployed-presentation.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' ci-evidence/deployed-presentation.log
+          cargo clippy --locked -p orr_editor --features package-manager --lib -- -D warnings 2>&1 | tee ci-evidence/clippy-feature-off.log
+          cargo clippy --locked -p orr_editor --features package-manager,project-create,room-character,room-lighting,windows-export --lib -- -D warnings 2>&1 | tee ci-evidence/clippy-feature-on.log
+      - name: Preserve results including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-room-presentation-${{ github.sha }}
+          path: ci-evidence
+          if-no-files-found: error

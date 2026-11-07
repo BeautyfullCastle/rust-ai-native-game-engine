@@ -4,7 +4,6 @@ use super::removal::{admit_candidate, read_regular, root_identity, RootIdentity,
 use super::{checked_directory, inspect_source, MAX_MANIFEST_BYTES};
 use orr_model_bindings::model_bindings::ModelKind;
 use orr_package::{Lock, LockedPackage, Project, Runtime};
-use orr_sample::room_project::PreparedProject;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,7 +104,7 @@ pub fn inspect_update_impact(root: &Path, source: &Path) -> Result<UpdateImpactR
     validate_update(&before, &preview.candidate, &candidate)?;
     // Admit the CURRENT Room only. Never admit the replacement as safe to apply.
     let snapshot = admit_candidate(&root, &before, &before)?;
-    let prepared = PreparedProject::open(&root)?;
+    let prepared = super::open_room_project(&root)?;
     let mut bindings = Vec::new();
     for (guid, binding) in &prepared.models().document.bindings {
         #[cfg(not(feature = "room-animated-models"))]
