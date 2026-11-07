@@ -11,6 +11,8 @@ const MAX_UNDO: usize = 32;
 
 mod viewport_pick;
 mod environment_ui;
+mod environment_preset;
+mod environment_preset_ui;
 
 // Private failure-injection boundary. Checks may fail an operation but never
 // replace it: production Save always executes the real persistence operations.
@@ -491,6 +493,7 @@ impl Panel {
                 }
 
                 self.show_environment_controls(ui);
+                self.show_environment_presets(ui, can_edit);
 
                 if ui
                     .add_enabled(self.candidate != self.document, egui::Button::new("Discard lighting draft"))

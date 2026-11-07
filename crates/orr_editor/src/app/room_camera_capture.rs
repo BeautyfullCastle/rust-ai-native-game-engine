@@ -106,14 +106,21 @@ impl EditorApp {
         }
         ui.separator();
         ui.label("Capture Room viewport camera");
+        // A queued accessibility activation must not author or save a camera
+        // after focus was lost, even if this same input batch regained focus.
+        let authoring_focused = ui.ctx().input(|input| {
+            input.focused && !input.events.iter().any(|event| {
+                matches!(event, egui::Event::WindowFocused(false))
+            })
+        });
         let current = self.room_capture_context(false);
         let owned = self.room_camera_capture.edit.is_some();
         if ui
             .add_enabled(
-                current.is_some() && !owned && !self.room_camera_capture.staged.busy(),
+                authoring_focused && current.is_some() && !owned && !self.room_camera_capture.staged.busy(),
                 egui::Button::new("Stage viewport camera"),
             )
-            .clicked()
+            .clicked() && authoring_focused
         {
             if let Some(context) = self.room_capture_context(false) {
                 self.room_camera_capture.message = match self.room_camera_capture.staged.stage(context,&self.editor.camera3d) {
@@ -128,10 +135,10 @@ impl EditorApp {
             .cloned();
         if ui
             .add_enabled(
-                candidate.is_some(),
+                authoring_focused && candidate.is_some(),
                 egui::Button::new("Apply staged viewport camera"),
             )
-            .clicked()
+            .clicked() && authoring_focused
         {
             if let Some(context) = self.room_capture_context(false) {
                 if let Some(candidate) =
@@ -184,8 +191,8 @@ impl EditorApp {
                 .as_ref()
                 .is_some_and(|edit| edit.undone);
             if ui
-                .add_enabled(!undone, egui::Button::new("Undo captured camera"))
-                .clicked()
+                .add_enabled(authoring_focused && !undone, egui::Button::new("Undo captured camera"))
+                .clicked() && authoring_focused
             {
                 self.sync_room_camera_capture();
                 if self
@@ -206,8 +213,8 @@ impl EditorApp {
                 }
             }
             if ui
-                .add_enabled(undone, egui::Button::new("Redo captured camera"))
-                .clicked()
+                .add_enabled(authoring_focused && undone, egui::Button::new("Redo captured camera"))
+                .clicked() && authoring_focused
             {
                 self.sync_room_camera_capture();
                 if let Some(edit) = self
@@ -229,7 +236,7 @@ impl EditorApp {
                     }
                 }
             }
-            if ui.button("Save captured camera").clicked() {
+            if ui.add_enabled(authoring_focused, egui::Button::new("Save captured camera")).clicked() && authoring_focused {
                 self.sync_room_camera_capture();
                 if self.room_camera_capture.edit.is_some() {
                     self.room_camera_capture.message =
@@ -251,3 +258,7 @@ impl EditorApp {
         }
     }
 }
+
+#[cfg(all(test,target_os="linux"))]
+#[path="room_camera_capture_focus_tests.rs"]
+mod focus_tests;

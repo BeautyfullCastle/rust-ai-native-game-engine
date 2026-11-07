@@ -1,0 +1,84 @@
+name: Room capture and environment presets focused CI
+on:
+  push:
+    branches: [codex/room-authoring-next-20261107]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: room-camera-focus-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  room-camera-focus:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Record exact source and prepare Linux toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir ci-evidence
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git rev-parse HEAD HEAD^{tree} | tee ci-evidence/source.txt
+          git status --porcelain=v1 > ci-evidence/source-status.txt
+          git archive --format=tar HEAD > ci-evidence/source.tar
+          rustup toolchain install 1.99.1 --profile minimal --component clippy
+          rustup override set 1.99.1
+          rustc --version --verbose | tee ci-evidence/rustc.txt
+          sudo apt-get update -q 2>&1 | tee ci-evidence/dependencies.log
+          sudo apt-get install -y -q pkg-config libasound2-dev libudev-dev libx11-dev libxkbcommon-dev libwayland-dev 2>&1 | tee -a ci-evidence/dependencies.log
+      - name: Collect focused camera checks
+        shell: python {0}
+        run: |
+          import json, re, subprocess
+          from pathlib import Path
+          evidence=Path('ci-evidence'); results=[]
+          minimal='room-project'
+          full='package-manager,project-create,room-character,room-lighting,windows-export'
+          def run(label, command, count=None):
+              with (evidence/(label+'.log')).open('w') as log:
+                  process=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+                  lines=[]
+                  for line in process.stdout:
+                      print(line,end='',flush=True); log.write(line); log.flush(); lines.append(line)
+                  code=process.wait()
+              text=''.join(lines); ok=code==0
+              if count is not None:
+                  summary=re.findall(r'^test result: (\w+)\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured;',text,re.M)
+                  names=re.findall(r'^test (\S+) \.\.\. ok$',text,re.M)
+                  ok=ok and summary==[('ok',str(count),'0','0','0')] and len(names)==len(set(names))==count
+              results.append(dict(label=label,command=command,exit=code,ok=ok,expected=count))
+              (evidence/'results.json').write_text(json.dumps(results,indent=2))
+          def tests(label,selector,count,features=full,exact=False):
+              args=['cargo','test','--locked','-p','orr_editor','--features',features,'--lib',selector,'--']
+              if exact: args+=['--exact']
+              run(label,args+['--test-threads=1'],count)
+          tests('capture-core','room_camera_capture::tests::',8,minimal)
+          tests('capture-coherence','editor::room_camera_capture_coherence_tests::staged_capture_survives_read_polls_but_rejects_mutations',1,minimal,True)
+          tests('focus-actual-widgets','app::room_camera_capture::focus_tests::',2)
+          for label,name in [('saved-flow','widgets_stage_apply_undo_save_reopen'),('play-refusal','play_widgets_cannot_apply_or_save_staged_values'),('invalid-bounds','invalid_tracking_limits_preserve_applied_history_and_saved_bytes')]:
+              tests(label,'room_camera_panel::tests::'+name,1,exact=True)
+          tests('environment-codec-storage','room_lighting_panel::environment_preset::tests::',6)
+          tests('environment-actual-widgets','room_lighting_panel::environment_preset_ui::tests::',3)
+          for label,features in [('minimal',minimal),('combined',full)]:
+              run('strict-'+label,['cargo','clippy','--locked','-p','orr_editor','--features',features,'--lib','--','-D','warnings'])
+          run('feature-off',['cargo','check','--locked','-p','orr_editor','--lib'])
+          (evidence/'scope.txt').write_text('23 CPU executions required; 0 failed/ignored. GPU/window/physical play/video and Windows execution UNRUN. No full-workspace verification. Original failures retained.')
+          if not all(item['ok'] for item in results): raise SystemExit('Focused camera checks failed')
+      - name: Preserve every original result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: room-camera-focus-${{ github.sha }}-${{ github.run_attempt }}
+          path: ci-evidence
+          if-no-files-found: error
