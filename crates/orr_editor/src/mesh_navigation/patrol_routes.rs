@@ -70,9 +70,7 @@ pub(super) fn inspect(
         // Core admission remains authoritative. Enrich route failures only,
         // without indexing malformed counts or returning any partial report.
         if error.starts_with("MeshPatrol segment:") && (1..=8).contains(&config.count) {
-            if let Err(indexed) = legs(graph, config, start, max_vertical) {
-                return Err(indexed);
-            }
+            legs(graph, config, start, max_vertical)?;
         }
         return Err(error);
     }
