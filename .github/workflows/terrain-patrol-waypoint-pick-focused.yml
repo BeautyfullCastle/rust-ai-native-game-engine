@@ -1,0 +1,84 @@
+name: Terrain patrol waypoint picking focused CI
+on:
+  push:
+    branches: [codex/asset-authoring-next-20261107]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: terrain-patrol-pick-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  terrain-patrol-pick:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Record exact source and prepare Linux toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir ci-evidence
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git rev-parse HEAD HEAD^{tree} | tee ci-evidence/source.txt
+          git status --porcelain=v1 > ci-evidence/source-status.txt
+          git archive --format=tar HEAD > ci-evidence/source.tar
+          rustup toolchain install 1.99.1 --profile minimal --component clippy
+          rustup override set 1.99.1
+          rustc --version --verbose | tee ci-evidence/rustc.txt
+          sudo apt-get update -q 2>&1 | tee ci-evidence/dependencies.log
+          sudo apt-get install -y -q pkg-config libasound2-dev libudev-dev libx11-dev libxkbcommon-dev libwayland-dev 2>&1 | tee -a ci-evidence/dependencies.log
+      - name: Collect focused waypoint checks
+        shell: python {0}
+        run: |
+          import json, re, subprocess
+          from pathlib import Path
+          evidence=Path('ci-evidence'); results=[]
+          minimal='navigation'
+          full='terrain-patrol,project-create,room-character,room-lighting,mesh-hazards-export,navigation-export'
+          def run(label, command, count=None):
+              with (evidence/(label+'.log')).open('w') as log:
+                  process=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+                  lines=[]
+                  for line in process.stdout:
+                      print(line,end='',flush=True); log.write(line); log.flush(); lines.append(line)
+                  code=process.wait()
+              text=''.join(lines); ok=code==0
+              if count is not None:
+                  summary=re.findall(r'^test result: (\w+)\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured;',text,re.M)
+                  names=re.findall(r'^test (\S+) \.\.\. ok$',text,re.M)
+                  ok=ok and summary==[('ok',str(count),'0','0','0')] and len(names)==len(set(names))==count
+              results.append(dict(label=label,command=command,exit=code,ok=ok,expected=count))
+              (evidence/'results.json').write_text(json.dumps(results,indent=2))
+          def tests(label,selector,count,features=full,exact=False):
+              args=['cargo','test','--locked','-p','orr_editor','--features',features,'--lib',selector,'--']
+              if exact: args+=['--exact']
+              run(label,args+['--test-threads=1'],count)
+          tests('legacy-endpoints','app::navigation_endpoint_pick::tests::',7,minimal)
+          tests('terrain-cell-rays','terrain_pick::tests::',3,minimal)
+          tests('patrol-row-tokens','navigation_panel::patrol_panel::patrol_pick::tests::',5)
+          tests('patrol-row-widgets','navigation_panel::patrol_panel::pick_panel_tests::',4)
+          tests('patrol-existing-widgets','navigation_panel::patrol_panel::tests::',6)
+          tests('patrol-save-runtime','navigation_panel::patrol_integration_tests::',2)
+          tests('patrol-app-picking','app::navigation_endpoint_pick::patrol_tests::',3)
+          for label,features in [('minimal',minimal),('combined',full)]:
+              run('strict-'+label,['cargo','clippy','--locked','-p','orr_editor','--features',features,'--lib','--','-D','warnings'])
+          run('feature-off',['cargo','check','--locked','-p','orr_editor','--lib'])
+          (evidence/'scope.txt').write_text('30 CPU executions expected, zero failed/ignored. GPU/window/physical play/video and Windows execution UNRUN; legacy ignored GPU acceptance NOT executed or counted. No full-workspace verification.')
+          if not all(item['ok'] for item in results): raise SystemExit('Focused waypoint checks failed')
+      - name: Preserve every original result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: terrain-patrol-pick-${{ github.sha }}-${{ github.run_attempt }}
+          path: ci-evidence
+          if-no-files-found: error

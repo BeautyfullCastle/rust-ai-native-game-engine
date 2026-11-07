@@ -1990,6 +1990,8 @@ impl EditorApp {
             if let Some(endpoint) = self.navigation.show(ui, &mut self.editor, &self.terrain) {
                 let _ = self.navigation_endpoint_arm(endpoint);
             }
+            #[cfg(feature="terrain-patrol")]
+            self.navigation_patrol_request();
             self.navigation_endpoint_validate();
             if !self.navigation_endpoint.status.is_empty() { ui.label(&self.navigation_endpoint.status); }
         }
@@ -2161,7 +2163,13 @@ impl EditorApp {
         #[cfg(feature="room-lighting")]
         { self.room_light_pointer_owned |= self.room_light_pick_pending(); }
         #[cfg(feature="models")]
-        self.frame_selection_button(ui);
+        {
+            #[cfg(feature="navigation")]
+            let picking = self.navigation_endpoint_owns_input();
+            #[cfg(not(feature="navigation"))]
+            let picking = false;
+            if !picking { self.frame_selection_button(ui); }
+        }
         #[cfg(feature="terrain")]
         self.terrain.sync_for_editor(&self.editor);
         #[cfg(all(feature="terrain", feature="irradiance-probes"))]
@@ -2217,14 +2225,19 @@ impl EditorApp {
         let ppp=ui.ctx().pixels_per_point();
         let px=(((rect.width()*ppp).round() as u32).clamp(1,8192),((rect.height()*ppp).round() as u32).clamp(1,8192));
         self.ui.viewport_rect=Some(rect);self.ui.viewport_px=px;
+        #[cfg(feature="navigation")]
+        let navigation_pointer_owned = self.navigation_endpoint_owns_input();
+        #[cfg(not(feature="navigation"))]
+        let navigation_pointer_owned = false;
         #[cfg(feature="models")]
-        self.frame_selection_shortcut(ui, &resp, px);
+        if !navigation_pointer_owned { self.frame_selection_shortcut(ui, &resp, px); }
         #[cfg(feature="mesh-navigation")]
         let prop_moving = self.mesh_navigation.prop_gesture_busy() || self.mesh_navigation.geometry_vertex_dragging();
         #[cfg(not(feature="mesh-navigation"))]
         let prop_moving = false;
         #[cfg(feature="room-lighting")]
         let prop_moving = prop_moving || self.room_light_pick_owns_input();
+        let prop_moving = prop_moving || navigation_pointer_owned;
         if !prop_moving {
             if resp.dragged_by(PointerButton::Secondary){let delta=resp.drag_delta();self.editor.orbit3d([delta.x*ppp,delta.y*ppp]);}
             if resp.dragged_by(PointerButton::Middle){let delta=resp.drag_delta();self.editor.pan3d([delta.x*ppp,delta.y*ppp],px);}
@@ -2238,7 +2251,9 @@ impl EditorApp {
                 #[cfg(feature="room-lighting")]
                 self.cancel_room_light_pick();
                 if let Some(tex)=self.gpu3d.as_ref().and_then(|gpu|gpu.last_texture()) { ui.painter().image(tex,rect,Rect::from_min_max(Pos2::ZERO,Pos2::new(1.0,1.0)),Color32::WHITE); }
-                ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,error,egui::FontId::proportional(14.0),Color32::RED); return;
+                ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,error,egui::FontId::proportional(14.0),Color32::RED); #[cfg(feature="terrain-patrol")]
+                self.navigation_patrol_frame_drawn(false);
+                return;
             }
         };
         let mut frame_drawn = false;
@@ -2400,6 +2415,8 @@ impl EditorApp {
                     ui.painter().image(texture,rect,Rect::from_min_max(Pos2::ZERO,Pos2::new(1.0,1.0)),Color32::WHITE);
                 }
                 ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,error,egui::FontId::proportional(14.0),Color32::RED);
+                #[cfg(feature="terrain-patrol")]
+                self.navigation_patrol_frame_drawn(false);
                 return;
             }
         };
@@ -2412,7 +2429,9 @@ impl EditorApp {
                 Ok(None) => {}
                 Err(error) => {
                     ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,error,egui::FontId::proportional(14.0),Color32::RED);
-                    return;
+                    #[cfg(feature="terrain-patrol")]
+                self.navigation_patrol_frame_drawn(false);
+                return;
                 }
             }
             placements
@@ -2438,7 +2457,9 @@ impl EditorApp {
         #[cfg(feature="room-lighting")]
         if let Err(error) = self.editor.apply_room_environment_for_presentation(&mut list.lighting) {
             ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,error,egui::FontId::proportional(14.0),Color32::RED);
-            return;
+            #[cfg(feature="terrain-patrol")]
+                self.navigation_patrol_frame_drawn(false);
+                return;
         }
         if let Some(item) = self.editor.yard_frame().items.iter().find(|item| Some(item.entity) == selected) {
             selection_outline::append(&mut list, item);
@@ -2515,6 +2536,8 @@ impl EditorApp {
             #[cfg(feature = "models")]
             if let Err(error) = point_light.and_then(|settings|gpu.set_point_light_settings(settings)) {
                 ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, error, egui::FontId::proportional(14.0), Color32::RED);
+                #[cfg(feature="terrain-patrol")]
+                self.navigation_patrol_frame_drawn(false);
                 return;
             }
             #[cfg(all(feature="animated-models", not(feature="irradiance-probes"), not(any(feature="terrain", feature="mesh-navigation"))))]
@@ -2579,6 +2602,8 @@ impl EditorApp {
         self.room_actor_placement_input(ui, &resp, &camera, px, rect, ppp, frame_drawn);
         #[cfg(feature="room-authoring")]
         self.room_wall_placement_input(ui, &resp, &camera, px, rect, ppp, frame_drawn);
+        #[cfg(feature="terrain-patrol")]
+        self.navigation_patrol_frame_drawn(frame_drawn);
         if !hazard_pointer_consumed && !mission_pointer_consumed && !mesh_play_pointer_consumed && !agent_pointer_consumed && !prop_pointer_consumed && (frame_drawn || !self.editor.has_room_camera()) && resp.clicked_by(PointerButton::Primary) && self.editor.previewing().is_none() {
             if let Some(at) = resp.interact_pointer_pos() {
                 let pixel = [(at.x-rect.min.x)*ppp, (at.y-rect.min.y)*ppp];

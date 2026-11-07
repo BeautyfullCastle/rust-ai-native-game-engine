@@ -14,11 +14,17 @@ use orr_remote::navigation_yard3d::{NavigationAgentSpec, NavigationScenePin, PIN
 use serde_json::json;
 #[cfg(feature="terrain-patrol")]
 mod patrol_panel;
+#[cfg(feature="terrain-patrol")]
+pub(crate) use patrol_panel::PatrolPickRequest;
+#[cfg(feature="terrain-patrol")]
+pub(crate) use patrol_panel::patrol_pick::Token as PatrolPickToken;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Endpoint {
     Start,
     Goal,
+    #[cfg(feature="terrain-patrol")]
+    Patrol(usize),
 }
 
 pub struct NavigationPanel {
