@@ -231,9 +231,7 @@ impl ModelPanel {
     }
     /// Every draw rechecks context, even with the inspector closed. It performs no disk I/O.
     pub(crate) fn draft_placement(&mut self, editor: &Editor) -> Option<DraftPlacement> {
-        if self.draft_preview.accepted.is_none() {
-            return None;
-        }
+        self.draft_preview.accepted.as_ref()?;
         let current = self.draft_context(editor).ok().map(|(c, _)| c);
         self.draft_preview.sync(current.as_ref());
         self.draft_preview
