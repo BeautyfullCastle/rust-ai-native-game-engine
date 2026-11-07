@@ -1,7 +1,7 @@
 //! CPU-only cross-scene acceptance. Widget actions use accesskit, not a native
 //! window or GPU playtest. Existing mesh_export post-process tests cover bundles.
 use super::*;
-use egui::accesskit::Role;
+use egui::{accesskit::Role, Key, Modifiers};
 use egui_kittest::{kittest::Queryable, Harness};
 
 struct State {
@@ -29,10 +29,27 @@ fn click(ui: &mut Harness<'_, State>, label: &str) {
     ui.run_steps(3);
 }
 fn path(ui: &mut Harness<'_, State>, path: &Path) {
+    let expected = path.to_str().unwrap();
     ui.get_by_role_and_label(Role::TextInput, "Lighting preset file")
-        .type_text(path.to_str().unwrap());
+        .scroll_to_me();
+    ui.run_steps(20);
+    ui.get_by_role_and_label(Role::TextInput, "Lighting preset file")
+        .focus();
+    ui.run_steps(2);
+    ui.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    ui.run_steps(2);
+    ui.get_by_role_and_label(Role::TextInput, "Lighting preset file")
+        .type_text(expected);
     ui.run_steps(3);
+    assert_eq!(
+        ui.get_by_role_and_label(Role::TextInput, "Lighting preset file")
+            .value()
+            .as_deref(),
+        Some(expected),
+        "preset file widget must contain the intended absolute path before Save/Load"
+    );
 }
+
 fn prepare(scene: &Path) -> State {
     let editor = crate::mesh_workspace::mission::prepare(
         scene,
