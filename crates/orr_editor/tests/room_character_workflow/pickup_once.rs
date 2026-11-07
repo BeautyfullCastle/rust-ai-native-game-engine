@@ -46,7 +46,23 @@ fn author(f: &Fixture) -> Document {
     assert_eq!(h.state().editor.room_character(), Some(&old));
     click(&mut h, "Redo character edit");
     assert_eq!(h.state().editor.room_character(), Some(&document));
-    click(&mut h, "Save character and model bindings");
+    // Dispatch to the current widget identity without depending on scroll layout.
+    let save = h.get_by_label("Save character and model bindings");
+    assert!(
+        !save.accesskit_node().is_disabled(),
+        "paired Save must be enabled after Redo"
+    );
+    save.click_accesskit();
+    settle(&mut h);
+    assert_eq!(
+        Document::parse(&fs::read(f.root.join("room.character.json")).unwrap()).unwrap(),
+        document,
+        "actual Save widget must persist the expected policy before closing"
+    );
+    assert!(
+        !h.state().room_character.as_ref().unwrap().dirty(),
+        "actual Save must advance the character baseline"
+    );
     assert_eq!(frame_bytes(&mut h.state_mut().editor), before);
     drop(h);
     let mut h = f.app(false);

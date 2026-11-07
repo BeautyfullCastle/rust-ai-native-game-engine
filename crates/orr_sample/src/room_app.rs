@@ -283,6 +283,11 @@ fn headless_checked(
             println!("room character observed pose sha256: {digest}");
         }
     }
+    #[cfg(feature = "room-character")]
+    if check_model_poses && project.character().is_some_and(|character|character.document.motion.and_then(|motion|motion.facing).is_some()) {
+        let placed = room_view::observed_character_placement(FrameView::of(sim.frame()),project.scene().index(),project.models(),&character_playback)?.ok_or("observed facing character missing")?;
+        println!("room character observed instance: {}",serde_json::to_string(&placed.transform).map_err(|error|error.to_string())?);
+    }
     if let Some(camera) = project.camera().filter(|camera| camera.document.follow_player.is_some()) {
         let resolved = camera.document.camera_for_frame(&camera.document.orbit(),(800,600),FrameView::of(sim.frame()))?;
         // Normal headless stdout is the exporter's exact smoke protocol.
@@ -871,3 +876,7 @@ mod progress_tests;
 #[cfg(all(test, feature = "room-character", feature = "project-create", target_os = "linux"))]
 #[path = "room_character_pickup_app_tests.rs"]
 mod pickup_tests;
+
+#[cfg(all(test, feature="room-character", feature="project-create", target_os="linux"))]
+#[path="room_character_facing_app_tests.rs"]
+mod facing_tests;

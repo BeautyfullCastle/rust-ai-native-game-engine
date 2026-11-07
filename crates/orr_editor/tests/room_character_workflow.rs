@@ -1230,3 +1230,6 @@ mod camera_limits;
 
 #[path = "room_character_workflow/pickup_once.rs"]
 mod pickup_once;
+
+#[path = "room_character_workflow/facing.rs"]
+mod facing;

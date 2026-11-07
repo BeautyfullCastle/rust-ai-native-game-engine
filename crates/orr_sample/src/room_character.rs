@@ -22,6 +22,10 @@ use orr_reflect::{Guid, SceneIndex};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, mem::size_of, sync::Arc};
 
+#[path="room_character/facing.rs"]
+mod facing;
+pub use facing::ForwardAxis;
+
 pub const MAX_BYTES: usize = 4096;
 pub const MAX_CROSSFADE_TICKS: u32 = 120;
 pub use orr_model_bindings::animation_time::PlaybackRate;
@@ -72,19 +76,21 @@ pub struct Motion {
     pub escaped_once: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pickup: Option<Pickup>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub facing: Option<ForwardAxis>,
 }
 impl<'de> Deserialize<'de> for Motion {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
-        struct Wire { searching_idle: u32, carrying_idle: u32, escaped_once: bool, #[serde(default,deserialize_with="present_pickup")] pickup:Option<Pickup> }
+        struct Wire { searching_idle: u32, carrying_idle: u32, escaped_once: bool, #[serde(default,deserialize_with="present_pickup")] pickup:Option<Pickup>, #[serde(default,deserialize_with="facing::present")] facing:Option<ForwardAxis> }
         struct Object;
         impl<'de> serde::de::Visitor<'de> for Object {
             type Value = Motion;
             fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("a complete room motion JSON object") }
             fn visit_map<M: serde::de::MapAccess<'de>>(self, map: M) -> Result<Motion, M::Error> {
                 let wire = Wire::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
-                Ok(Motion { searching_idle: wire.searching_idle, carrying_idle: wire.carrying_idle, escaped_once: wire.escaped_once, pickup:wire.pickup })
+                Ok(Motion { searching_idle: wire.searching_idle, carrying_idle: wire.carrying_idle, escaped_once: wire.escaped_once, pickup:wire.pickup, facing:wire.facing })
             }
         }
         deserializer.deserialize_map(Object)
@@ -226,10 +232,10 @@ impl Document {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        match (self.schema, self.speeds, self.crossfade_ticks, self.motion, self.motion.and_then(|m|m.pickup)) {
-            (1, None, None, None, None) | (2, Some(_), None, None, None) => {}
-            (3 | 4, Some(_), Some(ticks), None, None) | (5, Some(_), Some(ticks), Some(_), None) | (6, Some(_), Some(ticks), Some(_), Some(_)) if ticks <= MAX_CROSSFADE_TICKS => {}
-            _ => return Err("room character schema 1 requires legacy fields, schema 2 requires speeds, and schemas 3/4 require speeds plus crossfade_ticks 0..120, and schema 5 additionally requires motion; schema 6 requires motion and pickup".into()),
+        match (self.schema, self.speeds, self.crossfade_ticks, self.motion, self.motion.and_then(|m|m.pickup), self.motion.and_then(|m|m.facing)) {
+            (1, None, None, None, None, None) | (2, Some(_), None, None, None, None) => {}
+            (3 | 4, Some(_), Some(ticks), None, None, None) | (5, Some(_), Some(ticks), Some(_), None, None) | (6, Some(_), Some(ticks), Some(_), Some(_), None) | (7, Some(_), Some(ticks), Some(_), _, Some(_)) if ticks <= MAX_CROSSFADE_TICKS => {}
+            _ => return Err("room character schema 1 requires legacy fields, schema 2 requires speeds, and schemas 3/4 require speeds plus crossfade_ticks 0..120, and schema 5 additionally requires motion; schema 6 requires motion and pickup; schema 7 requires motion and facing".into()),
         }
         let player =
             Guid::parse(&self.player).map_err(|e| format!("room character player GUID: {e}"))?;
@@ -474,6 +480,7 @@ struct ObservedPose {
     escaped_start: u64,
     pickup_start: Option<u64>,
     pickup_active: bool,
+    heading_yaw: f32,
     position: Option<orr_fp::FPVec3>,
     clip: u32,
     state: State,
@@ -531,6 +538,11 @@ impl PlaybackCursor {
         } else { tick };
         let moving = matching.filter(|old| old.tick < tick).and_then(|old| old.position)
             .zip(position).is_some_and(|(old, current)| old.x != current.x || old.z != current.z);
+        let heading_yaw = document.motion.and_then(|m|m.facing).filter(|_| !context.rest).map_or(0.0,|axis| {
+            let previous=matching.filter(|old|!old.context.rest && old.tick<tick)
+                .and_then(|old|old.position.map(|p|(p,old.heading_yaw)));
+            position.map_or(0.0,|p|facing::advance(axis,previous,p))
+        });
         let pickup_start = if document.motion.and_then(|m|m.pickup).is_some() && !context.rest && state == State::Carrying {
             matching.filter(|old| !old.context.rest && old.tick < tick).and_then(|old| {
                 if old.state == State::Searching && old.tick.checked_add(1) == Some(tick) { Some(tick) }
@@ -581,6 +593,7 @@ impl PlaybackCursor {
             escaped_start,
             pickup_start,
             pickup_active: active_pickup.is_some(),
+            heading_yaw,
             position,
             clip,
             state,
@@ -588,6 +601,12 @@ impl PlaybackCursor {
             outgoing,
         });
         Ok(&self.observed.as_ref().unwrap().current)
+    }
+    /// Presentation yaw in radians, positive rotation from +Z toward +X.
+    /// Apply to the body transform before the saved model-local TRS.
+    pub fn facing_yaw(&self,document:&Document,model:&Arc<AnimatedModel>,frame:FrameView<'_>,context:PlaybackContext)->Result<f32,String> {
+        self.pose(document,model,frame,context)?;
+        Ok(self.observed.as_ref().expect("pose admitted the observation").heading_yaw)
     }
     /// Render only a pose already observed for this exact source and tick.
     pub fn pose(
@@ -1500,7 +1519,7 @@ mod tests {
     mod motion_tests {
         use super::*;
         fn doc(ticks: u32) -> Document {
-            Document { schema: 5, motion: Some(Motion { searching_idle: 2, carrying_idle: 0, escaped_once: true, pickup:None }), ..crossfade_document(ticks) }
+            Document { schema: 5, motion: Some(Motion { searching_idle: 2, carrying_idle: 0, escaped_once: true, pickup:None, facing:None }), ..crossfade_document(ticks) }
         }
         fn observed_frame(tick: u64, x: i32, key: u32, won: u32) -> (Frame, PlaybackContext) {
             use crate::room_game::{RoomConfig, RoomEscapeV1};
@@ -1602,5 +1621,6 @@ mod tests {
     }
 
     mod pickup_tests { include!("room_character/pickup_tests.rs"); }
+    mod facing_tests { include!("room_character/facing_tests.rs"); }
 
 }

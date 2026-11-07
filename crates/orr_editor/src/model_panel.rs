@@ -1410,24 +1410,33 @@ impl ModelPanel {
                     .map_err(|e| format!("{guid}: sample rest pose: {e}")),
             };
             #[cfg(feature="room-character")]
-            let pose = if let Some(character) = room_character {
+            let (pose, facing_yaw) = if let Some(character) = room_character {
                 let mut playback = self.room_character_playback.borrow_mut();
                 if playback.0.as_ref().is_none_or(|revision| !std::sync::Arc::ptr_eq(revision, editor.room_character_revision())) {
                     playback.1.reset();
                     playback.0 = Some(editor.room_character_revision().clone());
                 }
-                playback.1.observe(character, &model, snapshot.predicted(), orr_sample::room_character::PlaybackContext {
+                let context = orr_sample::room_character::PlaybackContext {
                     entity: row.entity,
                     tick_rate: snapshot.tick_rate(),
                     rest: playback_time.is_none(),
                     revision: snapshot.timeline().map_or(0, |timeline| timeline.epoch),
-                })?.clone()
-            } else { sample_generic()? };
+                };
+                let pose = playback.1.observe(character, &model, snapshot.predicted(), context)?.clone();
+                let yaw = playback.1.facing_yaw(character, &model, snapshot.predicted(), context)?;
+                (pose, yaw)
+            } else { (sample_generic()?, 0.0) };
             #[cfg(not(feature="room-character"))]
             let pose = sample_generic()?;
+            #[cfg(feature="room-character")]
+            let instance = if room_character.is_some_and(|character|character.motion.and_then(|motion|motion.facing).is_some()) {
+                orr_sample::room_view::facing_world_matrix(*body_pose, binding.transform, facing_yaw)?
+            } else { Self::animated_instance(*body_pose, binding.transform) };
+            #[cfg(not(feature="room-character"))]
+            let instance = Self::animated_instance(*body_pose, binding.transform);
             placements.push(AnimatedPlacement {
                 entity: row.entity,
-                instance: Self::animated_instance(*body_pose, binding.transform),
+                instance,
                 model,
                 pose,
             });
