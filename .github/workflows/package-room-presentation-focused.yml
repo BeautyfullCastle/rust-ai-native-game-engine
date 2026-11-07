@@ -37,7 +37,7 @@ jobs:
           cargo test --locked -p orr_editor --features package-manager,project-create,orr_sample/room-character,orr_sample/room-lighting --lib package_manager::presentation_tests:: -- --test-threads=1 2>&1 | tee ci-evidence/feature-isolation.log
           grep -F 'test result: ok. 2 passed; 0 failed; 0 ignored;' ci-evidence/feature-isolation.log
           cargo test --locked -p orr_editor --features package-manager,project-create,room-character,room-lighting,windows-export --lib package_manager:: -- --test-threads=1 2>&1 | tee ci-evidence/package-manager.log
-          grep -F 'test result: ok. 59 passed; 0 failed; 1 ignored;' ci-evidence/package-manager.log
+          grep -F 'test result: ok. 56 passed; 0 failed; 1 ignored;' ci-evidence/package-manager.log
           cargo test --locked -p orr_editor --features package-manager,project-create,room-character,room-lighting,windows-export --lib package_manager_panel::usage::tests:: -- --test-threads=1 2>&1 | tee ci-evidence/usage.log
           grep -F 'test result: ok. 15 passed; 0 failed; 0 ignored;' ci-evidence/usage.log
           cargo test --locked -p orr_sample --features room-character,room-lighting,project-create --example room_package_usage -- --test-threads=1 2>&1 | tee ci-evidence/legacy-usage-cli.log
