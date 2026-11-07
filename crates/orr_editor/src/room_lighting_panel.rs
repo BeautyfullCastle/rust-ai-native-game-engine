@@ -9,6 +9,8 @@ use std::{
 
 const MAX_UNDO: usize = 32;
 
+mod viewport_pick;
+
 // Private failure-injection boundary. Checks may fail an operation but never
 // replace it: production Save always executes the real persistence operations.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -32,6 +34,7 @@ pub struct Panel {
     redo: Vec<Document>,
     source: SourcePin,
     error: Option<String>,
+    viewport_pick: viewport_pick::State,
 }
 
 enum SourcePin {
@@ -53,6 +56,9 @@ trait LightingEditor {
     fn room_lighting_scene_path(&self) -> Option<PathBuf>;
     fn install_room_lighting(&mut self, document: Document) -> Result<(), String>;
     fn lighting_authoring_editable(&self) -> bool;
+    fn lighting_pick_identity(&self) -> Option<(u64, u64, u64)> {
+        None
+    }
 }
 
 impl LightingEditor for crate::editor::Editor {
@@ -70,6 +76,16 @@ impl LightingEditor for crate::editor::Editor {
     }
     fn install_room_lighting(&mut self, document: Document) -> Result<(), String> {
         crate::editor::Editor::install_room_lighting(self, document)
+    }
+    fn lighting_pick_identity(&self) -> Option<(u64, u64, u64)> {
+        if !self.lighting_authoring_editable() || self.in_gesture() {
+            return None;
+        }
+        Some((
+            self.scene_load_epoch(),
+            self.sim().epoch,
+            self.snapshot()?.predicted().checksum(),
+        ))
     }
     fn lighting_authoring_editable(&self) -> bool {
         self.mode() == crate::editor::Mode::Edit
@@ -172,6 +188,7 @@ impl Panel {
             redo: Vec::new(),
             source: SourcePin::Unbound,
             error,
+            viewport_pick: Default::default(),
         }
     }
     pub fn document(&self) -> &Document {
@@ -184,6 +201,7 @@ impl Panel {
         Ok(())
     }
     fn accept_document(&mut self, candidate: Document) {
+        self.cancel_active_pick();
         if candidate != self.document {
             push_bounded(
                 &mut self.undo,
@@ -194,11 +212,13 @@ impl Panel {
         self.candidate = self.document.clone();
     }
     fn discard_draft(&mut self) {
+        self.cancel_active_pick();
         self.candidate = self.document.clone();
         self.error = None;
     }
     fn undo(&mut self) -> bool {
         if let Some(previous) = self.undo.pop() {
+            self.cancel_active_pick();
             push_bounded(
                 &mut self.redo,
                 std::mem::replace(&mut self.document, previous),
@@ -211,6 +231,7 @@ impl Panel {
     }
     fn redo(&mut self) -> bool {
         if let Some(next) = self.redo.pop() {
+            self.cancel_active_pick();
             push_bounded(&mut self.undo, std::mem::replace(&mut self.document, next));
             self.candidate = self.document.clone();
             true
@@ -300,6 +321,7 @@ impl Panel {
         };
         self.validate_candidate(editor, &previous)?;
         editor.install_room_lighting(previous.clone())?;
+        self.cancel_active_pick();
         let _ = self.undo.pop();
         push_bounded(
             &mut self.redo,
@@ -315,6 +337,7 @@ impl Panel {
         };
         self.validate_candidate(editor, &next)?;
         editor.install_room_lighting(next.clone())?;
+        self.cancel_active_pick();
         let _ = self.redo.pop();
         push_bounded(&mut self.undo, std::mem::replace(&mut self.document, next));
         self.candidate = self.document.clone();
@@ -337,6 +360,7 @@ impl Panel {
         unchanged_file(&self.manifest_path, &self.manifest_bytes)
     }
     fn save(&mut self) -> Result<(), String> {
+        self.cancel_active_pick();
         self.save_with_check(|_| Ok(()))
     }
     fn save_with_check(
@@ -414,6 +438,7 @@ impl Panel {
             None => true,
         };
         let can_edit = editable && source_ok;
+        self.sync_viewport_pick(editor.as_deref());
         let mut reset_live = false;
         ui.collapsing("Room lighting", |ui| {
             ui.label(if self.document != self.saved {
@@ -442,6 +467,7 @@ impl Panel {
                     number_bounded(ui, "Range", &mut light.range, 1e-6, 1e9);
                 }
 
+                self.show_viewport_pick(ui, editor.as_deref());
                 if self.candidate.point_light.is_some() {
                     egui::ComboBox::from_label("Light activation")
                         .selected_text(match self.candidate.activation {None=>"Always",Some(orr_sample::room_lighting::Activation::KeyCollected)=>"Key collected",Some(orr_sample::room_lighting::Activation::Escaped)=>"Escaped",Some(orr_sample::room_lighting::Activation::KeyMissing)=>"Before key pickup",Some(orr_sample::room_lighting::Activation::BeforeEscape)=>"Before escape"})
@@ -542,6 +568,7 @@ impl Panel {
                 ui.colored_label(egui::Color32::RED, error);
             }
         });
+        self.sync_viewport_pick(editor.as_deref());
         reset_live
     }
 }
