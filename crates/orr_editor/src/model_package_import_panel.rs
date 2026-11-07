@@ -1,3 +1,5 @@
+#[path = "model_package_import_panel/source_inspection.rs"]
+mod source_inspection;
 use crate::model_package_import::{
     self, ColorVariant, Report, Request, SourceFormat, TextureVariant,
 };
@@ -35,6 +37,9 @@ pub struct Panel {
     texture_variant_enabled: bool,
     texture_variant: TextureVariant,
     submitted_texture: Option<Option<TextureVariant>>,
+    inspection: source_inspection::State,
+    inspected_hash: Option<String>,
+    submitted_inspected_hash: Option<Option<String>>,
 }
 
 impl Default for Panel {
@@ -57,13 +62,16 @@ impl Default for Panel {
             texture_variant_enabled: false,
             texture_variant: default_texture_variant(),
             submitted_texture: None,
+            inspection: Default::default(),
+            inspected_hash: None,
+            submitted_inspected_hash: None,
         }
     }
 }
 
 impl Panel {
     pub fn busy(&self) -> bool {
-        self.pending.is_some()
+        self.pending.is_some() || self.inspection.busy()
     }
 
     pub fn poll(
@@ -72,6 +80,7 @@ impl Panel {
         project_generation: u64,
         source_generation: u64,
     ) -> Option<Report> {
+        self.sync_inspection(project_root, project_generation, source_generation);
         let Some(receiver) = &self.pending else {
             return None;
         };
@@ -82,6 +91,7 @@ impl Panel {
                 self.pending = None;
                 self.submitted_color = None;
                 self.submitted_texture = None;
+                self.submitted_inspected_hash = None;
                 self.license_acknowledged = false;
                 self.destination_identity = None;
                 self.status = "Model import worker disconnected before returning a result. Publication may have completed; inspect the destination before retrying. No automatic retry.".into();
@@ -100,7 +110,10 @@ impl Panel {
             .texture_request()
             .ok()
             .is_some_and(|texture| texture == submitted_texture);
-        let is_current = texture_is_current
+        let inspected_hash_is_current =
+            self.submitted_inspected_hash.take().unwrap_or(None) == self.inspected_hash;
+        let is_current = inspected_hash_is_current
+            && texture_is_current
             && color_is_current
             && project_root == Some(completion.project_root.as_path())
             && project_generation == completion.project_generation
@@ -168,6 +181,7 @@ impl Panel {
         project_generation: u64,
         source_generation: u64,
     ) {
+        self.sync_inspection(project_root, project_generation, source_generation);
         egui::CollapsingHeader::new("Import a model package")
             .default_open(false)
             .show(ui, |ui| {
@@ -236,8 +250,10 @@ impl Panel {
                             text_field(ui,"Variant asset ID",&mut self.texture_variant.asset_id,240);
                             ui.weak("Replace one material's embedded PNG image. The rights acknowledgement below covers this PNG as well as the model and license.");
                         }
+                        if old.1.material != self.color_variant.material || old.3.material != self.texture_variant.material { self.inspected_hash=None; }
                         if old != (self.color_variant_enabled,self.color_variant.clone(),self.texture_variant_enabled,self.texture_variant.clone()) { self.source_inputs_changed(); }
                     }
+                    self.show_source_inspection(ui,project_root,project_generation,source_generation);
                     ui.checkbox(
                         &mut self.license_acknowledged,
                         "I have reviewed rights to distribute this content",
@@ -323,6 +339,8 @@ impl Panel {
                 return;
             }
         };
+        let expected_hash = self.inspected_hash.clone();
+        let submitted_inspected_hash = expected_hash.clone();
         let submitted_texture = texture.clone();
         let submitted_color = color.clone();
         let request = self.request();
@@ -333,12 +351,22 @@ impl Panel {
             .spawn(move || {
                 let expected_destination = request_destination(&request.destination);
                 let result = match (color, texture) {
-                    (Some(color), None) => {
-                        model_package_import::import_color_variant(request, color)
-                    }
-                    (None, Some(texture)) => {
-                        model_package_import::import_texture_variant(request, texture)
-                    }
+                    (Some(color), None) => match expected_hash {
+                        Some(hash) => model_package_import::import_color_variant_checked(
+                            request,
+                            color,
+                            Some(hash),
+                        ),
+                        None => model_package_import::import_color_variant(request, color),
+                    },
+                    (None, Some(texture)) => match expected_hash {
+                        Some(hash) => model_package_import::import_texture_variant_checked(
+                            request,
+                            texture,
+                            Some(hash),
+                        ),
+                        None => model_package_import::import_texture_variant(request, texture),
+                    },
                     (None, None) => model_package_import::import_package(request),
                     _ => Err("Select only one animated authoring operation".into()),
                 };
@@ -356,6 +384,7 @@ impl Panel {
                 self.pending = Some(receiver);
                 self.submitted_color = Some(submitted_color);
                 self.submitted_texture = Some(submitted_texture);
+                self.submitted_inspected_hash = Some(submitted_inspected_hash);
                 self.status = match source_format {
                     SourceFormat::RawGlb => {
                         "Importing and validating the self-contained GLB on a worker…"
@@ -397,6 +426,8 @@ impl Panel {
     }
 
     fn reset_color_variant(&mut self) {
+        self.inspected_hash = None;
+        self.inspection.invalidate();
         self.color_variant_enabled = false;
         self.color_variant = default_color_variant();
         self.texture_variant_enabled = false;

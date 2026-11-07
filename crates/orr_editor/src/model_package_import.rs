@@ -90,13 +90,22 @@ struct InputBytes {
 }
 
 pub(crate) fn import_package(request: Request) -> Result<Report, String> {
-    import_package_inner(request, None)
+    import_package_inner(request, None, None)
 }
 
 pub(crate) fn import_color_variant(
     request: Request,
     variant: ColorVariant,
 ) -> Result<Report, String> {
+    import_color_variant_checked(request, variant, None)
+}
+
+pub(crate) fn import_color_variant_checked(
+    request: Request,
+    variant: ColorVariant,
+    expected_source_sha256: Option<String>,
+) -> Result<Report, String> {
+    validate_expected_source_hash(expected_source_sha256.as_deref())?;
     // All option/feature/license admission precedes any filesystem access.
     if !request.license_acknowledged {
         return Err("explicit license acknowledgement is required".into());
@@ -111,13 +120,26 @@ pub(crate) fn import_color_variant(
         );
     }
     validate_color_variant(&variant)?;
-    import_package_inner(request, Some(AuthoringVariant::Color(variant)))
+    import_package_inner(
+        request,
+        Some(AuthoringVariant::Color(variant)),
+        expected_source_sha256,
+    )
 }
 
 pub(crate) fn import_texture_variant(
     request: Request,
     variant: TextureVariant,
 ) -> Result<Report, String> {
+    import_texture_variant_checked(request, variant, None)
+}
+
+pub(crate) fn import_texture_variant_checked(
+    request: Request,
+    variant: TextureVariant,
+    expected_source_sha256: Option<String>,
+) -> Result<Report, String> {
+    validate_expected_source_hash(expected_source_sha256.as_deref())?;
     if !request.license_acknowledged {
         return Err("explicit license acknowledgement is required".into());
     }
@@ -133,7 +155,11 @@ pub(crate) fn import_texture_variant(
         );
     }
     validate_texture_variant(&variant)?;
-    import_package_inner(request, Some(AuthoringVariant::Texture(variant)))
+    import_package_inner(
+        request,
+        Some(AuthoringVariant::Texture(variant)),
+        expected_source_sha256,
+    )
 }
 
 fn validate_texture_variant(variant: &TextureVariant) -> Result<(), String> {
@@ -252,6 +278,7 @@ fn color_variant_bytes(source: &[u8], variant: &ColorVariant) -> Result<Vec<u8>,
 fn import_package_inner(
     request: Request,
     variant: Option<AuthoringVariant>,
+    expected_source_sha256: Option<String>,
 ) -> Result<Report, String> {
     if !request.license_acknowledged {
         return Err("explicit license acknowledgement is required".into());
@@ -305,6 +332,12 @@ fn import_package_inner(
     }
 
     let mut source = read_bounded_file(&source_path, MAX_SOURCE_BYTES, source_label)?;
+    if expected_source_sha256
+        .as_deref()
+        .is_some_and(|expected| !expected.eq_ignore_ascii_case(&source.digest))
+    {
+        return Err("inspected animated source changed; inspect again before importing".into());
+    }
     let license = read_bounded_file(&license_path, MAX_LICENSE_BYTES, "license source")?;
     if std::str::from_utf8(&license.bytes)
         .ok()
@@ -745,3 +778,17 @@ mod animated_color_tests;
 #[cfg(test)]
 #[path = "model_package_import/animated_texture_tests.rs"]
 mod animated_texture_tests;
+
+fn validate_expected_source_hash(expected: Option<&str>) -> Result<(), String> {
+    if expected.is_some_and(|s| s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit())) {
+        return Err(
+            "expected source SHA-256 must contain exactly 64 hexadecimal characters".into(),
+        );
+    }
+    Ok(())
+}
+#[path = "model_package_import/source_inspection.rs"]
+pub(crate) mod source_inspection;
+#[cfg(test)]
+#[path = "model_package_import/source_inspection_tests.rs"]
+mod source_inspection_tests;
