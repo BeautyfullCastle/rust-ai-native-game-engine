@@ -6,7 +6,7 @@ use super::*;
 use std::fs;
 const SOURCE: &[u8] =
     include_bytes!("../../../../assets/room_character_demo/courier.orrmodel.json");
-fn produced() -> orr_model::AnimatedModel {
+fn produced() -> orr_model::animation::AnimatedModel {
     let recipe = br#"{"format":"orr_animated_material_color","version":1,"source":"courier.animated.json","material":0,"linear_rgb":[0.2,0.7,0.4]}"#;
     let mut reads = 0;
     let model = orr_model::animated_recolor::recolor_model(
@@ -20,7 +20,7 @@ fn produced() -> orr_model::AnimatedModel {
     )
     .unwrap();
     assert_eq!(reads, 1);
-    let old = orr_model::AnimatedModel::from_bytes(SOURCE).unwrap();
+    let old = orr_model::animation::AnimatedModel::from_bytes(SOURCE).unwrap();
     let before = old.source();
     let after = model.source();
     assert_eq!(after.asset_id, "variants/courier.recolor.json");
@@ -107,7 +107,7 @@ fn assert_variant(prepared: &orr_sample::room_project::PreparedProject, bytes: &
     let model = loaded.animated_model().unwrap();
     assert_eq!(model.source().asset_id, "variants/courier.recolor.json");
     assert_eq!(model.source().materials[0].base_color, [0.2, 0.7, 0.4, 1.0]);
-    let original = orr_model::AnimatedModel::from_bytes(SOURCE).unwrap();
+    let original = orr_model::animation::AnimatedModel::from_bytes(SOURCE).unwrap();
     for clip in 0..3 {
         let a = original.sample_clip(clip, 0.5).unwrap();
         let b = model.sample_clip(clip, 0.5).unwrap();
