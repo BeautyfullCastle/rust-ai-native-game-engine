@@ -4,6 +4,7 @@ use crate::mesh_lighting_preset::{Preset, store};
 #[derive(Default)]
 pub(super) struct Controls {
     path: String,
+    include_post_process: bool,
 }
 
 impl Panel {
@@ -12,6 +13,8 @@ impl Panel {
         ui.label("Portable lighting presets");
         ui.weak("Use an absolute .mesh-lighting-preset.json path. Save creates a new file; Load stages reusable lighting and preserves this scene's shadow bounds.");
         text_field(ui, "Lighting preset file", &mut self.presets.path);
+        ui.checkbox(&mut self.presets.include_post_process, "Include post-processing in preset");
+        ui.weak("This option changes Save only. Load uses the file's contents; presets without effects preserve this scene's effects.");
         let ready = self.can_edit(editor) && !self.form_dirty && self.current_document().is_some();
         if ui
             .add_enabled(ready, egui::Button::new("Save applied lighting preset"))
@@ -51,7 +54,12 @@ impl Panel {
     fn save_applied_preset(&mut self, editor: &Editor) {
         let result = (|| {
             let document = self.preset_target(editor)?;
-            let bytes = Preset::from_document(&document)?.encode()?;
+            let preset = if self.presets.include_post_process {
+                Preset::from_document_with_post_process(&document)?
+            } else {
+                Preset::from_document(&document)?
+            };
+            let bytes = preset.encode()?;
             store::save_new(Path::new(&self.presets.path), &bytes)
         })();
         match result {
@@ -72,10 +80,11 @@ impl Panel {
             if self.preset_target(editor)? != target {
                 return Err("Applied game lighting changed while loading the preset".into());
             }
-            merged.lighting()
+            let post_process = preset.includes_post_process().then(|| merged.post_process_settings());
+            Ok::<_, String>((merged.lighting()?, post_process))
         })();
         match result {
-            Ok(lighting) => {
+            Ok((lighting, post_process)) => {
                 // Shadow center/radius belong to the target scene. Do not even
                 // reformat their strings: loading changes reusable fields only.
                 self.direction = lighting.direction.map(format_number);
@@ -87,6 +96,10 @@ impl Panel {
                 self.shadows = lighting.shadows;
                 self.tonemap = lighting.tonemap;
                 self.exposure = format_number(lighting.exposure);
+                if let Some(post_process) = post_process {
+                    self.post_process = post_process;
+                    self.post_process_authored = true;
+                }
                 self.form_dirty = true;
                 self.error = None;
                 self.status = "Lighting preset staged; this scene's shadow bounds are preserved. Apply game lighting to preview, then save explicitly.".into();
@@ -99,3 +112,7 @@ impl Panel {
 #[cfg(all(test, feature = "mesh-mission"))]
 #[path = "presets_tests.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "mesh-mission"))]
+#[path = "presets_post_process_tests.rs"]
+mod post_process_tests;
