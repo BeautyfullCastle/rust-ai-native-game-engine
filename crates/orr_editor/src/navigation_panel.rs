@@ -15,6 +15,9 @@ use serde_json::json;
 #[cfg(feature="terrain-patrol")]
 mod patrol_panel;
 #[cfg(feature="terrain-patrol")]
+#[path="navigation_panel/patrol_routes.rs"]
+pub(crate) mod patrol_routes;
+#[cfg(feature="terrain-patrol")]
 pub(crate) use patrol_panel::PatrolPickRequest;
 #[cfg(feature="terrain-patrol")]
 pub(crate) use patrol_panel::patrol_pick::Token as PatrolPickToken;
@@ -366,3 +369,10 @@ fn field(ui: &mut Ui, label: &str, value: &mut String) {
 #[cfg(all(test,target_os="linux",feature="terrain-patrol"))]
 #[path="navigation_panel/patrol_integration_tests.rs"]
 mod patrol_integration_tests;
+
+#[cfg(feature="terrain-patrol")]
+#[path="navigation_panel/patrol_route_overlay.rs"]
+mod patrol_route_overlay;
+#[cfg(all(test,target_os="linux",feature="terrain-patrol"))]
+#[path="navigation_panel/patrol_route_overlay_integration_tests.rs"]
+mod patrol_route_overlay_integration_tests;

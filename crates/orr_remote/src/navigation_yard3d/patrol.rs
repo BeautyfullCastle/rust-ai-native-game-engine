@@ -3,7 +3,8 @@ use super::{NavigationView, navigation_from_view, navigation_yard3d_types};
 use orr_bridge::FrameView;
 use orr_edit::{EditorDoc, Op, Origin};
 use orr_games::navigation_yard3d_game::patrol;
-pub use patrol::{PATROL_NAME, RUN_NAME, TerrainPatrol, TerrainPatrolRun};
+pub use patrol::{validate_config, PATROL_NAME, RUN_NAME, TerrainPatrol, TerrainPatrolRun};
+pub use orr_navigation_runtime::MAX_ROUTE_TRIANGLES;
 use serde_json::{Value, json};
 pub struct PatrolView {
     pub config: TerrainPatrol,
