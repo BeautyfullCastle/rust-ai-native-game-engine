@@ -22,12 +22,23 @@ pub(crate) const MAX_RUNTIME: usize = 64 * 1024 * 1024;
 pub(crate) const MAX_LAUNCHER: usize = 4096;
 pub(crate) const LAUNCHER:&[u8]=b"#!/bin/sh\nset -eu\nROOT=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd -P)\nexec \"$ROOT/bin/navigation_player\" --bundle \"$ROOT\" \"$@\"\n";
 
+/// Bundle profile is selected by the compiled registry, even when patrol is disabled.
+/// Patrol simulation without explicit bundle support cannot read or publish bundles.
+pub fn compiled_profile() -> Result<&'static str,String> {
+    match (orr_games::navigation_yard3d_game::TERRAIN_PATROL_ENABLED,cfg!(feature="terrain-patrol-bundle")) {
+        (false,false)=>Ok("NavigationYard3DPointV1"),
+        (true,true)=>Ok("NavigationYard3DPatrolV1"),
+        _=>Err("legacy navigation bundle does not support terrain patrol profile without explicit terrain-patrol-bundle support".into()),
+    }
+}
+
 /// `None` is only for export-stage internal verification. Production bundle-open
 /// must supply current_exe and prove both its exact path and bytes are included.
 pub(crate) fn verify_bundle(
     root: &Path,
     expected_exe: Option<&Path>,
 ) -> Result<AuthoredPlayer, String> {
+    compiled_profile()?;
     let root = checked_path(root)?;
     let manifest_snapshot = Snapshot::read(&root.join(MANIFEST_PATH), MAX_MANIFEST)?;
     if manifest_snapshot.mode != 0o644 {

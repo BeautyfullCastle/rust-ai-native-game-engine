@@ -8,6 +8,7 @@ fn legacy_bundle_capture_rejects_new_compiled_profile_before_source_io() {
     assert_eq!(
         error.contains("does not support terrain patrol profile"),
         orr_games::navigation_yard3d_game::TERRAIN_PATROL_ENABLED
+            && !cfg!(feature = "terrain-patrol-bundle")
     );
 }
 
@@ -85,7 +86,11 @@ fn runtime_capabilities_and_bundle_commands_match_compiled_profile() {
     if enabled {
         assert_eq!(
             crate::player::capabilities(),
-            "ORR_TERRAIN_PATROL_SCENE_PLAYER_V1"
+            if cfg!(feature = "terrain-patrol-bundle") {
+                "ORR_TERRAIN_PATROL_SCENE_PLAYER_V1\nORR_TERRAIN_PATROL_BUNDLE_V1"
+            } else {
+                "ORR_TERRAIN_PATROL_SCENE_PLAYER_V1"
+            }
         );
         assert_eq!(
             crate::surface_player::capabilities(),
@@ -110,7 +115,11 @@ fn runtime_capabilities_and_bundle_commands_match_compiled_profile() {
             .into_iter()
             .map(std::ffi::OsString::from)
     };
-    assert_eq!(crate::player::parse_command(args()).is_err(), enabled);
+    let plain_unsupported = enabled && !cfg!(feature = "terrain-patrol-bundle");
+    assert_eq!(
+        crate::player::parse_command(args()).is_err(),
+        plain_unsupported
+    );
     assert_eq!(
         crate::surface_player::parse_command(args()).is_err(),
         enabled
@@ -126,7 +135,7 @@ fn runtime_capabilities_and_bundle_commands_match_compiled_profile() {
         crate::player::run_bundle(plain)
             .unwrap_err()
             .contains("does not support terrain patrol profile"),
-        enabled
+        plain_unsupported
     );
     assert_eq!(
         crate::surface_player::run_bundle(surface)

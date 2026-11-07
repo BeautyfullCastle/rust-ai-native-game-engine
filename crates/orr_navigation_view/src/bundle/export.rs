@@ -32,6 +32,13 @@ struct Options {
     output: PathBuf,
     revision: Option<String>,
 }
+fn validate_capability_reply(reply: &[u8]) -> Result<(), String> {
+    if reply != format!("{}\n", player::capabilities()).as_bytes() {
+        return Err("trusted runtime lacks exact navigation bundle capabilities".into());
+    }
+    Ok(())
+}
+
 fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Options>, String> {
     let mut argsv = Vec::new();
     let mut bytes = 0usize;
@@ -242,6 +249,7 @@ fn export_bound(
     source: Option<&super::SavedSource>,
     mut checkpoint: impl FnMut(&str) -> Result<(), String>,
 ) -> Result<PathBuf, String> {
+    super::compiled_profile()?;
     validate_options(options)?;
     if let Some(source) = source {
         source.recheck()?;
@@ -334,11 +342,7 @@ fn export_bound(
             .current_dir(&stage)
             .env_remove("LD_PRELOAD")
             .env_remove("LD_LIBRARY_PATH");
-        if run_bounded(&mut capability, Duration::from_secs(10), 65536)?
-            != b"ORR_NAVIGATION_PLAYER_V1\nORR_NAVIGATION_BUNDLE_V1\n"
-        {
-            return Err("trusted runtime lacks exact navigation bundle capabilities".into());
-        }
+        validate_capability_reply(&run_bounded(&mut capability, Duration::from_secs(10), 65536)?)?;
         let args = [
             OsString::from("--scene"),
             stage.join(SCENE_PATH).into_os_string(),
@@ -515,3 +519,7 @@ mod source_contract_tests {
         assert!(source.recheck().is_err());
     }
 }
+
+#[cfg(all(test,feature="terrain-patrol-bundle"))]
+#[path="patrol_native_tests.rs"]
+mod patrol_native_tests;
