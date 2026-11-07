@@ -8,7 +8,8 @@ struct State {
     app: EditorApp,
     camera: orr_render::Camera3D,
     consumed: usize,
-    pixels_per_point: f32,
+    trace: Vec<String>,
+    window_rect: Option<egui::Rect>,
 }
 const SIZE: (u32, u32) = (800, 600);
 fn rect() -> egui::Rect {
@@ -55,18 +56,23 @@ fn setup(pixels_per_point: f32) -> (tempfile::TempDir, PathBuf, Harness<'static,
     app.room_lighting = Some(panel);
     let mut h = Harness::builder()
         .with_size([1200.0, 1200.0])
+        .with_pixels_per_point(pixels_per_point)
         .build_ui_state(
             |ui, state: &mut State| {
-                ui.ctx().set_pixels_per_point(state.pixels_per_point);
                 state.app.sync_room_light_pick(ui.ctx());
                 let response = ui.allocate_rect(rect(), egui::Sense::click());
+                if ui.ctx().input(|i| i.pointer.any_down() || i.pointer.any_released()) {
+                    state.trace.push(format!("rect={:?} clip={:?} screen={:?} ppp={} clicked={} hover={} pos={:?} pending={}",
+                        response.rect,ui.clip_rect(),ui.ctx().content_rect(),ui.ctx().pixels_per_point(),
+                        response.clicked_by(egui::PointerButton::Primary),response.hovered(),response.interact_pointer_pos(),state.app.room_light_pick_pending()));
+                }
                 if state
                     .app
                     .room_light_viewport_pick(ui.ctx(), &response, &state.camera, SIZE)
                 {
                     state.consumed += 1;
                 }
-                egui::Window::new("Lighting authoring test")
+                let window = egui::Window::new("Lighting authoring test")
                     .fixed_pos(egui::pos2(540.0, 20.0))
                     .show(ui.ctx(), |ui| {
                         let app = &mut state.app;
@@ -75,12 +81,14 @@ fn setup(pixels_per_point: f32) -> (tempfile::TempDir, PathBuf, Harness<'static,
                             .unwrap()
                             .show_for_editor(ui, &mut app.editor);
                     });
+                state.window_rect=window.map(|shown|shown.response.rect);
             },
             State {
                 app,
                 camera: projection,
                 consumed: 0,
-                pixels_per_point,
+                trace: Vec::new(),
+                window_rect: None,
             },
         );
     h.run_steps(5);
@@ -131,8 +139,20 @@ fn offset_hidpi_viewport_pick_stages_then_explicit_apply_save_reopens_actual_roo
         let pixel = h.state().camera.world_to_screen(expected, SIZE).unwrap();
         let point = rect().min + egui::vec2(pixel[0] / 2.0, pixel[1] / 2.0);
         assert!(rect().contains(point));
+        let ground = h
+            .state()
+            .camera
+            .screen_to_plane_y(pixel, SIZE, 0.0)
+            .unwrap();
+        assert!((ground[0] - expected[0]).abs() < 0.002 && (ground[2] - expected[2]).abs() < 0.002);
+        assert!(
+            !h.state().window_rect.unwrap().contains(point),
+            "authoring window {:?} must not cover viewport click {point:?}, ppp={pixels_per_point}",
+            h.state().window_rect
+        );
         pointer(&mut h, point);
-        assert!(!h.state().app.room_lighting.as_ref().unwrap().pick_pending());
+        assert!(!h.state().app.room_lighting.as_ref().unwrap().pick_pending(),
+            "ppp={pixels_per_point} pixel={pixel:?} logical={point:?} window={:?} consumed={} trace={:?}",h.state().window_rect,h.state().consumed,h.state().trace);
         assert!(h.state().consumed > 0);
         assert_eq!(h.state().app.editor.room_lighting_document(), Some(&before));
         assert_eq!(
