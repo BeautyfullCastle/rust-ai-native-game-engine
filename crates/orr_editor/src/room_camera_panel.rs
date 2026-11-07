@@ -35,6 +35,8 @@ pub struct Panel {
     undo: Vec<Document>,
     redo: Vec<Document>,
     error: Option<String>,
+    match_width: String,
+    match_height: String,
 }
 
 struct RootPin {
@@ -159,6 +161,8 @@ impl Panel {
             undo: Vec::new(),
             redo: Vec::new(),
             error,
+            match_width: "1280".into(),
+            match_height: "720".into(),
         }
     }
     pub fn document(&self) -> &Document {
@@ -243,6 +247,27 @@ impl Panel {
     }
     /// True requests that the editor reset its live camera to this document.
     /// Navigation itself is never captured or silently persisted by this panel.
+    fn stage_matching_projection(&mut self) {
+        let result =
+            (|| {
+                let width =
+                    self.match_width.trim().parse::<u32>().map_err(|_| {
+                        "Projection aspect width must be a positive integer".to_owned()
+                    })?;
+                let height = self.match_height.trim().parse::<u32>().map_err(|_| {
+                    "Projection aspect height must be a positive integer".to_owned()
+                })?;
+                projection_match::match_projection(&self.candidate, (width, height))
+            })();
+        match result {
+            Ok(candidate) => {
+                self.candidate = candidate;
+                self.error = None;
+            }
+            Err(error) => self.error = Some(error),
+        }
+    }
+
     pub fn show(&mut self, ui: &mut egui::Ui, editable: bool) -> bool {
         let mut reset_live = false;
         ui.collapsing("Room camera", |ui| {
@@ -286,6 +311,16 @@ impl Panel {
                         number(ui, "Orthographic half-height", half_height)
                     }
                 }
+                ui.collapsing("Match projection scale", |ui| {
+                for (label,value) in [("Match projection aspect width",&mut self.match_width),("Match projection aspect height",&mut self.match_height)] {
+                    let label=ui.label(label);
+                    ui.add(egui::TextEdit::singleline(value).char_limit(10)).labelled_by(label.id);
+                }
+                ui.weak("Use an explicit aspect width and height, not the live viewport. Switching preserves scale only on the plane through the camera target; depth appearance differs.");
+                if ui.button("Switch projection keeping target-plane scale").clicked() {
+                    self.stage_matching_projection();
+                }
+                });
                 let mut follow = self.candidate.follow_player.is_some();
                 if ui.checkbox(&mut follow,"Follow player during play").changed() {
                     self.candidate.schema = if follow { 2 } else { 1 };
@@ -384,15 +419,29 @@ mod tests {
     }
     #[test]
     fn invalid_tracking_limits_preserve_applied_history_and_saved_bytes() {
-        let (_dir, prepared)=fixture();let path=prepared.path.clone();let original=prepared.bytes.clone();
-        let mut panel=Panel::new(prepared);let mut valid=panel.document().clone();valid.schema=3;valid.follow_player=Some([0.0;3]);
-        valid.target_bounds=Some(orr_sample::room_camera::TargetBounds {min:[-1.0;3],max:[1.0;3]});
+        let (_dir, prepared) = fixture();
+        let path = prepared.path.clone();
+        let original = prepared.bytes.clone();
+        let mut panel = Panel::new(prepared);
+        let mut valid = panel.document().clone();
+        valid.schema = 3;
+        valid.follow_player = Some([0.0; 3]);
+        valid.target_bounds = Some(orr_sample::room_camera::TargetBounds {
+            min: [-1.0; 3],
+            max: [1.0; 3],
+        });
         panel.apply_document(valid.clone()).unwrap();
-        let undo=panel.undo.clone();let redo=panel.redo.clone();let saved=panel.saved.clone();
-        let mut invalid=valid.clone();invalid.target_bounds.as_mut().unwrap().min[0]=2.0;
+        let undo = panel.undo.clone();
+        let redo = panel.redo.clone();
+        let saved = panel.saved.clone();
+        let mut invalid = valid.clone();
+        invalid.target_bounds.as_mut().unwrap().min[0] = 2.0;
         assert!(panel.apply_document(invalid).is_err());
-        assert_eq!(panel.document(),&valid);assert_eq!(panel.undo,undo);assert_eq!(panel.redo,redo);assert_eq!(panel.saved,saved);
-        assert_eq!(std::fs::read(path).unwrap(),original);
+        assert_eq!(panel.document(), &valid);
+        assert_eq!(panel.undo, undo);
+        assert_eq!(panel.redo, redo);
+        assert_eq!(panel.saved, saved);
+        assert_eq!(std::fs::read(path).unwrap(), original);
     }
     #[test]
     fn widgets_stage_apply_undo_save_reopen() {
@@ -705,3 +754,13 @@ mod tests {
 #[cfg(test)]
 #[path = "room_camera_panel/redo_tests.rs"]
 mod redo_tests;
+
+#[cfg(test)]
+#[path = "room_camera_panel/projection_match_panel_tests.rs"]
+mod projection_match_panel_tests;
+#[path = "room_camera_panel/projection_match.rs"]
+mod projection_match;
+
+#[cfg(all(test,target_os="linux",feature="package-manager",feature="project-create",feature="room-character",feature="room-lighting",feature="windows-export"))]
+#[path="room_camera_panel/projection_match_integration_tests.rs"]
+mod projection_match_integration_tests;
