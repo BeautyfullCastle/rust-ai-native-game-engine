@@ -21,6 +21,7 @@ fn pickup_app_observes_event_resumes_carrying_and_restarts_without_source() {
         searching_idle: document.searching,
         carrying_idle: document.carrying,
         escaped_once: false,
+        facing: None,
         pickup: Some(Pickup {
             clip: document.escaped,
             speed: PlaybackRate::Normal,

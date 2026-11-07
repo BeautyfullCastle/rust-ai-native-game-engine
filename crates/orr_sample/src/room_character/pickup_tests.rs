@@ -6,6 +6,7 @@ fn enabled() -> Document {
             searching_idle: 0,
             carrying_idle: 1,
             escaped_once: true,
+            facing: None,
             pickup: Some(Pickup {
                 clip: 0,
                 speed: PlaybackRate::default(),

@@ -546,6 +546,17 @@ fn frame_placements_with_playback(
                 };
                 #[cfg(not(feature = "room-character"))]
                 let pose = sample_binding()?;
+                #[cfg(feature = "room-character")]
+                let transform = if let Some(character) = models.character.as_ref().filter(|character| character.player == guid.to_string() && character.motion.and_then(|motion| motion.facing).is_some()) {
+                    let yaw = match playback {
+                        Some(cursor) => cursor.facing_yaw(character, model, frame, crate::room_character::PlaybackContext {
+                            entity, tick_rate: orr_games::room_escape_game::TICK_RATE, rest: false, revision: 0,
+                        })?,
+                        None => 0.0,
+                    };
+                    facing_world_matrix(body_transform, binding.transform, yaw)?
+                } else { world_matrix(body_transform, binding.transform) };
+                #[cfg(not(feature = "room-character"))]
                 let transform = world_matrix(body_transform, binding.transform);
                 SkinnedInstance {
                     pose: &pose,
@@ -565,6 +576,18 @@ fn frame_placements_with_playback(
         }
     }
     Ok(result)
+}
+
+/// Compose presentation facing between the admitted body and authored local TRS.
+/// Local offsets rotate about the body origin; no binding or Frame is modified.
+#[cfg(feature = "room-character")]
+pub fn facing_world_matrix(body: Transform3, local: LocalTransform, yaw: f32) -> Result<orr_model::animation::Matrix4, String> {
+    if !yaw.is_finite() { return Err("Room character facing yaw must be finite".into()); }
+    if yaw == 0.0 { return Ok(world_matrix(body, local)); }
+    let body = Trs { translation:body.pos.to_array(),rotation:body.rot.to_array(),scale:[1.0;3] }.matrix();
+    let facing = Trs { rotation:orr_view::Quat::from_axis_angle(orr_view::Vec3::new(0.0,1.0,0.0),yaw).to_array(),..Trs::default() }.matrix();
+    let local = Trs {translation:local.translation,rotation:local.rotation,scale:local.scale}.matrix();
+    Ok(matrix_multiply(matrix_multiply(body,facing),local))
 }
 
 #[cfg(feature = "room-animated-models")]
@@ -1262,6 +1285,19 @@ pub fn observe_character(
     Ok(())
 }
 
+/// The exact observed pose and instance matrix consumed by native rendering.
+#[cfg(feature = "room-character")]
+pub fn observed_character_placement(
+    frame: FrameView<'_>, index: &SceneIndex, models: &PreparedModels,
+    playback: &crate::room_character::PlaybackCursor,
+) -> Result<Option<CharacterPlacement>, String> {
+    let Some(character) = &models.character else { return Ok(None); };
+    let entity = index.entity(&Guid::parse(&character.player)?).ok_or("character entity missing")?;
+    let placements = frame_placements_with_playback(frame,index,models,Some(playback))?;
+    let placed = placements.animated_models.into_iter().find(|placed|placed.entity==entity).ok_or("observed character placement missing")?;
+    Ok(Some(CharacterPlacement {entity,model:placed.model,pose:placed.pose,transform:placed.transform}))
+}
+
 /// Stateless character sampling for diagnostics; runtime draws use the observed cursor.
 #[cfg(feature = "room-character")]
 pub struct CharacterPlacement {
@@ -1328,3 +1364,7 @@ mod environment_consumer_tests {
         assert!(!presentation_lighting(None).unwrap().shadows);
     }
 }
+
+#[cfg(all(test, feature="room-character"))]
+#[path="room_view/facing_tests.rs"]
+mod facing_tests;

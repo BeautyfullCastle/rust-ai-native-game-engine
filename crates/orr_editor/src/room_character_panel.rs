@@ -12,6 +12,10 @@ use std::{
 
 const MAX_UNDO: usize = 32;
 
+fn motion_schema(motion: &orr_sample::room_character::Motion) -> u32 {
+    if motion.facing.is_some() { 7 } else if motion.pickup.is_some() { 6 } else { 5 }
+}
+
 fn clip_text(clip: &crate::model_panel::CharacterClip) -> String {
     let name = if clip.name.trim().is_empty() { "Unnamed clip" } else { &clip.name };
     format!("{}: {} ({:.2}s)", clip.index, name, clip.seconds)
@@ -397,28 +401,28 @@ impl Panel {
                         });
                 }
                 if speeds != original_speeds {
-                    self.candidate.schema = if self.candidate.motion.as_ref().is_some_and(|motion| motion.pickup.is_some()) { 6 } else if self.candidate.motion.is_some() { 5 } else if self.candidate.escaped_once() { 4 } else if self.candidate.crossfade_ticks.is_some() { 3 } else { 2 };
+                    self.candidate.schema = if let Some(motion) = self.candidate.motion.as_ref() { motion_schema(motion) } else if self.candidate.escaped_once() { 4 } else if self.candidate.crossfade_ticks.is_some() { 3 } else { 2 };
                     self.candidate.speeds = Some(speeds);
                 }
                 let mut ticks = self.candidate.crossfade_ticks.unwrap_or(0);
                 let previous_ticks = ticks;
                 ui.add(egui::Slider::new(&mut ticks, 0..=orr_sample::room_character::MAX_CROSSFADE_TICKS).text("Crossfade ticks"));
                 if ticks != previous_ticks {
-                    self.candidate.schema = if self.candidate.motion.as_ref().is_some_and(|motion| motion.pickup.is_some()) { 6 } else if self.candidate.motion.is_some() { 5 } else if self.candidate.escaped_once() { 4 } else { 3 };
+                    self.candidate.schema = if let Some(motion) = self.candidate.motion.as_ref() { motion_schema(motion) } else if self.candidate.escaped_once() { 4 } else { 3 };
                     self.candidate.speeds = Some(speeds);
                     self.candidate.crossfade_ticks = Some(ticks);
                 }
                 let mut escaped_once = self.candidate.escaped_once();
                 if ui.checkbox(&mut escaped_once, "Play escaped clip once").changed() {
-                    self.candidate.schema = if let Some(motion) = self.candidate.motion.as_mut() { motion.escaped_once = escaped_once; if motion.pickup.is_some() { 6 } else { 5 } } else if escaped_once { 4 } else { 3 };
+                    self.candidate.schema = if let Some(motion) = self.candidate.motion.as_mut() { motion.escaped_once = escaped_once; motion_schema(motion) } else if escaped_once { 4 } else { 3 };
                     self.candidate.speeds = Some(speeds);
                     self.candidate.crossfade_ticks = Some(ticks);
                 }
                 ui.weak("Once starts on the first observed escaped tick and holds the final pose. Seek/restart/source replacement resets it.");
                 let mut idle = self.candidate.motion.is_some();
-                if ui.add_enabled(self.candidate.motion.as_ref().is_none_or(|motion| motion.pickup.is_none()), egui::Checkbox::new(&mut idle, "Use idle clips")).on_hover_text("Turn off key pickup playback before disabling idle clips.").changed() {
+                if ui.add_enabled(self.candidate.motion.as_ref().is_none_or(|motion| motion.pickup.is_none() && motion.facing.is_none()), egui::Checkbox::new(&mut idle, "Use idle clips")).on_hover_text("Turn off key pickup playback and movement facing before disabling idle clips.").changed() {
                     self.candidate.motion = if idle { Some(orr_sample::room_character::Motion {
-                        searching_idle: self.candidate.searching, carrying_idle: self.candidate.carrying, escaped_once, pickup: None,
+                        searching_idle: self.candidate.searching, carrying_idle: self.candidate.carrying, escaped_once, pickup: None, facing: None,
                     }) } else { None };
                     self.candidate.schema = if idle { 5 } else if escaped_once { 4 } else { 3 };
                     self.candidate.speeds = Some(speeds); self.candidate.crossfade_ticks = Some(ticks);
@@ -439,14 +443,15 @@ impl Panel {
                             carrying_idle: self.candidate.carrying,
                             escaped_once,
                             pickup: None,
+                            facing: None,
                         });
                         self.candidate.speeds = Some(speeds);
                         self.candidate.crossfade_ticks = Some(ticks);
                         self.candidate.motion.as_mut().unwrap().pickup = Some(orr_sample::room_character::Pickup { clip: self.candidate.carrying, speed: PlaybackRate::Normal });
-                        self.candidate.schema = 6;
+                        self.candidate.schema = motion_schema(self.candidate.motion.as_ref().unwrap());
                     } else {
                         self.candidate.motion.as_mut().unwrap().pickup = None;
-                        self.candidate.schema = 5;
+                        self.candidate.schema = motion_schema(self.candidate.motion.as_ref().unwrap());
                     }
                 }
                 if let Some(pickup) = self.candidate.motion.as_mut().and_then(|motion| motion.pickup.as_mut()) {
@@ -458,6 +463,30 @@ impl Panel {
                     });
                     ui.weak("Observed key pickup plays once, then resumes carrying idle or movement. Unknown first snapshots and timeline/source changes do not reconstruct unseen interactions. Apply and Save remain explicit.");
                 }
+                let focused = ui.ctx().input(|input| input.focused && !input.events.iter().any(|event| matches!(event, egui::Event::WindowFocused(false))));
+                ui.add_enabled_ui(focused, |ui| {
+                    let mut facing = self.candidate.motion.as_ref().is_some_and(|motion| motion.facing.is_some());
+                    if ui.checkbox(&mut facing, "Face observed movement direction").changed() && focused {
+                        if facing {
+                            let motion = self.candidate.motion.get_or_insert(orr_sample::room_character::Motion {
+                                searching_idle: self.candidate.searching, carrying_idle: self.candidate.carrying, escaped_once, pickup: None, facing: None,
+                            });
+                            motion.facing = Some(orr_sample::room_character::ForwardAxis::PositiveZ);
+                            self.candidate.speeds = Some(speeds);
+                            self.candidate.crossfade_ticks = Some(ticks);
+                        } else if let Some(motion) = self.candidate.motion.as_mut() { motion.facing = None; }
+                        self.candidate.schema = motion_schema(self.candidate.motion.as_ref().unwrap());
+                    }
+                    if let Some(axis) = self.candidate.motion.as_mut().and_then(|motion| motion.facing.as_mut()) {
+                        use orr_sample::room_character::ForwardAxis;
+                        let options = [(ForwardAxis::PositiveZ,"+Z"),(ForwardAxis::NegativeZ,"-Z"),(ForwardAxis::PositiveX,"+X"),(ForwardAxis::NegativeX,"-X")];
+                        let label = options.iter().find(|(value,_)| *value == *axis).unwrap().1;
+                        egui::ComboBox::from_label("Authored forward direction").selected_text(label).show_ui(ui, |ui| {
+                            for (value,label) in options { ui.selectable_value(axis,value,format!("Model forward {label}")); }
+                        });
+                        ui.weak("Presentation only: observed XZ movement turns the model; stopping holds its heading. New source, restart or seek resets it. Collider and game state are unchanged.");
+                    }
+                });
                 if ui.button("Apply character settings").clicked() {
                     self.error = self
                         .apply_document(self.candidate.clone(), editor, models)
@@ -1205,7 +1234,7 @@ mod tests {
             f.models.assign(&f.editor).unwrap();
         }
         fn document(f: &Fixture) -> Document {
-            Document {schema:5,speeds:Some(Default::default()),crossfade_ticks:Some(0),motion:Some(orr_sample::room_character::Motion { searching_idle:fixture::IDLE,carrying_idle:fixture::IDLE,escaped_once:true, pickup:None }),..f.panel.document.clone()}
+            Document {schema:5,speeds:Some(Default::default()),crossfade_ticks:Some(0),motion:Some(orr_sample::room_character::Motion { searching_idle:fixture::IDLE,carrying_idle:fixture::IDLE,escaped_once:true, pickup:None, facing:None }),..f.panel.document.clone()}
         }
         #[test]
         fn motion_policy_save_reopen_history_and_all_mapped_clip_admission_are_atomic() {
@@ -1265,5 +1294,7 @@ mod tests {
     }
 
     mod pickup_ui_tests { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/room_character_panel/pickup_ui_tests.rs")); }
+
+    mod facing_ui_tests { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/room_character_panel/facing_ui_tests.rs")); }
 
 }
