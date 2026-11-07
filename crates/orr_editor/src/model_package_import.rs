@@ -792,3 +792,7 @@ pub(crate) mod source_inspection;
 #[cfg(test)]
 #[path = "model_package_import/source_inspection_tests.rs"]
 mod source_inspection_tests;
+
+#[cfg(feature = "room-animated-models")]
+#[path = "model_package_import/variant_preview.rs"]
+pub(crate) mod variant_preview;
