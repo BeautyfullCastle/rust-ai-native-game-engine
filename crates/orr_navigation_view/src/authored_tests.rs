@@ -26,7 +26,7 @@ fn saved_scene_matches_actual_simulation_each_tick_and_restart_after_sources_hid
     let admission = LocalNavigationAdmission::for_scene(&f.scene).unwrap();
     let doc = navigation_yard3d_doc_from_yaml(YAML, admission).unwrap();
     let mut oracle =
-        Simulation::<NavigationYard3D>::from_frame(doc.frame(), YARD_TICK_RATE, YARD_BUILD_ID)
+        Simulation::<NavigationYard3D>::from_frame(doc.frame(), YARD_TICK_RATE, NAVIGATION_BUILD_ID)
             .unwrap();
     assert_eq!(player.tick(), 0);
     let initial = player.frame().to_bytes();

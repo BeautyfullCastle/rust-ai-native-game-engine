@@ -21,6 +21,14 @@ pub use orr_games::navigation_yard3d_game::{
     NavigationAgentSpec, NavigationScenePin, NavigationStepStatus, NavigationYard3D, PIN_NAME,
 };
 
+#[cfg(feature = "terrain-patrol")]
+#[path = "navigation_yard3d/patrol.rs"]
+pub mod patrol;
+#[cfg(not(feature = "terrain-patrol"))]
+pub const NAVIGATION_BUILD_ID: u64 = YARD_BUILD_ID;
+#[cfg(feature = "terrain-patrol")]
+pub const NAVIGATION_BUILD_ID: u64 = 0x544e_4156_0000_0001;
+
 pub fn navigation_yard3d_types() -> TypeRegistry {
     let mut types = TypeRegistry::new();
     orr_games::navigation_yard3d_game::register_reflect(&mut types);
@@ -81,7 +89,11 @@ impl LocalNavigationAdmission {
     }
 }
 impl BakeAdmission for LocalNavigationAdmission {
-    fn admit(&self, scene: &Scene, frame: &mut Frame, _: &SceneIndex) -> Result<(), EditError> {
+    fn admit(&self, scene: &Scene, original_frame: &mut Frame, _: &SceneIndex) -> Result<(), EditError> {
+        let frame = &mut *original_frame;
+        if orr_games::navigation_yard3d_game::TERRAIN_PATROL_ENABLED != cfg!(feature = "terrain-patrol") {
+            return Err(EditError::Invalid("TerrainNavigation patrol feature profile differs between game and host".into()));
+        }
         let fail = |message: String| EditError::Invalid(format!("navigation admission: {message}"));
         if !scene.entities.is_empty() || frame.alive_count() != 0 {
             return Err(fail(
@@ -96,11 +108,20 @@ impl BakeAdmission for LocalNavigationAdmission {
                 "runtime failure status cannot be authored into a scene".into(),
             ));
         }
+        #[cfg(feature = "terrain-patrol")]
+        if *frame.singleton::<patrol::TerrainPatrolRun>() != bytemuck::Zeroable::zeroed() {
+            return Err(fail("runtime terrain patrol progress cannot be authored".into()));
+        }
+        let mut candidate = frame.clone();
+        let frame = &mut candidate;
         let pin = *frame.singleton::<NavigationScenePin>();
         let explicit_pin = scene.singletons.iter().any(|(name, _)| name == PIN_NAME);
         if !explicit_pin || bytemuck::bytes_of(&pin).iter().all(|&byte| byte == 0) {
             // An empty document is a deliberate edit-only staging state. It
             // cannot play: the first runtime tick records an authoritative error.
+            #[cfg(feature = "terrain-patrol")]
+            orr_games::navigation_yard3d_game::patrol::admit(frame, pin).map_err(fail)?;
+            *original_frame = candidate;
             return Ok(());
         }
         if pin.agent.distance_per_tick <= orr_fp::FP::ZERO {
@@ -121,7 +142,11 @@ impl BakeAdmission for LocalNavigationAdmission {
         }
         NavigationRuntime::admit(frame, &terrain, &graph, pin.agent.to_runtime())
             .map_err(|e| fail(e.to_string()))?;
-        orr_games::navigation_yard3d_game::validate_scene_frame(frame).map_err(fail)
+        #[cfg(feature = "terrain-patrol")]
+        orr_games::navigation_yard3d_game::patrol::admit(frame, pin).map_err(fail)?;
+        orr_games::navigation_yard3d_game::validate_scene_frame(frame).map_err(fail)?;
+        *original_frame = candidate;
+        Ok(())
     }
     fn allow_play_edits(&self) -> bool {
         false
@@ -208,7 +233,7 @@ pub fn configure_navigation_yard3d(limits: &mut HostLimits) {
     limits.reject_scene_path_overrides = true;
     limits.player_count = YARD_PLAYERS;
     limits.tick_rate = YARD_TICK_RATE;
-    limits.build_id = YARD_BUILD_ID;
+    limits.build_id = NAVIGATION_BUILD_ID;
     limits.game = GameHooks::new("NavigationYard3D");
     limits.view_stream = Some(ViewStreamHook::new(NavigationStream::new(
         limits.build_id,
@@ -252,12 +277,16 @@ impl StreamProducer for NavigationStream {
 /// Readback from the same immutable Frame as the simulation, never from the
 /// editor's working copy or a source path that may have changed since admission.
 pub struct NavigationView {
+    pub pin: NavigationScenePin,
     pub terrain: Terrain,
     pub graph: TerrainGraph,
     pub navigator: Navigator,
     pub spec: NavigationAgentSpec,
 }
 pub fn navigation_from_view(frame: orr_bridge::FrameView<'_>) -> Result<NavigationView, String> {
+    if orr_games::navigation_yard3d_game::TERRAIN_PATROL_ENABLED != cfg!(feature = "terrain-patrol") {
+        return Err("TerrainNavigation patrol feature profile differs between game and host".into());
+    }
     let state = *frame.singleton::<RuntimeState>();
     if !state.is_active() || !frame.exists(state.agent) || frame.count::<RuntimeAgent>() != 1 {
         return Err("snapshot has no admitted navigation route".into());
@@ -277,11 +306,17 @@ pub fn navigation_from_view(frame: orr_bridge::FrameView<'_>) -> Result<Navigati
     if terrain.asset_id() != pin.identity()?
         || terrain.revision() != pin.terrain_revision
         || graph.revision() != pin.graph_revision
-        || spec != pin.agent.to_runtime()
+        || (!cfg!(feature = "terrain-patrol") && spec != pin.agent.to_runtime())
     {
         return Err("snapshot navigation route does not match its scene pin".into());
     }
+    #[cfg(feature = "terrain-patrol")]
+    orr_games::navigation_yard3d_game::patrol::validate_runtime_parts(
+        frame.singleton::<patrol::TerrainPatrol>(), frame.singleton::<patrol::TerrainPatrolRun>(),
+        pin, &terrain, &graph, &navigator, &spec,
+    )?;
     Ok(NavigationView {
+        pin: *pin,
         terrain,
         graph,
         navigator,

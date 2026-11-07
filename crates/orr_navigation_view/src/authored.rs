@@ -6,7 +6,7 @@ use orr_ecs::Frame;
 use orr_games::navigation_yard3d_game::validate_scene_frame;
 use orr_remote::navigation_yard3d::{
     navigation_from_view, navigation_yard3d_doc_from_yaml, LocalNavigationAdmission,
-    NavigationStepStatus, NavigationView, NavigationYard3D, YARD_BUILD_ID, YARD_PLAYERS,
+    NavigationStepStatus, NavigationView, NavigationYard3D, NAVIGATION_BUILD_ID, YARD_PLAYERS,
     YARD_TICK_RATE,
 };
 use orr_sim::{Simulation, TickInputs};
@@ -83,7 +83,7 @@ impl AuthoredPlayer {
             return Err("authored scene has no admitted route".into());
         }
         let initial = doc.frame().clone();
-        let simulation = Simulation::from_frame(&initial, YARD_TICK_RATE, YARD_BUILD_ID)
+        let simulation = Simulation::from_frame(&initial, YARD_TICK_RATE, NAVIGATION_BUILD_ID)
             .map_err(|e| e.to_string())?;
         Ok(Self {
             initial,
@@ -104,7 +104,7 @@ impl AuthoredPlayer {
     }
     pub fn restart(&mut self) -> Result<(), String> {
         validate(&self.initial)?;
-        let candidate = Simulation::from_frame(&self.initial, YARD_TICK_RATE, YARD_BUILD_ID)
+        let candidate = Simulation::from_frame(&self.initial, YARD_TICK_RATE, NAVIGATION_BUILD_ID)
             .map_err(|e| e.to_string())?;
         validate(candidate.frame())?;
         self.simulation = candidate;
