@@ -35,6 +35,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo check --locked -p orr_editor --features models --lib 2>&1 | tee ci-evidence/static-only.log
+          cargo check --locked -p orr_editor --features animated-models --lib 2>&1 | tee ci-evidence/animated-only.log
           cargo test --locked -p orr_editor --features package-manager,room-character,room-lighting,project-create,windows-export --lib model_panel::draft_preview::tests:: -- --test-threads=1 2>&1 | tee ci-evidence/context.log
           grep -F 'test result: ok. 3 passed; 0 failed; 0 ignored;' ci-evidence/context.log
           cargo test --locked -p orr_editor --features package-manager,room-character,room-lighting,project-create,windows-export --lib model_panel::draft_preview_panel_tests:: -- --test-threads=1 2>&1 | tee ci-evidence/panel.log
