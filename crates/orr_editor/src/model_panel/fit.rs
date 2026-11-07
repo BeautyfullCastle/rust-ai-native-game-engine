@@ -9,6 +9,58 @@ pub(super) fn loaded_sphere(asset: &LoadedAsset, radius: f64) -> Result<LocalTra
     loaded_target(asset, Target::Sphere(radius))
 }
 
+#[cfg(feature = "animated-models")]
+pub(super) fn loaded_pose(
+    asset: &LoadedAsset,
+    clip: u32,
+    seconds: f32,
+    half: [f64; 3],
+) -> Result<LocalTransform, String> {
+    let model = asset
+        .animated_model()
+        .ok_or("Sampled pose fitting requires an animated model")?;
+    sampled_model(model, clip, seconds, Target::Box(half))
+}
+#[cfg(feature = "animated-models")]
+pub(super) fn loaded_pose_sphere(
+    asset: &LoadedAsset,
+    clip: u32,
+    seconds: f32,
+    radius: f64,
+) -> Result<LocalTransform, String> {
+    let model = asset
+        .animated_model()
+        .ok_or("Sampled pose fitting requires an animated model")?;
+    sampled_model(model, clip, seconds, Target::Sphere(radius))
+}
+#[cfg(feature = "animated-models")]
+fn sampled_model(
+    model: &orr_model::animation::AnimatedModel,
+    clip: u32,
+    seconds: f32,
+    target: Target,
+) -> Result<LocalTransform, String> {
+    let duration = model
+        .source()
+        .clips
+        .get(clip as usize)
+        .ok_or("Sampled pose clip index is out of range")?
+        .duration();
+    if !seconds.is_finite() || seconds < 0.0 || seconds > duration {
+        return Err(format!(
+            "Sampled pose time must be finite and in 0..={duration} seconds"
+        ));
+    }
+    let pose = model
+        .sample_clip(clip, seconds)
+        .map_err(|e| e.to_string())?;
+    let bounds = model.bounds(&pose).map_err(|e| e.to_string())?;
+    fit_points(
+        [bounds.min.map(f64::from), bounds.max.map(f64::from)],
+        target,
+    )
+}
+
 #[derive(Clone, Copy)]
 enum Target {
     Box([f64; 3]),
@@ -226,3 +278,7 @@ mod tests {
         assert!(points([[0.0; 3], [1.0e-6; 3]], [1.0; 3]).is_err());
     }
 }
+
+#[cfg(all(test, feature = "animated-models"))]
+#[path = "fit/pose_tests.rs"]
+mod pose_tests;
