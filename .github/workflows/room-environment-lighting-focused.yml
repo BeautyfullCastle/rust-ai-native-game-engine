@@ -1,0 +1,60 @@
+name: Room environment lighting focused CI
+on:
+  push:
+    branches: [codex/room-environment-lighting-20261107]
+permissions:
+  contents: read
+jobs:
+  room-environment-lighting:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record exact source and prepare toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir ci-evidence
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git rev-parse HEAD HEAD^{tree} | tee ci-evidence/source.txt
+          rustup toolchain install 1.99.1 --profile minimal --component clippy
+          rustup override set 1.99.1
+          rustc --version --verbose | tee ci-evidence/rustc.txt
+          sudo apt-get update -q 2>&1 | tee ci-evidence/dependencies.log
+          sudo apt-get install -y -q pkg-config libasound2-dev libudev-dev libx11-dev libxkbcommon-dev libwayland-dev 2>&1 | tee -a ci-evidence/dependencies.log
+      - name: Room environment authoring and deployed use
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo check --locked -p orr_sample --features room-project --bin room_escape 2>&1 | tee ci-evidence/legacy-room-build.log
+          cargo test --locked -p orr_sample --features room-lighting --lib room_lighting:: --  --test-threads=1 2>&1 | tee ci-evidence/codec-legacy.log
+          grep -F 'test result: ok. 15 passed; 0 failed; 0 ignored;' ci-evidence/codec-legacy.log
+          cargo test --locked -p orr_sample --features room-lighting --lib room_view::environment_consumer_tests:: --  --test-threads=1 2>&1 | tee ci-evidence/consumer.log
+          grep -F 'test result: ok. 2 passed; 0 failed; 0 ignored;' ci-evidence/consumer.log
+          cargo check --locked -p orr_editor --features room-lighting --lib 2>&1 | tee ci-evidence/minimal-editor.log
+          cargo test --locked -p orr_editor --features package-manager,room-character,room-lighting,project-create,windows-export --lib room_lighting_panel::environment_ui::tests:: --  --test-threads=1 2>&1 | tee ci-evidence/ui.log
+          grep -F 'test result: ok. 4 passed; 0 failed; 0 ignored;' ci-evidence/ui.log
+          cargo test --locked -p orr_editor --features package-manager,room-character,room-lighting,project-create,windows-export --lib room_lighting_panel::environment_integration_tests::actual_environment_widgets_stage_apply_history_save_reopen_and_feed_shared_lighting -- --exact --test-threads=1 2>&1 | tee ci-evidence/integration.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' ci-evidence/integration.log
+          cargo build --locked -p orr_sample --features room-character,room-lighting,project-export --bin room_escape 2>&1 | tee ci-evidence/native-build.log
+          export ORR_ROOM_ENVIRONMENT_RUNTIME="$PWD/target/debug/room_escape"
+          cargo test --locked -p orr_editor --features package-manager,room-character,room-lighting,project-create,windows-export --lib room_lighting_panel::environment_integration_tests::saved_environment_survives_source_hidden_native_export_without_frame_changes -- --ignored --exact --test-threads=1 2>&1 | tee ci-evidence/deployed.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' ci-evidence/deployed.log
+          cargo check --locked -p orr_editor --features package-manager,room-animated-models,mesh-hazards-export,mesh-animated-models,room-lighting --lib 2>&1 | tee ci-evidence/cross-consumers.log
+          cargo clippy --locked -p orr_editor --features package-manager,room-character,room-lighting,project-create,windows-export --lib -- -D warnings 2>&1 | tee ci-evidence/clippy-editor.log
+          cargo clippy --locked -p orr_sample --features room-character,room-lighting,project-export --lib --bin room_escape -- -D warnings 2>&1 | tee ci-evidence/clippy-sample.log
+      - name: Preserve results including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: room-environment-lighting-${{ github.sha }}
+          path: ci-evidence
+          if-no-files-found: error

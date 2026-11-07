@@ -2,6 +2,10 @@
 use orr_render::{PointLight, PointLightSettings};
 use serde::{Deserialize, Deserializer, Serialize};
 
+#[path="room_lighting/environment.rs"]
+mod environment;
+pub use environment::Environment;
+
 pub const MAX_BYTES: usize = orr_render::point_light::MAX_POINT_LIGHT_SETTINGS_BYTES;
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -9,6 +13,7 @@ pub struct Document {
     pub point_light: Option<PointLight>,
     pub follow_player: Option<[f32;3]>,
     pub activation: Option<Activation>,
+    pub environment: Option<Environment>,
 }
 
 /// Gates actual Play lighting. Edit always previews the authored light.
@@ -65,6 +70,8 @@ struct Wire {
     follow_player:Option<[f32;3]>,
     #[serde(default,deserialize_with="present_activation")]
     activation:Option<Activation>,
+    #[serde(default,deserialize_with="environment::deserialize_present")]
+    environment:Option<Environment>,
 }
 impl Document {
     pub fn enabled_default() -> Self {
@@ -77,7 +84,14 @@ impl Document {
             }),
             follow_player:None,
             activation:None,
+            environment:None,
         }
+    }
+    /// Apply saved environment fields only; shadows and output settings stay with the caller.
+    pub fn apply_environment(&self, lighting: &mut orr_render::Lighting) -> Result<(),String> {
+        self.validate()?;
+        if let Some(environment)=&self.environment {environment.apply_to(lighting)?;}
+        Ok(())
     }
     pub fn settings(&self) -> PointLightSettings {
         PointLightSettings {
@@ -108,6 +122,7 @@ impl Document {
         Ok(settings)
     }
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(environment)=&self.environment {environment.validate()?;}
         if self.activation.is_some() && self.point_light.is_none() {return Err("conditional room light requires an enabled point light".into());}
         if let Some(offset)=self.follow_player {
             if self.point_light.is_none() || !offset.iter().all(|v|v.is_finite() && v.abs()<=32.0) {
@@ -125,20 +140,27 @@ impl Document {
         let mut decoder = serde_json::Deserializer::from_slice(bytes);
         let wire: Wire = object(&mut decoder).map_err(|e| format!("room lighting: {e}"))?;
         decoder.end().map_err(|e| format!("room lighting: {e}"))?;
-        match (wire.version,wire.follow_player,wire.activation) {
-            (1,None,None)|(2,Some(_),None)|(3,_,Some(_))=>{},
-            _=>return Err("room lighting version1 is fixed; version2 requires follow_player; version3 requires activation".into()),
+        match (wire.version,wire.follow_player,wire.activation,wire.environment.as_ref()) {
+            (1,None,None,None)|(2,Some(_),None,None)|(3,_,Some(_),None)|(4,_,_,Some(_))=>{},
+            _=>return Err("room lighting version1 is fixed; version2 requires follow_player; version3 requires activation; version4 requires environment".into()),
         }
         let document = Self {
             point_light: wire.point_light.map(|light| light.0),
             follow_player: wire.follow_player,
             activation: wire.activation,
+            environment: wire.environment,
         };
         document.validate()?;
         Ok(document)
     }
     pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
         self.validate()?;
+        if let Some(environment)=&self.environment {
+            #[derive(Serialize)]
+            struct Output<'a> {version:u32,point_light:Option<PointLight>,#[serde(skip_serializing_if="Option::is_none")]follow_player:Option<[f32;3]>,#[serde(skip_serializing_if="Option::is_none")]activation:Option<Activation>,environment:&'a Environment}
+            let bytes=serde_json::to_vec_pretty(&Output {version:4,point_light:self.point_light,follow_player:self.follow_player,activation:self.activation,environment}).map_err(|e|e.to_string())?;
+            if bytes.len()>MAX_BYTES {return Err("room lighting exceeds 4096 bytes".into());}return Ok(bytes);
+        }
         if let Some(activation)=self.activation {
             #[derive(Serialize)]
             struct Conditional {version:u32,point_light:Option<PointLight>,#[serde(skip_serializing_if="Option::is_none")]follow_player:Option<[f32;3]>,activation:Activation}

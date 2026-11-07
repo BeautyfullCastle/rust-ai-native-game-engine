@@ -267,6 +267,8 @@ fn headless_checked(
         let size = (1024, 768);
         let mut renderer = RoomRenderer::new(&gpu, size, project.models())?;
         renderer.set_point_light_settings(project.point_light_settings_for_frame(FrameView::of(sim.frame()))?)?;
+        #[cfg(feature = "room-lighting")]
+        renderer.set_environment(project.lighting().and_then(|light| light.document.environment.clone()))?;
         #[cfg(feature = "room-character")]
         let render = RoomRenderer::render_with_playback;
         #[cfg(not(feature = "room-character"))]
@@ -494,6 +496,8 @@ impl App {
         let title = format!("{title} | {}", self.progress.status());
         g.window.set_title(&title);
         g.renderer.set_point_light_settings(self.project.point_light_settings_for_frame(FrameView::of(self.sim.frame()))?)?;
+        #[cfg(feature = "room-lighting")]
+        g.renderer.set_environment(self.project.lighting().and_then(|light| light.document.environment.clone()))?;
         // The backend reconfigures lost/outdated surfaces and returns Skip.
         if let Acquire::Frame(surface_frame) = g.rhi.acquire_frame(&mut g.surface) {
             let view = g.rhi.frame_view(&surface_frame);
@@ -555,6 +559,8 @@ impl ApplicationHandler for App {
             let mut renderer =
                 RoomRenderer::new_with_format(&rhi, size, self.project.models(), format)?;
             renderer.set_point_light_settings(self.project.point_light_settings_for_frame(FrameView::of(self.sim.frame()))?)?;
+            #[cfg(feature = "room-lighting")]
+            renderer.set_environment(self.project.lighting().and_then(|light| light.document.environment.clone()))?;
             Ok::<_, String>(Graphics {
                 window,
                 rhi,
