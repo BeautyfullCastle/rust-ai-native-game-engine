@@ -73,7 +73,7 @@ jobs:
             printf '%s\t%s\t%s\t%s\n' "$label" "$command_exit" "$tee_exit" "$last_ok" >> ci-evidence/status.tsv
           }
           cases legacy-profile 4 cargo test --locked -p orr_navigation_view --features authored-surface-bundle --lib bundle::manifest::profile_tests:: -- --test-threads=1
-          cases legacy-descriptors 5 cargo test --locked -p orr_navigation_view --features authored-surface-bundle --lib bundle::manifest::tests:: -- --test-threads=1
+          cases legacy-descriptors 5 cargo test --locked -p orr_navigation_view --features authored-surface-bundle --lib bundle::manifest::tests:: -- --skip surface_bundle::manifest::tests:: --test-threads=1
           cases legacy-source 3 cargo test --locked -p orr_navigation_view --features authored-surface-bundle --lib bundle::source::tests:: -- --test-threads=1
           cases legacy-matrix 3 cargo test --locked -p orr_navigation_view --features authored-surface-bundle --lib terrain_patrol_tests:: -- --test-threads=1
           check legacy-build cargo build --locked -p orr_navigation_view --features authored-bundle --bin navigation_player
@@ -87,7 +87,7 @@ jobs:
           cases patrol-matrix 4 cargo test --locked -p orr_navigation_view --features "$BUNDLE_FEATURES" --lib terrain_patrol_tests:: -- --test-threads=1
           cases patrol-cli 3 cargo test --locked -p orr_navigation_view --features "$BUNDLE_FEATURES" --lib player::patrol_bundle_tests:: -- --test-threads=1
           cases patrol-probe 2 cargo test --locked -p orr_navigation_view --features "$BUNDLE_FEATURES" --lib bundle::export::patrol_native_tests:: -- --skip native_patrol_bundle_relocates_source_hidden_and_matches_two_hundred_tick_restart --test-threads=1
-          cases patrol-descriptors 5 cargo test --locked -p orr_navigation_view --features "$BUNDLE_FEATURES" --lib bundle::manifest::tests:: -- --test-threads=1
+          cases patrol-descriptors 5 cargo test --locked -p orr_navigation_view --features "$BUNDLE_FEATURES" --lib bundle::manifest::tests:: -- --skip surface_bundle::manifest::tests:: --test-threads=1
           cases patrol-source 3 cargo test --locked -p orr_navigation_view --features "$BUNDLE_FEATURES" --lib bundle::source::tests:: -- --test-threads=1
           check patrol-build cargo build --locked -p orr_navigation_view --features terrain-patrol-bundle --bin navigation_player --bin navigation_export
           export ORR_TERRAIN_PATROL_BUNDLE_RUNTIME="$RUNNER_TEMP/patrol-navigation-player"

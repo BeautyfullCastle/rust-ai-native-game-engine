@@ -89,7 +89,8 @@ fn text(h: &mut Harness<'_, EditorApp>, label: &str, value: &str) {
     assert_eq!(
         h.get_by_role_and_label(Role::TextInput, label)
             .accesskit_node()
-            .value(),
+            .value()
+            .as_deref(),
         Some(value)
     );
 }
@@ -103,7 +104,7 @@ fn reap(h: &mut Harness<'_, EditorApp>) {
 }
 #[test]
 fn actual_patrol_export_widgets_require_trust_and_report_failed_worker_without_mutation() {
-    let (dir, app) = fixture();
+    let (dir, mut app) = fixture();
     let scene = dir.path().join("source/point.scene.yaml");
     let saved = fs::read(&scene).unwrap();
     let frame = app
@@ -146,14 +147,15 @@ fn actual_patrol_export_widgets_require_trust_and_report_failed_worker_without_m
     assert!(!h.state().navigation_export.completed_successfully);
     assert!(h.state().navigation_export.uncertain_output.is_some());
     assert!(!dir.path().join("bundle").exists());
-    assert_eq!(
-        h.state()
-            .editor
-            .navigation_export_source(&h.state().navigation, &h.state().terrain)
+    let after = {
+        let app = h.state_mut();
+        app.editor
+            .navigation_export_source(&app.navigation, &app.terrain)
             .unwrap()
-            .initial_frame_bytes(),
-        frame
-    );
+            .initial_frame_bytes()
+            .to_vec()
+    };
+    assert_eq!(after, frame);
     assert_eq!(h.state().editor.history(), &history);
     assert_eq!(fs::read(scene).unwrap(), saved);
 }
