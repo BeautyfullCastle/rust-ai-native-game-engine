@@ -232,7 +232,9 @@ fn headless_checked(
     }
     if let Some(camera) = project.camera().filter(|camera| camera.document.follow_player.is_some()) {
         let resolved = camera.document.camera_for_frame(&camera.document.orbit(),(800,600),FrameView::of(sim.frame()))?;
-        println!("room follow camera target: {:?}",resolved.target);
+        // Normal headless stdout is the exporter's exact smoke protocol.
+        // Emit extra tracking diagnostics only under the explicit pose check.
+        if check_model_poses { println!("room follow camera target: {:?}",resolved.target); }
     }
     let run = sim.frame().singleton::<RoomRun>();
     println!(
