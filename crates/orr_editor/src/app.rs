@@ -1178,6 +1178,8 @@ impl EditorApp {
         self.terrain_ramp_sync(&ctx);
         #[cfg(feature="navigation")]
         self.navigation_endpoint_sync(&ctx);
+        #[cfg(feature = "mesh-patrol")]
+        self.mesh_navigation.sync_patrol_inspection_focus(&self.editor, &ctx);
         self.poll_remote_capture_request();
         self.start_pulses(ctx.input(|i| i.time));
         if self.editor.agent_mut().take_tab_request() {

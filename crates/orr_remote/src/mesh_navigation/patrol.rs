@@ -4,7 +4,7 @@ use orr_bridge::FrameView;
 use orr_edit::{EditorDoc, Op, Origin};
 use orr_games::mesh_navigation_game::patrol;
 pub use orr_games::mesh_navigation_game::patrol::{
-    MeshPatrol, MeshPatrolRun, PATROL_NAME, RUN_NAME,
+    validate_config, MeshPatrol, MeshPatrolRun, PATROL_NAME, RUN_NAME,
 };
 use serde_json::{json, Value as JsonValue};
 pub struct PatrolView {

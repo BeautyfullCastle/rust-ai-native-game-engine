@@ -37,6 +37,18 @@ pub(super) struct State {
     dirty: bool,
     stale: bool,
     status: String,
+    generation: u64,
+    inspection: Option<(InspectionPin, Result<super::patrol_routes::Report, String>)>,
+    show_inspection: bool,
+    retired: std::cell::Cell<bool>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct InspectionPin {
+    context: Context,
+    form: Form,
+    generation: u64,
+    start: [FP; 3],
+    max_vertical: FP,
 }
 fn parse(form: &Form, revision: [u8; 32]) -> Result<MeshPatrol, String> {
     let mut config = MeshPatrol {
@@ -85,6 +97,8 @@ fn parse(form: &Form, revision: [u8; 32]) -> Result<MeshPatrol, String> {
 }
 impl State {
     fn load(&mut self, context: Context, config: Option<MeshPatrol>, goal: [FP; 3]) {
+        self.generation = self.generation.saturating_add(1);
+        self.clear_inspection();
         self.form = match config {
             Some(config) if config.enabled == 1 => Form {
                 enabled: true,
@@ -109,7 +123,13 @@ impl State {
             "Patrol fields match the current scene. Apply changes, then save the scene explicitly."
                 .into();
     }
+    fn clear_inspection(&mut self) {
+        self.inspection = None;
+        self.show_inspection = false;
+        self.retired.set(false);
+    }
     fn sync_context(&mut self, current: Option<&Context>) {
+        if self.context.as_ref() != current { self.retired.set(true); }
         if self.context.as_ref() != current && self.dirty {
             self.stale = true;
             self.status="Patrol draft is stale after a scene or graph change; reload fields before applying.".into();
@@ -159,6 +179,8 @@ impl State {
                 field(ui, "Patrol wait ticks", &mut self.form.wait);
             }
             if self.form != before {
+                self.generation = self.generation.saturating_add(1);
+                self.clear_inspection();
                 self.dirty = true;
             }
             apply = ui
@@ -167,8 +189,67 @@ impl State {
         });
         apply
     }
+    fn inspection_controls(&mut self, ui: &mut Ui, ready: bool) -> bool {
+        let focused = ui.ctx().input(|input| input.focused && !input.events.iter().any(|event| matches!(event, egui::Event::WindowFocused(false))));
+        if !focused { self.retired.set(true); }
+        let ready = ready && focused;
+        if self.retired.get() { self.show_inspection = false; }
+        let inspect = ui.add_enabled(ready, egui::Button::new("Inspect patrol draft route")).clicked() && ready;
+        if ui.button("Clear patrol inspection").clicked() { self.clear_inspection(); }
+        let available = !self.retired.get() && self.inspection.as_ref().is_some_and(|(_, result)| result.is_ok());
+        ui.add_enabled(available, egui::Checkbox::new(&mut self.show_inspection, "Show inspected patrol route"));
+        if let Some((_, result)) = self.inspection.as_ref().filter(|_| !self.retired.get()) {
+            match result {
+                Ok(report) => {
+                    ui.weak("Leg 1 is the initial approach; a loop adds a final closing leg. Total includes each once, not an ETA.");
+                    for (index, leg) in report.legs.iter().enumerate() {
+                        ui.label(format!("Patrol leg {} ready: {} corridor triangles; length {}", index + 1, leg.corridor_triangles, format_fixed(leg.length)));
+                    }
+                    ui.label(format!("Inspected {} legs; total length {}", report.legs.len(), format_fixed(report.total_length)));
+                }
+                Err(error) => { ui.label(format!("Patrol route inspection failed: {error}")); }
+            }
+        }
+        ui.weak("Inspection is a point-agent preview only. It does not apply, save, move an agent or verify hazard clearance.");
+        inspect
+    }
 }
 impl Panel {
+    fn patrol_inspection_context(&self, editor: &Editor) -> Result<(InspectionPin, orr_remote::mesh_navigation::MeshView), String> {
+        let (context, view) = self.patrol_context(editor)?;
+        if self.patrol.stale || self.patrol.context.as_ref() != Some(&context) || !self.patrol.form.enabled || self.patrol.generation == u64::MAX {
+            return Err("Reload a current enabled patrol draft before inspection".into());
+        }
+        let pin = InspectionPin { context, form: self.patrol.form.clone(), generation: self.patrol.generation, start: view.pin.start, max_vertical: view.pin.max_vertical };
+        Ok((pin, view))
+    }
+    pub(crate) fn retire_patrol_route(&self) { self.patrol.retired.set(true); }
+    pub(super) fn inspected_patrol_route(&self, editor: &Editor) -> Option<&super::patrol_routes::Report> {
+        let current = match self.patrol_inspection_context(editor) {
+            Ok((pin, _)) => pin,
+            Err(_) => { self.retire_patrol_route(); return None; }
+        };
+        let (pin, result) = self.patrol.inspection.as_ref()?;
+        if pin != &current { self.retire_patrol_route(); }
+        if self.patrol.retired.get() || !self.patrol.show_inspection { return None; }
+        result.as_ref().ok()
+    }
+    fn show_patrol_inspection(&mut self, ui: &mut Ui, editor: &Editor) {
+        let current = self.patrol_inspection_context(editor);
+        if let Some((old, _)) = self.patrol.inspection.as_ref() {
+            if current.as_ref().ok().map(|(pin, _)| pin) != Some(old) { self.retire_patrol_route(); }
+        }
+        let focused = ui.ctx().input(|input| input.focused && !input.events.iter().any(|event| matches!(event, egui::Event::WindowFocused(false))));
+        if !focused { self.retire_patrol_route(); }
+        if self.patrol.inspection_controls(ui, current.is_ok() && focused) {
+            if let Ok((pin, view)) = current {
+                let result = parse(&pin.form, pin.context.revision).and_then(|config| super::patrol_routes::inspect(&view.graph, &config, pin.start, pin.max_vertical));
+                self.patrol.inspection = Some((pin, result));
+                self.patrol.retired.set(false);
+                self.patrol.show_inspection = false;
+            }
+        }
+    }
     fn patrol_context(
         &self,
         editor: &Editor,
@@ -279,6 +360,7 @@ impl Panel {
             if let Err(reason)=&current {ui.label(reason);}
             if self.patrol.controls(ui,editable) {if let Err(error)=self.apply_patrol(editor){self.error=Some(format!("Apply waypoint patrol failed: {error}"));}}
             if ui.add_enabled(editable,egui::Button::new("Reload patrol fields")).clicked(){if let Ok((context,view))=current {let config=editor.snapshot().and_then(|s|patrol::from_view(s.predicted()).ok().flatten()).map(|p|p.config);self.patrol.load(context,config,view.pin.goal);}}
+            self.show_patrol_inspection(ui, editor);
             if !self.patrol.status.is_empty(){ui.label(&self.patrol.status);}
         });
     }
@@ -286,3 +368,7 @@ impl Panel {
 #[cfg(test)]
 #[path = "patrol_panel_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "patrol_preview_panel_tests.rs"]
+mod preview_tests;

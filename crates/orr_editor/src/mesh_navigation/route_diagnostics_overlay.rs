@@ -32,6 +32,8 @@ impl Panel {
         if !editor.game().has_mesh_view() {
             return;
         }
+        #[cfg(feature = "mesh-patrol")]
+        self.paint_patrol_route(editor, list);
         if let Some(points) = self.inspected_route_points(editor) {
             let _ = append(list, points);
         }
