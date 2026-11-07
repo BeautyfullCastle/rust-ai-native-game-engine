@@ -1,6 +1,6 @@
 # Create a Room with authored lighting
 
-`orr_new_lit_room` creates a new complete Linux Room project with a supplied light document already declared. The existing Room starter normally omits lighting, requiring manual manifest work. This path retains its scene, models, camera, verified CC0 package and deterministic initial Frame, adding the light before publication.
+`orr_new_lit_room` creates a new complete Linux Room project with lighting already declared, using an explicit built-in default or a supplied light document. The existing Room starter normally omits lighting, requiring manual manifest work. This path retains its scene, models, camera, verified CC0 package and deterministic initial Frame, adding the light before publication.
 
 Build:
 
@@ -8,7 +8,15 @@ Build:
 cargo build --locked -p orr_sample --features project-create,room-lighting --bin orr_new_lit_room
 ```
 
-Provide a valid Room lighting document, for example:
+For a ready-to-edit warm fixed light without writing JSON, explicitly select the existing enabled default:
+
+```sh
+target/debug/orr_new_lit_room --output /absolute/new-game --seed my-game --lighting-default
+```
+
+Exactly one of `--lighting-default` and `--lighting FILE` is required. `--lighting-default` takes no value and cannot be repeated; there is no implicit light choice. It uses `Document::enabled_default()` (fixed position `[0,4,0]`, linear color `[1,0.9,0.7]`, intensity3, range12, always active). These values are saved in the project and remain editable. Both modes support the optional `--character` flag.
+
+For custom lighting instead, provide a valid Room lighting document, for example:
 
 ```json
 {"version":3,"point_light":{"position":[0,4,0],"color":[1,0.9,0.7],"intensity":3,"range":12},"follow_player":[1,2,-1],"activation":"key_missing"}
@@ -36,4 +44,4 @@ The supplied light is the existing single unshadowed imported-model light. The o
 
 Creation first uses the existing Room generator in an owned temporary directory. Only its unpublished manifest, lighting sidecar and README change. The complete saved project is admitted and its bounded byte closure rechecked before atomic Linux no-replace publication. Existing files, directories and symlinks at the output are refused, including a competing destination created just before publication. Failures clean only the owned stage. This assumes trusted local directories; parent inode replacement, hostile filesystem races and power-loss durability are not covered.
 
-Focused acceptance checks reproducible creation, unchanged base gameplay/assets, explicit consumer consent, invalid paths/lights, interruption, tampering, competing publication, bounded FIFO-safe input, actual CLI options, Editor Apply/Save/reopen/pickup and a source-hidden exported headless game. These are CPU checks. Windows is an explicit unsupported CLI target here; its fallback is compile-checked, not positive creation. Existing Windows access failures remain unresolved. Native-window, GPU pixels, audio-device and video playtests require separate verification; a locked computer is not unlocked or bypassed.
+Focused acceptance checks explicit default creation without an input document, mutually exclusive/duplicate/malformed light choices, reproducible creation, unchanged base gameplay/assets, explicit consumer consent, invalid paths/lights, interruption, tampering, competing publication, bounded FIFO-safe input, actual CLI options, Editor Apply/Save/reopen/pickup and a source-hidden exported headless game. These are CPU checks. Windows is an explicit unsupported CLI target here; its fallback is compile-checked, not positive creation. Existing Windows access failures remain unresolved. Native-window, GPU pixels, audio-device and video playtests require separate verification; a locked computer is not unlocked or bypassed.
