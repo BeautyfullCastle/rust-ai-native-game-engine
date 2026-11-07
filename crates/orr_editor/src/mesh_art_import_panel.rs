@@ -44,10 +44,10 @@ impl Panel {
         can_edit: bool,
     ) -> Option<Report> {
         let completed = self.poll(current_scene, scene_epoch, graph_revision);
-        egui::CollapsingHeader::new("Import raw agent art")
+        egui::CollapsingHeader::new("Import agent art source")
             .default_open(false)
             .show(ui, |ui| {
-                ui.label("Import a local self-contained GLB and license file into a new agent-art package.");
+                ui.label("Import a local self-contained GLB or fully embedded cooked static model and license into a new agent-art package. Use .glb, .model.json, .orrmodel.json or legacy .orrmodel.");
                 ui.label("External resources, scripts, network access, package installation, and automatic application are not supported.");
                 ui.label("A supplied license file is metadata only; its presence is not legal review or a rights determination.");
                 if !can_edit {
@@ -55,8 +55,8 @@ impl Panel {
                 }
                 let fields_enabled = can_edit && !self.busy();
                 ui.add_enabled_ui(fields_enabled, |ui| {
-                    let source_changed = path_field(ui, "Raw agent GLB", &mut self.source);
-                    let license_changed = path_field(ui, "Raw agent license", &mut self.license);
+                    let source_changed = path_field(ui, "Agent art source (.glb or cooked model)", &mut self.source);
+                    let license_changed = path_field(ui, "Agent art source license", &mut self.license);
                     let destination_changed = path_field(
                         ui,
                         "New agent package directory",
@@ -88,13 +88,13 @@ impl Panel {
                     && current_scene.is_some()
                     && graph_revision.is_some()
                     && self.license_acknowledged
-                    && !self.source.trim().is_empty()
+                    && supported_source(&self.source)
                     && !self.license.trim().is_empty()
                     && !self.destination.trim().is_empty()
                     && !self.name.trim().is_empty()
                     && !self.version.trim().is_empty();
                 if ui
-                    .add_enabled(request_ready, egui::Button::new("Import agent GLB"))
+                    .add_enabled(request_ready, egui::Button::new("Import agent art package"))
                     .clicked()
                 {
                     match (current_scene, graph_revision) {
@@ -131,6 +131,10 @@ impl Panel {
                 "Explicitly review and acknowledge rights before importing agent art.".into();
             return;
         }
+        if !supported_source(&self.source) {
+            self.status="Choose a .glb, .model.json, .orrmodel.json or .orrmodel static source; no worker was started.".into();
+            return;
+        }
         let request = Request {
             source: PathBuf::from(self.source.trim()),
             license: PathBuf::from(self.license.trim()),
@@ -155,7 +159,9 @@ impl Panel {
             }) {
             Ok(_) => {
                 self.pending = Some(receiver);
-                self.status = "Importing and validating the self-contained GLB on a worker…".into();
+                self.status =
+                    "Importing and validating the self-contained static source on a worker..."
+                        .into();
             }
             Err(error) => self.status = format!("Cannot start agent-art import: {error}"),
         }
@@ -257,3 +263,13 @@ fn text_field(ui: &mut Ui, label: &str, value: &mut String, limit: usize) -> boo
 #[cfg(test)]
 #[path = "mesh_art_import_panel/tests.rs"]
 mod tests;
+
+fn supported_source(path: &str) -> bool {
+    let path = path.trim().to_ascii_lowercase();
+    [".glb", ".model.json", ".orrmodel.json", ".orrmodel"]
+        .iter()
+        .any(|suffix| path.ends_with(suffix))
+}
+#[cfg(test)]
+#[path = "mesh_art_import_panel/cooked_ui_tests.rs"]
+mod cooked_ui_tests;

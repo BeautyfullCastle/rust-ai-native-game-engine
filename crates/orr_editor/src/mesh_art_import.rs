@@ -52,18 +52,14 @@ pub(crate) fn import_package(request: Request) -> Result<Report, String> {
         return Err("explicit license acknowledgement is required".into());
     }
     validate_package_identity(&request.name, &request.version)?;
-    let source = read_input_file(&request.source, MAX_SOURCE_BYTES, "GLB source")?;
-    if !source
-        .path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("glb"))
-    {
-        return Err("mesh art import accepts only self-contained .glb sources".into());
+    let asset = source_asset(&request.source)?;
+    let source = read_input_file(&request.source, MAX_SOURCE_BYTES, "model source")?;
+    if asset == "model.model.json" {
+        crate::mesh_art::cooked_provenance::decode(asset, &source.bytes)?;
     }
     let license = read_input_file(&request.license, MAX_LICENSE_BYTES, "license source")?;
     if source.path == license.path {
-        return Err("GLB and license must be separate files".into());
+        return Err("Model and license must be separate files".into());
     }
     let license_text =
         std::str::from_utf8(&license.bytes).map_err(|_| "license must be nonempty UTF-8 text")?;
@@ -85,14 +81,14 @@ pub(crate) fn import_package(request: Request) -> Result<Report, String> {
         engine: format!("={}", runtime.engine_version),
         capabilities: BTreeSet::from(["models".to_owned()]),
         dependencies: BTreeMap::new(),
-        files: BTreeSet::from(["LICENSE.txt".into(), "model.glb".into()]),
+        files: BTreeSet::from(["LICENSE.txt".into(), asset.into()]),
     };
     let manifest_bytes = serde_json::to_vec(&manifest)
         .map_err(|error| format!("serialize mesh art package manifest: {error}"))?;
     if manifest_bytes.len() > MAX_MANIFEST_BYTES {
         return Err("mesh art package manifest exceeds 1 MiB".into());
     }
-    write_new_file(&stage.path().join("model.glb"), &source.bytes)?;
+    write_new_file(&stage.path().join(asset), &source.bytes)?;
     write_new_file(&stage.path().join("LICENSE.txt"), &license.bytes)?;
     write_new_file(&stage.path().join("orr.package.json"), &manifest_bytes)?;
     let inspected = orr_package::inspect(stage.path(), &runtime)
@@ -100,13 +96,9 @@ pub(crate) fn import_package(request: Request) -> Result<Report, String> {
     if inspected.manifest != manifest {
         return Err("mesh art package manifest changed during inspection".into());
     }
-    let snapshot = Snapshot::from_package(
-        stage.path(),
-        "model.glb",
-        "LICENSE.txt",
-        request.graph_revision,
-    )?;
-    recheck_input(&source, MAX_SOURCE_BYTES, "GLB source")?;
+    let snapshot =
+        Snapshot::from_package(stage.path(), asset, "LICENSE.txt", request.graph_revision)?;
+    recheck_input(&source, MAX_SOURCE_BYTES, "model source")?;
     recheck_input(&license, MAX_LICENSE_BYTES, "license source")?;
     let parent_after_stage = checked_directory(&destination_parent, "package destination parent")?;
     if parent_after_stage != destination_parent {
@@ -117,13 +109,38 @@ pub(crate) fn import_package(request: Request) -> Result<Report, String> {
 
     Ok(Report {
         root: destination,
-        asset: "model.glb".into(),
+        asset: asset.into(),
         license: "LICENSE.txt".into(),
         source_sha256: source.sha256,
         license_sha256: license.sha256,
         snapshot,
     })
 }
+
+fn source_asset(path: &Path) -> Result<&'static str, String> {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("model source filename must be UTF-8")?
+        .to_ascii_lowercase();
+    if name.ends_with(".glb") {
+        Ok("model.glb")
+    } else if name.ends_with(".model.json")
+        || name.ends_with(".orrmodel.json")
+        || name.ends_with(".orrmodel")
+    {
+        Ok("model.model.json")
+    } else {
+        Err(
+            "mesh art import accepts .glb or cooked .model.json/.orrmodel.json/.orrmodel sources"
+                .into(),
+        )
+    }
+}
+
+#[cfg(test)]
+#[path = "mesh_art_import/cooked_tests.rs"]
+pub(crate) mod cooked_tests;
 
 pub(crate) fn validate_package_identity(name: &str, version: &str) -> Result<(), String> {
     if name.is_empty()
