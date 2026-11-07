@@ -1,7 +1,10 @@
 //! CPU-only actual authoring controls -> ephemeral placement -> Cancel/Assign.
 #![allow(clippy::disallowed_types, clippy::float_arithmetic)]
 use super::*;
-use egui_kittest::{kittest::Queryable, Harness};
+use egui_kittest::{
+    kittest::{NodeT, Queryable},
+    Harness,
+};
 use std::{
     fs,
     path::Path,
@@ -73,7 +76,7 @@ fn fixture(animated: bool) -> (tempfile::TempDir, Harness<'static, (ModelPanel, 
     )
     .unwrap();
     fs::write(source.join("LICENSE.txt"), b"Acceptance fixture license").unwrap();
-    fs::write(source.join("orr.package.json"),serde_json::to_vec(&serde_json::json!({"schema":1,"name":"pose-fit","version":"1.0.0","engine":"^0.0.1","capabilities":["animation"],"dependencies":{},"files":["model.animated.json","model.model.json","LICENSE.txt"]})).unwrap()).unwrap();
+    fs::write(source.join("orr.package.json"),serde_json::to_vec(&serde_json::json!({"schema":1,"name":"pose-fit","version":"1.0.0","engine":"^0.0.1","capabilities":["models","animation"],"dependencies":{},"files":["model.animated.json","model.model.json","LICENSE.txt"]})).unwrap()).unwrap();
     let root = temp.path().join("project");
     fs::create_dir(&root).unwrap();
     orr_package::Project::open_for_install(
@@ -168,9 +171,28 @@ fn fixture(animated: bool) -> (tempfile::TempDir, Harness<'static, (ModelPanel, 
 }
 
 fn click(h: &mut Harness<'_, (ModelPanel, Editor)>, label: &str) {
+    // The production draw getter can retire a preview after the inspector was
+    // rendered. Rebuild its tree before targeting a widget: removing Cancel
+    // changes subsequent automatic egui IDs, including the Preview button.
+    h.run_steps(3);
+    assert!(
+        !h.get_by_label(label).accesskit_node().is_disabled(),
+        "{label} must be enabled; error={:?}",
+        h.state().0.error
+    );
     h.get_by_label(label).click_accesskit();
     h.run_steps(3);
-    assert!(h.state().0.error.is_none(), "{:?}", h.state().0.error);
+    assert!(
+        h.state().0.error.is_none(),
+        "{label}: {:?}",
+        h.state().0.error
+    );
+    if label == "Preview model draft on selected object" {
+        assert!(h.state().0.draft_preview_active(),
+            "Preview widget did not accept a draft: error={:?}, candidate={}, kind={:?}, selected={:?}, editable={}",
+            h.state().0.error, h.state().0.candidate.is_some(), h.state().0.kind,
+            h.state().1.selected_guid(), h.state().0.editable(&h.state().1));
+    }
 }
 fn placement(h: &mut Harness<'_, (ModelPanel, Editor)>) -> Option<DraftPlacement> {
     let state = h.state_mut();
