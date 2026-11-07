@@ -1178,6 +1178,8 @@ impl EditorApp {
         self.terrain_ramp_sync(&ctx);
         #[cfg(feature="navigation")]
         self.navigation_endpoint_sync(&ctx);
+        #[cfg(feature = "terrain-patrol")]
+        self.navigation.sync_patrol_inspection_focus(&self.editor, &self.terrain, &ctx);
         #[cfg(feature = "mesh-patrol")]
         self.mesh_navigation.sync_patrol_inspection_focus(&self.editor, &ctx);
         self.poll_remote_capture_request();
@@ -2480,6 +2482,12 @@ impl EditorApp {
                     list.aabb(bounds.min, bounds.max, 2.0, [1.0, 0.85, 0.2, 1.0]);
                 }
             }
+            list
+        };
+        #[cfg(feature = "terrain-patrol")]
+        let list = {
+            let mut list = list;
+            self.navigation.paint_patrol_route(&self.editor, &self.terrain, &mut list);
             list
         };
         #[cfg(feature="terrain")]

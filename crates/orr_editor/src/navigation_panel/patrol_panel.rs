@@ -45,6 +45,21 @@ pub(super) struct State {
     status: String,
     pick_generation: u64,
     pick_request: Option<(PatrolPickRequest, Form, u64)>,
+    inspection: Option<(InspectionPin, Result<super::patrol_routes::Report, String>)>,
+    show_inspection: bool,
+    retired: std::cell::Cell<bool>,
+}
+#[derive(Clone)]
+struct InspectionPin {
+    context: Context,
+    form: Form,
+    generation: u64,
+    terrain_model: std::sync::Arc<orr_model::StaticModel>,
+}
+impl PartialEq for InspectionPin {
+    fn eq(&self, other: &Self) -> bool {
+        self.context == other.context && self.form == other.form && self.generation == other.generation && std::sync::Arc::ptr_eq(&self.terrain_model, &other.terrain_model)
+    }
 }
 fn parse(form: &Form, revision: [u8; 32]) -> Result<TerrainPatrol, String> {
     let mut config = TerrainPatrol {
@@ -90,6 +105,7 @@ fn parse(form: &Form, revision: [u8; 32]) -> Result<TerrainPatrol, String> {
 impl State {
     fn load(&mut self, context: Context, config: Option<TerrainPatrol>) {
         self.pick_generation = self.pick_generation.saturating_add(1);
+        self.clear_inspection();
         self.form = match config {
             Some(c) if c.enabled == 1 => Form {
                 enabled: true,
@@ -113,7 +129,13 @@ impl State {
         self.stale = false;
         self.status="Terrain patrol fields match the current admitted source. Apply, then save the scene explicitly.".into();
     }
+    fn clear_inspection(&mut self) {
+        self.inspection = None;
+        self.show_inspection = false;
+        self.retired.set(false);
+    }
     fn sync_context(&mut self, current: Option<&Context>) {
+        if self.context.as_ref() != current { self.retired.set(true); }
         if self.context.as_ref() != current { self.pick_request = None; }
         if self.dirty && self.context.as_ref() != current {
             self.pick_request = None;
@@ -188,6 +210,7 @@ impl State {
             }
             if self.form != before {
                 self.pick_generation = self.pick_generation.saturating_add(1);
+                self.clear_inspection();
                 self.dirty = true;
             }
             apply = ui
@@ -202,6 +225,30 @@ impl State {
         }
         apply
     }
+    fn inspection_controls(&mut self, ui: &mut Ui, ready: bool) -> bool {
+        let focused = ui.ctx().input(|input| input.focused && !input.events.iter().any(|event| matches!(event, egui::Event::WindowFocused(false))));
+        if !focused { self.retired.set(true); }
+        let ready = ready && focused;
+        if self.retired.get() { self.show_inspection = false; }
+        let inspect = ui.add_enabled(ready, egui::Button::new("Inspect terrain patrol draft route")).clicked() && ready;
+        if ui.button("Clear terrain patrol inspection").clicked() { self.clear_inspection(); }
+        let available = !self.retired.get() && self.inspection.as_ref().is_some_and(|(_, result)| result.is_ok());
+        ui.add_enabled(available, egui::Checkbox::new(&mut self.show_inspection, "Show inspected terrain patrol route"));
+        if let Some((_, result)) = self.inspection.as_ref().filter(|_| !self.retired.get()) {
+            match result {
+                Ok(report) => {
+                    ui.weak("Leg 1 is the initial approach; a loop adds a final closing leg. Total includes each once, not a distance or ETA.");
+                    for (index, leg) in report.legs.iter().enumerate() {
+                        ui.label(format!("Patrol leg {} ready: {} corridor triangles; graph cost {}", index + 1, leg.corridor_triangles, format_fixed(leg.graph_cost)));
+                    }
+                    ui.label(format!("Inspected {} legs; total graph cost {}", report.legs.len(), format_fixed(report.total_graph_cost)));
+                }
+                Err(error) => { ui.label(format!("Patrol route inspection failed: {error}")); }
+            }
+        }
+        ui.weak("Inspection is a point-agent preview only. It does not apply, save, move an agent or verify hazard clearance.");
+        inspect
+    }
     fn take_pick_request(&mut self) -> Option<PatrolPickRequest> {
         let (request, form, generation) = self.pick_request.take()?;
         if request == PatrolPickRequest::Cancel { return Some(request); }
@@ -215,6 +262,39 @@ impl State {
     }
 }
 impl NavigationPanel {
+    fn patrol_inspection_context(&self, editor: &Editor, terrain: &TerrainPanel) -> Result<(InspectionPin, NavigationView), String> {
+        let (context, view) = self.patrol_context(editor, terrain)?;
+        if self.patrol.stale || self.patrol.context.as_ref() != Some(&context) || !self.patrol.form.enabled || self.patrol.pick_generation == u64::MAX {
+            return Err("Reload a current enabled terrain patrol before inspection".into());
+        }
+        let terrain_model = terrain.document.model().ok_or("Load the current terrain before inspection")?.clone();
+        Ok((InspectionPin { context, form: self.patrol.form.clone(), generation: self.patrol.pick_generation, terrain_model }, view))
+    }
+    pub(crate) fn retire_patrol_route(&self) { self.patrol.retired.set(true); }
+    pub(crate) fn inspected_patrol_route(&self, editor: &Editor, terrain: &TerrainPanel) -> Option<&super::patrol_routes::Report> {
+        let (pin, result) = self.patrol.inspection.as_ref()?;
+        let current = match self.patrol_inspection_context(editor, terrain) {
+            Ok((pin, _)) => pin,
+            Err(_) => { self.retire_patrol_route(); return None; }
+        };
+        if pin != &current { self.retire_patrol_route(); }
+        if self.patrol.retired.get() || !self.patrol.show_inspection { return None; }
+        result.as_ref().ok()
+    }
+    fn show_patrol_inspection(&mut self, ui: &mut Ui, editor: &Editor, terrain: &TerrainPanel) {
+        let current = self.patrol_inspection_context(editor, terrain);
+        if let Some((old, _)) = self.patrol.inspection.as_ref() {
+            if current.as_ref().ok().map(|(pin, _)| pin) != Some(old) { self.retire_patrol_route(); }
+        }
+        if self.patrol.inspection_controls(ui, current.is_ok()) {
+            if let Ok((pin, view)) = current {
+                let result = parse(&pin.form, pin.context.pin.graph_revision).and_then(|config| super::patrol_routes::inspect(&view.terrain, &view.graph, &config, pin.context.pin.agent.start));
+                self.patrol.inspection = Some((pin, result));
+                self.patrol.retired.set(false);
+                self.patrol.show_inspection = false;
+            }
+        }
+    }
     pub(crate) fn take_patrol_pick_request(&mut self) -> Option<PatrolPickRequest> {
         self.patrol.take_pick_request()
     }
@@ -308,6 +388,7 @@ impl NavigationPanel {
             let current=self.patrol_context(editor,terrain);let editable=current.is_ok();if let Err(reason)=&current {ui.label(reason);}
             if self.patrol.controls(ui,editable){if let Err(error)=self.apply_patrol(editor,terrain){self.error=Some(format!("Apply terrain patrol failed: {error}"));}}
             if ui.add_enabled(editable,egui::Button::new("Reload terrain patrol fields")).clicked(){if let Ok((context,_))=current {let config=editor.snapshot().and_then(|s|patrol::from_view(s.predicted()).ok().flatten()).map(|v|v.config);self.patrol.load(context,config);}}
+            self.show_patrol_inspection(ui, editor, terrain);
             if !self.patrol.status.is_empty(){ui.label(&self.patrol.status);}
         });
     }
@@ -319,3 +400,7 @@ mod tests;
 #[cfg(test)]
 #[path = "patrol_pick_panel_tests.rs"]
 mod pick_panel_tests;
+
+#[cfg(test)]
+#[path="patrol_preview_panel_tests.rs"]
+mod preview_tests;
