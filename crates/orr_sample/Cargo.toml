@@ -206,3 +206,9 @@ test = false
 name = "orr_prepare_stormglass_settings"
 path = "src/bin/orr_prepare_stormglass_settings.rs"
 required-features = ["coop-defense-controls"]
+
+[[bin]]
+name = "orr_new_lit_room"
+path = "src/bin/orr_new_lit_room.rs"
+required-features = ["project-create", "room-lighting"]
+test = false
