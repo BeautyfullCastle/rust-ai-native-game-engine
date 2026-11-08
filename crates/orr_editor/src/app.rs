@@ -108,6 +108,9 @@ mod frame_selection;
 #[cfg(feature="room-lighting")]
 #[path="app/room_light_pick.rs"]
 mod room_light_pick;
+#[cfg(feature="mesh-navigation")]
+#[path="app/mesh_light_pick.rs"]
+mod mesh_light_pick;
 #[path="app/selection_outline.rs"]
 mod selection_outline;
 
@@ -418,6 +421,10 @@ pub struct EditorApp {
     room_wall_pointer_owned: bool,
     #[cfg(feature="room-lighting")]
     room_light_pointer_owned: bool,
+    #[cfg(feature="mesh-navigation")]
+    mesh_light_pointer_owned: bool,
+    #[cfg(feature="mesh-navigation")]
+    mesh_light_waiting_release: bool,
     #[cfg(feature="room-authoring")]
     room_actor_pointer_owned: bool,
     #[cfg(feature="room-authoring")]
@@ -492,7 +499,7 @@ impl EditorApp {
     }
 
     pub fn new(editor: Editor, render_state: Option<egui_wgpu::RenderState>) -> Self {
-        Self { #[cfg(feature="terrain-surface")] terrain_surface: crate::terrain_surface_panel::Panel::default(), #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))] arena_export: arena_export::State::default(), #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "navigation-export"))] navigation_export: navigation_export::State::default(), editor, #[cfg(feature="room-character")] room_character: None, #[cfg(feature="tilemap")] tilemap: None, #[cfg(feature="mesh-export")] mesh_player_session: mesh_player_session::State::default(), #[cfg(feature="mesh-mission")] mesh_game_creator: crate::mesh_game_creator::Panel::default(), #[cfg(feature="mesh-export")] mesh_recorded_playback: mesh_recorded_playback::State::default(), #[cfg(feature="mesh-export")] mesh_player_input_allowed: true, #[cfg(feature="mesh-navigation")] mesh_play_controls: crate::mesh_play_controls::Panel::default(), #[cfg(all(any(windows,target_os="linux"),target_arch="x86_64",feature="room-authoring"))] room_wall_stamps: crate::room_wall_stamp_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_lighting: crate::mesh_lighting_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_post_process_runtime: crate::mesh_lighting::post_process_runtime::RuntimePolicy::default(), #[cfg(feature="mesh-navigation")] mesh_hud: crate::mesh_hud_panel::Panel::default(), #[cfg(feature="mesh-mission")] mesh_mission: crate::mesh_mission_panel::Panel::default(), #[cfg(feature="mesh-hazards")] mesh_hazards: crate::mesh_hazards_panel::Panel::default(), #[cfg(feature="mesh-hazards")] mesh_hazard_pointer_owned: false, #[cfg(all(windows,target_arch="x86_64",feature="mesh-navigation"))] mesh_copy: crate::mesh_workspace::copy_panel::Panel::default(), #[cfg(feature="mesh-animated-models")] mesh_animation: crate::mesh_animation_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_camera: crate::mesh_camera_panel::Panel::default(), #[cfg(feature="mesh-export")] mesh_export: crate::mesh_export_panel::Panel::default(), #[cfg(feature="mesh-hazards-export")] mesh_hazards_export: crate::mesh_hazards_export_panel::Panel::default(), #[cfg(feature="package-manager")] package_manager: crate::package_manager_panel::Panel::default(), #[cfg(feature="package-manager")] package_model_preview: package_model_preview::PreviewWindow::default(), #[cfg(all(feature="package-manager",feature="room-animated-models"))] variant_model_preview: variant_model_preview::PreviewWindow::default(), #[cfg(feature="room-authoring")] room_authoring: crate::room_authoring_panel::Panel::default(), #[cfg(feature="room-authoring")] room_wall_pointer_owned: false, #[cfg(feature="room-authoring")] room_actor_pointer_owned: false, #[cfg(feature="room-authoring")] room_wall_placement_pointer_owned: false, #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))] windows_projects: crate::windows_project_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-export"))] windows_export: crate::windows_export_panel::Panel::default(), #[cfg(feature="room-lighting")] room_lighting: None, #[cfg(feature="room-lighting")] room_light_pointer_owned: false, #[cfg(feature="room-project")] room_camera: None, #[cfg(feature="room-project")] room_camera_capture: room_camera_capture::Capture::default(), #[cfg(feature="linked-prefabs")] linked_prefabs: crate::linked_prefab_panel::Panel::default(), #[cfg(feature="collect-ui")] collect_ui: None, #[cfg(feature="collect-ui")] collect_ui_preview: collect_ui_preview::PreviewWindow::default(), #[cfg(feature="project-ui")] project_ui: None, #[cfg(feature="navigation")] navigation: crate::navigation_panel::NavigationPanel::default(), #[cfg(feature="navigation")] navigation_endpoint: navigation_endpoint_pick::State::default(), #[cfg(feature="mesh-navigation")] mesh_navigation: crate::mesh_navigation::Panel::default(), #[cfg(feature="terrain")] terrain_ramp: terrain_ramp::State::default(), #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature = "static-gameplay")] registered_gameplay_view: crate::registered_gameplay_view::State::default(), #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), #[cfg(feature="models")] blockout_uv_density: blockout_uv_density::Panel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
+        Self { #[cfg(feature="terrain-surface")] terrain_surface: crate::terrain_surface_panel::Panel::default(), #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))] arena_export: arena_export::State::default(), #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "navigation-export"))] navigation_export: navigation_export::State::default(), editor, #[cfg(feature="mesh-navigation")] mesh_light_pointer_owned: false, #[cfg(feature="mesh-navigation")] mesh_light_waiting_release: false, #[cfg(feature="room-character")] room_character: None, #[cfg(feature="tilemap")] tilemap: None, #[cfg(feature="mesh-export")] mesh_player_session: mesh_player_session::State::default(), #[cfg(feature="mesh-mission")] mesh_game_creator: crate::mesh_game_creator::Panel::default(), #[cfg(feature="mesh-export")] mesh_recorded_playback: mesh_recorded_playback::State::default(), #[cfg(feature="mesh-export")] mesh_player_input_allowed: true, #[cfg(feature="mesh-navigation")] mesh_play_controls: crate::mesh_play_controls::Panel::default(), #[cfg(all(any(windows,target_os="linux"),target_arch="x86_64",feature="room-authoring"))] room_wall_stamps: crate::room_wall_stamp_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_lighting: crate::mesh_lighting_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_post_process_runtime: crate::mesh_lighting::post_process_runtime::RuntimePolicy::default(), #[cfg(feature="mesh-navigation")] mesh_hud: crate::mesh_hud_panel::Panel::default(), #[cfg(feature="mesh-mission")] mesh_mission: crate::mesh_mission_panel::Panel::default(), #[cfg(feature="mesh-hazards")] mesh_hazards: crate::mesh_hazards_panel::Panel::default(), #[cfg(feature="mesh-hazards")] mesh_hazard_pointer_owned: false, #[cfg(all(windows,target_arch="x86_64",feature="mesh-navigation"))] mesh_copy: crate::mesh_workspace::copy_panel::Panel::default(), #[cfg(feature="mesh-animated-models")] mesh_animation: crate::mesh_animation_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_camera: crate::mesh_camera_panel::Panel::default(), #[cfg(feature="mesh-export")] mesh_export: crate::mesh_export_panel::Panel::default(), #[cfg(feature="mesh-hazards-export")] mesh_hazards_export: crate::mesh_hazards_export_panel::Panel::default(), #[cfg(feature="package-manager")] package_manager: crate::package_manager_panel::Panel::default(), #[cfg(feature="package-manager")] package_model_preview: package_model_preview::PreviewWindow::default(), #[cfg(all(feature="package-manager",feature="room-animated-models"))] variant_model_preview: variant_model_preview::PreviewWindow::default(), #[cfg(feature="room-authoring")] room_authoring: crate::room_authoring_panel::Panel::default(), #[cfg(feature="room-authoring")] room_wall_pointer_owned: false, #[cfg(feature="room-authoring")] room_actor_pointer_owned: false, #[cfg(feature="room-authoring")] room_wall_placement_pointer_owned: false, #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))] windows_projects: crate::windows_project_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-export"))] windows_export: crate::windows_export_panel::Panel::default(), #[cfg(feature="room-lighting")] room_lighting: None, #[cfg(feature="room-lighting")] room_light_pointer_owned: false, #[cfg(feature="room-project")] room_camera: None, #[cfg(feature="room-project")] room_camera_capture: room_camera_capture::Capture::default(), #[cfg(feature="linked-prefabs")] linked_prefabs: crate::linked_prefab_panel::Panel::default(), #[cfg(feature="collect-ui")] collect_ui: None, #[cfg(feature="collect-ui")] collect_ui_preview: collect_ui_preview::PreviewWindow::default(), #[cfg(feature="project-ui")] project_ui: None, #[cfg(feature="navigation")] navigation: crate::navigation_panel::NavigationPanel::default(), #[cfg(feature="navigation")] navigation_endpoint: navigation_endpoint_pick::State::default(), #[cfg(feature="mesh-navigation")] mesh_navigation: crate::mesh_navigation::Panel::default(), #[cfg(feature="terrain")] terrain_ramp: terrain_ramp::State::default(), #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, viewport_hdr_disabled: false, #[cfg(feature = "static-gameplay")] registered_gameplay_view: crate::registered_gameplay_view::State::default(), #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), #[cfg(feature="models")] blockout_uv_density: blockout_uv_density::Panel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
     }
 
     #[cfg(feature="package-manager")]
@@ -1132,6 +1139,8 @@ impl EditorApp {
         { self.sync_room_camera_capture(); if ctx.input(|input|input.key_pressed(Key::Escape)) { self.room_camera_capture.invalidate(); } }
         #[cfg(feature="room-lighting")]
         self.sync_room_light_pick(&ctx);
+        #[cfg(feature="mesh-navigation")]
+        self.sync_mesh_light_pick(&ctx);
         #[cfg(feature="package-manager")]
         if self.package_removal_pending() {
             // Freeze the whole input frame, including the completion frame: no
@@ -1215,6 +1224,8 @@ impl EditorApp {
             let cancelling_gesture = self.editor.in_gesture();
             #[cfg(feature="room-lighting")]
             let cancelling_gesture = cancelling_gesture || self.room_light_pick_owns_input();
+            #[cfg(feature="mesh-navigation")]
+            let cancelling_gesture = cancelling_gesture || self.mesh_light_pick_owns_input();
             #[cfg(feature="room-authoring")]
             let cancelling_gesture = cancelling_gesture || self.room_wall_pointer_owned || self.room_actor_pointer_owned || self.room_wall_placement_pointer_owned;
             #[cfg(feature="mesh-navigation")]
@@ -1505,7 +1516,7 @@ impl EditorApp {
         #[cfg(feature="mesh-mission")]
         if self.mesh_game_creator.busy() { return; }
         #[cfg(feature="mesh-navigation")]
-        if self.mesh_navigation.art_import_busy() || self.mesh_animation_import_busy() || self.mesh_navigation.prop_gesture_busy() || self.mesh_navigation.agent_pick_busy() || self.mesh_navigation.geometry_vertex_busy() || self.mesh_mission_pick_busy() || self.hazard_pick_busy() { return; }
+        if self.mesh_light_pick_owns_input() || self.mesh_navigation.art_import_busy() || self.mesh_animation_import_busy() || self.mesh_navigation.prop_gesture_busy() || self.mesh_navigation.agent_pick_busy() || self.mesh_navigation.geometry_vertex_busy() || self.mesh_mission_pick_busy() || self.hazard_pick_busy() { return; }
         if self.editor.input_phase() != crate::editor::input::Phase::Off || ctx.egui_wants_keyboard_input() || !self.editor.can_mutate() || self.editor.previewing().is_some() {
             return;
         }
@@ -2190,6 +2201,8 @@ impl EditorApp {
     fn yard_viewport(&mut self,ui:&mut Ui){
         #[cfg(feature="room-lighting")]
         { self.room_light_pointer_owned |= self.room_light_pick_pending(); }
+        #[cfg(feature="mesh-navigation")]
+        { self.mesh_light_pointer_owned |= self.mesh_light_pick_pending(); }
         #[cfg(feature="models")]
         {
             #[cfg(feature="navigation")]
@@ -2198,6 +2211,8 @@ impl EditorApp {
             let picking = false;
             #[cfg(feature = "mesh-patrol")]
             let picking = picking || self.mesh_navigation.patrol_pick_owns_input();
+            #[cfg(feature="mesh-navigation")]
+            let picking = picking || self.mesh_light_pick_owns_input();
             if !picking { self.frame_selection_button(ui); }
         }
         #[cfg(feature="terrain")]
@@ -2265,6 +2280,8 @@ impl EditorApp {
             let mesh_owned = self.mesh_navigation.patrol_pick_owns_input();
             #[cfg(not(feature = "mesh-patrol"))]
             let mesh_owned = false;
+            #[cfg(feature="mesh-navigation")]
+            let mesh_owned = mesh_owned || self.mesh_light_pick_owns_input();
             if !mesh_owned { self.frame_selection_shortcut(ui, &resp, px); }
         }
         #[cfg(feature="mesh-navigation")]
@@ -2273,6 +2290,8 @@ impl EditorApp {
         let prop_moving = false;
         #[cfg(feature="room-lighting")]
         let prop_moving = prop_moving || self.room_light_pick_owns_input();
+        #[cfg(feature="mesh-navigation")]
+        let prop_moving = prop_moving || self.mesh_light_pick_owns_input();
         let prop_moving = prop_moving || navigation_pointer_owned;
         #[cfg(feature = "mesh-patrol")]
         let prop_moving = prop_moving || self.mesh_navigation.patrol_pick_owns_input();
@@ -2291,6 +2310,8 @@ impl EditorApp {
                 if let Some(tex)=self.gpu3d.as_ref().and_then(|gpu|gpu.last_texture()) { ui.painter().image(tex,rect,Rect::from_min_max(Pos2::ZERO,Pos2::new(1.0,1.0)),Color32::WHITE); }
                 ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,error,egui::FontId::proportional(14.0),Color32::RED); #[cfg(feature="terrain-patrol")]
                 self.navigation_patrol_frame_drawn(false);
+                #[cfg(feature="mesh-navigation")]
+                self.cancel_mesh_light_pick();
                 #[cfg(feature = "mesh-patrol")]
                 self.mesh_navigation.cancel_patrol_pick();
                 return;
@@ -2305,6 +2326,8 @@ impl EditorApp {
         let wall_pointer_consumed = false;
         #[cfg(feature="room-lighting")]
         let wall_pointer_consumed = wall_pointer_consumed || self.room_light_pick_owns_input();
+        #[cfg(feature="mesh-navigation")]
+        let wall_pointer_consumed = wall_pointer_consumed || self.mesh_light_pick_owns_input();
         #[cfg(feature="mesh-hazards")]
         let hazard_pointer_consumed = {
             let owned = self.mesh_hazard_pointer_owned || self.mesh_hazards.hazard_pick_busy();
@@ -2457,6 +2480,8 @@ impl EditorApp {
                 ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,error,egui::FontId::proportional(14.0),Color32::RED);
                 #[cfg(feature="terrain-patrol")]
                 self.navigation_patrol_frame_drawn(false);
+                #[cfg(feature="mesh-navigation")]
+                self.cancel_mesh_light_pick();
                 #[cfg(feature = "mesh-patrol")]
                 self.mesh_navigation.cancel_patrol_pick();
                 return;
@@ -2473,6 +2498,8 @@ impl EditorApp {
                     ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,error,egui::FontId::proportional(14.0),Color32::RED);
                     #[cfg(feature="terrain-patrol")]
                 self.navigation_patrol_frame_drawn(false);
+                #[cfg(feature="mesh-navigation")]
+                self.cancel_mesh_light_pick();
                 #[cfg(feature = "mesh-patrol")]
                 self.mesh_navigation.cancel_patrol_pick();
                 return;
@@ -2503,6 +2530,8 @@ impl EditorApp {
             ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,error,egui::FontId::proportional(14.0),Color32::RED);
             #[cfg(feature="terrain-patrol")]
                 self.navigation_patrol_frame_drawn(false);
+                #[cfg(feature="mesh-navigation")]
+                self.cancel_mesh_light_pick();
                 #[cfg(feature = "mesh-patrol")]
                 self.mesh_navigation.cancel_patrol_pick();
                 return;
@@ -2590,6 +2619,8 @@ impl EditorApp {
                 ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, error, egui::FontId::proportional(14.0), Color32::RED);
                 #[cfg(feature="terrain-patrol")]
                 self.navigation_patrol_frame_drawn(false);
+                #[cfg(feature="mesh-navigation")]
+                self.cancel_mesh_light_pick();
                 #[cfg(feature = "mesh-patrol")]
                 self.mesh_navigation.cancel_patrol_pick();
                 return;
@@ -2644,6 +2675,8 @@ impl EditorApp {
             ui.painter().rect_filled(rect,0.0,Color32::from_rgb(10,10,16));
             ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,"Yard3D viewport needs a GPU",egui::FontId::proportional(14.0),Color32::GRAY);
         }
+        #[cfg(feature="mesh-navigation")]
+        self.mesh_light_viewport_pick(ui.ctx(), &resp, &camera, px, frame_drawn);
         #[cfg(feature="room-lighting")]
         if frame_drawn {
             self.room_light_viewport_pick(ui.ctx(), &resp, &camera, px);
@@ -2674,7 +2707,7 @@ impl EditorApp {
             }, frame_drawn);
             agent_pointer_consumed || consumed
         };
-        if !hazard_pointer_consumed && !mission_pointer_consumed && !mesh_play_pointer_consumed && !agent_pointer_consumed && !prop_pointer_consumed && (frame_drawn || !self.editor.has_room_camera()) && resp.clicked_by(PointerButton::Primary) && self.editor.previewing().is_none() {
+        if !wall_pointer_consumed && !hazard_pointer_consumed && !mission_pointer_consumed && !mesh_play_pointer_consumed && !agent_pointer_consumed && !prop_pointer_consumed && (frame_drawn || !self.editor.has_room_camera()) && resp.clicked_by(PointerButton::Primary) && self.editor.previewing().is_none() {
             if let Some(at) = resp.interact_pointer_pos() {
                 let pixel = [(at.x-rect.min.x)*ppp, (at.y-rect.min.y)*ppp];
                 #[cfg(feature="navigation")]
@@ -3174,7 +3207,7 @@ impl EditorApp {
             }
 
             #[cfg(feature="mesh-navigation")]
-            if self.mesh_navigation.art_import_busy() || self.mesh_animation_import_busy() || self.mesh_navigation.prop_gesture_busy() || self.mesh_navigation.agent_pick_busy() || self.mesh_mission_pick_busy() || self.hazard_pick_busy() {
+            if self.mesh_light_pick_owns_input() || self.mesh_navigation.art_import_busy() || self.mesh_animation_import_busy() || self.mesh_navigation.prop_gesture_busy() || self.mesh_navigation.agent_pick_busy() || self.mesh_mission_pick_busy() || self.hazard_pick_busy() {
                 self.editor.error("Finish content imports, viewport moves or endpoint picking before changing the scene path");
                 self.ui.dialog = Some(dialog);
                 return;

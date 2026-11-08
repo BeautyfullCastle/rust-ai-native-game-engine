@@ -18,6 +18,41 @@ fn number(ui: &mut Ui, label: &str, value: &mut f32, min: f32, max: f32) -> bool
     .inner
 }
 impl Panel {
+    pub(super) fn show_point_light_pick_controls(
+        &mut self,
+        ui: &mut Ui,
+        editor: &Editor,
+        can_edit: bool,
+    ) {
+        let focused = ui.input(|input| {
+            input.focused
+                && !input
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, egui::Event::WindowFocused(false)))
+        });
+        let ready = can_edit
+            && self.can_edit(editor)
+            && focused
+            && self.point_light.is_some()
+            && !self.pick_pending()
+            && !self.viewport_pick_busy();
+        if ui
+            .add_enabled(ready, egui::Button::new("Pick point light X/Z"))
+            .clicked()
+            && ready
+        {
+            if let Err(error) = self.begin_viewport_pick(editor) {
+                self.error = Some(error);
+            }
+        }
+        if self.pick_pending() {
+            ui.weak("Click the viewport Y=0 plane to stage X/Z only; height and other light settings stay unchanged. Apply and Save explicitly.");
+            if ui.button("Cancel point light pick").clicked() {
+                self.cancel_pick();
+            }
+        }
+    }
     pub(super) fn show_point_light_controls(&mut self, ui: &mut Ui) -> bool {
         let mut enabled = self.point_light.is_some();
         let mut changed = ui.checkbox(&mut enabled, "Enable point light").changed();
