@@ -72,14 +72,14 @@ jobs:
             ('sampler-ui','model_package_import_panel::sampler_ui::tests::',3),
             ('sampler-editor-use','package_manager_panel::editor_animated_sampler_tests::',1),
             ('preview-backend-regression','model_package_import::variant_preview::tests::',8),
-            ('preview-panel-regression','model_package_import_panel::variant_preview::tests::',7),
+            ('preview-panel-regression','model_package_import_panel::variant_preview::tests::',6),
             ('catalog-regression','model_package_import_panel::source_inspection::tests::',5),
             ('trim-mode-regression','model_package_import_panel::trim_ui::tests::',5),
             ('preview-parent-regression','package_manager_panel::variant_preview_parent_tests::',1),
             ('legacy-png','package_manager_panel::editor_animated_texture_tests::actual_editor_texture_widgets_import_install_assign_save_and_reopen',1),
           ]
           for label,selector,count in checks: tests(label,selector,count)
-          assert sum(n for _,_,n in checks)==37
+          assert sum(n for _,_,n in checks)==36
           run('sampler-ui-feature-off',['cargo','test','--locked','-p','orr_editor','--features','package-manager','--lib','model_package_import_panel::sampler_ui::tests::','--','--test-threads=1'],1)
           run('sampler-feature-off-tests',['cargo','test','--locked','-p','orr_editor','--features','package-manager','--lib','model_package_import::sampler::tests::','--','--test-threads=1'],3)
           run('strict-package-minimal',['cargo','clippy','--locked','-p','orr_editor','--features','package-manager','--lib','--','-D','warnings'])

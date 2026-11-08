@@ -1,7 +1,9 @@
 #[path="model_package_import/sampler.rs"]
 mod sampler;
 pub(crate) use sampler::{SamplerVariant,import_sampler_variant,import_sampler_variant_checked};
-use sampler::{validate_sampler_variant,sampler_variant_bytes};
+use sampler::sampler_variant_bytes;
+#[cfg(feature = "room-animated-models")]
+use sampler::validate_sampler_variant;
 use crate::{model_bindings::ModelKind, package_manager};
 use orr_package::Manifest;
 use sha2::{Digest, Sha256};
