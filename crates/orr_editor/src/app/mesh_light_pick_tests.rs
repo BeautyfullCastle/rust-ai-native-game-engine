@@ -254,7 +254,7 @@ fn final_frame_gate_and_failed_draw_cancel_before_draft_staging() {
                 assert!((actual - expected).abs() < 0.002, "{label}: {actual}");
             }
             assert_eq!(
-                h.state().app.point_light_settings_for_frame().unwrap(),
+                h.state_mut().app.point_light_settings_for_frame().unwrap(),
                 applied
             );
             unchanged(h.state(), checksum, &history, &files);

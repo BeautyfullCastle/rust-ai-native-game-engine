@@ -13,6 +13,8 @@ mod shadow_fit;
 mod point_light_ui;
 #[path="mesh_lighting_panel/viewport_pick.rs"]
 mod viewport_pick;
+#[path="mesh_lighting_panel/draft_preview.rs"]
+mod draft_preview;
 
 const MAX_HISTORY: usize = 16;
 
@@ -23,6 +25,7 @@ struct HistoryEntry {
 }
 
 pub(crate) struct Panel {
+    draft_preview: draft_preview::State,
     viewport_pick: viewport_pick::State,
     pick_generation: u64,
     direction: [String; 3],
@@ -64,6 +67,7 @@ impl Default for Panel {
     fn default() -> Self {
         let defaults = orr_sample::yard3d_view::yard_lighting();
         Self {
+            draft_preview: Default::default(),
             viewport_pick: Default::default(),
             pick_generation: 0,
             direction: defaults.direction.map(format_number),
@@ -108,6 +112,7 @@ impl Default for Panel {
 
 impl Panel {
     pub(crate) fn sync(&mut self, editor: &Editor) {
+        self.sync_preview(editor);
         self.sync_viewport_pick(editor);
         if !supports_lighting_profile(editor.game()) || !editor.spec().is_local() {
             self.document_pending = true;
@@ -241,6 +246,7 @@ impl Panel {
             });
 
             self.show_point_light_pick_controls(ui, editor, can_edit);
+            self.show_point_light_preview_controls(ui, editor, can_edit);
             self.show_preset_controls(ui, editor);
 
             let history_enabled = self.can_change_history(editor);
@@ -573,6 +579,7 @@ impl Panel {
     }
 
     fn apply(&mut self, editor: &Editor) {
+        self.draft_preview = Default::default();
         self.invalidate_viewport_pick();
         if !self.can_edit(editor) {
             self.error = Some("Apply requires the matching editable local mesh scene".into());
@@ -598,6 +605,7 @@ impl Panel {
     }
 
     fn save(&mut self) {
+        self.draft_preview = Default::default();
         self.invalidate_viewport_pick();
         let (Some(scene), Some(graph_revision)) = (self.scene.as_deref(), self.graph_revision)
         else {
@@ -627,6 +635,7 @@ impl Panel {
     }
 
     fn reload(&mut self, editor: &Editor) {
+        self.draft_preview = Default::default();
         self.invalidate_viewport_pick();
         if !self.can_reload(editor) || self.dirty() {
             self.error = Some(
@@ -647,6 +656,7 @@ impl Panel {
     }
 
     fn remove(&mut self) {
+        self.draft_preview = Default::default();
         self.invalidate_viewport_pick();
         if self.current_document().is_none() || !self.confirm_remove {
             self.error =
@@ -662,6 +672,7 @@ impl Panel {
     }
 
     fn discard_changes_and_reload(&mut self, editor: &Editor) {
+        self.draft_preview = Default::default();
         self.invalidate_viewport_pick();
         if !self.confirm_discard_changes {
             return;
@@ -685,6 +696,7 @@ impl Panel {
     }
 
     fn discard_invalid(&mut self) {
+        self.draft_preview = Default::default();
         self.invalidate_viewport_pick();
         let (Some(scene), Some(sidecar_sha), Some(graph_revision)) = (
             self.scene.as_deref(),
@@ -716,6 +728,7 @@ impl Panel {
     }
 
     fn undo(&mut self) {
+        self.draft_preview = Default::default();
         self.invalidate_viewport_pick();
         if self.cursor == 0 {
             return;
@@ -728,6 +741,7 @@ impl Panel {
     }
 
     fn redo(&mut self) {
+        self.draft_preview = Default::default();
         self.invalidate_viewport_pick();
         if self.cursor + 1 >= self.history.len() {
             return;
@@ -746,6 +760,7 @@ impl Panel {
         scene_epoch: u64,
         profile: EditorGame,
     ) {
+        self.draft_preview = Default::default();
         self.invalidate_viewport_pick();
         self.profile = Some(profile);
         self.scene = Some(scene.to_path_buf());
@@ -830,6 +845,7 @@ impl Panel {
     }
 
     fn reset_history(&mut self, document: Option<Document>, saved_id: Option<u64>) {
+        self.draft_preview = Default::default();
         self.invalidate_viewport_pick();
         self.history.clear();
         self.history.push(HistoryEntry { id: 0, document });
@@ -843,6 +859,7 @@ impl Panel {
     }
 
     fn push_state(&mut self, document: Option<Document>) {
+        self.draft_preview = Default::default();
         self.invalidate_viewport_pick();
         if self.current_document() == document.as_ref() {
             return;
@@ -953,3 +970,10 @@ mod viewport_pick_ui_tests;
 #[cfg(all(test,target_os="linux",feature="mesh-mission"))]
 #[path="mesh_lighting_panel/viewport_pick_integration_tests.rs"]
 mod viewport_pick_integration_tests;
+
+#[cfg(all(test,target_os="linux",feature="mesh-mission"))]
+#[path="mesh_lighting_panel/draft_preview_ui_tests.rs"]
+mod draft_preview_ui_tests;
+#[cfg(all(test,target_os="linux",feature="mesh-mission"))]
+#[path="mesh_lighting_panel/draft_preview_integration_tests.rs"]
+mod draft_preview_integration_tests;

@@ -18,6 +18,40 @@ fn number(ui: &mut Ui, label: &str, value: &mut f32, min: f32, max: f32) -> bool
     .inner
 }
 impl Panel {
+    pub(super) fn show_point_light_preview_controls(
+        &mut self,
+        ui: &mut Ui,
+        editor: &Editor,
+        can_edit: bool,
+    ) {
+        self.sync_preview(editor);
+        let focused = ui.input(|input| {
+            input.focused
+                && !input
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, egui::Event::WindowFocused(false)))
+        });
+        let ready = can_edit
+            && self.can_edit(editor)
+            && focused
+            && self
+                .scene
+                .as_deref()
+                .zip(self.graph_revision)
+                .is_some_and(|(scene, revision)| self.parse_document(scene, revision).is_ok());
+        let mut enabled = self.point_light_preview_enabled();
+        let response = ui.add_enabled(
+            ready || enabled,
+            egui::Checkbox::new(&mut enabled, "Preview point light draft"),
+        );
+        if response.changed() && (!enabled || ready) {
+            if let Err(error) = self.set_point_light_preview(editor, enabled) {
+                self.error = Some(error);
+            }
+        }
+        ui.weak("Preview only: shows the validated point light draft in this viewport. Apply and Save explicitly to persist it; reopening starts with preview off.");
+    }
     pub(super) fn show_point_light_pick_controls(
         &mut self,
         ui: &mut Ui,
