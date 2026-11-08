@@ -13,7 +13,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      CARGO_TARGET_DIR: ${{ runner.temp }}/editor-static-recolor-${{ github.run_id }}-${{ github.run_attempt }}
       CARGO_BUILD_JOBS: 2
       CARGO_INCREMENTAL: 0
       CARGO_TERM_COLOR: never
@@ -41,6 +40,8 @@ jobs:
           sudo apt-get update -q 2>&1 | tee ci-evidence/dependencies.log
           sudo apt-get install -y -q pkg-config libasound2-dev libudev-dev libx11-dev libxkbcommon-dev libwayland-dev 2>&1 | tee -a ci-evidence/dependencies.log
       - name: Collect static RGB authoring and editor-use checks
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/editor-static-recolor-${{ github.run_id }}-${{ github.run_attempt }}
         shell: python {0}
         run: |
           import hashlib,json,os,re,shutil,subprocess
