@@ -38,15 +38,19 @@ impl Plan {
     pub(crate) fn summary(&self) -> &Summary {
         &self.summary
     }
+    #[cfg(test)]
     pub(crate) fn project(&self) -> &Path {
         &self.project
     }
+    #[cfg(test)]
     pub(crate) fn source(&self) -> &Path {
         &self.source
     }
+    #[cfg(test)]
     pub(crate) fn previous(&self) -> &Lock {
         &self.previous
     }
+    #[cfg(test)]
     pub(crate) fn candidate(&self) -> &Lock {
         &self.candidate
     }
@@ -169,7 +173,7 @@ pub(crate) fn apply(
     // Do not clean up unreachable objects or retry a refused transaction.
     opened
         .install_checked(
-            &[plan.source.clone()],
+            std::slice::from_ref(&plan.source),
             &plan.previous,
             &plan.candidate,
             before_publish,

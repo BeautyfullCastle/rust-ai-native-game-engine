@@ -59,6 +59,7 @@ impl State {
         self.pending.is_some()
     }
 
+    #[cfg(feature = "sprite-grid-authoring")]
     pub(super) fn blocks_grid(&self) -> bool {
         self.busy() || self.prepared.is_some()
     }
@@ -124,7 +125,7 @@ impl State {
             && self.draft_ticket == pin.draft_ticket
             && self.draft == pin.draft
             && self.observed_draft == pin.draft
-            && PathBuf::from(self.draft.source_directory.trim()) == pin.source
+            && pin.source.as_path() == std::path::Path::new(self.draft.source_directory.trim())
     }
 
     fn start_preview(&mut self) {
