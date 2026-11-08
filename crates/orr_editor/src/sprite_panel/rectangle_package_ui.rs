@@ -564,7 +564,7 @@ impl State {
                     self.sync(context.clone());
                     match self.validate_draft() {
                         Ok(document) => ui.label(format!("{} valid rectangles. PNG hash is checked again before package publication.", document.regions().len())),
-                        Err(error) => { ui.colored_label(Color32::LIGHT_RED, error); }
+                        Err(error) => ui.colored_label(Color32::LIGHT_RED, error),
                     }
                     ui.checkbox(&mut self.rights, "Rectangle rights acknowledgement");
                     self.sync(context.clone());

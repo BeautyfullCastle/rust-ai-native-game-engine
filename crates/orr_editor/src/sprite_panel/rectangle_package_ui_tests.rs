@@ -1,7 +1,10 @@
 //! Rectangle form validation and ticketed worker completions; CPU-only egui.
 use super::*;
 use egui::accesskit::Role;
-use egui_kittest::{kittest::Queryable, Harness};
+use egui_kittest::{
+    kittest::{NodeT, Queryable},
+    Harness,
+};
 
 fn context() -> Context {
     Context {

@@ -125,8 +125,13 @@ fn rectangles_preserve_order_ids_overlap_zero_origin_and_exact_edges() {
             height: 4,
         },
     ];
-    let doc = validate_rectangle_spec(&RectangleSpec { regions: input.clone() }, &image(6, 4))
-        .unwrap();
+    let doc = validate_rectangle_spec(
+        &RectangleSpec {
+            regions: input.clone(),
+        },
+        &image(6, 4),
+    )
+    .unwrap();
     assert_eq!(doc.regions(), input);
     assert!(doc.clips().is_empty());
     assert_eq!(doc.region(0), Some(&input[1]));
@@ -198,13 +203,7 @@ fn inspection_hash_and_dimensions_are_bounded() {
             .unwrap_err()
             .contains("64 hexadecimal"));
     }
-    for (width, height) in [
-        (0, 4),
-        (6, 0),
-        (2049, 4),
-        (6, 2049),
-        (u32::MAX, u32::MAX),
-    ] {
+    for (width, height) in [(0, 4), (6, 0), (2049, 4), (6, 2049), (u32::MAX, u32::MAX)] {
         assert!(validate_rectangle_spec(&spec(), &image(width, height))
             .unwrap_err()
             .contains("1..=2048"));
@@ -265,7 +264,10 @@ fn publication_copies_exact_inputs_and_emits_installable_empty_clip_package() {
     assert_eq!(report.root, root.join("new-package"));
     assert_eq!(report.package, "rectangle-actor");
     assert_eq!(report.document, "sprites.json");
-    assert_eq!((report.width, report.height, report.region_count), (6, 4, 3));
+    assert_eq!(
+        (report.width, report.height, report.region_count),
+        (6, 4, 3)
+    );
     assert_eq!(report.source_sha256, hash(&before));
     assert_eq!(fs::read(report.root.join("atlas.png")).unwrap(), before);
     assert_eq!(fs::read(&png).unwrap(), before);
@@ -301,7 +303,10 @@ fn same_dimension_png_change_rejects_before_publication() {
     fs::write(&req.png, &changed).unwrap();
     fs::write(&req.license, [0xff]).unwrap();
     let error = create_package(req).unwrap_err();
-    assert!(error.contains("PNG") && error.contains("changed"), "{error}");
+    assert!(
+        error.contains("PNG") && error.contains("changed"),
+        "{error}"
+    );
     assert!(!destination.exists());
     assert_eq!(fs::read(root.join("source.png")).unwrap(), changed);
     assert_eq!(fs::read_dir(root).unwrap().count(), 2);
@@ -314,9 +319,7 @@ fn acknowledgement_path_metadata_and_license_errors_never_publish() {
 
     let mut req = unopened();
     req.license_acknowledged = false;
-    assert!(create_package(req)
-        .unwrap_err()
-        .contains("acknowledgement"));
+    assert!(create_package(req).unwrap_err().contains("acknowledgement"));
     for bad in [
         PathBuf::from("relative.png"),
         root.join("..").join("outside.png"),
@@ -402,16 +405,20 @@ fn core_png_and_license_byte_limits_reject_without_output_or_input_cleanup() {
         let root = temp.path().canonicalize().unwrap();
         let req = request(&root);
         let destination = req.destination.clone();
-        let target = if oversized_png { &req.png } else { &req.license };
+        let target = if oversized_png {
+            req.png.clone()
+        } else {
+            req.license.clone()
+        };
         let limit = if oversized_png {
             authoring::MAX_PNG_BYTES
         } else {
             authoring::MAX_LICENSE_BYTES
         };
-        fs::write(target, vec![b'x'; limit + 1]).unwrap();
+        fs::write(&target, vec![b'x'; limit + 1]).unwrap();
         assert!(create_package(req).is_err());
         assert!(!destination.exists());
-        assert_eq!(fs::metadata(target).unwrap().len(), (limit + 1) as u64);
+        assert_eq!(fs::metadata(&target).unwrap().len(), (limit + 1) as u64);
         assert_eq!(fs::read_dir(root).unwrap().count(), 2);
     }
 }
