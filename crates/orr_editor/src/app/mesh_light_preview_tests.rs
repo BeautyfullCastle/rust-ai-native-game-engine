@@ -203,7 +203,7 @@ fn opt_in_renderer_selection_previews_every_point_field_and_toggle_off_reverts()
             f.app
                 .mesh_lighting
                 .applied_point_light_settings(&f.app.editor),
-            Some(f.saved)
+            Some(f.saved.clone())
         );
         f.unchanged();
         f.preview(false);
@@ -224,7 +224,7 @@ fn opt_in_renderer_selection_previews_every_point_field_and_toggle_off_reverts()
             f.app
                 .mesh_lighting
                 .applied_point_light_settings(&f.app.editor),
-            Some(f.saved)
+            Some(f.saved.clone())
         );
         f.unchanged();
         let mut reopened = Editor::open_game(&f.scene, game).unwrap();
