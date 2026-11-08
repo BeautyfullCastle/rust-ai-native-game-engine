@@ -731,7 +731,14 @@ impl SpritePanel {
                 let matches = self.scene_matches(editor);
                 #[cfg(feature = "sprite-json-authoring")]
                 let json_busy = self.json_package.busy();
-                #[cfg(not(feature = "sprite-json-authoring"))]
+                #[cfg(all(
+                    not(feature = "sprite-json-authoring"),
+                    any(
+                        feature = "sprite-grid-authoring",
+                        feature = "sprite-rectangle-authoring",
+                        feature = "sprite-package-install"
+                    )
+                ))]
                 let json_busy = false;
                 #[cfg(feature = "sprite-grid-authoring")]
                 if matches && editor.spec().is_local() {
