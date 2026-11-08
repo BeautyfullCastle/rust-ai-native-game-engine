@@ -7,6 +7,8 @@ const MAX_POINTS: usize = 8;
 pub(crate) enum PatrolPickRequest { Pick(usize), Cancel }
 #[path="patrol_pick.rs"]
 pub(crate) mod patrol_pick;
+#[path="patrol_frame.rs"]
+mod patrol_frame;
 fn supported_profile(game: EditorGame) -> bool {
     game.is_mesh_navigation() || game.is_mesh_hazards()
 }
@@ -43,6 +45,8 @@ pub(super) struct State {
     status: String,
     generation: u64,
     order_busy: bool,
+    frame_busy: bool,
+    frame_request: Option<(InspectionPin, super::patrol_routes::Report, EditorGame, u64)>,
     pick_request: Option<(PatrolPickRequest, Form, u64)>,
     inspection: Option<(InspectionPin, Result<super::patrol_routes::Report, String>)>,
     show_inspection: bool,
@@ -131,6 +135,7 @@ impl State {
                 .into();
     }
     fn clear_inspection(&mut self) {
+        self.frame_request = None;
         self.inspection = None;
         self.show_inspection = false;
         self.retired.set(false);
@@ -278,6 +283,7 @@ impl Panel {
         if self.patrol.inspection_controls(ui, current.is_ok() && focused) {
             if let Ok((pin, view)) = current {
                 let result = parse(&pin.form, pin.context.revision).and_then(|config| super::patrol_routes::inspect(&view.graph, &config, pin.start, pin.max_vertical));
+                self.patrol.frame_request = None;
                 self.patrol.inspection = Some((pin, result));
                 self.patrol.retired.set(false);
                 self.patrol.show_inspection = false;
@@ -399,6 +405,7 @@ impl Panel {
             if self.patrol.controls(ui,editable) {if let Err(error)=self.apply_patrol(editor){self.error=Some(format!("Apply waypoint patrol failed: {error}"));}}
             if ui.add_enabled(editable,egui::Button::new("Reload patrol fields")).clicked(){if let Ok((context,view))=current {let config=editor.snapshot().and_then(|s|patrol::from_view(s.predicted()).ok().flatten()).map(|p|p.config);self.patrol.load(context,config,view.pin.goal);}}
             self.show_patrol_inspection(ui, editor);
+            self.show_patrol_frame_controls(ui, editor);
             if !self.patrol.status.is_empty(){ui.label(&self.patrol.status);}
         });
     }

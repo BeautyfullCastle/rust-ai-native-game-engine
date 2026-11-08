@@ -3677,3 +3677,7 @@ mod room_lighting_coherence_tests {
         assert_eq!(panel.document(), &Document::enabled_default());
     }
 }
+
+#[cfg(feature="mesh-patrol")]
+#[path="editor/frame_mesh_patrol.rs"]
+mod frame_mesh_patrol;

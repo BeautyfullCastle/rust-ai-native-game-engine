@@ -109,6 +109,8 @@ impl Default for Panel {
 }
 
 impl Panel {
+    #[cfg(feature="mesh-patrol")]
+    pub(crate) fn draft_follows_agent(&self) -> bool { self.follow_agent }
     pub(crate) fn sync(&mut self, editor: &mut Editor) {
         self.sync_static_preview(editor);
         if !supports_camera_profile(editor.game()) || !editor.spec().is_local() {

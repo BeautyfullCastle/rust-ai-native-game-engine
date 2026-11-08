@@ -4,7 +4,7 @@ use crate::game::EditorGame;
 use orr_render::OrbitCamera;
 use orr_view::Shape3;
 #[path = "frame_selection/math.rs"]
-mod math;
+pub(super) mod math;
 
 impl Editor {
     pub(crate) fn frame_selected_collider(&mut self, size: (u32, u32)) -> Result<(), String> {
