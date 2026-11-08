@@ -64,6 +64,7 @@ impl Panel {
         }
         if self.source_format != SourceFormat::CookedStatic
             || self.kind != ModelKind::Static
+            || self.static_texture.enabled
             || self.color_variant_enabled
             || self.texture_variant_enabled
             || self.trim.enabled
@@ -156,7 +157,9 @@ impl Panel {
             return;
         }
         let before = self.static_uv.clone();
-        ui.checkbox(&mut self.static_uv.enabled, "Create static UV variant");
+        if ui.checkbox(&mut self.static_uv.enabled, "Create static UV variant").changed() && self.static_uv.enabled {
+            self.static_texture.enabled = false;
+        }
         if self.static_uv.enabled {
             ui.label(
                 self.static_uv

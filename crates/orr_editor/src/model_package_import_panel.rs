@@ -1,3 +1,5 @@
+#[path="model_package_import_panel/static_texture_ui.rs"]
+mod static_texture_ui;
 #[path="model_package_import_panel/static_uv_ui.rs"]
 mod static_uv_ui;
 #[path="model_package_import_panel/uv_ui.rs"]
@@ -52,6 +54,8 @@ pub struct Panel {
     uv: uv_ui::Controls,
     static_uv: static_uv_ui::Controls,
     submitted_static_uv: Option<Option<static_uv_ui::Snapshot>>,
+    static_texture: static_texture_ui::Controls,
+    submitted_static_texture: Option<Option<static_texture_ui::Snapshot>>,
     submitted_uv: Option<Option<model_package_import::UvVariant>>,
     submitted_sequence: Option<Option<model_package_import::SequenceVariant>>,
     submitted_sampler: Option<Option<model_package_import::SamplerVariant>>,
@@ -91,6 +95,8 @@ impl Default for Panel {
             uv: Default::default(),
             static_uv: Default::default(),
             submitted_static_uv: None,
+            static_texture: Default::default(),
+            submitted_static_texture: None,
             submitted_uv: None,
             submitted_sequence: None,
             submitted_sampler: None,
@@ -149,6 +155,7 @@ impl Panel {
                 self.submitted_sequence = None;
                 self.submitted_uv = None;
                 self.submitted_static_uv = None;
+                self.submitted_static_texture = None;
                 self.submitted_authoring_generation = None;
                 self.submitted_inspected_hash = None;
                 self.license_acknowledged = false;
@@ -161,6 +168,8 @@ impl Panel {
         self.license_acknowledged = false;
         let submitted_static_uv = self.submitted_static_uv.take().unwrap_or(None);
         let static_uv_is_current = project_root.is_some_and(|root| self.static_uv_snapshot(root, project_generation, source_generation).is_ok_and(|snapshot| snapshot == submitted_static_uv));
+        let submitted_static_texture = self.submitted_static_texture.take().unwrap_or(None);
+        let static_texture_is_current = project_root.is_some_and(|root| self.static_texture_snapshot(root, project_generation, source_generation).is_ok_and(|snapshot| snapshot == submitted_static_texture));
         let submitted_color = self.submitted_color.take().unwrap_or(None);
         let color_is_current = self
             .color_request()
@@ -182,7 +191,7 @@ impl Panel {
         let generation_is_current = self.submitted_authoring_generation.take().is_none_or(|generation| generation == self.authoring_generation);
         let inspected_hash_is_current =
             self.submitted_inspected_hash.take().unwrap_or(None) == self.inspected_hash;
-        let is_current = static_uv_is_current && uv_is_current && sequence_is_current && sampler_is_current && trim_is_current && generation_is_current && inspected_hash_is_current
+        let is_current = static_texture_is_current && static_uv_is_current && uv_is_current && sequence_is_current && sampler_is_current && trim_is_current && generation_is_current && inspected_hash_is_current
             && texture_is_current
             && color_is_current
             && project_root == Some(completion.project_root.as_path())
@@ -258,7 +267,7 @@ impl Panel {
             .default_open(false)
             .show(ui, |ui| {
                 ui.label("Import a local self-contained GLB, cooked static model or cooked animated model and a license file into a new package folder.");
-                ui.label("Cooked import preserves exact bytes unless you explicitly create a static UV variant or an animated color variant, PNG skin, trimmed clip, sampler variant, clip sequence or UV variant. Historical dependencies are not loaded or added to the package.");
+                ui.label("Cooked import preserves exact bytes unless you explicitly create a static UV variant, static PNG skin or an animated color variant, PNG skin, trimmed clip, sampler variant, clip sequence or UV variant. Historical dependencies are not loaded or added to the package.");
                 ui.label("External resources, scripts, network access and package activation are not supported.");
                 ui.label("A supplied license file is metadata only; its presence is not legal review or a rights determination.");
                 let fields_enabled = enabled && !self.busy();
@@ -288,7 +297,7 @@ impl Panel {
                     path_field(ui, "Package destination directory", &mut self.destination);
                     text_field(ui, "Package name", &mut self.name, 128);
                     text_field(ui, "Package version", &mut self.version, 128);
-                    if self.static_uv.enabled && old_package != (self.destination.clone(), self.name.clone(), self.version.clone()) { self.source_inputs_changed(); }
+                    if (self.static_uv.enabled || self.static_texture.enabled) && old_package != (self.destination.clone(), self.name.clone(), self.version.clone()) { self.source_inputs_changed(); }
                     let old_kind = self.kind;
                     ui.horizontal(|ui| {
                         ui.add_enabled_ui(self.source_format != SourceFormat::CookedAnimated, |ui| {
@@ -332,6 +341,7 @@ impl Panel {
                     self.show_sequence_controls(ui);
                     self.show_uv_controls(ui);
                     self.show_static_uv_controls(ui);
+                    self.show_static_texture_controls(ui);
                     self.show_source_inspection(ui,project_root,project_generation,source_generation);
                     ui.checkbox(
                         &mut self.license_acknowledged,
@@ -368,7 +378,8 @@ impl Panel {
                     && self.sampler_request().is_ok()
                     && self.sequence_request().is_ok()
                     && self.uv_request().is_ok()
-                    && self.static_uv_request().is_ok();
+                    && self.static_uv_request().is_ok()
+                    && self.static_texture_request().is_ok();
                 let import_label = match self.source_format {
                     SourceFormat::RawGlb => "Import raw GLB package",
                     SourceFormat::CookedStatic => "Import cooked static package",
@@ -415,6 +426,8 @@ impl Panel {
         self.sync_inspection(Some(&project_root), project_generation, source_generation);
         let static_uv = match self.static_uv_request() { Ok(value) => value, Err(error) => { self.status=error; return; } };
         let submitted_static_uv = match self.static_uv_snapshot(&project_root, project_generation, source_generation) { Ok(value) => value, Err(error) => { self.status=error; return; } };
+        let static_texture = match self.static_texture_request() { Ok(value) => value, Err(error) => { self.status=error; return; } };
+        let submitted_static_texture = match self.static_texture_snapshot(&project_root, project_generation, source_generation) { Ok(value) => value, Err(error) => { self.status=error; return; } };
         let trim = match self.trim_request() { Ok(trim) => trim, Err(error) => { self.status=error; return; } };
         let submitted_trim = trim.clone();
         let sampler=match self.sampler_request(){Ok(value)=>value,Err(error)=>{self.status=error;return;}};
@@ -448,8 +461,8 @@ impl Panel {
             .name("orr-model-package-import".into())
             .spawn(move || {
                 let expected_destination = request_destination(&request.destination);
-                let result = match (color, texture, trim, sampler, sequence, uv, static_uv) {
-                    (Some(color), None, None, None, None, None, None) => match expected_hash {
+                let result = match (color, texture, trim, sampler, sequence, uv, static_uv, static_texture) {
+                    (Some(color), None, None, None, None, None, None, None) => match expected_hash {
                         Some(hash) => model_package_import::import_color_variant_checked(
                             request,
                             color,
@@ -457,7 +470,7 @@ impl Panel {
                         ),
                         None => model_package_import::import_color_variant(request, color),
                     },
-                    (None, Some(texture), None, None, None, None, None) => match expected_hash {
+                    (None, Some(texture), None, None, None, None, None, None) => match expected_hash {
                         Some(hash) => model_package_import::import_texture_variant_checked(
                             request,
                             texture,
@@ -465,12 +478,13 @@ impl Panel {
                         ),
                         None => model_package_import::import_texture_variant(request, texture),
                     },
-                    (None, None, Some(trim), None, None, None, None) => match expected_hash { Some(hash) => model_package_import::import_trim_variant_checked(request, trim, Some(hash)), None => model_package_import::import_trim_variant(request, trim) },
-                    (None, None, None, Some(sampler), None, None, None) => match expected_hash {Some(hash)=>model_package_import::import_sampler_variant_checked(request,sampler,Some(hash)),None=>model_package_import::import_sampler_variant(request,sampler)},
-                    (None,None,None,None,Some(sequence),None,None) => match expected_hash {Some(hash)=>model_package_import::import_sequence_variant_checked(request,sequence,Some(hash)),None=>model_package_import::import_sequence_variant(request,sequence)},
-                    (None,None,None,None,None,Some(uv),None)=>match expected_hash{Some(hash)=>model_package_import::import_uv_variant_checked(request,uv,Some(hash)),None=>model_package_import::import_uv_variant(request,uv)},
-                    (None,None,None,None,None,None,Some(static_uv)) => match expected_hash {Some(hash)=>model_package_import::import_static_uv_variant_checked(request,static_uv,Some(hash)),None=>model_package_import::import_static_uv_variant(request,static_uv)},
-                    (None, None, None, None, None, None, None) => model_package_import::import_package(request),
+                    (None, None, Some(trim), None, None, None, None, None) => match expected_hash { Some(hash) => model_package_import::import_trim_variant_checked(request, trim, Some(hash)), None => model_package_import::import_trim_variant(request, trim) },
+                    (None, None, None, Some(sampler), None, None, None, None) => match expected_hash {Some(hash)=>model_package_import::import_sampler_variant_checked(request,sampler,Some(hash)),None=>model_package_import::import_sampler_variant(request,sampler)},
+                    (None,None,None,None,Some(sequence),None,None,None) => match expected_hash {Some(hash)=>model_package_import::import_sequence_variant_checked(request,sequence,Some(hash)),None=>model_package_import::import_sequence_variant(request,sequence)},
+                    (None,None,None,None,None,Some(uv),None,None)=>match expected_hash{Some(hash)=>model_package_import::import_uv_variant_checked(request,uv,Some(hash)),None=>model_package_import::import_uv_variant(request,uv)},
+                    (None,None,None,None,None,None,Some(static_uv),None) => match expected_hash {Some(hash)=>model_package_import::import_static_uv_variant_checked(request,static_uv,Some(hash)),None=>model_package_import::import_static_uv_variant(request,static_uv)},
+                    (None,None,None,None,None,None,None,Some(static_texture)) => match expected_hash {Some(hash)=>model_package_import::import_static_texture_variant_checked(request,static_texture,Some(hash)),None=>model_package_import::import_static_texture_variant(request,static_texture)},
+                    (None, None, None, None, None, None, None, None) => model_package_import::import_package(request),
                     _ => Err("Select only one authoring operation".into()),
                 };
                 let _ = sender.send(Completion {
@@ -490,6 +504,7 @@ impl Panel {
                 self.submitted_sequence = Some(submitted_sequence);
                 self.submitted_uv = Some(submitted_uv);
                 self.submitted_static_uv = Some(submitted_static_uv);
+                self.submitted_static_texture = Some(submitted_static_texture);
                 self.submitted_authoring_generation = Some(self.authoring_generation);
                 self.submitted_color = Some(submitted_color);
                 self.submitted_texture = Some(submitted_texture);
@@ -547,6 +562,7 @@ impl Panel {
         self.sequence = Default::default();
         self.uv = Default::default();
         self.static_uv = Default::default();
+        self.static_texture = Default::default();
         self.color_variant_enabled = false;
         self.color_variant = default_color_variant();
         self.texture_variant_enabled = false;
