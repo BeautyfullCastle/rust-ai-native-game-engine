@@ -3681,3 +3681,10 @@ mod room_lighting_coherence_tests {
 #[cfg(feature="mesh-patrol")]
 #[path="editor/frame_mesh_patrol.rs"]
 mod frame_mesh_patrol;
+
+#[cfg(any(feature="mesh-patrol",feature="terrain-patrol"))]
+#[path="editor/frame_route_points.rs"]
+mod frame_route_points;
+#[cfg(feature="terrain-patrol")]
+#[path="editor/frame_terrain_patrol.rs"]
+mod frame_terrain_patrol;
