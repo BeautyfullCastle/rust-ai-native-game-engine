@@ -2638,3 +2638,7 @@ mod editor_animation_sequence_tests;
 #[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "room-lighting", feature = "windows-export"))]
 #[path = "package_manager_panel/editor_animated_uv_tests.rs"]
 mod editor_animated_uv_tests;
+
+#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "room-lighting", feature = "windows-export"))]
+#[path = "package_manager_panel/editor_static_uv_tests.rs"]
+mod editor_static_uv_tests;

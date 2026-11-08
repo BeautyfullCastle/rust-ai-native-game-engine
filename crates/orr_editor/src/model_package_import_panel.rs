@@ -1,3 +1,5 @@
+#[path="model_package_import_panel/static_uv_ui.rs"]
+mod static_uv_ui;
 #[path="model_package_import_panel/uv_ui.rs"]
 mod uv_ui;
 #[path="model_package_import_panel/sequence_ui.rs"]
@@ -48,6 +50,8 @@ pub struct Panel {
     sampler: sampler_ui::Controls,
     sequence: sequence_ui::Controls,
     uv: uv_ui::Controls,
+    static_uv: static_uv_ui::Controls,
+    submitted_static_uv: Option<Option<static_uv_ui::Snapshot>>,
     submitted_uv: Option<Option<model_package_import::UvVariant>>,
     submitted_sequence: Option<Option<model_package_import::SequenceVariant>>,
     submitted_sampler: Option<Option<model_package_import::SamplerVariant>>,
@@ -85,6 +89,8 @@ impl Default for Panel {
             sampler: Default::default(),
             sequence: Default::default(),
             uv: Default::default(),
+            static_uv: Default::default(),
+            submitted_static_uv: None,
             submitted_uv: None,
             submitted_sequence: None,
             submitted_sampler: None,
@@ -142,6 +148,7 @@ impl Panel {
                 self.submitted_sampler = None;
                 self.submitted_sequence = None;
                 self.submitted_uv = None;
+                self.submitted_static_uv = None;
                 self.submitted_authoring_generation = None;
                 self.submitted_inspected_hash = None;
                 self.license_acknowledged = false;
@@ -152,6 +159,8 @@ impl Panel {
         };
         self.pending = None;
         self.license_acknowledged = false;
+        let submitted_static_uv = self.submitted_static_uv.take().unwrap_or(None);
+        let static_uv_is_current = project_root.is_some_and(|root| self.static_uv_snapshot(root, project_generation, source_generation).is_ok_and(|snapshot| snapshot == submitted_static_uv));
         let submitted_color = self.submitted_color.take().unwrap_or(None);
         let color_is_current = self
             .color_request()
@@ -173,7 +182,7 @@ impl Panel {
         let generation_is_current = self.submitted_authoring_generation.take().is_none_or(|generation| generation == self.authoring_generation);
         let inspected_hash_is_current =
             self.submitted_inspected_hash.take().unwrap_or(None) == self.inspected_hash;
-        let is_current = uv_is_current && sequence_is_current && sampler_is_current && trim_is_current && generation_is_current && inspected_hash_is_current
+        let is_current = static_uv_is_current && uv_is_current && sequence_is_current && sampler_is_current && trim_is_current && generation_is_current && inspected_hash_is_current
             && texture_is_current
             && color_is_current
             && project_root == Some(completion.project_root.as_path())
@@ -249,7 +258,7 @@ impl Panel {
             .default_open(false)
             .show(ui, |ui| {
                 ui.label("Import a local self-contained GLB, cooked static model or cooked animated model and a license file into a new package folder.");
-                ui.label("Cooked import preserves exact bytes unless you explicitly create an animated color variant, PNG skin, trimmed clip, sampler variant, clip sequence or UV variant. Historical dependencies are not loaded or added to the package.");
+                ui.label("Cooked import preserves exact bytes unless you explicitly create a static UV variant or an animated color variant, PNG skin, trimmed clip, sampler variant, clip sequence or UV variant. Historical dependencies are not loaded or added to the package.");
                 ui.label("External resources, scripts, network access and package activation are not supported.");
                 ui.label("A supplied license file is metadata only; its presence is not legal review or a rights determination.");
                 let fields_enabled = enabled && !self.busy();
@@ -275,9 +284,11 @@ impl Panel {
                     if source_changed || license_changed {
                         self.source_inputs_changed();
                     }
+                    let old_package = (self.destination.clone(), self.name.clone(), self.version.clone());
                     path_field(ui, "Package destination directory", &mut self.destination);
                     text_field(ui, "Package name", &mut self.name, 128);
                     text_field(ui, "Package version", &mut self.version, 128);
+                    if self.static_uv.enabled && old_package != (self.destination.clone(), self.name.clone(), self.version.clone()) { self.source_inputs_changed(); }
                     let old_kind = self.kind;
                     ui.horizontal(|ui| {
                         ui.add_enabled_ui(self.source_format != SourceFormat::CookedAnimated, |ui| {
@@ -320,6 +331,7 @@ impl Panel {
                     self.show_sampler_controls(ui);
                     self.show_sequence_controls(ui);
                     self.show_uv_controls(ui);
+                    self.show_static_uv_controls(ui);
                     self.show_source_inspection(ui,project_root,project_generation,source_generation);
                     ui.checkbox(
                         &mut self.license_acknowledged,
@@ -355,7 +367,8 @@ impl Panel {
                     && self.trim_request().is_ok()
                     && self.sampler_request().is_ok()
                     && self.sequence_request().is_ok()
-                    && self.uv_request().is_ok();
+                    && self.uv_request().is_ok()
+                    && self.static_uv_request().is_ok();
                 let import_label = match self.source_format {
                     SourceFormat::RawGlb => "Import raw GLB package",
                     SourceFormat::CookedStatic => "Import cooked static package",
@@ -399,6 +412,9 @@ impl Panel {
             return;
         }
         if self.authoring_generation == u64::MAX { self.status="Authoring generation exhausted; reopen the panel".into(); return; }
+        self.sync_inspection(Some(&project_root), project_generation, source_generation);
+        let static_uv = match self.static_uv_request() { Ok(value) => value, Err(error) => { self.status=error; return; } };
+        let submitted_static_uv = match self.static_uv_snapshot(&project_root, project_generation, source_generation) { Ok(value) => value, Err(error) => { self.status=error; return; } };
         let trim = match self.trim_request() { Ok(trim) => trim, Err(error) => { self.status=error; return; } };
         let submitted_trim = trim.clone();
         let sampler=match self.sampler_request(){Ok(value)=>value,Err(error)=>{self.status=error;return;}};
@@ -432,8 +448,8 @@ impl Panel {
             .name("orr-model-package-import".into())
             .spawn(move || {
                 let expected_destination = request_destination(&request.destination);
-                let result = match (color, texture, trim, sampler, sequence, uv) {
-                    (Some(color), None, None, None, None, None) => match expected_hash {
+                let result = match (color, texture, trim, sampler, sequence, uv, static_uv) {
+                    (Some(color), None, None, None, None, None, None) => match expected_hash {
                         Some(hash) => model_package_import::import_color_variant_checked(
                             request,
                             color,
@@ -441,7 +457,7 @@ impl Panel {
                         ),
                         None => model_package_import::import_color_variant(request, color),
                     },
-                    (None, Some(texture), None, None, None, None) => match expected_hash {
+                    (None, Some(texture), None, None, None, None, None) => match expected_hash {
                         Some(hash) => model_package_import::import_texture_variant_checked(
                             request,
                             texture,
@@ -449,12 +465,13 @@ impl Panel {
                         ),
                         None => model_package_import::import_texture_variant(request, texture),
                     },
-                    (None, None, Some(trim), None, None, None) => match expected_hash { Some(hash) => model_package_import::import_trim_variant_checked(request, trim, Some(hash)), None => model_package_import::import_trim_variant(request, trim) },
-                    (None, None, None, Some(sampler), None, None) => match expected_hash {Some(hash)=>model_package_import::import_sampler_variant_checked(request,sampler,Some(hash)),None=>model_package_import::import_sampler_variant(request,sampler)},
-                    (None,None,None,None,Some(sequence),None) => match expected_hash {Some(hash)=>model_package_import::import_sequence_variant_checked(request,sequence,Some(hash)),None=>model_package_import::import_sequence_variant(request,sequence)},
-                    (None,None,None,None,None,Some(uv))=>match expected_hash{Some(hash)=>model_package_import::import_uv_variant_checked(request,uv,Some(hash)),None=>model_package_import::import_uv_variant(request,uv)},
-                    (None, None, None, None, None, None) => model_package_import::import_package(request),
-                    _ => Err("Select only one animated authoring operation".into()),
+                    (None, None, Some(trim), None, None, None, None) => match expected_hash { Some(hash) => model_package_import::import_trim_variant_checked(request, trim, Some(hash)), None => model_package_import::import_trim_variant(request, trim) },
+                    (None, None, None, Some(sampler), None, None, None) => match expected_hash {Some(hash)=>model_package_import::import_sampler_variant_checked(request,sampler,Some(hash)),None=>model_package_import::import_sampler_variant(request,sampler)},
+                    (None,None,None,None,Some(sequence),None,None) => match expected_hash {Some(hash)=>model_package_import::import_sequence_variant_checked(request,sequence,Some(hash)),None=>model_package_import::import_sequence_variant(request,sequence)},
+                    (None,None,None,None,None,Some(uv),None)=>match expected_hash{Some(hash)=>model_package_import::import_uv_variant_checked(request,uv,Some(hash)),None=>model_package_import::import_uv_variant(request,uv)},
+                    (None,None,None,None,None,None,Some(static_uv)) => match expected_hash {Some(hash)=>model_package_import::import_static_uv_variant_checked(request,static_uv,Some(hash)),None=>model_package_import::import_static_uv_variant(request,static_uv)},
+                    (None, None, None, None, None, None, None) => model_package_import::import_package(request),
+                    _ => Err("Select only one authoring operation".into()),
                 };
                 let _ = sender.send(Completion {
                     source_format,
@@ -472,6 +489,7 @@ impl Panel {
                 self.submitted_sampler = Some(submitted_sampler);
                 self.submitted_sequence = Some(submitted_sequence);
                 self.submitted_uv = Some(submitted_uv);
+                self.submitted_static_uv = Some(submitted_static_uv);
                 self.submitted_authoring_generation = Some(self.authoring_generation);
                 self.submitted_color = Some(submitted_color);
                 self.submitted_texture = Some(submitted_texture);
@@ -528,6 +546,7 @@ impl Panel {
         self.sampler = Default::default();
         self.sequence = Default::default();
         self.uv = Default::default();
+        self.static_uv = Default::default();
         self.color_variant_enabled = false;
         self.color_variant = default_color_variant();
         self.texture_variant_enabled = false;
