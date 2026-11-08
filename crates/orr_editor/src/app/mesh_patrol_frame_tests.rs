@@ -62,6 +62,10 @@ impl Fixture {
         navigation.place_agent(&mut editor).unwrap();
         coherent(&mut editor);
         assert!(editor.save());
+        // Save schedules public state/history refreshes. This CPU harness draws
+        // authoring panels without the normal App pump, so settle those receipts
+        // before testing the coherent framing admission guard.
+        coherent(&mut editor);
         #[cfg(feature = "mesh-hazards")]
         if game.is_mesh_hazards() {
             let yaml = std::fs::read_to_string(&scene).unwrap();
@@ -298,7 +302,9 @@ fn inspected_bends_and_loop_closure_frame_through_real_button_and_app_at_multipl
                 let after = f.app.editor.camera3d;
                 assert_ne!(
                     (after.target, after.distance),
-                    (before.target, before.distance)
+                    (before.target, before.distance),
+                    "framing dispatch: {:?}",
+                    f.app.editor.status()
                 );
                 assert_eq!(
                     (after.yaw, after.pitch, after.fov_y_degrees),
@@ -360,7 +366,12 @@ fn inspected_bends_and_loop_closure_frame_through_real_button_and_app_at_multipl
         h.state_mut().dispatch = Some((800, 600));
         h.run_steps(1);
         let f = h.state();
-        assert_eq!(f.app.editor.camera3d.target, [1.0, 0.0, 1.0]);
+        assert_eq!(
+            f.app.editor.camera3d.target,
+            [1.0, 0.0, 1.0],
+            "stationary framing dispatch: {:?}",
+            f.app.editor.status()
+        );
         assert_eq!(f.app.editor.camera3d.distance, before.distance);
         assert_eq!(
             (
@@ -600,7 +611,12 @@ fn simultaneous_drag_wheel_rejects_once_and_fences_until_physical_release_and_qu
             h.state_mut().dispatch = Some((800, 600));
             h.run_steps(1);
             let f = h.state();
-            assert_ne!(f.app.editor.camera3d, before);
+            assert_ne!(
+                f.app.editor.camera3d,
+                before,
+                "framing after wheel drain: {:?}",
+                f.app.editor.status()
+            );
             assert!(!f.app.mesh_navigation.has_patrol_frame_request());
             fit(
                 &f.app.editor.presentation_camera3d((800, 600)).unwrap(),
