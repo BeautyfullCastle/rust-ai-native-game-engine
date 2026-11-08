@@ -73,6 +73,7 @@ irradiance-probes = ["orr_model_bindings/irradiance-probes", "models", "orr_rend
 sprites = ["dep:orr_sprite", "dep:orr_package", "dep:serde", "dep:tempfile", "orr_sample/project"]
 sprite-package-install = ["sprites", "dep:sha2"]
 sprite-grid-authoring = ["sprites", "orr_package/sprite-authoring", "orr_sprite/png-import", "dep:sha2", "sprite-package-install"]
+sprite-rectangle-authoring = ["sprite-grid-authoring"]
 models = ["dep:orr_model_bindings", "dep:orr_model", "orr_render/imported-scene", "dep:orr_package", "dep:serde", "dep:tempfile", "dep:sha2"]
 animated-models = ["orr_model_bindings/animated-models", "models", "orr_model/animation", "orr_render/animation"]
 

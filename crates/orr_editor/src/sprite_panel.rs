@@ -18,6 +18,8 @@ mod clip_timing;
 mod package_install_ui;
 #[cfg(feature = "sprite-grid-authoring")]
 mod grid_package_ui;
+#[cfg(feature = "sprite-rectangle-authoring")]
+mod rectangle_package_ui;
 
 struct Loaded {
     asset: Asset,
@@ -48,6 +50,8 @@ pub struct SpritePanel {
     package_install: package_install_ui::State,
     #[cfg(feature = "sprite-grid-authoring")]
     grid_package: grid_package_ui::State,
+    #[cfg(feature = "sprite-rectangle-authoring")]
+    rectangle_package: rectangle_package_ui::State,
     preview_playing: bool,
     preview_started: f64,
 }
@@ -76,6 +80,8 @@ impl Default for SpritePanel {
             package_install: package_install_ui::State::default(),
             #[cfg(feature = "sprite-grid-authoring")]
             grid_package: grid_package_ui::State::default(),
+            #[cfg(feature = "sprite-rectangle-authoring")]
+            rectangle_package: rectangle_package_ui::State::default(),
             preview_playing: false,
             preview_started: 0.0,
         }
@@ -543,6 +549,8 @@ impl SpritePanel {
         self.poll_package_install(editor);
         #[cfg(feature = "sprite-grid-authoring")]
         self.poll_grid_package(editor);
+        #[cfg(feature = "sprite-rectangle-authoring")]
+        self.poll_rectangle_package(editor);
         self.update_timing(editor);
         if editor.game() != EditorGame::Arena && !editor.game().is_collect() {
             return;
@@ -580,14 +588,29 @@ impl SpritePanel {
                     let install_busy = self.package_install.blocks_grid();
                     #[cfg(not(feature = "sprite-package-install"))]
                     let install_busy = false;
-                    self.show_grid_package(ui, editor, install_busy);
+                    #[cfg(feature = "sprite-rectangle-authoring")]
+                    let rectangle_busy = self.rectangle_package.busy();
+                    #[cfg(not(feature = "sprite-rectangle-authoring"))]
+                    let rectangle_busy = false;
+                    self.show_grid_package(ui, editor, install_busy || rectangle_busy);
+                }
+                #[cfg(feature = "sprite-rectangle-authoring")]
+                if matches && editor.spec().is_local() {
+                    let installer_busy = self.package_install.blocks_grid();
+                    let grid_busy = self.grid_package.busy();
+                    self.show_rectangle_package(ui, editor, installer_busy || grid_busy);
                 }
                 #[cfg(feature = "sprite-package-install")]
                 if matches && editor.spec().is_local() {
                     #[cfg(feature = "sprite-grid-authoring")]
-                    let authoring_busy = self.grid_package.busy();
+                    let grid_busy = self.grid_package.busy();
                     #[cfg(not(feature = "sprite-grid-authoring"))]
-                    let authoring_busy = false;
+                    let grid_busy = false;
+                    #[cfg(feature = "sprite-rectangle-authoring")]
+                    let rectangle_busy = self.rectangle_package.busy();
+                    #[cfg(not(feature = "sprite-rectangle-authoring"))]
+                    let rectangle_busy = false;
+                    let authoring_busy = grid_busy || rectangle_busy;
                     self.show_package_install(ui, editor, authoring_busy);
                 }
                 if !matches { ui.colored_label(Color32::YELLOW, "Scene changed or unavailable. Bindings retained; preview/assignment disabled. Save the old sidecar or explicitly discard/close. Save As does not retarget this sidecar."); }
