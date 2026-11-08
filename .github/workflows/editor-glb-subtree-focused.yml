@@ -56,7 +56,9 @@ jobs:
               text=''.join(lines);ok=code==0
               if count is not None:
                   summary=re.findall(r'^test result: (\w+)\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured;',text,re.M)
-                  names=re.findall(r'^test (\S+) \.\.\. ok$',text,re.M)
+                  # CLI writes directly to stdout, splitting some test completion lines.
+                  pattern=r'^test (\S+) \.\.\. ' if label=='model-extract-existing-contract' else r'^test (\S+) \.\.\. ok$'
+                  names=re.findall(pattern,text,re.M)
                   running=re.findall(r'^running (\d+) tests?$',text,re.M)
                   ok=ok and summary==[('ok',str(count),'0','0','0')] and len(names)==len(set(names))==count and running==[str(count)]
               results.append(dict(label=label,command=command,exit=code,ok=ok,expected=count))
