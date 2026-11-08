@@ -60,6 +60,7 @@ impl Panel {
             || self.static_uv.enabled
             || self.static_sampler.enabled
             || self.static_recolor.enabled
+            || self.static_planar.enabled
             || self.static_texture.enabled
             || self.static_assembly.enabled
             || self.glb_subtree.enabled
@@ -139,6 +140,7 @@ impl Panel {
                 self.static_uv.enabled = false;
                 self.static_sampler.enabled = false;
                 self.static_recolor.enabled = false;
+                self.static_planar.enabled = false;
                 self.static_texture.enabled = false;
                 self.static_assembly.enabled = false;
                 self.glb_subtree.enabled = false;

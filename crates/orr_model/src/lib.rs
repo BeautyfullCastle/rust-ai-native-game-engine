@@ -32,6 +32,10 @@ pub mod static_assemble;
 pub mod static_uv;
 
 #[cfg(feature = "import")]
+#[path = "authoring/static_planar_uv.rs"]
+pub mod static_planar_uv;
+
+#[cfg(feature = "import")]
 #[path = "authoring/static_retexture.rs"]
 pub mod static_retexture;
 
