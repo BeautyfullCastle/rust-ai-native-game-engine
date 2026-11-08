@@ -278,9 +278,9 @@ fn invalid_form_retires_preview_and_valid_repair_requires_explicit_opt_in() {
 }
 
 #[test]
-fn scene_host_and_mode_transitions_retire_preview_without_automatic_revival() {
+fn scene_reload_mode_focus_and_dialog_retire_preview_without_automatic_revival() {
     for game in games() {
-        for transition in ["scene", "host", "mode", "focus", "dialog"] {
+        for transition in ["scene", "host_reload", "mode", "focus", "dialog"] {
             let mut h = harness(Fixture::new(game));
             let expected = draft(&mut h);
             let f = h.state_mut();
@@ -291,7 +291,9 @@ fn scene_host_and_mode_transitions_retire_preview_without_automatic_revival() {
                     assert!(f.app.editor.open_path(&f.scene));
                     coherent(&mut f.app.editor);
                 }
-                "host" => {
+                "host_reload" => {
+                    // Both reload routes advance the source epoch. Edit-state
+                    // host epoch is zero; independent epoch pins have core tests.
                     let text = std::fs::read_to_string(&f.scene).unwrap();
                     f.app
                         .editor
