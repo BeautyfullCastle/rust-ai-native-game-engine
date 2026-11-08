@@ -55,7 +55,7 @@ impl Panel {
         let supported = (self.source_format == SourceFormat::CookedStatic && self.kind == ModelKind::Static)
             || (self.source_format == SourceFormat::RawGlb && self.kind == ModelKind::Static && self.glb_subtree.enabled)
             || (cfg!(feature = "room-animated-models") && self.source_format == SourceFormat::CookedAnimated && self.kind == ModelKind::Animated);
-        if !supported || self.source.trim().is_empty() || self.inspection.revision == u64::MAX
+        if self.cylinder.enabled || !supported || self.source.trim().is_empty() || self.inspection.revision == u64::MAX
         {
             return None;
         }

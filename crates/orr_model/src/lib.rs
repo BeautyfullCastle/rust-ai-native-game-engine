@@ -24,6 +24,10 @@ pub mod static_sampler;
 pub mod static_recolor;
 
 #[cfg(feature = "import")]
+#[path = "authoring/static_cylinder.rs"]
+pub mod static_cylinder;
+
+#[cfg(feature = "import")]
 #[path = "authoring/static_assemble.rs"]
 pub mod static_assemble;
 

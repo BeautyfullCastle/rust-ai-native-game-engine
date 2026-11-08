@@ -1,3 +1,5 @@
+#[path="model_package_import_panel/cylinder_ui.rs"]
+mod cylinder_ui;
 #[path="model_package_import_panel/static_planar_ui.rs"]
 mod static_planar_ui;
 #[path="model_package_import_panel/pose_bake_ui.rs"]
@@ -84,6 +86,9 @@ pub struct Panel {
     submitted_pose_bake: Option<Option<pose_bake_ui::Snapshot>>,
     static_planar: static_planar_ui::Controls,
     submitted_static_planar: Option<Option<static_planar_ui::Snapshot>>,
+    cylinder: cylinder_ui::Controls,
+    cylinder_context: Option<cylinder_ui::Context>,
+    submitted_cylinder: Option<Option<cylinder_ui::Snapshot>>,
     submitted_uv: Option<Option<model_package_import::UvVariant>>,
     submitted_sequence: Option<Option<model_package_import::SequenceVariant>>,
     submitted_sampler: Option<Option<model_package_import::SamplerVariant>>,
@@ -139,6 +144,9 @@ impl Default for Panel {
             submitted_pose_bake: None,
             static_planar: Default::default(),
             submitted_static_planar: None,
+            cylinder: Default::default(),
+            cylinder_context: None,
+            submitted_cylinder: None,
             submitted_uv: None,
             submitted_sequence: None,
             submitted_sampler: None,
@@ -179,6 +187,7 @@ impl Panel {
         project_generation: u64,
         source_generation: u64,
     ) -> Option<Report> {
+        self.sync_cylinder_context(project_root, project_generation, source_generation);
         self.sync_inspection(project_root, project_generation, source_generation);
         #[cfg(feature = "room-animated-models")]
         self.service_variant_preview(project_root, project_generation, source_generation);
@@ -205,6 +214,7 @@ impl Panel {
                 self.submitted_static_recolor = None;
                 self.submitted_pose_bake = None;
                 self.submitted_static_planar = None;
+                self.submitted_cylinder = None;
                 self.submitted_authoring_generation = None;
                 self.submitted_inspected_hash = None;
                 self.license_acknowledged = false;
@@ -215,6 +225,8 @@ impl Panel {
         };
         self.pending = None;
         self.license_acknowledged = false;
+        let submitted_cylinder = self.submitted_cylinder.take().unwrap_or(None);
+        let cylinder_is_current = project_root.is_some_and(|root| self.cylinder_snapshot(root, project_generation, source_generation).is_ok_and(|snapshot| snapshot == submitted_cylinder));
         let submitted_static_uv = self.submitted_static_uv.take().unwrap_or(None);
         let static_uv_is_current = project_root.is_some_and(|root| self.static_uv_snapshot(root, project_generation, source_generation).is_ok_and(|snapshot| snapshot == submitted_static_uv));
         let submitted_static_texture = self.submitted_static_texture.take().unwrap_or(None);
@@ -254,7 +266,7 @@ impl Panel {
         let generation_is_current = self.submitted_authoring_generation.take().is_none_or(|generation| generation == self.authoring_generation);
         let inspected_hash_is_current =
             self.submitted_inspected_hash.take().unwrap_or(None) == self.inspected_hash;
-        let is_current = static_planar_is_current && pose_bake_is_current && static_recolor_is_current && static_sampler_is_current && static_pivot_is_current && glb_subtree_is_current && static_assembly_is_current && static_texture_is_current && static_uv_is_current && uv_is_current && sequence_is_current && sampler_is_current && trim_is_current && generation_is_current && inspected_hash_is_current
+        let is_current = cylinder_is_current && static_planar_is_current && pose_bake_is_current && static_recolor_is_current && static_sampler_is_current && static_pivot_is_current && glb_subtree_is_current && static_assembly_is_current && static_texture_is_current && static_uv_is_current && uv_is_current && sequence_is_current && sampler_is_current && trim_is_current && generation_is_current && inspected_hash_is_current
             && texture_is_current
             && color_is_current
             && project_root == Some(completion.project_root.as_path())
@@ -262,6 +274,11 @@ impl Panel {
             && source_generation == completion.source_generation
             && self.source_format == completion.source_format;
         match completion.result {
+            Ok(report) if is_current && self.cylinder.enabled && (report.kind != ModelKind::Static || report.asset != "model.orrmodel") => {
+                self.destination_identity = None;
+                self.status = format!("Cylinder creation returned unexpected {:?} asset {} at {}; it was not selected. Inspect the destination before continuing.", report.kind, report.asset, report.root.display());
+                None
+            }
             Ok(report)
                 if is_current && completion.expected_destination.as_ref() == Ok(&report.root) =>
             {
@@ -323,18 +340,27 @@ impl Panel {
         project_generation: u64,
         source_generation: u64,
     ) {
+        self.sync_cylinder_context(project_root, project_generation, source_generation);
         self.sync_inspection(project_root, project_generation, source_generation);
         #[cfg(feature = "room-animated-models")]
         self.service_variant_preview(project_root, project_generation, source_generation);
         egui::CollapsingHeader::new("Import a model package")
             .default_open(false)
             .show(ui, |ui| {
+                if self.cylinder.enabled {
+                    ui.label("Create a new capped cylinder static package from dimensions and a license file; no external model source is opened.");
+                } else {
                 ui.label("Import a local self-contained GLB, cooked static model or cooked animated model and a license file into a new package folder.");
                 ui.label("Cooked import preserves exact bytes unless you explicitly create a static UV variant, static planar UV variant, static PNG skin, static two-copy assembly, static pivot variant, static sampler variant, static color variant or an animated color variant, PNG skin, trimmed clip, sampler variant, clip sequence or UV variant. Historical dependencies are not loaded or added to the package.");
+                }
                 ui.label("External resources, scripts, network access and package activation are not supported.");
                 ui.label("A supplied license file is metadata only; its presence is not legal review or a rights determination.");
                 let fields_enabled = enabled && !self.busy();
                 ui.add_enabled_ui(fields_enabled, |ui| {
+                    let mut create_cylinder = self.cylinder.enabled;
+                    if ui.checkbox(&mut create_cylinder, "Create cylinder package").changed() { self.set_cylinder_mode(create_cylinder); }
+                    self.sync_cylinder_context(project_root, project_generation, source_generation);
+                    if !self.cylinder.enabled {
                     let mut source_format = self.source_format;
                     ui.horizontal(|ui| {
                         ui.label("Source format");
@@ -351,16 +377,18 @@ impl Panel {
                         SourceFormat::CookedAnimated => "Cooked animated model file (.animated.json)",
                     };
                     let source_changed = path_field(ui, source_label, &mut self.source);
-                    let license_changed = path_field(ui, "License file", &mut self.license);
                     if source_changed { self.reset_color_variant(); }
-                    if source_changed || license_changed {
+                    if source_changed {
                         self.source_inputs_changed();
                     }
+                    }
+                    if path_field(ui, "License file", &mut self.license) { self.source_inputs_changed(); }
                     let old_package = (self.destination.clone(), self.name.clone(), self.version.clone());
                     path_field(ui, "Package destination directory", &mut self.destination);
                     text_field(ui, "Package name", &mut self.name, 128);
                     text_field(ui, "Package version", &mut self.version, 128);
-                    if (self.static_uv.enabled || self.static_texture.enabled || self.static_assembly.enabled || self.glb_subtree.enabled || self.static_pivot.enabled || self.static_sampler.enabled || self.static_recolor.enabled || self.pose_bake.enabled || self.static_planar.enabled) && old_package != (self.destination.clone(), self.name.clone(), self.version.clone()) { self.source_inputs_changed(); }
+                    if (self.static_uv.enabled || self.static_texture.enabled || self.static_assembly.enabled || self.glb_subtree.enabled || self.static_pivot.enabled || self.static_sampler.enabled || self.static_recolor.enabled || self.pose_bake.enabled || self.static_planar.enabled || self.cylinder.enabled) && old_package != (self.destination.clone(), self.name.clone(), self.version.clone()) { self.source_inputs_changed(); }
+                    if self.cylinder.enabled { self.show_cylinder_controls(ui); } else {
                     let old_kind = self.kind;
                     ui.horizontal(|ui| {
                         ui.add_enabled_ui(self.source_format != SourceFormat::CookedAnimated, |ui| {
@@ -413,16 +441,17 @@ impl Panel {
                     self.show_pose_bake_controls(ui);
                     self.show_static_planar_controls(ui);
                     self.show_source_inspection(ui,project_root,project_generation,source_generation);
+                    }
                     ui.checkbox(
                         &mut self.license_acknowledged,
                         "I have reviewed rights to distribute this content",
                     );
                 });
                 #[cfg(feature="room-animated-models")]
-                self.show_variant_preview(ui,enabled,project_root,project_generation,source_generation);
+                if !self.cylinder.enabled { self.show_variant_preview(ui,enabled,project_root,project_generation,source_generation); }
                 #[cfg(not(feature = "room-animated-models"))]
-                ui.small("Animated import requires the room-animated-models feature; it never falls back to static.");
-                if self.source_format == SourceFormat::CookedStatic {
+                if !self.cylinder.enabled { ui.small("Animated import requires the room-animated-models feature; it never falls back to static."); }
+                if self.source_format == SourceFormat::CookedStatic && !self.cylinder.enabled {
                     ui.small("Cooked import requires Static model mode and never falls back to GLB parsing.");
                 }
                 if self.source_format == SourceFormat::CookedAnimated {
@@ -436,7 +465,7 @@ impl Panel {
                 let request_ready = fields_enabled
                     && project_root.is_some()
                     && self.license_acknowledged
-                    && !self.source.trim().is_empty()
+                    && (self.cylinder.enabled || !self.source.trim().is_empty())
                     && !self.license.trim().is_empty()
                     && !self.destination.trim().is_empty()
                     && !self.name.trim().is_empty()
@@ -456,14 +485,15 @@ impl Panel {
                     && self.static_sampler_request().is_ok()
                     && self.static_recolor_request().is_ok()
                     && self.pose_bake_request().is_ok()
-                    && self.static_planar_request().is_ok();
-                let import_label = match self.source_format {
+                    && self.static_planar_request().is_ok()
+                    && self.cylinder_spec().is_ok();
+                let import_label = if self.cylinder.enabled { "Create capped cylinder package" } else { match self.source_format {
                     SourceFormat::RawGlb if self.glb_subtree.enabled => "Import GLB subtree package",
                     SourceFormat::RawGlb => "Import raw GLB package",
                     SourceFormat::CookedStatic => "Import cooked static package",
                     SourceFormat::CookedAnimated if self.pose_bake.enabled => "Import baked static pose package",
                     SourceFormat::CookedAnimated => "Import cooked animated package",
-                };
+                } };
                 if ui
                     .add_enabled(request_ready, egui::Button::new(import_label))
                     .clicked()
@@ -502,6 +532,7 @@ impl Panel {
             return;
         }
         if self.authoring_generation == u64::MAX { self.status="Authoring generation exhausted; reopen the panel".into(); return; }
+        if self.cylinder.enabled { self.start_cylinder_creation(project_root, project_generation, source_generation); return; }
         self.sync_inspection(Some(&project_root), project_generation, source_generation);
         let static_uv = match self.static_uv_request() { Ok(value) => value, Err(error) => { self.status=error; return; } };
         let submitted_static_uv = match self.static_uv_snapshot(&project_root, project_generation, source_generation) { Ok(value) => value, Err(error) => { self.status=error; return; } };
@@ -661,6 +692,8 @@ impl Panel {
 
     fn set_source_format(&mut self, source_format: SourceFormat) {
         if self.source_format != source_format {
+            self.cylinder.enabled = false;
+            self.cylinder_context = None;
             self.source_format = source_format;
             match source_format {
                 SourceFormat::CookedStatic => self.kind = ModelKind::Static,
