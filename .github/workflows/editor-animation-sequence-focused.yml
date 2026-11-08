@@ -1,0 +1,99 @@
+name: Editor animation sequence focused CI
+on:
+  push:
+    branches: [codex/editor-animation-sequence-20261108]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: editor-animation-sequence-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  editor-animation-sequence:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Record exact source and prepare Linux toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir ci-evidence
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git rev-parse HEAD HEAD^{tree} | tee ci-evidence/source.txt
+          git status --porcelain=v1 > ci-evidence/source-status.txt
+          git archive --format=tar HEAD > ci-evidence/source.tar
+          rustup toolchain install 1.99.1 --profile minimal --component clippy
+          rustup override set 1.99.1
+          rustc --version --verbose | tee ci-evidence/rustc.txt
+          uname -a | tee ci-evidence/platform.txt
+          hostname | tee ci-evidence/runner-hostname.txt
+          sudo apt-get update -q 2>&1 | tee ci-evidence/dependencies.log
+          sudo apt-get install -y -q pkg-config libasound2-dev libudev-dev libx11-dev libxkbcommon-dev libwayland-dev 2>&1 | tee -a ci-evidence/dependencies.log
+      - name: Collect sequence authoring and editor-use checks
+        shell: python {0}
+        run: |
+          import hashlib,json,os,re,shutil,subprocess
+          from pathlib import Path
+          evidence=Path('ci-evidence');results=[]
+          full='package-manager,room-character,room-lighting,project-create,windows-export,mesh-hazards-export'
+          def run(label,command,count=None):
+              with (evidence/(label+'.log')).open('w') as log:
+                  p=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+                  lines=[]
+                  for line in p.stdout:
+                      print(line,end='',flush=True);log.write(line);log.flush();lines.append(line)
+                  code=p.wait()
+              text=''.join(lines);ok=code==0
+              if count is not None:
+                  summary=re.findall(r'^test result: (\w+)\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured;',text,re.M)
+                  names=re.findall(r'^test (\S+) \.\.\. ok$',text,re.M)
+                  running=re.findall(r'^running (\d+) tests?$',text,re.M)
+                  ok=ok and summary==[('ok',str(count),'0','0','0')] and len(names)==len(set(names))==count and running==[str(count)]
+              results.append(dict(label=label,command=command,exit=code,ok=ok,expected=count))
+              (evidence/'results.json').write_text(json.dumps(results,indent=2))
+              return ok
+          def tests(label,selector,count,extra=()):
+              if not libtest_ready:
+                  results.append(dict(label=label,ok=False,expected=count,unrun="libtest compilation failed"));return
+              run(label,['cargo','test','--locked','-p','orr_editor','--features',full,'--lib',selector,'--']+list(extra)+['--test-threads=1'],count)
+          libtest_ready=run("libtest-build",["cargo","test","--locked","-p","orr_editor","--features",full,"--lib","--no-run"])
+          checks=[
+            ('sequence-backend','model_package_import::sequence::tests::',6),
+            ('sequence-ui','model_package_import_panel::sequence_ui::tests::',3),
+            ('sequence-editor-use','package_manager_panel::editor_animation_sequence_tests::',1),
+            ('preview-backend-regression','model_package_import::variant_preview::tests::',8),
+            ('preview-panel-regression','model_package_import_panel::variant_preview::tests::',6),
+            ('catalog-regression','model_package_import_panel::source_inspection::tests::',5),
+            ('trim-mode-regression','model_package_import_panel::trim_ui::tests::',5),
+            ('sampler-mode-regression','model_package_import_panel::sampler_ui::tests::',3),
+            ('preview-parent-regression','package_manager_panel::variant_preview_parent_tests::',1),
+            ('legacy-sampler-use','package_manager_panel::editor_animated_sampler_tests::',1),
+          ]
+          assert sum(n for _,_,n in checks)==39
+          for label,selector,count in checks: tests(label,selector,count)
+          run('sequence-ui-feature-off',['cargo','test','--locked','-p','orr_editor','--features','package-manager','--lib','model_package_import_panel::sequence_ui::tests::','--','--test-threads=1'],1)
+          run('sequence-feature-off-tests',['cargo','test','--locked','-p','orr_editor','--features','package-manager','--lib','model_package_import::sequence::tests::','--','--test-threads=1'],3)
+          run('strict-package-minimal',['cargo','clippy','--locked','-p','orr_editor','--features','package-manager','--lib','--','-D','warnings'])
+          run('strict-sequence-minimal',['cargo','clippy','--locked','-p','orr_editor','--features','package-manager,room-animated-models','--lib','--','-D','warnings'])
+          run('strict-combined',['cargo','clippy','--locked','-p','orr_editor','--features',full,'--lib','--','-D','warnings'])
+          run('feature-off',['cargo','check','--locked','-p','orr_editor','--lib'])
+          (evidence/'results.json').write_text(json.dumps(results,indent=2))
+          (evidence/'scope.txt').write_text('Focused CPU sequence authoring, preview/import identity, stale source and safe publication, two-clip selection, install/assignment and Save/reopen consumption. Windows/GPU/physical play/video UNRUN; no full-workspace validation.')
+          if not all(r['ok'] for r in results):raise SystemExit('Focused Editor animation sequence checks failed')
+      - name: Preserve every original result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: editor-animation-sequence-${{ github.sha }}-${{ github.run_attempt }}
+          path: ci-evidence
+          if-no-files-found: error
