@@ -1,4 +1,4 @@
-//! Read-only cooked animated source catalog; no license or destination access.
+//! Read-only cooked source catalogs; no license or destination access.
 use super::*;
 #[derive(Clone, Debug)]
 pub(crate) struct Catalog {
@@ -23,6 +23,52 @@ pub(crate) struct ClipEntry {
     pub index: u32,
     pub name: String,
     pub duration: f32,
+}
+pub(crate) fn inspect_static_source(path: &Path) -> Result<Catalog, String> {
+    if !path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .is_some_and(|s| s.to_ascii_lowercase().ends_with(".model.json"))
+    {
+        return Err("static inspection source must be a .model.json file".into());
+    }
+    let path = checked_file_path(path, "static inspection source")?;
+    let input = read_bounded_file(&path, MAX_SOURCE_BYTES, "static inspection source")?;
+    static_catalog_from_bytes(&input.bytes)
+}
+
+pub(super) fn static_catalog_from_bytes(bytes: &[u8]) -> Result<Catalog, String> {
+    let model = orr_model::StaticModel::from_bytes(bytes)
+        .map_err(|error| format!("static source inspection: {error}"))?;
+    let source = model.source();
+    let materials = source
+        .materials
+        .iter()
+        .enumerate()
+        .map(|(index, material)| {
+            let image = &source.images[material.image as usize];
+            MaterialEntry {
+                index: index as u32,
+                used_primitive_count: source
+                    .primitives
+                    .iter()
+                    .filter(|primitive| primitive.material == index as u32)
+                    .count() as u32,
+                base_color: material.base_color,
+                image: material.image,
+                width: image.width,
+                height: image.height,
+                linear_filter: material.linear_filter,
+                wrap_s: material.wrap_s,
+                wrap_t: material.wrap_t,
+            }
+        })
+        .collect();
+    Ok(Catalog {
+        source_sha256: digest(bytes),
+        materials,
+        clips: Vec::new(),
+    })
 }
 pub(crate) fn inspect_animated_source(path: &Path) -> Result<Catalog, String> {
     if !cfg!(feature = "room-animated-models") {

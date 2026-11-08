@@ -1,6 +1,6 @@
 //! Read-only source discovery; its immutable identity is independent of import completion.
 use super::*;
-use crate::model_package_import::source_inspection::{inspect_animated_source, Catalog};
+use crate::model_package_import::source_inspection::{inspect_animated_source, inspect_static_source, Catalog};
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Identity {
     root: PathBuf,
@@ -19,6 +19,11 @@ pub(super) struct State {
 }
 impl State {
     pub(super) fn catalog(&self) -> Option<&Catalog> { self.catalog.as_ref() }
+    pub(super) fn current_catalog(&self, source: &str, kind: ModelKind, format: SourceFormat) -> Option<&Catalog> {
+        let identity = self.identity.as_ref()?;
+        (identity.source == source.trim() && identity.kind == kind && identity.format == format)
+            .then_some(self.catalog.as_ref()).flatten()
+    }
     pub(super) fn busy(&self) -> bool {
         self.pending.is_some()
     }
@@ -35,10 +40,9 @@ impl Panel {
         project: u64,
         generation: u64,
     ) -> Option<Identity> {
-        if !cfg!(feature = "room-animated-models")
-            || self.source_format != SourceFormat::CookedAnimated
-            || self.kind != ModelKind::Animated
-            || self.source.trim().is_empty()
+        let supported = (self.source_format == SourceFormat::CookedStatic && self.kind == ModelKind::Static)
+            || (cfg!(feature = "room-animated-models") && self.source_format == SourceFormat::CookedAnimated && self.kind == ModelKind::Animated);
+        if !supported || self.source.trim().is_empty()
         {
             return None;
         }
@@ -54,6 +58,9 @@ impl Panel {
     pub(super) fn sync_inspection(&mut self, root: Option<&Path>, project: u64, generation: u64) {
         let current = self.inspection_identity(root, project, generation);
         if self.inspection.identity != current {
+            if self.inspection.identity.as_ref().is_some_and(|id| id.format == SourceFormat::CookedStatic) {
+                self.source_inputs_changed();
+            }
             self.inspection.identity = None;
             self.inspection.catalog = None;
             self.inspection.status.clear();
@@ -69,7 +76,7 @@ impl Panel {
             Some(Err(TryRecvError::Disconnected)) => {
                 self.inspection.pending = None;
                 self.inspection.status =
-                    "Animated source inspection worker disconnected; inspect again explicitly."
+                    "Source inspection worker disconnected; inspect again explicitly."
                         .into();
                 None
             }
@@ -88,7 +95,7 @@ impl Panel {
                 }
                 Err(error) => {
                     self.inspection.catalog = None;
-                    self.inspection.status = format!("Animated source inspection failed: {error}");
+                    self.inspection.status = format!("Source inspection failed: {error}");
                 }
             }
         }
@@ -104,9 +111,12 @@ impl Panel {
         let source = PathBuf::from(&identity.source);
         let (sender, receiver) = mpsc::channel();
         match std::thread::Builder::new()
-            .name("orr-animated-source-inspect".into())
+            .name("orr-model-source-inspect".into())
             .spawn(move || {
-                let result = inspect_animated_source(&source);
+                let result = match worker_identity.format {
+                    SourceFormat::CookedStatic => inspect_static_source(&source),
+                    _ => inspect_animated_source(&source),
+                };
                 let _ = sender.send((worker_identity, result));
             }) {
             Ok(_) => {
@@ -114,11 +124,11 @@ impl Panel {
                 self.inspection.catalog = None;
                 self.inspection.pending = Some(receiver);
                 self.inspection.status =
-                    "Inspecting animated source on a read-only worker...".into();
+                    "Inspecting source on a read-only worker...".into();
                 self.inspected_hash = None;
             }
             Err(error) => {
-                self.inspection.status = format!("Cannot start animated source inspection: {error}")
+                self.inspection.status = format!("Cannot start source inspection: {error}")
             }
         }
     }
@@ -130,10 +140,8 @@ impl Panel {
         generation: u64,
     ) {
         self.sync_inspection(root, project, generation);
-        if !cfg!(feature = "room-animated-models")
-            || self.source_format != SourceFormat::CookedAnimated
-            || self.kind != ModelKind::Animated
-        {
+        if !((self.source_format == SourceFormat::CookedStatic && self.kind == ModelKind::Static)
+            || (cfg!(feature = "room-animated-models") && self.source_format == SourceFormat::CookedAnimated && self.kind == ModelKind::Animated)) {
             return;
         }
         if ui
@@ -142,7 +150,7 @@ impl Panel {
                     && self
                         .inspection_identity(root, project, generation)
                         .is_some(),
-                egui::Button::new("Inspect animated source"),
+                egui::Button::new(if self.source_format == SourceFormat::CookedStatic { "Inspect static source" } else { "Inspect animated source" }),
             )
             .clicked()
         {
@@ -160,7 +168,7 @@ impl Panel {
                     .add_enabled(
                         !self.busy()
                             && material.used_primitive_count > 0
-                            && (self.color_variant_enabled || self.texture_variant_enabled || self.sampler.enabled || self.uv.enabled),
+                            && (self.color_variant_enabled || self.texture_variant_enabled || self.sampler.enabled || self.uv.enabled || self.static_uv.enabled),
                         egui::Button::new(format!("Use material {}", material.index)),
                     )
                     .clicked()
@@ -183,6 +191,7 @@ impl Panel {
             }
             if self.sampler.enabled { self.sampler.material=Some(index); }
             if self.uv.enabled { self.uv.material=Some(index); }
+            if self.static_uv.enabled { self.static_uv.material=Some(index); }
             self.inspected_hash = Some(hash);
             self.source_inputs_changed();
         }

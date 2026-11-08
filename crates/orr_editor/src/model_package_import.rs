@@ -1,3 +1,9 @@
+#[path = "model_package_import/static_uv.rs"]
+mod static_uv;
+pub(crate) use static_uv::{
+    import_static_uv_variant, import_static_uv_variant_checked, StaticUvVariant,
+};
+use static_uv::static_uv_variant_bytes;
 #[path="model_package_import/uv.rs"]
 mod uv;
 pub(crate) use uv::{UvVariant,import_uv_variant,import_uv_variant_checked};
@@ -104,6 +110,7 @@ enum AuthoringVariant {
     Sampler(SamplerVariant),
     Sequence(SequenceVariant),
     Uv(UvVariant),
+    StaticUv(StaticUvVariant),
 }
 
 pub(crate) struct Report {
@@ -420,7 +427,10 @@ fn import_package_inner(
         .as_deref()
         .is_some_and(|expected| !expected.eq_ignore_ascii_case(&source.digest))
     {
-        return Err("inspected animated source changed; inspect again before importing".into());
+        return Err(match request.source_format {
+            SourceFormat::CookedStatic => "inspected static source changed; inspect again before importing",
+            _ => "inspected animated source changed; inspect again before importing",
+        }.into());
     }
     let license = read_bounded_file(&license_path, MAX_LICENSE_BYTES, "license source")?;
     if std::str::from_utf8(&license.bytes)
@@ -447,6 +457,7 @@ fn import_package_inner(
             AuthoringVariant::Sampler(spec) => sampler_variant_bytes(&source.bytes, &spec)?,
             AuthoringVariant::Sequence(spec) => sequence_variant_bytes(&source.bytes, &spec)?,
             AuthoringVariant::Uv(spec) => uv_variant_bytes(&source.bytes, &spec)?,
+            AuthoringVariant::StaticUv(spec) => static_uv_variant_bytes(&source.bytes, &spec)?,
             AuthoringVariant::Texture(spec) => {
                 let path = checked_file_path(&spec.texture, "PNG texture")?;
                 let png = read_bounded_file(&path, MAX_SOURCE_BYTES, "PNG texture")?;
@@ -880,6 +891,9 @@ pub(crate) mod source_inspection;
 #[cfg(test)]
 #[path = "model_package_import/source_inspection_tests.rs"]
 mod source_inspection_tests;
+#[cfg(test)]
+#[path = "model_package_import/static_source_inspection_tests.rs"]
+mod static_source_inspection_tests;
 
 #[cfg(feature = "room-animated-models")]
 #[path = "model_package_import/variant_preview.rs"]
