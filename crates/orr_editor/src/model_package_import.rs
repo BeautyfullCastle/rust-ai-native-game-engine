@@ -1,3 +1,10 @@
+#[path = "model_package_import/glb_subtree.rs"]
+mod glb_subtree;
+pub(crate) use glb_subtree::{
+    inspect_glb_subtree_source, import_glb_subtree_variant, import_glb_subtree_variant_checked,
+    validate_glb_subtree_variant, GlbSubtreeCatalog, GlbSubtreeVariant,
+};
+use glb_subtree::glb_subtree_variant_bytes;
 #[path = "model_package_import/static_assembly.rs"]
 mod static_assembly;
 pub(crate) use static_assembly::{
@@ -118,6 +125,7 @@ pub(crate) struct TrimVariant {
 }
 
 enum AuthoringVariant {
+    GlbSubtree(GlbSubtreeVariant),
     Color(ColorVariant),
     Texture(TextureVariant),
     Trim(TrimVariant),
@@ -405,7 +413,11 @@ fn import_package_inner(
         return Err("cooked static model import requires Static model mode".into());
     }
     let source_label = request.source_format.source_label();
-    let asset_name = request.source_format.asset_name();
+    let asset_name = if matches!(&variant, Some(AuthoringVariant::GlbSubtree(_))) {
+        "model.orrmodel"
+    } else {
+        request.source_format.asset_name()
+    };
     let source_path = checked_file_path(&request.source, source_label)?;
     let license_path = checked_file_path(&request.license, "license source")?;
     match request.source_format {
@@ -445,6 +457,7 @@ fn import_package_inner(
     {
         return Err(match request.source_format {
             SourceFormat::CookedStatic => "inspected static source changed; inspect again before importing",
+            SourceFormat::RawGlb => "inspected GLB source changed; inspect again before importing",
             _ => "inspected animated source changed; inspect again before importing",
         }.into());
     }
@@ -468,6 +481,7 @@ fn import_package_inner(
 
     if let Some(variant) = variant {
         let bytes = match variant {
+            AuthoringVariant::GlbSubtree(spec) => glb_subtree_variant_bytes(&source.bytes, &spec)?,
             AuthoringVariant::Color(spec) => color_variant_bytes(&source.bytes, &spec)?,
             AuthoringVariant::Trim(spec) => trim_variant_bytes(&source.bytes, &spec)?,
             AuthoringVariant::Sampler(spec) => sampler_variant_bytes(&source.bytes, &spec)?,
