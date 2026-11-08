@@ -346,6 +346,15 @@ impl TerrainSession {
         candidate.apply(edits).map_err(|e| e.to_string())?;
         admitted.replace_document(candidate, self.render_admission_error.as_deref())
     }
+    /// Grow the positive X/Z grid edges as one undoable, fully admitted edit.
+    /// Canonical bytes, query and mesh change only after every stage succeeds.
+    pub fn expand_grid(&mut self, width: u32, depth: u32, fill: FP) -> Result<(), String> {
+        self.require_editable()?;
+        let admitted = self.admitted.as_mut().expect("editable terrain");
+        let mut candidate = admitted.document.clone();
+        candidate.expand_grid(width, depth, fill).map_err(|e| e.to_string())?;
+        admitted.replace_document(candidate, self.render_admission_error.as_deref())
+    }
     pub fn undo(&mut self) -> Result<bool, String> {
         self.require_editable()?;
         let admitted = self.admitted.as_mut().expect("editable terrain");
