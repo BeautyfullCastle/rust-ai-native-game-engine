@@ -1,3 +1,7 @@
+#[path = "model_package_import/cylinder.rs"]
+mod cylinder;
+pub(crate) use cylinder::{create_cylinder_package, validate_cylinder_spec, CylinderRequest, CylinderSpec};
+use cylinder::{cylinder_recipe_bytes, cylinder_model_bytes};
 #[path = "model_package_import/static_planar.rs"]
 mod static_planar;
 pub(crate) use static_planar::{
@@ -160,6 +164,7 @@ pub(crate) struct TrimVariant {
 }
 
 enum AuthoringVariant {
+    Cylinder(CylinderSpec),
     StaticPlanarUv(StaticPlanarUvVariant),
     PoseBake(PoseBakeVariant),
     StaticColor(StaticColorVariant),
@@ -446,6 +451,17 @@ fn import_package_inner(
             return Err("cooked animated model import requires room-animated-models; no input or destination opened".into());
         }
     }
+    let cylinder_seed = if let Some(AuthoringVariant::Cylinder(spec)) = &variant {
+        if request.kind != ModelKind::Static || request.source_format != SourceFormat::CookedStatic
+            || !request.source.as_os_str().is_empty() || expected_source_sha256.is_some()
+        {
+            return Err("cylinder creation requires source-less Static mode without an inspected source hash".into());
+        }
+        Some(cylinder_recipe_bytes(spec)?)
+    } else {
+        None
+    };
+    let creating_cylinder = cylinder_seed.is_some();
     validate_destination_policy(&request.destination)?;
     let (destination_parent, destination) = checked_new_directory(&request.destination)?;
     validate_destination_policy(&destination)?;
@@ -462,49 +478,55 @@ fn import_package_inner(
     } else {
         request.source_format.asset_name()
     };
-    let source_path = checked_file_path(&request.source, source_label)?;
-    let license_path = checked_file_path(&request.license, "license source")?;
-    match request.source_format {
-        SourceFormat::RawGlb => {
-            if !source_path
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("glb"))
-            {
-                return Err("source must be a self-contained .glb file".into());
+    let (mut source, license_path) = if let Some(recipe) = cylinder_seed {
+        let license_path = checked_file_path(&request.license, "license source")?;
+        (InputBytes { digest: digest(&recipe), bytes: recipe }, license_path)
+    } else {
+        let source_path = checked_file_path(&request.source, source_label)?;
+        let license_path = checked_file_path(&request.license, "license source")?;
+        match request.source_format {
+            SourceFormat::RawGlb => {
+                if !source_path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("glb"))
+                {
+                    return Err("source must be a self-contained .glb file".into());
+                }
+            }
+            SourceFormat::CookedAnimated => {
+                if !source_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.to_ascii_lowercase().ends_with(".animated.json"))
+                {
+                    return Err("cooked animated source must be a .animated.json file".into());
+                }
+            }
+            SourceFormat::CookedStatic => {
+                if !source_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.to_ascii_lowercase().ends_with(".model.json"))
+                {
+                    return Err("cooked static source must be a .model.json file".into());
+                }
             }
         }
-        SourceFormat::CookedAnimated => {
-            if !source_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.to_ascii_lowercase().ends_with(".animated.json"))
-            {
-                return Err("cooked animated source must be a .animated.json file".into());
-            }
-        }
-        SourceFormat::CookedStatic => {
-            if !source_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.to_ascii_lowercase().ends_with(".model.json"))
-            {
-                return Err("cooked static source must be a .model.json file".into());
-            }
-        }
-    }
 
-    let mut source = read_bounded_file(&source_path, MAX_SOURCE_BYTES, source_label)?;
-    if expected_source_sha256
-        .as_deref()
-        .is_some_and(|expected| !expected.eq_ignore_ascii_case(&source.digest))
-    {
-        return Err(match request.source_format {
-            SourceFormat::CookedStatic => "inspected static source changed; inspect again before importing",
-            SourceFormat::RawGlb => "inspected GLB source changed; inspect again before importing",
-            _ => "inspected animated source changed; inspect again before importing",
-        }.into());
-    }
+        let source = read_bounded_file(&source_path, MAX_SOURCE_BYTES, source_label)?;
+        if expected_source_sha256
+            .as_deref()
+            .is_some_and(|expected| !expected.eq_ignore_ascii_case(&source.digest))
+        {
+            return Err(match request.source_format {
+                SourceFormat::CookedStatic => "inspected static source changed; inspect again before importing",
+                SourceFormat::RawGlb => "inspected GLB source changed; inspect again before importing",
+                _ => "inspected animated source changed; inspect again before importing",
+            }.into());
+        }
+        (source, license_path)
+    };
     let license = read_bounded_file(&license_path, MAX_LICENSE_BYTES, "license source")?;
     if std::str::from_utf8(&license.bytes)
         .ok()
@@ -512,19 +534,22 @@ fn import_package_inner(
     {
         return Err("license must be nonempty UTF-8 text".into());
     }
-    match request.source_format {
-        SourceFormat::RawGlb => validate_glb(&source.bytes, request.kind)?,
-        SourceFormat::CookedAnimated => validate_cooked_animated(&source.bytes)?,
-        SourceFormat::CookedStatic => {
-            // Validate the cooked payload directly. Dependency digests describe its
-            // history; they are neither resolver inputs nor package dependencies.
-            orr_model::StaticModel::from_bytes(&source.bytes)
-                .map_err(|error| format!("cooked static model import: {error}"))?;
+    if !creating_cylinder {
+        match request.source_format {
+            SourceFormat::RawGlb => validate_glb(&source.bytes, request.kind)?,
+            SourceFormat::CookedAnimated => validate_cooked_animated(&source.bytes)?,
+            SourceFormat::CookedStatic => {
+                // Validate the cooked payload directly. Dependency digests describe its
+                // history; they are neither resolver inputs nor package dependencies.
+                orr_model::StaticModel::from_bytes(&source.bytes)
+                    .map_err(|error| format!("cooked static model import: {error}"))?;
+            }
         }
     }
 
     if let Some(variant) = variant {
         let bytes = match variant {
+            AuthoringVariant::Cylinder(spec) => cylinder_model_bytes(&source.bytes, &spec.asset_id)?,
             AuthoringVariant::StaticPlanarUv(spec) => static_planar_uv_variant_bytes(&source.bytes, &spec)?,
             AuthoringVariant::PoseBake(spec) => pose_bake_variant_bytes(&source.bytes, &spec)?,
             AuthoringVariant::StaticColor(spec) => static_color_variant_bytes(&source.bytes, &spec)?,
@@ -560,7 +585,7 @@ fn import_package_inner(
         };
     }
 
-    if baking_pose {
+    if baking_pose || creating_cylinder {
         orr_model::StaticModel::from_bytes(&source.bytes)
             .map_err(|error| format!("baked static model import: {error}"))?;
     }
