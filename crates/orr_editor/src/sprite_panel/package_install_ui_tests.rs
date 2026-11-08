@@ -1,7 +1,10 @@
 //! Headless egui tests for explicit sprite package installation controls.
 #![allow(clippy::disallowed_types)]
 use super::*;
-use egui_kittest::{kittest::Queryable, Harness};
+use egui_kittest::{
+    kittest::{NodeT, Queryable},
+    Harness,
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,

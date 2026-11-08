@@ -91,6 +91,7 @@ pub(super) struct State {
     created: Option<backend::Report>,
     last_output: Option<PathBuf>,
     status: String,
+    installer_busy: bool,
 }
 fn decimal(raw: &str, max_digits: usize) -> Result<u64, String> {
     let raw = raw.trim();
@@ -341,8 +342,9 @@ impl State {
             }
         }
     }
-    fn show(&mut self, ui: &mut Ui, context: Option<Context>, installer_busy: bool) {
+    fn show(&mut self, ui: &mut Ui, context: Option<Context>) {
         self.sync(context.clone());
+        let installer_busy = self.installer_busy;
         ui.collapsing("Create sprite package from PNG grid", |ui| {
             ui.weak("Inspect a PNG explicitly, then create one regular row-major grid and one named clip, up to 256 cells. No image preview, packing, installation, loading or assignment is performed.");
             let enabled = context.is_some() && !self.busy() && !self.exhausted() && !installer_busy;
@@ -416,7 +418,8 @@ impl SpritePanel {
     }
     pub(super) fn show_grid_package(&mut self, ui: &mut Ui, editor: &Editor, installer_busy: bool) {
         let context = self.grid_package_context(editor);
-        self.grid_package.show(ui, context, installer_busy);
+        self.grid_package.installer_busy = installer_busy;
+        self.grid_package.show(ui, context);
     }
 }
 #[cfg(all(test, target_os = "linux"))]
