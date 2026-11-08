@@ -16,6 +16,8 @@ use std::{
 mod clip_timing;
 #[cfg(feature = "sprite-grid-authoring")]
 mod grid_package_ui;
+#[cfg(feature = "sprite-json-authoring")]
+mod json_package_ui;
 #[cfg(feature = "sprite-package-install")]
 mod package_install_ui;
 #[cfg(feature = "sprite-rectangle-authoring")]
@@ -58,6 +60,8 @@ pub struct SpritePanel {
     package_install: package_install_ui::State,
     #[cfg(feature = "sprite-grid-authoring")]
     grid_package: grid_package_ui::State,
+    #[cfg(feature = "sprite-json-authoring")]
+    json_package: json_package_ui::State,
     #[cfg(feature = "sprite-rectangle-authoring")]
     rectangle_package: rectangle_package_ui::State,
     preview_playing: bool,
@@ -96,6 +100,8 @@ impl Default for SpritePanel {
             package_install: package_install_ui::State::default(),
             #[cfg(feature = "sprite-grid-authoring")]
             grid_package: grid_package_ui::State::default(),
+            #[cfg(feature = "sprite-json-authoring")]
+            json_package: json_package_ui::State::default(),
             #[cfg(feature = "sprite-rectangle-authoring")]
             rectangle_package: rectangle_package_ui::State::default(),
             preview_playing: false,
@@ -688,6 +694,8 @@ impl SpritePanel {
         self.poll_package_install(editor);
         #[cfg(feature = "sprite-grid-authoring")]
         self.poll_grid_package(editor);
+        #[cfg(feature = "sprite-json-authoring")]
+        self.poll_json_package(editor);
         #[cfg(feature = "sprite-rectangle-authoring")]
         self.poll_rectangle_package(editor);
         self.update_timing(editor);
@@ -721,6 +729,10 @@ impl SpritePanel {
                 ui.label(format!("{}{}", b.path.display(), if b.dirty() { " · UNSAVED bindings" } else { " · saved" }));
                 ui.label(format!("Scene: {} · Project: {}", b.document().scene, b.document().project));
                 let matches = self.scene_matches(editor);
+                #[cfg(feature = "sprite-json-authoring")]
+                let json_busy = self.json_package.busy();
+                #[cfg(not(feature = "sprite-json-authoring"))]
+                let json_busy = false;
                 #[cfg(feature = "sprite-grid-authoring")]
                 if matches && editor.spec().is_local() {
                     #[cfg(feature = "sprite-package-install")]
@@ -731,13 +743,13 @@ impl SpritePanel {
                     let rectangle_busy = self.rectangle_package.busy();
                     #[cfg(not(feature = "sprite-rectangle-authoring"))]
                     let rectangle_busy = false;
-                    self.show_grid_package(ui, editor, install_busy || rectangle_busy);
+                    self.show_grid_package(ui, editor, install_busy || rectangle_busy || json_busy);
                 }
                 #[cfg(feature = "sprite-rectangle-authoring")]
                 if matches && editor.spec().is_local() {
                     let installer_busy = self.package_install.blocks_grid();
                     let grid_busy = self.grid_package.busy();
-                    self.show_rectangle_package(ui, editor, installer_busy || grid_busy);
+                    self.show_rectangle_package(ui, editor, installer_busy || grid_busy || json_busy);
                 }
                 #[cfg(feature = "sprite-package-install")]
                 if matches && editor.spec().is_local() {
@@ -749,8 +761,28 @@ impl SpritePanel {
                     let rectangle_busy = self.rectangle_package.busy();
                     #[cfg(not(feature = "sprite-rectangle-authoring"))]
                     let rectangle_busy = false;
-                    let authoring_busy = grid_busy || rectangle_busy;
+                    let authoring_busy = grid_busy || rectangle_busy || json_busy;
                     self.show_package_install(ui, editor, authoring_busy);
+                }
+                #[cfg(feature = "sprite-json-authoring")]
+                if matches && editor.spec().is_local() {
+                    #[cfg(feature = "sprite-package-install")]
+                    let installer_busy = self.package_install.blocks_grid();
+                    #[cfg(not(feature = "sprite-package-install"))]
+                    let installer_busy = false;
+                    #[cfg(feature = "sprite-grid-authoring")]
+                    let grid_busy = self.grid_package.busy();
+                    #[cfg(not(feature = "sprite-grid-authoring"))]
+                    let grid_busy = false;
+                    #[cfg(feature = "sprite-rectangle-authoring")]
+                    let rectangle_busy = self.rectangle_package.busy();
+                    #[cfg(not(feature = "sprite-rectangle-authoring"))]
+                    let rectangle_busy = false;
+                    self.show_json_package(
+                        ui,
+                        editor,
+                        installer_busy || grid_busy || rectangle_busy,
+                    );
                 }
                 if !matches { ui.colored_label(Color32::YELLOW, "Scene changed or unavailable. Bindings retained; preview/assignment disabled. Save the old sidecar or explicitly discard/close. Save As does not retarget this sidecar."); }
                 ui.horizontal_wrapped(|ui| {

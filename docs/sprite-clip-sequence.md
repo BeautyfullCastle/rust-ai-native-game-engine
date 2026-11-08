@@ -12,6 +12,9 @@ or retime these copied frames with the same controls below. Export still appends
 one new clip and never replaces the source clip. Copying is rejected atomically
 if the added frames or clip exceed the existing document limits.
 
+Export writes JSON only. To create a package from it, provide that JSON and its
+atlas PNG separately in the default-off [JSON sprite package authoring UI](editor-sprite-json.md).
+
 Choose an admitted region for each appended frame. Repeated and noncontiguous
 region IDs are allowed. Select a frame to remove it or move it one position up or
 down; at least one frame must remain. **Reverse clip sequence** reverses all
