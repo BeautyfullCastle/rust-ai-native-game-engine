@@ -1,3 +1,9 @@
+#[path="model_package_import/uv.rs"]
+mod uv;
+pub(crate) use uv::{UvVariant,import_uv_variant,import_uv_variant_checked};
+use uv::uv_variant_bytes;
+#[cfg(feature="room-animated-models")]
+use uv::validate_uv_variant;
 #[path="model_package_import/sequence.rs"]
 mod sequence;
 pub(crate) use sequence::{SequenceVariant,import_sequence_variant,import_sequence_variant_checked};
@@ -97,6 +103,7 @@ enum AuthoringVariant {
     Trim(TrimVariant),
     Sampler(SamplerVariant),
     Sequence(SequenceVariant),
+    Uv(UvVariant),
 }
 
 pub(crate) struct Report {
@@ -439,6 +446,7 @@ fn import_package_inner(
             AuthoringVariant::Trim(spec) => trim_variant_bytes(&source.bytes, &spec)?,
             AuthoringVariant::Sampler(spec) => sampler_variant_bytes(&source.bytes, &spec)?,
             AuthoringVariant::Sequence(spec) => sequence_variant_bytes(&source.bytes, &spec)?,
+            AuthoringVariant::Uv(spec) => uv_variant_bytes(&source.bytes, &spec)?,
             AuthoringVariant::Texture(spec) => {
                 let path = checked_file_path(&spec.texture, "PNG texture")?;
                 let png = read_bounded_file(&path, MAX_SOURCE_BYTES, "PNG texture")?;

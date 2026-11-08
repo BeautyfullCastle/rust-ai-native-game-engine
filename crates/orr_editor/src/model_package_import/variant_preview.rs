@@ -10,6 +10,7 @@ pub(crate) enum Spec {
     Trim(TrimVariant),
     Sampler(SamplerVariant),
     Sequence(SequenceVariant),
+    Uv(UvVariant),
 }
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Request {
@@ -32,6 +33,7 @@ fn validate(request: &Request) -> Result<(), String> {
         Spec::Trim(spec) => validate_trim_variant(spec)?,
         Spec::Sampler(spec) => validate_sampler_variant(spec)?,
         Spec::Sequence(spec) => validate_sequence_variant(spec)?,
+        Spec::Uv(spec) => validate_uv_variant(spec)?,
     }
     validate_path_shape(&request.source, "animated preview source")?;
     if !request
@@ -59,7 +61,7 @@ pub(crate) fn prepare(request: Request) -> Result<Prepared, String> {
                 "preview PNG texture",
             )?)
         }
-        Spec::Color(_) | Spec::Trim(_) | Spec::Sampler(_) | Spec::Sequence(_) => None,
+        Spec::Color(_) | Spec::Trim(_) | Spec::Sampler(_) | Spec::Sequence(_) | Spec::Uv(_) => None,
     };
     from_captured(
         &request,
@@ -86,6 +88,7 @@ fn from_captured(request: &Request, source: &[u8], png: Option<&[u8]>) -> Result
         Spec::Trim(spec) => trim_variant_bytes(source, spec)?,
         Spec::Sampler(spec) => sampler_variant_bytes(source, spec)?,
         Spec::Sequence(spec) => sequence_variant_bytes(source, spec)?,
+        Spec::Uv(spec) => uv_variant_bytes(source, spec)?,
         Spec::Texture(spec) => {
             texture_variant_bytes(source, png.ok_or("preview PNG snapshot missing")?, spec)?
         }
@@ -100,7 +103,7 @@ fn from_captured(request: &Request, source: &[u8], png: Option<&[u8]>) -> Result
         asset_sha256: digest(&bytes),
         source_sha256,
         png_sha256: match &request.spec {
-            Spec::Color(_) | Spec::Trim(_) | Spec::Sampler(_) | Spec::Sequence(_) => None,
+            Spec::Color(_) | Spec::Trim(_) | Spec::Sampler(_) | Spec::Sequence(_) | Spec::Uv(_) => None,
             Spec::Texture(_) => png.map(digest),
         },
     })

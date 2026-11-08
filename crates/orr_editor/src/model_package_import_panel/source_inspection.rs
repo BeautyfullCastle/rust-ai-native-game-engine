@@ -160,7 +160,7 @@ impl Panel {
                     .add_enabled(
                         !self.busy()
                             && material.used_primitive_count > 0
-                            && (self.color_variant_enabled || self.texture_variant_enabled || self.sampler.enabled),
+                            && (self.color_variant_enabled || self.texture_variant_enabled || self.sampler.enabled || self.uv.enabled),
                         egui::Button::new(format!("Use material {}", material.index)),
                     )
                     .clicked()
@@ -182,6 +182,7 @@ impl Panel {
                 self.texture_variant.material = index;
             }
             if self.sampler.enabled { self.sampler.material=Some(index); }
+            if self.uv.enabled { self.uv.material=Some(index); }
             self.inspected_hash = Some(hash);
             self.source_inputs_changed();
         }

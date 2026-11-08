@@ -42,15 +42,16 @@ impl Panel {
         {
             return Err("Choose a cooked animated source before previewing".into());
         }
-        let spec = match (self.color_request()?, self.texture_request()?, self.trim_request()?, self.sampler_request()?, self.sequence_request()?) {
-            (Some(color), None, None, None, None) => Spec::Color(color),
-            (None, Some(texture), None, None, None) => Spec::Texture(texture),
-            (None, None, Some(trim), None, None) => Spec::Trim(trim),
-            (None,None,None,Some(sampler),None) => Spec::Sampler(sampler),
-            (None,None,None,None,Some(sequence))=>Spec::Sequence(sequence),
+        let spec = match (self.color_request()?, self.texture_request()?, self.trim_request()?, self.sampler_request()?, self.sequence_request()?, self.uv_request()?) {
+            (Some(color), None, None, None, None, None) => Spec::Color(color),
+            (None, Some(texture), None, None, None, None) => Spec::Texture(texture),
+            (None, None, Some(trim), None, None, None) => Spec::Trim(trim),
+            (None,None,None,Some(sampler),None,None) => Spec::Sampler(sampler),
+            (None,None,None,None,Some(sequence),None)=>Spec::Sequence(sequence),
+            (None,None,None,None,None,Some(uv))=>Spec::Uv(uv),
             _ => {
                 return Err(
-                    "Choose one animated color variant, PNG skin, clip trim, sampler variant or clip sequence before previewing".into(),
+                    "Choose one animated color variant, PNG skin, clip trim, sampler variant, clip sequence or UV variant before previewing".into(),
                 )
             }
         };
@@ -194,6 +195,7 @@ impl Panel {
         self.trim = Default::default();
         self.sampler = Default::default();
         self.sequence = Default::default();
+        self.uv = Default::default();
         self.color_variant_enabled = true;
         self.texture_variant_enabled = false;
         self.color_variant = super::default_color_variant();

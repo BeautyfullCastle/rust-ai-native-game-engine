@@ -38,6 +38,7 @@ impl Panel {
             || self.texture_variant_enabled
             || self.trim.enabled
             || self.sampler.enabled
+            || self.uv.enabled
         {
             return Err("Choose only cooked animated clip sequence mode".into());
         }
@@ -116,6 +117,7 @@ impl Panel {
             .changed()
             && self.sequence.enabled
         {
+            self.uv.enabled=false;
             self.color_variant_enabled = false;
             self.texture_variant_enabled = false;
             self.trim.enabled = false;

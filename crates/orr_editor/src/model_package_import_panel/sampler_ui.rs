@@ -48,6 +48,7 @@ impl Panel {
             || self.texture_variant_enabled
             || self.trim.enabled
             || self.sequence.enabled
+            || self.uv.enabled
         {
             return Err("Choose only cooked animated sampler mode".into());
         }
@@ -99,6 +100,7 @@ impl Panel {
             && self.sampler.enabled
         {
             self.sequence.enabled=false;
+            self.uv.enabled=false;
             self.color_variant_enabled = false;
             self.texture_variant_enabled = false;
             self.trim.enabled = false;
