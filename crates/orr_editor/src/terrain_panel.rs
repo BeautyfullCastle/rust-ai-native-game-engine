@@ -19,6 +19,7 @@ use std::{path::PathBuf, sync::Arc};
 
 pub mod flatten;
 pub mod terrace;
+pub mod grid_expand;
 pub mod holes;
 pub mod offset;
 pub mod patch;
@@ -33,6 +34,7 @@ pub mod png16;
 pub struct TerrainPanel {
     pub flatten: flatten::Spec,
     pub terrace: terrace::Spec,
+    pub grid_expand: grid_expand::Spec,
     pub holes: holes::Spec,
     pub offset: offset::Spec,
     pub patch: patch::State,
@@ -67,6 +69,7 @@ impl Default for TerrainPanel {
         Self {
             flatten: flatten::Spec::default(),
             terrace: terrace::Spec::default(),
+            grid_expand: grid_expand::Spec::default(),
             holes: holes::Spec::default(),
             offset: offset::Spec::default(),
             patch: patch::State::default(),
@@ -334,6 +337,7 @@ impl TerrainPanel {
             self.document.undo()
         })();
         if matches!(result, Ok(true)) {
+            self.refresh_grid_dimensions();
             self.refresh_selection();
         }
         self.report(result)
@@ -344,6 +348,7 @@ impl TerrainPanel {
             self.document.redo()
         })();
         if matches!(result, Ok(true)) {
+            self.refresh_grid_dimensions();
             self.refresh_selection();
         }
         self.report(result)
@@ -375,10 +380,22 @@ impl TerrainPanel {
         if let Some(terrain) = self.document.terrain() {
             self.asset_id = terrain.asset_id().into();
             self.dimensions = [terrain.width(), terrain.depth()];
+            self.grid_expand = grid_expand::Spec::for_dimensions(self.dimensions);
             self.origin = terrain.origin().map(format_fixed);
             self.spacing = format_fixed(terrain.spacing());
         }
         self.refresh_selection();
+    }
+    /// History can reduce the grid after Undo. Keep the draft and selection
+    /// indices inside the newly admitted dimensions before reading their values.
+    fn refresh_grid_dimensions(&mut self) {
+        let Some(terrain) = self.document.terrain() else { return; };
+        self.dimensions = [terrain.width(), terrain.depth()];
+        self.grid_expand.dimensions = self.dimensions;
+        for axis in 0..2 {
+            self.selected_vertex[axis] = self.selected_vertex[axis].min(self.dimensions[axis] - 1);
+            self.selected_cell[axis] = self.selected_cell[axis].min(self.dimensions[axis] - 2);
+        }
     }
     fn refresh_selection(&mut self) {
         let Some(terrain) = self.document.terrain() else {
@@ -638,6 +655,7 @@ impl TerrainPanel {
             self.show_holes(ui, editor, writable);
             self.show_flatten(ui, editor, writable);
             self.show_terrace(ui, editor, writable);
+            self.show_grid_expand(ui, editor, writable);
             self.show_offset(ui, editor, writable);
             self.show_sculpt(ui, editor, writable);
             self.show_smooth(ui, editor, writable);
