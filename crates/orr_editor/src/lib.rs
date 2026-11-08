@@ -75,6 +75,8 @@ pub(crate) mod sprite_package_install;
 pub(crate) mod sprite_grid_authoring;
 #[cfg(feature = "sprite-rectangle-authoring")]
 pub(crate) mod sprite_rectangle_authoring;
+#[cfg(feature = "sprite-json-authoring")]
+pub(crate) mod sprite_json_authoring;
 #[cfg(feature = "sprites")]
 pub mod sprite_bindings;
 #[cfg(feature = "sprites")]

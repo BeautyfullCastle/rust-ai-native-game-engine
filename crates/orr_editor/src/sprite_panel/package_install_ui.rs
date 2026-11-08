@@ -59,7 +59,7 @@ impl State {
         self.pending.is_some()
     }
 
-    #[cfg(feature = "sprite-grid-authoring")]
+    #[cfg(any(feature = "sprite-grid-authoring", feature = "sprite-json-authoring"))]
     pub(super) fn blocks_grid(&self) -> bool {
         self.busy() || self.prepared.is_some()
     }
@@ -283,7 +283,7 @@ impl State {
                     ui.label(&self.status);
                 }
                 if authoring_busy {
-                    ui.weak("Sprite grid authoring is active; wait for it to finish before previewing or installing.");
+                    ui.weak("Sprite package authoring is active; wait for it to finish before previewing or installing.");
                 }
             });
         install_clicked
