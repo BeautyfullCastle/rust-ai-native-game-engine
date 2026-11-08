@@ -7,6 +7,19 @@ impl EditorApp {
     pub(super) fn mesh_light_pick_owns_input(&self) -> bool {
         self.mesh_light_pointer_owned || self.mesh_light_pick_pending()
     }
+    /// A wheel event can outlive pointer ownership: egui smooths its hidden
+    /// remainder on later passes. Suppress viewport zoom until the public scroll
+    /// status and this pass's delta both report that it has drained.
+    pub(super) fn mesh_light_pick_blocks_scroll(&mut self, ctx: &egui::Context) -> bool {
+        let scrolling =
+            ctx.input(|i| i.is_scrolling() || i.smooth_scroll_delta != egui::Vec2::ZERO);
+        if self.mesh_light_pick_owns_input() && scrolling {
+            self.mesh_light_scroll_quarantined = true;
+        } else if !scrolling {
+            self.mesh_light_scroll_quarantined = false;
+        }
+        self.mesh_light_scroll_quarantined
+    }
     pub(super) fn cancel_mesh_light_pick(&mut self) {
         self.mesh_lighting.cancel_pick();
     }
@@ -136,6 +149,7 @@ impl EditorApp {
         self.mesh_lighting.sync_viewport_pick(&self.editor);
         let owned = self.mesh_light_pick_owns_input();
         self.mesh_lighting.set_viewport_pick_busy(owned);
+        self.mesh_light_pick_blocks_scroll(ctx);
     }
     /// Receives the final presentation camera and physical size used by this
     /// viewport. Outside controls retain their own input; only a viewport click

@@ -347,13 +347,69 @@ fn same_batch_focus_regain_press_fences_real_dispatch_until_release_and_quiet() 
             .mesh_lighting
             .begin_viewport_pick(&f.app.editor)
             .is_err());
-        f.step(vec![], None, false);
+        f.step(vec![], None, true);
         assert!(!f.app.mesh_light_pick_owns_input());
         f.app
             .mesh_lighting
             .begin_viewport_pick(&f.app.editor)
             .unwrap();
         f.app.cancel_mesh_light_pick();
+        assert!(
+            f.ctx.input(
+                |input| input.is_scrolling() || input.smooth_scroll_delta != egui::Vec2::ZERO
+            ),
+            "owned wheel input must leave real smoothing to drain after release"
+        );
+        assert_eq!(f.app.editor.presentation_camera3d(SIZE).unwrap(), before);
+        let mut drained = false;
+        for _ in 0..240 {
+            f.step(vec![], None, true);
+            assert!(!f.app.mesh_light_pick_owns_input());
+            assert_eq!(
+                f.app.editor.presentation_camera3d(SIZE).unwrap(),
+                before,
+                "cancelled wheel smoothing cannot become viewport zoom"
+            );
+            if !f.ctx.input(|input| {
+                input.is_scrolling() || input.smooth_scroll_delta != egui::Vec2::ZERO
+            }) {
+                drained = true;
+                break;
+            }
+        }
+        assert!(drained, "wheel smoothing did not settle within 240 frames");
+        f.step(vec![], None, true);
+        assert_eq!(f.app.editor.presentation_camera3d(SIZE).unwrap(), before);
+        f.app
+            .mesh_lighting
+            .begin_viewport_pick(&f.app.editor)
+            .unwrap();
+        f.app.cancel_mesh_light_pick();
+        f.step(
+            vec![
+                egui::Event::PointerMoved(rect().center()),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, 120.0),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: Default::default(),
+                },
+            ],
+            None,
+            true,
+        );
+        let mut zoomed = f.app.editor.presentation_camera3d(SIZE).unwrap() != before;
+        for _ in 0..8 {
+            if zoomed {
+                break;
+            }
+            f.step(vec![], None, true);
+            zoomed = f.app.editor.presentation_camera3d(SIZE).unwrap() != before;
+        }
+        assert!(
+            zoomed,
+            "a fresh wheel gesture must zoom after quarantine drains"
+        );
         unchanged(&f, checksum, &history, &files);
     }
 }
