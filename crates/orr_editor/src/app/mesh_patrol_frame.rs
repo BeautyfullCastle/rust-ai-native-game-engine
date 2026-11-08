@@ -138,7 +138,8 @@ impl EditorApp {
             }
         };
         let blocked = self.mesh_patrol_frame_blocker(ctx);
-        let residual = self.mesh_patrol_frame.scroll;
+        let residual = self.mesh_patrol_frame.scroll
+            || ctx.input(|i| i.is_scrolling() || i.smooth_scroll_delta != egui::Vec2::ZERO);
         // Even a rejected action owns this input batch; never cancel then route
         // its simultaneous drag/click into a different authoring tool.
         self.mesh_patrol_frame.sync(ctx, true);

@@ -532,5 +532,82 @@ fn simultaneous_drag_wheel_rejects_once_and_fences_until_physical_release_and_qu
         assert!(!f.app.mesh_patrol_frame_owns_input());
         assert_eq!(f.app.editor.camera3d, before);
         receipt.unchanged(f);
+        for existing_tail in [false, true] {
+            let mut h = harness(game, Projection::Perspective, false);
+            queue(&mut h);
+            let f = h.state_mut();
+            f.viewport((800, 600));
+            let points = f.points();
+            let before = f.app.editor.camera3d;
+            let receipt = Receipt::of(f);
+            let ctx = egui::Context::default();
+            let wheel = egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, 120.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: Default::default(),
+            };
+            let events = if existing_tail {
+                // Seed only egui's scroll state. No App tool has owned this
+                // wheel, so its private quarantine is still unset.
+                let mut out = ctx.run_ui(
+                    egui::RawInput {
+                        focused: true,
+                        events: vec![wheel],
+                        ..Default::default()
+                    },
+                    |_| {},
+                );
+                out.textures_delta.clear();
+                assert!(!f.app.mesh_patrol_frame_owns_input());
+                vec![]
+            } else {
+                vec![wheel]
+            };
+            dispatch_raw(f, &ctx, events, (800, 600), true);
+            assert!(!ctx.input(|i| i.pointer.any_down()));
+            assert!(ctx.input(|i| i.is_scrolling() || i.smooth_scroll_delta != egui::Vec2::ZERO));
+            assert_eq!(
+                f.app.editor.camera3d, before,
+                "wheel-only tail={existing_tail}"
+            );
+            assert!(!f.app.mesh_navigation.has_patrol_frame_request());
+            assert!(f.app.mesh_patrol_frame_owns_input());
+            receipt.unchanged(f);
+            dispatch_raw(f, &ctx, vec![], (800, 600), true);
+            assert_eq!(
+                f.app.editor.camera3d, before,
+                "rejected action cannot be replayed"
+            );
+            let mut drained = false;
+            for _ in 0..240 {
+                dispatch_raw(f, &ctx, vec![], (800, 600), false);
+                assert_eq!(f.app.editor.camera3d, before);
+                if !ctx.input(|i| i.is_scrolling() || i.smooth_scroll_delta != egui::Vec2::ZERO) {
+                    drained = true;
+                    break;
+                }
+            }
+            assert!(drained, "wheel smoothing must settle");
+            dispatch_raw(f, &ctx, vec![], (800, 600), false);
+            assert!(!f.app.mesh_patrol_frame_owns_input());
+            receipt.unchanged(f);
+            // Settling alone never frames anything: another explicit widget
+            // activation must queue a new, current request.
+            h.run_steps(2);
+            assert_eq!(h.state().app.editor.camera3d, before);
+            queue(&mut h);
+            h.state_mut().dispatch = Some((800, 600));
+            h.run_steps(1);
+            let f = h.state();
+            assert_ne!(f.app.editor.camera3d, before);
+            assert!(!f.app.mesh_navigation.has_patrol_frame_request());
+            fit(
+                &f.app.editor.presentation_camera3d((800, 600)).unwrap(),
+                &points,
+                (800, 600),
+            );
+            receipt.unchanged(f);
+        }
     }
 }
