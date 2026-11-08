@@ -1,6 +1,7 @@
 //! Explicit inspected-PNG rectangle creation. It never installs, loads or assigns assets.
 use super::*;
 use crate::sprite_rectangle_authoring as backend;
+use std::path::Path;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 const MAX_REGIONS: usize = 256;
@@ -260,10 +261,8 @@ impl State {
             .rectangles
             .iter()
             .enumerate()
-            .filter_map(|(index, row)| {
-                (decimal_u32(&row.id, true).ok() == Some(id))
-                    .then(|| format!("row {} (key {}, ID {})", index + 1, row.row_key, id))
-            })
+            .filter(|&(_, row)| decimal_u32(&row.id, true).ok() == Some(id))
+            .map(|(index, row)| format!("row {} (key {}, ID {})", index + 1, row.row_key, id))
             .collect::<Vec<_>>();
         if rows.is_empty() {
             error
@@ -375,7 +374,7 @@ impl State {
             && self.draft_ticket == pin.draft_ticket
             && self.draft == pin.draft
             && self.observed_draft == pin.draft
-            && PathBuf::from(&self.draft.png) == pin.source.png
+            && Path::new(&self.draft.png) == pin.source.png.as_path()
             && self
                 .inspection
                 .as_ref()
@@ -428,7 +427,7 @@ impl State {
             Completion::Create(pin, result) => match result {
                 Ok(report) => {
                     self.last_output = Some(report.root.clone());
-                    let expected = report.root == PathBuf::from(&pin.draft.destination)
+                    let expected = report.root.as_path() == Path::new(&pin.draft.destination)
                         && report.package == pin.draft.name
                         && report.document == "sprites.json"
                         && report.width == pin.image.width
