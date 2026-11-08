@@ -1,7 +1,7 @@
 name: Terrain grid expansion focused CI
 on:
   push:
-    branches: [codex/terrain-grid-expansion-20261108]
+    branches: [codex/terrain-grid-expand-20261108]
   workflow_dispatch:
 permissions:
   contents: read
