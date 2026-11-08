@@ -1,3 +1,10 @@
+#[path = "model_package_import/static_texture.rs"]
+mod static_texture;
+pub(crate) use static_texture::{
+    import_static_texture_variant, import_static_texture_variant_checked, StaticTextureVariant,
+    validate_static_texture_variant,
+};
+use static_texture::static_texture_variant_bytes;
 #[path = "model_package_import/static_uv.rs"]
 mod static_uv;
 pub(crate) use static_uv::{
@@ -111,6 +118,7 @@ enum AuthoringVariant {
     Sequence(SequenceVariant),
     Uv(UvVariant),
     StaticUv(StaticUvVariant),
+    StaticTexture(StaticTextureVariant),
 }
 
 pub(crate) struct Report {
@@ -458,6 +466,13 @@ fn import_package_inner(
             AuthoringVariant::Sequence(spec) => sequence_variant_bytes(&source.bytes, &spec)?,
             AuthoringVariant::Uv(spec) => uv_variant_bytes(&source.bytes, &spec)?,
             AuthoringVariant::StaticUv(spec) => static_uv_variant_bytes(&source.bytes, &spec)?,
+            AuthoringVariant::StaticTexture(spec) => {
+                // The original cooked source and optional inspected hash have already
+                // been admitted above; do not open the PNG before that check.
+                let path = checked_file_path(&spec.texture, "static PNG texture")?;
+                let png = read_bounded_file(&path, MAX_SOURCE_BYTES, "static PNG texture")?;
+                static_texture_variant_bytes(&source.bytes, &png.bytes, &spec)?
+            }
             AuthoringVariant::Texture(spec) => {
                 let path = checked_file_path(&spec.texture, "PNG texture")?;
                 let png = read_bounded_file(&path, MAX_SOURCE_BYTES, "PNG texture")?;
