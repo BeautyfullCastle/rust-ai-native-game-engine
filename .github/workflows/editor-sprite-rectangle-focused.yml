@@ -56,41 +56,47 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - name: Create evidence directory
+        env:
+          EVIDENCE_DIR: ${{ runner.temp }}/editor-sprite-rectangle-evidence-${{ github.run_id }}-${{ github.run_attempt }}
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p ci-evidence
-          printf '%s\n' 'Focused editor sprite rectangle checks; results are written per command.' > ci-evidence/workflow-status.txt
+          mkdir -p "$EVIDENCE_DIR"
+          printf '%s\n' 'Focused editor sprite rectangle checks; results are written per command.' > "$EVIDENCE_DIR/workflow-status.txt"
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Record exact source and prepare Linux toolchain
+        env:
+          EVIDENCE_DIR: ${{ runner.temp }}/editor-sprite-rectangle-evidence-${{ github.run_id }}-${{ github.run_attempt }}
         shell: bash
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          git rev-parse HEAD 'HEAD^{tree}' | tee ci-evidence/source-commit-and-tree.txt
-          git status --porcelain=v1 > ci-evidence/source-status.txt
-          git archive --format=tar HEAD > ci-evidence/source.tar
-          uname -a | tee ci-evidence/platform.txt
-          hostname | tee ci-evidence/runner-hostname.txt
-          rustup toolchain install 1.99.1 --profile minimal --component clippy 2>&1 | tee ci-evidence/rustup.log
+          git rev-parse HEAD 'HEAD^{tree}' | tee "$EVIDENCE_DIR/source-commit-and-tree.txt"
+          git status --porcelain=v1 > "$EVIDENCE_DIR/source-status.txt"
+          git archive --format=tar HEAD > "$EVIDENCE_DIR/source.tar"
+          sha256sum "$EVIDENCE_DIR/source.tar" | tee "$EVIDENCE_DIR/source-archive-sha256.txt"
+          uname -a | tee "$EVIDENCE_DIR/platform.txt"
+          hostname | tee "$EVIDENCE_DIR/runner-hostname.txt"
+          rustup toolchain install 1.99.1 --profile minimal --component clippy 2>&1 | tee "$EVIDENCE_DIR/rustup.log"
           rustup override set 1.99.1
-          rustc --version --verbose | tee ci-evidence/rustc.txt
-          cargo --version --verbose | tee ci-evidence/cargo.txt
-          sudo apt-get update -q 2>&1 | tee ci-evidence/dependencies.log
-          sudo apt-get install -y -q pkg-config libasound2-dev libudev-dev libx11-dev libxkbcommon-dev libwayland-dev 2>&1 | tee -a ci-evidence/dependencies.log
+          rustc --version --verbose | tee "$EVIDENCE_DIR/rustc.txt"
+          cargo --version --verbose | tee "$EVIDENCE_DIR/cargo.txt"
+          sudo apt-get update -q 2>&1 | tee "$EVIDENCE_DIR/dependencies.log"
+          sudo apt-get install -y -q pkg-config libasound2-dev libudev-dev libx11-dev libxkbcommon-dev libwayland-dev 2>&1 | tee -a "$EVIDENCE_DIR/dependencies.log"
       - name: Run focused rectangle, grid, package, and install checks
         env:
+          EVIDENCE_DIR: ${{ runner.temp }}/editor-sprite-rectangle-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           CARGO_TARGET_DIR: ${{ runner.temp }}/editor-sprite-rectangle-${{ github.run_id }}-${{ github.run_attempt }}
         shell: python {0}
         run: |
-          import json, re, subprocess
+          import json, os, re, subprocess
           from collections import Counter
           from pathlib import Path
 
-          evidence = Path('ci-evidence')
+          evidence = Path(os.environ['EVIDENCE_DIR'])
           results = []
           observed_tests = []
           expected_executions = 0
@@ -271,5 +277,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: editor-sprite-rectangle-${{ github.sha }}-${{ github.run_attempt }}
-          path: ci-evidence
+          path: ${{ runner.temp }}/editor-sprite-rectangle-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: error
