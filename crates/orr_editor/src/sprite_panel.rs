@@ -14,10 +14,12 @@ use std::{
 };
 
 mod clip_timing;
-#[cfg(feature = "sprite-package-install")]
-mod package_install_ui;
 #[cfg(feature = "sprite-grid-authoring")]
 mod grid_package_ui;
+#[cfg(feature = "sprite-package-install")]
+mod package_install_ui;
+#[cfg(feature = "sprite-rectangle-authoring")]
+mod rectangle_package_ui;
 
 struct Loaded {
     asset: Asset,
@@ -39,15 +41,25 @@ pub struct SpritePanel {
     loaded: BTreeMap<(String, String), Loaded>,
     tilemap_pinned: bool,
     error: Option<String>,
-    #[cfg(all(feature = "image-reimport", target_os = "linux", target_arch = "x86_64"))]
+    #[cfg(all(
+        feature = "image-reimport",
+        target_os = "linux",
+        target_arch = "x86_64"
+    ))]
     pub replacement_image: String,
-    #[cfg(all(feature = "image-reimport", target_os = "linux", target_arch = "x86_64"))]
+    #[cfg(all(
+        feature = "image-reimport",
+        target_os = "linux",
+        target_arch = "x86_64"
+    ))]
     pub replacement_version: String,
     timing: clip_timing::State,
     #[cfg(feature = "sprite-package-install")]
     package_install: package_install_ui::State,
     #[cfg(feature = "sprite-grid-authoring")]
     grid_package: grid_package_ui::State,
+    #[cfg(feature = "sprite-rectangle-authoring")]
+    rectangle_package: rectangle_package_ui::State,
     preview_playing: bool,
     preview_started: f64,
 }
@@ -67,15 +79,25 @@ impl Default for SpritePanel {
             loaded: BTreeMap::new(),
             tilemap_pinned: false,
             error: None,
-            #[cfg(all(feature = "image-reimport", target_os = "linux", target_arch = "x86_64"))]
+            #[cfg(all(
+                feature = "image-reimport",
+                target_os = "linux",
+                target_arch = "x86_64"
+            ))]
             replacement_image: String::new(),
-            #[cfg(all(feature = "image-reimport", target_os = "linux", target_arch = "x86_64"))]
+            #[cfg(all(
+                feature = "image-reimport",
+                target_os = "linux",
+                target_arch = "x86_64"
+            ))]
             replacement_version: String::new(),
             timing: clip_timing::State::default(),
             #[cfg(feature = "sprite-package-install")]
             package_install: package_install_ui::State::default(),
             #[cfg(feature = "sprite-grid-authoring")]
             grid_package: grid_package_ui::State::default(),
+            #[cfg(feature = "sprite-rectangle-authoring")]
+            rectangle_package: rectangle_package_ui::State::default(),
             preview_playing: false,
             preview_started: 0.0,
         }
@@ -83,11 +105,24 @@ impl Default for SpritePanel {
 }
 impl SpritePanel {
     /// Compare only referenced cached assets; never reload or mutate the renderer cache.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
-    pub(crate) fn arena_export_assets_match(&self, admitted: &BTreeMap<(String,String),Asset>) -> Result<(),String> {
+    #[cfg(all(
+        target_os = "linux",
+        target_arch = "x86_64",
+        feature = "arena-project-export"
+    ))]
+    pub(crate) fn arena_export_assets_match(
+        &self,
+        admitted: &BTreeMap<(String, String), Asset>,
+    ) -> Result<(), String> {
         for (key, asset) in admitted {
-            let cached = self.loaded.get(key).ok_or("Referenced sprite is absent from the editor cache; reopen explicitly")?;
-            if cached.asset.document.to_json().map_err(|e| e.to_string())? != asset.document.to_json().map_err(|e| e.to_string())? || cached.asset.rgba != asset.rgba {
+            let cached = self
+                .loaded
+                .get(key)
+                .ok_or("Referenced sprite is absent from the editor cache; reopen explicitly")?;
+            if cached.asset.document.to_json().map_err(|e| e.to_string())?
+                != asset.document.to_json().map_err(|e| e.to_string())?
+                || cached.asset.rgba != asset.rgba
+            {
                 return Err("Referenced cached sprite document or pixels differ from saved project assets; reopen explicitly".into());
             }
         }
@@ -101,8 +136,13 @@ impl SpritePanel {
     }
     /// Read-only access to the single admitted egui texture cache.
     #[cfg(feature = "tilemap")]
-    pub(crate) fn tilemap_asset(&self, key: &orr_sample::project_sprites::AssetKey) -> Option<(&Asset, egui::TextureId)> {
-        self.loaded.get(key).map(|loaded| (&loaded.asset, loaded.texture.id()))
+    pub(crate) fn tilemap_asset(
+        &self,
+        key: &orr_sample::project_sprites::AssetKey,
+    ) -> Option<(&Asset, egui::TextureId)> {
+        self.loaded
+            .get(key)
+            .map(|loaded| (&loaded.asset, loaded.texture.id()))
     }
     #[cfg(feature = "tilemap")]
     pub(crate) fn tilemap_is_pinned(&self) -> bool {
@@ -110,15 +150,24 @@ impl SpritePanel {
     }
     /// Startup only: install a missing already-admitted asset before pinning.
     #[cfg(feature = "tilemap")]
-    pub(crate) fn install_tilemap_asset(&mut self, ctx: &egui::Context, asset: Option<(orr_sample::project_sprites::AssetKey, Asset)>) {
+    pub(crate) fn install_tilemap_asset(
+        &mut self,
+        ctx: &egui::Context,
+        asset: Option<(orr_sample::project_sprites::AssetKey, Asset)>,
+    ) {
         if let Some((key, asset)) = asset {
-            if !self.loaded.contains_key(&key) { self.cache_asset(ctx, key, asset); }
+            if !self.loaded.contains_key(&key) {
+                self.cache_asset(ctx, key, asset);
+            }
         }
         self.tilemap_pinned = true;
     }
     #[cfg(feature = "tilemap")]
     pub(crate) fn tilemap_assets(&self) -> BTreeMap<orr_sample::project_sprites::AssetKey, Asset> {
-        self.loaded.iter().map(|(key, loaded)| (key.clone(), loaded.asset.clone())).collect()
+        self.loaded
+            .iter()
+            .map(|(key, loaded)| (key.clone(), loaded.asset.clone()))
+            .collect()
     }
 
     pub fn scene_matches(&self, editor: &Editor) -> bool {
@@ -232,44 +281,81 @@ impl SpritePanel {
     fn replace_assets(&mut self, ctx: &egui::Context, assets: BTreeMap<(String, String), Asset>) {
         self.loaded = Self::prepare_loaded(ctx, assets);
     }
-    fn prepare_loaded(ctx: &egui::Context, assets: BTreeMap<(String, String), Asset>) -> BTreeMap<(String, String), Loaded> {
-        assets.into_iter().map(|(key, asset)| {
-            let atlas = asset.document.atlas();
-            let image = egui::ColorImage::from_rgba_unmultiplied(
-                [atlas.width as usize, atlas.height as usize], &asset.rgba,
-            );
-            let texture = ctx.load_texture(
-                format!("sprite:{}:{}", key.0, key.1), image, egui::TextureOptions::NEAREST,
-            );
-            (key, Loaded { asset, texture })
-        }).collect()
+    fn prepare_loaded(
+        ctx: &egui::Context,
+        assets: BTreeMap<(String, String), Asset>,
+    ) -> BTreeMap<(String, String), Loaded> {
+        assets
+            .into_iter()
+            .map(|(key, asset)| {
+                let atlas = asset.document.atlas();
+                let image = egui::ColorImage::from_rgba_unmultiplied(
+                    [atlas.width as usize, atlas.height as usize],
+                    &asset.rgba,
+                );
+                let texture = ctx.load_texture(
+                    format!("sprite:{}:{}", key.0, key.1),
+                    image,
+                    egui::TextureOptions::NEAREST,
+                );
+                (key, Loaded { asset, texture })
+            })
+            .collect()
     }
-    #[cfg(all(feature = "image-reimport", target_os = "linux", target_arch = "x86_64"))]
+    #[cfg(all(
+        feature = "image-reimport",
+        target_os = "linux",
+        target_arch = "x86_64"
+    ))]
     pub fn reimport_image(&mut self, ctx: &egui::Context, editor: &Editor) -> Result<(), String> {
         self.require_unpinned()?;
-        if !self.editable(editor) || editor.is_dirty() || editor.sim().in_tx
-            || editor.screenshot_waiting_for().is_some() || !editor.has_local_screenshot_owner() {
+        if !self.editable(editor)
+            || editor.is_dirty()
+            || editor.sim().in_tx
+            || editor.screenshot_waiting_for().is_some()
+            || !editor.has_local_screenshot_owner()
+        {
             return Err("image reimport requires a clean settled local scene in Edit".into());
         }
-        let bindings = self.bindings.as_ref().ok_or("open saved sprite bindings first")?;
-        if bindings.dirty() { return Err("save sprite bindings before image reimport".into()); }
+        let bindings = self
+            .bindings
+            .as_ref()
+            .ok_or("open saved sprite bindings first")?;
+        if bindings.dirty() {
+            return Err("save sprite bindings before image reimport".into());
+        }
         let root = sprite_bindings::resolve_project(bindings.base(), &bindings.document().project)?;
-        let transaction = orr_sample::image_reimport::prepare(&orr_sample::image_reimport::Options {
-            project: root, package: self.package.clone(), document: self.document.clone(),
-            image: PathBuf::from(&self.replacement_image), version: self.replacement_version.clone(),
-            consumer: orr_sample::image_reimport::Consumer { collect: editor.game().is_collect(),
-                ui: (editor.game() == EditorGame::Arena && cfg!(feature = "project-ui"))
-                    || (editor.game().is_collect() && cfg!(feature = "collect-ui")) },
-        })?;
+        let transaction =
+            orr_sample::image_reimport::prepare(&orr_sample::image_reimport::Options {
+                project: root,
+                package: self.package.clone(),
+                document: self.document.clone(),
+                image: PathBuf::from(&self.replacement_image),
+                version: self.replacement_version.clone(),
+                consumer: orr_sample::image_reimport::Consumer {
+                    collect: editor.game().is_collect(),
+                    ui: (editor.game() == EditorGame::Arena && cfg!(feature = "project-ui"))
+                        || (editor.game().is_collect() && cfg!(feature = "collect-ui")),
+                },
+            })?;
         let checked_file = |path: &std::path::Path| -> Result<PathBuf, String> {
-            let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
-            Ok(sprite_bindings::resolve_project(parent, ".")?.join(path.file_name().ok_or("missing local file name")?))
+            let parent = path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(std::path::Path::new("."));
+            Ok(sprite_bindings::resolve_project(parent, ".")?
+                .join(path.file_name().ok_or("missing local file name")?))
         };
-        let scene_path = editor.sim().scene_path.as_deref().ok_or("saved scene required")?;
+        let scene_path = editor
+            .sim()
+            .scene_path
+            .as_deref()
+            .ok_or("saved scene required")?;
         if transaction.document() != bindings.document()
             || transaction.sidecar_path() != checked_file(&bindings.path)?
             || transaction.scene_path() != checked_file(std::path::Path::new(scene_path))?
-            || transaction.initial_checksum() != editor.checksum() {
+            || transaction.initial_checksum() != editor.checksum()
+        {
             return Err("saved project differs from the displayed scene or sprite bindings; reopen before reimport".into());
         }
         let loaded = Self::prepare_loaded(ctx, transaction.assets().clone());
@@ -349,9 +435,14 @@ impl SpritePanel {
             return Err("selected entity has no displayed sprite body".into());
         }
         let bindings = self.bindings.as_ref().ok_or("open a view sidecar first")?;
-        let binding = bindings.document().bindings.get(&guid)
+        let binding = bindings
+            .document()
+            .bindings
+            .get(&guid)
             .ok_or("selected entity has no sprite binding")?;
-        let asset = self.loaded.get(&(binding.package.clone(), binding.document.clone()))
+        let asset = self
+            .loaded
+            .get(&(binding.package.clone(), binding.document.clone()))
             .ok_or("selected sprite asset is unavailable; reload assets first")?;
         binding.region(&asset.asset.document, 0)?;
         // All fallible checks precede draft mutation, including both locomotion clips.
@@ -421,47 +512,90 @@ impl SpritePanel {
         Ok(())
     }
     fn selected_orientation(&self, editor: &Editor) -> Option<Orientation> {
-        if editor.selected_guids().len() != 1 { return None; }
-        self.bindings.as_ref()?.document().bindings
-            .get(editor.selected_guids()[0].as_str())?.orientation
+        if editor.selected_guids().len() != 1 {
+            return None;
+        }
+        self.bindings
+            .as_ref()?
+            .document()
+            .bindings
+            .get(editor.selected_guids()[0].as_str())?
+            .orientation
     }
     /// Immediate current-selection transaction: no retained target draft can be
     /// applied after selection, document or history has changed. Revalidate the
     /// installed source and refuse to edit a stale last-good texture preview.
-    pub fn set_selected_orientation(&mut self, editor: &Editor, orientation: Option<Orientation>) -> Result<(), String> {
+    pub fn set_selected_orientation(
+        &mut self,
+        editor: &Editor,
+        orientation: Option<Orientation>,
+    ) -> Result<(), String> {
         self.require_unpinned()?;
-        if !self.editable(editor) || !editor.spec().is_local() || !editor.can_mutate()
-            || editor.sim().in_tx || editor.selected_guids().len() != 1 {
+        if !self.editable(editor)
+            || !editor.spec().is_local()
+            || !editor.can_mutate()
+            || editor.sim().in_tx
+            || editor.selected_guids().len() != 1
+        {
             return Err("sprite orientation requires one selected binding in the matching settled local Edit scene".into());
         }
-        if let Some(orientation) = orientation { orientation.validate()?; }
+        if let Some(orientation) = orientation {
+            orientation.validate()?;
+        }
         let guid = &editor.selected_guids()[0];
-        let row = binding_row(editor.rows(), guid.as_str()).ok_or("selected sprite entity is unavailable")?;
+        let row = binding_row(editor.rows(), guid.as_str())
+            .ok_or("selected sprite entity is unavailable")?;
         if !editor.bodies().iter().any(|body| body.entity == row.entity) {
             return Err("selected sprite entity is absent from the displayed snapshot".into());
         }
         let bindings = self.bindings.as_ref().ok_or("open sprite bindings first")?;
-        let binding = bindings.document().bindings.get(guid.as_str()).ok_or("selected entity has no sprite binding")?;
+        let binding = bindings
+            .document()
+            .bindings
+            .get(guid.as_str())
+            .ok_or("selected entity has no sprite binding")?;
         let key = (binding.package.clone(), binding.document.clone());
-        let current = self.loaded.get(&key).ok_or("reload verified sprite assets first")?;
+        let current = self
+            .loaded
+            .get(&key)
+            .ok_or("reload verified sprite assets first")?;
         let fresh = sprite_bindings::load_asset(
             &sprite_bindings::resolve_project(bindings.base(), &bindings.document().project)?,
-            &binding.package, &binding.document,
+            &binding.package,
+            &binding.document,
         )?;
         binding.region(&fresh.document, 0)?;
         if fresh.rgba != current.asset.rgba
             || fresh.document.to_json().map_err(|e| e.to_string())?
-                != current.asset.document.to_json().map_err(|e| e.to_string())? {
-            return Err("installed sprite source changed; Reload assets before editing orientation".into());
+                != current
+                    .asset
+                    .document
+                    .to_json()
+                    .map_err(|e| e.to_string())?
+        {
+            return Err(
+                "installed sprite source changed; Reload assets before editing orientation".into(),
+            );
         }
-        self.bindings.as_mut().unwrap().set_orientation(guid, orientation)?;
+        self.bindings
+            .as_mut()
+            .unwrap()
+            .set_orientation(guid, orientation)?;
         self.picked_orientation = None;
         Ok(())
     }
     fn show_orientation(&mut self, ui: &mut Ui, editor: &Editor) {
-        if editor.selected_guids().len() != 1 { return; }
+        if editor.selected_guids().len() != 1 {
+            return;
+        }
         let guid = &editor.selected_guids()[0];
-        let Some(binding) = self.bindings.as_ref().and_then(|b| b.document().bindings.get(guid.as_str())) else { return; };
+        let Some(binding) = self
+            .bindings
+            .as_ref()
+            .and_then(|b| b.document().bindings.get(guid.as_str()))
+        else {
+            return;
+        };
         let saved = binding.orientation;
         let mut draft = saved.unwrap_or_default();
         ui.collapsing("Selected sprite orientation", |ui| {
@@ -524,11 +658,22 @@ impl SpritePanel {
         let elapsed = match &binding.source {
             Source::Locomotion { .. } => state.elapsed_ms,
             _ => editor.snapshot().map_or(0, |s| {
-                #[cfg(feature="collect-dodge")]
+                #[cfg(feature = "collect-dodge")]
                 if editor.game().is_collect() {
-                    return s.timeline().map_or(0, |_| scene_elapsed_ms(Mode::Play, u64::from(s.predicted().singleton::<orr_sample::collect_game::CollectRun>().elapsed_ticks), s.tick_rate()));
+                    return s.timeline().map_or(0, |_| {
+                        scene_elapsed_ms(
+                            Mode::Play,
+                            u64::from(
+                                s.predicted()
+                                    .singleton::<orr_sample::collect_game::CollectRun>()
+                                    .elapsed_ticks,
+                            ),
+                            s.tick_rate(),
+                        )
+                    });
                 }
-                s.timeline().map_or(0, |t| scene_elapsed_ms(Mode::Play, t.tick, s.tick_rate()))
+                s.timeline()
+                    .map_or(0, |t| scene_elapsed_ms(Mode::Play, t.tick, s.tick_rate()))
             }),
         };
         binding
@@ -543,6 +688,8 @@ impl SpritePanel {
         self.poll_package_install(editor);
         #[cfg(feature = "sprite-grid-authoring")]
         self.poll_grid_package(editor);
+        #[cfg(feature = "sprite-rectangle-authoring")]
+        self.poll_rectangle_package(editor);
         self.update_timing(editor);
         if editor.game() != EditorGame::Arena && !editor.game().is_collect() {
             return;
@@ -580,14 +727,29 @@ impl SpritePanel {
                     let install_busy = self.package_install.blocks_grid();
                     #[cfg(not(feature = "sprite-package-install"))]
                     let install_busy = false;
-                    self.show_grid_package(ui, editor, install_busy);
+                    #[cfg(feature = "sprite-rectangle-authoring")]
+                    let rectangle_busy = self.rectangle_package.busy();
+                    #[cfg(not(feature = "sprite-rectangle-authoring"))]
+                    let rectangle_busy = false;
+                    self.show_grid_package(ui, editor, install_busy || rectangle_busy);
+                }
+                #[cfg(feature = "sprite-rectangle-authoring")]
+                if matches && editor.spec().is_local() {
+                    let installer_busy = self.package_install.blocks_grid();
+                    let grid_busy = self.grid_package.busy();
+                    self.show_rectangle_package(ui, editor, installer_busy || grid_busy);
                 }
                 #[cfg(feature = "sprite-package-install")]
                 if matches && editor.spec().is_local() {
                     #[cfg(feature = "sprite-grid-authoring")]
-                    let authoring_busy = self.grid_package.busy();
+                    let grid_busy = self.grid_package.busy();
                     #[cfg(not(feature = "sprite-grid-authoring"))]
-                    let authoring_busy = false;
+                    let grid_busy = false;
+                    #[cfg(feature = "sprite-rectangle-authoring")]
+                    let rectangle_busy = self.rectangle_package.busy();
+                    #[cfg(not(feature = "sprite-rectangle-authoring"))]
+                    let rectangle_busy = false;
+                    let authoring_busy = grid_busy || rectangle_busy;
                     self.show_package_install(ui, editor, authoring_busy);
                 }
                 if !matches { ui.colored_label(Color32::YELLOW, "Scene changed or unavailable. Bindings retained; preview/assignment disabled. Save the old sidecar or explicitly discard/close. Save As does not retarget this sidecar."); }
@@ -607,8 +769,12 @@ impl SpritePanel {
                     let result = self.use_selected_settings(editor); self.report(result);
                 }
                 ui.weak("Pick settings into the draft, then select targets and Assign. Picking does not change saved bindings.");
-                ui.label("Package name"); ui.text_edit_singleline(&mut self.package);
-                ui.label("Sprite document path in package"); ui.text_edit_singleline(&mut self.document);
+                let package_label = ui.label("Package name");
+                ui.text_edit_singleline(&mut self.package)
+                    .labelled_by(package_label.id);
+                let document_label = ui.label("Sprite document path in package");
+                ui.text_edit_singleline(&mut self.document)
+                    .labelled_by(document_label.id);
                 if ui.button("Load sprite document").clicked() {
                     let package = self.package.clone(); let document = self.document.clone();
                     let result = self.load(ui.ctx(), &package, &document);
@@ -811,7 +977,14 @@ impl SpritePanel {
         }
     }
 }
-fn paint_oriented_preview(ui: &Ui, texture: egui::TextureId, rect: Rect, size: egui::Vec2, uv: [f32; 4], orientation: Orientation) {
+fn paint_oriented_preview(
+    ui: &Ui,
+    texture: egui::TextureId,
+    rect: Rect,
+    size: egui::Vec2,
+    uv: [f32; 4],
+    orientation: Orientation,
+) {
     let uv = orientation.uv_rect(uv);
     let half = size * 0.5;
     let (sin, cos) = orientation.radians().sin_cos();

@@ -1,0 +1,281 @@
+name: Editor sprite rectangle focused CI
+
+on:
+  push:
+    paths:
+      - '.github/workflows/editor-sprite-rectangle-focused.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'docs/editor-sprite-rectangle.md'
+      - 'crates/orr_editor/src/lib.rs'
+      - 'crates/orr_editor/src/sprite_panel.rs'
+      - 'crates/orr_editor/src/sprite_panel/**'
+      - 'crates/orr_editor/src/sprite_rectangle_authoring.rs'
+      - 'crates/orr_editor/src/sprite_rectangle_authoring/**'
+      - 'crates/orr_package/**'
+      - 'crates/orr_sample/**'
+      - 'crates/orr_sprite/**'
+      - 'crates/orr_tilemap/**'
+      - 'assets/sprite_demo/**'
+      - 'scenes/arena_blank.scene.yaml'
+  pull_request:
+    paths:
+      - '.github/workflows/editor-sprite-rectangle-focused.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'docs/editor-sprite-rectangle.md'
+      - 'crates/orr_editor/src/lib.rs'
+      - 'crates/orr_editor/src/sprite_panel.rs'
+      - 'crates/orr_editor/src/sprite_panel/**'
+      - 'crates/orr_editor/src/sprite_rectangle_authoring.rs'
+      - 'crates/orr_editor/src/sprite_rectangle_authoring/**'
+      - 'crates/orr_package/**'
+      - 'crates/orr_sample/**'
+      - 'crates/orr_sprite/**'
+      - 'crates/orr_tilemap/**'
+      - 'assets/sprite_demo/**'
+      - 'scenes/arena_blank.scene.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: editor-sprite-rectangle-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  editor-sprite-rectangle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - name: Create evidence directory
+        env:
+          EVIDENCE_DIR: ${{ runner.temp }}/editor-sprite-rectangle-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE_DIR"
+          printf '%s\n' 'Focused editor sprite rectangle checks; results are written per command.' > "$EVIDENCE_DIR/workflow-status.txt"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Record exact source and prepare Linux toolchain
+        env:
+          EVIDENCE_DIR: ${{ runner.temp }}/editor-sprite-rectangle-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git rev-parse HEAD 'HEAD^{tree}' | tee "$EVIDENCE_DIR/source-commit-and-tree.txt"
+          git status --porcelain=v1 > "$EVIDENCE_DIR/source-status.txt"
+          git archive --format=tar HEAD > "$EVIDENCE_DIR/source.tar"
+          sha256sum "$EVIDENCE_DIR/source.tar" | tee "$EVIDENCE_DIR/source-archive-sha256.txt"
+          uname -a | tee "$EVIDENCE_DIR/platform.txt"
+          hostname | tee "$EVIDENCE_DIR/runner-hostname.txt"
+          rustup toolchain install 1.99.1 --profile minimal --component clippy 2>&1 | tee "$EVIDENCE_DIR/rustup.log"
+          rustup override set 1.99.1
+          rustc --version --verbose | tee "$EVIDENCE_DIR/rustc.txt"
+          cargo --version --verbose | tee "$EVIDENCE_DIR/cargo.txt"
+          sudo apt-get update -q 2>&1 | tee "$EVIDENCE_DIR/dependencies.log"
+          sudo apt-get install -y -q pkg-config libasound2-dev libudev-dev libx11-dev libxkbcommon-dev libwayland-dev 2>&1 | tee -a "$EVIDENCE_DIR/dependencies.log"
+      - name: Run focused rectangle, grid, package, and install checks
+        env:
+          EVIDENCE_DIR: ${{ runner.temp }}/editor-sprite-rectangle-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          CARGO_TARGET_DIR: ${{ runner.temp }}/editor-sprite-rectangle-${{ github.run_id }}-${{ github.run_attempt }}
+        shell: python {0}
+        run: |
+          import json, os, re, subprocess
+          from collections import Counter
+          from pathlib import Path
+
+          evidence = Path(os.environ['EVIDENCE_DIR'])
+          results = []
+          observed_tests = []
+          expected_executions = 0
+          rectangle = 'sprite-rectangle-authoring'
+          rectangle_full = f'{rectangle},tilemap'
+          grid = 'sprite-grid-authoring'
+          full = f'{grid},tilemap'
+          install = 'sprite-package-install'
+
+          def save_results(summary=None):
+              payload = {'commands': results}
+              if summary is not None:
+                  payload['test_summary'] = summary
+              (evidence / 'results.json').write_text(json.dumps(payload, indent=2), encoding='utf-8')
+
+          def run(label, command, expected_tests=None):
+              global expected_executions
+              log_path = evidence / f'{label}.log'
+              with log_path.open('w', encoding='utf-8') as log:
+                  process = subprocess.Popen(
+                      command,
+                      stdout=subprocess.PIPE,
+                      stderr=subprocess.STDOUT,
+                      text=True,
+                      encoding='utf-8',
+                      errors='replace',
+                      bufsize=1,
+                  )
+                  lines = []
+                  for line in process.stdout:
+                      print(line, end='', flush=True)
+                      log.write(line)
+                      log.flush()
+                      lines.append(line)
+                  code = process.wait()
+
+              output = ''.join(lines)
+              result = {
+                  'label': label,
+                  'command': command,
+                  'exit': code,
+                  'ok': code == 0,
+              }
+              if expected_tests is not None:
+                  expected_executions += expected_tests
+                  summaries = [
+                      (status, int(passed), int(failed), int(ignored), int(measured))
+                      for status, passed, failed, ignored, measured in re.findall(
+                          r'^test result: (\w+)\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured;',
+                          output,
+                          re.M,
+                      )
+                  ]
+                  running = [int(count) for count in re.findall(r'^running (\d+) tests?$', output, re.M)]
+                  events = re.findall(r'^test (\S+) \.\.\. (.+)$', output, re.M)
+                  statuses = Counter()
+                  names = []
+                  for name, detail in events:
+                      status = detail.split(',', 1)[0].strip()
+                      names.append(name)
+                      statuses[status] += 1
+                      observed_tests.append({
+                          'package': command[command.index('-p') + 1],
+                          'name': name,
+                          'status': status,
+                          'run': label,
+                      })
+                  package = command[command.index('-p') + 1]
+                  namespaced = [f'{package}:{name}' for name in names]
+                  inventory_ok = (
+                      summaries == [('ok', expected_tests, 0, 0, 0)]
+                      and running == [expected_tests]
+                      and len(events) == expected_tests
+                      and len(set(names)) == expected_tests
+                      and statuses['ok'] == expected_tests
+                      and statuses['ignored'] == 0
+                      and statuses['FAILED'] == 0
+                      and statuses['failed'] == 0
+                      and len(statuses) == (1 if expected_tests else 0)
+                  )
+                  result.update({
+                      'expected_tests': expected_tests,
+                      'running': running,
+                      'summaries': summaries,
+                      'status_counts': dict(statuses),
+                      'observed_test_names': names,
+                      'test_inventory_ok': inventory_ok,
+                  })
+                  result['ok'] = result['ok'] and inventory_ok
+              results.append(result)
+              save_results()
+              return result['ok']
+
+          def tests(label, package, selector, expected, features=None):
+              command = ['cargo', 'test', '--locked', '-p', package]
+              if features:
+                  command += ['--features', features]
+              command += ['--lib']
+              if selector:
+                  command += [selector]
+              command += ['--', '--test-threads=1']
+              run(label, command, expected)
+
+          # Rectangle tests: Linux runs 12 backend tests (one additional test is cfg(windows)),
+          # eight headless UI tests in each profile, and one Linux-only consumer integration.
+          tests('rectangle-backend-minimal', 'orr_editor', 'sprite_rectangle_authoring::tests::', 12, rectangle)
+          tests('rectangle-ui-minimal', 'orr_editor', 'sprite_panel::rectangle_package_ui::tests::', 8, rectangle)
+          tests('rectangle-backend-tilemap', 'orr_editor', 'sprite_rectangle_authoring::tests::', 12, rectangle_full)
+          tests('rectangle-ui-tilemap', 'orr_editor', 'sprite_panel::rectangle_package_ui::tests::', 8, rectangle_full)
+          tests('rectangle-preview-install-load-assign-integration', 'orr_editor', 'sprite_panel::rectangle_package_ui::integration_tests::', 1, rectangle_full)
+
+          # Preserve grid backend and UI regressions in minimal and tilemap profiles.
+          tests('grid-backend-minimal', 'orr_editor', 'sprite_grid_authoring::tests::', 11, grid)
+          tests('grid-ui-minimal', 'orr_editor', 'sprite_panel::grid_package_ui::tests::', 4, grid)
+          tests('grid-backend-tilemap', 'orr_editor', 'sprite_grid_authoring::tests::', 11, full)
+          tests('grid-ui-tilemap', 'orr_editor', 'sprite_panel::grid_package_ui::tests::', 4, full)
+          tests('grid-consumer-integration', 'orr_editor', 'sprite_panel::grid_package_ui::integration_tests::', 2, full)
+
+          # Preserve the local package installer and existing SpritePanel consumer regressions.
+          tests('sprite-package-install-backend', 'orr_editor', 'sprite_package_install::tests::', 10, install)
+          tests('sprite-install-ui', 'orr_editor', 'sprite_panel::package_install_ui::tests::', 4, install)
+          tests('sprite-install-preview-integration', 'orr_editor', 'sprite_panel::package_install_ui::integration_tests::', 2, full)
+          tests('existing-sprite-panel-load-assign-save', 'orr_editor', 'sprite_panel::tests::headless_widgets_assign_remove_save_and_guard_dirty_scene_switch', 1, install)
+          tests('sprite-settings-regression', 'orr_editor', 'sprite_panel::sprite_settings_tests::', 5, full)
+
+          # Exercise the package authoring and PNG decoder crates used by this flow.
+          tests('sprite-package-authoring', 'orr_package', 'sprite_package::', 13, 'sprite-authoring')
+          tests('sprite-png-import', 'orr_sprite', None, 18, 'png-import')
+
+          run(
+              'strict-editor-rectangle-minimal',
+              ['cargo', 'clippy', '--locked', '-p', 'orr_editor', '--features', rectangle, '--lib', '--', '-D', 'warnings'],
+          )
+          run(
+              'strict-editor-rectangle-tilemap',
+              ['cargo', 'clippy', '--locked', '-p', 'orr_editor', '--features', rectangle_full, '--lib', '--', '-D', 'warnings'],
+          )
+          run(
+              'strict-editor-rectangle-off-grid-only',
+              ['cargo', 'clippy', '--locked', '-p', 'orr_editor', '--features', grid, '--lib', '--', '-D', 'warnings'],
+          )
+          run(
+              'strict-editor-rectangle-off-installer-only',
+              ['cargo', 'clippy', '--locked', '-p', 'orr_editor', '--features', install, '--lib', '--', '-D', 'warnings'],
+          )
+          run(
+              'editor-default-feature-off',
+              ['cargo', 'check', '--locked', '-p', 'orr_editor', '--lib'],
+          )
+
+          executions = len(observed_tests)
+          unique_tests = {
+              (entry['package'], entry['name'])
+              for entry in observed_tests
+          }
+          statuses = Counter(entry['status'] for entry in observed_tests)
+          summary = {
+              'expected_executions': expected_executions,
+              'executed': executions,
+              'unique': len(unique_tests),
+              'repeated': executions - len(unique_tests),
+              'ignored': statuses['ignored'],
+              'failed': statuses['FAILED'] + statuses['failed'],
+              'other_status': executions - statuses['ok'] - statuses['ignored'] - statuses['FAILED'] - statuses['failed'],
+              'failed_commands': sum(not result['ok'] for result in results),
+              'tests': observed_tests,
+          }
+          (evidence / 'test-summary.json').write_text(json.dumps(summary, indent=2), encoding='utf-8')
+          save_results(summary)
+          (evidence / 'scope.txt').write_text(
+              'Focused Ubuntu CPU checks cover rectangle backend/UI and Linux preview-install-Load/Assign/reopen integration, existing grid/install regressions, sprite package authoring, PNG import, strict minimal/combined/rectangle-off Clippy profiles, and the default-feature-off editor check. Aggregate test executions, unique tests, repeats, ignored tests, and failures are derived from each command log; every selected command must match its expected count with zero ignored or failed tests. CPU evidence does not establish native GPU rendering, Windows behavior, actual play, video, or export.\n',
+              encoding='utf-8',
+          )
+          if executions != expected_executions or summary['ignored'] != 0 or summary['failed'] != 0 or summary['other_status'] != 0 or summary['failed_commands'] != 0:
+              raise SystemExit('Focused editor sprite rectangle checks failed')
+      - name: Preserve every original result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: editor-sprite-rectangle-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/editor-sprite-rectangle-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error

@@ -73,6 +73,8 @@ pub use model::Target;
 pub(crate) mod sprite_package_install;
 #[cfg(feature = "sprite-grid-authoring")]
 pub(crate) mod sprite_grid_authoring;
+#[cfg(feature = "sprite-rectangle-authoring")]
+pub(crate) mod sprite_rectangle_authoring;
 #[cfg(feature = "sprites")]
 pub mod sprite_bindings;
 #[cfg(feature = "sprites")]
