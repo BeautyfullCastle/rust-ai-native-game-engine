@@ -1,6 +1,10 @@
 #[path = "mesh_camera_panel/projection_match.rs"]
 mod projection_match;
 mod focus_agent;
+#[path="mesh_camera_panel/draft_preview.rs"]
+mod draft_preview;
+#[path="mesh_camera_panel/draft_preview_ui.rs"]
+mod draft_preview_ui;
 
 use crate::{
     backend::HostSpec,
@@ -28,6 +32,7 @@ struct HistoryEntry {
 }
 
 pub(crate) struct Panel {
+    draft_preview: draft_preview::State,
     target: [String; 3],
     follow_agent: bool,
     follow_offset: [String; 3],
@@ -64,6 +69,7 @@ pub(crate) struct Panel {
 impl Default for Panel {
     fn default() -> Self {
         Self {
+            draft_preview: Default::default(),
             target: ["0".into(), "2".into(), "0".into()],
             follow_agent: false,
             follow_offset: ["0".into(), "0".into(), "0".into()],
@@ -104,6 +110,7 @@ impl Default for Panel {
 
 impl Panel {
     pub(crate) fn sync(&mut self, editor: &mut Editor) {
+        self.sync_static_preview(editor);
         if !supports_camera_profile(editor.game()) || !editor.spec().is_local() {
             self.document_pending = true;
             return;
@@ -238,7 +245,7 @@ impl Panel {
                 self.show_focus_agent(ui, editor, match_requested);
                 ui.horizontal_wrapped(|ui| {
                     if ui
-                        .button("Capture viewport as game camera")
+                        .add_enabled(!self.static_preview_enabled() && !self.static_preview_busy(), egui::Button::new("Capture viewport as game camera"))
                         .clicked()
                     {
                         self.capture_viewport(editor);
@@ -253,6 +260,8 @@ impl Panel {
                 });
             });
 
+            self.sync_static_preview(editor);
+            self.show_static_preview_controls(ui, editor, can_edit);
             let history_enabled = self.can_change_history(editor);
             ui.horizontal_wrapped(|ui| {
                 if ui
@@ -501,7 +510,7 @@ impl Panel {
     }
 
     fn can_reset_viewport(&self, editor: &Editor) -> bool {
-        self.can_edit_scene(editor)
+        !self.static_preview_enabled() && !self.static_preview_busy() && self.can_edit_scene(editor)
             && editor.mode() == Mode::Edit
             && editor.can_mutate()
             && !editor.in_gesture()
@@ -543,6 +552,7 @@ impl Panel {
     }
 
     fn capture_viewport(&mut self, editor: &Editor) {
+        if self.static_preview_enabled() || self.static_preview_busy() {self.error=Some("Turn off camera draft preview and release viewport input before capturing".into());return;}
         if !self.can_edit(editor) {
             self.error = Some("Capture requires the matching editable local mesh scene".into());
             return;
@@ -607,6 +617,7 @@ impl Panel {
     }
 
     fn apply(&mut self, editor: &mut Editor) {
+        self.clear_static_preview();
         if !self.can_edit(editor) {
             self.error = Some("Apply requires the matching editable local mesh scene".into());
             return;
@@ -634,6 +645,7 @@ impl Panel {
     }
 
     fn save(&mut self, editor: &Editor) {
+        self.clear_static_preview();
         if !self.can_save(editor) {
             self.error = Some(
                 "Save requires a clean camera form in its matching editable local scene".into(),
@@ -668,6 +680,7 @@ impl Panel {
     }
 
     fn reload(&mut self, editor: &mut Editor) {
+        self.clear_static_preview();
         if !self.can_reload(editor) || self.dirty() {
             self.error = Some(
                 "Reload requires a clean camera state in the current editable local scene".into(),
@@ -682,6 +695,7 @@ impl Panel {
     }
 
     fn remove(&mut self, editor: &mut Editor) {
+        self.clear_static_preview();
         if !self.can_edit(editor) || self.current_document().is_none() || !self.confirm_remove {
             self.error =
                 Some("Remove requires confirmation and a saved or applied game camera".into());
@@ -714,6 +728,7 @@ impl Panel {
     }
 
     fn discard_changes_and_reload(&mut self, editor: &mut Editor) {
+        self.clear_static_preview();
         if !self.can_discard_changes(editor) || !self.confirm_discard_changes {
             self.error = Some(
                 "Discard requires explicit confirmation in the current editable local scene".into(),
@@ -735,6 +750,7 @@ impl Panel {
     }
 
     fn discard_invalid(&mut self, editor: &mut Editor) {
+        self.clear_static_preview();
         if !self.can_discard_invalid(editor) || !self.confirm_discard_invalid {
             self.error = Some(
                 "Discard requires explicit confirmation for the unchanged invalid camera sidecar"
@@ -775,6 +791,7 @@ impl Panel {
     }
 
     fn undo(&mut self, editor: &mut Editor) {
+        self.clear_static_preview();
         if self.cursor == 0 {
             return;
         }
@@ -784,6 +801,7 @@ impl Panel {
     }
 
     fn redo(&mut self, editor: &mut Editor) {
+        self.clear_static_preview();
         if self.cursor + 1 >= self.history.len() {
             return;
         }
@@ -793,6 +811,7 @@ impl Panel {
     }
 
     fn restore_current(&mut self, editor: &mut Editor) {
+        self.clear_static_preview();
         let document = self.current_document().cloned();
         let result = match document {
             Some(document) => editor.install_mesh_camera(document),
@@ -809,6 +828,7 @@ impl Panel {
     }
 
     fn load_context(&mut self, scene: &Path, graph_revision: [u8; 32], editor: &mut Editor) {
+        self.clear_static_preview();
         if editor.has_mesh_camera() {
             editor.clear_mesh_camera();
         }
@@ -963,6 +983,7 @@ impl Panel {
     }
 
     fn reset_history(&mut self, document: Option<Document>, saved_id: Option<u64>) {
+        self.clear_static_preview();
         self.history.clear();
         self.history.push(HistoryEntry { id: 0, document });
         self.cursor = 0;
@@ -975,6 +996,7 @@ impl Panel {
     }
 
     fn push_state(&mut self, document: Option<Document>) {
+        self.clear_static_preview();
         if self.current_document() == document.as_ref() {
             return;
         }
@@ -1099,3 +1121,10 @@ mod tests;
 #[cfg(test)]
 #[path = "mesh_camera_panel/projection_match_tests.rs"]
 mod projection_match_tests;
+
+#[cfg(all(test,target_os="linux",feature="mesh-mission"))]
+#[path="mesh_camera_panel/draft_preview_ui_tests.rs"]
+mod draft_preview_ui_tests;
+#[cfg(all(test,target_os="linux",feature="mesh-mission"))]
+#[path="mesh_camera_panel/draft_preview_integration_tests.rs"]
+mod draft_preview_integration_tests;

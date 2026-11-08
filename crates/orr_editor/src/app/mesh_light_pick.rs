@@ -24,6 +24,7 @@ impl EditorApp {
         self.mesh_lighting.cancel_pick();
     }
     fn mesh_light_pick_blocked(&self, ctx: &egui::Context) -> bool {
+        if self.mesh_camera_preview_owns_input() { return true; }
         #[cfg(all(windows, target_arch = "x86_64", feature = "windows-projects"))]
         if self.windows_projects.busy() {
             return true;
@@ -147,7 +148,7 @@ impl EditorApp {
             self.cancel_mesh_light_pick();
         }
         self.mesh_lighting.sync_viewport_pick(&self.editor);
-        let owned = self.mesh_light_pick_owns_input();
+        let owned = self.mesh_light_pick_owns_input() || self.mesh_camera_preview_owns_input();
         self.mesh_lighting.set_viewport_pick_busy(owned);
         self.mesh_light_pick_blocks_scroll(ctx);
     }

@@ -11,7 +11,7 @@ impl Panel {
         // Do not let a second action hide a same-frame projection-match failure.
         if ui
             .add_enabled(
-                self.can_edit(editor) && !self.follow_agent && !projection_match_requested,
+                self.can_edit(editor) && !self.follow_agent && !projection_match_requested && !self.static_preview_enabled() && !self.static_preview_busy(),
                 egui::Button::new("Aim target at mesh agent"),
             )
             .clicked()
@@ -23,6 +23,7 @@ impl Panel {
 
     fn aim_at_agent(&mut self, editor: &Editor) {
         let result = (|| {
+            if self.static_preview_enabled() || self.static_preview_busy() {return Err("Turn off camera draft preview and release viewport input before aiming".to_owned());}
             if !self.can_edit(editor) {
                 return Err(
                     "Aim requires the matching editable local mesh scene and graph".to_owned(),
