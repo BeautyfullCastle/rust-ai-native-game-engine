@@ -756,6 +756,7 @@ fn source_lock_and_live_context_changes_refuse_install_without_replacing_active_
     let mut duplicate_manifest: serde_json::Value =
         serde_json::from_slice(&original_manifest).unwrap();
     duplicate_manifest["name"] = "sample-sprites".into();
+    duplicate_manifest["version"] = "1.0.1".into();
     fs::write(
         &manifest_path,
         serde_json::to_vec_pretty(&duplicate_manifest).unwrap(),
