@@ -48,6 +48,7 @@ impl Panel {
             || self.kind != ModelKind::Static
             || self.static_uv.enabled
             || self.static_assembly.enabled
+            || self.static_pivot.enabled
             || self.color_variant_enabled
             || self.texture_variant_enabled
             || self.trim.enabled
@@ -124,6 +125,7 @@ impl Panel {
         {
             self.static_uv.enabled = false;
             self.static_assembly.enabled = false;
+            self.static_pivot.enabled = false;
             self.color_variant_enabled = false;
             self.texture_variant_enabled = false;
             self.trim.enabled = false;

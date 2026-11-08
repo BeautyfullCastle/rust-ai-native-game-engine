@@ -85,6 +85,7 @@ impl Panel {
             self.inspection.status.clear();
             self.inspected_hash = None;
             self.static_assembly.source_sha256 = None;
+            self.static_pivot.source_sha256 = None;
             self.glb_subtree.node_index = None;
         }
         let result = match self
@@ -176,6 +177,7 @@ impl Panel {
                     "Inspecting source on a read-only worker...".into();
                 self.inspected_hash = None;
                 self.static_assembly.source_sha256 = None;
+                self.static_pivot.source_sha256 = None;
             }
             Err(error) => {
                 self.inspection.status = format!("Cannot start source inspection: {error}")

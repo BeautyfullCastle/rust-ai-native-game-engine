@@ -66,6 +66,7 @@ impl Panel {
             || self.kind != ModelKind::Static
             || self.static_texture.enabled
             || self.static_assembly.enabled
+            || self.static_pivot.enabled
             || self.color_variant_enabled
             || self.texture_variant_enabled
             || self.trim.enabled
@@ -161,6 +162,7 @@ impl Panel {
         if ui.checkbox(&mut self.static_uv.enabled, "Create static UV variant").changed() && self.static_uv.enabled {
             self.static_texture.enabled = false;
             self.static_assembly.enabled = false;
+            self.static_pivot.enabled = false;
         }
         if self.static_uv.enabled {
             ui.label(

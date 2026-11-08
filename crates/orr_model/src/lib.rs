@@ -12,6 +12,10 @@ pub mod import;
 pub mod extract;
 
 #[cfg(feature = "import")]
+#[path = "authoring/static_pivot.rs"]
+pub mod static_pivot;
+
+#[cfg(feature = "import")]
 #[path = "authoring/static_assemble.rs"]
 pub mod static_assemble;
 
