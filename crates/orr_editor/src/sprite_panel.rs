@@ -14,6 +14,8 @@ use std::{
 };
 
 mod clip_timing;
+#[cfg(feature = "sprite-package-install")]
+mod package_install_ui;
 #[cfg(feature = "sprite-grid-authoring")]
 mod grid_package_ui;
 
@@ -42,6 +44,8 @@ pub struct SpritePanel {
     #[cfg(all(feature = "image-reimport", target_os = "linux", target_arch = "x86_64"))]
     pub replacement_version: String,
     timing: clip_timing::State,
+    #[cfg(feature = "sprite-package-install")]
+    package_install: package_install_ui::State,
     #[cfg(feature = "sprite-grid-authoring")]
     grid_package: grid_package_ui::State,
     preview_playing: bool,
@@ -68,6 +72,8 @@ impl Default for SpritePanel {
             #[cfg(all(feature = "image-reimport", target_os = "linux", target_arch = "x86_64"))]
             replacement_version: String::new(),
             timing: clip_timing::State::default(),
+            #[cfg(feature = "sprite-package-install")]
+            package_install: package_install_ui::State::default(),
             #[cfg(feature = "sprite-grid-authoring")]
             grid_package: grid_package_ui::State::default(),
             preview_playing: false,
@@ -533,6 +539,8 @@ impl SpritePanel {
         self.error = result.err();
     }
     pub fn show(&mut self, ui: &mut Ui, editor: &Editor) {
+        #[cfg(feature = "sprite-package-install")]
+        self.poll_package_install(editor);
         #[cfg(feature = "sprite-grid-authoring")]
         self.poll_grid_package(editor);
         self.update_timing(editor);
@@ -567,7 +575,21 @@ impl SpritePanel {
                 ui.label(format!("Scene: {} · Project: {}", b.document().scene, b.document().project));
                 let matches = self.scene_matches(editor);
                 #[cfg(feature = "sprite-grid-authoring")]
-                if matches && editor.spec().is_local() { self.show_grid_package(ui, editor); }
+                if matches && editor.spec().is_local() {
+                    #[cfg(feature = "sprite-package-install")]
+                    let install_busy = self.package_install.blocks_grid();
+                    #[cfg(not(feature = "sprite-package-install"))]
+                    let install_busy = false;
+                    self.show_grid_package(ui, editor, install_busy);
+                }
+                #[cfg(feature = "sprite-package-install")]
+                if matches && editor.spec().is_local() {
+                    #[cfg(feature = "sprite-grid-authoring")]
+                    let authoring_busy = self.grid_package.busy();
+                    #[cfg(not(feature = "sprite-grid-authoring"))]
+                    let authoring_busy = false;
+                    self.show_package_install(ui, editor, authoring_busy);
+                }
                 if !matches { ui.colored_label(Color32::YELLOW, "Scene changed or unavailable. Bindings retained; preview/assignment disabled. Save the old sidecar or explicitly discard/close. Save As does not retarget this sidecar."); }
                 ui.horizontal_wrapped(|ui| {
                     if ui.button("Save bindings").clicked() { let result = self.bindings.as_mut().unwrap().save(); self.report(result); }
