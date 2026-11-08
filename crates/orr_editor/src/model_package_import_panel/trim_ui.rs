@@ -36,6 +36,7 @@ impl Panel {
             || self.kind != ModelKind::Animated
             || self.color_variant_enabled
             || self.texture_variant_enabled
+            || self.sampler.enabled
         {
             return Err("Choose only cooked animated clip trim mode".into());
         }
@@ -118,6 +119,7 @@ impl Panel {
             .changed()
             && self.trim.enabled
         {
+            self.sampler.enabled = false;
             self.color_variant_enabled = false;
             self.texture_variant_enabled = false;
         }

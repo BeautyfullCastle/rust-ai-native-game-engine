@@ -2626,3 +2626,7 @@ mod editor_animation_trim_tests;
 #[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "room-lighting", feature = "windows-export"))]
 #[path = "package_manager_panel/editor_animation_trim_native_tests.rs"]
 mod editor_animation_trim_native_tests;
+
+#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "room-lighting", feature = "windows-export"))]
+#[path = "package_manager_panel/editor_animated_sampler_tests.rs"]
+mod editor_animated_sampler_tests;

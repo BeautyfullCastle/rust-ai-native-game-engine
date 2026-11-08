@@ -42,13 +42,14 @@ impl Panel {
         {
             return Err("Choose a cooked animated source before previewing".into());
         }
-        let spec = match (self.color_request()?, self.texture_request()?, self.trim_request()?) {
-            (Some(color), None, None) => Spec::Color(color),
-            (None, Some(texture), None) => Spec::Texture(texture),
-            (None, None, Some(trim)) => Spec::Trim(trim),
+        let spec = match (self.color_request()?, self.texture_request()?, self.trim_request()?, self.sampler_request()?) {
+            (Some(color), None, None, None) => Spec::Color(color),
+            (None, Some(texture), None, None) => Spec::Texture(texture),
+            (None, None, Some(trim), None) => Spec::Trim(trim),
+            (None,None,None,Some(sampler)) => Spec::Sampler(sampler),
             _ => {
                 return Err(
-                    "Choose one animated color variant, PNG skin or clip trim before previewing".into(),
+                    "Choose one animated color variant, PNG skin, clip trim or sampler variant before previewing".into(),
                 )
             }
         };
@@ -190,6 +191,7 @@ impl Panel {
         self.kind = ModelKind::Animated;
         self.source = "/held-preview.animated.json".into();
         self.trim = Default::default();
+        self.sampler = Default::default();
         self.color_variant_enabled = true;
         self.texture_variant_enabled = false;
         self.color_variant = super::default_color_variant();
