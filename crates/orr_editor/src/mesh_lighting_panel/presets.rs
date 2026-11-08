@@ -87,6 +87,7 @@ impl Panel {
             Ok((lighting, post_process)) => {
                 // Shadow center/radius belong to the target scene. Do not even
                 // reformat their strings: loading changes reusable fields only.
+                self.invalidate_viewport_pick();
                 self.direction = lighting.direction.map(format_number);
                 self.color = lighting.color.map(format_number);
                 self.intensity = format_number(lighting.intensity);
