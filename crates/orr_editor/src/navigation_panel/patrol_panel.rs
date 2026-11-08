@@ -12,6 +12,8 @@ const MAX_POINTS: usize = 8;
 pub(crate) enum PatrolPickRequest { Pick(usize), Cancel }
 #[path = "patrol_pick.rs"]
 pub(crate) mod patrol_pick;
+#[path="patrol_frame.rs"]
+mod patrol_frame;
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Context {
     scene: PathBuf,
@@ -49,6 +51,8 @@ pub(super) struct State {
     show_inspection: bool,
     retired: std::cell::Cell<bool>,
     order_busy: bool,
+    frame_busy: bool,
+    frame_request: Option<(InspectionPin, super::patrol_routes::Report, EditorGame, u64)>,
 }
 #[derive(Clone)]
 struct InspectionPin {
@@ -131,6 +135,7 @@ impl State {
         self.status="Terrain patrol fields match the current admitted source. Apply, then save the scene explicitly.".into();
     }
     fn clear_inspection(&mut self) {
+        self.frame_request = None;
         self.inspection = None;
         self.show_inspection = false;
         self.retired.set(false);
@@ -306,6 +311,7 @@ impl NavigationPanel {
         if self.patrol.inspection_controls(ui, current.is_ok()) {
             if let Ok((pin, view)) = current {
                 let result = parse(&pin.form, pin.context.pin.graph_revision).and_then(|config| super::patrol_routes::inspect(&view.terrain, &view.graph, &config, pin.context.pin.agent.start));
+                self.patrol.frame_request = None;
                 self.patrol.inspection = Some((pin, result));
                 self.patrol.retired.set(false);
                 self.patrol.show_inspection = false;
@@ -406,6 +412,7 @@ impl NavigationPanel {
             if self.patrol.controls(ui,editable){if let Err(error)=self.apply_patrol(editor,terrain){self.error=Some(format!("Apply terrain patrol failed: {error}"));}}
             if ui.add_enabled(editable,egui::Button::new("Reload terrain patrol fields")).clicked(){if let Ok((context,_))=current {let config=editor.snapshot().and_then(|s|patrol::from_view(s.predicted()).ok().flatten()).map(|v|v.config);self.patrol.load(context,config);}}
             self.show_patrol_inspection(ui, editor, terrain);
+            self.show_patrol_frame_controls(ui, editor, terrain);
             if !self.patrol.status.is_empty(){ui.label(&self.patrol.status);}
         });
     }

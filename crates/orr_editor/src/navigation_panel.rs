@@ -380,3 +380,7 @@ mod patrol_route_overlay_integration_tests;
 #[cfg(all(test,target_os="linux",feature="terrain-patrol"))]
 #[path="navigation_panel/patrol_order_integration_tests.rs"]
 mod patrol_order_integration_tests;
+
+#[cfg(feature="terrain-patrol")]
+#[path="navigation_panel/patrol_frame_points.rs"]
+mod patrol_frame_points;
