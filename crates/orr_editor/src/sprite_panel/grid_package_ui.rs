@@ -341,11 +341,11 @@ impl State {
             }
         }
     }
-    fn show(&mut self, ui: &mut Ui, context: Option<Context>) {
+    fn show(&mut self, ui: &mut Ui, context: Option<Context>, installer_busy: bool) {
         self.sync(context.clone());
         ui.collapsing("Create sprite package from PNG grid", |ui| {
             ui.weak("Inspect a PNG explicitly, then create one regular row-major grid and one named clip, up to 256 cells. No image preview, packing, installation, loading or assignment is performed.");
-            let enabled = context.is_some() && !self.busy() && !self.exhausted();
+            let enabled = context.is_some() && !self.busy() && !self.exhausted() && !installer_busy;
             ui.add_enabled_ui(enabled, |ui| {
                 field(ui, "Sprite grid PNG file", &mut self.draft.png, 4096);
                 field(ui, "Grid cell width", &mut self.draft.cell_width, 10);
@@ -372,6 +372,7 @@ impl State {
                 if ui.add_enabled(!self.busy() && self.rights && self.creation_pin().is_ok(), egui::Button::new("Create sprite grid package")).clicked() { self.start_creation(); }
             });
             if self.busy() { ui.spinner(); }
+            if installer_busy { ui.weak("Sprite package installation is active; wait for it to finish before authoring a grid package."); }
             if !self.status.is_empty() { ui.label(&self.status); }
             if let Some(path) = &self.last_output { ui.label(format!("Last package destination: {}", path.display())); }
         });
@@ -413,9 +414,9 @@ impl SpritePanel {
         let context = self.grid_package_context(editor);
         self.grid_package.poll(context);
     }
-    pub(super) fn show_grid_package(&mut self, ui: &mut Ui, editor: &Editor) {
+    pub(super) fn show_grid_package(&mut self, ui: &mut Ui, editor: &Editor, installer_busy: bool) {
         let context = self.grid_package_context(editor);
-        self.grid_package.show(ui, context);
+        self.grid_package.show(ui, context, installer_busy);
     }
 }
 #[cfg(all(test, target_os = "linux"))]

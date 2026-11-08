@@ -69,6 +69,8 @@ pub use backend::HostSpec;
 pub use editor::{Editor, Mode, Owner};
 pub use model::Target;
 
+#[cfg(feature = "sprite-package-install")]
+pub(crate) mod sprite_package_install;
 #[cfg(feature = "sprite-grid-authoring")]
 pub(crate) mod sprite_grid_authoring;
 #[cfg(feature = "sprites")]
