@@ -202,7 +202,12 @@ impl Panel {
                 .selected_text(self.static_planar.plane.label())
                 .show_ui(ui, |ui| {
                     for plane in [Plane::Xy, Plane::Xz, Plane::Yz] {
-                        ui.selectable_value(&mut self.static_planar.plane, plane, plane.label());
+                        if ui
+                            .selectable_value(&mut self.static_planar.plane, plane, plane.label())
+                            .clicked()
+                        {
+                            ui.close();
+                        }
                     }
                 });
             for (axis, name) in ["X", "Y", "Z"].into_iter().enumerate() {

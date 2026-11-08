@@ -14,6 +14,36 @@ use std::{
 };
 static STAGE_ID: AtomicU64 = AtomicU64::new(0);
 
+// Retain the original private helper for CLI output-name admission as well as
+// the library's independent recipe-path admission.
+fn logical_path(path: &str, suffix: &str) -> Result<(), String> {
+    if path.is_empty()
+        || path.len() > 240
+        || !path.ends_with(suffix)
+        || !path
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-._/".contains(&b))
+    {
+        return Err(format!(
+            "expected a portable relative ASCII {suffix} path of at most 240 bytes"
+        ));
+    }
+    for segment in path.split('/') {
+        let device = segment.split('.').next().unwrap_or("").to_ascii_uppercase();
+        if segment.is_empty()
+            || segment.starts_with('.')
+            || segment.ends_with('.')
+            || ["CON", "PRN", "AUX", "NUL"].contains(&device.as_str())
+            || (device.len() == 4
+                && (device.starts_with("COM") || device.starts_with("LPT"))
+                && device.as_bytes()[3].is_ascii_digit())
+        {
+            return Err("path has an empty, hidden, traversal or reserved device segment".into());
+        }
+    }
+    Ok(())
+}
+
 fn checked_path(path: &Path, output: bool) -> Result<PathBuf, String> {
     if path.as_os_str().is_empty()
         || path

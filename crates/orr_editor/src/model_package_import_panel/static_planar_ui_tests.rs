@@ -251,7 +251,19 @@ fn static_planar_real_used_material_all_planes_invalid_units_and_source_aba() {
     ] {
         h.state_mut().license_acknowledged = true;
         click(&mut h, "Static planar UV plane");
+        for option in ["XY model plane", "XZ model plane", "YZ model plane"] {
+            assert!(
+                h.query_by_label(option).is_some(),
+                "opened plane option {option}"
+            );
+        }
         click(&mut h, label);
+        for option in ["XY model plane", "XZ model plane", "YZ model plane"] {
+            assert!(
+                h.query_by_label(option).is_none(),
+                "dismissed plane option {option}"
+            );
+        }
         assert_eq!(h.state().static_planar.plane, plane);
         assert!(!h.state().license_acknowledged);
         let request = h.state().static_planar_request().unwrap().unwrap();
