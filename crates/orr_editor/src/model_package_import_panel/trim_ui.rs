@@ -37,6 +37,7 @@ impl Panel {
             || self.color_variant_enabled
             || self.texture_variant_enabled
             || self.sampler.enabled
+            || self.sequence.enabled
         {
             return Err("Choose only cooked animated clip trim mode".into());
         }
@@ -120,6 +121,7 @@ impl Panel {
             && self.trim.enabled
         {
             self.sampler.enabled = false;
+            self.sequence.enabled=false;
             self.color_variant_enabled = false;
             self.texture_variant_enabled = false;
         }
