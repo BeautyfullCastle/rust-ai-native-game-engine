@@ -2,10 +2,7 @@
 use super::*;
 use crate::sprite_grid_authoring as backend;
 use orr_sprite::PlaybackMode;
-use std::{
-    path::Path,
-    sync::mpsc::{self, Receiver, TryRecvError},
-};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Context {
