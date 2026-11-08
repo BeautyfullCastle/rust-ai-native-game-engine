@@ -1,3 +1,5 @@
+#[path="model_package_import_panel/sampler_ui.rs"]
+mod sampler_ui;
 #[path="model_package_import_panel/trim_ui.rs"]
 mod trim_ui;
 #[cfg(feature = "room-animated-models")]
@@ -39,6 +41,8 @@ pub struct Panel {
     destination_identity: Option<PathBuf>,
     status: String,
     trim: trim_ui::Controls,
+    sampler: sampler_ui::Controls,
+    submitted_sampler: Option<Option<model_package_import::SamplerVariant>>,
     submitted_trim: Option<Option<model_package_import::TrimVariant>>,
     authoring_generation: u64,
     submitted_authoring_generation: Option<u64>,
@@ -70,6 +74,8 @@ impl Default for Panel {
             destination_identity: None,
             status: String::new(),
             trim: Default::default(),
+            sampler: Default::default(),
+            submitted_sampler: None,
             submitted_trim: None,
             authoring_generation: 0,
             submitted_authoring_generation: None,
@@ -121,6 +127,7 @@ impl Panel {
                 self.submitted_color = None;
                 self.submitted_texture = None;
                 self.submitted_trim = None;
+                self.submitted_sampler = None;
                 self.submitted_authoring_generation = None;
                 self.submitted_inspected_hash = None;
                 self.license_acknowledged = false;
@@ -141,12 +148,14 @@ impl Panel {
             .texture_request()
             .ok()
             .is_some_and(|texture| texture == submitted_texture);
+        let submitted_sampler=self.submitted_sampler.take().unwrap_or(None);
+        let sampler_is_current=self.sampler_request().ok().is_some_and(|value|value==submitted_sampler);
         let submitted_trim = self.submitted_trim.take().unwrap_or(None);
         let trim_is_current = self.trim_request().ok().is_some_and(|trim| trim == submitted_trim);
         let generation_is_current = self.submitted_authoring_generation.take().is_none_or(|generation| generation == self.authoring_generation);
         let inspected_hash_is_current =
             self.submitted_inspected_hash.take().unwrap_or(None) == self.inspected_hash;
-        let is_current = trim_is_current && generation_is_current && inspected_hash_is_current
+        let is_current = sampler_is_current && trim_is_current && generation_is_current && inspected_hash_is_current
             && texture_is_current
             && color_is_current
             && project_root == Some(completion.project_root.as_path())
@@ -222,7 +231,7 @@ impl Panel {
             .default_open(false)
             .show(ui, |ui| {
                 ui.label("Import a local self-contained GLB, cooked static model or cooked animated model and a license file into a new package folder.");
-                ui.label("Cooked import preserves exact bytes unless you explicitly create an animated color variant, PNG skin or trimmed clip. Historical dependencies are not loaded or added to the package.");
+                ui.label("Cooked import preserves exact bytes unless you explicitly create an animated color variant, PNG skin, trimmed clip or sampler variant. Historical dependencies are not loaded or added to the package.");
                 ui.label("External resources, scripts, network access and package activation are not supported.");
                 ui.label("A supplied license file is metadata only; its presence is not legal review or a rights determination.");
                 let fields_enabled = enabled && !self.busy();
@@ -266,8 +275,8 @@ impl Panel {
                     if old_kind != self.kind { self.reset_color_variant(); self.source_inputs_changed(); }
                     if cfg!(feature = "room-animated-models") && self.source_format == SourceFormat::CookedAnimated && self.kind == ModelKind::Animated {
                         let old = (self.color_variant_enabled, self.color_variant.clone(), self.texture_variant_enabled, self.texture_variant.clone());
-                        if ui.checkbox(&mut self.color_variant_enabled, "Create animated color variant").changed() && self.color_variant_enabled { self.texture_variant_enabled=false; self.trim.enabled=false; }
-                        if ui.checkbox(&mut self.texture_variant_enabled, "Create animated PNG skin").changed() && self.texture_variant_enabled { self.color_variant_enabled=false; self.trim.enabled=false; }
+                        if ui.checkbox(&mut self.color_variant_enabled, "Create animated color variant").changed() && self.color_variant_enabled { self.texture_variant_enabled=false; self.trim.enabled=false; self.sampler.enabled=false; }
+                        if ui.checkbox(&mut self.texture_variant_enabled, "Create animated PNG skin").changed() && self.texture_variant_enabled { self.color_variant_enabled=false; self.trim.enabled=false; self.sampler.enabled=false; }
                         if self.color_variant_enabled {
                             ui.weak("Replace one material's linear-light RGB factor (0..1). Texture, alpha and animation stay unchanged; this is not an sRGB color picker.");
                             ui.horizontal(|ui| { let label=ui.label("Variant material index");
@@ -290,6 +299,7 @@ impl Panel {
                         if old != (self.color_variant_enabled,self.color_variant.clone(),self.texture_variant_enabled,self.texture_variant.clone()) { self.source_inputs_changed(); }
                     }
                     self.show_trim_controls(ui);
+                    self.show_sampler_controls(ui);
                     self.show_source_inspection(ui,project_root,project_generation,source_generation);
                     ui.checkbox(
                         &mut self.license_acknowledged,
@@ -322,7 +332,8 @@ impl Panel {
                     && compatible_kind
                     && self.color_request().is_ok()
                     && self.texture_request().is_ok()
-                    && self.trim_request().is_ok();
+                    && self.trim_request().is_ok()
+                    && self.sampler_request().is_ok();
                 let import_label = match self.source_format {
                     SourceFormat::RawGlb => "Import raw GLB package",
                     SourceFormat::CookedStatic => "Import cooked static package",
@@ -368,6 +379,8 @@ impl Panel {
         if self.authoring_generation == u64::MAX { self.status="Authoring generation exhausted; reopen the panel".into(); return; }
         let trim = match self.trim_request() { Ok(trim) => trim, Err(error) => { self.status=error; return; } };
         let submitted_trim = trim.clone();
+        let sampler=match self.sampler_request(){Ok(value)=>value,Err(error)=>{self.status=error;return;}};
+        let submitted_sampler=sampler.clone();
         let color = match self.color_request() {
             Ok(color) => color,
             Err(error) => {
@@ -393,8 +406,8 @@ impl Panel {
             .name("orr-model-package-import".into())
             .spawn(move || {
                 let expected_destination = request_destination(&request.destination);
-                let result = match (color, texture, trim) {
-                    (Some(color), None, None) => match expected_hash {
+                let result = match (color, texture, trim, sampler) {
+                    (Some(color), None, None, None) => match expected_hash {
                         Some(hash) => model_package_import::import_color_variant_checked(
                             request,
                             color,
@@ -402,7 +415,7 @@ impl Panel {
                         ),
                         None => model_package_import::import_color_variant(request, color),
                     },
-                    (None, Some(texture), None) => match expected_hash {
+                    (None, Some(texture), None, None) => match expected_hash {
                         Some(hash) => model_package_import::import_texture_variant_checked(
                             request,
                             texture,
@@ -410,8 +423,9 @@ impl Panel {
                         ),
                         None => model_package_import::import_texture_variant(request, texture),
                     },
-                    (None, None, Some(trim)) => match expected_hash { Some(hash) => model_package_import::import_trim_variant_checked(request, trim, Some(hash)), None => model_package_import::import_trim_variant(request, trim) },
-                    (None, None, None) => model_package_import::import_package(request),
+                    (None, None, Some(trim), None) => match expected_hash { Some(hash) => model_package_import::import_trim_variant_checked(request, trim, Some(hash)), None => model_package_import::import_trim_variant(request, trim) },
+                    (None, None, None, Some(sampler)) => match expected_hash {Some(hash)=>model_package_import::import_sampler_variant_checked(request,sampler,Some(hash)),None=>model_package_import::import_sampler_variant(request,sampler)},
+                    (None, None, None, None) => model_package_import::import_package(request),
                     _ => Err("Select only one animated authoring operation".into()),
                 };
                 let _ = sender.send(Completion {
@@ -427,6 +441,7 @@ impl Panel {
                 self.destination_identity = None;
                 self.pending = Some(receiver);
                 self.submitted_trim = Some(submitted_trim);
+                self.submitted_sampler = Some(submitted_sampler);
                 self.submitted_authoring_generation = Some(self.authoring_generation);
                 self.submitted_color = Some(submitted_color);
                 self.submitted_texture = Some(submitted_texture);
@@ -480,6 +495,7 @@ impl Panel {
         self.close_variant_preview();
         self.inspection.invalidate();
         self.trim = Default::default();
+        self.sampler = Default::default();
         self.color_variant_enabled = false;
         self.color_variant = default_color_variant();
         self.texture_variant_enabled = false;
@@ -490,7 +506,7 @@ impl Panel {
         if !self.texture_variant_enabled {
             return Ok(None);
         }
-        if self.color_variant_enabled || self.trim.enabled
+        if self.color_variant_enabled || self.trim.enabled || self.sampler.enabled
             || !cfg!(feature = "room-animated-models")
             || self.source_format != SourceFormat::CookedAnimated
             || self.kind != ModelKind::Animated
@@ -509,7 +525,7 @@ impl Panel {
     }
 
     fn color_request(&self) -> Result<Option<ColorVariant>, String> {
-        if self.color_variant_enabled && (self.texture_variant_enabled || self.trim.enabled) {
+        if self.color_variant_enabled && (self.texture_variant_enabled || self.trim.enabled || self.sampler.enabled) {
             return Err("Select only one animated authoring operation".into());
         }
         if !self.color_variant_enabled {
