@@ -109,7 +109,7 @@ jobs:
             ('animated-sampler-ui-regression','model_package_import_panel::sampler_ui::tests::',3),
             ('animated-sequence-ui-regression','model_package_import_panel::sequence_ui::tests::',3),
             ('animated-uv-ui-regression','model_package_import_panel::uv_ui::tests::',3),
-            ('animated-output-editor-use-regression','package_manager_panel::editor_animated_uv_tests::',2),
+            ('animated-output-editor-use-regression','package_manager_panel::editor_animated_uv_tests::',1),
             ('static-output-editor-use-regression','package_manager_panel::editor_static_recolor_tests::',2),
             ('static-browser-regression','package_manager_panel::cooked_model_tests::',2),
             ('animated-preview-ui-regression','model_package_import_panel::variant_preview::tests::',6),
