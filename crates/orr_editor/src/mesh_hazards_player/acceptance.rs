@@ -611,13 +611,11 @@ fn hazards_camera_delivery_scenario(backend: Option<wgpu::Backend>, evidence: Op
             })
     };
     settle(&mut player_harness);
-    if rendered {
-        // Slow only this software-rendered synthetic-input test so the click
-        // event is delivered before the deterministic mission reaches an end.
-        player_harness.state_mut().inner.editor.set_speed(0.25);
-        player_harness.state_mut().inner.editor.sync();
-        player_harness.step();
-    }
+    // Pace synthetic input in both CPU and rendered runs before the mission
+    // reaches an end; simulation ticks and gameplay assertions are unchanged.
+    player_harness.state_mut().inner.editor.set_speed(0.25);
+    player_harness.state_mut().inner.editor.sync();
+    player_harness.step();
     if let Some(evidence) = evidence {
         capture(
             &mut player_harness,
@@ -728,6 +726,10 @@ fn hazards_camera_delivery_scenario(backend: Option<wgpu::Backend>, evidence: Op
         );
     }
 
+    // Restart creates a fresh session, so restore the same synthetic-input pace.
+    player_harness.state_mut().inner.editor.set_speed(0.25);
+    player_harness.state_mut().inner.editor.sync();
+    player_harness.step();
     click(&mut player_harness, "Resume");
     click(&mut player_harness, "Enable mesh goal input");
     wait_for(&mut player_harness, "managed input reenabled", |app| {
