@@ -16,6 +16,10 @@ pub mod extract;
 pub mod static_pivot;
 
 #[cfg(feature = "import")]
+#[path = "authoring/static_sampler.rs"]
+pub mod static_sampler;
+
+#[cfg(feature = "import")]
 #[path = "authoring/static_assemble.rs"]
 pub mod static_assemble;
 
