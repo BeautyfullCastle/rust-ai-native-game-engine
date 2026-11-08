@@ -1,3 +1,10 @@
+#[path = "model_package_import/static_pivot.rs"]
+mod static_pivot;
+pub(crate) use static_pivot::{
+    import_static_pivot_variant, import_static_pivot_variant_checked,
+    validate_static_pivot_variant, StaticPivotVariant,
+};
+use static_pivot::static_pivot_variant_bytes;
 #[path = "model_package_import/glb_subtree.rs"]
 mod glb_subtree;
 pub(crate) use glb_subtree::{
@@ -125,6 +132,7 @@ pub(crate) struct TrimVariant {
 }
 
 enum AuthoringVariant {
+    StaticPivot(StaticPivotVariant),
     GlbSubtree(GlbSubtreeVariant),
     Color(ColorVariant),
     Texture(TextureVariant),
@@ -481,6 +489,7 @@ fn import_package_inner(
 
     if let Some(variant) = variant {
         let bytes = match variant {
+            AuthoringVariant::StaticPivot(spec) => static_pivot_variant_bytes(&source.bytes, &spec)?,
             AuthoringVariant::GlbSubtree(spec) => glb_subtree_variant_bytes(&source.bytes, &spec)?,
             AuthoringVariant::Color(spec) => color_variant_bytes(&source.bytes, &spec)?,
             AuthoringVariant::Trim(spec) => trim_variant_bytes(&source.bytes, &spec)?,
