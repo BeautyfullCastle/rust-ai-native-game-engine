@@ -3,7 +3,10 @@
 #![cfg(feature = "mesh-mission")]
 use super::*;
 use crate::{game::EditorGame, mesh_lighting::Document};
-use egui_kittest::{kittest::Queryable, Harness};
+use egui_kittest::{
+    kittest::{NodeT, Queryable},
+    Harness,
+};
 use std::path::PathBuf;
 
 const SIZE: (u32, u32) = (800, 600);
@@ -135,13 +138,22 @@ impl Fixture {
         consumed
     }
     fn click(&mut self, available: bool) -> bool {
-        self.step(vec![button(true)], Some(available), false);
-        self.step(vec![button(false)], Some(available), false)
+        self.click_at(rect().center(), available)
+    }
+    fn click_at(&mut self, pos: egui::Pos2, available: bool) -> bool {
+        // egui hit-tests the previous pass's widget tree. Install the synthetic
+        // viewport response before pressing, including after a no-response frame.
+        self.step(vec![egui::Event::PointerMoved(pos)], Some(available), false);
+        self.step(vec![button_at(pos, true)], Some(available), false);
+        self.step(vec![button_at(pos, false)], Some(available), false)
     }
 }
 fn button(pressed: bool) -> egui::Event {
+    button_at(rect().center(), pressed)
+}
+fn button_at(pos: egui::Pos2, pressed: bool) -> egui::Event {
     egui::Event::PointerButton {
-        pos: rect().center(),
+        pos,
         button: egui::PointerButton::Primary,
         pressed,
         modifiers: egui::Modifiers::NONE,
@@ -190,6 +202,62 @@ fn final_frame_gate_and_failed_draw_cancel_before_draft_staging() {
             );
             assert_eq!(f.app.point_light_settings_for_frame().unwrap(), applied);
             unchanged(&f, checksum, &history, &files);
+            // Positive control uses the same App click helper with a fresh ticket
+            // and a projected, noncentral ground point in the offset viewport.
+            f.arm();
+            let pixel = camera().world_to_screen([2.0, 0.0, -1.0], SIZE).unwrap();
+            let pos = rect().min
+                + egui::vec2(
+                    pixel[0] * rect().width() / SIZE.0 as f32,
+                    pixel[1] * rect().height() / SIZE.1 as f32,
+                );
+            assert!(rect().contains(pos));
+            assert!(
+                f.click_at(pos, true),
+                "fresh successful stage consumes click"
+            );
+            assert!(!f.app.mesh_light_pick_pending());
+            assert!(f.app.mesh_lighting.dirty());
+            assert_eq!(f.app.point_light_settings_for_frame().unwrap(), applied);
+            unchanged(&f, checksum, &history, &files);
+            let mut h = Harness::builder()
+                .with_size([1400.0, 2800.0])
+                .build_ui_state(
+                    |ui, f: &mut Fixture| {
+                        f.app.mesh_lighting.show_with_navigation(
+                            ui,
+                            &f.app.editor,
+                            &f.app.mesh_navigation,
+                        );
+                    },
+                    f,
+                );
+            h.run_steps(3);
+            h.get_by_label("Mesh game lighting").click_accesskit();
+            h.run_steps(3);
+            h.get_by_label("Point light settings").click_accesskit();
+            h.run_steps(3);
+            let height = applied.point_light.unwrap().position[1];
+            for (label, expected) in [
+                ("Point light position X", 2.0),
+                ("Point light position Y", height),
+                ("Point light position Z", -1.0),
+            ] {
+                let actual: f32 = h
+                    .get_by_label(label)
+                    .accesskit_node()
+                    .value()
+                    .unwrap()
+                    .replace('\u{2212}', "-")
+                    .parse()
+                    .unwrap();
+                assert!((actual - expected).abs() < 0.002, "{label}: {actual}");
+            }
+            assert_eq!(
+                h.state().app.point_light_settings_for_frame().unwrap(),
+                applied
+            );
+            unchanged(h.state(), checksum, &history, &files);
         }
     }
 }
