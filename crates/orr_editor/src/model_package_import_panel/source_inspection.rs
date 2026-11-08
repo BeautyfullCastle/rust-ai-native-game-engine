@@ -9,6 +9,7 @@ struct Identity {
     generation: u64,
     kind: ModelKind,
     format: SourceFormat,
+    revision: u64,
 }
 #[derive(Default)]
 pub(super) struct State {
@@ -16,6 +17,7 @@ pub(super) struct State {
     pending: Option<Receiver<(Identity, Result<Catalog, String>)>>,
     catalog: Option<Catalog>,
     status: String,
+    revision: u64,
 }
 impl State {
     pub(super) fn catalog(&self) -> Option<&Catalog> { self.catalog.as_ref() }
@@ -28,6 +30,7 @@ impl State {
         self.pending.is_some()
     }
     pub(super) fn invalidate(&mut self) {
+        self.revision = self.revision.saturating_add(1);
         self.identity = None;
         self.catalog = None;
         self.status.clear();
@@ -42,7 +45,7 @@ impl Panel {
     ) -> Option<Identity> {
         let supported = (self.source_format == SourceFormat::CookedStatic && self.kind == ModelKind::Static)
             || (cfg!(feature = "room-animated-models") && self.source_format == SourceFormat::CookedAnimated && self.kind == ModelKind::Animated);
-        if !supported || self.source.trim().is_empty()
+        if !supported || self.source.trim().is_empty() || self.inspection.revision == u64::MAX
         {
             return None;
         }
@@ -53,11 +56,16 @@ impl Panel {
             generation,
             kind: self.kind,
             format: self.source_format,
+            revision: self.inspection.revision,
         })
     }
     pub(super) fn sync_inspection(&mut self, root: Option<&Path>, project: u64, generation: u64) {
-        let current = self.inspection_identity(root, project, generation);
+        let mut current = self.inspection_identity(root, project, generation);
         if self.inspection.identity != current {
+            if self.inspection.identity.is_some() {
+                self.inspection.revision = self.inspection.revision.saturating_add(1);
+                current = self.inspection_identity(root, project, generation);
+            }
             if self.inspection.identity.as_ref().is_some_and(|id| id.format == SourceFormat::CookedStatic) {
                 self.source_inputs_changed();
             }
@@ -65,6 +73,7 @@ impl Panel {
             self.inspection.catalog = None;
             self.inspection.status.clear();
             self.inspected_hash = None;
+            self.static_assembly.source_sha256 = None;
         }
         let result = match self
             .inspection
@@ -91,7 +100,7 @@ impl Panel {
             match result {
                 Ok(catalog) => {
                     self.inspection.catalog = Some(catalog);
-                    self.inspection.status="Inspection is read-only; choose an authoring operation and a used material. License acknowledgement is still required.".into();
+                    self.inspection.status="Inspection is read-only; choose an authoring operation and its source or used material. License acknowledgement is still required.".into();
                 }
                 Err(error) => {
                     self.inspection.catalog = None;
@@ -126,6 +135,7 @@ impl Panel {
                 self.inspection.status =
                     "Inspecting source on a read-only worker...".into();
                 self.inspected_hash = None;
+                self.static_assembly.source_sha256 = None;
             }
             Err(error) => {
                 self.inspection.status = format!("Cannot start source inspection: {error}")

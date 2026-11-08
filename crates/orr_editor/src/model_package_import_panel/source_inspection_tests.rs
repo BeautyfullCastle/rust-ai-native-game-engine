@@ -47,6 +47,57 @@ fn catalog() -> Catalog {
         }],
     }
 }
+
+#[test]
+fn static_assembly_inspection_revision_rejects_pending_source_aba_and_exhaustion() {
+    let root = Some(Path::new("/project"));
+    for invalidate in [false, true] {
+        let mut p = Panel::default();
+        p.set_source_format(SourceFormat::CookedStatic);
+        p.source = "/input.model.json".into();
+        p.static_assembly.enabled = true;
+        let identity = p.inspection_identity(root, 4, 7).unwrap();
+        p.inspection.identity = Some(identity.clone());
+        let (sender, receiver) = mpsc::channel();
+        p.inspection.pending = Some(receiver);
+        if invalidate {
+            p.inspection.invalidate();
+        } else {
+            p.source = "/other.model.json".into();
+            p.sync_inspection(root, 4, 7);
+            p.source = "/input.model.json".into();
+        }
+        // Keep the receiver while stale work runs: another inspect cannot start.
+        assert!(p.busy());
+        p.start_source_inspection(root, 4, 7);
+        assert!(p.busy());
+        sender.send((identity, Ok(catalog()))).unwrap();
+        p.sync_inspection(root, 4, 7);
+        assert!(!p.busy());
+        assert!(p.inspection.catalog.is_none());
+        assert!(p.inspected_hash.is_none());
+        assert!(p.static_assembly.source_sha256.is_none());
+        assert!(p.static_assembly_request().is_err());
+    }
+    let mut p = Panel::default();
+    p.set_source_format(SourceFormat::CookedStatic);
+    p.source = "/input.model.json".into();
+    p.inspection.revision = u64::MAX - 1;
+    let identity = p.inspection_identity(root, 4, 7).unwrap();
+    let (sender, receiver) = mpsc::channel();
+    p.inspection.identity = Some(identity.clone());
+    p.inspection.pending = Some(receiver);
+    p.inspection.invalidate();
+    p.inspection.invalidate();
+    assert_eq!(p.inspection.revision, u64::MAX);
+    assert!(p.inspection_identity(root, 4, 7).is_none());
+    sender.send((identity, Ok(catalog()))).unwrap();
+    p.sync_inspection(root, 4, 7);
+    p.start_source_inspection(root, 4, 7);
+    assert!(!p.busy());
+    assert!(p.inspection.catalog.is_none());
+    assert!(p.inspected_hash.is_none());
+}
 fn harness(p: Panel) -> Harness<'static, Panel> {
     let mut h = Harness::builder()
         .with_size([1600.0, 2000.0])
