@@ -1,0 +1,118 @@
+name: Editor PNG sprite grid focused CI
+on:
+  push:
+    branches: [codex/editor-sprite-grid-20261108]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: editor-sprite-grid-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  editor-sprite-grid:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Record exact source and prepare Linux toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir ci-evidence
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git rev-parse HEAD HEAD^{tree} | tee ci-evidence/source.txt
+          git status --porcelain=v1 > ci-evidence/source-status.txt
+          git archive --format=tar HEAD > ci-evidence/source.tar
+          rustup toolchain install 1.99.1 --profile minimal --component clippy
+          rustup override set 1.99.1
+          rustc --version --verbose | tee ci-evidence/rustc.txt
+          uname -a | tee ci-evidence/platform.txt
+          hostname | tee ci-evidence/runner-hostname.txt
+          sudo apt-get update -q 2>&1 | tee ci-evidence/dependencies.log
+          sudo apt-get install -y -q pkg-config libasound2-dev libudev-dev libx11-dev libxkbcommon-dev libwayland-dev 2>&1 | tee -a ci-evidence/dependencies.log
+      - name: Collect sprite grid authoring and consumer checks
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/editor-sprite-grid-${{ github.run_id }}-${{ github.run_attempt }}
+        shell: python {0}
+        run: |
+          import hashlib,json,os,re,subprocess
+          from pathlib import Path
+          evidence=Path('ci-evidence');results=[]
+          full='sprite-grid-authoring,tilemap'
+          def run(label,command,count=None):
+              with (evidence/(label+'.log')).open('w') as log:
+                  p=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+                  lines=[]
+                  for line in p.stdout:
+                      print(line,end='',flush=True);log.write(line);log.flush();lines.append(line)
+                  code=p.wait()
+              text=''.join(lines);ok=code==0
+              if count is not None:
+                  summary=re.findall(r'^test result: (\w+)\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured;',text,re.M)
+                  names=re.findall(r'^test (\S+) \.\.\. ok$',text,re.M)
+                  running=re.findall(r'^running (\d+) tests?$',text,re.M)
+                  ok=ok and summary==[('ok',str(count),'0','0','0')] and len(names)==len(set(names))==count and running==[str(count)]
+              results.append(dict(label=label,command=command,exit=code,ok=ok,expected=count))
+              (evidence/'results.json').write_text(json.dumps(results,indent=2))
+              return ok
+          def tests(label,selector,count):
+              if not libtest_ready:
+                  results.append(dict(label=label,ok=False,expected=count,unrun='Editor libtest compilation failed'));return
+              run(label,['cargo','test','--locked','-p','orr_editor','--features',full,'--lib',selector,'--','--test-threads=1'],count)
+          run('core-sprite-authoring',['cargo','test','--locked','-p','orr_package','--features','sprite-authoring','--lib','sprite_package::','--','--test-threads=1'],13)
+          run('strict-package',['cargo','clippy','--locked','-p','orr_package','--features','sprite-authoring','--lib','--bin','orr_pkg','--','-D','warnings'])
+          run('package-feature-off',['cargo','check','--locked','-p','orr_package','--lib'])
+          cli_ready=run('sprite-cli-build',['cargo','build','--locked','-p','orr_package','--features','sprite-authoring','--bin','orr_pkg','--message-format=json'])
+          if cli_ready:
+              artifacts=[]
+              for line in (evidence/'sprite-cli-build.log').read_text(encoding='utf-8').splitlines():
+                  try: artifact=json.loads(line)
+                  except json.JSONDecodeError: continue
+                  if artifact.get('reason')=='compiler-artifact' and artifact.get('target',{}).get('name')=='orr_pkg' and artifact.get('target',{}).get('kind')==['bin'] and artifact.get('executable'):
+                      artifacts.append(artifact)
+              assert len(artifacts)==1, 'unique current-source package CLI required'
+              artifact=artifacts[0]
+              assert Path(artifact['manifest_path']).resolve()==Path('crates/orr_package/Cargo.toml').resolve()
+              assert 'sprite-authoring' in artifact['features']
+              binary=Path(artifact['executable'])
+              assert binary.is_absolute() and binary.is_file()
+              binary=binary.resolve(strict=True)
+              (evidence/'producer.json').write_text(json.dumps(dict(executable=str(binary),sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),source=os.environ['GITHUB_SHA'],tree=subprocess.check_output(['git','rev-parse','HEAD^{tree}'],text=True).strip(),artifact=artifact),indent=2))
+              run('sprite-cli-help',[str(binary),'create-sprite','--help'])
+          else:
+              results.append(dict(label='sprite-cli-help',ok=False,unrun='current-source CLI build failed'))
+          run('sprite-runtime',['cargo','test','--locked','-p','orr_sprite','--features','png-import','--lib','--','--test-threads=1'],18)
+          libtest_ready=run('editor-libtest-build',['cargo','test','--locked','-p','orr_editor','--features',full,'--lib','--no-run'])
+          checks=[
+            ('grid-backend','sprite_grid_authoring::tests::',11),
+            ('grid-ui','sprite_panel::grid_package_ui::tests::',4),
+            ('grid-editor-use','sprite_panel::grid_package_ui::integration_tests::',2),
+            ('sprite-settings-regression','sprite_panel::sprite_settings_tests::',5),
+            ('clip-timing-regression','sprite_panel::clip_timing::tests::',34),
+          ]
+          for label,selector,count in checks: tests(label,selector,count)
+          run('grid-backend-minimal',['cargo','test','--locked','-p','orr_editor','--features','sprite-grid-authoring','--lib','sprite_grid_authoring::tests::','--','--test-threads=1'],11)
+          run('grid-ui-minimal',['cargo','test','--locked','-p','orr_editor','--features','sprite-grid-authoring','--lib','sprite_panel::grid_package_ui::tests::','--','--test-threads=1'],4)
+          run('strict-editor-full',['cargo','clippy','--locked','-p','orr_editor','--features',full,'--lib','--','-D','warnings'])
+          run('strict-editor-minimal',['cargo','clippy','--locked','-p','orr_editor','--features','sprite-grid-authoring','--lib','--','-D','warnings'])
+          run('strict-editor-sprites-off',['cargo','clippy','--locked','-p','orr_editor','--features','sprites','--lib','--','-D','warnings'])
+          run('editor-default-off',['cargo','check','--locked','-p','orr_editor','--lib'])
+          (evidence/'results.json').write_text(json.dumps(results,indent=2))
+          (evidence/'scope.txt').write_text('Focused CPU PNG grid sprite package authoring: full bounded PNG inspection, exact captured source SHA before publication/license, row-major exact grid, one typed loop/once clip with checked integer duration, unchanged visible-partial publisher and legacy APIs, explicit existing install API and SpritePanel assignment/history/Save/reopen/source-hidden CPU UV/pixel/playback consumer. No automatic installation, renderer/export or model/Room changes. Windows/GPU/physical play/video UNRUN; no whole-workspace validation.')
+          if not all(r['ok'] for r in results):raise SystemExit('Focused editor sprite grid checks failed')
+      - name: Preserve every original result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: editor-sprite-grid-${{ github.sha }}-${{ github.run_attempt }}
+          path: ci-evidence
+          if-no-files-found: error

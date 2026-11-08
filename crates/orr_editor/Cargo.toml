@@ -71,6 +71,7 @@ terrain-raw16 = ["terrain", "orr_terrain_view/raw16"]
 terrain-png16 = ["terrain-raw16", "orr_terrain_view/png16"]
 irradiance-probes = ["orr_model_bindings/irradiance-probes", "models", "orr_render/irradiance-probes"]
 sprites = ["dep:orr_sprite", "dep:orr_package", "dep:serde", "dep:tempfile", "orr_sample/project"]
+sprite-grid-authoring = ["sprites", "orr_package/sprite-authoring", "orr_sprite/png-import", "dep:sha2"]
 models = ["dep:orr_model_bindings", "dep:orr_model", "orr_render/imported-scene", "dep:orr_package", "dep:serde", "dep:tempfile", "dep:sha2"]
 animated-models = ["orr_model_bindings/animated-models", "models", "orr_model/animation", "orr_render/animation"]
 

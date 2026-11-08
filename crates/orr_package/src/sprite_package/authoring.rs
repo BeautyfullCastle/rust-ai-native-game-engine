@@ -30,6 +30,39 @@ pub struct Report {
     pub image: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PngInspection {
+    pub width: u32,
+    pub height: u32,
+    pub sha256: String,
+}
+
+/// Inspect one bounded PNG through the existing full atlas decoder. No output
+/// is created and decoded pixels are not retained in the returned inspection.
+pub fn inspect_png(path: &Path) -> Result<PngInspection, String> {
+    let png = read_regular(path, MAX_PNG_BYTES).map_err(|e| format!("PNG inspection: {e}"))?;
+    if png.len() < 24 || &png[..8] != b"\x89PNG\r\n\x1a\n" || &png[12..16] != b"IHDR" {
+        return Err("PNG inspection requires a PNG IHDR".into());
+    }
+    let width = u32::from_be_bytes(png[16..20].try_into().expect("four width bytes"));
+    let height = u32::from_be_bytes(png[20..24].try_into().expect("four height bytes"));
+    if width == 0
+        || height == 0
+        || width > orr_sprite::MAX_ATLAS_DIMENSION
+        || height > orr_sprite::MAX_ATLAS_DIMENSION
+    {
+        return Err("PNG inspection dimensions must be within 1..=2048".into());
+    }
+    let rgba = orr_sprite::png_import::decode_atlas(&png, width, height)
+        .map_err(|e| format!("PNG inspection decode: {e}"))?;
+    drop(rgba);
+    Ok(PngInspection {
+        width,
+        height,
+        sha256: crate::hash(&png),
+    })
+}
+
 #[derive(Serialize)]
 struct Package<'a> {
     schema: u32,
@@ -193,7 +226,7 @@ fn read_regular(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
 }
 
 pub fn import_package(request: &Request) -> Result<Report, String> {
-    import_package_with(request, || {
+    import_package_with(request, None, || {
         read_regular(&request.json, MAX_JSON_BYTES).map_err(|e| format!("sprite JSON: {e}"))
     })
 }
@@ -201,7 +234,7 @@ pub fn import_package(request: &Request) -> Result<Report, String> {
 /// Convert a materialized sprite-gen manifest. The explicit PNG is copied byte
 /// for byte; upstream path metadata is never opened or executed.
 pub fn import_sprite_gen_package(request: &Request) -> Result<Report, String> {
-    import_package_with(request, || {
+    import_package_with(request, None, || {
         let bytes = read_regular(&request.json, MAX_JSON_BYTES)
             .map_err(|e| format!("sprite-gen manifest: {e}"))?;
         let json = std::str::from_utf8(&bytes).map_err(|e| e.to_string())?;
@@ -215,7 +248,29 @@ pub fn import_sprite_gen_package(request: &Request) -> Result<Report, String> {
 /// Admit generated JSON through the same bounded document and PNG checks.
 /// The request's JSON path is not opened by this in-memory entry point.
 pub fn import_package_bytes(request: &Request, json: &[u8]) -> Result<Report, String> {
-    import_package_with(request, || {
+    import_package_with(request, None, || {
+        if json.len() > MAX_JSON_BYTES {
+            return Err("sprite JSON: input exceeds byte budget".into());
+        }
+        Ok(json.to_vec())
+    })
+}
+
+/// Import generated JSON only if the single captured PNG read matches its
+/// inspection. The request's JSON path is not opened and PNG bytes are not reread.
+pub fn import_package_bytes_checked(
+    request: &Request,
+    json: &[u8],
+    expected_png_sha256: &str,
+) -> Result<Report, String> {
+    if expected_png_sha256.len() != 64
+        || !expected_png_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("expected PNG SHA-256 must contain exactly 64 hexadecimal characters".into());
+    }
+    import_package_with(request, Some(expected_png_sha256), || {
         if json.len() > MAX_JSON_BYTES {
             return Err("sprite JSON: input exceeds byte budget".into());
         }
@@ -225,6 +280,7 @@ pub fn import_package_bytes(request: &Request, json: &[u8]) -> Result<Report, St
 
 fn import_package_with(
     request: &Request,
+    expected_png_sha256: Option<&str>,
     json: impl FnOnce() -> Result<Vec<u8>, String>,
 ) -> Result<Report, String> {
     if !validate_name(&request.name) {
@@ -249,6 +305,10 @@ fn import_package_with(
     let atlas = document.atlas();
     validate_image_name(&atlas.image)?;
     let png = read_regular(&request.png, MAX_PNG_BYTES).map_err(|e| format!("PNG: {e}"))?;
+    if expected_png_sha256.is_some_and(|expected| !crate::hash(&png).eq_ignore_ascii_case(expected))
+    {
+        return Err("inspected PNG changed; inspect again before importing".into());
+    }
     let rgba_bytes = (atlas.width as usize)
         .checked_mul(atlas.height as usize)
         .and_then(|n| n.checked_mul(4))
@@ -301,6 +361,10 @@ fn import_package_with(
         image: atlas.image.clone(),
     })
 }
+
+#[cfg(test)]
+#[path = "authoring/checked_tests.rs"]
+mod checked_tests;
 
 // mkdir claims a new destination without clobbering an existing path. The
 // directory is visible before completion; this is not atomic/crash-durable.

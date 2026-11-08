@@ -14,6 +14,8 @@ use std::{
 };
 
 mod clip_timing;
+#[cfg(feature = "sprite-grid-authoring")]
+mod grid_package_ui;
 
 struct Loaded {
     asset: Asset,
@@ -40,6 +42,8 @@ pub struct SpritePanel {
     #[cfg(all(feature = "image-reimport", target_os = "linux", target_arch = "x86_64"))]
     pub replacement_version: String,
     timing: clip_timing::State,
+    #[cfg(feature = "sprite-grid-authoring")]
+    grid_package: grid_package_ui::State,
     preview_playing: bool,
     preview_started: f64,
 }
@@ -64,6 +68,8 @@ impl Default for SpritePanel {
             #[cfg(all(feature = "image-reimport", target_os = "linux", target_arch = "x86_64"))]
             replacement_version: String::new(),
             timing: clip_timing::State::default(),
+            #[cfg(feature = "sprite-grid-authoring")]
+            grid_package: grid_package_ui::State::default(),
             preview_playing: false,
             preview_started: 0.0,
         }
@@ -527,6 +533,8 @@ impl SpritePanel {
         self.error = result.err();
     }
     pub fn show(&mut self, ui: &mut Ui, editor: &Editor) {
+        #[cfg(feature = "sprite-grid-authoring")]
+        self.poll_grid_package(editor);
         self.update_timing(editor);
         if editor.game() != EditorGame::Arena && !editor.game().is_collect() {
             return;
@@ -558,6 +566,8 @@ impl SpritePanel {
                 ui.label(format!("{}{}", b.path.display(), if b.dirty() { " · UNSAVED bindings" } else { " · saved" }));
                 ui.label(format!("Scene: {} · Project: {}", b.document().scene, b.document().project));
                 let matches = self.scene_matches(editor);
+                #[cfg(feature = "sprite-grid-authoring")]
+                if matches && editor.spec().is_local() { self.show_grid_package(ui, editor); }
                 if !matches { ui.colored_label(Color32::YELLOW, "Scene changed or unavailable. Bindings retained; preview/assignment disabled. Save the old sidecar or explicitly discard/close. Save As does not retarget this sidecar."); }
                 ui.horizontal_wrapped(|ui| {
                     if ui.button("Save bindings").clicked() { let result = self.bindings.as_mut().unwrap().save(); self.report(result); }
