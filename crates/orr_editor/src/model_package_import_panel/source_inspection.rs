@@ -88,6 +88,7 @@ impl Panel {
             self.static_pivot.source_sha256 = None;
             self.static_sampler.material = None;
             self.static_recolor.material = None;
+            self.static_planar.material = None;
             self.pose_bake.clip = None;
             self.glb_subtree.node_index = None;
         }
@@ -183,6 +184,7 @@ impl Panel {
                 self.static_pivot.source_sha256 = None;
                 self.static_sampler.material = None;
                 self.static_recolor.material = None;
+                self.static_planar.material = None;
                 self.pose_bake.clip = None;
             }
             Err(error) => {
@@ -274,7 +276,7 @@ impl Panel {
                     .add_enabled(
                         !self.busy()
                             && material.used_primitive_count > 0
-                            && (self.color_variant_enabled || self.texture_variant_enabled || self.sampler.enabled || self.uv.enabled || self.static_uv.enabled || self.static_texture.enabled || self.static_sampler.enabled || self.static_recolor.enabled),
+                            && (self.color_variant_enabled || self.texture_variant_enabled || self.sampler.enabled || self.uv.enabled || self.static_uv.enabled || self.static_texture.enabled || self.static_sampler.enabled || self.static_recolor.enabled || self.static_planar.enabled),
                         egui::Button::new(format!("Use material {}", material.index)),
                     )
                     .clicked()
@@ -304,6 +306,7 @@ impl Panel {
             if self.static_texture.enabled { self.static_texture.material=Some(index); }
             if self.static_sampler.enabled { self.static_sampler.material=Some(index); }
             if self.static_recolor.enabled { self.static_recolor.material=Some(index); }
+            if self.static_planar.enabled { self.static_planar.material=Some(index); }
             self.inspected_hash = Some(hash);
             self.source_inputs_changed();
         }

@@ -65,6 +65,7 @@ impl Panel {
             || self.static_assembly.enabled
             || self.static_pivot.enabled
             || self.static_recolor.enabled
+            || self.static_planar.enabled
             || self.glb_subtree.enabled
             || self.color_variant_enabled
             || self.texture_variant_enabled
@@ -150,6 +151,7 @@ impl Panel {
                 self.static_assembly.enabled = false;
                 self.static_pivot.enabled = false;
                 self.static_recolor.enabled = false;
+                self.static_planar.enabled = false;
                 self.glb_subtree.enabled = false;
                 self.color_variant_enabled = false;
                 self.texture_variant_enabled = false;

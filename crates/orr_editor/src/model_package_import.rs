@@ -1,3 +1,10 @@
+#[path = "model_package_import/static_planar.rs"]
+mod static_planar;
+pub(crate) use static_planar::{
+    import_static_planar_uv_variant, import_static_planar_uv_variant_checked,
+    validate_static_planar_uv_variant, StaticPlanarUvVariant,
+};
+use static_planar::static_planar_uv_variant_bytes;
 #[path = "model_package_import/pose_bake.rs"]
 mod pose_bake;
 pub(crate) use pose_bake::{
@@ -153,6 +160,7 @@ pub(crate) struct TrimVariant {
 }
 
 enum AuthoringVariant {
+    StaticPlanarUv(StaticPlanarUvVariant),
     PoseBake(PoseBakeVariant),
     StaticColor(StaticColorVariant),
     StaticSampler(StaticSamplerVariant),
@@ -517,6 +525,7 @@ fn import_package_inner(
 
     if let Some(variant) = variant {
         let bytes = match variant {
+            AuthoringVariant::StaticPlanarUv(spec) => static_planar_uv_variant_bytes(&source.bytes, &spec)?,
             AuthoringVariant::PoseBake(spec) => pose_bake_variant_bytes(&source.bytes, &spec)?,
             AuthoringVariant::StaticColor(spec) => static_color_variant_bytes(&source.bytes, &spec)?,
             AuthoringVariant::StaticSampler(spec) => static_sampler_variant_bytes(&source.bytes, &spec)?,

@@ -69,6 +69,7 @@ impl Panel {
             || self.static_pivot.enabled
             || self.static_sampler.enabled
             || self.static_recolor.enabled
+            || self.static_planar.enabled
             || self.color_variant_enabled
             || self.texture_variant_enabled
             || self.trim.enabled
@@ -167,6 +168,7 @@ impl Panel {
             self.static_pivot.enabled = false;
             self.static_sampler.enabled = false;
             self.static_recolor.enabled = false;
+            self.static_planar.enabled = false;
         }
         if self.static_uv.enabled {
             ui.label(
