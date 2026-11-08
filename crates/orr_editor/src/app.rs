@@ -111,6 +111,9 @@ mod room_light_pick;
 #[cfg(feature="mesh-navigation")]
 #[path="app/mesh_light_pick.rs"]
 mod mesh_light_pick;
+#[cfg(feature="mesh-navigation")]
+#[path="app/mesh_light_preview.rs"]
+mod mesh_light_preview;
 #[path="app/selection_outline.rs"]
 mod selection_outline;
 
@@ -471,9 +474,12 @@ pub struct EditorApp {
 
 impl EditorApp {
     #[cfg(feature="models")]
-    fn point_light_settings_for_frame(&self) -> Result<orr_render::PointLightSettings, String> {
+    fn point_light_settings_for_frame(&mut self) -> Result<orr_render::PointLightSettings, String> {
         #[cfg(feature="mesh-navigation")]
         if crate::mesh_lighting_panel::supports_lighting_profile(self.editor.game()) {
+            if let Some(preview) = self.mesh_lighting.preview_point_light_settings(&self.editor) {
+                return Ok(preview);
+            }
             return Ok(self.mesh_lighting.applied_point_light_settings(&self.editor).unwrap_or_default());
         }
         self.editor.room_point_light_settings_for_presentation()
@@ -1143,6 +1149,8 @@ impl EditorApp {
         self.sync_room_light_pick(&ctx);
         #[cfg(feature="mesh-navigation")]
         self.sync_mesh_light_pick(&ctx);
+        #[cfg(feature="mesh-navigation")]
+        self.sync_mesh_light_preview(&ctx);
         #[cfg(feature="package-manager")]
         if self.package_removal_pending() {
             // Freeze the whole input frame, including the completion frame: no
@@ -2616,6 +2624,9 @@ impl EditorApp {
         };
         #[cfg(feature="models")]
         let post_process = self.post_process_for_frame();
+        #[cfg(feature="models")]
+        #[cfg(feature="mesh-navigation")]
+        self.sync_mesh_light_preview(ui.ctx());
         #[cfg(feature="models")]
         let point_light = self.point_light_settings_for_frame();
         if let Some(rs)=&self.render_state {

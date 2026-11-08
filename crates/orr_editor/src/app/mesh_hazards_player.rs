@@ -308,7 +308,7 @@ impl super::EditorApp {
     }
 
     pub(crate) fn hazards_point_light_matches(
-        &self,
+        &mut self,
         expected: Option<&orr_render::PointLightSettings>,
     ) -> bool {
         let applied = self.mesh_lighting.applied_point_light_settings(&self.editor);
