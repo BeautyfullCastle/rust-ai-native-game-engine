@@ -60,6 +60,9 @@ impl State {
     }
 }
 impl EditorApp {
+    pub(super) fn mesh_patrol_frame_blocks_scroll(&self) -> bool {
+        self.mesh_patrol_frame.scroll
+    }
     pub(super) fn mesh_patrol_frame_owns_input(&self) -> bool {
         self.mesh_patrol_frame.frame.is_some()
     }

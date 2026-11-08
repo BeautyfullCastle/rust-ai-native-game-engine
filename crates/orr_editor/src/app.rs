@@ -2348,7 +2348,7 @@ impl EditorApp {
         #[cfg(feature="mesh-patrol")]
         let prop_moving=prop_moving||self.mesh_patrol_frame_owns_input();
         #[cfg(feature="mesh-patrol")]
-        let mesh_light_scroll_blocked=mesh_light_scroll_blocked||self.mesh_patrol_frame.scroll;
+        let mesh_light_scroll_blocked=mesh_light_scroll_blocked||self.mesh_patrol_frame_blocks_scroll();
         let prop_moving = prop_moving || navigation_pointer_owned;
         #[cfg(feature = "mesh-patrol")]
         let prop_moving = prop_moving || self.mesh_navigation.patrol_pick_owns_input();
