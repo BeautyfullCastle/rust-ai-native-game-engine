@@ -9,6 +9,9 @@ use std::{collections::BTreeSet, fmt};
 pub mod import;
 
 #[cfg(feature = "import")]
+pub mod extract;
+
+#[cfg(feature = "import")]
 #[path = "authoring/static_assemble.rs"]
 pub mod static_assemble;
 
