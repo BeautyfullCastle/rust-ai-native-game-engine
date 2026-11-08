@@ -294,14 +294,18 @@ fn play_stale_scene_and_installed_package_reject_terrace_without_writes() {
                     nav.build_route(&mut editor, &panel).unwrap();
                     settle(&mut editor);
                 }
-                assert!(editor.start_play());
+                assert!(editor.start_play(), "{:?}", editor.status());
                 settle(&mut editor);
             }
             "stale" => {
                 let next = dir.path().join("other.yaml");
                 fs::copy(&scene, &next).unwrap();
-                assert!(editor.open_path(&next));
+                // Pinned navigation hosts deliberately cannot change paths.
+                // Open the new scene in its own host, retaining the old panel
+                // to exercise the real stale scene-association guard.
+                editor = Editor::open_game(&next, editor.game()).unwrap();
                 settle(&mut editor);
+                assert!(!panel.scene_matches(&editor));
             }
             "package" => {
                 use orr_terrain_view::package::{install_and_reload, ASSET_PATH, PACKAGE_NAME};
