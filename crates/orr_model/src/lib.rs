@@ -36,6 +36,10 @@ pub mod static_uv;
 pub mod static_retexture;
 
 #[cfg(all(feature = "animation", feature = "import"))]
+#[path = "authoring/pose_bake.rs"]
+pub mod pose_bake;
+
+#[cfg(all(feature = "animation", feature = "import"))]
 #[path = "authoring/animation_sequence.rs"]
 pub mod animation_sequence;
 
