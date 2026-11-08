@@ -18,6 +18,7 @@ use orr_terrain::Edit;
 use std::{path::PathBuf, sync::Arc};
 
 pub mod flatten;
+pub mod terrace;
 pub mod holes;
 pub mod offset;
 pub mod patch;
@@ -31,6 +32,7 @@ pub mod png16;
 
 pub struct TerrainPanel {
     pub flatten: flatten::Spec,
+    pub terrace: terrace::Spec,
     pub holes: holes::Spec,
     pub offset: offset::Spec,
     pub patch: patch::State,
@@ -64,6 +66,7 @@ impl Default for TerrainPanel {
     fn default() -> Self {
         Self {
             flatten: flatten::Spec::default(),
+            terrace: terrace::Spec::default(),
             holes: holes::Spec::default(),
             offset: offset::Spec::default(),
             patch: patch::State::default(),
@@ -634,6 +637,7 @@ impl TerrainPanel {
             }
             self.show_holes(ui, editor, writable);
             self.show_flatten(ui, editor, writable);
+            self.show_terrace(ui, editor, writable);
             self.show_offset(ui, editor, writable);
             self.show_sculpt(ui, editor, writable);
             self.show_smooth(ui, editor, writable);
