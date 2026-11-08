@@ -1,3 +1,10 @@
+#[path = "model_package_import/static_recolor.rs"]
+mod static_recolor;
+pub(crate) use static_recolor::{
+    import_static_color_variant, import_static_color_variant_checked,
+    validate_static_color_variant, StaticColorVariant,
+};
+use static_recolor::static_color_variant_bytes;
 #[path = "model_package_import/static_sampler.rs"]
 mod static_sampler;
 pub(crate) use static_sampler::{
@@ -139,6 +146,7 @@ pub(crate) struct TrimVariant {
 }
 
 enum AuthoringVariant {
+    StaticColor(StaticColorVariant),
     StaticSampler(StaticSamplerVariant),
     StaticPivot(StaticPivotVariant),
     GlbSubtree(GlbSubtreeVariant),
@@ -497,6 +505,7 @@ fn import_package_inner(
 
     if let Some(variant) = variant {
         let bytes = match variant {
+            AuthoringVariant::StaticColor(spec) => static_color_variant_bytes(&source.bytes, &spec)?,
             AuthoringVariant::StaticSampler(spec) => static_sampler_variant_bytes(&source.bytes, &spec)?,
             AuthoringVariant::StaticPivot(spec) => static_pivot_variant_bytes(&source.bytes, &spec)?,
             AuthoringVariant::GlbSubtree(spec) => glb_subtree_variant_bytes(&source.bytes, &spec)?,

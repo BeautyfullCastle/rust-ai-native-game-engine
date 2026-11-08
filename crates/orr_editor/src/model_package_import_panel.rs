@@ -1,3 +1,5 @@
+#[path="model_package_import_panel/static_recolor_ui.rs"]
+mod static_recolor_ui;
 #[path="model_package_import_panel/static_sampler_ui.rs"]
 mod static_sampler_ui;
 #[path="model_package_import_panel/static_pivot_ui.rs"]
@@ -72,6 +74,8 @@ pub struct Panel {
     submitted_static_pivot: Option<Option<static_pivot_ui::Snapshot>>,
     static_sampler: static_sampler_ui::Controls,
     submitted_static_sampler: Option<Option<static_sampler_ui::Snapshot>>,
+    static_recolor: static_recolor_ui::Controls,
+    submitted_static_recolor: Option<Option<static_recolor_ui::Snapshot>>,
     submitted_uv: Option<Option<model_package_import::UvVariant>>,
     submitted_sequence: Option<Option<model_package_import::SequenceVariant>>,
     submitted_sampler: Option<Option<model_package_import::SamplerVariant>>,
@@ -121,6 +125,8 @@ impl Default for Panel {
             submitted_static_pivot: None,
             static_sampler: Default::default(),
             submitted_static_sampler: None,
+            static_recolor: Default::default(),
+            submitted_static_recolor: None,
             submitted_uv: None,
             submitted_sequence: None,
             submitted_sampler: None,
@@ -184,6 +190,7 @@ impl Panel {
                 self.submitted_glb_subtree = None;
                 self.submitted_static_pivot = None;
                 self.submitted_static_sampler = None;
+                self.submitted_static_recolor = None;
                 self.submitted_authoring_generation = None;
                 self.submitted_inspected_hash = None;
                 self.license_acknowledged = false;
@@ -206,6 +213,8 @@ impl Panel {
         let static_pivot_is_current = project_root.is_some_and(|root| self.static_pivot_snapshot(root, project_generation, source_generation).is_ok_and(|snapshot| snapshot == submitted_static_pivot));
         let submitted_static_sampler = self.submitted_static_sampler.take().unwrap_or(None);
         let static_sampler_is_current = project_root.is_some_and(|root| self.static_sampler_snapshot(root, project_generation, source_generation).is_ok_and(|snapshot| snapshot == submitted_static_sampler));
+        let submitted_static_recolor = self.submitted_static_recolor.take().unwrap_or(None);
+        let static_recolor_is_current = project_root.is_some_and(|root| self.static_recolor_snapshot(root, project_generation, source_generation).is_ok_and(|snapshot| snapshot == submitted_static_recolor));
         let submitted_color = self.submitted_color.take().unwrap_or(None);
         let color_is_current = self
             .color_request()
@@ -227,7 +236,7 @@ impl Panel {
         let generation_is_current = self.submitted_authoring_generation.take().is_none_or(|generation| generation == self.authoring_generation);
         let inspected_hash_is_current =
             self.submitted_inspected_hash.take().unwrap_or(None) == self.inspected_hash;
-        let is_current = static_sampler_is_current && static_pivot_is_current && glb_subtree_is_current && static_assembly_is_current && static_texture_is_current && static_uv_is_current && uv_is_current && sequence_is_current && sampler_is_current && trim_is_current && generation_is_current && inspected_hash_is_current
+        let is_current = static_recolor_is_current && static_sampler_is_current && static_pivot_is_current && glb_subtree_is_current && static_assembly_is_current && static_texture_is_current && static_uv_is_current && uv_is_current && sequence_is_current && sampler_is_current && trim_is_current && generation_is_current && inspected_hash_is_current
             && texture_is_current
             && color_is_current
             && project_root == Some(completion.project_root.as_path())
@@ -303,7 +312,7 @@ impl Panel {
             .default_open(false)
             .show(ui, |ui| {
                 ui.label("Import a local self-contained GLB, cooked static model or cooked animated model and a license file into a new package folder.");
-                ui.label("Cooked import preserves exact bytes unless you explicitly create a static UV variant, static PNG skin, static two-copy assembly, static pivot variant, static sampler variant or an animated color variant, PNG skin, trimmed clip, sampler variant, clip sequence or UV variant. Historical dependencies are not loaded or added to the package.");
+                ui.label("Cooked import preserves exact bytes unless you explicitly create a static UV variant, static PNG skin, static two-copy assembly, static pivot variant, static sampler variant, static color variant or an animated color variant, PNG skin, trimmed clip, sampler variant, clip sequence or UV variant. Historical dependencies are not loaded or added to the package.");
                 ui.label("External resources, scripts, network access and package activation are not supported.");
                 ui.label("A supplied license file is metadata only; its presence is not legal review or a rights determination.");
                 let fields_enabled = enabled && !self.busy();
@@ -333,7 +342,7 @@ impl Panel {
                     path_field(ui, "Package destination directory", &mut self.destination);
                     text_field(ui, "Package name", &mut self.name, 128);
                     text_field(ui, "Package version", &mut self.version, 128);
-                    if (self.static_uv.enabled || self.static_texture.enabled || self.static_assembly.enabled || self.glb_subtree.enabled || self.static_pivot.enabled || self.static_sampler.enabled) && old_package != (self.destination.clone(), self.name.clone(), self.version.clone()) { self.source_inputs_changed(); }
+                    if (self.static_uv.enabled || self.static_texture.enabled || self.static_assembly.enabled || self.glb_subtree.enabled || self.static_pivot.enabled || self.static_sampler.enabled || self.static_recolor.enabled) && old_package != (self.destination.clone(), self.name.clone(), self.version.clone()) { self.source_inputs_changed(); }
                     let old_kind = self.kind;
                     ui.horizontal(|ui| {
                         ui.add_enabled_ui(self.source_format != SourceFormat::CookedAnimated, |ui| {
@@ -382,6 +391,7 @@ impl Panel {
                     self.show_glb_subtree_controls(ui);
                     self.show_static_pivot_controls(ui);
                     self.show_static_sampler_controls(ui);
+                    self.show_static_recolor_controls(ui);
                     self.show_source_inspection(ui,project_root,project_generation,source_generation);
                     ui.checkbox(
                         &mut self.license_acknowledged,
@@ -423,7 +433,8 @@ impl Panel {
                     && self.static_assembly_request().is_ok()
                     && self.glb_subtree_request().is_ok()
                     && self.static_pivot_request().is_ok()
-                    && self.static_sampler_request().is_ok();
+                    && self.static_sampler_request().is_ok()
+                    && self.static_recolor_request().is_ok();
                 let import_label = match self.source_format {
                     SourceFormat::RawGlb if self.glb_subtree.enabled => "Import GLB subtree package",
                     SourceFormat::RawGlb => "Import raw GLB package",
@@ -481,6 +492,8 @@ impl Panel {
         let submitted_static_pivot = match self.static_pivot_snapshot(&project_root, project_generation, source_generation) { Ok(value) => value, Err(error) => { self.status=error; return; } };
         let static_sampler = match self.static_sampler_request() { Ok(value) => value, Err(error) => { self.status=error; return; } };
         let submitted_static_sampler = match self.static_sampler_snapshot(&project_root, project_generation, source_generation) { Ok(value) => value, Err(error) => { self.status=error; return; } };
+        let static_recolor = match self.static_recolor_request() { Ok(value) => value, Err(error) => { self.status=error; return; } };
+        let submitted_static_recolor = match self.static_recolor_snapshot(&project_root, project_generation, source_generation) { Ok(value) => value, Err(error) => { self.status=error; return; } };
         let trim = match self.trim_request() { Ok(trim) => trim, Err(error) => { self.status=error; return; } };
         let submitted_trim = trim.clone();
         let sampler=match self.sampler_request(){Ok(value)=>value,Err(error)=>{self.status=error;return;}};
@@ -514,20 +527,24 @@ impl Panel {
             .name("orr-model-package-import".into())
             .spawn(move || {
                 let expected_destination = request_destination(&request.destination);
-                let result = match (glb_subtree, static_pivot, static_sampler) {
-                    (Some(spec), None, None) => match expected_hash {
+                let result = match (glb_subtree, static_pivot, static_sampler, static_recolor) {
+                    (Some(spec), None, None, None) => match expected_hash {
                         Some(hash) => model_package_import::import_glb_subtree_variant_checked(request, spec, Some(hash)),
                         None => model_package_import::import_glb_subtree_variant(request, spec),
                     },
-                    (None, Some(spec), None) => match expected_hash {
+                    (None, Some(spec), None, None) => match expected_hash {
                         Some(hash) => model_package_import::import_static_pivot_variant_checked(request, spec, Some(hash)),
                         None => model_package_import::import_static_pivot_variant(request, spec),
                     },
-                    (None, None, Some(spec)) => match expected_hash {
+                    (None, None, Some(spec), None) => match expected_hash {
                         Some(hash) => model_package_import::import_static_sampler_variant_checked(request, spec, Some(hash)),
                         None => model_package_import::import_static_sampler_variant(request, spec),
                     },
-                    (None, None, None) => match (color, texture, trim, sampler, sequence, uv, static_uv, static_texture, static_assembly) {
+                    (None, None, None, Some(spec)) => match expected_hash {
+                        Some(hash) => model_package_import::import_static_color_variant_checked(request, spec, Some(hash)),
+                        None => model_package_import::import_static_color_variant(request, spec),
+                    },
+                    (None, None, None, None) => match (color, texture, trim, sampler, sequence, uv, static_uv, static_texture, static_assembly) {
                     (Some(color), None, None, None, None, None, None, None, None) => match expected_hash {
                         Some(hash) => model_package_import::import_color_variant_checked(
                             request,
@@ -578,6 +595,7 @@ impl Panel {
                 self.submitted_glb_subtree = Some(submitted_glb_subtree);
                 self.submitted_static_pivot = Some(submitted_static_pivot);
                 self.submitted_static_sampler = Some(submitted_static_sampler);
+                self.submitted_static_recolor = Some(submitted_static_recolor);
                 self.submitted_authoring_generation = Some(self.authoring_generation);
                 self.submitted_color = Some(submitted_color);
                 self.submitted_texture = Some(submitted_texture);
@@ -640,6 +658,7 @@ impl Panel {
         self.glb_subtree = Default::default();
         self.static_pivot = Default::default();
         self.static_sampler = Default::default();
+        self.static_recolor = Default::default();
         self.color_variant_enabled = false;
         self.color_variant = default_color_variant();
         self.texture_variant_enabled = false;

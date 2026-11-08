@@ -20,6 +20,10 @@ pub mod static_pivot;
 pub mod static_sampler;
 
 #[cfg(feature = "import")]
+#[path = "authoring/static_recolor.rs"]
+pub mod static_recolor;
+
+#[cfg(feature = "import")]
 #[path = "authoring/static_assemble.rs"]
 pub mod static_assemble;
 

@@ -59,6 +59,7 @@ impl Panel {
             || self.kind != ModelKind::Static
             || self.static_uv.enabled
             || self.static_sampler.enabled
+            || self.static_recolor.enabled
             || self.static_texture.enabled
             || self.static_assembly.enabled
             || self.glb_subtree.enabled
@@ -137,6 +138,7 @@ impl Panel {
             if self.static_pivot.enabled {
                 self.static_uv.enabled = false;
                 self.static_sampler.enabled = false;
+                self.static_recolor.enabled = false;
                 self.static_texture.enabled = false;
                 self.static_assembly.enabled = false;
                 self.glb_subtree.enabled = false;
