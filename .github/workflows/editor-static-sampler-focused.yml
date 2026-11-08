@@ -69,7 +69,26 @@ jobs:
                   results.append(dict(label=label,ok=False,expected=count,unrun="libtest compilation failed"));return
               run(label,['cargo','test','--locked','-p','orr_editor','--features',full,'--lib',selector,'--']+list(extra)+['--test-threads=1'],count)
           run('model-sampler-library',['cargo','test','--locked','-p','orr_model','--features','import','--lib','static_sampler::tests::','--','--test-threads=1'],3)
-          run('model-sampler-existing-contract',['cargo','test','--locked','-p','orr_model','--features','import','--test','static_model_sampler','--','--test-threads=1'],21)
+          cli_ready=run('sampler-cli-build',['cargo','build','--locked','-p','orr_model','--features','import','--example','static_model_sampler','--message-format=json'])
+          artifacts=[]
+          if cli_ready:
+              for line in (evidence/'sampler-cli-build.log').read_text(encoding='utf-8').splitlines():
+                  try: artifact=json.loads(line)
+                  except json.JSONDecodeError: continue
+                  if artifact.get('reason')=='compiler-artifact' and artifact.get('target',{}).get('name')=='static_model_sampler' and artifact.get('target',{}).get('kind')==['example'] and artifact.get('executable'):
+                      artifacts.append(artifact)
+              assert len(artifacts)==1, 'exactly one current-source sampler CLI artifact required'
+              artifact=artifacts[0]
+              assert Path(artifact['manifest_path']).resolve()==Path('crates/orr_model/Cargo.toml').resolve()
+              assert 'import' in artifact['features']
+              binary=Path(artifact['executable'])
+              assert binary.is_absolute() and binary.is_file()
+              binary=binary.resolve(strict=True)
+              os.environ['ORR_STATIC_MODEL_SAMPLER_BIN']=str(binary)
+              (evidence/'producer.json').write_text(json.dumps(dict(executable=str(binary),sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),source=os.environ['GITHUB_SHA'],tree=subprocess.check_output(['git','rev-parse','HEAD^{tree}'],text=True).strip(),artifact=artifact),indent=2))
+              run('model-sampler-existing-contract',['cargo','test','--locked','-p','orr_model','--features','import','--test','static_model_sampler','--','--include-ignored','--test-threads=1'],21)
+          else:
+              results.append(dict(label='model-sampler-existing-contract',ok=False,expected=21,unrun='current-source CLI build failed'))
           run('strict-model-sampler',['cargo','clippy','--locked','-p','orr_model','--features','import','--lib','--example','static_model_sampler','--','-D','warnings'])
           run('model-feature-off',['cargo','check','--locked','-p','orr_model','--lib'])
           libtest_ready=run("libtest-build",["cargo","test","--locked","-p","orr_editor","--features",full,"--lib","--no-run"])
