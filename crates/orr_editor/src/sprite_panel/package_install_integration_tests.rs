@@ -748,14 +748,23 @@ fn source_lock_and_live_context_changes_refuse_install_without_replacing_active_
     settle(&mut h.state_mut().editor);
     h.run_steps(3);
 
-    let sample = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../assets/sprite_demo")
-        .canonicalize()
-        .unwrap();
+    // Use an otherwise valid exact-three-file package with an already-active
+    // name. The general sample also declares a fourth RGBA asset, outside this
+    // installer flow's intentionally narrow package contract.
+    let manifest_path = source.join("orr.package.json");
+    let original_manifest = fs::read(&manifest_path).unwrap();
+    let mut duplicate_manifest: serde_json::Value =
+        serde_json::from_slice(&original_manifest).unwrap();
+    duplicate_manifest["name"] = "sample-sprites".into();
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&duplicate_manifest).unwrap(),
+    )
+    .unwrap();
     text(
         &mut h,
         "Local sprite package directory",
-        sample.to_str().unwrap(),
+        source.to_str().unwrap(),
     );
     preview(&mut h);
     assert!(h.state().panel.package_install.prepared.is_none());
@@ -768,6 +777,7 @@ fn source_lock_and_live_context_changes_refuse_install_without_replacing_active_
         "{}",
         h.state().panel.package_install.status
     );
+    fs::write(&manifest_path, original_manifest).unwrap();
     assert!(h
         .get_by_label("Install previewed sprite package")
         .accesskit_node()
