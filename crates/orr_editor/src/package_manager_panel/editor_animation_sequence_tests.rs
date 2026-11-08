@@ -403,7 +403,7 @@ fn assert_saved_sequence(root: &Path) {
     }
     let mut sim = prepared.scene().simulation().unwrap();
     let mut playback = orr_sample::room_character::PlaybackCursor::default();
-    let rate = orr_games::room_escape_game::TICK_RATE;
+    let rate = orr_sample::room_game::TICK_RATE;
     for tick in 0..=rate as u64 * 3 {
         if tick > 0 {
             sim.step(&orr_sim::TickInputs::new(sim.tick() + 1, 1));
