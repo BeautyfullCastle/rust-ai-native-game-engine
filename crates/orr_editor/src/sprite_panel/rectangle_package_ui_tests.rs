@@ -422,7 +422,7 @@ fn inspection_and_creation_workers_reject_aba_contexts_and_preserve_started_outp
         state.rights = true;
         state.start_creation();
         assert!(state.busy());
-        let mut current = Some(context());
+        let current = Some(context());
         match changed {
             "draft-aba" => {
                 state.draft.name = "changed".into();

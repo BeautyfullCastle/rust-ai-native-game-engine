@@ -343,7 +343,7 @@ fn acknowledgement_path_metadata_and_license_errors_never_publish() {
     }
 
     for invalid_license in [vec![], b"  \r\n".to_vec(), vec![0xff]] {
-        let mut req = request(&root);
+        let req = request(&root);
         fs::write(&req.license, invalid_license).unwrap();
         assert!(create_package(req).is_err());
         assert!(!root.join("new-package").exists());
