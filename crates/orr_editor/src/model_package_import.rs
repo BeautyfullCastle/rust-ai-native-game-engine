@@ -1,3 +1,10 @@
+#[path = "model_package_import/static_assembly.rs"]
+mod static_assembly;
+pub(crate) use static_assembly::{
+    import_static_assembly_variant, import_static_assembly_variant_checked,
+    validate_static_assembly_variant, StaticAssemblyPart, StaticAssemblyVariant,
+};
+use static_assembly::static_assembly_variant_bytes;
 #[path = "model_package_import/static_texture.rs"]
 mod static_texture;
 pub(crate) use static_texture::{
@@ -119,6 +126,7 @@ enum AuthoringVariant {
     Uv(UvVariant),
     StaticUv(StaticUvVariant),
     StaticTexture(StaticTextureVariant),
+    StaticAssembly(StaticAssemblyVariant),
 }
 
 pub(crate) struct Report {
@@ -466,6 +474,7 @@ fn import_package_inner(
             AuthoringVariant::Sequence(spec) => sequence_variant_bytes(&source.bytes, &spec)?,
             AuthoringVariant::Uv(spec) => uv_variant_bytes(&source.bytes, &spec)?,
             AuthoringVariant::StaticUv(spec) => static_uv_variant_bytes(&source.bytes, &spec)?,
+            AuthoringVariant::StaticAssembly(spec) => static_assembly_variant_bytes(&source.bytes, &spec)?,
             AuthoringVariant::StaticTexture(spec) => {
                 // The original cooked source and optional inspected hash have already
                 // been admitted above; do not open the PNG before that check.
