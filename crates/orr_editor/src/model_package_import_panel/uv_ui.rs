@@ -48,6 +48,7 @@ impl Panel {
             || self.trim.enabled
             || self.sampler.enabled
             || self.sequence.enabled
+            || self.pose_bake.enabled
         {
             return Err("Choose only cooked animated UV mode".into());
         }
@@ -110,6 +111,7 @@ impl Panel {
             && self.uv.enabled
         {
             self.color_variant_enabled = false;
+            self.pose_bake.enabled = false;
             self.texture_variant_enabled = false;
             self.trim.enabled = false;
             self.sampler.enabled = false;

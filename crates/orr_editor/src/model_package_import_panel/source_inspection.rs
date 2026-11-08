@@ -76,7 +76,7 @@ impl Panel {
                 self.inspection.revision = self.inspection.revision.saturating_add(1);
                 current = self.inspection_identity(root, project, generation);
             }
-            if self.inspection.identity.as_ref().is_some_and(|id| id.format == SourceFormat::CookedStatic || id.format == SourceFormat::RawGlb) {
+            if self.inspection.identity.as_ref().is_some_and(|id| id.format == SourceFormat::CookedStatic || id.format == SourceFormat::RawGlb || (id.format == SourceFormat::CookedAnimated && self.pose_bake.enabled)) {
                 self.source_inputs_changed();
             }
             self.inspection.identity = None;
@@ -88,6 +88,7 @@ impl Panel {
             self.static_pivot.source_sha256 = None;
             self.static_sampler.material = None;
             self.static_recolor.material = None;
+            self.pose_bake.clip = None;
             self.glb_subtree.node_index = None;
         }
         let result = match self
@@ -182,6 +183,7 @@ impl Panel {
                 self.static_pivot.source_sha256 = None;
                 self.static_sampler.material = None;
                 self.static_recolor.material = None;
+                self.pose_bake.clip = None;
             }
             Err(error) => {
                 self.inspection.status = format!("Cannot start source inspection: {error}")
@@ -221,6 +223,19 @@ impl Panel {
         self.glb_subtree.node_index = None;
         Box::new(move |result| { sender.send((identity, result)).unwrap(); })
     }
+    #[cfg(all(test, target_os = "linux", feature = "room-animated-models"))]
+    pub(super) fn hold_pose_inspection_for_test(&mut self, root: &Path, project: u64, generation: u64, near_exhaustion: bool) -> Box<dyn FnOnce(Result<Catalog, String>)> {
+        assert!(!self.busy());
+        if near_exhaustion { self.inspection.revision = u64::MAX - 1; }
+        let identity = self.inspection_identity(Some(root), project, generation).expect("pose test inspection context");
+        let (sender, receiver) = mpsc::channel();
+        self.inspection.identity = Some(identity.clone());
+        self.inspection.catalog = None;
+        self.inspection.pending = Some(receiver);
+        self.inspected_hash = None;
+        self.pose_bake.clip = None;
+        Box::new(move |result| { sender.send((identity, result)).unwrap(); })
+    }
     pub(super) fn show_source_inspection(
         &mut self,
         ui: &mut Ui,
@@ -250,6 +265,7 @@ impl Panel {
             ui.label(&self.inspection.status);
         }
         let mut selected = None;
+        let mut selected_clip = None;
         if let Some(catalog) = &self.inspection.catalog {
             ui.label(format!("Source SHA-256: {}", catalog.source_sha256));
             for material in &catalog.materials {
@@ -271,6 +287,9 @@ impl Panel {
                     "Clip {}: {} ({:.3}s)",
                     clip.index, clip.name, clip.duration
                 ));
+                if self.pose_bake.enabled && ui.add_enabled(!self.busy(), egui::Button::new(format!("Use clip {}", clip.index))).clicked() {
+                    selected_clip = Some((clip.index, catalog.source_sha256.clone()));
+                }
             }
         }
         if let Some((index, hash)) = selected {
@@ -285,6 +304,11 @@ impl Panel {
             if self.static_texture.enabled { self.static_texture.material=Some(index); }
             if self.static_sampler.enabled { self.static_sampler.material=Some(index); }
             if self.static_recolor.enabled { self.static_recolor.material=Some(index); }
+            self.inspected_hash = Some(hash);
+            self.source_inputs_changed();
+        }
+        if let Some((clip, hash)) = selected_clip {
+            self.pose_bake.clip = Some(clip);
             self.inspected_hash = Some(hash);
             self.source_inputs_changed();
         }

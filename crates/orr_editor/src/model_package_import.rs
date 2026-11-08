@@ -1,3 +1,10 @@
+#[path = "model_package_import/pose_bake.rs"]
+mod pose_bake;
+pub(crate) use pose_bake::{
+    import_pose_bake_variant, import_pose_bake_variant_checked,
+    validate_pose_bake_variant, PoseBakeVariant,
+};
+use pose_bake::pose_bake_variant_bytes;
 #[path = "model_package_import/static_recolor.rs"]
 mod static_recolor;
 pub(crate) use static_recolor::{
@@ -146,6 +153,7 @@ pub(crate) struct TrimVariant {
 }
 
 enum AuthoringVariant {
+    PoseBake(PoseBakeVariant),
     StaticColor(StaticColorVariant),
     StaticSampler(StaticSamplerVariant),
     StaticPivot(StaticPivotVariant),
@@ -436,8 +444,12 @@ fn import_package_inner(
     if request.source_format == SourceFormat::CookedStatic && request.kind != ModelKind::Static {
         return Err("cooked static model import requires Static model mode".into());
     }
+    // Input admission remains animated; only this authoring variant changes
+    // the published asset kind and capability set.
+    let baking_pose = matches!(&variant, Some(AuthoringVariant::PoseBake(_)));
+    let output_kind = if baking_pose { ModelKind::Static } else { request.kind };
     let source_label = request.source_format.source_label();
-    let asset_name = if matches!(&variant, Some(AuthoringVariant::GlbSubtree(_))) {
+    let asset_name = if baking_pose || matches!(&variant, Some(AuthoringVariant::GlbSubtree(_))) {
         "model.orrmodel"
     } else {
         request.source_format.asset_name()
@@ -505,6 +517,7 @@ fn import_package_inner(
 
     if let Some(variant) = variant {
         let bytes = match variant {
+            AuthoringVariant::PoseBake(spec) => pose_bake_variant_bytes(&source.bytes, &spec)?,
             AuthoringVariant::StaticColor(spec) => static_color_variant_bytes(&source.bytes, &spec)?,
             AuthoringVariant::StaticSampler(spec) => static_sampler_variant_bytes(&source.bytes, &spec)?,
             AuthoringVariant::StaticPivot(spec) => static_pivot_variant_bytes(&source.bytes, &spec)?,
@@ -538,11 +551,19 @@ fn import_package_inner(
         };
     }
 
+    if baking_pose {
+        orr_model::StaticModel::from_bytes(&source.bytes)
+            .map_err(|error| format!("baked static model import: {error}"))?;
+    }
     let stage = tempfile::Builder::new()
         .prefix(".orr-model-import-")
         .tempdir_in(&destination_parent)
         .map_err(|error| format!("create package staging directory: {error}"))?;
-    let manifest = package_manifest(&request, asset_name)?;
+    let manifest = if output_kind == request.kind {
+        package_manifest(&request, asset_name)?
+    } else {
+        package_manifest_for_kind(&request, asset_name, output_kind)?
+    };
     let manifest_bytes = serde_json::to_vec(&manifest)
         .map_err(|error| format!("serialize package manifest: {error}"))?;
 
@@ -573,14 +594,18 @@ fn import_package_inner(
         root: destination,
         package: request.name,
         asset: asset_name.into(),
-        kind: request.kind,
+        kind: output_kind,
         source_sha256: source.digest,
         license_sha256: license.digest,
     })
 }
 
 fn package_manifest(request: &Request, asset_name: &str) -> Result<Manifest, String> {
-    let capabilities = match request.kind {
+    package_manifest_for_kind(request, asset_name, request.kind)
+}
+
+fn package_manifest_for_kind(request: &Request, asset_name: &str, output_kind: ModelKind) -> Result<Manifest, String> {
+    let capabilities = match output_kind {
         ModelKind::Static => BTreeSet::from(["models".to_owned()]),
         ModelKind::Animated => {
             #[cfg(feature = "room-animated-models")]
