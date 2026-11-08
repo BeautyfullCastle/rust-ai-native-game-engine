@@ -210,8 +210,11 @@ fn read_bounded_regular(path: &Path, limit: usize, label: &str) -> Result<Vec<u8
     validate_path_shape(path, label)?;
     checked_ancestry(path)?;
     let metadata = fs::symlink_metadata(path).map_err(|error| format!("{label}: {error}"))?;
-    if !regular(&metadata) || metadata.len() > limit as u64 {
+    if !regular(&metadata) {
         return Err(format!("{label} must be a bounded regular file"));
+    }
+    if metadata.len() > limit as u64 {
+        return Err(format!("{label} exceeds its byte limit"));
     }
     let mut file = File::open(path).map_err(|error| format!("{label}: {error}"))?;
     let opened = file

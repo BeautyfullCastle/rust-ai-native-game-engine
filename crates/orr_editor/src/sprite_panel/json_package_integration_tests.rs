@@ -172,6 +172,85 @@ fn click(h: &mut Harness<'_, HarnessState>, label: &str) {
     h.run_steps(3);
 }
 
+// The append-region ComboBox updates popup layout between frames. Use the
+// same geometric choose/append interaction as the standalone clip-sequence UI
+// test so each option is clicked only after its real hit target is stable.
+fn pointer_ready(
+    h: &mut Harness<'_, HarnessState>,
+    role: Role,
+    label: &str,
+) -> egui::accesskit::NodeId {
+    h.get_by_role_and_label(role, label).scroll_to_me();
+    h.run_steps(3);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut previous = None;
+    loop {
+        let node = h.get_by_role_and_label(role, label);
+        let rect = node.rect();
+        let target = node.accesskit_node().locate().0;
+        node.hover();
+        h.run_steps(2);
+        let node = h.get_by_role_and_label(role, label);
+        let current = node.rect();
+        let disabled = node.accesskit_node().is_disabled();
+        let hovered = h.ctx.interaction_snapshot(|interaction| {
+            interaction.hovered.iter().copied().collect::<Vec<_>>()
+        });
+        let response = hovered
+            .iter()
+            .find(|id| id.accesskit_id() == target)
+            .and_then(|id| h.ctx.read_response(*id));
+        let ready = !disabled
+            && node.accesskit_node().locate().0 == target
+            && previous == Some(current)
+            && current == rect
+            && h.ctx.content_rect().contains(current.center())
+            && response.as_ref().is_some_and(|response| {
+                response.enabled() && response.interact_rect.contains(current.center())
+            });
+        if ready {
+            return target;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "pointer target {label:?} not stable or reachable: rect={rect:?}, current={current:?}, disabled={disabled}"
+        );
+        previous = Some(current);
+        if response.is_none() {
+            node.scroll_to_me();
+        }
+        h.run_steps(1);
+    }
+}
+
+fn click_role(h: &mut Harness<'_, HarnessState>, role: Role, label: &str) {
+    let target = pointer_ready(h, role, label);
+    h.get_by_role_and_label(role, label).click();
+    h.step();
+    let clicked = h
+        .ctx
+        .interaction_snapshot(|interaction| interaction.clicked.map(|id| id.accesskit_id()));
+    assert_eq!(
+        clicked,
+        Some(target),
+        "geometric click must dispatch once to {label:?}"
+    );
+    h.run_steps(3);
+}
+
+fn choose(h: &mut Harness<'_, HarnessState>, label: &str, value: &str) {
+    click_role(h, Role::ComboBox, label);
+    assert!(
+        h.query_by_role_and_label(Role::Button, value).is_some(),
+        "the {label:?} popup opens before choosing {value:?}"
+    );
+    click_role(h, Role::Button, value);
+    assert!(
+        h.query_by_role_and_label(Role::Button, value).is_none(),
+        "the {label:?} popup closes after choosing {value:?}"
+    );
+}
+
 fn text(h: &mut Harness<'_, HarnessState>, label: &str, value: &str) {
     h.get_by_role_and_label(Role::TextInput, label)
         .scroll_to_me();
@@ -224,20 +303,17 @@ fn export_sequence(h: &mut Harness<'_, HarnessState>, fixture: &Fixture) -> Path
     text(h, "Selected sequence frame duration ms", "70");
     click(h, "Apply sequence frame duration");
 
-    click(h, "Sequence append region");
-    click(h, "Sequence region 20");
+    choose(h, "Sequence append region", "Sequence region 20");
     click(h, "Append sequence frame");
     text(h, "Selected sequence frame duration ms", "230");
     click(h, "Apply sequence frame duration");
 
-    click(h, "Sequence append region");
-    click(h, "Sequence region 10");
+    choose(h, "Sequence append region", "Sequence region 10");
     click(h, "Append sequence frame");
     text(h, "Selected sequence frame duration ms", "90");
     click(h, "Apply sequence frame duration");
 
-    click(h, "Sequence append region");
-    click(h, "Sequence region 21");
+    choose(h, "Sequence append region", "Sequence region 21");
     click(h, "Append sequence frame");
     text(h, "Selected sequence frame duration ms", "310");
     click(h, "Apply sequence frame duration");
