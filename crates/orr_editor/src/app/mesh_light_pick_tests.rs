@@ -238,6 +238,7 @@ fn same_batch_focus_regain_press_fences_real_dispatch_until_release_and_quiet() 
                     egui::Event::MouseWheel {
                         unit: egui::MouseWheelUnit::Point,
                         delta: egui::vec2(0.0, 120.0),
+                        phase: egui::TouchPhase::Move,
                         modifiers: Default::default(),
                     },
                 ],
