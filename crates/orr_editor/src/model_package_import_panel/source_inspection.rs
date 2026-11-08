@@ -86,6 +86,7 @@ impl Panel {
             self.inspected_hash = None;
             self.static_assembly.source_sha256 = None;
             self.static_pivot.source_sha256 = None;
+            self.static_sampler.material = None;
             self.glb_subtree.node_index = None;
         }
         let result = match self
@@ -178,6 +179,7 @@ impl Panel {
                 self.inspected_hash = None;
                 self.static_assembly.source_sha256 = None;
                 self.static_pivot.source_sha256 = None;
+                self.static_sampler.material = None;
             }
             Err(error) => {
                 self.inspection.status = format!("Cannot start source inspection: {error}")
@@ -254,7 +256,7 @@ impl Panel {
                     .add_enabled(
                         !self.busy()
                             && material.used_primitive_count > 0
-                            && (self.color_variant_enabled || self.texture_variant_enabled || self.sampler.enabled || self.uv.enabled || self.static_uv.enabled || self.static_texture.enabled),
+                            && (self.color_variant_enabled || self.texture_variant_enabled || self.sampler.enabled || self.uv.enabled || self.static_uv.enabled || self.static_texture.enabled || self.static_sampler.enabled),
                         egui::Button::new(format!("Use material {}", material.index)),
                     )
                     .clicked()
@@ -279,6 +281,7 @@ impl Panel {
             if self.uv.enabled { self.uv.material=Some(index); }
             if self.static_uv.enabled { self.static_uv.material=Some(index); }
             if self.static_texture.enabled { self.static_texture.material=Some(index); }
+            if self.static_sampler.enabled { self.static_sampler.material=Some(index); }
             self.inspected_hash = Some(hash);
             self.source_inputs_changed();
         }
