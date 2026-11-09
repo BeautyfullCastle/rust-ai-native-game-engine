@@ -123,6 +123,15 @@ jobs:
                   traceback.print_exc()
 
           expected_inventories = {
+              'room-layout-unit': [
+                  'project_create::room_layout::tests::strict_recipe_and_authoritative_admission',
+                  'project_create::room_layout::tests::deterministic_layout_and_report_match_saved_scene',
+                  'project_create::room_layout::tests::invalid_input_never_publishes_and_special_files_fail',
+              ],
+              'room-layout-cli': [
+                  'authored_wall_blocks_direct_route_and_saved_detour_wins',
+                  'cli_rejects_bad_recipe_and_incompatible_flags_without_output',
+              ],
               'playtest-cli': [
                   'saved_completion_repeats_exactly_without_writes_and_requires_release',
                   'actual_wall_blocks_route_and_false_assertions_fail',
@@ -255,6 +264,8 @@ jobs:
               on = 'room-input-actions,project-create,project-export'
               off = 'room-project,project-create,project-export'
               suites = [
+                  ('room-layout-unit', 'orr_sample', 'project-create,room-project', ['--lib', 'project_create::room_layout::']),
+                  ('room-layout-cli', 'orr_sample', 'project-create,room-playtest', ['--test', 'room_layout_cli']),
                   ('playtest-cli', 'orr_sample', 'room-playtest,project-create', ['--test', 'room_playtest_cli']),
                   ('playtest-unified-cli', 'orr_sample', 'room-playtest,project-create,room-input-actions', ['--test', 'room_playtest_cli']),
                   ('room-attach', 'orr_sample', 'room-controls-attach,project-create', ['--lib', 'room_controls_attach::']),
@@ -285,6 +296,8 @@ jobs:
               attempt('python-controls', python_tests)
 
               for label, package, features, targets in [
+                  ('room-layout-creator-clippy', 'orr_sample', 'project-create,room-project', ['--lib', '--bin', 'orr_new_arena']),
+                  ('room-layout-cli-clippy', 'orr_sample', 'project-create,room-playtest', ['--test', 'room_layout_cli']),
                   ('playtest-bin-clippy', 'orr_sample', 'room-playtest', ['--bin', 'orr_playtest_room']),
                   ('playtest-cli-clippy', 'orr_sample', 'room-playtest,project-create', ['--test', 'room_playtest_cli']),
                   ('sample-attach-clippy', 'orr_sample', 'room-controls-attach', ['--lib', '--bin', 'orr_attach_room_controls']),
@@ -313,6 +326,13 @@ jobs:
                   binary = Path(os.environ['CARGO_TARGET_DIR']) / 'release' / 'orr_playtest_room'
                   (evidence / 'fresh-playtest-binary.json').write_text(json.dumps({'orr_playtest_room': hashlib.sha256(binary.read_bytes()).hexdigest()}, indent=2) + '\n')
               attempt('playtest-production', playtest_production)
+
+              def room_layout_production():
+                  # Minimal creator feature closure, distinct from the broader export/attachment builds.
+                  run('room-layout-production-build', ['cargo', 'build', '--locked', '--release', '-p', 'orr_sample', '--no-default-features', '--features', 'project-create,room-project', '--bin', 'orr_new_arena'])
+                  binary = Path(os.environ['CARGO_TARGET_DIR']) / 'release' / 'orr_new_arena'
+                  (evidence / 'fresh-room-layout-creator-binary.json').write_text(json.dumps({'orr_new_arena': hashlib.sha256(binary.read_bytes()).hexdigest()}, indent=2) + '\n')
+              attempt('room-layout-production', room_layout_production)
 
               attempt('editor-project-build', lambda: run('editor-project-build', ['cargo', 'build', '--locked', '--release', '-p', 'orr_editor', '--no-default-features', '--features', 'room-input-map-project', '--bin', 'orr_room_input_map']))
 
