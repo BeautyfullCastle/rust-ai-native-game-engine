@@ -59,13 +59,15 @@ fn combo(h: &mut Harness<'_, App>, label: &str, choice: &str) {
     );
 }
 fn path(h: &mut Harness<'_, App>, value: &Path) {
-    h.get_by_role(Role::TextInput).scroll_to_me();
+    h.get_by_role_and_label(Role::TextInput, "File path for explicit Open or Save As")
+        .scroll_to_me();
     settle(h, "path scroll");
-    h.get_by_role(Role::TextInput).focus();
+    h.get_by_role_and_label(Role::TextInput, "File path for explicit Open or Save As")
+        .focus();
     settle(h, "path focus");
     h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
     settle(h, "select path");
-    h.get_by_role(Role::TextInput)
+    h.get_by_role_and_label(Role::TextInput, "File path for explicit Open or Save As")
         .type_text(value.to_str().unwrap());
     settle(h, "path input");
 }
@@ -194,4 +196,49 @@ fn all_five_actions_persist_and_invalid_open_preserves_history() {
     click(&mut h, "Undo map edit");
     click(&mut h, "Redo map edit");
     assert_eq!(h.state().panel().document(), &accepted);
+}
+
+#[cfg(all(
+    feature = "room-input-map-project",
+    feature = "project-create",
+    target_os = "linux",
+    target_arch = "x86_64"
+))]
+#[test]
+fn standalone_app_scrolls_to_project_preview_and_confirms_saved_map() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("Room project");
+    orr_sample::project_create::create(&orr_sample::project_create::CreateOptions {
+        output: root.clone(),
+        template: orr_sample::project_create::ROOM_TEMPLATE.into(),
+        seed: "standalone-ui".into(),
+    })
+    .unwrap();
+    RoomControls::default_map()
+        .save_new(root.join("controls.json"))
+        .unwrap();
+    let mut h = harness();
+    for (label, value) in [
+        ("Project directory", root.to_str().unwrap()),
+        ("Saved controls filename", "controls.json"),
+    ] {
+        h.get_by_role_and_label(Role::TextInput, label)
+            .scroll_to_me();
+        settle(&mut h, "scroll link field");
+        h.get_by_role_and_label(Role::TextInput, label).focus();
+        settle(&mut h, "focus link field");
+        h.get_by_role_and_label(Role::TextInput, label)
+            .type_text(value);
+        settle(&mut h, "type link field");
+    }
+    click(&mut h, "Preview project link");
+    click(&mut h, "Cancel project link");
+    assert!(!root.join("orr.project.before-controls.json").exists());
+    click(&mut h, "Preview project link");
+    click(&mut h, "Confirm project link");
+    assert!(root.join("orr.project.before-controls.json").exists());
+    assert!(orr_sample::room_project::PreparedProject::open(&root)
+        .unwrap()
+        .controls()
+        .is_some());
 }

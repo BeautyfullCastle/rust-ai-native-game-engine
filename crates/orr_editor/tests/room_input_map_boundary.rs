@@ -41,3 +41,21 @@ fn main_editor_play_is_separate_explicit_capability() {
     assert!(lib
         .contains("#[cfg(feature = \"room-input-map-play\")]\npub mod room_input_map_authoring;"));
 }
+
+#[test]
+fn project_linking_is_separate_from_main_editor_play() {
+    let manifest: toml::Value = toml::from_str(include_str!("../Cargo.toml")).unwrap();
+    let features = manifest["features"].as_table().unwrap();
+    assert_eq!(
+        features["room-input-map-project"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["room-input-map-editor", "orr_sample/room-controls-attach"]
+    );
+    let panel = include_str!("../src/room_input_map_authoring.rs");
+    assert!(!panel.contains("ProjectLink"));
+    assert!(!panel.contains("room_controls_attach"));
+}

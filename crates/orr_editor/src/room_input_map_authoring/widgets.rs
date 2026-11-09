@@ -3,6 +3,14 @@ use super::Panel;
 use orr_input::{Button, Key, MAX_BINDINGS};
 use std::path::Path;
 
+#[cfg(all(
+    feature = "room-input-map-project",
+    target_os = "linux",
+    target_arch = "x86_64"
+))]
+#[path = "project_link.rs"]
+mod project_link;
+
 const KEYS: &[Key] = &[
     Key::A,
     Key::B,
@@ -38,10 +46,16 @@ const KEYS: &[Key] = &[
     Key::Tab,
 ];
 
-/// Standalone authoring app. It owns no project, runtime or game-input lifecycle.
+/// Standalone authoring app. Optional explicit project linking owns no runtime.
 #[derive(Default)]
 pub struct App {
     panel: Panel,
+    #[cfg(all(
+        feature = "room-input-map-project",
+        target_os = "linux",
+        target_arch = "x86_64"
+    ))]
+    project_link: project_link::ProjectLink,
     title_has_pending_draft: bool,
 }
 
@@ -54,7 +68,17 @@ impl App {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ui, |ui| self.panel.show(ui));
+        egui::CentralPanel::default().show(ui, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                self.panel.show(ui);
+                #[cfg(all(
+                    feature = "room-input-map-project",
+                    target_os = "linux",
+                    target_arch = "x86_64"
+                ))]
+                self.project_link.show(ui, &self.panel);
+            });
+        });
         let pending = self.panel().has_pending_draft();
         if pending != self.title_has_pending_draft {
             let title = if pending {
@@ -77,7 +101,7 @@ impl Panel {
     fn show_contents(&mut self, ui: &mut egui::Ui) {
         ui.heading("Room input map");
         ui.label("Five fixed actions · keyboard only · up to eight keys per action");
-        ui.small("Explicit Room project controls file. This tool does not launch a game or change a project. R/Escape are reserved.");
+        ui.small("Explicit Room project controls file. Map editing does not launch a game or change a project. R/Escape are reserved.");
         ui.separator();
         ui.strong("Accepted map · only these bindings are saved");
         egui::Grid::new("accepted_room_bindings")

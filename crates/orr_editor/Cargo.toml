@@ -82,6 +82,8 @@ animated-models = ["orr_model_bindings/animated-models", "models", "orr_model/an
 # Standalone default-off Room authoring; no main editor Play integration.
 room-input-map-editor = ["dep:orr_input", "orr_sample/room-input-actions"]
 # Explicit session-only main-editor Room controls and physical-key Play routing.
+# Explicit project linking in the standalone authoring app, Linux x86_64 only.
+room-input-map-project = ["room-input-map-editor", "orr_sample/room-controls-attach"]
 room-input-map-play = ["room-project", "room-input-map-editor"]
 
 [dependencies]

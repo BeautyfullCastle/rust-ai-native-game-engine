@@ -60,3 +60,32 @@ invalid manifests, stale references, aliases, unchanged old/new sidecars, backup
 collisions, changed inputs and injected
 stage/sync/backup/rename failures. These CPU/filesystem checks do not establish
 native keyboard, GPU, Windows or other platform acceptance.
+
+## Standalone editor workflow
+
+On Linux x86_64 build `orr_editor` with `--no-default-features --features
+room-input-map-project --bin orr_room_input_map`, then run `orr_room_input_map`.
+This default-off feature adds **Link saved controls to a project** only to the
+standalone authoring window, not the main editor's Play panel.
+
+1. Apply action drafts and **Save As new file** inside the project directory.
+2. Enter the project directory and saved root-local controls filename. For a
+   revision, select **Revise an existing controls reference** and enter the exact
+   current reference and a fresh backup filename.
+3. Click **Preview project link**. Production admission validates the project;
+   the saved map must match the accepted authoring map. Review the project,
+   old/new references and backup, then **Confirm project link** or **Cancel**.
+4. Reopen the complete project in a capable editor/player. Linking does not
+   change a running game, save a scene, or install the current Play map.
+
+Pending drafts block preview. Changing any link field, accepted map or pending
+map draft cancels the preview. Commit rechecks captured disk inputs and consumes
+its preview even on failure. Cancel changes no project files. A durability warning
+means the manifest was applied; inspect files before retrying. Map Undo does not
+undo a linked manifest. Keep other writers closed throughout the operation.
+
+Headless widget and real temporary-project tests cover preview, cancellation,
+invalidated confirmation, repeated actions, attachment and revision. The
+uncertain-durability message has a synthetic outcome test; filesystem fault
+injection remains in the existing backend tests. No native-window result is
+implied.

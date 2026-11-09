@@ -122,6 +122,43 @@ jobs:
                   traceback.print_exc()
 
           expected_inventories = {
+              'editor-project-bin': [
+                  'room_input_map_authoring::tests::bounded_history_and_semantic_selection_survive_reordered_imports',
+                  'room_input_map_authoring::tests::eight_aliases_roundtrip_and_overflow_and_failed_save_preserve_state',
+                  'room_input_map_authoring::tests::rejects_invalid_drafts_without_mutating_map_or_history',
+                  'room_input_map_authoring::tests::safe_persistence_pending_draft_and_runtime_interpretation',
+                  'room_input_map_authoring::tests::save_rejects_incompatible_root_document_names_without_writes',
+                  'room_input_map_authoring::widgets::project_link::tests::applied_uncertain_outcome_is_not_reported_as_no_change',
+                  'room_input_map_authoring::widgets::project_link::tests::attaches_reopens_and_revises_without_changing_sidecars_or_history',
+                  'room_input_map_authoring::widgets::project_link::tests::changed_sidecar_after_preview_is_rejected_and_preview_consumed',
+                  'room_input_map_authoring::widgets::project_link::tests::edits_drafts_and_every_request_field_invalidate_confirmation',
+                  'room_input_map_authoring::widgets::project_link::tests::mismatch_pending_stale_and_external_changes_fail_without_retry',
+                  'room_input_map_authoring::widgets::project_link::tests::production_widgets_cancel_repeat_edit_fail_and_commit',
+                  'room_input_map_authoring::widgets::project_link::tests::production_widgets_revision_and_restore_do_not_reuse_confirmation',
+              ],
+              'editor-project-ui': [
+                  'all_five_actions_persist_and_invalid_open_preserves_history',
+                  'production_apply_history_save_reopen_and_pending_cancellation',
+                  'production_duplicate_rejection_action_navigation_and_reserved_choices_absent',
+                  'room_input_map_authoring::tests::bounded_history_and_semantic_selection_survive_reordered_imports',
+                  'room_input_map_authoring::tests::eight_aliases_roundtrip_and_overflow_and_failed_save_preserve_state',
+                  'room_input_map_authoring::tests::rejects_invalid_drafts_without_mutating_map_or_history',
+                  'room_input_map_authoring::tests::safe_persistence_pending_draft_and_runtime_interpretation',
+                  'room_input_map_authoring::tests::save_rejects_incompatible_root_document_names_without_writes',
+                  'room_input_map_authoring::widgets::project_link::tests::applied_uncertain_outcome_is_not_reported_as_no_change',
+                  'room_input_map_authoring::widgets::project_link::tests::attaches_reopens_and_revises_without_changing_sidecars_or_history',
+                  'room_input_map_authoring::widgets::project_link::tests::changed_sidecar_after_preview_is_rejected_and_preview_consumed',
+                  'room_input_map_authoring::widgets::project_link::tests::edits_drafts_and_every_request_field_invalidate_confirmation',
+                  'room_input_map_authoring::widgets::project_link::tests::mismatch_pending_stale_and_external_changes_fail_without_retry',
+                  'room_input_map_authoring::widgets::project_link::tests::production_widgets_cancel_repeat_edit_fail_and_commit',
+                  'room_input_map_authoring::widgets::project_link::tests::production_widgets_revision_and_restore_do_not_reuse_confirmation',
+                  'standalone_app_scrolls_to_project_preview_and_confirms_saved_map',
+              ],
+              'editor-project-boundary': [
+                  'main_editor_play_is_separate_explicit_capability',
+                  'project_linking_is_separate_from_main_editor_play',
+                  'room_editor_is_explicit_and_default_off',
+              ],
               'room-attach': [
                   'room_controls_attach::tests::attaches_preserving_manifest_semantics_and_exact_sidecar_and_backup',
                   'room_controls_attach::tests::conflicts_in_manifest_controls_and_scene_prevent_publication',
@@ -208,6 +245,9 @@ jobs:
                   ('room-runtime-off', 'orr_sample', off, ['--lib', 'room_app::']),
                   ('package', 'orr_package', '', ['--lib']),
                   ('editor-play', 'orr_editor', 'room-input-map-play', ['--lib', 'app::room_controls::']),
+                  ('editor-project-bin', 'orr_editor', 'room-input-map-project,project-create', ['--bin', 'orr_room_input_map']),
+                  ('editor-project-ui', 'orr_editor', 'room-input-map-project,project-create', ['--test', 'room_input_map_authoring_ui']),
+                  ('editor-project-boundary', 'orr_editor', 'room-input-map-project,project-create', ['--test', 'room_input_map_boundary']),
                   ('editor-bin', 'orr_editor', 'room-input-map-editor', ['--bin', 'orr_room_input_map']),
                   ('editor-ui', 'orr_editor', 'room-input-map-editor', ['--test', 'room_input_map_authoring_ui']),
                   ('editor-default-off', 'orr_editor', '', ['--test', 'deps']),
@@ -232,6 +272,8 @@ jobs:
                   ('editor-play-clippy', 'orr_editor', 'room-input-map-play', ['--lib', '--bin', 'orr_editor']),
                   ('editor-room-off-clippy', 'orr_editor', 'room-project', ['--lib', '--bin', 'orr_editor']),
                   ('editor-default-main-clippy', 'orr_editor', '', ['--lib', '--bin', 'orr_editor']),
+                  ('editor-project-clippy', 'orr_editor', 'room-input-map-project,project-create', ['--bin', 'orr_room_input_map', '--test', 'room_input_map_authoring_ui', '--test', 'room_input_map_boundary']),
+                  ('editor-project-only-clippy', 'orr_editor', 'room-input-map-project', ['--bin', 'orr_room_input_map']),
                   ('editor-clippy', 'orr_editor', 'room-input-map-editor', ['--bin', 'orr_room_input_map', '--test', 'room_input_map_authoring_ui']),
                   ('editor-off-clippy', 'orr_editor', '', ['--test', 'deps', '--test', 'room_input_map_boundary']),
               ]:
@@ -240,6 +282,8 @@ jobs:
                       command += ['--features', features]
                   command += targets + ['--', '-D', 'warnings']
                   attempt(label, lambda label=label, command=command: run(label, command))
+
+              attempt('editor-project-build', lambda: run('editor-project-build', ['cargo', 'build', '--locked', '--release', '-p', 'orr_editor', '--no-default-features', '--features', 'room-input-map-project', '--bin', 'orr_room_input_map']))
 
               attempt('editor-play-build', lambda: run('editor-play-build', ['cargo', 'build', '--locked', '--release', '-p', 'orr_editor', '--no-default-features', '--features', 'room-input-map-play', '--bin', 'orr_editor']))
 
