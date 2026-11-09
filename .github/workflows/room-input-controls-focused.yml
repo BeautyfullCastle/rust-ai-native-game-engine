@@ -128,12 +128,16 @@ jobs:
                   'actual_wall_blocks_route_and_false_assertions_fail',
                   'rejects_schema_fields_ranges_budget_and_non_regular_inputs',
                   'cli_usage_and_project_admission_fail_closed',
+                  'json_reports_repeatable_success_and_actionable_first_failure',
+                  'json_usage_admission_and_maximum_report_are_bounded',
               ],
               'playtest-unified-cli': [
                   'saved_completion_repeats_exactly_without_writes_and_requires_release',
                   'actual_wall_blocks_route_and_false_assertions_fail',
                   'rejects_schema_fields_ranges_budget_and_non_regular_inputs',
                   'cli_usage_and_project_admission_fail_closed',
+                  'json_reports_repeatable_success_and_actionable_first_failure',
+                  'json_usage_admission_and_maximum_report_are_bounded',
                   'unified_controls_feature_does_not_grant_consumer_support',
               ],
               'editor-project-bin': [

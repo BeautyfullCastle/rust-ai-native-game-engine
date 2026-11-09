@@ -236,3 +236,184 @@ fn unified_controls_feature_does_not_grant_consumer_support() {
     assert!(String::from_utf8_lossy(&result.stderr)
         .contains("do not consume authored physical controls"));
 }
+
+fn run_json(root: &Path, script: &Path) -> (Output, Value) {
+    let output = Command::new(env!("CARGO_BIN_EXE_orr_playtest_room"))
+        .arg("--project")
+        .arg(root)
+        .arg("--script")
+        .arg(script)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(
+        output.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.len() < 256 * 1024);
+    let report = serde_json::from_slice(&output.stdout).unwrap();
+    (output, report)
+}
+
+#[test]
+fn json_reports_repeatable_success_and_actionable_first_failure() {
+    use sha2::{Digest, Sha256};
+    let (temp, root) = fixture();
+    let path = temp.path().join("route Ω.json");
+    let before = tree(&root);
+    let route = script(vec![
+        step(1, 0, true, true, false),
+        step(60, 1, false, true, false),
+        step(1, 0, true, true, true),
+    ]);
+    write(&path, &route);
+    let (first, report) = run_json(&root, &path);
+    assert_eq!(first.status.code(), Some(0));
+    assert_eq!(report["schema"], 1);
+    assert_eq!(report["status"], "passed");
+    assert!(report.get("error").is_none());
+    assert_eq!(report["ticks"], 62);
+    assert_eq!(report["steps"].as_array().unwrap().len(), 3);
+    assert_eq!(report["steps"][2]["step"], 3);
+    assert_eq!(report["steps"][2]["tick"], 62);
+    assert_eq!(
+        report["steps"][2]["observed"],
+        json!({"key":true,"won":true})
+    );
+    assert_eq!(report["steps"][2]["passed"], true);
+    for (field, bytes) in [
+        ("script_sha256", fs::read(&path).unwrap()),
+        (
+            "scene_sha256",
+            fs::read(root.join("room.scene.yaml")).unwrap(),
+        ),
+    ] {
+        let expected: String = Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(report[field], expected);
+    }
+    let text_output = run(&root, &path);
+    assert!(text_output.status.success());
+    let text = String::from_utf8(text_output.stdout).unwrap();
+    let initial = text
+        .lines()
+        .find_map(|line| line.strip_prefix("room playtest schema=1 initial_checksum="))
+        .unwrap();
+    assert_eq!(report["initial_checksum"], initial);
+    for boundary in report["steps"].as_array().unwrap() {
+        let prefix = format!("step={} ", boundary["step"]);
+        let line = text.lines().find(|line| line.starts_with(&prefix)).unwrap();
+        let checksum = line.split("checksum=").nth(1).unwrap();
+        assert_eq!(boundary["checksum"], checksum);
+    }
+    assert_eq!(first.stdout, run_json(&root, &path).0.stdout);
+    // Holding interact cannot trigger the exit again: diagnose, then release it.
+    let mut broken = route.clone();
+    broken["steps"][1]["interact"] = json!(true);
+    broken["steps"][1]["expect_won"] = json!(true);
+    write(&path, &broken);
+    let (failed, report) = run_json(&root, &path);
+    assert_eq!(failed.status.code(), Some(1));
+    assert_eq!(report["status"], "error");
+    assert_eq!(report["error"]["kind"], "assertion");
+    assert_eq!(report["steps"].as_array().unwrap().len(), 2);
+    assert_eq!(report["steps"][1]["step"], 2);
+    assert_eq!(report["steps"][1]["tick"], 61);
+    assert_eq!(
+        report["steps"][1]["expected"],
+        json!({"key":true,"won":true})
+    );
+    assert_eq!(
+        report["steps"][1]["observed"],
+        json!({"key":true,"won":false})
+    );
+    assert_eq!(report["steps"][1]["passed"], false);
+    assert_eq!(report["steps"][1]["checksum"].as_str().unwrap().len(), 18);
+    assert!(report.get("ticks").is_none());
+    write(&path, &route);
+    assert!(run_json(&root, &path).0.status.success());
+    assert_eq!(before, tree(&root));
+}
+
+#[test]
+fn json_usage_admission_and_maximum_report_are_bounded() {
+    for args in [
+        vec!["--json"],
+        vec!["--project", "missing", "--script", "--json"],
+        vec!["--project", "--json", "--script", "missing"],
+        vec!["--project", "--json", "--script", "missing", "--json"],
+        vec![
+            "--project",
+            "missing",
+            "--script",
+            "missing",
+            "--json=true",
+            "--json",
+        ],
+        vec!["--json", "--help"],
+        vec![
+            "--project",
+            "missing",
+            "--script",
+            "missing",
+            "--json",
+            "--json",
+        ],
+        vec!["a", "b", "c", "d", "e", "f", "g", "--json"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_orr_playtest_room"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stderr.is_empty());
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["error"]["kind"], "usage");
+        assert_eq!(report["steps"], json!([]));
+        assert!(report.get("script_sha256").is_none());
+    }
+    let (temp, root) = fixture();
+    let path = temp.path().join("route.json");
+    fs::write(&path, "bad").unwrap();
+    let (failed, report) = run_json(&root, &path);
+    assert_eq!(failed.status.code(), Some(1));
+    assert_eq!(report["error"]["kind"], "script");
+    assert!(report.get("script_sha256").is_none());
+    assert!(report.get("scene_sha256").is_none());
+    assert_eq!(report["steps"], json!([]));
+    for field in ["expect_key", "expect_won"] {
+        let mut missing = script(vec![step(0, 0, false, false, false)]);
+        missing["steps"][0].as_object_mut().unwrap().remove(field);
+        write(&path, &missing);
+        let (failed, report) = run_json(&root, &path);
+        assert_eq!(failed.status.code(), Some(1));
+        assert_eq!(report["error"]["kind"], "script");
+        assert_eq!(report["steps"], json!([]));
+        assert!(report.get("script_sha256").is_none());
+    }
+    let mut long_error = script(vec![step(0, 0, false, false, false)]);
+    long_error["Ω".repeat(3000)] = json!(true);
+    write(&path, &long_error);
+    let (failed, report) = run_json(&root, &path);
+    assert_eq!(failed.status.code(), Some(1));
+    assert_eq!(report["error"]["kind"], "script");
+    assert_eq!(report["error"]["message_truncated"], true);
+    assert!(report["error"]["message"].as_str().unwrap().len() <= 2048);
+    write(&path, &script(vec![step(0, 0, false, false, false); 256]));
+    let (passed, report) = run_json(&root, &path);
+    assert!(passed.status.success());
+    assert_eq!(report["steps"].as_array().unwrap().len(), 256);
+    assert_eq!(report["steps"][255]["step"], 256);
+    assert_eq!(report["steps"][255]["tick"], 0);
+    fs::write(root.join("room.scene.yaml"), "invalid scene").unwrap();
+    let (failed, report) = run_json(&root, &path);
+    assert_eq!(failed.status.code(), Some(1));
+    assert_eq!(report["error"]["kind"], "project");
+    assert!(report.get("script_sha256").is_some());
+    assert!(report.get("scene_sha256").is_none());
+    assert!(report.get("initial_checksum").is_none());
+    assert_eq!(report["steps"], json!([]));
+}

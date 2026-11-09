@@ -39,3 +39,35 @@ unsupported even when dependencies have those features enabled. Validated camera
 Output includes SHA-256 of the captured script bytes and admitted scene text, plus
 the engine package version. These identify gameplay inputs, not the full project
 or executable. Keep source and executable hashes with comparison results.
+
+## Structured results for authoring
+
+Append `--json` to the command to emit one schema-1 JSON object on stdout, with
+no progress text or stderr diagnostics. Exit codes remain 0 (all assertions
+passed), 1 (execution/admission/assertion failure), and 2 (usage). An exact
+`--json` anywhere in the arguments requests JSON errors, even for malformed
+arguments; valid syntax requires it once, last. `--help` alone stays text;
+`--help --json` is a usage error.
+
+The report has `schema`, `status` (`passed` or `error`) and `steps`. Each executed
+boundary contains a **one-based** `step`, cumulative simulation `tick` (initial
+state is tick 0), `expected` and `observed` key/won booleans, hexadecimal string
+`checksum` and `passed`. It includes the first failing boundary and stops there;
+later boundaries are absent. Zero-duration steps retain the current tick. Only
+successful runs include total `ticks`. Admission errors have empty `steps`, not
+invented expectations or observations.
+
+`script_sha256` appears only after complete script validation; `scene_sha256`
+and `initial_checksum` appear only after project admission and simulation
+construction. Hashes keep their limited meaning described above. `engine_version`
+is included for execution reports. Errors include `kind` (`usage`, `script`,
+`project`, `unsupported_project`, `simulation`, or `unsupported_target`) and a
+human-readable `message`. Assertion failures use `kind: "assertion"`. Branch on
+`kind` and structured state, not message wording. Execution error messages are
+capped at 2048 UTF-8 bytes with `message_truncated`; usage messages are fixed.
+Reports are bounded below 256 KiB by the script-step and diagnostic limits.
+
+For example, `expected.won: true` with `observed.won: false` identifies an unmet
+victory assertion. A route that holds interact continuously must release it
+before pressing again at the exit. Correct the route or authored scene, then
+rerun; this command never edits either file or promises that a retry will pass.
