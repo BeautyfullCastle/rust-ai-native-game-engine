@@ -105,7 +105,7 @@ fn write_atomic_with_counter(
 
 #[cfg(test)]
 mod tests {
-    use super::{CREATE_ATTEMPTS, create_temporary, temporary_path, write_atomic_with_counter};
+    use super::{create_temporary, temporary_path, write_atomic_with_counter, CREATE_ATTEMPTS};
     use std::{
         fs,
         path::{Path, PathBuf},
@@ -190,12 +190,10 @@ mod tests {
         drop(file);
         drop(guard);
 
-        assert!(
-            fs::symlink_metadata(&existing)
-                .unwrap()
-                .file_type()
-                .is_symlink()
-        );
+        assert!(fs::symlink_metadata(&existing)
+            .unwrap()
+            .file_type()
+            .is_symlink());
         assert_eq!(fs::read(sentinel).unwrap(), b"preserve sentinel");
         assert!(!candidate(&destination, 1).exists());
     }
