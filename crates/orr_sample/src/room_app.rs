@@ -415,6 +415,30 @@ impl Keys {
             reserved: 0,
         }
     }
+    #[cfg(feature = "room-input-actions")]
+    fn sample_controls(&mut self, controls: &crate::room_controls::RoomControls) -> RoomInput {
+        if std::mem::take(&mut self.neutral_pending) { return RoomInput::default(); }
+        controls.input_from_held(self.down.iter().filter_map(|code| match code {
+            KeyCode::KeyA => Some(orr_input::Key::A), KeyCode::KeyB => Some(orr_input::Key::B),
+            KeyCode::KeyC => Some(orr_input::Key::C), KeyCode::KeyD => Some(orr_input::Key::D),
+            KeyCode::KeyE => Some(orr_input::Key::E), KeyCode::KeyF => Some(orr_input::Key::F),
+            KeyCode::KeyG => Some(orr_input::Key::G), KeyCode::KeyH => Some(orr_input::Key::H),
+            KeyCode::KeyI => Some(orr_input::Key::I), KeyCode::KeyJ => Some(orr_input::Key::J),
+            KeyCode::KeyK => Some(orr_input::Key::K), KeyCode::KeyL => Some(orr_input::Key::L),
+            KeyCode::KeyM => Some(orr_input::Key::M), KeyCode::KeyN => Some(orr_input::Key::N),
+            KeyCode::KeyO => Some(orr_input::Key::O), KeyCode::KeyP => Some(orr_input::Key::P),
+            KeyCode::KeyQ => Some(orr_input::Key::Q), KeyCode::KeyR => Some(orr_input::Key::R),
+            KeyCode::KeyS => Some(orr_input::Key::S), KeyCode::KeyT => Some(orr_input::Key::T),
+            KeyCode::KeyU => Some(orr_input::Key::U), KeyCode::KeyV => Some(orr_input::Key::V),
+            KeyCode::KeyW => Some(orr_input::Key::W), KeyCode::KeyX => Some(orr_input::Key::X),
+            KeyCode::KeyY => Some(orr_input::Key::Y), KeyCode::KeyZ => Some(orr_input::Key::Z),
+            KeyCode::ArrowLeft => Some(orr_input::Key::ArrowLeft), KeyCode::ArrowRight => Some(orr_input::Key::ArrowRight),
+            KeyCode::ArrowUp => Some(orr_input::Key::ArrowUp), KeyCode::ArrowDown => Some(orr_input::Key::ArrowDown),
+            KeyCode::Space => Some(orr_input::Key::Space), KeyCode::Escape => Some(orr_input::Key::Escape),
+            KeyCode::Enter => Some(orr_input::Key::Enter), KeyCode::Tab => Some(orr_input::Key::Tab),
+            _ => None,
+        }))
+    }
 }
 struct Graphics {
     window: Arc<Window>,
@@ -540,7 +564,14 @@ impl App {
             self.accumulated += elapsed.min(Duration::from_millis(250));
             let interval = Duration::from_secs_f64(1.0 / f64::from(TICK_RATE));
             while self.accumulated >= interval {
-                let input = self.keys.sample();
+                let input = {
+                    #[cfg(feature = "room-input-actions")]
+                    if let Some(controls) = self.project.controls() {
+                        self.keys.sample_controls(&controls.map)
+                    } else { self.keys.sample() }
+                    #[cfg(not(feature = "room-input-actions"))]
+                    { self.keys.sample() }
+                };
                 self.step_authoritative(input)?;
                 self.accumulated -= interval;
             }
@@ -857,6 +888,47 @@ mod tests {
         keys.event(KeyCode::KeyW, true, false, false, true);
         assert_eq!(keys.sample(), RoomInput::default());
         assert_eq!(keys.sample().move_z, -1);
+    }
+    #[cfg(feature = "room-input-actions")]
+    #[test]
+    fn authored_mapping_uses_the_real_keys_admission_seam() {
+        let mut map = crate::room_controls::RoomControls::default_map();
+        map.actions[0].bindings = vec![orr_input::Button::Keyboard { key: orr_input::Key::J }];
+        let controls = crate::room_controls::RoomControls::from_map(&map).unwrap();
+        let mut keys = Keys::default();
+        assert!(keys.event(KeyCode::KeyJ, true, false, false, true));
+        assert_eq!(keys.sample_controls(&controls).move_x, -1);
+        keys.clear();
+        assert_eq!(keys.sample_controls(&controls), RoomInput::default());
+        assert!(!keys.event(KeyCode::KeyJ, true, false, true, true));
+        assert_eq!(keys.sample_controls(&controls), RoomInput::default());
+        keys.event(KeyCode::KeyJ, false, false, false, true);
+        assert!(keys.event(KeyCode::KeyJ, true, false, false, true));
+        assert_eq!(keys.sample_controls(&controls).move_x, -1);
+        keys.clear();
+        assert_eq!(keys.sample_controls(&controls), RoomInput::default());
+        assert!(!keys.event(KeyCode::KeyJ, true, false, false, false));
+        assert_eq!(keys.sample_controls(&controls), RoomInput::default());
+        keys.event(KeyCode::KeyJ, false, false, false, true);
+        assert!(keys.event(KeyCode::KeyJ, true, false, false, true));
+        assert_eq!(keys.sample_controls(&controls).move_x, -1);
+    }
+
+    #[cfg(feature = "room-input-actions")]
+    #[test]
+    fn authored_defaults_keep_alias_cancel_and_held_interact_in_keys_state() {
+        let controls = crate::room_controls::RoomControls::from_map(
+            &crate::room_controls::RoomControls::default_map(),
+        ).unwrap();
+        let mut keys = Keys::default();
+        for code in [KeyCode::KeyA, KeyCode::ArrowLeft, KeyCode::KeyD] {
+            assert!(keys.event(code, true, false, false, true));
+        }
+        assert_eq!(keys.sample_controls(&controls).move_x, 0);
+        assert!(keys.event(KeyCode::KeyE, true, false, false, true));
+        assert_ne!(keys.sample_controls(&controls).buttons & INTERACT, 0);
+        keys.event(KeyCode::KeyE, false, false, false, true);
+        assert_eq!(keys.sample_controls(&controls).buttons & INTERACT, 0);
     }
 }
 
