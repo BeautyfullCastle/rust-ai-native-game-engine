@@ -1,8 +1,8 @@
 use orr_edit::{EditorDoc, HistoryEntry, PlayController};
 use orr_reflect::{Scene, TypeRegistry};
-use orr_remote::{Cap, Caps, ErpTarget, HostLimits, RpcError, call_local};
+use orr_remote::{call_local, Cap, Caps, ErpTarget, HostLimits, RpcError};
 use orr_sim::Simulation;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -163,12 +163,10 @@ fn scene_save_preserves_predictable_regular_temp_and_reopens_saved_yaml() {
 
     assert_eq!(saved["dirty"], false);
     assert_eq!(saved["written"], scene_path.display().to_string());
-    assert!(
-        fs::symlink_metadata(&scene_path)
-            .unwrap()
-            .file_type()
-            .is_file()
-    );
+    assert!(fs::symlink_metadata(&scene_path)
+        .unwrap()
+        .file_type()
+        .is_file());
     let disk_bytes = fs::read(&scene_path).unwrap();
     let saved_text = saved["text"].as_str().unwrap();
     assert_eq!(disk_bytes, saved_text.as_bytes());
@@ -212,22 +210,18 @@ fn scene_save_does_not_follow_or_replace_predictable_temp_symlink() {
 
     assert_eq!(saved["dirty"], false);
     assert_eq!(fs::read(&sentinel).unwrap(), sentinel_before);
-    assert!(
-        fs::symlink_metadata(&scene_path)
-            .unwrap()
-            .file_type()
-            .is_file()
-    );
+    assert!(fs::symlink_metadata(&scene_path)
+        .unwrap()
+        .file_type()
+        .is_file());
     assert_eq!(
         fs::read(&scene_path).unwrap(),
         saved["text"].as_str().unwrap().as_bytes()
     );
-    assert!(
-        fs::symlink_metadata(&predictable_temp)
-            .unwrap()
-            .file_type()
-            .is_symlink()
-    );
+    assert!(fs::symlink_metadata(&predictable_temp)
+        .unwrap()
+        .file_type()
+        .is_symlink());
     assert_eq!(fs::read_link(predictable_temp).unwrap(), sentinel);
     assert_no_owned_temporary_files(&root.0);
 }
