@@ -78,6 +78,28 @@ impl RoomControls {
         self.input_from_keys(held)
     }
 
+    /// Physical key names from the admitted map, including every authored alias.
+    pub fn movement_hint(&self) -> String {
+        [
+            ("move_left", "left"),
+            ("move_right", "right"),
+            ("move_forward", "forward"),
+            ("move_backward", "backward"),
+            ("interact", "interact"),
+        ]
+        .into_iter()
+        .map(|(action, label)| {
+            let keys = self.map[action]
+                .iter()
+                .map(|key| format!("{key:?}"))
+                .collect::<Vec<_>>()
+                .join("/");
+            format!("{keys} {label}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+    }
+
     pub fn default_map() -> ActionMap {
         use orr_input::Action;
         ActionMap {
