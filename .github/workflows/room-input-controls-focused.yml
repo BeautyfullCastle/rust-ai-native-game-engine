@@ -1,0 +1,224 @@
+name: Room input controls focused Linux CI
+# Additive checks only; no existing workflow or branch protection is changed.
+on:
+  pull_request:
+    branches: [su/engine-correctness-hardening]
+    paths:
+      - '.github/workflows/room-input-controls-focused.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/orr_input/**'
+      - 'crates/orr_package/**'
+      - 'crates/orr_sample/Cargo.toml'
+      - 'crates/orr_sample/src/lib.rs'
+      - 'crates/orr_sample/src/room*'
+      - 'crates/orr_sample/src/room*/**'
+      - 'crates/orr_sample/src/project*'
+      - 'crates/orr_sample/src/project*/**'
+      - 'crates/orr_sample/src/bin/room_escape.rs'
+      - 'crates/orr_sample/src/bin/orr_export_room.rs'
+      - 'crates/orr_sample/src/bin/orr_new_arena.rs'
+      - 'crates/orr_sample/tests/*room*'
+      - 'crates/orr_games/src/room*'
+      - 'crates/orr_editor/Cargo.toml'
+      - 'crates/orr_editor/src/room_input*'
+      - 'crates/orr_editor/src/room_input*/**'
+      - 'crates/orr_editor/src/bin/orr_room_input_map.rs'
+      - 'crates/orr_editor/tests/room_input_map_authoring_ui.rs'
+      - 'crates/orr_editor/tests/deps.rs'
+      - 'crates/orr_editor/tests/room_input_map_boundary.rs'
+      - 'tools/create_room_controls.py'
+      - 'tools/test_create_room_controls.py'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: room-input-controls-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  room-input-controls:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      CARGO_TARGET_DIR: ${{ runner.temp }}/room-input-controls-${{ github.run_id }}-${{ github.run_attempt }}
+      EVIDENCE: ${{ github.workspace }}/ci-evidence
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Record pinned source and scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git rev-parse HEAD HEAD^{tree} | tee "$EVIDENCE/source.txt"
+          printf '%s\n' 'Native window, physical key capture and GPU checks are NOT RUN.' > "$EVIDENCE/limitations.txt"
+      - name: Install official Ubuntu build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          trap 'rc=$?; echo "$rc" > "$EVIDENCE/dependencies.exit"' EXIT
+          sudo apt-get update -q 2>&1 | tee "$EVIDENCE/dependencies.log"
+          sudo apt-get install -y -q build-essential pkg-config libasound2-dev libudev-dev libx11-dev libxkbcommon-dev libwayland-dev libegl1-mesa-dev libgl1-mesa-dev 2>&1 | tee -a "$EVIDENCE/dependencies.log"
+      - name: Select Rust 1.99.1 with Clippy
+        shell: bash
+        run: |
+          set -euo pipefail
+          trap 'rc=$?; echo "$rc" > "$EVIDENCE/toolchain.exit"' EXIT
+          rustup toolchain install 1.99.1 --profile minimal --component clippy 2>&1 | tee "$EVIDENCE/toolchain.log"
+          rustup override set 1.99.1 2>&1 | tee -a "$EVIDENCE/toolchain.log"
+          rustc --version --verbose | tee "$EVIDENCE/rustc.txt"
+          cargo --version | tee "$EVIDENCE/cargo.txt"
+          python3 --version | tee "$EVIDENCE/python.txt"
+      - name: Run focused inventories, tests, lint and CPU export closure
+        shell: python {0}
+        run: |
+          import hashlib, json, os, re, subprocess, sys, time, traceback
+          from pathlib import Path
+
+          evidence = Path(os.environ['EVIDENCE'])
+          receipts, failures = [], []
+          def save():
+              (evidence / 'receipts.json').write_text(json.dumps(receipts, indent=2) + '\n')
+          def run(label, command):
+              record = {'label': label, 'command': command, 'log': label + '.log', 'exit': None}
+              receipts.append(record)
+              save()
+              started = time.monotonic()
+              try:
+                  with (evidence / record['log']).open('w') as log:
+                      result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, text=True, timeout=1500)
+                  record['exit'] = result.returncode
+              except subprocess.TimeoutExpired:
+                  record['exit'] = 124
+                  record['timeout_seconds'] = 1500
+              finally:
+                  record['elapsed_seconds'] = round(time.monotonic() - started, 3)
+                  save()
+              output = (evidence / record['log']).read_text(errors='replace')
+              print(output, end='', flush=True)
+              if record['exit'] != 0:
+                  raise RuntimeError(f'{label}: exit {record["exit"]}')
+              return output, record
+
+          def attempt(label, callback):
+              try:
+                  callback()
+              except Exception:
+                  failures.append(label)
+                  (evidence / (label + '-failure.log')).write_text(traceback.format_exc())
+                  traceback.print_exc()
+
+          def suite(label, package, features, targets):
+              command = ['cargo', 'test', '--locked', '--release', '-p', package, '--no-default-features']
+              if features:
+                  command += ['--features', features]
+              command += targets
+              listing, record = run(label + '-inventory', command + ['--', '--list', '--format=terse'])
+              names = re.findall(r'^(.+): test$', listing, re.M)
+              record['test_count'] = len(names)
+              save()
+              if not names or len(names) != len(set(names)):
+                  raise RuntimeError(f'{label}: empty or duplicate inventory')
+              output, record = run(label, command + ['--', '--format=pretty', '--color=never', '--test-threads=1'])
+              if package == 'orr_package':
+                  child_pattern = (r'test tests::fifo_inputs_fail_without_blocking \.\.\. \n'
+                                   r'running 1 test\ntest tests::fifo_inputs_fail_without_blocking \.\.\. ok\n'
+                                   r'\ntest result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; '
+                                   + str(len(names) - 1) + r' filtered out; finished in [^\n]+\n\nok\n')
+                  output, child_count = re.subn(child_pattern, 'test tests::fifo_inputs_fail_without_blocking ... ok\n', output)
+                  record['fifo_subprocess_count'] = child_count
+                  save()
+                  if child_count != 1:
+                      raise RuntimeError('Expected exactly one passing bounded FIFO child and parent')
+              cases = re.findall(r'^test (.+) \.\.\. (ok|FAILED|ignored)(?: .*)?$', output, re.M)
+              summaries = re.findall(r'^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured;', output, re.M)
+              record['test_count'] = len(cases)
+              record['inventory_count'] = len(names)
+              save()
+              if summaries != [(str(len(names)), '0', '0', '0')] or sorted(name for name, status in cases if status == 'ok') != sorted(names):
+                  raise RuntimeError(f'{label}: inventory, execution or skip mismatch')
+
+          def source_fence(label):
+              head, record = run(label + '-head', ['git', 'rev-parse', 'HEAD'])
+              if head.strip() != os.environ['SOURCE_SHA']:
+                  raise RuntimeError(f'{label}: HEAD changed from the pinned source')
+              run(label + '-status', ['git', 'status', '--porcelain=v1', '--untracked-files=no'])
+              # HEAD comparison catches staged additions as well as tracked edits/deletions.
+              run(label + '-diff', ['git', 'diff', '--exit-code', 'HEAD', '--'])
+
+          try:
+              attempt('source-before', lambda: source_fence('source-before'))
+              if failures:
+                  raise RuntimeError('Refusing to test a dirty or unpinned source tree')
+              on = 'room-input-actions,project-create,project-export'
+              off = 'room-project,project-create,project-export'
+              suites = [
+                  ('room-controls', 'orr_sample', on, ['--lib', 'room_controls::']),
+                  ('room-admission-on', 'orr_sample', on, ['--lib', 'room_controls_project_tests::']),
+                  ('room-admission-off', 'orr_sample', off, ['--lib', 'room_controls_project_tests::']),
+                  ('room-runtime-on', 'orr_sample', on, ['--lib', 'room_app::']),
+                  ('room-runtime-off', 'orr_sample', off, ['--lib', 'room_app::']),
+                  ('package', 'orr_package', '', ['--lib']),
+                  ('editor-bin', 'orr_editor', 'room-input-map-editor', ['--bin', 'orr_room_input_map']),
+                  ('editor-ui', 'orr_editor', 'room-input-map-editor', ['--test', 'room_input_map_authoring_ui']),
+                  ('editor-default-off', 'orr_editor', '', ['--test', 'deps']),
+                  ('editor-room-boundary', 'orr_editor', '', ['--test', 'room_input_map_boundary']),
+              ]
+              for args in suites:
+                  attempt(args[0], lambda args=args: suite(*args))
+
+              def python_tests():
+                  output, record = run('python-controls', ['python3', '-m', 'unittest', 'discover', '-s', 'tools', '-p', 'test_create_room_controls.py', '-v'])
+                  record['test_count'] = sum(1 for line in output.splitlines() if line.startswith('test_') and line.endswith(' ... ok'))
+                  save()
+                  if record['test_count'] != 13 or not re.search(r'^Ran 13 tests in ', output, re.M) or not re.search(r'^OK$', output, re.M):
+                      raise RuntimeError('Python suite must execute all 13 cases without skips')
+              attempt('python-controls', python_tests)
+
+              for label, package, features, targets in [
+                  ('sample-clippy', 'orr_sample', on, ['--lib', '--bin', 'room_escape', '--bin', 'orr_new_arena', '--bin', 'orr_export_room']),
+                  ('sample-off-clippy', 'orr_sample', off, ['--lib', '--bin', 'room_escape', '--bin', 'orr_new_arena', '--bin', 'orr_export_room']),
+                  ('package-clippy', 'orr_package', '', ['--lib']),
+                  ('editor-clippy', 'orr_editor', 'room-input-map-editor', ['--bin', 'orr_room_input_map', '--test', 'room_input_map_authoring_ui']),
+                  ('editor-off-clippy', 'orr_editor', '', ['--test', 'deps', '--test', 'room_input_map_boundary']),
+              ]:
+                  command = ['cargo', 'clippy', '--locked', '--release', '-p', package, '--no-default-features']
+                  if features:
+                      command += ['--features', features]
+                  command += targets + ['--', '-D', 'warnings']
+                  attempt(label, lambda label=label, command=command: run(label, command))
+
+              def integration():
+                  # This run-isolated target starts empty; never consume PATH or cached binaries.
+                  run('runtime-build', ['cargo', 'build', '--locked', '--release', '-p', 'orr_sample', '--no-default-features', '--features', on, '--bin', 'orr_new_arena', '--bin', 'room_escape', '--bin', 'orr_export_room'])
+                  binary_dir = Path(os.environ['CARGO_TARGET_DIR']) / 'release'
+                  hashes = {name: hashlib.sha256((binary_dir / name).read_bytes()).hexdigest() for name in ['orr_new_arena', 'room_escape', 'orr_export_room']}
+                  (evidence / 'fresh-binaries.json').write_text(json.dumps(hashes, indent=2) + '\n')
+                  code = 'import sys; sys.path.insert(0, "tools"); from test_create_room_controls import run_integration; run_integration(sys.argv[1])'
+                  output, record = run('cpu-export-reopen', ['python3', '-c', code, str(binary_dir)])
+                  if 'PASS: authored sidecar admitted, exported byte-exactly, reopened with CPU model-pose checks.' not in output:
+                      raise RuntimeError('Missing CPU admission/export/reopen success marker')
+                  record['integration_count'] = 1
+                  save()
+              attempt('cpu-export-reopen', integration)
+          finally:
+              # Do not lose the final fence when an individual check fails.
+              attempt('source-after', lambda: source_fence('source-after'))
+              (evidence / 'scope.json').write_text(json.dumps({'source': os.environ['SOURCE_SHA'], 'failures': failures, 'native_window_gpu': 'not run', 'physical_key_capture': 'not run', 'full_workspace': False}, indent=2) + '\n')
+          if failures:
+              sys.exit('Focused checks failed: ' + ', '.join(failures))
+      - name: Preserve logs and receipts including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: room-input-controls-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-evidence
+          if-no-files-found: error
+          retention-days: 14
