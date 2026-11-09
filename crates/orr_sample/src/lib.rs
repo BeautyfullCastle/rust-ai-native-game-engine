@@ -213,3 +213,6 @@ pub(crate) mod defense_pixel_motion;
 
 #[cfg(all(target_os="linux",feature="project-create",feature="room-lighting"))]
 pub mod room_lit_starter;
+
+#[cfg(all(feature = "room-controls-attach", target_os = "linux", target_arch = "x86_64"))]
+pub mod room_controls_attach;

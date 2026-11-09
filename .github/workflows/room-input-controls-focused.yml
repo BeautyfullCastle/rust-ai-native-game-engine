@@ -17,6 +17,7 @@ on:
       - 'crates/orr_sample/src/project*/**'
       - 'crates/orr_sample/src/bin/room_escape.rs'
       - 'crates/orr_sample/src/bin/orr_export_room.rs'
+      - 'crates/orr_sample/src/bin/orr_attach_room_controls.rs'
       - 'crates/orr_sample/src/bin/orr_new_arena.rs'
       - 'crates/orr_sample/tests/*room*'
       - 'crates/orr_games/src/room*'
@@ -33,6 +34,7 @@ on:
       - 'crates/orr_editor/tests/room_input_map_boundary.rs'
       - 'tools/create_room_controls.py'
       - 'tools/test_create_room_controls.py'
+      - 'tools/test_attach_room_controls.py'
   workflow_dispatch:
 permissions:
   contents: read
@@ -120,6 +122,14 @@ jobs:
                   traceback.print_exc()
 
           expected_inventories = {
+              'room-attach': [
+                  'room_controls_attach::tests::attaches_preserving_manifest_semantics_and_exact_sidecar_and_backup',
+                  'room_controls_attach::tests::conflicts_in_manifest_controls_and_scene_prevent_publication',
+                  'room_controls_attach::tests::injected_prepublication_failures_keep_original_and_postpublication_is_explicit',
+                  'room_controls_attach::tests::rejects_backup_collisions_preserving_everything',
+                  'room_controls_attach::tests::rejects_null_duplicate_wrong_game_and_existing_controls_without_writes',
+                  'room_controls_attach::tests::rejects_unsafe_controls_and_aliases',
+              ],
               'editor-play': [
                   'app::room_controls::tests::actual_restart_restores_pinned_map_without_rereading_disk',
                   'app::room_controls::tests::actual_room_host_uses_physical_project_keys_and_releases_on_interrupted_focus',
@@ -184,6 +194,7 @@ jobs:
               on = 'room-input-actions,project-create,project-export'
               off = 'room-project,project-create,project-export'
               suites = [
+                  ('room-attach', 'orr_sample', 'room-controls-attach,project-create', ['--lib', 'room_controls_attach::']),
                   ('room-controls', 'orr_sample', on, ['--lib', 'room_controls::']),
                   ('room-admission-on', 'orr_sample', on, ['--lib', 'room_controls_project_tests::']),
                   ('room-admission-off', 'orr_sample', off, ['--lib', 'room_controls_project_tests::']),
@@ -208,6 +219,7 @@ jobs:
               attempt('python-controls', python_tests)
 
               for label, package, features, targets in [
+                  ('sample-attach-clippy', 'orr_sample', 'room-controls-attach', ['--lib', '--bin', 'orr_attach_room_controls']),
                   ('sample-clippy', 'orr_sample', on, ['--lib', '--bin', 'room_escape', '--bin', 'orr_new_arena', '--bin', 'orr_export_room']),
                   ('sample-off-clippy', 'orr_sample', off, ['--lib', '--bin', 'room_escape', '--bin', 'orr_new_arena', '--bin', 'orr_export_room']),
                   ('package-clippy', 'orr_package', '', ['--lib']),
@@ -238,6 +250,19 @@ jobs:
                   record['integration_count'] = 1
                   save()
               attempt('cpu-export-reopen', integration)
+
+              def attachment_integration():
+                  # Build all four producers together from pinned source, without PATH fallbacks.
+                  run('attach-build', ['cargo', 'build', '--locked', '--release', '-p', 'orr_sample', '--no-default-features', '--features', 'room-controls-attach,project-create', '--bin', 'orr_attach_room_controls', '--bin', 'orr_new_arena', '--bin', 'room_escape', '--bin', 'orr_export_room'])
+                  binary_dir = Path(os.environ['CARGO_TARGET_DIR']) / 'release'
+                  hashes = {name: hashlib.sha256((binary_dir / name).read_bytes()).hexdigest() for name in ['orr_attach_room_controls', 'orr_new_arena', 'room_escape', 'orr_export_room']}
+                  (evidence / 'fresh-attach-binaries.json').write_text(json.dumps(hashes, indent=2) + '\n')
+                  output, record = run('cpu-attach-export-reopen', ['python3', 'tools/test_attach_room_controls.py', '--binary-dir', str(binary_dir)])
+                  if 'PASS: real generated project, authored custom controls, explicit attachment, byte-exact backup/sidecar, CPU reopen/export/source-hidden launcher identical. No physical input/GPU coverage.' not in output:
+                      raise RuntimeError('Missing explicit attachment/export/reopen success marker')
+                  record['integration_count'] = 1
+                  save()
+              attempt('cpu-attach-export-reopen', attachment_integration)
           finally:
               # Do not lose the final fence when an individual check fails.
               attempt('source-after', lambda: source_fence('source-after'))
