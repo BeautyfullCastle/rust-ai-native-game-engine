@@ -43,7 +43,6 @@ jobs:
       CARGO_BUILD_JOBS: 2
       CARGO_INCREMENTAL: 0
       CARGO_TERM_COLOR: never
-      CARGO_TARGET_DIR: ${{ runner.temp }}/room-input-controls-${{ github.run_id }}-${{ github.run_attempt }}
       EVIDENCE: ${{ github.workspace }}/ci-evidence
       SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
@@ -56,6 +55,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$EVIDENCE"
+          printf 'CARGO_TARGET_DIR=%s/room-input-controls-%s-%s\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           git rev-parse HEAD HEAD^{tree} | tee "$EVIDENCE/source.txt"
           printf '%s\n' 'Native window, physical key capture and GPU checks are NOT RUN.' > "$EVIDENCE/limitations.txt"
