@@ -1,7 +1,8 @@
 # Room input-map editor
 
 Run `cargo run -p orr_editor --features room-input-map-editor --bin orr_room_input_map`.
-This default-off standalone window authors five Room actions, not main-editor Play.
+This default-off standalone window authors five Room actions. Main-editor Play
+uses the separate opt-in [room-input-map-play](room-controls-play.md) capability.
 It does not change a project manifest or launch the game.
 
 Select an action and choose physical keys using its binding dropdowns. Add/Remove
@@ -36,4 +37,5 @@ CPU tests cover validation, bounded history, safe persistence and saved-map Room
 input interpretation. Headless egui tests drive the production widgets for
 Apply, Discard, undo/redo, defaults, Save As/reopen, duplicate rejection, pending
 navigation and repeated clicks. They do not prove native OS keyboard handling,
-window rendering, GPU behavior or main-editor Play integration.
+window rendering or GPU behavior. Main-editor Play has separate acceptance checks
+documented in [Room controls in editor Play](room-controls-play.md).

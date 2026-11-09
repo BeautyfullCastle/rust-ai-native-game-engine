@@ -21,6 +21,10 @@ on:
       - 'crates/orr_sample/tests/*room*'
       - 'crates/orr_games/src/room*'
       - 'crates/orr_editor/Cargo.toml'
+      - 'crates/orr_editor/src/app.rs'
+      - 'crates/orr_editor/src/app/**'
+      - 'crates/orr_editor/src/lib.rs'
+      - 'crates/orr_editor/src/main.rs'
       - 'crates/orr_editor/src/room_input*'
       - 'crates/orr_editor/src/room_input*/**'
       - 'crates/orr_editor/src/bin/orr_room_input_map.rs'
@@ -115,6 +119,24 @@ jobs:
                   (evidence / (label + '-failure.log')).write_text(traceback.format_exc())
                   traceback.print_exc()
 
+          expected_inventories = {
+              'editor-play': [
+                  'app::room_controls::tests::actual_restart_restores_pinned_map_without_rereading_disk',
+                  'app::room_controls::tests::actual_room_host_uses_physical_project_keys_and_releases_on_interrupted_focus',
+                  'app::room_controls::tests::focus_reclaim_map_change_and_repeat_quarantine_until_release',
+                  'app::room_controls::tests::fresh_cli_bootstrap_accepts_preadmitted_controls_after_play_ticks_only_once',
+                  'app::room_controls::tests::full_editor_ui_does_not_treat_logical_escape_as_physical_release',
+                  'app::room_controls::tests::invalid_map_and_pending_draft_do_not_replace_live_controls',
+                  'app::room_controls::tests::missing_identity_and_shortcuts_do_not_create_gameplay_presses',
+                  'app::room_controls::tests::missing_physical_release_cannot_leave_a_remapped_key_held',
+                  'app::room_controls::tests::physical_aliases_signs_and_logical_escape_follow_admitted_map',
+                  'app::room_controls::tests::production_widgets_require_explicit_use_for_play_and_disable_in_play',
+                  'app::room_controls::tests::project_snapshot_survives_restart_but_not_a_different_scene',
+                  'app::room_controls::tests::public_project_install_rejects_play_lease_and_pending_draft',
+                  'app::room_controls::tests::scene_change_resets_session_map_without_discarding_authoring_draft',
+              ],
+          }
+
           def suite(label, package, features, targets):
               command = ['cargo', 'test', '--locked', '--release', '-p', package, '--no-default-features']
               if features:
@@ -126,6 +148,8 @@ jobs:
               save()
               if not names or len(names) != len(set(names)):
                   raise RuntimeError(f'{label}: empty or duplicate inventory')
+              if label in expected_inventories and sorted(names) != sorted(expected_inventories[label]):
+                  raise RuntimeError(f'{label}: focused inventory differs from the reviewed exact test set')
               output, record = run(label, command + ['--', '--format=pretty', '--color=never', '--test-threads=1'])
               if package == 'orr_package':
                   child_pattern = (r'test tests::fifo_inputs_fail_without_blocking \.\.\. \n'
@@ -166,6 +190,7 @@ jobs:
                   ('room-runtime-on', 'orr_sample', on, ['--lib', 'room_app::']),
                   ('room-runtime-off', 'orr_sample', off, ['--lib', 'room_app::']),
                   ('package', 'orr_package', '', ['--lib']),
+                  ('editor-play', 'orr_editor', 'room-input-map-play', ['--lib', 'app::room_controls::']),
                   ('editor-bin', 'orr_editor', 'room-input-map-editor', ['--bin', 'orr_room_input_map']),
                   ('editor-ui', 'orr_editor', 'room-input-map-editor', ['--test', 'room_input_map_authoring_ui']),
                   ('editor-default-off', 'orr_editor', '', ['--test', 'deps']),
@@ -186,6 +211,9 @@ jobs:
                   ('sample-clippy', 'orr_sample', on, ['--lib', '--bin', 'room_escape', '--bin', 'orr_new_arena', '--bin', 'orr_export_room']),
                   ('sample-off-clippy', 'orr_sample', off, ['--lib', '--bin', 'room_escape', '--bin', 'orr_new_arena', '--bin', 'orr_export_room']),
                   ('package-clippy', 'orr_package', '', ['--lib']),
+                  ('editor-play-clippy', 'orr_editor', 'room-input-map-play', ['--lib', '--bin', 'orr_editor']),
+                  ('editor-room-off-clippy', 'orr_editor', 'room-project', ['--lib', '--bin', 'orr_editor']),
+                  ('editor-default-main-clippy', 'orr_editor', '', ['--lib', '--bin', 'orr_editor']),
                   ('editor-clippy', 'orr_editor', 'room-input-map-editor', ['--bin', 'orr_room_input_map', '--test', 'room_input_map_authoring_ui']),
                   ('editor-off-clippy', 'orr_editor', '', ['--test', 'deps', '--test', 'room_input_map_boundary']),
               ]:
@@ -194,6 +222,8 @@ jobs:
                       command += ['--features', features]
                   command += targets + ['--', '-D', 'warnings']
                   attempt(label, lambda label=label, command=command: run(label, command))
+
+              attempt('editor-play-build', lambda: run('editor-play-build', ['cargo', 'build', '--locked', '--release', '-p', 'orr_editor', '--no-default-features', '--features', 'room-input-map-play', '--bin', 'orr_editor']))
 
               def integration():
                   # This run-isolated target starts empty; never consume PATH or cached binaries.

@@ -81,6 +81,8 @@ animated-models = ["orr_model_bindings/animated-models", "models", "orr_model/an
 
 # Standalone default-off Room authoring; no main editor Play integration.
 room-input-map-editor = ["dep:orr_input", "orr_sample/room-input-actions"]
+# Explicit session-only main-editor Room controls and physical-key Play routing.
+room-input-map-play = ["room-project", "room-input-map-editor"]
 
 [dependencies]
 rustix = { version = "1.1.5", features = ["fs"], optional = true }

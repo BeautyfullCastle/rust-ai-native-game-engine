@@ -248,7 +248,7 @@ impl Panel {
             "Attach explicitly: set entry.controls in orr.project.json to this root-level filename.",
         );
         ui.small(
-            "Keep the filename distinct from other entry documents (ignoring case). Room player requires room-input-actions. Main-editor Play does not support these authored controls.",
+            "Keep the filename distinct from other entry documents (ignoring case). Room player requires room-input-actions. Main-editor Play requires the separate room-input-map-play feature.",
         );
     }
 }

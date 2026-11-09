@@ -23,3 +23,21 @@ fn room_editor_is_explicit_and_default_off() {
     );
     assert!(!include_str!("../src/app.rs").contains("room_input_map_authoring"));
 }
+
+#[test]
+fn main_editor_play_is_separate_explicit_capability() {
+    let manifest: toml::Value = toml::from_str(include_str!("../Cargo.toml")).unwrap();
+    let features = manifest["features"].as_table().unwrap();
+    assert_eq!(
+        features["room-input-map-play"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["room-project", "room-input-map-editor"]
+    );
+    let lib = include_str!("../src/lib.rs");
+    assert!(lib
+        .contains("#[cfg(feature = \"room-input-map-play\")]\npub mod room_input_map_authoring;"));
+}
