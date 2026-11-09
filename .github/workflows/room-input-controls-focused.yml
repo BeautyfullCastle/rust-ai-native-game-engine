@@ -129,6 +129,12 @@ jobs:
                   'room_controls_attach::tests::rejects_backup_collisions_preserving_everything',
                   'room_controls_attach::tests::rejects_null_duplicate_wrong_game_and_existing_controls_without_writes',
                   'room_controls_attach::tests::rejects_unsafe_controls_and_aliases',
+                  'room_controls_attach::tests::explicit_revision_preserves_both_sidecars_and_every_version_backup',
+                  'room_controls_attach::tests::revision_rejects_stale_references_aliases_and_unsafe_names_without_writes',
+                  'room_controls_attach::tests::revision_rejects_missing_null_unsupported_and_corrupt_projects',
+                  'room_controls_attach::tests::revision_rejects_old_and_new_links_and_backup_collisions',
+                  'room_controls_attach::tests::revision_detects_early_and_late_changes_to_both_sidecars_and_project',
+                  'room_controls_attach::tests::revision_failure_outcomes_preserve_data_and_uncertain_apply_rejects_retry',
               ],
               'editor-play': [
                   'app::room_controls::tests::actual_restart_restores_pinned_map_without_rereading_disk',
@@ -258,8 +264,8 @@ jobs:
                   hashes = {name: hashlib.sha256((binary_dir / name).read_bytes()).hexdigest() for name in ['orr_attach_room_controls', 'orr_new_arena', 'room_escape', 'orr_export_room']}
                   (evidence / 'fresh-attach-binaries.json').write_text(json.dumps(hashes, indent=2) + '\n')
                   output, record = run('cpu-attach-export-reopen', ['python3', 'tools/test_attach_room_controls.py', '--binary-dir', str(binary_dir)])
-                  if 'PASS: real generated project, authored custom controls, explicit attachment, byte-exact backup/sidecar, CPU reopen/export/source-hidden launcher identical. No physical input/GPU coverage.' not in output:
-                      raise RuntimeError('Missing explicit attachment/export/reopen success marker')
+                  if 'PASS: real generated project, authored custom controls, explicit attachment/revision, stale-reference refusal, byte-exact old/new sidecars and version backups, CPU reopen/export/source-hidden launcher identical. No physical input/GPU coverage.' not in output:
+                      raise RuntimeError('Missing explicit attachment/revision/export/reopen success marker')
                   record['integration_count'] = 1
                   save()
               attempt('cpu-attach-export-reopen', attachment_integration)

@@ -1,4 +1,4 @@
-//! Explicit first attachment for plain Room projects on a stable local filesystem.
+//! Explicit attachment and guarded revision for plain Room projects on a stable local filesystem.
 //! This detects ordinary conflicts, not hostile concurrent directory replacement.
 use crate::project_export::{
     admission::{ProjectSnapshot, SnapshotFile},
@@ -27,10 +27,29 @@ pub struct Attachment {
     controls: SnapshotFile,
     candidate: Vec<u8>,
     mode: u32,
+    backup: String,
 }
 
 pub fn prepare(root: &Path, name: &str) -> Result<Attachment, String> {
-    if name.len() > 128
+    prepare_change(root, name, None)
+}
+
+/// Switch to a different existing sidecar only when the current reference matches.
+/// The caller supplies a fresh backup filename for this revision; neither sidecar
+/// is ever written. Close all other writers before preparing and committing.
+pub fn prepare_update(
+    root: &Path,
+    name: &str,
+    expected_old: &str,
+    backup: &str,
+) -> Result<Attachment, String> {
+    validate_name(expected_old)?;
+    validate_name(backup)?;
+    prepare_change(root, name, Some((expected_old, backup)))
+}
+
+fn validate_name(name: &str) -> Result<(), String> {
+    if name.len() > 100
         || !name.ends_with(".json")
         || !name
             .as_bytes()
@@ -48,6 +67,15 @@ pub fn prepare(root: &Path, name: &str) -> Result<Attachment, String> {
                 .into(),
         );
     }
+    Ok(())
+}
+
+fn prepare_change(
+    root: &Path,
+    name: &str,
+    revision: Option<(&str, &str)>,
+) -> Result<Attachment, String> {
+    validate_name(name)?;
     let original = ProjectSnapshot::open_profile(root, Profile::Room)?;
     let manifest = original
         .files
@@ -58,11 +86,13 @@ pub fn prepare(root: &Path, name: &str) -> Result<Attachment, String> {
         serde_json::from_slice(&manifest.bytes).map_err(err)?;
     if typed.schema != 2
         || typed.progress.is_some()
-        || original.entry.controls.is_some()
         || original.entry.lighting.is_some()
         || original.entry.character.is_some()
     {
-        return Err("attachment requires plain schema-2 Room, omitted controls, no lighting/character/progress".into());
+        return Err(
+            "attachment/revision requires plain schema-2 Room, no lighting/character/progress"
+                .into(),
+        );
     }
     // Do not reinterpret legacy sequence forms or silently rewrite null fields.
     let mut value: serde_json::Value = serde_json::from_slice(&manifest.bytes).map_err(err)?;
@@ -71,9 +101,34 @@ pub fn prepare(root: &Path, name: &str) -> Result<Attachment, String> {
         .and_then(|v| v.get_mut("entry"))
         .and_then(|v| v.as_object_mut())
         .ok_or("manifest and entry must be JSON objects")?;
-    if entry.contains_key("controls") {
-        return Err("controls already present".into());
-    }
+    let backup = if let Some((expected_old, backup)) = revision {
+        if original.entry.controls.as_deref() != Some(expected_old) {
+            return Err("current controls reference does not match expected old reference; inspect the manifest".into());
+        }
+        if backup.eq_ignore_ascii_case(name)
+            || original
+                .files
+                .iter()
+                .any(|f| f.relative.eq_ignore_ascii_case(backup))
+        {
+            return Err("backup filename aliases project content or new controls".into());
+        }
+        if fs::symlink_metadata(original.root.join(expected_old))
+            .map_err(err)?
+            .nlink()
+            != 1
+        {
+            return Err("old controls must not be hardlinked".into());
+        }
+        backup
+    } else {
+        if entry.contains_key("controls") {
+            return Err(
+                "controls already present; first attachment cannot replace a mapping".into(),
+            );
+        }
+        BACKUP
+    };
     if original
         .files
         .iter()
@@ -135,6 +190,7 @@ pub fn prepare(root: &Path, name: &str) -> Result<Attachment, String> {
         controls,
         candidate,
         mode: metadata.permissions().mode() & 0o777,
+        backup: backup.into(),
     })
 }
 
@@ -149,7 +205,7 @@ impl Attachment {
     ) -> Result<Outcome, String> {
         let root = &self.original.root;
         let manifest = root.join(MANIFEST);
-        let backup = root.join(BACKUP);
+        let backup = root.join(&self.backup);
         let original_bytes = &self
             .original
             .files
