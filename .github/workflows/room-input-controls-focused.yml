@@ -18,6 +18,7 @@ on:
       - 'crates/orr_sample/src/bin/room_escape.rs'
       - 'crates/orr_sample/src/bin/orr_export_room.rs'
       - 'crates/orr_sample/src/bin/orr_attach_room_controls.rs'
+      - 'crates/orr_sample/src/bin/orr_playtest_room.rs'
       - 'crates/orr_sample/src/bin/orr_new_arena.rs'
       - 'crates/orr_sample/tests/*room*'
       - 'crates/orr_games/src/room*'
@@ -122,6 +123,19 @@ jobs:
                   traceback.print_exc()
 
           expected_inventories = {
+              'playtest-cli': [
+                  'saved_completion_repeats_exactly_without_writes_and_requires_release',
+                  'actual_wall_blocks_route_and_false_assertions_fail',
+                  'rejects_schema_fields_ranges_budget_and_non_regular_inputs',
+                  'cli_usage_and_project_admission_fail_closed',
+              ],
+              'playtest-unified-cli': [
+                  'saved_completion_repeats_exactly_without_writes_and_requires_release',
+                  'actual_wall_blocks_route_and_false_assertions_fail',
+                  'rejects_schema_fields_ranges_budget_and_non_regular_inputs',
+                  'cli_usage_and_project_admission_fail_closed',
+                  'unified_controls_feature_does_not_grant_consumer_support',
+              ],
               'editor-project-bin': [
                   'room_input_map_authoring::tests::bounded_history_and_semantic_selection_survive_reordered_imports',
                   'room_input_map_authoring::tests::eight_aliases_roundtrip_and_overflow_and_failed_save_preserve_state',
@@ -237,6 +251,8 @@ jobs:
               on = 'room-input-actions,project-create,project-export'
               off = 'room-project,project-create,project-export'
               suites = [
+                  ('playtest-cli', 'orr_sample', 'room-playtest,project-create', ['--test', 'room_playtest_cli']),
+                  ('playtest-unified-cli', 'orr_sample', 'room-playtest,project-create,room-input-actions', ['--test', 'room_playtest_cli']),
                   ('room-attach', 'orr_sample', 'room-controls-attach,project-create', ['--lib', 'room_controls_attach::']),
                   ('room-controls', 'orr_sample', on, ['--lib', 'room_controls::']),
                   ('room-admission-on', 'orr_sample', on, ['--lib', 'room_controls_project_tests::']),
@@ -265,6 +281,8 @@ jobs:
               attempt('python-controls', python_tests)
 
               for label, package, features, targets in [
+                  ('playtest-bin-clippy', 'orr_sample', 'room-playtest', ['--bin', 'orr_playtest_room']),
+                  ('playtest-cli-clippy', 'orr_sample', 'room-playtest,project-create', ['--test', 'room_playtest_cli']),
                   ('sample-attach-clippy', 'orr_sample', 'room-controls-attach', ['--lib', '--bin', 'orr_attach_room_controls']),
                   ('sample-clippy', 'orr_sample', on, ['--lib', '--bin', 'room_escape', '--bin', 'orr_new_arena', '--bin', 'orr_export_room']),
                   ('sample-off-clippy', 'orr_sample', off, ['--lib', '--bin', 'room_escape', '--bin', 'orr_new_arena', '--bin', 'orr_export_room']),
@@ -282,6 +300,15 @@ jobs:
                       command += ['--features', features]
                   command += targets + ['--', '-D', 'warnings']
                   attempt(label, lambda label=label, command=command: run(label, command))
+
+              attempt('playtest-default-off', lambda: run('playtest-default-off', ['cargo', 'check', '--locked', '--release', '-p', 'orr_sample', '--no-default-features', '--lib']))
+
+              def playtest_production():
+                  # Build only the production feature; CLI suites separately exercise real RoomRun semantics.
+                  run('playtest-production-build', ['cargo', 'build', '--locked', '--release', '-p', 'orr_sample', '--no-default-features', '--features', 'room-playtest', '--bin', 'orr_playtest_room'])
+                  binary = Path(os.environ['CARGO_TARGET_DIR']) / 'release' / 'orr_playtest_room'
+                  (evidence / 'fresh-playtest-binary.json').write_text(json.dumps({'orr_playtest_room': hashlib.sha256(binary.read_bytes()).hexdigest()}, indent=2) + '\n')
+              attempt('playtest-production', playtest_production)
 
               attempt('editor-project-build', lambda: run('editor-project-build', ['cargo', 'build', '--locked', '--release', '-p', 'orr_editor', '--no-default-features', '--features', 'room-input-map-project', '--bin', 'orr_room_input_map']))
 

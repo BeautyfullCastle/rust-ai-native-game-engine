@@ -38,6 +38,7 @@ material-demo = ["particle-demo", "dep:orr_model", "dep:sha2", "orr_render/metal
 # Explicit optional pickup/preset preview; Arena default is unchanged.
 particle-demo = ["orr_games/collect-dodge", "orr_render/imported-scene", "orr_render/particles"]
 room-project = ["project", "orr_games/room-escape", "dep:orr_model", "dep:orr_model_bindings", "orr_render/imported-scene"]
+room-playtest = ["room-project", "dep:rustix", "dep:sha2"]
 room-input-actions = ["room-project", "input-actions"]
 # Explicit Linux x86_64 manifest attachment, not enabled by runtime controls.
 room-controls-attach = ["room-input-actions", "project-export"]
@@ -220,3 +221,8 @@ test = false
 name = "orr_attach_room_controls"
 path = "src/bin/orr_attach_room_controls.rs"
 required-features = ["room-controls-attach"]
+
+[[bin]]
+name = "orr_playtest_room"
+path = "src/bin/orr_playtest_room.rs"
+required-features = ["room-playtest"]
