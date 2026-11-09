@@ -27,6 +27,8 @@ on:
       - 'crates/orr_editor/src/app/**'
       - 'crates/orr_editor/src/lib.rs'
       - 'crates/orr_editor/src/main.rs'
+      - 'crates/orr_editor/src/room_authoring*'
+      - 'crates/orr_editor/src/room_authoring*/**'
       - 'crates/orr_editor/src/room_input*'
       - 'crates/orr_editor/src/room_input*/**'
       - 'crates/orr_editor/src/bin/orr_room_input_map.rs'
@@ -123,6 +125,27 @@ jobs:
                   traceback.print_exc()
 
           expected_inventories = {
+              'room-layout-shared-parser': [
+                  'room_layout::tests::bounded_strict_shared_recipe',
+              ],
+              'editor-layout-import-backend': [
+                  'room_authoring::layout_import::tests::bound_wall_and_play_mode_refuse_before_mutation',
+                  'room_authoring::layout_import::tests::import_is_one_undoable_edit_and_save_reopens_without_sidecar_changes',
+                  'room_authoring::layout_import::tests::imported_saved_puzzle_blocks_shortcut_and_replays_winning_detour',
+                  'room_authoring::layout_import::tests::rejected_import_rolls_back_partial_changes_and_stale_context',
+                  'room_authoring::layout_import::tests::same_checksum_document_rename_rejects_stale_preview',
+              ],
+              'editor-layout-import-controls-backend': [
+                  'room_authoring::layout_import::tests::bound_wall_and_play_mode_refuse_before_mutation',
+                  'room_authoring::layout_import::tests::import_is_one_undoable_edit_and_save_reopens_without_sidecar_changes',
+                  'room_authoring::layout_import::tests::imported_saved_puzzle_blocks_shortcut_and_replays_winning_detour',
+                  'room_authoring::layout_import::tests::rejected_import_rolls_back_partial_changes_and_stale_context',
+                  'room_authoring::layout_import::tests::same_checksum_document_rename_rejects_stale_preview',
+              ],
+              'editor-layout-import-ui': [
+                  'room_authoring_panel::layout_import::tests::actual_widgets_preview_cancel_apply_once_and_disable_for_model_edits',
+                  'room_authoring_panel::layout_import::tests::draft_close_blocker_and_stale_source_invalidate_preview',
+              ],
               'room-layout-unit': [
                   'project_create::room_layout::tests::strict_recipe_and_authoritative_admission',
                   'project_create::room_layout::tests::deterministic_layout_and_report_match_saved_scene',
@@ -264,6 +287,10 @@ jobs:
               on = 'room-input-actions,project-create,project-export'
               off = 'room-project,project-create,project-export'
               suites = [
+                  ('room-layout-shared-parser', 'orr_sample', 'room-project', ['--lib', 'room_layout::']),
+                  ('editor-layout-import-backend', 'orr_editor', 'room-authoring', ['--lib', 'room_authoring::layout_import::']),
+                  ('editor-layout-import-controls-backend', 'orr_editor', 'room-authoring,room-input-map-play', ['--lib', 'room_authoring::layout_import::']),
+                  ('editor-layout-import-ui', 'orr_editor', 'room-authoring', ['--lib', 'room_authoring_panel::layout_import::']),
                   ('room-layout-unit', 'orr_sample', 'project-create,room-project', ['--lib', 'project_create::room_layout::']),
                   ('room-layout-cli', 'orr_sample', 'project-create,room-playtest', ['--test', 'room_layout_cli']),
                   ('playtest-cli', 'orr_sample', 'room-playtest,project-create', ['--test', 'room_playtest_cli']),
@@ -296,6 +323,9 @@ jobs:
               attempt('python-controls', python_tests)
 
               for label, package, features, targets in [
+                  ('room-layout-parser-clippy', 'orr_sample', 'room-project', ['--lib']),
+                  ('editor-layout-import-controls-clippy', 'orr_editor', 'room-authoring,room-input-map-play', ['--lib', '--bin', 'orr_editor']),
+                  ('editor-layout-import-production-clippy', 'orr_editor', 'room-authoring', ['--lib', '--bin', 'orr_editor']),
                   ('room-layout-creator-clippy', 'orr_sample', 'project-create,room-project', ['--lib', '--bin', 'orr_new_arena']),
                   ('room-layout-cli-clippy', 'orr_sample', 'project-create,room-playtest', ['--test', 'room_layout_cli']),
                   ('playtest-bin-clippy', 'orr_sample', 'room-playtest', ['--bin', 'orr_playtest_room']),
@@ -333,6 +363,11 @@ jobs:
                   binary = Path(os.environ['CARGO_TARGET_DIR']) / 'release' / 'orr_new_arena'
                   (evidence / 'fresh-room-layout-creator-binary.json').write_text(json.dumps({'orr_new_arena': hashlib.sha256(binary.read_bytes()).hexdigest()}, indent=2) + '\n')
               attempt('room-layout-production', room_layout_production)
+
+              # Production-only targets are strict. Broad editor lib-test Clippy is not
+              # claimed here: existing unrelated camera/blockout test lints remain outside scope.
+              # Existing room-project/default-off strict checks above remain mandatory.
+              attempt('editor-layout-import-build', lambda: run('editor-layout-import-build', ['cargo', 'build', '--locked', '--release', '-p', 'orr_editor', '--no-default-features', '--features', 'room-authoring', '--bin', 'orr_editor']))
 
               attempt('editor-project-build', lambda: run('editor-project-build', ['cargo', 'build', '--locked', '--release', '-p', 'orr_editor', '--no-default-features', '--features', 'room-input-map-project', '--bin', 'orr_room_input_map']))
 

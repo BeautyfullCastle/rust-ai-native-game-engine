@@ -1,28 +1,12 @@
 //! Strict creation recipe applied only inside the creator's unpublished stage.
 use super::*;
+use crate::room_layout::{decimal, position, Recipe};
 use orr_fp::{FPVec3, FP};
 use orr_reflect::{Scene, SceneEntity, Value};
-use serde::Deserialize;
 
 const BODY: &str = "orr_physics3d::Body";
 const COLLIDER: &str = "orr_physics3d::Collider";
 const LIMIT: usize = 65536;
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Recipe {
-    schema: u32,
-    player: [String; 2],
-    key: [String; 2],
-    exit: [String; 2],
-    walls: Vec<Wall>,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Wall {
-    center: [String; 2],
-    half_extents: [String; 2],
-}
 
 /// Create a plain Room with authored positions and a replacement wall set.
 /// The captured recipe is read-only. Existing destinations are never replaced.
@@ -68,29 +52,6 @@ pub fn create_room_layout(options: &CreateOptions, recipe: &Path) -> Result<Crea
     Ok(report)
 }
 
-fn decimal(text: &str) -> Result<FP, String> {
-    let unsigned = text.strip_prefix('-').unwrap_or(text);
-    let mut parts = unsigned.split('.');
-    let integer = parts.next().unwrap_or("");
-    let fraction = parts.next();
-    if text.len() > 48
-        || integer.is_empty()
-        || !integer.bytes().all(|b| b.is_ascii_digit())
-        || fraction.is_some_and(|part| part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()))
-        || parts.next().is_some()
-    {
-        return Err("layout coordinates require plain decimal strings, at most 48 bytes".into());
-    }
-    text.parse::<FP>()
-        .map_err(|e| format!("invalid fixed-point decimal: {e:?}"))
-}
-fn position(pair: &[String; 2]) -> Result<FPVec3, String> {
-    Ok(FPVec3::new(
-        decimal(&pair[0])?,
-        FP::HALF,
-        decimal(&pair[1])?,
-    ))
-}
 fn component<'a>(entity: &'a mut SceneEntity, name: &str) -> Result<&'a mut Value, String> {
     entity
         .components
@@ -124,10 +85,7 @@ fn role(entity: &SceneEntity) -> Option<i128> {
         })
 }
 fn authored_scene(seed: &str, bytes: &[u8]) -> Result<Scene, String> {
-    let recipe: Recipe = serde_json::from_slice(bytes).map_err(error)?;
-    if recipe.schema != 1 || recipe.walls.len() > 64 {
-        return Err("layout requires schema 1 and at most 64 walls".into());
-    }
+    let recipe = Recipe::parse(bytes)?;
     let positions = [
         position(&recipe.player)?,
         position(&recipe.key)?,

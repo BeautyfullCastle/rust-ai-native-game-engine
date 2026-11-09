@@ -151,6 +151,8 @@ pub mod image_reimport;
 
 #[cfg(feature = "room-project")]
 pub mod room_project;
+#[cfg(feature = "room-project")]
+pub mod room_layout;
 #[cfg(feature = "room-input-actions")]
 pub mod room_controls;
 #[cfg(feature = "room-project")]
