@@ -78,17 +78,18 @@ jobs:
 
           run_expected_tests() {
             local label="$1"
-            local expected="$2"
-            shift 2
+            local expected_passed="$2"
+            local expected_filtered="$3"
+            shift 3
             local log="$RUNNER_TEMP/collect-delivery-${label}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.log"
-            printf 'Running %s; expecting exactly %s tests.\n' "$label" "$expected"
+            printf 'Running %s; expecting exactly %s passed and %s filtered tests.\n' "$label" "$expected_passed" "$expected_filtered"
             "$@" 2>&1 | tee "$log"
-            grep -Fxq "running ${expected} tests" "$log"
-            grep -Eq "^test result: ok\\. ${expected} passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;" "$log"
+            test "$(grep -Fxc "running ${expected_passed} tests" "$log")" -eq 1
+            test "$(grep -Ec "^test result: ok\\. ${expected_passed} passed; 0 failed; 0 ignored; 0 measured; ${expected_filtered} filtered out; finished in [0-9.]+s$" "$log")" -eq 1
           }
 
-          run_expected_tests journey 8 cargo test --locked --release --test journey -- --test-threads=1
-          run_expected_tests pixel-oracle 4 cargo test --locked --release --features native-acceptance --test native_journey pixel_oracle_tests -- --test-threads=1
+          run_expected_tests journey 8 0 cargo test --locked --release --test journey -- --test-threads=1
+          run_expected_tests pixel-oracle 4 5 cargo test --locked --release --features native-acceptance --test native_journey pixel_oracle_tests -- --test-threads=1
 
       - name: Compile native acceptance harness only
         shell: bash
