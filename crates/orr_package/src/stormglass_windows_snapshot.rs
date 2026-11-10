@@ -161,12 +161,12 @@ fn volume_path(file: &File) -> Result<PathBuf, String> {
         &buffer[..count],
     )))
 }
-struct Directory {
-    path: PathBuf,
+pub(super) struct Directory {
+    pub(super) path: PathBuf,
     anchors: Vec<File>,
 }
 impl Directory {
-    fn open(path: &Path) -> Result<Self, String> {
+    pub(super) fn open(path: &Path) -> Result<Self, String> {
         let (root, parts) = input_parts(path)?;
         let root = open_directory(&root)?;
         let mut path = volume_path(&root)?;
@@ -200,7 +200,7 @@ impl Directory {
         }
         Ok(Self { path, anchors })
     }
-    fn recheck(&self) -> Result<(), String> {
+    pub(super) fn recheck(&self) -> Result<(), String> {
         for anchor in &self.anchors {
             let attributes = info(anchor)?.dwFileAttributes;
             if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0

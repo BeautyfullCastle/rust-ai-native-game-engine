@@ -1,5 +1,8 @@
 //! Offline, content-only packages. No script execution, downloads or Cargo edits.
 //! The application supplies its real compiled capabilities through [`Runtime`].
+#[cfg(all(windows, feature = "stormglass-windows-stage"))]
+pub mod stormglass_windows_stage;
+
 #[cfg(feature = "stormglass-windows-admission")]
 pub mod stormglass_windows_admission;
 
