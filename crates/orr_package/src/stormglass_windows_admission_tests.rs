@@ -31,6 +31,13 @@ fn fixture() -> Vec<u8> {
 fn hash(bytes: &[u8]) -> String {
     digest(RUNTIME_NAME, bytes).sha256
 }
+#[test]
+fn sha256_matches_known_vector() {
+    assert_eq!(
+        hash(b"abc"),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+}
 fn reject(bytes: &[u8]) {
     assert!(admit(bytes, &hash(bytes), SCENE).is_err());
 }
