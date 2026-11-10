@@ -3816,7 +3816,7 @@ mod screenshot_tests {
             for (message, error) in [("ready", false), (long_message.as_str(), false), (long_message.as_str(), true)] {
                 if error { app.editor.error(message); } else { app.editor.info(message); }
                 let mut available = None;
-                let _output = context.run_ui(egui::RawInput {
+                let mut output = context.run_ui(egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 400.0))),
                     ..Default::default()
                 }, |ui| {
@@ -3824,6 +3824,8 @@ mod screenshot_tests {
                     egui::Panel::right("inspector").exact_size(120.0).show(ui, |_| {});
                     available = Some(ui.available_rect_before_wrap());
                 });
+                // CPU layout only: no renderer consumes this frame's texture updates.
+                output.textures_delta.clear();
                 let available = available.unwrap();
                 assert!((available.max.x - (width - 120.0)).abs() < 0.5, "status expanded viewport at width {width}: {available:?}");
                 if let Some(baseline) = baseline { assert_eq!(available, baseline); } else { baseline = Some(available); }
