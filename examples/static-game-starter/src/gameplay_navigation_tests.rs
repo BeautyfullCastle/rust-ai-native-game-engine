@@ -615,7 +615,7 @@ fn ui_frame(
 ) -> (egui::FullOutput, Option<IntentRequest>) {
     let bytes = frame.to_bytes();
     let mut intents = Vec::new();
-    let output = ctx.run_ui(
+    let mut output = ctx.run_ui(
         egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -630,6 +630,8 @@ fn ui_frame(
             }
         },
     );
+    // CPU layout only: no renderer consumes this frame's texture updates.
+    output.textures_delta.clear();
     assert!(intents.len() <= 1, "at most one intent per rendered frame");
     assert_eq!(
         frame.to_bytes(),
