@@ -158,6 +158,12 @@ pub(super) fn bake(scene: &Scene, reg: &TypeRegistry, frame: &mut Frame) -> Resu
             return Err(BakeError::MissingEntity(g));
         }
     }
+    // Preserve component error priority and check singletons before frame mutation.
+    for g in scene.singletons.iter().flat_map(|(_, v)| entity_refs(v)) {
+        if !scene.entities.contains_key(&Guid(g.clone())) {
+            return Err(BakeError::MissingEntity(g));
+        }
+    }
 
     let mut index = SceneIndex::default();
     for (guid, ent) in &scene.entities {

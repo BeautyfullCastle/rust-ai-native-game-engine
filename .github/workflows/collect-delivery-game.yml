@@ -8,6 +8,7 @@ on:
       - ready_for_review
     paths:
       - .github/workflows/collect-delivery-game.yml
+      - tools/test_collect_delivery_unicode_distribution.py
       - examples/collect-delivery-game/**
       - examples/static-game-starter/**
       - crates/**
@@ -102,3 +103,15 @@ jobs:
         run: |
           set -euo pipefail
           cargo clippy --locked --release --all-targets --features native-acceptance -- -D warnings
+
+      - name: Verify Unicode distribution with exact-head binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --bin collect-delivery-bundle --bin collect-delivery-player
+          python3 ../../tools/test_collect_delivery_unicode_distribution.py \
+            --bundle "$PWD/target/release/collect-delivery-bundle" \
+            --player "$PWD/target/release/collect-delivery-player" \
+            --source-sha "$EXPECTED_HEAD_SHA" \
+            --scene "$PWD/scenes/collect-delivery.scene.yaml" \
+            --evidence "$RUNNER_TEMP/collect-unicode-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
