@@ -19,8 +19,38 @@ def half_integer(twice):
     return f"{sign}{whole}" + (".5" if half else "")
 
 
-def encode(data, *, rotate=0, mirror_x=False, merge_walls=False, border=False):
+def opening_cells(openings, border, width=None, height=None):
+    """Validate bounded canonical passage selectors; return padded row/column cells."""
+    if type(openings) is not tuple or len(openings) > 8:
+        raise ValueError("openings must be a tuple of at most 8 selectors")
+    if openings and border is not True:
+        raise ValueError("openings require border=True")
+    seen = set()
+    cells = []
+    for selector in openings:
+        if type(selector) is not str or len(selector) > 9:
+            raise ValueError("opening requires side:index")
+        side, separator, index_text = selector.partition(":")
+        if (side not in ("north", "south", "west", "east") or separator != ":"
+                or not index_text or any(c not in "0123456789" for c in index_text)
+                or (len(index_text) > 1 and index_text[0] == "0")):
+            raise ValueError("opening requires north/south/west/east and a canonical index")
+        if selector in seen:
+            raise ValueError("opening selectors must be distinct")
+        seen.add(selector)
+        index = int(index_text)
+        if width is not None:
+            limit = width if side in ("north", "south") else height
+            if index >= limit:
+                raise ValueError("opening index is outside the interior edge")
+            cells.append({"north": (0, index + 1), "south": (height + 1, index + 1),
+                          "west": (index + 1, 0), "east": (index + 1, width + 1)}[side])
+    return cells
+
+
+def encode(data, *, rotate=0, mirror_x=False, merge_walls=False, border=False, openings=()):
     """Compile captured bytes. This is not scene admission or a puzzle solver."""
+    opening_cells(openings, border)
     if type(border) is not bool:
         raise ValueError("border must be a boolean")
     if type(merge_walls) is not bool:
@@ -66,7 +96,10 @@ def encode(data, *, rotate=0, mirror_x=False, merge_walls=False, border=False):
         if width > MAX_SIDE - 2 or height > MAX_SIDE - 2:
             raise ValueError("border requires an interior of at most 31 rows and columns")
         edge = "#" * (width + 2)
-        padded = [edge, *["#" + row + "#" for row in rows], edge]
+        padded = [list(edge), *[list("#" + row + "#") for row in rows], list(edge)]
+        for row, column in opening_cells(openings, border, width, height):
+            padded[row][column] = "."
+        padded = ["".join(row) for row in padded]
         return encode("\n".join(padded).encode("ascii"), rotate=rotate,
                       mirror_x=mirror_x, merge_walls=merge_walls)
     # Validate the original drawing first, so diagnostics retain input coordinates.
@@ -111,8 +144,9 @@ def merged_rectangles(rows):
     return walls
 
 
-def preview_svg(data, *, rotate=0, mirror_x=False, merge_walls=False, border=False):
+def preview_svg(data, *, rotate=0, mirror_x=False, merge_walls=False, border=False, openings=()):
     """Static schematic from the admitted recipe, not engine rendering or a solver."""
+    opening_cells(openings, border)
     if type(border) is not bool:
         raise ValueError("border must be a boolean")
     if type(merge_walls) is not bool:
@@ -120,6 +154,8 @@ def preview_svg(data, *, rotate=0, mirror_x=False, merge_walls=False, border=Fal
     options = {"merge_walls": True} if merge_walls else {}
     if border:
         options["border"] = True
+    if openings:
+        options["openings"] = openings
     recipe = json.loads(encode(data, rotate=rotate, mirror_x=mirror_x, **options))
     # Admission above establishes rectangular ASCII input and bounded dimensions.
     rows = data.decode("ascii").replace("\r\n", "\n").removesuffix("\n").split("\n")
@@ -220,7 +256,8 @@ def main(argv=None):
                         help="partition adjacent wall tiles into at most 64 rectangles")
     parser.add_argument("--border", action="count", default=0,
                         help="add one closed wall layer outside the interior drawing")
-    if len(argv) > 9 or any(len(arg) > 4096 for arg in argv):
+    parser.add_argument("--opening", action="append", help="border passage side:index; at most 8")
+    if len(argv) > 25 or any(len(arg) > 4096 for arg in argv):
         parser.error("too many or oversized arguments")
     args = parser.parse_args(argv)
     if len(args.input) != 1:
@@ -236,11 +273,16 @@ def main(argv=None):
     if args.border > 1:
         parser.error("--border must occur at most once")
     try:
+        opening_cells(tuple(args.opening or ()), bool(args.border))
+    except ValueError as error:
+        parser.error(str(error))
+    try:
         output = preview_svg if args.format == ["svg"] else encode
         result = output(read_grid(args.input[0]),
                         rotate=int(args.rotate[0]) if args.rotate else 0,
                         mirror_x=bool(args.mirror_x), merge_walls=bool(args.merge_walls),
-                        **({"border": True} if args.border else {}))
+                        **({"border": True} if args.border else {}),
+                        **({"openings": tuple(args.opening)} if args.opening else {}))
         sys.stdout.write(result.decode("ascii"))
     except (OSError, ValueError) as error:
         parser.exit(1, f"error: {error}\n")

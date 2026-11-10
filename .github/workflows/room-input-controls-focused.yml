@@ -383,6 +383,14 @@ jobs:
                       'test_create_room_grid.GridMergeTests.test_partition_covers_exact_cells_without_overlaps',
                       'test_create_room_grid.GridMergeTests.test_rectangle_partition_exact_positions',
                       'test_create_room_grid.GridMergeTests.test_transform_partition_and_svg_geometry',
+                      'test_create_room_grid.GridOpeningTests.test_empty_openings_preserve_all_previous_modes',
+                      'test_create_room_grid.GridOpeningTests.test_opening_api_types_grammar_duplicates_and_requirement',
+                      'test_create_room_grid.GridOpeningTests.test_opening_bounds_count_and_corners',
+                      'test_create_room_grid.GridOpeningTests.test_opening_cli_all_transforms_formats_no_writes',
+                      'test_create_room_grid.GridOpeningTests.test_opening_cli_invalid_syntax_before_read_and_bounds_error',
+                      'test_create_room_grid.GridOpeningTests.test_openings_all_transforms_and_merge_modes',
+                      'test_create_room_grid.GridOpeningTests.test_openings_never_relax_admission',
+                      'test_create_room_grid.GridOpeningTests.test_openings_remove_only_selected_noncorners',
                       'test_create_room_grid.GridPreviewTests.test_all_eight_preview_coordinates_match_admitted_json',
                       'test_create_room_grid.GridPreviewTests.test_cli_explicit_json_preserves_all_transform_output',
                       'test_create_room_grid.GridPreviewTests.test_cli_invalid_formats_rejected_before_reading',
@@ -734,6 +742,54 @@ jobs:
                   record['check_count'] = len(expected_checks)
                   save()
               attempt('python-grid-border-integration', grid_border_integration)
+
+              def grid_opening_integration():
+                  # Reuse the two existing production-only builds before broader builds
+                  # can overwrite them. Require this run's receipts and matching bytes.
+                  binary_dir = Path(os.environ['CARGO_TARGET_DIR']) / 'release'
+                  hashes = {}
+                  for name, label, manifest in [
+                      ('orr_new_arena', 'room-layout-production-build', 'fresh-room-layout-creator-binary.json'),
+                      ('orr_playtest_room', 'recorded-route-cli-build', 'fresh-recorded-route-binary.json'),
+                  ]:
+                      produced = [entry for entry in receipts if entry['label'] == label]
+                      if len(produced) != 1 or produced[0]['exit'] != 0:
+                          raise RuntimeError(f'Grid integration requires a passing fresh producer: {label}')
+                      recorded = json.loads((evidence / manifest).read_text())
+                      actual = hashlib.sha256((binary_dir / name).read_bytes()).hexdigest()
+                      if recorded != {name: actual}:
+                          raise RuntimeError(f'Grid integration producer bytes changed: {name}')
+                      hashes[name] = actual
+                  output_dir = evidence / 'grid-opening-integration'
+                  code = ('import sys; sys.path.insert(0, "tools"); '
+                          'from test_create_room_grid import run_opening_integration; '
+                          'run_opening_integration(sys.argv[1], sys.argv[2])')
+                  output, record = run('python-grid-opening-integration', ['python3', '-B', '-E', '-c', code,
+                                      str(binary_dir.resolve(strict=True)), str(output_dir)])
+                  result = json.loads(output)
+                  retained = json.loads((output_dir / 'result.json').read_text())
+                  expected_checks = [
+                      'mirror-0-rotate-0',
+                      'mirror-0-rotate-90',
+                      'mirror-0-rotate-180',
+                      'mirror-0-rotate-270',
+                      'mirror-1-rotate-0',
+                      'mirror-1-rotate-90',
+                      'mirror-1-rotate-180',
+                      'mirror-1-rotate-270',
+                      'out-of-range-opening-rejected',
+                  ]
+                  expected_per_transform = ['grid-cli', 'creator-admission', 'unbordered-exterior-bypass-wins', 'border-blocks-exterior-bypass', 'opened-border-bypass-wins', 'byte-identical-repeat', 'project-unchanged', '31x31-interior-padded33-admitted']
+                  if (result != retained or result.get('status') != 'passed'
+                          or result.get('binaries') != hashes
+                          or result.get('tool_sha256') != hashlib.sha256(Path('tools/create_room_grid.py').read_bytes()).hexdigest()
+                          or result.get('checks') != expected_checks
+                          or result.get('checks_per_transform') != expected_per_transform):
+                      raise RuntimeError('Grid integration result, retained receipts or source identity mismatch')
+                  record['integration_count'] = 1
+                  record['check_count'] = len(expected_checks)
+                  save()
+              attempt('python-grid-opening-integration', grid_opening_integration)
 
               def integration():
                   # This run-isolated target starts empty; never consume PATH or cached binaries.

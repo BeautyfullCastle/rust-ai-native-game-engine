@@ -1052,5 +1052,209 @@ def run_border_integration(binary_dir, output_dir):
     (root/'result.json').write_text(json.dumps(summary,indent=2)+'\n');print(json.dumps(summary,indent=2))
 
 
+class GridOpeningTests(unittest.TestCase):
+    def test_openings_remove_only_selected_noncorners(self):
+        data = b'P.K.\n...E\n....'
+        openings = ('north:0', 'north:3', 'south:1', 'west:2', 'east:0')
+        # Build the oracle independently, by selecting the exact requested ring cells.
+        rows = [list('######'), list('#P.K.#'), list('#...E#'), list('#....#'), list('######')]
+        for row, column in [(0,1),(0,4),(4,2),(3,0),(1,5)]: rows[row][column] = '.'
+        expected = '\n'.join(''.join(row) for row in rows).encode()
+        self.assertEqual(grid.encode(data,border=True,openings=openings),grid.encode(expected))
+        self.assertEqual(grid.encode(data,border=True,openings=openings),grid.encode(data,border=True,openings=tuple(reversed(openings))))
+        self.assertEqual(json.loads(grid.encode(data))['player'],json.loads(grid.encode(data,border=True,openings=openings))['player'])
+
+    def test_opening_api_types_grammar_duplicates_and_requirement(self):
+        invalid = [None, [], 'north:0', (None,), (True,), ('North:0',), ('north:-1',),
+                   ('north:+1',), ('north:01',), ('north:',), ('north: 0',), ('north:０',),
+                   ('north:0:1',), ('north:999999999999999',), ('north:0','north:0')]
+        for openings in invalid:
+            for method in (grid.encode,grid.preview_svg):
+                with self.subTest(openings=openings,method=method.__name__):
+                    with self.assertRaises(ValueError):method(DRAWING,border=True,openings=openings)
+        for border in (False,0,1,None,'true'):
+            with self.assertRaises(ValueError):grid.encode(DRAWING,border=border,openings=('north:0',))
+
+    def test_opening_bounds_count_and_corners(self):
+        data=('PKE'+'.'*28+'\n'+('.'*31+'\n')*30).encode()
+        valid=tuple(f'north:{i}' for i in range(8))
+        self.assertLessEqual(len(json.loads(grid.encode(data,border=True,merge_walls=True,openings=valid))['walls']),64)
+        for opening in ('north:31','south:31','east:31','west:31'):
+            with self.assertRaises(ValueError):grid.encode(data,border=True,merge_walls=True,openings=(opening,))
+        with self.assertRaises(ValueError):grid.encode(data,border=True,merge_walls=True,openings=valid+('north:8',))
+        self.assertEqual(grid.opening_cells(('north:0','south:30','west:0','east:30'),True,31,31),[(0,1),(32,31),(1,0),(31,32)])
+
+    def test_openings_all_transforms_and_merge_modes(self):
+        data=b'P.K.\n...E\n....'
+        padded=b'#.####\n#P.K.#\n#...E#\n#....#\n####.#'
+        for merge in (False,True):
+            for mirror in (False,True):
+                for rotate in (0,90,180,270):
+                    opts=dict(rotate=rotate,mirror_x=mirror,merge_walls=merge)
+                    self.assertEqual(grid.encode(data,border=True,openings=('north:0','south:3'),**opts),grid.encode(padded,**opts))
+                    self.assertEqual(grid.preview_svg(data,border=True,openings=('north:0','south:3'),**opts),grid.preview_svg(padded,**opts))
+
+    def test_empty_openings_preserve_all_previous_modes(self):
+        for border in (False,True):
+            for merge in (False,True):
+                for method in (grid.encode,grid.preview_svg):
+                    self.assertEqual(method(DRAWING,border=border,merge_walls=merge),method(DRAWING,border=border,merge_walls=merge,openings=()))
+
+    def test_openings_never_relax_admission(self):
+        for data in (b'PKE\n..',b'PK?',b'PKE ',b'PKE\n\n',b'PKE'+b'.'*29,b'PKE\n'+b'#'*65):
+            for method in (grid.encode,grid.preview_svg):
+                with self.assertRaises(ValueError):method(data,border=True,merge_walls=True,openings=('north:0',))
+        self.assertEqual(grid.read_grid.__name__,'read_grid')
+
+    def test_opening_cli_all_transforms_formats_no_writes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'drawing.txt';path.write_bytes(DRAWING)
+            before=inventory(Path(directory))
+            for mirror in (False,True):
+                for rotate in (0,90,180,270):
+                    for fmt,method in [('json',grid.encode),('svg',grid.preview_svg)]:
+                        args=['--input',str(path),'--border','--opening','south:0','--opening','south:6','--rotate',str(rotate),'--format',fmt,'--merge-walls']+(['--mirror-x'] if mirror else [])
+                        result=subprocess.run([sys.executable,'-B',str(TOOL),*args],capture_output=True,timeout=10)
+                        self.assertEqual(result.returncode,0,result.stderr)
+                        self.assertEqual(result.stdout,method(DRAWING,border=True,openings=('south:0','south:6'),rotate=rotate,mirror_x=mirror,merge_walls=True))
+                        self.assertEqual(result.stderr,b'')
+            self.assertEqual(before,inventory(Path(directory)))
+
+    def test_opening_cli_invalid_syntax_before_read_and_bounds_error(self):
+        bad=[['--opening','north:0'],['--border','--opening','north:00'],['--border','--opening','north:0','--opening','north:0'],['--border','--opening','north:-1']]
+        bad=bad+[['--border',*sum((['--opening',f'north:{i}'] for i in range(9)),[])]]
+        for args in bad:
+            with patch.object(grid,'read_grid',side_effect=AssertionError('must not read')):
+                with redirect_stderr(io.StringIO()),self.assertRaises(SystemExit) as caught:
+                    grid.main(['--input','missing',*args])
+                self.assertEqual(caught.exception.code,2)
+        with patch.object(grid,'read_grid',return_value=DRAWING):
+            with redirect_stderr(io.StringIO()),self.assertRaises(SystemExit) as caught:
+                grid.main(['--input','source','--border','--opening','north:7'])
+            self.assertEqual(caught.exception.code,1)
+
+
+def _run_opening_case(binary_dir, output_dir, *, rotate=0, mirror_x=False):
+    """Create retained fixtures and real CPU receipts, never build or download binaries."""
+    grid.encode(DRAWING, rotate=rotate, mirror_x=mirror_x)  # Validate before any writes.
+    transform_args = ["--rotate", str(rotate)] + (["--mirror-x"] if mirror_x else [])
+    binaries = Path(binary_dir).resolve(strict=True)
+    root = Path(output_dir).absolute()
+    root.mkdir()  # New evidence directory only; do not overwrite an earlier run.
+    root = root.resolve(strict=True)
+    executable_hashes = {name: hashlib.sha256((binaries / name).read_bytes()).hexdigest()
+                         for name in ("orr_new_arena", "orr_playtest_room")}
+
+    def require(condition, message):
+        if not condition:
+            raise AssertionError(message)
+
+    def unchanged(label, project, before):
+        after = inventory(project)
+        (root / (label + "-inventory.json")).write_text(
+            json.dumps({"before": before, "after": after}, indent=2) + "\n")
+        require(before == after, f"{label}: playtest changed the project")
+
+    def run(label, args, expected=0):
+        command = list(map(str, args))
+        (root / (label + ".command.json")).write_text(json.dumps(command) + "\n")
+        result = subprocess.run(command, capture_output=True, timeout=90)
+        (root / (label + ".stdout")).write_bytes(result.stdout)
+        (root / (label + ".stderr")).write_bytes(result.stderr)
+        (root / (label + ".exit")).write_text(str(result.returncode) + "\n")
+        if result.returncode != expected:
+            raise AssertionError(f"{label}: expected {expected}, got {result.returncode}: "
+                                 f"{result.stdout!r} {result.stderr!r}")
+        return result.stdout
+
+    def create(label, drawing, border=True, openings=()):
+        input_path = root / (label + " Ω.txt")
+        input_path.write_bytes(drawing)
+        recipe = run(label + "-compile", [sys.executable, "-B", TOOL, "--input", input_path, "--merge-walls", *(["--border"] if border else []), *[arg for opening in openings for arg in ("--opening",opening)], *transform_args])
+        recipe_path = root / (label + ".json")
+        recipe_path.write_bytes(recipe)
+        project = root / (label + " Project Ω")
+        run(label + "-create", [binaries / "orr_new_arena", "--output", project,
+                               "--template", "room-escape-3d-v1", "--seed", "ascii-grid",
+                               "--room-layout", recipe_path])
+        return project
+
+    def step(ticks, x=0, z=0, interact=False, key=True, won=False):
+        if mirror_x:
+            x = -x
+        for _ in range(rotate // 90):
+            x, z = -z, x
+        return {"ticks": ticks, "move_x": x, "move_z": z, "interact": interact,
+                "expect_key": key, "expect_won": won}
+
+    def play(label, project, steps, expected=0):
+        script = root / (label + "-route.json")
+        script.write_text(json.dumps({"schema": 1, "steps": steps}) + "\n")
+        return run(label, [binaries / "orr_playtest_room", "--project", project,
+                           "--script", script, "--json"], expected)
+
+    blocked_drawing = b"...#...\nPK.#..E\n...#...\n"
+    route = [step(1, interact=True), step(60,z=1),step(120,x=1),step(60,z=-1),step(1,interact=True,won=True)]
+    open_project=create('open',blocked_drawing,border=False)
+    open_before=inventory(open_project)
+    open_report=json.loads(play('exterior-open',open_project,route))
+    require(open_report['status']=='passed' and open_report['ticks']==242,'unbordered exterior bypass must win at242')
+    unchanged('open',open_project,open_before)
+    closed=create('closed',blocked_drawing)
+    closed_before=inventory(closed)
+    closed_report=json.loads(play('exterior-blocked',closed,route,expected=1))
+    require(closed_report['status']=='error' and closed_report['error']['kind']=='assertion','closed exterior route must fail gameplay assertion')
+    require(closed_report['steps'][-1]['observed']=={'key':True,'won':False},'border must block victory while retaining key')
+    unchanged('closed',closed,closed_before)
+    opened=create('opened',blocked_drawing,openings=('south:0','south:6'))
+    opened_before=inventory(opened)
+    first=play('opened-win',opened,route)
+    require(first==play('opened-repeat',opened,route),'opened route report must repeat identically')
+    require(json.loads(first)['ticks']==242 and json.loads(first)['status']=='passed','opened bypass must win at242')
+    unchanged('opened',opened,opened_before)
+    maximum=create('maximum',('PKE'+'.'*28+'\n'+('.'*31+'\n')*30).encode(),openings=('north:0','south:30','west:0','east:30'))
+    maximum_before=inventory(maximum)
+    require(json.loads(play('maximum-admit',maximum,[step(0,key=False)]))['status']=='passed','padded33maximum must admit')
+    unchanged('maximum',maximum,maximum_before)
+    require(executable_hashes=={name:hashlib.sha256((binaries/name).read_bytes()).hexdigest() for name in executable_hashes},'producer bytes changed')
+    summary={'status':'passed','checks':['grid-cli','creator-admission','unbordered-exterior-bypass-wins','border-blocks-exterior-bypass','opened-border-bypass-wins','byte-identical-repeat','project-unchanged','31x31-interior-padded33-admitted'],
+             'transformation':{'rotate':rotate,'mirror_x':mirror_x},'binaries':executable_hashes,'tool_sha256':hashlib.sha256(TOOL.read_bytes()).hexdigest(),
+             'scope':'retained production binaries, scripted CPU; no native/GPU or solvability claim'}
+    (root/'result.json').write_text(json.dumps(summary,indent=2)+'\n');print(json.dumps(summary,indent=2))
+
+
+def run_opening_integration(binary_dir, output_dir):
+    """All eight passage cases and out-of-range selector refusal."""
+    root=Path(output_dir).absolute();root.mkdir()
+    checks=[];hashes=None;tool_hash=hashlib.sha256(TOOL.read_bytes()).hexdigest()
+    expected_checks=['grid-cli','creator-admission','unbordered-exterior-bypass-wins','border-blocks-exterior-bypass','opened-border-bypass-wins','byte-identical-repeat','project-unchanged','31x31-interior-padded33-admitted']
+    for mirror in (False,True):
+        for rotation in (0,90,180,270):
+            label=f'mirror-{int(mirror)}-rotate-{rotation}'
+            with redirect_stdout(io.StringIO()) as captured:
+                _run_opening_case(binary_dir,root/label,rotate=rotation,mirror_x=mirror)
+            result=json.loads((root/label/'result.json').read_bytes())
+            if (result!=json.loads(captured.getvalue()) or result['status']!='passed'
+                    or result['checks']!=expected_checks or result['tool_sha256']!=tool_hash
+                    or result['transformation']!={'rotate':rotation,'mirror_x':mirror}):
+                raise AssertionError('opening integration result identity mismatch')
+            if hashes is None:hashes=result['binaries']
+            if result['binaries']!=hashes:raise AssertionError('opening producer identities changed')
+            checks.append(label)
+    rejected=root/'invalid-opening.txt';rejected.write_bytes(b'PKE....')
+    command=[sys.executable,'-B',str(TOOL),'--input',str(rejected),'--border','--merge-walls','--opening','north:7']
+    result=subprocess.run(command,capture_output=True,timeout=10)
+    (root/'invalid-opening.command.json').write_text(json.dumps(command)+'\n')
+    (root/'invalid-opening.stdout').write_bytes(result.stdout);(root/'invalid-opening.stderr').write_bytes(result.stderr)
+    (root/'invalid-opening.exit').write_text(str(result.returncode)+'\n')
+    if result.returncode!=1 or result.stdout or b'outside' not in result.stderr:
+        raise AssertionError('out-of-range opening not rejected')
+    checks.append('out-of-range-opening-rejected')
+    summary={'status':'passed','checks':checks,'checks_per_transform':expected_checks,
+             'binaries':hashes,'tool_sha256':tool_hash,
+             'scope':'retained production binaries, passage geometry CPU; not native/GPU or universal solvability'}
+    (root/'result.json').write_text(json.dumps(summary,indent=2)+'\n');print(json.dumps(summary,indent=2))
+
+
 if __name__ == "__main__":
     unittest.main()
