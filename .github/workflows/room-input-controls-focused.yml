@@ -367,6 +367,15 @@ jobs:
               def python_grid_tests():
                   from textwrap import dedent
                   expected = [
+                      'test_create_room_grid.GridPreviewTests.test_all_eight_preview_coordinates_match_admitted_json',
+                      'test_create_room_grid.GridPreviewTests.test_cli_explicit_json_preserves_all_transform_output',
+                      'test_create_room_grid.GridPreviewTests.test_cli_invalid_formats_rejected_before_reading',
+                      'test_create_room_grid.GridPreviewTests.test_cli_svg_all_transforms_capture_once_and_no_file_changes',
+                      'test_create_room_grid.GridPreviewTests.test_cli_svg_invalid_input_has_empty_stdout',
+                      'test_create_room_grid.GridPreviewTests.test_preview_deterministic_line_endings_and_repeat',
+                      'test_create_room_grid.GridPreviewTests.test_preview_minimum_maximum_and_wall_count_bounds',
+                      'test_create_room_grid.GridPreviewTests.test_preview_preserves_admission_errors',
+                      'test_create_room_grid.GridPreviewTests.test_static_svg_security_allowlist_and_labels',
                       'test_create_room_grid.GridTests.test_centered_even_dimensions_without_float_rounding',
                       'test_create_room_grid.GridTests.test_cli_bad_input_has_empty_stdout_and_exit_one',
                       'test_create_room_grid.GridTests.test_cli_emits_only_json_and_changes_no_files',

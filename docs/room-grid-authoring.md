@@ -71,7 +71,8 @@ Linux; unsupported platforms fail explicitly. Directory ancestors may be
 symlinks. Input paths are at most 4096 characters. This is a local file contract,
 not protection against hostile concurrent directory replacement.
 
-Success prints only schema-1 JSON and exits 0. Invalid content or file errors
+By default, success prints only schema-1 JSON and exits 0. Explicit SVG output is
+described below. Invalid content or file errors
 exit 1 with a diagnostic on stderr and no recipe on stdout. Invalid command
 syntax exits 2. There are no map directives, includes, expressions or paths.
 
@@ -89,3 +90,34 @@ fixtures and reports. Optional keyword arguments `rotate` and `mirror_x` exercis
 and correspondingly transformed route inputs. It checks wall blocking, a winning detour, repeatability,
 unchanged projects and boundary-size admission. It does not build Rust or prove
 native input, window/GPU rendering, export or cross-platform behavior.
+
+## Preview the floor plan
+
+Add `--format svg` to print a bounded static SVG schematic instead of JSON:
+
+```sh
+python3 -B tools/create_room_grid.py --input puzzle.txt --format svg
+python3 -B tools/create_room_grid.py --input puzzle.txt --rotate 90 --mirror-x --format svg
+```
+
+Save the printed SVG as a new `.svg` file in your editor and open it in an SVG
+viewer. Shell redirection is independent of the helper and may overwrite files.
+The helper still only reads the input and writes stdout; it does not open a
+viewer, save files, launch a game or change a project. `--format json` is explicit
+JSON output and omitting `--format` preserves the original JSON bytes. The format
+option may occur once; unknown formats and duplicate options fail before input
+capture. SVG is not an input format for Room recipe import.
+
+The diagram shows P (player), K (key), E (exit) and dark wall squares on a one-unit
+X/Z grid. X increases right, Z down. Mirror and rotation apply exactly as in JSON:
+the actor and wall coordinates are read from that same admitted recipe. Empty
+edge cells remain visible, including rectangular drawings after quarter turns.
+The letters distinguish roles without relying only on color. The drawing is
+static SVG with no scripts, links, external images/fonts or input filenames.
+Output is bounded to 256 KiB, with integer pixel coordinates and a fixed cell
+size. Generic local sans-serif rendering can vary by viewer.
+
+This is a schematic, not an engine screenshot. Actor markers are labels, not
+collision sizes. It does not show wall height, camera view, model packages,
+lighting, runtime movement or whether the puzzle can be solved. Use the existing
+editor and CPU playtest for gameplay checks; native/GPU acceptance is separate.

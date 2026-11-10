@@ -10,6 +10,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
+from fractions import Fraction
 from unittest.mock import patch
 
 import create_room_grid as grid
@@ -298,6 +300,145 @@ class GridTransformTests(unittest.TestCase):
                 self.assertEqual(error.exception.code, 2)
                 self.assertEqual(out.getvalue(), "")
                 read.assert_not_called()
+
+
+class GridPreviewTests(unittest.TestCase):
+    def test_static_svg_security_allowlist_and_labels(self):
+        raw = grid.preview_svg(DRAWING)
+        root = ET.fromstring(raw)
+        allowed = {"svg", "title", "desc", "rect", "text", "line", "circle"}
+        attributes = {"width", "height", "viewBox", "role", "aria-labelledby", "id",
+                      "x", "y", "fill", "font-family", "font-size", "font-weight",
+                      "stroke", "x1", "x2", "y1", "y2", "cx", "cy", "r", "text-anchor"}
+        for element in root.iter():
+            self.assertTrue(element.tag.startswith("{http://www.w3.org/2000/svg}"))
+            self.assertIn(element.tag.split("}")[1], allowed)
+            self.assertLessEqual(set(element.attrib), attributes)
+        self.assertEqual(root.attrib["role"], "img")
+        texts = [element.text for element in root.iter() if element.tag.endswith("}text")]
+        for letter in "PKE":
+            self.assertIn(letter, texts)
+        self.assertIn("Schematic only", raw.decode())
+        for forbidden in [b"<!", b"href", b"url(", b"script", b"foreignObject", b"style=", b"file:"]:
+            # 'description' is an accessibility identifier, not a script element.
+            if forbidden == b"script":
+                self.assertNotIn(b"<script", raw)
+            else:
+                self.assertNotIn(forbidden, raw)
+
+    def test_all_eight_preview_coordinates_match_admitted_json(self):
+        source = b"P.K.\n#..E"
+        for mirror in (False, True):
+            for rotate in (0, 90, 180, 270):
+                with self.subTest(rotate=rotate, mirror=mirror):
+                    recipe = json.loads(grid.encode(source, rotate=rotate, mirror_x=mirror))
+                    root = ET.fromstring(grid.preview_svg(source, rotate=rotate, mirror_x=mirror))
+                    width, rows = (2, 4) if rotate in (90, 270) else (4, 2)
+                    left = (int(root.attrib["width"]) - width * 40) // 2
+                    elements = {e.attrib["id"]: e for e in root.iter() if "id" in e.attrib}
+                    for name in ("player", "key", "exit"):
+                        x, z = map(Fraction, recipe[name])
+                        self.assertEqual(Fraction(elements[name].attrib["cx"]), left + 20 * width + 40 * x)
+                        self.assertEqual(Fraction(elements[name].attrib["cy"]), 112 + 20 * rows + 40 * z)
+                    for index, wall in enumerate(recipe["walls"]):
+                        x, z = map(Fraction, wall["center"])
+                        element = elements[f"wall-{index}"]
+                        self.assertEqual(Fraction(element.attrib["x"]), left + 20 * width + 40 * x - 20)
+                        self.assertEqual(Fraction(element.attrib["y"]), 112 + 20 * rows + 40 * z - 20)
+                        self.assertEqual((element.attrib["width"], element.attrib["height"]), ("40", "40"))
+
+    def test_preview_deterministic_line_endings_and_repeat(self):
+        expected = grid.preview_svg(DRAWING, rotate=90, mirror_x=True)
+        for data in (DRAWING, DRAWING[:-1], DRAWING.replace(b"\n", b"\r\n")):
+            self.assertEqual(grid.preview_svg(data, rotate=90, mirror_x=True), expected)
+        self.assertTrue(expected.endswith(b"\n"))
+
+    def test_preview_minimum_maximum_and_wall_count_bounds(self):
+        maximum = list("." * (33 * 33))
+        maximum[:3] = "PKE"
+        maximum[3:67] = "#" * 64
+        drawing = "\n".join("".join(maximum[i:i + 33]) for i in range(0, len(maximum), 33)).encode()
+        for data, walls in [(b"PKE", 0), (b"P\nK\nE", 0), (drawing, 64)]:
+            for mirror in (False, True):
+                for rotation in (0, 90, 180, 270):
+                    raw = grid.preview_svg(data, rotate=rotation, mirror_x=mirror)
+                    self.assertLess(len(raw), 256 * 1024)
+                    root = ET.fromstring(raw)
+                    actual = [e for e in root.iter() if e.attrib.get("id", "").startswith("wall-")]
+                    self.assertEqual(len(actual), walls)
+                    width, height = int(root.attrib["width"]), int(root.attrib["height"])
+                    for element in actual:
+                        self.assertGreaterEqual(int(element.attrib["x"]), 0)
+                        self.assertGreaterEqual(int(element.attrib["y"]), 0)
+                        self.assertLessEqual(int(element.attrib["x"]) + 40, width)
+                        self.assertLessEqual(int(element.attrib["y"]) + 40, height)
+
+    def test_preview_preserves_admission_errors(self):
+        for data in (b"", b"PKE\n\n", b"PKE<script>", b"PK", b"PPKE", b"PKE\xff"):
+            with self.subTest(data=data), self.assertRaises(ValueError):
+                grid.preview_svg(data)
+        for options in ({"rotate": True}, {"rotate": 360}, {"mirror_x": 1}):
+            with self.assertRaises(ValueError):
+                grid.preview_svg(DRAWING, **options)
+        with patch.object(grid, "encode", wraps=grid.encode) as encoded:
+            grid.preview_svg(DRAWING)
+            encoded.assert_called_once_with(DRAWING, rotate=0, mirror_x=False)
+
+    def test_cli_svg_all_transforms_capture_once_and_no_file_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "private-name-secret.txt"
+            path.write_bytes(DRAWING)
+            before = inventory(root)
+            for mirror in (False, True):
+                for rotate in (0, 90, 180, 270):
+                    args = ["--input", str(path), "--format", "svg", "--rotate", str(rotate)]
+                    if mirror:
+                        args.append("--mirror-x")
+                    result = subprocess.run([sys.executable, "-B", str(TOOL), *args], capture_output=True, timeout=5)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stderr, b"")
+                    self.assertEqual(result.stdout, grid.preview_svg(DRAWING, rotate=rotate, mirror_x=mirror))
+                    self.assertNotIn(b"private-name-secret", result.stdout)
+            self.assertEqual(inventory(root), before)
+        with patch.object(grid, "read_grid", return_value=DRAWING) as read:
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(grid.main(["--input=x", "--format=svg"]), 0)
+            read.assert_called_once_with("x")
+
+    def test_cli_explicit_json_preserves_all_transform_output(self):
+        for mirror in (False, True):
+            for rotate in (0, 90, 180, 270):
+                args = ["--input=x", "--format=json", f"--rotate={rotate}"]
+                if mirror:
+                    args.append("--mirror-x")
+                with patch.object(grid, "read_grid", return_value=DRAWING), redirect_stdout(io.StringIO()) as out:
+                    self.assertEqual(grid.main(args), 0)
+                self.assertEqual(out.getvalue().encode(), grid.encode(DRAWING, rotate=rotate, mirror_x=mirror))
+
+    def test_cli_invalid_formats_rejected_before_reading(self):
+        for args in [["--input=x", "--format"], ["--input=x", "--format=png"],
+                     ["--input=x", "--format=svg", "--format=json"],
+                     ["--input=x", "--format=svg", "--format=svg"],
+                     ["--input=x", "--for=svg"], ["--input=x", "--format=SVG"],
+                     ["--input=x", "--format=svg", "extra"]]:
+            with patch.object(grid, "read_grid") as read, redirect_stdout(io.StringIO()) as out, redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as error:
+                    grid.main(args)
+                self.assertEqual(error.exception.code, 2)
+                self.assertEqual(out.getvalue(), "")
+                read.assert_not_called()
+
+    def test_cli_svg_invalid_input_has_empty_stdout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "bad").write_bytes(b"PKE<svg>")
+            (root / "link").symlink_to(root / "bad")
+            for name in ("bad", "link", "missing"):
+                result = subprocess.run([sys.executable, "-B", str(TOOL), "--input", str(root / name), "--format=svg"], capture_output=True, timeout=5)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stdout, b"")
+                self.assertTrue(result.stderr.startswith(b"error: "))
 
 
 def run_integration(binary_dir, output_dir, *, rotate=0, mirror_x=False):
