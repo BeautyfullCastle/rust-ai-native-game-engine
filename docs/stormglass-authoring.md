@@ -34,6 +34,8 @@ Missing singletons default independently. Present YAML singletons require all fi
 
 In the registered Editor, open **Details → Authored waves** to inspect starting resources, enemy HP multiplier, first spawn tick and cadence, and the complete enemy order/count per lane for each active wave. Each row also shows first/last spawn ticks relative to that wave's start. These are not absolute game ticks or completion times: a wave waits for surviving enemies after its last spawn. This read-only preview follows the displayed snapshot, including unsaved edits and Undo/Redo before Play; Save/reopen retains the settings. In Play it describes session configuration, not remaining enemies or a predicted victory. It does not edit the scene or send commands.
 
+The Stormglass starter installs a WavePacing inspector with one-click pair intervals of 35, 70, 140 or 350 ticks. It displays the exact current interval, including other authored values. Choose **Use generic fields** for any integer from 35 to 350. Cadence changes use normal Undo/Redo and Save, and are unavailable in Play; choosing the current cadence creates no edit.
+
 In the Inspector, hover the `regular_kinds`, `opening_boss` or `pair_counts` array header, expanded or collapsed, for its wave-index and composition guidance.
 
 Existing ERP `world.singleton.patch` accepts nested paths, for example:

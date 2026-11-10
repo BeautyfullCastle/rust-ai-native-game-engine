@@ -34,10 +34,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Static Game Starter",
         eframe::NativeOptions::default(),
         Box::new(move |cc| {
-            Ok(Box::new(orr_editor::EditorApp::new(
+            let app = orr_editor::EditorApp::new(
                 editor,
                 cc.wgpu_render_state.clone(),
-            )))
+            );
+            #[cfg(feature = "stormglass")]
+            let app = app.with_custom_inspectors(orr_static_starter::stormglass::cadence_inspector::registry());
+            Ok(Box::new(app))
         }),
     )
     .map_err(|e| e.to_string())?;

@@ -22,6 +22,7 @@ use serde_json::{json, Value as J};
 use std::sync::OnceLock;
 
 mod authoring_preview;
+pub mod cadence_inspector;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable, Reflect)]
