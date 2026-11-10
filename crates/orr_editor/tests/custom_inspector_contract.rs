@@ -263,3 +263,54 @@ fn disabled_parent_ui_never_invokes_extension() {
     output.textures_delta.clear();
     assert!(events.is_empty());
 }
+
+#[test]
+fn vector_edit_is_exact_atomic_and_checks_each_axis() {
+    use orr_fp::{FPVec2, FP};
+    let d = TypeDesc::structure(
+        16,
+        vec![FieldDesc::new(
+            "velocity",
+            0,
+            TypeDesc::vec2().with_range_str("-2..=2"),
+        )],
+    );
+    let zero = Value::Vec2(FPVec2::ZERO);
+    let s = Snapshot::new(key(), d, Value::Struct(vec![("velocity".into(), zero)])).unwrap();
+    // Preserve a single raw fixed-point unit without floating point conversion.
+    let precise = Value::Vec2(FPVec2::new(FP::from_raw(1), FP::from_int(-2)));
+    assert_eq!(
+        s.checked_edit(FieldEdit {
+            field: "velocity".into(),
+            value: precise.clone()
+        })
+        .unwrap(),
+        InspEvent::Set {
+            path: "velocity".into(),
+            value: precise
+        }
+    );
+    for value in [
+        Value::Vec2(FPVec2::new(FP::from_int(3), FP::ZERO)),
+        Value::Vec2(FPVec2::new(FP::ZERO, FP::from_int(-3))),
+        Value::Int(1),
+        Value::Array(vec![Value::Int(1), Value::Int(1)]),
+    ] {
+        assert!(s
+            .checked_edit(FieldEdit {
+                field: "velocity".into(),
+                value
+            })
+            .is_err());
+    }
+    assert!(s
+        .checked_edit(FieldEdit {
+            field: "velocity.x".into(),
+            value: Value::Fixed(FP::ONE)
+        })
+        .is_err());
+    assert_eq!(
+        s.value().field("velocity"),
+        Some(&Value::Vec2(FPVec2::ZERO))
+    );
+}

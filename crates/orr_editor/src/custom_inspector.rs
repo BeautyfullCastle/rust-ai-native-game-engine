@@ -56,7 +56,7 @@ impl Snapshot {
         &self.value
     }
 
-    /// Validate one top-level scalar field and produce an ordinary inspector event.
+    /// Validate one top-level scalar or Vec2 field into an ordinary inspector event.
     /// Nested/structural edits are deliberately left to the generic inspector.
     /// This is not authority to apply an event to a newer or different document.
     pub fn checked_edit(&self, edit: FieldEdit) -> Result<InspEvent, String> {
@@ -76,10 +76,11 @@ impl Snapshot {
                 | Kind::Int { .. }
                 | Kind::Fixed { .. }
                 | Kind::Fixed32 { .. }
+                | Kind::Vec2 { .. }
                 | Kind::Enum { .. }
                 | Kind::Flags { .. }
         ) {
-            return Err("custom edits require a scalar field".into());
+            return Err("custom edits require a scalar or Vec2 field".into());
         }
         field
             .ty

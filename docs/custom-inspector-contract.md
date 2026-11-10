@@ -12,11 +12,16 @@ specialized 3D panels that bypass the generic component Inspector.
 From the repository root:
 
 ```sh
-cargo run --locked -p orr_editor --features custom-inspector --example arena_custom_inspector -- scenes/arena_blank.scene.yaml
+cargo run --locked -p orr_editor --features custom-inspector --example arena_custom_inspector -- crates/orr_editor/examples/arena_custom_inspector/projectile.scene.yaml
 ```
 
-Add/select an Arena player. Its custom PlayerTag panel assigns slots 0 through 7.
-The same executable registers a second panel for an existing Bullet's lifetime.
+Select `hero` in the hierarchy. Its custom PlayerTag panel assigns slots 0 through 7.
+Select `projectile` for its Bullet lifetime and velocity presets. Direction presets
+set a whole exact Vec2 at 2 world units per simulation tick; stopped sets zero.
+Repeated selection of the current preset adds no Undo step. Use generic fields
+for arbitrary exact velocity values. Save As your own scene, reopen it with the
+same command with your saved path replacing the fixture path, then Play/Step. The supplied scene
+is also the test input, not a new runtime or player firing-speed setting.
 `examples/arena_custom_inspector/panels.rs` owns both registrations and draw
 functions. Adding the second component required no editor/core/game-enum changes.
 Arena has no health or inventory, so these examples do not complete #562's
@@ -45,8 +50,9 @@ the earlier unpublished numeric fingerprint field is replaced by exact schema.
 
 Callbacks receive egui UI, a scoped ID and an owned read-only `Snapshot`. The
 snapshot rejects malformed values and duplicate fields. Return at most one
-`FieldEdit` per frame. Exact top-level bool, integer, fixed-point, enum and flag
-fields are accepted after reflection kind/range checks. Nested/structural/entity
+`FieldEdit` per frame. Exact top-level bool, integer, fixed-point, Vec2, enum and flag
+fields are accepted after reflection kind/range checks. Whole Vec2 edits validate both axes
+and create one Set/Undo operation. Vec3 and nested/structural/entity
 edits remain generic-Inspector work. UI state stays outside gameplay data.
 
 Valid intents become ordinary `InspEvent::Set` and use the existing
@@ -67,6 +73,8 @@ enabled, plus `inspector_number_focus` with or without it. CPU egui tests cover
 custom/generic edits, invalid
 intent preservation, Undo/Redo, dirty/Save/reopen, Play suppression, selection,
 preview, exact-schema fallback, duplicate fields and disabled parent callbacks.
+The supplied projectile scene is saved/reopened and stepped in the real Arena
+host to verify the edited velocity changes movement and Stop restores the scene.
 The example executable is build-checked; tests use actual EditorApp and local
 hosts with injected egui input, not physical input or native window/GPU proof.
 

@@ -8,7 +8,7 @@ use egui_kittest::{kittest::Queryable, Harness};
 use orr_editor::{custom_inspector::*, game::EditorGame, Editor, EditorApp, Mode};
 use orr_reflect::Value;
 
-const SCENE: &str = "schema: orr.scene/1\nsingletons:\n  Score: { kills: [0,0,0,0,0,0,0,0] }\nentities:\n  e_00000001:\n    name: hero\n    Position: { pos: [-300,0] }\n    PlayerTag: { slot: 0 }\n  e_00000002:\n    name: projectile\n    Position: { pos: [0,200] }\n    Bullet: { velocity: [1,0], owner_slot: 0, ttl: 60 }\n";
+const SCENE: &str = include_str!("../examples/arena_custom_inspector/projectile.scene.yaml");
 
 fn app(path: &std::path::Path, name: &str, registry: Registry) -> Harness<'static, EditorApp> {
     let mut editor = Editor::open_game(path, EditorGame::Arena).unwrap();
@@ -283,4 +283,106 @@ fn actual_app_generic_focus_commit_undo_redo_save_and_reopen() {
     assert_eq!(value(&reopened, "Bullet", "ttl"), Value::Int(120));
     assert_eq!(reopened.checksum(), checksum);
     assert_eq!(std::fs::read_to_string(path).unwrap(), SCENE);
+}
+
+#[test]
+fn projectile_velocity_preset_survives_save_and_changes_real_play_motion() {
+    use orr_fp::{FPVec2, FP};
+    let (tmp, path) = scene();
+    let mut h = app(&path, "projectile", panels::panels().unwrap());
+    settle(&mut h);
+    let initial = h.state().editor.checksum();
+    h.get_by_label("Velocity up").click();
+    settle(&mut h);
+    let up = Value::Vec2(FPVec2::new(FP::ZERO, FP::from_int(2)));
+    assert_eq!(value(&h.state().editor, "Bullet", "velocity"), up);
+    assert_eq!(value(&h.state().editor, "Bullet", "ttl"), Value::Int(60));
+    assert_eq!(h.state().editor.history().entries.len(), 1);
+    assert!(h.state().editor.sim().dirty);
+    h.get_by_label("Velocity up").click();
+    settle(&mut h);
+    assert_eq!(h.state().editor.history().entries.len(), 1);
+    assert!(h.state_mut().editor.undo());
+    settle(&mut h);
+    assert_eq!(h.state().editor.checksum(), initial);
+    assert!(h.state_mut().editor.redo());
+    settle(&mut h);
+    let edited = h.state().editor.checksum();
+    let saved = tmp.path().join("projectile.scene.yaml");
+    assert!(h.state_mut().editor.save_as(&saved));
+    settle(&mut h);
+    assert!(!h.state().editor.sim().dirty);
+    let saved_bytes = std::fs::read(&saved).unwrap();
+    let mut reopened = app(&saved, "projectile", panels::panels().unwrap());
+    settle(&mut reopened);
+    assert_eq!(value(&reopened.state().editor, "Bullet", "velocity"), up);
+    assert_eq!(reopened.state().editor.checksum(), edited);
+    assert!(reopened.state_mut().editor.start_play());
+    settle(&mut reopened);
+    assert!(reopened.query_by_label("Velocity up").is_none());
+    reopened.state_mut().editor.step(3);
+    settle(&mut reopened);
+    assert_eq!(
+        value(&reopened.state().editor, "Position", "pos"),
+        Value::Vec2(FPVec2::new(FP::ZERO, FP::from_int(206)))
+    );
+    assert!(reopened.state_mut().editor.stop().is_some());
+    settle(&mut reopened);
+    assert_eq!(reopened.state().editor.checksum(), edited);
+    assert_eq!(std::fs::read(saved).unwrap(), saved_bytes);
+    assert_eq!(std::fs::read_to_string(path).unwrap(), SCENE);
+}
+
+#[test]
+fn projectile_direction_presets_and_generic_axis_share_history() {
+    use orr_fp::{FPVec2, FP};
+    let (_tmp, path) = scene();
+    let mut h = app(&path, "projectile", panels::panels().unwrap());
+    settle(&mut h);
+    for (index, (label, x, y)) in [
+        ("Velocity left", -2, 0),
+        ("Velocity right", 2, 0),
+        ("Velocity down", 0, -2),
+        ("Velocity stopped", 0, 0),
+        ("Velocity up", 0, 2),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        h.get_by_label(label).click();
+        settle(&mut h);
+        assert_eq!(
+            value(&h.state().editor, "Bullet", "velocity"),
+            Value::Vec2(FPVec2::new(FP::from_int(x), FP::from_int(y)))
+        );
+        assert_eq!(h.state().editor.history().entries.len(), index + 1);
+    }
+    h.get_by_label("Use generic fields").click();
+    settle(&mut h);
+    // Unique current value 2 identifies velocity.y; changing it preserves x.
+    h.get_by(|node| {
+        node.role() == egui::accesskit::Role::TextInput && node.value().as_deref() == Some("2")
+    })
+    .focus();
+    h.run_steps(1);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.run_steps(1);
+    h.get_by(|node| {
+        node.role() == egui::accesskit::Role::TextInput && node.value().as_deref() == Some("2")
+    })
+    .type_text("1.5");
+    h.run_steps(1);
+    h.key_press(egui::Key::Enter);
+    settle(&mut h);
+    assert_eq!(
+        value(&h.state().editor, "Bullet", "velocity"),
+        Value::Vec2(FPVec2::new(FP::ZERO, FP::from_raw(98304)))
+    );
+    assert_eq!(h.state().editor.history().entries.len(), 6);
+    assert!(h.state_mut().editor.undo());
+    settle(&mut h);
+    assert_eq!(
+        value(&h.state().editor, "Bullet", "velocity"),
+        Value::Vec2(FPVec2::new(FP::ZERO, FP::from_int(2)))
+    );
 }
