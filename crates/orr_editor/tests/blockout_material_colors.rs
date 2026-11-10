@@ -19,9 +19,11 @@ fn portable_v1_palette_and_serialization_remain_unchanged() {
 }
 #[test]
 fn portable_v2_palette_roundtrip_bakes_both_opaque_materials() {
-    let mut recipe = Recipe::default();
-    recipe.version = 2;
-    recipe.material_colors = Some([[0.8, 0.2, 0.1], [0.1, 0.8, 0.3]]);
+    let mut recipe = Recipe {
+        version: 2,
+        material_colors: Some([[0.8, 0.2, 0.1], [0.1, 0.8, 0.3]]),
+        ..Recipe::default()
+    };
     recipe.faces[Face::PosX.index()].material = 1;
     let bytes = recipe.to_bytes().unwrap();
     assert_eq!(Recipe::from_bytes(&bytes).unwrap(), recipe);
@@ -37,8 +39,10 @@ fn portable_v2_palette_roundtrip_bakes_both_opaque_materials() {
 }
 #[test]
 fn portable_colors_reject_schema_null_duplicates_and_invalid_rgb() {
-    let mut recipe = Recipe::default();
-    recipe.version = 2;
+    let mut recipe = Recipe {
+        version: 2,
+        ..Recipe::default()
+    };
     assert!(recipe.validate().is_err());
     recipe.version = 1;
     recipe.material_colors = Some([[1.0; 3]; 2]);
