@@ -1,0 +1,45 @@
+{
+  "schema": 2,
+  "steps": [
+    {
+      "ticks": 1,
+      "held": [
+        "space"
+      ],
+      "expect_key": true,
+      "expect_won": false
+    },
+    {
+      "ticks": 60,
+      "held": [
+        "arrow_down"
+      ],
+      "expect_key": true,
+      "expect_won": false
+    },
+    {
+      "ticks": 120,
+      "held": [
+        "arrow_right"
+      ],
+      "expect_key": true,
+      "expect_won": false
+    },
+    {
+      "ticks": 60,
+      "held": [
+        "arrow_up"
+      ],
+      "expect_key": true,
+      "expect_won": false
+    },
+    {
+      "ticks": 1,
+      "held": [
+        "space"
+      ],
+      "expect_key": true,
+      "expect_won": true
+    }
+  ]
+}

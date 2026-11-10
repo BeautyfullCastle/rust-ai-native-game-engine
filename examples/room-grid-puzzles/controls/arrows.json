@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "actions": [
+    {
+      "name": "move_left",
+      "bindings": [
+        {
+          "device": "Keyboard",
+          "key": "arrow_left"
+        }
+      ]
+    },
+    {
+      "name": "move_right",
+      "bindings": [
+        {
+          "device": "Keyboard",
+          "key": "arrow_right"
+        }
+      ]
+    },
+    {
+      "name": "move_forward",
+      "bindings": [
+        {
+          "device": "Keyboard",
+          "key": "arrow_up"
+        }
+      ]
+    },
+    {
+      "name": "move_backward",
+      "bindings": [
+        {
+          "device": "Keyboard",
+          "key": "arrow_down"
+        }
+      ]
+    },
+    {
+      "name": "interact",
+      "bindings": [
+        {
+          "device": "Keyboard",
+          "key": "space"
+        }
+      ]
+    }
+  ]
+}

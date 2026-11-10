@@ -41,6 +41,7 @@ on:
       - 'tools/create_room_grid.py'
       - 'tools/test_create_room_grid.py'
       - 'tools/test_room_grid_puzzles.py'
+      - 'tools/test_room_grid_keyboard.py'
       - 'examples/room-grid-puzzles/**'
       - 'docs/room-grid-authoring.md'
       - 'tools/test_attach_room_controls.py'
@@ -540,6 +541,67 @@ jobs:
                       raise RuntimeError('Starter Python inventory, execution or skip mismatch')
               attempt('python-starters', python_starter_tests)
 
+              def python_keyboard_tests():
+                  from textwrap import dedent
+                  expected = [
+                      'test_room_grid_keyboard.KeyboardTests.test_all_seven_keyboard_assets_match_logical_routes',
+                      'test_room_grid_keyboard.KeyboardTests.test_arrow_mapping_and_space_are_exact',
+                      'test_room_grid_keyboard.KeyboardTests.test_asset_reader_refuses_symlinks_directories_and_oversize',
+                      'test_room_grid_keyboard.KeyboardTests.test_duplicate_keys_and_nonfinite_values_rejected',
+                      'test_room_grid_keyboard.KeyboardTests.test_exact_json_rejects_wrong_types_and_extra_fields',
+                      'test_room_grid_keyboard.KeyboardTests.test_interaction_release_and_tick_totals_preserved',
+                      'test_room_grid_keyboard.KeyboardTests.test_translation_preserves_every_semantic_step',
+                      'test_room_grid_keyboard.KeyboardTests.test_wrong_key_order_or_identity_is_not_silently_repaired',
+                  ]
+                  runner = dedent("""
+                      import json, sys, unittest
+                      suite = unittest.defaultTestLoader.discover('tools', pattern='test_room_grid_keyboard.py')
+                      def names(node):
+                          if isinstance(node, unittest.TestSuite):
+                              return [name for child in node for name in names(child)]
+                          return [node.id()]
+                      if sys.argv[1] == 'inventory':
+                          print(json.dumps(names(suite)))
+                      else:
+                          class Result(unittest.TextTestResult):
+                              def __init__(self, *args, **kwargs):
+                                  super().__init__(*args, **kwargs)
+                                  self.passed = []
+                              def addSuccess(self, test):
+                                  super().addSuccess(test)
+                                  self.passed.append(test.id())
+                          result = unittest.TextTestRunner(verbosity=2, resultclass=Result).run(suite)
+                          print('KEYBOARD_TEST_RESULT=' + json.dumps({
+                              'passed': result.passed, 'tests_run': result.testsRun,
+                              'failures': len(result.failures), 'errors': len(result.errors),
+                              'skipped': len(result.skipped),
+                              'expected_failures': len(result.expectedFailures),
+                              'unexpected_successes': len(result.unexpectedSuccesses),
+                          }))
+                          sys.exit(0 if result.wasSuccessful() else 1)
+                  """)
+                  # Ignore ambient Python flags so assertions cannot be optimized away.
+                  command = ['python3', '-B', '-E', '-c', runner]
+                  output, record = run('python-keyboard-inventory', command + ['inventory'])
+                  inventory = json.loads(output)
+                  record['test_count'] = len(inventory)
+                  save()
+                  if sorted(inventory) != expected:
+                      raise RuntimeError('Keyboard Python inventory differs from the reviewed exact test set')
+                  output, record = run('python-keyboard', command + ['run'])
+                  markers = re.findall(r'^KEYBOARD_TEST_RESULT=(.+)$', output, re.M)
+                  if len(markers) != 1:
+                      raise RuntimeError('Keyboard Python suite must report exactly one execution result')
+                  result = json.loads(markers[0])
+                  record['test_count'] = result['tests_run']
+                  record['inventory_count'] = len(inventory)
+                  save()
+                  if (sorted(result['passed']) != expected or result['tests_run'] != len(expected)
+                          or any(result[field] != 0 for field in (
+                              'failures', 'errors', 'skipped', 'expected_failures', 'unexpected_successes'))):
+                      raise RuntimeError('Keyboard Python inventory, execution or skip mismatch')
+              attempt('python-keyboard', python_keyboard_tests)
+
               for label, package, features, targets in [
                   ('recorded-route-session-clippy', 'orr_session', '', ['--lib']),
                   ('playtest-keys-bin-clippy', 'orr_sample', 'room-playtest,room-input-actions', ['--bin', 'orr_playtest_room']),
@@ -925,6 +987,54 @@ jobs:
                   record['integration_count'] = 1
                   save()
               attempt('cpu-attach-export-reopen', attachment_integration)
+
+              def keyboard_integration():
+                  # Use this run's existing attachment producers and unchanged prior playtest.
+                  binary_dir = Path(os.environ['CARGO_TARGET_DIR']) / 'release'
+                  produced_hashes = {}
+                  for label, manifest, names in [
+                      ('attach-build', 'fresh-attach-binaries.json', ['orr_attach_room_controls', 'orr_new_arena', 'room_escape', 'orr_export_room']),
+                      ('recorded-route-cli-build', 'fresh-recorded-route-binary.json', ['orr_playtest_room']),
+                  ]:
+                      produced = [entry for entry in receipts if entry['label'] == label]
+                      if len(produced) != 1 or produced[0]['exit'] != 0:
+                          raise RuntimeError(f'Keyboard integration requires a passing fresh producer: {label}')
+                      recorded = json.loads((evidence / manifest).read_text())
+                      actual = {name: hashlib.sha256((binary_dir / name).read_bytes()).hexdigest() for name in names}
+                      if recorded != actual:
+                          raise RuntimeError(f'Keyboard integration producer bytes changed: {label}')
+                      produced_hashes.update(actual)
+                  hashes = {name: produced_hashes[name] for name in ['orr_new_arena', 'orr_attach_room_controls', 'orr_playtest_room']}
+                  output_dir = evidence / 'keyboard-integration'
+                  code = ('import sys; sys.path.insert(0, "tools"); '
+                          'from test_room_grid_keyboard import run_integration; '
+                          'run_integration(sys.argv[1], sys.argv[2])')
+                  output, record = run('python-keyboard-integration', ['python3', '-B', '-E', '-c', code,
+                                      str(binary_dir.resolve(strict=True)), str(output_dir)])
+                  result = json.loads(output)
+                  retained = json.loads((output_dir / 'result.json').read_text())
+                  expected_checks = ['courtyard', 'switchback', 'passage']
+                  expected_assets = {str(Path(path).relative_to("examples/room-grid-puzzles")): hashlib.sha256(Path(path).read_bytes()).hexdigest() for path in ['examples/room-grid-puzzles/controls/arrows.json', 'examples/room-grid-puzzles/keyboard/courtyard/route-keys.json', 'examples/room-grid-puzzles/keyboard/courtyard/shortcut-keys.json', 'examples/room-grid-puzzles/keyboard/switchback/route-keys.json', 'examples/room-grid-puzzles/keyboard/switchback/shortcut-keys.json', 'examples/room-grid-puzzles/keyboard/passage/route-keys.json', 'examples/room-grid-puzzles/keyboard/passage/shortcut-keys.json']}
+                  expected_original_assets = {str(Path(path).relative_to("examples/room-grid-puzzles")): hashlib.sha256(Path(path).read_bytes()).hexdigest() for path in ['examples/room-grid-puzzles/courtyard/grid.txt', 'examples/room-grid-puzzles/courtyard/route.json', 'examples/room-grid-puzzles/courtyard/shortcut.json', 'examples/room-grid-puzzles/courtyard/puzzle.json', 'examples/room-grid-puzzles/switchback/grid.txt', 'examples/room-grid-puzzles/switchback/route.json', 'examples/room-grid-puzzles/switchback/shortcut.json', 'examples/room-grid-puzzles/switchback/puzzle.json', 'examples/room-grid-puzzles/passage/grid.txt', 'examples/room-grid-puzzles/passage/route.json', 'examples/room-grid-puzzles/passage/shortcut.json', 'examples/room-grid-puzzles/passage/puzzle.json']}
+                  expected_controls = hashlib.sha256(Path('examples/room-grid-puzzles/controls/arrows.json').read_bytes()).hexdigest()
+                  expected_checks_per_puzzle = ['fixed-keyboard-assets', 'creator-admission', 'semantic-baseline', 'safe-controls-attachment', 'exact-backup-and-sidecar', 'authored-key-victory', 'resolved-input-and-checksum-parity', 'byte-identical-repeat', 'shortcut-blocked', 'schema1-refused', 'repeat-attachment-refused', 'project-unchanged']
+                  expected_puzzles = {'courtyard': {'status': 'passed', 'checks': ['fixed-keyboard-assets', 'creator-admission', 'semantic-baseline', 'safe-controls-attachment', 'exact-backup-and-sidecar', 'authored-key-victory', 'resolved-input-and-checksum-parity', 'byte-identical-repeat', 'shortcut-blocked', 'schema1-refused', 'repeat-attachment-refused', 'project-unchanged'], 'winning_ticks': 202, 'shortcut_ticks': 122, 'repeat_identical': True, 'semantic_checksums_equal': True}, 'switchback': {'status': 'passed', 'checks': ['fixed-keyboard-assets', 'creator-admission', 'semantic-baseline', 'safe-controls-attachment', 'exact-backup-and-sidecar', 'authored-key-victory', 'resolved-input-and-checksum-parity', 'byte-identical-repeat', 'shortcut-blocked', 'schema1-refused', 'repeat-attachment-refused', 'project-unchanged'], 'winning_ticks': 362, 'shortcut_ticks': 202, 'repeat_identical': True, 'semantic_checksums_equal': True}, 'passage': {'status': 'passed', 'checks': ['fixed-keyboard-assets', 'creator-admission', 'semantic-baseline', 'safe-controls-attachment', 'exact-backup-and-sidecar', 'authored-key-victory', 'resolved-input-and-checksum-parity', 'byte-identical-repeat', 'shortcut-blocked', 'schema1-refused', 'repeat-attachment-refused', 'project-unchanged'], 'winning_ticks': 242, 'shortcut_ticks': 122, 'repeat_identical': True, 'semantic_checksums_equal': True}}
+                  if (result != retained or result.get('status') != 'passed'
+                          or result.get('binaries') != hashes
+                          or result.get('tool_sha256') != hashlib.sha256(Path('tools/create_room_grid.py').read_bytes()).hexdigest()
+                          or result.get('checks') != expected_checks
+                          or result.get('asset_sha256') != expected_assets
+                          or result.get('original_asset_sha256') != expected_original_assets
+                          or result.get('controls_sha256') != expected_controls
+                          or result.get('harness_sha256') != hashlib.sha256(Path('tools/test_room_grid_keyboard.py').read_bytes()).hexdigest()
+                          or result.get('starter_harness_sha256') != hashlib.sha256(Path('tools/test_room_grid_puzzles.py').read_bytes()).hexdigest()
+                          or json.dumps(result.get('checks_per_puzzle'), sort_keys=True) != json.dumps(expected_checks_per_puzzle, sort_keys=True)
+                          or json.dumps(result.get('puzzles'), sort_keys=True) != json.dumps(expected_puzzles, sort_keys=True)):
+                      raise RuntimeError('Keyboard integration result, retained receipts or source identity mismatch')
+                  record['integration_count'] = 1
+                  record['check_count'] = len(expected_checks)
+                  save()
+              attempt('python-keyboard-integration', keyboard_integration)
           finally:
               # Do not lose the final fence when an individual check fails.
               attempt('source-after', lambda: source_fence('source-after'))
