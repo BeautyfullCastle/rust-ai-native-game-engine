@@ -34,6 +34,8 @@ Missing singletons default independently. Present YAML singletons require all fi
 
 In the registered Editor, open **Details → Authored waves** to inspect starting resources, enemy HP multiplier, first spawn tick and cadence, and the complete enemy order/count per lane for each active wave. This read-only preview follows the displayed snapshot, including unsaved edits and Undo/Redo before Play; Save/reopen retains the settings. In Play it describes session configuration, not remaining enemies or a predicted victory. It does not edit the scene or send commands.
 
+In the Inspector, hover the `regular_kinds`, `opening_boss` or `pair_counts` array header, expanded or collapsed, for its wave-index and composition guidance.
+
 Existing ERP `world.singleton.patch` accepts nested paths, for example:
 
 ```json

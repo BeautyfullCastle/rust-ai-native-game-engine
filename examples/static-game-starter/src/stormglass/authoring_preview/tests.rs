@@ -257,3 +257,55 @@ fn authored_wave_preview_details_widget_is_readonly_in_edit_and_live() {
         assert_eq!(sim.frame().to_bytes(), before);
     }
 }
+
+#[cfg(feature = "api-acceptance")]
+#[test]
+fn authored_array_headers_expose_existing_field_guidance_without_edits() {
+    use egui_kittest::{kittest::Queryable, Harness};
+    use orr_editor::inspector::{show_component, InspEvent};
+    use orr_reflect::Reflect;
+
+    // Render the same descriptors and values consumed by the generic Inspector.
+    // No substitute help strings or Stormglass-specific widgets are involved.
+    for (desc, value, headers) in [
+        (
+            WaveComposition::describe(),
+            WaveComposition::describe().read(bytemuck::bytes_of(&WaveComposition::default())),
+            vec![
+                ("regular_kinds [10]", "Waves 1 through 10, each with four regular families (normal/fast/armored/horde)."),
+                ("opening_boss [10]", "One flag per wave: 1 replaces its first pair with bosses; 0 uses regular kinds."),
+            ],
+        ),
+        (
+            WaveCounts::describe(),
+            WaveCounts::describe().read(bytemuck::bytes_of(&WaveCounts::default())),
+            vec![("pair_counts [10]", "Counts for waves 1 through 10; composition is authored independently.")],
+        ),
+    ] {
+        let original = value.clone();
+        let mut harness = Harness::builder().with_size([900.0, 1900.0]).build_ui_state(
+            |ui, events: &mut Vec<InspEvent>| {
+                ui.ctx().global_style_mut(|style| style.interaction.tooltip_delay = 0.0);
+                show_component(ui, egui::Id::new("authored-settings"), &desc, &value, events);
+            },
+            Vec::new(),
+        );
+        harness.run_steps(3);
+        // Collapse first to keep every field reachable in a compact Inspector.
+        for (header, _) in &headers {
+            harness.get_by_label(header).click();
+            harness.run_steps(3);
+        }
+        for (header, guidance) in headers {
+            for _ in 0..3 {
+                harness.get_by_label(header).hover();
+                harness.run_steps(5);
+                assert!(harness.query_by_label(guidance).is_some(), "missing {header} guidance");
+                harness.get_by_label(header).click();
+                harness.run_steps(3);
+            }
+        }
+        assert!(harness.state().is_empty());
+        assert_eq!(value, original);
+    }
+}

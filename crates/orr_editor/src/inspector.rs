@@ -130,7 +130,7 @@ fn show_field(ui: &mut Ui, base: Id, label: &str, ty: &TypeDesc, value: &Value, 
                     let name = format!("[{i}]");
                     show_field(ui, base, &name, elem, item, &join(path, &name), "", out);
                 }
-            });
+            }).header_response.on_hover_text(&hover);
         }
         (Kind::List { elem, min, max }, Value::Array(items)) => {
             egui::CollapsingHeader::new(format!("{label} [{}]", items.len())).id_salt(id).default_open(true).show(ui, |ui| {
