@@ -1,10 +1,10 @@
-//! Opt-in static custom-inspector contract. No EditorApp wiring is installed.
+//! Opt-in static custom-inspector contract, explicitly installed per EditorApp.
 //!
 //! Callbacks are trusted native code, not a sandbox. They receive no host or
 //! document handle. Returned intents still require normal host authorization,
 //! freshness, validation and Undo handling when eventually applied.
 use egui::{Id, Ui};
-use orr_reflect::{Kind, TypeDesc, Value};
+use orr_reflect::{Kind, TypeDesc, TypeRegistry, Value};
 
 use crate::inspector::{self, InspEvent};
 
@@ -13,10 +13,22 @@ use crate::inspector::{self, InspEvent};
 pub struct SchemaKey {
     /// Stable reflected component name, qualified by the game when necessary.
     pub type_name: String,
-    /// Schema fingerprint supplied by the host's reflection registry.
-    pub fingerprint: u64,
+    /// Exact deterministic type JSON Schema, not a caller-invented version or hash.
+    pub schema_json: String,
 }
 
+impl SchemaKey {
+    /// Derive compatibility from the already verified reflected type registry.
+    pub fn for_type(types: &TypeRegistry, type_name: &str) -> Result<Self, String> {
+        let schema_json = types
+            .type_json_schema(type_name)
+            .ok_or_else(|| format!("unknown reflected type '{type_name}'"))?;
+        Ok(Self {
+            type_name: type_name.into(),
+            schema_json,
+        })
+    }
+}
 /// Owned, read-only input. UI state must be kept separately from this value.
 pub struct Snapshot {
     key: SchemaKey,
@@ -27,7 +39,7 @@ pub struct Snapshot {
 impl Snapshot {
     /// Reject malformed snapshots before invoking any extension.
     pub fn new(key: SchemaKey, desc: TypeDesc, value: Value) -> Result<Self, String> {
-        if key.type_name.is_empty() {
+        if key.type_name.is_empty() || key.schema_json.is_empty() {
             return Err("empty reflected type name".into());
         }
         check_unique_fields(&value)?;
@@ -138,6 +150,7 @@ impl Registry {
         if extension.api_version != 1
             || extension.id.is_empty()
             || extension.schema.type_name.is_empty()
+            || extension.schema.schema_json.is_empty()
         {
             return Err("unsupported API version or empty identity".into());
         }
@@ -170,7 +183,7 @@ impl Registry {
         editable: bool,
         out: &mut Vec<InspEvent>,
     ) {
-        if !editable {
+        if !editable || !ui.is_enabled() {
             ui.add_enabled_ui(false, |ui| {
                 inspector::show_component(
                     ui,
@@ -183,6 +196,17 @@ impl Registry {
             return;
         }
         if let Some(extension) = self.resolve(snapshot.key()) {
+            let toggle_id = base.with("use_generic_inspector");
+            let mut generic = ui
+                .data(|data| data.get_temp::<bool>(toggle_id))
+                .unwrap_or(false);
+            if ui.checkbox(&mut generic, "Use generic fields").changed() {
+                ui.data_mut(|data| data.insert_temp(toggle_id, generic));
+            }
+            if generic {
+                inspector::show_component(ui, base, &snapshot.desc, &snapshot.value, out);
+                return;
+            }
             if let Some(edit) = (extension.draw)(ui, base.with(extension.id), snapshot) {
                 out.push(snapshot.checked_edit(edit).unwrap_or_else(InspEvent::Error));
             }

@@ -292,6 +292,12 @@ impl Num {
 fn number_field(ui: &mut Ui, id: Id, canonical: &str, hover: &str, width: f32) -> Option<String> {
     let edit_id = id.with("text");
     let focused = ui.memory(|m| m.has_focus(edit_id));
+    // Selection changes can remove the widget before it observes lost_focus.
+    // An unfocused field displays canonical data; discard its abandoned draft
+    // too, so a later focus cannot resurrect text cancelled by Escape.
+    if !focused {
+        ui.data_mut(|d| d.remove_temp::<String>(edit_id));
+    }
     let mut text: String = if focused { ui.data(|d| d.get_temp::<String>(edit_id)).unwrap_or_else(|| canonical.to_string()) } else { canonical.to_string() };
     let resp = ui.add(egui::TextEdit::singleline(&mut text).id(edit_id).desired_width(width).clip_text(true)).on_hover_text(hover);
     if resp.changed() {

@@ -6,7 +6,7 @@ use orr_reflect::{FieldDesc, IntKind, TypeDesc, Value};
 fn key() -> SchemaKey {
     SchemaKey {
         type_name: "example::Health".into(),
-        fingerprint: 42,
+        schema_json: "schema-42".into(),
     }
 }
 fn desc() -> TypeDesc {
@@ -63,7 +63,7 @@ fn exact_schema_and_type_or_generic_fallback() {
     assert_eq!(r.resolve(&key()).unwrap().id, "health");
     assert!(r
         .resolve(&SchemaKey {
-            fingerprint: 43,
+            schema_json: "schema-43".into(),
             ..key()
         })
         .is_none());
@@ -240,4 +240,26 @@ fn duplicate_snapshot_fields_are_rejected_recursively() {
         Value::Struct(vec![("children".into(), Value::Array(vec![duplicate]))])
     )
     .is_err());
+}
+
+#[test]
+fn disabled_parent_ui_never_invokes_extension() {
+    let mut r = Registry::default();
+    let mut e = extension("disabled-parent", 0);
+    e.draw = forbidden;
+    r.register(e).unwrap();
+    let mut events = Vec::new();
+    let ctx = egui::Context::default();
+    let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        ui.disable();
+        r.show(
+            ui,
+            Id::new("disabled-parent"),
+            &snapshot(),
+            true,
+            &mut events,
+        );
+    });
+    output.textures_delta.clear();
+    assert!(events.is_empty());
 }

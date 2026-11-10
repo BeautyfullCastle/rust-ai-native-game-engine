@@ -187,3 +187,7 @@ path = "src/bin/editor_room_package_upgrade.rs"
 required-features = ["package-upgrade-copy"]
 test = false
 bench = false
+
+[[example]]
+name = "arena_custom_inspector"
+required-features = ["custom-inspector"]
