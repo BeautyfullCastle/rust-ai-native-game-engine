@@ -1,5 +1,8 @@
 //! Offline, content-only packages. No script execution, downloads or Cargo edits.
 //! The application supplies its real compiled capabilities through [`Runtime`].
+#[cfg(feature = "stormglass-windows-admission")]
+pub mod stormglass_windows_admission;
+
 #[cfg(any(windows, target_os = "linux"))]
 #[path = "source_authoring_core.rs"]
 pub mod source_authoring;

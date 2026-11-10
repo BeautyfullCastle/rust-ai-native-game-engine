@@ -10,6 +10,7 @@ workspace = true
 
 [features]
 default = []
+stormglass-windows-admission = ["dep:orr_games"]
 model-authoring = ["dep:orr_model", "dep:rustix"]
 animation-authoring = ["model-authoring", "orr_model/animation"]
 sprite-authoring = ["dep:orr_sprite", "orr_sprite/png-import"]
