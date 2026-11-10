@@ -1,0 +1,7 @@
+{
+  "schema": "orr.registered-project/1",
+  "game": "CollectDeliveryV1",
+  "build_id": "0x434f4c4c444c5631",
+  "scene": "collect-delivery.scene.yaml",
+  "input": "commands"
+}

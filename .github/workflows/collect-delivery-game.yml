@@ -1,0 +1,117 @@
+name: Collect delivery game CPU
+
+on:
+  pull_request:
+    branches:
+      - su/engine-correctness-hardening
+    types:
+      - ready_for_review
+    paths:
+      - .github/workflows/collect-delivery-game.yml
+      - tools/test_collect_delivery_unicode_distribution.py
+      - examples/collect-delivery-game/**
+      - examples/static-game-starter/**
+      - crates/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain
+      - rust-toolchain.toml
+      - .cargo/**
+      - build.rs
+      - config.toml
+
+permissions:
+  contents: read
+
+jobs:
+  collect-delivery-game-cpu:
+    name: Collect delivery game CPU
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: 1
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      ORR_STATIC_STANDALONE_BUILD_SHA: ${{ github.event.pull_request.head.sha }}
+      RUSTUP_TOOLCHAIN: 1.99.1
+    defaults:
+      run:
+        working-directory: examples/collect-delivery-game
+    steps:
+      - name: Check out exact PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Verify exact source and install toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD_SHA"
+          test "$ORR_STATIC_STANDALONE_BUILD_SHA" = "$EXPECTED_HEAD_SHA"
+          printf 'Verified PR head: %s\n' "$(git rev-parse HEAD)"
+          git rev-parse HEAD 'HEAD^{tree}'
+          rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
+          rustc --version --verbose
+          cargo --version
+          rustfmt --version
+          cargo clippy --version
+
+      - name: Install compile-only Linux dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install -y -q pkg-config libasound2-dev libudev-dev libx11-dev libxkbcommon-dev libwayland-dev
+
+      - name: Check package formatting
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt -- --check --config skip_children=true
+
+      - name: Run CPU journey and synthetic pixel oracle
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          run_expected_tests() {
+            local label="$1"
+            local expected_passed="$2"
+            local expected_filtered="$3"
+            shift 3
+            local log="$RUNNER_TEMP/collect-delivery-${label}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.log"
+            printf 'Running %s; expecting exactly %s passed and %s filtered tests.\n' "$label" "$expected_passed" "$expected_filtered"
+            "$@" 2>&1 | tee "$log"
+            test "$(grep -Fxc "running ${expected_passed} tests" "$log")" -eq 1
+            test "$(grep -Ec "^test result: ok\\. ${expected_passed} passed; 0 failed; 0 ignored; 0 measured; ${expected_filtered} filtered out; finished in [0-9.]+s$" "$log")" -eq 1
+          }
+
+          run_expected_tests journey 8 0 cargo test --locked --release --test journey -- --test-threads=1
+          run_expected_tests pixel-oracle 4 5 cargo test --locked --release --features native-acceptance --test native_journey pixel_oracle_tests -- --test-threads=1
+
+      - name: Compile native acceptance harness only
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --release --features native-acceptance --test native_journey --no-run
+
+      - name: Run strict Clippy for all package targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy --locked --release --all-targets --features native-acceptance -- -D warnings
+
+      - name: Verify Unicode distribution with exact-head binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --bin collect-delivery-bundle --bin collect-delivery-player
+          python3 ../../tools/test_collect_delivery_unicode_distribution.py \
+            --bundle "$PWD/target/release/collect-delivery-bundle" \
+            --player "$PWD/target/release/collect-delivery-player" \
+            --source-sha "$EXPECTED_HEAD_SHA" \
+            --scene "$PWD/scenes/collect-delivery.scene.yaml" \
+            --evidence "$RUNNER_TEMP/collect-unicode-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
