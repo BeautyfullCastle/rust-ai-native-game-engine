@@ -32,7 +32,7 @@ Missing singletons default independently. Present YAML singletons require all fi
 
 ## Edit, save and play
 
-In the registered Editor, open **Details → Authored waves** to inspect starting resources, enemy HP multiplier, first spawn tick and cadence, and the complete enemy order/count per lane for each active wave. This read-only preview follows the displayed snapshot, including unsaved edits and Undo/Redo before Play; Save/reopen retains the settings. In Play it describes session configuration, not remaining enemies or a predicted victory. It does not edit the scene or send commands.
+In the registered Editor, open **Details → Authored waves** to inspect starting resources, enemy HP multiplier, first spawn tick and cadence, and the complete enemy order/count per lane for each active wave. Each row also shows first/last spawn ticks relative to that wave's start. These are not absolute game ticks or completion times: a wave waits for surviving enemies after its last spawn. This read-only preview follows the displayed snapshot, including unsaved edits and Undo/Redo before Play; Save/reopen retains the settings. In Play it describes session configuration, not remaining enemies or a predicted victory. It does not edit the scene or send commands.
 
 In the Inspector, hover the `regular_kinds`, `opening_boss` or `pair_counts` array header, expanded or collapsed, for its wave-index and composition guidance.
 

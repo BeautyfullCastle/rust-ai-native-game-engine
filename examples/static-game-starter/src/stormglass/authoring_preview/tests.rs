@@ -86,6 +86,7 @@ fn authored_wave_preview_matches_real_spawn_ticks_and_kinds() {
             })
             .collect();
         assert_eq!(actual, expected);
+        assert_eq!(rows[0].spawn_ticks, Some((actual.first().unwrap().0, actual.last().unwrap().0)));
     }
 }
 
@@ -130,6 +131,13 @@ fn authored_wave_preview_tracks_unsaved_undo_redo_save_and_reopen() {
     editor.sync();
     let original = waves(editor.snapshot().unwrap().predicted());
     assert_eq!(original[0].kinds.len(), 3);
+    assert_eq!(original[0].spawn_ticks, Some((350, 1050)));
+    assert!(editor.undo());
+    editor.sync();
+    assert_eq!(waves(editor.snapshot().unwrap().predicted())[0].spawn_ticks, Some((210, 280)));
+    assert!(editor.redo());
+    editor.sync();
+    assert_eq!(waves(editor.snapshot().unwrap().predicted()), original);
     assert_eq!(
         first_spawn_tick(
             editor
@@ -243,6 +251,8 @@ fn authored_wave_preview_details_widget_is_readonly_in_edit_and_live() {
                 "Starting gold per board: 1000 | Reactor HP: 1000 | Enemy HP multiplier: 2"
             )
             .is_some());
+        assert!(harness.query_by_label("Wave 1 spawn ticks: 210 to 490 (relative to this wave's start)").is_some());
+        assert!(harness.query_by_label("Spawn ticks restart at each wave. The last spawn is not wave completion: surviving enemies must also be cleared.").is_some());
         let expected = if phase == GameplayViewPhase::Edit {
             "Read-only current edit snapshot, including unsaved changes. Save to keep these settings."
         } else {
@@ -307,5 +317,42 @@ fn authored_array_headers_expose_existing_field_guidance_without_edits() {
         }
         assert!(harness.state().is_empty());
         assert_eq!(value, original);
+    }
+}
+
+#[test]
+fn authored_spawn_windows_restart_at_each_real_wave_transition() {
+    use orr_games::coop_defense_game::EVENT_ENEMY_SPAWN;
+    let mut config = DefenseConfig::default();
+    config.campaign.last_wave = 2;
+    config.scenario.reactor_hp = 1000;
+    config.wave_counts.pair_counts[0] = 1;
+    config.wave_counts.pair_counts[1] = 2;
+    config.wave_pacing.spawn_interval_ticks = 70;
+    let mut sim = simulation(config);
+    let rows = waves(FrameView::of(sim.frame()));
+    assert_eq!(rows[0].spawn_ticks, Some((210, 210)));
+    assert_eq!(rows[1].spawn_ticks, Some((210, 280)));
+    let mut actual = [Vec::new(), Vec::new()];
+    let mut wave_two_start = None;
+    for _ in 0..5000 {
+        let old_wave = sim.frame().singleton::<DefenseRun>().wave;
+        let mut inputs = TickInputs::new(sim.tick(), 1);
+        inputs.set_input(PlayerSlot(0), DefenseInput::default());
+        let spawned = sim.step(&inputs).iter().any(|event| event.payload.kind == EVENT_ENEMY_SPAWN);
+        let run = sim.frame().singleton::<DefenseRun>();
+        if run.wave == 2 && old_wave == 1 {
+            wave_two_start = Some(run.tick);
+            assert_eq!(run.wave_tick, 0);
+        }
+        if spawned {
+            actual[(run.wave - 1) as usize].push(run.wave_tick);
+        }
+        if actual[1].len() == 2 { break; }
+    }
+    assert_eq!(actual, [vec![210], vec![210, 280]]);
+    assert!(wave_two_start.unwrap() > 210, "the first wave waits for its enemies after its final spawn");
+    for (row, ticks) in rows.iter().zip(actual) {
+        assert_eq!(row.spawn_ticks, Some((*ticks.first().unwrap(), *ticks.last().unwrap())));
     }
 }

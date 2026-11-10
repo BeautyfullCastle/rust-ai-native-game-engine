@@ -11,9 +11,16 @@ use orr_games::coop_defense_game::{
 struct WavePreview {
     wave: u32,
     kinds: Vec<u32>,
+    spawn_ticks: Option<(u32, u32)>,
 }
 
 impl WavePreview {
+    fn timing_label(&self) -> Option<String> {
+        self.spawn_ticks.map(|(first, last)| {
+            format!("Wave {} spawn ticks: {first} to {last} (relative to this wave's start)", self.wave)
+        })
+    }
+
     fn label(&self) -> String {
         let names = self
             .kinds
@@ -42,11 +49,18 @@ fn waves(frame: FrameView<'_>) -> Vec<WavePreview> {
     let campaign = frame.singleton::<Campaign>();
     let counts = frame.singleton::<WaveCounts>();
     let composition = frame.singleton::<WaveComposition>();
+    let interval = frame.singleton::<WavePacing>().spawn_interval_ticks;
     (0..campaign.last_wave.min(10))
         .map(|index| {
             let i = index as usize;
             WavePreview {
                 wave: index + 1,
+                spawn_ticks: first_spawn_tick(interval).and_then(|first| {
+                    // Only report admitted counts; an invalid empty wave has no last pair.
+                    (1..=28).contains(&counts.pair_counts[i]).then(|| {
+                        (first, first + (counts.pair_counts[i] - 1) * interval)
+                    })
+                }),
                 kinds: (0..counts.pair_counts[i].min(28))
                     .map(|ordinal| {
                         if ordinal == 0 && composition.opening_boss[i] != 0 {
@@ -84,9 +98,13 @@ pub(super) fn show(ui: &mut egui::Ui, frame: FrameView<'_>, phase: GameplayViewP
             ui.label(format!("First pair at wave tick {first}; then every {interval} ticks (60 ticks/second)."));
         }
         ui.label("Each pair sends one enemy per lane. Listed in spawn order; bosses replace the first pair without shifting later kinds.");
+        ui.label("Spawn ticks restart at each wave. The last spawn is not wave completion: surviving enemies must also be cleared.");
         egui::ScrollArea::vertical().id_salt("authored_wave_rows").max_height(180.0).show(ui, |ui| {
             for wave in waves(frame) {
                 ui.label(wave.label());
+                if let Some(timing) = wave.timing_label() {
+                    ui.small(timing);
+                }
             }
         });
     });
