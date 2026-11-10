@@ -38,6 +38,9 @@ on:
       - 'crates/orr_editor/tests/room_input_map_boundary.rs'
       - 'tools/create_room_controls.py'
       - 'tools/test_create_room_controls.py'
+      - 'tools/create_room_grid.py'
+      - 'tools/test_create_room_grid.py'
+      - 'docs/room-grid-authoring.md'
       - 'tools/test_attach_room_controls.py'
   workflow_dispatch:
 permissions:
@@ -361,6 +364,76 @@ jobs:
                       raise RuntimeError('Python suite must execute all 13 cases without skips')
               attempt('python-controls', python_tests)
 
+              def python_grid_tests():
+                  from textwrap import dedent
+                  expected = [
+                      'test_create_room_grid.GridTests.test_centered_even_dimensions_without_float_rounding',
+                      'test_create_room_grid.GridTests.test_cli_bad_input_has_empty_stdout_and_exit_one',
+                      'test_create_room_grid.GridTests.test_cli_emits_only_json_and_changes_no_files',
+                      'test_create_room_grid.GridTests.test_cli_usage_rejected_before_reading',
+                      'test_create_room_grid.GridTests.test_deterministic_line_endings_and_final_newline',
+                      'test_create_room_grid.GridTests.test_dimension_boundaries',
+                      'test_create_room_grid.GridTests.test_exact_schema_and_tile_positions',
+                      'test_create_room_grid.GridTests.test_file_size_and_growth_bounds',
+                      'test_create_room_grid.GridTests.test_input_type_and_byte_bound',
+                      'test_create_room_grid.GridTests.test_invalid_whitespace_ragged_rows_and_non_ascii',
+                      'test_create_room_grid.GridTests.test_missing_duplicate_and_lowercase_actor_tiles',
+                      'test_create_room_grid.GridTests.test_path_bounds',
+                      'test_create_room_grid.GridTests.test_read_error_closes_file',
+                      'test_create_room_grid.GridTests.test_regular_file_is_captured_read_only',
+                      'test_create_room_grid.GridTests.test_special_files_and_symlinks_rejected_without_hanging',
+                      'test_create_room_grid.GridTests.test_wall_order_is_row_major',
+                      'test_create_room_grid.GridTests.test_zero_and_sixty_four_walls',
+                  ]
+                  runner = dedent("""
+                      import json, sys, unittest
+                      suite = unittest.defaultTestLoader.discover('tools', pattern='test_create_room_grid.py')
+                      def names(node):
+                          if isinstance(node, unittest.TestSuite):
+                              return [name for child in node for name in names(child)]
+                          return [node.id()]
+                      if sys.argv[1] == 'inventory':
+                          print(json.dumps(names(suite)))
+                      else:
+                          class Result(unittest.TextTestResult):
+                              def __init__(self, *args, **kwargs):
+                                  super().__init__(*args, **kwargs)
+                                  self.passed = []
+                              def addSuccess(self, test):
+                                  super().addSuccess(test)
+                                  self.passed.append(test.id())
+                          result = unittest.TextTestRunner(verbosity=2, resultclass=Result).run(suite)
+                          print('GRID_TEST_RESULT=' + json.dumps({
+                              'passed': result.passed, 'tests_run': result.testsRun,
+                              'failures': len(result.failures), 'errors': len(result.errors),
+                              'skipped': len(result.skipped),
+                              'expected_failures': len(result.expectedFailures),
+                              'unexpected_successes': len(result.unexpectedSuccesses),
+                          }))
+                          sys.exit(0 if result.wasSuccessful() else 1)
+                  """)
+                  # Ignore ambient Python flags so assertions cannot be optimized away.
+                  command = ['python3', '-B', '-E', '-c', runner]
+                  output, record = run('python-grid-inventory', command + ['inventory'])
+                  inventory = json.loads(output)
+                  record['test_count'] = len(inventory)
+                  save()
+                  if sorted(inventory) != expected:
+                      raise RuntimeError('Grid Python inventory differs from the reviewed exact test set')
+                  output, record = run('python-grid', command + ['run'])
+                  markers = re.findall(r'^GRID_TEST_RESULT=(.+)$', output, re.M)
+                  if len(markers) != 1:
+                      raise RuntimeError('Grid Python suite must report exactly one execution result')
+                  result = json.loads(markers[0])
+                  record['test_count'] = result['tests_run']
+                  record['inventory_count'] = len(inventory)
+                  save()
+                  if (sorted(result['passed']) != expected or result['tests_run'] != len(expected)
+                          or any(result[field] != 0 for field in (
+                              'failures', 'errors', 'skipped', 'expected_failures', 'unexpected_successes'))):
+                      raise RuntimeError('Grid Python inventory, execution or skip mismatch')
+              attempt('python-grid', python_grid_tests)
+
               for label, package, features, targets in [
                   ('recorded-route-session-clippy', 'orr_session', '', ['--lib']),
                   ('playtest-keys-bin-clippy', 'orr_sample', 'room-playtest,room-input-actions', ['--bin', 'orr_playtest_room']),
@@ -447,6 +520,47 @@ jobs:
                   if cases != [(name, 'ok')] or summaries != [('1', '0', '0', '0')] or len(markers) != 1:
                       raise RuntimeError('Recorded Room route must execute exactly one passing editor-to-fresh-CLI bridge with its success marker')
               attempt('recorded-route-cli-bridge', recorded_route_bridge)
+
+              def grid_integration():
+                  # Reuse the two existing production-only builds before broader builds
+                  # can overwrite them. Require this run's receipts and matching bytes.
+                  binary_dir = Path(os.environ['CARGO_TARGET_DIR']) / 'release'
+                  hashes = {}
+                  for name, label, manifest in [
+                      ('orr_new_arena', 'room-layout-production-build', 'fresh-room-layout-creator-binary.json'),
+                      ('orr_playtest_room', 'recorded-route-cli-build', 'fresh-recorded-route-binary.json'),
+                  ]:
+                      produced = [entry for entry in receipts if entry['label'] == label]
+                      if len(produced) != 1 or produced[0]['exit'] != 0:
+                          raise RuntimeError(f'Grid integration requires a passing fresh producer: {label}')
+                      recorded = json.loads((evidence / manifest).read_text())
+                      actual = hashlib.sha256((binary_dir / name).read_bytes()).hexdigest()
+                      if recorded != {name: actual}:
+                          raise RuntimeError(f'Grid integration producer bytes changed: {name}')
+                      hashes[name] = actual
+                  output_dir = evidence / 'grid-integration'
+                  code = ('import sys; sys.path.insert(0, "tools"); '
+                          'from test_create_room_grid import run_integration; '
+                          'run_integration(sys.argv[1], sys.argv[2])')
+                  output, record = run('python-grid-integration', ['python3', '-B', '-E', '-c', code,
+                                      str(binary_dir.resolve(strict=True)), str(output_dir)])
+                  result = json.loads(output)
+                  retained = json.loads((output_dir / 'result.json').read_text())
+                  expected_checks = [
+                      'grid-cli', 'creator-admission', 'wall-blocks-direct-route',
+                      'detour-wins', 'byte-identical-repeat', 'project-unchanged',
+                      'zero-wall-control-wins', '33x33-and-64-walls-admitted',
+                      'even-dimension-half-integers-admitted',
+                  ]
+                  if (result != retained or result.get('status') != 'passed'
+                          or result.get('binaries') != hashes
+                          or result.get('tool_sha256') != hashlib.sha256(Path('tools/create_room_grid.py').read_bytes()).hexdigest()
+                          or result.get('checks') != expected_checks):
+                      raise RuntimeError('Grid integration result, retained receipts or source identity mismatch')
+                  record['integration_count'] = 1
+                  record['check_count'] = len(expected_checks)
+                  save()
+              attempt('python-grid-integration', grid_integration)
 
               def integration():
                   # This run-isolated target starts empty; never consume PATH or cached binaries.
