@@ -331,6 +331,12 @@ fn windows_room_project_ui_create_guard_reopen_and_play_gpu_acceptance() {
     settle(&mut harness);
     assert!(harness.state().editor.is_dirty());
     let dirty_checksum = harness.state().editor.checksum();
+    menu_click(&mut harness, "Edit", "Undo Ctrl+Z");
+    assert_eq!(harness.state().editor.checksum(), initial_checksum);
+    assert!(!harness.state().editor.is_dirty());
+    menu_click(&mut harness, "Edit", "Redo Ctrl+Y");
+    assert_eq!(harness.state().editor.checksum(), dirty_checksum);
+    assert!(harness.state().editor.is_dirty());
     set_field(
         &mut harness,
         "Existing Room project directory",
