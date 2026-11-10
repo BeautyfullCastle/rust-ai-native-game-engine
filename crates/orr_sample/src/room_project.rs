@@ -1,4 +1,5 @@
 //! Closed RoomEscapeV1 project admission. File and package reads finish before startup.
+pub mod recorded_route;
 use orr_ecs::Frame;
 use orr_fp::FrameRng;
 use orr_games::room_escape_game::{self as game, RoomEscapeV1};
@@ -119,6 +120,8 @@ pub fn validate_document(scene: &Scene) -> Result<(), String> {
 pub fn compiled_runtime() -> orr_package::Runtime {
     let mut runtime = orr_package::Runtime::content_only();
     runtime.capabilities.insert("models".into());
+    #[cfg(feature = "room-input-actions")]
+    runtime.capabilities.insert("room-input-actions".into());
     #[cfg(feature = "room-animated-models")]
     runtime.capabilities.insert("animation".into());
     runtime
@@ -178,10 +181,18 @@ pub struct PreparedProject {
     #[cfg(feature = "room-lighting")]
     lighting: Option<PreparedRoomLighting>,
     camera: Option<PreparedRoomCamera>,
+    #[cfg(feature = "room-input-actions")]
+    controls: Option<PreparedRoomControls>,
     root: PathBuf,
     path: PathBuf,
     scene: PreparedScene,
     models: PreparedModels,
+}
+#[cfg(feature = "room-input-actions")]
+pub struct PreparedRoomControls {
+    pub path: PathBuf,
+    pub bytes: Vec<u8>,
+    pub map: crate::room_controls::RoomControls,
 }
 impl PreparedProject {
     pub fn open(root: impl AsRef<Path>) -> Result<Self, String> {
@@ -223,6 +234,17 @@ impl PreparedProject {
         if entry.character.is_some() && !(capabilities.character && cfg!(feature = "room-character")) {
             return Err("room character requires explicit character consumer support".into());
         }
+        #[cfg(not(feature = "room-input-actions"))]
+        if entry.controls.is_some() {
+            return Err("Room controls require the room-input-actions feature".into());
+        }
+        #[cfg(feature = "room-input-actions")]
+        let controls = entry.controls.as_ref().map(|relative| {
+            let path = crate::project::entry_file(project.root(), relative)?;
+            let bytes = crate::project::read_regular(&path, orr_input::MAX_FILE_BYTES as u64)?;
+            let map = crate::room_controls::RoomControls::load(&bytes)?;
+            Ok::<_, String>(PreparedRoomControls { path, bytes, map })
+        }).transpose()?;
         #[cfg(feature = "room-character")]
         let character = entry.character.as_ref().map(|relative| {
             let path = crate::project::entry_file(project.root(), relative)?;
@@ -343,6 +365,8 @@ impl PreparedProject {
             #[cfg(feature = "room-lighting")]
             lighting,
             camera,
+            #[cfg(feature = "room-input-actions")]
+            controls,
             root: project.root().to_path_buf(),
             path,
             scene,
@@ -370,6 +394,8 @@ impl PreparedProject {
     pub fn camera(&self) -> Option<&PreparedRoomCamera> {
         self.camera.as_ref()
     }
+    #[cfg(feature = "room-input-actions")]
+    pub fn controls(&self) -> Option<&PreparedRoomControls> { self.controls.as_ref() }
     pub fn take_camera(&mut self) -> Option<PreparedRoomCamera> {
         self.camera.take()
     }
@@ -608,3 +634,7 @@ fn add_bytes(total: usize, count: usize, stride: usize) -> Result<usize, String>
 #[cfg(all(test, feature = "room-progress", feature = "project-create"))]
 #[path = "room_progress_admission_tests.rs"]
 mod progress_admission_tests;
+
+#[cfg(all(test, feature = "project-create", target_os = "linux"))]
+#[path = "room_controls_project_tests.rs"]
+mod room_controls_project_tests;

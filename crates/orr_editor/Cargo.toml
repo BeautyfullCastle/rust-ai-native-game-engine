@@ -79,6 +79,13 @@ sprite-json-authoring = ["sprite-package-install", "orr_package/sprite-authoring
 models = ["dep:orr_model_bindings", "dep:orr_model", "orr_render/imported-scene", "dep:orr_package", "dep:serde", "dep:tempfile", "dep:sha2"]
 animated-models = ["orr_model_bindings/animated-models", "models", "orr_model/animation", "orr_render/animation"]
 
+# Standalone default-off Room authoring; no main editor Play integration.
+room-input-map-editor = ["dep:orr_input", "orr_sample/room-input-actions"]
+# Explicit session-only main-editor Room controls and physical-key Play routing.
+# Explicit project linking in the standalone authoring app, Linux x86_64 only.
+room-input-map-project = ["room-input-map-editor", "orr_sample/room-controls-attach"]
+room-input-map-play = ["room-project", "room-input-map-editor"]
+
 [dependencies]
 rustix = { version = "1.1.5", features = ["fs"], optional = true }
 orr_navigation_view = { path = "../orr_navigation_view", default-features = false, optional = true }
@@ -185,3 +192,8 @@ path = "src/bin/editor_room_package_upgrade.rs"
 required-features = ["package-upgrade-copy"]
 test = false
 bench = false
+
+[[bin]]
+name = "orr_room_input_map"
+path = "src/bin/orr_room_input_map.rs"
+required-features = ["room-input-map-editor"]

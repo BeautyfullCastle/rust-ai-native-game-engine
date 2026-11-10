@@ -1,0 +1,1175 @@
+name: Room input controls focused Linux CI
+# Additive checks only; no existing workflow or branch protection is changed.
+on:
+  pull_request:
+    branches: [su/engine-correctness-hardening]
+    paths:
+      - '.github/workflows/room-input-controls-focused.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/orr_session/**'
+      - 'crates/orr_input/**'
+      - 'crates/orr_package/**'
+      - 'crates/orr_sample/Cargo.toml'
+      - 'crates/orr_sample/src/lib.rs'
+      - 'crates/orr_sample/src/room*'
+      - 'crates/orr_sample/src/room*/**'
+      - 'crates/orr_sample/src/project*'
+      - 'crates/orr_sample/src/project*/**'
+      - 'crates/orr_sample/src/bin/room_escape.rs'
+      - 'crates/orr_sample/src/bin/orr_export_room.rs'
+      - 'crates/orr_sample/src/bin/orr_attach_room_controls.rs'
+      - 'crates/orr_sample/src/bin/orr_playtest_room.rs'
+      - 'crates/orr_sample/src/bin/orr_new_arena.rs'
+      - 'crates/orr_sample/tests/*room*'
+      - 'crates/orr_games/src/room*'
+      - 'crates/orr_editor/Cargo.toml'
+      - 'crates/orr_editor/src/app.rs'
+      - 'crates/orr_editor/src/app/**'
+      - 'crates/orr_editor/src/lib.rs'
+      - 'crates/orr_editor/src/main.rs'
+      - 'crates/orr_editor/src/room_authoring*'
+      - 'crates/orr_editor/src/room_authoring*/**'
+      - 'crates/orr_editor/src/room_input*'
+      - 'crates/orr_editor/src/room_input*/**'
+      - 'crates/orr_editor/src/bin/orr_room_input_map.rs'
+      - 'crates/orr_editor/tests/room_input_map_authoring_ui.rs'
+      - 'crates/orr_editor/tests/deps.rs'
+      - 'crates/orr_editor/tests/room_input_map_boundary.rs'
+      - 'tools/create_room_controls.py'
+      - 'tools/test_create_room_controls.py'
+      - 'tools/create_room_grid.py'
+      - 'tools/test_create_room_grid.py'
+      - 'tools/test_room_grid_puzzles.py'
+      - 'tools/test_room_grid_keyboard.py'
+      - 'tools/test_room_grid_exports.py'
+      - 'examples/room-grid-puzzles/**'
+      - 'docs/room-grid-authoring.md'
+      - 'tools/test_attach_room_controls.py'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: room-input-controls-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  room-input-controls:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      EVIDENCE: ${{ github.workspace }}/ci-evidence
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Record pinned source and scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE"
+          printf 'CARGO_TARGET_DIR=%s/room-input-controls-%s-%s\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git rev-parse HEAD HEAD^{tree} | tee "$EVIDENCE/source.txt"
+          printf '%s\n' 'Native window, physical key capture and GPU checks are NOT RUN.' > "$EVIDENCE/limitations.txt"
+      - name: Install official Ubuntu build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          trap 'rc=$?; echo "$rc" > "$EVIDENCE/dependencies.exit"' EXIT
+          sudo apt-get update -q 2>&1 | tee "$EVIDENCE/dependencies.log"
+          sudo apt-get install -y -q build-essential pkg-config libasound2-dev libudev-dev libx11-dev libxkbcommon-dev libwayland-dev libegl1-mesa-dev libgl1-mesa-dev 2>&1 | tee -a "$EVIDENCE/dependencies.log"
+      - name: Select Rust 1.99.1 with Clippy
+        shell: bash
+        run: |
+          set -euo pipefail
+          trap 'rc=$?; echo "$rc" > "$EVIDENCE/toolchain.exit"' EXIT
+          rustup toolchain install 1.99.1 --profile minimal --component clippy 2>&1 | tee "$EVIDENCE/toolchain.log"
+          rustup override set 1.99.1 2>&1 | tee -a "$EVIDENCE/toolchain.log"
+          rustc --version --verbose | tee "$EVIDENCE/rustc.txt"
+          cargo --version | tee "$EVIDENCE/cargo.txt"
+          python3 --version | tee "$EVIDENCE/python.txt"
+      - name: Run focused inventories, tests, lint and CPU export closure
+        shell: python {0}
+        run: |
+          import hashlib, json, os, re, subprocess, sys, time, traceback
+          from pathlib import Path
+
+          evidence = Path(os.environ['EVIDENCE'])
+          receipts, failures = [], []
+          def save():
+              (evidence / 'receipts.json').write_text(json.dumps(receipts, indent=2) + '\n')
+          def run(label, command):
+              record = {'label': label, 'command': command, 'log': label + '.log', 'exit': None}
+              receipts.append(record)
+              save()
+              started = time.monotonic()
+              try:
+                  with (evidence / record['log']).open('w') as log:
+                      result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, text=True, timeout=1500)
+                  record['exit'] = result.returncode
+              except subprocess.TimeoutExpired:
+                  record['exit'] = 124
+                  record['timeout_seconds'] = 1500
+              finally:
+                  record['elapsed_seconds'] = round(time.monotonic() - started, 3)
+                  save()
+              output = (evidence / record['log']).read_text(errors='replace')
+              print(output, end='', flush=True)
+              if record['exit'] != 0:
+                  raise RuntimeError(f'{label}: exit {record["exit"]}')
+              return output, record
+
+          def attempt(label, callback):
+              try:
+                  callback()
+              except Exception:
+                  failures.append(label)
+                  (evidence / (label + '-failure.log')).write_text(traceback.format_exc())
+                  traceback.print_exc()
+
+          expected_inventories = {
+              'recorded-route-session': [
+                  'replay::debug_presence_tests::presence_includes_commands_outside_input_range',
+              ],
+              'recorded-route-converter': [
+                  'room_project::recorded_route::tests::winning_route_replays_and_preserves_release',
+                  'room_project::recorded_route::tests::rejects_debug_commands_at_any_tick_and_simulation_commands',
+                  'room_project::recorded_route::tests::rejects_invalid_identity_corruption_missing_ticks_and_stop_receipts',
+                  'room_project::recorded_route::tests::bounds_steps_ticks_and_preparse_memory',
+                  'room_project::recorded_route::tests::rejects_nonzero_start_missing_initial_frame_wrong_frame_and_intermediate_checksum',
+              ],
+              'recorded-route-editor': [
+                  'room_authoring_panel::recorded_route::tests::actual_stopped_play_prepares_copies_and_replays_through_cli_when_supplied',
+                  'room_authoring_panel::recorded_route::tests::close_blocker_play_restart_and_changed_file_invalidate_copy',
+                  'room_authoring_panel::recorded_route::tests::actual_widgets_prepare_cancel_copy_emit_only_explicit_clipboard_output',
+                  'room_authoring_panel::recorded_route::tests::same_path_reload_different_scene_and_corrupt_recording_cannot_reuse_prepared_route',
+              ],
+              'recorded-route-editor-controls': [
+                  'room_authoring_panel::recorded_route::tests::actual_stopped_play_prepares_copies_and_replays_through_cli_when_supplied',
+                  'room_authoring_panel::recorded_route::tests::close_blocker_play_restart_and_changed_file_invalidate_copy',
+                  'room_authoring_panel::recorded_route::tests::actual_widgets_prepare_cancel_copy_emit_only_explicit_clipboard_output',
+                  'room_authoring_panel::recorded_route::tests::same_path_reload_different_scene_and_corrupt_recording_cannot_reuse_prepared_route',
+                  'room_authoring_panel::recorded_route::tests::authored_controls_are_refused_at_prepare_and_after_prepare',
+              ],
+              'playtest-keys-off-cli': [
+                  'key_scripts_require_explicit_compiled_support',
+              ],
+              'playtest-keys-cli': [
+                  'enabled::controls_are_required_read_fresh_and_never_fallback_on_invalid_project',
+                  'enabled::key_script_validation_is_strict_before_project_admission',
+                  'enabled::mapped_keys_win_repeat_and_report_exact_admitted_map_without_writes',
+                  'enabled::maximum_key_script_report_is_bounded',
+              ],
+              'room-layout-shared-parser': [
+                  'room_layout::tests::bounded_strict_shared_recipe',
+              ],
+              'editor-layout-import-backend': [
+                  'editor::room_authoring::layout_import::tests::bound_wall_and_play_mode_refuse_before_mutation',
+                  'editor::room_authoring::layout_import::tests::import_is_one_undoable_edit_and_save_reopens_without_sidecar_changes',
+                  'editor::room_authoring::layout_import::tests::imported_saved_puzzle_blocks_shortcut_and_replays_winning_detour',
+                  'editor::room_authoring::layout_import::tests::rejected_import_rolls_back_partial_changes_and_stale_context',
+                  'editor::room_authoring::layout_import::tests::same_checksum_document_rename_rejects_stale_preview',
+              ],
+              'editor-layout-import-controls-backend': [
+                  'editor::room_authoring::layout_import::tests::bound_wall_and_play_mode_refuse_before_mutation',
+                  'editor::room_authoring::layout_import::tests::import_is_one_undoable_edit_and_save_reopens_without_sidecar_changes',
+                  'editor::room_authoring::layout_import::tests::imported_saved_puzzle_blocks_shortcut_and_replays_winning_detour',
+                  'editor::room_authoring::layout_import::tests::rejected_import_rolls_back_partial_changes_and_stale_context',
+                  'editor::room_authoring::layout_import::tests::same_checksum_document_rename_rejects_stale_preview',
+              ],
+              'editor-layout-import-ui': [
+                  'room_authoring_panel::layout_import::tests::actual_widgets_preview_cancel_apply_once_and_disable_for_model_edits',
+                  'room_authoring_panel::layout_import::tests::draft_close_blocker_and_stale_source_invalidate_preview',
+              ],
+              'room-layout-unit': [
+                  'project_create::room_layout::tests::strict_recipe_and_authoritative_admission',
+                  'project_create::room_layout::tests::deterministic_layout_and_report_match_saved_scene',
+                  'project_create::room_layout::tests::invalid_input_never_publishes_and_special_files_fail',
+              ],
+              'room-layout-cli': [
+                  'authored_wall_blocks_direct_route_and_saved_detour_wins',
+                  'cli_rejects_bad_recipe_and_incompatible_flags_without_output',
+              ],
+              'playtest-cli': [
+                  'saved_completion_repeats_exactly_without_writes_and_requires_release',
+                  'actual_wall_blocks_route_and_false_assertions_fail',
+                  'rejects_schema_fields_ranges_budget_and_non_regular_inputs',
+                  'cli_usage_and_project_admission_fail_closed',
+                  'json_reports_repeatable_success_and_actionable_first_failure',
+                  'json_usage_admission_and_maximum_report_are_bounded',
+              ],
+              'playtest-unified-cli': [
+                  'saved_completion_repeats_exactly_without_writes_and_requires_release',
+                  'actual_wall_blocks_route_and_false_assertions_fail',
+                  'rejects_schema_fields_ranges_budget_and_non_regular_inputs',
+                  'cli_usage_and_project_admission_fail_closed',
+                  'json_reports_repeatable_success_and_actionable_first_failure',
+                  'json_usage_admission_and_maximum_report_are_bounded',
+                  'unified_controls_feature_does_not_grant_consumer_support',
+              ],
+              'editor-project-bin': [
+                  'room_input_map_authoring::tests::bounded_history_and_semantic_selection_survive_reordered_imports',
+                  'room_input_map_authoring::tests::eight_aliases_roundtrip_and_overflow_and_failed_save_preserve_state',
+                  'room_input_map_authoring::tests::rejects_invalid_drafts_without_mutating_map_or_history',
+                  'room_input_map_authoring::tests::safe_persistence_pending_draft_and_runtime_interpretation',
+                  'room_input_map_authoring::tests::save_rejects_incompatible_root_document_names_without_writes',
+                  'room_input_map_authoring::widgets::project_link::tests::applied_uncertain_outcome_is_not_reported_as_no_change',
+                  'room_input_map_authoring::widgets::project_link::tests::attaches_reopens_and_revises_without_changing_sidecars_or_history',
+                  'room_input_map_authoring::widgets::project_link::tests::changed_sidecar_after_preview_is_rejected_and_preview_consumed',
+                  'room_input_map_authoring::widgets::project_link::tests::edits_drafts_and_every_request_field_invalidate_confirmation',
+                  'room_input_map_authoring::widgets::project_link::tests::mismatch_pending_stale_and_external_changes_fail_without_retry',
+                  'room_input_map_authoring::widgets::project_link::tests::production_widgets_cancel_repeat_edit_fail_and_commit',
+                  'room_input_map_authoring::widgets::project_link::tests::production_widgets_revision_and_restore_do_not_reuse_confirmation',
+              ],
+              'editor-project-ui': [
+                  'all_five_actions_persist_and_invalid_open_preserves_history',
+                  'production_apply_history_save_reopen_and_pending_cancellation',
+                  'production_duplicate_rejection_action_navigation_and_reserved_choices_absent',
+                  'room_input_map_authoring::tests::bounded_history_and_semantic_selection_survive_reordered_imports',
+                  'room_input_map_authoring::tests::eight_aliases_roundtrip_and_overflow_and_failed_save_preserve_state',
+                  'room_input_map_authoring::tests::rejects_invalid_drafts_without_mutating_map_or_history',
+                  'room_input_map_authoring::tests::safe_persistence_pending_draft_and_runtime_interpretation',
+                  'room_input_map_authoring::tests::save_rejects_incompatible_root_document_names_without_writes',
+                  'room_input_map_authoring::widgets::project_link::tests::applied_uncertain_outcome_is_not_reported_as_no_change',
+                  'room_input_map_authoring::widgets::project_link::tests::attaches_reopens_and_revises_without_changing_sidecars_or_history',
+                  'room_input_map_authoring::widgets::project_link::tests::changed_sidecar_after_preview_is_rejected_and_preview_consumed',
+                  'room_input_map_authoring::widgets::project_link::tests::edits_drafts_and_every_request_field_invalidate_confirmation',
+                  'room_input_map_authoring::widgets::project_link::tests::mismatch_pending_stale_and_external_changes_fail_without_retry',
+                  'room_input_map_authoring::widgets::project_link::tests::production_widgets_cancel_repeat_edit_fail_and_commit',
+                  'room_input_map_authoring::widgets::project_link::tests::production_widgets_revision_and_restore_do_not_reuse_confirmation',
+                  'standalone_app_scrolls_to_project_preview_and_confirms_saved_map',
+              ],
+              'editor-project-boundary': [
+                  'main_editor_play_is_separate_explicit_capability',
+                  'project_linking_is_separate_from_main_editor_play',
+                  'room_editor_is_explicit_and_default_off',
+              ],
+              'room-attach': [
+                  'room_controls_attach::tests::attaches_preserving_manifest_semantics_and_exact_sidecar_and_backup',
+                  'room_controls_attach::tests::conflicts_in_manifest_controls_and_scene_prevent_publication',
+                  'room_controls_attach::tests::injected_prepublication_failures_keep_original_and_postpublication_is_explicit',
+                  'room_controls_attach::tests::rejects_backup_collisions_preserving_everything',
+                  'room_controls_attach::tests::rejects_null_duplicate_wrong_game_and_existing_controls_without_writes',
+                  'room_controls_attach::tests::rejects_unsafe_controls_and_aliases',
+                  'room_controls_attach::tests::explicit_revision_preserves_both_sidecars_and_every_version_backup',
+                  'room_controls_attach::tests::revision_rejects_stale_references_aliases_and_unsafe_names_without_writes',
+                  'room_controls_attach::tests::revision_rejects_missing_null_unsupported_and_corrupt_projects',
+                  'room_controls_attach::tests::revision_rejects_old_and_new_links_and_backup_collisions',
+                  'room_controls_attach::tests::revision_detects_early_and_late_changes_to_both_sidecars_and_project',
+                  'room_controls_attach::tests::revision_failure_outcomes_preserve_data_and_uncertain_apply_rejects_retry',
+              ],
+              'editor-play': [
+                  'app::room_controls::tests::actual_restart_restores_pinned_map_without_rereading_disk',
+                  'app::room_controls::tests::actual_room_host_uses_physical_project_keys_and_releases_on_interrupted_focus',
+                  'app::room_controls::tests::focus_reclaim_map_change_and_repeat_quarantine_until_release',
+                  'app::room_controls::tests::fresh_cli_bootstrap_accepts_preadmitted_controls_after_play_ticks_only_once',
+                  'app::room_controls::tests::full_editor_ui_does_not_treat_logical_escape_as_physical_release',
+                  'app::room_controls::tests::invalid_map_and_pending_draft_do_not_replace_live_controls',
+                  'app::room_controls::tests::missing_identity_and_shortcuts_do_not_create_gameplay_presses',
+                  'app::room_controls::tests::missing_physical_release_cannot_leave_a_remapped_key_held',
+                  'app::room_controls::tests::physical_aliases_signs_and_logical_escape_follow_admitted_map',
+                  'app::room_controls::tests::production_widgets_require_explicit_use_for_play_and_disable_in_play',
+                  'app::room_controls::tests::project_snapshot_survives_restart_but_not_a_different_scene',
+                  'app::room_controls::tests::public_project_install_rejects_play_lease_and_pending_draft',
+                  'app::room_controls::tests::scene_change_resets_session_map_without_discarding_authoring_draft',
+              ],
+          }
+
+          def suite(label, package, features, targets):
+              command = ['cargo', 'test', '--locked', '--release', '-p', package, '--no-default-features']
+              if features:
+                  command += ['--features', features]
+              command += targets
+              listing, record = run(label + '-inventory', command + ['--', '--list', '--format=terse'])
+              names = re.findall(r'^(.+): test$', listing, re.M)
+              record['test_count'] = len(names)
+              save()
+              if not names or len(names) != len(set(names)):
+                  raise RuntimeError(f'{label}: empty or duplicate inventory')
+              if label in expected_inventories and sorted(names) != sorted(expected_inventories[label]):
+                  raise RuntimeError(f'{label}: focused inventory differs from the reviewed exact test set')
+              output, record = run(label, command + ['--', '--format=pretty', '--color=never', '--test-threads=1'])
+              if package == 'orr_package':
+                  child_pattern = (r'test tests::fifo_inputs_fail_without_blocking \.\.\. \n'
+                                   r'running 1 test\ntest tests::fifo_inputs_fail_without_blocking \.\.\. ok\n'
+                                   r'\ntest result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; '
+                                   + str(len(names) - 1) + r' filtered out; finished in [^\n]+\n\nok\n')
+                  output, child_count = re.subn(child_pattern, 'test tests::fifo_inputs_fail_without_blocking ... ok\n', output)
+                  record['fifo_subprocess_count'] = child_count
+                  save()
+                  if child_count != 1:
+                      raise RuntimeError('Expected exactly one passing bounded FIFO child and parent')
+              cases = re.findall(r'^test (.+) \.\.\. (ok|FAILED|ignored)(?: .*)?$', output, re.M)
+              summaries = re.findall(r'^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured;', output, re.M)
+              record['test_count'] = len(cases)
+              record['inventory_count'] = len(names)
+              save()
+              if summaries != [(str(len(names)), '0', '0', '0')] or sorted(name for name, status in cases if status == 'ok') != sorted(names):
+                  raise RuntimeError(f'{label}: inventory, execution or skip mismatch')
+
+          def source_fence(label):
+              head, record = run(label + '-head', ['git', 'rev-parse', 'HEAD'])
+              if head.strip() != os.environ['SOURCE_SHA']:
+                  raise RuntimeError(f'{label}: HEAD changed from the pinned source')
+              run(label + '-status', ['git', 'status', '--porcelain=v1', '--untracked-files=no'])
+              # HEAD comparison catches staged additions as well as tracked edits/deletions.
+              run(label + '-diff', ['git', 'diff', '--exit-code', 'HEAD', '--'])
+
+          try:
+              attempt('source-before', lambda: source_fence('source-before'))
+              if failures:
+                  raise RuntimeError('Refusing to test a dirty or unpinned source tree')
+              on = 'room-input-actions,project-create,project-export'
+              off = 'room-project,project-create,project-export'
+              suites = [
+                  ('recorded-route-session', 'orr_session', '', ['--lib', 'replay::debug_presence_tests::']),
+                  ('recorded-route-converter', 'orr_sample', 'room-project', ['--lib', 'room_project::recorded_route::']),
+                  ('recorded-route-editor', 'orr_editor', 'room-authoring', ['--lib', 'room_authoring_panel::recorded_route::']),
+                  ('recorded-route-editor-controls', 'orr_editor', 'room-authoring,room-input-map-play', ['--lib', 'room_authoring_panel::recorded_route::']),
+                  ('playtest-keys-off-cli', 'orr_sample', 'room-playtest,project-create', ['--test', 'room_playtest_keys_cli']),
+                  ('playtest-keys-cli', 'orr_sample', 'room-playtest,project-create,room-input-actions', ['--test', 'room_playtest_keys_cli']),
+                  ('room-layout-shared-parser', 'orr_sample', 'room-project', ['--lib', 'room_layout::']),
+                  ('editor-layout-import-backend', 'orr_editor', 'room-authoring', ['--lib', 'room_authoring::layout_import::']),
+                  ('editor-layout-import-controls-backend', 'orr_editor', 'room-authoring,room-input-map-play', ['--lib', 'room_authoring::layout_import::']),
+                  ('editor-layout-import-ui', 'orr_editor', 'room-authoring', ['--lib', 'room_authoring_panel::layout_import::']),
+                  ('room-layout-unit', 'orr_sample', 'project-create,room-project', ['--lib', 'project_create::room_layout::']),
+                  ('room-layout-cli', 'orr_sample', 'project-create,room-playtest', ['--test', 'room_layout_cli']),
+                  ('playtest-cli', 'orr_sample', 'room-playtest,project-create', ['--test', 'room_playtest_cli']),
+                  ('playtest-unified-cli', 'orr_sample', 'room-playtest,project-create,room-input-actions', ['--test', 'room_playtest_cli']),
+                  ('room-attach', 'orr_sample', 'room-controls-attach,project-create', ['--lib', 'room_controls_attach::']),
+                  ('room-controls', 'orr_sample', on, ['--lib', 'room_controls::']),
+                  ('room-admission-on', 'orr_sample', on, ['--lib', 'room_controls_project_tests::']),
+                  ('room-admission-off', 'orr_sample', off, ['--lib', 'room_controls_project_tests::']),
+                  ('room-runtime-on', 'orr_sample', on, ['--lib', 'room_app::']),
+                  ('room-runtime-off', 'orr_sample', off, ['--lib', 'room_app::']),
+                  ('package', 'orr_package', '', ['--lib']),
+                  ('editor-play', 'orr_editor', 'room-input-map-play', ['--lib', 'app::room_controls::']),
+                  ('editor-project-bin', 'orr_editor', 'room-input-map-project,project-create', ['--bin', 'orr_room_input_map']),
+                  ('editor-project-ui', 'orr_editor', 'room-input-map-project,project-create', ['--test', 'room_input_map_authoring_ui']),
+                  ('editor-project-boundary', 'orr_editor', 'room-input-map-project,project-create', ['--test', 'room_input_map_boundary']),
+                  ('editor-bin', 'orr_editor', 'room-input-map-editor', ['--bin', 'orr_room_input_map']),
+                  ('editor-ui', 'orr_editor', 'room-input-map-editor', ['--test', 'room_input_map_authoring_ui']),
+                  ('editor-default-off', 'orr_editor', '', ['--test', 'deps']),
+                  ('editor-room-boundary', 'orr_editor', '', ['--test', 'room_input_map_boundary']),
+              ]
+              for args in suites:
+                  attempt(args[0], lambda args=args: suite(*args))
+
+              def python_tests():
+                  output, record = run('python-controls', ['python3', '-m', 'unittest', 'discover', '-s', 'tools', '-p', 'test_create_room_controls.py', '-v'])
+                  record['test_count'] = sum(1 for line in output.splitlines() if line.startswith('test_') and line.endswith(' ... ok'))
+                  save()
+                  if record['test_count'] != 13 or not re.search(r'^Ran 13 tests in ', output, re.M) or not re.search(r'^OK$', output, re.M):
+                      raise RuntimeError('Python suite must execute all 13 cases without skips')
+              attempt('python-controls', python_tests)
+
+              def python_grid_tests():
+                  from textwrap import dedent
+                  expected = [
+                      'test_create_room_grid.GridBorderTests.test_all_border_transform_and_merge_combinations',
+                      'test_create_room_grid.GridBorderTests.test_border_cli_all_transforms_formats_no_writes',
+                      'test_create_room_grid.GridBorderTests.test_border_dimension_and_wall_caps',
+                      'test_create_room_grid.GridBorderTests.test_border_duplicate_and_unknown_cli_refused_before_read',
+                      'test_create_room_grid.GridBorderTests.test_border_exact_padding_and_actor_coordinates',
+                      'test_create_room_grid.GridBorderTests.test_border_false_is_byte_identical',
+                      'test_create_room_grid.GridBorderTests.test_border_occupancy_and_actor_preservation',
+                      'test_create_room_grid.GridBorderTests.test_border_types_and_original_admission',
+                      'test_create_room_grid.GridMergeTests.test_cli_merge_formats_and_duplicate_rejection',
+                      'test_create_room_grid.GridMergeTests.test_merge_does_not_relax_invalid_input',
+                      'test_create_room_grid.GridMergeTests.test_merge_option_types_are_strict',
+                      'test_create_room_grid.GridMergeTests.test_more_than_sixty_four_boxes_rejected',
+                      'test_create_room_grid.GridMergeTests.test_more_than_sixty_four_tiles_can_merge',
+                      'test_create_room_grid.GridMergeTests.test_partition_covers_exact_cells_without_overlaps',
+                      'test_create_room_grid.GridMergeTests.test_rectangle_partition_exact_positions',
+                      'test_create_room_grid.GridMergeTests.test_transform_partition_and_svg_geometry',
+                      'test_create_room_grid.GridOpeningTests.test_empty_openings_preserve_all_previous_modes',
+                      'test_create_room_grid.GridOpeningTests.test_opening_api_types_grammar_duplicates_and_requirement',
+                      'test_create_room_grid.GridOpeningTests.test_opening_bounds_count_and_corners',
+                      'test_create_room_grid.GridOpeningTests.test_opening_cli_all_transforms_formats_no_writes',
+                      'test_create_room_grid.GridOpeningTests.test_opening_cli_invalid_syntax_before_read_and_bounds_error',
+                      'test_create_room_grid.GridOpeningTests.test_openings_all_transforms_and_merge_modes',
+                      'test_create_room_grid.GridOpeningTests.test_openings_never_relax_admission',
+                      'test_create_room_grid.GridOpeningTests.test_openings_remove_only_selected_noncorners',
+                      'test_create_room_grid.GridPreviewTests.test_all_eight_preview_coordinates_match_admitted_json',
+                      'test_create_room_grid.GridPreviewTests.test_cli_explicit_json_preserves_all_transform_output',
+                      'test_create_room_grid.GridPreviewTests.test_cli_invalid_formats_rejected_before_reading',
+                      'test_create_room_grid.GridPreviewTests.test_cli_svg_all_transforms_capture_once_and_no_file_changes',
+                      'test_create_room_grid.GridPreviewTests.test_cli_svg_invalid_input_has_empty_stdout',
+                      'test_create_room_grid.GridPreviewTests.test_preview_deterministic_line_endings_and_repeat',
+                      'test_create_room_grid.GridPreviewTests.test_preview_minimum_maximum_and_wall_count_bounds',
+                      'test_create_room_grid.GridPreviewTests.test_preview_preserves_admission_errors',
+                      'test_create_room_grid.GridPreviewTests.test_static_svg_security_allowlist_and_labels',
+                      'test_create_room_grid.GridTests.test_centered_even_dimensions_without_float_rounding',
+                      'test_create_room_grid.GridTests.test_cli_bad_input_has_empty_stdout_and_exit_one',
+                      'test_create_room_grid.GridTests.test_cli_emits_only_json_and_changes_no_files',
+                      'test_create_room_grid.GridTests.test_cli_usage_rejected_before_reading',
+                      'test_create_room_grid.GridTests.test_deterministic_line_endings_and_final_newline',
+                      'test_create_room_grid.GridTests.test_dimension_boundaries',
+                      'test_create_room_grid.GridTests.test_exact_schema_and_tile_positions',
+                      'test_create_room_grid.GridTests.test_file_size_and_growth_bounds',
+                      'test_create_room_grid.GridTests.test_input_type_and_byte_bound',
+                      'test_create_room_grid.GridTests.test_invalid_whitespace_ragged_rows_and_non_ascii',
+                      'test_create_room_grid.GridTests.test_missing_duplicate_and_lowercase_actor_tiles',
+                      'test_create_room_grid.GridTests.test_path_bounds',
+                      'test_create_room_grid.GridTests.test_read_error_closes_file',
+                      'test_create_room_grid.GridTests.test_regular_file_is_captured_read_only',
+                      'test_create_room_grid.GridTests.test_special_files_and_symlinks_rejected_without_hanging',
+                      'test_create_room_grid.GridTests.test_wall_order_is_row_major',
+                      'test_create_room_grid.GridTests.test_zero_and_sixty_four_walls',
+                      'test_create_room_grid.GridTransformTests.test_all_eight_transforms_match_hand_drawn_rectangles',
+                      'test_create_room_grid.GridTransformTests.test_all_transform_coordinates_have_exact_geometric_relation',
+                      'test_create_room_grid.GridTransformTests.test_cli_transforms_in_any_option_order_without_file_changes',
+                      'test_create_room_grid.GridTransformTests.test_explicit_default_is_byte_identical',
+                      'test_create_room_grid.GridTransformTests.test_invalid_and_duplicate_options_fail_before_read',
+                      'test_create_room_grid.GridTransformTests.test_transform_parameter_types_and_values_are_strict',
+                      'test_create_room_grid.GridTransformTests.test_transformed_walls_are_in_new_row_major_order',
+                      'test_create_room_grid.GridTransformTests.test_transforms_never_relax_input_admission',
+                  ]
+                  runner = dedent("""
+                      import json, sys, unittest
+                      suite = unittest.defaultTestLoader.discover('tools', pattern='test_create_room_grid.py')
+                      def names(node):
+                          if isinstance(node, unittest.TestSuite):
+                              return [name for child in node for name in names(child)]
+                          return [node.id()]
+                      if sys.argv[1] == 'inventory':
+                          print(json.dumps(names(suite)))
+                      else:
+                          class Result(unittest.TextTestResult):
+                              def __init__(self, *args, **kwargs):
+                                  super().__init__(*args, **kwargs)
+                                  self.passed = []
+                              def addSuccess(self, test):
+                                  super().addSuccess(test)
+                                  self.passed.append(test.id())
+                          result = unittest.TextTestRunner(verbosity=2, resultclass=Result).run(suite)
+                          print('GRID_TEST_RESULT=' + json.dumps({
+                              'passed': result.passed, 'tests_run': result.testsRun,
+                              'failures': len(result.failures), 'errors': len(result.errors),
+                              'skipped': len(result.skipped),
+                              'expected_failures': len(result.expectedFailures),
+                              'unexpected_successes': len(result.unexpectedSuccesses),
+                          }))
+                          sys.exit(0 if result.wasSuccessful() else 1)
+                  """)
+                  # Ignore ambient Python flags so assertions cannot be optimized away.
+                  command = ['python3', '-B', '-E', '-c', runner]
+                  output, record = run('python-grid-inventory', command + ['inventory'])
+                  inventory = json.loads(output)
+                  record['test_count'] = len(inventory)
+                  save()
+                  if sorted(inventory) != expected:
+                      raise RuntimeError('Grid Python inventory differs from the reviewed exact test set')
+                  output, record = run('python-grid', command + ['run'])
+                  markers = re.findall(r'^GRID_TEST_RESULT=(.+)$', output, re.M)
+                  if len(markers) != 1:
+                      raise RuntimeError('Grid Python suite must report exactly one execution result')
+                  result = json.loads(markers[0])
+                  record['test_count'] = result['tests_run']
+                  record['inventory_count'] = len(inventory)
+                  save()
+                  if (sorted(result['passed']) != expected or result['tests_run'] != len(expected)
+                          or any(result[field] != 0 for field in (
+                              'failures', 'errors', 'skipped', 'expected_failures', 'unexpected_successes'))):
+                      raise RuntimeError('Grid Python inventory, execution or skip mismatch')
+              attempt('python-grid', python_grid_tests)
+
+              def python_starter_tests():
+                  from textwrap import dedent
+                  expected = [
+                      'test_room_grid_puzzles.PuzzleTests.test_exact_three_starter_assets_are_admitted',
+                      'test_room_grid_puzzles.PuzzleTests.test_layouts_are_distinct_and_all_have_obstacles',
+                      'test_room_grid_puzzles.PuzzleTests.test_readme_and_fixed_catalog_do_not_execute_metadata',
+                      'test_room_grid_puzzles.PuzzleTests.test_route_rejects_missing_final_victory_and_unreleased_input',
+                      'test_room_grid_puzzles.PuzzleTests.test_route_rejects_wrong_schema_types_and_fields',
+                      'test_room_grid_puzzles.PuzzleTests.test_shortcuts_assert_victory_and_are_not_fake_successes',
+                      'test_room_grid_puzzles.PuzzleTests.test_strict_json_rejects_duplicates_constants_and_size',
+                      'test_room_grid_puzzles.PuzzleTests.test_subprocess_exit_and_both_output_streams_are_retained',
+                      'test_room_grid_puzzles.PuzzleTests.test_subprocess_output_and_time_are_bounded',
+                      'test_room_grid_puzzles.PuzzleTests.test_winning_routes_have_distinct_authored_lengths',
+                  ]
+                  runner = dedent("""
+                      import json, sys, unittest
+                      suite = unittest.defaultTestLoader.discover('tools', pattern='test_room_grid_puzzles.py')
+                      def names(node):
+                          if isinstance(node, unittest.TestSuite):
+                              return [name for child in node for name in names(child)]
+                          return [node.id()]
+                      if sys.argv[1] == 'inventory':
+                          print(json.dumps(names(suite)))
+                      else:
+                          class Result(unittest.TextTestResult):
+                              def __init__(self, *args, **kwargs):
+                                  super().__init__(*args, **kwargs)
+                                  self.passed = []
+                              def addSuccess(self, test):
+                                  super().addSuccess(test)
+                                  self.passed.append(test.id())
+                          result = unittest.TextTestRunner(verbosity=2, resultclass=Result).run(suite)
+                          print('STARTER_TEST_RESULT=' + json.dumps({
+                              'passed': result.passed, 'tests_run': result.testsRun,
+                              'failures': len(result.failures), 'errors': len(result.errors),
+                              'skipped': len(result.skipped),
+                              'expected_failures': len(result.expectedFailures),
+                              'unexpected_successes': len(result.unexpectedSuccesses),
+                          }))
+                          sys.exit(0 if result.wasSuccessful() else 1)
+                  """)
+                  # Ignore ambient Python flags so assertions cannot be optimized away.
+                  command = ['python3', '-B', '-E', '-c', runner]
+                  output, record = run('python-starters-inventory', command + ['inventory'])
+                  inventory = json.loads(output)
+                  record['test_count'] = len(inventory)
+                  save()
+                  if sorted(inventory) != expected:
+                      raise RuntimeError('Starter Python inventory differs from the reviewed exact test set')
+                  output, record = run('python-starters', command + ['run'])
+                  markers = re.findall(r'^STARTER_TEST_RESULT=(.+)$', output, re.M)
+                  if len(markers) != 1:
+                      raise RuntimeError('Starter Python suite must report exactly one execution result')
+                  result = json.loads(markers[0])
+                  record['test_count'] = result['tests_run']
+                  record['inventory_count'] = len(inventory)
+                  save()
+                  if (sorted(result['passed']) != expected or result['tests_run'] != len(expected)
+                          or any(result[field] != 0 for field in (
+                              'failures', 'errors', 'skipped', 'expected_failures', 'unexpected_successes'))):
+                      raise RuntimeError('Starter Python inventory, execution or skip mismatch')
+              attempt('python-starters', python_starter_tests)
+
+              def python_keyboard_tests():
+                  from textwrap import dedent
+                  expected = [
+                      'test_room_grid_keyboard.KeyboardTests.test_all_seven_keyboard_assets_match_logical_routes',
+                      'test_room_grid_keyboard.KeyboardTests.test_arrow_mapping_and_space_are_exact',
+                      'test_room_grid_keyboard.KeyboardTests.test_asset_reader_refuses_symlinks_directories_and_oversize',
+                      'test_room_grid_keyboard.KeyboardTests.test_duplicate_keys_and_nonfinite_values_rejected',
+                      'test_room_grid_keyboard.KeyboardTests.test_exact_json_rejects_wrong_types_and_extra_fields',
+                      'test_room_grid_keyboard.KeyboardTests.test_interaction_release_and_tick_totals_preserved',
+                      'test_room_grid_keyboard.KeyboardTests.test_translation_preserves_every_semantic_step',
+                      'test_room_grid_keyboard.KeyboardTests.test_wrong_key_order_or_identity_is_not_silently_repaired',
+                  ]
+                  runner = dedent("""
+                      import json, sys, unittest
+                      suite = unittest.defaultTestLoader.discover('tools', pattern='test_room_grid_keyboard.py')
+                      def names(node):
+                          if isinstance(node, unittest.TestSuite):
+                              return [name for child in node for name in names(child)]
+                          return [node.id()]
+                      if sys.argv[1] == 'inventory':
+                          print(json.dumps(names(suite)))
+                      else:
+                          class Result(unittest.TextTestResult):
+                              def __init__(self, *args, **kwargs):
+                                  super().__init__(*args, **kwargs)
+                                  self.passed = []
+                              def addSuccess(self, test):
+                                  super().addSuccess(test)
+                                  self.passed.append(test.id())
+                          result = unittest.TextTestRunner(verbosity=2, resultclass=Result).run(suite)
+                          print('KEYBOARD_TEST_RESULT=' + json.dumps({
+                              'passed': result.passed, 'tests_run': result.testsRun,
+                              'failures': len(result.failures), 'errors': len(result.errors),
+                              'skipped': len(result.skipped),
+                              'expected_failures': len(result.expectedFailures),
+                              'unexpected_successes': len(result.unexpectedSuccesses),
+                          }))
+                          sys.exit(0 if result.wasSuccessful() else 1)
+                  """)
+                  # Ignore ambient Python flags so assertions cannot be optimized away.
+                  command = ['python3', '-B', '-E', '-c', runner]
+                  output, record = run('python-keyboard-inventory', command + ['inventory'])
+                  inventory = json.loads(output)
+                  record['test_count'] = len(inventory)
+                  save()
+                  if sorted(inventory) != expected:
+                      raise RuntimeError('Keyboard Python inventory differs from the reviewed exact test set')
+                  output, record = run('python-keyboard', command + ['run'])
+                  markers = re.findall(r'^KEYBOARD_TEST_RESULT=(.+)$', output, re.M)
+                  if len(markers) != 1:
+                      raise RuntimeError('Keyboard Python suite must report exactly one execution result')
+                  result = json.loads(markers[0])
+                  record['test_count'] = result['tests_run']
+                  record['inventory_count'] = len(inventory)
+                  save()
+                  if (sorted(result['passed']) != expected or result['tests_run'] != len(expected)
+                          or any(result[field] != 0 for field in (
+                              'failures', 'errors', 'skipped', 'expected_failures', 'unexpected_successes'))):
+                      raise RuntimeError('Keyboard Python inventory, execution or skip mismatch')
+              attempt('python-keyboard', python_keyboard_tests)
+
+              def python_export_tests():
+                  from textwrap import dedent
+                  expected = ['test_room_grid_exports.ExportTests.test_all_fixed_starters_have_keyboard_routes', 'test_room_grid_exports.ExportTests.test_budget_preserves_hard_floor', 'test_room_grid_exports.ExportTests.test_budget_rejects_unbounded_or_boolean_size', 'test_room_grid_exports.ExportTests.test_executables_bind_actual_runtime_identity_size_and_mode', 'test_room_grid_exports.ExportTests.test_inventory_is_stable_and_content_sensitive', 'test_room_grid_exports.ExportTests.test_inventory_rejects_symlinks', 'test_room_grid_exports.ExportTests.test_launcher_contract_rejects_absolute_source_and_nonexecutable', 'test_room_grid_exports.ExportTests.test_manifest_rejects_wrong_envelope']
+
+                  runner = dedent("""
+                      import json, sys, unittest
+                      suite = unittest.defaultTestLoader.discover('tools', pattern='test_room_grid_exports.py')
+                      def names(node):
+                          if isinstance(node, unittest.TestSuite):
+                              return [name for child in node for name in names(child)]
+                          return [node.id()]
+                      if sys.argv[1] == 'inventory':
+                          print(json.dumps(names(suite)))
+                      else:
+                          class Result(unittest.TextTestResult):
+                              def __init__(self, *args, **kwargs):
+                                  super().__init__(*args, **kwargs)
+                                  self.passed = []
+                              def addSuccess(self, test):
+                                  super().addSuccess(test)
+                                  self.passed.append(test.id())
+                          result = unittest.TextTestRunner(verbosity=2, resultclass=Result).run(suite)
+                          print('EXPORT_TEST_RESULT=' + json.dumps({
+                              'passed': result.passed, 'tests_run': result.testsRun,
+                              'failures': len(result.failures), 'errors': len(result.errors),
+                              'skipped': len(result.skipped),
+                              'expected_failures': len(result.expectedFailures),
+                              'unexpected_successes': len(result.unexpectedSuccesses),
+                          }))
+                          sys.exit(0 if result.wasSuccessful() else 1)
+                  """)
+                  # Ignore ambient Python flags so assertions cannot be optimized away.
+                  command = ['python3', '-B', '-E', '-c', runner]
+                  output, record = run('python-exports-inventory', command + ['inventory'])
+                  inventory = json.loads(output)
+                  record['test_count'] = len(inventory)
+                  save()
+                  if sorted(inventory) != expected:
+                      raise RuntimeError('Export Python inventory differs from the reviewed exact test set')
+                  output, record = run('python-exports', command + ['run'])
+                  markers = re.findall(r'^EXPORT_TEST_RESULT=(.+)$', output, re.M)
+                  if len(markers) != 1:
+                      raise RuntimeError('Export Python suite must report exactly one execution result')
+                  result = json.loads(markers[0])
+                  record['test_count'] = result['tests_run']
+                  record['inventory_count'] = len(inventory)
+                  save()
+                  if (sorted(result['passed']) != expected or result['tests_run'] != len(expected)
+                          or any(result[field] != 0 for field in (
+                              'failures', 'errors', 'skipped', 'expected_failures', 'unexpected_successes'))):
+                      raise RuntimeError('Export Python inventory, execution or skip mismatch')
+              attempt('python-exports', python_export_tests)
+
+              for label, package, features, targets in [
+                  ('recorded-route-session-clippy', 'orr_session', '', ['--lib']),
+                  ('playtest-keys-bin-clippy', 'orr_sample', 'room-playtest,room-input-actions', ['--bin', 'orr_playtest_room']),
+                  ('playtest-keys-cli-clippy', 'orr_sample', 'room-playtest,project-create,room-input-actions', ['--test', 'room_playtest_keys_cli']),
+                  ('playtest-keys-off-cli-clippy', 'orr_sample', 'room-playtest,project-create', ['--test', 'room_playtest_keys_cli']),
+                  ('room-layout-parser-clippy', 'orr_sample', 'room-project', ['--lib']),
+                  ('editor-layout-import-controls-clippy', 'orr_editor', 'room-authoring,room-input-map-play', ['--lib', '--bin', 'orr_editor']),
+                  ('editor-layout-import-production-clippy', 'orr_editor', 'room-authoring', ['--lib', '--bin', 'orr_editor']),
+                  ('room-layout-creator-clippy', 'orr_sample', 'project-create,room-project', ['--lib', '--bin', 'orr_new_arena']),
+                  ('room-layout-cli-clippy', 'orr_sample', 'project-create,room-playtest', ['--test', 'room_layout_cli']),
+                  ('playtest-bin-clippy', 'orr_sample', 'room-playtest', ['--bin', 'orr_playtest_room']),
+                  ('playtest-cli-clippy', 'orr_sample', 'room-playtest,project-create', ['--test', 'room_playtest_cli']),
+                  ('sample-attach-clippy', 'orr_sample', 'room-controls-attach', ['--lib', '--bin', 'orr_attach_room_controls']),
+                  ('sample-clippy', 'orr_sample', on, ['--lib', '--bin', 'room_escape', '--bin', 'orr_new_arena', '--bin', 'orr_export_room']),
+                  ('sample-off-clippy', 'orr_sample', off, ['--lib', '--bin', 'room_escape', '--bin', 'orr_new_arena', '--bin', 'orr_export_room']),
+                  ('package-clippy', 'orr_package', '', ['--lib']),
+                  ('editor-play-clippy', 'orr_editor', 'room-input-map-play', ['--lib', '--bin', 'orr_editor']),
+                  ('editor-room-off-clippy', 'orr_editor', 'room-project', ['--lib', '--bin', 'orr_editor']),
+                  ('editor-default-main-clippy', 'orr_editor', '', ['--lib', '--bin', 'orr_editor']),
+                  ('editor-project-clippy', 'orr_editor', 'room-input-map-project,project-create', ['--bin', 'orr_room_input_map', '--test', 'room_input_map_authoring_ui', '--test', 'room_input_map_boundary']),
+                  ('editor-project-only-clippy', 'orr_editor', 'room-input-map-project', ['--bin', 'orr_room_input_map']),
+                  ('editor-clippy', 'orr_editor', 'room-input-map-editor', ['--bin', 'orr_room_input_map', '--test', 'room_input_map_authoring_ui']),
+                  ('editor-off-clippy', 'orr_editor', '', ['--test', 'deps', '--test', 'room_input_map_boundary']),
+              ]:
+                  command = ['cargo', 'clippy', '--locked', '--release', '-p', package, '--no-default-features']
+                  if features:
+                      command += ['--features', features]
+                  command += targets + ['--', '-D', 'warnings']
+                  attempt(label, lambda label=label, command=command: run(label, command))
+
+              attempt('playtest-default-off', lambda: run('playtest-default-off', ['cargo', 'check', '--locked', '--release', '-p', 'orr_sample', '--no-default-features', '--lib']))
+
+              def playtest_production():
+                  # Build only the production feature; CLI suites separately exercise real RoomRun semantics.
+                  run('playtest-production-build', ['cargo', 'build', '--locked', '--release', '-p', 'orr_sample', '--no-default-features', '--features', 'room-playtest', '--bin', 'orr_playtest_room'])
+                  binary = Path(os.environ['CARGO_TARGET_DIR']) / 'release' / 'orr_playtest_room'
+                  (evidence / 'fresh-playtest-binary.json').write_text(json.dumps({'orr_playtest_room': hashlib.sha256(binary.read_bytes()).hexdigest()}, indent=2) + '\n')
+              attempt('playtest-production', playtest_production)
+
+              def playtest_keys_production():
+                  # Fresh opt-in producer, separate from schema-1 production and test feature closures.
+                  run('playtest-keys-production-build', ['cargo', 'build', '--locked', '--release', '-p', 'orr_sample', '--no-default-features', '--features', 'room-playtest,room-input-actions', '--bin', 'orr_playtest_room'])
+                  binary = Path(os.environ['CARGO_TARGET_DIR']) / 'release' / 'orr_playtest_room'
+                  (evidence / 'fresh-playtest-keys-binary.json').write_text(json.dumps({'orr_playtest_room': hashlib.sha256(binary.read_bytes()).hexdigest()}, indent=2) + '\n')
+              attempt('playtest-keys-production', playtest_keys_production)
+
+              def room_layout_production():
+                  # Minimal creator feature closure, distinct from the broader export/attachment builds.
+                  run('room-layout-production-build', ['cargo', 'build', '--locked', '--release', '-p', 'orr_sample', '--no-default-features', '--features', 'project-create,room-project', '--bin', 'orr_new_arena'])
+                  binary = Path(os.environ['CARGO_TARGET_DIR']) / 'release' / 'orr_new_arena'
+                  (evidence / 'fresh-room-layout-creator-binary.json').write_text(json.dumps({'orr_new_arena': hashlib.sha256(binary.read_bytes()).hexdigest()}, indent=2) + '\n')
+              attempt('room-layout-production', room_layout_production)
+
+              # Production-only targets are strict. Broad editor lib-test Clippy is not
+              # claimed here: existing unrelated camera/blockout test lints remain outside scope.
+              # Existing room-project/default-off strict checks above remain mandatory.
+              attempt('editor-layout-import-build', lambda: run('editor-layout-import-build', ['cargo', 'build', '--locked', '--release', '-p', 'orr_editor', '--no-default-features', '--features', 'room-authoring', '--bin', 'orr_editor']))
+
+              attempt('editor-project-build', lambda: run('editor-project-build', ['cargo', 'build', '--locked', '--release', '-p', 'orr_editor', '--no-default-features', '--features', 'room-input-map-project', '--bin', 'orr_room_input_map']))
+
+              attempt('editor-play-build', lambda: run('editor-play-build', ['cargo', 'build', '--locked', '--release', '-p', 'orr_editor', '--no-default-features', '--features', 'room-input-map-play', '--bin', 'orr_editor']))
+
+              def recorded_route_bridge():
+                  # Build the actual consumer from pinned source, not a PATH or cached executable.
+                  run('recorded-route-cli-build', ['cargo', 'build', '--locked', '--release', '-p', 'orr_sample', '--no-default-features', '--features', 'room-playtest', '--bin', 'orr_playtest_room'])
+                  binary = Path(os.environ['CARGO_TARGET_DIR']) / 'release' / 'orr_playtest_room'
+                  (evidence / 'fresh-recorded-route-binary.json').write_text(json.dumps({'orr_playtest_room': hashlib.sha256(binary.read_bytes()).hexdigest()}, indent=2) + '\n')
+                  name = 'room_authoring_panel::recorded_route::tests::actual_stopped_play_prepares_copies_and_replays_through_cli_when_supplied'
+                  previous = os.environ.get('ORR_RECORDED_ROUTE_CLI')
+                  os.environ['ORR_RECORDED_ROUTE_CLI'] = str(binary.resolve(strict=True))
+                  try:
+                      output, record = run('recorded-route-cli-bridge', ['cargo', 'test', '--locked', '--release', '-p', 'orr_editor', '--no-default-features', '--features', 'room-authoring', '--lib', name, '--', '--exact', '--show-output', '--format=pretty', '--color=never', '--test-threads=1'])
+                  finally:
+                      if previous is None:
+                          os.environ.pop('ORR_RECORDED_ROUTE_CLI', None)
+                      else:
+                          os.environ['ORR_RECORDED_ROUTE_CLI'] = previous
+                  cases = re.findall(r'^test (.+) \.\.\. (ok|FAILED|ignored)(?: .*)?$', output, re.M)
+                  summaries = re.findall(r'^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured;', output, re.M)
+                  markers = re.findall(r'^RECORDED_ROUTE_CLI_PASSED$', output, re.M)
+                  record['test_count'] = len(cases)
+                  record['integration_count'] = len(markers)
+                  save()
+                  if cases != [(name, 'ok')] or summaries != [('1', '0', '0', '0')] or len(markers) != 1:
+                      raise RuntimeError('Recorded Room route must execute exactly one passing editor-to-fresh-CLI bridge with its success marker')
+              attempt('recorded-route-cli-bridge', recorded_route_bridge)
+
+              def grid_integration():
+                  # Reuse the two existing production-only builds before broader builds
+                  # can overwrite them. Require this run's receipts and matching bytes.
+                  binary_dir = Path(os.environ['CARGO_TARGET_DIR']) / 'release'
+                  hashes = {}
+                  for name, label, manifest in [
+                      ('orr_new_arena', 'room-layout-production-build', 'fresh-room-layout-creator-binary.json'),
+                      ('orr_playtest_room', 'recorded-route-cli-build', 'fresh-recorded-route-binary.json'),
+                  ]:
+                      produced = [entry for entry in receipts if entry['label'] == label]
+                      if len(produced) != 1 or produced[0]['exit'] != 0:
+                          raise RuntimeError(f'Grid integration requires a passing fresh producer: {label}')
+                      recorded = json.loads((evidence / manifest).read_text())
+                      actual = hashlib.sha256((binary_dir / name).read_bytes()).hexdigest()
+                      if recorded != {name: actual}:
+                          raise RuntimeError(f'Grid integration producer bytes changed: {name}')
+                      hashes[name] = actual
+                  output_dir = evidence / 'grid-integration'
+                  code = ('import sys; sys.path.insert(0, "tools"); '
+                          'from test_create_room_grid import run_integration; '
+                          'run_integration(sys.argv[1], sys.argv[2])')
+                  output, record = run('python-grid-integration', ['python3', '-B', '-E', '-c', code,
+                                      str(binary_dir.resolve(strict=True)), str(output_dir)])
+                  result = json.loads(output)
+                  retained = json.loads((output_dir / 'result.json').read_text())
+                  expected_checks = [
+                      'grid-cli', 'creator-admission', 'wall-blocks-direct-route',
+                      'detour-wins', 'byte-identical-repeat', 'project-unchanged',
+                      'zero-wall-control-wins', '33x33-and-64-walls-admitted',
+                      'even-dimension-half-integers-admitted',
+                  ]
+                  if (result != retained or result.get('status') != 'passed'
+                          or result.get('binaries') != hashes
+                          or result.get('tool_sha256') != hashlib.sha256(Path('tools/create_room_grid.py').read_bytes()).hexdigest()
+                          or result.get('checks') != expected_checks):
+                      raise RuntimeError('Grid integration result, retained receipts or source identity mismatch')
+                  record['integration_count'] = 1
+                  record['check_count'] = len(expected_checks)
+                  save()
+              attempt('python-grid-integration', grid_integration)
+
+              def grid_transform_integration(rotate, mirror_x):
+                  # Reuse the two existing production-only builds before broader builds
+                  # can overwrite them. Require this run's receipts and matching bytes.
+                  binary_dir = Path(os.environ['CARGO_TARGET_DIR']) / 'release'
+                  hashes = {}
+                  for name, label, manifest in [
+                      ('orr_new_arena', 'room-layout-production-build', 'fresh-room-layout-creator-binary.json'),
+                      ('orr_playtest_room', 'recorded-route-cli-build', 'fresh-recorded-route-binary.json'),
+                  ]:
+                      produced = [entry for entry in receipts if entry['label'] == label]
+                      if len(produced) != 1 or produced[0]['exit'] != 0:
+                          raise RuntimeError(f'Grid integration requires a passing fresh producer: {label}')
+                      recorded = json.loads((evidence / manifest).read_text())
+                      actual = hashlib.sha256((binary_dir / name).read_bytes()).hexdigest()
+                      if recorded != {name: actual}:
+                          raise RuntimeError(f'Grid integration producer bytes changed: {name}')
+                      hashes[name] = actual
+                  output_dir = evidence / f'grid-transform-{rotate}-{int(mirror_x)}'
+                  code = ('import sys; sys.path.insert(0, "tools"); '
+                          'from test_create_room_grid import run_integration; '
+                          'run_integration(sys.argv[1], sys.argv[2], rotate=int(sys.argv[3]), mirror_x=sys.argv[4] == "1")')
+                  output, record = run(f'python-grid-transform-{rotate}-{int(mirror_x)}', ['python3', '-B', '-E', '-c', code,
+                                      str(binary_dir.resolve(strict=True)), str(output_dir), str(rotate), str(int(mirror_x))])
+                  result = json.loads(output)
+                  retained = json.loads((output_dir / 'result.json').read_text())
+                  expected_checks = [
+                      'grid-cli', 'creator-admission', 'wall-blocks-direct-route',
+                      'detour-wins', 'byte-identical-repeat', 'project-unchanged',
+                      'zero-wall-control-wins', '33x33-and-64-walls-admitted',
+                      'even-dimension-half-integers-admitted',
+                  ]
+                  if (result != retained or result.get('status') != 'passed'
+                          or result.get('binaries') != hashes
+                          or result.get('tool_sha256') != hashlib.sha256(Path('tools/create_room_grid.py').read_bytes()).hexdigest()
+                          or result.get('checks') != expected_checks
+                          or result.get('transformation') != {'rotate': rotate, 'mirror_x': mirror_x}):
+                      raise RuntimeError('Grid integration result, retained receipts or source identity mismatch')
+                  record['integration_count'] = 1
+                  record['check_count'] = len(expected_checks)
+                  save()
+              for grid_rotation, grid_mirror in [(0, True), (90, False), (90, True), (180, False), (180, True), (270, False), (270, True)]:
+                  attempt(f'python-grid-transform-{grid_rotation}-{int(grid_mirror)}',
+                          lambda rotate=grid_rotation, mirror=grid_mirror: grid_transform_integration(rotate, mirror))
+
+              def grid_merge_integration():
+                  # Reuse the two existing production-only builds before broader builds
+                  # can overwrite them. Require this run's receipts and matching bytes.
+                  binary_dir = Path(os.environ['CARGO_TARGET_DIR']) / 'release'
+                  hashes = {}
+                  for name, label, manifest in [
+                      ('orr_new_arena', 'room-layout-production-build', 'fresh-room-layout-creator-binary.json'),
+                      ('orr_playtest_room', 'recorded-route-cli-build', 'fresh-recorded-route-binary.json'),
+                  ]:
+                      produced = [entry for entry in receipts if entry['label'] == label]
+                      if len(produced) != 1 or produced[0]['exit'] != 0:
+                          raise RuntimeError(f'Grid integration requires a passing fresh producer: {label}')
+                      recorded = json.loads((evidence / manifest).read_text())
+                      actual = hashlib.sha256((binary_dir / name).read_bytes()).hexdigest()
+                      if recorded != {name: actual}:
+                          raise RuntimeError(f'Grid integration producer bytes changed: {name}')
+                      hashes[name] = actual
+                  output_dir = evidence / 'grid-merge-integration'
+                  code = ('import sys; sys.path.insert(0, "tools"); '
+                          'from test_create_room_grid import run_merge_integration; '
+                          'run_merge_integration(sys.argv[1], sys.argv[2])')
+                  output, record = run('python-grid-merge-integration', ['python3', '-B', '-E', '-c', code,
+                                      str(binary_dir.resolve(strict=True)), str(output_dir)])
+                  result = json.loads(output)
+                  retained = json.loads((output_dir / 'result.json').read_text())
+                  expected_checks = [
+                      'mirror-0-rotate-0',
+                      'mirror-0-rotate-90',
+                      'mirror-0-rotate-180',
+                      'mirror-0-rotate-270',
+                      'mirror-1-rotate-0',
+                      'mirror-1-rotate-90',
+                      'mirror-1-rotate-180',
+                      'mirror-1-rotate-270',
+                      'more-than-64-boxes-rejected',
+                  ]
+                  expected_per_transform = ['grid-cli', 'creator-admission', 'wall-blocks-direct-route', 'detour-wins', 'byte-identical-repeat', 'project-unchanged', 'zero-wall-control-wins', '33x33-and-99-wall-tiles-merged-admitted', 'even-dimension-half-integers-admitted']
+                  if (result != retained or result.get('status') != 'passed'
+                          or result.get('binaries') != hashes
+                          or result.get('tool_sha256') != hashlib.sha256(Path('tools/create_room_grid.py').read_bytes()).hexdigest()
+                          or result.get('checks') != expected_checks
+                          or result.get('checks_per_transform') != expected_per_transform):
+                      raise RuntimeError('Grid integration result, retained receipts or source identity mismatch')
+                  record['integration_count'] = 1
+                  record['check_count'] = len(expected_checks)
+                  save()
+              attempt('python-grid-merge-integration', grid_merge_integration)
+
+              def grid_border_integration():
+                  # Reuse the two existing production-only builds before broader builds
+                  # can overwrite them. Require this run's receipts and matching bytes.
+                  binary_dir = Path(os.environ['CARGO_TARGET_DIR']) / 'release'
+                  hashes = {}
+                  for name, label, manifest in [
+                      ('orr_new_arena', 'room-layout-production-build', 'fresh-room-layout-creator-binary.json'),
+                      ('orr_playtest_room', 'recorded-route-cli-build', 'fresh-recorded-route-binary.json'),
+                  ]:
+                      produced = [entry for entry in receipts if entry['label'] == label]
+                      if len(produced) != 1 or produced[0]['exit'] != 0:
+                          raise RuntimeError(f'Grid integration requires a passing fresh producer: {label}')
+                      recorded = json.loads((evidence / manifest).read_text())
+                      actual = hashlib.sha256((binary_dir / name).read_bytes()).hexdigest()
+                      if recorded != {name: actual}:
+                          raise RuntimeError(f'Grid integration producer bytes changed: {name}')
+                      hashes[name] = actual
+                  output_dir = evidence / 'grid-border-integration'
+                  code = ('import sys; sys.path.insert(0, "tools"); '
+                          'from test_create_room_grid import run_border_integration; '
+                          'run_border_integration(sys.argv[1], sys.argv[2])')
+                  output, record = run('python-grid-border-integration', ['python3', '-B', '-E', '-c', code,
+                                      str(binary_dir.resolve(strict=True)), str(output_dir)])
+                  result = json.loads(output)
+                  retained = json.loads((output_dir / 'result.json').read_text())
+                  expected_checks = [
+                      'mirror-0-rotate-0',
+                      'mirror-0-rotate-90',
+                      'mirror-0-rotate-180',
+                      'mirror-0-rotate-270',
+                      'mirror-1-rotate-0',
+                      'mirror-1-rotate-90',
+                      'mirror-1-rotate-180',
+                      'mirror-1-rotate-270',
+                      'oversized-interior-rejected',
+                  ]
+                  expected_per_transform = ['grid-cli', 'creator-admission', 'unbordered-exterior-bypass-wins', 'border-blocks-exterior-bypass', 'internal-detour-wins', 'byte-identical-repeat', 'project-unchanged', '31x31-interior-padded33-admitted']
+                  if (result != retained or result.get('status') != 'passed'
+                          or result.get('binaries') != hashes
+                          or result.get('tool_sha256') != hashlib.sha256(Path('tools/create_room_grid.py').read_bytes()).hexdigest()
+                          or result.get('checks') != expected_checks
+                          or result.get('checks_per_transform') != expected_per_transform):
+                      raise RuntimeError('Grid integration result, retained receipts or source identity mismatch')
+                  record['integration_count'] = 1
+                  record['check_count'] = len(expected_checks)
+                  save()
+              attempt('python-grid-border-integration', grid_border_integration)
+
+              def grid_opening_integration():
+                  # Reuse the two existing production-only builds before broader builds
+                  # can overwrite them. Require this run's receipts and matching bytes.
+                  binary_dir = Path(os.environ['CARGO_TARGET_DIR']) / 'release'
+                  hashes = {}
+                  for name, label, manifest in [
+                      ('orr_new_arena', 'room-layout-production-build', 'fresh-room-layout-creator-binary.json'),
+                      ('orr_playtest_room', 'recorded-route-cli-build', 'fresh-recorded-route-binary.json'),
+                  ]:
+                      produced = [entry for entry in receipts if entry['label'] == label]
+                      if len(produced) != 1 or produced[0]['exit'] != 0:
+                          raise RuntimeError(f'Grid integration requires a passing fresh producer: {label}')
+                      recorded = json.loads((evidence / manifest).read_text())
+                      actual = hashlib.sha256((binary_dir / name).read_bytes()).hexdigest()
+                      if recorded != {name: actual}:
+                          raise RuntimeError(f'Grid integration producer bytes changed: {name}')
+                      hashes[name] = actual
+                  output_dir = evidence / 'grid-opening-integration'
+                  code = ('import sys; sys.path.insert(0, "tools"); '
+                          'from test_create_room_grid import run_opening_integration; '
+                          'run_opening_integration(sys.argv[1], sys.argv[2])')
+                  output, record = run('python-grid-opening-integration', ['python3', '-B', '-E', '-c', code,
+                                      str(binary_dir.resolve(strict=True)), str(output_dir)])
+                  result = json.loads(output)
+                  retained = json.loads((output_dir / 'result.json').read_text())
+                  expected_checks = [
+                      'mirror-0-rotate-0',
+                      'mirror-0-rotate-90',
+                      'mirror-0-rotate-180',
+                      'mirror-0-rotate-270',
+                      'mirror-1-rotate-0',
+                      'mirror-1-rotate-90',
+                      'mirror-1-rotate-180',
+                      'mirror-1-rotate-270',
+                      'out-of-range-opening-rejected',
+                  ]
+                  expected_per_transform = ['grid-cli', 'creator-admission', 'unbordered-exterior-bypass-wins', 'border-blocks-exterior-bypass', 'opened-border-bypass-wins', 'byte-identical-repeat', 'project-unchanged', '31x31-interior-padded33-admitted']
+                  if (result != retained or result.get('status') != 'passed'
+                          or result.get('binaries') != hashes
+                          or result.get('tool_sha256') != hashlib.sha256(Path('tools/create_room_grid.py').read_bytes()).hexdigest()
+                          or result.get('checks') != expected_checks
+                          or result.get('checks_per_transform') != expected_per_transform):
+                      raise RuntimeError('Grid integration result, retained receipts or source identity mismatch')
+                  record['integration_count'] = 1
+                  record['check_count'] = len(expected_checks)
+                  save()
+              attempt('python-grid-opening-integration', grid_opening_integration)
+
+              def starter_integration():
+                  # Reuse the two existing production-only builds before broader builds
+                  # can overwrite them. Require this run's receipts and matching bytes.
+                  binary_dir = Path(os.environ['CARGO_TARGET_DIR']) / 'release'
+                  hashes = {}
+                  for name, label, manifest in [
+                      ('orr_new_arena', 'room-layout-production-build', 'fresh-room-layout-creator-binary.json'),
+                      ('orr_playtest_room', 'recorded-route-cli-build', 'fresh-recorded-route-binary.json'),
+                  ]:
+                      produced = [entry for entry in receipts if entry['label'] == label]
+                      if len(produced) != 1 or produced[0]['exit'] != 0:
+                          raise RuntimeError(f'Grid integration requires a passing fresh producer: {label}')
+                      recorded = json.loads((evidence / manifest).read_text())
+                      actual = hashlib.sha256((binary_dir / name).read_bytes()).hexdigest()
+                      if recorded != {name: actual}:
+                          raise RuntimeError(f'Grid integration producer bytes changed: {name}')
+                      hashes[name] = actual
+                  output_dir = evidence / 'starter-integration'
+                  code = ('import sys; sys.path.insert(0, "tools"); '
+                          'from test_room_grid_puzzles import run_integration; '
+                          'run_integration(sys.argv[1], sys.argv[2])')
+                  output, record = run('python-starter-integration', ['python3', '-B', '-E', '-c', code,
+                                      str(binary_dir.resolve(strict=True)), str(output_dir)])
+                  result = json.loads(output)
+                  retained = json.loads((output_dir / 'result.json').read_text())
+                  expected_checks = ['courtyard', 'switchback', 'passage']
+                  expected_assets = {str(Path(path).relative_to("examples/room-grid-puzzles")): hashlib.sha256(Path(path).read_bytes()).hexdigest() for path in ['examples/room-grid-puzzles/courtyard/grid.txt', 'examples/room-grid-puzzles/courtyard/route.json', 'examples/room-grid-puzzles/courtyard/shortcut.json', 'examples/room-grid-puzzles/courtyard/puzzle.json', 'examples/room-grid-puzzles/switchback/grid.txt', 'examples/room-grid-puzzles/switchback/route.json', 'examples/room-grid-puzzles/switchback/shortcut.json', 'examples/room-grid-puzzles/switchback/puzzle.json', 'examples/room-grid-puzzles/passage/grid.txt', 'examples/room-grid-puzzles/passage/route.json', 'examples/room-grid-puzzles/passage/shortcut.json', 'examples/room-grid-puzzles/passage/puzzle.json']}
+                  expected_checks_per_puzzle = ['fixed-asset-admission', 'creator-admission', 'winning-route', 'byte-identical-repeat', 'shortcut-blocked', 'project-unchanged']
+                  expected_puzzles = {'courtyard': {'status': 'passed', 'checks': ['fixed-asset-admission', 'creator-admission', 'winning-route', 'byte-identical-repeat', 'shortcut-blocked', 'project-unchanged'], 'winning_ticks': 202, 'shortcut_ticks': 122, 'repeat_identical': True}, 'switchback': {'status': 'passed', 'checks': ['fixed-asset-admission', 'creator-admission', 'winning-route', 'byte-identical-repeat', 'shortcut-blocked', 'project-unchanged'], 'winning_ticks': 362, 'shortcut_ticks': 202, 'repeat_identical': True}, 'passage': {'status': 'passed', 'checks': ['fixed-asset-admission', 'creator-admission', 'winning-route', 'byte-identical-repeat', 'shortcut-blocked', 'project-unchanged'], 'winning_ticks': 242, 'shortcut_ticks': 122, 'repeat_identical': True}}
+                  if (result != retained or result.get('status') != 'passed'
+                          or result.get('binaries') != hashes
+                          or result.get('tool_sha256') != hashlib.sha256(Path('tools/create_room_grid.py').read_bytes()).hexdigest()
+                          or result.get('checks') != expected_checks
+                          or result.get('asset_sha256') != expected_assets
+                          or result.get('harness_sha256') != hashlib.sha256(Path('tools/test_room_grid_puzzles.py').read_bytes()).hexdigest()
+                          or result.get('checks_per_puzzle') != expected_checks_per_puzzle
+                          or result.get('puzzles') != expected_puzzles):
+                      raise RuntimeError('Grid integration result, retained receipts or source identity mismatch')
+                  record['integration_count'] = 1
+                  record['check_count'] = len(expected_checks)
+                  save()
+              attempt('python-starter-integration', starter_integration)
+
+              def integration():
+                  # This run-isolated target starts empty; never consume PATH or cached binaries.
+                  run('runtime-build', ['cargo', 'build', '--locked', '--release', '-p', 'orr_sample', '--no-default-features', '--features', on, '--bin', 'orr_new_arena', '--bin', 'room_escape', '--bin', 'orr_export_room'])
+                  binary_dir = Path(os.environ['CARGO_TARGET_DIR']) / 'release'
+                  hashes = {name: hashlib.sha256((binary_dir / name).read_bytes()).hexdigest() for name in ['orr_new_arena', 'room_escape', 'orr_export_room']}
+                  (evidence / 'fresh-binaries.json').write_text(json.dumps(hashes, indent=2) + '\n')
+                  code = 'import sys; sys.path.insert(0, "tools"); from test_create_room_controls import run_integration; run_integration(sys.argv[1])'
+                  output, record = run('cpu-export-reopen', ['python3', '-c', code, str(binary_dir)])
+                  if 'PASS: authored sidecar admitted, exported byte-exactly, reopened with CPU model-pose checks.' not in output:
+                      raise RuntimeError('Missing CPU admission/export/reopen success marker')
+                  record['integration_count'] = 1
+                  save()
+              attempt('cpu-export-reopen', integration)
+
+              def attachment_integration():
+                  # Build all four producers together from pinned source, without PATH fallbacks.
+                  run('attach-build', ['cargo', 'build', '--locked', '--release', '-p', 'orr_sample', '--no-default-features', '--features', 'room-controls-attach,project-create', '--bin', 'orr_attach_room_controls', '--bin', 'orr_new_arena', '--bin', 'room_escape', '--bin', 'orr_export_room'])
+                  binary_dir = Path(os.environ['CARGO_TARGET_DIR']) / 'release'
+                  hashes = {name: hashlib.sha256((binary_dir / name).read_bytes()).hexdigest() for name in ['orr_attach_room_controls', 'orr_new_arena', 'room_escape', 'orr_export_room']}
+                  (evidence / 'fresh-attach-binaries.json').write_text(json.dumps(hashes, indent=2) + '\n')
+                  output, record = run('cpu-attach-export-reopen', ['python3', 'tools/test_attach_room_controls.py', '--binary-dir', str(binary_dir)])
+                  if 'PASS: real generated project, authored custom controls, explicit attachment/revision, stale-reference refusal, byte-exact old/new sidecars and version backups, CPU reopen/export/source-hidden launcher identical. No physical input/GPU coverage.' not in output:
+                      raise RuntimeError('Missing explicit attachment/revision/export/reopen success marker')
+                  record['integration_count'] = 1
+                  save()
+              attempt('cpu-attach-export-reopen', attachment_integration)
+
+              def keyboard_acceptance_production():
+                  # The schema-1 bridge overwrites the earlier opt-in executable.
+                  # Rebuild after all schema-1 consumers, preserving their separate gates.
+                  run('keyboard-acceptance-build', ['cargo', 'build', '--locked', '--release', '-p', 'orr_sample', '--no-default-features', '--features', 'room-playtest,room-input-actions', '--bin', 'orr_playtest_room'])
+                  binary = Path(os.environ['CARGO_TARGET_DIR']) / 'release' / 'orr_playtest_room'
+                  (evidence / 'fresh-keyboard-acceptance-binary.json').write_text(json.dumps({'orr_playtest_room': hashlib.sha256(binary.read_bytes()).hexdigest()}, indent=2) + '\n')
+              attempt('keyboard-acceptance-production', keyboard_acceptance_production)
+
+              def keyboard_integration():
+                  # Require this run's attachment producers and fresh keyboard-enabled CLI.
+                  binary_dir = Path(os.environ['CARGO_TARGET_DIR']) / 'release'
+                  produced_hashes = {}
+                  for label, manifest, names in [
+                      ('attach-build', 'fresh-attach-binaries.json', ['orr_attach_room_controls', 'orr_new_arena', 'room_escape', 'orr_export_room']),
+                      ('keyboard-acceptance-build', 'fresh-keyboard-acceptance-binary.json', ['orr_playtest_room']),
+                  ]:
+                      produced = [entry for entry in receipts if entry['label'] == label]
+                      if len(produced) != 1 or produced[0]['exit'] != 0:
+                          raise RuntimeError(f'Keyboard integration requires a passing fresh producer: {label}')
+                      recorded = json.loads((evidence / manifest).read_text())
+                      actual = {name: hashlib.sha256((binary_dir / name).read_bytes()).hexdigest() for name in names}
+                      if recorded != actual:
+                          raise RuntimeError(f'Keyboard integration producer bytes changed: {label}')
+                      produced_hashes.update(actual)
+                  hashes = {name: produced_hashes[name] for name in ['orr_new_arena', 'orr_attach_room_controls', 'orr_playtest_room']}
+                  output_dir = evidence / 'keyboard-integration'
+                  code = ('import sys; sys.path.insert(0, "tools"); '
+                          'from test_room_grid_keyboard import run_integration; '
+                          'run_integration(sys.argv[1], sys.argv[2])')
+                  output, record = run('python-keyboard-integration', ['python3', '-B', '-E', '-c', code,
+                                      str(binary_dir.resolve(strict=True)), str(output_dir)])
+                  result = json.loads(output)
+                  retained = json.loads((output_dir / 'result.json').read_text())
+                  expected_checks = ['courtyard', 'switchback', 'passage']
+                  expected_assets = {str(Path(path).relative_to("examples/room-grid-puzzles")): hashlib.sha256(Path(path).read_bytes()).hexdigest() for path in ['examples/room-grid-puzzles/controls/arrows.json', 'examples/room-grid-puzzles/keyboard/courtyard/route-keys.json', 'examples/room-grid-puzzles/keyboard/courtyard/shortcut-keys.json', 'examples/room-grid-puzzles/keyboard/switchback/route-keys.json', 'examples/room-grid-puzzles/keyboard/switchback/shortcut-keys.json', 'examples/room-grid-puzzles/keyboard/passage/route-keys.json', 'examples/room-grid-puzzles/keyboard/passage/shortcut-keys.json']}
+                  expected_original_assets = {str(Path(path).relative_to("examples/room-grid-puzzles")): hashlib.sha256(Path(path).read_bytes()).hexdigest() for path in ['examples/room-grid-puzzles/courtyard/grid.txt', 'examples/room-grid-puzzles/courtyard/route.json', 'examples/room-grid-puzzles/courtyard/shortcut.json', 'examples/room-grid-puzzles/courtyard/puzzle.json', 'examples/room-grid-puzzles/switchback/grid.txt', 'examples/room-grid-puzzles/switchback/route.json', 'examples/room-grid-puzzles/switchback/shortcut.json', 'examples/room-grid-puzzles/switchback/puzzle.json', 'examples/room-grid-puzzles/passage/grid.txt', 'examples/room-grid-puzzles/passage/route.json', 'examples/room-grid-puzzles/passage/shortcut.json', 'examples/room-grid-puzzles/passage/puzzle.json']}
+                  expected_controls = hashlib.sha256(Path('examples/room-grid-puzzles/controls/arrows.json').read_bytes()).hexdigest()
+                  expected_checks_per_puzzle = ['fixed-keyboard-assets', 'creator-admission', 'semantic-baseline', 'safe-controls-attachment', 'exact-backup-and-sidecar', 'authored-key-victory', 'resolved-input-and-checksum-parity', 'byte-identical-repeat', 'shortcut-blocked', 'schema1-refused', 'repeat-attachment-refused', 'project-unchanged']
+                  expected_puzzles = {'courtyard': {'status': 'passed', 'checks': ['fixed-keyboard-assets', 'creator-admission', 'semantic-baseline', 'safe-controls-attachment', 'exact-backup-and-sidecar', 'authored-key-victory', 'resolved-input-and-checksum-parity', 'byte-identical-repeat', 'shortcut-blocked', 'schema1-refused', 'repeat-attachment-refused', 'project-unchanged'], 'winning_ticks': 202, 'shortcut_ticks': 122, 'repeat_identical': True, 'semantic_checksums_equal': True}, 'switchback': {'status': 'passed', 'checks': ['fixed-keyboard-assets', 'creator-admission', 'semantic-baseline', 'safe-controls-attachment', 'exact-backup-and-sidecar', 'authored-key-victory', 'resolved-input-and-checksum-parity', 'byte-identical-repeat', 'shortcut-blocked', 'schema1-refused', 'repeat-attachment-refused', 'project-unchanged'], 'winning_ticks': 362, 'shortcut_ticks': 202, 'repeat_identical': True, 'semantic_checksums_equal': True}, 'passage': {'status': 'passed', 'checks': ['fixed-keyboard-assets', 'creator-admission', 'semantic-baseline', 'safe-controls-attachment', 'exact-backup-and-sidecar', 'authored-key-victory', 'resolved-input-and-checksum-parity', 'byte-identical-repeat', 'shortcut-blocked', 'schema1-refused', 'repeat-attachment-refused', 'project-unchanged'], 'winning_ticks': 242, 'shortcut_ticks': 122, 'repeat_identical': True, 'semantic_checksums_equal': True}}
+                  if (result != retained or result.get('status') != 'passed'
+                          or result.get('binaries') != hashes
+                          or result.get('tool_sha256') != hashlib.sha256(Path('tools/create_room_grid.py').read_bytes()).hexdigest()
+                          or result.get('checks') != expected_checks
+                          or result.get('asset_sha256') != expected_assets
+                          or result.get('original_asset_sha256') != expected_original_assets
+                          or result.get('controls_sha256') != expected_controls
+                          or result.get('harness_sha256') != hashlib.sha256(Path('tools/test_room_grid_keyboard.py').read_bytes()).hexdigest()
+                          or result.get('starter_harness_sha256') != hashlib.sha256(Path('tools/test_room_grid_puzzles.py').read_bytes()).hexdigest()
+                          or json.dumps(result.get('checks_per_puzzle'), sort_keys=True) != json.dumps(expected_checks_per_puzzle, sort_keys=True)
+                          or json.dumps(result.get('puzzles'), sort_keys=True) != json.dumps(expected_puzzles, sort_keys=True)):
+                      raise RuntimeError('Keyboard integration result, retained receipts or source identity mismatch')
+                  record['integration_count'] = 1
+                  record['check_count'] = len(expected_checks)
+                  save()
+              attempt('python-keyboard-integration', keyboard_integration)
+
+              def export_integration():
+                  binary_dir = Path(os.environ['CARGO_TARGET_DIR']) / 'release'
+                  hashes = {}
+                  for label, manifest, names in [
+                      ('attach-build', 'fresh-attach-binaries.json', ['orr_attach_room_controls', 'orr_new_arena', 'room_escape', 'orr_export_room']),
+                      ('keyboard-acceptance-build', 'fresh-keyboard-acceptance-binary.json', ['orr_playtest_room']),
+                  ]:
+                      produced = [entry for entry in receipts if entry['label'] == label]
+                      if len(produced) != 1 or type(produced[0]['exit']) is not int or produced[0]['exit'] != 0:
+                          raise RuntimeError(f'Export starter requires a passing fresh producer: {label}')
+                      recorded = json.loads((evidence / manifest).read_text())
+                      actual = {name: hashlib.sha256((binary_dir / name).read_bytes()).hexdigest() for name in names}
+                      if recorded != actual:
+                          raise RuntimeError(f'Export starter producer bytes changed: {label}')
+                      hashes.update(actual)
+                  output_dir = evidence / 'export-integration'
+                  code = ('import sys; sys.path.insert(0, "tools"); '
+                          'from test_room_grid_exports import run_integration; '
+                          'run_integration(sys.argv[1], sys.argv[2])')
+                  output, record = run('python-exports-integration', ['python3', '-B', '-E', '-c', code,
+                                      str(binary_dir.resolve(strict=True)), str(output_dir)])
+                  result = json.loads(output)
+                  retained = json.loads((output_dir / 'result.json').read_text())
+                  expected_checks = ['courtyard', 'switchback', 'passage']
+                  expected_checks_per_puzzle = ['fixed-assets', 'creator-admission', 'controls-attachment', 'source-victory', 'export-manifest-and-sidecars', 'backup-exclusion', 'source-hidden-relocation', 'exported-project-victory', 'exported-repeat', 'shortcut-blocked', 'launcher-cpu-parity', 'existing-output-refused', 'inputs-unchanged']
+                  expected_puzzles = {'courtyard': {'status': 'passed', 'checks': ['fixed-assets', 'creator-admission', 'controls-attachment', 'source-victory', 'export-manifest-and-sidecars', 'backup-exclusion', 'source-hidden-relocation', 'exported-project-victory', 'exported-repeat', 'shortcut-blocked', 'launcher-cpu-parity', 'existing-output-refused', 'inputs-unchanged'], 'winning_ticks': 202, 'shortcut_ticks': 122, 'source_hidden': True, 'launcher_cpu_ticks': 42}, 'switchback': {'status': 'passed', 'checks': ['fixed-assets', 'creator-admission', 'controls-attachment', 'source-victory', 'export-manifest-and-sidecars', 'backup-exclusion', 'source-hidden-relocation', 'exported-project-victory', 'exported-repeat', 'shortcut-blocked', 'launcher-cpu-parity', 'existing-output-refused', 'inputs-unchanged'], 'winning_ticks': 362, 'shortcut_ticks': 202, 'source_hidden': True, 'launcher_cpu_ticks': 42}, 'passage': {'status': 'passed', 'checks': ['fixed-assets', 'creator-admission', 'controls-attachment', 'source-victory', 'export-manifest-and-sidecars', 'backup-exclusion', 'source-hidden-relocation', 'exported-project-victory', 'exported-repeat', 'shortcut-blocked', 'launcher-cpu-parity', 'existing-output-refused', 'inputs-unchanged'], 'winning_ticks': 242, 'shortcut_ticks': 122, 'source_hidden': True, 'launcher_cpu_ticks': 42}}
+                  expected_sources = {key: hashlib.sha256(Path(path).read_bytes()).hexdigest() for key, path in {'harness': 'tools/test_room_grid_exports.py', 'keyboard_harness': 'tools/test_room_grid_keyboard.py', 'starter_harness': 'tools/test_room_grid_puzzles.py', 'compiler': 'tools/create_room_grid.py'}.items()}
+                  expected_assets = {str(Path(path).relative_to('examples/room-grid-puzzles')): hashlib.sha256(Path(path).read_bytes()).hexdigest() for path in ['examples/room-grid-puzzles/controls/arrows.json', 'examples/room-grid-puzzles/keyboard/courtyard/route-keys.json', 'examples/room-grid-puzzles/keyboard/courtyard/shortcut-keys.json', 'examples/room-grid-puzzles/keyboard/switchback/route-keys.json', 'examples/room-grid-puzzles/keyboard/switchback/shortcut-keys.json', 'examples/room-grid-puzzles/keyboard/passage/route-keys.json', 'examples/room-grid-puzzles/keyboard/passage/shortcut-keys.json', 'examples/room-grid-puzzles/courtyard/grid.txt', 'examples/room-grid-puzzles/courtyard/route.json', 'examples/room-grid-puzzles/courtyard/shortcut.json', 'examples/room-grid-puzzles/courtyard/puzzle.json', 'examples/room-grid-puzzles/switchback/grid.txt', 'examples/room-grid-puzzles/switchback/route.json', 'examples/room-grid-puzzles/switchback/shortcut.json', 'examples/room-grid-puzzles/switchback/puzzle.json', 'examples/room-grid-puzzles/passage/grid.txt', 'examples/room-grid-puzzles/passage/route.json', 'examples/room-grid-puzzles/passage/shortcut.json', 'examples/room-grid-puzzles/passage/puzzle.json']}
+                  runtime_size = (binary_dir / 'room_escape').stat().st_size
+                  if (json.dumps(result, sort_keys=True) != json.dumps(retained, sort_keys=True)
+                          or result.get('status') != 'passed' or result.get('binaries') != hashes
+                          or result.get('checks') != expected_checks
+                          or result.get('checks_per_puzzle') != expected_checks_per_puzzle
+                          or result.get('source_sha256') != expected_sources
+                          or result.get('asset_sha256') != expected_assets
+                          or result.get('scope') != 'Exported-project supplied-key CPU routes plus relocated launcher constant semantic input/model-pose parity; no native window, hardware keys or GPU coverage.'
+                          or type(result.get('runtime_bytes')) is not int or result['runtime_bytes'] != runtime_size
+                          or type(result.get('reserved_budget_bytes')) is not int or result['reserved_budget_bytes'] != 4 * runtime_size + 16 * 1024 ** 2
+                          or type(result.get('free_bytes_after')) is not int or result['free_bytes_after'] < 1024 ** 3
+                          or set(result.get('puzzles', {})) != set(expected_puzzles)):
+                      raise RuntimeError('Export starter result, retained evidence or source identity mismatch')
+                  for name, expected in expected_puzzles.items():
+                      puzzle = result['puzzles'][name]
+                      if (set(puzzle) != set(expected) | {'bundle_bytes', 'export_manifest_sha256'}
+                              or json.dumps({k: puzzle[k] for k in expected}, sort_keys=True) != json.dumps(expected, sort_keys=True)):
+                          raise RuntimeError('Export starter puzzle contract mismatch')
+                      bundle = output_dir / name / 'Relocated Bundle Ω'
+                      files = [p for p in bundle.rglob('*') if p.is_file()]
+                      if (type(puzzle['bundle_bytes']) is not int or puzzle['bundle_bytes'] != sum(p.stat().st_size for p in files)
+                              or puzzle['bundle_bytes'] < runtime_size
+                              or puzzle['export_manifest_sha256'] != hashlib.sha256((bundle / 'orr.export.json').read_bytes()).hexdigest()):
+                          raise RuntimeError('Export starter retained bundle mismatch')
+                      exits = {p.stem: p.read_text().strip() for p in (output_dir / name).glob('*.exit')}
+                      expected_exits = {key: '0' for key in ['create', 'attach', 'source-win', 'source-cpu', 'export', 'relocated-win', 'relocated-repeat', 'relocated-cpu', 'relocated-cpu-repeat']}
+                      expected_exits.update({'repeat-export-refused': '1', 'relocated-shortcut': '1'})
+                      if exits != expected_exits:
+                          raise RuntimeError('Export starter child exit inventory differs')
+                  record['integration_count'] = 1
+                  record['check_count'] = len(expected_checks)
+                  save()
+              attempt('python-exports-integration', export_integration)
+          finally:
+              # Do not lose the final fence when an individual check fails.
+              attempt('source-after', lambda: source_fence('source-after'))
+              (evidence / 'scope.json').write_text(json.dumps({'source': os.environ['SOURCE_SHA'], 'failures': failures, 'native_window_gpu': 'not run', 'physical_key_capture': 'not run', 'full_workspace': False}, indent=2) + '\n')
+          if failures:
+              sys.exit('Focused checks failed: ' + ', '.join(failures))
+      - name: Preserve logs and receipts including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: room-input-controls-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-evidence
+          if-no-files-found: error
+          retention-days: 14

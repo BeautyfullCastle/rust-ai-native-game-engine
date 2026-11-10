@@ -1,6 +1,6 @@
 //! Create one offline, versioned Arena starter with an explicit authoring seed.
 use std::{collections::BTreeMap, ffi::OsString, path::PathBuf};
-const HELP: &str = "Usage: orr_new_arena --output ABSOLUTE_NEW_DIR --template arena-2d-v1 --seed KEY\n\nCreates one sprite-only two-player Arena starter on Linux. The parent must exist;\nall existing destinations are rejected. KEY is 1..128 ASCII letters, digits,\ndots, underscores or hyphens. Same seed/template/tool reproduces project bytes;\nchoose a different seed for fresh authored GUIDs. Runtime identity and shared\nplayer preferences do not change. No downloads, scripts or builds are executed.\n\nWith collect-dodge enabled: --template collect-dodge-2d-v1 --seed KEY --game-id UUID\nrequires an explicit canonical lowercase UUIDv4 for the new game.\nWith collect-ui enabled, collect-dodge-ui-2d-v1 also installs the authored UI and Korean font.\nA reused UUID shares high-score identity; the seed does not create or change game identity.\n\nWith room-project enabled: --template room-escape-3d-v1|room-escape-character-3d-v1 --seed KEY creates a closed static-model RoomEscapeV1 starter. No --game-id or progress/save identity is accepted.\n\nWith tilemap enabled: --template arena-tilemap-2d-v1 creates a closed installed-atlas Arena background map for tilemap-enabled editor paint/erase/Undo/Save/reopen/Play. Linux creation only. Existing-project Attach, export and package changes are unsupported.\n\nWith tilemap enabled: --template arena-custom-tileset-2d-v1 --tileset-package ABS_DIR --tile-width N --tile-height N creates a new empty map from a local four-file sprite package. The package requires orr.package.json, sprites.json, a PNG atlas and LICENSE.txt. Actor art is retained; source files are unchanged.\n\nWith project-create enabled: --template arena-custom-sprites-2d-v1 --sprite-package ABS_DIR --idle-clip ID --walk-clip ID --units-per-pixel N replaces only the camera-follow hero art. The local four-file package requires a PNG atlas, sprites.json, LICENSE.txt and manifest. Clip IDs are explicit and may be equal; scale must be finite in 0.0001..=100. Target art and Arena gameplay are retained.";
+const HELP: &str = "Usage: orr_new_arena --output ABSOLUTE_NEW_DIR --template arena-2d-v1 --seed KEY\n\nCreates one sprite-only two-player Arena starter on Linux. The parent must exist;\nall existing destinations are rejected. KEY is 1..128 ASCII letters, digits,\ndots, underscores or hyphens. Same seed/template/tool reproduces project bytes;\nchoose a different seed for fresh authored GUIDs. Runtime identity and shared\nplayer preferences do not change. No downloads, scripts or builds are executed.\n\nWith collect-dodge enabled: --template collect-dodge-2d-v1 --seed KEY --game-id UUID\nrequires an explicit canonical lowercase UUIDv4 for the new game.\nWith collect-ui enabled, collect-dodge-ui-2d-v1 also installs the authored UI and Korean font.\nA reused UUID shares high-score identity; the seed does not create or change game identity.\n\nWith room-project enabled: --template room-escape-3d-v1|room-escape-character-3d-v1 --seed KEY creates a closed static-model RoomEscapeV1 starter. No --game-id or progress/save identity is accepted. Plain room-escape-3d-v1 accepts optional --room-layout FILE.json for schema-1 actor positions and replacement walls.\n\nWith tilemap enabled: --template arena-tilemap-2d-v1 creates a closed installed-atlas Arena background map for tilemap-enabled editor paint/erase/Undo/Save/reopen/Play. Linux creation only. Existing-project Attach, export and package changes are unsupported.\n\nWith tilemap enabled: --template arena-custom-tileset-2d-v1 --tileset-package ABS_DIR --tile-width N --tile-height N creates a new empty map from a local four-file sprite package. The package requires orr.package.json, sprites.json, a PNG atlas and LICENSE.txt. Actor art is retained; source files are unchanged.\n\nWith project-create enabled: --template arena-custom-sprites-2d-v1 --sprite-package ABS_DIR --idle-clip ID --walk-clip ID --units-per-pixel N replaces only the camera-follow hero art. The local four-file package requires a PNG atlas, sprites.json, LICENSE.txt and manifest. Clip IDs are explicit and may be equal; scale must be finite in 0.0001..=100. Target art and Arena gameplay are retained.";
 fn main() {
     if let Err((code, error)) = run() {
         eprintln!("error: {error}");
@@ -27,6 +27,9 @@ fn run() -> Result<(), (i32, String)> {
                 .into_string()
                 .map_err(|_| (2, "seed must be ASCII".into()))?,
         };
+        if args.contains_key("--room-layout") && options.template != orr_sample::project_create::ROOM_TEMPLATE {
+            return Err((2, "--room-layout requires room-escape-3d-v1".into()));
+        }
         let custom_sprites = options.template == orr_sample::project_create::CUSTOM_SPRITE_TEMPLATE;
         if !custom_sprites
             && [
@@ -117,7 +120,12 @@ fn run() -> Result<(), (i32, String)> {
             if args.contains_key("--game-id") {
                 return Err((2, "--game-id is only valid for CollectDodge".into()));
             }
-            orr_sample::project_create::create(&options)
+            if let Some(recipe) = args.get("--room-layout") {
+                #[cfg(feature = "room-project")]
+                { orr_sample::project_create::create_room_layout(&options, &PathBuf::from(recipe)) }
+                #[cfg(not(feature = "room-project"))]
+                { let _ = recipe; Err("Room layout requires room-project feature".into()) }
+            } else { orr_sample::project_create::create(&options) }
         }
         .map_err(|e| (1, e))?;
         println!("created project: {}", report.output.display());
@@ -143,7 +151,7 @@ fn parse(args: Vec<OsString>) -> Result<BTreeMap<String, OsString>, String> {
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         let option = arg.to_str().ok_or("option names must be UTF-8")?;
-        if !matches!(option, "--output" | "--template" | "--seed" | "--game-id" | "--tileset-package" | "--tile-width" | "--tile-height" | "--sprite-package" | "--idle-clip" | "--walk-clip" | "--units-per-pixel") {
+        if !matches!(option, "--output" | "--template" | "--seed" | "--game-id" | "--tileset-package" | "--tile-width" | "--tile-height" | "--sprite-package" | "--idle-clip" | "--walk-clip" | "--units-per-pixel" | "--room-layout") {
             return Err(format!("unknown option {option}; use --help for usage"));
         }
         if options.contains_key(option) {

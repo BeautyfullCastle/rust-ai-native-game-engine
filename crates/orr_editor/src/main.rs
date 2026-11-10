@@ -125,6 +125,8 @@ fn main() {
             }
             #[cfg(feature="room-project")]
             if let Some(mut project)=room_project {
+                #[cfg(feature = "room-input-map-play")]
+                app.install_room_project_controls(project.path(), project.controls().map(|controls| controls.bytes.as_slice())).unwrap_or_else(|error|fail(&error));
                 #[cfg(feature = "room-lighting")]
                 if let Some(lighting) = project.take_lighting() {
                     app.editor.install_room_lighting(lighting.document.clone()).unwrap_or_else(|error|fail(&error));

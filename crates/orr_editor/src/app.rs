@@ -78,6 +78,10 @@ mod mesh_player_session;
 #[path = "app/room_camera_capture.rs"]
 mod room_camera_capture;
 
+#[cfg(feature = "room-input-map-play")]
+#[path = "app/room_controls.rs"]
+mod room_controls;
+
 #[cfg(feature = "room-authoring")]
 #[path = "app/room_wall_footprint.rs"]
 mod room_wall_footprint;
@@ -263,6 +267,8 @@ pub struct UiState {
     static_actions: static_actions::Router,
     input_player: u8,
     take_control: bool,
+    #[cfg(feature = "room-input-map-play")]
+    room_controls: room_controls::Controls,
     #[cfg(all(feature = "collect-ui", feature = "collect-input-map-editor"))]
     collect_controls: collect_controls::CollectControls,
     #[cfg(feature = "animated-models")]
@@ -1008,6 +1014,8 @@ impl EditorApp {
         let candidate = (|| -> Result<Self, String> {
             let mut prepared = orr_sample::windows_project::open_room_project(&root)?;
             let expected_checksum = prepared.scene().frame().checksum();
+            #[cfg(feature = "room-input-map-play")]
+            let controls = (prepared.path().to_path_buf(), prepared.controls().map(|controls| controls.bytes.clone()));
             let camera = prepared.take_camera();
             let (_, path, scene, models) = prepared.into_parts();
             let mut editor = Editor::start(&crate::HostSpec::PreparedRoom {
@@ -1027,6 +1035,8 @@ impl EditorApp {
             let mut replacement = Self::new(editor, self.render_state.clone());
             replacement.models.install_room(models)?;
             replacement.room_camera = camera;
+            #[cfg(feature = "room-input-map-play")]
+            replacement.install_room_project_controls(&controls.0, controls.1.as_deref())?;
             replacement.viewport_hdr_disabled = self.viewport_hdr_disabled;
             if let Some(blocked) = self.windows_project_blocker() { return Err(blocked); }
             if self.editor.game() != original_game || self.editor.windows_project_source_stamp()? != original {
@@ -1141,8 +1151,12 @@ impl EditorApp {
         } else { false };
         #[cfg(not(all(feature = "collect-ui", feature = "collect-input-map-editor")))]
         let mapped_release = false;
+        #[cfg(feature = "room-input-map-play")]
+        let room_owned_on_entry = self.route_room_controls(&ctx, input_focus && !outside_click);
+        #[cfg(not(feature = "room-input-map-play"))]
+        let room_owned_on_entry = false;
         if self.ui.dialog.is_some() || self.editor.previewing().is_some()
-            || ctx.input(|input| !mapped_collect && input.key_pressed(Key::Escape)) || mapped_release {
+            || ctx.input(|input| !mapped_collect && !room_owned_on_entry && input.key_pressed(Key::Escape)) || mapped_release {
             self.editor.release_control();
         } else if keyboard_focus_lost || ctx.input(|input| !input.focused) {
             #[cfg(feature = "static-gameplay")]
@@ -1256,7 +1270,7 @@ impl EditorApp {
         }
         // Managed Collect resolves physical Escape before pump; a logical
         // Escape on another physical key must not cancel authoring or selection.
-        let editor_escape = !collect_owned_on_entry && ctx.input(|i| i.key_pressed(Key::Escape));
+        let editor_escape = !collect_owned_on_entry && !room_owned_on_entry && ctx.input(|i| i.key_pressed(Key::Escape));
         if editor_escape || ctx.input(|i| !i.focused) {
             // Escape cancels an active drag without changing its inspection
             // target. With no gesture, Escape clears the GUID selection.
@@ -1870,6 +1884,8 @@ impl EditorApp {
         if self.collect_project_dialog_open() { return; }
         #[cfg(all(feature = "collect-ui", feature = "collect-input-map-editor"))]
         self.ui.collect_controls.sync_session(self.editor.scene_load_epoch(), self.editor.game().is_collect());
+        #[cfg(feature = "room-input-map-play")]
+        self.show_room_controls(ui);
         if self.editor.game().has_keyboard() {
             ui.horizontal_wrapped(|ui| {
                 use crate::editor::input::Phase;
@@ -1896,7 +1912,13 @@ impl EditorApp {
                 let mapped_collect_hint = self.editor.game().is_collect().then(|| format!("Active · {}", self.ui.collect_controls.hint()));
                 #[cfg(not(all(feature = "collect-ui", feature = "collect-input-map-editor")))]
                 let mapped_collect_hint: Option<String> = None;
-                ui.label(match phase { Phase::Off => self.editor.input_hint(), Phase::Claiming => "Claiming…", Phase::Active => if let Some(hint) = self.editor.game().registered_input_hint() { hint } else if self.editor.game().is_room() { "Active · WASD/arrows · E interact · Escape releases" } else if self.editor.game().is_collect() { mapped_collect_hint.as_deref().unwrap_or("Active · WASD/arrows · press Space to restart · Escape releases") } else { "Active · WASD/arrows · hold Space to fire · Escape releases" }, Phase::Releasing => "Releasing…" });
+                #[cfg(feature = "room-input-map-play")]
+                let room_controls_hint = format!("Active · {} · Escape releases", self.ui.room_controls.hint());
+                #[cfg(feature = "room-input-map-play")]
+                let room_hint = room_controls_hint.as_str();
+                #[cfg(not(feature = "room-input-map-play"))]
+                let room_hint = "Active · WASD/arrows · E interact · Escape releases";
+                ui.label(match phase { Phase::Off => self.editor.input_hint(), Phase::Claiming => "Claiming…", Phase::Active => if let Some(hint) = self.editor.game().registered_input_hint() { hint } else if self.editor.game().is_room() { room_hint } else if self.editor.game().is_collect() { mapped_collect_hint.as_deref().unwrap_or("Active · WASD/arrows · press Space to restart · Escape releases") } else { "Active · WASD/arrows · hold Space to fire · Escape releases" }, Phase::Releasing => "Releasing…" });
             });
             #[cfg(all(feature = "collect-ui", feature = "collect-input-map-editor"))]
             if self.editor.game().is_collect() {
@@ -2294,7 +2316,10 @@ impl EditorApp {
             let run=self.editor.snapshot().map(|snapshot|*snapshot.predicted().singleton::<orr_sample::room_game::RoomRun>());
             ui.horizontal(|ui| {
                 if let Some(run)=run {
+                    #[cfg(not(feature = "room-input-map-play"))]
                     ui.label(if run.won!=0 { "Escaped!" } else if run.key_collected!=0 { "Key collected · Find exit and press E" } else { "Exit locked · Find key and press E" });
+                    #[cfg(feature = "room-input-map-play")]
+                    ui.label(if run.won!=0 { "Escaped!" } else if run.key_collected!=0 { "Key collected · Find exit and use Interact" } else { "Exit locked · Find key and use Interact" });
                 }
                 if ui.add_enabled(self.editor.mode()==Mode::Play,egui::Button::new("Restart room")).clicked() {
                     self.editor.stop();
@@ -2317,6 +2342,20 @@ impl EditorApp {
                 self.ui.take_control=false;
                 if self.ui.dialog.is_none() && ui.input(|i|i.focused) { resp.request_focus(); self.editor.take_control(0,true); }
             }
+            #[cfg(feature = "room-input-map-play")]
+            {
+                let controlled = resp.has_focus() && self.ui.dialog.is_none()
+                    && ui.input(|i| i.focused) && self.editor.can_take_control()
+                    && matches!(self.editor.input_phase(), crate::editor::input::Phase::Claiming | crate::editor::input::Phase::Active);
+                if resp.has_focus() {
+                    ui.memory_mut(|memory| memory.set_focus_lock_filter(resp.id, egui::EventFilter {
+                        horizontal_arrows: controlled, vertical_arrows: controlled,
+                        escape: controlled, tab: controlled,
+                    }));
+                }
+            }
+            #[cfg(not(feature = "room-input-map-play"))]
+            {
             let focused=resp.has_focus() && self.ui.dialog.is_none() && ui.input(|i|i.focused && !i.key_pressed(Key::Escape));
             let keys=ui.input(|i|crate::editor::input::Keys {
                 x:i8::from(i.key_down(Key::D)||i.key_down(Key::ArrowRight))-i8::from(i.key_down(Key::A)||i.key_down(Key::ArrowLeft)),
@@ -2327,6 +2366,7 @@ impl EditorApp {
             if resp.has_focus() {
                 let controlled=focused && self.editor.input_phase()==crate::editor::input::Phase::Active;
                 ui.memory_mut(|memory|memory.set_focus_lock_filter(resp.id,egui::EventFilter { horizontal_arrows:controlled,vertical_arrows:controlled,..Default::default() }));
+            }
             }
         }
         let ppp=ui.ctx().pixels_per_point();

@@ -152,6 +152,10 @@ pub mod image_reimport;
 #[cfg(feature = "room-project")]
 pub mod room_project;
 #[cfg(feature = "room-project")]
+pub mod room_layout;
+#[cfg(feature = "room-input-actions")]
+pub mod room_controls;
+#[cfg(feature = "room-project")]
 pub mod room_camera;
 #[cfg(feature = "room-project")]
 pub use orr_games::room_escape_game as room_game;
@@ -211,3 +215,6 @@ pub(crate) mod defense_pixel_motion;
 
 #[cfg(all(target_os="linux",feature="project-create",feature="room-lighting"))]
 pub mod room_lit_starter;
+
+#[cfg(all(feature = "room-controls-attach", target_os = "linux", target_arch = "x86_64"))]
+pub mod room_controls_attach;

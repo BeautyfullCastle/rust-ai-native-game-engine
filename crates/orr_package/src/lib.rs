@@ -257,6 +257,9 @@ pub struct ProjectEntry {
     /// Optional Room state-selected character clips. Additive: preserve legacy sequence slots.
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present_sprites")]
     pub character: Option<String>,
+    /// Optional Room-only authored physical-key action map. Additive trailing field.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present_sprites")]
+    pub controls: Option<String>,
 
 }
 
@@ -347,7 +350,7 @@ impl ProjectManifest {
                     let aliases = [Some("orr.project.json"), Some("orr.packages.lock.json"), Some(entry.scene.as_str()),
                         entry.models.as_deref(), entry.camera.as_deref(), entry.tilemap.as_deref(), entry.lighting.as_deref(),
                         entry.sprites.as_deref(),
-                        entry.ui.as_ref().and_then(|ui| ui.document.as_deref())];
+                        entry.ui.as_ref().and_then(|ui| ui.document.as_deref()), entry.controls.as_deref()];
                     if entry.game != ProjectGame::RoomEscapeV1 || !matches!(self.schema, 2 | 3)
                         || character.contains('/') || character.starts_with('.')
                         || aliases.into_iter().flatten().any(|path| path.eq_ignore_ascii_case(character))
@@ -358,11 +361,22 @@ impl ProjectManifest {
                     let aliases = [Some("orr.project.json"), Some("orr.packages.lock.json"), Some(entry.scene.as_str()),
                         entry.models.as_deref(), entry.camera.as_deref(), entry.tilemap.as_deref(),
                         entry.sprites.as_deref(),
-                        entry.ui.as_ref().and_then(|ui| ui.document.as_deref())];
+                        entry.ui.as_ref().and_then(|ui| ui.document.as_deref()), entry.controls.as_deref()];
                     if entry.game != ProjectGame::RoomEscapeV1 || !matches!(self.schema, 2 | 3)
                         || lighting.contains('/') || lighting.starts_with('.')
                         || aliases.into_iter().flatten().any(|path| path.eq_ignore_ascii_case(lighting))
                     { return fail("lighting requires a distinct root-level Room presentation document"); }
+                }
+                if let Some(controls) = &entry.controls {
+                    portable(controls)?;
+                    let aliases = [Some("orr.project.json"), Some("orr.packages.lock.json"), Some(entry.scene.as_str()),
+                        entry.models.as_deref(), entry.camera.as_deref(), entry.tilemap.as_deref(), entry.lighting.as_deref(),
+                        entry.character.as_deref(), entry.sprites.as_deref(),
+                        entry.ui.as_ref().and_then(|ui| ui.document.as_deref())];
+                    if entry.game != ProjectGame::RoomEscapeV1 || !matches!(self.schema, 2 | 3)
+                        || controls.contains('/') || controls.starts_with('.')
+                        || aliases.into_iter().flatten().any(|path| path.eq_ignore_ascii_case(controls))
+                    { return fail("controls require a distinct root-level Room input document"); }
                 }
                 if let Some(camera) = &entry.camera {
                     portable(camera)?;
@@ -1182,6 +1196,72 @@ mod tests {
             r#"{"schema":2,"engine":"*","entry":null}"#,
             r#"{"schema":2,"engine":"*","progress":null}"#,
         ] { assert!(serde_json::from_str::<ProjectManifest>(encoded).is_err()); }
+    }
+
+    #[test]
+    fn room_controls_is_trailing_optional_non_null_and_root_distinct() {
+        let legacy: ProjectEntry =
+            serde_json::from_str(r#"{"game":"room-escape-v1","scene":"room.yaml"}"#).unwrap();
+        let serialized = serde_json::to_value(&legacy).unwrap();
+        assert!(serialized.get("controls").is_none());
+        assert_eq!(
+            serde_json::to_string(&legacy).unwrap(),
+            r#"{"game":"room-escape-v1","scene":"room.yaml"}"#
+        );
+        assert_eq!(legacy.controls, None);
+        let mut sequence = serde_json::json!([
+            "tile.json",
+            "camera.json",
+            "room-escape-v1",
+            "room.yaml",
+            "sprites.json",
+            "models.json",
+            {
+                "profile": "arena-korean-v1",
+                "font": { "package": "p", "asset": "a.otf" }
+            },
+            "lighting.json",
+            "character.json"
+        ]);
+        let old: ProjectEntry = serde_json::from_value(sequence.clone()).unwrap();
+        assert_eq!(old.controls, None);
+        sequence.as_array_mut().unwrap().push("room.controls.json".into());
+        let extended: ProjectEntry = serde_json::from_value(sequence).unwrap();
+        assert_eq!(extended.controls.as_deref(), Some("room.controls.json"));
+        let manifest: ProjectManifest = serde_json::from_str(
+            r#"{"schema":2,"engine":"*","entry":{"game":"room-escape-v1","scene":"room.yaml","models":"models.json","controls":"room.controls.json"}}"#,
+        )
+        .unwrap();
+        manifest.validate(&Runtime::content_only()).unwrap();
+        let schema_three: ProjectManifest = serde_json::from_str(
+            r#"{"schema":3,"engine":"*","entry":{"game":"room-escape-v1","scene":"room.yaml","models":"models.json","controls":"room.controls.json"},"progress":{"schema":1,"game_id":"12345678-1234-4234-8234-123456789abc","profile":"room-escape-clear-v1"}}"#,
+        )
+        .unwrap();
+        schema_three.validate(&Runtime::content_only()).unwrap();
+        assert_eq!(
+            schema_three
+                .entry
+                .as_ref()
+                .unwrap()
+                .controls
+                .as_deref(),
+            Some("room.controls.json")
+        );
+        let null: serde_json::Result<ProjectManifest> = serde_json::from_str(
+            r#"{"schema":2,"engine":"*","entry":{"game":"room-escape-v1","scene":"room.yaml","models":"models.json","controls":null}}"#,
+        );
+        assert!(null.is_err());
+        for controls in [
+            "\"room.yaml\"",
+            "\"ORR.PROJECT.JSON\"",
+            "\"sub/controls.json\"",
+        ] {
+            let raw = format!(
+                r#"{{"schema":2,"engine":"*","entry":{{"game":"room-escape-v1","scene":"room.yaml","models":"models.json","controls":{controls}}}}}"#
+            );
+            let parsed: ProjectManifest = serde_json::from_str(&raw).unwrap();
+            assert!(parsed.validate(&Runtime::content_only()).is_err());
+        }
     }
 
     #[test]

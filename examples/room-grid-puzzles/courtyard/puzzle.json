@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "id": "courtyard",
+  "border": true,
+  "merge_walls": true,
+  "openings": [],
+  "winning_ticks": 202,
+  "shortcut_ticks": 122
+}

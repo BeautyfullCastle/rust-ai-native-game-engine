@@ -7,6 +7,10 @@
 mod collect_template;
 #[cfg(feature = "room-project")]
 mod room_template;
+#[cfg(feature = "room-project")]
+mod room_layout;
+#[cfg(feature = "room-project")]
+pub use room_layout::create_room_layout;
 #[cfg(feature = "room-character")]
 mod character_template;
 mod template;

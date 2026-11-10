@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "id": "switchback",
+  "border": true,
+  "merge_walls": true,
+  "openings": [],
+  "winning_ticks": 362,
+  "shortcut_ticks": 202
+}

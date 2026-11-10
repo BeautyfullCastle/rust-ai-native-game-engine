@@ -303,3 +303,6 @@ mod json_output;
 
 #[cfg(any(feature="mesh-patrol",feature="terrain-patrol"))]
 pub(crate) mod waypoint_order;
+
+#[cfg(feature = "room-input-map-play")]
+pub mod room_input_map_authoring;

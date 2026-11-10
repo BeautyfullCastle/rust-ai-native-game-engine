@@ -237,6 +237,14 @@ impl ProjectSnapshot {
         if let Some(sidecar) = &entry.lighting { plan.add(sidecar,4096)?; }
         if let Some(sidecar) = &entry.character { plan.add(sidecar,4096)?; }
         if let Some(sidecar) = &entry.camera { plan.add(sidecar,4096)?; }
+        #[cfg(all(feature = "room-project", not(feature = "room-input-actions")))]
+        if entry.controls.is_some() {
+            return Err("Room controls export requires --features room-input-actions".into());
+        }
+        #[cfg(feature = "room-input-actions")]
+        if let Some(sidecar) = &entry.controls {
+            plan.add(sidecar, orr_input::MAX_FILE_BYTES as u64)?;
+        }
         if let Some(sidecar) = &entry.sprites {
             plan.add(sidecar, MAX_JSON_BYTES)?;
         }
@@ -337,6 +345,18 @@ impl ProjectSnapshot {
                 return Err("camera changed after runtime admission".into());
             }
             file.role = "camera_sidecar"; files.push(file);
+        }
+        #[cfg(feature = "room-input-actions")]
+        if let Some(path) = &entry.controls {
+            let super::Prepared::Room(room) = &prepared else { return Err("controls require Room consumer".into()); };
+            let admitted = room.controls().ok_or("missing admitted Room controls")?;
+            let mut file = SnapshotFile::read(&root.join(path), path, orr_input::MAX_FILE_BYTES as u64)?;
+            if file.source != admitted.path || file.bytes != admitted.bytes
+                || crate::room_controls::RoomControls::load(&file.bytes)? != admitted.map {
+                return Err("Room controls changed after runtime admission".into());
+            }
+            file.role = "room_controls_sidecar";
+            files.push(file);
         }
         #[cfg(feature = "room-project")]
         if let Some(path) = &entry.models {
@@ -633,6 +653,104 @@ mod tests {
             .unwrap();
         copy_tree(&source, dir.path());
         dir
+    }
+
+    #[cfg(all(feature = "room-input-actions", feature = "project-create", feature = "room-project"))]
+    #[test]
+    fn room_controls_snapshot_pins_role_bytes_digest_and_detects_tampering() {
+        let dir = temporary();
+        let options = crate::project_create::CreateOptions {
+            output: dir.path().join("room"),
+            template: crate::project_create::ROOM_TEMPLATE.into(),
+            seed: "export-room-controls".into(),
+        };
+        crate::project_create::create(&options).unwrap();
+        let manifest_path = options.output.join(PROJECT_MANIFEST);
+        let mut manifest: serde_json::Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["entry"]["controls"] = "room.controls.json".into();
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let controls = serde_json::to_vec(&crate::room_controls::RoomControls::default_map()).unwrap();
+        let controls_path = options.output.join("room.controls.json");
+        fs::write(&controls_path, &controls).unwrap();
+
+        let snapshot = ProjectSnapshot::open_profile(&options.output, super::super::Profile::Room).unwrap();
+        let file = snapshot.files.iter().find(|file| file.relative == "room.controls.json").unwrap();
+        assert_eq!(file.role, "room_controls_sidecar");
+        assert_eq!(file.bytes, controls);
+        assert_eq!(file.sha256, hash(&controls));
+        let manifest_file = snapshot.files.iter().find(|file| file.relative == PROJECT_MANIFEST).unwrap();
+        assert_eq!(manifest_file.role, "project_manifest");
+        assert_eq!(manifest_file.bytes, fs::read(&manifest_path).unwrap());
+        assert!(manifest_file.bytes.windows(b"room.controls.json".len()).any(|window| window == b"room.controls.json"));
+        snapshot.recheck().unwrap();
+        fs::write(&controls_path, b"tampered").unwrap();
+        assert!(snapshot.recheck().unwrap_err().contains("changed"));
+    }
+
+    #[cfg(all(feature = "room-input-actions", feature = "project-create", feature = "room-project"))]
+    #[test]
+    fn room_controls_mutation_before_publish_leaves_no_export() {
+        let dir = temporary();
+        let options = crate::project_create::CreateOptions {
+            output: dir.path().join("room"),
+            template: crate::project_create::ROOM_TEMPLATE.into(),
+            seed: "export-room-controls-tamper".into(),
+        };
+        crate::project_create::create(&options).unwrap();
+        let project = &options.output;
+        let manifest_path = project.join(PROJECT_MANIFEST);
+        let mut manifest: serde_json::Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["entry"]["controls"] = "room.controls.json".into();
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let controls_path = project.join("room.controls.json");
+        fs::write(&controls_path, serde_json::to_vec(&crate::room_controls::RoomControls::default_map()).unwrap()).unwrap();
+        let runtime = std::env::current_exe().unwrap();
+        let runtime_sha256 = hash(&fs::read(&runtime).unwrap());
+        let export = super::super::ExportOptions {
+            project: project.clone(),
+            runtime,
+            runtime_sha256,
+            output: dir.path().join("export"),
+            trusted_runtime: true,
+            source_revision: Some("room-controls-test".into()),
+        };
+        let expected = super::super::profile::Prepared::open(project, super::super::Profile::Room).unwrap().smoke().unwrap();
+        let result = super::super::export_profile_with(
+            &export,
+            super::super::Profile::Room,
+            |point| {
+                if point == "before-publish" { fs::write(&controls_path, b"changed").unwrap(); }
+                Ok(())
+            },
+            |_| Ok(expected.clone()),
+        );
+        assert!(result.unwrap_err().contains("changed"));
+        assert!(!export.output.exists());
+        assert!(fs::read_dir(dir.path()).unwrap().all(|entry| !entry.unwrap().file_name().to_string_lossy().starts_with(".orr-export-")));
+    }
+
+    #[cfg(all(not(feature = "room-input-actions"), feature = "project-create", feature = "room-project"))]
+    #[test]
+    fn room_export_admission_keeps_legacy_without_controls_and_rejects_controls_feature_off() {
+        let dir = temporary();
+        let options = crate::project_create::CreateOptions {
+            output: dir.path().join("room"),
+            template: crate::project_create::ROOM_TEMPLATE.into(),
+            seed: "export-room-controls-off".into(),
+        };
+        crate::project_create::create(&options).unwrap();
+        assert!(ProjectSnapshot::open_profile(&options.output, super::super::Profile::Room).is_ok());
+        let manifest_path = options.output.join(PROJECT_MANIFEST);
+        let mut manifest: serde_json::Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["entry"]["controls"] = "room.controls.json".into();
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        fs::write(options.output.join("room.controls.json"), b"{}").unwrap();
+        let error = match ProjectSnapshot::open_profile(&options.output, super::super::Profile::Room) {
+            Err(error) => error,
+            Ok(_) => panic!("feature-off export admitted Room controls"),
+        };
+        assert!(error.contains("room-input-actions"));
+        assert!(!dir.path().join("export").exists());
     }
 
     #[test]

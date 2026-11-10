@@ -1,0 +1,61 @@
+{
+  "schema": 1,
+  "steps": [
+    {
+      "ticks": 1,
+      "move_x": 0,
+      "move_z": 0,
+      "interact": true,
+      "expect_key": true,
+      "expect_won": false
+    },
+    {
+      "ticks": 40,
+      "move_x": 0,
+      "move_z": 1,
+      "interact": false,
+      "expect_key": true,
+      "expect_won": false
+    },
+    {
+      "ticks": 100,
+      "move_x": 1,
+      "move_z": 0,
+      "interact": false,
+      "expect_key": true,
+      "expect_won": false
+    },
+    {
+      "ticks": 80,
+      "move_x": 0,
+      "move_z": -1,
+      "interact": false,
+      "expect_key": true,
+      "expect_won": false
+    },
+    {
+      "ticks": 100,
+      "move_x": 1,
+      "move_z": 0,
+      "interact": false,
+      "expect_key": true,
+      "expect_won": false
+    },
+    {
+      "ticks": 40,
+      "move_x": 0,
+      "move_z": 1,
+      "interact": false,
+      "expect_key": true,
+      "expect_won": false
+    },
+    {
+      "ticks": 1,
+      "move_x": 0,
+      "move_z": 0,
+      "interact": true,
+      "expect_key": true,
+      "expect_won": true
+    }
+  ]
+}
