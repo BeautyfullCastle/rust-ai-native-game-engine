@@ -53,6 +53,8 @@ pub mod cli;
 pub mod diagnostics;
 pub mod editor;
 pub mod inspector;
+#[cfg(feature = "custom-inspector")]
+pub mod custom_inspector;
 pub mod game;
 #[cfg(feature = "static-games")]
 pub mod static_adapter;
