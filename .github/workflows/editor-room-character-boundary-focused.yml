@@ -1,0 +1,134 @@
+name: Editor room character boundary focused CI
+on:
+  pull_request:
+    branches:
+      - su/engine-correctness-hardening
+    types:
+      - ready_for_review
+    paths:
+      - .github/workflows/editor-room-character-boundary-focused.yml
+      - crates/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain
+      - rust-toolchain.toml
+      - .cargo/**
+      - build.rs
+      - config.toml
+permissions:
+  contents: read
+jobs:
+  editor-room-character-boundary:
+    name: Editor room character boundary
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      RUSTUP_TOOLCHAIN: 1.99.1
+      EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Check out exact PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Record exact source and prepare toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir ci-evidence
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD_SHA"
+          git rev-parse HEAD 'HEAD^{tree}' | tee ci-evidence/source-commit-and-tree.txt
+          git status --porcelain=v1 > ci-evidence/source-status.txt
+          rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
+          rustc --version --verbose | tee ci-evidence/rustc.txt
+          cargo --version | tee ci-evidence/cargo.txt
+          sudo apt-get update -q 2>&1 | tee ci-evidence/dependencies.log
+          sudo apt-get install -y -q pkg-config libasound2-dev libudev-dev libx11-dev libxkbcommon-dev libwayland-dev 2>&1 | tee -a ci-evidence/dependencies.log
+      - name: Run dependency guard and adjacent panel tests
+        shell: python {0}
+        run: |
+          import re, subprocess
+          from pathlib import Path
+          evidence = Path('ci-evidence')
+          running_re = re.compile(r'^running (\d+) tests?$', re.M)
+          summary_re = re.compile(r'^test result: (\w+)\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out; finished in ([0-9.]+)s$', re.M)
+          test_re = re.compile(r'^test (\S+) \.\.\. (ok|ignored|FAILED)$', re.M)
+          checks = [
+              ('editor-dependency-guard', 8, ['cargo','test','--release','--locked','-p','orr_editor','--test','deps','--','--test-threads=1'], 0),
+              ('room-character-panel', 24, ['cargo','test','--release','--locked','-p','orr_editor','--features','room-character,project-create','--lib','room_character_panel::tests','--','--test-threads=1'], 182),
+          ]
+          failures = []
+          for label, expected, command, expected_filtered in checks:
+              path = evidence / f'{label}.log'
+              with path.open('w', encoding='utf-8') as log:
+                  process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace', bufsize=1)
+                  lines = []
+                  for line in process.stdout:
+                      print(line, end='', flush=True); log.write(line); log.flush(); lines.append(line)
+                  code = process.wait()
+              output = ''.join(lines)
+              running = [int(n) for n in running_re.findall(output)]
+              summaries = summary_re.findall(output)
+              tests = test_re.findall(output)
+              valid = code == 0 and running == [expected] and len(summaries) == 1 and len(tests) == expected and len({name for name, _ in tests}) == expected and all(result == 'ok' for _, result in tests)
+              if len(summaries) == 1:
+                  status, passed, failed, ignored, measured, filtered, _ = summaries[0]
+                  valid = valid and status == 'ok' and tuple(map(int, (passed, failed, ignored, measured, filtered))) == (expected, 0, 0, 0, expected_filtered)
+              else:
+                  valid = False
+              print(f'Guard {label}: exit={code}, expected={expected}, running={running}, summaries={len(summaries)}, names={len(tests)}, valid={valid}')
+              if not valid: failures.append(label)
+          if failures: raise SystemExit('Focused test guard failed: ' + ', '.join(failures))
+      - name: Build the actual room escape runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --locked -p orr_sample --features room-project,room-character --bin room_escape 2>&1 | tee ci-evidence/runtime-build.log
+          test -x target/release/room_escape
+          sha256sum target/release/room_escape | tee ci-evidence/runtime-sha256.txt
+      - name: Execute both deployed-export acceptance tests
+        env:
+          ORR_ESCAPE_ONCE_RUNTIME: ${{ github.workspace }}/target/release/room_escape
+          ORR_MOTION_RUNTIME: ${{ github.workspace }}/target/release/room_escape
+        shell: python {0}
+        run: |
+          import re, subprocess
+          from pathlib import Path
+          evidence = Path('ci-evidence')
+          command = ['cargo','test','--release','--locked','-p','orr_editor','--features','windows-export,room-character,project-create','--test','room_character_deployed_export','--','--ignored','--test-threads=1']
+          path = evidence / 'deployed-export-ignored-tests.log'
+          with path.open('w', encoding='utf-8') as log:
+              process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace', bufsize=1)
+              lines = []
+              for line in process.stdout:
+                  print(line, end='', flush=True); log.write(line); log.flush(); lines.append(line)
+              code = process.wait()
+          output = ''.join(lines)
+          running = re.findall(r'^running (\d+) tests?$', output, re.M)
+          summaries = re.findall(r'^test result: (\w+)\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out; finished in ([0-9.]+)s$', output, re.M)
+          names = re.findall(r'^test (\S+) \.\.\. (ok|ignored|FAILED)$', output, re.M)
+          valid = code == 0 and running == ['2'] and len(summaries) == 1 and summaries[0][:6] == ('ok','2','0','0','0','0') and len(names) == len({name for name, _ in names}) == 2 and all(result == 'ok' for _, result in names)
+          print(f'Guard deployed-export-ignored-tests: exit={code}, running={running}, summaries={len(summaries)}, names={len(names)}, valid={valid}')
+          if not valid: raise SystemExit('Both ignored export tests must actually execute and pass')
+      - name: Run strict Clippy for the actual acceptance target
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy --release --locked -p orr_editor --features windows-export,room-character,project-create --test room_character_deployed_export -- -D warnings 2>&1 | tee ci-evidence/clippy-deployed-export.log
+      - name: Check new Rust 2021 integration test formatting
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustfmt --edition 2021 --config skip_children=true --check crates/orr_editor/tests/room_character_deployed_export.rs 2>&1 | tee ci-evidence/rustfmt-new-test.log
+      - name: Preserve every original result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: editor-room-character-boundary-${{ github.event.pull_request.head.sha }}-${{ github.run_attempt }}
+          path: ci-evidence
+          if-no-files-found: error
