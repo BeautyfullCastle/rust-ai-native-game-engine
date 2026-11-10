@@ -125,6 +125,15 @@ jobs:
                   traceback.print_exc()
 
           expected_inventories = {
+              'playtest-keys-off-cli': [
+                  'key_scripts_require_explicit_compiled_support',
+              ],
+              'playtest-keys-cli': [
+                  'enabled::controls_are_required_read_fresh_and_never_fallback_on_invalid_project',
+                  'enabled::key_script_validation_is_strict_before_project_admission',
+                  'enabled::mapped_keys_win_repeat_and_report_exact_admitted_map_without_writes',
+                  'enabled::maximum_key_script_report_is_bounded',
+              ],
               'room-layout-shared-parser': [
                   'room_layout::tests::bounded_strict_shared_recipe',
               ],
@@ -287,6 +296,8 @@ jobs:
               on = 'room-input-actions,project-create,project-export'
               off = 'room-project,project-create,project-export'
               suites = [
+                  ('playtest-keys-off-cli', 'orr_sample', 'room-playtest,project-create', ['--test', 'room_playtest_keys_cli']),
+                  ('playtest-keys-cli', 'orr_sample', 'room-playtest,project-create,room-input-actions', ['--test', 'room_playtest_keys_cli']),
                   ('room-layout-shared-parser', 'orr_sample', 'room-project', ['--lib', 'room_layout::']),
                   ('editor-layout-import-backend', 'orr_editor', 'room-authoring', ['--lib', 'room_authoring::layout_import::']),
                   ('editor-layout-import-controls-backend', 'orr_editor', 'room-authoring,room-input-map-play', ['--lib', 'room_authoring::layout_import::']),
@@ -323,6 +334,9 @@ jobs:
               attempt('python-controls', python_tests)
 
               for label, package, features, targets in [
+                  ('playtest-keys-bin-clippy', 'orr_sample', 'room-playtest,room-input-actions', ['--bin', 'orr_playtest_room']),
+                  ('playtest-keys-cli-clippy', 'orr_sample', 'room-playtest,project-create,room-input-actions', ['--test', 'room_playtest_keys_cli']),
+                  ('playtest-keys-off-cli-clippy', 'orr_sample', 'room-playtest,project-create', ['--test', 'room_playtest_keys_cli']),
                   ('room-layout-parser-clippy', 'orr_sample', 'room-project', ['--lib']),
                   ('editor-layout-import-controls-clippy', 'orr_editor', 'room-authoring,room-input-map-play', ['--lib', '--bin', 'orr_editor']),
                   ('editor-layout-import-production-clippy', 'orr_editor', 'room-authoring', ['--lib', '--bin', 'orr_editor']),
@@ -356,6 +370,13 @@ jobs:
                   binary = Path(os.environ['CARGO_TARGET_DIR']) / 'release' / 'orr_playtest_room'
                   (evidence / 'fresh-playtest-binary.json').write_text(json.dumps({'orr_playtest_room': hashlib.sha256(binary.read_bytes()).hexdigest()}, indent=2) + '\n')
               attempt('playtest-production', playtest_production)
+
+              def playtest_keys_production():
+                  # Fresh opt-in producer, separate from schema-1 production and test feature closures.
+                  run('playtest-keys-production-build', ['cargo', 'build', '--locked', '--release', '-p', 'orr_sample', '--no-default-features', '--features', 'room-playtest,room-input-actions', '--bin', 'orr_playtest_room'])
+                  binary = Path(os.environ['CARGO_TARGET_DIR']) / 'release' / 'orr_playtest_room'
+                  (evidence / 'fresh-playtest-keys-binary.json').write_text(json.dumps({'orr_playtest_room': hashlib.sha256(binary.read_bytes()).hexdigest()}, indent=2) + '\n')
+              attempt('playtest-keys-production', playtest_keys_production)
 
               def room_layout_production():
                   # Minimal creator feature closure, distinct from the broader export/attachment builds.

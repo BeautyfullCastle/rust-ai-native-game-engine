@@ -1,19 +1,17 @@
 # Saved Room gameplay checks
 
-Build `orr_playtest_room` with the default-off `room-playtest` feature. On Linux,
-run `orr_playtest_room --project PATH --script route.json`. This reads an admitted
-plain Room project and simulates its authored scene without opening a window or
-writing project files. It does not load or save checkpoint progress.
+Build `orr_playtest_room` with `room-playtest`. On Linux, run `orr_playtest_room --project PATH --script route.json`. This reads an admitted
+plain Room project and simulates its authored scene without windows or project writes. It does not load or save checkpoint progress.
 
-A strict JSON script uses `schema: 1` and a nonempty `steps` array. Every step
+A JSON script uses `schema: 1` and a nonempty `steps` array. Every step
 requires six fields: `ticks`, `move_x`, `move_z`, `interact`, `expect_key`, and
 `expect_won`. Axes are integers -1, 0, or 1; the last three fields are booleans.
-Each step replaces the complete logical input for its duration, then compares
+Each step replaces logical input for its duration, then compares
 key possession and victory with the expected values. A zero-tick step checks
 state without changing input history. Use a positive-duration `interact: false`
 step to release interaction before a second press.
 
-For the generated Room starter, this sequence completes the game:
+The generated Room starter accepts:
 
 ```json
 {"schema":1,"steps":[
@@ -32,8 +30,8 @@ Frame checksum; failure identifies the first mismatching step and returns exit
 script need not end in victory unless it explicitly expects victory.
 
 This is a repeatable CPU gameplay check, not an automatic solver or a recording
-format. It does not test physical keys, authored key bindings, presentation,
-audio, exported launchers or native windows. The consumer admits plain Room
+format. Schema 1 does not test physical keys, authored key bindings, presentation,
+audio, exported launchers or native windows. Schema-1 scripts admit plain Room
 projects only; optional controls, animated models, lighting, character and progress declarations remain
 unsupported even when dependencies have those features enabled. Validated camera and static model metadata are admitted but not rendered or exercised.
 Output includes SHA-256 of the captured script bytes and admitted scene text, plus
@@ -67,7 +65,40 @@ human-readable `message`. Assertion failures use `kind: "assertion"`. Branch on
 capped at 2048 UTF-8 bytes with `message_truncated`; usage messages are fixed.
 Reports are bounded below 256 KiB by the script-step and diagnostic limits.
 
-For example, `expected.won: true` with `observed.won: false` identifies an unmet
-victory assertion. A route that holds interact continuously must release it
-before pressing again at the exit. Correct the route or authored scene, then
-rerun; this command never edits either file or promises that a retry will pass.
+## Check authored controls with supplied key identities
+
+Build with both `room-playtest,room-input-actions` and use a **schema-2** script
+for a project with admitted authored controls. Each step requires `ticks`,
+`held`, `expect_key` and `expect_won`. For example, after assigning Space to
+interact and L to right:
+
+```json
+{"schema":2,"steps":[
+  {"ticks":1,"held":["space"],"expect_key":true,"expect_won":false},
+  {"ticks":60,"held":["l"],"expect_key":true,"expect_won":false},
+  {"ticks":1,"held":["space"],"expect_key":true,"expect_won":true}
+]}
+```
+
+`held` replaces the entire held set for that step: at most eight distinct
+snake-case engine key names, such as `a`, `space`, or `arrow_right`. Unknown,
+duplicate, R and Escape keys are rejected. Empty `held` is neutral. Unbound keys
+are valid but have no action. Aliases do not multiply movement and opposing
+movement actions cancel. A zero-tick boundary does not release interaction;
+release for at least one simulation tick before pressing again. All existing
+byte, step, tick, file and project-admission limits remain.
+
+This is CPU translation of **supplied physical-key identities**, not actual
+hardware input, window dispatch or focus handling. Schema 2 requires the saved
+project's controls; it never substitutes defaults. Schema 1 retains its logical
+input contract and still refuses projects declaring controls. Other optional
+project capabilities remain unsupported.
+
+After a valid schema-2 script is parsed, JSON reports use `schema: 2`, including
+project errors. Once the project and simulation are admitted, reports include
+`controls_sha256` of the captured, validated map bytes and
+`input_mode: "supplied_physical_key_identities"`. Every executed step adds
+`input` with resolved `move_x`, `move_z` and `interact`. A zero-tick boundary
+reports the requested translation without consuming it. Parsing/usage errors
+retain schema-1 error envelopes because no valid script has been accepted.
+Map hashes identify control bytes only. Each invocation admits current saved files afresh.

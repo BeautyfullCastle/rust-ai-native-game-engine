@@ -1,4 +1,4 @@
-//! Read-only, bounded gameplay acceptance for an authored plain Room project.
+//! Read-only, bounded gameplay acceptance for an authored Room project.
 use std::process::ExitCode;
 const HELP: &str = "orr_playtest_room --project PATH --script FILE.json [--json]\nLinux CPU playtest; schema 1, at most 256 steps and 6000 total ticks.\nEach step replaces logical input and checks key/win state. No project files are written.";
 
@@ -95,9 +95,37 @@ mod linux {
     const MAX_BYTES: u64 = 65536;
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
-    struct Script {
+    struct Script<T> {
         schema: u32,
-        steps: Vec<Step>,
+        steps: Vec<T>,
+    }
+    struct ParsedScript {
+        logical: Script<Step>,
+        #[cfg(feature = "room-input-actions")]
+        held: Option<Vec<Vec<orr_input::Key>>>,
+    }
+    #[cfg(feature = "room-input-actions")]
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct KeyStep {
+        ticks: u32,
+        #[serde(deserialize_with = "key_names")]
+        held: Vec<orr_input::Key>,
+        expect_key: bool,
+        expect_won: bool,
+    }
+    #[cfg(feature = "room-input-actions")]
+    fn key_names<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<orr_input::Key>, D::Error> {
+        Vec::<String>::deserialize(deserializer)?
+            .into_iter()
+            .map(|name| {
+                orr_input::Key::deserialize(serde::de::value::StringDeserializer::<D::Error>::new(
+                    name,
+                ))
+            })
+            .collect()
     }
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -115,7 +143,7 @@ mod linux {
             .map(|byte| format!("{byte:02x}"))
             .collect()
     }
-    fn read_script(path: &Path) -> Result<(Script, String), String> {
+    fn read_script(path: &Path) -> Result<(ParsedScript, String), String> {
         use rustix::fs::{open, Mode, OFlags};
         let fd = open(
             path,
@@ -135,10 +163,64 @@ mod linux {
         if bytes.len() > MAX_BYTES as usize {
             return Err("script exceeds 65536 bytes".into());
         }
-        let script: Script =
-            serde_json::from_slice(&bytes).map_err(|error| format!("invalid script: {error}"))?;
-        if script.schema != 1 || script.steps.is_empty() || script.steps.len() > 256 {
-            return Err("script requires schema 1 and 1..=256 steps".into());
+        // Preserve the original schema-1 parser and diagnostics. The bounded
+        // header selects the opt-in schema only; typed decoding always uses
+        // ORIGINAL bytes, never Value, so duplicate fields remain errors.
+        #[cfg(feature = "room-input-actions")]
+        let schema2 = serde_json::from_slice::<Script<serde::de::IgnoredAny>>(&bytes)
+            .is_ok_and(|header| header.schema == 2);
+        #[cfg(not(feature = "room-input-actions"))]
+        let schema2 = false;
+        let parsed = match schema2 {
+            false => ParsedScript {
+                logical: serde_json::from_slice(&bytes)
+                    .map_err(|error| format!("invalid script: {error}"))?,
+                #[cfg(feature = "room-input-actions")]
+                held: None,
+            },
+            #[cfg(feature = "room-input-actions")]
+            true => {
+                let keys: Script<KeyStep> = serde_json::from_slice(&bytes)
+                    .map_err(|error| format!("invalid script: {error}"))?;
+                let mut steps = Vec::new();
+                let mut held = Vec::new();
+                for step in keys.steps {
+                    let unique: std::collections::BTreeSet<_> = step.held.iter().collect();
+                    if step.held.len() > 8
+                        || unique.len() != step.held.len()
+                        || step
+                            .held
+                            .iter()
+                            .any(|key| matches!(key, orr_input::Key::R | orr_input::Key::Escape))
+                    {
+                        return Err("held requires at most 8 distinct non-reserved keys".into());
+                    }
+                    held.push(step.held);
+                    steps.push(Step {
+                        ticks: step.ticks,
+                        move_x: 0,
+                        move_z: 0,
+                        interact: false,
+                        expect_key: step.expect_key,
+                        expect_won: step.expect_won,
+                    });
+                }
+                ParsedScript {
+                    logical: Script { schema: 2, steps },
+                    held: Some(held),
+                }
+            }
+            #[cfg(not(feature = "room-input-actions"))]
+            true => unreachable!("key scripts require compiled support"),
+        };
+        let script = &parsed.logical;
+        if (!schema2 && script.schema != 1) || script.steps.is_empty() || script.steps.len() > 256 {
+            return Err(if schema2 {
+                "script requires 1..=256 steps"
+            } else {
+                "script requires schema 1 and 1..=256 steps"
+            }
+            .into());
         }
         let mut ticks = 0u32;
         for step in &script.steps {
@@ -153,7 +235,7 @@ mod linux {
                 return Err("script exceeds 6000 total ticks".into());
             }
         }
-        Ok((script, hash(&bytes)))
+        Ok((parsed, hash(&bytes)))
     }
     pub(super) fn run(
         project: &Path,
@@ -161,17 +243,32 @@ mod linux {
         json: bool,
         report: &mut serde_json::Value,
     ) -> Result<(), (&'static str, String)> {
-        let (script, script_hash) = read_script(script).map_err(|e| ("script", e))?;
+        let (parsed, script_hash) = read_script(script).map_err(|e| ("script", e))?;
         report["script_sha256"] = serde_json::json!(script_hash);
-        // This consumer deliberately admits plain Room only, independent of unified features.
+        let script = &parsed.logical;
+        if script.schema == 2 {
+            report["schema"] = serde_json::json!(2);
+        }
+        // Optional controls are consumed only by explicit schema-2 key scripts.
         let project = PreparedProject::open(project).map_err(|e| ("project", e))?;
         #[cfg(feature = "room-input-actions")]
-        if project.controls().is_some() {
+        if script.schema == 1 && project.controls().is_some() {
             return Err((
                 "unsupported_project",
                 "Room playtests do not consume authored physical controls".into(),
             ));
         }
+        #[cfg(feature = "room-input-actions")]
+        let key_controls = if script.schema == 2 {
+            Some(project.controls().ok_or_else(|| {
+                (
+                    "unsupported_project",
+                    "schema 2 requires admitted authored Room controls".into(),
+                )
+            })?)
+        } else {
+            None
+        };
         if project
             .models()
             .document
@@ -191,6 +288,18 @@ mod linux {
         report["scene_sha256"] = serde_json::json!(hash(project.scene().text().as_bytes()));
         report["initial_checksum"] =
             serde_json::json!(format!("0x{:016x}", sim.frame().checksum()));
+        #[cfg(feature = "room-input-actions")]
+        if let Some(controls) = key_controls {
+            report["schema"] = serde_json::json!(2);
+            report["controls_sha256"] = serde_json::json!(hash(&controls.bytes));
+            report["input_mode"] = serde_json::json!("supplied_physical_key_identities");
+            if !json {
+                println!(
+                    "controls_sha256={} input_mode=supplied_physical_key_identities",
+                    hash(&controls.bytes)
+                );
+            }
+        }
         if !json {
             println!(
                 "script_sha256={script_hash} scene_sha256={} engine_version={}",
@@ -198,7 +307,8 @@ mod linux {
                 env!("CARGO_PKG_VERSION")
             );
             println!(
-                "room playtest schema=1 initial_checksum=0x{:016x}",
+                "room playtest schema={} initial_checksum=0x{:016x}",
+                script.schema,
                 sim.frame().checksum()
             );
         }
@@ -208,6 +318,13 @@ mod linux {
                 move_z: step.move_z,
                 reserved: 0,
                 buttons: if step.interact { INTERACT } else { 0 },
+            };
+            #[cfg(feature = "room-input-actions")]
+            let input = match (key_controls, parsed.held.as_ref()) {
+                (Some(controls), Some(held)) => {
+                    controls.map.input_from_held(held[index].iter().copied())
+                }
+                _ => input,
             };
             for _ in 0..step.ticks {
                 let mut inputs = TickInputs::new(sim.tick() + 1, 1);
@@ -222,6 +339,15 @@ mod linux {
                 "step": index + 1, "tick": sim.tick(), "expected":{"key":step.expect_key,"won":step.expect_won},
                 "observed":{"key":key,"won":won}, "checksum":format!("0x{:016x}",sim.frame().checksum()), "passed":passed
             }));
+            #[cfg(feature = "room-input-actions")]
+            if key_controls.is_some() {
+                let boundary = report["steps"]
+                    .as_array_mut()
+                    .expect("report steps array")
+                    .last_mut()
+                    .expect("executed boundary");
+                boundary["input"] = serde_json::json!({"move_x":input.move_x,"move_z":input.move_z,"interact": input.buttons & INTERACT != 0});
+            }
             if key != step.expect_key || won != step.expect_won {
                 return Err((
                     "assertion",
