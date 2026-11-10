@@ -40,6 +40,8 @@ on:
       - 'tools/test_create_room_controls.py'
       - 'tools/create_room_grid.py'
       - 'tools/test_create_room_grid.py'
+      - 'tools/test_room_grid_puzzles.py'
+      - 'examples/room-grid-puzzles/**'
       - 'docs/room-grid-authoring.md'
       - 'tools/test_attach_room_controls.py'
   workflow_dispatch:
@@ -475,6 +477,69 @@ jobs:
                       raise RuntimeError('Grid Python inventory, execution or skip mismatch')
               attempt('python-grid', python_grid_tests)
 
+              def python_starter_tests():
+                  from textwrap import dedent
+                  expected = [
+                      'test_room_grid_puzzles.PuzzleTests.test_exact_three_starter_assets_are_admitted',
+                      'test_room_grid_puzzles.PuzzleTests.test_layouts_are_distinct_and_all_have_obstacles',
+                      'test_room_grid_puzzles.PuzzleTests.test_readme_and_fixed_catalog_do_not_execute_metadata',
+                      'test_room_grid_puzzles.PuzzleTests.test_route_rejects_missing_final_victory_and_unreleased_input',
+                      'test_room_grid_puzzles.PuzzleTests.test_route_rejects_wrong_schema_types_and_fields',
+                      'test_room_grid_puzzles.PuzzleTests.test_shortcuts_assert_victory_and_are_not_fake_successes',
+                      'test_room_grid_puzzles.PuzzleTests.test_strict_json_rejects_duplicates_constants_and_size',
+                      'test_room_grid_puzzles.PuzzleTests.test_subprocess_exit_and_both_output_streams_are_retained',
+                      'test_room_grid_puzzles.PuzzleTests.test_subprocess_output_and_time_are_bounded',
+                      'test_room_grid_puzzles.PuzzleTests.test_winning_routes_have_distinct_authored_lengths',
+                  ]
+                  runner = dedent("""
+                      import json, sys, unittest
+                      suite = unittest.defaultTestLoader.discover('tools', pattern='test_room_grid_puzzles.py')
+                      def names(node):
+                          if isinstance(node, unittest.TestSuite):
+                              return [name for child in node for name in names(child)]
+                          return [node.id()]
+                      if sys.argv[1] == 'inventory':
+                          print(json.dumps(names(suite)))
+                      else:
+                          class Result(unittest.TextTestResult):
+                              def __init__(self, *args, **kwargs):
+                                  super().__init__(*args, **kwargs)
+                                  self.passed = []
+                              def addSuccess(self, test):
+                                  super().addSuccess(test)
+                                  self.passed.append(test.id())
+                          result = unittest.TextTestRunner(verbosity=2, resultclass=Result).run(suite)
+                          print('STARTER_TEST_RESULT=' + json.dumps({
+                              'passed': result.passed, 'tests_run': result.testsRun,
+                              'failures': len(result.failures), 'errors': len(result.errors),
+                              'skipped': len(result.skipped),
+                              'expected_failures': len(result.expectedFailures),
+                              'unexpected_successes': len(result.unexpectedSuccesses),
+                          }))
+                          sys.exit(0 if result.wasSuccessful() else 1)
+                  """)
+                  # Ignore ambient Python flags so assertions cannot be optimized away.
+                  command = ['python3', '-B', '-E', '-c', runner]
+                  output, record = run('python-starters-inventory', command + ['inventory'])
+                  inventory = json.loads(output)
+                  record['test_count'] = len(inventory)
+                  save()
+                  if sorted(inventory) != expected:
+                      raise RuntimeError('Starter Python inventory differs from the reviewed exact test set')
+                  output, record = run('python-starters', command + ['run'])
+                  markers = re.findall(r'^STARTER_TEST_RESULT=(.+)$', output, re.M)
+                  if len(markers) != 1:
+                      raise RuntimeError('Starter Python suite must report exactly one execution result')
+                  result = json.loads(markers[0])
+                  record['test_count'] = result['tests_run']
+                  record['inventory_count'] = len(inventory)
+                  save()
+                  if (sorted(result['passed']) != expected or result['tests_run'] != len(expected)
+                          or any(result[field] != 0 for field in (
+                              'failures', 'errors', 'skipped', 'expected_failures', 'unexpected_successes'))):
+                      raise RuntimeError('Starter Python inventory, execution or skip mismatch')
+              attempt('python-starters', python_starter_tests)
+
               for label, package, features, targets in [
                   ('recorded-route-session-clippy', 'orr_session', '', ['--lib']),
                   ('playtest-keys-bin-clippy', 'orr_sample', 'room-playtest,room-input-actions', ['--bin', 'orr_playtest_room']),
@@ -790,6 +855,49 @@ jobs:
                   record['check_count'] = len(expected_checks)
                   save()
               attempt('python-grid-opening-integration', grid_opening_integration)
+
+              def starter_integration():
+                  # Reuse the two existing production-only builds before broader builds
+                  # can overwrite them. Require this run's receipts and matching bytes.
+                  binary_dir = Path(os.environ['CARGO_TARGET_DIR']) / 'release'
+                  hashes = {}
+                  for name, label, manifest in [
+                      ('orr_new_arena', 'room-layout-production-build', 'fresh-room-layout-creator-binary.json'),
+                      ('orr_playtest_room', 'recorded-route-cli-build', 'fresh-recorded-route-binary.json'),
+                  ]:
+                      produced = [entry for entry in receipts if entry['label'] == label]
+                      if len(produced) != 1 or produced[0]['exit'] != 0:
+                          raise RuntimeError(f'Grid integration requires a passing fresh producer: {label}')
+                      recorded = json.loads((evidence / manifest).read_text())
+                      actual = hashlib.sha256((binary_dir / name).read_bytes()).hexdigest()
+                      if recorded != {name: actual}:
+                          raise RuntimeError(f'Grid integration producer bytes changed: {name}')
+                      hashes[name] = actual
+                  output_dir = evidence / 'starter-integration'
+                  code = ('import sys; sys.path.insert(0, "tools"); '
+                          'from test_room_grid_puzzles import run_integration; '
+                          'run_integration(sys.argv[1], sys.argv[2])')
+                  output, record = run('python-starter-integration', ['python3', '-B', '-E', '-c', code,
+                                      str(binary_dir.resolve(strict=True)), str(output_dir)])
+                  result = json.loads(output)
+                  retained = json.loads((output_dir / 'result.json').read_text())
+                  expected_checks = ['courtyard', 'switchback', 'passage']
+                  expected_assets = {str(Path(path).relative_to("examples/room-grid-puzzles")): hashlib.sha256(Path(path).read_bytes()).hexdigest() for path in ['examples/room-grid-puzzles/courtyard/grid.txt', 'examples/room-grid-puzzles/courtyard/route.json', 'examples/room-grid-puzzles/courtyard/shortcut.json', 'examples/room-grid-puzzles/courtyard/puzzle.json', 'examples/room-grid-puzzles/switchback/grid.txt', 'examples/room-grid-puzzles/switchback/route.json', 'examples/room-grid-puzzles/switchback/shortcut.json', 'examples/room-grid-puzzles/switchback/puzzle.json', 'examples/room-grid-puzzles/passage/grid.txt', 'examples/room-grid-puzzles/passage/route.json', 'examples/room-grid-puzzles/passage/shortcut.json', 'examples/room-grid-puzzles/passage/puzzle.json']}
+                  expected_checks_per_puzzle = ['fixed-asset-admission', 'creator-admission', 'winning-route', 'byte-identical-repeat', 'shortcut-blocked', 'project-unchanged']
+                  expected_puzzles = {'courtyard': {'status': 'passed', 'checks': ['fixed-asset-admission', 'creator-admission', 'winning-route', 'byte-identical-repeat', 'shortcut-blocked', 'project-unchanged'], 'winning_ticks': 202, 'shortcut_ticks': 122, 'repeat_identical': True}, 'switchback': {'status': 'passed', 'checks': ['fixed-asset-admission', 'creator-admission', 'winning-route', 'byte-identical-repeat', 'shortcut-blocked', 'project-unchanged'], 'winning_ticks': 362, 'shortcut_ticks': 202, 'repeat_identical': True}, 'passage': {'status': 'passed', 'checks': ['fixed-asset-admission', 'creator-admission', 'winning-route', 'byte-identical-repeat', 'shortcut-blocked', 'project-unchanged'], 'winning_ticks': 242, 'shortcut_ticks': 122, 'repeat_identical': True}}
+                  if (result != retained or result.get('status') != 'passed'
+                          or result.get('binaries') != hashes
+                          or result.get('tool_sha256') != hashlib.sha256(Path('tools/create_room_grid.py').read_bytes()).hexdigest()
+                          or result.get('checks') != expected_checks
+                          or result.get('asset_sha256') != expected_assets
+                          or result.get('harness_sha256') != hashlib.sha256(Path('tools/test_room_grid_puzzles.py').read_bytes()).hexdigest()
+                          or result.get('checks_per_puzzle') != expected_checks_per_puzzle
+                          or result.get('puzzles') != expected_puzzles):
+                      raise RuntimeError('Grid integration result, retained receipts or source identity mismatch')
+                  record['integration_count'] = 1
+                  record['check_count'] = len(expected_checks)
+                  save()
+              attempt('python-starter-integration', starter_integration)
 
               def integration():
                   # This run-isolated target starts empty; never consume PATH or cached binaries.
