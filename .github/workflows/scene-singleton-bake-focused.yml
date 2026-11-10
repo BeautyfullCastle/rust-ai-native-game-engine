@@ -62,7 +62,7 @@ jobs:
               ('singleton-admission', 7, ['cargo','test','--locked','-p','orr_reflect','--features','scene','--test','singleton_bake_admission','--','--test-threads=1'], 0),
               ('scene-regression', 20, ['cargo','test','--locked','-p','orr_reflect','--features','scene','--test','scene','--','--test-threads=1'], 0),
               ('edit-bake-admission', 6, ['cargo','test','--locked','-p','orr_edit','--test','bake_admission','--','--test-threads=1'], 0),
-              ('stormglass-authored-scene', 4, ['cargo','test','--locked','-p','orr_games','--features','coop-defense-scene','coop_defense_scene','--','--test-threads=1'], 46),
+              ('stormglass-authored-scene', 4, ['cargo','test','--locked','-p','orr_games','--features','coop-defense-scene','--lib','coop_defense_scene','--','--test-threads=1'], 46),
           ]
           failures = []
           for label, expected, command, expected_filtered in checks:
