@@ -19,8 +19,12 @@ def half_integer(twice):
     return f"{sign}{whole}" + (".5" if half else "")
 
 
-def encode(data):
+def encode(data, *, rotate=0, mirror_x=False):
     """Compile captured bytes. This is not scene admission or a puzzle solver."""
+    if type(rotate) is not int or rotate not in (0, 90, 180, 270):
+        raise ValueError("rotate must be 0, 90, 180 or 270")
+    if type(mirror_x) is not bool:
+        raise ValueError("mirror_x must be a boolean")
     if not isinstance(data, bytes) or not 1 <= len(data) <= MAX_INPUT_BYTES:
         raise ValueError("grid must contain 1..4096 bytes")
     try:
@@ -54,6 +58,14 @@ def encode(data):
                                  "use P, K, E, # or .")
     if set(actors) != set(ACTORS.values()):
         raise ValueError("grid requires exactly one P, one K and one E tile")
+    # Validate the original drawing first, so diagnostics retain input coordinates.
+    # Re-encode the transformed drawing to preserve row-major wall identities.
+    if mirror_x or rotate:
+        if mirror_x:
+            rows = [row[::-1] for row in rows]
+        for _ in range(rotate // 90):
+            rows = ["".join(row) for row in zip(*rows[::-1])]
+        return encode("\n".join(rows).encode("ascii"))
     recipe = {"schema": 1, **{name: actors[name] for name in ACTORS.values()},
               "walls": walls}
     return (json.dumps(recipe, indent=2) + "\n").encode("ascii")
@@ -80,13 +92,23 @@ def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--input", required=True, action="append", help="ASCII grid file")
-    if len(argv) > 2 or any(len(arg) > 4096 for arg in argv):
+    parser.add_argument("--rotate", choices=("0", "90", "180", "270"),
+                        action="append", help="clockwise degrees after mirroring")
+    parser.add_argument("--mirror-x", action="count", default=0,
+                        help="mirror left/right before rotating")
+    if len(argv) > 5 or any(len(arg) > 4096 for arg in argv):
         parser.error("too many or oversized arguments")
     args = parser.parse_args(argv)
     if len(args.input) != 1:
         parser.error("--input must occur exactly once")
+    if args.rotate is not None and len(args.rotate) != 1:
+        parser.error("--rotate must occur at most once")
+    if args.mirror_x > 1:
+        parser.error("--mirror-x must occur at most once")
     try:
-        result = encode(read_grid(args.input[0]))
+        result = encode(read_grid(args.input[0]),
+                        rotate=int(args.rotate[0]) if args.rotate else 0,
+                        mirror_x=bool(args.mirror_x))
         sys.stdout.write(result.decode("ascii"))
     except (OSError, ValueError) as error:
         parser.exit(1, f"error: {error}\n")

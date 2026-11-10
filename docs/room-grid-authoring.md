@@ -31,6 +31,28 @@ exist. The grid helper does not launch it or substitute for its scene admission.
 Shell redirection writes files independently of the helper and can overwrite
 them; use your editor's Save As when keeping an existing recipe.
 
+## Rotate or mirror a puzzle
+
+Add `--rotate 90`, `--rotate 180` or `--rotate 270` to turn the drawing clockwise
+as viewed in the text grid (rows increase Z). `--rotate 0` is the default.
+Add `--mirror-x` to reflect left/right. When both are supplied, mirroring happens
+first, then rotation, regardless of command-line option order. Each option may
+occur at most once; other angles, negative values and abbreviations are refused.
+
+For example, this prints a reflected and rotated recipe:
+
+```sh
+python3 -B tools/create_room_grid.py --input puzzle.txt --mirror-x --rotate 90
+```
+ The original text file and
+existing project remain untouched. Use the same Preview/Apply or creator flow.
+The whole rectangle is transformed, including empty cells; quarter turns swap
+its width and height. Actor roles remain unchanged and walls are emitted in the
+transformed drawing's row-major order. A 90-degree turn maps movement `(x,z)` to
+`(-z,x)`; a mirror maps it to `(-x,z)`. Existing recorded routes are not rewritten,
+so rotate/reflect their movement inputs too before replaying. Exact coordinates,
+bounds and admission rules remain unchanged. Without options, JSON is unchanged.
+
 ## Drawing contract
 
 - `P` is the player, `K` the key, `E` the exit. Include each exactly once.
@@ -63,6 +85,7 @@ Neither a valid grid nor scene admission proves a puzzle is solvable.
 Run `python3 -B -m unittest discover -s tools -p test_create_room_grid.py -v`.
 The separate `run_integration(binary_dir, new_receipt_dir)` test entrypoint uses
 explicit trusted, already-built creator/playtest executables and retains its
-fixtures and reports. It checks wall blocking, a winning detour, repeatability,
+fixtures and reports. Optional keyword arguments `rotate` and `mirror_x` exercise transformed drawings
+and correspondingly transformed route inputs. It checks wall blocking, a winning detour, repeatability,
 unchanged projects and boundary-size admission. It does not build Rust or prove
 native input, window/GPU rendering, export or cross-platform behavior.

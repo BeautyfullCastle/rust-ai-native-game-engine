@@ -199,8 +199,111 @@ class GridTests(unittest.TestCase):
                 read.assert_not_called()
 
 
-def run_integration(binary_dir, output_dir):
+
+class GridTransformTests(unittest.TestCase):
+    def test_explicit_default_is_byte_identical(self):
+        for drawing in [DRAWING, b"P.K.\n#..E", b"P\nK\nE"]:
+            self.assertEqual(grid.encode(drawing), grid.encode(drawing, rotate=0, mirror_x=False))
+
+    def test_all_eight_transforms_match_hand_drawn_rectangles(self):
+        source = b"P.K.\n#..E"
+        expected = {
+            (0, False): b"P.K.\n#..E", (90, False): b"#P\n..\n.K\nE.",
+            (180, False): b"E..#\n.K.P", (270, False): b".E\nK.\n..\nP#",
+            (0, True): b".K.P\nE..#", (90, True): b"E.\n.K\n..\n#P",
+            (180, True): b"#..E\nP.K.", (270, True): b"P#\n..\nK.\n.E",
+        }
+        for (rotate, mirror), drawing in expected.items():
+            with self.subTest(rotate=rotate, mirror=mirror):
+                self.assertEqual(grid.encode(source, rotate=rotate, mirror_x=mirror),
+                                 grid.encode(drawing))
+
+    def test_transformed_walls_are_in_new_row_major_order(self):
+        source = b"P#K\n#E#"
+        for rotation in (0, 90, 180, 270):
+            for mirror in (False, True):
+                result = json.loads(grid.encode(source, rotate=rotation, mirror_x=mirror))
+                centers = [wall["center"] for wall in result["walls"]]
+                # All coordinates in this fixture are integer/half-integer: doubled
+                # Decimal values remain exact and avoid an oracle using grid code.
+                from decimal import Decimal
+                pairs = [(Decimal(z), Decimal(x)) for x, z in centers]
+                self.assertEqual(pairs, sorted(pairs))
+                self.assertEqual(len(centers), 3)
+
+    def test_all_transform_coordinates_have_exact_geometric_relation(self):
+        from decimal import Decimal
+        for height, width in ((1, 33), (33, 1), (2, 4), (4, 2), (33, 33)):
+            cells = ["."] * (height * width)
+            cells[0], cells[1], cells[-1] = "P", "K", "E"
+            drawing = "\n".join("".join(cells[r * width:(r + 1) * width])
+                                for r in range(height)).encode()
+            original = json.loads(grid.encode(drawing))
+            for rotate in (0, 90, 180, 270):
+                for mirror in (False, True):
+                    result = json.loads(grid.encode(drawing, rotate=rotate, mirror_x=mirror))
+                    for actor in ("player", "key", "exit"):
+                        x, z = map(Decimal, original[actor])
+                        if mirror:
+                            x = -x
+                        for _ in range(rotate // 90):
+                            x, z = -z, x
+                        self.assertEqual(list(map(Decimal, result[actor])), [x, z])
+
+    def test_transform_parameter_types_and_values_are_strict(self):
+        for rotate in (True, False, 90.0, "90", None, -90, 360, 45):
+            with self.subTest(rotate=rotate), self.assertRaises(ValueError):
+                grid.encode(DRAWING, rotate=rotate)
+        for mirror in (0, 1, "true", None, []):
+            with self.subTest(mirror=mirror), self.assertRaises(ValueError):
+                grid.encode(DRAWING, mirror_x=mirror)
+
+    def test_transforms_never_relax_input_admission(self):
+        bad = [b"PKEE", b"PK\nE", b"PKE ", b"PKE\n\n", b"PKE" + b"#" * 65,
+               b"PKE" + b"." * 31, b"PKE\x00", b"PKE" + bytes([255])]
+        for drawing in bad:
+            for rotation in (0, 90, 180, 270):
+                for mirror in (False, True):
+                    with self.subTest(drawing=drawing, rotate=rotation, mirror=mirror):
+                        with self.assertRaises(ValueError):
+                            grid.encode(drawing, rotate=rotation, mirror_x=mirror)
+
+    def test_cli_transforms_in_any_option_order_without_file_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "grid Ω.txt"
+            path.write_bytes(b"P.K.\n#..E")
+            before = inventory(Path(tmp))
+            for rotation in (0, 90, 180, 270):
+                for mirror in (False, True):
+                    option = ["--mirror-x"] if mirror else []
+                    for args in (["--input", str(path), "--rotate", str(rotation), *option],
+                                 [*option, "--rotate=" + str(rotation), "--input=" + str(path)]):
+                        result = subprocess.run([sys.executable, "-B", str(TOOL), *args],
+                                                capture_output=True, timeout=5)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(result.stderr, b"")
+                        self.assertEqual(result.stdout, grid.encode(path.read_bytes(),
+                                         rotate=rotation, mirror_x=mirror))
+                        self.assertEqual(inventory(Path(tmp)), before)
+
+    def test_invalid_and_duplicate_options_fail_before_read(self):
+        for extra in (["--rotate", "90", "--rotate", "180"], ["--rotate=0", "--rotate=0"],
+                      ["--mirror-x", "--mirror-x"], ["--rotate", "45"], ["--rotate=-90"],
+                      ["--rotate=360"], ["--rotate=90.0"], ["--rotate=090"],
+                      ["--mirror-x=true"], ["--mirror"], ["--rotate"]):
+            with self.subTest(extra=extra), patch.object(grid, "read_grid") as read:
+                with redirect_stdout(io.StringIO()) as out, redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as error:
+                        grid.main(["--input=x", *extra])
+                self.assertEqual(error.exception.code, 2)
+                self.assertEqual(out.getvalue(), "")
+                read.assert_not_called()
+
+
+def run_integration(binary_dir, output_dir, *, rotate=0, mirror_x=False):
     """Create retained fixtures and real CPU receipts, never build or download binaries."""
+    grid.encode(DRAWING, rotate=rotate, mirror_x=mirror_x)  # Validate before any writes.
+    transform_args = ["--rotate", str(rotate)] + (["--mirror-x"] if mirror_x else [])
     binaries = Path(binary_dir).resolve(strict=True)
     root = Path(output_dir).absolute()
     root.mkdir()  # New evidence directory only; do not overwrite an earlier run.
@@ -233,7 +336,7 @@ def run_integration(binary_dir, output_dir):
     def create(label, drawing):
         input_path = root / (label + " Ω.txt")
         input_path.write_bytes(drawing)
-        recipe = run(label + "-compile", [sys.executable, "-B", TOOL, "--input", input_path])
+        recipe = run(label + "-compile", [sys.executable, "-B", TOOL, "--input", input_path, *transform_args])
         recipe_path = root / (label + ".json")
         recipe_path.write_bytes(recipe)
         project = root / (label + " Project Ω")
@@ -243,6 +346,10 @@ def run_integration(binary_dir, output_dir):
         return project
 
     def step(ticks, x=0, z=0, interact=False, key=True, won=False):
+        if mirror_x:
+            x = -x
+        for _ in range(rotate // 90):
+            x, z = -z, x
         return {"ticks": ticks, "move_x": x, "move_z": z, "interact": interact,
                 "expect_key": key, "expect_won": won}
 
@@ -302,6 +409,47 @@ def run_integration(binary_dir, output_dir):
                           "detour-wins", "byte-identical-repeat", "project-unchanged",
                           "zero-wall-control-wins", "33x33-and-64-walls-admitted",
                           "even-dimension-half-integers-admitted"],
+               "scope": "retained existing producer binaries; scripted CPU, not native input/GPU"}
+    if rotate or mirror_x:
+        summary["transformation"] = {"rotate": rotate, "mirror_x": mirror_x}
+    (root / "result.json").write_text(json.dumps(summary, indent=2) + "\n")
+    print(json.dumps(summary, indent=2))
+
+
+def run_transform_integration(binary_dir, output_dir):
+    """Exercise seven nonidentity transforms through actual creator and CPU gameplay."""
+    root = Path(output_dir).absolute()
+    root.mkdir()  # Preserve all earlier evidence; never reuse a directory.
+    checks = []
+    binaries = None
+    tool_hash = hashlib.sha256(TOOL.read_bytes()).hexdigest()
+    expected = ["grid-cli", "creator-admission", "wall-blocks-direct-route",
+                "detour-wins", "byte-identical-repeat", "project-unchanged",
+                "zero-wall-control-wins", "33x33-and-64-walls-admitted",
+                "even-dimension-half-integers-admitted"]
+    for mirror in (False, True):
+        for rotation in (0, 90, 180, 270):
+            if rotation == 0 and not mirror:
+                continue
+            label = f"mirror-{int(mirror)}-rotate-{rotation}"
+            with redirect_stdout(io.StringIO()) as printed:
+                run_integration(binary_dir, root / label, rotate=rotation, mirror_x=mirror)
+            report_bytes = (root / label / "result.json").read_bytes()
+            if len(report_bytes) > 16384 or len(printed.getvalue()) > 16384:
+                raise AssertionError(f"{label}: oversized result")
+            report = json.loads(report_bytes)
+            transform = report.get("transformation", {"rotate": 0, "mirror_x": False})
+            if (json.loads(printed.getvalue()) != report or report["status"] != "passed"
+                    or report["checks"] != expected or report["tool_sha256"] != tool_hash
+                    or transform != {"rotate": rotation, "mirror_x": mirror}):
+                raise AssertionError(f"{label}: invalid result")
+            if binaries is None:
+                binaries = report["binaries"]
+            if report["binaries"] != binaries:
+                raise AssertionError(f"{label}: producer identities changed")
+            checks.append(label)
+    summary = {"status": "passed", "checks": checks, "binaries": binaries,
+               "tool_sha256": tool_hash, "checks_per_transform": expected,
                "scope": "retained existing producer binaries; scripted CPU, not native input/GPU"}
     (root / "result.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary, indent=2))

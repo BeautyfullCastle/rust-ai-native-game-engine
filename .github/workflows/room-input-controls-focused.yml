@@ -384,6 +384,14 @@ jobs:
                       'test_create_room_grid.GridTests.test_special_files_and_symlinks_rejected_without_hanging',
                       'test_create_room_grid.GridTests.test_wall_order_is_row_major',
                       'test_create_room_grid.GridTests.test_zero_and_sixty_four_walls',
+                      'test_create_room_grid.GridTransformTests.test_all_eight_transforms_match_hand_drawn_rectangles',
+                      'test_create_room_grid.GridTransformTests.test_all_transform_coordinates_have_exact_geometric_relation',
+                      'test_create_room_grid.GridTransformTests.test_cli_transforms_in_any_option_order_without_file_changes',
+                      'test_create_room_grid.GridTransformTests.test_explicit_default_is_byte_identical',
+                      'test_create_room_grid.GridTransformTests.test_invalid_and_duplicate_options_fail_before_read',
+                      'test_create_room_grid.GridTransformTests.test_transform_parameter_types_and_values_are_strict',
+                      'test_create_room_grid.GridTransformTests.test_transformed_walls_are_in_new_row_major_order',
+                      'test_create_room_grid.GridTransformTests.test_transforms_never_relax_input_admission',
                   ]
                   runner = dedent("""
                       import json, sys, unittest
@@ -561,6 +569,50 @@ jobs:
                   record['check_count'] = len(expected_checks)
                   save()
               attempt('python-grid-integration', grid_integration)
+
+              def grid_transform_integration(rotate, mirror_x):
+                  # Reuse the two existing production-only builds before broader builds
+                  # can overwrite them. Require this run's receipts and matching bytes.
+                  binary_dir = Path(os.environ['CARGO_TARGET_DIR']) / 'release'
+                  hashes = {}
+                  for name, label, manifest in [
+                      ('orr_new_arena', 'room-layout-production-build', 'fresh-room-layout-creator-binary.json'),
+                      ('orr_playtest_room', 'recorded-route-cli-build', 'fresh-recorded-route-binary.json'),
+                  ]:
+                      produced = [entry for entry in receipts if entry['label'] == label]
+                      if len(produced) != 1 or produced[0]['exit'] != 0:
+                          raise RuntimeError(f'Grid integration requires a passing fresh producer: {label}')
+                      recorded = json.loads((evidence / manifest).read_text())
+                      actual = hashlib.sha256((binary_dir / name).read_bytes()).hexdigest()
+                      if recorded != {name: actual}:
+                          raise RuntimeError(f'Grid integration producer bytes changed: {name}')
+                      hashes[name] = actual
+                  output_dir = evidence / f'grid-transform-{rotate}-{int(mirror_x)}'
+                  code = ('import sys; sys.path.insert(0, "tools"); '
+                          'from test_create_room_grid import run_integration; '
+                          'run_integration(sys.argv[1], sys.argv[2], rotate=int(sys.argv[3]), mirror_x=sys.argv[4] == "1")')
+                  output, record = run(f'python-grid-transform-{rotate}-{int(mirror_x)}', ['python3', '-B', '-E', '-c', code,
+                                      str(binary_dir.resolve(strict=True)), str(output_dir), str(rotate), str(int(mirror_x))])
+                  result = json.loads(output)
+                  retained = json.loads((output_dir / 'result.json').read_text())
+                  expected_checks = [
+                      'grid-cli', 'creator-admission', 'wall-blocks-direct-route',
+                      'detour-wins', 'byte-identical-repeat', 'project-unchanged',
+                      'zero-wall-control-wins', '33x33-and-64-walls-admitted',
+                      'even-dimension-half-integers-admitted',
+                  ]
+                  if (result != retained or result.get('status') != 'passed'
+                          or result.get('binaries') != hashes
+                          or result.get('tool_sha256') != hashlib.sha256(Path('tools/create_room_grid.py').read_bytes()).hexdigest()
+                          or result.get('checks') != expected_checks
+                          or result.get('transformation') != {'rotate': rotate, 'mirror_x': mirror_x}):
+                      raise RuntimeError('Grid integration result, retained receipts or source identity mismatch')
+                  record['integration_count'] = 1
+                  record['check_count'] = len(expected_checks)
+                  save()
+              for grid_rotation, grid_mirror in [(0, True), (90, False), (90, True), (180, False), (180, True), (270, False), (270, True)]:
+                  attempt(f'python-grid-transform-{grid_rotation}-{int(grid_mirror)}',
+                          lambda rotate=grid_rotation, mirror=grid_mirror: grid_transform_integration(rotate, mirror))
 
               def integration():
                   # This run-isolated target starts empty; never consume PATH or cached binaries.
