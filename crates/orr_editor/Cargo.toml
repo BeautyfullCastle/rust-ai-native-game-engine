@@ -13,6 +13,8 @@ default-run = "orr_editor"
 workspace = true
 
 [features]
+# Explicit custom-inspector contract; no default app dispatch changes.
+custom-inspector = []
 # Explicit statically linked game adapters; no plugin discovery or code loading.
 static-games = []
 # Additive validated gameplay capabilities; no runtime loading or editor wiring.
