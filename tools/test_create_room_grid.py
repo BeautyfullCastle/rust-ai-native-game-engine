@@ -441,6 +441,95 @@ class GridPreviewTests(unittest.TestCase):
                 self.assertTrue(result.stderr.startswith(b"error: "))
 
 
+class GridMergeTests(unittest.TestCase):
+    def test_rectangle_partition_exact_positions(self):
+        data = b"PKE..\n####.\n####."
+        result = json.loads(grid.encode(data, merge_walls=True))
+        self.assertEqual(result["walls"], [{"center": ["-0.5", "0.5"], "half_extents": ["2", "1"]}])
+        self.assertEqual(result["player"], ["-2", "-1"])
+
+    def test_merge_option_types_are_strict(self):
+        for value in [None, 0, 1, "true", [], {}]:
+            with self.assertRaises(ValueError):
+                grid.encode(DRAWING, merge_walls=value)
+            with self.assertRaises(ValueError):
+                grid.preview_svg(DRAWING, merge_walls=value)
+
+    def test_partition_covers_exact_cells_without_overlaps(self):
+        for bits in range(512):
+            rows = ["PKE"] + ["".join("#" if bits & (1 << (y * 3 + x)) else "." for x in range(3)) for y in range(3)]
+            recipe = json.loads(grid.encode("\n".join(rows).encode(), merge_walls=True))
+            covered = set()
+            for wall in recipe["walls"]:
+                cx, cz = map(Fraction, wall["center"])
+                hx, hz = map(Fraction, wall["half_extents"])
+                cells = {(x, y) for y in range(4) for x in range(3)
+                         if abs(Fraction(x - 1) - cx) < hx and abs(Fraction(2*y - 3, 2) - cz) < hz}
+                self.assertTrue(cells)
+                self.assertFalse(covered & cells)
+                covered |= cells
+            self.assertEqual(covered, {(x,y) for y,row in enumerate(rows) for x,tile in enumerate(row) if tile == "#"})
+
+    def test_transform_partition_and_svg_geometry(self):
+        data = b"PKE..\n####.\n.###."
+        for mirror in (False, True):
+            for rotation in (0,90,180,270):
+                rows = data.decode().splitlines()
+                if mirror:
+                    rows = [r[::-1] for r in rows]
+                for _ in range(rotation//90):
+                    rows = ["".join(r) for r in zip(*rows[::-1])]
+                expected = grid.encode("\n".join(rows).encode(), merge_walls=True)
+                actual = grid.encode(data, rotate=rotation, mirror_x=mirror, merge_walls=True)
+                self.assertEqual(actual, expected)
+                recipe = json.loads(actual)
+                root = ET.fromstring(grid.preview_svg(data, rotate=rotation, mirror_x=mirror, merge_walls=True))
+                for i,wall in enumerate(recipe["walls"]):
+                    node = next(n for n in root if n.get("id") == f"wall-{i}")
+                    self.assertEqual(Fraction(node.get("width")), Fraction(wall["half_extents"][0])*80)
+                    self.assertEqual(Fraction(node.get("height")), Fraction(wall["half_extents"][1])*80)
+
+    def test_more_than_sixty_four_tiles_can_merge(self):
+        data = ("PKE" + "."*30 + "\n" + ("#"*33 + "\n")*3).encode()
+        with self.assertRaises(ValueError):
+            grid.encode(data)
+        walls = json.loads(grid.encode(data, merge_walls=True))["walls"]
+        self.assertEqual(len(walls), 3)
+        self.assertEqual([wall["half_extents"] for wall in walls], [["8", "1.5"], ["8", "1.5"], ["0.5", "1.5"]])
+        for mirror in (False, True):
+            for rotation in (0,90,180,270):
+                changed = json.loads(grid.encode(data, rotate=rotation, mirror_x=mirror, merge_walls=True))
+                self.assertEqual(len(changed["walls"]),3)
+                self.assertTrue(all(Fraction(v) <= 8 for wall in changed["walls"] for v in wall["half_extents"]))
+
+    def test_more_than_sixty_four_boxes_rejected(self):
+        rows = ["PKE" + "."*30] + ["".join("#" if (x+y)%2 == 0 else "." for x in range(33)) for y in range(5)]
+        with self.assertRaisesRegex(ValueError, "64 wall boxes"):
+            grid.encode("\n".join(rows).encode(), merge_walls=True)
+
+    def test_merge_does_not_relax_invalid_input(self):
+        for data in [b"PKE ", b"PK", b"PKE\n#", b"PPKE", b"PKE\r", b"PKE\n\n"]:
+            with self.assertRaises(ValueError):
+                grid.encode(data, merge_walls=True)
+        self.assertEqual(json.loads(grid.encode(b"PKE", merge_walls=True))["walls"], [])
+
+    def test_cli_merge_formats_and_duplicate_rejection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/"input.txt"
+            path.write_bytes(b"PKE..\n####.\n####.")
+            before = inventory(Path(directory))
+            for fmt in ("json","svg"):
+                result = subprocess.run([sys.executable,"-B",TOOL,"--input",path,"--merge-walls","--rotate","90","--mirror-x","--format",fmt], capture_output=True)
+                self.assertEqual(result.returncode,0,result.stderr)
+                method = grid.encode if fmt == "json" else grid.preview_svg
+                self.assertEqual(result.stdout,method(path.read_bytes(),rotate=90,mirror_x=True,merge_walls=True))
+            for extra in [["--merge-walls","--merge-walls"], ["--merge-walls=true"], ["--merge"]]:
+                result = subprocess.run([sys.executable,"-B",TOOL,"--input",path,*extra],capture_output=True)
+                self.assertEqual(result.returncode,2)
+                self.assertEqual(result.stdout,b"")
+            self.assertEqual(inventory(Path(directory)),before)
+
+
 def run_integration(binary_dir, output_dir, *, rotate=0, mirror_x=False):
     """Create retained fixtures and real CPU receipts, never build or download binaries."""
     grid.encode(DRAWING, rotate=rotate, mirror_x=mirror_x)  # Validate before any writes.
@@ -594,6 +683,171 @@ def run_transform_integration(binary_dir, output_dir):
                "scope": "retained existing producer binaries; scripted CPU, not native input/GPU"}
     (root / "result.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary, indent=2))
+
+
+def _run_merge_case(binary_dir, output_dir, *, rotate=0, mirror_x=False):
+    """Create retained fixtures and real CPU receipts, never build or download binaries."""
+    grid.encode(DRAWING, rotate=rotate, mirror_x=mirror_x)  # Validate before any writes.
+    transform_args = ["--rotate", str(rotate)] + (["--mirror-x"] if mirror_x else [])
+    binaries = Path(binary_dir).resolve(strict=True)
+    root = Path(output_dir).absolute()
+    root.mkdir()  # New evidence directory only; do not overwrite an earlier run.
+    root = root.resolve(strict=True)
+    executable_hashes = {name: hashlib.sha256((binaries / name).read_bytes()).hexdigest()
+                         for name in ("orr_new_arena", "orr_playtest_room")}
+
+    def require(condition, message):
+        if not condition:
+            raise AssertionError(message)
+
+    def unchanged(label, project, before):
+        after = inventory(project)
+        (root / (label + "-inventory.json")).write_text(
+            json.dumps({"before": before, "after": after}, indent=2) + "\n")
+        require(before == after, f"{label}: playtest changed the project")
+
+    def run(label, args, expected=0):
+        command = list(map(str, args))
+        (root / (label + ".command.json")).write_text(json.dumps(command) + "\n")
+        result = subprocess.run(command, capture_output=True, timeout=90)
+        (root / (label + ".stdout")).write_bytes(result.stdout)
+        (root / (label + ".stderr")).write_bytes(result.stderr)
+        (root / (label + ".exit")).write_text(str(result.returncode) + "\n")
+        if result.returncode != expected:
+            raise AssertionError(f"{label}: expected {expected}, got {result.returncode}: "
+                                 f"{result.stdout!r} {result.stderr!r}")
+        return result.stdout
+
+    def create(label, drawing):
+        input_path = root / (label + " Ω.txt")
+        input_path.write_bytes(drawing)
+        recipe = run(label + "-compile", [sys.executable, "-B", TOOL, "--input", input_path, "--merge-walls", *transform_args])
+        recipe_path = root / (label + ".json")
+        recipe_path.write_bytes(recipe)
+        project = root / (label + " Project Ω")
+        run(label + "-create", [binaries / "orr_new_arena", "--output", project,
+                               "--template", "room-escape-3d-v1", "--seed", "ascii-grid",
+                               "--room-layout", recipe_path])
+        return project
+
+    def step(ticks, x=0, z=0, interact=False, key=True, won=False):
+        if mirror_x:
+            x = -x
+        for _ in range(rotate // 90):
+            x, z = -z, x
+        return {"ticks": ticks, "move_x": x, "move_z": z, "interact": interact,
+                "expect_key": key, "expect_won": won}
+
+    def play(label, project, steps, expected=0):
+        script = root / (label + "-route.json")
+        script.write_text(json.dumps({"schema": 1, "steps": steps}) + "\n")
+        return run(label, [binaries / "orr_playtest_room", "--project", project,
+                           "--script", script, "--json"], expected)
+
+    project = create("wall", b"...#...\nPK.#..E\n.......\n")
+    require(len(json.loads((root / "wall.json").read_bytes())["walls"]) == 1,
+            "contiguous barrier did not merge into one wall box")
+    before = inventory(project)
+    direct = [step(1, interact=True), step(120, x=1), step(1, interact=True, won=True)]
+    blocked = json.loads(play("wall-direct", project, direct, expected=1))
+    require(blocked["status"] == "error" and blocked["error"]["kind"] == "assertion",
+            "wall route must fail a gameplay assertion")
+    require(blocked["steps"][-1]["observed"] == {"key": True, "won": False},
+            "wall route must retain key without reaching victory")
+    detour = [step(1, interact=True), step(40, z=1), step(120, x=1),
+              step(40, z=-1), step(1, interact=True, won=True)]
+    first = play("wall-detour", project, detour)
+    repeated = play("wall-detour-repeat", project, detour)
+    require(first == repeated, "repeated detour reports differ")
+    result = json.loads(first)
+    require(result["status"] == "passed" and result["ticks"] == 202,
+            "detour did not pass at tick 202")
+    require(result["steps"][-1]["observed"] == {"key": True, "won": True},
+            "detour did not reach victory")
+    unchanged("wall", project, before)
+
+    control = create("no-wall", b"...#...\nPK.#..E\n.......\n".replace(b"#", b"."))
+    control_before = inventory(control)
+    control_result = json.loads(play("no-wall-direct", control, direct))
+    require(control_result["status"] == "passed" and control_result["ticks"] == 122,
+            "zero-wall control did not pass at tick 122")
+    unchanged("no-wall", control, control_before)
+
+    rows = [list("." * 33) for _ in range(33)]
+    rows[0][0], rows[0][1], rows[32][32] = "P", "K", "E"
+    for i in range(99):
+        rows[16 + i // 33][i % 33] = "#"
+    maximum = create("maximum", "\n".join("".join(row) for row in rows).encode())
+    require(len(json.loads((root / "maximum.json").read_bytes())["walls"]) == 3,
+            "99 wall tiles did not merge into three bounded wall boxes")
+    maximum_before = inventory(maximum)
+    require(json.loads(play("maximum-admit", maximum, [step(0, key=False)]))["status"] == "passed",
+            "maximum grid was not admitted")
+    unchanged("maximum", maximum, maximum_before)
+    even = create("even", b"P.K.\n#..E")
+    even_before = inventory(even)
+    require(json.loads(play("even-admit", even, [step(0, key=False)]))["status"] == "passed",
+            "even-dimension grid was not admitted")
+    unchanged("even", even, even_before)
+    require(executable_hashes == {
+        name: hashlib.sha256((binaries / name).read_bytes()).hexdigest()
+        for name in executable_hashes}, "executables changed during integration")
+    summary = {"status": "passed", "binaries": executable_hashes,
+               "tool_sha256": hashlib.sha256(TOOL.read_bytes()).hexdigest(),
+               "checks": ["grid-cli", "creator-admission", "wall-blocks-direct-route",
+                          "detour-wins", "byte-identical-repeat", "project-unchanged",
+                          "zero-wall-control-wins", "33x33-and-99-wall-tiles-merged-admitted",
+                          "even-dimension-half-integers-admitted"],
+               "scope": "retained existing producer binaries; merged geometry CPU only, not collision/checksum equivalence"}
+    summary["transformation"] = {"rotate": rotate, "mirror_x": mirror_x}
+    (root / "result.json").write_text(json.dumps(summary, indent=2) + "\n")
+    print(json.dumps(summary, indent=2))
+
+
+
+def run_merge_integration(binary_dir, output_dir):
+    """All eight merged geometry cases against explicit production executables."""
+    root = Path(output_dir).absolute()
+    root.mkdir()
+    checks = []
+    hashes = None
+    tool_hash = hashlib.sha256(TOOL.read_bytes()).hexdigest()
+    expected_checks = ["grid-cli", "creator-admission", "wall-blocks-direct-route",
+                       "detour-wins", "byte-identical-repeat", "project-unchanged",
+                       "zero-wall-control-wins", "33x33-and-99-wall-tiles-merged-admitted",
+                       "even-dimension-half-integers-admitted"]
+    for mirror in (False, True):
+        for rotation in (0,90,180,270):
+            label = f"mirror-{int(mirror)}-rotate-{rotation}"
+            with redirect_stdout(io.StringIO()) as captured:
+                _run_merge_case(binary_dir, root/label, rotate=rotation, mirror_x=mirror)
+            result = json.loads((root/label/"result.json").read_bytes())
+            if (result != json.loads(captured.getvalue()) or result["status"] != "passed"
+                    or result["checks"] != expected_checks or result["tool_sha256"] != tool_hash
+                    or result["transformation"] != {"rotate":rotation,"mirror_x":mirror}):
+                raise AssertionError("merged integration result identity mismatch")
+            if hashes is None:
+                hashes = result["binaries"]
+            if result["binaries"] != hashes:
+                raise AssertionError("merged integration producer identities changed")
+            checks.append(label)
+    # A disconnected checkerboard requires >64 boxes even after merging.
+    rejected = root/"too-many-boxes.txt"
+    rejected.write_text("PKE" + "."*30 + "\n" + "\n".join("".join("#" if (x+y)%2 == 0 else "." for x in range(33)) for y in range(5)))
+    command = [sys.executable,"-B",str(TOOL),"--input",str(rejected),"--merge-walls"]
+    result = subprocess.run(command,capture_output=True,timeout=10)
+    (root/"too-many-boxes.command.json").write_text(json.dumps(command)+"\n")
+    (root/"too-many-boxes.stdout").write_bytes(result.stdout)
+    (root/"too-many-boxes.stderr").write_bytes(result.stderr)
+    (root/"too-many-boxes.exit").write_text(str(result.returncode)+"\n")
+    if result.returncode != 1 or result.stdout or b"64 wall boxes" not in result.stderr:
+        raise AssertionError("too many merged boxes were not refused")
+    checks.append("more-than-64-boxes-rejected")
+    summary = {"status":"passed","checks":checks,"checks_per_transform":expected_checks,
+               "binaries":hashes,"tool_sha256":tool_hash,
+               "scope":"retained production binaries, merged geometry CPU; not physics/checksum equivalence"}
+    (root/"result.json").write_text(json.dumps(summary,indent=2)+"\n")
+    print(json.dumps(summary,indent=2))
 
 
 if __name__ == "__main__":

@@ -19,8 +19,10 @@ def half_integer(twice):
     return f"{sign}{whole}" + (".5" if half else "")
 
 
-def encode(data, *, rotate=0, mirror_x=False):
+def encode(data, *, rotate=0, mirror_x=False, merge_walls=False):
     """Compile captured bytes. This is not scene admission or a puzzle solver."""
+    if type(merge_walls) is not bool:
+        raise ValueError("merge_walls must be a boolean")
     if type(rotate) is not int or rotate not in (0, 90, 180, 270):
         raise ValueError("rotate must be 0, 90, 180 or 270")
     if type(mirror_x) is not bool:
@@ -51,7 +53,7 @@ def encode(data, *, rotate=0, mirror_x=False):
                 actors[name] = position
             elif tile == "#":
                 walls.append({"center": position, "half_extents": ["0.5", "0.5"]})
-                if len(walls) > MAX_WALLS:
+                if not merge_walls and len(walls) > MAX_WALLS:
                     raise ValueError("grid has more than 64 wall tiles")
             elif tile != ".":
                 raise ValueError(f"invalid tile at row {row + 1}, column {column + 1}; "
@@ -65,15 +67,47 @@ def encode(data, *, rotate=0, mirror_x=False):
             rows = [row[::-1] for row in rows]
         for _ in range(rotate // 90):
             rows = ["".join(row) for row in zip(*rows[::-1])]
-        return encode("\n".join(rows).encode("ascii"))
+        return encode("\n".join(rows).encode("ascii"), merge_walls=merge_walls)
+    if merge_walls:
+        walls = merged_rectangles(rows)
     recipe = {"schema": 1, **{name: actors[name] for name in ACTORS.values()},
               "walls": walls}
     return (json.dumps(recipe, indent=2) + "\n").encode("ascii")
 
 
-def preview_svg(data, *, rotate=0, mirror_x=False):
+def merged_rectangles(rows):
+    """Row-major, widest-first rectangles; deterministic, not a minimum cover."""
+    height, width = len(rows), len(rows[0])
+    remaining = [[tile == "#" for tile in row] for row in rows]
+    walls = []
+    for row in range(height):
+        for column in range(width):
+            if not remaining[row][column]:
+                continue
+            right = column
+            while right < min(width, column + 16) and remaining[row][right]:
+                right += 1
+            bottom = row + 1
+            while bottom < min(height, row + 16) and all(remaining[bottom][x] for x in range(column, right)):
+                bottom += 1
+            for y in range(row, bottom):
+                for x in range(column, right):
+                    remaining[y][x] = False
+            walls.append({"center": [half_integer(column + right - width),
+                                     half_integer(row + bottom - height)],
+                          "half_extents": [half_integer(right - column),
+                                           half_integer(bottom - row)]})
+            if len(walls) > MAX_WALLS:
+                raise ValueError("merged grid has more than 64 wall boxes")
+    return walls
+
+
+def preview_svg(data, *, rotate=0, mirror_x=False, merge_walls=False):
     """Static schematic from the admitted recipe, not engine rendering or a solver."""
-    recipe = json.loads(encode(data, rotate=rotate, mirror_x=mirror_x))
+    if type(merge_walls) is not bool:
+        raise ValueError("merge_walls must be a boolean")
+    options = {"merge_walls": True} if merge_walls else {}
+    recipe = json.loads(encode(data, rotate=rotate, mirror_x=mirror_x, **options))
     # Admission above establishes rectangular ASCII input and bounded dimensions.
     rows = data.decode("ascii").replace("\r\n", "\n").removesuffix("\n").split("\n")
     columns, row_count = len(rows[0]), len(rows)
@@ -116,8 +150,13 @@ def preview_svg(data, *, rotate=0, mirror_x=False):
                      'stroke="#cbd5e1"/>')
     for index, wall in enumerate(recipe["walls"]):
         x, y = pixel(wall["center"])
-        lines.append(f'<rect id="wall-{index}" x="{x - cell // 2}" y="{y - cell // 2}" '
-                     f'width="{cell}" height="{cell}" fill="#334155"/>')
+        extents = []
+        for value in wall["half_extents"]:
+            whole, _, fraction = value.partition(".")
+            extents.append((int(whole) * 2 + (1 if fraction else 0)) * cell // 2)
+        half_x, half_z = extents
+        lines.append(f'<rect id="wall-{index}" x="{x - half_x}" y="{y - half_z}" '
+                     f'width="{half_x * 2}" height="{half_z * 2}" fill="#334155"/>')
     for name, letter, color in [("player", "P", "#1d4ed8"),
                                 ("key", "K", "#92400e"), ("exit", "E", "#047857")]:
         x, y = pixel(recipe[name])
@@ -127,6 +166,8 @@ def preview_svg(data, *, rotate=0, mirror_x=False):
     lines.extend([f'<text x="32" y="{height - 22}" font-family="sans-serif" font-size="14" '
                   'fill="#475569">Schematic only. Check gameplay in the editor or CPU playtest.</text>',
                   '</svg>'])
+    if merge_walls:
+        lines = [line.replace("dark squares = walls", "dark rectangles = walls") for line in lines]
     result = ("\n".join(lines) + "\n").encode("ascii")
     if len(result) > 256 * 1024:
         raise ValueError("preview exceeds 256 KiB")
@@ -160,7 +201,9 @@ def main(argv=None):
                         help="mirror left/right before rotating")
     parser.add_argument("--format", choices=("json", "svg"), action="append",
                         help="output format (default: json; svg is a static schematic)")
-    if len(argv) > 7 or any(len(arg) > 4096 for arg in argv):
+    parser.add_argument("--merge-walls", action="count", default=0,
+                        help="partition adjacent wall tiles into at most 64 rectangles")
+    if len(argv) > 8 or any(len(arg) > 4096 for arg in argv):
         parser.error("too many or oversized arguments")
     args = parser.parse_args(argv)
     if len(args.input) != 1:
@@ -171,11 +214,13 @@ def main(argv=None):
         parser.error("--mirror-x must occur at most once")
     if args.format is not None and len(args.format) != 1:
         parser.error("--format must occur at most once")
+    if args.merge_walls > 1:
+        parser.error("--merge-walls must occur at most once")
     try:
         output = preview_svg if args.format == ["svg"] else encode
         result = output(read_grid(args.input[0]),
                         rotate=int(args.rotate[0]) if args.rotate else 0,
-                        mirror_x=bool(args.mirror_x))
+                        mirror_x=bool(args.mirror_x), merge_walls=bool(args.merge_walls))
         sys.stdout.write(result.decode("ascii"))
     except (OSError, ValueError) as error:
         parser.exit(1, f"error: {error}\n")

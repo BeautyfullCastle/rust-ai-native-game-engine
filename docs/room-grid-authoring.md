@@ -57,7 +57,7 @@ bounds and admission rules remain unchanged. Without options, JSON is unchanged.
 
 - `P` is the player, `K` the key, `E` the exit. Include each exactly once.
 - `#` creates one wall box; `.` is empty. No implicit perimeter or floor is added.
-- Rows have equal width, 1–33 columns and 1–33 rows, with at most 64 `#` tiles.
+- Rows have equal width, 1–33 columns and 1–33 rows. By default, at most 64 `#` tiles are allowed; explicit wall merging below instead limits the emitted boxes.
 - Tiles are one world unit apart. The complete rectangle, including empty tiles,
   is centered at X/Z zero. Columns increase X; rows increase Z. Even dimensions
   give half-integer centers. Coordinates use exact decimal strings, never floats.
@@ -121,3 +121,36 @@ This is a schematic, not an engine screenshot. Actor markers are labels, not
 collision sizes. It does not show wall height, camera view, model packages,
 lighting, runtime movement or whether the puzzle can be solved. Use the existing
 editor and CPU playtest for gameplay checks; native/GPU acceptance is separate.
+
+## Merge adjacent wall tiles
+
+Add `--merge-walls` to JSON or SVG output when authoring long walls or large
+solid regions. The default remains one box per `#` tile, byte-for-byte unchanged.
+With merging, more than 64 wall tiles are accepted only when the resulting
+partition has at most 64 boxes. All other input bounds and creator admission
+remain enforced. For example, three adjacent 33-tile wall rows produce three
+boxes rather than 99, because each box is at most 16 cells per axis.
+
+The helper validates input, mirrors and rotates if requested, then partitions
+the transformed drawing. It scans row-major for the first uncovered `#`, takes
+the widest contiguous uncovered run (at most 16 cells), and extends downward
+while that entire width is still uncovered `#` (at most 16 rows). It marks that
+rectangle covered and continues. This deterministic greedy partition is not a
+minimum-box solver. If it produces more than 64 boxes, it refuses the drawing;
+it never silently fills empty cells or drops walls. Rotation can change the
+partition and box count, so one orientation can be rejected while another fits.
+
+Each rectangle covers exactly its wall tiles without overlap. Centers and half
+extents use exact integer/half-integer decimal strings. The 16-cell cap preserves
+the existing Room wall half-extent limit of 8. Actor positions do not change.
+SVG rectangles show the emitted geometry; grid lines behind a large wall are
+covered. No project is written by this option.
+
+Merged boxes have different entity identities and collision boundaries from
+individual tiles. Do not reuse old replay checksums or assume identical collision
+response/performance. Validate the new project with the creator and playtest.
+Focused retained-producer tests exercise a two-cell barrier, a blocked direct
+route, a winning detour and unchanged no-wall control in all eight orientations,
+plus 99-cell admission and over-64-box refusal. They are CPU checks, not native
+window/GPU or exported-player validation. `run_merge_integration(binary_dir,
+new_receipt_dir)` retains these explicit production checks separately.
