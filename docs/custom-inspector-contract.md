@@ -2,10 +2,10 @@
 
 Issue #562, opt-in CPU-tested consumer slice. Enable `orr_editor/custom-inspector`
 and install a `Registry` with `EditorApp::with_custom_inspectors` before the first
-frame. The feature is off by default; enabling it alone installs no panels.
+frame. Disabled by default; enabling it installs no panels.
 Each app owns its registry. There is no game-specific editor dispatch or global
-registry. This slice covers reflected entity components, not singletons or the
-specialized 3D panels that bypass the generic component Inspector.
+registry. This slice covers reflected entity components and authored singletons.
+Specialized 3D panels that bypass the generic component Inspector are excluded.
 
 ## Existing Arena example
 
@@ -45,15 +45,21 @@ ranges or schema documentation changes may require a matching registration.
 An extension declares a nonempty stable ID, API version 1 and signed priority.
 Higher priority wins independently of registration order. Duplicate IDs and equal
 priorities for the same key reject without changing the registry. Unsupported
-versions reject. This is experimental Rust source API, not a stable binary ABI;
+versions reject. This experimental Rust API has no stable binary ABI;
 the earlier unpublished numeric fingerprint field is replaced by exact schema.
+`FieldEdit.field` now uses `FieldTarget` instead of `String`: migrate direct
+String assignments with `.into()`. Existing `"name".into()` callers need no change;
+API version 1 denotes the statically compiled contract, not binary compatibility.
 
 Callbacks receive egui UI, a scoped ID and an owned read-only `Snapshot`. The
 snapshot rejects malformed values and duplicate fields. Return at most one
 `FieldEdit` per frame. Exact top-level bool, integer, fixed-point, Vec2, enum and flag
 fields are accepted after reflection kind/range checks. Whole Vec2 edits validate both axes
-and create one Set/Undo operation. Vec3 and nested/structural/entity
-edits remain generic-Inspector work. UI state stays outside gameplay data.
+and create one Set/Undo operation. `FieldTarget::ArrayElement { field, index }`
+also addresses exactly one scalar element of a top-level fixed array. Reflection
+checks its fixed length, element kind and range before generating `field[index]`.
+Lists, recursive arrays, array Vec2, structs and arbitrary path strings reject.
+Vec3 and other nested/structural/entity edits remain generic-Inspector work. UI state stays outside gameplay data.
 
 Valid intents become ordinary `InspEvent::Set` and use the existing
 `Editor::set_field`/host validation, Undo/Redo and dirty-state path. The app does

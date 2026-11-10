@@ -56,22 +56,40 @@ impl Snapshot {
         &self.value
     }
 
-    /// Validate one top-level scalar or Vec2 field into an ordinary inspector event.
-    /// Nested/structural edits are deliberately left to the generic inspector.
+    /// Validate one top-level scalar/Vec2 field or one scalar fixed-array element.
+    /// Structural changes and arbitrary nested paths remain generic-inspector work.
     /// This is not authority to apply an event to a newer or different document.
     pub fn checked_edit(&self, edit: FieldEdit) -> Result<InspEvent, String> {
         let Kind::Struct { fields, .. } = &self.desc.kind else {
             return Err("custom edits require a struct component".into());
         };
-        let field = fields
-            .iter()
-            .find(|f| f.name == edit.field)
-            .ok_or_else(|| "unknown top-level field".to_string())?;
-        if edit.field.is_empty() || edit.field.contains(['.', '[', ']']) {
+        let (name, index) = match &edit.field {
+            FieldTarget::Field(name) => (name, None),
+            FieldTarget::ArrayElement { field, index } => (field, Some(*index)),
+        };
+        if name.is_empty() || name.contains(['.', '[', ']']) {
             return Err("nested field paths are not supported".into());
         }
+        let field = fields
+            .iter()
+            .find(|f| f.name == *name)
+            .ok_or_else(|| "unknown top-level field".to_string())?;
+        let ty = if let Some(index) = index {
+            let Kind::Array { elem, len } = &field.ty.kind else {
+                return Err("array-element edits require a fixed-array field".into());
+            };
+            if index >= *len {
+                return Err("array element index out of bounds".into());
+            }
+            elem.as_ref()
+        } else {
+            &field.ty
+        };
+        if index.is_some() && matches!(ty.kind, Kind::Vec2 { .. }) {
+            return Err("array-element edits require a scalar element".into());
+        }
         if !matches!(
-            field.ty.kind,
+            ty.kind,
             Kind::Bool { .. }
                 | Kind::Int { .. }
                 | Kind::Fixed { .. }
@@ -82,12 +100,12 @@ impl Snapshot {
         ) {
             return Err("custom edits require a scalar or Vec2 field".into());
         }
-        field
-            .ty
-            .check(&edit.value, true)
-            .map_err(|e| e.to_string())?;
+        ty.check(&edit.value, true).map_err(|e| e.to_string())?;
         Ok(InspEvent::Set {
-            path: edit.field,
+            path: match index {
+                Some(index) => format!("{name}[{index}]"),
+                None => name.clone(),
+            },
             value: edit.value,
         })
     }
@@ -114,10 +132,33 @@ fn check_unique_fields(value: &Value) -> Result<(), String> {
     }
     Ok(())
 }
+/// A bounded target, never an arbitrary nested field path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FieldTarget {
+    /// One exact top-level scalar or Vec2 field.
+    Field(String),
+    /// One scalar element of a top-level fixed-size array.
+    ArrayElement {
+        /// Exact top-level array field name.
+        field: String,
+        /// Zero-based index, checked against the reflected fixed length.
+        index: usize,
+    },
+}
+impl From<String> for FieldTarget {
+    fn from(field: String) -> Self {
+        Self::Field(field)
+    }
+}
+impl From<&str> for FieldTarget {
+    fn from(field: &str) -> Self {
+        Self::Field(field.into())
+    }
+}
 /// One discrete edit, not an arbitrary command or callback chain.
 pub struct FieldEdit {
-    /// Exact top-level reflected field name.
-    pub field: String,
+    /// Typed top-level field or single fixed-array element target.
+    pub field: FieldTarget,
     /// Proposed value; the descriptor checks kind and range.
     pub value: Value,
 }

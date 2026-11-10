@@ -314,3 +314,136 @@ fn vector_edit_is_exact_atomic_and_checks_each_axis() {
         Some(&Value::Vec2(FPVec2::ZERO))
     );
 }
+
+#[test]
+fn typed_array_element_is_bounded_scalar_and_snapshot_is_immutable() {
+    let scalar = TypeDesc::int(IntKind::U32).with_range_str("1..=28");
+    let s = Snapshot::new(
+        key(),
+        TypeDesc::structure(
+            40,
+            vec![FieldDesc::new("counts", 0, TypeDesc::array(scalar, 10))],
+        ),
+        Value::Struct(vec![(
+            "counts".into(),
+            Value::Array(vec![Value::Int(10); 10]),
+        )]),
+    )
+    .unwrap();
+    let before = s.value().clone();
+    for (index, count) in [(0, 1), (9, 28), (0, 10)] {
+        assert_eq!(
+            s.checked_edit(FieldEdit {
+                field: FieldTarget::ArrayElement {
+                    field: "counts".into(),
+                    index
+                },
+                value: Value::Int(count),
+            })
+            .unwrap(),
+            InspEvent::Set {
+                path: format!("counts[{index}]"),
+                value: Value::Int(count)
+            }
+        );
+    }
+    for (field, index, value) in [
+        ("counts", 10, Value::Int(1)),
+        ("counts", usize::MAX, Value::Int(1)),
+        ("counts", 0, Value::Int(0)),
+        ("counts", 9, Value::Int(29)),
+        ("counts", 0, Value::Int(-1)),
+        ("counts", 0, Value::Bool(true)),
+        ("counts", 0, Value::Array(vec![Value::Int(1)])),
+        ("missing", 0, Value::Int(1)),
+        ("counts[0]", 0, Value::Int(1)),
+        ("counts.child", 0, Value::Int(1)),
+        ("", 0, Value::Int(1)),
+    ] {
+        assert!(s
+            .checked_edit(FieldEdit {
+                field: FieldTarget::ArrayElement {
+                    field: field.into(),
+                    index
+                },
+                value,
+            })
+            .is_err());
+        assert_eq!(s.value(), &before);
+    }
+    assert!(s
+        .checked_edit(FieldEdit {
+            field: "counts[0]".into(),
+            value: Value::Int(1)
+        })
+        .is_err());
+    assert!(s
+        .checked_edit(FieldEdit {
+            field: "counts".into(),
+            value: Value::Array(vec![Value::Int(1); 10])
+        })
+        .is_err());
+    assert!(snapshot()
+        .checked_edit(FieldEdit {
+            field: FieldTarget::ArrayElement {
+                field: "hp".into(),
+                index: 0
+            },
+            value: Value::Int(1),
+        })
+        .is_err());
+    // Recursive arrays, structures and Vec2 are not scalar-array edits.
+    for (elem, value) in [
+        (
+            TypeDesc::array(TypeDesc::int(IntKind::U32), 1),
+            Value::Array(vec![Value::Int(1)]),
+        ),
+        (desc(), Value::Struct(vec![("hp".into(), Value::Int(1))])),
+        (TypeDesc::vec2(), Value::Vec2(orr_fp::FPVec2::ZERO)),
+    ] {
+        let s = Snapshot::new(
+            key(),
+            TypeDesc::structure(
+                elem.size(),
+                vec![FieldDesc::new("nested", 0, TypeDesc::array(elem, 1))],
+            ),
+            Value::Struct(vec![("nested".into(), Value::Array(vec![value.clone()]))]),
+        )
+        .unwrap();
+        assert!(s
+            .checked_edit(FieldEdit {
+                field: FieldTarget::ArrayElement {
+                    field: "nested".into(),
+                    index: 0
+                },
+                value,
+            })
+            .is_err());
+    }
+}
+
+#[test]
+fn variable_list_is_not_a_fixed_array_target() {
+    let s = Snapshot::new(
+        key(),
+        TypeDesc::structure(
+            0,
+            vec![FieldDesc::new(
+                "items",
+                0,
+                TypeDesc::list(TypeDesc::int(IntKind::U32), 0, 10),
+            )],
+        ),
+        Value::Struct(vec![("items".into(), Value::Array(vec![Value::Int(1)]))]),
+    )
+    .unwrap();
+    assert!(s
+        .checked_edit(FieldEdit {
+            field: FieldTarget::ArrayElement {
+                field: "items".into(),
+                index: 0
+            },
+            value: Value::Int(2),
+        })
+        .is_err());
+}
