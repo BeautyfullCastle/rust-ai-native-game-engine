@@ -169,18 +169,18 @@ jobs:
                   'room_layout::tests::bounded_strict_shared_recipe',
               ],
               'editor-layout-import-backend': [
-                  'room_authoring::layout_import::tests::bound_wall_and_play_mode_refuse_before_mutation',
-                  'room_authoring::layout_import::tests::import_is_one_undoable_edit_and_save_reopens_without_sidecar_changes',
-                  'room_authoring::layout_import::tests::imported_saved_puzzle_blocks_shortcut_and_replays_winning_detour',
-                  'room_authoring::layout_import::tests::rejected_import_rolls_back_partial_changes_and_stale_context',
-                  'room_authoring::layout_import::tests::same_checksum_document_rename_rejects_stale_preview',
+                  'editor::room_authoring::layout_import::tests::bound_wall_and_play_mode_refuse_before_mutation',
+                  'editor::room_authoring::layout_import::tests::import_is_one_undoable_edit_and_save_reopens_without_sidecar_changes',
+                  'editor::room_authoring::layout_import::tests::imported_saved_puzzle_blocks_shortcut_and_replays_winning_detour',
+                  'editor::room_authoring::layout_import::tests::rejected_import_rolls_back_partial_changes_and_stale_context',
+                  'editor::room_authoring::layout_import::tests::same_checksum_document_rename_rejects_stale_preview',
               ],
               'editor-layout-import-controls-backend': [
-                  'room_authoring::layout_import::tests::bound_wall_and_play_mode_refuse_before_mutation',
-                  'room_authoring::layout_import::tests::import_is_one_undoable_edit_and_save_reopens_without_sidecar_changes',
-                  'room_authoring::layout_import::tests::imported_saved_puzzle_blocks_shortcut_and_replays_winning_detour',
-                  'room_authoring::layout_import::tests::rejected_import_rolls_back_partial_changes_and_stale_context',
-                  'room_authoring::layout_import::tests::same_checksum_document_rename_rejects_stale_preview',
+                  'editor::room_authoring::layout_import::tests::bound_wall_and_play_mode_refuse_before_mutation',
+                  'editor::room_authoring::layout_import::tests::import_is_one_undoable_edit_and_save_reopens_without_sidecar_changes',
+                  'editor::room_authoring::layout_import::tests::imported_saved_puzzle_blocks_shortcut_and_replays_winning_detour',
+                  'editor::room_authoring::layout_import::tests::rejected_import_rolls_back_partial_changes_and_stale_context',
+                  'editor::room_authoring::layout_import::tests::same_checksum_document_rename_rejects_stale_preview',
               ],
               'editor-layout-import-ui': [
                   'room_authoring_panel::layout_import::tests::actual_widgets_preview_cancel_apply_once_and_disable_for_model_edits',
@@ -1042,13 +1042,21 @@ jobs:
                   save()
               attempt('cpu-attach-export-reopen', attachment_integration)
 
+              def keyboard_acceptance_production():
+                  # The schema-1 bridge overwrites the earlier opt-in executable.
+                  # Rebuild after all schema-1 consumers, preserving their separate gates.
+                  run('keyboard-acceptance-build', ['cargo', 'build', '--locked', '--release', '-p', 'orr_sample', '--no-default-features', '--features', 'room-playtest,room-input-actions', '--bin', 'orr_playtest_room'])
+                  binary = Path(os.environ['CARGO_TARGET_DIR']) / 'release' / 'orr_playtest_room'
+                  (evidence / 'fresh-keyboard-acceptance-binary.json').write_text(json.dumps({'orr_playtest_room': hashlib.sha256(binary.read_bytes()).hexdigest()}, indent=2) + '\n')
+              attempt('keyboard-acceptance-production', keyboard_acceptance_production)
+
               def keyboard_integration():
-                  # Use this run's existing attachment producers and unchanged prior playtest.
+                  # Require this run's attachment producers and fresh keyboard-enabled CLI.
                   binary_dir = Path(os.environ['CARGO_TARGET_DIR']) / 'release'
                   produced_hashes = {}
                   for label, manifest, names in [
                       ('attach-build', 'fresh-attach-binaries.json', ['orr_attach_room_controls', 'orr_new_arena', 'room_escape', 'orr_export_room']),
-                      ('recorded-route-cli-build', 'fresh-recorded-route-binary.json', ['orr_playtest_room']),
+                      ('keyboard-acceptance-build', 'fresh-keyboard-acceptance-binary.json', ['orr_playtest_room']),
                   ]:
                       produced = [entry for entry in receipts if entry['label'] == label]
                       if len(produced) != 1 or produced[0]['exit'] != 0:
@@ -1095,7 +1103,7 @@ jobs:
                   hashes = {}
                   for label, manifest, names in [
                       ('attach-build', 'fresh-attach-binaries.json', ['orr_attach_room_controls', 'orr_new_arena', 'room_escape', 'orr_export_room']),
-                      ('recorded-route-cli-build', 'fresh-recorded-route-binary.json', ['orr_playtest_room']),
+                      ('keyboard-acceptance-build', 'fresh-keyboard-acceptance-binary.json', ['orr_playtest_room']),
                   ]:
                       produced = [entry for entry in receipts if entry['label'] == label]
                       if len(produced) != 1 or type(produced[0]['exit']) is not int or produced[0]['exit'] != 0:
