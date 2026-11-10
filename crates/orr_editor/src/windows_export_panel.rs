@@ -22,6 +22,15 @@ pub struct Panel {
 }
 
 impl Panel {
+    // Consent applies to this path and these bytes, not to later selections.
+    fn set_runtime_identity(&mut self, runtime: String, sha256: String) {
+        if self.runtime != runtime || self.runtime_sha256 != sha256 {
+            self.trusted_runtime = false;
+        }
+        self.runtime = runtime;
+        self.runtime_sha256 = sha256;
+    }
+
     pub fn busy(&self) -> bool {
         self.pending.is_some()
     }
@@ -52,7 +61,7 @@ impl Panel {
         self.pending = None;
         match result {
             Ok(Completed::Measured { path, sha256 }) if self.runtime == path => {
-                self.runtime_sha256 = sha256;
+                self.set_runtime_identity(path, sha256);
                 self.status = "Runtime measured. Its hash does not establish trust; confirm trusted code separately.".into();
             }
             Ok(Completed::Measured { .. }) => {
@@ -168,8 +177,11 @@ impl Panel {
                 if ui.button("Use current project").clicked() {
                     self.use_current_scene(editor.path().as_deref());
                 }
-                field(ui, "Runtime executable", &mut self.runtime);
-                field(ui, "Runtime SHA-256", &mut self.runtime_sha256);
+                let mut runtime = self.runtime.clone();
+                let mut sha256 = self.runtime_sha256.clone();
+                field(ui, "Runtime executable", &mut runtime);
+                field(ui, "Runtime SHA-256", &mut sha256);
+                self.set_runtime_identity(runtime, sha256);
                 if ui.button("Check runtime SHA-256").clicked() {
                     self.measure();
                 }
@@ -203,3 +215,6 @@ fn field(ui: &mut egui::Ui, label: &str, value: &mut String) {
     ui.add(egui::TextEdit::singleline(value).desired_width(f32::INFINITY))
         .labelled_by(label.id);
 }
+
+#[cfg(test)]
+mod tests;
