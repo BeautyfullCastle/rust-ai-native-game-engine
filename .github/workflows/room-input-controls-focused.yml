@@ -7,6 +7,7 @@ on:
       - '.github/workflows/room-input-controls-focused.yml'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'crates/orr_session/**'
       - 'crates/orr_input/**'
       - 'crates/orr_package/**'
       - 'crates/orr_sample/Cargo.toml'
@@ -125,6 +126,29 @@ jobs:
                   traceback.print_exc()
 
           expected_inventories = {
+              'recorded-route-session': [
+                  'replay::debug_presence_tests::presence_includes_commands_outside_input_range',
+              ],
+              'recorded-route-converter': [
+                  'room_project::recorded_route::tests::winning_route_replays_and_preserves_release',
+                  'room_project::recorded_route::tests::rejects_debug_commands_at_any_tick_and_simulation_commands',
+                  'room_project::recorded_route::tests::rejects_invalid_identity_corruption_missing_ticks_and_stop_receipts',
+                  'room_project::recorded_route::tests::bounds_steps_ticks_and_preparse_memory',
+                  'room_project::recorded_route::tests::rejects_nonzero_start_missing_initial_frame_wrong_frame_and_intermediate_checksum',
+              ],
+              'recorded-route-editor': [
+                  'room_authoring_panel::recorded_route::tests::actual_stopped_play_prepares_copies_and_replays_through_cli_when_supplied',
+                  'room_authoring_panel::recorded_route::tests::close_blocker_play_restart_and_changed_file_invalidate_copy',
+                  'room_authoring_panel::recorded_route::tests::actual_widgets_prepare_cancel_copy_emit_only_explicit_clipboard_output',
+                  'room_authoring_panel::recorded_route::tests::same_path_reload_different_scene_and_corrupt_recording_cannot_reuse_prepared_route',
+              ],
+              'recorded-route-editor-controls': [
+                  'room_authoring_panel::recorded_route::tests::actual_stopped_play_prepares_copies_and_replays_through_cli_when_supplied',
+                  'room_authoring_panel::recorded_route::tests::close_blocker_play_restart_and_changed_file_invalidate_copy',
+                  'room_authoring_panel::recorded_route::tests::actual_widgets_prepare_cancel_copy_emit_only_explicit_clipboard_output',
+                  'room_authoring_panel::recorded_route::tests::same_path_reload_different_scene_and_corrupt_recording_cannot_reuse_prepared_route',
+                  'room_authoring_panel::recorded_route::tests::authored_controls_are_refused_at_prepare_and_after_prepare',
+              ],
               'playtest-keys-off-cli': [
                   'key_scripts_require_explicit_compiled_support',
               ],
@@ -296,6 +320,10 @@ jobs:
               on = 'room-input-actions,project-create,project-export'
               off = 'room-project,project-create,project-export'
               suites = [
+                  ('recorded-route-session', 'orr_session', '', ['--lib', 'replay::debug_presence_tests::']),
+                  ('recorded-route-converter', 'orr_sample', 'room-project', ['--lib', 'room_project::recorded_route::']),
+                  ('recorded-route-editor', 'orr_editor', 'room-authoring', ['--lib', 'room_authoring_panel::recorded_route::']),
+                  ('recorded-route-editor-controls', 'orr_editor', 'room-authoring,room-input-map-play', ['--lib', 'room_authoring_panel::recorded_route::']),
                   ('playtest-keys-off-cli', 'orr_sample', 'room-playtest,project-create', ['--test', 'room_playtest_keys_cli']),
                   ('playtest-keys-cli', 'orr_sample', 'room-playtest,project-create,room-input-actions', ['--test', 'room_playtest_keys_cli']),
                   ('room-layout-shared-parser', 'orr_sample', 'room-project', ['--lib', 'room_layout::']),
@@ -334,6 +362,7 @@ jobs:
               attempt('python-controls', python_tests)
 
               for label, package, features, targets in [
+                  ('recorded-route-session-clippy', 'orr_session', '', ['--lib']),
                   ('playtest-keys-bin-clippy', 'orr_sample', 'room-playtest,room-input-actions', ['--bin', 'orr_playtest_room']),
                   ('playtest-keys-cli-clippy', 'orr_sample', 'room-playtest,project-create,room-input-actions', ['--test', 'room_playtest_keys_cli']),
                   ('playtest-keys-off-cli-clippy', 'orr_sample', 'room-playtest,project-create', ['--test', 'room_playtest_keys_cli']),
@@ -393,6 +422,31 @@ jobs:
               attempt('editor-project-build', lambda: run('editor-project-build', ['cargo', 'build', '--locked', '--release', '-p', 'orr_editor', '--no-default-features', '--features', 'room-input-map-project', '--bin', 'orr_room_input_map']))
 
               attempt('editor-play-build', lambda: run('editor-play-build', ['cargo', 'build', '--locked', '--release', '-p', 'orr_editor', '--no-default-features', '--features', 'room-input-map-play', '--bin', 'orr_editor']))
+
+              def recorded_route_bridge():
+                  # Build the actual consumer from pinned source, not a PATH or cached executable.
+                  run('recorded-route-cli-build', ['cargo', 'build', '--locked', '--release', '-p', 'orr_sample', '--no-default-features', '--features', 'room-playtest', '--bin', 'orr_playtest_room'])
+                  binary = Path(os.environ['CARGO_TARGET_DIR']) / 'release' / 'orr_playtest_room'
+                  (evidence / 'fresh-recorded-route-binary.json').write_text(json.dumps({'orr_playtest_room': hashlib.sha256(binary.read_bytes()).hexdigest()}, indent=2) + '\n')
+                  name = 'room_authoring_panel::recorded_route::tests::actual_stopped_play_prepares_copies_and_replays_through_cli_when_supplied'
+                  previous = os.environ.get('ORR_RECORDED_ROUTE_CLI')
+                  os.environ['ORR_RECORDED_ROUTE_CLI'] = str(binary.resolve(strict=True))
+                  try:
+                      output, record = run('recorded-route-cli-bridge', ['cargo', 'test', '--locked', '--release', '-p', 'orr_editor', '--no-default-features', '--features', 'room-authoring', '--lib', name, '--', '--exact', '--show-output', '--format=pretty', '--color=never', '--test-threads=1'])
+                  finally:
+                      if previous is None:
+                          os.environ.pop('ORR_RECORDED_ROUTE_CLI', None)
+                      else:
+                          os.environ['ORR_RECORDED_ROUTE_CLI'] = previous
+                  cases = re.findall(r'^test (.+) \.\.\. (ok|FAILED|ignored)(?: .*)?$', output, re.M)
+                  summaries = re.findall(r'^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured;', output, re.M)
+                  markers = re.findall(r'^RECORDED_ROUTE_CLI_PASSED$', output, re.M)
+                  record['test_count'] = len(cases)
+                  record['integration_count'] = len(markers)
+                  save()
+                  if cases != [(name, 'ok')] or summaries != [('1', '0', '0', '0')] or len(markers) != 1:
+                      raise RuntimeError('Recorded Room route must execute exactly one passing editor-to-fresh-CLI bridge with its success marker')
+              attempt('recorded-route-cli-bridge', recorded_route_bridge)
 
               def integration():
                   # This run-isolated target starts empty; never consume PATH or cached binaries.

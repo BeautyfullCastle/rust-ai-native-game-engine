@@ -1,5 +1,6 @@
 mod actor_placement;
 mod layout_import;
+mod recorded_route;
 mod wall_placement;
 mod wall_footprint;
 pub(crate) use wall_footprint::ViewInput;
@@ -16,6 +17,7 @@ pub struct Panel {
     pub open: bool,
     actor_placement: actor_placement::State,
     layout_import: layout_import::State,
+    recorded_route: recorded_route::State,
     wall_placement: wall_placement::State,
     footprint: wall_footprint::State,
     footprint_grid: wall_footprint::GridStep,
@@ -46,6 +48,7 @@ impl Default for Panel {
             open: false,
             actor_placement: Default::default(),
             layout_import: Default::default(),
+            recorded_route: Default::default(),
             wall_placement: Default::default(),
             footprint: Default::default(),
             footprint_grid: Default::default(),
@@ -75,6 +78,7 @@ impl Default for Panel {
 impl Panel {
     pub fn show(&mut self, context: &Context, editor: &mut Editor, removal_blocker: Option<&str>) {
         self.sync_layout_import(editor, removal_blocker);
+        self.sync_recorded_route(editor, removal_blocker);
         self.sync_wall_footprint(editor);
         self.sync_actor_placement(editor);
         self.sync_wall_placement(editor);
@@ -206,6 +210,7 @@ impl Panel {
                         self.wall_list_and_editor(ui, editor, editable, removal_blocker);
                     });
                 self.show_layout_import(ui, editor, removal_blocker);
+                self.show_recorded_route(ui, editor, removal_blocker);
                 if !self.status.is_empty() {
                     ui.label(&self.status);
                 }

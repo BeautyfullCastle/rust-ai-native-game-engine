@@ -13,7 +13,7 @@ struct Preview {
     source: String,
 }
 impl Panel {
-    fn import_ready(&self, editor: &Editor, blocker: Option<&str>) -> bool {
+    pub(super) fn import_ready(&self, editor: &Editor, blocker: Option<&str>) -> bool {
         self.open
             && blocker.is_none()
             && editor.game().is_room()

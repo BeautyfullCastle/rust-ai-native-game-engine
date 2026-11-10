@@ -1,4 +1,5 @@
 //! Closed RoomEscapeV1 project admission. File and package reads finish before startup.
+pub mod recorded_route;
 use orr_ecs::Frame;
 use orr_fp::FrameRng;
 use orr_games::room_escape_game::{self as game, RoomEscapeV1};

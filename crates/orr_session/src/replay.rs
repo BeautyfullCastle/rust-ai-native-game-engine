@@ -561,6 +561,11 @@ impl<G: Game> ReplayReader<G> {
         self.debug.get(&tick).map_or(&[], |v| v.as_slice())
     }
 
+    /// Whether any debug command exists, including outside the input tick range.
+    pub fn has_debug_commands(&self) -> bool {
+        !self.debug.is_empty()
+    }
+
     /// Tick of the earliest recorded input (1 when the file has none).
     pub fn first_tick(&self) -> u64 {
         self.first_tick
@@ -850,4 +855,35 @@ fn replay_verify_reader<G: Game>(reader: ReplayReader<G>, config: G::Config) -> 
     }
 
     Ok(VerifyReport { ticks_simulated: reader.last_tick(), checksums_checked: checked, mismatch })
+}
+
+#[cfg(test)]
+mod debug_presence_tests {
+    use super::*;
+    #[test]
+    fn presence_includes_commands_outside_input_range() {
+        let mut writer = ReplayWriter::<orr_testgame::Arena>::new(ReplayHeader {
+            format_version: 3,
+            game_id: "test".into(),
+            build_hash: 0,
+            seed: 0,
+            player_count: 1,
+            tick_rate: 60,
+            input_size: core::mem::size_of::<orr_testgame::ArenaInput>() as u32,
+        });
+        assert!(
+            !ReplayReader::<orr_testgame::Arena>::parse(&writer.to_bytes())
+                .unwrap()
+                .has_debug_commands()
+        );
+        writer.record_debug(
+            u64::MAX,
+            DebugCommand::Spawn {
+                components: Vec::new(),
+            },
+        );
+        let reader = ReplayReader::<orr_testgame::Arena>::parse(&writer.to_bytes()).unwrap();
+        assert_eq!(reader.tick_count(), 0);
+        assert!(reader.has_debug_commands());
+    }
 }
