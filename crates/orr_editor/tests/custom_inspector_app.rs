@@ -229,3 +229,58 @@ fn selection_preview_and_schema_mismatch_do_not_invoke_wrong_callbacks() {
     assert!(fallback.query_by_label("Use generic fields").is_none());
     assert!(fallback.state().editor.history().entries.is_empty());
 }
+
+#[test]
+fn actual_app_generic_focus_commit_undo_redo_save_and_reopen() {
+    let (tmp, path) = scene();
+    let mut h = app(&path, "projectile", panels::panels().unwrap());
+    settle(&mut h);
+    h.get_by_label("Set lifetime to 180 ticks").click();
+    settle(&mut h);
+    h.get_by_label("Use generic fields").click();
+    settle(&mut h);
+    h.get_by(|n| {
+        n.role() == egui::accesskit::Role::TextInput && n.value().as_deref() == Some("180")
+    })
+    .focus();
+    h.run_steps(1);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.run_steps(1);
+    h.get_by(|n| {
+        n.role() == egui::accesskit::Role::TextInput && n.value().as_deref() == Some("180")
+    })
+    .type_text("120");
+    h.run_steps(1);
+    h.get_by(|n| {
+        n.role() == egui::accesskit::Role::TextInput && n.value().as_deref() == Some("200")
+    })
+    .focus();
+    settle(&mut h);
+    assert_eq!(value(&h.state().editor, "Bullet", "ttl"), Value::Int(120));
+    assert_eq!(h.state().editor.history().entries.len(), 2);
+    assert!(h.state().editor.sim().dirty);
+    settle(&mut h);
+    assert_eq!(
+        h.state().editor.history().entries.len(),
+        2,
+        "blur commits once"
+    );
+    assert!(h.state_mut().editor.undo());
+    settle(&mut h);
+    assert_eq!(value(&h.state().editor, "Bullet", "ttl"), Value::Int(180));
+    assert!(h.state_mut().editor.redo());
+    settle(&mut h);
+    assert_eq!(value(&h.state().editor, "Bullet", "ttl"), Value::Int(120));
+    let checksum = h.state().editor.checksum();
+    let saved = tmp.path().join("focus-saved.scene.yaml");
+    assert!(h.state_mut().editor.save_as(&saved));
+    settle(&mut h);
+    assert!(!h.state().editor.sim().dirty);
+    let mut reopened = Editor::open_game(&saved, EditorGame::Arena).unwrap();
+    reopened.sync();
+    assert!(reopened.select_named("projectile"));
+    reopened.sync();
+    assert_eq!(value(&reopened, "Bullet", "ttl"), Value::Int(120));
+    assert_eq!(reopened.checksum(), checksum);
+    assert_eq!(std::fs::read_to_string(path).unwrap(), SCENE);
+}

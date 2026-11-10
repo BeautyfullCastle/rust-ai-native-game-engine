@@ -62,18 +62,19 @@ service, listener or credential path is added.
 
 ## Validation and remaining acceptance
 
-Run the two `custom_inspector_contract` and `custom_inspector_app` test targets
-with the feature enabled. CPU egui tests cover custom/generic edits, invalid
+Run `custom_inspector_contract` and `custom_inspector_app` with the feature
+enabled, plus `inspector_number_focus` with or without it. CPU egui tests cover
+custom/generic edits, invalid
 intent preservation, Undo/Redo, dirty/Save/reopen, Play suppression, selection,
 preview, exact-schema fallback, duplicate fields and disabled parent callbacks.
 The example executable is build-checked; tests use actual EditorApp and local
 hosts with injected egui input, not physical input or native window/GPU proof.
 
 Health/inventory consumption, native Windows visual/physical-input acceptance,
-disconnect recovery, generic numeric draft commit on programmatic focus transfer,
-full required checks and development integration remain
-pending. Use Enter to commit generic numeric edits; the focus-transfer failure
-is reproduced with the original widget and retained separately, not counted as
-passed. Escape safely discards a draft, including after selection/reselection.
+disconnect recovery, full required checks and development integration remain
+pending. Generic numeric edits now commit once on Enter, Tab, pointer or
+programmatic focus transfer. Escape, disabled UI and a hidden Inspector discard
+drafts without document mutation. The original focus-transfer failure and initial
+compile failure are retained alongside the regression results.
 Publication is separately blocked by the Windows GitHub network policy;
 local validation does not waive that restriction or complete #562.
