@@ -367,6 +367,14 @@ jobs:
               def python_grid_tests():
                   from textwrap import dedent
                   expected = [
+                      'test_create_room_grid.GridBorderTests.test_all_border_transform_and_merge_combinations',
+                      'test_create_room_grid.GridBorderTests.test_border_cli_all_transforms_formats_no_writes',
+                      'test_create_room_grid.GridBorderTests.test_border_dimension_and_wall_caps',
+                      'test_create_room_grid.GridBorderTests.test_border_duplicate_and_unknown_cli_refused_before_read',
+                      'test_create_room_grid.GridBorderTests.test_border_exact_padding_and_actor_coordinates',
+                      'test_create_room_grid.GridBorderTests.test_border_false_is_byte_identical',
+                      'test_create_room_grid.GridBorderTests.test_border_occupancy_and_actor_preservation',
+                      'test_create_room_grid.GridBorderTests.test_border_types_and_original_admission',
                       'test_create_room_grid.GridMergeTests.test_cli_merge_formats_and_duplicate_rejection',
                       'test_create_room_grid.GridMergeTests.test_merge_does_not_relax_invalid_input',
                       'test_create_room_grid.GridMergeTests.test_merge_option_types_are_strict',
@@ -678,6 +686,54 @@ jobs:
                   record['check_count'] = len(expected_checks)
                   save()
               attempt('python-grid-merge-integration', grid_merge_integration)
+
+              def grid_border_integration():
+                  # Reuse the two existing production-only builds before broader builds
+                  # can overwrite them. Require this run's receipts and matching bytes.
+                  binary_dir = Path(os.environ['CARGO_TARGET_DIR']) / 'release'
+                  hashes = {}
+                  for name, label, manifest in [
+                      ('orr_new_arena', 'room-layout-production-build', 'fresh-room-layout-creator-binary.json'),
+                      ('orr_playtest_room', 'recorded-route-cli-build', 'fresh-recorded-route-binary.json'),
+                  ]:
+                      produced = [entry for entry in receipts if entry['label'] == label]
+                      if len(produced) != 1 or produced[0]['exit'] != 0:
+                          raise RuntimeError(f'Grid integration requires a passing fresh producer: {label}')
+                      recorded = json.loads((evidence / manifest).read_text())
+                      actual = hashlib.sha256((binary_dir / name).read_bytes()).hexdigest()
+                      if recorded != {name: actual}:
+                          raise RuntimeError(f'Grid integration producer bytes changed: {name}')
+                      hashes[name] = actual
+                  output_dir = evidence / 'grid-border-integration'
+                  code = ('import sys; sys.path.insert(0, "tools"); '
+                          'from test_create_room_grid import run_border_integration; '
+                          'run_border_integration(sys.argv[1], sys.argv[2])')
+                  output, record = run('python-grid-border-integration', ['python3', '-B', '-E', '-c', code,
+                                      str(binary_dir.resolve(strict=True)), str(output_dir)])
+                  result = json.loads(output)
+                  retained = json.loads((output_dir / 'result.json').read_text())
+                  expected_checks = [
+                      'mirror-0-rotate-0',
+                      'mirror-0-rotate-90',
+                      'mirror-0-rotate-180',
+                      'mirror-0-rotate-270',
+                      'mirror-1-rotate-0',
+                      'mirror-1-rotate-90',
+                      'mirror-1-rotate-180',
+                      'mirror-1-rotate-270',
+                      'oversized-interior-rejected',
+                  ]
+                  expected_per_transform = ['grid-cli', 'creator-admission', 'unbordered-exterior-bypass-wins', 'border-blocks-exterior-bypass', 'internal-detour-wins', 'byte-identical-repeat', 'project-unchanged', '31x31-interior-padded33-admitted']
+                  if (result != retained or result.get('status') != 'passed'
+                          or result.get('binaries') != hashes
+                          or result.get('tool_sha256') != hashlib.sha256(Path('tools/create_room_grid.py').read_bytes()).hexdigest()
+                          or result.get('checks') != expected_checks
+                          or result.get('checks_per_transform') != expected_per_transform):
+                      raise RuntimeError('Grid integration result, retained receipts or source identity mismatch')
+                  record['integration_count'] = 1
+                  record['check_count'] = len(expected_checks)
+                  save()
+              attempt('python-grid-border-integration', grid_border_integration)
 
               def integration():
                   # This run-isolated target starts empty; never consume PATH or cached binaries.

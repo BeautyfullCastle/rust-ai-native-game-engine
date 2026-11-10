@@ -850,5 +850,207 @@ def run_merge_integration(binary_dir, output_dir):
     print(json.dumps(summary,indent=2))
 
 
+class GridBorderTests(unittest.TestCase):
+    def test_border_exact_padding_and_actor_coordinates(self):
+        data = b"PKE\n.#."
+        expected = b"#####\n#PKE#\n#.#.#\n#####"
+        self.assertEqual(grid.encode(data, border=True), grid.encode(expected))
+        old, new = json.loads(grid.encode(data)), json.loads(grid.encode(data, border=True))
+        self.assertEqual({k: old[k] for k in grid.ACTORS.values()}, {k: new[k] for k in grid.ACTORS.values()})
+        self.assertEqual(len(new["walls"]), 15)
+
+    def test_border_types_and_original_admission(self):
+        for value in [None, 0, 1, "true", [], {}]:
+            for method in (grid.encode, grid.preview_svg):
+                with self.assertRaises(ValueError): method(DRAWING, border=value)
+        for data in [b"PK", b"PPKE", b"PKE ", b"PKE\n#", b"PKE\n\n", b"PKE\r"]:
+            with self.assertRaises(ValueError): grid.encode(data, border=True, merge_walls=True)
+
+    def test_border_dimension_and_wall_caps(self):
+        data = ("PKE" + "."*28 + "\n" + ("."*31+"\n")*30).encode()
+        with self.assertRaisesRegex(ValueError, "64 wall tiles"): grid.encode(data, border=True)
+        recipe = json.loads(grid.encode(data, border=True, merge_walls=True))
+        self.assertLessEqual(len(recipe["walls"]),64)
+        self.assertTrue(all(Fraction(v)<=8 for wall in recipe["walls"] for v in wall["half_extents"]))
+        for rows in [["PKE"+"."*29], ["PKE"]+["..."]*31]:
+            with self.assertRaisesRegex(ValueError,"31"):
+                grid.encode("\n".join(rows).encode(),border=True,merge_walls=True)
+        sparse = ["PKE"+"."*28]+["".join("#" if (x+y)%2==0 else "." for x in range(31)) for y in range(5)]
+        with self.assertRaisesRegex(ValueError,"64 wall boxes"):
+            grid.encode("\n".join(sparse).encode(),border=True,merge_walls=True)
+
+    def test_all_border_transform_and_merge_combinations(self):
+        data = b"PKE.\n.#..\n..#."
+        padded = b"######\n#PKE.#\n#.#..#\n#..#.#\n######"
+        for merge in (False,True):
+            for mirror in (False,True):
+                for rotation in (0,90,180,270):
+                    options=dict(rotate=rotation,mirror_x=mirror,merge_walls=merge)
+                    self.assertEqual(grid.encode(data,border=True,**options),grid.encode(padded,**options))
+                    self.assertEqual(grid.preview_svg(data,border=True,**options),grid.preview_svg(padded,**options))
+
+    def test_border_false_is_byte_identical(self):
+        for method in (grid.encode,grid.preview_svg):
+            for merge in (False,True):
+                self.assertEqual(method(DRAWING,merge_walls=merge),method(DRAWING,merge_walls=merge,border=False))
+
+    def test_border_occupancy_and_actor_preservation(self):
+        for bits in range(64):
+            rows=["PKE"]+["".join("#" if bits&(1<<(y*3+x)) else "." for x in range(3)) for y in range(2)]
+            data="\n".join(rows).encode()
+            for merge in (False,True):
+                recipe=json.loads(grid.encode(data,border=True,merge_walls=merge)); covered=set()
+                for wall in recipe['walls']:
+                    cx,cz=map(Fraction,wall['center']);hx,hz=map(Fraction,wall['half_extents'])
+                    cells={(x,z) for z in range(-2,3) for x in range(-2,3) if abs(x-cx)<hx and abs(z-cz)<hz}
+                    self.assertFalse(cells&covered);covered|=cells
+                expected={(x,z) for z in range(-2,3) for x in range(-2,3) if abs(x)==2 or abs(z)==2 or rows[z+1][x+1]=='#'}
+                self.assertEqual(covered,expected)
+                self.assertEqual(recipe['player'],['-1','-1'])
+
+    def test_border_cli_all_transforms_formats_no_writes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);path=root/'grid Ω.txt';path.write_bytes(DRAWING);before=inventory(root)
+            for merge in (False,True):
+                for mirror in (False,True):
+                    for rotation in (0,90,180,270):
+                        for fmt in ('json','svg'):
+                            args=['--border','--rotate',str(rotation),'--format',fmt]+(['--mirror-x'] if mirror else [])+(['--merge-walls'] if merge else [])
+                            result=subprocess.run([sys.executable,'-B',TOOL,'--input',path,*args],capture_output=True)
+                            self.assertEqual(result.returncode,0,result.stderr)
+                            method=grid.encode if fmt=='json' else grid.preview_svg
+                            self.assertEqual(result.stdout,method(DRAWING,border=True,rotate=rotation,mirror_x=mirror,merge_walls=merge))
+            self.assertEqual(inventory(root),before)
+
+    def test_border_duplicate_and_unknown_cli_refused_before_read(self):
+        for args in [['--border','--border'],['--border=true'],['--bord']]:
+            with patch.object(grid,'read_grid',side_effect=AssertionError('must not read')):
+                with redirect_stderr(io.StringIO()),self.assertRaises(SystemExit) as error:
+                    grid.main(['--input','missing',*args])
+                self.assertEqual(error.exception.code,2)
+
+
+def _run_border_case(binary_dir, output_dir, *, rotate=0, mirror_x=False):
+    """Create retained fixtures and real CPU receipts, never build or download binaries."""
+    grid.encode(DRAWING, rotate=rotate, mirror_x=mirror_x)  # Validate before any writes.
+    transform_args = ["--rotate", str(rotate)] + (["--mirror-x"] if mirror_x else [])
+    binaries = Path(binary_dir).resolve(strict=True)
+    root = Path(output_dir).absolute()
+    root.mkdir()  # New evidence directory only; do not overwrite an earlier run.
+    root = root.resolve(strict=True)
+    executable_hashes = {name: hashlib.sha256((binaries / name).read_bytes()).hexdigest()
+                         for name in ("orr_new_arena", "orr_playtest_room")}
+
+    def require(condition, message):
+        if not condition:
+            raise AssertionError(message)
+
+    def unchanged(label, project, before):
+        after = inventory(project)
+        (root / (label + "-inventory.json")).write_text(
+            json.dumps({"before": before, "after": after}, indent=2) + "\n")
+        require(before == after, f"{label}: playtest changed the project")
+
+    def run(label, args, expected=0):
+        command = list(map(str, args))
+        (root / (label + ".command.json")).write_text(json.dumps(command) + "\n")
+        result = subprocess.run(command, capture_output=True, timeout=90)
+        (root / (label + ".stdout")).write_bytes(result.stdout)
+        (root / (label + ".stderr")).write_bytes(result.stderr)
+        (root / (label + ".exit")).write_text(str(result.returncode) + "\n")
+        if result.returncode != expected:
+            raise AssertionError(f"{label}: expected {expected}, got {result.returncode}: "
+                                 f"{result.stdout!r} {result.stderr!r}")
+        return result.stdout
+
+    def create(label, drawing, border=True):
+        input_path = root / (label + " Ω.txt")
+        input_path.write_bytes(drawing)
+        recipe = run(label + "-compile", [sys.executable, "-B", TOOL, "--input", input_path, "--merge-walls", *(["--border"] if border else []), *transform_args])
+        recipe_path = root / (label + ".json")
+        recipe_path.write_bytes(recipe)
+        project = root / (label + " Project Ω")
+        run(label + "-create", [binaries / "orr_new_arena", "--output", project,
+                               "--template", "room-escape-3d-v1", "--seed", "ascii-grid",
+                               "--room-layout", recipe_path])
+        return project
+
+    def step(ticks, x=0, z=0, interact=False, key=True, won=False):
+        if mirror_x:
+            x = -x
+        for _ in range(rotate // 90):
+            x, z = -z, x
+        return {"ticks": ticks, "move_x": x, "move_z": z, "interact": interact,
+                "expect_key": key, "expect_won": won}
+
+    def play(label, project, steps, expected=0):
+        script = root / (label + "-route.json")
+        script.write_text(json.dumps({"schema": 1, "steps": steps}) + "\n")
+        return run(label, [binaries / "orr_playtest_room", "--project", project,
+                           "--script", script, "--json"], expected)
+
+    blocked_drawing = b"...#...\nPK.#..E\n...#...\n"
+    route = [step(1, interact=True), step(40,z=1),step(120,x=1),step(40,z=-1),step(1,interact=True,won=True)]
+    open_project=create('open',blocked_drawing,border=False)
+    open_before=inventory(open_project)
+    open_report=json.loads(play('exterior-open',open_project,route))
+    require(open_report['status']=='passed' and open_report['ticks']==202,'unbordered exterior bypass must win at202')
+    unchanged('open',open_project,open_before)
+    closed=create('closed',blocked_drawing)
+    closed_before=inventory(closed)
+    closed_report=json.loads(play('exterior-blocked',closed,route,expected=1))
+    require(closed_report['status']=='error' and closed_report['error']['kind']=='assertion','closed exterior route must fail gameplay assertion')
+    require(closed_report['steps'][-1]['observed']=={'key':True,'won':False},'border must block victory while retaining key')
+    unchanged('closed',closed,closed_before)
+    internal=create('internal',b'.......\n.......\n.......\nPK.#..E\n.......\n.......\n.......')
+    internal_before=inventory(internal)
+    first=play('internal-win',internal,route)
+    require(first==play('internal-repeat',internal,route),'internal route report must repeat identically')
+    require(json.loads(first)['ticks']==202 and json.loads(first)['status']=='passed','internal detour must win at202')
+    unchanged('internal',internal,internal_before)
+    maximum=create('maximum',('PKE'+'.'*28+'\n'+('.'*31+'\n')*30).encode())
+    maximum_before=inventory(maximum)
+    require(json.loads(play('maximum-admit',maximum,[step(0,key=False)]))['status']=='passed','padded33maximum must admit')
+    unchanged('maximum',maximum,maximum_before)
+    require(executable_hashes=={name:hashlib.sha256((binaries/name).read_bytes()).hexdigest() for name in executable_hashes},'producer bytes changed')
+    summary={'status':'passed','checks':['grid-cli','creator-admission','unbordered-exterior-bypass-wins','border-blocks-exterior-bypass','internal-detour-wins','byte-identical-repeat','project-unchanged','31x31-interior-padded33-admitted'],
+             'transformation':{'rotate':rotate,'mirror_x':mirror_x},'binaries':executable_hashes,'tool_sha256':hashlib.sha256(TOOL.read_bytes()).hexdigest(),
+             'scope':'retained production binaries, scripted CPU; no native/GPU or solvability claim'}
+    (root/'result.json').write_text(json.dumps(summary,indent=2)+'\n');print(json.dumps(summary,indent=2))
+
+
+def run_border_integration(binary_dir, output_dir):
+    """All eight bordered geometry cases and oversized-interior refusal."""
+    root=Path(output_dir).absolute();root.mkdir()
+    checks=[];hashes=None;tool_hash=hashlib.sha256(TOOL.read_bytes()).hexdigest()
+    expected_checks=['grid-cli','creator-admission','unbordered-exterior-bypass-wins','border-blocks-exterior-bypass','internal-detour-wins','byte-identical-repeat','project-unchanged','31x31-interior-padded33-admitted']
+    for mirror in (False,True):
+        for rotation in (0,90,180,270):
+            label=f'mirror-{int(mirror)}-rotate-{rotation}'
+            with redirect_stdout(io.StringIO()) as captured:
+                _run_border_case(binary_dir,root/label,rotate=rotation,mirror_x=mirror)
+            result=json.loads((root/label/'result.json').read_bytes())
+            if (result!=json.loads(captured.getvalue()) or result['status']!='passed'
+                    or result['checks']!=expected_checks or result['tool_sha256']!=tool_hash
+                    or result['transformation']!={'rotate':rotation,'mirror_x':mirror}):
+                raise AssertionError('border integration result identity mismatch')
+            if hashes is None:hashes=result['binaries']
+            if result['binaries']!=hashes:raise AssertionError('border producer identities changed')
+            checks.append(label)
+    rejected=root/'oversized.txt';rejected.write_text('PKE'+'.'*29)
+    command=[sys.executable,'-B',str(TOOL),'--input',str(rejected),'--border','--merge-walls']
+    result=subprocess.run(command,capture_output=True,timeout=10)
+    (root/'oversized.command.json').write_text(json.dumps(command)+'\n')
+    (root/'oversized.stdout').write_bytes(result.stdout);(root/'oversized.stderr').write_bytes(result.stderr)
+    (root/'oversized.exit').write_text(str(result.returncode)+'\n')
+    if result.returncode!=1 or result.stdout or b'31' not in result.stderr:
+        raise AssertionError('oversized border interior not rejected')
+    checks.append('oversized-interior-rejected')
+    summary={'status':'passed','checks':checks,'checks_per_transform':expected_checks,
+             'binaries':hashes,'tool_sha256':tool_hash,
+             'scope':'retained production binaries, bordered geometry CPU; not native/GPU or universal solvability'}
+    (root/'result.json').write_text(json.dumps(summary,indent=2)+'\n');print(json.dumps(summary,indent=2))
+
+
 if __name__ == "__main__":
     unittest.main()

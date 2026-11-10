@@ -19,8 +19,10 @@ def half_integer(twice):
     return f"{sign}{whole}" + (".5" if half else "")
 
 
-def encode(data, *, rotate=0, mirror_x=False, merge_walls=False):
+def encode(data, *, rotate=0, mirror_x=False, merge_walls=False, border=False):
     """Compile captured bytes. This is not scene admission or a puzzle solver."""
+    if type(border) is not bool:
+        raise ValueError("border must be a boolean")
     if type(merge_walls) is not bool:
         raise ValueError("merge_walls must be a boolean")
     if type(rotate) is not int or rotate not in (0, 90, 180, 270):
@@ -60,6 +62,13 @@ def encode(data, *, rotate=0, mirror_x=False, merge_walls=False):
                                  "use P, K, E, # or .")
     if set(actors) != set(ACTORS.values()):
         raise ValueError("grid requires exactly one P, one K and one E tile")
+    if border:
+        if width > MAX_SIDE - 2 or height > MAX_SIDE - 2:
+            raise ValueError("border requires an interior of at most 31 rows and columns")
+        edge = "#" * (width + 2)
+        padded = [edge, *["#" + row + "#" for row in rows], edge]
+        return encode("\n".join(padded).encode("ascii"), rotate=rotate,
+                      mirror_x=mirror_x, merge_walls=merge_walls)
     # Validate the original drawing first, so diagnostics retain input coordinates.
     # Re-encode the transformed drawing to preserve row-major wall identities.
     if mirror_x or rotate:
@@ -102,15 +111,21 @@ def merged_rectangles(rows):
     return walls
 
 
-def preview_svg(data, *, rotate=0, mirror_x=False, merge_walls=False):
+def preview_svg(data, *, rotate=0, mirror_x=False, merge_walls=False, border=False):
     """Static schematic from the admitted recipe, not engine rendering or a solver."""
+    if type(border) is not bool:
+        raise ValueError("border must be a boolean")
     if type(merge_walls) is not bool:
         raise ValueError("merge_walls must be a boolean")
     options = {"merge_walls": True} if merge_walls else {}
+    if border:
+        options["border"] = True
     recipe = json.loads(encode(data, rotate=rotate, mirror_x=mirror_x, **options))
     # Admission above establishes rectangular ASCII input and bounded dimensions.
     rows = data.decode("ascii").replace("\r\n", "\n").removesuffix("\n").split("\n")
     columns, row_count = len(rows[0]), len(rows)
+    if border:
+        columns, row_count = columns + 2, row_count + 2
     if rotate in (90, 270):
         columns, row_count = row_count, columns
     cell = 40
@@ -203,7 +218,9 @@ def main(argv=None):
                         help="output format (default: json; svg is a static schematic)")
     parser.add_argument("--merge-walls", action="count", default=0,
                         help="partition adjacent wall tiles into at most 64 rectangles")
-    if len(argv) > 8 or any(len(arg) > 4096 for arg in argv):
+    parser.add_argument("--border", action="count", default=0,
+                        help="add one closed wall layer outside the interior drawing")
+    if len(argv) > 9 or any(len(arg) > 4096 for arg in argv):
         parser.error("too many or oversized arguments")
     args = parser.parse_args(argv)
     if len(args.input) != 1:
@@ -216,11 +233,14 @@ def main(argv=None):
         parser.error("--format must occur at most once")
     if args.merge_walls > 1:
         parser.error("--merge-walls must occur at most once")
+    if args.border > 1:
+        parser.error("--border must occur at most once")
     try:
         output = preview_svg if args.format == ["svg"] else encode
         result = output(read_grid(args.input[0]),
                         rotate=int(args.rotate[0]) if args.rotate else 0,
-                        mirror_x=bool(args.mirror_x), merge_walls=bool(args.merge_walls))
+                        mirror_x=bool(args.mirror_x), merge_walls=bool(args.merge_walls),
+                        **({"border": True} if args.border else {}))
         sys.stdout.write(result.decode("ascii"))
     except (OSError, ValueError) as error:
         parser.exit(1, f"error: {error}\n")
