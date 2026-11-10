@@ -7,6 +7,9 @@
 use std::io::{self, Write};
 use std::path::PathBuf;
 
+#[path = "dispatch/scene_save_file.rs"]
+mod scene_save_file;
+
 use orr_ecs::Entity;
 use orr_edit::{EditorDoc, EntityInfo, Op, Origin, PlayController, StoppedPlay, Target, View};
 use orr_reflect::{Guid, TypeInfo, TypeKind, Value};
@@ -962,10 +965,13 @@ fn scene_save<G: Game>(t: &mut ErpTarget<'_, G>, lim: &HostLimits, p: &P<'_>, fx
         return Err(RpcError::state("tx_open", "a transaction is open; commit or roll it back before saving"));
     }
     let text = t.doc.to_yaml();
-    let tmp = path.with_extension("scene.yaml.tmp");
-    std::fs::write(&tmp, &text)
-        .and_then(|()| std::fs::rename(&tmp, path))
-        .map_err(|e| RpcError::new(INTERNAL_ERROR, "io", format!("cannot write {}: {e}", path.display())))?;
+    scene_save_file::write_atomic(path, text.as_bytes()).map_err(|e| {
+        RpcError::new(
+            INTERNAL_ERROR,
+            "io",
+            format!("cannot write {}: {e}", path.display()),
+        )
+    })?;
     // Do not mark the document clean before the replacement has succeeded.
     t.doc.save_yaml();
     if named.is_some() {
