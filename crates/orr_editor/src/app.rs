@@ -2255,7 +2255,22 @@ impl EditorApp {
                 let base = egui::Id::new(("singleton", name));
                 egui::CollapsingHeader::new(name).id_salt(base).default_open(editor.game() == crate::game::EditorGame::Arena && name == "Score").show(ui, |ui| {
                     let mut evs = Vec::new();
+                    #[cfg(not(feature = "custom-inspector"))]
                     show_component(ui, base, ty.desc(), value, &mut evs);
+                    #[cfg(feature = "custom-inspector")]
+                    {
+                        let schema = crate::custom_inspector::SchemaKey::for_type(types, name);
+                        match schema {
+                            Ok(schema) if self.custom_inspectors.resolve(&schema).is_some() => {
+                                match crate::custom_inspector::Snapshot::new(schema, ty.desc().clone(), value.clone()) {
+                                    Ok(snapshot) => self.custom_inspectors.show(ui, base, &snapshot,
+                                        editor.mode() == Mode::Edit && editor.can_mutate() && editor.previewing().is_none(), &mut evs),
+                                    Err(error) => evs.push(InspEvent::Error(error)),
+                                }
+                            }
+                            _ => show_component(ui, base, ty.desc(), value, &mut evs),
+                        }
+                    }
                     events.extend(evs.into_iter().map(|e| (Owner::Singleton(name.clone()), e)));
                 });
             }
