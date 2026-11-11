@@ -80,6 +80,8 @@ fn fixture(root: &Path, sources: &Path) {
             projection: orr_sample::room_camera::Projection::Perspective {
                 fov_y_degrees: 45.0,
             },
+            follow_player: None,
+            target_bounds: None,
         })
         .unwrap(),
     )

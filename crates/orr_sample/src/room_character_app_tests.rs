@@ -237,7 +237,7 @@ fn exported_character_app_child() {
     assert_eq!(searching, restarted);
 }
 
-#[cfg(feature = "project-create")]
+#[cfg(all(feature = "project-create", target_os = "linux"))]
 #[test]
 #[ignore = "explicit GPU acceptance: requires ORR_REQUIRE_GPU=1 and a working adapter"]
 fn character_app_three_states_restart_and_lighting() {

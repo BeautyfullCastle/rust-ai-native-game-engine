@@ -67,6 +67,8 @@ mesh-hazards-export = ["mesh-hazards", "mesh-export"]
 mesh-animated-models = ["mesh-navigation", "animated-models"]
 terrain-physics = ["terrain", "orr_remote/terrain-physics"]
 default = []
+# Every feature that builds on a Windows desktop.
+full = ["animated-models", "arena-project-export", "collect-dodge", "collect-input-map-editor", "collect-ui", "custom-inspector", "image-reimport", "input-map-editor", "irradiance-probes", "linked-prefabs", "mesh-animated-models", "mesh-export", "mesh-hazards", "mesh-hazards-export", "mesh-mission", "mesh-navigation", "mesh-patrol", "mesh-prop-delivery", "mesh-prop-shading", "models", "navigation", "navigation-export", "package-manager", "package-upgrade-animated", "package-upgrade-copy", "particle-preset-editor", "particle-preset-preview", "project-create", "project-ui", "room-animated-models", "room-authoring", "room-character", "room-input-map-editor", "room-input-map-play", "room-input-map-project", "room-lighting", "room-project", "sprite-grid-authoring", "sprite-json-authoring", "sprite-package-install", "sprite-rectangle-authoring", "sprites", "static-game-actions", "static-gameplay", "static-games", "terrain", "terrain-patrol", "terrain-patrol-export", "terrain-physics", "terrain-png16", "terrain-raw16", "terrain-surface", "tilemap", "windows-export", "windows-projects"]
 terrain = ["dep:rustix", "orr_model_bindings/terrain", "models", "dep:orr_terrain", "dep:orr_terrain_view"]
 terrain-surface = ["navigation", "orr_terrain_view/surface"]
 terrain-raw16 = ["terrain", "orr_terrain_view/raw16"]

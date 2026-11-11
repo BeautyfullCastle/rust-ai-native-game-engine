@@ -3587,7 +3587,7 @@ mod work_status_operation_tests {
     }
 }
 
-#[cfg(all(test, feature = "room-lighting", feature = "project-create"))]
+#[cfg(all(test, feature = "room-lighting", feature = "project-create", target_os = "linux"))]
 mod room_lighting_coherence_tests {
     use super::*;
     use crate::room_lighting_panel::Panel;

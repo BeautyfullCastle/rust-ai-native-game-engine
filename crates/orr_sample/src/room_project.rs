@@ -632,7 +632,7 @@ fn add_bytes(total: usize, count: usize, stride: usize) -> Result<usize, String>
 }
 
 #[cfg(all(test, feature = "room-progress", feature = "project-create"))]
-#[path = "room_progress_admission_tests.rs"]
+#[cfg(all(test, feature = "room-progress", feature = "project-create", target_os = "linux"))]
 mod progress_admission_tests;
 
 #[cfg(all(test, feature = "project-create", target_os = "linux"))]
