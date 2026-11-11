@@ -135,7 +135,7 @@ fn absolute_regular_file(path: &Path) -> Result<PathBuf, String> {
             Component::ParentDir => {
                 return Err("terrain paths cannot contain parent traversal".into())
             }
-            // A drive or verbatim prefix such as `\?\C:` is not a filesystem object.
+            // A drive or verbatim prefix such as `\\?\C:` is not a filesystem object.
             Component::Prefix(_) => {
                 checked.push(part.as_os_str());
                 continue;
