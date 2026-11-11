@@ -23,7 +23,7 @@ const OWN_NAME: &[&str] = &["spawn", "propose", "apply"];
 /// (the command word first). Global options may appear anywhere, except that
 /// `--name` (informational: the host's auth decides who you are) is left in
 /// place for the commands that take a `--name` themselves.
-pub fn split_global(args: Vec<String>) -> Result<(Global, Vec<String>), CliErr> {
+pub fn split_global(args: Vec<String>) -> Result<(Global, Vec<String>), (CliErr, bool)> {
     let mut g = Global {
         erp: env("ORR_ERP").or_else(|| env("ORR_ERP_URL")).unwrap_or_else(|| "ws://127.0.0.1:7777".to_string()),
         token: env("ORR_ERP_TOKEN"),
@@ -32,6 +32,9 @@ pub fn split_global(args: Vec<String>) -> Result<(Global, Vec<String>), CliErr> 
         help: false,
         version: false,
     };
+    // Keep the first parse error, but finish classifying global flags so --json
+    // works on either side of it. Consumed option values are never flags.
+    let mut error = None;
     let mut rest: Vec<String> = Vec::new();
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
@@ -44,17 +47,29 @@ pub fn split_global(args: Vec<String>) -> Result<(Global, Vec<String>), CliErr> 
             "--erp" | "--token" | "--timeout" => {
                 let v = match inline {
                     Some(v) => v,
-                    None => it.next().ok_or_else(|| CliErr::Usage(format!("{flag} needs a value")))?,
+                    None => match it.next() {
+                        Some(v) => v,
+                        None => {
+                            error.get_or_insert_with(|| CliErr::Usage(format!("{flag} needs a value")));
+                            break;
+                        }
+                    },
                 };
                 match flag.as_str() {
                     "--erp" => g.erp = v,
                     "--token" => g.token = Some(v),
-                    _ => g.timeout = v.parse().map_err(|_| CliErr::Usage("--timeout needs a number of seconds".into()))?,
+                    _ => match v.parse() {
+                        Ok(timeout) => g.timeout = timeout,
+                        Err(_) => {
+                            error.get_or_insert_with(|| CliErr::Usage("--timeout needs a number of seconds".into()));
+                        }
+                    },
                 }
             }
             "--name" if is_name => {
-                if inline.is_none() {
-                    it.next().ok_or_else(|| CliErr::Usage("--name needs a value".into()))?;
+                if inline.is_none() && it.next().is_none() {
+                    error.get_or_insert_with(|| CliErr::Usage("--name needs a value".into()));
+                    break;
                 }
             }
             "--json" => g.json = true,
@@ -63,11 +78,14 @@ pub fn split_global(args: Vec<String>) -> Result<(Global, Vec<String>), CliErr> 
             _ => rest.push(a),
         }
     }
+    if let Some(error) = error {
+        return Err((error, g.json));
+    }
     if !g.erp.contains("://") {
         g.erp = format!("ws://{}", g.erp);
     }
     if !g.erp.starts_with("ws://") && !g.erp.starts_with("wss://") {
-        return Err(CliErr::Usage(format!("--erp must be a WebSocket URL like ws://127.0.0.1:7777, not '{}'", redact_url(&g.erp))));
+        return Err((CliErr::Usage(format!("--erp must be a WebSocket URL like ws://127.0.0.1:7777, not '{}'", redact_url(&g.erp))), g.json));
     }
     Ok((g, rest))
 }
