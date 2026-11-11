@@ -747,3 +747,358 @@ fn cli_extract_installed_cooked_clip_matches_source_time_gpu_and_analytic_oracle
     );
     eprintln!("ORR_CLIP_EXTRACT_ACCEPTANCE {report}");
 }
+
+// The reverse gate deliberately invokes a separately built executable, rather
+// than authoring::run. Its retained producer/hash is also checked by the CI
+// driver. Never substitute cargo run or an in-process fallback here.
+fn installed_reverse(
+    scratch: &Scratch,
+    captures: &Captures,
+    cli: &std::path::Path,
+    cli_bytes: &[u8],
+    label: &str,
+    speed: &str,
+) -> (Project, AnimatedModel, AnimatedModel, Value) {
+    let source = scratch.0.join("source");
+    fs::create_dir(&source).unwrap();
+    let input = source.join("original.glb");
+    let asset = format!("reverse-{label}.glb");
+    let output = source.join(&asset);
+    fs::write(&input, ORIGINAL).unwrap();
+    let arguments = vec![
+        OsString::from("--input"),
+        input.clone().into_os_string(),
+        OsString::from("--output"),
+        output.clone().into_os_string(),
+        OsString::from("--clip"),
+        OsString::from("0"),
+        OsString::from("--start"),
+        OsString::from("0.25"),
+        OsString::from("--end"),
+        OsString::from("1.5"),
+        OsString::from("--name"),
+        OsString::from(CLIP_NAME),
+        OsString::from("--speed"),
+        OsString::from(speed),
+        OsString::from("--direction"),
+        OsString::from("reverse"),
+    ];
+    assert_eq!(fs::read(cli).unwrap(), cli_bytes, "CLI producer changed");
+    let result = std::process::Command::new(cli)
+        .args(&arguments)
+        .output()
+        .expect("mandatory reverse acceptance must execute the actual built CLI");
+    let stdout = captures.write(&format!("reverse-{label}-cli.stdout"), &result.stdout);
+    let stderr = captures.write(&format!("reverse-{label}-cli.stderr"), &result.stderr);
+    assert!(
+        result.status.success(),
+        "reverse CLI failed: {:?}",
+        result.status
+    );
+    assert_eq!(fs::read(cli).unwrap(), cli_bytes, "CLI producer changed");
+    assert_eq!(fs::read(&input).unwrap(), ORIGINAL);
+    let authored = fs::read(&output).unwrap();
+    assert_preserved(ORIGINAL, &authored);
+    let authored_record = captures.write(&asset, &authored);
+    let mut cooked_records = Vec::new();
+    let mut files = vec![String::from("original.glb"), asset.clone()];
+    let mut snapshots = vec![
+        (String::from("original.glb"), ORIGINAL.to_vec()),
+        (asset.clone(), authored),
+    ];
+    // Production import -> cook -> reload first. Both raw and cooked assets are
+    // then installed in a real package and reopened with the source hidden.
+    for (name, bytes) in snapshots.clone() {
+        let imported =
+            orr_model::animation_import::import_with_resolver("animated.glb", &bytes, |_| {
+                Err(orr_model::Error::message(
+                    "embedded GLB must not resolve any external resource",
+                ))
+            })
+            .unwrap();
+        let cooked = imported.to_bytes().unwrap();
+        let reloaded = AnimatedModel::from_bytes(&cooked).unwrap();
+        assert_eq!(imported.source(), reloaded.source());
+        let filename = format!("{name}.cooked.json");
+        fs::write(source.join(&filename), &cooked).unwrap();
+        cooked_records.push(captures.write(&format!("reverse-{label}-{filename}"), &cooked));
+        files.push(filename.clone());
+        snapshots.push((filename, cooked));
+    }
+    fs::write(
+        source.join("orr.package.json"),
+        serde_json::to_vec(&json!({
+            "schema":1,"name":"clip-extract-acceptance","version":"1.0.0",
+            "engine":"^0.0.1","capabilities":["animation"],"dependencies":{},"files":files
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let root = scratch.0.join("project");
+    fs::create_dir(&root).unwrap();
+    Project::open_for_install(&root, Runtime::content_only().engine_version)
+        .unwrap()
+        .install(std::slice::from_ref(&source))
+        .unwrap();
+    fs::rename(&source, scratch.0.join("source-hidden-after-install")).unwrap();
+    assert!(!source.exists());
+    let mut runtime = Runtime::content_only();
+    runtime.capabilities.insert("animation".into());
+    let project = Project::open(root, runtime).unwrap();
+    project.verify().unwrap();
+    for (name, bytes) in &snapshots {
+        assert_eq!(
+            &project.read_asset("clip-extract-acceptance", name).unwrap(),
+            bytes
+        );
+    }
+    let original = AnimatedModel::from_bytes(
+        &project
+            .read_asset("clip-extract-acceptance", "original.glb.cooked.json")
+            .unwrap(),
+    )
+    .unwrap();
+    let reversed = AnimatedModel::from_bytes(
+        &project
+            .read_asset("clip-extract-acceptance", &format!("{asset}.cooked.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    let record = json!({
+        "argv":arguments.iter().map(|v|v.to_string_lossy()).collect::<Vec<_>>(),
+        "exit_code":result.status.code(),"stdout":stdout,"stderr":stderr,
+        "authored":authored_record,"cooked":cooked_records,
+        "installed_files":files,"source_hidden_after_install":true,
+        "installed_cooked_reload_before_render":true
+    });
+    (project, original, reversed, record)
+}
+
+fn assert_reverse_quaternion(pose: &Pose, source_time: f32) {
+    // Separate f64 half-angle oracle, including sign-invariant quaternion
+    // comparison. No runtime interpolation or authoring output is consulted.
+    let t = f64::from(source_time);
+    let angle = std::f64::consts::PI / 3.0 * if t <= 1.0 { t } else { 2.0 - t };
+    let expected = [0.0, 0.0, (angle / 2.0).sin(), (angle / 2.0).cos()];
+    let actual = pose.local()[2].rotation.map(f64::from);
+    let dot: f64 = actual.iter().zip(expected).map(|(a, b)| a * b).sum();
+    let sign = if dot < 0.0 { -1.0 } else { 1.0 };
+    for (a, b) in actual.into_iter().zip(expected) {
+        assert!(
+            (a * sign - b).abs() < POSITION_EPSILON,
+            "source t={source_time}: quaternion component {a} != {b}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires explicit built CLI and device/capture acceptance"]
+fn cli_reverse_extract_installed_cooked_clip_matches_source_time_gpu_and_analytic_oracle() {
+    let captures = Captures::new();
+    let cli = PathBuf::from(
+        std::env::var_os("ORR_CLIP_EXTRACT_CLI")
+            .expect("mandatory reverse acceptance requires the actual built ORR_CLIP_EXTRACT_CLI"),
+    );
+    assert!(cli.is_absolute(), "CLI producer must be an absolute path");
+    let cli_bytes = fs::read(&cli).expect("read actual built CLI producer");
+    assert!(!cli_bytes.is_empty());
+    let cli_record = json!({"path":cli,"bytes":cli_bytes.len(),"fnv1a64":fnv1a64(&cli_bytes)});
+    let source_record = captures.write("reverse-original.glb", ORIGINAL);
+    let require_software =
+        std::env::var_os("ORR_CLIP_EXTRACT_REQUIRE_SOFTWARE").is_some_and(|value| value == "1");
+    let g = Wgpu::headless(WgpuOptions {
+        force_software: require_software,
+        ..WgpuOptions::default()
+    })
+    .expect("mandatory reverse acceptance requires a GPU adapter; skipping is forbidden");
+    let adapter = g.adapter().get_info();
+    let adapter_record = json!({
+        "name":adapter.name,"backend":format!("{:?}",adapter.backend),
+        "device_type":format!("{:?}",adapter.device_type),"vendor":adapter.vendor,
+        "device":adapter.device,"driver":adapter.driver,"driver_info":adapter.driver_info,
+        "software":g.is_software()
+    });
+    captures.write(
+        "reverse-adapter.json",
+        &serde_json::to_vec_pretty(&adapter_record).unwrap(),
+    );
+    eprintln!("ORR_CLIP_EXTRACT_REVERSE_ADAPTER {adapter_record}");
+    if require_software {
+        assert!(
+            g.is_software(),
+            "mandatory CI must observe a software adapter"
+        );
+        assert_eq!(
+            adapter_record["backend"], "Vulkan",
+            "mandatory software CI requires Vulkan"
+        );
+    }
+    let format = TextureFormat::Rgba8UnormSrgb;
+    let target = g.create_texture(&TextureDesc {
+        label: "mandatory reverse clip acceptance",
+        width: SIZE,
+        height: SIZE,
+        format,
+        usage: TextureUsage::RENDER_ATTACHMENT | TextureUsage::COPY_SRC,
+        sample_count: 1,
+        view_formats: &[],
+    });
+    let view = g.create_texture_view(&target, None);
+    let mut speeds = Vec::new();
+    for (label, argument, speed) in [
+        ("quarter", "0.25", 0.25_f32),
+        ("half", "0.5", 0.5),
+        ("unit", "1", 1.0),
+        ("double", "2", 2.0),
+        ("quadruple", "4", 4.0),
+    ] {
+        let scratch = Scratch::new();
+        let (project, original, reversed, installation) =
+            installed_reverse(&scratch, &captures, &cli, &cli_bytes, label, argument);
+        let old = original.source();
+        let new = reversed.source();
+        assert_eq!(old.clips.len(), 2);
+        assert_eq!(new.clips.len(), old.clips.len() + 1);
+        assert_eq!(&new.clips[..old.clips.len()], &old.clips);
+        assert_eq!(new.nodes, old.nodes);
+        assert_eq!(new.skins, old.skins);
+        assert_eq!(new.primitives, old.primitives);
+        assert_eq!(new.materials, old.materials);
+        assert_eq!(new.images, old.images);
+        let extracted_index = old.clips.len() as u32;
+        let clip = &new.clips[extracted_index as usize];
+        assert_eq!(clip.name, CLIP_NAME);
+        assert_eq!(clip.duration(), (END - START) / speed);
+        assert_eq!(clip.channels.len(), 1);
+        assert_eq!(clip.channels[0].times, [0.0, 0.5 / speed, 1.25 / speed]);
+        let mut source_renderer =
+            SkinnedModelRenderer::new(g.clone(), format, original.clone()).unwrap();
+        let mut reverse_renderer =
+            SkinnedModelRenderer::new(g.clone(), format, reversed.clone()).unwrap();
+        source_renderer.clear = [0.0, 0.0, 0.0, 1.0];
+        reverse_renderer.clear = source_renderer.clear;
+        let mut samples = Vec::new();
+        let mut previous: Option<Vec<u8>> = None;
+        // Include exact endpoints, both interiors, and the reversed interior key.
+        // Dyadic values make independent time mapping exact at all five speeds.
+        for (index, offset) in [0.0_f32, 0.25, 0.5, 0.75, 1.0, 1.25]
+            .into_iter()
+            .enumerate()
+        {
+            let local_time = offset / speed;
+            let source_time = END - local_time * speed;
+            assert_eq!(source_time, END - offset);
+            let source_pose = original.sample_clip(0, source_time).unwrap();
+            let reverse_pose = reversed.sample_clip(extracted_index, local_time).unwrap();
+            let preserved_pose = reversed.sample_clip(0, source_time).unwrap();
+            for (model, pose) in [
+                (&original, &source_pose),
+                (&reversed, &reverse_pose),
+                (&reversed, &preserved_pose),
+            ] {
+                assert_pose(model, pose, source_time);
+                assert_reverse_quaternion(pose, source_time);
+            }
+            let source_pixels = render(&g, &mut source_renderer, &source_pose, &target, &view);
+            let reverse_pixels = render(&g, &mut reverse_renderer, &reverse_pose, &target, &view);
+            let preserved_pixels =
+                render(&g, &mut reverse_renderer, &preserved_pose, &target, &view);
+            let images = json!({
+                "source":captures.frame(&format!("reverse-{label}-{index}-source"), &source_pixels),
+                "reversed":captures.frame(&format!("reverse-{label}-{index}-reversed"), &reverse_pixels),
+                "preserved":captures.frame(&format!("reverse-{label}-{index}-preserved"), &preserved_pixels)
+            });
+            let source_coverage = assert_pixels(&source_pixels, source_time);
+            let reverse_coverage = assert_pixels(&reverse_pixels, source_time);
+            assert_pixels(&preserved_pixels, source_time);
+            let differences = differing_pixels(&source_pixels, &reverse_pixels);
+            assert!(
+                differences <= MAX_BOUNDARY_PIXELS,
+                "{label} reverse equivalent differences: {differences}"
+            );
+            assert_eq!(
+                source_pixels, preserved_pixels,
+                "retained original clip renders byte-identically"
+            );
+            // Forward rather than reverse maps this interior sample to .5,
+            // while reverse maps it to 1.25. Those poses are not symmetric.
+            let wrong_direction = if index == 1 {
+                let wrong_source_time = START + local_time * speed;
+                let wrong_pose = original.sample_clip(0, wrong_source_time).unwrap();
+                assert_pose(&original, &wrong_pose, wrong_source_time);
+                assert_reverse_quaternion(&wrong_pose, wrong_source_time);
+                let pixels = render(&g, &mut source_renderer, &wrong_pose, &target, &view);
+                let image = captures.frame(&format!("reverse-{label}-wrong-direction"), &pixels);
+                let coverage = assert_pixels(&pixels, wrong_source_time);
+                let changed = differing_pixels(&reverse_pixels, &pixels);
+                assert!(
+                    changed > MIN_CHANGED_PIXELS,
+                    "{label} wrong-direction control must differ visibly: {changed}"
+                );
+                Some(
+                    json!({"source_time":wrong_source_time,"image":image,"coverage":coverage,"pixel_differences":changed}),
+                )
+            } else {
+                None
+            };
+            let temporal_differences = previous
+                .as_ref()
+                .map(|p| differing_pixels(p, &reverse_pixels));
+            if let Some(changed) = temporal_differences {
+                assert!(
+                    changed > MIN_CHANGED_PIXELS,
+                    "{label} reversed clip must visibly animate: {changed}"
+                );
+            }
+            previous = Some(reverse_pixels);
+            samples.push(json!({
+                "local_time":local_time,"source_time":source_time,"images":images,
+                "source_coverage":source_coverage,"reverse_coverage":reverse_coverage,
+                "equivalent_pixel_differences":differences,"preserved_pixel_differences":0,
+                "wrong_direction_control":wrong_direction,"temporal_pixel_differences":temporal_differences
+            }));
+        }
+        reverse_renderer
+            .draw(&view, (SIZE, SIZE), &camera(), &light(), &[])
+            .unwrap();
+        let cleared = g.read_texture(&target);
+        let clear_record = captures.frame(&format!("reverse-{label}-empty-draw-clear"), &cleared);
+        assert!(reverse_renderer.bounds().is_empty());
+        assert!(cleared.chunks_exact(4).all(|p| p == [0, 0, 0, 255]));
+        project.verify().unwrap();
+        assert_eq!(
+            project
+                .read_asset("clip-extract-acceptance", "original.glb")
+                .unwrap(),
+            ORIGINAL
+        );
+        let record = json!({
+            "status":"passed","label":label,"speed":speed,"direction":"reverse",
+            "source_clip":0,"extracted_clip":extracted_index,"start":START,"end":END,
+            "duration":clip.duration(),"key_times":clip.channels[0].times,
+            "installation":installation,"samples":samples,"empty_draw":clear_record
+        });
+        captures.write(
+            &format!("reverse-{label}.json"),
+            &serde_json::to_vec_pretty(&record).unwrap(),
+        );
+        speeds.push(record);
+    }
+    assert_eq!(fs::read(&cli).unwrap(), cli_bytes);
+    let report = json!({
+        "schema_version":1,"status":"passed","mandatory_gpu":true,
+        "suite":"animation-clip-reverse-extract-consumer","direction":"reverse",
+        "required_software_vulkan":require_software,"adapter":adapter_record,
+        "resolution":[SIZE,SIZE],"format":"Rgba8UnormSrgb","source":source_record,
+        "cli":cli_record,"speeds":speeds,"source_clip":0,"start":START,"end":END,
+        "position_tolerance":POSITION_EPSILON,"color_byte_tolerance":COLOR_EPSILON,
+        "max_boundary_pixels":MAX_BOUNDARY_PIXELS,"min_changed_pixels_exclusive":MIN_CHANGED_PIXELS,
+        "source_hidden_after_install":true,"cooked_reload_before_render":true,
+        "installed_cooked_reload_before_render":true
+    });
+    captures.write(
+        "reverse-acceptance.json",
+        &serde_json::to_vec_pretty(&report).unwrap(),
+    );
+    eprintln!("ORR_CLIP_EXTRACT_REVERSE_ACCEPTANCE {report}");
+}

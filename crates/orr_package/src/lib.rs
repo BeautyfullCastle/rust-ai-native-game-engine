@@ -35,6 +35,8 @@ mod cached_revision;
 mod checked_remove;
 mod keep_dependency;
 mod restore_removed;
+mod source_export;
+pub use source_export::{ExportedSource, SourceExportReport};
 mod verification;
 pub use verification::PackageVerification;
 

@@ -2,6 +2,9 @@
 //! renderer is owned here. Optional PNG decoding is feature-gated.
 //! Times are caller-supplied milliseconds.
 //! JSON schema version 1 is separate from ORAM, motion and PCM formats.
+pub mod grid;
+pub mod sequence;
+
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, fmt};
 
