@@ -351,7 +351,7 @@ mod terminal_focus {
                 );
             }
             FocusRoute::RawInput => {
-                a.process_input(
+                let mut output = a.process_input(
                     egui::RawInput {
                         focused: false,
                         screen_rect: Some(egui::Rect::from_min_size(
@@ -362,6 +362,7 @@ mod terminal_focus {
                     },
                     0.0,
                 );
+                output.textures_delta.clear(); // CPU-only harness has no renderer for uploads.
                 frame(a, vec![], 0.0);
             }
         }

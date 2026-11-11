@@ -30,7 +30,7 @@ fn app(path: &std::path::Path, scene: Option<String>) -> App {
     }
 }
 fn frame(app: &mut App, events: Vec<egui::Event>, delta: f64) {
-    app.process_input(
+    let mut output = app.process_input(
         egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -41,6 +41,7 @@ fn frame(app: &mut App, events: Vec<egui::Event>, delta: f64) {
         },
         delta,
     );
+    output.textures_delta.clear(); // CPU-only harness has no renderer for uploads.
 }
 fn key(key: egui::Key) -> Vec<egui::Event> {
     [true, false]
