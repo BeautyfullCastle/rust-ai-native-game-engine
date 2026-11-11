@@ -321,6 +321,9 @@ pub fn extract_glb(input: &[u8], options: &ExtractOptions) -> Result<Vec<u8>, St
     let mut samplers = Vec::with_capacity(clip.channels.len());
     let mut channels = Vec::with_capacity(clip.channels.len());
     for channel in &clip.channels {
+        if channel.interpolation == Interpolation::CubicSpline {
+            return Err("CUBICSPLINE clip extraction unsupported".into());
+        }
         let mut times = vec![0.0];
         let mut values = values_at(&channel.values, &start_pose.local()[channel.node as usize]);
         for (i, &time) in channel.times.iter().enumerate() {
@@ -354,6 +357,7 @@ pub fn extract_glb(input: &[u8], options: &ExtractOptions) -> Result<Vec<u8>, St
         let interpolation = match channel.interpolation {
             Interpolation::Step => "STEP",
             Interpolation::Linear => "LINEAR",
+            Interpolation::CubicSpline => unreachable!("rejected above"),
         };
         channels.push(json!({"sampler":samplers.len(),"target":{"node":channel.node,"path":path}}));
         samplers

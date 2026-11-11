@@ -999,6 +999,7 @@ fn assert_generated_payload(output: &[u8], model: &AnimatedModel, clip_index: us
             match channel.interpolation {
                 Interpolation::Linear => "LINEAR",
                 Interpolation::Step => "STEP",
+                Interpolation::CubicSpline => "CUBICSPLINE",
             }
         );
     }
