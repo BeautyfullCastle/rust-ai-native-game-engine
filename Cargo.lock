@@ -3669,6 +3669,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "orr_terrain_camera"
+version = "0.0.1"
+dependencies = [
+ "orr_terrain",
+ "orr_terrain_view",
+]
+
+[[package]]
 name = "orr_terrain_import"
 version = "0.0.1"
 dependencies = [
