@@ -1,0 +1,8 @@
+# Short commands for the full desktop build. See README.md.
+[alias]
+build-all = "build --release -p orr_editor -p orr_sample --features orr_editor/full,orr_sample/full"
+editor = "run --release -p orr_editor --features full --bin orr_editor --"
+new-room = "run --release -p orr_sample --features full --bin orr_new_room --"
+room = "run --release -p orr_sample --features full --bin room_escape --"
+stormglass = "run --release -p orr_sample --features full --bin coop_defense --"
+arena = "run --release -p orr_sample --features full --bin arena --"

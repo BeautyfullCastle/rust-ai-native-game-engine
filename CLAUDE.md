@@ -17,6 +17,7 @@
 - 골든 체크섬 테스트 값은 의도적 변경이 아니면 바꾸지 않는다. 바꾸면 커밋 메시지에 이유를 쓴다.
 
 ## 확인 명령
+- 윈도우 실행 방법과 별칭(`cargo build-all`, `cargo editor`, `cargo room`, `cargo stormglass`): `README.md`
 - `cargo test --workspace --release`
 - `cargo clippy --workspace --all-targets`
 - `cargo bench -p orr_ecs` / `-p orr_session` / `-p orr_fp`
