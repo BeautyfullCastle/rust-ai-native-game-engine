@@ -1,5 +1,6 @@
 //! Bounded local staging primitive, not a validated exporter or smoke receipt.
-//! Trusted NTFS directories only. No process execution or permission changes.
+//! Trusted NTFS directories only. Optional explicitly trusted headless smoke;
+//! no permission changes or publication.
 //! Failed/dropped stages are retained; this module never recursively removes files.
 use crate::stormglass_windows_admission::{LAUNCHER, LAUNCHER_NAME, RUNTIME_NAME, SCENE_NAME};
 use crate::stormglass_windows_snapshot::{Directory, ReservedInputs};
@@ -11,6 +12,10 @@ use std::{
     path::{Path, PathBuf},
 };
 use windows_sys::Win32::Storage::FileSystem::*;
+
+#[cfg(feature = "stormglass-windows-smoke")]
+#[path = "stormglass_windows_stage/smoke.rs"]
+mod smoke;
 
 fn info(file: &File) -> Result<BY_HANDLE_FILE_INFORMATION, String> {
     let mut info = BY_HANDLE_FILE_INFORMATION::default();

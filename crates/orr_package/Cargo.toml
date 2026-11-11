@@ -12,6 +12,7 @@ workspace = true
 default = []
 stormglass-windows-admission = ["dep:orr_games"]
 stormglass-windows-stage = ["stormglass-windows-snapshot"]
+stormglass-windows-smoke = ["stormglass-windows-stage", "dep:orr_sim", "windows-sys/Win32_Security", "windows-sys/Win32_System_IO", "windows-sys/Win32_System_Threading", "windows-sys/Win32_System_JobObjects", "windows-sys/Win32_System_Pipes", "windows-sys/Win32_System_SystemInformation"]
 stormglass-windows-snapshot = ["stormglass-windows-admission", "dep:windows-sys"]
 model-authoring = ["dep:orr_model", "dep:rustix"]
 animation-authoring = ["model-authoring", "orr_model/animation"]
