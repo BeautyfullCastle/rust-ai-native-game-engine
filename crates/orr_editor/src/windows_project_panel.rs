@@ -91,10 +91,25 @@ impl Panel {
                     field(ui, "Room project seed", &mut self.seed);
                     field(ui, "Existing Room project directory", &mut self.root);
                 });
+                // Passive input guidance only: no path probes or admission receipts.
+                let create_problem = if self.output.is_empty() {
+                    Some("Enter a new Room project directory to enable Create.")
+                } else if PathBuf::from(&self.output).as_os_str().as_encoded_bytes().len() > 4096 {
+                    Some("Shorten the new project directory to at most 4096 native bytes.")
+                } else { None };
+                let open_problem = if self.root.is_empty() {
+                    Some("Enter an existing Room project directory to enable Open.")
+                } else if PathBuf::from(&self.root).as_os_str().as_encoded_bytes().len() > 4096 {
+                    Some("Shorten the existing project directory to at most 4096 native bytes.")
+                } else { None };
+                if let Some(reason) = create_problem { ui.label(reason); }
+                if let Some(reason) = open_problem { ui.label(reason); }
+                ui.weak("Use an absolute local disk path. Create requires a new directory inside an existing parent; existing data is never overwritten.");
+                ui.weak("Seed: 1-128 ASCII letters, digits, dots, underscores or hyphens. These hints do not validate files or grant permission; all admission checks still run after your click.");
                 ui.horizontal(|ui| {
                     let can_start = !self.busy() && blocked_reason.is_none();
                     if ui
-                        .add_enabled(can_start, egui::Button::new("Create Room project"))
+                        .add_enabled(can_start && create_problem.is_none(), egui::Button::new("Create Room project"))
                         .clicked()
                     {
                         match authorize() {
@@ -110,7 +125,7 @@ impl Panel {
                         }
                     }
                     if ui
-                        .add_enabled(can_start, egui::Button::new("Open Room project"))
+                        .add_enabled(can_start && open_problem.is_none(), egui::Button::new("Open Room project"))
                         .clicked()
                     {
                         match authorize() {

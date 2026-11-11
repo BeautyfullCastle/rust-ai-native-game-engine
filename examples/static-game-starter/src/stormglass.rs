@@ -21,6 +21,10 @@ use orr_remote::{
 use serde_json::{json, Value as J};
 use std::sync::OnceLock;
 
+mod authoring_preview;
+pub mod cadence_inspector;
+mod counts_inspector;
+
 #[repr(C)]
 #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable, Reflect)]
 struct DefenseAction {
@@ -278,6 +282,7 @@ impl EmbeddedGameplayView for StormglassView {
             }
         });
         ui.collapsing("Details", |ui| {
+            authoring_preview::show(ui, frame, context.phase);
             // Project help is bounded; generic command status and errors remain
             // in the editor chrome and are never hidden by this disclosure.
             egui::ScrollArea::vertical()

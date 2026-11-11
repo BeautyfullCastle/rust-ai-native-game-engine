@@ -231,6 +231,10 @@ pub fn exercise_failure_cases(new_root: &Path) -> Result<serde_json::Value> {
         permissions.set_mode(permissions.mode() | 0o200);
     }
     #[cfg(windows)]
+    #[expect(
+        clippy::permissions_set_readonly_false,
+        reason = "Windows-only disposable fixture; no Unix permission bits or ACLs are changed"
+    )]
     permissions.set_readonly(false);
     fs::set_permissions(&nav_object, permissions)?;
     fs::write(
@@ -370,6 +374,10 @@ mod tests {
             permissions.set_mode(permissions.mode() | 0o200);
         }
         #[cfg(windows)]
+        #[expect(
+            clippy::permissions_set_readonly_false,
+            reason = "Windows-only disposable fixture; no Unix permission bits or ACLs are changed"
+        )]
         permissions.set_readonly(false);
         fs::set_permissions(&object, permissions).unwrap();
         fs::remove_file(object.join(NAVIGATION_PATH)).unwrap();
@@ -397,6 +405,10 @@ mod tests {
             permissions.set_mode(permissions.mode() | 0o200);
         }
         #[cfg(windows)]
+        #[expect(
+            clippy::permissions_set_readonly_false,
+            reason = "Windows-only disposable fixture; no Unix permission bits or ACLs are changed"
+        )]
         permissions.set_readonly(false);
         fs::set_permissions(&installed, permissions).unwrap();
         fs::write(installed, b"tampered cooked graph").unwrap();

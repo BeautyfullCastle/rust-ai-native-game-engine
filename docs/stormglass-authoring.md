@@ -32,6 +32,17 @@ Missing singletons default independently. Present YAML singletons require all fi
 
 ## Edit, save and play
 
+WaveCounts controls label Wave 1 through Wave 10. Fewer/more pairs edits one
+count within 1-28; boundary buttons disable. **Use generic fields** permits exact
+entry. Inactive waves beyond `Campaign.last_wave` remain independently editable.
+Controls share host validation, Undo/Redo, Save/reopen and Play locking.
+
+Open **Details → Authored waves** for a read-only preview of resources, HP multiplier, cadence, and each active wave's enemy order/count per lane and first/last spawn ticks. Spawn ticks are relative to each wave's start, not absolute game ticks or completion times: surviving enemies must still be cleared. The preview follows unsaved edits and Undo/Redo; Save/reopen retains settings. In Play it shows session configuration, not remaining enemies or predicted victory. It sends no commands.
+
+The Stormglass starter installs a WavePacing inspector with one-click pair intervals of 35, 70, 140 or 350 ticks. It displays the exact current interval, including other authored values. Choose **Use generic fields** for any integer from 35 to 350. Cadence changes use normal Undo/Redo and Save, and are unavailable in Play; choosing the current cadence creates no edit.
+
+In the Inspector, hover the `regular_kinds`, `opening_boss` or `pair_counts` array header, expanded or collapsed, for its wave-index and composition guidance.
+
 Existing ERP `world.singleton.patch` accepts nested paths, for example:
 
 ```json

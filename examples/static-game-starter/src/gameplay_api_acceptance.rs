@@ -398,7 +398,7 @@ fn capture_paused(
     rgba.truncate(decoded.buffer_size());
     assert_eq!(rgba.len(), (WIDTH * HEIGHT * 4) as usize);
     assert!(
-        rgba.chunks_exact(4).any(|pixel| pixel[..3] != [0, 0, 0]),
+        rgba.as_chunks::<4>().0.iter().any(|pixel| pixel[..3] != [0, 0, 0]),
         "blank fake image rejected"
     );
     let viewport = harness
@@ -443,7 +443,7 @@ fn color_centroid(capture: &Capture, linear: [f32; 3]) -> (usize, f64) {
     let want = color.to_array();
     let mut count = 0;
     let mut x_sum = 0u64;
-    for (index, pixel) in capture.rgba.chunks_exact(4).enumerate() {
+    for (index, pixel) in capture.rgba.as_chunks::<4>().0.iter().enumerate() {
         let x = (index % WIDTH as usize) as u32;
         let y = (index / WIDTH as usize) as u32;
         if capture.viewport.contains(egui::pos2(x as f32, y as f32))
@@ -903,7 +903,7 @@ fn gameplay_cli_stormglass_play_loop_actual_wgpu_png() {
         let mut rgba = vec![0; reader.output_buffer_size().unwrap()];
         reader.next_frame(&mut rgba).unwrap();
         reader.finish().unwrap();
-        assert!(rgba.chunks_exact(4).any(|p| p[..3] != [0, 0, 0]));
+        assert!(rgba.as_chunks::<4>().0.iter().any(|p| p[..3] != [0, 0, 0]));
         let hash = Sha256::digest(&bytes)
             .iter()
             .map(|b| format!("{b:02x}"))
@@ -1140,7 +1140,7 @@ fn viewport_focus_enlarges_stormglass_and_preserves_registered_projects() {
             let tile_pixels = |capture: &Capture| {
                 capture
                     .rgba
-                    .chunks_exact(4)
+                    .as_chunks::<4>().0.iter()
                     .filter(|p| {
                         [[92u8, 111, 91], [66, 88, 78]]
                             .iter()
@@ -1194,7 +1194,7 @@ fn compact_stormglass_hud_preserves_controls_and_enlarges_board() {
     let decoded = reader.next_frame(&mut baseline).unwrap();
     baseline.truncate(decoded.buffer_size());
     let tile_pixels = |rgba: &[u8]| {
-        rgba.chunks_exact(4)
+        rgba.as_chunks::<4>().0.iter()
             .filter(|p| {
                 [[92u8, 111, 91], [66, 88, 78]]
                     .iter()
@@ -1521,7 +1521,7 @@ fn stormglass_action_cost_hints_actual_wgpu() {
     let capture = capture_paused(&mut h, &mut agent, &identity, "stormglass-cost-hints");
     let tile_pixels = capture
         .rgba
-        .chunks_exact(4)
+        .as_chunks::<4>().0.iter()
         .filter(|pixel| {
             [[92u8, 111, 91], [66, 88, 78]].iter().any(|color| {
                 pixel[..3]

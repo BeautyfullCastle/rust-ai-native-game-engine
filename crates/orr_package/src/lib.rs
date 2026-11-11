@@ -3,6 +3,15 @@
 #[cfg(feature = "stormglass-embedded-distribution")]
 pub mod stormglass_embedded_distribution;
 
+#[cfg(all(windows, feature = "stormglass-windows-stage"))]
+pub mod stormglass_windows_stage;
+
+#[cfg(feature = "stormglass-windows-admission")]
+pub mod stormglass_windows_admission;
+
+#[cfg(all(windows, feature = "stormglass-windows-snapshot"))]
+pub mod stormglass_windows_snapshot;
+
 #[cfg(any(windows, target_os = "linux"))]
 #[path = "source_authoring_core.rs"]
 pub mod source_authoring;

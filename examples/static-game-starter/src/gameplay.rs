@@ -472,6 +472,10 @@ pub fn registry() -> &'static GameplayContracts {
 mod cpu_api_acceptance;
 #[cfg(all(test, feature = "api-acceptance"))]
 #[path = "gameplay_api_acceptance.rs"]
+#[expect(
+    clippy::disallowed_types,
+    reason = "Monotonic deadlines bound asynchronous acceptance transport and renderer waits, not simulation"
+)]
 mod gpu_api_acceptance;
 #[cfg(test)]
 #[path = "gameplay_ws_acceptance.rs"]
