@@ -449,7 +449,7 @@ fn assignment_is_guid_keyed_transactional_and_reopens_without_transient_history(
     assert!(reopened.matches_scene(&temp.path().join("scene.yaml").display().to_string()));
     assert!(!reopened.matches_scene(&temp.path().join("other.yaml").display().to_string()));
     assert_eq!(
-        reopened.project_root().unwrap(),
+        reopened.project_root().unwrap().canonicalize().unwrap(),
         temp.path().canonicalize().unwrap()
     );
     assert!(!reopened

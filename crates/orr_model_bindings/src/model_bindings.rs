@@ -837,7 +837,7 @@ fn relative_hint(path: &str) -> bool {
         && !path.contains('\\')
         && !path.contains(':')
         && !path.contains('\0')
-        && !Path::new(path).is_absolute()
+        && !Path::new(path).has_root()
 }
 
 /// `uri` is already normalized by the model importer. Resolve it inside the
