@@ -40,7 +40,7 @@ impl TestHost {
             register_reflect(&mut types);
             let doc = EditorDoc::from_yaml(&demo_text(), types, Simulation::<PhysGame>::build_registry(), 7).expect("demo scene");
             let entry = |client: &str, token: &str, caps: &str| TokenEntry { client: client.into(), token: token.into(), caps: Caps::parse(caps).unwrap() };
-            let mut cfg = ServerConfig::new(Auth::Tokens(vec![entry("claude", "claude-tok", "all"), entry("limited", "limited-tok", "read,scene_edit")]));
+            let mut cfg = ServerConfig::new(Auth::Tokens(vec![entry("claude", "claude-tok", "all"), entry("limited", "limited-tok", "read,scene_edit"), entry("reader", "reader-tok", "read")]));
             cfg.limits.build_id = default_build_id("PhysGame");
             cfg.limits.game = GameHooks::new("PhysGame").with_metrics(PhysMetrics).with_bot(|seed, tick, slot| bot_input(seed, tick, PlayerSlot(slot)));
             let server = ErpServer::start(cfg).expect("start the ERP server");
@@ -49,6 +49,28 @@ impl TestHost {
             host.run(&s, Duration::from_micros(500));
         });
         let url = rx.recv_timeout(Duration::from_secs(20)).expect("the host did not start");
+        TestHost { url, stop, thread: Some(thread) }
+    }
+
+    /// A headless Stormglass host for actual authored-singleton CLI acceptance.
+    pub fn start_stormglass() -> TestHost {
+        use orr_games::coop_defense_game::{scenario_types, DefenseGame};
+        let stop = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = channel();
+        let s = stop.clone();
+        let thread = std::thread::spawn(move || {
+            let text = "schema: orr.scene/1\nentities: {}\nsingletons: {}\n";
+            let doc = EditorDoc::from_yaml(text, scenario_types(), Simulation::<DefenseGame>::build_registry(), 7).expect("Stormglass scene");
+            let entry = TokenEntry { client: "claude".into(), token: "claude-tok".into(), caps: Caps::parse("all").unwrap() };
+            let mut cfg = ServerConfig::new(Auth::Tokens(vec![entry]));
+            cfg.limits.build_id = default_build_id("CoopDefense");
+            cfg.limits.game = GameHooks::new("CoopDefense");
+            let server = ErpServer::start(cfg).expect("start Stormglass ERP server");
+            tx.send(server.url()).unwrap();
+            let mut host = Host::<DefenseGame>::new(doc, server);
+            host.run(&s, Duration::from_micros(500));
+        });
+        let url = rx.recv_timeout(Duration::from_secs(20)).expect("Stormglass host did not start");
         TestHost { url, stop, thread: Some(thread) }
     }
 

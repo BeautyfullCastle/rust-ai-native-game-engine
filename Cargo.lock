@@ -3126,6 +3126,7 @@ name = "orr_cli"
 version = "0.0.1"
 dependencies = [
  "orr_edit",
+ "orr_games",
  "orr_mcp",
  "orr_reflect",
  "orr_remote",

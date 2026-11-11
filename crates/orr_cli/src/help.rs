@@ -12,6 +12,7 @@ Look
 
 Change
   set <entity> Comp.path=value...   edit fields (one undo entry)
+  sset Singleton.path=value...     edit scene-wide settings (one undo entry)
   spawn | despawn | rename | add | remove
   apply <label> <ops...> --check <rule>   propose, verify, accept if it passes (recommended)
   propose | verify | accept | reject | proposals | diff      the same, step by step
@@ -138,6 +139,25 @@ Examples:
   orr set body_05 Body.pos=[6,18]
   orr set hero orr_physics::Body.kind=dynamic Body.angle=0.5
   orr set e_0000000e Body.vel=[0,0]",
+    ),
+    (
+        "sset",
+        "orr sset <Singleton.path>=<value> [...more]",
+        "orr sset <Singleton.path>=<value> [<Singleton.path>=<value>...]
+
+Directly edit reflected scene-wide settings; all assignments are one undo entry.
+Use singleton names without @ (the @ prefix belongs to get). Discover names and
+fields with `orr schema --types`, `orr schema <type>` and `orr get @Singleton`.
+Short names work only when unambiguous. Nested paths use the host's field syntax.
+Requires read and scene_edit, Edit mode, and a host that admits the changes.
+A rejected assignment rolls back the batch. No automatic retry or save.
+For changes needing replay checks use `orr apply <label> sset ... --check <rule>`.
+
+Examples:
+  orr sset Scene.spawn_batch=3 Scene.height=42.5
+  orr sset CoopDefense::Campaign.last_wave=3 --json
+  orr undo
+  orr save --write",
     ),
     (
         "spawn",
