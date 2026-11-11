@@ -80,8 +80,12 @@ The command and compatibility example fail before opening a project on other
 targets or without both features.
 The Room profile has no new HUD, checkpoint, skinning or progress support here.
 
-The production folder exporter remains Linux x86-64-only. Creating and playing a
-project on Windows does not establish Windows export or source-hidden execution.
+Windows x86-64 folder export is available through `orr_export_windows` with
+`project-export,room-project`; see the [Windows export CLI and runtime trust
+requirements](windows-game-export.md#command-line). The Room-enabled editor also
+provides export through its optional `windows-export` feature. Creating and
+playing a project does not by itself verify either export path or source-hidden
+execution; those checks must be performed separately.
 Full #94 creation→save→play→export acceptance remains separate, as do current-head
 mandatory CI, independent review and development integration. Original #2's
 22-item denominator remains unchanged.
