@@ -55,6 +55,8 @@ room-progress = ["room-project", "dep:sha2", "dep:tempfile", "dep:rustix"]
 collect-progress = ["collect-dodge", "dep:sha2", "dep:tempfile", "dep:rustix"]
 collect-dodge = ["project", "orr_games/collect-dodge"]
 default = []
+# Every feature that builds on a Windows desktop.
+full = ["audio", "audio-native", "collect-dodge", "collect-progress", "collect-sprites", "collect-ui", "coop-defense", "coop-defense-attack-clip", "coop-defense-audio", "coop-defense-audio-settings", "coop-defense-controls", "coop-defense-embedded-prototype", "coop-defense-pixel-motion", "coop-defense-pixelfx", "coop-defense-presentation", "coop-defense-run-save", "game-ui", "image-reimport", "input-actions", "linked-prefabs", "material-demo", "particle-demo", "particle-preset", "player-settings", "project", "project-create", "project-export", "room-animated-models", "room-character", "room-controls-attach", "room-input-actions", "room-lighting", "room-playtest", "room-progress", "room-project", "runtime-export-support", "sprites", "tilemap"]
 # Optional Linux player preferences; no simulation or default dependencies.
 player-settings = ["project", "game-ui", "dep:tempfile", "dep:rustix"]
 # Offline bounded Arena starter creation; no default/runtime dependency changes.

@@ -655,7 +655,7 @@ mod tests {
         dir
     }
 
-    #[cfg(all(feature = "room-input-actions", feature = "project-create", feature = "room-project"))]
+    #[cfg(all(target_os = "linux", feature = "room-input-actions", feature = "project-create", feature = "room-project"))]
     #[test]
     fn room_controls_snapshot_pins_role_bytes_digest_and_detects_tampering() {
         let dir = temporary();
@@ -687,7 +687,7 @@ mod tests {
         assert!(snapshot.recheck().unwrap_err().contains("changed"));
     }
 
-    #[cfg(all(feature = "room-input-actions", feature = "project-create", feature = "room-project"))]
+    #[cfg(all(target_os = "linux", feature = "room-input-actions", feature = "project-create", feature = "room-project"))]
     #[test]
     fn room_controls_mutation_before_publish_leaves_no_export() {
         let dir = temporary();
@@ -984,4 +984,5 @@ mod tests {
 }
 
 #[cfg(all(test, feature = "tilemap"))]
+#[path = "admission/tilemap_tests.rs"]
 mod tilemap_tests;
