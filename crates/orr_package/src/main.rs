@@ -3,7 +3,7 @@ use std::{env, path::PathBuf};
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.is_empty() || args[0] == "--help" {
-        println!("orr_pkg <install PROJECT [--dry-run] --path SOURCE [--dependency-path SOURCE]... | keep PROJECT NAME [--dry-run] | remove PROJECT NAME [--dry-run] | restore PROJECT NAME DIGEST [--dry-run] | list PROJECT | explain PROJECT NAME | verify PROJECT [--package NAME] | inspect SOURCE>\nOptional Linux authoring: pack-coop-native --help (requires coop-native-authoring, trusted native runtime); create-coop-native-scene --help (requires coop-native-authoring feature, no Node/WASM); orr_pkg create-assembled/create-uv-model/create-retextured-model --help (requires model-authoring feature); create-animated-sequence --help (requires animation-authoring feature); create-sprite --help (requires sprite-authoring feature); create-coop-audio-bank[-from-wav] --help (requires audio-authoring feature); deployment --help (requires deployment-authoring feature); bootstrap-user-game --help (requires bootstrap-authoring feature); build-coop-recipe/copy-coop-web-assets/pack-coop-offline/create-coop-scene/create-coop-animation/compose-coop-animations --help (requires coop-web-authoring feature).\nOffline content only. Runtime capabilities must be validated by the consuming host.");
+        println!("orr_pkg <install PROJECT [--dry-run] --path SOURCE [--dependency-path SOURCE]... | keep PROJECT NAME [--dry-run] | remove PROJECT NAME [--dry-run] | restore PROJECT NAME DIGEST [--dry-run] | list PROJECT | explain PROJECT NAME | verify PROJECT [--package NAME] | export-source PROJECT NAME --output NEW_DIR | inspect SOURCE>\nOptional Linux authoring: pack-coop-native --help (requires coop-native-authoring, trusted native runtime); create-coop-native-scene --help (requires coop-native-authoring feature, no Node/WASM); orr_pkg create-assembled/create-uv-model/create-retextured-model --help (requires model-authoring feature); create-animated-sequence --help (requires animation-authoring feature); create-sprite --help (requires sprite-authoring feature); create-coop-audio-bank[-from-wav] --help (requires audio-authoring feature); deployment --help (requires deployment-authoring feature); bootstrap-user-game --help (requires bootstrap-authoring feature); build-coop-recipe/copy-coop-web-assets/pack-coop-offline/create-coop-scene/create-coop-animation/compose-coop-animations --help (requires coop-web-authoring feature).\nOffline content only. Runtime capabilities must be validated by the consuming host.");
         return Ok(());
     }
     let engine = Runtime::content_only().engine_version;
@@ -13,8 +13,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             serde_json::to_string_pretty(&inspect_for_install(&args[1], engine)?)?
         );
     } else {
+        #[cfg(not(target_os = "linux"))]
+        if args[0] == "export-source" {
+            return Err("package source export currently requires Linux".into());
+        }
         let root = args.get(1).ok_or("project directory required")?;
         let project = Project::open_for_install(root, engine)?;
+        if args[0] == "export-source" && args.len() == 5 && args[3] == "--output" {
+            println!("{}", serde_json::to_string_pretty(&project.export_sources(&args[2], &args[4])?)?);
+            eprintln!("Exported inert package sources, not a game/runtime bundle or consuming-host admission. Install the requested source with the listed dependencies. Directory publication is not atomic; failures after creation retain partial output. Redistribution rights are not verified.");
+            return Ok(());
+        }
         if args[0] == "verify" && args.len() == 4 && args[2] == "--package" {
             println!(
                 "{}",
