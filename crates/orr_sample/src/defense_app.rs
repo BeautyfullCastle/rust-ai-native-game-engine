@@ -256,17 +256,32 @@ pub(crate) fn session(config: game::DefenseConfig) -> DefenseSession {
     Session::new(config, session_config, LocalInputSource)
 }
 pub fn run(options: Options) -> Result<(), String> {
+    let scene = prepare_scene(&options)?;
+    run_prepared_scene(options, scene)
+}
+
+/// Prototype entry point for a binary containing its exact authored scene text.
+/// External scene overrides are rejected before any file, window or GPU access.
+/// Both interactive and headless modes use the same strict 64 KiB scene parser.
+pub fn run_embedded(options: Options, scene: &str) -> Result<(), String> {
+    if options.scene.is_some() {
+        return Err("embedded game does not accept --scene; rebuild its authored scene".into());
+    }
+    orr_games::coop_defense_scene::validate_source(scene)?;
+    run_prepared_scene(options, Some(scene.to_owned()))
+}
+
+fn run_prepared_scene(options: Options, scene: Option<String>) -> Result<(), String> {
+    let config = match &scene {
+        Some(text) => orr_games::coop_defense_scene::parse_config(text)?,
+        None => game::DefenseConfig::default(),
+    };
     #[cfg(all(feature = "coop-defense-controls", any(target_os = "linux", windows)))]
     let controls = prepare_controls(&options)?;
     #[cfg(all(feature = "coop-defense-audio-settings", any(target_os = "linux", windows)))]
     let audio_settings = prepare_audio_settings(&options)?;
     #[cfg(feature = "coop-defense-audio")]
     let audio_bank = prepare_audio(&options)?;
-    let scene = prepare_scene(&options)?;
-    let config = match &scene {
-        Some(text) => orr_games::coop_defense_scene::parse_config(text)?,
-        None => game::DefenseConfig::default(),
-    };
     if options.headless {
         return headless_prepared(options, config);
     }
@@ -1943,3 +1958,7 @@ mod pixel_motion_tests;
 #[cfg(all(test, target_os = "linux"))]
 #[path = "defense_app/native_scene_tests.rs"]
 mod native_scene_tests;
+
+#[cfg(test)]
+#[path = "defense_app/embedded_tests.rs"]
+mod embedded_tests;

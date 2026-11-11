@@ -11,6 +11,8 @@ default-run = "arena"
 workspace = true
 
 [features]
+# Explicit scene-embedding experiment; not a production export format.
+coop-defense-embedded-prototype = ["coop-defense"]
 # Optional physical gameplay keys and independent explicit settings, reusing private storage.
 coop-defense-controls = ["coop-defense-audio-settings"]
 # Explicit native audio preference storage, independent of game run journals.
@@ -226,3 +228,9 @@ required-features = ["room-controls-attach"]
 name = "orr_playtest_room"
 path = "src/bin/orr_playtest_room.rs"
 required-features = ["room-playtest"]
+
+[[bin]]
+name = "stormglass_embedded"
+path = "src/bin/stormglass_embedded.rs"
+required-features = ["coop-defense-embedded-prototype"]
+test = false

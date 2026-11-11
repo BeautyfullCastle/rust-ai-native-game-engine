@@ -1,0 +1,11 @@
+schema: orr.scene/1
+entities: {}
+singletons:
+  CoopDefense::Scenario: {starting_gold: 250, reactor_hp: 75}
+  CoopDefense::Campaign: {last_wave: 3}
+  CoopDefense::WavePacing: {spawn_interval_ticks: 70}
+  CoopDefense::WaveCounts: {pair_counts: [2, 1, 3, 4, 5, 6, 7, 8, 9, 10]}
+  CoopDefense::EnemyHealth: {multiplier: 3}
+  CoopDefense::WaveComposition:
+    regular_kinds: [[3, 2, 1, 0], [0, 1, 2, 3], [1, 2, 3, 0], [2, 3, 0, 1], [3, 0, 1, 2], [0, 0, 0, 0], [1, 1, 1, 1], [2, 2, 2, 2], [3, 3, 3, 3], [0, 1, 2, 3]]
+    opening_boss: [1, 0, 0, 0, 1, 0, 0, 0, 0, 1]
