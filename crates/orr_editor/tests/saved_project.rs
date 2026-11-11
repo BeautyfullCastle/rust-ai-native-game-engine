@@ -57,7 +57,7 @@ fn saved_project_edit_save_play_stop_close_reopen_and_relocate() {
         node.role() == egui::accesskit::Role::Button
             && node
                 .label()
-                .is_some_and(|label| label.starts_with("Save ") && !label.starts_with("Save As"))
+                .is_some_and(|label| label.starts_with("Save Ctrl"))
     })
     .click();
     settle(&mut h);
