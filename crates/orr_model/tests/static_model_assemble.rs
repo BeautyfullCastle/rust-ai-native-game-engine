@@ -1073,6 +1073,7 @@ fn cli_unix_socket_inputs_reject_without_opening_or_publishing() {
 }
 
 #[test]
+#[ignore = "requires ORR_STATIC_MODEL_ASSEMBLE_BIN pointing at the current-source CLI"]
 fn actual_cli_publishes_validated_output_and_rejects_second_write() {
     let binary =
         std::env::var_os("ORR_STATIC_MODEL_ASSEMBLE_BIN").expect("fresh actual CLI required");

@@ -55,7 +55,7 @@ fn python_decodes_a_3d_frame_like_rust() {
          print(e[0]['prev'], e[0]['cur'])\n\
          print(e[1]['shape'], e[1]['mode'], e[1]['size'], e[1]['checker'])\n"
     );
-    let out = match Command::new("python3").arg("-c").arg(&code).output() {
+    let out = match Command::new(if cfg!(windows) { "python" } else { "python3" }).arg("-c").arg(&code).output() {
         Ok(o) => o,
         Err(e) => {
             eprintln!("SKIP: no python3 ({e})");

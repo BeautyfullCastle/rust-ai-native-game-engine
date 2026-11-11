@@ -7,7 +7,7 @@ without changing simulation state/schema or the reserved export implementation.
 
 ```powershell
 cargo build --release --locked -p orr_editor --features windows-projects
-target/release/orr_editor.exe --game room-escape
+target/release/orr_editor.exe --game room-escape-v1
 ```
 
 The project menu is available in a local Room or PhysGame editor, not as an
