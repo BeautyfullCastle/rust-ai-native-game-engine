@@ -19,6 +19,7 @@ cargo fmt --all -- --check || format_status=$?
 printf 'Advisory rustfmt exit status: %s\n' "$format_status"
 python3 -B tools/check_sim_float_types.py
 python3 -B tools/test_sim_float_guard.py
+python3 -B tools/test_cli_clock_policy.py
 cargo build --locked --workspace --release
 # Workspace regressions execute this freshly built example, not a cached CLI
 # supplied by the caller. Cargo's artifact message supplies its real path.
