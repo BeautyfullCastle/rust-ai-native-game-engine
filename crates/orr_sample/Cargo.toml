@@ -12,7 +12,7 @@ workspace = true
 
 [features]
 # Explicit scene-embedding experiment; not a production export format.
-coop-defense-embedded-prototype = ["coop-defense"]
+coop-defense-embedded-prototype = ["coop-defense", "dep:sha2"]
 # Optional physical gameplay keys and independent explicit settings, reusing private storage.
 coop-defense-controls = ["coop-defense-audio-settings"]
 # Explicit native audio preference storage, independent of game run journals.

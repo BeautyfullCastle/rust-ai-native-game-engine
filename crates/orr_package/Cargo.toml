@@ -10,6 +10,8 @@ workspace = true
 
 [features]
 default = []
+# Explicit local Windows publication of an already built, independently trusted EXE.
+stormglass-embedded-distribution = ["dep:orr_games", "dep:orr_sim", "dep:windows-sys", "windows-sys/Win32_Security", "windows-sys/Win32_System_IO", "windows-sys/Win32_System_Threading", "windows-sys/Win32_System_JobObjects", "windows-sys/Win32_System_Pipes", "windows-sys/Win32_System_SystemInformation"]
 model-authoring = ["dep:orr_model", "dep:rustix"]
 animation-authoring = ["model-authoring", "orr_model/animation"]
 sprite-authoring = ["dep:orr_sprite", "orr_sprite/png-import"]
@@ -50,3 +52,9 @@ rustix = { version = "1.1.5", features = ["fs"], optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", optional = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+[[bin]]
+name = "orr_publish_stormglass"
+path = "src/bin/orr_publish_stormglass.rs"
+required-features = ["stormglass-embedded-distribution"]
+test = false

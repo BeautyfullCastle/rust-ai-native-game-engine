@@ -1962,3 +1962,15 @@ mod native_scene_tests;
 #[cfg(test)]
 #[path = "defense_app/embedded_tests.rs"]
 mod embedded_tests;
+
+/// SHA256 of the exact compiled source, after the same strict runtime admission.
+/// Integrity evidence for an independently trusted build, not authentication.
+#[cfg(feature = "coop-defense-embedded-prototype")]
+pub fn embedded_scene_sha256(source: &str) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    orr_games::coop_defense_scene::parse_config(source)?;
+    Ok(Sha256::digest(source.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
+}

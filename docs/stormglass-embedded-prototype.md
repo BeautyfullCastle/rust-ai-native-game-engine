@@ -27,7 +27,9 @@ summaries/checksums, retain hashes and sizes, distinguish warm unchanged from
 scene-only incremental timing, and prove no-replace publication using continuously
 held artifact/source handles after confirmed bounded process/job cleanup.
 
-This is not the final export format or a production publisher. The isolated
+For the explicit bounded Windows distribution CLI, see
+[embedded EXE distribution](stormglass-embedded-distribution.md). The original
+prototype alone is not a publisher. The isolated
 Windows evidence harness is separate from the existing directory publisher,
 whose known failure is unchanged. Headless acceptance does not validate native
 input, a locked desktop, GPU presentation, hostile directory races, portability,

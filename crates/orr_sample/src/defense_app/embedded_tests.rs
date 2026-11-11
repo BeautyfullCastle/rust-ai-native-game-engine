@@ -89,3 +89,21 @@ fn embedded_authored_scene_matches_file_session_and_changed_scene_differs() {
     assert_eq!(game::run(embedded.predicted_frame()).reactor_hp, 75);
     assert_eq!(game::run(edited.predicted_frame()).reactor_hp, 76);
 }
+
+#[test]
+fn embedded_source_hash_binds_exact_bytes_and_strict_admission() {
+    use sha2::{Digest, Sha256};
+    let expected: String = Sha256::digest(SCENE.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert_eq!(embedded_scene_sha256(SCENE).unwrap(), expected);
+    let comment = format!("{SCENE}# same configuration, distinct source\n");
+    assert_eq!(
+        orr_games::coop_defense_scene::parse_config(SCENE).unwrap(),
+        orr_games::coop_defense_scene::parse_config(&comment).unwrap()
+    );
+    assert_ne!(embedded_scene_sha256(&comment).unwrap(), expected);
+    assert!(embedded_scene_sha256("invalid: source").is_err());
+    assert!(embedded_scene_sha256(&"x".repeat(65537)).is_err());
+}
