@@ -123,3 +123,74 @@ fn output_write_and_flush_failures_are_reported_without_panics() {
         "{\"error\":{\"kind\":\"output_write\",\"exit_code\":1}}"
     );
 }
+
+#[test]
+fn simulation_budget_is_validated_before_input() {
+    struct NoRead;
+    impl Read for NoRead {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            panic!("read on invalid usage")
+        }
+    }
+    for value in [
+        "",
+        "0",
+        "36001",
+        "4294967296",
+        "-1",
+        "+1",
+        " 1",
+        "1.0",
+        "secret",
+    ] {
+        assert_eq!(
+            report(
+                &["--stdin".into(), "--simulate".into(), value.into()],
+                NoRead
+            ),
+            Err(Failure::Usage)
+        );
+    }
+    assert_eq!(
+        report(&["--stdin".into(), "--simulate".into()], NoRead),
+        Err(Failure::Usage)
+    );
+    assert_eq!(
+        report(
+            &[
+                "--stdin".into(),
+                "--simulate".into(),
+                "1".into(),
+                "extra".into()
+            ],
+            NoRead
+        ),
+        Err(Failure::Usage)
+    );
+}
+
+#[test]
+fn bounded_simulation_uses_authored_state_and_exact_replay() {
+    let args = ["--stdin".into(), "--simulate".into(), "1".into()];
+    let a = report(&args, EMPTY.as_bytes()).unwrap();
+    assert_eq!(a, report(&args, EMPTY.as_bytes()).unwrap());
+    assert!(a.contains("\"ticks_executed\":1,\"outcome\":\"playing\",\"budget_exhausted\":true"));
+    let c = parse_config(EMPTY).unwrap();
+    let mut sim = Simulation::<DefenseGame>::with_build_id(
+        c,
+        TICK_RATE,
+        u64::from(c.seed),
+        SCENARIO_BUILD_ID,
+    );
+    let mut input = TickInputs::new(sim.tick(), 1);
+    input.set_input(
+        PlayerSlot(0),
+        strategy_input(&run(sim.frame()), &units(sim.frame()), 0, 1),
+    );
+    sim.step(&input);
+    assert!(a.contains(&format!("\"final_checksum\":\"0x{:016x}\"", sim.checksum())));
+    assert!(a.contains("\"same_input_replay\":\"exact\""));
+    assert!(!report(&super::tests::args(), EMPTY.as_bytes())
+        .unwrap()
+        .contains("\"simulation\""));
+}

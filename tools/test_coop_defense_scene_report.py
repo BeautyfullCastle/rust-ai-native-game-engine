@@ -27,6 +27,61 @@ class SceneReportTests(unittest.TestCase):
         self.assertEqual(run.stderr, b"")
         return json.loads(run.stdout)
 
+    def test_bounded_authored_simulation(self):
+        args = ("--stdin", "--simulate", "1")
+        first = self.invoke(EMPTY, *args)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(first.stdout, self.invoke(EMPTY, *args).stdout)
+        value = json.loads(first.stdout)
+        smoke = value["simulation"]
+        self.assertEqual((smoke["ticks_executed"], smoke["tick_budget"]), (1, 1))
+        self.assertEqual(smoke["outcome"], "playing")
+        self.assertTrue(smoke["budget_exhausted"])
+        self.assertEqual(smoke["same_input_replay"], "exact")
+        self.assertNotEqual(value["initial_checksum"], smoke["final_checksum"])
+        custom = EMPTY + b"singletons: {CoopDefense::Scenario: {starting_gold: 0, reactor_hp: 1}}\n"
+        changed = self.invoke(custom, *args)
+        self.assertEqual(changed.returncode, 0, changed.stderr)
+        self.assertNotEqual(smoke["final_checksum"], json.loads(changed.stdout)["simulation"]["final_checksum"])
+
+    def test_authored_short_campaign_victory_stops_exactly(self):
+        path = Path(__file__).resolve().parents[1] / "examples/static-game-starter/scenes/stormglass-short.scene.yaml"
+        source = path.read_bytes()
+        result = self.invoke(source, "--stdin", "--simulate", "36000")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        smoke = json.loads(result.stdout)["simulation"]
+        self.assertEqual(smoke["outcome"], "victory")
+        self.assertEqual(smoke["wave"], 3)
+        self.assertFalse(smoke["budget_exhausted"])
+        self.assertLess(smoke["ticks_executed"], 36000)
+        exact = self.invoke(source, "--stdin", "--simulate", str(smoke["ticks_executed"]))
+        self.assertEqual(exact.returncode, 0, exact.stderr)
+        exact_smoke = json.loads(exact.stdout)["simulation"]
+        self.assertEqual(exact_smoke["outcome"], "victory")
+        self.assertFalse(exact_smoke["budget_exhausted"])
+        self.assertEqual(exact_smoke["final_checksum"], smoke["final_checksum"])
+
+    def test_terminal_defeat_stops_and_is_not_a_tool_error(self):
+        source = EMPTY + b"singletons: {CoopDefense::Scenario: {starting_gold: 0, reactor_hp: 1}}\n"
+        result = self.invoke(source, "--stdin", "--simulate", "36000")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        smoke = json.loads(result.stdout)["simulation"]
+        self.assertEqual(smoke["outcome"], "defeat")
+        self.assertFalse(smoke["budget_exhausted"])
+        self.assertGreater(smoke["ticks_executed"], 1)
+        self.assertLess(smoke["ticks_executed"], 36000)
+        self.assertEqual(smoke["reactor_hp"], 0)
+        self.assertEqual(smoke["same_input_replay"], "exact")
+
+    def test_simulation_usage_is_bounded_and_private(self):
+        for value in ("0", "36001", "9999999999999", "-1", "+1", "secret"):
+            result = self.invoke(b"private invalid source", "--stdin", "--simulate", value)
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(result.stdout, b"")
+            self.assertEqual(json.loads(result.stderr), {"error": {"kind": "usage", "exit_code": 2}})
+        result = self.invoke(EMPTY, "--stdin", "--simulate", "1", "extra")
+        self.assertEqual(result.returncode, 2)
+
     def test_defaults_and_repeatability(self):
         first = self.invoke()
         self.assertEqual(first.returncode, 0, first.stderr)

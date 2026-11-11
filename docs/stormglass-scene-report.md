@@ -21,7 +21,7 @@ different native-pipe encoding and is not covered by this example):
 Get-Content -Raw -Encoding utf8 .\my.scene.yaml | .\target\debug\examples\coop_defense_scene_report.exe --stdin
 ```
 
-Only `--stdin` or `--help` is accepted. Standard input is limited to 64 KiB of
+Use `--stdin`, `--stdin --simulate TICKS`, or `--help`. Standard input is limited to 64 KiB of
 UTF-8; the reader consumes at most one additional byte to detect oversize input.
 Reading a pipe still waits for its producer. Bound or close the producer if it
 might stall; this tool does not impose a wall-clock input deadline. Shell text
@@ -39,16 +39,38 @@ must satisfy the existing strict schema, exact array sizes and bounds. Unknown
 entities, runtime state, prefabs, duplicate fields and extra documents remain
 rejected. No admission policy is relaxed.
 
-Exit 0 means admission or help. Usage errors exit 2. Input/admission/output errors
+Exit 0 means admission/completed probe or help, not victory. Usage errors exit 2. Input/admission/output errors
 exit 1 and emit a fixed JSON error on stderr: `usage`, `input_read`,
-`source_too_large`, `invalid_utf8`, `invalid_scene` or `output_write`. Errors omit
+`source_too_large`, `invalid_utf8`, `invalid_scene`, `replay_mismatch` or `output_write`. Errors omit
 raw YAML/parser text, paths and input values. `invalid_scene` means consult the
 [authoring contract](stormglass-authoring.md); it is not a field-level diagnostic.
 
 The checksum identifies initial CPU state under this build, not source bytes,
-a signature, runtime trust, later gameplay results or export integrity. The tool
-performs no gameplay ticks and does not prove victory, native rendering or Player
+a signature, runtime trust, later gameplay results or export integrity. The default performs no gameplay ticks. Neither mode proves native rendering or Player
 portability. A consumer must still validate the actual bytes it later receives.
+
+## Probe an authored campaign
+
+Add `--simulate 36000` to run up to 36,000 CPU ticks (ten simulated minutes).
+Only decimal budgets from 1 through 36,000 are accepted, before stdin is read.
+This is a work bound, not a wall-clock deadline. The built-in ordinary strategy
+acts on board zero at tick one and every 90 ticks; the game's normal partner AI
+remains enabled. No runtime-state edits or restarts occur. This is scripted
+policy coverage, not human play or a real-model completion test.
+
+The optional `simulation` object reports the budget, executed ticks, outcome
+(`playing`, `victory`, or `defeat`), wave, reactor HP, kills, leaks, summons,
+merges, and final checksum. Simulation stops at the first terminal state.
+`budget_exhausted` means the campaign is still playing at the limit, not defeat.
+Both defeat and budget exhaustion return exit 0: consumers must inspect outcome
+for their own acceptance criteria. Source admission and initial identity fields
+retain their existing meaning.
+
+A second fresh simulation consumes the identical inputs, checking checksum
+agreement after every tick. `same_input_replay: exact` means same-build CPU
+agreement, not cross-platform replay, recorded input export or game balance.
+The tool retains no input history. A mismatch emits only `replay_mismatch` and
+exit 1; it never emits a successful partial report.
 
 ## Verify
 
