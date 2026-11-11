@@ -67,9 +67,10 @@ fn is_handle(t: &str) -> bool {
 }
 
 /// True if `t` is `name=...` with a plausible name (a component or field path), not a verb or a flag.
+// Classify tokens, not reflected paths: the host validates bracket syntax and bounds.
 pub fn is_assignment(t: &str) -> bool {
     match t.split_once('=') {
-        Some((lhs, _)) => !lhs.is_empty() && lhs.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':' || c == '.'),
+        Some((lhs, _)) => !lhs.is_empty() && lhs.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '.' | '[' | ']')),
         None => false,
     }
 }
@@ -345,6 +346,17 @@ mod tests {
         let (c, p, v) = split_assignment("Body={\"a\":\"x=y\"}").unwrap();
         assert_eq!((c, p, v.to_string().as_str()), ("Body", "", "{\"a\":\"x=y\"}"));
         assert!(is_assignment("Body.pos=[1,2]") && !is_assignment("rename") && !is_assignment("=3") && !is_assignment("--name=x"));
+    }
+
+    #[test]
+    fn indexed_assignments_preserve_the_host_path() {
+        let (name, path, value) = split_assignment("CoopDefense::WaveComposition.regular_kinds[0][1]=3").unwrap();
+        assert_eq!(name, "CoopDefense::WaveComposition");
+        assert_eq!(path, "regular_kinds[0][1]");
+        assert_eq!(value, json!(3));
+        assert!(!is_assignment("--name=x[0]"));
+        assert!(!is_assignment("Scene.field;command=1"));
+        assert!(!is_assignment("Scene.field[0] extra=1"));
     }
 
     #[test]

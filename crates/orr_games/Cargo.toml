@@ -49,3 +49,7 @@ required-features = ["coop-defense"]
 [[example]]
 name = "coop_defense_campaign_trace"
 required-features = ["coop-defense-scene"]
+
+[[example]]
+name = "coop_defense_scene_report"
+required-features = ["coop-defense-scene"]

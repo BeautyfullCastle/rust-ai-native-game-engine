@@ -682,3 +682,55 @@ fn physics_host_reports_structured_input_unavailable_without_mutating_the_scene(
     assert_eq!(host.yaml(), before);
     assert!(host.history().is_empty());
 }
+
+#[test]
+fn early_usage_errors_honor_json_without_a_host() {
+    for args in [
+        vec!["--json"],
+        vec!["--json", "--timeout", "soon", "status"],
+        vec!["--timeout", "soon", "status", "--json"],
+        vec!["--timeout=-1", "--json", "status"],
+        vec!["--timeout=18446744073709551616", "--json", "status"],
+        vec!["--timeout=soon", "--json", "--help"],
+        vec!["--timeout=soon", "--json", "--version"],
+        vec!["--json", "--timeout"],
+        vec!["--json", "--token"],
+        vec!["--json", "--erp"],
+        vec!["--json", "--name"],
+        vec!["--erp", "https://localhost/?token=private-query", "--json", "status"],
+        vec!["--timeout=soon", "--json", "--token", "private-token", "--name"],
+    ] {
+        let r = finish(command("ws://127.0.0.1:1", None, &args).output().unwrap());
+        assert_eq!(r.code, 2, "{args:?}: {}", r.err);
+        assert!(r.out.is_empty());
+        let error: J = serde_json::from_str(r.err.trim()).expect("one JSON error on stderr");
+        assert_eq!(error["exit_code"], 2);
+        assert!(error["error"].as_str().is_some_and(|message| !message.is_empty()));
+        assert!(!r.err.contains("private-query") && !r.err.contains("private-token"));
+        if args[0] == "--timeout=soon" {
+            assert_eq!(error["error"], "--timeout needs a number of seconds");
+        }
+    }
+}
+
+#[test]
+fn early_error_json_selection_respects_global_option_value_boundaries() {
+    for args in [
+        vec!["--token", "--json"],
+        vec!["--name", "--json"],
+        vec!["--timeout", "--json"],
+        vec!["--token=--json"],
+        vec!["--timeout", "soon", "--token", "--json"],
+        vec!["--timeout", "soon", "spawn", "--name", "--json"],
+    ] {
+        let r = finish(command("ws://127.0.0.1:1", None, &args).output().unwrap());
+        assert_eq!(r.code, 2, "{args:?}: {}", r.err);
+        assert!(r.out.is_empty());
+        // spawn owns --name, so its following --json remains a global flag.
+        if args.contains(&"spawn") {
+            assert!(serde_json::from_str::<J>(r.err.trim()).is_ok());
+        } else {
+            assert!(r.err.starts_with("error:"), "{args:?}: {}", r.err);
+        }
+    }
+}
