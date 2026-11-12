@@ -1,0 +1,7 @@
+schema: orr.scene/1
+singletons:
+  CollectDeliveryState: { start: [0, 0], pickup: [2, 0], destination: [4, 0], hazard: [2, 1], item_available: 1, carrying: 0, won: 0, lost: 0, reserved: 0, action_held: 0 }
+entities:
+  e_00000001:
+    name: courier
+    Courier: { position: [0, 0] }

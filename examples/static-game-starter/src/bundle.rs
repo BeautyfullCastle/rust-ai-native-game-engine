@@ -171,7 +171,7 @@ fn export_with<G: Starter>(
         .get("input_contract")
         .filter(|v| v.is_object())
         .ok_or("missing input contract object in runtime identity")?;
-    let receipt = json!({
+    let mut receipt = json!({
         "schema": 1,
         "target": TARGET,
         "identity": identity,
@@ -184,6 +184,9 @@ fn export_with<G: Starter>(
         "runtime_requirements": "Linux x86-64 glibc, system ELF loader, display server and compatible Vulkan/graphics driver; not a fully static executable or universal Linux bundle",
         "files": inventory.iter().map(|(path,(bytes,sha256,mode))| json!({"path":path,"bytes":bytes,"sha256":sha256,"mode":mode})).collect::<Vec<_>>(),
     });
+    if admitted.reachability().is_some() {
+        receipt["reachability"] = admitted.reachability_report();
+    }
     let receipt_bytes = serde_json::to_vec_pretty(&receipt).map_err(error)?;
     if receipt_bytes.len() > MAX_QUERY_BYTES {
         return Err("receipt exceeds limit".into());
@@ -650,6 +653,50 @@ mod tests {
             fs::read(second.options.output.join("bundle.json")).unwrap()
         );
     }
+    #[test]
+    fn fractional_scene_exports_successfully_with_analysis_of_copied_scene() {
+        for (start, goal, current, origin) in [
+            ("[0, 0]", "[4, 0]", true, true),
+            ("[-0.5, 0.25]", "[4, 0]", false, true),
+            ("[1.5, -0.25]", "[3.5, 1.75]", true, false),
+            ("[0, 0]", "[4.5, 0]", false, false),
+        ] {
+            let mut fixture = Fixture::new();
+            let scene = crate::delivery::SCENE
+                .replace("position: [0, 0]", &format!("position: {start}"))
+                .replace("goal: [4, 0]", &format!("goal: {goal}"));
+            fs::write(&fixture.options.scene, &scene).unwrap();
+            fixture.identity = admit::<DeliveryGame>(&scene).unwrap().identity().clone();
+            let receipt =
+                export_with::<DeliveryGame>(&fixture.options, |_, _, p| Ok(fixture.answer(p)))
+                    .unwrap();
+            let copied =
+                fs::read_to_string(fixture.options.output.join("scene/game.scene.yaml")).unwrap();
+            assert_eq!(copied, scene);
+            let admitted = admit::<DeliveryGame>(&copied).unwrap();
+            assert_eq!(receipt["reachability"], admitted.reachability_report());
+            assert_eq!(receipt["reachability"]["current_to_goal"], current);
+            assert_eq!(receipt["reachability"]["origin_to_goal"], origin);
+            assert_eq!(receipt["identity"], *admitted.identity());
+            assert!(receipt["identity"].get("reachability").is_none());
+        }
+    }
+
+    #[test]
+    fn unsupported_bundle_omits_optional_analysis() {
+        use crate::switchboard::SwitchGame;
+        let mut fixture = Fixture::new();
+        fs::write(&fixture.options.scene, crate::switchboard::SCENE).unwrap();
+        fixture.identity = admit::<SwitchGame>(crate::switchboard::SCENE)
+            .unwrap()
+            .identity()
+            .clone();
+        let receipt =
+            export_with::<SwitchGame>(&fixture.options, |_, _, p| Ok(fixture.answer(p))).unwrap();
+        assert!(receipt.get("reachability").is_none());
+        assert_eq!(receipt["identity"], fixture.identity);
+    }
+
     #[test]
     fn wrong_identity_or_compile_revision_never_publishes() {
         for wrong_provenance in [false, true] {

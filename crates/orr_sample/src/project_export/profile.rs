@@ -64,7 +64,7 @@ impl Prepared {
     pub fn open(root: &Path, profile: Profile) -> Result<Self, String> {
         match profile {
             #[cfg(feature="room-project")]
-            Profile::Room => crate::room_project::PreparedProject::open(root).map(|value|Self::Room(Box::new(value))),
+            Profile::Room => crate::room_project::PreparedProject::open_with_progress(root, crate::room_project::RoomProjectCapabilities { lighting: cfg!(feature = "room-lighting"), character: cfg!(feature = "room-character") }, crate::room_project::ProgressSupport::MetadataOnly).map(|value|Self::Room(Box::new(value))),
             Profile::Arena => crate::project_runtime::PreparedRuntime::open(root)
                 .map(|value| Self::Arena(Box::new(value))),
             #[cfg(feature = "collect-dodge")]
@@ -110,6 +110,16 @@ impl Prepared {
             Self::Arena(p) => p.project().sprites(),
             #[cfg(feature = "collect-dodge")]
             Self::Collect(p) => p.sprites(),
+        }
+    }
+    #[cfg(feature = "tilemap")]
+    pub fn tilemap(&self) -> Option<&crate::project_tilemap::PreparedTilemap> {
+        match self {
+            Self::Arena(p) => p.project().tilemap(),
+            #[cfg(feature = "room-project")]
+            Self::Room(_) => None,
+            #[cfg(feature = "collect-dodge")]
+            Self::Collect(_) => None,
         }
     }
     pub fn smoke(&self) -> Result<Vec<u8>, String> {

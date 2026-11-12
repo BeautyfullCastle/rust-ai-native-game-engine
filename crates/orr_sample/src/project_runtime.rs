@@ -420,6 +420,9 @@ impl ProjectPresentation {
                         region.width as f32 * binding.units_per_pixel,
                         region.height as f32 * binding.units_per_pixel,
                     ],
+                    rotation: binding.orientation.unwrap_or_default().radians(),
+                    flip_x: binding.orientation.unwrap_or_default().flip_x,
+                    flip_y: binding.orientation.unwrap_or_default().flip_y,
                     ..Default::default()
                 },
             });
@@ -511,10 +514,11 @@ pub fn headless(
                 .as_ref()
                 .map(|_| crate::game_ui_gpu::GpuOverlay::new(&gpu, TextureFormat::Rgba8UnormSrgb));
             let mut pending = crate::game_ui_gpu::PendingOverlay::default();
-            compositor.draw_with_overlay(
+            compositor.draw_with_background_and_overlay(
                 target.render_view(),
                 size,
                 presentation.shapes(),
+                presentation.background(),
                 presentation.sprites(),
                 &presentation.camera,
                 |gpu, view, size| {
@@ -549,10 +553,11 @@ pub fn headless(
             )?;
         }
         #[cfg(not(feature = "game-ui"))]
-        compositor.draw(
+        compositor.draw_with_background(
             target.render_view(),
             size,
             presentation.shapes(),
+            presentation.background(),
             presentation.sprites(),
             &presentation.camera,
         )?;

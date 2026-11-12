@@ -1,0 +1,807 @@
+{
+  "excluded": {
+    "action-compatibility": [],
+    "bundle-contract": [],
+    "bundle-lib": [],
+    "controller": [],
+    "controller-actions": [],
+    "core": [],
+    "editor-acceptance": [],
+    "gameplay": [
+      "gameplay::ws_acceptance::gameplay_cli_two_registered_games_consume_and_release",
+      "gameplay::ws_acceptance::two_registered_games_accept_authenticated_websocket_semantic_input"
+    ],
+    "gameplay-acceptance": [],
+    "objectives": [],
+    "objectives-actions": [],
+    "reachability-core": [],
+    "reachability-gameplay": [],
+    "standalone": [],
+    "standalone-actions": []
+  },
+  "identities": {
+    "delivery": {
+      "alias": "delivery",
+      "build_id": "0x5354415254563201",
+      "game": "StarterDelivery",
+      "initial_checksum": "0x9fa5ee06fe8496ab",
+      "input_contract": {
+        "max_players": 1,
+        "schema": {
+          "$defs": {
+            "orr.EntityRef": {
+              "description": "GUID of another entity of the scene (e_ and 8 to 32 lowercase hex digits), or null for no entity.",
+              "pattern": "^e_[0-9a-f]{8,32}$",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "orr.Fixed": {
+              "description": "Fixed-point number, Q48.16 (1/65536 steps). Write a plain decimal such as 12, -0.5 or 3.25: no exponent, no '+', no quotes. The loader reads it with integer arithmetic (never as a float) and rounds to the nearest 1/65536, so 0.1 is stored as 0.1000061. Files are written with the shortest decimal that reads back to exactly the same value.",
+              "type": "number"
+            },
+            "orr.Fixed32": {
+              "description": "Fixed-point number, Q16.16 (1/65536 steps, range -32768 to 32767.99998). Same text rules as the 64-bit fixed-point number: a plain decimal, rounded to the nearest 1/65536.",
+              "maximum": 32767.99998,
+              "minimum": -32768,
+              "type": "number"
+            }
+          },
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "properties": {
+            "deliver": {
+              "description": "Control mode: released (0), primary action (1), or navigation pulse (2).",
+              "maximum": 2,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "dx": {
+              "maximum": 2147483647,
+              "minimum": -2147483648,
+              "type": "integer"
+            },
+            "dy": {
+              "maximum": 2147483647,
+              "minimum": -2147483648,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "dx",
+            "dy",
+            "deliver"
+          ],
+          "title": "DeliveryInput",
+          "type": "object"
+        },
+        "value_format": "Values follow the scene file and `registry.schema`: bool = true/false; integer = JSON number; fixed-point = JSON number with its exact decimal text (never rounded through a float; the server accepts a number or a string with the same text, an exponent, and rounds extra digits to 1/65536); vec2/vec3 = [x, y] / [x, y, z]; entity reference = GUID string `e_7f3a91c2` or null (`12v0` handle text for entities created during play); enum = variant name; flags = array of names; struct = object with all fields (a whole-component write may leave fields out: they take the type default); tagged value = object with `kind`. u64 checksums are strings `0x` + 16 hex digits."
+      },
+      "player_count": 1,
+      "schema": {
+        "$defs": {
+          "Courier": {
+            "additionalProperties": false,
+            "properties": {
+              "position": {
+                "items": false,
+                "maxItems": 2,
+                "minItems": 2,
+                "prefixItems": [
+                  {
+                    "$ref": "#/$defs/orr.Fixed"
+                  },
+                  {
+                    "$ref": "#/$defs/orr.Fixed"
+                  }
+                ],
+                "type": "array"
+              }
+            },
+            "required": [
+              "position"
+            ],
+            "type": "object"
+          },
+          "Delivery": {
+            "additionalProperties": false,
+            "properties": {
+              "action_held": {
+                "description": "Boolean latch shared by primary actions and navigation pulses.",
+                "maximum": 4294967295,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "goal": {
+                "items": false,
+                "maxItems": 2,
+                "minItems": 2,
+                "prefixItems": [
+                  {
+                    "$ref": "#/$defs/orr.Fixed"
+                  },
+                  {
+                    "$ref": "#/$defs/orr.Fixed"
+                  }
+                ],
+                "type": "array"
+              },
+              "won": {
+                "maximum": 4294967295,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "goal",
+              "won",
+              "action_held"
+            ],
+            "type": "object"
+          },
+          "orr.EntityRef": {
+            "description": "GUID of another entity of the scene (e_ and 8 to 32 lowercase hex digits), or null for no entity.",
+            "pattern": "^e_[0-9a-f]{8,32}$",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "orr.Fixed": {
+            "description": "Fixed-point number, Q48.16 (1/65536 steps). Write a plain decimal such as 12, -0.5 or 3.25: no exponent, no '+', no quotes. The loader reads it with integer arithmetic (never as a float) and rounds to the nearest 1/65536, so 0.1 is stored as 0.1000061. Files are written with the shortest decimal that reads back to exactly the same value.",
+            "type": "number"
+          },
+          "orr.Fixed32": {
+            "description": "Fixed-point number, Q16.16 (1/65536 steps, range -32768 to 32767.99998). Same text rules as the 64-bit fixed-point number: a plain decimal, rounded to the nearest 1/65536.",
+            "maximum": 32767.99998,
+            "minimum": -32768,
+            "type": "number"
+          },
+          "orr.SceneEntity": {
+            "additionalProperties": false,
+            "properties": {
+              "Courier": {
+                "$ref": "#/$defs/Courier"
+              },
+              "name": {
+                "description": "Display name (editor only).",
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Strict YAML scene file. No anchors, aliases or tags. Types come from this schema, not from the YAML text.",
+        "properties": {
+          "entities": {
+            "additionalProperties": {
+              "$ref": "#/$defs/orr.SceneEntity"
+            },
+            "description": "Entities by stable GUID. Keys are sorted on save.",
+            "propertyNames": {
+              "pattern": "^e_[0-9a-f]{8,32}$"
+            },
+            "type": "object"
+          },
+          "schema": {
+            "const": "orr.scene/1"
+          },
+          "singletons": {
+            "additionalProperties": false,
+            "description": "One value per singleton type of the frame.",
+            "properties": {
+              "Delivery": {
+                "$ref": "#/$defs/Delivery"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "schema",
+          "entities"
+        ],
+        "title": "Orrery scene (orr.scene/1)",
+        "type": "object"
+      },
+      "seed": 42,
+      "tick_rate": 60
+    },
+    "switchboard": {
+      "alias": "switchboard",
+      "build_id": "0x5354415254563202",
+      "game": "StarterSwitchboard",
+      "initial_checksum": "0xc6baf4d4a7755404",
+      "input_contract": {
+        "max_players": 1,
+        "schema": {
+          "$defs": {
+            "orr.EntityRef": {
+              "description": "GUID of another entity of the scene (e_ and 8 to 32 lowercase hex digits), or null for no entity.",
+              "pattern": "^e_[0-9a-f]{8,32}$",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "orr.Fixed": {
+              "description": "Fixed-point number, Q48.16 (1/65536 steps). Write a plain decimal such as 12, -0.5 or 3.25: no exponent, no '+', no quotes. The loader reads it with integer arithmetic (never as a float) and rounds to the nearest 1/65536, so 0.1 is stored as 0.1000061. Files are written with the shortest decimal that reads back to exactly the same value.",
+              "type": "number"
+            },
+            "orr.Fixed32": {
+              "description": "Fixed-point number, Q16.16 (1/65536 steps, range -32768 to 32767.99998). Same text rules as the 64-bit fixed-point number: a plain decimal, rounded to the nearest 1/65536.",
+              "maximum": 32767.99998,
+              "minimum": -32768,
+              "type": "number"
+            }
+          },
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "properties": {
+            "selection": {
+              "$ref": "#/$defs/orr.Fixed"
+            },
+            "toggle": {
+              "description": "Control mode: released (0), primary action (1), or navigation pulse (2).",
+              "maximum": 2,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "selection",
+            "toggle"
+          ],
+          "title": "SwitchInput",
+          "type": "object"
+        },
+        "value_format": "Values follow the scene file and `registry.schema`: bool = true/false; integer = JSON number; fixed-point = JSON number with its exact decimal text (never rounded through a float; the server accepts a number or a string with the same text, an exponent, and rounds extra digits to 1/65536); vec2/vec3 = [x, y] / [x, y, z]; entity reference = GUID string `e_7f3a91c2` or null (`12v0` handle text for entities created during play); enum = variant name; flags = array of names; struct = object with all fields (a whole-component write may leave fields out: they take the type default); tagged value = object with `kind`. u64 checksums are strings `0x` + 16 hex digits."
+      },
+      "player_count": 1,
+      "schema": {
+        "$defs": {
+          "Board": {
+            "additionalProperties": false,
+            "properties": {
+              "bits": {
+                "maximum": 4294967295,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "moves": {
+                "maximum": 4294967295,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "solved": {
+                "maximum": 4294967295,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "target": {
+                "maximum": 4294967295,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "bits",
+              "target",
+              "solved",
+              "moves"
+            ],
+            "type": "object"
+          },
+          "Cursor": {
+            "additionalProperties": false,
+            "properties": {
+              "held": {
+                "description": "Boolean latch shared by primary actions and navigation pulses.",
+                "maximum": 4294967295,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "position": {
+                "items": false,
+                "maxItems": 2,
+                "minItems": 2,
+                "prefixItems": [
+                  {
+                    "$ref": "#/$defs/orr.Fixed"
+                  },
+                  {
+                    "$ref": "#/$defs/orr.Fixed"
+                  }
+                ],
+                "type": "array"
+              },
+              "selected": {
+                "maximum": 4294967295,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "position",
+              "selected",
+              "held"
+            ],
+            "type": "object"
+          },
+          "orr.EntityRef": {
+            "description": "GUID of another entity of the scene (e_ and 8 to 32 lowercase hex digits), or null for no entity.",
+            "pattern": "^e_[0-9a-f]{8,32}$",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "orr.Fixed": {
+            "description": "Fixed-point number, Q48.16 (1/65536 steps). Write a plain decimal such as 12, -0.5 or 3.25: no exponent, no '+', no quotes. The loader reads it with integer arithmetic (never as a float) and rounds to the nearest 1/65536, so 0.1 is stored as 0.1000061. Files are written with the shortest decimal that reads back to exactly the same value.",
+            "type": "number"
+          },
+          "orr.Fixed32": {
+            "description": "Fixed-point number, Q16.16 (1/65536 steps, range -32768 to 32767.99998). Same text rules as the 64-bit fixed-point number: a plain decimal, rounded to the nearest 1/65536.",
+            "maximum": 32767.99998,
+            "minimum": -32768,
+            "type": "number"
+          },
+          "orr.SceneEntity": {
+            "additionalProperties": false,
+            "properties": {
+              "Cursor": {
+                "$ref": "#/$defs/Cursor"
+              },
+              "name": {
+                "description": "Display name (editor only).",
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Strict YAML scene file. No anchors, aliases or tags. Types come from this schema, not from the YAML text.",
+        "properties": {
+          "entities": {
+            "additionalProperties": {
+              "$ref": "#/$defs/orr.SceneEntity"
+            },
+            "description": "Entities by stable GUID. Keys are sorted on save.",
+            "propertyNames": {
+              "pattern": "^e_[0-9a-f]{8,32}$"
+            },
+            "type": "object"
+          },
+          "schema": {
+            "const": "orr.scene/1"
+          },
+          "singletons": {
+            "additionalProperties": false,
+            "description": "One value per singleton type of the frame.",
+            "properties": {
+              "Board": {
+                "$ref": "#/$defs/Board"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "schema",
+          "entities"
+        ],
+        "title": "Orrery scene (orr.scene/1)",
+        "type": "object"
+      },
+      "seed": 42,
+      "tick_rate": 60
+    }
+  },
+  "python_tests": [
+    "test_static_game_native_gate.NativeGateTests.test_blank_png_with_updated_hash_and_claimed_pixel_counts_fails",
+    "test_static_game_native_gate.NativeGateTests.test_command_success_and_failure_preserve_phase_timing",
+    "test_static_game_native_gate.NativeGateTests.test_contract_provenance_and_required_checks_mutations",
+    "test_static_game_native_gate.NativeGateTests.test_current_navigation_build_identities",
+    "test_static_game_native_gate.NativeGateTests.test_dirty_tracked_source_cannot_inherit_head_provenance",
+    "test_static_game_native_gate.NativeGateTests.test_early_failure_still_writes_attempt",
+    "test_static_game_native_gate.NativeGateTests.test_missing_game",
+    "test_static_game_native_gate.NativeGateTests.test_png_all_adaptive_filters_decode_independently",
+    "test_static_game_native_gate.NativeGateTests.test_png_crc_and_symlink_rejected",
+    "test_static_game_native_gate.NativeGateTests.test_positive_complete_both_games",
+    "test_static_game_native_gate.NativeGateTests.test_rustup_and_cargo_inputs_are_fenced_in_both_gates",
+    "test_static_game_native_gate.NativeGateTests.test_shared_compile_budget_debits_success_and_failure",
+    "test_static_game_native_gate.NativeGateTests.test_shared_compile_budget_exhaustion_never_launches_next_phase",
+    "test_static_game_native_gate.NativeGateTests.test_switch_direction_toggle_neutral_mutations",
+    "test_static_game_native_gate.NativeGateTests.test_switch_neutral_requires_release_fixture_target",
+    "test_static_game_native_gate.NativeGateTests.test_switch_target_mutations_reject_producer_counts",
+    "test_static_game_native_gate.NativeGateTests.test_switch_target_pixels_cannot_replace_current_lamp",
+    "test_static_game_native_gate.NativeGateTests.test_test_inventory_result_cannot_be_zero_filtered_or_skipped",
+    "test_static_game_native_gate.NativeGateTests.test_timeout_preserves_partial_log_and_stops_group",
+    "test_static_game_standalone_gate.CommandBounds.test_failure_preserves_diagnostics",
+    "test_static_game_standalone_gate.CommandBounds.test_output_overflow_is_bounded",
+    "test_static_game_standalone_gate.CommandBounds.test_success_records_duration",
+    "test_static_game_standalone_gate.CommandBounds.test_timeout_is_failure",
+    "test_static_game_standalone_gate.TargetPixelTests.test_independent_camera_includes_target_row",
+    "test_static_game_standalone_gate.TargetPixelTests.test_target_row_and_current_transition",
+    "test_static_game_standalone_gate.TargetPixelTests.test_target_row_does_not_mask_wrong_current_transition",
+    "test_static_game_standalone_gate.TargetPixelTests.test_wrong_camera_and_producer_geometry_spoof",
+    "test_static_game_standalone_gate.ValidatorTests.test_bundle_mutation",
+    "test_static_game_standalone_gate.ValidatorTests.test_checker_fixture_only",
+    "test_static_game_standalone_gate.ValidatorTests.test_current_navigation_build_identities",
+    "test_static_game_standalone_gate.ValidatorTests.test_direct_input_substitute",
+    "test_static_game_standalone_gate.ValidatorTests.test_duplicate_json",
+    "test_static_game_standalone_gate.ValidatorTests.test_editor_checker_fixture_only",
+    "test_static_game_standalone_gate.ValidatorTests.test_editor_missing_game",
+    "test_static_game_standalone_gate.ValidatorTests.test_editor_partial_ticks",
+    "test_static_game_standalone_gate.ValidatorTests.test_editor_unrelated_trace",
+    "test_static_game_standalone_gate.ValidatorTests.test_external_network_namespace",
+    "test_static_game_standalone_gate.ValidatorTests.test_extra_bundle_file",
+    "test_static_game_standalone_gate.ValidatorTests.test_missing_actual_pixels",
+    "test_static_game_standalone_gate.ValidatorTests.test_missing_first_consumed_tick",
+    "test_static_game_standalone_gate.ValidatorTests.test_missing_game",
+    "test_static_game_standalone_gate.ValidatorTests.test_missing_toolchain_hidden_path",
+    "test_static_game_standalone_gate.ValidatorTests.test_no_isolation",
+    "test_static_game_standalone_gate.ValidatorTests.test_offscreen_substitute",
+    "test_static_game_standalone_gate.ValidatorTests.test_png_crc",
+    "test_static_game_standalone_gate.ValidatorTests.test_pre_regain_paused_receipt_rejected_even_with_valid_hashes",
+    "test_static_game_standalone_gate.ValidatorTests.test_raw_replay_mutation",
+    "test_static_game_standalone_gate.ValidatorTests.test_vacuous_action_clear",
+    "test_static_game_standalone_gate.ValidatorTests.test_writable_bundle_mount",
+    "test_static_game_standalone_gate.ValidatorTests.test_wrong_camera",
+    "test_static_game_standalone_gate.ValidatorTests.test_wrong_producer",
+    "test_static_game_standalone_gate.ValidatorTests.test_zero_or_filtered_tests",
+    "test_static_game_native_ui_settle_gate.NativeUiSettleTests.test_budget_and_required_evidence_are_preserved",
+    "test_static_game_native_ui_settle_gate.NativeUiSettleTests.test_immediate_restart_click_is_rejected",
+    "test_static_game_native_ui_settle_gate.NativeUiSettleTests.test_pause_settle_guards_are_required_independently",
+    "test_static_game_native_ui_settle_gate.NativeUiSettleTests.test_paused_sim_alone_is_not_rendered_play_readiness",
+    "test_static_game_native_ui_settle_gate.NativeUiSettleTests.test_play_waits_for_a_post_transition_ui_frame",
+    "test_static_game_native_ui_settle_gate.NativeUiSettleTests.test_previous_frame_interaction_model"
+  ],
+  "reports": {
+    "delivery-both-unreachable": {
+      "analysis": "integer_unit_exact_position",
+      "current_to_goal": false,
+      "game": "StarterDelivery",
+      "origin_to_goal": false,
+      "schema": "orr.delivery-reachability/1",
+      "scope": "admitted_initial_scene",
+      "supported": true,
+      "warnings": [
+        "Goal unreachable from the current position. Match the courier and goal fractional coordinates on both axes; whole-unit coordinates work.",
+        "Goal unreachable after restart at the origin. Use whole-unit goal coordinates for origin restart."
+      ]
+    },
+    "delivery-current-unreachable": {
+      "analysis": "integer_unit_exact_position",
+      "current_to_goal": false,
+      "game": "StarterDelivery",
+      "origin_to_goal": true,
+      "schema": "orr.delivery-reachability/1",
+      "scope": "admitted_initial_scene",
+      "supported": true,
+      "warnings": [
+        "Goal unreachable from the current position. Match the courier and goal fractional coordinates on both axes; whole-unit coordinates work."
+      ]
+    },
+    "delivery-restart-unreachable": {
+      "analysis": "integer_unit_exact_position",
+      "current_to_goal": true,
+      "game": "StarterDelivery",
+      "origin_to_goal": false,
+      "schema": "orr.delivery-reachability/1",
+      "scope": "admitted_initial_scene",
+      "supported": true,
+      "warnings": [
+        "Goal unreachable after restart at the origin. Use whole-unit goal coordinates for origin restart."
+      ]
+    },
+    "delivery-stock": {
+      "analysis": "integer_unit_exact_position",
+      "current_to_goal": true,
+      "game": "StarterDelivery",
+      "origin_to_goal": true,
+      "schema": "orr.delivery-reachability/1",
+      "scope": "admitted_initial_scene",
+      "supported": true,
+      "warnings": []
+    },
+    "switchboard-unsupported": {
+      "analysis": "integer_unit_exact_position",
+      "current_to_goal": null,
+      "game": "StarterSwitchboard",
+      "origin_to_goal": null,
+      "schema": "orr.delivery-reachability/1",
+      "scope": "admitted_initial_scene",
+      "supported": false,
+      "warnings": []
+    }
+  },
+  "reviewed": true,
+  "schema": "orr.delivery-reachability-focused/1",
+  "suites": {
+    "action-compatibility": [
+      "frozen_domain_lifecycle_and_replay_are_exact",
+      "invalid_typed_domain_and_mismatched_json_are_rejected",
+      "nonneutral_and_oversized_profiles_are_rejected_before_play"
+    ],
+    "bundle-contract": [
+      "launcher_rejects_overrides_unknowns_duplicates_and_relative_outputs",
+      "launcher_relocates_with_spaces_and_preserves_exact_argument_boundaries",
+      "linked_runtime_rejected_without_changing_input_or_output",
+      "untrusted_runtime_is_not_executed"
+    ],
+    "bundle-lib": [
+      "bundle::tests::bounded_process_rejects_overflow_timeout_and_failure",
+      "bundle::tests::deterministic_receipt_and_exact_inventory_without_source_paths",
+      "bundle::tests::existing_and_racing_destinations_remain_untouched",
+      "bundle::tests::fractional_scene_exports_successfully_with_analysis_of_copied_scene",
+      "bundle::tests::process_group_cleanup_covers_inherited_redirected_and_timeout_descendants",
+      "bundle::tests::snapshots_reject_symlinks_hardlinks_special_files_and_bounds",
+      "bundle::tests::source_mutation_dirty_stage_and_staged_mutation_rejected",
+      "bundle::tests::stage_symlink_and_added_empty_directory_rejected",
+      "bundle::tests::unsupported_bundle_omits_optional_analysis",
+      "bundle::tests::wrong_hash_mode_architecture_and_invalid_initial_scene_rejected",
+      "bundle::tests::wrong_identity_or_compile_revision_never_publishes",
+      "editor_args::tests::explicit_loopback_only",
+      "editor_args::tests::malformed_tokens_and_legacy_listener_are_rejected",
+      "editor_args::tests::old_launch_has_no_listener",
+      "editor_args::tests::rejects_ambiguous_or_incomplete_options",
+      "editor_args::tests::supplied_tokens_and_bind_are_preserved_in_either_order",
+      "editor_args::tests::token_caps_preserved_and_errors_redacted",
+      "game_contract::file_read_tests::bounded_reader_accepts_exact_cap_and_rejects_over_cap",
+      "game_contract::file_read_tests::bounded_reader_accepts_regular_content_and_empty_files",
+      "game_contract::file_read_tests::bounded_reader_rejects_fifo_without_waiting_for_a_writer",
+      "game_contract::file_read_tests::bounded_reader_rejects_leaf_symlinks_even_at_guarded_open",
+      "game_contract::file_read_tests::scene_reader_enforces_utf8_and_256_kib_cap",
+      "game_contract::file_read_tests::unix_snapshot_rejects_same_length_file_replacement",
+      "game_contract::navigation_pulse_tests::both_games_mixed_legacy_and_navigation_replays_and_seeks_are_byte_exact",
+      "game_contract::navigation_pulse_tests::delivery_legacy_modes_keep_per_tick_axes_action_edges_and_custom_scene_reset",
+      "game_contract::navigation_pulse_tests::delivery_navigation_never_delivers_or_restarts_and_primary_retains_origin_reset",
+      "game_contract::navigation_pulse_tests::delivery_navigation_overflow_is_atomic_and_consumes_the_latch",
+      "game_contract::navigation_pulse_tests::delivery_navigation_pulse_moves_once_with_diagonals_and_shared_boolean_latch",
+      "game_contract::navigation_pulse_tests::invalid_raw_modes_are_deterministic_noops_without_releasing_existing_latches",
+      "game_contract::navigation_pulse_tests::navigation_builds_reject_old_mode_zero_one_replay_headers",
+      "game_contract::navigation_pulse_tests::navigation_mode_two_is_reflected_and_finite_but_three_plus_is_rejected",
+      "game_contract::navigation_pulse_tests::navigation_modes_preserve_input_layouts_and_reflected_field_sets",
+      "game_contract::navigation_pulse_tests::switch_legacy_axes_resume_without_new_edges_across_primary_navigation_transitions",
+      "game_contract::navigation_pulse_tests::switch_navigation_normalizes_raw_selection_without_overflow",
+      "game_contract::navigation_pulse_tests::switch_navigation_wraps_once_canonicalizes_x_preserves_y_and_board_after_solved",
+      "game_contract::reachability_tests::admitted_report_is_separate_read_only_and_unsupported_is_explicit",
+      "game_contract::reachability_tests::exact_coordinate_residues_cover_all_outcomes_axes_and_extremes"
+    ],
+    "controller": [
+      "both_games_all_eighteen_held_values_round_trip_through_the_typed_trace_decoder",
+      "both_games_cancel_opposing_keys_and_clear_releases",
+      "both_games_escape_pauses_without_a_hidden_tick_and_resumes_neutral",
+      "both_games_focus_loss_pauses_without_a_hidden_tick_and_resumes_neutral",
+      "both_games_record_actual_consumed_inputs_and_replay_every_tick_past_two_keyframes",
+      "both_games_reject_inputs_outside_the_finite_held_contract",
+      "both_games_reject_wrong_replay_identity_and_unbounded_or_noncanonical_envelopes",
+      "both_games_start_paused_and_require_a_fresh_neutral_boundary",
+      "both_games_verify_future_keyframes_against_independent_admitted_simulation",
+      "options_reject_duplicate_relative_and_conflicting_output_queries"
+    ],
+    "controller-actions": [
+      "both_games_all_eighteen_held_values_round_trip_through_the_typed_trace_decoder",
+      "both_games_cancel_opposing_keys_and_clear_releases",
+      "both_games_escape_pauses_without_a_hidden_tick_and_resumes_neutral",
+      "both_games_focus_loss_pauses_without_a_hidden_tick_and_resumes_neutral",
+      "both_games_record_actual_consumed_inputs_and_replay_every_tick_past_two_keyframes",
+      "both_games_reject_inputs_outside_the_finite_held_contract",
+      "both_games_reject_wrong_replay_identity_and_unbounded_or_noncanonical_envelopes",
+      "both_games_start_paused_and_require_a_fresh_neutral_boundary",
+      "both_games_verify_future_keyframes_against_independent_admitted_simulation",
+      "options_reject_duplicate_relative_and_conflicting_output_queries"
+    ],
+    "core": [
+      "editor_args::tests::explicit_loopback_only",
+      "editor_args::tests::malformed_tokens_and_legacy_listener_are_rejected",
+      "editor_args::tests::old_launch_has_no_listener",
+      "editor_args::tests::rejects_ambiguous_or_incomplete_options",
+      "editor_args::tests::supplied_tokens_and_bind_are_preserved_in_either_order",
+      "editor_args::tests::token_caps_preserved_and_errors_redacted",
+      "game_contract::file_read_tests::bounded_reader_accepts_exact_cap_and_rejects_over_cap",
+      "game_contract::file_read_tests::bounded_reader_accepts_regular_content_and_empty_files",
+      "game_contract::file_read_tests::bounded_reader_rejects_fifo_without_waiting_for_a_writer",
+      "game_contract::file_read_tests::bounded_reader_rejects_leaf_symlinks_even_at_guarded_open",
+      "game_contract::file_read_tests::scene_reader_enforces_utf8_and_256_kib_cap",
+      "game_contract::file_read_tests::unix_snapshot_rejects_same_length_file_replacement",
+      "game_contract::navigation_pulse_tests::both_games_mixed_legacy_and_navigation_replays_and_seeks_are_byte_exact",
+      "game_contract::navigation_pulse_tests::delivery_legacy_modes_keep_per_tick_axes_action_edges_and_custom_scene_reset",
+      "game_contract::navigation_pulse_tests::delivery_navigation_never_delivers_or_restarts_and_primary_retains_origin_reset",
+      "game_contract::navigation_pulse_tests::delivery_navigation_overflow_is_atomic_and_consumes_the_latch",
+      "game_contract::navigation_pulse_tests::delivery_navigation_pulse_moves_once_with_diagonals_and_shared_boolean_latch",
+      "game_contract::navigation_pulse_tests::invalid_raw_modes_are_deterministic_noops_without_releasing_existing_latches",
+      "game_contract::navigation_pulse_tests::navigation_builds_reject_old_mode_zero_one_replay_headers",
+      "game_contract::navigation_pulse_tests::navigation_mode_two_is_reflected_and_finite_but_three_plus_is_rejected",
+      "game_contract::navigation_pulse_tests::navigation_modes_preserve_input_layouts_and_reflected_field_sets",
+      "game_contract::navigation_pulse_tests::switch_legacy_axes_resume_without_new_edges_across_primary_navigation_transitions",
+      "game_contract::navigation_pulse_tests::switch_navigation_normalizes_raw_selection_without_overflow",
+      "game_contract::navigation_pulse_tests::switch_navigation_wraps_once_canonicalizes_x_preserves_y_and_board_after_solved",
+      "game_contract::reachability_tests::admitted_report_is_separate_read_only_and_unsupported_is_explicit",
+      "game_contract::reachability_tests::exact_coordinate_residues_cover_all_outcomes_axes_and_extremes"
+    ],
+    "editor-acceptance": [
+      "both_games_use_managed_keyboard_mapping_and_focus_loss_neutral",
+      "changed_build_is_rejected_before_editor_use",
+      "changed_input_schema_and_noninitial_scene_are_rejected",
+      "changed_reflection_schema_is_rejected_before_editor_use",
+      "delivery_editor_source_replay_win_restart_and_save_as",
+      "player_subprocess_nonzero_traces_win_for_both_schemas",
+      "relocated_source_player_executable_matches_admitted_idle_trace",
+      "second_schema_edit_play_reconnect_is_not_an_arena_alias",
+      "trace_rejects_malformed_unknown_and_unbounded_data_before_running"
+    ],
+    "gameplay": [
+      "editor_args::tests::explicit_loopback_only",
+      "editor_args::tests::malformed_tokens_and_legacy_listener_are_rejected",
+      "editor_args::tests::old_launch_has_no_listener",
+      "editor_args::tests::rejects_ambiguous_or_incomplete_options",
+      "editor_args::tests::supplied_tokens_and_bind_are_preserved_in_either_order",
+      "editor_args::tests::token_caps_preserved_and_errors_redacted",
+      "game_contract::file_read_tests::bounded_reader_accepts_exact_cap_and_rejects_over_cap",
+      "game_contract::file_read_tests::bounded_reader_accepts_regular_content_and_empty_files",
+      "game_contract::file_read_tests::bounded_reader_rejects_fifo_without_waiting_for_a_writer",
+      "game_contract::file_read_tests::bounded_reader_rejects_leaf_symlinks_even_at_guarded_open",
+      "game_contract::file_read_tests::scene_reader_enforces_utf8_and_256_kib_cap",
+      "game_contract::file_read_tests::unix_snapshot_rejects_same_length_file_replacement",
+      "game_contract::navigation_pulse_tests::both_games_mixed_legacy_and_navigation_replays_and_seeks_are_byte_exact",
+      "game_contract::navigation_pulse_tests::delivery_legacy_modes_keep_per_tick_axes_action_edges_and_custom_scene_reset",
+      "game_contract::navigation_pulse_tests::delivery_navigation_never_delivers_or_restarts_and_primary_retains_origin_reset",
+      "game_contract::navigation_pulse_tests::delivery_navigation_overflow_is_atomic_and_consumes_the_latch",
+      "game_contract::navigation_pulse_tests::delivery_navigation_pulse_moves_once_with_diagonals_and_shared_boolean_latch",
+      "game_contract::navigation_pulse_tests::invalid_raw_modes_are_deterministic_noops_without_releasing_existing_latches",
+      "game_contract::navigation_pulse_tests::navigation_builds_accept_current_manifests_and_reject_previous_build_manifests",
+      "game_contract::navigation_pulse_tests::navigation_builds_reject_old_mode_zero_one_replay_headers",
+      "game_contract::navigation_pulse_tests::navigation_mode_two_is_reflected_and_finite_but_three_plus_is_rejected",
+      "game_contract::navigation_pulse_tests::navigation_modes_preserve_input_layouts_and_reflected_field_sets",
+      "game_contract::navigation_pulse_tests::switch_legacy_axes_resume_without_new_edges_across_primary_navigation_transitions",
+      "game_contract::navigation_pulse_tests::switch_navigation_normalizes_raw_selection_without_overflow",
+      "game_contract::navigation_pulse_tests::switch_navigation_wraps_once_canonicalizes_x_preserves_y_and_board_after_solved",
+      "game_contract::reachability_tests::admitted_report_is_separate_read_only_and_unsupported_is_explicit",
+      "game_contract::reachability_tests::exact_coordinate_residues_cover_all_outcomes_axes_and_extremes",
+      "gameplay::cpu_api_acceptance::stock_registered_projects_complete_via_semantic_erp_and_do_not_replay",
+      "gameplay::cpu_api_acceptance::two_saved_games_support_api_only_authoring_commands_and_reconnect_fences",
+      "gameplay::navigation_tests::act_receipts_prove_fractional_delivery_win_origin_restart_and_switch_reset",
+      "gameplay::navigation_tests::delivery_move_receipt_proves_exact_raw_state_after_delayed_observation",
+      "gameplay::navigation_tests::delivery_navigation_rejects_atomic_raw_overflow_and_victory",
+      "gameplay::navigation_tests::encoders_reject_zero_unknown_payloads_wrong_players_and_actor_counts",
+      "gameplay::navigation_tests::navigation_catalog_requires_exact_integer_payloads",
+      "gameplay::navigation_tests::presenter_disables_unavailable_actions_and_does_not_bind_keyboard_navigation",
+      "gameplay::navigation_tests::presenter_emits_all_registered_buttons_without_mutating_the_frame",
+      "gameplay::navigation_tests::receipts_invalidate_malformed_identity_or_any_contradictory_held_state",
+      "gameplay::navigation_tests::switch_selection_wraps_custom_coordinates_and_preserves_every_board_field",
+      "gameplay::tests::command_capabilities_preserve_both_compiled_scene_and_input_identities",
+      "gameplay::tests::saved_manifests_select_compiled_capabilities_and_reject_unsafe_inputs",
+      "gameplay::tests::saved_projects_drive_the_existing_editor_lifecycle_and_preserve_source",
+      "gameplay::tests::sticky_failure_discards_late_start_ack_without_sending_play",
+      "gameplay::tests::stock_navigation_delayed_observation_moves_once_and_requires_newer_neutral",
+      "gameplay::tests::stock_navigation_lifecycle_cancels_before_and_after_admission_without_replay",
+      "gameplay::tests::stock_registered_act_only_diagnostic_preserves_unreachable_objectives",
+      "gameplay::tests::stock_registered_navigation_delivery_reaches_goal_and_restarts",
+      "gameplay::tests::stock_registered_navigation_switchboard_solves_target_and_restarts",
+      "gameplay::tests::stock_scenes_win_through_separate_raw_managed_input_positive_control",
+      "gameplay::tests::two_project_owned_games_share_actual_router_play_commands_and_stop"
+    ],
+    "gameplay-acceptance": [
+      "both_games_use_managed_keyboard_mapping_and_focus_loss_neutral",
+      "changed_build_is_rejected_before_editor_use",
+      "changed_input_schema_and_noninitial_scene_are_rejected",
+      "changed_reflection_schema_is_rejected_before_editor_use",
+      "delivery_editor_source_replay_win_restart_and_save_as",
+      "player_subprocess_nonzero_traces_win_for_both_schemas",
+      "relocated_source_player_executable_matches_admitted_idle_trace",
+      "second_schema_edit_play_reconnect_is_not_an_arena_alias",
+      "trace_rejects_malformed_unknown_and_unbounded_data_before_running"
+    ],
+    "objectives": [
+      "authored_objective_is_visible_before_starting",
+      "authored_objective_stays_visible_after_a_shared_nonwinning_action",
+      "every_authored_target_is_distinct_and_independent_of_reachable_current_bits",
+      "objective_hint_explains_rows_without_changing_delivery_fallback",
+      "objective_survives_win_release_restart_and_focus_pause_without_hidden_ticks"
+    ],
+    "objectives-actions": [
+      "authored_objective_is_visible_before_starting",
+      "authored_objective_stays_visible_after_a_shared_nonwinning_action",
+      "every_authored_target_is_distinct_and_independent_of_reachable_current_bits",
+      "objective_hint_explains_rows_without_changing_delivery_fallback",
+      "objective_presentation_does_not_opt_legacy_games_into_static_action_profiles",
+      "objective_survives_win_release_restart_and_focus_pause_without_hidden_ticks"
+    ],
+    "reachability-core": [
+      "authored_integer_scene_wins_and_wins_again_after_restart",
+      "every_legal_direction_mode_and_latch_preserves_position_residues_before_win"
+    ],
+    "reachability-gameplay": [
+      "authored_integer_scene_wins_and_wins_again_after_restart",
+      "diagnostics::authored_incompatible_goal_shows_current_position_warning",
+      "diagnostics::compatible_fractional_scene_shows_restart_warning_through_lifecycle",
+      "diagnostics::integer_scene_has_no_unreachable_warning_before_or_after_restart",
+      "every_legal_direction_mode_and_latch_preserves_position_residues_before_win"
+    ],
+    "standalone": [
+      "editor_args::tests::explicit_loopback_only",
+      "editor_args::tests::malformed_tokens_and_legacy_listener_are_rejected",
+      "editor_args::tests::old_launch_has_no_listener",
+      "editor_args::tests::rejects_ambiguous_or_incomplete_options",
+      "editor_args::tests::supplied_tokens_and_bind_are_preserved_in_either_order",
+      "editor_args::tests::token_caps_preserved_and_errors_redacted",
+      "game_contract::file_read_tests::bounded_reader_accepts_exact_cap_and_rejects_over_cap",
+      "game_contract::file_read_tests::bounded_reader_accepts_regular_content_and_empty_files",
+      "game_contract::file_read_tests::bounded_reader_rejects_fifo_without_waiting_for_a_writer",
+      "game_contract::file_read_tests::bounded_reader_rejects_leaf_symlinks_even_at_guarded_open",
+      "game_contract::file_read_tests::scene_reader_enforces_utf8_and_256_kib_cap",
+      "game_contract::file_read_tests::unix_snapshot_rejects_same_length_file_replacement",
+      "game_contract::navigation_pulse_tests::both_games_mixed_legacy_and_navigation_replays_and_seeks_are_byte_exact",
+      "game_contract::navigation_pulse_tests::delivery_legacy_modes_keep_per_tick_axes_action_edges_and_custom_scene_reset",
+      "game_contract::navigation_pulse_tests::delivery_navigation_never_delivers_or_restarts_and_primary_retains_origin_reset",
+      "game_contract::navigation_pulse_tests::delivery_navigation_overflow_is_atomic_and_consumes_the_latch",
+      "game_contract::navigation_pulse_tests::delivery_navigation_pulse_moves_once_with_diagonals_and_shared_boolean_latch",
+      "game_contract::navigation_pulse_tests::invalid_raw_modes_are_deterministic_noops_without_releasing_existing_latches",
+      "game_contract::navigation_pulse_tests::navigation_builds_reject_old_mode_zero_one_replay_headers",
+      "game_contract::navigation_pulse_tests::navigation_mode_two_is_reflected_and_finite_but_three_plus_is_rejected",
+      "game_contract::navigation_pulse_tests::navigation_modes_preserve_input_layouts_and_reflected_field_sets",
+      "game_contract::navigation_pulse_tests::switch_legacy_axes_resume_without_new_edges_across_primary_navigation_transitions",
+      "game_contract::navigation_pulse_tests::switch_navigation_normalizes_raw_selection_without_overflow",
+      "game_contract::navigation_pulse_tests::switch_navigation_wraps_once_canonicalizes_x_preserves_y_and_board_after_solved",
+      "game_contract::reachability_tests::admitted_report_is_separate_read_only_and_unsupported_is_explicit",
+      "game_contract::reachability_tests::exact_coordinate_residues_cover_all_outcomes_axes_and_extremes",
+      "standalone::tests::controls_status_preserves_legacy_pause_active_and_win",
+      "standalone::tests::empty_presentation_hint_preserves_legacy_titles",
+      "standalone::tests::objective_hint_survives_pause_active_and_win_titles",
+      "standalone::tests::output_creation_never_clobbers_existing_files_or_symlinks",
+      "standalone::tests::outputs_stay_outside_runtime_bundle_and_normalize_parents",
+      "standalone::tests::reachability_query_requires_scene_and_excludes_runtime_or_other_queries",
+      "standalone::tests::reachability_title_is_dynamic_and_preserves_controls_and_hints",
+      "standalone::view_clock::tests::delayed_wake_schedules_one_frame_without_catch_up_burst",
+      "standalone::view_clock::tests::redraw_wakes_do_not_schedule_another_frame_before_deadline"
+    ],
+    "standalone-actions": [
+      "editor_args::tests::explicit_loopback_only",
+      "editor_args::tests::malformed_tokens_and_legacy_listener_are_rejected",
+      "editor_args::tests::old_launch_has_no_listener",
+      "editor_args::tests::rejects_ambiguous_or_incomplete_options",
+      "editor_args::tests::supplied_tokens_and_bind_are_preserved_in_either_order",
+      "editor_args::tests::token_caps_preserved_and_errors_redacted",
+      "game_contract::file_read_tests::bounded_reader_accepts_exact_cap_and_rejects_over_cap",
+      "game_contract::file_read_tests::bounded_reader_accepts_regular_content_and_empty_files",
+      "game_contract::file_read_tests::bounded_reader_rejects_fifo_without_waiting_for_a_writer",
+      "game_contract::file_read_tests::bounded_reader_rejects_leaf_symlinks_even_at_guarded_open",
+      "game_contract::file_read_tests::scene_reader_enforces_utf8_and_256_kib_cap",
+      "game_contract::file_read_tests::unix_snapshot_rejects_same_length_file_replacement",
+      "game_contract::navigation_pulse_tests::both_games_mixed_legacy_and_navigation_replays_and_seeks_are_byte_exact",
+      "game_contract::navigation_pulse_tests::delivery_legacy_modes_keep_per_tick_axes_action_edges_and_custom_scene_reset",
+      "game_contract::navigation_pulse_tests::delivery_navigation_never_delivers_or_restarts_and_primary_retains_origin_reset",
+      "game_contract::navigation_pulse_tests::delivery_navigation_overflow_is_atomic_and_consumes_the_latch",
+      "game_contract::navigation_pulse_tests::delivery_navigation_pulse_moves_once_with_diagonals_and_shared_boolean_latch",
+      "game_contract::navigation_pulse_tests::invalid_raw_modes_are_deterministic_noops_without_releasing_existing_latches",
+      "game_contract::navigation_pulse_tests::navigation_builds_reject_old_mode_zero_one_replay_headers",
+      "game_contract::navigation_pulse_tests::navigation_mode_two_is_reflected_and_finite_but_three_plus_is_rejected",
+      "game_contract::navigation_pulse_tests::navigation_modes_preserve_input_layouts_and_reflected_field_sets",
+      "game_contract::navigation_pulse_tests::switch_legacy_axes_resume_without_new_edges_across_primary_navigation_transitions",
+      "game_contract::navigation_pulse_tests::switch_navigation_normalizes_raw_selection_without_overflow",
+      "game_contract::navigation_pulse_tests::switch_navigation_wraps_once_canonicalizes_x_preserves_y_and_board_after_solved",
+      "game_contract::reachability_tests::admitted_report_is_separate_read_only_and_unsupported_is_explicit",
+      "game_contract::reachability_tests::exact_coordinate_residues_cover_all_outcomes_axes_and_extremes",
+      "standalone::tests::action_controls_status_never_invents_restart_or_hides_pause",
+      "standalone::tests::controls_status_preserves_legacy_pause_active_and_win",
+      "standalone::tests::empty_presentation_hint_preserves_legacy_titles",
+      "standalone::tests::objective_hint_survives_pause_active_and_win_titles",
+      "standalone::tests::output_creation_never_clobbers_existing_files_or_symlinks",
+      "standalone::tests::outputs_stay_outside_runtime_bundle_and_normalize_parents",
+      "standalone::tests::presentation_hint_preserves_action_titles_without_inventing_restart",
+      "standalone::tests::reachability_query_requires_scene_and_excludes_runtime_or_other_queries",
+      "standalone::tests::reachability_title_is_dynamic_and_preserves_controls_and_hints",
+      "standalone::view_clock::tests::delayed_wake_schedules_one_frame_without_catch_up_burst",
+      "standalone::view_clock::tests::redraw_wakes_do_not_schedule_another_frame_before_deadline"
+    ]
+  }
+}

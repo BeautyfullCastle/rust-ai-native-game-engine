@@ -7,6 +7,23 @@ use orr_session::{ControlOp, PlaySession};
 use orr_sim::PlayerSlot;
 use orr_static_starter::{delivery::*, integration::*, switchboard::*};
 use serde_json::{json, Value as J};
+
+// Downloaded-artifact replay supplies the hash-verified copy of this exact
+// candidate's player. An invalid explicit override is an error, never a reason
+// to fall back to a producer path that only exists on the original CI runner.
+fn player_test_executable() -> std::path::PathBuf {
+    match std::env::var_os("ORR_STATIC_STARTER_PLAYER_TEST_BIN") {
+        Some(path) => {
+            let path = std::path::PathBuf::from(path);
+            assert!(
+                path.is_absolute() && path.is_file(),
+                "ORR_STATIC_STARTER_PLAYER_TEST_BIN must name an existing absolute player executable"
+            );
+            path
+        }
+        None => std::path::PathBuf::from(env!("CARGO_BIN_EXE_player")),
+    }
+}
 fn fixture<G: Starter>() -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("game.scene.yaml");
@@ -325,7 +342,7 @@ fn relocated_source_player_executable_matches_admitted_idle_trace() {
         let (dir, _) = fixture::<G>();
         let mut expected = player::<G>(G::SCENE).unwrap();
         expected.control(ControlOp::Step(60));
-        let output = std::process::Command::new(env!("CARGO_BIN_EXE_player"))
+        let output = std::process::Command::new(player_test_executable())
             .current_dir(dir.path())
             .args([G::ALIAS, "game.scene.yaml"])
             .output()
@@ -365,7 +382,7 @@ fn player_subprocess_nonzero_traces_win_for_both_schemas() {
             expected.control(ControlOp::Step(ticks));
         }
         assert!(G::won(expected.frame()));
-        let output = std::process::Command::new(env!("CARGO_BIN_EXE_player"))
+        let output = std::process::Command::new(player_test_executable())
             .current_dir(dir.path())
             .args([G::ALIAS, "game.scene.yaml", "trace.json"])
             .output()
@@ -415,7 +432,7 @@ fn trace_rejects_malformed_unknown_and_unbounded_data_before_running() {
     assert!(trace::<SwitchGame>(br#"[{"ticks":1,"input":{"selection":0.5,"toggle":0}}]"#).is_err());
     let (dir, _) = fixture::<DeliveryGame>();
     std::fs::write(dir.path().join("bad.json"), b"[").unwrap();
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_player"))
+    let output = std::process::Command::new(player_test_executable())
         .current_dir(dir.path())
         .args(["delivery", "game.scene.yaml", "bad.json"])
         .output()

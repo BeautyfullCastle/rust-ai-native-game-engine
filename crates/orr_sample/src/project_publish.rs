@@ -1,7 +1,7 @@
 //! Shared Linux atomic no-replace publication; never falls back to replacing rename.
 use std::path::Path;
 
-pub(crate) fn publish_no_replace(stage: &Path, output: &Path) -> Result<(), String> {
+pub fn publish_no_replace(stage: &Path, output: &Path) -> Result<(), String> {
     publish_with(stage, output, |stage, output| {
         rustix::fs::renameat_with(
             rustix::fs::CWD,

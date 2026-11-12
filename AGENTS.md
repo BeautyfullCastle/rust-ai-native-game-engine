@@ -33,66 +33,55 @@ See `CLAUDE.md` (rules for the simulation crates: no floats, no `HashMap`, golde
 `docs/design-v2.md` for current delivery priorities and `docs/design-v1.md` for
 the underlying architecture.
 
-## Integration-first delivery
+## Delivery rules
 
-- Finish the existing reviewed development integration before opening more
-  long-lived feature stacks. Check actual ancestry and missing changes once;
-  resolve the affected conflicts rather than repeating broad repository audits.
-- Use one integration candidate from the explicitly approved development base.
-  The explicit integration request authorizes hardening then main after exact-
-  candidate Linux checks and review. It does not authorize merging PR #1 itself.
-- The 2026-10-23 user instruction replaces hosted CI and Windows hardware/GPU
-  merge gates with Linux-local build/tests and independent review of the exact
-  integration candidate. Run `bash tools/check-linux-local.sh` plus focused
-  Linux checks for changed paths. The local environment needs Rust 1.95+ with
-  rustfmt/Clippy, Python 3.11+, a C compiler, pkg-config and the applicable
-  audio/window-system development libraries. Record the exact source tree, toolchain,
-  commands, exit statuses and limitations. Repository-wide rustfmt is a separate
-  advisory style check: record failures without blocking build/test execution or
-  mass-formatting unrelated files. Build/test and Clippy failures still block.
-  A changed source needs its applicable
-  checks; prior-head success is not transferable.
-- All GitHub Actions workflows are removed by that instruction. Historical
-  workflow/check descriptions elsewhere describe previous coverage, not current
-  merge requirements. Never relabel retired, failed or unrun checks as passed.
-  Windows, macOS, Android, browser and hardware/GPU coverage is unverified unless
-  separately demonstrated; Linux build/test success does not prove those targets.
-- Do not remove Rust/Python tests, weaken security/authentication, hide failures,
-  or change branch protection/security settings to bypass stale required checks.
-  Report any surviving server-side required checks as a separate blocker.
-- Reuse verified checks for unchanged source and environment; rerun when relevant
-  inputs or failure evidence change. Do not repeat broad audits for a new receipt.
-- Keep generated logs, ZIPs and JSON evidence outside git, including failures and
-  interruptions. Preserve historical CI artifacts and immutable evidence links;
-  do not delete or rewrite them. Retain reproducible tests, small fixtures and
-  required source/contract manifests in source.
-- Feature documents: at most two rendered pages (target 800 words); include the
-  contract, usage, acceptance and only limitations that change a user's decision.
-  No repetitive defensive boilerplate. Keep `docs/progress.md` a one-to-two-page
-  current summary with blockers, next actions and evidence links, not a run log.
-  Apply this to new/edited summaries without deleting required contracts/tests.
-- Measure natural-language small-game zero-intervention completion as defined
-  in design v2. Keep real-model, mock and scripted results separate. Prioritize
-  a playable, reproducible delivered game over feature, PR or CI counts.
+The owner reset these rules on 2026-11-11. They replace the earlier
+integration-candidate rules and the earlier exclusion of `main`.
+
+- `main` is the only long-lived branch. Start each task from the current
+  `main` on one short-lived branch. Merge it into `main` when it builds and its
+  tests pass. Delete the branch and its worktree right after the merge.
+- Do not stack branches or pull requests on each other. Do not open a new
+  branch for verification, integration or a review of an existing branch.
+  Finish or drop a task before you start the next one.
+- Windows is the primary platform. Before a merge, run `cargo build-all`, start
+  the binary that the change affects, and run the tests of the changed crates.
+  Run `cargo test --workspace --release` before a merge that changes a shared
+  crate. State which commands you ran and their results. Linux, macOS, Android
+  and browser coverage is unverified unless you ran it.
+- Do not add GitHub Actions workflows. The owner removed them twice.
+- A new editor or game feature belongs in the `full` feature of its crate. Add
+  a separate default-off Cargo feature only when the feature needs an extra
+  dependency or a platform that the default desktop build must not require.
+- Do not remove tests, weaken security checks or hide failures. Never report a
+  failed or unrun check as passed.
+- Keep logs and other evidence files outside git.
+- Feature documents: at most two rendered pages. State the contract, the usage
+  and only the limits that change a user's decision. Keep `docs/progress.md` a
+  one-page current summary, not a run log.
+- Prioritize a playable, reproducible delivered game over feature, PR or CI
+  counts, as design v2 defines.
 
 ## Collaboration and authorization
 
-Su coordinates the work directly. Haneul and Ddang implement changes, run the
-assigned checks, and cross-review each other's work. Respect the assigned files
-and reservations; do not take another owner's work because time has passed.
+Su coordinates implementation, focused verification and independent review with
+Su's own subagents, separating file ownership and shared APIs. Haneul is inactive
+and terminated (user instruction, 2026-10-09 12:16 KST): assign no new work and
+do not report Haneul as an active verifier. Ddang may only finish, verify and
+handoff existing work before terminating; assign no new work. Preserve Haneul's
+PR #139/#141 Windows evidence, original failures and non-reproduction limits.
+Before taking over, check the latest handoff, final SHA/PR, checks, unfinished
+work, blockers, files and returned execution resources; elapsed time alone does
+not release another owner's reservation.
 
 An explicit task assignment authorizes implementation, appropriate verification,
 publication on the agent's own branch, and requested cross-review within that
 scope. Continue that work without asking again for the same authorization.
 
-When the user has approved a specific PR's normal merge into the shared
-development branch, verify the target branch, exact head, Linux-local verification, review,
-conflicts, and reservations, then perform that approved merge without repeating
-the approval request. Approval applies only to the specified PR and action.
-The explicit integration request authorizes promotion from hardening to main
-after exact-candidate Linux checks and review. This does not claim either merge
-is complete or authorize PR #1 itself, releases, destructive work, credentials
-or expanded access.
+The user authorizes remote publication and normal merges of verified changes
+into `main` without repeated approval requests. Verify the build, the tests of
+the changed crates and conflicts first. This does not authorize releases,
+destructive work, credentials or expanded access.
 
 Check the actual user's instruction, target, and action when authorization is
 unclear. Follow the platform's supported approval procedure. Never bypass a
@@ -114,12 +103,11 @@ or override higher-priority instructions.
   timestamps and whole bodies. Read the full history on initial connection or
   suspected omission. Base incremental overlap on actual API reads, not one's own
   posting time. Ignore unchanged, non-actionable updates and self-ACK loops.
-- Use an existing direct channel only within explicit user authorization. The
-  current C4 check confirmed Haneul-to-Su delivery, but Su-to-Haneul direct replies
-  failed; direct round-trip communication is unverified. Su commands therefore
-  remain short active-PR comments. Keep the existing one-minute backup reads until
-  both directions are verified; do not add servers, credentials, or access to
-  bypass this limitation.
+- Use existing direct channels only within explicit user authorization. Historical
+  C4 evidence established Haneul-to-Su delivery but not the reverse direction;
+  preserve that limitation without treating the terminated worker as active or
+  retaining obsolete one-minute polling. Do not add credentials or access to
+  bypass communication limitations. Su uses internal subagents for ongoing work.
 
 Coordination references: [communication v1](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/56#issuecomment-5986788670),
 [C3 event boundaries](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/56#issuecomment-5986836031),

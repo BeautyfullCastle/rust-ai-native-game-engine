@@ -110,6 +110,13 @@ fn close3(a: [f32; 3], b: [f32; 3]) {
         close(a[i], b[i]);
     }
 }
+fn close_matrix(a: Matrix4, b: Matrix4) {
+    for column in 0..4 {
+        for row in 0..4 {
+            close(a[column][row], b[column][row]);
+        }
+    }
+}
 fn rejected(mut change: impl FnMut(&mut AnimatedSource), message: &str) {
     let mut input = source();
     change(&mut input);
@@ -228,6 +235,198 @@ fn antipodal_rotations_are_identical_and_do_not_generate_nan() {
         let pose = model.sample_clip(0, t).unwrap();
         close(pose.local()[2].rotation[3].abs(), 1.0);
         model.deform(&pose).unwrap();
+    }
+}
+
+#[test]
+fn pose_blend_endpoints_are_exact_and_accept_asset_clones() {
+    let mut input = source();
+    // Validation permits this tiny unit-length tolerance. An endpoint must
+    // retain the original local value, rather than re-normalize it via slerp.
+    input.nodes[2].rest.rotation[3] = 1.00001;
+    let model = AnimatedModel::new(input).unwrap();
+    let from = model.rest_pose().unwrap();
+    let to = model.sample_clip(0, 4.0).unwrap();
+    for weight in [0.0, -0.0] {
+        assert_eq!(model.blend_poses(&from, &to, weight).unwrap(), from);
+    }
+    assert_eq!(model.blend_poses(&from, &to, 1.0).unwrap(), to);
+    assert_eq!(
+        model.clone().blend_poses(&from, &to, 0.5).unwrap(),
+        model.blend_poses(&from, &to, 0.5).unwrap()
+    );
+    assert_eq!(from.local()[2].rotation[3], 1.00001);
+}
+
+#[test]
+fn pose_blend_midpoint_rebuilds_local_hierarchy_palettes_and_deformation() {
+    let mut input = source();
+    input.clips[0].channels = vec![
+        AnimationChannel {
+            node: 2,
+            interpolation: Interpolation::Step,
+            times: vec![0.0],
+            values: ChannelValues::Translation(vec![[4.0, 3.0, 0.0]]),
+        },
+        AnimationChannel {
+            node: 2,
+            interpolation: Interpolation::Step,
+            times: vec![0.0],
+            values: ChannelValues::Rotation(vec![[0.0, 0.0, 1.0, 0.0]]),
+        },
+        AnimationChannel {
+            node: 2,
+            interpolation: Interpolation::Step,
+            times: vec![0.0],
+            values: ChannelValues::Scale(vec![[3.0, 5.0, 1.0]]),
+        },
+    ];
+    for vertex in &mut input.primitives[0].vertices {
+        vertex.vertex.normal = [
+            std::f32::consts::FRAC_1_SQRT_2,
+            std::f32::consts::FRAC_1_SQRT_2,
+            0.0,
+        ];
+    }
+    let model = AnimatedModel::new(input).unwrap();
+    let from = model.rest_pose().unwrap();
+    let to = model.sample_clip(0, 0.0).unwrap();
+    let pose = model.blend_poses(&from, &to, 0.5).unwrap();
+    close3(pose.local()[2].translation, [2.0, 2.0, 0.0]);
+    close3(pose.local()[2].scale, [2.0, 3.0, 1.0]);
+    for (actual, expected) in pose.local()[2].rotation.into_iter().zip([
+        0.0,
+        0.0,
+        std::f32::consts::FRAC_1_SQRT_2,
+        std::f32::consts::FRAC_1_SQRT_2,
+    ]) {
+        close(actual, expected);
+    }
+    // A 90-degree joint rotation acts on the child's local y offset. These
+    // globals and palettes are recomposed TRS, rather than matrix interpolation.
+    let mut joint_global = [
+        [0.0, 2.0, 0.0, 0.0],
+        [-3.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [4.0, 2.0, 0.0, 1.0],
+    ];
+    close_matrix(pose.global()[2], joint_global);
+    joint_global[3] = [1.0, 2.0, 0.0, 1.0];
+    close_matrix(pose.global()[0], joint_global);
+    let mut palette = joint_global;
+    palette[3] = [7.0, -2.0, 0.0, 1.0];
+    for &matrix in &pose.skin_matrices()[0] {
+        close_matrix(matrix, palette);
+    }
+    model.validate_pose(&pose).unwrap();
+    let deformed = model.deform(&pose).unwrap();
+    assert_eq!(deformed[0].transform, IDENTITY);
+    for (vertex, expected) in
+        deformed[0]
+            .vertices
+            .iter()
+            .zip([[7.0, -2.0, 0.0], [7.0, 0.0, 0.0], [4.0, -2.0, 0.0]])
+    {
+        close3(vertex.position, expected);
+        close3(
+            vertex.normal,
+            [-2.0 / 13.0f32.sqrt(), 3.0 / 13.0f32.sqrt(), 0.0],
+        );
+    }
+    let bounds = model.bounds(&pose).unwrap();
+    close3(bounds.min, [4.0, -2.0, 0.0]);
+    close3(bounds.max, [7.0, 0.0, 0.0]);
+}
+
+#[test]
+fn pose_blend_rotation_uses_normalized_shortest_path_slerp() {
+    let mut input = source();
+    input.nodes[2].rest.rotation[3] = 1.00001;
+    input.clips[0].channels = vec![AnimationChannel {
+        node: 2,
+        interpolation: Interpolation::Step,
+        times: vec![0.0],
+        values: ChannelValues::Rotation(vec![[0.0, 0.0, -0.70710677, -0.70710677]]),
+    }];
+    let model = AnimatedModel::new(input).unwrap();
+    let from = model.rest_pose().unwrap();
+    let to = model.sample_clip(0, 0.0).unwrap();
+    for weight in [0.25, 0.5, 0.75] {
+        let pose = model.blend_poses(&from, &to, weight).unwrap();
+        let q = pose.local()[2].rotation;
+        let half_angle = weight * std::f32::consts::FRAC_PI_4;
+        close(q[0], 0.0);
+        close(q[1], 0.0);
+        close(q[2], half_angle.sin());
+        close(q[3], half_angle.cos());
+        close(q.iter().map(|x| x * x).sum(), 1.0);
+        model.deform(&pose).unwrap();
+    }
+}
+
+#[test]
+fn pose_blend_antipodal_quaternions_preserve_the_same_finite_rotation() {
+    let mut input = source();
+    input.clips[0].channels = vec![AnimationChannel {
+        node: 2,
+        interpolation: Interpolation::Step,
+        times: vec![0.0],
+        values: ChannelValues::Rotation(vec![[0.0, 0.0, 0.0, -1.0]]),
+    }];
+    let model = AnimatedModel::new(input).unwrap();
+    let from = model.rest_pose().unwrap();
+    let to = model.sample_clip(0, 0.0).unwrap();
+    assert_eq!(from.local()[2].rotation[3], 1.0);
+    assert_eq!(to.local()[2].rotation[3], -1.0);
+    let expected = model.deform(&from).unwrap();
+    for weight in [0.0, 0.25, 0.5, 0.75, 1.0] {
+        let pose = model.blend_poses(&from, &to, weight).unwrap();
+        let q = pose.local()[2].rotation;
+        assert!(q.iter().all(|v| v.is_finite()));
+        close(q.iter().map(|x| x * x).sum(), 1.0);
+        assert_eq!(pose.global(), from.global());
+        assert_eq!(pose.skin_matrices(), from.skin_matrices());
+        assert_eq!(model.deform(&pose).unwrap(), expected);
+    }
+}
+
+#[test]
+fn pose_blend_rejects_nonfinite_and_out_of_range_weights() {
+    let model = AnimatedModel::new(source()).unwrap();
+    let from = model.rest_pose().unwrap();
+    let to = model.sample_clip(0, 4.0).unwrap();
+    for weight in [
+        f32::NAN,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        -0.1,
+        1.0001,
+        f32::MIN,
+        f32::MAX,
+    ] {
+        let error = model.blend_poses(&from, &to, weight).unwrap_err();
+        assert!(error.to_string().contains("blend weight"));
+    }
+}
+
+#[test]
+fn pose_blend_validates_both_foreign_owners_even_at_endpoints() {
+    let model = AnimatedModel::new(source()).unwrap();
+    let other = AnimatedModel::new(source()).unwrap();
+    let restored = AnimatedModel::from_bytes(&model.to_bytes().unwrap()).unwrap();
+    let from = model.rest_pose().unwrap();
+    let to = model.sample_clip(0, 4.0).unwrap();
+    for foreign_model in [&other, &restored] {
+        let foreign = foreign_model.rest_pose().unwrap();
+        assert_eq!(foreign.local(), from.local());
+        assert_eq!(foreign.global(), from.global());
+        assert_eq!(foreign.skin_matrices(), from.skin_matrices());
+        for weight in [0.0, 0.5, 1.0] {
+            for (a, b) in [(&foreign, &to), (&from, &foreign)] {
+                let error = model.blend_poses(a, b, weight).unwrap_err();
+                assert!(error.to_string().contains("different animated model"));
+            }
+        }
     }
 }
 
@@ -665,4 +864,133 @@ fn loop_remainder_rounding_never_exposes_exact_duration() {
     assert!(player.time() < duration);
     assert_eq!(player.time(), 0.0);
     assert_eq!(player.state(), PlaybackState::Playing);
+}
+
+fn cubic_source() -> AnimatedSource {
+    let mut source = source();
+    let channel = &mut source.clips[0].channels[0];
+    channel.interpolation = Interpolation::CubicSpline;
+    // Two-second segment: midpoint x = 1 + (2 * 4 / 8) = 2.
+    channel.values = ChannelValues::Translation(vec![
+        [0.0; 3],
+        [0.0, 1.0, 0.0],
+        [4.0, 0.0, 0.0],
+        [0.0; 3],
+        [2.0, 1.0, 0.0],
+        [0.0; 3],
+    ]);
+    source
+}
+
+#[test]
+fn cubic_hermite_scales_tangents_and_drives_skin_deformation() {
+    let model = AnimatedModel::new(cubic_source()).unwrap();
+    for (time, x) in [
+        (-1.0, 0.0),
+        (2.0, 0.0),
+        (2.5, 1.4375),
+        (3.0, 2.0),
+        (4.0, 2.0),
+        (99.0, 2.0),
+    ] {
+        let pose = model.sample_clip(0, time).unwrap();
+        close3(pose.local()[2].translation, [x, 1.0, 0.0]);
+        // The first vertex is fully weighted to joint 2; bind cancels its rest.
+        close3(
+            model.deform(&pose).unwrap()[0].vertices[0].position,
+            [x, 0.0, 0.0],
+        );
+        assert!(model.bounds(&pose).is_ok());
+    }
+    let bytes = model.to_bytes().unwrap();
+    let reopened = AnimatedModel::from_bytes(&bytes).unwrap();
+    assert_eq!(model.source(), reopened.source());
+    // Sampling another time/clip/rest cannot contaminate a repeated seek.
+    let want = model.sample_clip(0, 3.0).unwrap();
+    model.sample_clip(0, 4.0).unwrap();
+    model.rest_pose().unwrap();
+    assert_eq!(want, model.sample_clip(0, 3.0).unwrap());
+    assert_eq!(want.local(), reopened.sample_clip(0, 3.0).unwrap().local());
+}
+
+#[test]
+fn cubic_rotation_normalizes_component_hermite_without_sign_flipping() {
+    let mut source = cubic_source();
+    source.clips[0].channels[0].values = ChannelValues::Rotation(vec![
+        [0.0; 4],
+        [0.0, 0.0, 0.0, 1.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0; 4],
+        [0.0, 0.0, 0.0, -1.0],
+        [0.0; 4],
+    ]);
+    let model = AnimatedModel::new(source).unwrap();
+    let pose = model.sample_clip(0, 3.0).unwrap();
+    assert_eq!(pose.local()[2].rotation, [0.0, 0.0, 1.0, 0.0]);
+    assert!(model.deform(&pose).is_ok());
+}
+
+#[test]
+fn cubic_tangents_allow_zero_negative_values_but_invalid_outputs_fail_closed() {
+    let mut source = cubic_source();
+    source.clips[0].channels[0].values = ChannelValues::Scale(vec![
+        [0.0; 3], [1.0; 3], [-8.0; 3], [0.0; 3], [1.0; 3], [0.0; 3],
+    ]);
+    let model = AnimatedModel::new(source).unwrap();
+    assert!(model.sample_clip(0, 3.0).is_err()); // Hermite overshoot cannot mirror geometry.
+    let mut source = cubic_source();
+    source.clips[0].channels[0].values = ChannelValues::Rotation(vec![
+        [0.0; 4],
+        [0.0, 0.0, 0.0, 1.0],
+        [0.0; 4],
+        [0.0; 4],
+        [0.0, 0.0, 0.0, -1.0],
+        [0.0; 4],
+    ]);
+    assert!(AnimatedModel::new(source)
+        .unwrap()
+        .sample_clip(0, 3.0)
+        .is_err());
+    let mut huge = cubic_source();
+    if let ChannelValues::Translation(values) = &mut huge.clips[0].channels[0].values {
+        values[2][0] = f32::MAX;
+    }
+    assert!(AnimatedModel::new(huge)
+        .unwrap()
+        .sample_clip(0, 3.0)
+        .is_err());
+    for index in [0, 2, 3, 5] {
+        let mut source = cubic_source();
+        if let ChannelValues::Translation(values) = &mut source.clips[0].channels[0].values {
+            values[index][0] = f32::NAN;
+        }
+        assert!(AnimatedModel::new(source).is_err());
+    }
+    for times in [
+        vec![2.0],
+        vec![2.0, 2.0],
+        vec![4.0, 2.0],
+        vec![2.0, f32::INFINITY],
+    ] {
+        let mut source = cubic_source();
+        source.clips[0].channels[0].times = times;
+        assert!(AnimatedModel::new(source).is_err());
+    }
+    let model = AnimatedModel::new(cubic_source()).unwrap();
+    for time in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        assert!(model.sample_clip(0, time).is_err());
+    }
+}
+
+#[test]
+fn cubic_tangent_entries_count_toward_aggregate_key_budget() {
+    let mut source = cubic_source();
+    let count = MAX_ANIMATION_KEYS / 3 + 1;
+    let channel = &mut source.clips[0].channels[0];
+    channel.times = (0..count).map(|index| index as f32).collect();
+    channel.values = ChannelValues::Translation(vec![[0.0; 3]; count * 3]);
+    assert!(AnimatedModel::new(source)
+        .unwrap_err()
+        .to_string()
+        .contains("key budget"));
 }

@@ -2,6 +2,10 @@
 use super::*;
 impl EditorApp {
     fn frame_selection_allowed(&self, ctx: &egui::Context) -> bool {
+        #[cfg(feature = "room-lighting")]
+        if self.room_light_pick_owns_input() {
+            return false;
+        }
         if !(self.editor.game().is_room() || self.editor.game() == crate::game::EditorGame::Yard3D)
             || self.editor.mode() != Mode::Edit
             || self.editor.previewing().is_some()

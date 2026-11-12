@@ -255,25 +255,28 @@ fn check_identity(request: &PreviewRequest, lock: &Lock) -> Result<(), String> {
             "preview requires a declared model asset in a {capability} package"
         ));
     }
-    let extensions: &[&str] = match request.kind {
-        ModelKind::Static => &["orrmodel", "glb", "gltf"],
-        ModelKind::Animated => &["glb", "gltf"],
-    };
-    if !Path::new(&request.asset_path)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            extensions
-                .iter()
-                .any(|allowed| extension.eq_ignore_ascii_case(allowed))
-        })
-    {
+    if !supports_asset(request.kind, &request.asset_path) {
         return Err(format!(
             "{} preview requires a declared supported model asset",
             kind_label(request.kind)
         ));
     }
     Ok(())
+}
+
+/// Filename admission for the browser and preview. Decoding and verified package
+/// identity remain mandatory; a suffix is not proof that bytes are a model.
+pub(crate) fn supports_asset(kind: ModelKind, asset: &str) -> bool {
+    let extension = Path::new(asset).extension().and_then(|value| value.to_str());
+    let source = extension.is_some_and(|value| {
+        value.eq_ignore_ascii_case("glb") || value.eq_ignore_ascii_case("gltf")
+    });
+    source
+        || (kind == ModelKind::Static
+            && (extension.is_some_and(|value| value.eq_ignore_ascii_case("orrmodel"))
+                || asset.to_ascii_lowercase().ends_with(".model.json")))
+        || (kind == ModelKind::Animated
+            && asset.to_ascii_lowercase().ends_with(".animated.json"))
 }
 
 fn load(request: &PreviewRequest) -> Result<Ready, String> {

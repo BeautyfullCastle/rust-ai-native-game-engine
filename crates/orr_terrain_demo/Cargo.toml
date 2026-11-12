@@ -1,0 +1,35 @@
+[package]
+name = "orr_terrain_demo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Optional bounded keyboard terrain course with a CPU-only default"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+render = ["dep:orr_render", "dep:orr_terrain_view", "dep:orr_view", "dep:png", "orr_fp/float-interop"]
+window = ["render", "dep:winit"]
+
+[dependencies]
+orr_fp = { path = "../orr_fp" }
+orr_terrain = { path = "../orr_terrain" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+orr_render = { path = "../orr_render", features = ["imported-scene"], optional = true }
+orr_terrain_view = { path = "../orr_terrain_view", optional = true }
+orr_view = { path = "../orr_view", optional = true }
+png = { version = "0.18", optional = true }
+winit = { version = "0.30", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "terrain_demo"
+path = "src/bin/terrain_demo.rs"
+test = false

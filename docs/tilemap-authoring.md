@@ -13,7 +13,14 @@ viewport. Fill changes the four-connected area matching the clicked cell's
 exact value with one click. Diagonals are not connected. Choose Erase to clear
 the painted cell or filled area; empty cells and region ID zero remain distinct.
 Fill runs only on the initial unobstructed viewport press, never repeatedly
-while holding or dragging. Changing Paint/Fill/Rectangle mode ends an active stroke.
+while holding or dragging. Changing Paint/Fill/Rectangle/Pick mode ends an active stroke.
+
+Pick is an explicit mode: click an unobstructed cell in the matching Edit
+viewport to select its region thumbnail, or Erase for an empty cell. Region ID
+zero remains distinct from empty. Picking changes only the palette selection;
+it preserves document bytes, tile Undo/Redo, the saved marker and simulation
+checksums. Pick stays selected until you choose another mode; it never switches
+to Paint automatically. Holding or dragging into the viewport does not pick.
 
 A complete fill is one Undo tile / Redo tile entry in the separate, bounded
 128-edit history, not the scene document's Undo. Filling with the same value is
@@ -53,10 +60,10 @@ verify the saved presentation, then Play. Unsaved tiles must be saved or undone
 before Play or closing. Scene Save does not save tile data; scene Open and Save
 As do not retarget the installed tilemap. The app refuses those operations while
 the map is installed. Proposal preview, replay, disconnected hosts and mismatched
-scene identity cannot paint, fill, rectangle or resize. While enabled, the tile tool reserves viewport
+scene identity cannot paint, fill, rectangle, pick or resize. While enabled, the tile tool reserves viewport
 pointer input, including when an edit is refused, rather than moving actors.
 A paint or fill gesture must start inside the unobstructed viewport. Pressing elsewhere
-and dragging in does not paint. Palette buttons expose Static region N labels; mode buttons expose Paint, Fill and Rectangle labels.
+and dragging in does not paint. Palette buttons expose Static region N labels; mode buttons expose Paint, Fill, Rectangle and Pick labels.
 
 This visual layer replaces the runtime Arena floor presentation only. Empty and
 transparent texels show the normal clear background. Tiles do not create actors,
@@ -68,8 +75,12 @@ The palette uses SpritePanel's admitted read-only asset and egui texture cache.
 The long-lived project compositor uses a separate GPU backend representation of
 the same admitted assets. There is no second image decoder or egui atlas cache.
 Cache-changing sprite operations are refused while the tilemap pins that cache.
-Package mutation, image reimport and export are unsupported, even when a usage
-query succeeds. Usage information is not permission to remove packages.
+Existing actors can change only their Region/Clip within the same admitted asset
+through [Actor appearance](tilemap-actor-sources.md), with separate guarded Save.
+Package mutation, image reimport and editor-button export remain unsupported, even
+when a usage query succeeds. The optional Linux CLI export path is documented in
+[Export an Arena tilemap](arena-tilemap-export.md). Usage information is not
+permission to remove packages.
 
 Save compares the root/scene identity, manifest, lock and exact original/saved
 sidecar bytes and pinned actor-sprite sidecar before replacing the file through a
@@ -96,7 +107,7 @@ visual evidence; four runtime captures have an independent pixel oracle.
 Strict Clippy passed for the selected production libraries and three new sample
 integration targets, including the final runtime fixture. This is not a full
 workspace or editor `cfg(test)` Clippy claim. Export-enabled library compilation
-was checked, but export functionality remains unsupported and was not accepted.
+was checked, but export functionality was unsupported and was not accepted in that run.
 
 Original failed attempts are retained in the issue's validation history: a
 missing test import, interleaved shader-cache warnings confusing the result
@@ -140,7 +151,7 @@ passed 25 pure-Python validator tests, without changing a workflow or creating a
 new job. Local
 SwiftShader results are not hosted required-CI results: that gate requires
 llvmpipe. Native OS input, Windows and exported-player behavior remain outside
-this acceptance; export remains unsupported. See
+this historical acceptance; export was unsupported in that run. See
 [issue #261](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/261).
 
 ## Resize local verification scope (2026-10-20)
@@ -176,8 +187,8 @@ The existing tilemap gate specifies CPU35/GPU5. Its 35 pure-Python validator tes
 and the applied gate against the actual local evidence passed, without adding or
 changing a workflow or job. Local SwiftShader validation is not hosted required
 CI, whose gate requires llvmpipe. Native OS input, Windows, hosted required CI and
-exported-player behavior remain outside this acceptance; export remains
-unsupported. See
+exported-player behavior remain outside this historical acceptance; export was
+unsupported in that run. See
 [issue #263](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/263).
 
 ## Rectangle implementation status (2026-10-20)
@@ -212,3 +223,25 @@ transition. The mandatory legacy tilemap cases cover the epoch pin but do not
 supply those missing transitions; separate editor transport tests are not part
 of the tilemap gate census. The existing read-only/editability guards remain in
 production, without claiming those two scenarios were executed by this suite.
+
+## Pick focused Windows verification (2026-10-25)
+
+The existing editor library target initially passed 19 focused release CPU cases with
+`tilemap` enabled, including four new Pick cases. Actual egui input frames cover
+region zero versus empty, history preservation, event-position picking, held
+input and drag-entry refusal, disabled/focus/clip/occlusion boundaries, and invalid
+grid/viewport coordinates. Strict Clippy also passed for the production library
+with `tilemap` enabled. A subsequent isolated release regression also passed:
+it admits a copied installed project, starts a socket-free in-process Arena
+host and sends egui input through the actual `paint_viewport` dispatcher. Picking
+dirty unsaved cells and empty cells changes the panel selection while preserving
+tile document/history/saved state, host history/checksum and exact project files.
+Held input, outside-origin drag, missing admission epoch and a disabled tool are
+also checked through that dispatcher. No test target was added. These CPU frames
+do not exercise a native window, GPU or the full EditorApp lifecycle. Proposal, replay,
+disconnect and scene/epoch transitions retain the common production admission
+guards but were not independently executed in this Pick run. Full Linux/CI and
+visual acceptance remain separate from this focused Windows result.
+
+See [Tile pattern Copy and Stamp](tilemap-copy-stamp.md) for bounded rectangle
+copying and single-click stamping, including empty-cell erasure and lifetime.

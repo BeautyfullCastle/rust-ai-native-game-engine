@@ -117,12 +117,9 @@ impl EditorApp {
             || self.ui.dialog.is_some()
             || self.package_work_pending()
             || self.hazard_export_busy()
+            || self.navigation_export_busy()
         {
             return Err("Finish screenshot mode, capture, path dialogs and pending content work before export".into());
-        }
-        #[cfg(feature = "tilemap")]
-        if self.tilemap.is_some() {
-            return Err("Loaded tilemap is not supported by this export slice".into());
         }
         #[cfg(feature = "collect-ui")]
         if self.collect_ui.is_some() {
@@ -163,9 +160,12 @@ impl EditorApp {
         {
             return Err("Enter project, runtime and new output paths".into());
         }
-        let source =
-            self.editor
-                .arena_export_source(&options.project, &self.sprites, installed_ui)?;
+        #[cfg(feature = "tilemap")]
+        let source = self.editor.arena_export_source_with_tilemap(
+            &options.project, &self.sprites, installed_ui, self.tilemap.as_ref(),
+        )?;
+        #[cfg(not(feature = "tilemap"))]
+        let source = self.editor.arena_export_source(&options.project, &self.sprites, installed_ui)?;
         let id = self
             .arena_export
             .next_id
@@ -278,3 +278,7 @@ impl EditorApp {
 #[cfg(test)]
 #[path = "arena_export_tests.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "tilemap", feature = "project-create"))]
+#[path = "arena_export_tilemap_tests.rs"]
+mod tilemap_tests;

@@ -1,0 +1,1205 @@
+//! Editor-owned character authoring. Clip edits coordinate the searching binding
+//! default; pair saves roll back ordinary second-file failures, not process crashes.
+use orr_sample::{
+    room_character::{Document, PlaybackRate},
+    room_project::PreparedRoomCharacter,
+};
+use std::{
+    fs::{File, Metadata},
+    io::{Read, Write},
+    path::{Path, PathBuf},
+};
+
+const MAX_UNDO: usize = 32;
+
+fn motion_schema(motion: &orr_sample::room_character::Motion) -> u32 {
+    if motion.facing.is_some() { 7 } else if motion.pickup.is_some() { 6 } else { 5 }
+}
+
+fn clip_text(clip: &crate::model_panel::CharacterClip) -> String {
+    let name = if clip.name.trim().is_empty() { "Unnamed clip" } else { &clip.name };
+    format!("{}: {} ({:.2}s)", clip.index, name, clip.seconds)
+}
+fn selected_clip_text(clips: &[crate::model_panel::CharacterClip], index: u32) -> String {
+    clips.iter().find(|clip| clip.index == index).map(clip_text)
+        .unwrap_or_else(|| format!("Unavailable clip {index}"))
+}
+
+
+// Private failure-injection boundary. Checks may fail an operation but never
+// replace it: production Save always executes the real persistence operations.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SaveStage {
+    ModelPersist,
+    CharacterPersist,
+    #[cfg(unix)]
+    DirectorySync,
+}
+
+pub struct Panel {
+    source: Option<std::sync::Arc<()>>,
+    retired: bool,
+    scene_path: PathBuf,
+    path: PathBuf,
+    manifest_path: PathBuf,
+    root: Result<RootPin, String>,
+    document: Document,
+    candidate: Document,
+    saved: Document,
+    saved_bytes: Vec<u8>,
+    manifest_bytes: Vec<u8>,
+    undo: Vec<Document>,
+    redo: Vec<Document>,
+    error: Option<String>,
+}
+
+struct RootPin {
+    path: PathBuf,
+    directory: File,
+}
+impl RootPin {
+    fn new(parent: &Path) -> Result<Self, String> {
+        let path = checked_directory(parent)?;
+        let directory = File::open(&path).map_err(|e| e.to_string())?;
+        Ok(Self { path, directory })
+    }
+    fn recheck(&self, path: &Path) -> Result<(), String> {
+        let current = checked_directory(path.parent().unwrap_or(Path::new(".")))?;
+        let metadata = std::fs::symlink_metadata(&current).map_err(|e| e.to_string())?;
+        let pinned = self.directory.metadata().map_err(|e| e.to_string())?;
+        if current != self.path || !same_directory(&metadata, &pinned) {
+            return Err("Character project directory changed; reopen before saving".into());
+        }
+        Ok(())
+    }
+}
+#[cfg(unix)]
+fn same_directory(a: &Metadata, b: &Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    a.dev() == b.dev() && a.ino() == b.ino()
+}
+#[cfg(not(unix))]
+fn same_directory(a: &Metadata, b: &Metadata) -> bool {
+    matches!((a.created(), b.created()), (Ok(a), Ok(b)) if a == b)
+}
+fn checked_directory(path: &Path) -> Result<PathBuf, String> {
+    orr_model_bindings::model_bindings::resolve_project(path, ".")
+        .and_then(|p| std::fs::canonicalize(p).map_err(|e| e.to_string()))
+}
+fn unchanged_file(path: &Path, expected: &[u8]) -> Result<(), String> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!(
+            "{} must remain a regular non-symlink file",
+            path.display()
+        ));
+    }
+    if metadata.len() != expected.len() as u64 {
+        return Err(format!(
+            "{} changed on disk; reopen before saving",
+            path.display()
+        ));
+    }
+    // A changing file cannot cause unbounded allocation even after metadata.
+    let mut current = Vec::new();
+    File::open(path)
+        .map_err(|e| e.to_string())?
+        .take(expected.len() as u64 + 1)
+        .read_to_end(&mut current)
+        .map_err(|e| e.to_string())?;
+    if current != expected {
+        return Err(format!(
+            "{} changed on disk; reopen before saving",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+impl Panel {
+    fn new(prepared: PreparedRoomCharacter) -> Self {
+        let root = RootPin::new(prepared.path.parent().unwrap_or(Path::new(".")));
+        let error = root.as_ref().err().cloned();
+        Self {
+            source: None,
+            retired: false,
+            scene_path: prepared.scene_path,
+            path: prepared.path,
+            manifest_path: prepared.manifest_path,
+            root,
+            candidate: prepared.document.clone(),
+            saved: prepared.document.clone(),
+            document: prepared.document,
+            saved_bytes: prepared.bytes,
+            manifest_bytes: prepared.manifest_bytes,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            error,
+        }
+    }
+    /// Pin authoring to this exact editor source, including same-path restarts.
+    pub fn new_for_editor(
+        prepared: PreparedRoomCharacter,
+        editor: &crate::Editor,
+    ) -> Result<Self, String> {
+        let mut panel = Self::new(prepared);
+        panel.ensure_source(editor)?;
+        Ok(panel)
+    }
+    fn ensure_source(&mut self, editor: &crate::Editor) -> Result<(), String> {
+        let token = editor.room_character_source_token();
+        if self.retired
+            || editor.path().as_deref() != Some(self.scene_path.as_path())
+            || editor.room_character() != Some(&self.document)
+            || self
+                .source
+                .as_ref()
+                .is_some_and(|source| !std::sync::Arc::ptr_eq(source, &token))
+        {
+            self.retired = true;
+            return Err("Character source changed; reopen the complete project".into());
+        }
+        if self.source.is_none() {
+            self.source = Some(token);
+        }
+        Ok(())
+    }
+    pub fn dirty(&self) -> bool {
+        self.document != self.saved || self.has_unapplied_changes()
+    }
+    pub fn has_unapplied_changes(&self) -> bool {
+        self.candidate != self.document
+    }
+    /// Discard only the form draft; applied unsaved edits and history remain.
+    pub fn reset_draft(
+        &mut self,
+        editor: &crate::Editor,
+        models: &crate::model_panel::ModelPanel,
+    ) -> Result<(), String> {
+        self.ensure_source(editor)?;
+        if editor.mode() != crate::model::Mode::Edit || !editor.can_mutate()
+            || editor.previewing().is_some()
+        { return Err("Reset character draft requires local Edit mode".into()); }
+        models.character_clips(editor)?;
+        self.candidate = self.document.clone();
+        self.error = None;
+        Ok(())
+    }
+    pub fn document(&self) -> &Document {
+        &self.document
+    }
+    pub fn apply_document(
+        &mut self,
+        candidate: Document,
+        editor: &mut crate::editor::Editor,
+        models: &mut crate::model_panel::ModelPanel,
+    ) -> Result<(), String> {
+        self.ensure_source(editor)?;
+        candidate.to_bytes()?;
+        models.apply_character_mapping(editor, &candidate)?;
+        if candidate != self.document {
+            if self.undo.len() == MAX_UNDO {
+                self.undo.remove(0);
+            }
+            self.undo
+                .push(std::mem::replace(&mut self.document, candidate));
+            self.redo.clear();
+        }
+        self.candidate = self.document.clone();
+        Ok(())
+    }
+    pub fn undo(
+        &mut self,
+        editor: &mut crate::editor::Editor,
+        models: &mut crate::model_panel::ModelPanel,
+    ) -> Result<bool, String> {
+        self.ensure_source(editor)?;
+        let Some(previous) = self.undo.last().cloned() else {
+            return Ok(false);
+        };
+        models.apply_character_mapping(editor, &previous)?;
+        self.undo.pop();
+        self.redo
+            .push(std::mem::replace(&mut self.document, previous));
+        self.candidate = self.document.clone();
+        Ok(true)
+    }
+    pub fn redo(
+        &mut self,
+        editor: &mut crate::editor::Editor,
+        models: &mut crate::model_panel::ModelPanel,
+    ) -> Result<bool, String> {
+        self.ensure_source(editor)?;
+        let Some(next) = self.redo.last().cloned() else {
+            return Ok(false);
+        };
+        models.apply_character_mapping(editor, &next)?;
+        self.redo.pop();
+        self.undo.push(std::mem::replace(&mut self.document, next));
+        self.candidate = self.document.clone();
+        Ok(true)
+    }
+    fn recheck_disk(&self) -> Result<(), String> {
+        let pin = self.root.as_ref().map_err(Clone::clone)?;
+        pin.recheck(&self.path)?;
+        pin.recheck(&self.manifest_path)?;
+        unchanged_file(&self.path, &self.saved_bytes)?;
+        unchanged_file(&self.manifest_path, &self.manifest_bytes)
+    }
+    pub fn save_all(
+        &mut self,
+        editor: &crate::editor::Editor,
+        models: &mut crate::model_panel::ModelPanel,
+    ) -> Result<(), String> {
+        self.save_with_check(editor, models, |_| Ok(()))
+    }
+    fn save_with_check(
+        &mut self,
+        editor: &crate::editor::Editor,
+        models: &mut crate::model_panel::ModelPanel,
+        mut check: impl FnMut(SaveStage) -> std::io::Result<()>,
+    ) -> Result<(), String> {
+        self.ensure_source(editor)?;
+        if self.has_unapplied_changes() {
+            return Err("Apply or reset the character draft before saving".into());
+        }
+        models.validate_save(editor)?;
+        if editor.room_character() != Some(&self.document) {
+            return Err("Character document detached from current editor".into());
+        }
+        let bindings = models
+            .bindings
+            .as_ref()
+            .ok_or("Room model bindings missing")?;
+        let model_path = bindings.path.clone();
+        let pin = self.root.as_ref().map_err(Clone::clone)?;
+        pin.recheck(&model_path)?;
+        let metadata = std::fs::symlink_metadata(&model_path).map_err(|e| e.to_string())?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 1024 * 1024
+        {
+            return Err("Model sidecar must remain a bounded regular file".into());
+        }
+        let mut original = Vec::new();
+        File::open(&model_path)
+            .map_err(|e| e.to_string())?
+            .take(1024 * 1024 + 1)
+            .read_to_end(&mut original)
+            .map_err(|e| e.to_string())?;
+        if original.len() > 1024 * 1024 {
+            return Err("Model sidecar exceeds limit".into());
+        }
+        let disk: crate::model_bindings::Document =
+            serde_json::from_slice(&original).map_err(|e| e.to_string())?;
+        if &disk != bindings.saved_document() {
+            return Err("Model sidecar changed on disk; reopen before saving".into());
+        }
+        let model_bytes =
+            serde_json::to_vec_pretty(bindings.document()).map_err(|e| e.to_string())?;
+        let bytes = self.document.to_bytes()?;
+        let write_temp = |bytes: &[u8]| -> Result<tempfile::NamedTempFile, String> {
+            let mut file = tempfile::NamedTempFile::new_in(&pin.path).map_err(|e| e.to_string())?;
+            file.write_all(bytes)
+                .and_then(|()| file.as_file().sync_all())
+                .map_err(|e| e.to_string())?;
+            Ok(file)
+        };
+        let model_temp = write_temp(&model_bytes)?;
+        let character_temp = write_temp(&bytes)?;
+        let rollback = write_temp(&original)?;
+        self.recheck_disk()?;
+        unchanged_file(&model_path, &original)?;
+        check(SaveStage::ModelPersist).map_err(|e| format!("Character not saved: {e}"))?;
+        model_temp.persist(&model_path).map_err(|e| e.to_string())?;
+        let second = check(SaveStage::CharacterPersist)
+            .map_err(|e| e.to_string())
+            .and_then(|()| {
+                character_temp
+                    .persist(&self.path)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            });
+        if let Err(error) = second {
+            return match rollback.persist(&model_path) {
+                Ok(_) => {
+                    let _ = pin.directory.sync_all();
+                    Err(format!(
+                        "Character save failed; model sidecar restored: {error}"
+                    ))
+                }
+                Err(rollback) => Err(format!(
+                    "Character save failed ({error}); model rollback failed ({rollback}); reopen and recover the sidecars before continuing"
+                )),
+            };
+        }
+        models.bindings.as_mut().unwrap().mark_current_saved();
+        self.saved = self.document.clone();
+        self.saved_bytes = bytes;
+        #[cfg(unix)]
+        check(SaveStage::DirectorySync).and_then(|()|pin.directory.sync_all()).map_err(|e|format!("Character and model sidecars replaced, but directory sync failed; durability is uncertain: {e}"))?;
+        Ok(())
+    }
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        editor: &mut crate::editor::Editor,
+        models: &mut crate::model_panel::ModelPanel,
+    ) {
+        let source_ok = match self.ensure_source(editor) {
+            Ok(()) => true,
+            Err(error) => {
+                self.error = Some(error);
+                false
+            }
+        };
+        let clips = if source_ok { models.character_clips(editor) }
+            else { Err("Reopen the complete character project".into()) };
+        let editable = source_ok && clips.is_ok()
+            && editor.mode() == crate::model::Mode::Edit
+            && editor.can_mutate()
+            && editor.previewing().is_none()
+            && editor.yard_rows_coherent();
+        ui.collapsing("Room character", |ui| {
+            ui.label(format!("Player {}", self.document.player));
+            if self.has_unapplied_changes() {
+                ui.colored_label(egui::Color32::YELLOW, "Character draft has unapplied changes: Apply or Reset character draft before saving");
+            } else {
+                ui.label(if self.document != self.saved { "Character (unsaved)" } else { "Character saved" });
+            }
+            ui.label("Loop clips use absolute simulation ticks; Edit/Stop shows rest");
+            if let Err(error) = &clips { ui.colored_label(egui::Color32::LIGHT_RED, error); }
+            let clips = clips.as_deref().unwrap_or(&[]);
+            ui.add_enabled_ui(editable, |ui| {
+                for (label, value) in [
+                    ("Searching clip", &mut self.candidate.searching),
+                    ("Carrying key clip", &mut self.candidate.carrying),
+                    ("Escaped clip", &mut self.candidate.escaped),
+                ] {
+                    egui::ComboBox::from_label(label)
+                        .selected_text(selected_clip_text(clips, *value))
+                        .show_ui(ui, |ui| {
+                            for clip in clips {
+                                ui.selectable_value(value, clip.index, format!("{label} {}", clip_text(clip)));
+                            }
+                        });
+                }
+                let mut speeds = self.candidate.speeds.unwrap_or_default();
+                let original_speeds = speeds;
+                for (label, value) in [
+                    ("Searching speed", &mut speeds.searching),
+                    ("Carrying key speed", &mut speeds.carrying),
+                    ("Escaped speed", &mut speeds.escaped),
+                ] {
+                    egui::ComboBox::from_label(label)
+                        .selected_text(value.label())
+                        .show_ui(ui, |ui| {
+                            for rate in PlaybackRate::ALL {
+                                ui.selectable_value(
+                                    value,
+                                    rate,
+                                    format!("{label} {}", rate.label()),
+                                );
+                            }
+                        });
+                }
+                if speeds != original_speeds {
+                    self.candidate.schema = if let Some(motion) = self.candidate.motion.as_ref() { motion_schema(motion) } else if self.candidate.escaped_once() { 4 } else if self.candidate.crossfade_ticks.is_some() { 3 } else { 2 };
+                    self.candidate.speeds = Some(speeds);
+                }
+                let mut ticks = self.candidate.crossfade_ticks.unwrap_or(0);
+                let previous_ticks = ticks;
+                ui.add(egui::Slider::new(&mut ticks, 0..=orr_sample::room_character::MAX_CROSSFADE_TICKS).text("Crossfade ticks"));
+                if ticks != previous_ticks {
+                    self.candidate.schema = if let Some(motion) = self.candidate.motion.as_ref() { motion_schema(motion) } else if self.candidate.escaped_once() { 4 } else { 3 };
+                    self.candidate.speeds = Some(speeds);
+                    self.candidate.crossfade_ticks = Some(ticks);
+                }
+                let mut escaped_once = self.candidate.escaped_once();
+                if ui.checkbox(&mut escaped_once, "Play escaped clip once").changed() {
+                    self.candidate.schema = if let Some(motion) = self.candidate.motion.as_mut() { motion.escaped_once = escaped_once; motion_schema(motion) } else if escaped_once { 4 } else { 3 };
+                    self.candidate.speeds = Some(speeds);
+                    self.candidate.crossfade_ticks = Some(ticks);
+                }
+                ui.weak("Once starts on the first observed escaped tick and holds the final pose. Seek/restart/source replacement resets it.");
+                let mut idle = self.candidate.motion.is_some();
+                if ui.add_enabled(self.candidate.motion.as_ref().is_none_or(|motion| motion.pickup.is_none() && motion.facing.is_none()), egui::Checkbox::new(&mut idle, "Use idle clips")).on_hover_text("Turn off key pickup playback and movement facing before disabling idle clips.").changed() {
+                    self.candidate.motion = if idle { Some(orr_sample::room_character::Motion {
+                        searching_idle: self.candidate.searching, carrying_idle: self.candidate.carrying, escaped_once, pickup: None, facing: None,
+                    }) } else { None };
+                    self.candidate.schema = if idle { 5 } else if escaped_once { 4 } else { 3 };
+                    self.candidate.speeds = Some(speeds); self.candidate.crossfade_ticks = Some(ticks);
+                }
+                if let Some(motion) = self.candidate.motion.as_mut() {
+                    for (label, value) in [("Searching idle clip", &mut motion.searching_idle), ("Carrying idle clip", &mut motion.carrying_idle)] {
+                        egui::ComboBox::from_label(label).selected_text(selected_clip_text(clips, *value)).show_ui(ui, |ui| {
+                            for clip in clips { ui.selectable_value(value, clip.index, format!("{label} {}", clip_text(clip))); }
+                        });
+                    }
+                    ui.weak("Actual XZ displacement selects moving clips; stationary/first snapshots select idle. Forward gaps use observed net displacement.");
+                }
+                let mut pickup_enabled = self.candidate.motion.as_ref().is_some_and(|motion| motion.pickup.is_some());
+                if ui.checkbox(&mut pickup_enabled, "Play key pickup clip once").changed() {
+                    if pickup_enabled {
+                        self.candidate.motion.get_or_insert(orr_sample::room_character::Motion {
+                            searching_idle: self.candidate.searching,
+                            carrying_idle: self.candidate.carrying,
+                            escaped_once,
+                            pickup: None,
+                            facing: None,
+                        });
+                        self.candidate.speeds = Some(speeds);
+                        self.candidate.crossfade_ticks = Some(ticks);
+                        self.candidate.motion.as_mut().unwrap().pickup = Some(orr_sample::room_character::Pickup { clip: self.candidate.carrying, speed: PlaybackRate::Normal });
+                        self.candidate.schema = motion_schema(self.candidate.motion.as_ref().unwrap());
+                    } else {
+                        self.candidate.motion.as_mut().unwrap().pickup = None;
+                        self.candidate.schema = motion_schema(self.candidate.motion.as_ref().unwrap());
+                    }
+                }
+                if let Some(pickup) = self.candidate.motion.as_mut().and_then(|motion| motion.pickup.as_mut()) {
+                    egui::ComboBox::from_label("Key pickup clip").selected_text(selected_clip_text(clips, pickup.clip)).show_ui(ui, |ui| {
+                        for clip in clips { ui.selectable_value(&mut pickup.clip, clip.index, format!("Key pickup clip {}", clip_text(clip))); }
+                    });
+                    egui::ComboBox::from_label("Key pickup speed").selected_text(pickup.speed.label()).show_ui(ui, |ui| {
+                        for rate in PlaybackRate::ALL { ui.selectable_value(&mut pickup.speed, rate, format!("Key pickup speed {}", rate.label())); }
+                    });
+                    ui.weak("Observed key pickup plays once, then resumes carrying idle or movement. Unknown first snapshots and timeline/source changes do not reconstruct unseen interactions. Apply and Save remain explicit.");
+                }
+                let focused = ui.ctx().input(|input| input.focused && !input.events.iter().any(|event| matches!(event, egui::Event::WindowFocused(false))));
+                ui.add_enabled_ui(focused, |ui| {
+                    let mut facing = self.candidate.motion.as_ref().is_some_and(|motion| motion.facing.is_some());
+                    if ui.checkbox(&mut facing, "Face observed movement direction").changed() && focused {
+                        if facing {
+                            let motion = self.candidate.motion.get_or_insert(orr_sample::room_character::Motion {
+                                searching_idle: self.candidate.searching, carrying_idle: self.candidate.carrying, escaped_once, pickup: None, facing: None,
+                            });
+                            motion.facing = Some(orr_sample::room_character::ForwardAxis::PositiveZ);
+                            self.candidate.speeds = Some(speeds);
+                            self.candidate.crossfade_ticks = Some(ticks);
+                        } else if let Some(motion) = self.candidate.motion.as_mut() { motion.facing = None; }
+                        self.candidate.schema = motion_schema(self.candidate.motion.as_ref().unwrap());
+                    }
+                    if let Some(axis) = self.candidate.motion.as_mut().and_then(|motion| motion.facing.as_mut()) {
+                        use orr_sample::room_character::ForwardAxis;
+                        let options = [(ForwardAxis::PositiveZ,"+Z"),(ForwardAxis::NegativeZ,"-Z"),(ForwardAxis::PositiveX,"+X"),(ForwardAxis::NegativeX,"-X")];
+                        let label = options.iter().find(|(value,_)| *value == *axis).unwrap().1;
+                        egui::ComboBox::from_label("Authored forward direction").selected_text(label).show_ui(ui, |ui| {
+                            for (value,label) in options { ui.selectable_value(axis,value,format!("Model forward {label}")); }
+                        });
+                        ui.weak("Presentation only: observed XZ movement turns the model; stopping holds its heading. New source, restart or seek resets it. Collider and game state are unchanged.");
+                    }
+                });
+                if ui.button("Apply character settings").clicked() {
+                    self.error = self
+                        .apply_document(self.candidate.clone(), editor, models)
+                        .err();
+                }
+                if ui.add_enabled(self.has_unapplied_changes(), egui::Button::new("Reset character draft")).clicked() {
+                    self.error = self.reset_draft(editor, models).err();
+                }
+                if ui
+                    .add_enabled(
+                        !self.undo.is_empty(),
+                        egui::Button::new("Undo character edit"),
+                    )
+                    .clicked()
+                {
+                    self.error = self.undo(editor, models).err();
+                }
+                if ui
+                    .add_enabled(
+                        !self.redo.is_empty(),
+                        egui::Button::new("Redo character edit"),
+                    )
+                    .clicked()
+                {
+                    self.error = self.redo(editor, models).err();
+                }
+                if ui.add_enabled(!self.has_unapplied_changes(), egui::Button::new("Save character and model bindings")).clicked() {
+                    self.error = self.save_all(editor, models).err();
+                }
+            });
+            if let Some(error) = &self.error {
+                ui.colored_label(egui::Color32::LIGHT_RED, error);
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+mod clip_catalog_labels {
+    use super::*;
+    #[test]
+    fn indices_names_durations_and_missing_drafts_are_unambiguous() {
+        use crate::model_panel::CharacterClip;
+        let clips = vec![CharacterClip { index: 0, name: "walk".into(), seconds: 1.5 },
+            CharacterClip { index: 1, name: "walk".into(), seconds: 2.0 },
+            CharacterClip { index: 2, name: " ".into(), seconds: 0.0 }];
+        assert_eq!(selected_clip_text(&clips, 0), "0: walk (1.50s)");
+        assert_eq!(selected_clip_text(&clips, 1), "1: walk (2.00s)");
+        assert_eq!(selected_clip_text(&clips, 2), "2: Unnamed clip (0.00s)");
+        assert_eq!(selected_clip_text(&clips, 31), "Unavailable clip 31");
+    }
+}
+
+#[cfg(all(test, feature = "project-create", target_os = "linux"))]
+mod tests {
+    use super::*;
+    use crate::{model_panel::ModelPanel, Editor, HostSpec};
+    use orr_sample::{
+        project_create::{create, CreateOptions, ROOM_CHARACTER_TEMPLATE},
+        room_project::PreparedProject,
+    };
+    use std::{fs, time::Duration};
+
+    struct Fixture {
+        _temp: tempfile::TempDir,
+        root: PathBuf,
+        editor: Editor,
+        models: ModelPanel,
+        panel: Panel,
+    }
+    impl Fixture {
+        fn new() -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join("character project");
+            create(&CreateOptions {
+                output: root.clone(),
+                template: ROOM_CHARACTER_TEMPLATE.into(),
+                seed: "character-pair-save".into(),
+            })
+            .unwrap();
+            let mut prepared = PreparedProject::open_with_capabilities(
+                &root,
+                orr_sample::room_project::RoomProjectCapabilities {
+                    lighting: false,
+                    character: true,
+                },
+            )
+            .unwrap();
+            let character = prepared.take_character().unwrap();
+            let (_, path, scene, prepared_models) = prepared.into_parts();
+            let mut editor = Editor::start(&HostSpec::PreparedRoom {
+                scene: path,
+                text: scene.text().into(),
+                listen: None,
+                debug_hooks: false,
+            })
+            .unwrap();
+            editor
+                .install_room_character(character.document.clone())
+                .unwrap();
+            let mut models = ModelPanel::default();
+            models.install_room(prepared_models).unwrap();
+            for attempt in 0..1600 {
+                editor.sync();
+                if editor.yard_rows_coherent() && models.scene_matches(&editor) {
+                    break;
+                }
+                assert!(
+                    attempt < 1599,
+                    "room character panel did not become coherent"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let panel = Panel::new_for_editor(character, &editor).unwrap();
+            Self {
+                _temp: temp,
+                root,
+                editor,
+                models,
+                panel,
+            }
+        }
+        fn edit_searching(&mut self) -> Document {
+            let mut candidate = self.panel.document().clone();
+            std::mem::swap(&mut candidate.searching, &mut candidate.carrying);
+            self.panel
+                .apply_document(candidate.clone(), &mut self.editor, &mut self.models)
+                .unwrap();
+            assert!(self.models.bindings.as_ref().unwrap().dirty());
+            assert_ne!(self.panel.document, self.panel.saved);
+            candidate
+        }
+        fn model_path(&self) -> PathBuf {
+            self.models.bindings.as_ref().unwrap().path.clone()
+        }
+        fn pair_bytes(&self) -> (Vec<u8>, Vec<u8>) {
+            (
+                fs::read(self.model_path()).unwrap(),
+                fs::read(&self.panel.path).unwrap(),
+            )
+        }
+        fn reopen(&self, expected: &Document) {
+            let reopened = PreparedProject::open_with_capabilities(
+                &self.root,
+                orr_sample::room_project::RoomProjectCapabilities {
+                    lighting: false,
+                    character: true,
+                },
+            )
+            .unwrap();
+            assert_eq!(&reopened.character().unwrap().document, expected);
+            let binding = &reopened.models().document.bindings[&expected.player];
+            assert_eq!(binding.animation.unwrap().clip_index, expected.searching);
+            assert_eq!(
+                binding.animation.unwrap().playback,
+                crate::model_bindings::PlaybackMode::Loop
+            );
+        }
+        fn assert_character_history_survives(
+            &mut self,
+            old: &crate::model_bindings::Document,
+            edited: &crate::model_bindings::Document,
+        ) {
+            // Character edits must not create a contradictory model undo step.
+            self.models.undo(&self.editor).unwrap();
+            assert_eq!(self.models.bindings.as_ref().unwrap().document(), edited);
+            self.panel.undo(&mut self.editor, &mut self.models).unwrap();
+            assert_eq!(self.models.bindings.as_ref().unwrap().document(), old);
+            self.panel.redo(&mut self.editor, &mut self.models).unwrap();
+            assert_eq!(self.models.bindings.as_ref().unwrap().document(), edited);
+        }
+    }
+
+    #[test]
+    fn draft_guard_blocks_pair_save_before_any_persistence_and_reset_keeps_applied_history() {
+        let mut f = Fixture::new(); let saved = f.panel.document.clone(); let files = f.pair_bytes();
+        f.panel.candidate.searching = 31;
+        assert!(f.panel.has_unapplied_changes()); assert!(f.panel.dirty());
+        let mut persistence_reached = false;
+        let error = f.panel.save_with_check(&f.editor, &mut f.models, |_| {
+            persistence_reached = true; Ok(())
+        }).unwrap_err();
+        assert!(error.contains("Apply or reset")); assert!(!persistence_reached);
+        assert_eq!(f.pair_bytes(), files); assert_eq!(f.panel.document, saved);
+        f.panel.reset_draft(&f.editor, &f.models).unwrap();
+        assert!(!f.panel.dirty()); assert_eq!(f.panel.candidate, saved);
+        let edited = f.edit_searching();
+        let undo_len = f.panel.undo.len(); let redo_len = f.panel.redo.len();
+        f.panel.candidate = saved.clone(); // Looks saved, but the applied value is still unsaved.
+        assert!(f.panel.has_unapplied_changes()); assert!(f.panel.dirty());
+        f.panel.reset_draft(&f.editor, &f.models).unwrap();
+        assert_eq!(f.panel.candidate, edited); assert!(f.panel.dirty());
+        assert_eq!((f.panel.undo.len(),f.panel.redo.len()), (undo_len,redo_len));
+        f.panel.undo(&mut f.editor, &mut f.models).unwrap(); assert_eq!(f.panel.document, saved);
+        assert!(!f.panel.dirty()); assert_eq!(f.pair_bytes(), files);
+    }
+    #[test]
+    fn draft_guard_reset_rejects_play_and_retired_source_without_changing_candidate() {
+        let mut f = Fixture::new(); f.panel.candidate.carrying = 0;
+        let candidate = f.panel.candidate.clone(); let files = f.pair_bytes();
+        assert!(f.editor.start_play()); f.editor.sync();
+        assert!(f.panel.reset_draft(&f.editor, &f.models).is_err());
+        assert_eq!(f.panel.candidate, candidate); assert_eq!(f.pair_bytes(), files);
+        let mut f = Fixture::new(); f.panel.candidate.carrying = 0;
+        let candidate = f.panel.candidate.clone(); let files = f.pair_bytes();
+        f.panel.retired = true;
+        assert!(f.panel.reset_draft(&f.editor, &f.models).is_err());
+        assert_eq!(f.panel.candidate, candidate); assert_eq!(f.pair_bytes(), files);
+    }
+    #[test]
+    fn draft_guard_apply_save_reopen_preserves_requested_state_mapping() {
+        let mut f = Fixture::new(); f.panel.candidate.searching = 1; f.panel.candidate.carrying = 2; f.panel.candidate.escaped = 0;
+        let expected = f.panel.candidate.clone(); assert!(f.panel.dirty());
+        f.panel.apply_document(expected.clone(), &mut f.editor, &mut f.models).unwrap();
+        assert!(!f.panel.has_unapplied_changes()); assert!(f.panel.dirty());
+        f.panel.save_all(&f.editor, &mut f.models).unwrap(); assert!(!f.panel.dirty());
+        f.reopen(&expected);
+    }
+
+    #[test]
+    fn clip_catalog_matches_admitted_names_without_changing_documents_or_files() {
+        let f = Fixture::new(); let before = f.pair_bytes(); let checksum = f.editor.checksum();
+        let document = f.models.bindings.as_ref().unwrap().document().clone();
+        let clips = f.models.character_clips(&f.editor).unwrap();
+        assert_eq!(clips.iter().map(|c| (c.index, c.name.as_str(), c.seconds)).collect::<Vec<_>>(),
+            vec![(0,"searching",2.0),(1,"carrying_key",1.5),(2,"escaped",1.0)]);
+        assert_eq!(f.pair_bytes(), before); assert_eq!(f.editor.checksum(), checksum);
+        assert_eq!(f.models.bindings.as_ref().unwrap().document(), &document);
+    }
+    #[test]
+    fn clip_catalog_rejects_missing_and_stale_bindings_without_replacing_cache() {
+        let mut f = Fixture::new(); let bytes = f.pair_bytes();
+        let bindings = f.models.bindings.take().unwrap();
+        assert!(f.models.character_clips(&f.editor).is_err());
+        let mut stale = bindings.document().clone();
+        stale.bindings.get_mut(&f.panel.document.player).unwrap().source_hash = "0".repeat(64);
+        f.models.bindings = Some(crate::model_bindings::Bindings::from_document(bindings.path.clone(), stale).unwrap());
+        assert!(f.models.character_clips(&f.editor).is_err());
+        f.models.bindings = Some(bindings);
+        assert_eq!(f.models.character_clips(&f.editor).unwrap().len(), 3);
+        assert_eq!(f.pair_bytes(), bytes);
+    }
+    #[test]
+    fn clip_catalog_does_not_rewrite_unavailable_draft_or_allow_invalid_apply() {
+        let mut f = Fixture::new(); let before = f.pair_bytes(); let original = f.panel.document.clone();
+        let models = f.models.bindings.as_ref().unwrap().document().clone();
+        f.panel.candidate.searching = 31;
+        let context = egui::Context::default();
+        let mut output = context.run_ui(Default::default(), |ui| {
+            f.panel.show(ui, &mut f.editor, &mut f.models);
+        });
+        output.textures_delta.clear(); // This authoring check has no GPU.
+        assert_eq!(f.panel.candidate.searching, 31);
+        assert!(f.panel.apply_document(f.panel.candidate.clone(), &mut f.editor, &mut f.models).is_err());
+        assert_eq!(f.panel.document, original); assert_eq!(f.models.bindings.as_ref().unwrap().document(), &models);
+        assert_eq!(f.pair_bytes(), before);
+    }
+
+    #[cfg(feature = "windows-export")]
+    #[test]
+    fn clip_catalog_mapping_saves_into_source_hidden_real_export() {
+        use sha2::{Digest, Sha256};
+        let mut f = Fixture::new();
+        let clips = f.models.character_clips(&f.editor).unwrap();
+        let named = |name: &str| clips.iter().find(|clip| clip.name == name).unwrap().index;
+        let mut document = f.panel.document.clone();
+        document.searching = named("carrying_key"); document.carrying = named("escaped"); document.escaped = named("searching");
+        f.panel.apply_document(document.clone(), &mut f.editor, &mut f.models).unwrap();
+        f.panel.save_all(&f.editor, &mut f.models).unwrap();
+        let character_bytes = fs::read(&f.panel.path).unwrap(); let model_bytes = fs::read(f.model_path()).unwrap();
+        let built = PathBuf::from(std::env::var_os("ORR_CHARACTER_CLIP_RUNTIME").expect("focused export requires explicit built runtime")).canonicalize().unwrap();
+        let runtime = f._temp.path().join("trusted character runtime"); fs::copy(built, &runtime).unwrap();
+        let hash: String = Sha256::digest(fs::read(&runtime).unwrap()).iter().map(|b| format!("{b:02x}")).collect();
+        let bundle = f._temp.path().join("deployed character game");
+        orr_sample::project_export::export_room(&orr_sample::project_export::ExportOptions {
+            project: f.root.clone(), runtime: runtime.clone(), runtime_sha256: hash, output: bundle.clone(), trusted_runtime: true, source_revision: None,
+        }).unwrap();
+        assert_eq!(fs::read(bundle.join("project/room.character.json")).unwrap(), character_bytes);
+        assert_eq!(fs::read(bundle.join("project/room.models.json")).unwrap(), model_bytes);
+        fs::rename(&f.root, f.root.with_extension("hidden")).unwrap(); fs::rename(&runtime, runtime.with_extension("hidden")).unwrap();
+        let prepared = PreparedProject::open_with_capabilities(&bundle.join("project"),
+            orr_sample::room_project::RoomProjectCapabilities { lighting: false, character: true }).unwrap();
+        assert_eq!(prepared.character().unwrap().document, document);
+        assert_eq!(prepared.models().document.bindings[&document.player].animation.unwrap().clip_index, document.searching);
+        let output = std::process::Command::new(bundle.join("run-room-escape")).current_dir(f._temp.path())
+            .args(["--headless","--ticks","8","--hold","interact","--check-model-poses"])
+            .env_remove("DISPLAY").env_remove("WAYLAND_DISPLAY").output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let output = String::from_utf8(output.stdout).unwrap();
+        assert!(output.contains("room model poses: 9 frames checked;")); assert!(output.contains("animated: 1"));
+        assert!(output.contains("room key: 1"));
+    }
+
+    #[test]
+    fn character_history_does_not_lock_earlier_model_transform_undo_or_redo() {
+        let mut f = Fixture::new();
+        let character = f.panel.document().clone();
+        let original = f.models.bindings.as_ref().unwrap().document().clone();
+        let player = original.bindings[&character.player].clone();
+        f.editor.select(Some(crate::Target::Guid(
+            orr_reflect::Guid::parse(&character.player).unwrap(),
+        )));
+        f.models.kind = player.kind;
+        f.models.package = player.package.clone();
+        f.models.asset = player.asset.clone();
+        f.models.animation = player.animation.unwrap();
+        f.models.transform = player.transform;
+        f.models.transform.scale = [1.1; 3];
+        f.models.assign(&f.editor).unwrap();
+        let transformed = f.models.bindings.as_ref().unwrap().document().clone();
+        assert_ne!(transformed, original);
+        f.edit_searching();
+        f.panel.undo(&mut f.editor, &mut f.models).unwrap();
+        assert_eq!(f.models.bindings.as_ref().unwrap().document(), &transformed);
+        f.models.undo(&f.editor).unwrap();
+        assert_eq!(f.models.bindings.as_ref().unwrap().document(), &original);
+        // Character redo must also rebase an outstanding model redo snapshot.
+        f.panel.redo(&mut f.editor, &mut f.models).unwrap();
+        let edited = f.panel.document().clone();
+        f.models.redo(&f.editor).unwrap();
+        let restored = &f.models.bindings.as_ref().unwrap().document().bindings[&character.player];
+        assert_eq!(
+            restored.transform,
+            transformed.bindings[&character.player].transform
+        );
+        assert_eq!(restored.animation.unwrap().clip_index, edited.searching);
+        assert_eq!(f.editor.room_character(), Some(&edited));
+        f.panel.save_all(&f.editor, &mut f.models).unwrap();
+        f.reopen(&edited);
+    }
+
+    #[test]
+    fn rate_only_history_preserves_model_transform_undo_redo_and_save() {
+        let mut f = Fixture::new();
+        let legacy = f.panel.document().clone();
+        let original = f.models.bindings.as_ref().unwrap().document().clone();
+        let player = original.bindings[&legacy.player].clone();
+        f.editor.select(Some(crate::Target::Guid(
+            orr_reflect::Guid::parse(&legacy.player).unwrap(),
+        )));
+        f.models.kind = player.kind;
+        f.models.package = player.package.clone();
+        f.models.asset = player.asset.clone();
+        f.models.animation = player.animation.unwrap();
+        f.models.transform = player.transform;
+        f.models.transform.scale = [1.1; 3];
+        f.models.assign(&f.editor).unwrap();
+        let transformed = f.models.bindings.as_ref().unwrap().document().clone();
+        let mut rated = legacy.clone();
+        rated.schema = 2;
+        rated.speeds = Some(orr_sample::room_character::PlaybackRates {
+            searching: PlaybackRate::Half,
+            carrying: PlaybackRate::Double,
+            escaped: PlaybackRate::Quadruple,
+        });
+        f.panel
+            .apply_document(rated.clone(), &mut f.editor, &mut f.models)
+            .unwrap();
+        assert_eq!(f.models.bindings.as_ref().unwrap().document(), &transformed);
+        f.panel.undo(&mut f.editor, &mut f.models).unwrap();
+        assert_eq!(f.editor.room_character(), Some(&legacy));
+        f.models.undo(&f.editor).unwrap();
+        assert_eq!(f.models.bindings.as_ref().unwrap().document(), &original);
+        f.panel.redo(&mut f.editor, &mut f.models).unwrap();
+        f.models.redo(&f.editor).unwrap();
+        assert_eq!(f.models.bindings.as_ref().unwrap().document(), &transformed);
+        assert_eq!(f.editor.room_character(), Some(&rated));
+        f.panel.save_all(&f.editor, &mut f.models).unwrap();
+        f.reopen(&rated);
+    }
+
+    #[test]
+    fn invalid_crossfade_apply_preserves_documents_disk_and_history() {
+        let mut f = Fixture::new();
+        let legacy = f.panel.document().clone();
+        let models = f.models.bindings.as_ref().unwrap().document().clone();
+        let disk = f.pair_bytes();
+        for (schema, speeds, crossfade_ticks) in [
+            (1, None, Some(0)),
+            (2, Some(Default::default()), Some(12)),
+            (3, None, Some(12)),
+            (3, Some(Default::default()), None),
+            (3, Some(Default::default()), Some(121)),
+        ] {
+            let mut invalid = legacy.clone();
+            invalid.schema = schema;
+            invalid.speeds = speeds;
+            invalid.crossfade_ticks = crossfade_ticks;
+            assert!(f.panel.apply_document(invalid, &mut f.editor, &mut f.models).is_err());
+            assert_eq!(f.editor.room_character(), Some(&legacy));
+            assert_eq!(f.panel.document(), &legacy);
+            assert_eq!(f.models.bindings.as_ref().unwrap().document(), &models);
+            assert_eq!(f.pair_bytes(), disk);
+            assert!(!f.panel.dirty());
+            assert!(f.panel.undo.is_empty());
+            assert!(f.panel.redo.is_empty());
+        }
+    }
+
+    #[test]
+    fn invalid_rate_schema_apply_preserves_documents_disk_and_history() {
+        let mut f = Fixture::new();
+        let legacy = f.panel.document().clone();
+        let models = f.models.bindings.as_ref().unwrap().document().clone();
+        let disk = f.pair_bytes();
+        for (schema, speeds) in [
+            (
+                1,
+                Some(orr_sample::room_character::PlaybackRates::default()),
+            ),
+            (2, None),
+        ] {
+            let mut invalid = legacy.clone();
+            invalid.schema = schema;
+            invalid.speeds = speeds;
+            assert!(f
+                .panel
+                .apply_document(invalid, &mut f.editor, &mut f.models)
+                .is_err());
+            assert_eq!(f.editor.room_character(), Some(&legacy));
+            assert_eq!(f.panel.document(), &legacy);
+            assert_eq!(f.models.bindings.as_ref().unwrap().document(), &models);
+            assert_eq!(f.pair_bytes(), disk);
+            assert!(!f.panel.dirty());
+            assert!(f.panel.undo.is_empty());
+            assert!(f.panel.redo.is_empty());
+        }
+    }
+
+    #[test]
+    fn same_path_restart_retires_character_authoring_without_writes() {
+        let mut fixture = Fixture::new();
+        let before = fixture.pair_bytes();
+        let document = fixture.panel.document().clone();
+        let models = fixture.models.bindings.as_ref().unwrap().document().clone();
+        assert!(fixture.editor.restart());
+        for attempt in 0..1600 {
+            fixture.editor.sync();
+            if fixture.editor.yard_rows_coherent() {
+                break;
+            }
+            assert!(attempt < 1599, "restarted Room did not become coherent");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(fixture.editor.room_character(), Some(&document));
+        let mut candidate = document.clone();
+        std::mem::swap(&mut candidate.searching, &mut candidate.carrying);
+        assert!(fixture
+            .panel
+            .apply_document(candidate, &mut fixture.editor, &mut fixture.models)
+            .unwrap_err()
+            .contains("source changed"));
+        let mut rated = document.clone();
+        rated.schema = 2;
+        rated.speeds = Some(orr_sample::room_character::PlaybackRates {
+            searching: PlaybackRate::Quarter,
+            ..Default::default()
+        });
+        assert!(fixture
+            .panel
+            .apply_document(rated, &mut fixture.editor, &mut fixture.models)
+            .unwrap_err()
+            .contains("source changed"));
+        assert!(fixture
+            .panel
+            .undo(&mut fixture.editor, &mut fixture.models)
+            .is_err());
+        assert!(fixture
+            .panel
+            .redo(&mut fixture.editor, &mut fixture.models)
+            .is_err());
+        assert!(fixture
+            .panel
+            .save_all(&fixture.editor, &mut fixture.models)
+            .is_err());
+        assert_eq!(fixture.panel.document(), &document);
+        assert_eq!(
+            fixture.models.bindings.as_ref().unwrap().document(),
+            &models
+        );
+        assert_eq!(fixture.pair_bytes(), before);
+        assert!(!fixture.panel.dirty());
+    }
+
+    #[test]
+    fn pair_save_second_file_failure_restores_both_files_and_dirty_history_then_retries() {
+        for fail_stage in [SaveStage::ModelPersist, SaveStage::CharacterPersist] {
+            let mut f = Fixture::new();
+            let initial = f.pair_bytes();
+            let original = f.panel.document.clone();
+            let original_models = f.models.bindings.as_ref().unwrap().document().clone();
+            let edited = f.edit_searching();
+            let edited_models = f.models.bindings.as_ref().unwrap().document().clone();
+            let history = f.panel.undo.clone();
+            let checksum = f.editor.snapshot().unwrap().predicted().checksum();
+            let mut visited = Vec::new();
+            let error = f
+                .panel
+                .save_with_check(&f.editor, &mut f.models, |stage| {
+                    visited.push(stage);
+                    if stage == fail_stage {
+                        Err(std::io::Error::other("injected pair-save failure"))
+                    } else {
+                        Ok(())
+                    }
+                })
+                .unwrap_err();
+            assert!(visited.last() == Some(&fail_stage));
+            if fail_stage == SaveStage::CharacterPersist {
+                assert!(error.contains("model sidecar restored"), "{error}");
+            }
+            assert_eq!(f.pair_bytes(), initial);
+            assert_eq!(f.panel.saved, original);
+            assert_eq!(f.panel.saved_bytes, initial.1);
+            assert_eq!(f.panel.document, edited);
+            assert_eq!(f.panel.candidate, edited);
+            assert_eq!(f.panel.undo, history);
+            assert!(f.panel.redo.is_empty());
+            assert!(f.models.bindings.as_ref().unwrap().dirty());
+            assert_eq!(
+                f.models.bindings.as_ref().unwrap().saved_document(),
+                &original_models
+            );
+            f.assert_character_history_survives(&original_models, &edited_models);
+            assert_eq!(
+                f.editor.snapshot().unwrap().predicted().checksum(),
+                checksum
+            );
+            // Independent model Save must not publish half a searching remap.
+            assert!(f.models.save(&f.editor).is_err());
+            assert_eq!(f.pair_bytes(), initial);
+            f.panel.save_all(&f.editor, &mut f.models).unwrap();
+            assert_eq!(f.panel.document, f.panel.saved);
+            assert!(!f.models.bindings.as_ref().unwrap().dirty());
+            assert_eq!(f.panel.undo, history);
+            f.reopen(&edited);
+        }
+    }
+
+    #[test]
+    fn external_manifest_character_and_model_edits_preserve_disk_and_history() {
+        for target in ["manifest", "character", "models"] {
+            let mut f = Fixture::new();
+            let original = f.pair_bytes();
+            let original_manifest = fs::read(&f.panel.manifest_path).unwrap();
+            let original_models = f.models.bindings.as_ref().unwrap().document().clone();
+            let edited = f.edit_searching();
+            let edited_models = f.models.bindings.as_ref().unwrap().document().clone();
+            let history = f.panel.undo.clone();
+            let path = match target {
+                "manifest" => f.panel.manifest_path.clone(),
+                "character" => f.panel.path.clone(),
+                _ => f.model_path(),
+            };
+            let mut external = fs::read(&path).unwrap();
+            if target == "models" {
+                let mut document: crate::model_bindings::Document =
+                    serde_json::from_slice(&external).unwrap();
+                document
+                    .bindings
+                    .get_mut(&edited.player)
+                    .unwrap()
+                    .transform
+                    .translation[0] += 0.25;
+                external = serde_json::to_vec_pretty(&document).unwrap();
+            } else {
+                // Even semantically identical external edits to the pinned
+                // manifest/character bytes require reopening.
+                external.push(b' ');
+            }
+            fs::write(&path, &external).unwrap();
+            let before_pair = f.pair_bytes();
+            let before_manifest = fs::read(&f.panel.manifest_path).unwrap();
+            assert!(
+                f.panel.save_all(&f.editor, &mut f.models).is_err(),
+                "{target}"
+            );
+            assert_eq!(fs::read(&path).unwrap(), external);
+            assert_eq!(f.pair_bytes(), before_pair);
+            assert_eq!(fs::read(&f.panel.manifest_path).unwrap(), before_manifest);
+            assert_eq!(f.panel.document, edited);
+            assert_eq!(f.panel.undo, history);
+            assert!(f.panel.redo.is_empty());
+            assert!(f.models.bindings.as_ref().unwrap().dirty());
+            assert_ne!(f.panel.document, f.panel.saved);
+            f.assert_character_history_survives(&original_models, &edited_models);
+            // Restoring the original external baseline lets the same retained
+            // transaction retry without rebuilding its undo history.
+            fs::write(f.model_path(), &original.0).unwrap();
+            fs::write(&f.panel.path, &original.1).unwrap();
+            fs::write(&f.panel.manifest_path, &original_manifest).unwrap();
+            f.panel.save_all(&f.editor, &mut f.models).unwrap();
+            f.reopen(&edited);
+        }
+    }
+
+    #[test]
+    fn directory_sync_failure_advances_both_baselines_and_retry_keeps_history() {
+        let mut f = Fixture::new();
+        let edited = f.edit_searching();
+        let history = f.panel.undo.clone();
+        let mut visited = Vec::new();
+        let error = f
+            .panel
+            .save_with_check(&f.editor, &mut f.models, |stage| {
+                visited.push(stage);
+                if stage == SaveStage::DirectorySync {
+                    Err(std::io::Error::other("injected directory sync failure"))
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err();
+        assert!(
+            visited
+                == [
+                    SaveStage::ModelPersist,
+                    SaveStage::CharacterPersist,
+                    SaveStage::DirectorySync
+                ]
+        );
+        assert!(error.contains("durability is uncertain"), "{error}");
+        assert_eq!(f.panel.saved, edited);
+        assert_eq!(f.panel.saved_bytes, fs::read(&f.panel.path).unwrap());
+        assert!(!f.models.bindings.as_ref().unwrap().dirty());
+        assert_eq!(f.panel.undo, history);
+        f.reopen(&edited);
+        f.panel.save_all(&f.editor, &mut f.models).unwrap();
+        assert_eq!(f.panel.undo, history);
+        assert!(f.panel.undo(&mut f.editor, &mut f.models).unwrap());
+        assert_ne!(f.panel.document, f.panel.saved);
+        assert!(f.models.bindings.as_ref().unwrap().dirty());
+    }
+
+    #[test]
+    fn replaced_project_directory_refuses_both_sidecar_writes() {
+        fn copy_tree(from: &Path, to: &Path) {
+            fs::create_dir(to).unwrap();
+            for entry in fs::read_dir(from).unwrap() {
+                let entry = entry.unwrap();
+                let target = to.join(entry.file_name());
+                if entry.file_type().unwrap().is_dir() {
+                    copy_tree(&entry.path(), &target);
+                } else {
+                    assert!(entry.file_type().unwrap().is_file());
+                    fs::copy(entry.path(), target).unwrap();
+                }
+            }
+        }
+        let mut f = Fixture::new();
+        let edited = f.edit_searching();
+        let history = f.panel.undo.clone();
+        let before = f.pair_bytes();
+        let moved = f.root.with_file_name("moved original");
+        fs::rename(&f.root, &moved).unwrap();
+        copy_tree(&moved, &f.root);
+        // The replacement has byte-identical valid packages and documents,
+        // so rejection must retain the pinned original directory identity.
+        let error = f.panel.save_all(&f.editor, &mut f.models).unwrap_err();
+        assert!(error.contains("directory changed"), "{error}");
+        assert_eq!(f.pair_bytes(), before);
+        assert_eq!(f.panel.document, edited);
+        assert_eq!(f.panel.undo, history);
+        assert!(f.models.bindings.as_ref().unwrap().dirty());
+        assert_ne!(f.panel.document, f.panel.saved);
+    }
+    #[test]
+    fn once_policy_apply_history_and_paired_save_reopen_keep_model_default_and_frame() {
+        let mut f = Fixture::new(); let original = f.panel.document().clone();
+        let models = f.models.bindings.as_ref().unwrap().document().clone();
+        let bytes = f.pair_bytes(); let checksum = f.editor.checksum();
+        let mut once = original.clone(); once.schema = 4; once.speeds = Some(Default::default()); once.crossfade_ticks = Some(0);
+        f.panel.apply_document(once.clone(), &mut f.editor, &mut f.models).unwrap();
+        assert_eq!(f.models.bindings.as_ref().unwrap().document(), &models);
+        assert_eq!(f.editor.checksum(), checksum); assert_eq!(f.pair_bytes(), bytes);
+        f.panel.undo(&mut f.editor, &mut f.models).unwrap(); assert_eq!(f.panel.document(), &original);
+        f.panel.redo(&mut f.editor, &mut f.models).unwrap(); assert_eq!(f.panel.document(), &once);
+        f.panel.save_all(&f.editor, &mut f.models).unwrap(); f.reopen(&once);
+    }
+    mod motion_tests {
+        use super::*;
+        mod fixture { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/room_motion.rs")); }
+        fn install(f: &mut Fixture) {
+            fixture::install(&f.root,&f._temp.path().join("idle source"));
+            f.editor.select(Some(crate::Target::Guid(orr_reflect::Guid::parse(&f.panel.document.player).unwrap())));
+            f.models.package=fixture::PACKAGE.into();f.models.asset=fixture::ASSET.into();f.models.kind=crate::model_bindings::ModelKind::Animated;
+            f.models.animation=crate::model_bindings::AnimationDescriptor {clip_index:f.panel.document.searching,playback:crate::model_bindings::PlaybackMode::Loop};
+            f.models.assign(&f.editor).unwrap();
+        }
+        fn document(f: &Fixture) -> Document {
+            Document {schema:5,speeds:Some(Default::default()),crossfade_ticks:Some(0),motion:Some(orr_sample::room_character::Motion { searching_idle:fixture::IDLE,carrying_idle:fixture::IDLE,escaped_once:true, pickup:None, facing:None }),..f.panel.document.clone()}
+        }
+        #[test]
+        fn motion_policy_save_reopen_history_and_all_mapped_clip_admission_are_atomic() {
+            let mut f=Fixture::new();install(&mut f);let original=f.panel.document.clone();let doc=document(&f);
+            let before=f.pair_bytes();let checksum=f.editor.checksum();
+            f.panel.apply_document(doc.clone(),&mut f.editor,&mut f.models).unwrap();
+            assert_eq!(f.pair_bytes(),before);assert_eq!(f.editor.checksum(),checksum);
+            f.panel.undo(&mut f.editor,&mut f.models).unwrap();assert_eq!(f.panel.document(),&original);
+            f.panel.redo(&mut f.editor,&mut f.models).unwrap();assert_eq!(f.panel.document(),&doc);
+            let models=f.models.bindings.as_ref().unwrap().document().clone();let mut invalid=doc.clone();invalid.motion.as_mut().unwrap().carrying_idle=31;
+            assert!(f.panel.apply_document(invalid,&mut f.editor,&mut f.models).is_err());
+            assert_eq!(f.panel.document(),&doc);assert_eq!(f.models.bindings.as_ref().unwrap().document(),&models);assert_eq!(f.pair_bytes(),before);
+            f.panel.save_all(&f.editor,&mut f.models).unwrap();f.reopen(&doc);
+        }
+    }
+
+    mod pickup_ui_tests { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/room_character_panel/pickup_ui_tests.rs")); }
+
+    mod facing_ui_tests { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/room_character_panel/facing_ui_tests.rs")); }
+
+}

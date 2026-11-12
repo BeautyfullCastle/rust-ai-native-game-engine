@@ -57,7 +57,7 @@ impl Fixture {
     pub fn headless(&self) -> Harness<'static, EditorApp> {
         let editor = self.editor();
         Harness::builder()
-            .with_size([1500.0, 1400.0])
+            .with_size([1500.0, 2400.0])
             .with_step_dt(1.0 / 60.0)
             .build_eframe(move |_| EditorApp::new(editor, None))
     }

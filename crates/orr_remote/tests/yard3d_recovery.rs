@@ -1,6 +1,7 @@
 //! Yard3D recovery through real bridges and ERP sockets. The relay test delays
 //! actual downstream WebSocket payloads; the server's finalized input log is
 //! the independent simulation oracle. Neither test constructs recovery flags.
+#![cfg(feature = "sample-host")]
 #![allow(clippy::disallowed_types)] // socket/progress deadlines are test-side
 #![allow(clippy::float_arithmetic)] // decoded view transforms, never sim state
 

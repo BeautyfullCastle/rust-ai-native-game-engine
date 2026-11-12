@@ -81,7 +81,7 @@ fn optional_project_path_has_no_editor_remote_or_edit_production_dependency() {
     let manifest =
         std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")).unwrap();
     assert!(manifest.contains("default = []"));
-    assert!(manifest.contains("project = [\"sprites\", \"orr_reflect/scene\", \"dep:serde\", \"dep:serde_json\", \"dep:png17\"]"));
+    assert!(manifest.contains("project = [\"sprites\", \"orr_sprite/png-import\", \"orr_reflect/scene\", \"dep:serde\", \"dep:serde_json\", \"dep:png17\"]"));
     let production = manifest
         .split("[dependencies]")
         .nth(1)

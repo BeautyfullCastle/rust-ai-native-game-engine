@@ -32,7 +32,7 @@ impl PreviewBounds {
     }
 
     #[cfg(feature = "room-animated-models")]
-    pub(super) fn from_animation(bounds: orr_model::animation::Bounds) -> Result<Self, String> {
+    pub(crate) fn from_animation(bounds: orr_model::animation::Bounds) -> Result<Self, String> {
         if (0..3).any(|axis| bounds.min[axis] > bounds.max[axis]) {
             return Err("animated preview bounds are inverted".into());
         }
@@ -95,6 +95,28 @@ impl Default for PreviewCamera {
 }
 
 impl PreviewCamera {
+    /// Front (+Z), right (+X), back (-Z), or left (-X), looking at the
+    /// admitted model center. Restore fitted zoom without editing the model.
+    pub fn horizontal_view(&mut self, quarter_turn: usize) -> bool {
+        let Some(yaw) = [
+            0.0,
+            std::f32::consts::FRAC_PI_2,
+            std::f32::consts::PI,
+            -std::f32::consts::FRAC_PI_2,
+        ]
+        .get(quarter_turn)
+        .copied() else {
+            return false;
+        };
+        let next = Self {
+            angles: [yaw, 0.0],
+            zoom_factor: 1.0,
+        };
+        let changed = *self != next;
+        *self = next;
+        changed
+    }
+
     pub fn reset(&mut self) -> bool {
         let changed = *self != Self::default();
         *self = Self::default();

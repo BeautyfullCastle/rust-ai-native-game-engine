@@ -35,13 +35,45 @@ impl Editor {
         Ok(())
     }
 
+    #[cfg(any(not(feature = "tilemap"), test))]
     pub(crate) fn arena_export_source(
         &mut self,
         root: &Path,
         sprites: &crate::sprite_panel::SpritePanel,
         installed_ui: Option<&ArenaUiSource>,
     ) -> Result<ArenaExportSource, String> {
+        self.arena_export_source_inner(
+            root,
+            sprites,
+            installed_ui,
+            #[cfg(feature = "tilemap")]
+            None,
+        )
+    }
+
+    #[cfg(feature = "tilemap")]
+    pub(crate) fn arena_export_source_with_tilemap(
+        &mut self,
+        root: &Path,
+        sprites: &crate::sprite_panel::SpritePanel,
+        installed_ui: Option<&ArenaUiSource>,
+        tilemap: Option<&crate::tilemap_panel::TilemapPanel>,
+    ) -> Result<ArenaExportSource, String> {
+        self.arena_export_source_inner(root, sprites, installed_ui, tilemap)
+    }
+
+    fn arena_export_source_inner(
+        &mut self,
+        root: &Path,
+        sprites: &crate::sprite_panel::SpritePanel,
+        installed_ui: Option<&ArenaUiSource>,
+        #[cfg(feature = "tilemap")] tilemap: Option<&crate::tilemap_panel::TilemapPanel>,
+    ) -> Result<ArenaExportSource, String> {
         self.arena_export_idle()?;
+        #[cfg(feature = "tilemap")]
+        if let Some(panel) = tilemap {
+            panel.arena_export_ready(self, root)?;
+        }
         let generations = (
             self.change_gen,
             self.state_generation,
@@ -83,13 +115,16 @@ impl Editor {
             .as_ref()
             .ok_or("Project has no authored entry")?;
         if entry.game != orr_package::ProjectGame::Arena
-            || entry.tilemap.is_some()
             || entry.models.is_some()
             || entry.camera.is_some()
         {
             return Err(
-                "Editor Arena export refuses tilemaps and other unsupported presentation".into(),
+                "Editor Arena export refuses unsupported models or camera presentation".into(),
             );
+        }
+        #[cfg(not(feature = "tilemap"))]
+        if entry.tilemap.is_some() {
+            return Err("Editor tilemap export requires tilemap feature".into());
         }
         let mut files = vec![("orr.project.json".to_owned(), Some(manifest_bytes))];
         let lock = match fs::symlink_metadata(root.join("orr.packages.lock.json")) {
@@ -129,6 +164,17 @@ impl Editor {
                 Some(read_saved_file(&root.join(name), 1024 * 1024)?),
             ));
         }
+        #[cfg(feature = "tilemap")]
+        if let Some(name) = &entry.tilemap {
+            ArenaSourceFile::new(name.clone(), None)?;
+            files.push((
+                name.clone(),
+                Some(read_saved_file(
+                    &root.join(name),
+                    orr_tilemap::MAX_BYTES as u64,
+                )?),
+            ));
+        }
         // Shared admission verifies the complete active package lock and decodes referenced assets.
         let prepared = orr_sample::project::PreparedProject::open_with_capabilities(
             &root,
@@ -138,12 +184,17 @@ impl Editor {
             } else {
                 orr_sample::project::UiSupport::Unsupported
             },
-            orr_sample::project::TilemapSupport::Unsupported,
+            if cfg!(feature = "tilemap") {
+                orr_sample::project::TilemapSupport::Supported
+            } else {
+                orr_sample::project::TilemapSupport::Unsupported
+            },
         )?;
-        if prepared.scene().path() != path || prepared.scene().scene() != &current {
+        let prepared = prepared.into_presentation_parts();
+        if prepared.scene.path() != path || prepared.scene.scene() != &current {
             return Err("Project source changed during admission".into());
         }
-        let matched_ui = match (entry.ui.as_ref(), prepared.ui(), installed_ui) {
+        let matched_ui = match (entry.ui.as_ref(), prepared.ui.as_ref(), installed_ui) {
             (None, None, None) => None,
             (Some(declared), Some(admitted), Some(installed)) if cfg!(feature = "project-ui") => {
                 let fresh = ArenaUiSource::new(
@@ -167,7 +218,7 @@ impl Editor {
                 );
             }
         };
-        match (prepared.sprites(), sprites.bindings.as_ref()) {
+        match (prepared.sprites.as_ref(), sprites.bindings.as_ref()) {
             (None, None) => {}
             (Some(admitted), Some(loaded)) => {
                 if crate::sprite_bindings::resolve_project(
@@ -188,6 +239,20 @@ impl Editor {
             }
             _ => return Err("Declared and loaded sprite bindings must match exactly".into()),
         }
+        #[cfg(feature = "tilemap")]
+        match (entry.tilemap.as_ref(), prepared.tilemap.as_ref(), tilemap) {
+            (None, None, None) => {}
+            (Some(_), Some(admitted), Some(panel)) => {
+                panel.arena_export_matches(self, &root, admitted)?;
+                if let Some((key, asset)) = &prepared.tilemap_asset {
+                    sprites.arena_export_assets_match(&std::collections::BTreeMap::from([(
+                        key.clone(),
+                        asset.clone(),
+                    )]))?;
+                }
+            }
+            _ => return Err("Declared, admitted and loaded tilemap must match exactly".into()),
+        }
         let mut inventory = Vec::new();
         for (name, bytes) in files {
             let actual = match fs::symlink_metadata(root.join(&name)) {
@@ -195,6 +260,8 @@ impl Editor {
                     &root.join(&name),
                     if name == entry.scene {
                         orr_sample::project::MAX_SCENE_BYTES
+                    } else if entry.tilemap.as_ref() == Some(&name) {
+                        64 * 1024
                     } else {
                         1024 * 1024
                     },
@@ -239,6 +306,10 @@ impl Editor {
             })
         {
             return Err("Host/history/frame changed while capturing export source; retry explicitly after it settles".into());
+        }
+        #[cfg(feature = "tilemap")]
+        if let Some(panel) = tilemap {
+            panel.arena_export_ready(self, &root)?;
         }
         let source = ArenaExportSource::new(path, checksum, inventory)?;
         match matched_ui {

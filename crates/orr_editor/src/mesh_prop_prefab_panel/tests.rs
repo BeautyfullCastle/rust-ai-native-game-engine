@@ -1,4 +1,4 @@
-use super::{context_matches, Completion, Context, Operation, Panel, RequestStamp};
+use super::{context_matches, Completion, Context, Operation, Panel, RequestStamp, SaveSource};
 use crate::mesh_art::Snapshot;
 use orr_package::Manifest;
 use std::{
@@ -140,7 +140,15 @@ fn save_worker_captures_applied_snapshot_and_never_overwrites_existing_file() {
         ..Panel::default()
     };
     let destination = PathBuf::from(panel.path.trim());
-    assert!(panel.start_save(context(), "Bridge", &applied));
+    assert!(panel.start_save(
+        context(),
+        SaveSource {
+            name: "Bridge",
+            art: &applied,
+            #[cfg(feature = "mesh-prop-shading")]
+            shading: None
+        }
+    ));
     assert!(panel.busy());
     let candidate = poll_until_done(&mut panel, Some(context()));
     assert!(!panel.busy());
@@ -151,7 +159,15 @@ fn save_worker_captures_applied_snapshot_and_never_overwrites_existing_file() {
     let bytes_before = fs::read(&destination).unwrap();
     assert!(!bytes_before.is_empty());
 
-    assert!(panel.start_save(context(), "Changed", &applied));
+    assert!(panel.start_save(
+        context(),
+        SaveSource {
+            name: "Changed",
+            art: &applied,
+            #[cfg(feature = "mesh-prop-shading")]
+            shading: None
+        }
+    ));
     assert!(poll_until_done(&mut panel, Some(context())).is_none());
     assert!(!panel.busy());
     assert!(panel
@@ -242,4 +258,115 @@ fn disconnected_worker_releases_busy_state_without_candidate() {
     assert!(panel.poll(Some(context())).is_none());
     assert!(!panel.busy());
     assert!(panel.status.contains("disconnected"));
+}
+
+#[cfg(feature = "mesh-prop-shading")]
+fn shading(art: &Snapshot, metallic: f32) -> crate::mesh_prop_shading::Settings {
+    crate::mesh_prop_shading::Settings::new(
+        vec![crate::mesh_prop_shading::Slot {
+            material: art.source_model_arc().source().primitives[0].material,
+            metallic,
+            roughness: 0.3,
+        }],
+        art.source_model_arc(),
+    )
+    .unwrap()
+}
+
+#[cfg(feature = "mesh-prop-shading")]
+#[test]
+fn shaded_save_owns_one_applied_selection_even_when_inputs_change() {
+    let root = tempfile::tempdir().unwrap();
+    let mut art = snapshot(root.path());
+    let original = art.clone();
+    let mut settings = shading(&art, 0.7);
+    let wanted = settings.clone();
+    let mut name = String::from("Captured bridge");
+    let destination = root.path().join("captured.mesh-prop-prefab.json");
+    let mut panel = Panel {
+        path: destination.display().to_string(),
+        ..Default::default()
+    };
+    assert!(panel.start_save(
+        context(),
+        SaveSource {
+            name: &name,
+            art: &art,
+            shading: Some(&settings)
+        }
+    ));
+    name.clear();
+    name.push_str("Later selection");
+    art = art.with_transform([12.0, 0.0, 0.0], 2.0).unwrap();
+    settings = shading(&art, 0.1);
+    panel.path = root
+        .path()
+        .join("later.mesh-prop-prefab.json")
+        .display()
+        .to_string();
+    panel.input_generation += 1;
+    assert!(poll_until_done(&mut panel, Some(context())).is_none());
+    let decoded =
+        crate::mesh_prop_prefab::Template::decode(&fs::read(&destination).unwrap(), [7; 32])
+            .unwrap();
+    assert_eq!(decoded.name(), "Captured bridge");
+    assert_eq!(decoded.art().offset(), original.offset());
+    assert_eq!(decoded.art().scale(), original.scale());
+    assert_eq!(decoded.shading(), Some(&wanted));
+    assert_ne!(decoded.name(), name);
+    assert_ne!(decoded.shading(), Some(&settings));
+    assert!(!Path::new(&panel.path).exists());
+}
+
+#[cfg(feature = "mesh-prop-shading")]
+#[test]
+fn shaded_load_completion_discards_changed_context_path_and_rights() {
+    let root = tempfile::tempdir().unwrap();
+    let art = snapshot(root.path());
+    let settings = shading(&art, 0.7);
+    let template = crate::mesh_prop_prefab::Template::capture("Shaded", &art)
+        .unwrap()
+        .with_shading(Some(settings.clone()))
+        .unwrap();
+    let path = root.path().join("shaded.mesh-prop-prefab.json");
+    crate::mesh_prop_prefab_store::save_new(&path, &template.encode().unwrap()).unwrap();
+    // Real worker success first; subsequent deterministic injected completions
+    // exercise disposal independent of scheduler timing (not joined workers).
+    let mut panel = Panel {
+        path: path.display().to_string(),
+        rights_acknowledged: true,
+        ..Default::default()
+    };
+    assert!(panel.start_load(context()));
+    let loaded = poll_until_done(&mut panel, Some(context())).unwrap();
+    assert_eq!(loaded.shading(), Some(&settings));
+    for change in 0..3 {
+        let mut panel = Panel {
+            path: path.display().to_string(),
+            rights_acknowledged: true,
+            ..Default::default()
+        };
+        let (tx, rx) = mpsc::channel();
+        tx.send(Completion {
+            stamp: RequestStamp {
+                context: context(),
+                path: path.clone(),
+                input_generation: 0,
+                operation: Operation::Load,
+            },
+            result: Ok((loaded.clone(), "a".repeat(64))),
+        })
+        .unwrap();
+        drop(tx);
+        panel.pending = Some(rx);
+        let mut current = context();
+        match change {
+            0 => current.scene_epoch += 1,
+            1 => panel.path.push_str(".changed"),
+            _ => panel.rights_acknowledged = false,
+        }
+        assert!(panel.poll(Some(current)).is_none());
+        assert!(!panel.busy());
+        assert!(panel.status.contains("discarded"));
+    }
 }

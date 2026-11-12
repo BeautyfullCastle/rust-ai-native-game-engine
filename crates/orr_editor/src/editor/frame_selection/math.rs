@@ -6,7 +6,7 @@ fn aspect(size: (u32, u32)) -> Result<f64, String> {
     }
     Ok(f64::from(size.0) / f64::from(size.1))
 }
-pub(super) fn fit(
+pub(in crate::editor) fn fit(
     orbit: OrbitCamera,
     camera: Camera3D,
     center: [f32; 3],
@@ -78,7 +78,7 @@ pub(super) fn fit(
     candidate.distance = distance as f32;
     Ok(candidate)
 }
-pub(super) fn validate_fit(
+pub(in crate::editor) fn validate_fit(
     camera: &Camera3D,
     center: [f32; 3],
     radius: f32,

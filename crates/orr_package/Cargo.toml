@@ -8,7 +8,39 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+# Explicit local Windows publication of an already built, independently trusted EXE.
+stormglass-embedded-distribution = ["dep:orr_games", "dep:orr_sim", "dep:windows-sys", "windows-sys/Win32_Security", "windows-sys/Win32_System_IO", "windows-sys/Win32_System_Threading", "windows-sys/Win32_System_JobObjects", "windows-sys/Win32_System_Pipes", "windows-sys/Win32_System_SystemInformation"]
+stormglass-windows-admission = ["dep:orr_games"]
+stormglass-windows-stage = ["stormglass-windows-snapshot"]
+stormglass-windows-smoke = ["stormglass-windows-stage", "dep:orr_sim", "windows-sys/Win32_Security", "windows-sys/Win32_System_IO", "windows-sys/Win32_System_Threading", "windows-sys/Win32_System_JobObjects", "windows-sys/Win32_System_Pipes", "windows-sys/Win32_System_SystemInformation"]
+stormglass-windows-snapshot = ["stormglass-windows-admission", "dep:windows-sys"]
+model-authoring = ["dep:orr_model", "dep:rustix"]
+animation-authoring = ["model-authoring", "orr_model/animation"]
+sprite-authoring = ["dep:orr_sprite", "orr_sprite/png-import"]
+coop-audio-admission = ["dep:orr_asset_cook"]
+coop-audio-load = ["coop-audio-admission", "dep:rustix", "dep:windows-sys"]
+audio-authoring = ["coop-audio-admission", "dep:rustix"]
+coop-web-authoring = ["dep:html5gum", "dep:base64", "coop-audio-admission", "dep:png17", "dep:crc32fast", "dep:regex", "dep:rustix", "dep:orr_sprite", "orr_sprite/png-import"]
+coop-native-authoring = ["coop-web-authoring", "dep:orr_games", "dep:orr_sim", "rustix/process"]
+bootstrap-authoring = ["dep:sha1", "dep:regex", "dep:toml", "dep:rustix"]
+deployment-authoring = ["dep:orr_sim", "dep:orr_ecs", "dep:rustix"]
+
 [dependencies]
+html5gum = { version = "=0.9.0", default-features = false, optional = true }
+base64 = { version = "0.22.1", optional = true }
+png17 = { package = "png", version = "0.17", optional = true }
+crc32fast = { version = "1", optional = true }
+sha1 = { version = "0.11", optional = true }
+regex = { version = "1", optional = true }
+toml = { version = "1.1", default-features = false, features = ["std", "serde", "parse"], optional = true }
+orr_games = { path = "../orr_games", default-features = false, features = ["coop-defense-scene"], optional = true }
+orr_sim = { path = "../orr_sim", optional = true }
+orr_ecs = { path = "../orr_ecs", optional = true }
+orr_asset_cook = { path = "../orr_asset_cook", optional = true }
+orr_sprite = { path = "../orr_sprite", optional = true }
+orr_model = { path = "../orr_model", features = ["import"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 semver = "1"
@@ -18,3 +50,15 @@ tempfile = "3"
 [[bin]]
 name = "orr_pkg"
 path = "src/main.rs"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1.1.5", features = ["fs"], optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", optional = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+[[bin]]
+name = "orr_publish_stormglass"
+path = "src/bin/orr_publish_stormglass.rs"
+required-features = ["stormglass-embedded-distribution"]
+test = false

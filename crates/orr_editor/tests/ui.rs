@@ -423,7 +423,8 @@ fn camera_zoom_and_pan() {
 
 #[test]
 fn inspector_flags_enum_and_component_buttons() {
-    let mut h = harness();
+    // Tall enough that panels stacked above the inspector under any feature set leave its fields on screen.
+    let mut h = Harness::builder().with_size([1500.0, 2400.0]).build_eframe(|_cc| EditorApp::new(demo_editor(), None));
     h.run_steps(3);
     h.get_by_label("body_05").click();
     settle(&mut h);

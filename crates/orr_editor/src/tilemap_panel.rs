@@ -13,19 +13,48 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
 };
+mod actors;
+mod copy;
+mod pattern_asset;
+mod pattern_files;
+#[cfg(all(
+    target_os = "linux",
+    target_arch = "x86_64",
+    feature = "arena-project-export"
+))]
+mod export;
 mod fill;
+mod line;
 mod rectangle;
+mod replace;
 mod resize;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ToolMode {
     Paint,
     Fill,
+    Replace,
     Rectangle,
+    Line,
+    Copy,
+    Stamp,
+    Repeat,
+    Pick,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RectanglePurpose {
+    PaintRectangle,
+    PaintLine,
+    Repeat,
+    Copy,
 }
 
 /// An uncommitted gesture: selection is fixed at press, not at release.
 struct RectangleGesture {
+    purpose: RectanglePurpose,
+    copy_atlas: Option<String>,
+    repeat_pattern: Option<copy::Pattern>,
     start: CellCoord,
     end: CellCoord,
     region: Option<u32>,
@@ -156,11 +185,16 @@ pub struct TilemapPanel {
     mode: ToolMode,
     painting: bool,
     rectangle: Option<RectangleGesture>,
+    pattern: Option<copy::Pattern>,
+    pattern_texture: Option<egui::TextureId>,
+    pattern_file: String,
+    pattern_notice: Option<String>,
     selected: Option<u32>,
     draft_width: String,
     draft_height: String,
     error: Option<String>,
     compositor: Option<ProjectCompositor<Wgpu>>,
+    actors: actors::State,
 }
 impl TilemapPanel {
     pub fn prepare(root: &Path, scene: &Path, prepared: PreparedTilemap) -> Result<Self, String> {
@@ -230,9 +264,14 @@ impl TilemapPanel {
             mode: ToolMode::Paint,
             painting: false,
             rectangle: None,
+            pattern: None,
+            pattern_texture: None,
+            pattern_file: String::new(),
+            pattern_notice: None,
             selected: None,
             error: None,
             compositor: None,
+            actors: actors::State::default(),
         })
     }
     pub fn install_renderer(
@@ -357,16 +396,106 @@ impl TilemapPanel {
             ToolMode::Fill => {
                 fill::candidate(&self.history.current, cell, region, &asset.document)?.0
             }
-            ToolMode::Rectangle => return Err("Rectangle requires a complete gesture".into()),
+            ToolMode::Replace => {
+                replace::candidate(&self.history.current, cell, region, &asset.document)?.0
+            }
+            ToolMode::Rectangle | ToolMode::Line | ToolMode::Repeat => return Err("Drag tool requires a complete gesture".into()),
+            ToolMode::Copy | ToolMode::Stamp => {
+                return Err("Copy/Stamp requires its own input gesture".into())
+            }
+            ToolMode::Pick => return Err("Pick only changes the palette selection".into()),
         };
         Self::budget(&next, Self::actor_count(sprites))?;
         Ok(self.history.commit(next))
+    }
+    fn refresh_pattern(&mut self, editor: &Editor, sprites: &SpritePanel) {
+        // The atlas cache is pinned while a tilemap is installed. Texture identity
+        // detects replacement without serializing the atlas or reading files per frame.
+        if self.pattern.as_ref().is_some_and(|pattern| {
+            !self.scene_matches(editor)
+                || !pattern.context_matches(&self.history.current, editor.scene_load_epoch())
+                || sprites
+                    .tilemap_asset(&self.key())
+                    .is_none_or(|(_, texture)| Some(texture) != self.pattern_texture)
+        }) {
+            self.pattern = None;
+            self.pattern_texture = None;
+        }
+    }
+    fn transform_pattern(
+        &mut self,
+        transform: copy::LayoutTransform,
+        editor: &Editor,
+        sprites: &SpritePanel,
+    ) -> Result<(), String> {
+        if !self.editable(editor) {
+            return Err("Layout transforms require matching Edit viewport".into());
+        }
+        if self.painting || self.rectangle.is_some() {
+            return Err("finish or cancel the current tile gesture before transforming".into());
+        }
+        self.check_stamp()?;
+        self.verify_pattern_assets()?;
+        self.check_stamp()?;
+        let (asset, _) = sprites
+            .tilemap_asset(&self.key())
+            .ok_or("shared atlas missing")?;
+        let pattern = self.pattern.as_mut().ok_or("Copy a rectangle first")?;
+        if !pattern.matches(&self.history.current, editor.scene_load_epoch(), &asset.document) {
+            return Err("copied pattern expired; Copy again".into());
+        }
+        pattern.transform(transform);
+        Ok(())
+    }
+    fn stamp_pattern(
+        &mut self,
+        anchor: CellCoord,
+        editor: &Editor,
+        sprites: &SpritePanel,
+    ) -> Result<bool, String> {
+        if !self.editable(editor) {
+            return Err("Stamp requires matching Edit viewport".into());
+        }
+        if self.painting || self.rectangle.is_some() {
+            return Err("finish or cancel the current tile gesture before Stamp".into());
+        }
+        self.check_stamp()?;
+        let (asset, _) = sprites
+            .tilemap_asset(&self.key())
+            .ok_or("shared atlas missing")?;
+        let pattern = self
+            .pattern
+            .as_ref()
+            .ok_or("Copy a rectangle before Stamp")?;
+        self.verify_pattern_assets()?;
+        let next = pattern.candidate(
+            &self.history.current,
+            anchor,
+            editor.scene_load_epoch(),
+            &asset.document,
+        )?;
+        Self::budget(&next, Self::actor_count(sprites))?;
+        self.check_stamp()?;
+        Ok(self.history.commit(next))
+    }
+    fn verify_pattern_assets(&self) -> Result<(), String> {
+        orr_package::Project::open(&self.stamp.root, crate::sprite_bindings::compiled_runtime())
+            .and_then(|project| project.verify())
+            .map(|_| ())
+            .map_err(|e| format!("installed tilemap assets: {e}"))
     }
     fn cancel_gesture(&mut self) {
         self.painting = false;
         self.rectangle = None;
     }
     fn sync_dimensions(&mut self) {
+        if self
+            .pattern
+            .as_ref()
+            .is_some_and(|p| !p.geometry_matches(&self.history.current))
+        {
+            self.pattern = None;
+        }
         self.draft_width = self.history.current.document().width.to_string();
         self.draft_height = self.history.current.document().height.to_string();
         self.cancel_gesture();
@@ -491,10 +620,11 @@ impl TilemapPanel {
         Self::budget(&self.history.current, Self::actor_count(sprites))?;
         self.save_document()
     }
-    pub fn show(&mut self, ui: &mut egui::Ui, editor: &Editor, sprites: &SpritePanel) {
+    pub fn show(&mut self, ui: &mut egui::Ui, editor: &Editor, sprites: &mut SpritePanel) {
+        self.refresh_pattern(editor, sprites);
         ui.heading("Tile background");
         ui.label("Replaces Arena floor presentation only. Empty / transparent cells show clear background, not collision or navmesh.");
-        ui.label("Scene Save / Save As does not save or retarget this tilemap. Package mutation and export are unsupported in v1.");
+        ui.label("Scene Save / Save As does not save or retarget this tilemap. Package mutation remains unsupported. Saved tilemaps can use Arena Export when built with arena-project-export and tilemap.");
         if ui
             .checkbox(&mut self.tool, "Tile tool (owns viewport clicks)")
             .changed()
@@ -508,15 +638,36 @@ impl TilemapPanel {
         });
         let editable = self.editable(editor);
         ui.add_enabled_ui(editable, |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 let paint = ui.selectable_value(&mut self.mode, ToolMode::Paint, "Paint");
                 let fill = ui.selectable_value(&mut self.mode, ToolMode::Fill, "Fill");
+                let replace = ui.selectable_value(&mut self.mode, ToolMode::Replace, "Replace all");
                 let rectangle = ui.selectable_value(&mut self.mode, ToolMode::Rectangle, "Rectangle");
-                if paint.changed() || fill.changed() || rectangle.changed() {
+                let line = ui.selectable_value(&mut self.mode, ToolMode::Line, "Line");
+                let copy = ui.selectable_value(&mut self.mode, ToolMode::Copy, "Copy");
+                let stamp = ui.selectable_value(&mut self.mode, ToolMode::Stamp, "Stamp");
+                let repeat = ui.selectable_value(&mut self.mode, ToolMode::Repeat, "Repeat pattern");
+                let pick = ui.selectable_value(&mut self.mode, ToolMode::Pick, "Pick");
+                if paint.changed() || fill.changed() || replace.changed() || rectangle.changed() || line.changed() || copy.changed() || stamp.changed() || repeat.changed() || pick.changed() {
                     self.cancel_gesture();
                 }
             });
-            ui.label("Paint: click or drag. Fill: click once to replace connected matching cells. Rectangle: drag, then release to apply once.");
+            ui.label("Paint: click or drag. Fill: click once to replace connected matching cells. Replace all: click once to replace every matching cell. Rectangle/Line: drag, then release to apply once. Pick: click a cell to select its region or Erase.");
+            ui.label("Copy: drag a rectangle, then release. Stamp: click its top-left destination once; the whole pattern must fit. Repeat pattern: drag a rectangle to tile from its top-left, including partial edge repeats and empty erasing cells.");
+            ui.label(self.pattern.as_ref().map_or_else(|| "No copied pattern".to_string(), |p| format!("Pattern: {} × {}", p.width, p.height)));
+            ui.add_enabled_ui(self.pattern.is_some() && !self.painting && self.rectangle.is_none(), |ui| {
+                for (label, transform) in [
+                    ("Rotate layout clockwise", copy::LayoutTransform::Clockwise),
+                    ("Mirror layout horizontally", copy::LayoutTransform::Horizontal),
+                    ("Mirror layout vertically", copy::LayoutTransform::Vertical),
+                ] {
+                    if ui.button(label).clicked() {
+                        self.error = self.transform_pattern(transform, editor, sprites).err();
+                    }
+                }
+            });
+            ui.label("Layout transforms rearrange copied cells only; individual tile artwork stays upright. Stamp applies the result.");
+            self.show_pattern_files(ui, editor, sprites);
             ui.horizontal(|ui| {
                 if ui
                     .add_enabled(
@@ -586,8 +737,9 @@ impl TilemapPanel {
             }
         });
         if !editable {
-            ui.label("Paint, Fill, Rectangle, Resize and Save require matching Edit viewport, without proposal, replay or disconnected host.");
+            ui.label("Paint, Fill, Replace all, Rectangle, Line, Copy, Stamp, Repeat pattern, Pick, Resize and Save require matching Edit viewport, without proposal, replay or disconnected host.");
         }
+        self.show_actors(ui, editor, sprites);
         if let Some(error) = &self.error {
             ui.colored_label(egui::Color32::RED, error);
         }
@@ -601,6 +753,7 @@ impl TilemapPanel {
         rect: egui::Rect,
         pixels: (u32, u32),
     ) -> bool {
+        self.refresh_pattern(editor, sprites);
         if !self.tool {
             self.cancel_gesture();
             return false;
@@ -614,7 +767,34 @@ impl TilemapPanel {
             self.cancel_gesture();
             return true;
         }
-        if self.mode == ToolMode::Rectangle {
+        if self.mode == ToolMode::Pick {
+            self.cancel_gesture();
+            if let Some(region) =
+                Self::picked_region(ui, &editor.camera, rect, pixels, &self.history.current)
+            {
+                self.selected = region;
+            }
+            return true;
+        }
+        if self.mode == ToolMode::Replace {
+            self.cancel_gesture();
+            if let Some(cell) =
+                Self::pressed_cell(ui, &editor.camera, rect, pixels, &self.history.current)
+            {
+                self.error = self.change(cell, self.selected, sprites).err();
+            }
+            return true;
+        }
+        if self.mode == ToolMode::Stamp {
+            self.cancel_gesture();
+            if let Some(cell) =
+                Self::pressed_cell(ui, &editor.camera, rect, pixels, &self.history.current)
+            {
+                self.error = self.stamp_pattern(cell, editor, sprites).err();
+            }
+            return true;
+        }
+        if matches!(self.mode, ToolMode::Rectangle | ToolMode::Line | ToolMode::Copy | ToolMode::Repeat) {
             self.rectangle_viewport(ui, editor, sprites, rect, pixels);
             return true;
         }
@@ -649,6 +829,79 @@ impl TilemapPanel {
         }
         true
     }
+    /// Read only the cell under an actual, unobstructed primary press. The outer
+    /// viewport dispatcher retains the common tool/scene/epoch/Edit guards.
+    fn picked_region(
+        ui: &egui::Ui,
+        camera: &Camera,
+        rect: egui::Rect,
+        pixels: (u32, u32),
+        document: &ValidatedDocument,
+    ) -> Option<Option<u32>> {
+        document
+            .cell(Self::pressed_cell(ui, camera, rect, pixels, document)?)
+            .ok()
+    }
+    fn pressed_cell(
+        ui: &egui::Ui,
+        camera: &Camera,
+        rect: egui::Rect,
+        pixels: (u32, u32),
+        document: &ValidatedDocument,
+    ) -> Option<CellCoord> {
+        if !ui.is_enabled()
+            || pixels.0 == 0
+            || pixels.1 == 0
+            || rect.width() <= 0.
+            || rect.height() <= 0.
+        {
+            return None;
+        }
+        let press = ui.input(|i| {
+            let mut press = None;
+            let mut released = false;
+            let mut ambiguous = false;
+            for event in &i.events {
+                if let egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    ..
+                } = event
+                {
+                    if *pressed {
+                        ambiguous |= press.is_some() || released;
+                        press = Some(*pos);
+                    } else {
+                        ambiguous |= press.is_none() || released;
+                        released = true;
+                    }
+                }
+            }
+            (i.focused
+                && !ambiguous
+                && !i.key_pressed(egui::Key::Escape)
+                && !i.events.iter().any(|event| {
+                    matches!(
+                        event,
+                        egui::Event::WindowFocused(false) | egui::Event::PointerGone
+                    )
+                }))
+            .then_some(press)
+            .flatten()
+        })?;
+        if !rect.contains(press)
+            || !ui.clip_rect().contains(press)
+            || ui.ctx().layer_id_at(press) != Some(ui.layer_id())
+        {
+            return None;
+        }
+        let screen = [
+            (press.x - rect.min.x) * pixels.0 as f32 / rect.width(),
+            (press.y - rect.min.y) * pixels.1 as f32 / rect.height(),
+        ];
+        Self::document_cell_at(document, camera.screen_to_world(screen, pixels))
+    }
     /// No document mutation occurs until an actual primary release passes every guard.
     fn rectangle_viewport(
         &mut self,
@@ -659,6 +912,15 @@ impl TilemapPanel {
         pixels: (u32, u32),
     ) {
         self.painting = false;
+        let purpose = if self.mode == ToolMode::Copy {
+            RectanglePurpose::Copy
+        } else if self.mode == ToolMode::Repeat {
+            RectanglePurpose::Repeat
+        } else if self.mode == ToolMode::Line {
+            RectanglePurpose::PaintLine
+        } else {
+            RectanglePurpose::PaintRectangle
+        };
         let (pos, down, press_pos, release_pos, cancel) = ui.input(|i| {
             let mut press = None;
             let mut release = None;
@@ -700,11 +962,11 @@ impl TilemapPanel {
             return;
         }
         let frame = ui.ctx().cumulative_frame_nr();
-        if self
-            .rectangle
-            .as_ref()
-            .is_some_and(|g| g.source != self.history.current || frame > g.frame.saturating_add(1))
-        {
+        if self.rectangle.as_ref().is_some_and(|g| {
+            g.purpose != purpose
+                || g.source != self.history.current
+                || frame > g.frame.saturating_add(1)
+        }) {
             self.rectangle = None;
             return;
         }
@@ -744,7 +1006,41 @@ impl TilemapPanel {
                     orr_sample::project::MAX_SCENE_BYTES as usize,
                 ) {
                     Ok(scene_bytes) => {
+                        let copy_atlas = if purpose == RectanglePurpose::Copy {
+                            match sprites
+                                .tilemap_asset(&self.key())
+                                .ok_or("shared atlas missing".to_string())
+                                .and_then(|(asset, _)| {
+                                    asset.document.to_json().map_err(|e| e.to_string())
+                                }) {
+                                Ok(json) => Some(json),
+                                Err(error) => {
+                                    self.error = Some(error);
+                                    return;
+                                }
+                            }
+                        } else {
+                            None
+                        };
+                        let repeat_pattern = if purpose == RectanglePurpose::Repeat {
+                            let result = (|| {
+                                let pattern = self.pattern.as_ref().ok_or("Copy or load a pattern before Repeat")?;
+                                let (asset, _) = sprites.tilemap_asset(&self.key()).ok_or("shared atlas missing")?;
+                                if !pattern.matches(&self.history.current, editor.scene_load_epoch(), &asset.document) {
+                                    return Err("copied pattern expired; Copy again".into());
+                                }
+                                self.verify_pattern_assets()?;
+                                Ok::<_, String>(pattern.clone())
+                            })();
+                            match result {
+                                Ok(pattern) => Some(pattern),
+                                Err(error) => { self.error = Some(error); return; }
+                            }
+                        } else { None };
                         self.rectangle = Some(RectangleGesture {
+                            purpose,
+                            copy_atlas,
+                            repeat_pattern,
                             start,
                             end: start,
                             region: self.selected,
@@ -778,17 +1074,44 @@ impl TilemapPanel {
                             "scene source changed during Rectangle; reopen full project".into()
                         );
                     }
-                    let (asset, _) = sprites
+                    let (asset, texture) = sprites
                         .tilemap_asset(&self.key())
                         .ok_or("shared atlas missing")?;
-                    let next = rectangle::candidate(
-                        &self.history.current,
-                        gesture.start,
-                        end,
-                        gesture.region,
-                        &asset.document,
-                    )?;
+                    if gesture.purpose == RectanglePurpose::Copy {
+                        if gesture.copy_atlas.as_ref()
+                            != Some(&asset.document.to_json().map_err(|e| e.to_string())?)
+                        {
+                            return Err("atlas changed during Copy; Copy again".into());
+                        }
+                        self.verify_pattern_assets()?;
+                        let pattern = copy::Pattern::capture(
+                            &self.history.current,
+                            gesture.start,
+                            end,
+                            editor.scene_load_epoch(),
+                            &asset.document,
+                        )?;
+                        self.check_stamp()?;
+                        self.pattern = Some(pattern);
+                        self.pattern_texture = Some(texture);
+                        return Ok(());
+                    }
+                    let next = if gesture.purpose == RectanglePurpose::Repeat {
+                        self.verify_pattern_assets()?;
+                        gesture.repeat_pattern.as_ref().ok_or("Repeat pattern missing")?.repeat_candidate(
+                            &self.history.current, gesture.start, end,
+                            editor.scene_load_epoch(), &asset.document,
+                        )?
+                    } else {
+                        let candidate = if gesture.purpose == RectanglePurpose::PaintLine {
+                            line::candidate
+                        } else {
+                            rectangle::candidate
+                        };
+                        candidate(&self.history.current, gesture.start, end, gesture.region, &asset.document)?
+                    };
                     Self::budget(&next, Self::actor_count(sprites))?;
+                    self.check_stamp()?;
                     self.history.commit(next);
                     Ok::<_, String>(())
                 })()
@@ -820,32 +1143,84 @@ impl TilemapPanel {
             egui::Color32::from_rgba_unmultiplied(90, 180, 200, 100),
         );
         if let Some(gesture) = &self.rectangle {
-            let left = gesture.start.column.min(gesture.end.column);
-            let right = gesture.start.column.max(gesture.end.column) + 1;
-            let top = gesture.start.row.min(gesture.end.row);
-            let bottom = gesture.start.row.max(gesture.end.row) + 1;
-            let preview = egui::Rect::from_two_pos(
-                to_pos([
-                    d.origin[0] + left as f32 * size[0],
-                    d.origin[1] - top as f32 * size[1],
-                ]),
-                to_pos([
-                    d.origin[0] + right as f32 * size[0],
-                    d.origin[1] - bottom as f32 * size[1],
-                ]),
-            );
-            let color = if gesture.region.is_some() {
-                egui::Color32::from_rgba_unmultiplied(70, 190, 230, 55)
+            if gesture.purpose == RectanglePurpose::PaintLine {
+                let color = if gesture.region.is_some() {
+                    egui::Color32::from_rgba_unmultiplied(70, 190, 230, 55)
+                } else {
+                    egui::Color32::from_rgba_unmultiplied(230, 100, 70, 55)
+                };
+                for cell in line::cells(gesture.start, gesture.end) {
+                    let preview = egui::Rect::from_two_pos(
+                        to_pos([d.origin[0] + cell.column as f32 * size[0], d.origin[1] - cell.row as f32 * size[1]]),
+                        to_pos([d.origin[0] + (cell.column + 1) as f32 * size[0], d.origin[1] - (cell.row + 1) as f32 * size[1]]),
+                    );
+                    painter.rect_filled(preview, 0.0, color);
+                    painter.rect_stroke(preview, 0.0, egui::Stroke::new(2.0, egui::Color32::WHITE), egui::StrokeKind::Inside);
+                }
             } else {
-                egui::Color32::from_rgba_unmultiplied(230, 100, 70, 55)
-            };
-            painter.rect_filled(preview, 0.0, color);
-            painter.rect_stroke(
-                preview,
-                0.0,
-                egui::Stroke::new(2.0, egui::Color32::WHITE),
-                egui::StrokeKind::Inside,
-            );
+                let left = gesture.start.column.min(gesture.end.column);
+                let right = gesture.start.column.max(gesture.end.column) + 1;
+                let top = gesture.start.row.min(gesture.end.row);
+                let bottom = gesture.start.row.max(gesture.end.row) + 1;
+                let preview = egui::Rect::from_two_pos(
+                    to_pos([
+                        d.origin[0] + left as f32 * size[0],
+                        d.origin[1] - top as f32 * size[1],
+                    ]),
+                    to_pos([
+                        d.origin[0] + right as f32 * size[0],
+                        d.origin[1] - bottom as f32 * size[1],
+                    ]),
+                );
+                let color = if gesture.region.is_some() {
+                    egui::Color32::from_rgba_unmultiplied(70, 190, 230, 55)
+                } else {
+                    egui::Color32::from_rgba_unmultiplied(230, 100, 70, 55)
+                };
+                painter.rect_filled(preview, 0.0, color);
+                painter.rect_stroke(
+                    preview,
+                    0.0,
+                    egui::Stroke::new(2.0, egui::Color32::WHITE),
+                    egui::StrokeKind::Inside,
+                );
+            }
+        }
+        if self.mode == ToolMode::Stamp {
+            if let (Some(pattern), Some(pos)) = (&self.pattern, ui.input(|i| i.pointer.hover_pos()))
+            {
+                if rect.contains(pos)
+                    && ui.clip_rect().contains(pos)
+                    && ui.ctx().layer_id_at(pos) == Some(ui.layer_id())
+                {
+                    let screen = [
+                        (pos.x - rect.min.x) * pixels.0 as f32 / rect.width(),
+                        (pos.y - rect.min.y) * pixels.1 as f32 / rect.height(),
+                    ];
+                    if let Some(anchor) =
+                        self.cell_at(editor.camera.screen_to_world(screen, pixels))
+                    {
+                        if let Ok(end) = pattern.end(&self.history.current, anchor) {
+                            let preview = egui::Rect::from_two_pos(
+                                to_pos([
+                                    d.origin[0] + anchor.column as f32 * size[0],
+                                    d.origin[1] - anchor.row as f32 * size[1],
+                                ]),
+                                to_pos([
+                                    d.origin[0] + (end.column + 1) as f32 * size[0],
+                                    d.origin[1] - (end.row + 1) as f32 * size[1],
+                                ]),
+                            );
+                            painter.rect_stroke(
+                                preview,
+                                0.0,
+                                egui::Stroke::new(2.0, egui::Color32::YELLOW),
+                                egui::StrokeKind::Inside,
+                            );
+                        }
+                    }
+                }
+            }
         }
         for column in 0..=d.width {
             let x = d.origin[0] + column as f32 * size[0];
@@ -869,7 +1244,10 @@ impl TilemapPanel {
         }
     }
     pub fn cell_at(&self, world: [f32; 2]) -> Option<CellCoord> {
-        let d = self.history.current.document();
+        Self::document_cell_at(&self.history.current, world)
+    }
+    fn document_cell_at(document: &ValidatedDocument, world: [f32; 2]) -> Option<CellCoord> {
+        let d = document.document();
         let x = ((world[0] - d.origin[0]) / (d.tile_size[0] as f32 * d.units_per_pixel)).floor();
         let y = ((d.origin[1] - world[1]) / (d.tile_size[1] as f32 * d.units_per_pixel)).floor();
         (x.is_finite()
@@ -1183,3 +1561,7 @@ mod resize_history_tests {
         assert_eq!(panel.history_snapshot(), full);
     }
 }
+
+#[cfg(test)]
+#[path = "tilemap_panel/replace_tests.rs"]
+mod replace_tests;

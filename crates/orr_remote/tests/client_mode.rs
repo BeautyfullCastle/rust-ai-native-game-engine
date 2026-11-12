@@ -6,6 +6,7 @@
 //! peers agree on the confirmed state.
 //!
 //! Waits are progress based (the run ends when the ticks have been played), with generous limits.
+#![cfg(feature = "sample-host")]
 #![allow(clippy::disallowed_types)] // tests wait on the wall clock
 
 use std::collections::BTreeMap;

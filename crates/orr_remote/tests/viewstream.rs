@@ -4,23 +4,38 @@
 
 mod common;
 
+#[cfg(feature = "sample-host")]
 use std::io::{BufRead, BufReader, Write};
+#[cfg(feature = "sample-host")]
 use std::net::TcpStream;
+#[cfg(feature = "sample-host")]
 use std::process::Command;
+#[cfg(feature = "sample-host")]
 use std::time::Duration;
 
-use common::{demo_text, TestHost};
+#[cfg(feature = "sample-host")]
+use common::demo_text;
+use common::TestHost;
+#[cfg(feature = "sample-host")]
 use orr_remote::sample::spawn_phys_host;
-use orr_remote::{Auth, ErpClient, LocalHost, ServerConfig};
+use orr_remote::ErpClient;
+#[cfg(feature = "sample-host")]
+use orr_remote::{Auth, LocalHost, ServerConfig};
+#[cfg(feature = "sample-host")]
 use orr_viewstream::{ViewFrame, FLAG_DISCONTINUITY, FLAG_PAUSED, HEADER_LEN, RECORD_LEN};
-use serde_json::{json, Value as J};
+use serde_json::json;
+#[cfg(feature = "sample-host")]
+use serde_json::Value as J;
 
+#[cfg(feature = "sample-host")]
 const WAIT: Duration = Duration::from_secs(20);
 
+#[cfg(feature = "sample-host")]
 fn phys_host() -> LocalHost {
     spawn_phys_host(demo_text(), None, ServerConfig::new(Auth::DevNoAuth)).expect("host")
 }
 
+#[cfg(feature = "sample-host")]
 fn subscribed(url: &str) -> ErpClient {
     let mut c = ErpClient::connect(url, None).unwrap();
     let r = c.call("watch.subscribe", json!({"topics": ["viewstream"], "max_fps": 1000})).unwrap();
@@ -29,6 +44,7 @@ fn subscribed(url: &str) -> ErpClient {
 }
 
 /// The next frame of at least `tick`.
+#[cfg(feature = "sample-host")]
 fn frame_from(c: &mut ErpClient, tick: u64) -> (Vec<u8>, ViewFrame) {
     loop {
         let bytes = c.wait_frame(WAIT).unwrap().unwrap_or_else(|| panic!("no view frame of tick {tick}"));
@@ -39,11 +55,13 @@ fn frame_from(c: &mut ErpClient, tick: u64) -> (Vec<u8>, ViewFrame) {
     }
 }
 
+#[cfg(feature = "sample-host")]
 fn fnv(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3))
 }
 
 #[test]
+#[cfg(feature = "sample-host")]
 fn schema_comes_first_then_frames_that_match_the_sim() {
     let host = phys_host();
     let mut c = subscribed(host.url().unwrap());
@@ -91,6 +109,7 @@ fn schema_comes_first_then_frames_that_match_the_sim() {
 }
 
 #[test]
+#[cfg(feature = "sample-host")]
 fn tcp_carries_the_same_bytes_as_the_websocket() {
     let host = phys_host();
     let url = host.url().unwrap().to_string();
@@ -134,6 +153,7 @@ fn tcp_carries_the_same_bytes_as_the_websocket() {
 }
 
 #[test]
+#[cfg(feature = "sample-host")]
 fn python_client_decodes_the_same_frame() {
     // (On Windows `python3` may be a Store stub that fails: skip then too.)
     if !Command::new("python3").arg("--version").output().is_ok_and(|o| o.status.success()) {
@@ -164,8 +184,11 @@ fn a_host_without_a_view_stream_says_so() {
     let e = c.call_err("watch.subscribe", json!({"topics": ["viewstream"]}));
     assert!(e.message.contains("no view stream"), "{}", e.message);
     // And a host with one refuses a proposal as the source.
-    let phys = phys_host();
-    let mut c = ErpClient::connect(phys.url().unwrap(), None).unwrap();
-    let e = c.call_err("watch.subscribe", json!({"topics": ["viewstream"], "source": "proposal:p1"}));
-    assert!(e.message.contains("not a proposal"), "{}", e.message);
+    #[cfg(feature = "sample-host")]
+    {
+        let phys = phys_host();
+        let mut c = ErpClient::connect(phys.url().unwrap(), None).unwrap();
+        let e = c.call_err("watch.subscribe", json!({"topics": ["viewstream"], "source": "proposal:p1"}));
+        assert!(e.message.contains("not a proposal"), "{}", e.message);
+    }
 }

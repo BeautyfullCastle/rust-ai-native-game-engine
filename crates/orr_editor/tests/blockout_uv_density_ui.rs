@@ -371,7 +371,7 @@ fn density_widgets_preserve_draft_and_render_after_existing_bake() {
     number(&mut h, "Face V offset", "0.25");
     click(&mut h, "90 degrees");
     click(&mut h, "Apply face UV");
-    click(&mut h, "Checker blue");
+    click(&mut h, "Material slot 1");
     click(&mut h, "Apply face material");
     let package_before = bake_assign(&mut h);
     let before = recipe(&h);

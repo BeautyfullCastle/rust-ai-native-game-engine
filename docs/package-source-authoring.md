@@ -1,112 +1,115 @@
 # Author a local content package
 
-The Windows `orr_pkg_source` command creates `orr.package.json` for an existing
-asset directory. Explicitly choose its metadata and files instead of writing JSON
-by hand. It uses the package manager's existing `Manifest` and
-`inspect_for_install` contracts; installation, dependency resolution, immutable
-objects and locks remain the responsibility of `orr_pkg` and the consuming host.
+On **Linux and Windows**, `orr_pkg_source` creates `orr.package.json` for an
+existing asset directory using the package manager's existing `Manifest` and
+`inspect_for_install` contracts. The `package_source` Cargo example remains a
+compatibility entry point to the same implementation. Other platforms fail
+closed before opening a source directory, including for `--help`.
+
+## Usage
+
+Linux:
+
+```sh
+cargo build --locked --release -p orr_package --bins --example package_source
+mkdir MyModels MyGame
+cp assets/imported_scene_demo/foreground.glb assets/imported_scene_demo/LICENSE.txt MyModels/
+target/release/orr_pkg_source --source "$PWD/MyModels" --name my-models \
+  --version 1.0.0 --engine '^0.0.1' --capability models \
+  --file foreground.glb --file LICENSE.txt
+target/release/orr_pkg inspect MyModels
+target/release/orr_pkg install MyGame --dry-run --path MyModels
+target/release/orr_pkg install MyGame --path MyModels
+target/release/orr_pkg verify MyGame
+```
+
+Windows PowerShell uses the same options:
 
 ```powershell
-cargo build --locked --release -p orr_package --bin orr_pkg_source --bin orr_pkg --example package_source
-New-Item -ItemType Directory .\MyModels
-Copy-Item .\assets\imported_scene_demo\foreground.glb .\MyModels\
-Copy-Item .\assets\imported_scene_demo\LICENSE.txt .\MyModels\
 .\target\release\orr_pkg_source.exe --source (Resolve-Path .\MyModels).Path --name my-models --version 1.0.0 --engine '^0.0.1' --capability models --file foreground.glb --file LICENSE.txt
-.\target\release\orr_pkg.exe inspect .\MyModels
-New-Item -ItemType Directory .\MyGame
-.\target\release\orr_pkg.exe install .\MyGame --path .\MyModels
-.\target\release\orr_pkg.exe verify .\MyGame
 ```
 
-The previous `package_source` Cargo example remains available as a compatibility
-entry point and shares the authoring implementation. New workflows should use
-the `orr_pkg_source` executable shown above.
+Choose both directories deliberately. The source must already exist, its
+manifest must not exist, and its Unicode path must be absolute and non-root.
+Linux requires normalized spelling: no repeated/trailing `/` or `.`/`..`
+components. Windows accepts disk and verbatim disk paths, not UNC/device paths
+or traversal. All source ancestors must be real directories, not symlinks or
+Windows reparse points.
 
-Both directories must be chosen deliberately. The source directory already
-exists and is supplied as an absolute disk path, not a drive root, UNC/device
-path or a path with `.`/`..` components; its manifest must not exist. Canonical
-Windows verbatim disk paths are also accepted. `--help` describes the options.
-Required single-value options are `--source`, `--name`, `--version` and
-`--engine`.
-Repeat `--file PORTABLE_RELATIVE_PATH` for each intended file, and optionally
-`--capability NAME` and `--dependency NAME=EXACT_VERSION`. At least one file is
-required by this helper. Duplicate flags or repeated values are rejected rather
-than silently discarded. Capabilities and dependencies are never inferred from
-extensions, source contents or folder names.
+`--help` lists options. Supply `--source`, `--name`, `--version`, `--engine`, and
+at least one `--file PORTABLE_RELATIVE_PATH`. Repeat `--file`, `--capability NAME`
+and `--dependency NAME=EXACT_VERSION` as needed. Duplicate options/values,
+noncanonical versions, incompatible engines, invalid metadata and colliding
+paths fail without publication. Files use portable ASCII `/`-separated paths;
+absolute paths, traversal, backslashes and reserved device names are rejected.
+Capabilities and dependencies are never inferred from filenames or contents.
 
-Names, exact canonical versions, engine compatibility, capabilities, dependency
-metadata, portable file paths and bounds are checked against the authoritative
-package inspector. Declared paths use portable ASCII with `/` separators, not
-absolute paths, traversal, backslashes, case collisions or device names.
-Metadata uses sorted sets/maps and deterministic pretty JSON. The same choices
-produce the same manifest bytes; the source location is not serialized.
+Sorted sets/maps and pretty JSON make manifest bytes and inspected content
+identity independent of source location and option order. Only declared files
+contribute; unlisted files are untouched. Dependency sources must be available
+when `orr_pkg` resolves the graph; use `--dependency-path SOURCE` during preview
+and installation. Authoring does not install packages or edit project locks.
 
-Bounds match the existing inspector for content: 4,096 files, 64 MiB per file,
-256 MiB total declared bytes, 1 MiB manifest and 128 capabilities/dependencies.
-The helper also bounds source paths to 4,096 UTF-8 bytes and 64 components,
-versions to 128 bytes, engine requirements to 256 bytes, and CLI input to 8,500
-arguments and 4 MiB of native encoded argument bytes.
+## Bounds and filesystem contract
 
-Only explicitly declared regular files are copied into a bounded private
-validation snapshot. Symlink/reparse parents and files are rejected before
-reading; Windows opened-file metadata is checked as well. The helper observes
-ordinary filesystem changes and rechecks declared source bytes before publishing.
-It is not a sandbox against hostile concurrent parent-path replacement.
+Limits: 4,096 files, 64 MiB each, 256 MiB total declared content, 1 MiB manifest,
+128 capabilities/dependencies, 4,096 source-path bytes, 64 source components,
+128-byte versions, 256-byte engine requirements, 8,500 CLI arguments and 4 MiB
+of native argument bytes. Bounded reads admit only regular files: declared
+symlinks, directories, FIFOs and sockets are rejected.
 
-The fixed destination is `<source>/orr.package.json`. A synced same-directory
-temporary manifest is published with `NamedTempFile::persist_noclobber`.
-Existing files and directories, including a concurrent winner, are not replaced.
-No crash-atomicity or power-loss durability claim is made. Only the new manifest
-is retained; temporary validation data is cleaned up on normal success/failure.
-Reading can update filesystem access times.
+Use **trusted, quiescent source and temporary directories**. Each source
+ancestor and declared component is checked with
+[Rust `symlink_metadata`](https://doc.rust-lang.org/std/fs/fn.symlink_metadata.html);
+this does not freeze parent-directory resolution. Linux additionally compares
+opened-file device/inode identity, while Windows retains reparse-aware opening.
+The helper validates a private snapshot with the authoritative inspector,
+rechecks declared source bytes, then publishes. These are observation checks,
+not a race-proof sandbox: concurrent hostile path replacement is unsupported.
+Reading may update access times.
 
-Unlisted files are not read into the package, copied, executed or installed.
-Explicitly declared scripts are inert content, not hooks. The helper does not
-install anything, write a project lock/object, invoke Cargo or a runtime, download
-content, modify credentials, or authenticate publishers. Source content remains
-mutable; normal installation recomputes its identity. No candidate digest is
-presented as an installed identity.
+A synced same-directory temporary manifest is published using
+[`NamedTempFile::persist_noclobber`](https://docs.rs/tempfile/latest/tempfile/struct.NamedTempFile.html#method.persist_noclobber).
+Existing files, directories, dangling symlinks and concurrent winners are not
+overwritten. The API does not guarantee atomic publication on every platform;
+a failure/interruption can leave temporary names. No crash/power-loss durability
+promise is made. Normal cleanup removes private validation data.
 
-`inspect_for_install` checks content and engine compatibility, **not** whether a
-game was compiled with the declared capabilities. A manifest saying `models`
-does not enable model rendering. The real consuming host must admit its actual
-compiled capability inventory; the CLI does not manufacture that inventory.
-Declared dependencies must be available when installation resolves the graph.
+Scripts are inert content, never hooks. There are no downloads, Cargo edits,
+credential changes or publisher authentication. Source content remains mutable;
+installation recomputes identity. Manifest capabilities do **not** enable engine
+features: the consuming host must supply its actual compiled inventory and
+reject unsupported content. CLI verification checks content/engine contracts,
+not rendering or compiled capability support.
 
-For a model workflow, install a package containing a self-contained `.glb` or
-`.orrmodel`. The navigation cooker can load either a source file or a verified
-installed project asset directly. For installed content, run
-`cargo run --locked --release -p orr_editor --features navigation --bin orr_mesh_cook -- --project <absolute-project-path> --package my-models --asset foreground.glb --output <absolute-mesh.orrmesh>`.
-This uses the consuming project's compiled `models` capability and reads through
-the package and model binding APIs; it does not expose immutable object paths or
-extract files. For a standalone source file, run
-`cargo run --locked --release -p orr_editor --features navigation --bin orr_mesh_cook -- --source <absolute-model-path> --output <absolute-mesh.orrmesh>`,
-then use `orr_mesh new` to create a self-contained MeshNavigation scene, as shown
-in [the production mesh workflow](mesh-navigation-authoring.md). The cooker
-creates a point-agent, open-sky navigation mesh. The actual mesh panel's editor
-hooks are still pending; these commands do not prove GUI placement or export.
+## Acceptance
 
-## Verification
-
-```powershell
-cargo test --locked --release -p orr_package --test package_source_cli -- --test-threads=1
-cargo test --locked --release -p orr_package --test package_source -- --test-threads=1
-$env:ORR_PACKAGE_SOURCE_BIN = (Resolve-Path .\target\release\examples\package_source.exe).Path
-$env:ORR_PKG_BIN = (Resolve-Path .\target\release\orr_pkg.exe).Path
-New-Item -ItemType Directory C:\Evidence\PackageSource
-$env:ORR_PACKAGE_SOURCE_EVIDENCE = 'C:\Evidence\PackageSource'
-cargo test --locked --release -p orr_package --test package_source -- --ignored --exact actual_cli_creates_inspects_installs_and_reads_package --test-threads=1 --nocapture
+```sh
+cargo test --locked --release -p orr_package --test package_source_linux -- --test-threads=1
 ```
 
-The compatibility example's ignored CLI case requires explicit existing
-executables and a fresh empty evidence directory; it must not silently skip
-missing inputs. The ordinary test run's ignored case is not executed production
-CLI acceptance. The dedicated
-`package_source_cli` integration test launches `orr_pkg_source` from Cargo and
-exercises package inspection, installation, reading and verification through
-the existing Project API. Package filesystem checks do not prove model/sprite
-decoding, a rendered game, editor integration or export.
-Those consuming workflows require their own actual checks. The source command
-adds no public engine API, schema, Cargo dependency or default capability.
-Other platforms fail closed before opening a source directory; the existing
-cross-platform package manager is unchanged.
+The Linux suite runs real CLI help/create/inspect, dependency dry-run/install,
+source-hidden verification and explicit consuming-inventory admission/rejection.
+It covers deterministic identities, preservation on invalid inputs, existing
+manifests, symlink/nonregular rejection, size bounds and concurrent creators.
+At the user's request, primary special-file acceptance uses a real FIFO
+(`mkfifo` required), exercising the same generic nonregular-file rejection as a
+socket. Symlink and directory cases remain required. AF_UNIX socket creation
+returned `EPERM` in this environment: socket-specific coverage is **unverified**,
+not passed. That retained test is an explicitly ignored supplemental lane; on a
+permitted host, opt in with:
+
+```sh
+cargo test --locked --release -p orr_package --test package_source_linux socket_source_is_rejected_without_changes -- --ignored --exact
+```
+
+This does not change sandbox/security settings or weaken production rejection.
+Windows retains `package_source_cli` and `package_source` tests; its ignored
+external-executable acceptance still requires
+`ORR_PACKAGE_SOURCE_BIN`, `ORR_PKG_BIN` and a fresh empty
+`ORR_PACKAGE_SOURCE_EVIDENCE` directory.
+
+These checks do not prove asset decoding, GUI placement, rendered gameplay or
+export. See [mesh navigation authoring](mesh-navigation-authoring.md) for model
+cooking and downstream checks. No public engine API, schema, dependency or
+default capability changes are introduced.

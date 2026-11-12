@@ -42,6 +42,18 @@ mod geometry_history;
 mod geometry_vertex_view;
 #[path = "mesh_navigation/geometry_vertex_viewport.rs"]
 mod geometry_vertex_viewport;
+#[path = "mesh_navigation/route_diagnostics.rs"]
+mod route_diagnostics;
+#[path = "mesh_navigation/route_diagnostics_panel.rs"]
+mod route_diagnostics_panel;
+#[cfg(feature="mesh-patrol")]
+#[path="mesh_navigation/patrol_panel.rs"]
+mod patrol_panel;
+#[cfg(feature="mesh-patrol")]
+pub(crate) use patrol_panel::{PatrolPickRequest, patrol_pick::Token as PatrolPickToken};
+#[cfg(feature="mesh-patrol")]
+#[path="mesh_navigation/patrol_routes.rs"]
+mod patrol_routes;
 #[cfg(feature = "mesh-mission")]
 #[path = "mesh_navigation/mission_view.rs"]
 mod mission_view;
@@ -101,6 +113,9 @@ pub struct Panel {
     geometry_preview: Option<Arc<StaticModel>>,
     geometry_preview_visible: bool,
     geometry_vertex: geometry_vertex_viewport::State,
+    route_diagnostics: route_diagnostics_panel::State,
+    #[cfg(feature="mesh-patrol")]
+    patrol: patrol_panel::State,
     #[cfg(feature = "mesh-mission")]
     mission_bound: bool,
     #[cfg(feature = "mesh-mission")]
@@ -145,6 +160,9 @@ impl Default for Panel {
             geometry_preview: None,
             geometry_preview_visible: false,
             geometry_vertex: geometry_vertex_viewport::State::default(),
+            route_diagnostics: route_diagnostics_panel::State::default(),
+            #[cfg(feature="mesh-patrol")]
+            patrol: Default::default(),
             #[cfg(feature = "mesh-mission")]
             mission_bound: false,
             #[cfg(feature = "mesh-mission")]
@@ -156,6 +174,8 @@ impl Default for Panel {
 impl Panel {
     pub fn sync(&mut self, editor: &Editor) {
         self.sync_host(editor);
+        #[cfg(feature="mesh-patrol")]
+        self.sync_patrol(editor);
         if let Some(report) = self.surface_package.poll(editor.path().as_deref(), editor.scene_load_epoch(), self.graph.as_ref().map(StaticMeshGraph::revision)) {
             self.geometry.select_import_package(&report);
         }
@@ -358,6 +378,21 @@ impl Panel {
         self.art.placement(editor)
     }
 
+    #[cfg(any(test, feature = "mesh-hazards-export"))]
+    pub(crate) fn art_matches_saved_sidecar(&self, expected: Option<&str>) -> bool {
+        self.art.matches_saved_sidecar(expected)
+    }
+
+    #[cfg(any(test, feature = "mesh-hazards-export"))]
+    pub(crate) fn props_matches_saved_sidecar(&self, editor: &Editor, expected: Option<&str>) -> bool {
+        self.props.matches_saved_sidecar(editor, expected)
+    }
+
+    #[cfg(any(test, feature = "mesh-hazards-export"))]
+    pub(crate) fn props_document_bytes(&self, editor: &Editor) -> Result<Vec<u8>, String> {
+        self.props.document_bytes(editor)
+    }
+
     pub(crate) fn art_dirty(&self) -> bool {
         self.art.dirty() || self.props.dirty()
     }
@@ -396,6 +431,9 @@ impl Panel {
     }
 
     pub fn play_blocker(&self, editor: &Editor) -> Option<String> {
+        if editor.game().is_mesh_hazards() {
+            return self.art.play_blocker(editor).or_else(|| self.props.play_blocker(editor));
+        }
         if self.surface_package.busy() { return Some("Wait for the walkable model package cook before Play".into()); }
         if self.geometry_vertex_busy() { return Some("Finish or cancel viewport vertex editing before Play".into()); }
         if self.agent_pick_busy() {
@@ -619,6 +657,14 @@ impl Panel {
     }
 
     pub fn show(&mut self, ui: &mut Ui, editor: &mut Editor) {
+        if editor.game().is_mesh_hazards() {
+            self.sync(editor);
+            #[cfg(feature="mesh-patrol")]
+            self.show_patrol(ui,editor);
+            self.art.show(ui, editor);
+            self.props.show(ui, editor, false);
+            return;
+        }
         if editor.game() != EditorGame::MeshNavigation {
             return;
         }
@@ -752,6 +798,9 @@ impl Panel {
             self.draft_dirty |= field(ui, "Maximum slope", &mut self.max_slope);
             self.draft_dirty |= field(ui, "Maximum vertical projection", &mut self.max_vertical);
             self.draft_dirty |= field(ui, "Distance per tick", &mut self.distance_per_tick);
+            self.show_route_diagnostics(ui, editor);
+            #[cfg(feature="mesh-patrol")]
+            self.show_patrol(ui,editor);
             self.show_agent_picking(ui, editor);
             if let Some(reason) = self.authoring_blocker(editor) {
                 ui.label(reason);
@@ -1475,3 +1524,28 @@ fn normalize(vector: [f32; 3]) -> Option<[f32; 3]> {
 fn hex_revision(revision: [u8; 32]) -> String {
     revision.iter().map(|byte| format!("{byte:02x}")).collect()
 }
+#[path = "mesh_navigation/route_diagnostics_overlay.rs"]
+mod route_diagnostics_overlay;
+
+#[cfg(all(test,target_os="linux"))]
+#[path="mesh_navigation/route_diagnostics_overlay_integration_tests.rs"]
+mod route_diagnostics_overlay_integration_tests;
+
+#[cfg(all(test,target_os="linux",feature="mesh-patrol"))]
+#[path="mesh_navigation/patrol_integration_tests.rs"]
+mod patrol_integration_tests;
+
+#[cfg(all(test,target_os="linux",feature="mesh-patrol",feature="mesh-hazards"))]
+#[path="mesh_navigation/patrol_hazards_integration_tests.rs"]
+mod patrol_hazards_integration_tests;
+
+#[cfg(feature="mesh-patrol")]
+#[path="mesh_navigation/patrol_route_overlay.rs"]
+mod patrol_route_overlay;
+#[cfg(all(test,target_os="linux",feature="mesh-patrol"))]
+#[path="mesh_navigation/patrol_route_overlay_integration_tests.rs"]
+mod patrol_route_overlay_integration_tests;
+
+#[cfg(all(test,target_os="linux",feature="mesh-patrol"))]
+#[path="mesh_navigation/patrol_order_integration_tests.rs"]
+mod patrol_order_integration_tests;

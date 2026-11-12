@@ -1,0 +1,13 @@
+# Use authored static models as Mesh art and props
+
+Build the editor with `mesh-navigation`. Open an admitted local MeshNavigation scene, then expand **Import agent art source**. Supply absolute local paths for a static `.glb`, `.model.json`, `.orrmodel.json` or legacy `.orrmodel`, a separate nonempty UTF-8 license, and a new package directory. Enter package name/version, review import rights, then choose **Import agent art package**.
+
+Cooked inputs can come from the existing cylinder, assembly, color, PNG skin, UV, sampler and pivot authoring tools. Their geometry, normals, UVs, material/image tables and provenance are retained. Raw packages keep `model.glb`; cooked packages preserve exact source bytes as `model.model.json`, alongside `LICENSE.txt` and the generated models manifest. This does not install the package or automatically apply/save presentation data.
+
+In **Mesh agent art**, explicitly review use rights and Load the candidate, edit its transform, Apply and Save. For scenery, open **Mesh props**, enter the produced package path, `model.model.json` and `LICENSE.txt`, review use rights, Load, place the prop and Save. Agent art and prop transforms/history remain independent. Saved scene-adjacent sidecars embed the model/license and can reopen without the original input or generated package.
+
+All three static-model entry points share the same metadata policy: package admission, embedded encoding and reopening. At most 256 unique bounded records are accepted, with a leading `$source`; additional records must be normalized portable relative names and lowercase SHA-256 strings. This supports assemblies with 32 unique direct inputs. These records describe history only: no historical path is opened and no historical digest or licensing claim is independently verified.
+
+Recognized cooked suffixes select the static decoder directly, with no GLB fallback. Animated, malformed and oversized models are rejected. GLB external-resource refusal, existing source/license/decoded/render limits, actual input and embedded hashes, stable-byte rechecks, graph binding and new-only publication stay in effect. Use trusted, quiescent directories; existing path checks are not a hostile-filesystem sandbox.
+
+CPU acceptance covers seven real producers through actual import widgets, agent art and prop Apply/Save, hidden-source reopen, exact model/transforms/bounds, unchanged scene/history and an independent one-tick simulation checksum. Existing raw import, sidecar and prop regressions remain. The computer is locked; GPU appearance, native window input and playtest video are unverified. The old GPU acceptance is compile-only here; its environment-guarded early return is not counted as a pass.

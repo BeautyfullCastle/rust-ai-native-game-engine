@@ -9,6 +9,8 @@ use orr_ecs::Entity;
 use orr_games::room_escape_game::{RoomActor, RoomRun, EXIT, FLOOR, KEY, PLAYER, WALL};
 #[cfg(feature = "room-animated-models")]
 use orr_model::animation::{AnimatedModel, Pose, Trs};
+#[cfg(feature = "room-animated-models")]
+use orr_model_bindings::animation_time::sample_clip_time;
 use orr_model_bindings::model_bindings::{LocalTransform, ModelKind};
 use orr_physics3d::{Body, Collider};
 use orr_reflect::{Guid, SceneIndex};
@@ -24,6 +26,21 @@ use orr_view::{Extractor3, RenderItem3, Transform3};
 use std::{collections::BTreeSet, sync::Arc};
 
 pub const TARGET_FORMAT: TextureFormat = TextureFormat::Rgba8Unorm;
+
+/// Shared Room procedural/imported base lighting. Environment authoring never
+/// changes shadow policy or the independent point-light settings.
+pub fn presentation_lighting(
+    #[cfg(feature = "room-lighting")] environment: Option<&crate::room_lighting::Environment>,
+) -> Result<orr_render::Lighting, String> {
+    let mut lighting = yard3d_view::yard_lighting();
+    lighting.shadows = false;
+    #[cfg(feature = "room-lighting")]
+    if let Some(environment) = environment {
+        environment.apply_to(&mut lighting)?;
+    }
+    Ok(lighting)
+}
+
 
 /// Exact current-frame collider presentation. The collected key remains in the
 /// simulation and GUID index, but is absent from both presentation paths.
@@ -83,6 +100,42 @@ struct AnimatedPlacement {
 struct FramePlacements {
     static_models: Vec<ModelPlacement>,
     animated_models: Vec<AnimatedPlacement>,
+}
+
+/// Visible placements successfully validated by the native rendering path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelPoseCounts {
+    pub static_models: usize,
+    pub animated_models: usize,
+}
+
+/// Validate this frame's actual model placements and sampled poses without a GPU.
+/// Collected keys are validated but excluded from visible counts, as in rendering.
+pub fn check_model_poses(
+    frame: FrameView<'_>,
+    index: &SceneIndex,
+    models: &PreparedModels,
+    #[cfg(feature = "room-character")] playback: Option<&crate::room_character::PlaybackCursor>,
+) -> Result<ModelPoseCounts, String> {
+    #[cfg(feature = "room-animated-models")]
+    {
+        let placed = frame_placements_with_playback(
+            frame,
+            index,
+            models,
+            #[cfg(feature = "room-character")]
+            playback,
+        )?;
+        Ok(ModelPoseCounts {
+            static_models: placed.static_models.len(),
+            animated_models: placed.animated_models.len(),
+        })
+    }
+    #[cfg(not(feature = "room-animated-models"))]
+    Ok(ModelPoseCounts {
+        static_models: placements(frame, index, models)?.len(),
+        animated_models: 0,
+    })
 }
 
 /// Body-to-world × binding-local TRS, identical to the editor model placement
@@ -190,6 +243,20 @@ pub fn admit_presentation(
     index: &SceneIndex,
     models: &PreparedModels,
 ) -> Result<(), String> {
+    #[cfg(feature = "room-character")]
+    if let Some(character) = &models.character {
+        character.validate_bindings(frame, index, &models.document, &models.assets)?;
+        if character.crossfade_ticks.unwrap_or(0) > 0 {
+            let binding = &models.document.bindings[&character.player];
+            let model = models.assets[&(binding.package.clone(), binding.asset.clone())]
+                .animated_model()
+                .ok_or("character model missing")?;
+            crate::room_project::validate_decoded_model_budget_with_extra(
+                models.assets.values(),
+                crate::room_character::crossfade_extra_pose_bytes(model)?,
+            )?;
+        }
+    }
     #[cfg(feature = "room-animated-models")]
     frame_placements(frame, index, models)?;
     #[cfg(not(feature = "room-animated-models"))]
@@ -226,32 +293,39 @@ pub fn admit_presentation(
                 {
                     let model = loaded.animated_model().ok_or("missing animated model")?;
                     let animation = binding.animation.ok_or("missing animation selection")?;
-                    let clip = model
-                        .source()
-                        .clips
-                        .get(animation.clip_index as usize)
-                        .ok_or("missing selected animation clip")?;
-                    let mut sample_poses =
-                        vec![model.rest_pose().map_err(|error| error.to_string())?];
-                    sample_poses.push(
-                        model
-                            .sample_clip(animation.clip_index, 0.0)
-                            .map_err(|error| error.to_string())?,
-                    );
-                    sample_poses.push(
-                        model
-                            .sample_clip(animation.clip_index, clip.duration())
-                            .map_err(|error| error.to_string())?,
-                    );
-                    for transform in placements {
-                        let matrix = world_matrix(transform, binding.transform);
-                        for pose in &sample_poses {
+                    let clips = vec![animation.clip_index];
+                    #[cfg(feature = "room-character")]
+                    let clips = match &models.character {
+                        Some(character) if &character.player == guid => {
+                            character.mapped_clips().collect()
+                        }
+                        _ => clips,
+                    };
+                    // Stream admission poses, retaining only one at a time under
+                    // the existing per-binding pose-memory budget.
+                    let validate_pose = |pose: &Pose| -> Result<(), String> {
+                        for transform in &placements {
                             SkinnedInstance {
                                 pose,
-                                transform: matrix,
+                                transform: world_matrix(*transform, binding.transform),
                             }
                             .validate_for(model)
                             .map_err(|error| format!("room admitted animation pose: {error}"))?;
+                        }
+                        Ok(())
+                    };
+                    validate_pose(&model.rest_pose().map_err(|error| error.to_string())?)?;
+                    for clip_index in clips {
+                        let clip = model
+                            .source()
+                            .clips
+                            .get(clip_index as usize)
+                            .ok_or("missing selected animation clip")?;
+                        for time in [0.0, clip.duration() * 0.5, clip.duration()] {
+                            let pose = model
+                                .sample_clip(clip_index, time)
+                                .map_err(|error| error.to_string())?;
+                            validate_pose(&pose)?;
                         }
                     }
                 }
@@ -347,7 +421,27 @@ fn frame_placements(
     index: &SceneIndex,
     models: &PreparedModels,
 ) -> Result<FramePlacements, String> {
+    frame_placements_with_playback(
+        frame,
+        index,
+        models,
+        #[cfg(feature = "room-character")]
+        None,
+    )
+}
+
+#[cfg(feature = "room-animated-models")]
+fn frame_placements_with_playback(
+    frame: FrameView<'_>,
+    index: &SceneIndex,
+    models: &PreparedModels,
+    #[cfg(feature = "room-character")] playback: Option<&crate::room_character::PlaybackCursor>,
+) -> Result<FramePlacements, String> {
     validate_models(models)?;
+    #[cfg(feature = "room-character")]
+    if let Some(character) = &models.character {
+        character.validate_current_bindings(frame, index, &models.document, &models.assets)?;
+    }
     let count = frame.alive_count() as usize;
     if !(3..=MAX_MODEL_BINDINGS).contains(&count)
         || index.len() != count
@@ -407,21 +501,62 @@ fn frame_placements(
                 let model = loaded
                     .animated_model()
                     .ok_or("room model is not animated")?;
-                let animation = binding.animation.ok_or("room model animation is absent")?;
-                let clip = model
-                    .source()
-                    .clips
-                    .get(animation.clip_index as usize)
-                    .ok_or("room model animation clip is absent")?;
-                let time = sample_clip_time(
-                    frame.tick(),
-                    orr_games::room_escape_game::TICK_RATE,
-                    clip.duration(),
-                    animation.playback,
-                )?;
-                let pose = model
-                    .sample_clip(animation.clip_index, time)
-                    .map_err(|error| error.to_string())?;
+                let sample_binding = || -> Result<Pose, String> {
+                    let animation = binding.animation.ok_or("room model animation is absent")?;
+                    let clip = model
+                        .source()
+                        .clips
+                        .get(animation.clip_index as usize)
+                        .ok_or("room model animation clip is absent")?;
+                    let time = sample_clip_time(
+                        frame.tick(),
+                        orr_games::room_escape_game::TICK_RATE,
+                        clip.duration(),
+                        animation.playback,
+                    )?;
+                    model
+                        .sample_clip(animation.clip_index, time)
+                        .map_err(|error| error.to_string())
+                };
+                #[cfg(feature = "room-character")]
+                let pose = match &models.character {
+                    Some(character) if character.player == guid.to_string() => match playback {
+                        Some(cursor) => cursor
+                            .pose(
+                                character,
+                                model,
+                                frame,
+                                crate::room_character::PlaybackContext {
+                                    entity,
+                                    tick_rate: orr_games::room_escape_game::TICK_RATE,
+                                    rest: false,
+                                    revision: 0,
+                                },
+                            )?
+                            .clone(),
+                        None => crate::room_character::sample_pose(
+                            character,
+                            model,
+                            frame,
+                            orr_games::room_escape_game::TICK_RATE,
+                            false,
+                        )?,
+                    },
+                    _ => sample_binding()?,
+                };
+                #[cfg(not(feature = "room-character"))]
+                let pose = sample_binding()?;
+                #[cfg(feature = "room-character")]
+                let transform = if let Some(character) = models.character.as_ref().filter(|character| character.player == guid.to_string() && character.motion.and_then(|motion| motion.facing).is_some()) {
+                    let yaw = match playback {
+                        Some(cursor) => cursor.facing_yaw(character, model, frame, crate::room_character::PlaybackContext {
+                            entity, tick_rate: orr_games::room_escape_game::TICK_RATE, rest: false, revision: 0,
+                        })?,
+                        None => 0.0,
+                    };
+                    facing_world_matrix(body_transform, binding.transform, yaw)?
+                } else { world_matrix(body_transform, binding.transform) };
+                #[cfg(not(feature = "room-character"))]
                 let transform = world_matrix(body_transform, binding.transform);
                 SkinnedInstance {
                     pose: &pose,
@@ -441,6 +576,18 @@ fn frame_placements(
         }
     }
     Ok(result)
+}
+
+/// Compose presentation facing between the admitted body and authored local TRS.
+/// Local offsets rotate about the body origin; no binding or Frame is modified.
+#[cfg(feature = "room-character")]
+pub fn facing_world_matrix(body: Transform3, local: LocalTransform, yaw: f32) -> Result<orr_model::animation::Matrix4, String> {
+    if !yaw.is_finite() { return Err("Room character facing yaw must be finite".into()); }
+    if yaw == 0.0 { return Ok(world_matrix(body, local)); }
+    let body = Trs { translation:body.pos.to_array(),rotation:body.rot.to_array(),scale:[1.0;3] }.matrix();
+    let facing = Trs { rotation:orr_view::Quat::from_axis_angle(orr_view::Vec3::new(0.0,1.0,0.0),yaw).to_array(),..Trs::default() }.matrix();
+    let local = Trs {translation:local.translation,rotation:local.rotation,scale:local.scale}.matrix();
+    Ok(matrix_multiply(matrix_multiply(body,facing),local))
 }
 
 #[cfg(feature = "room-animated-models")]
@@ -475,105 +622,6 @@ fn matrix_multiply(
     })
 }
 
-#[cfg(feature = "room-animated-models")]
-fn sample_clip_time(
-    tick: u64,
-    tick_rate: u32,
-    duration_seconds: f32,
-    playback: orr_model_bindings::model_bindings::PlaybackMode,
-) -> Result<f32, String> {
-    use orr_model_bindings::model_bindings::PlaybackMode;
-
-    if tick_rate == 0 {
-        return Err("Room animation cannot sample a zero tick rate".into());
-    }
-    if !duration_seconds.is_finite() || duration_seconds < 0.0 {
-        return Err("Room animation duration must be finite and nonnegative".into());
-    }
-    if duration_seconds == 0.0 {
-        return Ok(0.0);
-    }
-    let duration = f64::from(duration_seconds);
-    let (significand, exponent) = f32_rational(duration_seconds);
-    let sampled = match playback {
-        PlaybackMode::Once if once_finished(tick, tick_rate, significand, exponent) => duration,
-        PlaybackMode::Once => tick as f64 / f64::from(tick_rate),
-        PlaybackMode::Loop => loop_remainder(tick, tick_rate, significand, exponent),
-    } as f32;
-    let sampled = if playback == PlaybackMode::Loop && sampled >= duration_seconds {
-        0.0
-    } else {
-        sampled
-    };
-    if !sampled.is_finite() {
-        return Err("Room animation sample time is not finite".into());
-    }
-    Ok(sampled)
-}
-
-#[cfg(feature = "room-animated-models")]
-fn f32_rational(value: f32) -> (u32, i32) {
-    let bits = value.to_bits();
-    let exponent_bits = ((bits >> 23) & 0xff) as i32;
-    let fraction = bits & 0x7f_ffff;
-    if exponent_bits == 0 {
-        (fraction, -149)
-    } else {
-        ((1 << 23) | fraction, exponent_bits - 127 - 23)
-    }
-}
-
-#[cfg(feature = "room-animated-models")]
-fn once_finished(tick: u64, tick_rate: u32, significand: u32, exponent: i32) -> bool {
-    let rate = u128::from(tick_rate);
-    let duration_ticks = if exponent >= 0 {
-        u128::from(significand)
-            .checked_shl(exponent as u32)
-            .and_then(|seconds| seconds.checked_mul(rate))
-    } else {
-        let numerator = u128::from(significand) * rate;
-        let shift = exponent.unsigned_abs();
-        let ceiling = if shift >= 128 {
-            1
-        } else {
-            let denominator = 1_u128 << shift;
-            numerator.saturating_add(denominator - 1) / denominator
-        };
-        return u128::from(tick) >= ceiling.max(1);
-    };
-    duration_ticks.is_some_and(|duration_ticks| u128::from(tick) >= duration_ticks)
-}
-
-#[cfg(feature = "room-animated-models")]
-fn loop_remainder(tick: u64, tick_rate: u32, significand: u32, exponent: i32) -> f64 {
-    let rate = u128::from(tick_rate);
-    if exponent >= 0 {
-        let Some(duration_ticks) = u128::from(significand)
-            .checked_shl(exponent as u32)
-            .and_then(|seconds| seconds.checked_mul(rate))
-        else {
-            return tick as f64 / f64::from(tick_rate);
-        };
-        return (u128::from(tick) % duration_ticks) as f64 / f64::from(tick_rate);
-    }
-    let shift = exponent.unsigned_abs();
-    let modulus = rate * u128::from(significand);
-    let mut power = 1_u128;
-    let mut base = 2_u128 % modulus;
-    let mut remaining = shift;
-    while remaining != 0 {
-        if remaining & 1 == 1 {
-            power = (power * base) % modulus;
-        }
-        remaining >>= 1;
-        if remaining != 0 {
-            base = (base * base) % modulus;
-        }
-    }
-    let numerator = (u128::from(tick) % modulus) * power % modulus;
-    (numerator as f64 / f64::from(tick_rate)) * 2.0_f64.powi(-(shift as i32))
-}
-
 struct CachedModel {
     model: Arc<orr_model::StaticModel>,
     renderer: ModelRenderer<Wgpu>,
@@ -594,6 +642,8 @@ pub struct RoomRenderer {
 }
 
 struct RoomRenderCore {
+    lighting: orr_render::Lighting,
+    point_light: PointLightSettings,
     format: TextureFormat,
     procedural: Renderer3D<Wgpu>,
     imported: ImportedSceneRenderer<Wgpu>,
@@ -678,8 +728,10 @@ impl RoomRenderer {
             .map(|(model, instances)| (model.as_ref(), instances.as_slice()))
             .collect();
         let mut empty = RenderList3D::new();
-        empty.lighting = yard3d_view::yard_lighting();
-        empty.lighting.shadows = false;
+        empty.lighting = presentation_lighting(
+            #[cfg(feature = "room-lighting")]
+            None,
+        )?;
         #[cfg(feature = "room-animated-models")]
         {
             let animated_prepared: Vec<_> = animated_admission
@@ -752,6 +804,8 @@ impl RoomRenderer {
         Ok(Self {
             target: OffscreenTarget::new(rhi, size.0, size.1, format),
             core: RoomRenderCore {
+                lighting: empty.lighting,
+                point_light: PointLightSettings::default(),
                 format,
                 procedural: Renderer3D::with_settings(rhi.clone(), format, Settings3D::LOW),
                 imported,
@@ -760,6 +814,19 @@ impl RoomRenderer {
                 animated_models: animated_cache,
             },
         })
+    }
+    /// Validate an authored environment before replacing the active base light.
+    /// None restores the exact legacy Room lighting; no assets are reread.
+    #[cfg(feature = "room-lighting")]
+    pub fn set_environment(&mut self, environment: Option<crate::room_lighting::Environment>) -> Result<(), String> {
+        let lighting = presentation_lighting(environment.as_ref())?;
+        self.core.lighting = lighting;
+        Ok(())
+    }
+    pub fn set_point_light_settings(&mut self, settings: PointLightSettings) -> Result<(), String> {
+        settings.validate().map_err(|e| e.to_string())?;
+        self.core.point_light = settings;
+        Ok(())
     }
     pub fn target(&self) -> &OffscreenTarget<Wgpu> {
         &self.target
@@ -791,7 +858,15 @@ impl RoomRenderer {
             format: self.core.format,
             sample_count: 1,
         };
-        self.core.render(frame, index, models, camera, target)
+        self.core.render(
+            frame,
+            index,
+            models,
+            camera,
+            target,
+            #[cfg(feature = "room-character")]
+            None,
+        )
     }
 
     /// Draw directly into a window-owned texture without readback, copying, or
@@ -804,11 +879,52 @@ impl RoomRenderer {
         camera: &Camera3D,
         target: ImportedSceneTarget<'_, Wgpu>,
     ) -> Result<(), String> {
-        self.core.render(frame, index, models, camera, target)
+        self.core.render(
+            frame,
+            index,
+            models,
+            camera,
+            target,
+            #[cfg(feature = "room-character")]
+            None,
+        )
+    }
+    #[cfg(feature = "room-character")]
+    pub fn render_with_playback(
+        &mut self,
+        frame: FrameView<'_>,
+        index: &SceneIndex,
+        models: &PreparedModels,
+        camera: &Camera3D,
+        playback: &crate::room_character::PlaybackCursor,
+    ) -> Result<(), String> {
+        let target = ImportedSceneTarget {
+            view: self.target.render_view(),
+            size: self.target.size(),
+            format: self.core.format,
+            sample_count: 1,
+        };
+        self.core
+            .render(frame, index, models, camera, target, Some(playback))
+    }
+    #[cfg(feature = "room-character")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_to_with_playback(
+        &mut self,
+        frame: FrameView<'_>,
+        index: &SceneIndex,
+        models: &PreparedModels,
+        camera: &Camera3D,
+        target: ImportedSceneTarget<'_, Wgpu>,
+        playback: &crate::room_character::PlaybackCursor,
+    ) -> Result<(), String> {
+        self.core
+            .render(frame, index, models, camera, target, Some(playback))
     }
 }
 
 impl RoomRenderCore {
+    #[allow(clippy::too_many_arguments)]
     fn render(
         &mut self,
         frame: FrameView<'_>,
@@ -816,6 +932,7 @@ impl RoomRenderCore {
         models: &PreparedModels,
         camera: &Camera3D,
         target: ImportedSceneTarget<'_, Wgpu>,
+        #[cfg(feature = "room-character")] playback: Option<&crate::room_character::PlaybackCursor>,
     ) -> Result<(), String> {
         // Check caller metadata before changing retained instance lists or GPU state.
         if target.sample_count != 1 {
@@ -829,7 +946,13 @@ impl RoomRenderCore {
             return Err("room target must be 1..=4096 pixels per dimension".into());
         }
         #[cfg(feature = "room-animated-models")]
-        let frame_placements = frame_placements(frame, index, models)?;
+        let frame_placements = frame_placements_with_playback(
+            frame,
+            index,
+            models,
+            #[cfg(feature = "room-character")]
+            playback,
+        )?;
         #[cfg(not(feature = "room-animated-models"))]
         let placed = placements(frame, index, models)?;
         // Reject replaced/reopened content, including hidden-key assets. Never upload
@@ -914,8 +1037,7 @@ impl RoomRenderCore {
             .filter(|item| !bound.contains(&item.entity))
             .collect();
         let mut list = RenderList3D::new();
-        list.lighting = yard3d_view::yard_lighting();
-        list.lighting.shadows = false;
+        list.lighting = self.lighting;
         yard3d_view::fill_list(&visible, &mut list);
         let prepared: Vec<_> = self
             .models
@@ -938,7 +1060,7 @@ impl RoomRenderCore {
                     target.size,
                     camera,
                     &list.lighting,
-                    &PointLightSettings::default(),
+                    &self.point_light,
                     &list,
                     &prepared,
                     &animated_prepared,
@@ -951,7 +1073,7 @@ impl RoomRenderCore {
                 target.size,
                 camera,
                 &list.lighting,
-                &PointLightSettings::default(),
+                &self.point_light,
                 &list,
                 &prepared,
             )
@@ -985,7 +1107,7 @@ impl RoomRenderCore {
                 target,
                 camera,
                 &list.lighting,
-                &PointLightSettings::default(),
+                &self.point_light,
                 &mut batches,
             )
             .map_err(|e| e.to_string())
@@ -1113,3 +1235,136 @@ mod tests {
         assert!(sample_clip_time(1, 0, 1.0, PlaybackMode::Once).is_err());
     }
 }
+
+#[cfg(feature = "room-character")]
+#[derive(Clone, Copy)]
+pub struct PresentationTime {
+    pub tick_rate: u32,
+    pub rest: bool,
+}
+#[cfg(feature = "room-character")]
+impl Default for PresentationTime {
+    fn default() -> Self {
+        Self {
+            tick_rate: orr_games::room_escape_game::TICK_RATE,
+            rest: false,
+        }
+    }
+}
+#[cfg(feature = "room-character")]
+pub fn observe_character(
+    cursor: &mut crate::room_character::PlaybackCursor,
+    frame: FrameView<'_>,
+    index: &SceneIndex,
+    models: &PreparedModels,
+    time: PresentationTime,
+) -> Result<(), String> {
+    let Some(character) = &models.character else {
+        cursor.reset();
+        return Ok(());
+    };
+    character.validate_current_bindings(frame, index, &models.document, &models.assets)?;
+    let entity = index
+        .entity(&Guid::parse(&character.player)?)
+        .ok_or("character entity missing")?;
+    let binding = &models.document.bindings[&character.player];
+    let model = models.assets[&(binding.package.clone(), binding.asset.clone())]
+        .animated_model()
+        .ok_or("character model missing")?;
+    cursor.observe(
+        character,
+        model,
+        frame,
+        crate::room_character::PlaybackContext {
+            entity,
+            tick_rate: time.tick_rate,
+            rest: time.rest,
+            revision: 0,
+        },
+    )?;
+    Ok(())
+}
+
+/// The exact observed pose and instance matrix consumed by native rendering.
+#[cfg(feature = "room-character")]
+pub fn observed_character_placement(
+    frame: FrameView<'_>, index: &SceneIndex, models: &PreparedModels,
+    playback: &crate::room_character::PlaybackCursor,
+) -> Result<Option<CharacterPlacement>, String> {
+    let Some(character) = &models.character else { return Ok(None); };
+    let entity = index.entity(&Guid::parse(&character.player)?).ok_or("character entity missing")?;
+    let placements = frame_placements_with_playback(frame,index,models,Some(playback))?;
+    let placed = placements.animated_models.into_iter().find(|placed|placed.entity==entity).ok_or("observed character placement missing")?;
+    Ok(Some(CharacterPlacement {entity,model:placed.model,pose:placed.pose,transform:placed.transform}))
+}
+
+/// Stateless character sampling for diagnostics; runtime draws use the observed cursor.
+#[cfg(feature = "room-character")]
+pub struct CharacterPlacement {
+    pub entity: Entity,
+    pub model: Arc<AnimatedModel>,
+    pub pose: Pose,
+    pub transform: orr_model::animation::Matrix4,
+}
+#[cfg(feature = "room-character")]
+pub fn character_placement(
+    frame: FrameView<'_>,
+    index: &SceneIndex,
+    models: &PreparedModels,
+    time: PresentationTime,
+) -> Result<Option<CharacterPlacement>, String> {
+    let Some(character) = &models.character else {
+        return Ok(None);
+    };
+    let placements = frame_placements(frame, index, models)?;
+    let entity = index
+        .entity(&Guid::parse(&character.player)?)
+        .ok_or("character entity missing")?;
+    let placed = placements
+        .animated_models
+        .into_iter()
+        .find(|placed| placed.entity == entity)
+        .ok_or("character placement missing")?;
+    let pose = crate::room_character::sample_pose(
+        character,
+        &placed.model,
+        frame,
+        time.tick_rate,
+        time.rest,
+    )?;
+    Ok(Some(CharacterPlacement {
+        entity,
+        model: placed.model,
+        pose,
+        transform: placed.transform,
+    }))
+}
+
+#[cfg(all(test, feature = "room-lighting"))]
+mod environment_consumer_tests {
+    use super::*;
+    #[test]
+    fn absent_environment_keeps_exact_legacy_room_light_and_shadow_policy() {
+        let mut legacy = yard3d_view::yard_lighting();
+        legacy.shadows = false;
+        assert_eq!(presentation_lighting(None).unwrap(), legacy);
+    }
+    #[test]
+    fn environment_reaches_shared_base_without_changing_shadow_output_or_point_settings() {
+        let environment = crate::room_lighting::Environment {
+            direction: [-0.25, -0.75, 0.5], color: [0.2, 0.4, 0.7], intensity: 0.8,
+            sky: [0.1, 0.2, 0.3], ground: [0.04, 0.08, 0.12], ambient: 0.3,
+        };
+        let mut expected = presentation_lighting(None).unwrap();
+        environment.apply_to(&mut expected).unwrap();
+        assert_eq!(presentation_lighting(Some(&environment)).unwrap(), expected);
+        let mut invalid = environment;
+        invalid.intensity = f32::NAN;
+        assert!(presentation_lighting(Some(&invalid)).is_err());
+        assert!(!presentation_lighting(None).unwrap().shadows);
+    }
+}
+
+#[cfg(all(test, feature="room-character"))]
+#[path="room_view/facing_tests.rs"]
+mod facing_tests;

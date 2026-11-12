@@ -680,9 +680,9 @@ fn arena_keyboard_explicit_focus_fire_release_and_recording() {
         h.input_mut().events.push(egui::Event::Key {key,physical_key:Some(key),pressed:false,repeat:false,modifiers:egui::Modifiers::NONE});
     }
     // Focus a real text widget: gameplay and editor shortcuts must not steal it.
-    h.get_by(|n| n.role()==egui::accesskit::Role::TextInput && n.value().as_deref()==Some("")).focus();
+    h.get_by(|n| n.role()==egui::accesskit::Role::TextInput && n.label().is_none() && n.value().as_deref()==Some("")).focus();
     while h.state().editor.input_phase()!=Phase::Off { assert!(Instant::now()<end);h.run_steps(1);std::thread::sleep(Duration::from_millis(2)); }
-    h.get_by(|n| n.role()==egui::accesskit::Role::TextInput && n.value().as_deref()==Some("")).type_text("wasd ");
+    h.get_by(|n| n.role()==egui::accesskit::Role::TextInput && n.label().is_none() && n.value().as_deref()==Some("")).type_text("wasd ");
     h.run_steps(2);
     assert_eq!(h.state().ui.filter,"wasd ");
     assert_eq!(h.state().editor.input_phase(),Phase::Off);

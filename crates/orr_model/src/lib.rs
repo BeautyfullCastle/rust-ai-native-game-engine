@@ -8,6 +8,69 @@ use std::{collections::BTreeSet, fmt};
 #[cfg(feature = "import")]
 pub mod import;
 
+#[cfg(feature = "import")]
+pub mod extract;
+
+#[cfg(feature = "import")]
+#[path = "authoring/static_pivot.rs"]
+pub mod static_pivot;
+
+#[cfg(feature = "import")]
+#[path = "authoring/static_sampler.rs"]
+pub mod static_sampler;
+
+#[cfg(feature = "import")]
+#[path = "authoring/static_recolor.rs"]
+pub mod static_recolor;
+
+#[cfg(feature = "import")]
+#[path = "authoring/static_cylinder.rs"]
+pub mod static_cylinder;
+
+#[cfg(feature = "import")]
+#[path = "authoring/static_assemble.rs"]
+pub mod static_assemble;
+
+#[cfg(feature = "import")]
+#[path = "authoring/static_uv.rs"]
+pub mod static_uv;
+
+#[cfg(feature = "import")]
+#[path = "authoring/static_planar_uv.rs"]
+pub mod static_planar_uv;
+
+#[cfg(feature = "import")]
+#[path = "authoring/static_retexture.rs"]
+pub mod static_retexture;
+
+#[cfg(all(feature = "animation", feature = "import"))]
+#[path = "authoring/pose_bake.rs"]
+pub mod pose_bake;
+
+#[cfg(all(feature = "animation", feature = "import"))]
+#[path = "authoring/animation_sequence.rs"]
+pub mod animation_sequence;
+
+#[cfg(all(feature = "animation", feature = "import"))]
+#[path = "authoring/animation_trim.rs"]
+pub mod animation_trim;
+
+#[cfg(all(feature = "animation", feature = "import"))]
+#[path = "authoring/animated_recolor.rs"]
+pub mod animated_recolor;
+
+#[cfg(all(feature = "animation", feature = "import"))]
+#[path = "authoring/animated_retexture.rs"]
+pub mod animated_retexture;
+
+#[cfg(all(feature = "animation", feature = "import"))]
+#[path = "authoring/animated_sampler.rs"]
+pub mod animated_sampler;
+
+#[cfg(all(feature = "animation", feature = "import"))]
+#[path = "authoring/animated_uv.rs"]
+pub mod animated_uv;
+
 pub const MAX_FILE_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_DECODED_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_VERTICES: usize = 250_000;

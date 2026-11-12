@@ -7,6 +7,14 @@ use std::path::{Path, PathBuf};
 
 #[path = "mesh_lighting_panel/presets.rs"]
 mod presets;
+#[path = "mesh_lighting_panel/shadow_fit.rs"]
+mod shadow_fit;
+#[path="mesh_lighting_panel/point_light_ui.rs"]
+mod point_light_ui;
+#[path="mesh_lighting_panel/viewport_pick.rs"]
+mod viewport_pick;
+#[path="mesh_lighting_panel/draft_preview.rs"]
+mod draft_preview;
 
 const MAX_HISTORY: usize = 16;
 
@@ -17,6 +25,9 @@ struct HistoryEntry {
 }
 
 pub(crate) struct Panel {
+    draft_preview: draft_preview::State,
+    viewport_pick: viewport_pick::State,
+    pick_generation: u64,
     direction: [String; 3],
     color: [String; 3],
     intensity: String,
@@ -28,6 +39,9 @@ pub(crate) struct Panel {
     shadow_radius: String,
     tonemap: bool,
     exposure: String,
+    post_process: orr_render::PostProcessSettings,
+    post_process_authored: bool,
+    point_light: Option<orr_render::PointLight>,
     form_dirty: bool,
     presets: presets::Controls,
     confirm_remove: bool,
@@ -37,6 +51,7 @@ pub(crate) struct Panel {
     cursor: usize,
     next_id: u64,
     saved_id: Option<u64>,
+    profile: Option<EditorGame>,
     scene: Option<PathBuf>,
     scene_epoch: Option<u64>,
     graph_revision: Option<[u8; 32]>,
@@ -52,6 +67,9 @@ impl Default for Panel {
     fn default() -> Self {
         let defaults = orr_sample::yard3d_view::yard_lighting();
         Self {
+            draft_preview: Default::default(),
+            viewport_pick: Default::default(),
+            pick_generation: 0,
             direction: defaults.direction.map(format_number),
             color: defaults.color.map(format_number),
             intensity: format_number(defaults.intensity),
@@ -63,6 +81,9 @@ impl Default for Panel {
             shadow_radius: format_number(defaults.shadow_radius),
             tonemap: defaults.tonemap,
             exposure: format_number(defaults.exposure),
+            post_process: Default::default(),
+            post_process_authored: false,
+            point_light: None,
             form_dirty: false,
             presets: presets::Controls::default(),
             confirm_remove: false,
@@ -75,6 +96,7 @@ impl Default for Panel {
             cursor: 0,
             next_id: 1,
             saved_id: Some(0),
+            profile: None,
             scene: None,
             scene_epoch: None,
             graph_revision: None,
@@ -90,7 +112,9 @@ impl Default for Panel {
 
 impl Panel {
     pub(crate) fn sync(&mut self, editor: &Editor) {
-        if editor.game() != EditorGame::MeshNavigation || !editor.spec().is_local() {
+        self.sync_preview(editor);
+        self.sync_viewport_pick(editor);
+        if !supports_lighting_profile(editor.game()) || !editor.spec().is_local() {
             self.document_pending = true;
             return;
         }
@@ -101,7 +125,8 @@ impl Panel {
         };
         self.document_pending = false;
         let scene_epoch = editor.scene_load_epoch();
-        if self.scene.as_ref() == Some(&scene)
+        if self.profile == Some(editor.game())
+            && self.scene.as_ref() == Some(&scene)
             && self.scene_epoch == Some(scene_epoch)
             && self.graph_revision == Some(graph_revision)
         {
@@ -123,11 +148,30 @@ impl Panel {
         self.confirm_discard_changes = false;
         self.confirm_discard_invalid = false;
         self.reset_history(None, Some(0));
-        self.load_context(&scene, graph_revision, scene_epoch);
+        self.load_context(&scene, graph_revision, scene_epoch, editor.game());
     }
 
+    #[cfg(all(test, feature = "mesh-mission"))]
     pub(crate) fn show(&mut self, ui: &mut Ui, editor: &Editor) {
-        if editor.game() != EditorGame::MeshNavigation {
+        self.show_inner(ui, editor, None);
+    }
+
+    pub(crate) fn show_with_navigation(
+        &mut self,
+        ui: &mut Ui,
+        editor: &Editor,
+        navigation: &crate::mesh_navigation::Panel,
+    ) {
+        self.show_inner(ui, editor, Some(navigation));
+    }
+
+    fn show_inner(
+        &mut self,
+        ui: &mut Ui,
+        editor: &Editor,
+        navigation: Option<&crate::mesh_navigation::Panel>,
+    ) {
+        if !supports_lighting_profile(editor.game()) {
             return;
         }
         self.sync(editor);
@@ -171,10 +215,27 @@ impl Panel {
                 changed |= text_field(ui, "Shadow radius", &mut self.shadow_radius);
                 changed |= ui.checkbox(&mut self.tonemap, "Enable tonemapping").changed();
                 changed |= text_field(ui, "Exposure", &mut self.exposure);
+                let mut effects_changed = ui.checkbox(&mut self.post_process.enabled, "Saved HDR post-processing").changed();
+                ui.add_enabled_ui(self.post_process.enabled, |ui| {
+                    effects_changed |= ui.checkbox(&mut self.post_process.bloom, "Saved bloom").changed();
+                    effects_changed |= ui.add(egui::Slider::new(&mut self.post_process.threshold, 0.0..=65_504.0).text("Bloom threshold")).changed();
+                    effects_changed |= ui.add(egui::Slider::new(&mut self.post_process.strength, 0.0..=8.0).text("Bloom strength")).changed();
+                    effects_changed |= ui.add(egui::Slider::new(&mut self.post_process.radius, 1..=8).text("Bloom radius")).changed();
+                    effects_changed |= ui.add(egui::Slider::new(&mut self.post_process.iterations, 1..=4).text("Bloom iterations")).changed();
+                });
+                changed |= self.show_point_light_controls(ui);
+                if effects_changed {
+                    self.post_process_authored = true;
+                    changed = true;
+                }
                 if changed {
+                    self.invalidate_viewport_pick();
                     self.form_dirty = true;
                     self.error = None;
                     self.status = "Lighting form changed; apply it before Play or save.".into();
+                }
+                if let Some(navigation) = navigation {
+                    self.show_shadow_fit(ui, editor, navigation);
                 }
                 if ui
                     .add_enabled(self.form_dirty || self.current_document().is_none(), egui::Button::new("Apply game lighting"))
@@ -184,6 +245,8 @@ impl Panel {
                 }
             });
 
+            self.show_point_light_pick_controls(ui, editor, can_edit);
+            self.show_point_light_preview_controls(ui, editor, can_edit);
             self.show_preset_controls(ui, editor);
 
             let history_enabled = self.can_change_history(editor);
@@ -243,8 +306,22 @@ impl Panel {
             .and_then(|document| document.lighting().ok())
     }
 
+    /// Only an admitted document can supply the renderer's saved policy.
+    pub(crate) fn applied_post_process(
+        &self,
+        editor: &Editor,
+    ) -> Option<orr_render::PostProcessSettings> {
+        self.applied_lighting(editor)?;
+        self.current_document().map(Document::post_process_settings)
+    }
+
+    pub(crate) fn applied_point_light_settings(&self,editor:&Editor)->Option<orr_render::PointLightSettings> {
+        self.applied_lighting(editor)?;
+        self.current_document().and_then(|document|document.point_light_settings().ok())
+    }
+
     pub(crate) fn play_blocker(&self, editor: &Editor) -> Option<String> {
-        if editor.game() != EditorGame::MeshNavigation {
+        if !supports_lighting_profile(editor.game()) {
             return None;
         }
         if self.document_pending || current_identity(editor).is_none() {
@@ -265,6 +342,15 @@ impl Panel {
             return Some("Game lighting does not match the current mesh scene and graph".into());
         }
         None
+    }
+
+    #[cfg(any(feature = "mesh-hazards-export", test))]
+    pub(crate) fn matches_saved_sidecar(&self, expected: Option<&str>) -> bool {
+        !self.document_pending
+            && !self.dirty()
+            && self.sidecar_error.is_none()
+            && self.sidecar_sha.as_deref() == expected
+            && self.current_document().is_some() == expected.is_some()
     }
 
     pub(crate) fn dirty(&self) -> bool {
@@ -319,8 +405,69 @@ impl Panel {
         self.history.get(self.cursor)?.document.as_ref()
     }
 
+    fn show_shadow_fit(
+        &mut self,
+        ui: &mut Ui,
+        editor: &Editor,
+        navigation: &crate::mesh_navigation::Panel,
+    ) {
+        ui.weak("One-time shadow bounds draft for the current static mesh and applied, saved props. Refit after geometry or light direction edits. Excludes agents and animation; not a live coverage or quality guarantee.");
+        let ready = self.can_edit(editor)
+            && navigation.workspace_save_blocker(editor).is_none()
+            && !navigation.geometry_preview_active()
+            && !navigation.has_unplaced_draft();
+        if ui
+            .add_enabled(ready, egui::Button::new("Fit static shadow bounds"))
+            .clicked()
+        {
+            if let Err(error) = self.fit_shadow_bounds(editor, navigation) {
+                self.error = Some(format!("Fit static shadow bounds failed: {error}"));
+            }
+        }
+    }
+
+    fn fit_shadow_bounds(
+        &mut self,
+        editor: &Editor,
+        navigation: &crate::mesh_navigation::Panel,
+    ) -> Result<(), String> {
+        self.invalidate_viewport_pick();
+        if !self.can_edit(editor) {
+            return Err("Shadow fitting requires the matching editable local mesh scene".into());
+        }
+        if let Some(reason) = navigation.workspace_save_blocker(editor) {
+            return Err(reason);
+        }
+        if navigation.geometry_preview_active() || navigation.has_unplaced_draft() {
+            return Err(
+                "Place or discard geometry drafts and save applied props before fitting shadows"
+                    .into(),
+            );
+        }
+        let scene = self.scene.as_deref().ok_or("Mesh scene is not ready")?;
+        let revision = self.graph_revision.ok_or("Mesh graph is not ready")?;
+        let lighting = self.parse_document(scene, revision)?.lighting()?;
+        let snapshot = editor
+            .snapshot()
+            .ok_or("Wait for an authoritative mesh Frame")?;
+        let view = mesh_from_view(snapshot.predicted())?;
+        if view.graph.revision() != revision {
+            return Err("Mesh graph changed before fitting shadows".into());
+        }
+        let props = navigation.prop_models(editor);
+        let (center, radius) = shadow_fit::fit(&view.graph, &props, lighting)?;
+        // A one-time draft, deliberately retained if geometry changes later.
+        // No current-coverage receipt, render mutation, Apply, or Save occurs.
+        self.shadow_center = center.map(format_number);
+        self.shadow_radius = format_number(radius);
+        self.form_dirty = true;
+        self.error = None;
+        self.status = "Static shadow bounds staged only; explicitly Apply game lighting, then Save. Refit after geometry or direction edits.".into();
+        Ok(())
+    }
+
     fn can_edit(&self, editor: &Editor) -> bool {
-        editor.game() == EditorGame::MeshNavigation
+        supports_lighting_profile(editor.game())
             && editor.spec().is_local()
             && editor.mode() == Mode::Edit
             && editor.can_mutate()
@@ -344,7 +491,7 @@ impl Panel {
     }
 
     fn can_reload(&self, editor: &Editor) -> bool {
-        editor.game() == EditorGame::MeshNavigation
+        supports_lighting_profile(editor.game())
             && editor.spec().is_local()
             && editor.mode() == Mode::Edit
             && editor.can_mutate()
@@ -360,7 +507,7 @@ impl Panel {
     }
 
     fn can_discard_invalid(&self, editor: &Editor) -> bool {
-        editor.game() == EditorGame::MeshNavigation
+        supports_lighting_profile(editor.game())
             && editor.spec().is_local()
             && editor.mode() == Mode::Edit
             && editor.can_mutate()
@@ -375,7 +522,8 @@ impl Panel {
 
     fn identity_matches(&self, editor: &Editor) -> bool {
         current_identity(editor).is_some_and(|(scene, revision)| {
-            self.scene.as_ref() == Some(&scene)
+            self.profile == Some(editor.game())
+                && self.scene.as_ref() == Some(&scene)
                 && self.scene_epoch == Some(editor.scene_load_epoch())
                 && self.graph_revision == Some(revision)
         })
@@ -414,6 +562,14 @@ impl Panel {
         lighting.tonemap = self.tonemap;
         lighting.exposure = parse_number(&self.exposure, "exposure")?;
         let document = Document::from_lighting(lighting)?;
+        let document = if self.post_process_authored {
+            document.with_post_process(self.post_process)?
+        } else {
+            document
+        };
+        let mut document=document;
+        document.point_light=self.point_light;
+        document.point_light_settings()?;
         let filename = scene
             .file_name()
             .and_then(|value| value.to_str())
@@ -423,6 +579,8 @@ impl Panel {
     }
 
     fn apply(&mut self, editor: &Editor) {
+        self.draft_preview = Default::default();
+        self.invalidate_viewport_pick();
         if !self.can_edit(editor) {
             self.error = Some("Apply requires the matching editable local mesh scene".into());
             return;
@@ -447,6 +605,8 @@ impl Panel {
     }
 
     fn save(&mut self) {
+        self.draft_preview = Default::default();
+        self.invalidate_viewport_pick();
         let (Some(scene), Some(graph_revision)) = (self.scene.as_deref(), self.graph_revision)
         else {
             self.error = Some("Save the mesh scene before saving its lighting".into());
@@ -475,6 +635,8 @@ impl Panel {
     }
 
     fn reload(&mut self, editor: &Editor) {
+        self.draft_preview = Default::default();
+        self.invalidate_viewport_pick();
         if !self.can_reload(editor) || self.dirty() {
             self.error = Some(
                 "Reload requires a clean lighting state in the current editable local scene".into(),
@@ -485,10 +647,17 @@ impl Panel {
             self.error = Some("The current mesh scene is not ready for lighting reload".into());
             return;
         };
-        self.load_context(&scene, graph_revision, editor.scene_load_epoch());
+        self.load_context(
+            &scene,
+            graph_revision,
+            editor.scene_load_epoch(),
+            editor.game(),
+        );
     }
 
     fn remove(&mut self) {
+        self.draft_preview = Default::default();
+        self.invalidate_viewport_pick();
         if self.current_document().is_none() || !self.confirm_remove {
             self.error =
                 Some("Remove requires confirmation and a saved or applied game lighting".into());
@@ -503,6 +672,8 @@ impl Panel {
     }
 
     fn discard_changes_and_reload(&mut self, editor: &Editor) {
+        self.draft_preview = Default::default();
+        self.invalidate_viewport_pick();
         if !self.confirm_discard_changes {
             return;
         }
@@ -516,10 +687,17 @@ impl Panel {
         self.form_dirty = false;
         self.confirm_discard_changes = false;
         self.reset_history(None, Some(0));
-        self.load_context(&scene, graph_revision, editor.scene_load_epoch());
+        self.load_context(
+            &scene,
+            graph_revision,
+            editor.scene_load_epoch(),
+            editor.game(),
+        );
     }
 
     fn discard_invalid(&mut self) {
+        self.draft_preview = Default::default();
+        self.invalidate_viewport_pick();
         let (Some(scene), Some(sidecar_sha), Some(graph_revision)) = (
             self.scene.as_deref(),
             self.sidecar_sha.as_deref(),
@@ -550,6 +728,8 @@ impl Panel {
     }
 
     fn undo(&mut self) {
+        self.draft_preview = Default::default();
+        self.invalidate_viewport_pick();
         if self.cursor == 0 {
             return;
         }
@@ -561,6 +741,8 @@ impl Panel {
     }
 
     fn redo(&mut self) {
+        self.draft_preview = Default::default();
+        self.invalidate_viewport_pick();
         if self.cursor + 1 >= self.history.len() {
             return;
         }
@@ -571,7 +753,16 @@ impl Panel {
         self.status = "Redid game lighting edit; save explicitly to persist.".into();
     }
 
-    fn load_context(&mut self, scene: &Path, graph_revision: [u8; 32], scene_epoch: u64) {
+    fn load_context(
+        &mut self,
+        scene: &Path,
+        graph_revision: [u8; 32],
+        scene_epoch: u64,
+        profile: EditorGame,
+    ) {
+        self.draft_preview = Default::default();
+        self.invalidate_viewport_pick();
+        self.profile = Some(profile);
         self.scene = Some(scene.to_path_buf());
         self.scene_epoch = Some(scene_epoch);
         self.graph_revision = Some(graph_revision);
@@ -618,20 +809,27 @@ impl Panel {
 
     fn copy_document_fields(&mut self, document: &Document) -> Result<(), String> {
         self.copy_lighting_fields(document.lighting()?);
+        self.post_process = document.post_process_settings();
+        self.post_process_authored = document.has_post_process();
+        self.point_light = document.point_light_settings()?.point_light;
         Ok(())
     }
 
     fn copy_current_fields(&mut self) {
-        match self.current_document().map(Document::lighting) {
-            Some(Ok(lighting)) => self.copy_lighting_fields(lighting),
-            Some(Err(error)) => {
-                self.error = Some(format!("Current game lighting is invalid: {error}"))
+        match self.current_document().cloned() {
+            Some(document) => {
+                if let Err(error) = self.copy_document_fields(&document) {
+                    self.error = Some(format!("Current game lighting is invalid: {error}"));
+                }
             }
             None => self.copy_lighting_fields(orr_sample::yard3d_view::yard_lighting()),
         }
     }
 
     fn copy_lighting_fields(&mut self, lighting: orr_render::Lighting) {
+        self.post_process = Default::default();
+        self.post_process_authored = false;
+        self.point_light = None;
         self.direction = lighting.direction.map(format_number);
         self.color = lighting.color.map(format_number);
         self.intensity = format_number(lighting.intensity);
@@ -647,6 +845,8 @@ impl Panel {
     }
 
     fn reset_history(&mut self, document: Option<Document>, saved_id: Option<u64>) {
+        self.draft_preview = Default::default();
+        self.invalidate_viewport_pick();
         self.history.clear();
         self.history.push(HistoryEntry { id: 0, document });
         self.cursor = 0;
@@ -659,6 +859,8 @@ impl Panel {
     }
 
     fn push_state(&mut self, document: Option<Document>) {
+        self.draft_preview = Default::default();
+        self.invalidate_viewport_pick();
         if self.current_document() == document.as_ref() {
             return;
         }
@@ -674,8 +876,12 @@ impl Panel {
     }
 }
 
+pub(crate) fn supports_lighting_profile(game: EditorGame) -> bool {
+    game == EditorGame::MeshNavigation || game.is_mesh_hazards()
+}
+
 fn current_identity(editor: &Editor) -> Option<(PathBuf, [u8; 32])> {
-    if editor.game() != EditorGame::MeshNavigation
+    if !supports_lighting_profile(editor.game())
         || !editor.spec().is_local()
         || editor.down().is_some()
         || editor.previewing().is_some()
@@ -683,7 +889,7 @@ fn current_identity(editor: &Editor) -> Option<(PathBuf, [u8; 32])> {
         return None;
     }
     let scene = editor.path()?;
-    if !reported_scene_matches_request(editor.spec(), &scene) {
+    if !reported_scene_matches_request(editor.spec(), &scene, editor.game()) {
         return None;
     }
     let snapshot = editor.snapshot()?;
@@ -695,14 +901,14 @@ fn current_identity(editor: &Editor) -> Option<(PathBuf, [u8; 32])> {
     Some((scene, view.graph.revision()))
 }
 
-fn reported_scene_matches_request(spec: &HostSpec, reported: &Path) -> bool {
+fn reported_scene_matches_request(spec: &HostSpec, reported: &Path, profile: EditorGame) -> bool {
     let requested = match spec {
-        HostSpec::Local { scene, .. } => scene.as_path(),
-        HostSpec::LocalGame {
-            scene,
-            game: EditorGame::MeshNavigation,
-            ..
-        } => scene.as_path(),
+        HostSpec::Local { scene, .. } if profile == EditorGame::MeshNavigation => scene.as_path(),
+        HostSpec::LocalGame { scene, game, .. }
+            if *game == profile && supports_lighting_profile(*game) =>
+        {
+            scene.as_path()
+        }
         _ => return false,
     };
     if requested == reported {
@@ -741,3 +947,33 @@ fn text_field(ui: &mut Ui, label: &str, value: &mut String) -> bool {
 #[cfg(test)]
 #[path = "mesh_lighting_panel/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "mesh_lighting_panel/post_process_tests.rs"]
+mod post_process_tests;
+
+#[cfg(test)]
+#[path = "mesh_lighting_panel/shadow_fit_panel_tests.rs"]
+mod shadow_fit_panel_tests;
+
+#[cfg(all(test,feature="mesh-mission"))]
+#[path="mesh_lighting_panel/preset_effects_integration_tests.rs"]
+mod preset_effects_integration_tests;
+
+#[cfg(all(test,target_os="linux",feature="mesh-mission"))]
+#[path="mesh_lighting_panel/point_light_integration_tests.rs"]
+mod point_light_integration_tests;
+
+#[cfg(all(test,target_os="linux",feature="mesh-mission"))]
+#[path="mesh_lighting_panel/viewport_pick_ui_tests.rs"]
+mod viewport_pick_ui_tests;
+#[cfg(all(test,target_os="linux",feature="mesh-mission"))]
+#[path="mesh_lighting_panel/viewport_pick_integration_tests.rs"]
+mod viewport_pick_integration_tests;
+
+#[cfg(all(test,target_os="linux",feature="mesh-mission"))]
+#[path="mesh_lighting_panel/draft_preview_ui_tests.rs"]
+mod draft_preview_ui_tests;
+#[cfg(all(test,target_os="linux",feature="mesh-mission"))]
+#[path="mesh_lighting_panel/draft_preview_integration_tests.rs"]
+mod draft_preview_integration_tests;

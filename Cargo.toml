@@ -12,7 +12,8 @@ rust-version = "1.85"
 float_arithmetic = "warn"
 
 [profile.release]
-debug = 1
+debug = 0
+strip = "debuginfo"
 codegen-units = 1
 lto = "thin"
 

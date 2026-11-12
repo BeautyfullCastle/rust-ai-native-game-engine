@@ -9,7 +9,7 @@ path. Matching is case-insensitive; every whitespace-separated word must occur
 in the combined `package/path`. For example, `characters hero` narrows a large
 library to matching character models. Search uses literal text, not globs.
 
-The result count counts GLB, glTF and Orrmodel assets once each, even when an
+The result count counts GLB, glTF, Orrmodel and cooked `*.model.json` assets once each, even when an
 asset offers both static and animated actions. **Clear model filter** restores
 all models. Changing projects clears the filter and the verified inventory.
 
@@ -21,3 +21,5 @@ bypass the normal edit-mode and compiled-capability restrictions.
 To inspect an asset without selecting an entity, use its **Preview static model**
 action. The separate viewer offers orbit, zoom, Reset and Close without changing
 bindings or project files. See [Static package preview](editor-package-preview.md).
+
+With `room-animated-models`, verified animation packages also list cooked `*.animated.json` assets once each, with explicit animated Preview/Use actions.

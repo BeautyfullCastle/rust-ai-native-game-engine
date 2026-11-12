@@ -1,0 +1,648 @@
+//! Thin browser ABI: all economy, combat, spawning and AI remain in DefenseGame.
+use orr_games::coop_defense_game::*;
+use orr_games::coop_defense_scene::{parse_config, MAX_SOURCE_BYTES};
+use orr_sim::{PlayerSlot, Simulation, TickInputs};
+use std::cell::{Cell, RefCell};
+mod presentation;
+use presentation::LatestTickEvents;
+pub use presentation::MAX_PRESENTATION_EVENTS;
+use std::fmt::Write;
+
+struct Client {
+    sim: Simulation<DefenseGame>,
+    json: String,
+    source: u64,
+    events: LatestTickEvents<DefenseEvent>,
+}
+thread_local! {
+    static CLIENT: RefCell<Option<Client>> = const { RefCell::new(None) };
+    static SOURCE: Cell<u64> = const { Cell::new(0) };
+    static SCENE_BYTES: RefCell<[u8; MAX_SOURCE_BYTES]> = const { RefCell::new([0; MAX_SOURCE_BYTES]) };
+}
+
+/// Reset the actual engine simulation. The browser supplies only a seed.
+#[no_mangle]
+pub extern "C" fn defense_init(seed: u32) {
+    replace_client(DefenseConfig { seed, ..Default::default() });
+}
+
+/// Adapter-owned staging memory. Copy bytes immediately; never retain a memory
+/// view across another export. No caller-selected pointer is accepted.
+#[no_mangle]
+pub extern "C" fn defense_scene_buffer() -> *mut u8 {
+    SCENE_BYTES.with(|bytes| bytes.borrow_mut().as_mut_ptr())
+}
+#[no_mangle]
+pub extern "C" fn defense_scene_capacity() -> usize { MAX_SOURCE_BYTES }
+
+/// 0 = loaded, 1 = oversized, 2 = invalid UTF-8, 3 = rejected Scene.
+/// All admission happens before replacing the current client/source identity.
+#[no_mangle]
+pub extern "C" fn defense_init_scene(length: usize) -> u32 {
+    if length > MAX_SOURCE_BYTES { return 1; }
+    let candidate = SCENE_BYTES.with(|bytes| {
+        let bytes = bytes.borrow();
+        let text = std::str::from_utf8(&bytes[..length]).map_err(|_| 2u32)?;
+        parse_config(text).map_err(|_| 3)
+    });
+    match candidate {
+        Ok(config) => {
+            replace_client(config);
+            0
+        }
+        Err(status) => status,
+    }
+}
+
+fn replace_client(config: DefenseConfig) {
+    let seed = config.seed;
+    let source = SOURCE.with(|serial| {
+        let next = serial
+            .get()
+            .checked_add(1)
+            .expect("defense source identity exhausted");
+        serial.set(next);
+        next
+    });
+    CLIENT.with(|slot| {
+        *slot.borrow_mut() = Some(Client {
+            sim: Simulation::with_build_id(
+                config,
+                TICK_RATE,
+                u64::from(seed),
+                SCENARIO_BUILD_ID,
+            ),
+            json: String::new(),
+            source,
+            events: LatestTickEvents::new(),
+        })
+    });
+}
+
+/// One fixed tick and one input sample; AI partner is owned by the Rust game.
+#[no_mangle]
+pub extern "C" fn defense_step(action: u32, source_cell: u32, target_cell: u32, sequence: u32) {
+    CLIENT.with(|slot| {
+        if let Some(client) = slot.borrow_mut().as_mut() {
+            let mut inputs = TickInputs::new(client.sim.tick(), 2);
+            inputs.set_input(
+                PlayerSlot(0),
+                DefenseInput {
+                    action,
+                    source_cell,
+                    target_cell,
+                    sequence,
+                },
+            );
+            client.events.replace(client.sim.step(&inputs));
+        }
+    });
+}
+
+/// Returns a UTF-8 snapshot pointer valid until the next snapshot/reset.
+/// The JS caller copies these bytes immediately before calling another export.
+#[no_mangle]
+pub extern "C" fn defense_snapshot() -> *const u8 {
+    CLIENT.with(|slot| {
+        let mut borrow = slot.borrow_mut();
+        let Some(client) = borrow.as_mut() else { return std::ptr::null() };
+        let frame = client.sim.frame();
+        let r = run(frame);
+        let out = &mut client.json;
+        out.clear();
+        let last_wave = frame.singleton::<Campaign>().last_wave;
+        write!(out, "{{\"phase\":{},\"tick\":{},\"wave\":{},\"lastWave\":{},\"hp\":{},\"maxHp\":{},\"gold\":{:?},\"investment\":{:?},\"upgrades\":{:?},\"kills\":{},\"leaks\":{},\"summons\":{},\"merges\":{},\"units\":[", r.phase,r.tick,r.wave,last_wave,r.reactor_hp,frame.singleton::<Scenario>().reactor_hp,r.gold,r.investment,r.upgrades,r.kills,r.leaks,r.summons,r.merges).unwrap();
+        let mut comma = "";
+        for u in units(frame).into_iter().filter(|u| u.active != 0) {
+            let (x,y) = board_cell_position(u.board,u.cell);
+            write!(out,"{comma}[{},{},{},{},{},{},{},{}]",u.board,u.cell,u.role,u.tier,u.cooldown,x,y,u.id).unwrap(); comma=",";
+        }
+        out.push_str("],\"enemies\":["); comma="";
+        for e in enemies(frame).into_iter().filter(|e| e.active != 0) {
+            let (x,y)=enemy_position(e.lane,e.progress);
+            write!(out,"{comma}[{},{},{},{},{},{},{},{}]",e.id,e.lane,e.kind,e.hp,e.max_hp,e.slow_ticks,x,y).unwrap(); comma=",";
+        }
+        out.push_str("],\"projectiles\":["); comma="";
+        for p in projectiles(frame).into_iter().filter(|p| p.active != 0) {
+            write!(out,"{comma}[{},{},{},{},{},{},{},{}]",p.board,p.role,p.target_id,p.x,p.y,p.damage,p.id,p.source_unit_id).unwrap(); comma=",";
+        }
+        out.push_str("],\"cells\":["); comma="";
+        for board in 0..2 { for cell in 0..CELLS_PER_BOARD {
+            let (x,y)=board_cell_position(board,cell);
+            write!(out,"{comma}[{board},{cell},{x},{y}]").unwrap(); comma=",";
+        }}
+        out.push_str("],\"paths\":[");
+        for lane in 0..2 {
+            if lane > 0 { out.push(','); }
+            out.push('[');
+            for (i,progress) in [0,500,900,1400,1600,2000].iter().enumerate() {
+                if i>0 { out.push(','); }
+                let (x,y)=enemy_position(lane,*progress);
+                write!(out,"[{x},{y}]").unwrap();
+            }
+            out.push(']');
+        }
+        write!(out,"],\"costs\":[{},{},{}],\"checksum\":\"{:016x}\"}}",SUMMON_COST,upgrade_cost(r.upgrades[0]),investment_cost(r.investment[0]),client.sim.checksum()).unwrap();
+        // Append an additive, versioned object without changing legacy fields.
+        out.pop();
+        let overflow = client.events.dropped != 0;
+        write!(out, ",\"presentation\":{{\"version\":1,\"source\":\"{}\",\"generation\":{},\"tick\":\"{}\",\"delivery\":\"latest_tick\",\"status\":\"{}\",\"dropped\":{},\"fullResync\":{},\"windup\":false,\"events\":[", client.source, r.generation, client.sim.tick(), if overflow { "overflow" } else { "complete" }, client.events.dropped, overflow).unwrap();
+        comma = "";
+        for event in &client.events.events {
+            let e = event.payload;
+            let kind = e.event_kind().expect("known defense event kind").name();
+            write!(out, "{comma}{{\"tick\":\"{}\",\"system\":{},\"seq\":{},\"kind\":\"{kind}\",\"generation\":{},\"unitId\":{},\"otherUnitId\":{},\"enemyId\":{},\"projectileId\":{},\"board\":{},\"role\":{},\"value\":{},\"hpAfter\":{},\"x\":{},\"y\":{}}}", event.key.tick, event.key.system_index, event.key.seq, e.generation, e.unit_id, e.other_unit_id, e.enemy_id, e.projectile_id, e.board, e.role, e.value, e.hp_after, e.x, e.y).unwrap();
+            comma = ",";
+        }
+        out.push_str("]}}");
+        out.as_ptr()
+    })
+}
+#[no_mangle]
+pub extern "C" fn defense_snapshot_len() -> usize {
+    CLIENT.with(|slot| slot.borrow().as_ref().map_or(0, |c| c.json.len()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn json() -> String {
+        defense_snapshot();
+        CLIENT.with(|slot| slot.borrow().as_ref().unwrap().json.clone())
+    }
+    fn load(bytes: &[u8]) -> u32 {
+        SCENE_BYTES.with(|buffer| buffer.borrow_mut()[..bytes.len()].copy_from_slice(bytes));
+        defense_init_scene(bytes.len())
+    }
+    const AUTHORED: &str = "schema: orr.scene/1\nentities: {}\nsingletons: {CoopDefense::Scenario: {starting_gold: 250, reactor_hp: 75}}\n";
+    #[test]
+    fn saved_scene_matches_canonical_simulation_and_restart() {
+        assert_eq!(load(AUTHORED.as_bytes()), 0);
+        let config = parse_config(AUTHORED).unwrap();
+        let mut expected = Simulation::<DefenseGame>::with_build_id(config, TICK_RATE, u64::from(config.seed), SCENARIO_BUILD_ID);
+        CLIENT.with(|slot| assert_eq!(slot.borrow().as_ref().unwrap().sim.checksum(), expected.checksum()));
+        assert!(json().contains("\"hp\":75,\"maxHp\":75,\"gold\":[250, 250]"));
+        for (action, sequence) in [(SUMMON, 1), (UPGRADE, 2), (RESTART, 3), (SUMMON, 4)] {
+            let mut inputs = TickInputs::new(expected.tick(), 2);
+            inputs.set_input(PlayerSlot(0), DefenseInput { action, source_cell: 0, target_cell: 0, sequence });
+            expected.step(&inputs);
+            defense_step(action, 0, 0, sequence);
+            CLIENT.with(|slot| assert_eq!(slot.borrow().as_ref().unwrap().sim.checksum(), expected.checksum()));
+        }
+        assert!(json().contains("\"hp\":75,\"maxHp\":75"));
+        println!("authored trace checksum: {:016x}", expected.checksum());
+    }
+    #[test]
+    fn rejected_scene_preserves_entire_client() {
+        defense_init(71825); defense_step(SUMMON, 0, 0, 1);
+        let before = json();
+        assert_eq!(defense_init_scene(MAX_SOURCE_BYTES + 1), 1);
+        assert_eq!(json(), before);
+        assert_eq!(load(&[0xff]), 2);
+        assert_eq!(json(), before);
+        for bad in ["", "schema: wrong", "schema: orr.scene/1\nentities: {e_00000001: {name: injected}}\n", "schema: orr.scene/1\nentities: {}\nsingletons: {CoopDefense::Scenario: {starting_gold: 1, reactor_hp: 0}}\n"] {
+            assert_eq!(load(bad.as_bytes()), 3);
+            assert_eq!(json(), before);
+        }
+    }
+    #[test]
+    fn imported_empty_scene_uses_default_seed_not_legacy_seed() {
+        defense_init(DefenseConfig::default().seed);
+        let expected = CLIENT.with(|slot| slot.borrow().as_ref().unwrap().sim.checksum());
+        assert_eq!(load(b"schema: orr.scene/1\nentities: {}\n"), 0);
+        CLIENT.with(|slot| assert_eq!(slot.borrow().as_ref().unwrap().sim.checksum(), expected));
+        assert_eq!(defense_scene_capacity(), 65536);
+        assert!(!defense_scene_buffer().is_null());
+    }
+    #[test]
+    fn legacy_seed_trace_matches_native_simulation() {
+        let seed = 71825;
+        defense_init(seed);
+        let config = DefenseConfig { seed, ..Default::default() };
+        let mut expected = Simulation::<DefenseGame>::with_build_id(config, TICK_RATE, u64::from(seed), SCENARIO_BUILD_ID);
+        let mut sequence = 0;
+        for tick in 0..1200 {
+            let (action, sequence) = if tick % 30 == 0 { sequence += 1; (SUMMON, sequence) } else { (0, 0) };
+            let mut inputs = TickInputs::new(expected.tick(), 2);
+            inputs.set_input(PlayerSlot(0), DefenseInput { action, source_cell: 0, target_cell: 0, sequence });
+            expected.step(&inputs);
+            defense_step(action, 0, 0, sequence);
+        }
+        CLIENT.with(|slot| assert_eq!(slot.borrow().as_ref().unwrap().sim.checksum(), expected.checksum()));
+        println!("legacy native trace checksum: {:016x}", expected.checksum());
+    }
+    #[test]
+    fn browser_tracks_scenario_build_identity() {
+        defense_init(7);
+        CLIENT.with(|slot| {
+            assert_eq!(
+                slot.borrow().as_ref().unwrap().sim.build_id(),
+                SCENARIO_BUILD_ID
+            );
+        });
+        assert_ne!(SCENARIO_BUILD_ID, 0);
+    }
+    #[test]
+    fn repeated_snapshots_preserve_keys_and_reset_has_a_new_source() {
+        defense_init(7);
+        defense_step(SUMMON, 0, 0, 1);
+        let first = json();
+        assert_eq!(first, json());
+        assert!(first.contains("\"kind\":\"summon\""));
+        assert!(first.contains("\"tick\":\"1\",\"system\":0,\"seq\":0"));
+        defense_step(SUMMON, 0, 0, 1);
+        assert!(json().contains("\"events\":[]"));
+        defense_step(RESTART, 0, 0, 2);
+        assert!(json().contains("\"generation\":1,\"tick\":\"3\""));
+        let old_source = CLIENT.with(|slot| slot.borrow().as_ref().unwrap().source);
+        defense_init(7);
+        CLIENT.with(|slot| {
+            let borrow = slot.borrow();
+            let c = borrow.as_ref().unwrap();
+            assert_ne!(c.source, old_source);
+            assert_eq!(run(c.sim.frame()).generation, 0);
+            assert!(c.events.events.is_empty());
+        });
+    }
+    #[test]
+    fn overflow_is_explicit_and_never_serializes_partial_events() {
+        defense_init(7);
+        CLIENT.with(|slot| {
+            let mut borrow = slot.borrow_mut();
+            let c = borrow.as_mut().unwrap();
+            c.events.replace(
+                (0..=MAX_PRESENTATION_EVENTS)
+                    .map(|seq| orr_sim::SimEvent {
+                        key: orr_sim::EventKey::new(0, 0, seq as u32),
+                        payload: DefenseEvent::default(),
+                    })
+                    .collect(),
+            );
+        });
+        let snapshot = json();
+        assert!(snapshot.contains("\"status\":\"overflow\",\"dropped\":1025,\"fullResync\":true"));
+        assert!(snapshot.contains("\"events\":[]"));
+    }
+
+    const COUNTS_SCENE: &str =
+        include_str!("../../../examples/static-game-starter/scenes/stormglass-counts.scene.yaml");
+
+    #[test]
+    fn counts_scene_abi_matches_shared_config_consumed_trace_win_and_restart() {
+        campaign_scene_abi_parity(COUNTS_SCENE);
+    }
+
+    const HEALTH_SCENE: &str =
+        include_str!("../../../examples/static-game-starter/scenes/stormglass-health.scene.yaml");
+
+    #[test]
+    fn health_scene_abi_matches_shared_config_consumed_trace_win_and_restart() {
+        campaign_scene_abi_parity(HEALTH_SCENE);
+    }
+
+    const COMPOSITION_SCENE: &str =
+        include_str!("../../../examples/static-game-starter/scenes/stormglass-composition.scene.yaml");
+
+    #[test]
+    fn composition_scene_abi_matches_literal_spawns_full_events_and_restart() {
+        campaign_scene_abi_parity(COMPOSITION_SCENE);
+    }
+
+    #[test]
+    fn rejected_composition_preserves_complete_live_client_and_source_serial() {
+        assert_eq!(load(COMPOSITION_SCENE.as_bytes()), 0);
+        defense_step(SUMMON, 0, 0, 1);
+        let before = json();
+        let frame = CLIENT.with(|slot| slot.borrow().as_ref().unwrap().sim.frame().to_bytes());
+        let serial = SOURCE.with(Cell::get);
+        let defaults = "[[1,2,3,0],[2,3,0,1],[3,0,1,2],[0,1,2,3],[1,2,3,0],[2,3,0,1],[3,0,1,2],[0,1,2,3],[1,2,3,0],[2,3,0,1]]";
+        let flags = "[0,0,0,0,1,0,0,0,0,1]";
+        let fields = format!("regular_kinds: {defaults}, opening_boss: {flags}");
+        let mut invalid = vec!["{}".to_owned(), format!("{{regular_kinds: {defaults}}}"), format!("{{opening_boss: {flags}}}"), format!("{{{fields}, extra: 1}}"), format!("{{{fields}, opening_boss: {flags}}}")];
+        for bad in ["[]", "null", "[1,2,3,0]", "[[1,2,3,0]]"] {
+            invalid.push(format!("{{regular_kinds: {bad}, opening_boss: {flags}}}"));
+        }
+        for bad in ["4", "-1", "1.5", "null", "4294967296"] {
+            invalid.push(format!("{{regular_kinds: {}, opening_boss: {flags}}}", defaults.replacen('1', bad, 1)));
+        }
+        for bad in ["[]", "null", "[0,0,0,0,0,0,0,0,0]", "[0,0,0,0,0,0,0,0,0,2]", "[0,0,0,0,0,0,0,0,0,-1]"] {
+            invalid.push(format!("{{regular_kinds: {defaults}, opening_boss: {bad}}}"));
+        }
+        for fields in invalid {
+            let bad = format!("schema: orr.scene/1\nentities: {{}}\nsingletons: {{CoopDefense::WaveComposition: {fields}}}\n");
+            assert_eq!(load(bad.as_bytes()), 3, "accepted {bad}");
+            CLIENT.with(|slot| assert_eq!(slot.borrow().as_ref().unwrap().sim.frame().to_bytes(), frame));
+            assert_eq!(SOURCE.with(Cell::get), serial);
+            assert_eq!(json(), before);
+        }
+        let source = format!("schema: orr.scene/1\nentities: {{}}\nsingletons: {{CoopDefense::WaveComposition: {{{fields}}}}}\n");
+        assert_eq!(load(source.as_bytes()), 0);
+        defense_step(RESTART, 0, 0, 1);
+        CLIENT.with(|slot| {
+            let client = slot.borrow();
+            let frame = client.as_ref().unwrap().sim.frame();
+            assert_eq!(*frame.singleton::<WaveComposition>(), WaveComposition::default());
+            assert_eq!(*frame.singleton::<Scenario>(), Scenario::default());
+            assert_eq!(*frame.singleton::<Campaign>(), Campaign::default());
+            assert_eq!(*frame.singleton::<WaveCounts>(), WaveCounts::default());
+            assert_eq!(*frame.singleton::<WavePacing>(), WavePacing::default());
+            assert_eq!(*frame.singleton::<EnemyHealth>(), EnemyHealth::default());
+        });
+    }
+
+    fn campaign_scene_abi_parity(scene: &str) {
+        assert_eq!(load(scene.as_bytes()), 0);
+        let config = parse_config(scene).unwrap();
+        let composition = scene == COMPOSITION_SCENE;
+        assert_eq!(config.wave_counts.pair_counts, if composition {
+            [5, 6, 7, 16, 18, 20, 22, 24, 26, 28]
+        } else {
+            [1, 2, 3, 16, 18, 20, 22, 24, 26, 28]
+        });
+        let expected_pairs = if composition { 18 } else { 6 };
+        let mut per_wave = [0_usize; 3];
+        let mut expected = Simulation::<DefenseGame>::with_build_id(
+            config,
+            TICK_RATE,
+            u64::from(config.seed),
+            SCENARIO_BUILD_ID,
+        );
+        let source = CLIENT.with(|slot| slot.borrow().as_ref().unwrap().source);
+        let mut spawn_count = 0;
+        let mut sequence = 0;
+        for tick in 0..6000 {
+            let value = if tick % 30 == 0 {
+                sequence += 1;
+                strategy_input(
+                    &run(expected.frame()),
+                    &units(expected.frame()),
+                    0,
+                    sequence,
+                )
+            } else {
+                DefenseInput::default()
+            };
+            // Both paths consume this exact input now, not at a guessed local
+            // submission tick. The separate ERP trace covers Session delay.
+            let mut inputs = TickInputs::new(expected.tick(), 2);
+            inputs.set_input(PlayerSlot(0), value);
+            let events = expected.step(&inputs);
+            spawn_count += events
+                .iter()
+                .filter(|event| event.payload.event_kind() == Some(DefenseEventKind::EnemySpawn))
+                .count();
+            for event in &events {
+                if composition && event.payload.kind == EVENT_ENEMY_SPAWN {
+                    const KINDS: [&[u32]; 3] = [&[4, 0, 2, 1, 3], &[2, 3, 1, 0, 2, 3], &[4, 2, 3, 1, 0, 2, 3]];
+                    const HP: [&[u32]; 3] = [&[1092, 78, 156, 78, 52], &[216, 72, 108, 108, 216, 72], &[1932, 276, 92, 138, 138, 276, 92]];
+                    let wave = (run(expected.frame()).wave - 1) as usize;
+                    let ordinal = per_wave[wave] / 2;
+                    assert_eq!(event.payload.board, (per_wave[wave] % 2) as u32);
+                    assert_eq!(event.payload.value, KINDS[wave][ordinal]);
+                    assert_eq!(event.payload.hp_after, HP[wave][ordinal]);
+                    per_wave[wave] += 1;
+                }
+            }
+            defense_step(
+                value.action,
+                value.source_cell,
+                value.target_cell,
+                value.sequence,
+            );
+            CLIENT.with(|slot| {
+                let client = slot.borrow();
+                let client = client.as_ref().unwrap();
+                assert_eq!(
+                    client.sim.frame().to_bytes(),
+                    expected.frame().to_bytes(),
+                    "tick {tick}"
+                );
+                assert_eq!(client.sim.checksum(), expected.checksum());
+                assert_eq!(client.source, source);
+                assert_eq!(client.events.dropped, 0);
+                assert_eq!(
+                    client
+                        .events
+                        .events
+                        .iter()
+                        .map(|e| (e.key, e.payload))
+                        .collect::<Vec<_>>(),
+                    events
+                        .iter()
+                        .map(|e| (e.key, e.payload))
+                        .collect::<Vec<_>>()
+                );
+            });
+            if run(expected.frame()).phase != PLAYING {
+                break;
+            }
+        }
+        let finished = run(expected.frame());
+        assert_eq!(finished.phase, WON);
+        assert_eq!(finished.wave, 3);
+        assert_eq!(spawn_count, 2 * expected_pairs);
+        if composition { assert_eq!(per_wave, [10, 12, 14]); }
+        assert_eq!(finished.kills + finished.leaks, 2 * expected_pairs as u32);
+        sequence += 1;
+        let mut inputs = TickInputs::new(expected.tick(), 2);
+        inputs.set_input(
+            PlayerSlot(0),
+            DefenseInput {
+                action: RESTART,
+                sequence,
+                ..Default::default()
+            },
+        );
+        expected.step(&inputs);
+        defense_step(RESTART, 0, 0, sequence);
+        CLIENT.with(|slot| {
+            let client = slot.borrow();
+            let client = client.as_ref().unwrap();
+            assert_eq!(client.sim.frame().to_bytes(), expected.frame().to_bytes());
+            assert_eq!(client.source, source);
+            assert_eq!(
+                *client.sim.frame().singleton::<WaveCounts>(),
+                config.wave_counts
+            );
+            assert_eq!(
+                *client.sim.frame().singleton::<WavePacing>(),
+                config.wave_pacing
+            );
+            assert_eq!(*client.sim.frame().singleton::<EnemyHealth>(), config.enemy_health);
+            assert_eq!(*client.sim.frame().singleton::<WaveComposition>(), config.wave_composition);
+            assert_eq!(*client.sim.frame().singleton::<Campaign>(), config.campaign);
+            assert_eq!(*client.sim.frame().singleton::<Scenario>(), config.scenario);
+            let restarted = run(client.sim.frame());
+            assert_eq!(restarted.generation, 1);
+            assert_eq!(restarted.gold, [1000; 2]);
+            assert_eq!(restarted.reactor_hp, 1000);
+            assert_eq!(restarted.wave, 1);
+            assert_eq!(restarted.spawned, 0);
+            assert_eq!(client.events.events.len(), 1);
+            assert_eq!(
+                client.events.events[0].payload.event_kind(),
+                Some(DefenseEventKind::Restart)
+            );
+        });
+    }
+
+
+    #[test]
+    fn rejected_health_scene_preserves_client_and_source_serial() {
+        assert_eq!(load(HEALTH_SCENE.as_bytes()), 0);
+        defense_step(SUMMON, 0, 0, 1);
+        let before = json();
+        let frame = CLIENT.with(|slot| slot.borrow().as_ref().unwrap().sim.frame().to_bytes());
+        let serial = SOURCE.with(Cell::get);
+        for fields in [
+            "{}", "{multiplier: 0}", "{multiplier: 5}", "{multiplier: -1}",
+            "{multiplier: 1.5}", "{multiplier: 4294967296}", "{multiplier: null}",
+            "{multiplier: 2, extra: 1}", "{multiplier: 2, multiplier: 3}",
+        ] {
+            let bad = HEALTH_SCENE.replace("{multiplier: 4}", fields);
+            assert_eq!(load(bad.as_bytes()), 3, "accepted {bad}");
+            CLIENT.with(|slot| {
+                let client = slot.borrow();
+                let client = client.as_ref().unwrap();
+                assert_eq!(client.json, before);
+                assert_eq!(client.sim.frame().to_bytes(), frame);
+            });
+            assert_eq!(SOURCE.with(Cell::get), serial);
+            assert_eq!(json(), before);
+        }
+        for multiplier in 1..=4 {
+            let source = format!("schema: orr.scene/1\nentities: {{}}\nsingletons: {{CoopDefense::EnemyHealth: {{multiplier: {multiplier}}}}}\n");
+            assert_eq!(load(source.as_bytes()), 0);
+            defense_step(RESTART, 0, 0, 1);
+            CLIENT.with(|slot| {
+                let client = slot.borrow();
+                let frame = client.as_ref().unwrap().sim.frame();
+                assert_eq!(frame.singleton::<EnemyHealth>().multiplier, multiplier);
+                assert_eq!(*frame.singleton::<Scenario>(), Scenario::default());
+                assert_eq!(*frame.singleton::<Campaign>(), Campaign::default());
+                assert_eq!(*frame.singleton::<WaveCounts>(), WaveCounts::default());
+                assert_eq!(*frame.singleton::<WavePacing>(), WavePacing::default());
+            });
+        }
+    }
+
+    #[test]
+    fn rejected_counts_scene_preserves_all_client_state_and_source_serial() {
+        assert_eq!(load(COUNTS_SCENE.as_bytes()), 0);
+        defense_step(SUMMON, 0, 0, 1);
+        let before_json = json();
+        let (before_frame, before_source, before_tick, before_build, before_events, before_dropped) =
+            CLIENT.with(|slot| {
+                let client = slot.borrow();
+                let client = client.as_ref().unwrap();
+                (
+                    client.sim.frame().to_bytes(),
+                    client.source,
+                    client.sim.tick(),
+                    client.sim.build_id(),
+                    client
+                        .events
+                        .events
+                        .iter()
+                        .map(|e| (e.key, e.payload))
+                        .collect::<Vec<_>>(),
+                    client.events.dropped,
+                )
+            });
+        let before_serial = SOURCE.with(Cell::get);
+        assert!(!before_events.is_empty());
+        let assert_unchanged = || {
+            // Check the stored serialization before calling snapshot again.
+            CLIENT.with(|slot| {
+                let client = slot.borrow();
+                let client = client.as_ref().unwrap();
+                assert_eq!(client.json, before_json);
+                assert_eq!(client.sim.frame().to_bytes(), before_frame);
+                assert_eq!(client.source, before_source);
+                assert_eq!(client.sim.tick(), before_tick);
+                assert_eq!(client.sim.build_id(), before_build);
+                assert_eq!(
+                    client
+                        .events
+                        .events
+                        .iter()
+                        .map(|e| (e.key, e.payload))
+                        .collect::<Vec<_>>(),
+                    before_events
+                );
+                assert_eq!(client.events.dropped, before_dropped);
+            });
+            assert_eq!(SOURCE.with(Cell::get), before_serial);
+            assert_eq!(json(), before_json);
+        };
+        let counts = "[1, 2, 3, 16, 18, 20, 22, 24, 26, 28]";
+        let mut invalid = Vec::new();
+        for bad in [
+            "[1, 2, 3, 16, 18, 20, 22, 24, 26, 0]",
+            "[1, 2, 3, 16, 18, 20, 22, 24, 26, 29]",
+            "[1, 2, 3, 16, 18, 20, 22, 24, 26, -1]",
+            "[1, 2, 3, 16, 18, 20, 22, 24, 26, 1.5]",
+            "[1, 2, 3, 16, 18, 20, 22, 24, 26, 4294967296]",
+            "[1, 2, 3, 16, 18, 20, 22, 24, 26, bad]",
+            "[1, 2, 3]",
+            "[1, 2, 3, 16, 18, 20, 22, 24, 26, 28, 1]",
+            "null",
+        ] {
+            invalid.push(COUNTS_SCENE.replace(counts, bad));
+        }
+        for fields in [
+            "{}".to_string(),
+            format!("{{pair_counts: {counts}, extra: 1}}"),
+            format!("{{pair_counts: {counts}, pair_counts: {counts}}}"),
+        ] {
+            invalid.push(COUNTS_SCENE.replace(&format!("{{pair_counts: {counts}}}"), &fields));
+        }
+        for text in invalid {
+            assert_eq!(load(text.as_bytes()), 3, "accepted {text}");
+            assert_unchanged();
+        }
+        assert_eq!(defense_init_scene(MAX_SOURCE_BYTES + 1), 1);
+        assert_unchanged();
+        assert_eq!(load(&[0xff]), 2);
+        assert_unchanged();
+    }
+
+}
+
+#[cfg(test)]
+mod pacing_tests {
+    use super::*;
+    #[test]
+    fn pacing_admission_is_atomic_and_matches_native_after_spawns() {
+        let source = include_bytes!("../../../examples/static-game-starter/scenes/stormglass-training.scene.yaml");
+        SCENE_BYTES.with(|buffer| buffer.borrow_mut()[..source.len()].copy_from_slice(source));
+        assert_eq!(defense_init_scene(source.len()), 0);
+        let config = parse_config(std::str::from_utf8(source).unwrap()).unwrap();
+        let mut expected = Simulation::<DefenseGame>::with_build_id(config, TICK_RATE, u64::from(config.seed), SCENARIO_BUILD_ID);
+        for tick in 0..500 {
+            let mut input = TickInputs::new(expected.tick(), 2);
+            let value = DefenseInput { action: if tick == 490 { RESTART } else { 0 }, sequence: tick + 1, ..Default::default() };
+            input.set_input(PlayerSlot(0), value);
+            let events = expected.step(&input);
+            defense_step(value.action, 0, 0, value.sequence);
+            CLIENT.with(|slot| {
+                let client = slot.borrow();
+                let client = client.as_ref().unwrap();
+                assert_eq!(client.sim.frame().to_bytes(), expected.frame().to_bytes());
+                assert_eq!(client.events.dropped, 0);
+                assert_eq!(
+                    client.events.events.iter().map(|e| (e.key, e.payload)).collect::<Vec<_>>(),
+                    events.iter().map(|e| (e.key, e.payload)).collect::<Vec<_>>()
+                );
+            });
+        }
+        CLIENT.with(|slot| assert_eq!(slot.borrow().as_ref().unwrap().sim.frame().singleton::<WavePacing>().spawn_interval_ticks, 70));
+        let before = CLIENT.with(|slot| slot.borrow().as_ref().unwrap().sim.frame().to_bytes());
+        for interval in [0, 34, 351] {
+            let text = format!("schema: orr.scene/1\nentities: {{}}\nsingletons: {{CoopDefense::WavePacing: {{spawn_interval_ticks: {interval}}}}}\n");
+            SCENE_BYTES.with(|buffer| buffer.borrow_mut()[..text.len()].copy_from_slice(text.as_bytes()));
+            assert_eq!(defense_init_scene(text.len()), 3);
+            CLIENT.with(|slot| assert_eq!(slot.borrow().as_ref().unwrap().sim.frame().to_bytes(), before));
+        }
+    }
+}

@@ -1,0 +1,136 @@
+{
+  "version": 1,
+  "scope": "original-td-sample-bank-not-project-package",
+  "sampleRate": 48000,
+  "maxRecords": 16,
+  "maxFrames": 48000,
+  "maxPeakPcm16": 8192,
+  "gainPolicy": {
+    "headroom": 0.75,
+    "maxGain": 0.5,
+    "defaultVoices": 12,
+    "maxVoices": 32
+  },
+  "cues": [
+    {
+      "cue": "attack-light",
+      "assetId": "a_0000000054440001",
+      "file": "attack-light.pcm",
+      "frames": 6720,
+      "bytes": 13448,
+      "sha256": "a0189ec76bb90685b8978e52a418d751159da5de922e6f0513ff849f059f3b00",
+      "peakPcm16": 6500,
+      "rmsPcm16": 957.745,
+      "description": "Short air swish and plucked woody release; light projectile.",
+      "seed": 101
+    },
+    {
+      "cue": "attack-heavy",
+      "assetId": "a_0000000054440002",
+      "file": "attack-heavy.pcm",
+      "frames": 12960,
+      "bytes": 25928,
+      "sha256": "bde67fdee226ba2e1dab5e98e66b406cc5b43b67d4f716a781689f045bb10818",
+      "peakPcm16": 7200,
+      "rmsPcm16": 1590.652,
+      "description": "Low pressure thump with a brief rough air burst; heavy launch.",
+      "seed": 202
+    },
+    {
+      "cue": "attack-magic",
+      "assetId": "a_0000000054440003",
+      "file": "attack-magic.pcm",
+      "frames": 14880,
+      "bytes": 29768,
+      "sha256": "089772dc18b17f411bbb044431548d48eeb465afc82648e8c4252ef9f21af65b",
+      "peakPcm16": 6100,
+      "rmsPcm16": 1504.28,
+      "description": "Rising hollow glass partials with a soft sparkling tail; magical release.",
+      "seed": 303
+    },
+    {
+      "cue": "impact-light",
+      "assetId": "a_0000000054440004",
+      "file": "impact-light.pcm",
+      "frames": 5760,
+      "bytes": 11528,
+      "sha256": "0bd08f27cd80d1e02e3ce919a0451905f875af1f420cced6d916f1d2788d38eb",
+      "peakPcm16": 6600,
+      "rmsPcm16": 1149.738,
+      "description": "Dry woody knock with small inharmonic ticks; actual light damage.",
+      "seed": 404
+    },
+    {
+      "cue": "impact-heavy",
+      "assetId": "a_0000000054440005",
+      "file": "impact-heavy.pcm",
+      "frames": 16320,
+      "bytes": 32648,
+      "sha256": "3b5588757fb61e43037c1c2265c093df51ccd4159292a438bdb4500c5ca32eaa",
+      "peakPcm16": 7400,
+      "rmsPcm16": 1248.467,
+      "description": "Low resonant impact, granular crack and falling body; actual heavy damage.",
+      "seed": 505
+    },
+    {
+      "cue": "summon",
+      "assetId": "a_0000000054440006",
+      "file": "summon.pcm",
+      "frames": 28800,
+      "bytes": 57608,
+      "sha256": "89d8382aedae8172d7c4d04b58d40c5d90e4bdc3073987030a7140d2f05466ab",
+      "peakPcm16": 6900,
+      "rmsPcm16": 1653.336,
+      "description": "Three rising soft bell entries and a breathy bloom; new friendly unit.",
+      "seed": 606
+    },
+    {
+      "cue": "merge",
+      "assetId": "a_0000000054440007",
+      "file": "merge.pcm",
+      "frames": 37440,
+      "bytes": 74888,
+      "sha256": "f9bdb7cc4037ce9ba743b0faab0bb3c8235fb79ae25324a39941f6475e3fc16f",
+      "peakPcm16": 7200,
+      "rmsPcm16": 1168.229,
+      "description": "Two gathering pulses resolving into a brighter chord; accepted merge.",
+      "seed": 707
+    },
+    {
+      "cue": "ui-confirm",
+      "assetId": "a_0000000054440008",
+      "file": "ui-confirm.pcm",
+      "frames": 4800,
+      "bytes": 9608,
+      "sha256": "ae23f54a8c1234e4331281acb6e3222bbbfa9d242a5a2147550ef0fbcca8931f",
+      "peakPcm16": 5000,
+      "rmsPcm16": 1064.579,
+      "description": "Small rounded wooden click with a high positive accent.",
+      "seed": 808
+    },
+    {
+      "cue": "ui-reject",
+      "assetId": "a_0000000054440009",
+      "file": "ui-reject.pcm",
+      "frames": 7680,
+      "bytes": 15368,
+      "sha256": "1e1f1cc4c93398b5bd603a1381ea13d3d8b557cefcb6cfbec239a80053004e08",
+      "peakPcm16": 4800,
+      "rmsPcm16": 1067.67,
+      "description": "Gentle double low knock, not a loud alarm.",
+      "seed": 909
+    },
+    {
+      "cue": "death",
+      "assetId": "a_000000005444000a",
+      "file": "death.pcm",
+      "frames": 13440,
+      "bytes": 26888,
+      "sha256": "6cd5d2cebb030f41a8bbf54213f237ff7b9855eb59c4a9aef565ebbbed14ffa0",
+      "peakPcm16": 5700,
+      "rmsPcm16": 1080.198,
+      "description": "Small falling hollow puff, softer than the damaging impact.",
+      "seed": 1010
+    }
+  ]
+}

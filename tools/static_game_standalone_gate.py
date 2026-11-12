@@ -15,14 +15,14 @@ import sys
 import time
 import zlib
 
-from static_game_native_gate import clean_checkout, digest, json_file, require, engine_context, CONTEXT_TESTS, context_test_output
+from static_game_native_gate import clean_checkout, digest, json_file, require, engine_context, CONTEXT_TESTS, context_test_output, switchboard_target_pixels
 
 SCHEMA = 'orr.static-standalone-native/1'
 TEST = 'source_hidden_standalone_windows'
 DECODERS = {'little_and_big_endian_pixels', 'rgb565_masks_and_scanline_padding',
             'swapped_masks_and_packed24', 'reject_bad_bounds_masks_and_lengths'}
-GAMES = {'delivery': ('StarterDelivery', '0x5354415254455201'),
-         'switchboard': ('StarterSwitchboard', '0x5354415254455202')}
+GAMES = {'delivery': ('StarterDelivery', '0x5354415254563201'),
+         'switchboard': ('StarterSwitchboard', '0x5354415254563202')}
 
 
 def strict_json(text):
@@ -104,9 +104,9 @@ def png(path, width, height):
 
 def expected_camera(alias):
     # Independently derive from known authored fixture positions and shared 0.4
-    # circle radii, matching f32 arithmetic without accepting producer geometry.
+    # circle radii / target square half-extents; never producer geometry.
     f32 = lambda n: struct.unpack('<f', struct.pack('<f', n))[0]
-    points = [[2,2],[2,2]] if alias == 'delivery' else [[0,0],[0,2],[2,2],[4,2],[6,2]]
+    points = [[2,2],[2,2]] if alias == 'delivery' else [[0,0],[0,2],[2,2],[4,2],[6,2],[0,4],[2,4],[4,4],[6,4]]
     radius = f32(0.4)
     low = [min(f32(p[i]-radius) for p in points) for i in range(2)]
     high = [max(f32(p[i]+radius) for p in points) for i in range(2)]
@@ -140,6 +140,11 @@ def pixel_oracle(path, capture, alias):
     else:
         require(count([0, 0], 'blue') > 20, 'native switch cursor missing')
         require(count([0, 2], 'green' if capture['phase'] == 'won' else 'gray') > 20, 'native lamp transition missing')
+        # standalone fixture authors target=1, immutable through win/restart.
+        switchboard_target_pixels(pixels, w, h, lambda world: (
+            w/2+(world[0]-expected['center'][0])*min(w,h)/(2*expected['half_extent']),
+            h/2-(world[1]-expected['center'][1])*min(w,h)/(2*expected['half_extent'])), 1)
+
 
 
 def bundle(directory, receipt, source_sha, expected_binary):

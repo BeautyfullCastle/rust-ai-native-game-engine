@@ -727,3 +727,6 @@ fn validate_room_wall_extents(half_extents: [FP; 2]) -> Result<(), String> {
 #[cfg(test)]
 #[path = "room_wall_update_checked_tests.rs"]
 mod room_wall_update_checked_tests;
+
+#[path = "room_authoring/layout_import.rs"]
+mod layout_import;

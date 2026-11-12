@@ -35,6 +35,7 @@ pub(super) fn documents_for(seed: &str, template: &str) -> Result<(Scene, Docume
                             Source::Region(if index == 3 { 21 } else { 20 })
                         },
                         units_per_pixel: 0.5,
+                        orientation: None,
                     },
                 )
             })

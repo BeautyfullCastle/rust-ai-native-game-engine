@@ -1,0 +1,47 @@
+# Create a Room with authored lighting
+
+`orr_new_lit_room` creates a new complete Linux Room project with lighting already declared, using an explicit built-in default or a supplied light document. The existing Room starter normally omits lighting, requiring manual manifest work. This path retains its scene, models, camera, verified CC0 package and deterministic initial Frame, adding the light before publication.
+
+Build:
+
+```sh
+cargo build --locked -p orr_sample --features project-create,room-lighting --bin orr_new_lit_room
+```
+
+For a ready-to-edit warm fixed light without writing JSON, explicitly select the existing enabled default:
+
+```sh
+target/debug/orr_new_lit_room --output /absolute/new-game --seed my-game --lighting-default
+```
+
+Exactly one of `--lighting-default` and `--lighting FILE` is required. `--lighting-default` takes no value and cannot be repeated; there is no implicit light choice. It uses `Document::enabled_default()` (fixed position `[0,4,0]`, linear color `[1,0.9,0.7]`, intensity3, range12, always active). These values are saved in the project and remain editable. Both modes support the optional `--character` flag.
+
+For custom lighting instead, provide a valid Room lighting document, for example:
+
+```json
+{"version":3,"point_light":{"position":[0,4,0],"color":[1,0.9,0.7],"intensity":3,"range":12},"follow_player":[1,2,-1],"activation":"key_missing"}
+```
+
+Then create a new destination under an existing directory:
+
+```sh
+target/debug/orr_new_lit_room --output /absolute/new-game --seed my-game --lighting /absolute/light.json
+```
+
+For the existing animated character starter, add `--features room-character` when building creator, editor, runtime and exporter, and pass `--character` to creation. The combined template ID is `room-escape-lit-character-3d-v1`. This explicitly opts into both character and lighting; the default command retains the original static starter. Missing compiled character support rejects before opening the input or destination.
+
+The seed uses the existing bounded ASCII starter contract. The tool copies validated light values, not a live reference to the input file. Fixed, carried, conditional and disabled documents use the existing strict versions1–3. The input is a bounded regular nonsymlink file; malformed, oversized and special inputs reject. No source script, compiler or downloaded content executes during creation. The static template ID is `room-escape-lit-3d-v1`.
+
+Open with a `room-lighting` enabled editor:
+
+```sh
+orr_editor --room-project /absolute/new-game
+```
+
+Room lighting controls can Apply, Undo/Redo, Save and reopen the generated sidecar without editing the manifest. Run with a `room-lighting` enabled `room_escape --project /absolute/new-game`. Export with the existing lighting-enabled `orr_export_room` and a trusted lighting-capable runtime. Consumers still require explicit lighting consent; a feature being compiled does not authorize every caller. The lighting source and creator are unnecessary once the complete project or exported bundle exists. Combined projects require explicit character and lighting consumer consent; enabling only one is insufficient.
+
+The supplied light is the existing single unshadowed imported-model light. The optional character reuses the existing character package, authored animation configuration and gameplay-state selection. This does not add GPU features, progress identity or gameplay rules. `key_missing` lights turn off on actual key pickup; Edit/Stop still previews the authored light.
+
+Creation first uses the existing Room generator in an owned temporary directory. Only its unpublished manifest, lighting sidecar and README change. The complete saved project is admitted and its bounded byte closure rechecked before atomic Linux no-replace publication. Existing files, directories and symlinks at the output are refused, including a competing destination created just before publication. Failures clean only the owned stage. This assumes trusted local directories; parent inode replacement, hostile filesystem races and power-loss durability are not covered.
+
+Focused acceptance checks explicit default creation without an input document, mutually exclusive/duplicate/malformed light choices, reproducible creation, unchanged base gameplay/assets, explicit consumer consent, invalid paths/lights, interruption, tampering, competing publication, bounded FIFO-safe input, actual CLI options, Editor Apply/Save/reopen/pickup and a source-hidden exported headless game. These are CPU checks. Windows is an explicit unsupported CLI target here; its fallback is compile-checked, not positive creation. Existing Windows access failures remain unresolved. Native-window, GPU pixels, audio-device and video playtests require separate verification; a locked computer is not unlocked or bypassed.

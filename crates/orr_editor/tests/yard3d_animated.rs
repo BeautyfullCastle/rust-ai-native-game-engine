@@ -652,3 +652,31 @@ fn assignment_rejects_invalid_external_rest_bounds_even_when_clip_zero_is_valid(
     assert!(app.models.assign(&app.editor).is_err());
     assert_eq!(app.models.bindings.as_ref().unwrap().document(), &before);
 }
+
+#[cfg(target_os = "linux")]
+#[path = "yard3d_animated/settings_copy.rs"]
+mod settings_copy;
+
+#[cfg(target_os = "linux")]
+#[path = "yard3d_animated/box_fit.rs"]
+mod box_fit;
+
+#[cfg(target_os = "linux")]
+#[path = "yard3d_animated/sphere_fit.rs"]
+mod sphere_fit;
+
+#[cfg(target_os = "linux")]
+#[path = "yard3d_animated/rotation.rs"]
+mod rotation;
+
+#[cfg(target_os = "linux")]
+#[path = "yard3d_animated/orphan_cleanup.rs"]
+mod orphan_cleanup;
+
+#[cfg(target_os = "linux")]
+#[path = "yard3d_animated/batch.rs"]
+mod batch;
+
+#[cfg(target_os = "linux")]
+#[path = "yard3d_animated/batch_remove.rs"]
+mod batch_remove;

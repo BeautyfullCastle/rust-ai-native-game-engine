@@ -7,13 +7,17 @@ without changing simulation state/schema or the reserved export implementation.
 
 ```powershell
 cargo build --release --locked -p orr_editor --features windows-projects
-target/release/orr_editor.exe --game room-escape
+target/release/orr_editor.exe --game room-escape-v1
 ```
 
-The project menu is intentionally available in a local Room editor, not as an
-implicit game switch from Physics, MeshNavigation or other game types. In
+The project menu is available in a local Room or PhysGame editor, not as an
+implicit game switch from MeshNavigation or other game types. In
 `File > New Room project…`, enter an absolute new directory inside an existing
 parent and a deterministic ASCII seed, then choose `Create Room project`.
+Empty or overlong directory fields disable only their corresponding action and
+show the needed correction before authorization or a worker starts. These passive
+hints do not inspect disk contents or establish readiness. The existing admission
+checks still reject invalid paths, seeds, missing files and unsafe targets.
 Existing files/directories are not overwritten. The starter includes its scene,
 stable GUIDs, models/package closure, camera and local project metadata.
 

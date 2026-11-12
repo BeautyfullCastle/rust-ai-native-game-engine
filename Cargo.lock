@@ -1952,6 +1952,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
+name = "html5gum"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbae3133814a10216af5242a254420a74cb0d2f7715646924f5a8e7720cd188b"
+
+[[package]]
 name = "httlib-huffman"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3120,13 +3126,23 @@ name = "orr_cli"
 version = "0.0.1"
 dependencies = [
  "orr_edit",
+ "orr_games",
  "orr_mcp",
  "orr_reflect",
  "orr_remote",
  "orr_sample",
  "orr_sim",
+ "png 0.18.1",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "orr_coop_defense_web"
+version = "0.0.1"
+dependencies = [
+ "orr_games",
+ "orr_sim",
 ]
 
 [[package]]
@@ -3168,6 +3184,7 @@ dependencies = [
  "orr_model",
  "orr_model_bindings",
  "orr_navigation",
+ "orr_navigation_view",
  "orr_package",
  "orr_reflect",
  "orr_remote",
@@ -3182,10 +3199,12 @@ dependencies = [
  "orr_tilemap",
  "orr_view",
  "png 0.17.16",
+ "rustix 1.1.5",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
+ "toml",
  "winit",
 ]
 
@@ -3304,16 +3323,24 @@ dependencies = [
 name = "orr_navigation_view"
 version = "0.0.1"
 dependencies = [
+ "orr_bridge",
+ "orr_ecs",
  "orr_fp",
+ "orr_games",
  "orr_model",
  "orr_navigation",
  "orr_package",
+ "orr_remote",
  "orr_render",
+ "orr_sample",
+ "orr_sim",
  "orr_terrain",
  "orr_terrain_view",
  "png 0.18.1",
+ "rustix 1.1.5",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
 ]
 
@@ -3345,10 +3372,35 @@ dependencies = [
 name = "orr_package"
 version = "0.0.1"
 dependencies = [
+ "base64 0.22.1",
+ "crc32fast",
+ "html5gum",
+ "orr_asset_cook",
+ "orr_ecs",
+ "orr_games",
+ "orr_model",
+ "orr_sim",
+ "orr_sprite",
+ "png 0.17.16",
+ "regex",
+ "rustix 1.1.5",
  "semver",
  "serde",
  "serde_json",
+ "sha1",
  "sha2",
+ "tempfile",
+ "toml",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "orr_package_diff"
+version = "0.0.1"
+dependencies = [
+ "orr_package",
+ "serde",
+ "serde_json",
  "tempfile",
 ]
 
@@ -3519,6 +3571,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "ttf-parser",
+ "windows-sys 0.61.2",
  "winit",
 ]
 
@@ -3571,6 +3624,7 @@ dependencies = [
 name = "orr_sprite"
 version = "0.0.1"
 dependencies = [
+ "png 0.17.16",
  "serde",
  "serde_json",
 ]
@@ -3588,6 +3642,7 @@ dependencies = [
  "orr_edit",
  "orr_editor",
  "orr_fp",
+ "orr_games",
  "orr_input",
  "orr_reflect",
  "orr_remote",
@@ -3611,6 +3666,30 @@ version = "0.0.1"
 dependencies = [
  "orr_fp",
  "sha2",
+]
+
+[[package]]
+name = "orr_terrain_camera"
+version = "0.0.1"
+dependencies = [
+ "orr_terrain",
+ "orr_terrain_view",
+]
+
+[[package]]
+name = "orr_terrain_demo"
+version = "0.0.1"
+dependencies = [
+ "orr_fp",
+ "orr_render",
+ "orr_terrain",
+ "orr_terrain_view",
+ "orr_view",
+ "png 0.18.1",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "winit",
 ]
 
 [[package]]
@@ -3645,13 +3724,16 @@ dependencies = [
 name = "orr_terrain_view"
 version = "0.0.1"
 dependencies = [
+ "fdeflate",
  "orr_fp",
  "orr_model",
  "orr_package",
  "orr_render",
  "orr_terrain",
  "png 0.18.1",
+ "serde",
  "serde_json",
+ "sha2",
  "tempfile",
 ]
 
@@ -5103,10 +5185,12 @@ version = "1.1.6+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "920602543f0911ab71da12c50d59701da54c196d1a2bf5cb4b75667f137a406a"
 dependencies = [
+ "indexmap",
  "serde_core",
  "serde_spanned",
  "toml_datetime",
  "toml_parser",
+ "toml_writer",
  "winnow",
 ]
 
@@ -5139,6 +5223,12 @@ checksum = "1d38ac1cf9b95face32296c0a3ede1fdc270627c9d9c02a7274dd6d960dc4d56"
 dependencies = [
  "winnow",
 ]
+
+[[package]]
+name = "toml_writer"
+version = "1.1.3+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06bdbd8cfc056b8d2e2e85f29b56a3bdbecb527cef81eb39e3e7b98af4652770"
 
 [[package]]
 name = "tracing"

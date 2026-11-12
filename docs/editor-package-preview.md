@@ -7,7 +7,8 @@ models** when needed.
 
 Choose **Preview static model {package}/{asset}**. A separate **Static package
 model preview** window loads that installed GLB, glTF or Orrmodel as a static
-asset. No selected entity is required. This is different from **Preview package
+asset. Cooked `*.model.json` files produced by model package authoring are also
+listed as static models. No selected entity is required. This is different from **Preview package
 addition**, which only previews an installation change.
 
 - Drag the preview image with the primary mouse button to orbit
@@ -59,3 +60,31 @@ bounds, finite camera input and bounded target sizes.
 With `room-animated-models`, animation-capable packages also support explicit
 [indexed clip pose inspection](editor-package-animation-preview.md) before
 assignment. Static and animated previews share one resource slot.
+
+## Fitted horizontal views
+
+The preview's **Front view**, **Right view**, **Back view**, and **Left view**
+buttons look toward the admitted model center from world +Z, +X, -Z, and -X.
+World +Y stays upright. Each choice restores the fitted zoom, making silhouette
+comparisons consistent even after scrolling. Dragging resumes free orbit;
+**Reset preview view** returns to the original oblique fitted view. Static and
+animated previews use the same controls; choosing a view does not change an
+animation clip or sample time.
+
+These controls affect only this preview's session camera. They do not rotate,
+assign or save the model, change the main editor camera, or modify project files.
+Focused CPU tests verify directions, fit, bounded matrices, orbit/reset and the
+production egui buttons. Native-window/GPU appearance still needs a separate
+playtest; CPU widget checks do not establish rendered model acceptance.
+
+## Use saved cooked model variants
+
+Packages created by `create-assembled`, `create-uv-model` and
+`create-retextured-model` contain `model.model.json`. After installing and
+verifying that package, choose **Preview static model** to inspect it, or select
+an entity and choose **Use model**, then **Save model bindings**. Reopening the
+bindings loads the installed model even after the original source directory is
+hidden. Recipe files and arbitrary JSON are not model entries; the cooked suffix
+still requires valid decoded model bytes, declared capability and verified identity.
+It does not enable animation. New cooked-file acceptance covers CPU browser
+requests and Linux assignment/save/reopen; native-window/GPU display is unverified.

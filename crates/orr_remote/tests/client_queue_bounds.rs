@@ -11,8 +11,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use common::*;
-use orr_bridge::{Bridge, BridgeError};
+use orr_bridge::Bridge;
+#[cfg(feature = "sample-host")]
+use orr_bridge::BridgeError;
 use orr_remote::link::{Incoming, PumpedWs, QueueLimits, Request, SendError, TransportQueueLimits};
+#[cfg(feature = "sample-host")]
 use orr_remote::sample::spawn_phys_host;
 use orr_remote::{
     Auth, Caps, ErpServer, Host, RemoteBridge, RemoteConfig, ServerConfig, Transport,
@@ -358,6 +361,7 @@ fn pumped_large_payload_is_delivered_once_and_reclaimed_on_dequeue() {
 }
 
 #[test]
+#[cfg(feature = "sample-host")]
 fn remote_error_budget_reclaims_and_overflow_terminates_local_and_websocket() {
     for websocket in [false, true] {
         let mut cfg = ServerConfig::new(Auth::DevNoAuth);
@@ -492,6 +496,7 @@ fn zero_and_small_socket_ingress_limits_are_observable_terminal() {
 }
 
 #[test]
+#[cfg(feature = "sample-host")]
 fn zero_or_undersized_error_limits_reject_retention_and_keep_terminal_marker() {
     for limits in [
         QueueLimits {

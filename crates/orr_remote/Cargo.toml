@@ -11,11 +11,14 @@ description = "Orrery ERP (Engine Remote Protocol): JSON-RPC server for the edit
 workspace = true
 
 [features]
+coop-defense = ["dep:orr_games", "orr_games/coop-defense-scene"]
 room-project = ["sample-host", "orr_sample/room-project"]
 linked-prefabs = ["orr_edit/linked-prefabs", "orr_reflect/linked-prefabs", "orr_sample?/linked-prefabs"]
 collect-dodge = ["sample-host", "orr_sample/collect-dodge"]
 navigation = ["sample-host", "dep:orr_games", "orr_games/navigation", "dep:orr_navigation_runtime", "dep:orr_navigation", "dep:orr_terrain"]
+terrain-patrol = ["navigation", "orr_games/terrain-patrol"]
 mesh-navigation = ["sample-host", "dep:orr_games", "orr_games/mesh-navigation", "dep:orr_navigation_runtime", "dep:orr_navigation"]
+mesh-patrol = ["mesh-navigation", "orr_games/mesh-patrol"]
 mesh-mission = ["mesh-navigation", "orr_games/mesh-mission"]
 mesh-hazards = ["mesh-mission", "orr_games/mesh-hazards"]
 terrain-physics = ["sample-host", "dep:orr_games", "orr_games/terrain-physics", "dep:orr_terrain_physics3d", "dep:orr_terrain"]

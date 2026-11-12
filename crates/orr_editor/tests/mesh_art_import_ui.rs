@@ -625,17 +625,17 @@ fn raw_agent_glb_import_is_applied_saved_reopened_and_exported_in_the_editor() {
     let graph_revision = initial_view.graph.revision();
     let initial_pixels = viewport_pixels(&mut harness);
 
-    if harness.query_by_label("Raw agent GLB").is_none() {
-        click(&mut harness, "Import raw agent art");
+    if harness.query_by_label("Agent art source (.glb or cooked model)").is_none() {
+        click(&mut harness, "Import agent art source");
     }
     set_field(
         &mut harness,
-        "Raw agent GLB",
+        "Agent art source (.glb or cooked model)",
         &fixture.raw_source.join(MODEL_ASSET).display().to_string(),
     );
     set_field(
         &mut harness,
-        "Raw agent license",
+        "Agent art source license",
         &fixture.raw_source.join(LICENSE_ASSET).display().to_string(),
     );
     set_field(
@@ -646,7 +646,7 @@ fn raw_agent_glb_import_is_applied_saved_reopened_and_exported_in_the_editor() {
     set_field(&mut harness, "Agent package name", PACKAGE_NAME);
     set_field(&mut harness, "Agent package version", PACKAGE_VERSION);
     assert!(harness
-        .get_by_label("Import agent GLB")
+        .get_by_label("Import agent art package")
         .accesskit_node()
         .is_disabled());
     click(
@@ -654,10 +654,10 @@ fn raw_agent_glb_import_is_applied_saved_reopened_and_exported_in_the_editor() {
         "I have reviewed rights to import this agent art",
     );
     assert!(!harness
-        .get_by_label("Import agent GLB")
+        .get_by_label("Import agent art package")
         .accesskit_node()
         .is_disabled());
-    click(&mut harness, "Import agent GLB");
+    click(&mut harness, "Import agent art package");
     wait_for_label(
         &mut harness,
         "raw agent-art importer result",

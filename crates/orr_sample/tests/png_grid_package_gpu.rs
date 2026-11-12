@@ -342,3 +342,285 @@ fn grid_cli_installed_locomotion_twelve_capture_pixels_and_frame_parity() {
         "producer_sha256":producer_hash,"source_png_sha256":hash(&sheet_bytes),"capture_count":12,"parity_checks":54,"source_hidden":true,"installed_bytes_preserved":true,"captures":captures})).unwrap()).unwrap();
     eprintln!("PNG grid: 12 Vulkan captures; 54 authoritative parity checks; source-hidden installed packages; Loop/Once and wrong-cell control");
 }
+
+// Separate padded acceptance: the legacy Vulkan test above is intentionally unchanged.
+const PADDED_GUTTER: [u8; 4] = [255, 0, 255, 255];
+const PADDED_CELLS: [[[u8; 4]; 6]; 4] = [
+    [R, G, B, P, Z, R],
+    [B, Z, G, R, P, B],
+    [G, P, R, Z, B, G],
+    [P, R, Z, B, G, P],
+];
+
+fn padded_oracle(texels: &[[u8; 4]; 6]) -> Vec<u8> {
+    let mut result = Vec::with_capacity(64 * 64 * 4);
+    for y in 0..64 {
+        for x in 0..64 {
+            // Literal 3x2 cell, eight screen pixels per source texel.
+            let cx = (f64::from(x) + 0.5 - 32.) / 8. + 1.5;
+            let cy = (f64::from(y) + 0.5 - 32.) / 8. + 1.;
+            let p = if (0.0..3.0).contains(&cx) && (0.0..2.0).contains(&cy) {
+                texels[cy.floor() as usize * 3 + cx.floor() as usize]
+            } else {
+                Z
+            };
+            let a = f64::from(p[3]) / 255.;
+            result.extend([
+                srgb(linear(p[0]) * a + 0.02 * (1. - a)),
+                srgb(linear(p[1]) * a + 0.02 * (1. - a)),
+                srgb(linear(p[2]) * a + 0.035 * (1. - a)),
+                255,
+            ]);
+        }
+    }
+    result
+}
+
+#[test]
+#[ignore = "requires built grid CLI and normal headless GPU; explicit gate runs exact one test"]
+fn padded_grid_cli_installed_headless_twelve_capture_pixels_and_frame_parity() {
+    assert_eq!(
+        std::env::var("ORR_REQUIRE_GPU").as_deref(),
+        Ok("1"),
+        "explicit GPU acceptance must fail closed"
+    );
+    let binary =
+        PathBuf::from(std::env::var_os("ORR_PNG_GRID_PACKAGE_BIN").expect("grid CLI required"))
+            .canonicalize()
+            .unwrap();
+    let evidence = PathBuf::from(
+        std::env::var_os("ORR_PADDED_GRID_PIXEL_EVIDENCE")
+            .expect("fresh evidence directory required"),
+    );
+    fs::create_dir(&evidence).expect("evidence directory must not already exist");
+    let fixture = ProjectFixture::new();
+    let inputs = fixture.root.join("grid-private-inputs");
+    let outputs = fixture.root.join("grid-generated");
+    fs::create_dir(&inputs).unwrap();
+    fs::create_dir(&outputs).unwrap();
+    let producer = inputs.join("grid-producer");
+    fs::copy(&binary, &producer).unwrap();
+    let producer_hash = hash(&fs::read(&producer).unwrap());
+    // Symmetric margins (1,2), unequal gaps (3,1), four 3x2 cells.
+    let mut sheet = PADDED_GUTTER.repeat(11 * 9);
+    for (cell, texels) in PADDED_CELLS.iter().enumerate() {
+        let left = 1 + (cell % 2) * 6;
+        let top = 2 + (cell / 2) * 3;
+        for y in 0..2 {
+            for x in 0..3 {
+                let at = ((top + y) * 11 + left + x) * 4;
+                sheet[at..at + 4].copy_from_slice(&texels[y * 3 + x]);
+            }
+        }
+    }
+    png(&inputs.join("sheet.png"), 11, 9, &sheet);
+    let sheet_bytes = fs::read(inputs.join("sheet.png")).unwrap();
+    fs::write(inputs.join("license.txt"), "Synthetic fixture, CC0-1.0\n").unwrap();
+    let mut packages = Vec::new();
+    for (name, order) in [("grid-good", [2, 3]), ("grid-wrong-order", [3, 2])] {
+        let recipe = json!({"schema":1,"name":name,"version":"1.0.0","license":"license.txt","png":"sheet.png",
+            "cell_width":3,"cell_height":2,"columns":2,"rows":2,
+            "margin_x":1,"margin_y":2,"spacing_x":3,"spacing_y":1,
+            "clips":[{"id":"idle","mode":"loop","frames":[{"cell":0,"duration_ms":100},{"cell":1,"duration_ms":100}]},
+                {"id":"walk","mode":"once","frames":[{"cell":order[0],"duration_ms":100},{"cell":order[1],"duration_ms":100}]}]});
+        let recipe_path = inputs.join(format!("{name}.json"));
+        fs::write(&recipe_path, serde_json::to_vec(&recipe).unwrap()).unwrap();
+        let output = outputs.join(name);
+        let result = Command::new(&producer)
+            .arg("--recipe")
+            .arg(&recipe_path)
+            .arg("--out")
+            .arg(&output)
+            .output()
+            .unwrap();
+        fs::write(
+            evidence.join(format!("{name}-cli.log")),
+            [result.stdout.as_slice(), result.stderr.as_slice()].concat(),
+        )
+        .unwrap();
+        assert!(
+            result.status.success(),
+            "grid CLI failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(fs::read(output.join("atlas.png")).unwrap(), sheet_bytes);
+        packages.push(output);
+    }
+    orr_package::Project::open(&fixture.root, compiled_runtime())
+        .unwrap()
+        .install(&packages)
+        .unwrap();
+    fs::remove_dir_all(&inputs).unwrap();
+    fs::remove_dir_all(&outputs).unwrap();
+    assert!(!producer.exists());
+    orr_package::Project::open(&fixture.root, compiled_runtime())
+        .unwrap()
+        .verify()
+        .unwrap();
+    fs::write(fixture.root.join("arena.scene.yaml"), "schema: orr.scene/1\nsingletons:\n  Score: { kills: [0,0,0,0,0,0,0,0] }\nentities:\n  e_00000001:\n    Position: { pos: [0,0] }\n    PlayerTag: { slot: 0 }\n").unwrap();
+    let gpu =
+        Wgpu::headless(WgpuOptions::default()).expect("required normal headless GPU unavailable");
+    let backend = format!("{:?}", gpu.adapter().get_info().backend);
+    let device_type = format!("{:?}", gpu.adapter().get_info().device_type);
+    eprintln!(
+        "Padded headless adapter: backend={backend}; name={}; type={device_type}",
+        gpu.adapter_name()
+    );
+    let target = OffscreenTarget::new(&gpu, 64, 64, TextureFormat::Rgba8UnormSrgb);
+    let mut captures = Vec::new();
+    let mut parity_checks = 0;
+    for (name, wrong_order) in [("grid-good", false), ("grid-wrong-order", true)] {
+        fs::write(fixture.root.join("arena.sprites.json"), serde_json::to_vec(&json!({"version":2,"scene":"arena.scene.yaml","project":".","camera_follow":HERO,
+            "bindings":{HERO:{"package":name,"document":"sprites.json","source":{"Locomotion":{"idle":"idle","walk":"walk"}},"units_per_pixel":1.0}}})).unwrap()).unwrap();
+        let before = tree(&fixture.root);
+        let prepared = PreparedRuntime::open(&fixture.root).unwrap();
+        let entity = prepared
+            .index()
+            .entity(&orr_reflect::Guid::parse(HERO).unwrap())
+            .unwrap();
+        let mut bridge = prepared.bridge().unwrap();
+        let mut control = prepared.bridge().unwrap();
+        let (_, mut presentation) = prepared.into_parts().unwrap();
+        presentation.update(bridge.snapshot().as_ref()).unwrap();
+        let admitted = &presentation.assets()[&(name.into(), "sprites.json".into())];
+        assert_eq!(
+            (
+                admitted.document.atlas().width,
+                admitted.document.atlas().height
+            ),
+            (11, 9)
+        );
+        assert_eq!(admitted.rgba, sheet);
+        assert_eq!(admitted.document.regions().len(), 4);
+        for (id, x, y) in [(0, 1, 2), (1, 7, 2), (2, 1, 5), (3, 7, 5)] {
+            let region = admitted.document.region(id).unwrap();
+            assert_eq!(
+                (region.x, region.y, region.width, region.height),
+                (x, y, 3, 2)
+            );
+        }
+        assert_eq!(
+            orr_package::Project::open(&fixture.root, compiled_runtime())
+                .unwrap()
+                .read_asset(name, "atlas.png")
+                .unwrap(),
+            sheet_bytes
+        );
+        assert_eq!(admitted.document.clips().len(), 2);
+        let mut compositor =
+            ProjectCompositor::new(gpu.clone(), target.format(), presentation.assets()).unwrap();
+        for tick in 0..=26u64 {
+            let moving = (13..26).contains(&tick);
+            if tick > 0 {
+                let input =
+                    ArenaInput::new(if moving { FP::ONE } else { FP::ZERO }, FP::ZERO, false);
+                bridge.set_input(PlayerSlot(0), input).unwrap();
+                control.set_input(PlayerSlot(0), input).unwrap();
+                bridge.step(1);
+                control.step(1);
+            }
+            let immutable = bridge.host().session().frame().to_bytes();
+            let checksum = bridge.host().session().frame().checksum();
+            presentation.update(bridge.snapshot().as_ref()).unwrap();
+            assert_eq!(presentation.state(HERO).moving, moving);
+            let origin = if tick >= 26 {
+                26
+            } else if moving {
+                13
+            } else {
+                0
+            };
+            assert_eq!(
+                presentation.state(HERO).elapsed_ms,
+                (tick - origin) * 1000 / 60
+            );
+            if (!wrong_order && CAPTURE_TICKS.contains(&tick)) || (wrong_order && tick == 19) {
+                let position = bridge
+                    .host()
+                    .session()
+                    .frame()
+                    .get::<Position>(entity)
+                    .unwrap()
+                    .pos;
+                let camera = Camera::new([position.x.to_f32(), position.y.to_f32()], 4.);
+                assert_eq!(presentation.camera.center, camera.center);
+                compositor
+                    .draw(
+                        target.render_view(),
+                        target.size(),
+                        &RenderList::new(),
+                        presentation.sprites(),
+                        &camera,
+                    )
+                    .unwrap();
+                let image = target.read_rgba8();
+                let cell = expected_cell(tick, wrong_order);
+                // Persist the first failing readback before either pixel verdict.
+                let file = format!("{name}-tick-{tick}.png");
+                png(&evidence.join(&file), 64, 64, &image);
+                captures.push(json!({"file":file,"sha256":hash(&fs::read(evidence.join(&file)).unwrap()),"tick":tick,"cell":cell,"wrong_order":wrong_order}));
+                fs::write(evidence.join("partial-receipt.json"), serde_json::to_vec_pretty(&json!({
+                    "schema":1,"completed":false,"pixel_verdict_pending":true,
+                    "adapter":gpu.adapter_name(),"backend":backend,"device_type":device_type,"producer_sha256":producer_hash,
+                    "source_png_sha256":hash(&sheet_bytes),"capture_count":captures.len(),
+                    "completed_parity_checks":parity_checks,"captures":captures
+                })).unwrap()).unwrap();
+                let expected = padded_oracle(&PADDED_CELLS[cell]);
+                let first_mismatch = image
+                    .iter()
+                    .zip(&expected)
+                    .position(|(a, b)| a.abs_diff(*b) > 3);
+                let max_difference = image
+                    .iter()
+                    .zip(&expected)
+                    .map(|(a, b)| a.abs_diff(*b))
+                    .max();
+                assert!(
+                    matches(&image, &expected),
+                    "{name} tick={tick} expected literal cell={cell}; first differing byte={first_mismatch:?}, maximum difference={max_difference:?}"
+                );
+                if !wrong_order && tick == 18 {
+                    // Wrong row stride (cell_height instead of cell_height + spacing_y)
+                    // would sample y=4: three magenta gutter texels then cell 2's first row.
+                    let wrong_stride = [PADDED_GUTTER, PADDED_GUTTER, PADDED_GUTTER, G, P, R];
+                    assert!(
+                        !matches(&image, &padded_oracle(&wrong_stride)),
+                        "wrong-stride/gutter negative control did not distinguish oracle"
+                    );
+                }
+                if wrong_order {
+                    assert!(
+                        !matches(
+                            &image,
+                            &padded_oracle(&PADDED_CELLS[expected_cell(tick, false)])
+                        ),
+                        "wrong-cell negative control did not distinguish oracle"
+                    );
+                }
+            }
+            assert_eq!(
+                bridge.host().session().frame().to_bytes(),
+                immutable,
+                "presentation mutated frame"
+            );
+            assert_eq!(
+                bridge.host().session().frame().to_bytes(),
+                control.host().session().frame().to_bytes()
+            );
+            assert_eq!(bridge.host().session().frame().checksum(), checksum);
+            assert_eq!(checksum, control.host().session().frame().checksum());
+            parity_checks += 1;
+        }
+        assert_eq!(
+            tree(&fixture.root),
+            before,
+            "runtime changed installed project bytes"
+        );
+    }
+    assert_eq!(captures.len(), 12);
+    assert_eq!(parity_checks, 54);
+    fs::write(evidence.join("receipt.json"), serde_json::to_vec_pretty(&json!({"schema":1,"test":"padded_grid_cli_installed_headless_twelve_capture_pixels_and_frame_parity",
+        "adapter":gpu.adapter_name(),"backend":backend,"device_type":format!("{:?}",gpu.adapter().get_info().device_type),"is_software":gpu.is_software(),
+        "producer_sha256":producer_hash,"source_png_sha256":hash(&sheet_bytes),"capture_count":12,"parity_checks":54,"source_hidden":true,"installed_bytes_preserved":true,"wrong_stride_gutter_rejected":true,"captures":captures})).unwrap()).unwrap();
+    eprintln!("Padded PNG grid: 12 normal-headless captures; 54 authoritative parity checks; source-hidden installed packages; Loop/Once and wrong-cell control");
+}

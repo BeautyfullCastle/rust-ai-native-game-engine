@@ -12,6 +12,7 @@
 mod args;
 mod cmds;
 mod help;
+mod gameplay;
 mod ops;
 
 use std::io::Write;
@@ -134,7 +135,7 @@ fn main() -> ExitCode {
     let all: Vec<String> = std::env::args().skip(1).collect();
     let (g, rest) = match args::split_global(all) {
         Ok(v) => v,
-        Err(e) => return finish_early(&e, false),
+        Err((e, json)) => return finish_early(&e, json),
     };
     if g.version {
         out(&format!("orr {}", env!("CARGO_PKG_VERSION")));
@@ -144,6 +145,9 @@ fn main() -> ExitCode {
         if g.help {
             out(help::overview());
             return ExitCode::SUCCESS;
+        }
+        if g.json {
+            return finish_early(&CliErr::Usage("no command given".into()), true);
         }
         eprintln!("error: no command given\n\n{}", help::overview());
         return ExitCode::from(2);

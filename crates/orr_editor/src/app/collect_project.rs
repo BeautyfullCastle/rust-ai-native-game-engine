@@ -62,6 +62,7 @@ impl EditorApp {
     }
 
     fn collect_project_blocker(&self) -> Option<String> {
+        if self.navigation_export_busy() { return Some("Wait for Navigation export completion before replacing the workspace".into()); }
         if !(self.editor.game() == crate::game::EditorGame::PhysGame
             || self.editor.game().is_collect())
             || !self.editor.spec().is_local()
@@ -110,6 +111,7 @@ impl EditorApp {
         }
         #[cfg(feature = "mesh-navigation")]
         if self.mesh_navigation.art_import_busy()
+            || self.mesh_animation_import_busy()
             || self.mesh_navigation.prop_gesture_busy()
             || self.mesh_navigation.agent_pick_busy()
             || self.mesh_navigation.geometry_vertex_busy()

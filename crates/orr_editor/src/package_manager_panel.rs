@@ -1,3 +1,9 @@
+mod keep;
+mod dependency_add;
+mod dependency_update;
+mod update_impact;
+mod usage;
+
 use crate::package_manager::{self, Plan, RemovalPlan, RemovalReceipt, UpdatePlan};
 use egui::Context;
 use orr_model_bindings::model_bindings::ModelKind;
@@ -8,6 +14,36 @@ use std::{
 };
 
 enum Completion {
+    KeepPreviewed {identity:keep::Identity,result:Result<package_manager::KeepPlan,String>},
+    Kept {identity:keep::Identity,result:Result<Lock,String>},
+    DependenciesUpdatePreviewed {
+        identity: dependency_update::Identity,
+        result: Result<package_manager::DependencyUpdatePlan, String>,
+    },
+    DependenciesUpdated {
+        identity: dependency_update::Identity,
+        result: Result<Lock, String>,
+    },
+    DependenciesPreviewed {
+        identity: dependency_add::Identity,
+        result: Result<package_manager::DependencyAddPlan, String>,
+    },
+    DependenciesAdded {
+        identity: dependency_add::Identity,
+        result: Result<Lock, String>,
+    },
+    UpdateImpactInspected {
+        identity: update_impact::Identity,
+        result: Result<package_manager::UpdateImpactReport, String>,
+    },
+    UpdateImpactChecked {
+        identity: update_impact::Identity,
+        result: Result<package_manager::UpdateImpactReport, String>,
+    },
+    UsageInspected {
+        identity: usage::Identity,
+        result: Result<usage::UsageReport, String>,
+    },
     UpdatePreviewed {
         root: PathBuf,
         source_identity: String,
@@ -102,6 +138,14 @@ pub struct Panel {
     source_generation: u64,
     model_filter: String,
     verified: Option<Lock>,
+    dependency_add: dependency_add::State,
+    dependency_update: dependency_update::State,
+    updating_dependencies: bool,
+    installing_dependencies: bool,
+    usage: usage::State,
+    keep: keep::State,
+    keeping: bool,
+    update_impact: update_impact::State,
     preview: Option<PreviewedPlan>,
     update_preview: Option<PreviewedUpdate>,
     removal_name: String,
@@ -120,7 +164,7 @@ pub struct Panel {
 impl Panel {
     pub(crate) fn removal_busy(&self) -> bool {
         // The host uses this existing hook for its whole-frame mutation fence.
-        (self.removing || self.updating) && self.pending.is_some()
+        (self.removing || self.updating || self.installing_dependencies || self.updating_dependencies || self.keeping) && self.pending.is_some()
     }
     pub fn busy(&self) -> bool {
         self.pending.is_some() || self.model_import.busy()
@@ -198,7 +242,17 @@ impl Panel {
     ) {
         self.select_project(project);
         self.select_source();
+        self.dependency_add.observe();
         let was_mutating = self.removal_busy();
+        // Invalidate before polling: a completed saved-state query must not
+        // reappear after dirty authoring, a modal, or closing this panel.
+        if blocked_reason.is_some() || !self.open {
+            self.keep.invalidate();
+            self.usage.invalidate();
+            self.update_impact.invalidate();
+            self.dependency_add.invalidate();
+            self.dependency_update.invalidate();
+        }
         self.poll();
         if blocked_reason.is_some() {
             self.update_preview = None;
@@ -317,6 +371,9 @@ impl Panel {
                         update_preview_details(ui, preview.plan.preview());
                     }
                 }
+                self.show_dependency_add(ui, can_operate, was_mutating);
+                self.show_dependency_update(ui, can_operate);
+                self.show_update_impact(ui, can_operate);
                 self.model_import.show(
                     ui,
                     can_operate && !self.busy(),
@@ -354,6 +411,8 @@ impl Panel {
                         (self.project_generation, self.source_generation),
                     );
                 }
+                self.show_keep(ui,can_operate);
+                self.show_usage(ui, can_operate);
                 ui.horizontal(|ui| {
                     ui.label(format!("Removal selection: {}", self.removal_name));
                     if ui.add_enabled(can_operate && self.verified.as_ref().is_some_and(|lock| lock.direct.contains_key(&self.removal_name)), egui::Button::new("Preview package removal")).clicked() { self.start_removal_preview(); }
@@ -392,12 +451,22 @@ impl Panel {
                     ui.label(&self.status);
                 }
             });
+        if !open {
+            self.usage.invalidate();
+            self.update_impact.invalidate();
+            self.dependency_add.invalidate();
+            self.dependency_update.invalidate();
+        }
         self.open = open;
     }
 
     fn select_project(&mut self, project: Option<&Path>) {
         let next_root = project.map(Path::to_path_buf);
         if self.root != next_root {
+            self.usage = usage::State::default();
+            self.update_impact.invalidate();
+            self.dependency_add.invalidate();
+            self.dependency_update.invalidate();
             self.root = next_root;
             self.project_generation = self.project_generation.saturating_add(1);
             self.last_removal = None;
@@ -420,6 +489,10 @@ impl Panel {
     fn select_source(&mut self) {
         let next_source = self.source.trim().to_owned();
         if self.source_identity != next_source {
+            self.usage.invalidate();
+            self.update_impact.invalidate();
+            self.dependency_add.invalidate();
+            self.dependency_update.invalidate();
             self.update_preview = None;
             self.removal_preview = None;
             self.source_identity = next_source;
@@ -429,6 +502,7 @@ impl Panel {
     }
 
     fn poll(&mut self) {
+        self.clear_stale_dependency_update();
         let Some(receiver) = &self.pending else {
             return;
         };
@@ -438,22 +512,57 @@ impl Panel {
             Err(TryRecvError::Disconnected) => {
                 self.pending = None;
                 self.removing = false;
-                self.status = if self.updating {
+                self.status = if self.keeping {
+                    "Dependency keep worker disconnected; publication outcome is uncertain. Verify installed packages; no automatic retry or rollback was performed.".into()
+                } else if self.updating_dependencies {
+                    "Dependency Update worker disconnected; publication outcome is uncertain. Verify installed packages; no automatic retry or rollback was performed.".into()
+                } else if self.installing_dependencies {
+                    "Dependency Add worker disconnected; publication outcome is uncertain. Verify installed packages; no automatic retry or rollback was performed.".into()
+                } else if self.updating {
                     "Package update worker disconnected; publication outcome is uncertain. Verify installed packages before another attempt; no automatic retry or rollback was performed.".into()
                 } else {
                     "Package worker disconnected before returning a result.".into()
                 };
-                if self.updating {
+                if self.updating || self.installing_dependencies || self.updating_dependencies || self.keeping {
                     self.invalidate_package_cache();
                 }
+                self.keeping = false;
                 self.updating = false;
+                self.installing_dependencies = false;
+                self.updating_dependencies = false;
                 return;
             }
         };
         self.pending = None;
+        self.keeping = false;
         self.removing = false;
         self.updating = false;
+        self.installing_dependencies = false;
+        self.updating_dependencies = false;
         match completion {
+            Completion::KeepPreviewed {identity,result}=>self.finish_keep_preview(identity,result),
+            Completion::Kept {identity,result}=>self.finish_keep(identity,result),
+            Completion::DependenciesUpdatePreviewed { identity, result } => {
+                self.finish_dependencies_update_preview(identity, result);
+            }
+            Completion::DependenciesUpdated { identity, result } => {
+                self.finish_dependencies_update(identity, result);
+            }
+            Completion::DependenciesPreviewed { identity, result } => {
+                self.finish_dependencies_preview(identity, result);
+            }
+            Completion::DependenciesAdded { identity, result } => {
+                self.finish_dependencies_add(identity, result);
+            }
+            Completion::UpdateImpactInspected { identity, result } => {
+                self.recheck_update_impact(identity, result);
+            }
+            Completion::UpdateImpactChecked { identity, result } => {
+                self.finish_update_impact(identity, result);
+            }
+            Completion::UsageInspected { identity, result } => {
+                self.finish_usage(identity, result);
+            }
             Completion::UpdatePreviewed {
                 root,
                 source_identity,
@@ -468,7 +577,7 @@ impl Panel {
                     && self.source_generation == source_generation
                 {
                     match result {
-                        Ok(plan) if plan.root() == root => {
+                        Ok(plan) if same_project_root(plan.root(), &root) => {
                             self.update_preview = Some(PreviewedUpdate {
                                 plan,
                                 source_identity,
@@ -527,7 +636,7 @@ impl Panel {
                     && self.restoration_generation == generation
                 {
                     match result {
-                        Ok(preview) if receipt.root() == root => {
+                        Ok(preview) if same_project_root(receipt.root(), &root) => {
                             self.last_removal = Some(receipt);
                             self.restoration_preview = Some(preview);
                             self.status = "Restoration preview ready. Nothing changed; explicitly Restore last removal to reactivate the exact cached selection.".into();
@@ -733,6 +842,11 @@ impl Panel {
     }
 
     fn invalidate_package_cache(&mut self) {
+        self.keep.invalidate();
+        self.usage.invalidate();
+        self.update_impact.invalidate();
+        self.dependency_add.invalidate();
+        self.dependency_update.invalidate();
         self.preview_request = None;
         self.last_removal = None;
         self.restoration_preview = None;
@@ -780,6 +894,10 @@ impl Panel {
         if self.busy() {
             return;
         }
+        self.usage.invalidate();
+        self.update_impact.invalidate();
+        self.dependency_add.invalidate();
+        self.dependency_update.invalidate();
         let Some(root) = self.root.clone() else {
             self.status = "Open a Room project before previewing a package update.".into();
             return;
@@ -820,6 +938,10 @@ impl Panel {
         if self.busy() {
             return;
         }
+        self.usage.invalidate();
+        self.update_impact.invalidate();
+        self.dependency_add.invalidate();
+        self.dependency_update.invalidate();
         if let Err(error) = parse_source_path(&self.source) {
             self.update_preview = None;
             self.status = error;
@@ -872,6 +994,10 @@ impl Panel {
         if self.busy() {
             return;
         }
+        self.usage.invalidate();
+        self.update_impact.invalidate();
+        self.dependency_add.invalidate();
+        self.dependency_update.invalidate();
         let Some(root) = self.root.clone() else {
             return;
         };
@@ -911,6 +1037,10 @@ impl Panel {
         if self.busy() {
             return;
         }
+        self.usage.invalidate();
+        self.update_impact.invalidate();
+        self.dependency_add.invalidate();
+        self.dependency_update.invalidate();
         let Some(plan) = self.removal_preview.take() else {
             return;
         };
@@ -953,6 +1083,10 @@ impl Panel {
         if self.busy() {
             return;
         }
+        self.usage.invalidate();
+        self.update_impact.invalidate();
+        self.dependency_add.invalidate();
+        self.dependency_update.invalidate();
         let Some(receipt) = self.last_removal.take() else {
             return;
         };
@@ -990,6 +1124,10 @@ impl Panel {
         if self.busy() || self.restoration_preview.is_none() {
             return;
         }
+        self.usage.invalidate();
+        self.update_impact.invalidate();
+        self.dependency_add.invalidate();
+        self.dependency_update.invalidate();
         let Some(receipt) = self.last_removal.take() else {
             return;
         };
@@ -1028,6 +1166,10 @@ impl Panel {
         if self.busy() {
             return;
         }
+        self.usage.invalidate();
+        self.update_impact.invalidate();
+        self.dependency_add.invalidate();
+        self.dependency_update.invalidate();
         self.last_removal = None;
         self.restoration_preview = None;
         self.restoration_generation = self.restoration_generation.saturating_add(1);
@@ -1061,6 +1203,10 @@ impl Panel {
         if self.busy() {
             return;
         }
+        self.usage.invalidate();
+        self.update_impact.invalidate();
+        self.dependency_add.invalidate();
+        self.dependency_update.invalidate();
         let Some(root) = self.root.clone() else {
             self.status = "Open a Room project before previewing a package.".into();
             return;
@@ -1100,6 +1246,10 @@ impl Panel {
         if self.busy() {
             return;
         }
+        self.usage.invalidate();
+        self.update_impact.invalidate();
+        self.dependency_add.invalidate();
+        self.dependency_update.invalidate();
         if let Err(error) = parse_source_path(&self.source) {
             self.status = error;
             return;
@@ -1147,6 +1297,12 @@ impl Panel {
             Err(error) => self.status = format!("Cannot start package addition: {error}"),
         }
     }
+}
+
+// Plans report the canonical root, which on Windows carries a verbatim drive prefix.
+fn same_project_root(planned: &Path, shown: &Path) -> bool {
+    planned == shown
+        || cfg!(windows) && std::fs::canonicalize(shown).is_ok_and(|canonical| canonical == planned)
 }
 
 fn parse_source_path(source: &str) -> Result<PathBuf, String> {
@@ -1202,18 +1358,14 @@ fn preview_kind_allowed(
     capabilities: &std::collections::BTreeSet<String>,
     asset: &str,
 ) -> bool {
+    if !crate::package_model_preview::supports_asset(kind, asset) {
+        return false;
+    }
     match kind {
         ModelKind::Static => capabilities.contains("models"),
         ModelKind::Animated => {
             cfg!(feature = "room-animated-models")
                 && capabilities.contains("animation")
-                && Path::new(asset)
-                    .extension()
-                    .and_then(|extension| extension.to_str())
-                    .is_some_and(|extension| {
-                        extension.eq_ignore_ascii_case("glb")
-                            || extension.eq_ignore_ascii_case("gltf")
-                    })
         }
     }
 }
@@ -1253,14 +1405,9 @@ fn model_asset_buttons(
     let mut shown = 0;
     for (package_name, package) in &browser.lock.packages {
         for asset in &package.manifest.files {
-            let supported = Path::new(asset)
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .is_some_and(|extension| {
-                    extension.eq_ignore_ascii_case("glb")
-                        || extension.eq_ignore_ascii_case("gltf")
-                        || extension.eq_ignore_ascii_case("orrmodel")
-                });
+            let supported = crate::package_model_preview::supports_asset(ModelKind::Static, asset);
+            let supported = supported
+                || preview_kind_allowed(ModelKind::Animated, &package.manifest.capabilities, asset);
             if !supported {
                 continue;
             }
@@ -1274,9 +1421,12 @@ fn model_asset_buttons(
             #[cfg(feature = "room-animated-models")]
             let kinds = [ModelKind::Static, ModelKind::Animated];
             for kind in kinds {
+                if !crate::package_model_preview::supports_asset(kind, asset) {
+                    continue;
+                }
                 if kind == ModelKind::Animated
                     && (!package.manifest.capabilities.contains("animation")
-                        || asset.to_ascii_lowercase().ends_with(".orrmodel"))
+                        || !crate::package_model_preview::supports_asset(kind, asset))
                 {
                     continue;
                 }
@@ -2418,3 +2568,119 @@ mod update_tests {
         assert_eq!(fs::read(&path).unwrap(), before);
     }
 }
+
+
+#[cfg(test)]
+#[path = "package_manager_panel/cooked_model_tests.rs"]
+mod cooked_model_tests;
+
+#[cfg(test)]
+#[path = "package_manager_panel/cooked_animation_tests.rs"]
+mod cooked_animation_tests;
+
+#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="room-lighting",feature="windows-export"))]
+#[path="package_manager_panel/cooked_animated_import_tests.rs"]
+mod cooked_animated_import_tests;
+
+#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="room-lighting",feature="windows-export"))]
+#[path="package_manager_panel/animated_recolor_import_tests.rs"]
+mod animated_recolor_import_tests;
+
+#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="room-lighting",feature="windows-export"))]
+#[path="package_manager_panel/animated_retexture_import_tests.rs"]
+mod animated_retexture_import_tests;
+
+#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="room-lighting",feature="windows-export"))]
+#[path="package_manager_panel/animated_sampler_import_tests.rs"]
+mod animated_sampler_import_tests;
+
+#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="room-lighting",feature="windows-export"))]
+#[path="package_manager_panel/animated_uv_import_tests.rs"]
+mod animated_uv_import_tests;
+
+#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="room-lighting",feature="windows-export"))]
+#[path="package_manager_panel/editor_animated_color_tests.rs"]
+mod editor_animated_color_tests;
+
+#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="room-lighting",feature="windows-export"))]
+#[path="package_manager_panel/editor_animated_texture_tests.rs"]
+mod editor_animated_texture_tests;
+
+#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="room-lighting",feature="windows-export"))]
+#[path="package_manager_panel/editor_material_catalog_tests.rs"]
+mod editor_material_catalog_tests;
+
+#[cfg(feature="room-animated-models")]
+impl Panel {
+    pub(crate) fn variant_preview_frame(&mut self) -> Option<crate::model_package_import_panel::PreviewFrame> {
+        self.model_import.preview_frame()
+    }
+    pub(crate) fn close_variant_preview(&mut self) {
+        self.model_import.close_variant_preview();
+    }
+}
+#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="room-lighting",feature="windows-export"))]
+#[path="package_manager_panel/variant_preview_integration_tests.rs"]
+mod variant_preview_integration_tests;
+#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="room-lighting",feature="windows-export"))]
+#[path="package_manager_panel/variant_preview_parent_tests.rs"]
+mod variant_preview_parent_tests;
+
+#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "room-lighting", feature = "windows-export"))]
+#[path = "package_manager_panel/editor_animation_trim_tests.rs"]
+mod editor_animation_trim_tests;
+#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "room-lighting", feature = "windows-export"))]
+#[path = "package_manager_panel/editor_animation_trim_native_tests.rs"]
+mod editor_animation_trim_native_tests;
+
+#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "room-lighting", feature = "windows-export"))]
+#[path = "package_manager_panel/editor_animated_sampler_tests.rs"]
+mod editor_animated_sampler_tests;
+
+#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "room-lighting", feature = "windows-export"))]
+#[path = "package_manager_panel/editor_animation_sequence_tests.rs"]
+mod editor_animation_sequence_tests;
+
+#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "room-lighting", feature = "windows-export"))]
+#[path = "package_manager_panel/editor_animated_uv_tests.rs"]
+mod editor_animated_uv_tests;
+
+#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "room-lighting", feature = "windows-export"))]
+#[path = "package_manager_panel/editor_static_uv_tests.rs"]
+mod editor_static_uv_tests;
+
+#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "room-lighting", feature = "windows-export"))]
+#[path = "package_manager_panel/editor_static_texture_tests.rs"]
+mod editor_static_texture_tests;
+
+#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "room-lighting", feature = "windows-export"))]
+#[path = "package_manager_panel/editor_static_assembly_tests.rs"]
+mod editor_static_assembly_tests;
+
+#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "room-lighting", feature = "windows-export"))]
+#[path = "package_manager_panel/editor_glb_subtree_tests.rs"]
+mod editor_glb_subtree_tests;
+
+#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "room-lighting", feature = "windows-export"))]
+#[path = "package_manager_panel/editor_static_pivot_tests.rs"]
+mod editor_static_pivot_tests;
+
+#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "room-lighting", feature = "windows-export"))]
+#[path = "package_manager_panel/editor_static_sampler_tests.rs"]
+mod editor_static_sampler_tests;
+
+#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "room-lighting", feature = "windows-export"))]
+#[path = "package_manager_panel/editor_static_recolor_tests.rs"]
+mod editor_static_recolor_tests;
+
+#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "room-lighting", feature = "windows-export"))]
+#[path = "package_manager_panel/editor_pose_bake_tests.rs"]
+mod editor_pose_bake_tests;
+
+#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="room-lighting",feature="windows-export"))]
+#[path="package_manager_panel/editor_static_planar_tests.rs"]
+mod editor_static_planar_tests;
+
+#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="room-lighting",feature="windows-export"))]
+#[path="package_manager_panel/editor_cylinder_tests.rs"]
+mod editor_cylinder_tests;

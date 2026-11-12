@@ -1,3 +1,87 @@
+#[path = "model_package_import/cylinder.rs"]
+mod cylinder;
+pub(crate) use cylinder::{create_cylinder_package, validate_cylinder_spec, CylinderRequest, CylinderSpec};
+use cylinder::{cylinder_recipe_bytes, cylinder_model_bytes};
+#[path = "model_package_import/static_planar.rs"]
+mod static_planar;
+pub(crate) use static_planar::{
+    import_static_planar_uv_variant, import_static_planar_uv_variant_checked,
+    validate_static_planar_uv_variant, StaticPlanarUvVariant,
+};
+use static_planar::static_planar_uv_variant_bytes;
+#[path = "model_package_import/pose_bake.rs"]
+mod pose_bake;
+pub(crate) use pose_bake::{
+    import_pose_bake_variant, import_pose_bake_variant_checked,
+    validate_pose_bake_variant, PoseBakeVariant,
+};
+use pose_bake::pose_bake_variant_bytes;
+#[path = "model_package_import/static_recolor.rs"]
+mod static_recolor;
+pub(crate) use static_recolor::{
+    import_static_color_variant, import_static_color_variant_checked,
+    validate_static_color_variant, StaticColorVariant,
+};
+use static_recolor::static_color_variant_bytes;
+#[path = "model_package_import/static_sampler.rs"]
+mod static_sampler;
+pub(crate) use static_sampler::{
+    import_static_sampler_variant, import_static_sampler_variant_checked,
+    validate_static_sampler_variant, StaticSamplerVariant,
+};
+use static_sampler::static_sampler_variant_bytes;
+#[path = "model_package_import/static_pivot.rs"]
+mod static_pivot;
+pub(crate) use static_pivot::{
+    import_static_pivot_variant, import_static_pivot_variant_checked,
+    validate_static_pivot_variant, StaticPivotVariant,
+};
+use static_pivot::static_pivot_variant_bytes;
+#[path = "model_package_import/glb_subtree.rs"]
+mod glb_subtree;
+pub(crate) use glb_subtree::{
+    inspect_glb_subtree_source, import_glb_subtree_variant, import_glb_subtree_variant_checked,
+    validate_glb_subtree_variant, GlbSubtreeCatalog, GlbSubtreeVariant,
+};
+use glb_subtree::glb_subtree_variant_bytes;
+#[path = "model_package_import/static_assembly.rs"]
+mod static_assembly;
+pub(crate) use static_assembly::{
+    import_static_assembly_variant, import_static_assembly_variant_checked,
+    validate_static_assembly_variant, StaticAssemblyPart, StaticAssemblyVariant,
+};
+use static_assembly::static_assembly_variant_bytes;
+#[path = "model_package_import/static_texture.rs"]
+mod static_texture;
+pub(crate) use static_texture::{
+    import_static_texture_variant, import_static_texture_variant_checked, StaticTextureVariant,
+    validate_static_texture_variant,
+};
+use static_texture::static_texture_variant_bytes;
+#[path = "model_package_import/static_uv.rs"]
+mod static_uv;
+pub(crate) use static_uv::{
+    import_static_uv_variant, import_static_uv_variant_checked, StaticUvVariant,
+};
+use static_uv::static_uv_variant_bytes;
+#[path="model_package_import/uv.rs"]
+mod uv;
+pub(crate) use uv::{UvVariant,import_uv_variant,import_uv_variant_checked};
+use uv::uv_variant_bytes;
+#[cfg(feature="room-animated-models")]
+use uv::validate_uv_variant;
+#[path="model_package_import/sequence.rs"]
+mod sequence;
+pub(crate) use sequence::{SequenceVariant,import_sequence_variant,import_sequence_variant_checked};
+use sequence::sequence_variant_bytes;
+#[cfg(feature="room-animated-models")]
+use sequence::validate_sequence_variant;
+#[path="model_package_import/sampler.rs"]
+mod sampler;
+pub(crate) use sampler::{SamplerVariant,import_sampler_variant,import_sampler_variant_checked};
+use sampler::sampler_variant_bytes;
+#[cfg(feature = "room-animated-models")]
+use sampler::validate_sampler_variant;
 use crate::{model_bindings::ModelKind, package_manager};
 use orr_package::Manifest;
 use sha2::{Digest, Sha256};
@@ -17,6 +101,32 @@ const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 #[cfg(windows)]
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SourceFormat {
+    #[default]
+    RawGlb,
+    CookedStatic,
+    CookedAnimated,
+}
+
+impl SourceFormat {
+    fn asset_name(self) -> &'static str {
+        match self {
+            Self::RawGlb => "model.glb",
+            Self::CookedStatic => "model.orrmodel",
+            Self::CookedAnimated => "model.animated.json",
+        }
+    }
+
+    fn source_label(self) -> &'static str {
+        match self {
+            Self::RawGlb => "GLB source",
+            Self::CookedStatic => "cooked static model source",
+            Self::CookedAnimated => "cooked animated model source",
+        }
+    }
+}
+
 pub(crate) struct Request {
     pub source: PathBuf,
     pub license: PathBuf,
@@ -24,7 +134,52 @@ pub(crate) struct Request {
     pub name: String,
     pub version: String,
     pub kind: ModelKind,
+    pub source_format: SourceFormat,
     pub license_acknowledged: bool,
+}
+
+/// Explicit, immutable authoring request. Source data and installed assets stay unchanged.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ColorVariant {
+    pub material: u32,
+    pub linear_rgb: [f64; 3],
+    pub asset_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TextureVariant {
+    pub material: u32,
+    pub texture: PathBuf,
+    pub asset_id: String,
+}
+
+/// Append a source clip segment without changing any existing clip index.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TrimVariant {
+    pub clip: u32,
+    pub start_seconds: f64,
+    pub end_seconds: f64,
+    pub name: String,
+    pub asset_id: String,
+}
+
+enum AuthoringVariant {
+    Cylinder(CylinderSpec),
+    StaticPlanarUv(StaticPlanarUvVariant),
+    PoseBake(PoseBakeVariant),
+    StaticColor(StaticColorVariant),
+    StaticSampler(StaticSamplerVariant),
+    StaticPivot(StaticPivotVariant),
+    GlbSubtree(GlbSubtreeVariant),
+    Color(ColorVariant),
+    Texture(TextureVariant),
+    Trim(TrimVariant),
+    Sampler(SamplerVariant),
+    Sequence(SequenceVariant),
+    Uv(UvVariant),
+    StaticUv(StaticUvVariant),
+    StaticTexture(StaticTextureVariant),
+    StaticAssembly(StaticAssemblyVariant),
 }
 
 pub(crate) struct Report {
@@ -32,6 +187,7 @@ pub(crate) struct Report {
     pub package: String,
     pub asset: String,
     pub kind: ModelKind,
+    /// SHA-256 of the published model payload (the cooked variant when authored).
     pub source_sha256: String,
     pub license_sha256: String,
 }
@@ -42,23 +198,335 @@ struct InputBytes {
 }
 
 pub(crate) fn import_package(request: Request) -> Result<Report, String> {
+    import_package_inner(request, None, None)
+}
+
+pub(crate) fn import_color_variant(
+    request: Request,
+    variant: ColorVariant,
+) -> Result<Report, String> {
+    import_color_variant_checked(request, variant, None)
+}
+
+pub(crate) fn import_color_variant_checked(
+    request: Request,
+    variant: ColorVariant,
+    expected_source_sha256: Option<String>,
+) -> Result<Report, String> {
+    validate_expected_source_hash(expected_source_sha256.as_deref())?;
+    // All option/feature/license admission precedes any filesystem access.
     if !request.license_acknowledged {
         return Err("explicit license acknowledgement is required".into());
     }
+    if request.source_format != SourceFormat::CookedAnimated || request.kind != ModelKind::Animated
+    {
+        return Err("color variant requires CookedAnimated source and Animated model mode".into());
+    }
+    if !cfg!(feature = "room-animated-models") {
+        return Err(
+            "color variant requires room-animated-models; no input or destination opened".into(),
+        );
+    }
+    validate_color_variant(&variant)?;
+    import_package_inner(
+        request,
+        Some(AuthoringVariant::Color(variant)),
+        expected_source_sha256,
+    )
+}
+
+pub(crate) fn import_texture_variant(
+    request: Request,
+    variant: TextureVariant,
+) -> Result<Report, String> {
+    import_texture_variant_checked(request, variant, None)
+}
+
+pub(crate) fn import_texture_variant_checked(
+    request: Request,
+    variant: TextureVariant,
+    expected_source_sha256: Option<String>,
+) -> Result<Report, String> {
+    validate_expected_source_hash(expected_source_sha256.as_deref())?;
+    if !request.license_acknowledged {
+        return Err("explicit license acknowledgement is required".into());
+    }
+    if request.source_format != SourceFormat::CookedAnimated || request.kind != ModelKind::Animated
+    {
+        return Err(
+            "texture variant requires CookedAnimated source and Animated model mode".into(),
+        );
+    }
+    if !cfg!(feature = "room-animated-models") {
+        return Err(
+            "texture variant requires room-animated-models; no input or destination opened".into(),
+        );
+    }
+    validate_texture_variant(&variant)?;
+    import_package_inner(
+        request,
+        Some(AuthoringVariant::Texture(variant)),
+        expected_source_sha256,
+    )
+}
+
+pub(crate) fn import_trim_variant(request: Request, variant: TrimVariant) -> Result<Report, String> {
+    import_trim_variant_checked(request, variant, None)
+}
+
+pub(crate) fn import_trim_variant_checked(
+    request: Request, variant: TrimVariant, expected_source_sha256: Option<String>,
+) -> Result<Report, String> {
+    validate_expected_source_hash(expected_source_sha256.as_deref())?;
+    if !request.license_acknowledged { return Err("explicit license acknowledgement is required".into()); }
+    if request.source_format != SourceFormat::CookedAnimated || request.kind != ModelKind::Animated {
+        return Err("clip trim requires CookedAnimated source and Animated model mode".into());
+    }
+    if !cfg!(feature = "room-animated-models") {
+        return Err("clip trim requires room-animated-models; no input or destination opened".into());
+    }
+    validate_trim_variant(&variant)?;
+    import_package_inner(request, Some(AuthoringVariant::Trim(variant)), expected_source_sha256)
+}
+
+fn validate_trim_variant(variant: &TrimVariant) -> Result<(), String> {
+    validate_variant_identity(&variant.asset_id, ".trim.json")?;
+    if variant.name.trim().is_empty() || variant.name.len() > 128 || variant.name.chars().any(char::is_control) {
+        return Err("trim clip name must be nonempty, at most 128 UTF-8 bytes, without controls".into());
+    }
+    if !variant.start_seconds.is_finite() || !variant.end_seconds.is_finite()
+        || variant.start_seconds < 0.0 || variant.end_seconds <= variant.start_seconds || variant.end_seconds > 3600.0
+        || (variant.end_seconds as f32) <= (variant.start_seconds as f32) {
+        return Err("trim range must be finite 0 <= start < end <= 3600 and distinct after f32 conversion".into());
+    }
+    #[cfg(feature = "room-animated-models")]
+    if variant.clip as usize >= orr_model::animation::MAX_CLIPS { return Err("trim clip index exceeds the model clip limit".into()); }
+    Ok(())
+}
+
+fn trim_variant_bytes(source: &[u8], variant: &TrimVariant) -> Result<Vec<u8>, String> {
+    validate_trim_variant(variant)?;
+    #[cfg(feature = "room-animated-models")]
+    {
+        let recipe = serde_json::to_vec(&serde_json::json!({
+            "format":"orr_animation_clip_trim", "version":1, "source":"input.animated.json",
+            "clip":variant.clip, "start_seconds":variant.start_seconds, "end_seconds":variant.end_seconds,"name":variant.name,
+        })).map_err(|error|format!("clip trim recipe: {error}"))?;
+        let model = orr_model::animation_trim::trim_clip(&recipe,&variant.asset_id,|path| {
+            if path != "input.animated.json" { return Err("unexpected clip trim dependency".into()); }
+            Ok(source.to_vec())
+        })?;
+        model.to_bytes().map_err(|error|format!("clip trim cook: {error}"))
+    }
+    #[cfg(not(feature = "room-animated-models"))]
+    { let _ = source; Err("clip trim requires room-animated-models".into()) }
+}
+
+fn validate_texture_variant(variant: &TextureVariant) -> Result<(), String> {
+    validate_variant_identity(&variant.asset_id, ".retexture.json")?;
+    validate_path_shape(&variant.texture, "PNG texture")?;
+    if !variant
+        .texture
+        .extension()
+        .and_then(|v| v.to_str())
+        .is_some_and(|v| v.eq_ignore_ascii_case("png"))
+    {
+        return Err("texture variant requires a .png file".into());
+    }
+    Ok(())
+}
+
+fn texture_variant_bytes(
+    source: &[u8],
+    png: &[u8],
+    variant: &TextureVariant,
+) -> Result<Vec<u8>, String> {
+    #[cfg(feature = "room-animated-models")]
+    {
+        let recipe = serde_json::to_vec(
+            &serde_json::json!({"format":"orr_animated_material_texture","version":1,
+            "source":"input.animated.json","texture":"input.png","material":variant.material}),
+        )
+        .map_err(|e| format!("texture recipe: {e}"))?;
+        let model =
+            orr_model::animated_retexture::retexture_model(&recipe, &variant.asset_id, |path| {
+                match path {
+                    "input.animated.json" => Ok(source.to_vec()),
+                    "input.png" => Ok(png.to_vec()),
+                    _ => Err("unexpected texture variant dependency".into()),
+                }
+            })?;
+        model
+            .to_bytes()
+            .map_err(|e| format!("texture variant cook: {e}"))
+    }
+    #[cfg(not(feature = "room-animated-models"))]
+    {
+        let _ = (source, png, variant);
+        Err("texture variant requires room-animated-models".into())
+    }
+}
+
+fn validate_color_variant(variant: &ColorVariant) -> Result<(), String> {
+    if !variant
+        .linear_rgb
+        .iter()
+        .all(|v| v.is_finite() && (0.0..=1.0).contains(v))
+    {
+        return Err("linear_rgb must contain three finite linear-light values in 0..=1".into());
+    }
+    validate_variant_identity(&variant.asset_id, ".recolor.json")
+}
+
+fn validate_variant_identity(id: &str, suffix: &str) -> Result<(), String> {
+    if id.is_empty()
+        || id.len() > 240
+        || !id.ends_with(suffix)
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-._/".contains(&b))
+    {
+        return Err(format!(
+            "variant identity must be a portable relative ASCII {suffix} path of at most 240 bytes"
+        ));
+    }
+    for part in id.split('/') {
+        let device = part.split('.').next().unwrap_or("").to_ascii_uppercase();
+        if part.is_empty()
+            || part.starts_with('.')
+            || part.ends_with('.')
+            || ["CON", "PRN", "AUX", "NUL"].contains(&device.as_str())
+            || (device.len() == 4
+                && (device.starts_with("COM") || device.starts_with("LPT"))
+                && device.as_bytes()[3].is_ascii_digit())
+        {
+            return Err(
+                "variant identity contains an empty, hidden, traversal or reserved segment".into(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn color_variant_bytes(source: &[u8], variant: &ColorVariant) -> Result<Vec<u8>, String> {
+    #[cfg(feature = "room-animated-models")]
+    {
+        let recipe = serde_json::to_vec(&serde_json::json!({
+            "format":"orr_animated_material_color", "version":1,
+            "source":"input.animated.json", "material":variant.material,
+            "linear_rgb":variant.linear_rgb
+        }))
+        .map_err(|e| format!("color recipe: {e}"))?;
+        let model =
+            orr_model::animated_recolor::recolor_model(&recipe, &variant.asset_id, |path| {
+                if path != "input.animated.json" {
+                    return Err("unexpected color variant dependency".into());
+                }
+                Ok(source.to_vec())
+            })?;
+        model
+            .to_bytes()
+            .map_err(|e| format!("color variant cook: {e}"))
+    }
+    #[cfg(not(feature = "room-animated-models"))]
+    {
+        let _ = (source, variant);
+        Err("color variant requires room-animated-models".into())
+    }
+}
+
+fn import_package_inner(
+    request: Request,
+    variant: Option<AuthoringVariant>,
+    expected_source_sha256: Option<String>,
+) -> Result<Report, String> {
+    if !request.license_acknowledged {
+        return Err("explicit license acknowledgement is required".into());
+    }
+    if request.source_format == SourceFormat::CookedAnimated {
+        if request.kind != ModelKind::Animated {
+            return Err("cooked animated model import requires Animated model mode".into());
+        }
+        if !cfg!(feature = "room-animated-models") {
+            return Err("cooked animated model import requires room-animated-models; no input or destination opened".into());
+        }
+    }
+    let cylinder_seed = if let Some(AuthoringVariant::Cylinder(spec)) = &variant {
+        if request.kind != ModelKind::Static || request.source_format != SourceFormat::CookedStatic
+            || !request.source.as_os_str().is_empty() || expected_source_sha256.is_some()
+        {
+            return Err("cylinder creation requires source-less Static mode without an inspected source hash".into());
+        }
+        Some(cylinder_recipe_bytes(spec)?)
+    } else {
+        None
+    };
+    let creating_cylinder = cylinder_seed.is_some();
     validate_destination_policy(&request.destination)?;
     let (destination_parent, destination) = checked_new_directory(&request.destination)?;
     validate_destination_policy(&destination)?;
-    let source_path = checked_file_path(&request.source, "GLB source")?;
-    let license_path = checked_file_path(&request.license, "license source")?;
-    if !source_path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("glb"))
-    {
-        return Err("source must be a self-contained .glb file".into());
+    if request.source_format == SourceFormat::CookedStatic && request.kind != ModelKind::Static {
+        return Err("cooked static model import requires Static model mode".into());
     }
+    // Input admission remains animated; only this authoring variant changes
+    // the published asset kind and capability set.
+    let baking_pose = matches!(&variant, Some(AuthoringVariant::PoseBake(_)));
+    let output_kind = if baking_pose { ModelKind::Static } else { request.kind };
+    let source_label = request.source_format.source_label();
+    let asset_name = if baking_pose || matches!(&variant, Some(AuthoringVariant::GlbSubtree(_))) {
+        "model.orrmodel"
+    } else {
+        request.source_format.asset_name()
+    };
+    let (mut source, license_path) = if let Some(recipe) = cylinder_seed {
+        let license_path = checked_file_path(&request.license, "license source")?;
+        (InputBytes { digest: digest(&recipe), bytes: recipe }, license_path)
+    } else {
+        let source_path = checked_file_path(&request.source, source_label)?;
+        let license_path = checked_file_path(&request.license, "license source")?;
+        match request.source_format {
+            SourceFormat::RawGlb => {
+                if !source_path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("glb"))
+                {
+                    return Err("source must be a self-contained .glb file".into());
+                }
+            }
+            SourceFormat::CookedAnimated => {
+                if !source_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.to_ascii_lowercase().ends_with(".animated.json"))
+                {
+                    return Err("cooked animated source must be a .animated.json file".into());
+                }
+            }
+            SourceFormat::CookedStatic => {
+                if !source_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.to_ascii_lowercase().ends_with(".model.json"))
+                {
+                    return Err("cooked static source must be a .model.json file".into());
+                }
+            }
+        }
 
-    let source = read_bounded_file(&source_path, MAX_SOURCE_BYTES, "GLB source")?;
+        let source = read_bounded_file(&source_path, MAX_SOURCE_BYTES, source_label)?;
+        if expected_source_sha256
+            .as_deref()
+            .is_some_and(|expected| !expected.eq_ignore_ascii_case(&source.digest))
+        {
+            return Err(match request.source_format {
+                SourceFormat::CookedStatic => "inspected static source changed; inspect again before importing",
+                SourceFormat::RawGlb => "inspected GLB source changed; inspect again before importing",
+                _ => "inspected animated source changed; inspect again before importing",
+            }.into());
+        }
+        (source, license_path)
+    };
     let license = read_bounded_file(&license_path, MAX_LICENSE_BYTES, "license source")?;
     if std::str::from_utf8(&license.bytes)
         .ok()
@@ -66,17 +534,74 @@ pub(crate) fn import_package(request: Request) -> Result<Report, String> {
     {
         return Err("license must be nonempty UTF-8 text".into());
     }
-    validate_glb(&source.bytes, request.kind)?;
+    if !creating_cylinder {
+        match request.source_format {
+            SourceFormat::RawGlb => validate_glb(&source.bytes, request.kind)?,
+            SourceFormat::CookedAnimated => validate_cooked_animated(&source.bytes)?,
+            SourceFormat::CookedStatic => {
+                // Validate the cooked payload directly. Dependency digests describe its
+                // history; they are neither resolver inputs nor package dependencies.
+                orr_model::StaticModel::from_bytes(&source.bytes)
+                    .map_err(|error| format!("cooked static model import: {error}"))?;
+            }
+        }
+    }
 
+    if let Some(variant) = variant {
+        let bytes = match variant {
+            AuthoringVariant::Cylinder(spec) => cylinder_model_bytes(&source.bytes, &spec.asset_id)?,
+            AuthoringVariant::StaticPlanarUv(spec) => static_planar_uv_variant_bytes(&source.bytes, &spec)?,
+            AuthoringVariant::PoseBake(spec) => pose_bake_variant_bytes(&source.bytes, &spec)?,
+            AuthoringVariant::StaticColor(spec) => static_color_variant_bytes(&source.bytes, &spec)?,
+            AuthoringVariant::StaticSampler(spec) => static_sampler_variant_bytes(&source.bytes, &spec)?,
+            AuthoringVariant::StaticPivot(spec) => static_pivot_variant_bytes(&source.bytes, &spec)?,
+            AuthoringVariant::GlbSubtree(spec) => glb_subtree_variant_bytes(&source.bytes, &spec)?,
+            AuthoringVariant::Color(spec) => color_variant_bytes(&source.bytes, &spec)?,
+            AuthoringVariant::Trim(spec) => trim_variant_bytes(&source.bytes, &spec)?,
+            AuthoringVariant::Sampler(spec) => sampler_variant_bytes(&source.bytes, &spec)?,
+            AuthoringVariant::Sequence(spec) => sequence_variant_bytes(&source.bytes, &spec)?,
+            AuthoringVariant::Uv(spec) => uv_variant_bytes(&source.bytes, &spec)?,
+            AuthoringVariant::StaticUv(spec) => static_uv_variant_bytes(&source.bytes, &spec)?,
+            AuthoringVariant::StaticAssembly(spec) => static_assembly_variant_bytes(&source.bytes, &spec)?,
+            AuthoringVariant::StaticTexture(spec) => {
+                // The original cooked source and optional inspected hash have already
+                // been admitted above; do not open the PNG before that check.
+                let path = checked_file_path(&spec.texture, "static PNG texture")?;
+                let png = read_bounded_file(&path, MAX_SOURCE_BYTES, "static PNG texture")?;
+                static_texture_variant_bytes(&source.bytes, &png.bytes, &spec)?
+            }
+            AuthoringVariant::Texture(spec) => {
+                let path = checked_file_path(&spec.texture, "PNG texture")?;
+                let png = read_bounded_file(&path, MAX_SOURCE_BYTES, "PNG texture")?;
+                texture_variant_bytes(&source.bytes, &png.bytes, &spec)?
+            }
+        };
+        if bytes.len() as u64 > MAX_SOURCE_BYTES {
+            return Err("authored variant cooked output exceeds 64 MiB limit".into());
+        }
+        source = InputBytes {
+            digest: digest(&bytes),
+            bytes,
+        };
+    }
+
+    if baking_pose || creating_cylinder {
+        orr_model::StaticModel::from_bytes(&source.bytes)
+            .map_err(|error| format!("baked static model import: {error}"))?;
+    }
     let stage = tempfile::Builder::new()
         .prefix(".orr-model-import-")
         .tempdir_in(&destination_parent)
         .map_err(|error| format!("create package staging directory: {error}"))?;
-    let manifest = package_manifest(&request)?;
+    let manifest = if output_kind == request.kind {
+        package_manifest(&request, asset_name)?
+    } else {
+        package_manifest_for_kind(&request, asset_name, output_kind)?
+    };
     let manifest_bytes = serde_json::to_vec(&manifest)
         .map_err(|error| format!("serialize package manifest: {error}"))?;
 
-    write_new(&stage.path().join("model.glb"), &source.bytes)?;
+    write_new(&stage.path().join(asset_name), &source.bytes)?;
     write_new(&stage.path().join("LICENSE.txt"), &license.bytes)?;
     write_new(&stage.path().join("orr.package.json"), &manifest_bytes)?;
     let runtime = orr_sample::room_project::compiled_runtime();
@@ -94,6 +619,7 @@ pub(crate) fn import_package(request: Request) -> Result<Report, String> {
     publish_directory(
         stage.path(),
         &destination,
+        asset_name,
         &source.bytes,
         &license.bytes,
         &manifest_bytes,
@@ -101,15 +627,19 @@ pub(crate) fn import_package(request: Request) -> Result<Report, String> {
     Ok(Report {
         root: destination,
         package: request.name,
-        asset: "model.glb".into(),
-        kind: request.kind,
+        asset: asset_name.into(),
+        kind: output_kind,
         source_sha256: source.digest,
         license_sha256: license.digest,
     })
 }
 
-fn package_manifest(request: &Request) -> Result<Manifest, String> {
-    let capabilities = match request.kind {
+fn package_manifest(request: &Request, asset_name: &str) -> Result<Manifest, String> {
+    package_manifest_for_kind(request, asset_name, request.kind)
+}
+
+fn package_manifest_for_kind(request: &Request, asset_name: &str, output_kind: ModelKind) -> Result<Manifest, String> {
+    let capabilities = match output_kind {
         ModelKind::Static => BTreeSet::from(["models".to_owned()]),
         ModelKind::Animated => {
             #[cfg(feature = "room-animated-models")]
@@ -130,9 +660,26 @@ fn package_manifest(request: &Request) -> Result<Manifest, String> {
         ),
         capabilities,
         dependencies: BTreeMap::new(),
-        files: BTreeSet::from(["LICENSE.txt".into(), "model.glb".into()]),
+        files: BTreeSet::from(["LICENSE.txt".into(), asset_name.into()]),
     };
     Ok(manifest)
+}
+
+fn validate_cooked_animated(bytes: &[u8]) -> Result<(), String> {
+    #[cfg(feature = "room-animated-models")]
+    {
+        let model = orr_model::animation::AnimatedModel::from_bytes(bytes)
+            .map_err(|error| format!("cooked animated model import: {error}"))?;
+        if model.source().clips.is_empty() {
+            return Err("cooked animated model must contain at least one animation clip".into());
+        }
+        Ok(())
+    }
+    #[cfg(not(feature = "room-animated-models"))]
+    {
+        let _ = bytes;
+        Err("cooked animated model import requires room-animated-models".into())
+    }
 }
 
 fn validate_glb(bytes: &[u8], kind: ModelKind) -> Result<(), String> {
@@ -330,6 +877,7 @@ fn checked_new_directory(path: &Path) -> Result<(PathBuf, PathBuf), String> {
 fn publish_directory(
     stage: &Path,
     destination: &Path,
+    asset_name: &str,
     source: &[u8],
     license: &[u8],
     manifest: &[u8],
@@ -337,7 +885,7 @@ fn publish_directory(
     fs::create_dir(destination).map_err(|error| format!("create package destination: {error}"))?;
     let mut created = Vec::new();
     let result = (|| {
-        for (name, bytes) in [("model.glb", source), ("LICENSE.txt", license)] {
+        for (name, bytes) in [(asset_name, source), ("LICENSE.txt", license)] {
             let staged = stage.join(name);
             let staged_bytes =
                 fs::read(&staged).map_err(|error| format!("read staged {name}: {error}"))?;
@@ -441,3 +989,40 @@ fn digest(bytes: &[u8]) -> String {
 #[cfg(test)]
 #[path = "model_package_import/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "model_package_import/cooked_animated_tests.rs"]
+mod cooked_animated_tests;
+
+#[cfg(test)]
+#[path = "model_package_import/animated_color_tests.rs"]
+mod animated_color_tests;
+
+#[cfg(test)]
+#[path = "model_package_import/animated_texture_tests.rs"]
+mod animated_texture_tests;
+
+fn validate_expected_source_hash(expected: Option<&str>) -> Result<(), String> {
+    if expected.is_some_and(|s| s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit())) {
+        return Err(
+            "expected source SHA-256 must contain exactly 64 hexadecimal characters".into(),
+        );
+    }
+    Ok(())
+}
+#[path = "model_package_import/source_inspection.rs"]
+pub(crate) mod source_inspection;
+#[cfg(test)]
+#[path = "model_package_import/source_inspection_tests.rs"]
+mod source_inspection_tests;
+#[cfg(test)]
+#[path = "model_package_import/static_source_inspection_tests.rs"]
+mod static_source_inspection_tests;
+
+#[cfg(feature = "room-animated-models")]
+#[path = "model_package_import/variant_preview.rs"]
+pub(crate) mod variant_preview;
+
+#[cfg(test)]
+#[path = "model_package_import/animation_trim.rs"]
+mod animation_trim_tests;

@@ -1,30 +1,49 @@
 # Orrery 현재 상태
 
-갱신: 2026-10-23 UTC · [설계 v2](design-v2.md) · [상위 추적 #2](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/2) · [게임 제작 #94](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94)
+갱신: 2026-11-12 · [설계 v2](design-v2.md) · [상위 추적 #2](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/2) · [게임 제작 #94](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94)
 
-## 지금의 제품 경로
+## 지금 되는 것
 
-자연어 요구를 받은 에이전트가 작은 게임을 만들고, 직접 실행·수정·재현하여 전달하는 것이 목표다. 현재 경로는 정적 Rust 게임과 CLI/ERP, 에디터, standalone player, bundle이다. 다음 성과는 기능·PR·테스트 개수 증가가 아니라 **사람의 중간 수정 없이 끝난 게임 제작 과제의 비율**로 측정한다. 실제 모델 기반 기준선은 아직 없다.
+아래는 2026-11-11~12에 윈도우 11(NVIDIA RTX 4060)에서 직접 실행해 확인한 항목이다. 실행 방법은 [README](../README.md)에 있다.
 
-- 결정론 코어: 고정소수점, 순서가 고정된 Game/System, 롤백·리플레이와 시뮬/뷰 분리가 구현되어 있다. Linux 로컬 검증으로 전환하며, 교차 플랫폼 동일성은 이번 실행으로 증명하지 않는다.
-- 제작 경로: `examples/static-game-starter`의 Delivery/Switchboard와 독립 사용자 프로젝트 생성기가 있다. 사용자 소스·자체 lockfile·native 실행·source-hidden 전달은 각각 해당 수용 검사로 판단한다. 생성 성공만으로 게임 전달 완료를 선언하지 않는다.
-- 다중 액션: 선택적 `static-game-actions`와 명시적 `multi-action-preview`가 있다. 기존 기본 프로필을 조용히 새 pin으로 바꾸지 않는다. private fixture는 새 사용자 게임 완료 수로 세지 않는다.
-- 에이전트 평가: `tools/arena_agent_trial.py`의 다섯 목표·실제 host·독립 oracle·중단/재개 기록이 있다. 현재 solver는 mock이며, scripted control이나 mock 통과를 실제 모델 성공률로 환산하지 않는다.
+- **빌드**: `cargo build-all` 한 줄로 에디터와 게임 실행 파일이 모두 만들어진다.
+- **에디터**: 기본 물리 씬, `--game arena`, Room 프로젝트 열기를 화면 캡처로 확인했다.
+- **Room 제작 흐름**: `orr_new_room`으로 프로젝트 생성 → `orr_editor --room-project`로 열기 → `room_escape --project`로 실행 → `orr_export_windows`로 내보내기 → 내보낸 폴더의 실행 파일만으로 실행.
+- **게임**: Stormglass(`coop_defense`)의 창 실행과 창 없는 600틱 실행, `arena`의 60fps 실행과 오디오 출력.
+- **테스트(기본 구성)**: `cargo test --workspace --release` 2779개 통과, 실패 0개, 무시 26개.
+- **테스트(전체 기능 구성)**: `--features orr_editor/full,orr_sample/full`로 에디터와 샘플 게임을 전체 실행했을 때 3376개 통과, 19개 실패였다. 그 뒤 17건의 원인을 고쳐 해당 테스트를 다시 실행해 통과를 확인했다. 남은 실패는 2건이다.
 
-## 통합 상태와 차단점
+## 2026-11-11~12 정리 내용
 
-이번 요약의 소스 기준은 [PR #289](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/289)의 `f20097d6aeb2b4a110a7145b58ea07e0c7a0e8e6`, tree `b85846f63f77773624208fd5d93cf18f09d87da7`이다. 이것은 게시된 후보 기준이지 통합 완료 선언이 아니다. 새 Linux-only 후보는 이 계보의 후속 후보이며, 로컬 검증 및 리뷰가 끝나기 전 통과나 병합 완료로 표시하지 않는다.
+- 흩어져 있던 개발 줄기를 `main`에 합쳤다. `main`은 그전까지 실제 작업보다 약 720커밋 뒤처져 있었다.
+- 기능별로 쌓인 GitHub Actions 워크플로 169개를 지웠다.
+- 에디터(`orr_editor`)와 샘플 게임(`orr_sample`)에 모든 기능을 한 번에 켜는 `full` 기능을 추가했다. 기본값은 그대로 최소 구성이다. 모바일과 웹 빌드가 `orr_sample`의 최소 구성에 의존하기 때문이다.
+- 오래된 브랜치에만 있던 작업 8건을 합쳤다: glTF CUBICSPLINE 애니메이션, P2P 메시 정지·이탈, 원뿔 모델 제작, 스프라이트 격자·핑퐁, 설치 패키지 소스 내보내기, 애니메이션 클립 역재생, 지형 카메라 붐, 지형 키보드 코스.
+- 윈도우에서만 드러나던 결함을 고쳤다.
+  - `\\?\C:` 형태의 경로에서 내비게이션·지형·조명 프로브 씬을 열지 못하던 문제
+  - 폴더 핸들을 열지 못해 스프라이트 클립, RAW16 지형, Room 조명, 연결 프리팹 저장이 실패하던 문제
+  - 메시 애니메이션 패키지 가져오기에서 폴더 이동이 거부되던 문제
+  - 패키지 의존성 미리보기가 경로 표기 차이로 버려지던 문제
+  - 모델 바인딩이 `/remote/scene.yaml` 같은 루트 경로를 상대 경로로 받아들이던 문제
 
-1. 기존 후보들을 하나의 개발 통합 후보로 정리한다. ancestry와 실제 변경의 포함 여부를 확인하고 충돌/누락만 해결한다. 이미 검토한 동일 소스의 광범위 감사를 반복하지 않는다. 고아 브랜치는 개별 변경을 살릴지/보류할지 분류하고, 통합·보존 여부와 삭제 대상을 확인한 병합 브랜치만 정리한다. 단순 브랜치 개수나 ancestry만으로 고유 작업을 버리지 않는다.
-2. 사용자 지시 “리눅스 로컬빌드로만 검증해 ci 다 없애고”에 따라 GitHub Actions workflow 47개를 제거한다. `bash tools/check-linux-local.sh`와 변경 경로별 Linux 검사를 정확한 최종 tree에서 실행하고 독립 리뷰를 완료한다. 현재 실행 결과는 **대기**이며, 진행 중·미실행·실패는 통과가 아니다.
-3. 이전 필수 hosted CI 및 Room mirror Windows hardware/UI 병합 조건은 **사용자 지시로 대체**되었다. 과거 실패를 성공으로 바꾸거나 Windows·macOS·Android·browser·GPU 검증을 주장하지 않는다. 검증과 독립 리뷰 후 사용자 명시적 요청대로 hardening 다음 main에 통합한다. 아직 병합 완료를 선언하지 않으며 PR #1 자체 병합은 포함하지 않는다. 서버 측 required check가 남으면 별도 차단점으로 보고하며 보호 설정은 변경하지 않는다.
-4. 통합된 제작 경로로 작은 게임 하나를 끝까지 전달한 뒤, 설계 v2의 고정 과제군을 실행한다. 새 스크립트 런타임보다 기존 경로의 실패·빌드 대기·중간 개입을 먼저 줄인다.
+## 알려진 문제
 
-## 최근 실패와 증거 위치
+추적 이슈: [#563](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/563)
 
-- [#94 reflection 기록](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94#issuecomment-6356552702): 필수 정확 테스트 목록 누락을 보정했다. 원래 실패 artifact `12474014053`을 보존하며, 보정 소스와 hosted 통과를 구별한다.
-- [#94 compile 예산 기록](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94#issuecomment-6356609143): 첫 cold compile의 900초 실패 뒤 총 2700초 예산을 재배분했다. 원래 실패 artifact `12472729915`과 총 예산을 유지한다.
-- [#94 fixture 기록](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94#issuecomment-6356618808): private binary의 실제 계약 테스트를 harness에 노출했다. 기존 guard나 테스트를 삭제하지 않았다.
-- [이전 진행 기록 전체](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/blob/f20097d6aeb2b4a110a7145b58ea07e0c7a0e8e6/docs/progress.md)에 CI #57 픽셀 실패와 #58 수정, #75 relay bootstrap stall, #76 Windows idle-timeout 실패, GPU VIEW_FORMATS 실패 등 당시 근거가 남아 있다. 이 요약은 과거 실패를 새 성공으로 바꾸거나 미해결 항목을 닫지 않는다.
+- 전체 기능 구성에서 실패하는 테스트가 2건 남아 있다. 목록은 위 이슈에 있다.
+- 모든 기능을 켜면 인스펙터에 패널이 길게 쌓이고, 세로 스크롤이 없어 아래쪽 버튼이 화면 밖으로 밀릴 수 있다.
+- Arena·Collect 프로젝트의 새로 만들기와 내보내기, 게임 진행 저장, 지형 패치 불러오기, `orr_pkg`의 번들·웹 명령은 리눅스 전용이다.
+- 에디터 메뉴(`File > New Room project…`, `File > Export Windows game…`)는 사람이 직접 눌러 보는 확인을 아직 하지 않았다. 같은 기능을 명령 도구로 실행해 확인했다.
+- 리눅스, macOS, 안드로이드, 브라우저 빌드는 이번에 실행하지 않았다.
 
-새 Linux 실행 로그·ZIP·JSON 결과는 성공·실패·중단 모두 git 밖에 보관하고 정확한 source tree·toolchain·명령·종료 상태를 기록한다. 기존 CI artifact와 workflow 원본의 외부 보존본은 삭제하지 않는다. 저장소에는 재현 가능한 테스트·작은 고정 fixture·필수 계약만 두고, 이 문서에는 source SHA, 결과, 차단점, 다음 행동, 증거 링크만 유지한다. 전체 기능/브랜치/CI 개수를 완성률로 쓰지 않는다.
+## 다음 작업
+
+1. [#104](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/104) 흐름을 에디터 화면에서 사람 손으로 끝까지 진행한다: 새 프로젝트 → 개체 이동과 값 수정 → 실행 취소 → 저장 → Play → 내보내기 → 내보낸 게임 실행.
+2. 인스펙터에 세로 스크롤을 넣고, 현재 게임과 관계없는 패널은 숨긴다.
+3. 전체 기능 구성의 남은 테스트 실패를 없앤다.
+4. Arena 프로젝트 생성과 내보내기를 윈도우로 옮긴다.
+5. 설계 v2의 고정 과제군(배달, 스위치 퍼즐, 액션)으로 무개입 완주율을 처음 측정한다.
+
+## 작업 규칙
+
+`main`만 오래 유지한다. 작업마다 짧은 브랜치 하나를 만들고, 빌드와 테스트가 통과하면 바로 `main`에 합친 뒤 브랜치를 지운다. 자세한 규칙은 [AGENTS.md](../AGENTS.md)의 Delivery rules에 있다.

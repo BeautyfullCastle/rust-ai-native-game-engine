@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "source": "https://github.com/patch-gg/pixelfx",
+  "commit": "a84159688af3ca37a4be05a0d422b94451b2e24e",
+  "seed": 4,
+  "alphaRegression": {
+    "source": [
+      255,
+      0,
+      0,
+      128
+    ],
+    "upstream": [
+      128,
+      0,
+      0,
+      128
+    ],
+    "corrected": [
+      255,
+      0,
+      0,
+      128
+    ]
+  },
+  "effects": [
+    {
+      "id": "impacts/hit-spark",
+      "frames": 16,
+      "width": 544,
+      "height": 320,
+      "fps": 30,
+      "pivot": [
+        44,
+        64
+      ],
+      "originalSha256": "dedfdada4bd2a1d177f36e679fe2688d099d2b5481402a9b2c74cc2edbe5a5dd",
+      "correctedSha256": "450d586632894bfd17af704d0c90b553f9620832cad9d30b0090ca94051c9368",
+      "translucentPixels": 13001,
+      "alteredRgbChannels": 35018,
+      "repeatedFrameBytesEqual": true
+    },
+    {
+      "id": "lightning/zap-hit",
+      "frames": 28,
+      "width": 720,
+      "height": 672,
+      "fps": 30,
+      "pivot": [
+        76,
+        56
+      ],
+      "originalSha256": "5a18ddeb637a50765f828cbe04add55d0d8f71207305762feee4a44f3abfe86e",
+      "correctedSha256": "ef2a2dbf60c37956a4211465c40b76b74295e893c281869d2f82e32e6eeeab5b",
+      "translucentPixels": 53286,
+      "alteredRgbChannels": 147238,
+      "repeatedFrameBytesEqual": true
+    }
+  ]
+}

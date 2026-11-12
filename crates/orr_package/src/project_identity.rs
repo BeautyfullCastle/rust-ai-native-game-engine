@@ -17,6 +17,8 @@ pub struct ProjectProgress {
 pub enum ProgressProfile {
     #[serde(rename = "collect-dodge-highscore-v1")]
     CollectDodgeHighscoreV1,
+    #[serde(rename = "room-escape-clear-v1")]
+    RoomEscapeClearV1,
 }
 
 impl ProjectProgress {

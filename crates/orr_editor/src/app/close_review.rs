@@ -28,9 +28,17 @@ impl EditorApp {
         });
         #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
         self.poll_arena_export(&ctx);
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "navigation-export"))]
+        self.poll_navigation_export(&ctx);
+        #[cfg(feature = "mesh-animated-models")]
+        self.mesh_animation.sync(&self.editor);
         draw(self, ui);
+        #[cfg(feature = "mesh-animated-models")]
+        self.mesh_animation.sync(&self.editor);
         #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
         self.poll_arena_export(&ctx);
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "navigation-export"))]
+        self.poll_navigation_export(&ctx);
         let observed = self.work_status_domains(Inspection::Observation);
         self.publish_work_status(observed.clone());
         if root_close {
@@ -52,6 +60,10 @@ impl EditorApp {
                 || closing.iter().any(|row| row.is_blocker());
             #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
             if self.arena_export.busy() { self.ui.close_review.blocked = true; }
+            #[cfg(feature = "terrain-surface")]
+            if self.terrain_surface.state.busy() { self.ui.close_review.blocked = true; }
+            if self.navigation_export_busy() { self.ui.close_review.blocked = true; }
+            if self.mesh_animation_import_busy() { self.ui.close_review.blocked = true; }
             if self.ui.close_review.blocked {
                 ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             }
@@ -74,6 +86,8 @@ impl EditorApp {
             )
             .clicked()
         {
+            // Explicit navigation reveals its destination; passive close checks do not.
+            self.ui.viewport_focus = false;
             self.ui.bottom_tab = BottomTab::UnsavedWork;
         }
     }
@@ -82,6 +96,14 @@ impl EditorApp {
     /// The latter are historical UI details, not current API facts or close vetoes.
     pub(super) fn close_review_items(&self) -> Vec<Item> {
         let mut items = Vec::new();
+        #[cfg(feature = "terrain-surface")]
+        if self.terrain_surface.state.busy() { items.push(Item { name: "Terrain appearance · unsaved or pending", action: "Save appearance, cancel Preview or explicitly discard appearance work before closing.", last_close: false }); }
+        if self.mesh_animation_import_busy() {
+            items.push(Item { name: "Mesh animation import · worker owned", action: "Wait for import worker completion and join, then explicitly close again. A published package is not automatically applied or saved.", last_close: false });
+        }
+        if self.navigation_export_busy() {
+            items.push(Item { name: "Navigation export · worker owned", action: "Wait for terminal and joined completion, then explicitly close again. Editing remains available.", last_close: false });
+        }
         #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
         if self.arena_export.busy() {
             items.push(Item { name: "Arena export · worker owned", action: "Wait for export worker completion and join, then explicitly close again. Editing remains available.", last_close: false });

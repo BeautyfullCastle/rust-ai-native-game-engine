@@ -85,6 +85,13 @@ def fixture(root):
                 if phase == 'won':
                     paint([4, 2], [40, 250, 40])
                 counts = {'cursor_origin_blue': 289, 'target_lamp_green': 289 if phase == 'won' else 0}
+                for index in range(4):
+                    cx,cy=map(round,gate.screen(capture,[index*2,4]))
+                    rgb=[40,250,40] if phase=='neutral' or index==2 else [150,150,150]
+                    for yy in range(cy-16,cy+17):
+                        for xx in range(cx-16,cx+17):
+                            pixels[(yy*1400+xx)*4:(yy*1400+xx)*4+4]=bytes((*rgb,255))
+
             counts['selection_outline'] = paint(origin, [250, 210, 50], ring=True) if phase == 'edit' else 0
             capture['pixel_counts'] = counts
             path = directory/capture['png']
@@ -119,6 +126,12 @@ class NativeGateTests(unittest.TestCase):
         write(path, receipt)
         with self.assertRaises((ValueError, KeyError)):
             gate.validate(self.root, PROVENANCE)
+
+    def test_current_navigation_build_identities(self):
+        self.assertEqual(gate.GAMES, {
+            'delivery': ('StarterDelivery', '0x5354415254563201'),
+            'switchboard': ('StarterSwitchboard', '0x5354415254563202'),
+        })
 
     def test_positive_complete_both_games(self):
         self.assertEqual(gate.validate(self.root, PROVENANCE)['captures'], 8)
@@ -174,6 +187,53 @@ class NativeGateTests(unittest.TestCase):
         path = self.root/'delivery/edit.png'
         rgba_png(path, bytes(1400*1000*4))
         self.mutate(lambda r: r['captures'][0].update(sha256=gate.digest(path)))
+
+    def test_switch_neutral_requires_release_fixture_target(self):
+        receipt=json.loads((self.root/'switchboard/native-receipt.json').read_text())
+        neutral=receipt['captures'][2]
+        # target=4 pixels are valid for won, but neutral must show authored target=15.
+        with self.assertRaisesRegex(ValueError,'authored target pattern'):
+            gate.pixel_counts(gate.png(self.root/'switchboard/won.png'),neutral,'switchboard')
+
+    def test_switch_target_pixels_cannot_replace_current_lamp(self):
+        receipt=json.loads((self.root/'switchboard/native-receipt.json').read_text())
+        capture=receipt['captures'][1]
+        pixels=gate.png(self.root/'switchboard/won.png')
+        cx,cy=map(round,gate.screen(capture,[4,2]))
+        for yy in range(cy-20,cy+21):
+            for xx in range(cx-20,cx+21):
+                pixels[(yy*1400+xx)*4:(yy*1400+xx)*4+4]=bytes(4)
+        with self.assertRaisesRegex(ValueError,'switch win pixels'):
+            gate.pixel_counts(pixels,capture,'switchboard')
+
+    def test_switch_target_mutations_reject_producer_counts(self):
+        capture=json.loads((self.root/'switchboard/native-receipt.json').read_text())['captures'][1]
+        original=gate.png(self.root/'switchboard/won.png')
+        for mutation in ('missing','wrong_pattern','wrong_row','circle','wrong_camera'):
+            with self.subTest(mutation=mutation):
+                pixels=bytearray(original)
+                import copy
+                changed=copy.deepcopy(capture)
+                if mutation=='wrong_row':
+                    for index in range(4):
+                        cx,cy=map(round,gate.screen(capture,[index*2,6]))
+                        rgb=(40,250,40,255) if index==2 else (150,150,150,255)
+                        for yy in range(cy-16,cy+17):
+                            for xx in range(cx-16,cx+17):
+                                pixels[(yy*1400+xx)*4:(yy*1400+xx)*4+4]=bytes(rgb)
+                if mutation=='wrong_camera':
+                    changed['camera']['center']=[0,1]
+                else:
+                    for index in range(4):
+                        cx,cy=map(round,gate.screen(capture,[index*2,4]))
+                        for yy in range(cy-18,cy+19):
+                            for xx in range(cx-18,cx+19):
+                                offset=(yy*1400+xx)*4
+                                if mutation in ('missing','wrong_row') or (mutation=='circle' and (xx-cx)**2+(yy-cy)**2 > 16**2):
+                                    pixels[offset:offset+4]=bytes(4)
+                                elif mutation=='wrong_pattern':
+                                    pixels[offset:offset+4]=bytes((40,250,40,255) if index==0 else (150,150,150,255))
+                with self.assertRaises(ValueError):gate.pixel_counts(pixels,changed,'switchboard')
 
     def test_png_all_adaptive_filters_decode_independently(self):
         def chunk(kind, data):

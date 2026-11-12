@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::{Mode, editor::Editor, game::EditorGame};
+use crate::{editor::Editor, game::EditorGame, Mode};
 use egui::{Button, Ui, Window};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -244,6 +244,122 @@ impl State {
     }
 }
 
+impl super::EditorApp {
+    /// Keep the already admitted hazards-player camera panel bound to its
+    /// validated sidecar instead of letting the first UI frame load it again.
+    pub(crate) fn install_validated_hazards_navigation(
+        &mut self,
+        panel: crate::mesh_navigation::Panel,
+    ) {
+        self.mesh_navigation = panel;
+    }
+
+    pub(crate) fn install_validated_hazards_lighting(
+        &mut self,
+        panel: crate::mesh_lighting_panel::Panel,
+    ) {
+        self.mesh_lighting = panel;
+    }
+
+    pub(crate) fn install_validated_hazards_hud(&mut self, panel: crate::mesh_hud_panel::Panel) {
+        self.mesh_hud = panel;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hazard_hud_panel(&self) -> &crate::mesh_hud_panel::Panel {
+        &self.mesh_hud
+    }
+
+    pub(crate) fn hazards_hud_matches(
+        &self,
+        expected_digest: &Option<String>,
+        document: &Option<crate::mesh_hud::Document>,
+    ) -> bool {
+        self.mesh_hud
+            .matches_saved_sidecar(expected_digest.as_deref())
+            && self.mesh_hud.applied_document(&self.editor).as_ref() == document.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hazard_lighting_panel(&self) -> &crate::mesh_lighting_panel::Panel {
+        &self.mesh_lighting
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hazard_lighting_warning(&self) -> Option<&str> {
+        self.mesh_post_process_runtime.warning()
+    }
+
+    pub(crate) fn hazards_lighting_matches(
+        &self,
+        expected_digest: &Option<String>,
+        lighting: Option<orr_render::Lighting>,
+        post_process: Option<orr_render::PostProcessSettings>,
+    ) -> bool {
+        self.mesh_lighting
+            .matches_saved_sidecar(expected_digest.as_deref())
+            && self.mesh_lighting.applied_lighting(&self.editor) == lighting
+            && self.mesh_lighting.applied_post_process(&self.editor) == post_process
+    }
+
+    pub(crate) fn hazards_props_match(&self, expected_digest: &Option<String>, document: &[u8]) -> bool {
+        self.mesh_navigation.props_matches_saved_sidecar(&self.editor, expected_digest.as_deref())
+            && self.mesh_navigation.props_document_bytes(&self.editor).is_ok_and(|bytes| bytes == document)
+    }
+
+    pub(crate) fn hazards_point_light_matches(
+        &mut self,
+        expected: Option<&orr_render::PointLightSettings>,
+    ) -> bool {
+        let applied = self.mesh_lighting.applied_point_light_settings(&self.editor);
+        applied.as_ref() == expected
+            && self.point_light_settings_for_frame().ok() == Some(expected.cloned().unwrap_or_default())
+    }
+
+    #[cfg(feature = "mesh-animated-models")]
+    pub(crate) fn install_validated_hazards_animation(&mut self, panel: crate::mesh_animation_panel::Panel) {
+        self.mesh_animation = panel;
+    }
+
+    #[cfg(feature = "mesh-animated-models")]
+    pub(crate) fn hazards_animation_matches(&self, expected: Option<&str>) -> bool {
+        self.mesh_animation.matches_saved_sidecar(expected)
+    }
+
+    #[cfg(feature = "mesh-animated-models")]
+    pub(crate) fn hazards_animation_pose_digest(&mut self) -> Result<Option<String>, String> {
+        self.mesh_animation_for_frame().map(|placement| placement.as_ref().map(crate::mesh_hazards_player::animation_pose_digest))
+    }
+
+    pub(crate) fn verify_hazards_restart(&mut self) -> Result<(), String> {
+        let mut session = State::default();
+        session.open_dialog(&mut self.editor);
+        if !self.restart_mesh_hazards_player(&mut session) {
+            return Err(session
+                .error
+                .unwrap_or_else(|| "Headless restart failed".into()));
+        }
+        validate_fresh_session(&self.editor)?;
+        if let Some(blocker) = self
+            .mesh_navigation
+            .play_blocker(&self.editor)
+            .or_else(|| self.mesh_lighting.play_blocker(&self.editor))
+            .or_else(|| self.mesh_hud.play_blocker(&self.editor))
+            .or_else(|| self.mesh_animation_blocker())
+        {
+            return Err(blocker);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn install_validated_hazards_camera(
+        &mut self,
+        panel: crate::mesh_camera_panel::Panel,
+    ) {
+        self.mesh_camera = panel;
+    }
+}
+
 /// Check the hazard registry before accessing its typed singleton state.
 pub(crate) fn validate_fresh_session(editor: &Editor) -> Result<(), String> {
     if editor.game() != EditorGame::MeshHazardsV1 || editor.mode() != Mode::Play {
@@ -483,6 +599,93 @@ mod tests {
     }
 
     #[test]
+    fn busy_export_disables_art_fields_and_conflicting_restart() {
+        use egui_kittest::{
+            kittest::{NodeT, Queryable},
+            Harness,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = super::super::EditorApp::new(editor(directory.path()), None);
+        app.sync_mesh_presentation();
+        let mut harness = Harness::builder()
+            .with_size([1200.0, 1000.0])
+            .build_ui_state(
+                |ui, app: &mut super::super::EditorApp| app.inspector(ui),
+                app,
+            );
+        harness.run_steps(2);
+        harness.get_by_label("Mesh agent art").click_accesskit();
+        harness.run_steps(3);
+        let release = harness
+            .state_mut()
+            .mesh_hazards_export
+            .hold_pending_for_test();
+        harness.run_steps(2);
+        assert!(harness
+            .get_by_role_and_label(
+                egui::accesskit::Role::TextInput,
+                "Art package source directory"
+            )
+            .accesskit_node()
+            .is_disabled());
+        let epoch = harness.state().editor.scene_load_epoch();
+        harness.state_mut().restart_from_ui();
+        assert_eq!(harness.state().editor.scene_load_epoch(), epoch);
+        assert!(harness
+            .state()
+            .editor
+            .status()
+            .unwrap()
+            .text
+            .contains("export completion"));
+        assert!(harness
+            .state()
+            .mesh_creation_base_blocker()
+            .unwrap()
+            .contains("export completion"));
+        assert!(harness
+            .state()
+            .playback_start_blocker()
+            .unwrap()
+            .contains("export completion"));
+        release();
+    }
+
+    #[test]
+    fn busy_hazard_export_disables_lighting_fields() {
+        use egui_kittest::{
+            kittest::{NodeT, Queryable},
+            Harness,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = super::super::EditorApp::new(editor(directory.path()), None);
+        app.sync_mesh_presentation();
+        let mut harness = Harness::builder()
+            .with_size([1200.0, 1000.0])
+            .build_ui_state(
+                |ui, app: &mut super::super::EditorApp| app.inspector(ui),
+                app,
+            );
+        harness.run_steps(2);
+        harness.get_by_label("Mesh game lighting").click_accesskit();
+        harness.run_steps(3);
+        assert!(!harness
+            .get_by_role_and_label(egui::accesskit::Role::TextInput, "Light intensity")
+            .accesskit_node()
+            .is_disabled());
+        let release = harness
+            .state_mut()
+            .mesh_hazards_export
+            .hold_pending_for_test();
+        harness.run_steps(2);
+        assert!(harness
+            .get_by_role_and_label(egui::accesskit::Role::TextInput, "Light intensity")
+            .accesskit_node()
+            .is_disabled());
+        release();
+    }
+
+    #[test]
     fn cancel_is_paused_and_does_not_reset_session() {
         let directory = tempfile::tempdir().unwrap();
         let mut editor = editor(directory.path());
@@ -573,7 +776,7 @@ mod tests {
 
     #[test]
     fn actual_player_ui_restart_refreshes_authored_panels_after_loss() {
-        use egui_kittest::{Harness, kittest::Queryable};
+        use egui_kittest::{kittest::Queryable, Harness};
         use orr_remote::mesh_navigation::{hazards, mesh_from_view};
         let directory = tempfile::tempdir().unwrap();
         let mut editor = editor(directory.path());
@@ -704,11 +907,9 @@ mod tests {
         assert_eq!(std::fs::read(&output).unwrap(), b"preserve raced output");
         let fresh = directory.path().join("fresh.png");
         write_capture(&fresh, &image).unwrap();
-        assert!(
-            std::fs::read(&fresh)
-                .unwrap()
-                .starts_with(b"\x89PNG\r\n\x1a\n")
-        );
+        assert!(std::fs::read(&fresh)
+            .unwrap()
+            .starts_with(b"\x89PNG\r\n\x1a\n"));
     }
 
     #[cfg(unix)]

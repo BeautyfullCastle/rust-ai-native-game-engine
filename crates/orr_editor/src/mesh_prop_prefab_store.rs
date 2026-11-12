@@ -194,7 +194,13 @@ fn verify_open_directory(path: &Path, observed: &Metadata) -> Result<(), String>
         let opened = directory
             .metadata()
             .map_err(|error| format!("inspect opened mesh prop prefab directory: {error}"))?;
-        if !opened.is_dir() || is_reparse(&opened) || !same_metadata_stamp(observed, &opened) {
+        // A new sibling file changes a directory's size and write time, not its identity.
+        let same_directory = {
+            use std::os::windows::fs::MetadataExt;
+            observed.creation_time() == opened.creation_time()
+                && observed.file_attributes() == opened.file_attributes()
+        };
+        if !opened.is_dir() || is_reparse(&opened) || !same_directory {
             return Err("mesh prop prefab directory changed while opening".into());
         }
     }

@@ -101,6 +101,7 @@ pub struct ServerConfig {
     pub listen: bool,
     /// Optional local editor framebuffer capture endpoint; absent on headless hosts.
     pub screenshot: Option<crate::screenshot::ScreenshotService>,
+
 }
 
 impl ServerConfig {
@@ -120,6 +121,7 @@ impl ServerConfig {
             activity_capacity: DEFAULT_ACTIVITY_CAPACITY,
             listen: true,
             screenshot: None,
+
         }
     }
 }
@@ -594,6 +596,9 @@ struct VerifyTask {
     notified: bool,
 }
 
+struct GameplayCaller<'a>{connection:u64,client:&'a str,caps:Caps}
+struct PendingGameplay {serial:u64,conn:u64,id:J,client:String,method:String,safe:J}
+
 struct PendingScreenshot {
     request: crate::screenshot::CaptureRequest,
     conn: u64,
@@ -645,6 +650,8 @@ pub struct ErpServer {
     structured_input: Option<Box<dyn std::any::Any + Send + Sync>>,
     managed_input: crate::input::ManagedHeld,
     pending_screenshot: Option<PendingScreenshot>,
+    pending_gameplay: Vec<PendingGameplay>,
+    editor_gameplay: Option<crate::editor_gameplay::EditorGameplayService>,
     editor_work_status: Option<crate::work_status::WorkStatusService>,
 }
 
@@ -734,6 +741,8 @@ impl ErpServer {
             structured_input: None,
             managed_input: crate::input::ManagedHeld::default(),
             pending_screenshot: None,
+            pending_gameplay: Vec::new(),
+            editor_gameplay: None,
             editor_work_status: None,
         })
     }
@@ -784,6 +793,14 @@ impl ErpServer {
     /// automatically. This never clears legacy slots or accepted commands.
     pub fn invalidate_managed_input<G: Game>(&mut self, target: &mut ErpTarget<'_, G>) {
         self.managed_input.invalidate(target);
+    }
+
+    /// Installs one trusted native editor owner before any connection is served.
+    /// Existing clients or a previous installation make the operation fail closed.
+    pub fn install_editor_gameplay(&mut self,service:crate::editor_gameplay::EditorGameplayService)->Result<(),String>{
+        if self.editor_gameplay.is_some(){return Err("editor_gameplay_already_installed".into());}
+        if !self.conns.is_empty(){return Err("editor_gameplay_connections_already_present".into());}
+        self.editor_gameplay=Some(service);Ok(())
     }
 
     /// Tells the server about a play session the host stopped itself (for
@@ -989,6 +1006,7 @@ impl ErpServer {
     pub fn poll<G: Game>(&mut self, target: &mut ErpTarget<'_, G>) -> PollReport {
         let now = Instant::now();
         self.poll_screenshot(target, now);
+        self.poll_gameplay(target,now);
         self.managed_input.expire(target, now);
         self.complete_verification(target);
         // These events came from the host's real-time advance after the last
@@ -1022,6 +1040,7 @@ impl ErpServer {
                 },
             };
             match msg {
+                Inbound::InstallEditorGameplay{service,reply}=>{let _=reply.send(self.install_editor_gameplay(service));}
                 Inbound::Connected {
                     conn,
                     client,
@@ -1105,6 +1124,7 @@ impl ErpServer {
         }
         self.complete_verification(target);
         self.poll_screenshot(target, Instant::now());
+        self.poll_gameplay(target,Instant::now());
         self.publish(target, now);
         self.managed_input.expire(target, Instant::now());
         report.crash = std::mem::take(&mut self.crash);
@@ -1114,6 +1134,8 @@ impl ErpServer {
 
     fn disconnected<G: Game>(&mut self, conn: u64, target: &mut ErpTarget<'_, G>) {
         self.managed_input.disconnect(target, conn);
+        if let Some(service)=&self.editor_gameplay{service.disconnect(conn);}
+        self.pending_gameplay.retain(|pending|pending.conn!=conn);
         self.conns.remove(&conn);
         if self
             .pending_screenshot
@@ -1135,6 +1157,41 @@ impl ErpServer {
                 let _ = target.doc.rollback_tx();
             }
             self.tx_owner = None;
+        }
+    }
+
+    fn gameplay_request<G:Game>(&mut self,target:&ErpTarget<'_,G>,caller:GameplayCaller<'_>,id:Option<J>,method:&str,params:&J){
+        let GameplayCaller{connection:conn,client,caps}=caller;
+        let authorized=authorize(method,caps,target.play.is_some(),params);
+        self.stats.requests+=1;if let Some(connection)=self.conns.get_mut(&conn){connection.requests+=1;}
+        // Mutations require a reply identity. Fire-and-forget never performs work.
+        let Some(id)=id else{return;};
+        if self.pending_gameplay.iter().any(|pending|pending.conn==conn&&pending.id==id){return;}
+        let result=authorized.and_then(|_|{
+            if self.pending_gameplay.len()>=64{return Err(RpcError::state("editor_gameplay_busy","The bounded editor gameplay response queue is busy"));}
+            self.editor_gameplay.as_ref().ok_or_else(||RpcError::state("editor_gameplay_unavailable","No paired editor gameplay owner"))?.admit(conn,client,method,params,Instant::now())
+        });
+        // Never retain payload/schema/scope/grant/token or arbitrary caller text in activity.
+        let safe=crate::editor_gameplay::safe_activity_params(method,params);
+        match result{
+            Ok(serial)=>self.pending_gameplay.push(PendingGameplay{serial,conn,id,client:client.to_owned(),method:method.to_owned(),safe}),
+            Err(error)=>self.gameplay_reply(target,PendingGameplay{serial:0,conn,id,client:client.to_owned(),method:method.to_owned(),safe},Err(error)),
+        }
+    }
+    fn gameplay_reply<G:Game>(&mut self,target:&ErpTarget<'_,G>,pending:PendingGameplay,result:Result<J,RpcError>){
+        if let Some(connection)=self.conns.get(&pending.conn){connection.tx.send_control_text(match &result{Ok(value)=>response_ok(&pending.id,value.clone()),Err(error)=>response_err(&pending.id,error)});}
+        if result.is_err(){self.stats.errors+=1;}
+        if !matches!(pending.method.as_str(),"editor.gameplay.describe"|"editor.gameplay.status"){
+            let safe_result=crate::editor_gameplay::safe_activity_result(&result);
+            let entry=activity::build(target,&pending.client,&pending.method,&pending.safe,&safe_result,Default::default(),None);self.push_activity(entry);
+        }
+    }
+    fn poll_gameplay<G:Game>(&mut self,target:&ErpTarget<'_,G>,now:Instant){
+        let Some(service)=self.editor_gameplay.clone()else{return;};
+        let pending=std::mem::take(&mut self.pending_gameplay);
+        for request in pending{
+            if !self.conns.contains_key(&request.conn){continue;}
+            match service.poll_result(request.serial,now){Some(result)=>self.gameplay_reply(target,request,result),None=>self.pending_gameplay.push(request)}
         }
     }
 
@@ -1310,6 +1367,7 @@ impl ErpServer {
             return;
         };
         let (client, caps, tx) = (c.client.clone(), c.caps, c.tx.clone());
+        if matches!(method,"editor.gameplay.describe"|"editor.gameplay.control"|"editor.gameplay.submit"|"editor.gameplay.status"|"editor.gameplay.cancel") {self.gameplay_request(target,GameplayCaller{connection:conn,client:&client,caps},id,method,params);return;}
         if method == "editor.work_status" {
             // No activity params, frame-cache invalidation or authoring effects.
             // Authorization precedes every owner/mailbox observation, even when
@@ -1401,6 +1459,7 @@ impl ErpServer {
                     self.managed_input.invalidate(target);
                 }
                 if method == "rpc.discover" && caps.has(Cap::Read) {
+                    if let Some(service)=&self.editor_gameplay{result["engine"]["editor_gameplay"]=service.discovery();}
                     if let Some(service) = &self.editor_work_status {
                         result["engine"]["editor_work_status"] = service.discovery();
                     }

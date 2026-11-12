@@ -40,6 +40,40 @@ fn controls_status(paused: bool, won: bool, legend: Option<&str>) -> std::borrow
     }
 }
 
+// Presentation hints never replace the host lifecycle or action-profile legend.
+fn window_title<G: StandaloneGame>(paused: bool, won: bool, legend: Option<&str>) -> String {
+    let status = controls_status(paused, won, legend);
+    let hint = G::presentation_hint();
+    if hint.is_empty() {
+        format!("{} | {status}", G::ID)
+    } else {
+        format!("{} | {status} | {hint}", G::ID)
+    }
+}
+
+// Keep the controls and static hint intact; recompute warnings from the live frame.
+fn window_title_for_frame<G: StandaloneGame>(
+    paused: bool,
+    won: bool,
+    legend: Option<&str>,
+    frame: FrameView<'_>,
+) -> String {
+    let mut title = window_title::<G>(paused, won, legend);
+    if let Some(reachability) = G::reachability(frame) {
+        let warning = match (reachability.current_to_goal, reachability.origin_to_goal) {
+            (true, true) => None,
+            (false, true) => Some("Warning: goal unreachable"),
+            (true, false) => Some("Warning: restart goal unreachable"),
+            (false, false) => Some("Warning: goal unreachable now/after restart"),
+        };
+        if let Some(warning) = warning {
+            title.push_str(" | ");
+            title.push_str(warning);
+        }
+    }
+    title
+}
+
 // This clock only schedules the view-side bridge pump. It never enters game state.
 #[allow(clippy::disallowed_types)]
 mod view_clock {
@@ -391,14 +425,36 @@ pub struct Options {
     pub observe: Option<PathBuf>,
     pub identity: bool,
     pub provenance: bool,
+    pub reachability: bool,
 }
 impl Options {
+    // Also checked by run: public Options values need not originate in parse.
+    // This validator intentionally leaves unrelated legacy flag behavior alone.
+    fn validate_reachability(&self) -> Result<(), String> {
+        if !self.reachability {
+            return Ok(());
+        }
+        if self.identity
+            || self.provenance
+            || self.record.is_some()
+            || self.replay.is_some()
+            || self.observe.is_some()
+        {
+            return Err("reachability query cannot combine with identity, provenance, run, replay, record or observe".into());
+        }
+        if self.scene.is_none() {
+            return Err("--scene PATH is required".into());
+        }
+        Ok(())
+    }
+
     pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Self, String> {
         let mut out = Self::default();
         let mut args = args.into_iter();
         while let Some(flag) = args.next() {
             match flag.as_str() {
                 "--identity" if !out.identity => out.identity = true,
+                "--reachability" if !out.reachability => out.reachability = true,
                 "--provenance" if !out.provenance => out.provenance = true,
                 "--scene" | "--record" | "--replay" | "--observe" => {
                     let slot = match flag.as_str() {
@@ -419,8 +475,10 @@ impl Options {
                 _ => return Err(format!("unknown or duplicate option {flag}")),
             }
         }
+        out.validate_reachability()?;
         if out.provenance {
             if out.identity
+                || out.reachability
                 || out.scene.is_some()
                 || out.record.is_some()
                 || out.replay.is_some()
@@ -630,12 +688,12 @@ impl<G: StandaloneGame> Native<G> {
         let action_legend = self.controller.action_legend.as_deref();
         #[cfg(not(feature = "static-game-actions"))]
         let action_legend = None;
-        let status = controls_status(
+        gfx.window.set_title(&window_title_for_frame::<G>(
             self.controller.paused(),
             state["won"].as_u64() == Some(1),
             action_legend,
-        );
-        gfx.window.set_title(&format!("{} | {status}", G::ID));
+            snapshot.predicted(),
+        ));
         if let Some(observer) = &mut self.observer {
             let size = gfx.renderer.size();
             observer.write(&json!({"schema":"orr.static-standalone-observation/1","sequence":self.sequence,"reason":self.reason,
@@ -765,6 +823,7 @@ pub fn main_for<G: StandaloneGame + 'static>() -> Result<(), String> {
     run::<G>(Options::parse(std::env::args().skip(1))?)
 }
 pub fn run<G: StandaloneGame + 'static>(options: Options) -> Result<(), String> {
+    options.validate_reachability()?;
     if options.provenance {
         println!("{}", json!({"source_sha":compiled_source_sha()?}));
         return Ok(());
@@ -773,6 +832,10 @@ pub fn run<G: StandaloneGame + 'static>(options: Options) -> Result<(), String> 
     let admitted = admit::<G>(&text)?;
     if options.identity {
         println!("{}", admitted.identity());
+        return Ok(());
+    }
+    if options.reachability {
+        println!("{}", admitted.reachability_report());
         return Ok(());
     }
     let replay = options.replay.as_deref().map(replay_bytes).transpose()?;
@@ -825,17 +888,179 @@ pub fn run<G: StandaloneGame + 'static>(options: Options) -> Result<(), String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game_contract::Starter;
+
+    #[test]
+    fn reachability_query_requires_scene_and_excludes_runtime_or_other_queries() {
+        let parse = |args: &[&str]| Options::parse(args.iter().map(|arg| (*arg).to_string()));
+        let options = parse(&["--reachability", "--scene", "scene.yaml"]).unwrap();
+        assert!(options.reachability);
+        assert!(parse(&["--reachability"]).is_err());
+        for flag in [
+            "--identity",
+            "--provenance",
+            "--reachability",
+            "--record",
+            "--replay",
+            "--observe",
+        ] {
+            let mut args = vec!["--reachability", "--scene", "scene.yaml", flag];
+            if ["--record", "--replay", "--observe"].contains(&flag) {
+                args.push("/tmp/output");
+            }
+            assert!(parse(&args).is_err(), "{flag}");
+            let mut reverse = vec![flag];
+            if ["--record", "--replay", "--observe"].contains(&flag) {
+                reverse.push("/tmp/output");
+            }
+            reverse.extend(["--scene", "scene.yaml", "--reachability"]);
+            assert!(parse(&reverse).is_err(), "reverse {flag}");
+        }
+        // Nonexistent scene/output paths and exact validation errors prove these
+        // calls return before file reads, output creation, or native setup.
+        for conflict in [
+            "missing scene",
+            "identity",
+            "provenance",
+            "record",
+            "replay",
+            "observe",
+        ] {
+            let mut options = Options {
+                reachability: true,
+                scene: Some(PathBuf::from("/nonexistent/reachability-test.scene.yaml")),
+                ..Options::default()
+            };
+            match conflict {
+                "missing scene" => options.scene = None,
+                "identity" => options.identity = true,
+                "provenance" => options.provenance = true,
+                "record" => options.record = Some(PathBuf::from("/nonexistent/output")),
+                "replay" => options.replay = Some(PathBuf::from("/nonexistent/output")),
+                "observe" => options.observe = Some(PathBuf::from("/nonexistent/output")),
+                _ => unreachable!(),
+            }
+            let expected = if conflict == "missing scene" {
+                "--scene PATH is required"
+            } else {
+                "reachability query cannot combine with identity, provenance, run, replay, record or observe"
+            };
+            assert_eq!(
+                run::<crate::delivery::DeliveryGame>(options).unwrap_err(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn reachability_title_is_dynamic_and_preserves_controls_and_hints() {
+        use crate::delivery::{DeliveryGame, DeliveryInput};
+        // The initial fractional position equals the goal, but origin restart
+        // changes current reachability. The title must use the current frame.
+        let scene = DeliveryGame::SCENE
+            .replace("position: [0, 0]", "position: [0.5, 0]")
+            .replace("goal: [4, 0]", "goal: [0.5, 0]");
+        let admitted = admit::<DeliveryGame>(&scene).unwrap();
+        let mut session = admitted.session().unwrap();
+        for paused in [false, true] {
+            for won in [false, true] {
+                let title = window_title_for_frame::<DeliveryGame>(
+                    paused,
+                    won,
+                    Some("custom controls"),
+                    FrameView::of(session.frame()),
+                );
+                assert!(title.starts_with(&window_title::<DeliveryGame>(
+                    paused,
+                    won,
+                    Some("custom controls")
+                )));
+                assert!(title.ends_with(" | Warning: restart goal unreachable"));
+            }
+        }
+        for deliver in [1, 0, 1] {
+            session.set_input(
+                PlayerSlot(0),
+                DeliveryInput {
+                    dx: 0,
+                    dy: 0,
+                    deliver,
+                },
+            );
+            session.control(ControlOp::Step(1));
+        }
+        let checksum = session.frame().checksum();
+        let title = window_title_for_frame::<DeliveryGame>(
+            false,
+            false,
+            None,
+            FrameView::of(session.frame()),
+        );
+        assert!(title.ends_with(" | Warning: goal unreachable now/after restart"));
+        assert_eq!(session.frame().checksum(), checksum);
+        assert!(admitted.reachability().unwrap().current_to_goal);
+        let current_only = admit::<DeliveryGame>(
+            &DeliveryGame::SCENE.replace("position: [0, 0]", "position: [0.5, 0]"),
+        )
+        .unwrap()
+        .session()
+        .unwrap();
+        assert_eq!(
+            window_title_for_frame::<DeliveryGame>(
+                false,
+                false,
+                None,
+                FrameView::of(current_only.frame())
+            ),
+            format!(
+                "{} | Warning: goal unreachable",
+                window_title::<DeliveryGame>(false, false, None)
+            ),
+        );
+        let stock = admit::<DeliveryGame>(DeliveryGame::SCENE)
+            .unwrap()
+            .session()
+            .unwrap();
+        assert_eq!(
+            window_title_for_frame::<DeliveryGame>(
+                false,
+                false,
+                None,
+                FrameView::of(stock.frame())
+            ),
+            window_title::<DeliveryGame>(false, false, None)
+        );
+        let switch = admit::<crate::switchboard::SwitchGame>(crate::switchboard::SCENE)
+            .unwrap()
+            .session()
+            .unwrap();
+        assert_eq!(
+            window_title_for_frame::<crate::switchboard::SwitchGame>(
+                true,
+                false,
+                None,
+                FrameView::of(switch.frame())
+            ),
+            window_title::<crate::switchboard::SwitchGame>(true, false, None)
+        );
+    }
 
     #[test]
     fn controls_status_preserves_legacy_pause_active_and_win() {
         for won in [false, true] {
-            assert_eq!(controls_status(true, won, None), "paused: Enter starts/resumes");
+            assert_eq!(
+                controls_status(true, won, None),
+                "paused: Enter starts/resumes"
+            );
         }
         assert_eq!(
             controls_status(false, false, None),
             "WASD/arrows move; Space acts; Escape pauses"
         );
-        assert_eq!(controls_status(false, true, None), "won: release then Space restarts");
+        assert_eq!(
+            controls_status(false, true, None),
+            "won: release then Space restarts"
+        );
     }
 
     #[cfg(feature = "static-game-actions")]
@@ -848,7 +1073,10 @@ mod tests {
         .unwrap();
         let legend = profile.controls_legend();
         for won in [false, true] {
-            assert_eq!(controls_status(true, won, Some(&legend)), "paused: Enter starts/resumes");
+            assert_eq!(
+                controls_status(true, won, Some(&legend)),
+                "paused: Enter starts/resumes"
+            );
             let status = controls_status(false, won, Some(&legend));
             assert!(status.contains("jump: Space"));
             assert!(status.ends_with("Escape pauses"));
@@ -862,6 +1090,74 @@ mod tests {
             controls_status(false, true, Some(&legend)),
             "won; WASD/arrows move; jump: Space; Escape pauses"
         );
+    }
+
+    #[test]
+    fn empty_presentation_hint_preserves_legacy_titles() {
+        use crate::delivery::DeliveryGame;
+        assert_eq!(DeliveryGame::presentation_hint(), "");
+        for paused in [false, true] {
+            for won in [false, true] {
+                assert_eq!(
+                    window_title::<DeliveryGame>(paused, won, None),
+                    format!(
+                        "{} | {}",
+                        DeliveryGame::ID,
+                        controls_status(paused, won, None)
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn objective_hint_survives_pause_active_and_win_titles() {
+        use crate::switchboard::SwitchGame;
+        let hint = SwitchGame::presentation_hint();
+        assert!(!hint.is_empty());
+        for paused in [false, true] {
+            for won in [false, true] {
+                assert_eq!(
+                    window_title::<SwitchGame>(paused, won, None),
+                    format!(
+                        "{} | {} | {hint}",
+                        SwitchGame::ID,
+                        controls_status(paused, won, None)
+                    )
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "static-game-actions")]
+    #[test]
+    fn presentation_hint_preserves_action_titles_without_inventing_restart() {
+        use crate::{delivery::DeliveryGame, switchboard::SwitchGame};
+        let profile = orr_input::HeldActionProfile::new(vec![Action {
+            name: "jump".into(),
+            bindings: vec![Button::Keyboard { key: Key::Space }],
+        }])
+        .unwrap();
+        let legend = profile.controls_legend();
+        for paused in [false, true] {
+            for won in [false, true] {
+                let status = controls_status(paused, won, Some(&legend));
+                assert_eq!(
+                    window_title::<DeliveryGame>(paused, won, Some(&legend)),
+                    format!("{} | {status}", DeliveryGame::ID)
+                );
+                let title = window_title::<SwitchGame>(paused, won, Some(&legend));
+                assert_eq!(
+                    title,
+                    format!(
+                        "{} | {status} | {}",
+                        SwitchGame::ID,
+                        SwitchGame::presentation_hint()
+                    )
+                );
+                assert!(!title.contains("restart"));
+            }
+        }
     }
 
     #[test]

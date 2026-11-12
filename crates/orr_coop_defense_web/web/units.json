@@ -1,0 +1,120 @@
+{
+  "image": "units.png",
+  "width": 1536,
+  "height": 1024,
+  "format": "RGBA PNG",
+  "generatedWith": "built-in image_gen",
+  "originalArt": true,
+  "layout": "3 columns x 2 rows; use explicit rectangles, not uniform cells",
+  "coreToAtlas": [
+    0,
+    1,
+    3,
+    2,
+    4,
+    5
+  ],
+  "sprites": [
+    {
+      "role": "gunner",
+      "coreRole": 0,
+      "sourceRect": [
+        55,
+        42,
+        457,
+        430
+      ],
+      "opaqueBounds": [
+        65,
+        52,
+        437,
+        410
+      ]
+    },
+    {
+      "role": "mortar",
+      "coreRole": 1,
+      "sourceRect": [
+        578,
+        47,
+        421,
+        451
+      ],
+      "opaqueBounds": [
+        588,
+        57,
+        401,
+        431
+      ]
+    },
+    {
+      "role": "slow",
+      "coreRole": 3,
+      "sourceRect": [
+        1117,
+        24,
+        359,
+        477
+      ],
+      "opaqueBounds": [
+        1127,
+        34,
+        339,
+        457
+      ]
+    },
+    {
+      "role": "armor_breaker",
+      "coreRole": 2,
+      "sourceRect": [
+        54,
+        528,
+        503,
+        476
+      ],
+      "opaqueBounds": [
+        64,
+        538,
+        483,
+        456
+      ]
+    },
+    {
+      "role": "haste",
+      "coreRole": 4,
+      "sourceRect": [
+        582,
+        502,
+        413,
+        477
+      ],
+      "opaqueBounds": [
+        592,
+        512,
+        393,
+        457
+      ]
+    },
+    {
+      "role": "miner",
+      "coreRole": 5,
+      "sourceRect": [
+        1107,
+        513,
+        377,
+        483
+      ],
+      "opaqueBounds": [
+        1117,
+        523,
+        357,
+        463
+      ]
+    }
+  ],
+  "usage": "sourceRect is [x,y,width,height]. Draw aspect-fit, bottom-center anchored. Alpha is 0 in transparent areas (maximum 254). Explicit sourceRects add 10px to main alpha>128 component boundaries. Generated low-alpha fringe may remain. Preserve vector fallback until in-game visual QA.",
+  "validation": {
+    "visual": "Six distinct coherent original painted mechanical towers inspected. No text. Generator did not provide requested uniform padding; individual sourceRects avoid neighboring sprites.",
+    "alpha": "PNG RGBA inspected read-only; transparent samples at (0,0),(512,256),(768,512) all alpha0."
+  }
+}

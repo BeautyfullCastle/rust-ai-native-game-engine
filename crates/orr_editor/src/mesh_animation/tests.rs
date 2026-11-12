@@ -319,3 +319,54 @@ fn decode_rejects_unknown_fields_and_cooked_digest_tampering() {
     let tampered = serde_json::to_vec(&value).unwrap();
     assert!(Snapshot::decode_embedded(&tampered, "mesh.scene.yaml", GRAPH_REVISION).is_err());
 }
+
+#[test]
+fn crossfade_schema_preserves_legacy_bytes_and_strictly_validates_v2() {
+    let legacy = fixture();
+    let bytes = legacy.encode_embedded("mesh.scene.yaml").unwrap();
+    let reopened = Snapshot::decode_embedded(&bytes, "mesh.scene.yaml", GRAPH_REVISION).unwrap();
+    assert_eq!(reopened.encode_embedded("mesh.scene.yaml").unwrap(), bytes);
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(value["schema"], 1);
+    assert!(value["settings"].get("crossfade_ticks").is_none());
+    for ticks in [0, 1, 120] {
+        let mut settings = legacy.settings();
+        settings.idle_clip = Some(0);
+        settings.crossfade_ticks = Some(ticks);
+        let configured = legacy.clone().with_settings(settings).unwrap();
+        let bytes = configured.encode_embedded("mesh.scene.yaml").unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["schema"], 2);
+        assert_eq!(Snapshot::decode_embedded(&bytes, "mesh.scene.yaml", GRAPH_REVISION)
+            .unwrap().settings(), settings);
+    }
+    for field in [serde_json::json!(null), serde_json::json!(-1), serde_json::json!(1.5),
+                  serde_json::json!(121), serde_json::json!("6")] {
+        let mut bad = value.clone();
+        bad["schema"] = serde_json::json!(2);
+        bad["settings"]["idle_clip"] = serde_json::json!(0);
+        bad["settings"]["crossfade_ticks"] = field;
+        assert!(Snapshot::decode_embedded(&serde_json::to_vec(&bad).unwrap(),
+            "mesh.scene.yaml", GRAPH_REVISION).is_err());
+    }
+    for (schema, ticks) in [(1, Some(0)), (2, None), (3, Some(0)), (2, Some(1))] {
+        let mut bad = value.clone();
+        bad["schema"] = serde_json::json!(schema);
+        if let Some(ticks) = ticks { bad["settings"]["crossfade_ticks"] = serde_json::json!(ticks); }
+        assert!(Snapshot::decode_embedded(&serde_json::to_vec(&bad).unwrap(),
+            "mesh.scene.yaml", GRAPH_REVISION).is_err());
+    }
+    let configured = legacy.clone().with_settings(Settings {
+        crossfade_ticks: Some(0), ..legacy.settings()
+    }).unwrap();
+    let text = String::from_utf8(configured.encode_embedded("mesh.scene.yaml").unwrap()).unwrap();
+    let duplicate = text.replace("\"crossfade_ticks\":0", "\"crossfade_ticks\":0,\"crossfade_ticks\":0");
+    assert!(Snapshot::decode_embedded(duplicate.as_bytes(), "mesh.scene.yaml", GRAPH_REVISION).is_err());
+}
+
+#[test]
+fn crossfade_default_settings_keep_preexisting_schema1_wire_shape() {
+    // Original Settings declaration order/defaults, pinned independently of decode/encode.
+    assert_eq!(serde_json::to_string(&Settings::default()).unwrap(),
+        r#"{"offset":[0.0,0.0,0.0],"scale":1.0,"rotation":[0.0,0.0,0.0,1.0],"clip":0,"rate":1.0,"looped":true}"#);
+}

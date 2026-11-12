@@ -78,6 +78,10 @@ mod editor {
         fn view_delivery(&self) -> RemoteViewDelivery {
             self.0.view_delivery()
         }
+        #[cfg(feature = "gameplay")]
+        fn frame_evidence(&self) -> Option<orr_remote::RemoteFrameEvidence> {
+            self.0.frame_evidence()
+        }
     }
     fn stream<G: Starter>(
         t: Box<dyn Transport>,
@@ -120,7 +124,7 @@ mod editor {
         types: SwitchGame::types, host: host::<SwitchGame>, stream: stream::<SwitchGame>, draw: draw::<SwitchGame>,
         position: StaticPosition { component: "Cursor", field: "position" },
         input: StaticInputDescriptor { type_name: "SwitchInput", types: inputs::<SwitchGame>, max_players: 1,
-            hint: "Left/right selects a switch; Space toggles; match target bits (default 0101); Space restarts",
+            hint: "Left/right selects a switch; Space toggles; upper target squares, lower current circles; green on, gray off; match each column; release then Space restarts",
             held: |k| SwitchGame::input_value(&SwitchGame::held_input(HeldKeys { x:k.x, y:k.y, action:k.action })) },
     }]
     }

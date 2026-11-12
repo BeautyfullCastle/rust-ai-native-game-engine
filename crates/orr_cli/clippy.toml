@@ -1,0 +1,9 @@
+# This binary is a transport client, never a simulation (see src/main.rs).
+# Monotonic Instant deadlines bound connection/authentication, RPCs and polling.
+# Keep every other workspace restriction. test_cli_clock_policy.py checks exact
+# parity, package-local discovery, strict defaults and the simulation -F guard.
+disallowed-types = [
+  { path = "std::collections::HashMap", reason = "non-deterministic iteration order in sim code; use BTreeMap or FrameMap" },
+  { path = "std::collections::HashSet", reason = "non-deterministic iteration order in sim code" },
+  { path = "std::time::SystemTime", reason = "wall clock is forbidden in sim code" },
+]

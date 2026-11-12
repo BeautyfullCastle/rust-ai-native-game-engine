@@ -1,3 +1,11 @@
+#[path = "mesh_camera_panel/projection_match.rs"]
+mod projection_match;
+mod focus_agent;
+#[path="mesh_camera_panel/draft_preview.rs"]
+mod draft_preview;
+#[path="mesh_camera_panel/draft_preview_ui.rs"]
+mod draft_preview_ui;
+
 use crate::{
     backend::HostSpec,
     editor::Editor,
@@ -24,6 +32,7 @@ struct HistoryEntry {
 }
 
 pub(crate) struct Panel {
+    draft_preview: draft_preview::State,
     target: [String; 3],
     follow_agent: bool,
     follow_offset: [String; 3],
@@ -35,6 +44,8 @@ pub(crate) struct Panel {
     far: String,
     half_height: String,
     projection: ProjectionMode,
+    match_width: String,
+    match_height: String,
     form_dirty: bool,
     confirm_remove: bool,
     confirm_discard_changes: bool,
@@ -43,6 +54,7 @@ pub(crate) struct Panel {
     cursor: usize,
     next_id: u64,
     saved_id: Option<u64>,
+    profile: Option<EditorGame>,
     scene: Option<PathBuf>,
     scene_epoch: Option<u64>,
     graph_revision: Option<[u8; 32]>,
@@ -57,6 +69,7 @@ pub(crate) struct Panel {
 impl Default for Panel {
     fn default() -> Self {
         Self {
+            draft_preview: Default::default(),
             target: ["0".into(), "2".into(), "0".into()],
             follow_agent: false,
             follow_offset: ["0".into(), "0".into(), "0".into()],
@@ -68,6 +81,8 @@ impl Default for Panel {
             far: "500".into(),
             half_height: "8".into(),
             projection: ProjectionMode::Perspective,
+            match_width: "16".into(),
+            match_height: "9".into(),
             form_dirty: false,
             confirm_remove: false,
             confirm_discard_changes: false,
@@ -79,6 +94,7 @@ impl Default for Panel {
             cursor: 0,
             next_id: 1,
             saved_id: Some(0),
+            profile: None,
             scene: None,
             scene_epoch: None,
             graph_revision: None,
@@ -93,19 +109,22 @@ impl Default for Panel {
 }
 
 impl Panel {
+    #[cfg(feature="mesh-patrol")]
+    pub(crate) fn draft_follows_agent(&self) -> bool { self.follow_agent }
     pub(crate) fn sync(&mut self, editor: &mut Editor) {
-        if editor.game() != EditorGame::MeshNavigation || !editor.spec().is_local() {
+        self.sync_static_preview(editor);
+        if !supports_camera_profile(editor.game()) || !editor.spec().is_local() {
             self.document_pending = true;
             return;
         }
-        let Some((scene, graph_revision)) = current_identity(editor) else {
+        let Some((profile, scene, scene_epoch, graph_revision)) = current_identity(editor) else {
             self.document_pending = true;
             self.status = "Waiting for the requested local mesh scene and admitted graph.".into();
             return;
         };
         self.document_pending = false;
-        let scene_epoch = editor.scene_load_epoch();
         if self.scene.as_ref() == Some(&scene)
+            && self.profile == Some(profile)
             && self.scene_epoch == Some(scene_epoch)
             && self.graph_revision == Some(graph_revision)
         {
@@ -113,12 +132,13 @@ impl Panel {
         }
         if self.dirty() {
             self.context_stale = true;
-            self.status = "Unsaved game camera belongs to another scene or graph revision; explicitly discard and reload before continuing.".into();
+            self.status = "Unsaved game camera belongs to another profile, scene, load epoch, or graph revision; explicitly discard and reload before continuing.".into();
             return;
         }
         if editor.has_mesh_camera() {
             editor.clear_mesh_camera();
         }
+        self.profile = Some(profile);
         self.scene = Some(scene.clone());
         self.scene_epoch = Some(scene_epoch);
         self.graph_revision = Some(graph_revision);
@@ -152,7 +172,7 @@ impl Panel {
     }
 
     pub(crate) fn show(&mut self, ui: &mut Ui, editor: &mut Editor) {
-        if editor.game() != EditorGame::MeshNavigation {
+        if !supports_camera_profile(editor.game()) {
             return;
         }
         self.sync(editor);
@@ -219,14 +239,15 @@ impl Panel {
                         )
                         .changed();
                 });
-                if changed {
-                    self.form_dirty = true;
-                    self.error = None;
-                    self.status = "Game camera form changed; apply it before Play or save.".into();
-                }
+                ui.weak("Match target-plane scale only, at the explicit aspect below (not the current viewport). Depth perspective still changes.");
+                text_field(ui, "Match projection aspect width", &mut self.match_width);
+                text_field(ui, "Match projection aspect height", &mut self.match_height);
+                let match_requested = ui.button("Switch projection keeping target-plane scale").clicked();
+                self.handle_form_actions(changed, match_requested, editor);
+                self.show_focus_agent(ui, editor, match_requested);
                 ui.horizontal_wrapped(|ui| {
                     if ui
-                        .button("Capture viewport as game camera")
+                        .add_enabled(!self.static_preview_enabled() && !self.static_preview_busy(), egui::Button::new("Capture viewport as game camera"))
                         .clicked()
                     {
                         self.capture_viewport(editor);
@@ -241,6 +262,8 @@ impl Panel {
                 });
             });
 
+            self.sync_static_preview(editor);
+            self.show_static_preview_controls(ui, editor, can_edit);
             let history_enabled = self.can_change_history(editor);
             ui.horizontal_wrapped(|ui| {
                 if ui
@@ -350,7 +373,7 @@ impl Panel {
     }
 
     pub(crate) fn play_blocker(&self, editor: &Editor) -> Option<String> {
-        if editor.game() != EditorGame::MeshNavigation {
+        if !supports_camera_profile(editor.game()) {
             return None;
         }
         if self.document_pending || current_identity(editor).is_none() {
@@ -358,7 +381,7 @@ impl Panel {
         }
         if self.context_stale {
             return Some(
-                "Discard or resolve the game camera from the previous scene or graph revision"
+                "Discard or resolve the game camera from the previous profile, scene, load epoch, or graph revision"
                     .into(),
             );
         }
@@ -370,17 +393,34 @@ impl Panel {
         }
         if self.current_document().is_some()
             && (self.scene_epoch != Some(editor.scene_load_epoch())
-                || current_identity(editor).is_none_or(|(scene, revision)| {
-                    self.scene.as_ref() != Some(&scene) || self.graph_revision != Some(revision)
+                || current_identity(editor).is_none_or(|(profile, scene, epoch, revision)| {
+                    self.profile != Some(profile)
+                        || self.scene.as_ref() != Some(&scene)
+                        || self.scene_epoch != Some(epoch)
+                        || self.graph_revision != Some(revision)
                 }))
         {
-            return Some("Game camera does not match the current mesh scene and graph".into());
+            return Some(
+                "Game camera does not match the current mesh profile, scene, load epoch, and graph"
+                    .into(),
+            );
         }
         None
     }
 
     pub(crate) fn dirty(&self) -> bool {
         self.form_dirty || self.context_stale || self.history_is_dirty()
+    }
+
+    /// Whether this already-admitted panel still represents the exact optional
+    /// camera sidecar digest captured by a caller before launch/export.
+    #[cfg(any(feature = "mesh-hazards-export", test))]
+    pub(crate) fn matches_saved_sidecar(&self, expected: Option<&str>) -> bool {
+        !self.document_pending
+            && !self.dirty()
+            && !self.context_stale
+            && self.sidecar_error.is_none()
+            && self.sidecar_sha.as_deref() == expected
     }
 
     pub(crate) fn workspace_save_blocker(&self, editor: &Editor) -> Option<String> {
@@ -449,7 +489,7 @@ impl Panel {
     }
 
     fn can_edit_scene(&self, editor: &Editor) -> bool {
-        editor.game() == EditorGame::MeshNavigation && editor.spec().is_local()
+        supports_camera_profile(editor.game()) && editor.spec().is_local()
     }
 
     fn can_change_history(&self, editor: &Editor) -> bool {
@@ -472,7 +512,7 @@ impl Panel {
     }
 
     fn can_reset_viewport(&self, editor: &Editor) -> bool {
-        self.can_edit_scene(editor)
+        !self.static_preview_enabled() && !self.static_preview_busy() && self.can_edit_scene(editor)
             && editor.mode() == Mode::Edit
             && editor.can_mutate()
             && !editor.in_gesture()
@@ -505,14 +545,16 @@ impl Panel {
     }
 
     fn identity_matches(&self, editor: &Editor) -> bool {
-        current_identity(editor).is_some_and(|(scene, revision)| {
+        current_identity(editor).is_some_and(|(profile, scene, epoch, revision)| {
             self.scene.as_ref() == Some(&scene)
-                && self.scene_epoch == Some(editor.scene_load_epoch())
+                && self.profile == Some(profile)
+                && self.scene_epoch == Some(epoch)
                 && self.graph_revision == Some(revision)
         })
     }
 
     fn capture_viewport(&mut self, editor: &Editor) {
+        if self.static_preview_enabled() || self.static_preview_busy() {self.error=Some("Turn off camera draft preview and release viewport input before capturing".into());return;}
         if !self.can_edit(editor) {
             self.error = Some("Capture requires the matching editable local mesh scene".into());
             return;
@@ -529,12 +571,60 @@ impl Panel {
         }
     }
 
+    fn handle_form_actions(&mut self, changed: bool, match_requested: bool, editor: &Editor) {
+        // Both events can occur in one UI frame. Clear only the previous error
+        // before conversion so its new failure (or success status) remains visible.
+        if changed {
+            self.form_dirty = true;
+            self.error = None;
+            self.status = "Game camera form changed; apply it before Play or save.".into();
+        }
+        if match_requested {
+            self.match_projection(editor);
+        }
+    }
+
+    fn match_projection(&mut self, editor: &Editor) {
+        if !self.can_edit(editor) {
+            self.error = Some("Projection matching requires the matching editable local mesh scene".into());
+            return;
+        }
+        let result = (|| {
+            let size = (self.match_width.parse::<u32>().map_err(|_| "Aspect width must be an integer in 1..=16384")?,
+                self.match_height.parse::<u32>().map_err(|_| "Aspect height must be an integer in 1..=16384")?);
+            let scene = self.scene.as_deref().ok_or("No matching camera scene")?;
+            let revision = self.graph_revision.ok_or("No matching graph revision")?;
+            let current = self.parse_form(scene, revision)?;
+            projection_match::match_projection(&current, size)
+        })();
+        match result {
+            Ok(document) => {
+                // Only projection parameters change. Preserve all other user text exactly.
+                match document.projection {
+                    Projection::Perspective => {
+                        self.projection = ProjectionMode::Perspective;
+                        self.fov_y_degrees = format_number(document.fov_y_degrees);
+                    }
+                    Projection::Orthographic { half_height } => {
+                        self.projection = ProjectionMode::Orthographic;
+                        self.half_height = format_number(half_height);
+                    }
+                }
+                self.form_dirty = true;
+                self.error = None;
+                self.status = "Projection matched at the specified aspect and target plane; Apply and Save remain explicit.".into();
+            }
+            Err(error) => self.error = Some(format!("Projection matching failed: {error}")),
+        }
+    }
+
     fn apply(&mut self, editor: &mut Editor) {
+        self.clear_static_preview();
         if !self.can_edit(editor) {
             self.error = Some("Apply requires the matching editable local mesh scene".into());
             return;
         }
-        let Some((scene, graph_revision)) = current_identity(editor) else {
+        let Some((_profile, scene, _epoch, graph_revision)) = current_identity(editor) else {
             self.error = Some("The current mesh scene is not ready for camera changes".into());
             return;
         };
@@ -557,6 +647,7 @@ impl Panel {
     }
 
     fn save(&mut self, editor: &Editor) {
+        self.clear_static_preview();
         if !self.can_save(editor) {
             self.error = Some(
                 "Save requires a clean camera form in its matching editable local scene".into(),
@@ -591,13 +682,14 @@ impl Panel {
     }
 
     fn reload(&mut self, editor: &mut Editor) {
+        self.clear_static_preview();
         if !self.can_reload(editor) || self.dirty() {
             self.error = Some(
                 "Reload requires a clean camera state in the current editable local scene".into(),
             );
             return;
         }
-        let Some((scene, graph_revision)) = current_identity(editor) else {
+        let Some((_profile, scene, _epoch, graph_revision)) = current_identity(editor) else {
             self.error = Some("The current mesh scene is not ready for camera reload".into());
             return;
         };
@@ -605,6 +697,7 @@ impl Panel {
     }
 
     fn remove(&mut self, editor: &mut Editor) {
+        self.clear_static_preview();
         if !self.can_edit(editor) || self.current_document().is_none() || !self.confirm_remove {
             self.error =
                 Some("Remove requires confirmation and a saved or applied game camera".into());
@@ -637,13 +730,14 @@ impl Panel {
     }
 
     fn discard_changes_and_reload(&mut self, editor: &mut Editor) {
+        self.clear_static_preview();
         if !self.can_discard_changes(editor) || !self.confirm_discard_changes {
             self.error = Some(
                 "Discard requires explicit confirmation in the current editable local scene".into(),
             );
             return;
         }
-        let Some((scene, graph_revision)) = current_identity(editor) else {
+        let Some((_profile, scene, _epoch, graph_revision)) = current_identity(editor) else {
             self.error = Some("The current mesh scene is not ready for camera reload".into());
             return;
         };
@@ -658,6 +752,7 @@ impl Panel {
     }
 
     fn discard_invalid(&mut self, editor: &mut Editor) {
+        self.clear_static_preview();
         if !self.can_discard_invalid(editor) || !self.confirm_discard_invalid {
             self.error = Some(
                 "Discard requires explicit confirmation for the unchanged invalid camera sidecar"
@@ -698,6 +793,7 @@ impl Panel {
     }
 
     fn undo(&mut self, editor: &mut Editor) {
+        self.clear_static_preview();
         if self.cursor == 0 {
             return;
         }
@@ -707,6 +803,7 @@ impl Panel {
     }
 
     fn redo(&mut self, editor: &mut Editor) {
+        self.clear_static_preview();
         if self.cursor + 1 >= self.history.len() {
             return;
         }
@@ -716,6 +813,7 @@ impl Panel {
     }
 
     fn restore_current(&mut self, editor: &mut Editor) {
+        self.clear_static_preview();
         let document = self.current_document().cloned();
         let result = match document {
             Some(document) => editor.install_mesh_camera(document),
@@ -732,10 +830,12 @@ impl Panel {
     }
 
     fn load_context(&mut self, scene: &Path, graph_revision: [u8; 32], editor: &mut Editor) {
+        self.clear_static_preview();
         if editor.has_mesh_camera() {
             editor.clear_mesh_camera();
         }
         self.scene = Some(scene.to_path_buf());
+        self.profile = Some(editor.game());
         self.scene_epoch = Some(editor.scene_load_epoch());
         self.graph_revision = Some(graph_revision);
         self.document_pending = false;
@@ -885,6 +985,7 @@ impl Panel {
     }
 
     fn reset_history(&mut self, document: Option<Document>, saved_id: Option<u64>) {
+        self.clear_static_preview();
         self.history.clear();
         self.history.push(HistoryEntry { id: 0, document });
         self.cursor = 0;
@@ -897,6 +998,7 @@ impl Panel {
     }
 
     fn push_state(&mut self, document: Option<Document>) {
+        self.clear_static_preview();
         if self.current_document() == document.as_ref() {
             return;
         }
@@ -936,8 +1038,17 @@ fn capture_document(
         .with_follow_offset(follow_offset)
 }
 
-fn current_identity(editor: &Editor) -> Option<(PathBuf, [u8; 32])> {
-    if editor.game() != EditorGame::MeshNavigation
+fn supports_camera_profile(profile: EditorGame) -> bool {
+    match profile {
+        EditorGame::MeshNavigation => true,
+        #[cfg(feature = "mesh-hazards")]
+        EditorGame::MeshHazardsV1 => true,
+        _ => false,
+    }
+}
+
+fn current_identity(editor: &Editor) -> Option<(EditorGame, PathBuf, u64, [u8; 32])> {
+    if !supports_camera_profile(editor.game())
         || !editor.spec().is_local()
         || editor.down().is_some()
         || editor.previewing().is_some()
@@ -945,7 +1056,7 @@ fn current_identity(editor: &Editor) -> Option<(PathBuf, [u8; 32])> {
         return None;
     }
     let scene = editor.path()?;
-    if !reported_scene_matches_request(editor.spec(), &scene) {
+    if !reported_scene_matches_request(editor.spec(), &scene, editor.game()) {
         return None;
     }
     let snapshot = editor.snapshot()?;
@@ -954,17 +1065,22 @@ fn current_identity(editor: &Editor) -> Option<(PathBuf, [u8; 32])> {
         return None;
     }
     let view = mesh_from_view(frame).ok()?;
-    Some((scene, view.graph.revision()))
+    Some((
+        editor.game(),
+        scene,
+        editor.scene_load_epoch(),
+        view.graph.revision(),
+    ))
 }
 
-fn reported_scene_matches_request(spec: &HostSpec, reported: &Path) -> bool {
+fn reported_scene_matches_request(spec: &HostSpec, reported: &Path, profile: EditorGame) -> bool {
     let requested = match spec {
-        HostSpec::Local { scene, .. } => scene.as_path(),
-        HostSpec::LocalGame {
-            scene,
-            game: EditorGame::MeshNavigation,
-            ..
-        } => scene.as_path(),
+        HostSpec::Local { scene, .. } if profile == EditorGame::MeshNavigation => scene.as_path(),
+        HostSpec::LocalGame { scene, game, .. }
+            if *game == profile && supports_camera_profile(*game) =>
+        {
+            scene.as_path()
+        }
         _ => return false,
     };
     if requested == reported {
@@ -1003,3 +1119,14 @@ fn text_field(ui: &mut Ui, label: &str, value: &mut String) -> bool {
 #[cfg(test)]
 #[path = "mesh_camera_panel/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "mesh_camera_panel/projection_match_tests.rs"]
+mod projection_match_tests;
+
+#[cfg(all(test,target_os="linux",feature="mesh-mission"))]
+#[path="mesh_camera_panel/draft_preview_ui_tests.rs"]
+mod draft_preview_ui_tests;
+#[cfg(all(test,target_os="linux",feature="mesh-mission"))]
+#[path="mesh_camera_panel/draft_preview_integration_tests.rs"]
+mod draft_preview_integration_tests;

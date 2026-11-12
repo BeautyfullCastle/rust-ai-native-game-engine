@@ -1,0 +1,49 @@
+#!/bin/sh
+# Fixed native bundle. Hashes detect accidental edits, not a malicious owner.
+set -eu
+fail() { printf '%s\n' "$1" >&2; exit 2; }
+headless= ticks= run_directory=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --headless)
+            [ -z "$headless" ] || fail 'duplicate --headless'
+            headless=1; shift ;;
+        --ticks)
+            [ -z "$ticks" ] || fail 'duplicate --ticks'
+            [ "$#" -ge 2 ] || fail '--ticks requires 0..36000'
+            case "$2" in ''|*[!0-9]*) fail '--ticks requires 0..36000';; esac
+            [ "${#2}" -le 5 ] && [ "$2" -le 36000 ] || fail '--ticks requires 0..36000'
+            ticks=$2; shift 2 ;;
+        --run-directory)
+            [ -z "$run_directory" ] || fail 'duplicate --run-directory'
+            [ "$#" -ge 2 ] || fail '--run-directory requires an absolute private directory'
+            case "$2" in /*) ;; *) fail '--run-directory must be absolute';; esac
+            run_directory=$2; shift 2 ;;
+        *) fail 'unsupported launcher argument' ;;
+    esac
+done
+[ -z "$ticks" ] || [ -n "$headless" ] || fail '--ticks requires --headless'
+[ -z "$headless" ] || [ -z "$run_directory" ] || fail '--run-directory requires interactive play'
+case "$0" in */*) parent=${0%/*};; *) parent=.;; esac
+# A sentinel preserves trailing newlines in otherwise valid relocated paths.
+root=$(CDPATH= cd -- "$parent" && pwd -P && printf '.') || fail 'cannot locate bundle'
+root=${root%??}
+cd -- "$root"
+[ -f coop_defense ] && [ ! -L coop_defense ] && [ -x coop_defense ] || fail 'invalid bundled executable'
+[ -f game.scene.yaml ] && [ ! -L game.scene.yaml ] || fail 'invalid bundled scene'
+/usr/bin/sha256sum --check --status <<'SUMS' || fail 'bundle digest mismatch; restore matching executable and scene'
+@RUNTIME_SHA256@  coop_defense
+@SCENE_SHA256@  game.scene.yaml
+SUMS
+set -- --scene "$root/game.scene.yaml"
+if [ -n "$headless" ]; then
+    set -- "$@" --headless --ticks "${ticks:-0}"
+fi
+if [ -n "$run_directory" ]; then
+    # The native store independently enforces private, no-follow external storage.
+    saves=$(CDPATH= cd -- "$run_directory" && pwd -P && printf '.') || fail 'save directory must already exist'
+    saves=${saves%??}
+    case "$saves/" in "$root/"*) fail 'save directory must be outside the bundle';; esac
+    set -- "$@" --run-directory "$run_directory"
+fi
+exec "$root/coop_defense" "$@"

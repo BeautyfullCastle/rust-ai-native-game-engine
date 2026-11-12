@@ -289,6 +289,7 @@ mod tests {
                 walk: "walk".into(),
             },
             units_per_pixel: 0.1,
+            orientation: None,
         }
     }
 

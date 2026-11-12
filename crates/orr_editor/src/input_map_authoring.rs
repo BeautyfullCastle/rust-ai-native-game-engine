@@ -13,6 +13,19 @@ const KEYS: &[Key] = &[
     Key::Space, Key::Escape, Key::Enter, Key::Tab,
 ];
 
+struct DraftPreview {
+    document: ActionMap,
+    selected: usize,
+    draft: Vec<Button>,
+    error: Option<String>,
+}
+
+fn validate_candidate(candidate: &ActionMap) -> Result<(), String> {
+    validate_map(candidate)?;
+    candidate.save(Vec::new())?;
+    Ok(())
+}
+
 /// Only accepted complete maps enter document history. Widget draft edits do not.
 pub struct Panel {
     document: ActionMap,
@@ -22,6 +35,7 @@ pub struct Panel {
     draft: Vec<Button>,
     path: String,
     message: String,
+    preview: Option<DraftPreview>,
 }
 
 impl Default for Panel {
@@ -30,7 +44,7 @@ impl Default for Panel {
         Self {
             draft: document.actions[0].bindings.clone(), document,
             undo: Vec::new(), redo: Vec::new(), selected: 0,
-            path: String::new(), message: String::new(),
+            path: String::new(), message: String::new(), preview: None,
         }
     }
 }
@@ -41,15 +55,43 @@ impl Panel {
     pub fn can_undo(&self) -> bool { !self.undo.is_empty() }
     pub fn can_redo(&self) -> bool { !self.redo.is_empty() }
 
+    pub fn draft_error(&self) -> Option<&str> {
+        self.preview.as_ref().and_then(|preview| preview.error.as_deref())
+    }
+
+    fn update_preview(&mut self) {
+        if self.preview.as_ref().is_some_and(|p| p.document == self.document
+            && p.selected == self.selected && p.draft == self.draft) { return; }
+        let mut candidate = self.document.clone();
+        let error = match candidate.actions.get_mut(self.selected) {
+            Some(action) => {
+                action.bindings.clone_from(&self.draft);
+                validate_candidate(&candidate).err()
+            }
+            None => Some("Select an Arena action before previewing its draft".into()),
+        };
+        self.preview = Some(DraftPreview { document: self.document.clone(),
+            selected: self.selected, draft: self.draft.clone(), error });
+    }
+
     fn reset_draft(&mut self) {
+        self.preview = None;
         self.selected = self.selected.min(self.document.actions.len() - 1);
         self.draft = self.document.actions[self.selected].bindings.clone();
     }
 
+    /// Stage only the selected action's defaults; Apply remains the sole commit.
+    fn restore_action_defaults(&mut self) -> Result<(), String> {
+        let name = &self.document.actions.get(self.selected)
+            .ok_or("Select an Arena action before restoring its defaults")?.name;
+        let action = default_map().actions.into_iter().find(|action| &action.name == name)
+            .ok_or("Selected action has no Arena defaults")?;
+        self.draft = action.bindings;
+        Ok(())
+    }
+
     pub fn apply_document(&mut self, candidate: ActionMap) -> Result<(), String> {
-        validate_map(&candidate)?;
-        // Preserve the actual existing encoded-size contract as well as schema limits.
-        candidate.save(Vec::new())?;
+        validate_candidate(&candidate)?;
         if candidate != self.document {
             if self.undo.len() == MAX_HISTORY { self.undo.remove(0); }
             self.undo.push(std::mem::replace(&mut self.document, candidate));
@@ -133,6 +175,10 @@ impl Panel {
                 self.draft.push(Button::Keyboard { key: Key::Z });
             }
             if ui.button("Clear action draft").clicked() { self.draft.clear(); }
+            if ui.button("Restore action defaults").clicked() {
+                self.message = self.restore_action_defaults().map_or_else(|error| error,
+                    |()| "Default bindings loaded into this action draft. Apply action to confirm.".into());
+            }
             if ui.button("Apply action").clicked() {
                 let mut candidate = self.document.clone();
                 candidate.actions[self.selected].bindings.clone_from(&self.draft);
@@ -142,6 +188,13 @@ impl Panel {
                 };
             }
         });
+        if ui.add_enabled(
+            self.draft != self.document.actions[self.selected].bindings,
+            egui::Button::new("Discard action draft"),
+        ).clicked() {
+            self.reset_draft();
+            self.message.clear();
+        }
         ui.separator();
         ui.label("Path for explicit Open or Save As (existing files are never overwritten)");
         ui.add(egui::TextEdit::singleline(&mut self.path).hint_text("/path/to/new-bindings.json").char_limit(4096));
@@ -155,6 +208,10 @@ impl Panel {
             }
         });
         ui.label("Open, Undo, Redo and Defaults also discard pending action drafts. Empty actions are allowed by Arena.");
+        self.update_preview();
+        if let Some(error) = self.draft_error() {
+            ui.label(format!("Draft preview: {error}"));
+        }
         if !self.message.is_empty() { ui.label(self.message()); }
         ui.separator();
         ui.label("Load explicitly: arena --input-bindings FILE. This tool never starts a runtime or changes player preferences.");

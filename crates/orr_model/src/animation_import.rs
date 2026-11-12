@@ -2,8 +2,10 @@
 //!
 //! The shared resource parser retains the static importer's image/material and
 //! containment checks. This entrypoint adds TRS nodes, four influences, skins,
-//! and STEP/LINEAR TRS channels. Morph targets, extra influence sets, matrix
-//! nodes, sparse accessors, extensions and CUBICSPLINE fail closed.
+//! and STEP/LINEAR TRS channels. Untargeted matrix nodes may encode a bounded
+//! positive-scale TRS. Morph targets, extra influence sets, targeted matrices,
+//! sparse accessors, unknown extensions and CUBICSPLINE fail closed.
+//! Declared base-color KHR_texture_transform is baked into UV0 at import only.
 //! See https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#skins
 //! and https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#animations.
 use crate::{
@@ -12,6 +14,8 @@ use crate::{
     *,
 };
 use std::{collections::BTreeSet, path::Path};
+
+mod matrix;
 
 /// Import from an immutable package snapshot, rejecting escaping symlinks/FIFOs.
 pub fn import_path(root: &Path, asset_id: &str) -> Result<AnimatedModel, Error> {
@@ -84,19 +88,35 @@ pub(crate) fn validate_document_limits(doc: &Document) -> Result<(), Error> {
 
 type Hierarchy = (Vec<AnimatedNode>, Vec<Option<usize>>, Vec<bool>);
 fn hierarchy(doc: &Document) -> Result<Hierarchy, Error> {
+    // glTF forbids matrices on a node targeted by ANY animation, including
+    // clips not currently sampled and nodes outside the selected scene. Scan
+    // the complete source before converting even the first matrix.
+    let mut targeted = vec![false; doc.nodes.len()];
+    for clip in doc.animations.as_deref().unwrap_or_default() {
+        for channel in &clip.channels {
+            *targeted
+                .get_mut(channel.target.node)
+                .ok_or_else(|| invalid("animation target node index out of range"))? = true;
+        }
+    }
     let mut parents = vec![None; doc.nodes.len()];
     let mut nodes = Vec::with_capacity(doc.nodes.len());
     for (i, node) in doc.nodes.iter().enumerate() {
-        if node.matrix.is_some() {
-            return Err(invalid(
-                "animated subset requires TRS nodes; matrix nodes unsupported",
-            ));
-        }
-        node.transform()?;
-        let rest = Trs {
-            translation: node.translation.unwrap_or([0.0; 3]),
-            rotation: node.rotation.unwrap_or([0.0, 0.0, 0.0, 1.0]),
-            scale: node.scale.unwrap_or([1.0; 3]),
+        let rest = if node.matrix.is_some() {
+            // Retain shared affine, range, invertibility and matrix/TRS checks.
+            let transform = node.transform()?;
+            if targeted[i] {
+                return Err(invalid("animation-targeted matrix nodes unsupported"));
+            }
+            matrix::decompose(transform)?
+        } else {
+            // Preserve the authored TRS path, including quaternion/sign bits.
+            node.transform()?;
+            Trs {
+                translation: node.translation.unwrap_or([0.0; 3]),
+                rotation: node.rotation.unwrap_or([0.0, 0.0, 0.0, 1.0]),
+                scale: node.scale.unwrap_or([1.0; 3]),
+            }
         };
         if rest.scale.iter().any(|s| !s.is_finite() || *s <= 0.0) {
             return Err(invalid("animated node scale must be positive"));
@@ -266,7 +286,7 @@ fn interpolation(sampler: &AnimationSampler) -> Result<Interpolation, Error> {
     match sampler.interpolation.as_deref().unwrap_or("LINEAR") {
         "STEP" => Ok(Interpolation::Step),
         "LINEAR" => Ok(Interpolation::Linear),
-        "CUBICSPLINE" => Err(invalid("CUBICSPLINE interpolation unsupported")),
+        "CUBICSPLINE" => Ok(Interpolation::CubicSpline),
         _ => Err(invalid("unsupported animation interpolation")),
     }
 }
@@ -279,12 +299,12 @@ fn read_clips(doc: &Document, buffers: &[Vec<u8>]) -> Result<Vec<AnimationClip>,
         // Validate unused samplers too. Unknown output shapes/normalized integer
         // rotations cannot silently sneak in through an unreferenced sampler.
         for sampler in &clip.samplers {
-            interpolation(sampler)?;
+            let cubic = interpolation(sampler)? == Interpolation::CubicSpline;
             let input = at(&doc.accessors, sampler.input, "animation input")?;
             let output = at(&doc.accessors, sampler.output, "animation output")?;
             data_accessor(doc, input)?;
             data_accessor(doc, output)?;
-            sampler_keys = sampler_keys.saturating_add(input.count);
+            sampler_keys = sampler_keys.saturating_add(output.count);
             if sampler_keys > MAX_ANIMATION_KEYS
                 || input.component_type != 5126
                 || input.normalized
@@ -292,7 +312,8 @@ fn read_clips(doc: &Document, buffers: &[Vec<u8>]) -> Result<Vec<AnimationClip>,
                 || output.component_type != 5126
                 || output.normalized
                 || !matches!(output.kind.as_str(), "VEC3" | "VEC4")
-                || input.count != output.count
+                || (cubic && input.count < 2)
+                || input.count.checked_mul(if cubic { 3 } else { 1 }) != Some(output.count)
             {
                 return Err(invalid(
                     "animation sampler count/type/key budget mismatch; only f32 output supported",
@@ -315,6 +336,8 @@ fn read_clips(doc: &Document, buffers: &[Vec<u8>]) -> Result<Vec<AnimationClip>,
                     return Err(invalid("animation times must be finite, nonnegative, bounded and strictly increasing"));
                 }
                 previous = Some(time);
+            }
+            for i in 0..output.count {
                 for chunk in output.bytes(doc, buffers, i).chunks_exact(4) {
                     if !f32::from_le_bytes(chunk.try_into().expect("f32 component")).is_finite() {
                         return Err(invalid("animation output must be finite"));
@@ -339,13 +362,14 @@ fn read_clips(doc: &Document, buffers: &[Vec<u8>]) -> Result<Vec<AnimationClip>,
                 "weights" => return Err(invalid("morph animation unsupported")),
                 _ => return Err(invalid("unsupported animation target path")),
             };
-            aggregate_keys = aggregate_keys.saturating_add(input.count);
-            aggregate_bytes =
-                aggregate_bytes.saturating_add(input.count.saturating_mul(if kind == "VEC4" {
-                    20
-                } else {
-                    16
-                }));
+            aggregate_keys = aggregate_keys.saturating_add(output.count);
+            aggregate_bytes = aggregate_bytes
+                .saturating_add(input.count.saturating_mul(4))
+                .saturating_add(
+                    output
+                        .count
+                        .saturating_mul(if kind == "VEC4" { 16 } else { 12 }),
+                );
             if aggregate_keys > MAX_ANIMATION_KEYS
                 || aggregate_bytes > MAX_ANIMATION_BYTES
                 || output.kind != kind
@@ -401,7 +425,7 @@ fn validate_primitive(doc: &Document, p: &PrimitiveDef) -> Result<bool, Error> {
         || (has_skin
             && (!p.attributes.contains_key("JOINTS_0") || !p.attributes.contains_key("WEIGHTS_0")))
     {
-        return Err(invalid("requires indexed TRIANGLES with POSITION/NORMAL, optional UV0 (required for textured materials), and at most JOINTS_0/WEIGHTS_0; additional influences unsupported"));
+        return Err(invalid("requires TRIANGLES with POSITION/NORMAL, optional UV0 (required for textured materials), and at most JOINTS_0/WEIGHTS_0; additional influences unsupported"));
     }
     crate::import::material_index(doc, p)?;
     let pos = at(&doc.accessors, p.attributes["POSITION"], "POSITION")?;
@@ -417,10 +441,22 @@ fn validate_primitive(doc: &Document, p: &PrimitiveDef) -> Result<bool, Error> {
             continue;
         };
         let a = at(&doc.accessors, index, name)?;
-        if a.component_type != 5126 || a.normalized || a.kind != kind || a.count != pos.count {
+        if a.kind != kind || a.count != pos.count {
             return Err(invalid("vertex attribute type/count mismatch"));
         }
-        vertex_accessor(doc, a)?;
+        if name == "TEXCOORD_0" {
+            import::validate_uv(doc, a)?;
+            // Keep the existing f32 vertex alignment policy. New integer UVs
+            // use the shared UV-specific relative offset/stride contract.
+            if a.component_type == 5126 {
+                vertex_accessor(doc, a)?;
+            }
+        } else {
+            if a.component_type != 5126 || a.normalized {
+                return Err(invalid("vertex attribute type/count mismatch"));
+            }
+            vertex_accessor(doc, a)?;
+        }
     }
     if pos.min.as_ref().is_none_or(|v| v.len() != 3)
         || pos.max.as_ref().is_none_or(|v| v.len() != 3)
@@ -444,7 +480,11 @@ fn validate_primitive(doc: &Document, p: &PrimitiveDef) -> Result<bool, Error> {
             }
         }
     }
-    let idx = at(&doc.accessors, p.indices, "indices")?;
+    let Some(index) = p.indices else {
+        import::validate_sequential_count(pos.count)?;
+        return Ok(has_skin);
+    };
+    let idx = at(&doc.accessors, index, "indices")?;
     let view = &doc.buffer_views[idx.buffer_view];
     if idx.kind != "SCALAR"
         || !matches!(idx.component_type, 5121 | 5123 | 5125)
@@ -571,9 +611,9 @@ fn read_primitives(
                 .attributes
                 .get("TEXCOORD_0")
                 .map(|&index| &doc.accessors[index]);
-            let idx = &doc.accessors[primitive.indices];
+            let index_count = import::primitive_index_count(doc, primitive);
             source_vertices = source_vertices.saturating_add(pos.count);
-            source_indices = source_indices.saturating_add(idx.count);
+            source_indices = source_indices.saturating_add(index_count);
             if source_vertices > MAX_VERTICES || source_indices > MAX_INDICES {
                 return Err(invalid("source geometry aggregate budget exceeded"));
             }
@@ -581,7 +621,7 @@ fn read_primitives(
             for i in 0..pos.count {
                 let position = pos.floats::<3>(doc, buffers, i);
                 let normal = normal.floats::<3>(doc, buffers, i);
-                let uv = uv.map_or([0.0; 2], |a| a.floats::<2>(doc, buffers, i));
+                let uv = uv.map_or([0.0; 2], |a| import::decode_uv(a, doc, buffers, i));
                 if (0..3).any(|c| {
                     !position[c].is_finite()
                         || position[c].abs() > 1.0e6
@@ -593,17 +633,15 @@ fn read_primitives(
                 {
                     return Err(invalid("invalid source vertex position/normal/UV"));
                 }
+                // Validate transformed UV even for unused meshes/nonselected nodes.
+                // The shared helper also validates source UV before zero scaling.
+                import::primitive_uv(doc, primitive, uv)?;
                 if has_skin {
                     influences(doc, buffers, primitive, i, usize::MAX)?;
                 }
             }
-            for i in 0..idx.count {
-                let b = idx.bytes(doc, buffers, i);
-                let index = match idx.component_type {
-                    5121 => u32::from(b[0]),
-                    5123 => u32::from(u16::from_le_bytes(b.try_into().expect("u16 index"))),
-                    _ => u32::from_le_bytes(b.try_into().expect("u32 index")),
-                };
+            for i in 0..index_count {
+                let index = import::primitive_index(doc, buffers, primitive, i);
                 if index as usize >= pos.count {
                     return Err(invalid("source index out of range"));
                 }
@@ -628,9 +666,9 @@ fn read_primitives(
                 .attributes
                 .get("TEXCOORD_0")
                 .map(|&index| &doc.accessors[index]);
-            let idx = &doc.accessors[primitive.indices];
+            let index_count = import::primitive_index_count(doc, primitive);
             vertices_total = vertices_total.saturating_add(pos.count);
-            indices_total = indices_total.saturating_add(idx.count);
+            indices_total = indices_total.saturating_add(index_count);
             if vertices_total > MAX_VERTICES
                 || indices_total > MAX_INDICES
                 || primitives.len() >= MAX_PRIMITIVES
@@ -668,20 +706,19 @@ fn read_primitives(
                     vertex: Vertex {
                         position,
                         normal: normal.floats(doc, buffers, i),
-                        uv: uv.map_or([0.0; 2], |a| a.floats(doc, buffers, i)),
+                        uv: import::primitive_uv(
+                            doc,
+                            primitive,
+                            uv.map_or([0.0; 2], |a| import::decode_uv(a, doc, buffers, i)),
+                        )?,
                     },
                     joints,
                     weights,
                 });
             }
-            let mut indices = Vec::with_capacity(idx.count);
-            for i in 0..idx.count {
-                let bytes = idx.bytes(doc, buffers, i);
-                let index = match idx.component_type {
-                    5121 => u32::from(bytes[0]),
-                    5123 => u32::from(u16::from_le_bytes(bytes.try_into().expect("u16 index"))),
-                    _ => u32::from_le_bytes(bytes.try_into().expect("u32 index")),
-                };
+            let mut indices = Vec::with_capacity(index_count);
+            for i in 0..index_count {
+                let index = import::primitive_index(doc, buffers, primitive, i);
                 if index as usize >= pos.count {
                     return Err(invalid("index out of range"));
                 }

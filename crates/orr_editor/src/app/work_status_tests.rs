@@ -195,9 +195,11 @@ fn actual_app_work_status_one_event_callback_and_early_return_publish() {
     // The same production final wrapper runs even when its draw callback exits.
     let app = h.state_mut();
     let ctx = egui::Context::default();
-    let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+    let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
         app.with_close_review(ui, |_, _| {});
     });
+    // CPU publication only: no renderer consumes this frame's texture updates.
+    output.textures_delta.clear();
     let final_status = app
         .editor
         .host_call("editor.work_status", json!({"max_age_ms":5000}))

@@ -19,6 +19,7 @@ cargo fmt --all -- --check || format_status=$?
 printf 'Advisory rustfmt exit status: %s\n' "$format_status"
 python3 -B tools/check_sim_float_types.py
 python3 -B tools/test_sim_float_guard.py
+python3 -B tools/test_cli_clock_policy.py
 cargo build --locked --workspace --release
 # Workspace regressions execute this freshly built example, not a cached CLI
 # supplied by the caller. Cargo's artifact message supplies its real path.
@@ -66,7 +67,17 @@ for test in \
   tools/test_static_game_native_ui_settle_gate.py \
   tools/test_user_game_action_preview_gate.py \
   tools/test_user_game_own_lock_gate.py; do
-  python3 -B "$test"
+  case "$test" in
+    tools/test_static_game_actions_observation_pacing.py|tools/test_static_game_standalone_focus_sync.py|tools/test_static_game_native_ui_settle_gate.py)
+      if [[ -n "${ORR_LOCAL_POLICY_RECEIPTS:-}" ]]; then
+        phase="${test#tools/test_}"
+        python3 -I -S -B tools/linux_local_gate.py --phase "${phase%.py}" --receipt-dir "$ORR_LOCAL_POLICY_RECEIPTS"
+      else
+        python3 -B "$test"
+      fi
+      ;;
+    *) python3 -B "$test" ;;
+  esac
 done
 set +x
 printf 'Advisory rustfmt exit status: %s (0 means passed).\n' "$format_status"

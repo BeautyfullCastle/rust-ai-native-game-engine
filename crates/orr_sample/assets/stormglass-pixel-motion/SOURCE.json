@@ -1,0 +1,80 @@
+{
+  "schema": 1,
+  "scope": "Optional visual-only idle/charge demo, not attack synchronization or production animation polish.",
+  "art": "AI-generated Stormglass Sentry via OpenAI image generation. Tool licenses do not relicense generated artwork.",
+  "motionSource": {
+    "url": "https://github.com/WU-HAOTIAN34/2dimg2motion",
+    "commit": "d4d73e243b6ff64b7cbb3879e45e951f972a7e62"
+  },
+  "pixelProcessing": {
+    "url": "https://github.com/KohakuBlueleaf/PixelOE",
+    "commit": "7ce444b36d3876a151d845d4493240e904454d89",
+    "pixelSize": 4,
+    "thickness": 1,
+    "mode": "contrast",
+    "colorMatch": false,
+    "quantization": false,
+    "postUpscale": false
+  },
+  "geometry": {
+    "atlas": [
+      672,
+      224
+    ],
+    "cell": [
+      96,
+      112
+    ],
+    "columns": 7,
+    "frames": 14,
+    "durationMs": 100,
+    "pivot": [
+      48,
+      85
+    ]
+  },
+  "limitations": [
+    "Helmet, boot and glove redraw jitter and uneven easing remain.",
+    "Frame 00 equals 13 exactly, retaining the 200ms neutral hold at loop boundaries."
+  ],
+  "sha256": {
+    "LICENSE.txt": "3ebbc49553d54fd374965ad6d5f78490f9af070330e405f0af86d00a7a39a6ce",
+    "atlas.png": "efcfb8bc0acbffb76c230846c111ba561d74cd6970ac4e2a721d4e981b6c5b56",
+    "orr.package.json": "9719db7be616d1df46c27da277fe0c8cea0d168dfe3504c07688fc0cf1c1b78b",
+    "sprites.json": "f601bccc284019656409744fc0559b39cf2a46360f3b71a0d2d467c07acaf65f"
+  },
+  "fixedTransform": {
+    "inputSize": [
+      566,
+      684
+    ],
+    "resize": [
+      368,
+      444
+    ],
+    "resampler": "LANCZOS",
+    "offset": [
+      8,
+      0
+    ],
+    "canvas": [
+      384,
+      448
+    ],
+    "finalCell": [
+      96,
+      112
+    ],
+    "pivot": [
+      48,
+      85
+    ]
+  },
+  "sourceArtifactSha256": {
+    "motionManifest": "9c76ea5d1d8414b4959577339f731bad58125b619ad77a84c54bfda8c7a75d00",
+    "independentMotionReview": "4fe323355ec921d70f2d523ba2193a43773764f6eaca5e001eeac208652b177b",
+    "pixelProcessingRunner": "5d64bc084f9a10b70010ddb55aabcb4c6ad4c816781e9b6601014d797a8a5e60",
+    "pixelProcessingReceipt": "73559b746dd2086ecc2a61bd69c2bde75b6a7f03380d4607c7277c2d9261d646",
+    "nativeAdmissionReceipt": "058b33f3aab7f56c826c5a4ee374ecb078e2415c6715b27e0de058eede9ee065"
+  }
+}

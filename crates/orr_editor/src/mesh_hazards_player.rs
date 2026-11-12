@@ -16,9 +16,9 @@ use std::{
 const MAX_PLAYER_EXE_BYTES: u64 = 256 << 20;
 const MAX_STARTUP_TICKS: u32 = 10_000;
 const MAX_CAPTURE_PIXELS: u64 = 1_048_576;
-const USAGE: &str = "orr_mesh_hazards_player [--bundle DIR] [--ticks N] [--screenshot PNG [--frames N]] [--size WxH]\n       orr_mesh_hazards_player --capabilities\n\nWithout --bundle, the validated bundle beside this executable is used.\n--ticks N starts Play and leaves the admitted simulation paused at tick N.\n--screenshot writes a bounded window PNG; --frames defaults to 30.\n--size sets the initial window dimensions in points (default 960x600).";
+const USAGE: &str = "orr_mesh_hazards_player [--bundle DIR] [--ticks N] [--screenshot PNG [--frames N]] [--size WxH]\n       orr_mesh_hazards_player [--bundle DIR] --verify-headless --ticks N\n       orr_mesh_hazards_player --capabilities\n\nWithout --bundle, the validated bundle beside this executable is used.\n--ticks N starts Play and leaves the admitted simulation paused at tick N.\n--screenshot writes a bounded window PNG; --frames defaults to 30.\n--size sets the initial window dimensions in points (default 960x600).";
 
-const CAPABILITIES: &str = "ORR_MESH_HAZARDS_PLAYER_V1\nORR_MESH_INPUT_V1";
+const CAPABILITIES: &str = "ORR_MESH_HAZARDS_PLAYER_V1\nORR_MESH_INPUT_V1\nORR_MESH_HAZARDS_CAMERA_V1\nORR_MESH_HAZARDS_ART_V1\nORR_MESH_HAZARDS_LIGHTING_V1\nORR_MESH_HAZARDS_HUD_V1\nORR_MESH_HAZARDS_PROPS_V1";
 
 enum Request {
     Help,
@@ -27,6 +27,7 @@ enum Request {
 }
 
 struct Options {
+    verify_headless: bool,
     bundle: Option<PathBuf>,
     ticks: Option<u32>,
     screenshot: Option<PathBuf>,
@@ -38,6 +39,7 @@ impl Options {
     fn parse(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Request, String> {
         let mut arguments = arguments.into_iter();
         let mut options = Self {
+            verify_headless: false,
             bundle: None,
             ticks: None,
             screenshot: None,
@@ -53,6 +55,12 @@ impl Options {
                 .to_str()
                 .ok_or_else(|| format!("arguments must be valid UTF-8\n\n{USAGE}"))?;
             match flag {
+                "--verify-headless" => {
+                    if options.verify_headless {
+                        return Err("--verify-headless may only be supplied once".into());
+                    }
+                    options.verify_headless = true;
+                }
                 "--bundle" => {
                     if options.bundle.is_some() {
                         return Err("--bundle may only be supplied once".into());
@@ -124,7 +132,8 @@ impl Options {
             }
         }
         if capabilities {
-            if options.bundle.is_some()
+            if options.verify_headless
+                || options.bundle.is_some()
                 || options.ticks.is_some()
                 || options.screenshot.is_some()
                 || frames_was_set
@@ -136,7 +145,8 @@ impl Options {
             return Ok(Request::Capabilities);
         }
         if help {
-            if options.bundle.is_some()
+            if options.verify_headless
+                || options.bundle.is_some()
                 || options.ticks.is_some()
                 || options.screenshot.is_some()
                 || frames_was_set
@@ -145,6 +155,14 @@ impl Options {
                 return Err("--help cannot be combined with other options".into());
             }
             return Ok(Request::Help);
+        }
+        if options.verify_headless
+            && (options.ticks.is_none()
+                || options.screenshot.is_some()
+                || frames_was_set
+                || size_was_set)
+        {
+            return Err("--verify-headless requires --ticks and cannot combine with screenshot, frames or size".into());
         }
         if frames_was_set && options.screenshot.is_none() {
             return Err("--frames requires --screenshot".into());
@@ -280,6 +298,8 @@ pub fn run() -> Result<(), String> {
         }
         Request::Capabilities => {
             println!("{CAPABILITIES}");
+            #[cfg(feature = "mesh-animated-models")]
+            println!("ORR_MESH_HAZARDS_ANIMATION_V1");
             Ok(())
         }
         Request::Launch(options) => launch(options),
@@ -322,14 +342,26 @@ fn launch(options: Options) -> Result<(), String> {
     panel.sync(&editor);
     let mut camera_panel = crate::mesh_camera_panel::Panel::default();
     camera_panel.sync(&mut editor);
+    verify_loaded_camera_bundle(&bundle_root, &bundle, &camera_panel)?;
+    verify_loaded_art_bundle(&bundle_root, &bundle, &panel)?;
+    verify_loaded_props_bundle(&bundle_root, &bundle, &panel, &editor)?;
     let mut lighting_panel = crate::mesh_lighting_panel::Panel::default();
     lighting_panel.sync(&editor);
+    verify_loaded_lighting_bundle(&bundle_root, &bundle, &lighting_panel)?;
+    let mut hud_panel = crate::mesh_hud_panel::Panel::default();
+    hud_panel.sync(&editor);
+    verify_loaded_hud_bundle(&bundle_root, &bundle, &hud_panel)?;
     #[cfg(feature = "mesh-animated-models")]
     let mut animation_panel = crate::mesh_animation_panel::Panel::default();
     #[cfg(feature = "mesh-animated-models")]
     animation_panel.sync(&editor);
     #[cfg(feature = "mesh-animated-models")]
     let animation_blocker = animation_panel.play_blocker(&editor);
+    #[cfg(feature = "mesh-animated-models")]
+    verify_loaded_animation_bundle(&bundle_root, &bundle, &animation_panel)?;
+    #[cfg(feature = "mesh-animated-models")]
+    let initial_animation_pose = animation_panel.initial_play_placement(&editor)?
+        .as_ref().map(animation_pose_digest);
     #[cfg(not(feature = "mesh-animated-models"))]
     let animation_blocker = match crate::mesh_animation_store::has_sidecar(&bundle.scene) {
         Ok(false) => None,
@@ -343,9 +375,22 @@ fn launch(options: Options) -> Result<(), String> {
             .play_blocker(&editor)
             .or_else(|| camera_panel.play_blocker(&editor))
             .or_else(|| lighting_panel.play_blocker(&editor))
+            .or_else(|| hud_panel.play_blocker(&editor))
             .or(animation_blocker),
     );
     start_playback(&mut editor, options.ticks, screenshot.is_some())?;
+    if options.verify_headless {
+        return verify_headless_session(
+            editor,
+            panel,
+            camera_panel,
+            lighting_panel,
+            hud_panel,
+            #[cfg(feature = "mesh-animated-models")]
+            (animation_panel, initial_animation_pose),
+            &bundle,
+        );
+    }
 
     let (width, height) = options.size;
     let native_options = eframe::NativeOptions {
@@ -361,6 +406,12 @@ fn launch(options: Options) -> Result<(), String> {
         native_options,
         Box::new(move |creation_context| {
             let mut inner = EditorApp::new(editor, creation_context.wgpu_render_state.clone());
+            inner.install_validated_hazards_camera(camera_panel);
+            inner.install_validated_hazards_navigation(panel);
+            inner.install_validated_hazards_lighting(lighting_panel);
+            inner.install_validated_hazards_hud(hud_panel);
+            #[cfg(feature = "mesh-animated-models")]
+            inner.install_validated_hazards_animation(animation_panel);
             inner.set_mesh_player_input_allowed(mesh_input_allowed);
             if let Some(path) = screenshot {
                 inner = inner.with_screenshot(ScreenshotJob::new(path, frames).with_settle());
@@ -372,6 +423,215 @@ fn launch(options: Options) -> Result<(), String> {
         }),
     )
     .map_err(|error| format!("Mesh Hazards Player window: {error}"))
+}
+
+fn verify_loaded_camera_bundle(
+    bundle_root: &Path,
+    bundle: &crate::mesh_hazards_export::PreparedBundle,
+    camera_panel: &crate::mesh_camera_panel::Panel,
+) -> Result<(), String> {
+    if !camera_panel.matches_saved_sidecar(bundle.camera_sha256.as_deref()) {
+        return Err("loaded game camera sidecar differs from the validated bundle".into());
+    }
+    // Re-read and validate the manifest + bounded file inventory after the
+    // camera has been installed. This detects ordinary edits between initial
+    // admission and launch; it does not claim immunity to an adversarial writer.
+    let current = crate::mesh_hazards_export::open_bundle(bundle_root).map_err(|error| {
+        format!("game bundle changed while the authored camera was loading: {error}")
+    })?;
+    if current != *bundle {
+        return Err("game bundle changed while the authored camera was loading".into());
+    }
+    Ok(())
+}
+
+fn verify_loaded_art_bundle(
+    bundle_root: &Path,
+    bundle: &crate::mesh_hazards_export::PreparedBundle,
+    panel: &crate::mesh_navigation::Panel,
+) -> Result<(), String> {
+    if !panel.art_matches_saved_sidecar(bundle.art_sha256.as_deref()) {
+        return Err("loaded game agent art differs from the validated bundle".into());
+    }
+    let current = crate::mesh_hazards_export::open_bundle(bundle_root)
+        .map_err(|error| format!("game bundle changed while agent art was loading: {error}"))?;
+    if current != *bundle {
+        return Err("game bundle changed while agent art was loading".into());
+    }
+    Ok(())
+}
+
+fn verify_loaded_props_bundle(
+    bundle_root: &Path,
+    bundle: &crate::mesh_hazards_export::PreparedBundle,
+    panel: &crate::mesh_navigation::Panel,
+    editor: &Editor,
+) -> Result<(), String> {
+    if !panel.props_matches_saved_sidecar(editor, bundle.props_sha256.as_deref()) {
+        return Err("loaded game props differ from the validated bundle".into());
+    }
+    let current = crate::mesh_hazards_export::open_bundle(bundle_root)
+        .map_err(|error| format!("game bundle changed while props were loading: {error}"))?;
+    if current != *bundle {
+        return Err("game bundle changed while props were loading".into());
+    }
+    Ok(())
+}
+
+fn verify_loaded_lighting_bundle(
+    bundle_root: &Path,
+    bundle: &crate::mesh_hazards_export::PreparedBundle,
+    panel: &crate::mesh_lighting_panel::Panel,
+) -> Result<(), String> {
+    if !panel.matches_saved_sidecar(bundle.lighting_sha256.as_deref()) {
+        return Err("loaded game lighting differs from the validated bundle".into());
+    }
+    let current = crate::mesh_hazards_export::open_bundle(bundle_root)
+        .map_err(|error| format!("game bundle changed while lighting was loading: {error}"))?;
+    if current != *bundle {
+        return Err("game bundle changed while lighting was loading".into());
+    }
+    Ok(())
+}
+
+fn verify_loaded_hud_bundle(
+    bundle_root: &Path,
+    bundle: &crate::mesh_hazards_export::PreparedBundle,
+    panel: &crate::mesh_hud_panel::Panel,
+) -> Result<(), String> {
+    if !panel.matches_saved_sidecar(bundle.hud_sha256.as_deref()) {
+        return Err("loaded game HUD differs from the validated bundle".into());
+    }
+    let current = crate::mesh_hazards_export::open_bundle(bundle_root)
+        .map_err(|error| format!("game bundle changed while HUD was loading: {error}"))?;
+    if current != *bundle {
+        return Err("game bundle changed while HUD was loading".into());
+    }
+    Ok(())
+}
+
+#[cfg(feature = "mesh-animated-models")]
+fn verify_loaded_animation_bundle(
+    root: &Path,
+    bundle: &crate::mesh_hazards_export::PreparedBundle,
+    panel: &crate::mesh_animation_panel::Panel,
+) -> Result<(), String> {
+    if !panel.matches_saved_sidecar(bundle.animation_sha256.as_deref()) {
+        return Err("loaded game animation differs from the validated bundle".into());
+    }
+    if crate::mesh_hazards_export::open_bundle(root)? != *bundle {
+        return Err("game bundle changed while animation was loading".into());
+    }
+    Ok(())
+}
+
+#[cfg(feature = "mesh-animated-models")]
+pub(crate) fn animation_pose_digest(placement: &crate::viewport3d::AnimatedPlacement) -> String {
+    let mut digest = Sha256::new();
+    // Local pose excludes world movement: a changing digest proves skeletal
+    // animation, not merely translation of the agent's instance.
+    for matrix in placement.pose.global() {
+        for row in matrix {
+            for value in row { digest.update(value.to_bits().to_le_bytes()); }
+        }
+    }
+    digest.finalize().iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn verify_headless_session(
+    editor: Editor,
+    navigation: crate::mesh_navigation::Panel,
+    camera: crate::mesh_camera_panel::Panel,
+    lighting: crate::mesh_lighting_panel::Panel,
+    hud: crate::mesh_hud_panel::Panel,
+    #[cfg(feature = "mesh-animated-models")] animation_state: (crate::mesh_animation_panel::Panel, Option<String>),
+    bundle: &crate::mesh_hazards_export::PreparedBundle,
+) -> Result<(), String> {
+    #[cfg(feature = "mesh-animated-models")]
+    let (mut animation, initial_animation_pose) = animation_state;
+    let tick = editor.sim().head_tick;
+    let checksum = editor.checksum();
+    let snapshot = editor.snapshot().ok_or("verification has no frame")?;
+    let view = mesh_from_view(snapshot.predicted())?;
+    let position = view.agent.position.map(|value| value.raw());
+    if bundle.art_sha256.is_some() && navigation.art_model(&editor).is_none() {
+        return Err("validated agent art has no playback placement".into());
+    }
+    let expected_props = navigation.props_document_bytes(&editor)?;
+    let prop_count = navigation.prop_models(&editor).len();
+    let expected_lighting = lighting.applied_lighting(&editor);
+    let expected_post_process = lighting.applied_post_process(&editor);
+    let expected_point_light = lighting.applied_point_light_settings(&editor);
+    if bundle.lighting_sha256.is_some() && expected_lighting.is_none() {
+        return Err("validated game lighting is not applied during playback".into());
+    }
+    let expected_hud = hud.applied_document(&editor);
+    if bundle.hud_sha256.is_some() && expected_hud.is_none() {
+        return Err("validated game HUD is not applied during playback".into());
+    }
+    #[cfg(feature = "mesh-animated-models")]
+    let played_animation_pose = animation.placement(&editor)?.as_ref().map(animation_pose_digest);
+    #[cfg(feature = "mesh-animated-models")]
+    if played_animation_pose.is_some() != bundle.animation_sha256.is_some() {
+        return Err("validated animation has no playback placement".into());
+    }
+    let mut app = EditorApp::new(editor, None);
+    app.install_validated_hazards_navigation(navigation);
+    app.install_validated_hazards_camera(camera);
+    app.install_validated_hazards_lighting(lighting);
+    app.install_validated_hazards_hud(hud);
+    #[cfg(feature = "mesh-animated-models")]
+    app.install_validated_hazards_animation(animation);
+    app.verify_hazards_restart()?;
+    if !app.hazards_props_match(&bundle.props_sha256, &expected_props) {
+        return Err("headless restart changed the admitted game props".into());
+    }
+    if !app.hazards_lighting_matches(
+        &bundle.lighting_sha256,
+        expected_lighting,
+        expected_post_process,
+    ) {
+        return Err("headless restart changed the admitted game lighting".into());
+    }
+    if !app.hazards_point_light_matches(expected_point_light.as_ref()) {
+        return Err("headless restart changed the admitted game point light".into());
+    }
+    if !app.hazards_hud_matches(&bundle.hud_sha256, &expected_hud) {
+        return Err("headless restart changed the admitted game HUD".into());
+    }
+    #[cfg(feature = "mesh-animated-models")]
+    let restarted_animation_pose = app.hazards_animation_pose_digest()?;
+    #[cfg(feature = "mesh-animated-models")]
+    if !app.hazards_animation_matches(bundle.animation_sha256.as_deref())
+        || restarted_animation_pose != initial_animation_pose {
+        return Err("headless restart changed the admitted animation pose".into());
+    }
+    if app.editor.checksum() != bundle.checksum {
+        return Err("headless restart differs from the admitted initial frame".into());
+    }
+    #[allow(unused_mut)]
+    let mut report = serde_json::json!({
+            "tick": tick, "checksum": format!("{checksum:016x}"),
+            "agent_position_raw": position, "art_sha256": bundle.art_sha256,
+            "lighting_sha256": bundle.lighting_sha256, "lighting_restart_parity": true,
+            "point_light": expected_point_light.and_then(|settings| settings.point_light), "point_light_restart_parity": true,
+            "hud_sha256": bundle.hud_sha256, "hud_restart_parity": true,
+            "props_sha256": bundle.props_sha256, "props_restart_parity": true,
+            "prop_count": prop_count,
+            "restarted_tick": app.editor.sim().head_tick,
+            "restarted_checksum": format!("{:016x}", app.editor.checksum()),
+            "restart_parity": true
+        });
+    #[cfg(feature = "mesh-animated-models")]
+    {
+        report["animation_sha256"] = serde_json::json!(bundle.animation_sha256);
+        report["animation_pose_sha256"] = serde_json::json!(played_animation_pose);
+        report["animation_initial_pose_sha256"] = serde_json::json!(initial_animation_pose);
+        report["animation_restarted_pose_sha256"] = serde_json::json!(restarted_animation_pose);
+        report["animation_restart_parity"] = serde_json::json!(true);
+    }
+    println!("{report}");
+    Ok(())
 }
 
 fn start_playback(editor: &mut Editor, ticks: Option<u32>, capturing: bool) -> Result<(), String> {
@@ -428,3 +688,27 @@ fn verify_executable(
 #[cfg(test)]
 #[path = "mesh_hazards_player/acceptance.rs"]
 mod acceptance;
+
+#[cfg(test)]
+#[path = "mesh_hazards_player/art_acceptance.rs"]
+mod art_acceptance;
+
+#[cfg(test)]
+#[path = "mesh_hazards_player/lighting_acceptance.rs"]
+mod lighting_acceptance;
+
+#[cfg(test)]
+#[path = "mesh_hazards_player/hud_acceptance.rs"]
+mod hud_acceptance;
+
+#[cfg(test)]
+#[path = "mesh_hazards_player/props_acceptance.rs"]
+mod props_acceptance;
+
+#[cfg(all(test, feature = "mesh-animated-models"))]
+#[path = "mesh_hazards_player/animation_acceptance.rs"]
+mod animation_acceptance;
+
+#[cfg(all(test,target_os="linux"))]
+#[path="mesh_hazards_player/point_light_acceptance.rs"]
+mod point_light_acceptance;

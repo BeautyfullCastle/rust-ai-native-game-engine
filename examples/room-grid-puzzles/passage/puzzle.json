@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "id": "passage",
+  "border": true,
+  "merge_walls": true,
+  "openings": [
+    "south:0",
+    "south:6"
+  ],
+  "winning_ticks": 242,
+  "shortcut_ticks": 122
+}

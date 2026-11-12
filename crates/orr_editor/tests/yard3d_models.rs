@@ -51,7 +51,7 @@ fn editor(scene: &Path) -> Editor {
 fn headless(scene: &Path) -> Harness<'static, EditorApp> {
     let editor = editor(scene);
     Harness::builder()
-        .with_size([1500.0, 1200.0])
+        .with_size([1500.0, 2400.0])
         .with_step_dt(1.0 / 60.0)
         .build_eframe(move |_| EditorApp::new(editor, None))
 }
@@ -177,6 +177,11 @@ fn actual_widgets_assign_remove_undo_save_reopen_and_disable_mutation_in_play() 
         "Redo model",
         "Save model bindings",
         "Reload verified models",
+        "Use selected model settings",
+        "Remove orphan model bindings",
+        "Fit rest model to box",
+        "Fit rest model to sphere",
+        "Rotate X -90", "Rotate X +90", "Rotate Y -90", "Rotate Y +90", "Rotate Z -90", "Rotate Z +90", "Reset model rotation",
         "Discard model bindings",
     ] {
         assert!(
@@ -898,3 +903,24 @@ fn scene_owned_reservation_rejects_model_assignment_before_history_or_cache_chan
     app.models.assign(&app.editor).unwrap();
     assert_eq!(app.models.bindings.as_ref().unwrap().document(), &before);
 }
+
+#[path = "yard3d_models/settings_copy.rs"]
+mod settings_copy;
+
+#[path = "yard3d_models/box_fit.rs"]
+mod box_fit;
+
+#[path = "yard3d_models/sphere_fit.rs"]
+mod sphere_fit;
+
+#[path = "yard3d_models/rotation.rs"]
+mod rotation;
+
+#[path = "yard3d_models/orphan_cleanup.rs"]
+mod orphan_cleanup;
+
+#[path = "yard3d_models/batch.rs"]
+mod batch;
+
+#[path = "yard3d_models/batch_remove.rs"]
+mod batch_remove;

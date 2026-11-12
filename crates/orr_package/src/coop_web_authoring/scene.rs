@@ -1,0 +1,327 @@
+//! Exact authored Scene bytes admitted by the existing trusted WASM validator.
+use super::{
+    prepared::{digest, snapshot},
+    publish,
+};
+use serde::{Deserialize, Serialize};
+use std::{collections::BTreeSet, ffi::OsString, path::PathBuf, process::Command, time::Duration};
+const VALIDATOR: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tools/validate_coop_defense_scene.mjs"
+));
+const USAGE:&str="orr_pkg create-coop-scene --wasm TRUSTED_LOCAL_WASM --output NEW_SCENE [--starting-gold 0..10000] [--reactor-hp 1..1000] [--last-wave 1..10] [--spawn-interval-ticks 35..350] [--wave-pairs N1,N2,N3,N4,N5,N6,N7,N8,N9,N10] [--enemy-health-multiplier 1..4] [--wave-kinds ROW1;ROW2;...;ROW10] [--opening-bosses B1,B2,...,B10]\nWave pairs require exactly ten integers, each 1..28; each pair spawns one enemy in each lane. Enemy health defaults to 1 when omitted. Wave kinds require ten semicolon-separated rows of four comma-separated integers in 0..3; opening bosses require ten comma-separated flags in 0..1. Supplying either composition option writes both fields, defaulting the other to the original rotation or bosses on waves 5 and 10. Executes trusted local WASM in trusted Node on PATH; not a sandbox. No fetch or build. Integers accept ASCII decimal digits, optional sign, whitespace and single underscores between digits; Unicode digits are not accepted. Duplicate options are refused.";
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(super) struct Receipt {
+    version: u32,
+    scene_bytes: usize,
+    scene_sha256: String,
+    wasm_sha256: String,
+    initial_checksum: String,
+}
+pub(super) struct Verified {
+    bytes: Vec<u8>,
+    receipt: Receipt,
+}
+impl Verified {
+    pub(super) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+    pub(super) fn receipt(&self) -> &Receipt {
+        &self.receipt
+    }
+}
+#[derive(Debug)]
+pub(super) struct Options {
+    wasm: Option<PathBuf>,
+    pub(super) output: PathBuf,
+    gold: i64,
+    hp: i64,
+    wave: i64,
+    pacing: Option<i64>,
+    wave_pairs: Option<[u32; 10]>,
+    enemy_health: Option<i64>,
+    wave_kinds: Option<[[u32; 4]; 10]>,
+    opening_bosses: Option<[u32; 10]>,
+}
+fn integer(value: &OsString) -> Result<i64, String> {
+    let raw = value
+        .to_str()
+        .ok_or("integer must be UTF-8 ASCII decimal")?;
+    let raw = raw.trim_matches(|c: char| c.is_whitespace() || matches!(c, '\u{1c}'..='\u{1f}'));
+    let digits = raw
+        .strip_prefix('+')
+        .or_else(|| raw.strip_prefix('-'))
+        .unwrap_or(raw);
+    if digits.is_empty()
+        || digits
+            .split('_')
+            .any(|s| s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return Err("invalid ASCII decimal integer".into());
+    }
+    raw.replace('_', "")
+        .parse()
+        .map_err(|_| "integer outside supported range".into())
+}
+fn wave_pairs(value: &OsString) -> Result<[u32; 10], String> {
+    let raw = value
+        .to_str()
+        .ok_or("wave pairs must be UTF-8 ASCII decimals")?;
+    let mut parts = raw.split(',');
+    let mut counts = [0; 10];
+    for count in &mut counts {
+        let part = parts
+            .next()
+            .ok_or("wave pairs require exactly ten integers")?;
+        let value = integer(&OsString::from(part))?;
+        if !(1..=28).contains(&value) {
+            return Err("wave pairs must each be in 1..28".into());
+        }
+        *count = value as u32;
+    }
+    if parts.next().is_some() {
+        return Err("wave pairs require exactly ten integers".into());
+    }
+    Ok(counts)
+}
+fn bounded_array<const N: usize>(raw: &str, maximum: i64) -> Result<[u32; N], String> {
+    let mut parts = raw.split(',');
+    let mut values = [0; N];
+    for value in &mut values {
+        let part = parts.next().ok_or("composition array has wrong length")?;
+        let n = integer(&OsString::from(part))?;
+        if !(0..=maximum).contains(&n) {
+            return Err("composition integer outside authored bounds".into());
+        }
+        *value = n as u32;
+    }
+    if parts.next().is_some() {
+        return Err("composition array has wrong length".into());
+    }
+    Ok(values)
+}
+fn wave_kinds(value: &OsString) -> Result<[[u32; 4]; 10], String> {
+    let raw = value
+        .to_str()
+        .ok_or("wave kinds must be UTF-8 ASCII decimals")?;
+    let mut rows = raw.split(';');
+    let mut kinds = [[0; 4]; 10];
+    for row in &mut kinds {
+        *row = bounded_array(rows.next().ok_or("wave kinds require exactly ten rows")?, 3)?;
+    }
+    if rows.next().is_some() {
+        return Err("wave kinds require exactly ten rows".into());
+    }
+    Ok(kinds)
+}
+fn default_wave_kinds() -> [[u32; 4]; 10] {
+    std::array::from_fn(|wave| std::array::from_fn(|ordinal| ((wave + 1 + ordinal) % 4) as u32))
+}
+const DEFAULT_OPENING_BOSSES: [u32; 10] = [0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+fn options(args: &[OsString]) -> Result<Options, String> {
+    options_for(args, false)
+}
+pub(super) fn options_for(args: &[OsString], native: bool) -> Result<Options, String> {
+    if args.len() > 20
+        || args.len() % 2 != 0
+        || args.iter().any(|s| {
+            s.is_empty() || s.as_encoded_bytes().len() > 4096 || s.as_encoded_bytes().contains(&0)
+        })
+    {
+        return Err("invalid bounded option/value arguments".into());
+    }
+    let (mut wasm, mut output) = (None, None);
+    let (mut gold, mut hp, mut wave, mut pacing) = (150, 30, 10, None);
+    let mut pairs = None;
+    let mut enemy_health = None;
+    let mut kinds = None;
+    let mut bosses = None;
+    let mut seen = BTreeSet::new();
+    for pair in args.chunks_exact(2) {
+        let key = pair[0].to_str().ok_or("invalid option")?;
+        if !seen.insert(key) {
+            return Err("duplicate option".into());
+        }
+        match key {
+            "--wasm" if !native => wasm = Some(PathBuf::from(&pair[1])),
+            "--output" => output = Some(PathBuf::from(&pair[1])),
+            "--starting-gold" => gold = integer(&pair[1])?,
+            "--reactor-hp" => hp = integer(&pair[1])?,
+            "--last-wave" => wave = integer(&pair[1])?,
+            "--spawn-interval-ticks" => pacing = Some(integer(&pair[1])?),
+            "--wave-pairs" => pairs = Some(wave_pairs(&pair[1])?),
+            "--enemy-health-multiplier" => enemy_health = Some(integer(&pair[1])?),
+            "--wave-kinds" => kinds = Some(wave_kinds(&pair[1])?),
+            "--opening-bosses" => {
+                bosses = Some(bounded_array(
+                    pair[1]
+                        .to_str()
+                        .ok_or("opening bosses must be UTF-8 ASCII decimals")?,
+                    1,
+                )?)
+            }
+            _ => return Err("unknown option".into()),
+        }
+    }
+    let o = Options {
+        wasm: if native {
+            None
+        } else {
+            Some(wasm.ok_or("--wasm required")?)
+        },
+        output: output.ok_or("--output required")?,
+        gold,
+        hp,
+        wave,
+        pacing,
+        wave_pairs: pairs,
+        enemy_health,
+        wave_kinds: kinds,
+        opening_bosses: bosses,
+    };
+    scene_text(&o)?;
+    Ok(o)
+}
+pub(super) fn scene_text(o: &Options) -> Result<Vec<u8>, String> {
+    if !(0..=10000).contains(&o.gold)
+        || !(1..=1000).contains(&o.hp)
+        || !(1..=10).contains(&o.wave)
+        || o.enemy_health.is_some_and(|m| !(1..=4).contains(&m))
+        || o.pacing.is_some_and(|p| !(35..=350).contains(&p))
+        || o.wave_pairs
+            .is_some_and(|counts| counts.iter().any(|n| !(1..=28).contains(n)))
+        || o.wave_kinds
+            .is_some_and(|rows| rows.iter().flatten().any(|n| *n > 3))
+        || o.opening_bosses
+            .is_some_and(|flags| flags.iter().any(|n| *n > 1))
+    {
+        return Err("scene integer outside authored bounds".into());
+    }
+    let mut text=format!("schema: orr.scene/1\nentities: {{}}\nsingletons:\n  CoopDefense::Scenario:\n    starting_gold: {}\n    reactor_hp: {}\n  CoopDefense::Campaign:\n    last_wave: {}\n",o.gold,o.hp,o.wave);
+    if let Some(pacing) = o.pacing {
+        text.push_str(&format!(
+            "  CoopDefense::WavePacing:\n    spawn_interval_ticks: {pacing}\n"
+        ));
+    }
+    if let Some(counts) = o.wave_pairs {
+        let values = counts.map(|n| n.to_string()).join(", ");
+        text.push_str(&format!(
+            "  CoopDefense::WaveCounts:\n    pair_counts: [{values}]\n"
+        ));
+    }
+    if let Some(multiplier) = o.enemy_health {
+        text.push_str(&format!(
+            "  CoopDefense::EnemyHealth:\n    multiplier: {multiplier}\n"
+        ));
+    }
+    if o.wave_kinds.is_some() || o.opening_bosses.is_some() {
+        let rows = o
+            .wave_kinds
+            .unwrap_or_else(default_wave_kinds)
+            .map(|row| format!("[{}]", row.map(|n| n.to_string()).join(", ")))
+            .join(", ");
+        let bosses = o
+            .opening_bosses
+            .unwrap_or(DEFAULT_OPENING_BOSSES)
+            .map(|n| n.to_string())
+            .join(", ");
+        text.push_str(&format!(
+            "  CoopDefense::WaveComposition:\n    regular_kinds: [{rows}]\n    opening_boss: [{bosses}]\n"
+        ));
+    }
+    Ok(text.into_bytes())
+}
+fn admit(bytes: Vec<u8>, wasm: &[u8], output: &[u8]) -> Result<Verified, String> {
+    if bytes.len() > 65536 || output.len() > 4096 {
+        return Err("scene or receipt exceeds bound".into());
+    }
+    let receipt: Receipt = serde_json::from_slice(output).map_err(|e| e.to_string())?;
+    if receipt.version != 1
+        || receipt.scene_bytes != bytes.len()
+        || receipt.scene_sha256 != digest(&bytes)
+        || receipt.wasm_sha256 != digest(wasm)
+        || receipt.initial_checksum.len() != 16
+        || !receipt
+            .initial_checksum
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err("scene receipt does not match exact admitted inputs".into());
+    }
+    Ok(Verified { bytes, receipt })
+}
+fn validate_node(wasm: &[u8], scene: &[u8]) -> Result<Vec<u8>, String> {
+    let temp = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let script = temp.path().join("validate.mjs");
+    let wasm_path = temp.path().join("game.wasm");
+    let scene_path = temp.path().join("scene.yaml");
+    for (path, bytes) in [
+        (&script, VALIDATOR),
+        (&wasm_path, wasm),
+        (&scene_path, scene),
+    ] {
+        std::fs::write(path, bytes).map_err(|e| e.to_string())?;
+    }
+    let mut command = Command::new("node");
+    command.arg(&script).arg(&wasm_path).arg(&scene_path);
+    super::node_gate::execute(command, Duration::from_secs(15))
+}
+pub(super) fn verify_bytes(bytes: Vec<u8>, wasm: &[u8]) -> Result<Verified, String> {
+    if bytes.len() > 65536 || wasm.len() > 64 * 1024 * 1024 {
+        return Err("scene/WASM exceeds bounds".into());
+    }
+    std::str::from_utf8(&bytes).map_err(|e| e.to_string())?;
+    let result = validate_node(wasm, &bytes)?;
+    admit(bytes, wasm, &result)
+}
+fn create_with(
+    o: &Options,
+    gate: impl FnOnce(&[u8], &[u8]) -> Result<Vec<u8>, String>,
+) -> Result<(Verified, Option<String>), String> {
+    let bytes = scene_text(o)?;
+    publish::preflight(&o.output)?;
+    let wasm_path = o.wasm.as_deref().ok_or("--wasm required")?;
+    let wasm = snapshot(wasm_path, 64 * 1024 * 1024)?;
+    let output = gate(&wasm, &bytes)?;
+    let verified = admit(bytes, &wasm, &output)?;
+    if snapshot(wasm_path, 64 * 1024 * 1024)? != wasm {
+        return Err("trusted WASM changed during verification".into());
+    }
+    let warning = publish::publish_scene(&o.output, &verified)?;
+    Ok((verified, warning))
+}
+pub(super) fn run_cli(args: impl IntoIterator<Item = OsString>) -> u8 {
+    let args: Vec<_> = args.into_iter().take(22).collect();
+    if args.len() == 1 && (args[0] == "--help" || args[0] == "-h") {
+        println!("{USAGE}");
+        return 0;
+    }
+    let o = match options(&args) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("{e}\n{USAGE}");
+            return 2;
+        }
+    };
+    match create_with(&o, validate_node) {
+        Ok((verified, warning)) => {
+            if let Some(w) = warning {
+                eprintln!("warning: published; {w}; do not retry or remove published output");
+            }
+            // Receipt fields are bounded and serializable by construction.
+            println!(
+                "{}",
+                serde_json::to_string(verified.receipt()).expect("validated receipt serialization")
+            );
+            0
+        }
+        Err(e) => {
+            eprintln!("Scene creation failed: {e}");
+            1
+        }
+    }
+}
+#[cfg(test)]
+#[path = "scene_tests.rs"]
+mod tests;

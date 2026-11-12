@@ -256,7 +256,7 @@ fn installed_transform_widgets_save_reopen_reject_malformed_and_preserve_host_by
     let scene = prepare(temp.path());
     let ed = editor(&scene);
     let mut h = Harness::builder()
-        .with_size([1500.0, 1200.0])
+        .with_size([1500.0, 2400.0])
         .with_step_dt(1.0 / 60.0)
         .build_eframe(move |_| EditorApp::new(ed, None));
     settle(&mut h);
@@ -387,7 +387,7 @@ fn production_main_viewport_matches_baked_uv_oracle_through_play_seek_stop() {
     let scene = prepare(temp.path());
     let ed = editor(&scene);
     let mut h = Harness::builder()
-        .with_size([1500.0, 1200.0])
+        .with_size([1500.0, 2400.0])
         .with_step_dt(1.0 / 60.0)
         .wgpu()
         .build_eframe(move |cc| EditorApp::new(ed, cc.wgpu_render_state.clone()));

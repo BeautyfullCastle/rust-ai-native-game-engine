@@ -15,7 +15,23 @@ use crate::{
 use egui::Ui;
 use std::{collections::BTreeMap, path::PathBuf};
 
+mod draft_preview;
+pub(crate) use draft_preview::DraftPlacement;
+mod batch;
+mod fit;
+mod rotation;
+
+#[cfg(feature = "room-character")]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct CharacterClip {
+    pub index: u32,
+    pub name: String,
+    pub seconds: f32,
+}
+
 pub struct ModelPanel {
+    batch: batch::Targets,
+    draft_preview: draft_preview::State,
     pub blockout: crate::blockout_panel::BlockoutPanel,
     pub bindings: Option<Bindings>,
     pub project: String,
@@ -28,6 +44,8 @@ pub struct ModelPanel {
     #[cfg(feature = "animated-models")]
     /// Persisted clip choice and once/loop policy for animated bindings.
     pub animation: AnimationDescriptor,
+    #[cfg(feature = "animated-models")]
+    sample_seconds: String,
     loaded: BTreeMap<String, LoadedAsset>,
     candidate: Option<(String, String, ModelKind, LoadedAsset)>,
     confirm_discard: bool,
@@ -35,10 +53,16 @@ pub struct ModelPanel {
     error: Option<String>,
     reserved_scene_models: usize,
     room_identity: Option<(PathBuf, String)>,
+    #[cfg(feature = "animated-models")]
+    room_character_enabled: bool,
+    #[cfg(feature = "room-character")]
+    room_character_playback: std::cell::RefCell<(Option<std::sync::Arc<()>>, orr_sample::room_character::PlaybackCursor)>,
 }
 impl Default for ModelPanel {
     fn default() -> Self {
         Self {
+            batch: Default::default(),
+            draft_preview: Default::default(),
             blockout: crate::blockout_panel::BlockoutPanel::default(),
             bindings: None,
             project: ".".into(),
@@ -51,6 +75,8 @@ impl Default for ModelPanel {
                 clip_index: 0,
                 playback: PlaybackMode::Once,
             },
+            #[cfg(feature = "animated-models")]
+            sample_seconds: "0".into(),
             loaded: BTreeMap::new(),
             candidate: None,
             confirm_discard: false,
@@ -58,16 +84,28 @@ impl Default for ModelPanel {
             error: None,
             reserved_scene_models: 0,
             room_identity: None,
+            #[cfg(feature = "animated-models")]
+            room_character_enabled: false,
+            #[cfg(feature = "room-character")]
+            room_character_playback: Default::default(),
         }
     }
 }
 impl ModelPanel {
+    /// Retire observed assets only after a replacement transaction commits.
+    fn retire_character_playback(&mut self) {
+        #[cfg(feature = "room-character")]
+        { *self.room_character_playback.get_mut() = Default::default(); }
+    }
     /// Install an admitted immutable room presentation without reopening files.
     #[cfg(feature = "room-project")]
     pub fn install_room(
         &mut self,
         prepared: orr_sample::room_project::PreparedModels,
     ) -> Result<(), String> {
+        if prepared.has_character() && !cfg!(feature="room-character") {
+            return Err("Room character requires explicit editor room-character support".into());
+        }
         let mut loaded = BTreeMap::new();
         for (guid, binding) in &prepared.document.bindings {
             let asset = prepared
@@ -78,11 +116,27 @@ impl ModelPanel {
             loaded.insert(guid.clone(), asset.clone());
         }
         orr_sample::room_project::validate_decoded_model_budget(loaded.values())?;
+        #[cfg(feature = "room-character")]
+        if let Some(character) = &prepared.character {
+            character.validate()?;
+            if character.crossfade_ticks.unwrap_or(0) > 0 {
+                let model = loaded.get(&character.player)
+                    .and_then(LoadedAsset::animated_model)
+                    .ok_or("Room character animated model missing")?;
+                orr_sample::room_project::validate_decoded_model_budget_with_extra(
+                    loaded.values(), orr_sample::room_character::crossfade_extra_pose_bytes(model)?,
+                )?;
+            }
+        }
         if prepared.document.project != "." {
             return Err("Room sidecar project must be exactly '.'".into());
         }
         let identity = (prepared.path.clone(), prepared.document.scene.clone());
+        #[cfg(feature = "animated-models")]
+        let character_enabled = prepared.has_character();
         let bindings = Bindings::from_document(prepared.path, prepared.document)?;
+        #[cfg(feature = "animated-models")]
+        { self.room_character_enabled = character_enabled; }
         self.room_identity = Some(identity);
         self.project = bindings
             .path
@@ -90,8 +144,10 @@ impl ModelPanel {
             .unwrap_or(std::path::Path::new("."))
             .display()
             .to_string();
+        self.batch = Default::default();
         self.bindings = Some(bindings);
         self.loaded = loaded;
+        self.retire_character_playback();
         self.error = None;
         Ok(())
     }
@@ -159,6 +215,8 @@ impl ModelPanel {
                     crate::backend::HostSpec::PreparedCollect { .. } => return false,
                     #[cfg(feature = "room-project")]
                     crate::backend::HostSpec::PreparedRoom { scene, .. } => scene,
+                    #[cfg(feature = "static-gameplay")]
+                    crate::backend::HostSpec::PreparedRegistered { .. } => return false,
                     crate::backend::HostSpec::Remote { .. } => return false,
                 };
                 if !local_path
@@ -199,6 +257,8 @@ impl ModelPanel {
             }
             #[cfg(feature = "room-project")]
             crate::backend::HostSpec::PreparedRoom { scene, .. } => scene,
+            #[cfg(feature = "static-gameplay")]
+            crate::backend::HostSpec::PreparedRegistered { .. } => return Err("Registered gameplay does not provide local model authoring authority".into()),
             crate::backend::HostSpec::Remote { .. } => {
                 return Err("Remote scene paths are not local authority".into())
             }
@@ -270,8 +330,10 @@ impl ModelPanel {
             &loaded,
             self.reserved_scene_models,
         )?;
+        self.batch = Default::default();
         self.bindings = Some(candidate);
         self.loaded = loaded;
+        self.retire_character_playback();
         self.candidate = None;
         self.error = None;
         Ok(())
@@ -383,6 +445,7 @@ impl ModelPanel {
             self.reserved_scene_models,
         )?;
         self.loaded = loaded;
+        self.retire_character_playback();
         Ok(())
     }
     /// Loads exactly the currently selected kind/package/path into a transient
@@ -440,28 +503,206 @@ impl ModelPanel {
             self.kind,
         )
     }
-    pub fn assign(&mut self, editor: &Editor) -> Result<(), String> {
+    /// Fill the authoring form from one coherent assigned binding. Assignment
+    /// still reloads/revalidates installed bytes; this cached candidate is not
+    /// permission to apply stale package content.
+    pub fn use_selected_settings(&mut self, editor: &Editor) -> Result<(), String> {
         if !self.editable(editor) {
-            return Err(
-                "Model assignment is disabled during Play, previews and remote sessions".into(),
-            );
+            return Err("Reading selected model settings requires coherent local Edit mode".into());
         }
-        let guid = editor
-            .selected_guid()
-            .ok_or("Select a persistent body GUID")?;
+        let guid = editor.selected_guid().ok_or("Select an assigned model")?;
+        if !editor.rows().iter().any(|row| row.guid.as_ref() == Some(&guid)) {
+            return Err("Selected GUID no longer exists".into());
+        }
+        let key = guid.to_string();
+        let binding = self.bindings.as_ref().and_then(|bindings| {
+            bindings.document().bindings.get(&key)
+        }).ok_or("Selected entity has no model binding")?.clone();
+        let loaded = self.loaded.get(&key).ok_or("Reload the selected model before reading its settings")?.clone();
+        binding.validate(&loaded)?;
+        // Commit all form values only after identity/kind validation succeeds.
+        self.package = binding.package.clone();
+        self.asset = binding.asset.clone();
+        self.kind = binding.kind;
+        self.transform = binding.transform;
+        #[cfg(feature = "animated-models")]
+        {
+            self.animation = binding.animation.unwrap_or(AnimationDescriptor {
+                clip_index: 0,
+                playback: PlaybackMode::Once,
+            });
+        }
+        self.candidate = Some((binding.package, binding.asset, binding.kind, loaded));
+        Ok(())
+    }
+
+    /// Center and uniformly fit verified rest geometry inside the selected box.
+    /// Only the authoring draft changes; Assign and Save remain explicit.
+    pub fn fit_selected_box(&mut self, editor: &Editor) -> Result<(), String> {
+        self.fit_selected_collider(editor, false, None)
+    }
+    /// Fit the rest bounding box inside the selected sphere, as a draft only.
+    pub fn fit_selected_sphere(&mut self, editor: &Editor) -> Result<(), String> {
+        self.fit_selected_collider(editor, true, None)
+    }
+    fn fit_selected_collider(
+        &mut self,
+        editor: &Editor,
+        sphere: bool,
+        pose_seconds: Option<&str>,
+    ) -> Result<(), String> {
+        if !self.editable(editor) {
+            return Err("Fitting a model requires coherent local Edit mode".into());
+        }
+        let guid = editor.selected_guid().ok_or("Select a collider first")?;
         let row = editor
             .rows()
             .iter()
-            .find(|r| r.guid.as_ref() == Some(&guid))
+            .find(|row| row.guid.as_ref() == Some(&guid))
             .ok_or("Selected GUID no longer exists")?;
-        if !editor
-            .yard_frame()
-            .poses
-            .iter()
-            .any(|(entity, _)| *entity == row.entity)
+        let snapshot = editor.snapshot().ok_or("Current snapshot is unavailable")?;
+        let dimensions = if sphere {
+            let radius =
+                orr_sample::yard3d_view::editor_sphere_radius(snapshot.predicted(), row.entity)
+                    .ok_or(
+                        "Fit rest model to sphere requires a current sphere collider and body",
+                    )?;
+            [radius; 3]
+        } else {
+            orr_sample::yard3d_view::editor_box_half(snapshot.predicted(), row.entity)
+                .ok_or("Fit rest model to box requires a current box collider and body")?
+        };
+        let (_, _, _, candidate) = self
+            .candidate
+            .as_ref()
+            .filter(|(package, asset, kind, _)| {
+                package == &self.package && asset == &self.asset && *kind == self.kind
+            })
+            .ok_or("Load the current model asset before fitting")?;
+        // A form candidate does not authorize stale installed bytes. Keep the
+        // draft and cache unchanged on any freshness or arithmetic failure.
+        let loaded = self.load_requested()?;
+        if loaded.package_digest() != candidate.package_digest()
+            || loaded.source_hash() != candidate.source_hash()
         {
-            return Err("Selected entity has no Yard3D body pose".into());
+            return Err("Model asset changed; load it again before fitting".into());
         }
+        let fitted = match pose_seconds {
+            None => {
+                if sphere {
+                    fit::loaded_sphere(&loaded, f64::from(dimensions[0]))?
+                } else {
+                    fit::loaded(&loaded, dimensions.map(f64::from))?
+                }
+            }
+            Some(seconds) => {
+                #[cfg(feature = "animated-models")]
+                {
+                    let model = loaded
+                        .animated_model()
+                        .ok_or("Sampled pose fitting requires an animated model")?;
+                    let clip = model
+                        .source()
+                        .clips
+                        .get(self.animation.clip_index as usize)
+                        .ok_or("Select a valid animation clip before fitting")?;
+                    let seconds = parse_pose_seconds(seconds, clip.duration())?;
+                    if sphere {
+                        fit::loaded_pose_sphere(
+                            &loaded,
+                            self.animation.clip_index,
+                            seconds,
+                            f64::from(dimensions[0]),
+                        )?
+                    } else {
+                        fit::loaded_pose(
+                            &loaded,
+                            self.animation.clip_index,
+                            seconds,
+                            dimensions.map(f64::from),
+                        )?
+                    }
+                }
+                #[cfg(not(feature = "animated-models"))]
+                {
+                    let _ = seconds;
+                    return Err("Sampled pose fitting requires animated-models".into());
+                }
+            }
+        };
+        self.transform = fitted;
+        Ok(())
+    }
+    #[cfg(feature = "animated-models")]
+    pub fn fit_selected_pose_box(&mut self, editor: &Editor) -> Result<(), String> {
+        let seconds = self.sample_seconds.clone();
+        self.fit_selected_collider(editor, false, Some(&seconds))
+    }
+    #[cfg(feature = "animated-models")]
+    pub fn fit_selected_pose_sphere(&mut self, editor: &Editor) -> Result<(), String> {
+        let seconds = self.sample_seconds.clone();
+        self.fit_selected_collider(editor, true, Some(&seconds))
+    }
+    #[cfg(feature = "animated-models")]
+    fn pose_fit_candidate_matches(&self) -> bool {
+        self.kind == ModelKind::Animated
+            && self
+                .candidate
+                .as_ref()
+                .is_some_and(|(package, asset, kind, loaded)| {
+                    package == &self.package
+                        && asset == &self.asset
+                        && *kind == self.kind
+                        && loaded.animated_model().is_some_and(|model| {
+                            model
+                                .source()
+                                .clips
+                                .get(self.animation.clip_index as usize)
+                                .is_some()
+                        })
+                })
+    }
+    #[cfg(feature = "animated-models")]
+    fn show_pose_fit_controls(
+        &mut self,
+        ui: &mut Ui,
+        eligible: bool,
+        editable: bool,
+    ) -> Option<bool> {
+        let mut requested = None;
+        ui.add_enabled_ui(editable,|ui| {
+            let label=ui.label("Fit pose seconds");
+            ui.add(egui::TextEdit::singleline(&mut self.sample_seconds).char_limit(64)).labelled_by(label.id);
+            ui.weak("Fits only the selected clip at one sampled time, not an envelope for the whole animation. Resets local rotation; changes only the transform draft.");
+            if ui.add_enabled(eligible,egui::Button::new("Fit sampled pose to box")).clicked() {requested=Some(false);}
+            if ui.add_enabled(eligible,egui::Button::new("Fit sampled pose to sphere")).clicked() {requested=Some(true);}
+        });
+        requested
+    }
+    /// Postmultiply the form quaternion: rotate about the model's local axis.
+    pub fn rotate_local_quarter(&mut self, editor: &Editor, axis: usize, direction: i8) -> Result<(), String> {
+        if !self.editable(editor) { return Err("Model rotation requires coherent local Edit mode".into()); }
+        let next = rotation::quarter_turn(self.transform.rotation, axis, direction)?;
+        self.transform.rotation = next;
+        Ok(())
+    }
+    /// Recover an invalid quaternion without altering offset, scale or history.
+    pub fn reset_local_rotation(&mut self, editor: &Editor) -> Result<(), String> {
+        if !self.editable(editor) { return Err("Model rotation requires coherent local Edit mode".into()); }
+        self.transform.rotation = [0.0, 0.0, 0.0, 1.0];
+        Ok(())
+    }
+    pub fn assign(&mut self, editor: &Editor) -> Result<(), String> {
+        let guid = editor.selected_guid().ok_or("Select a persistent body GUID")?;
+        self.assign_targets(editor, &[guid])
+    }
+    /// Apply one verified model draft to explicit persistent body GUIDs as one
+    /// model-history edit. Every target and the complete result admit together.
+    pub fn assign_targets(&mut self, editor: &Editor, guids: &[orr_reflect::Guid]) -> Result<(), String> {
+        if !self.editable(editor) {
+            return Err("Model assignment is disabled during Play, previews and remote sessions".into());
+        }
+        batch::validate_targets(editor, guids)?;
         let loaded = self.load_requested()?;
         if self
             .candidate
@@ -516,15 +757,12 @@ impl ModelPanel {
             }
         };
         let bindings = self.bindings.as_mut().ok_or("Open model bindings first")?;
-        if bindings.document().bindings.len() >= 256
-            && !bindings.document().bindings.contains_key(&guid.to_string())
-        {
-            return Err("Viewport model binding limit reached".into());
-        }
         let mut candidate = bindings.document().clone();
-        candidate.bindings.insert(guid.to_string(), binding.clone());
         let mut candidate_loaded = self.loaded.clone();
-        candidate_loaded.insert(guid.to_string(), loaded.clone());
+        for guid in guids {
+            candidate.bindings.insert(guid.to_string(), binding.clone());
+            candidate_loaded.insert(guid.to_string(), loaded.clone());
+        }
         candidate_loaded.retain(|guid, _| candidate.bindings.contains_key(guid));
         Self::validate_candidate(
             editor,
@@ -532,9 +770,34 @@ impl ModelPanel {
             &candidate_loaded,
             self.reserved_scene_models,
         )?;
-        bindings.assign_validated(std::slice::from_ref(&guid), &binding, &loaded)?;
+        bindings.assign_validated(guids, &binding, &loaded)?;
         self.loaded = candidate_loaded;
+        self.retire_character_playback();
         Ok(())
+    }
+    fn orphaned_guids(&self, editor: &Editor) -> Result<Vec<orr_reflect::Guid>, String> {
+        if !self.scene_matches(editor) || !editor.yard_rows_coherent() {
+            return Err("Orphan cleanup requires matching bindings and a coherent GUID snapshot".into());
+        }
+        let bindings = self.bindings.as_ref().ok_or("Open model bindings first")?;
+        let present: std::collections::BTreeSet<_> = editor.rows().iter()
+            .filter_map(|row| row.guid.as_ref()).map(ToString::to_string).collect();
+        bindings.document().bindings.keys().filter(|guid| !present.contains(*guid))
+            .map(|guid| orr_reflect::Guid::parse(guid)).collect()
+    }
+    /// Remove only absent persistent GUIDs as one explicit model-history edit.
+    /// The scene, installed assets and surviving cached model objects stay intact.
+    pub fn remove_orphaned(&mut self, editor: &Editor) -> Result<usize, String> {
+        if !self.editable(editor) { return Err("Orphan cleanup requires coherent local Edit mode".into()); }
+        let orphaned = self.orphaned_guids(editor)?;
+        if orphaned.is_empty() { return Ok(0); }
+        let mut candidate = self.bindings.as_ref().ok_or("Open model bindings first")?.document().clone();
+        for guid in &orphaned { candidate.bindings.remove(&guid.to_string()); }
+        let mut loaded = self.loaded.clone(); loaded.retain(|guid, _| candidate.bindings.contains_key(guid));
+        Self::validate_candidate(editor, &candidate, &loaded, self.reserved_scene_models)?;
+        self.bindings.as_mut().ok_or("Open model bindings first")?.remove(&orphaned)?;
+        self.loaded = loaded; self.retire_character_playback();
+        Ok(orphaned.len())
     }
     /// Validate the complete proposed state before touching document or history.
     pub fn remove(&mut self, editor: &Editor) -> Result<(), String> {
@@ -552,9 +815,10 @@ impl ModelPanel {
         }
         bindings.remove(&[guid])?;
         self.loaded = loaded;
+        self.retire_character_playback();
         Ok(())
     }
-    pub fn save(&mut self, editor: &Editor) -> Result<(), String> {
+    pub(crate) fn validate_save(&self, editor: &Editor) -> Result<(), String> {
         if editor.game().is_room() {
             if !self.editable(editor) {
                 return Err("Room model save requires the admitted scene in Edit mode".into());
@@ -573,10 +837,20 @@ impl ModelPanel {
                 self.reserved_scene_models,
             )?;
         }
-        self.bindings
-            .as_mut()
-            .ok_or("Open model bindings first")?
-            .save()
+        Ok(())
+    }
+    pub fn save(&mut self, editor: &Editor) -> Result<(), String> {
+        self.validate_save(editor)?;
+        #[cfg(feature="room-character")]
+        if let Some(character) = editor.room_character() {
+            let identity=self.room_identity.as_ref().ok_or("Room identity missing")?;
+            let root=identity.0.parent().ok_or("Room root missing")?;
+            let prepared=orr_sample::room_project::PreparedProject::open_with_capabilities(root, orr_sample::room_project::RoomProjectCapabilities { lighting: cfg!(feature="room-lighting"), character: true })?;
+            if prepared.character().map(|c| &c.document) != Some(character) {
+                return Err("Use Save character and model bindings for changed character clips".into());
+            }
+        }
+        self.bindings.as_mut().ok_or("Open model bindings first")?.save()
     }
     /// Sidecar undo/redo is independent of scene undo and preserves the previous
     /// valid binding/cache if restored content cannot be verified.
@@ -600,6 +874,7 @@ impl ModelPanel {
         }) {
             Ok(loaded) => {
                 self.loaded = loaded;
+                self.retire_character_playback();
                 Ok(())
             }
             Err(error) => {
@@ -630,6 +905,7 @@ impl ModelPanel {
         }) {
             Ok(loaded) => {
                 self.loaded = loaded;
+                self.retire_character_playback();
                 Ok(())
             }
             Err(error) => {
@@ -717,6 +993,10 @@ impl ModelPanel {
             orr_sample::room_project::validate_decoded_model_budget(loaded.values())?;
         }
         let mut identities = std::collections::BTreeSet::new();
+        #[cfg(feature="room-character")]
+        if let Some(character) = editor.room_character() {
+            Self::validate_room_character(editor, character, document, loaded)?;
+        }
         let mut draws = 5_usize.saturating_add(reserved_scene_models.saturating_mul(2));
         for (guid, binding) in &document.bindings {
             identities.insert((
@@ -949,6 +1229,79 @@ impl ModelPanel {
             })
             .collect()
     }
+    /// Read clip metadata from the currently admitted character binding/cache.
+    /// This is not a filesystem reload or a mutation of the authoring draft.
+    #[cfg(feature = "room-character")]
+    pub(crate) fn character_clips(&self, editor: &Editor) -> Result<Vec<CharacterClip>, String> {
+        if !editor.game().is_room() || !editor.spec().is_local()
+            || !self.scene_matches(editor) || !editor.yard_rows_coherent()
+        { return Err("Character clips require the coherent local Room model source".into()); }
+        let character = editor.room_character().ok_or("Room character is unavailable")?;
+        let binding = self.bindings.as_ref().and_then(|bindings| bindings.document().bindings.get(&character.player))
+            .ok_or("Character model binding is unavailable")?;
+        let loaded = self.loaded.get(&character.player).ok_or("Reload verified character model assets")?;
+        binding.validate(loaded)?;
+        if binding.animation != Some(AnimationDescriptor { clip_index: character.searching, playback: PlaybackMode::Loop }) {
+            return Err("Character searching clip and model binding differ".into());
+        }
+        let model = loaded.animated_model().ok_or("Character model is not animated")?;
+        if character.mapped_clips().any(|index| model.source().clips.get(index as usize).is_none()) {
+            return Err("Character mapping refers to an unavailable clip".into());
+        }
+        model.source().clips.iter().enumerate().map(|(index, clip)| {
+            Ok(CharacterClip { index: u32::try_from(index).map_err(|_| "Character clip index exceeds u32")?,
+                name: clip.name.clone(), seconds: clip.duration() })
+        }).collect()
+    }
+
+    /// Validate both presentation documents before committing a character edit.
+    #[cfg(feature="room-character")]
+    pub fn apply_character_mapping(&mut self, editor: &mut Editor, character: &orr_sample::room_character::Document) -> Result<(), String> {
+        if !self.editable(editor) { return Err("Character authoring requires coherent local Edit mode".into()); }
+        if !self.room_character_enabled || editor.room_character().is_none() { return Err("Character authoring requires an admitted character project".into()); }
+        let bindings = self.bindings.as_ref().ok_or("Room model bindings missing")?;
+        let mut candidate = bindings.document().clone();
+        let binding = candidate.bindings.get_mut(&character.player).ok_or("Character player model missing")?;
+        binding.animation = Some(AnimationDescriptor { clip_index: character.searching, playback: PlaybackMode::Loop });
+        let animation = binding.animation.unwrap();
+        Self::validate_room_character(editor, character, &candidate, &self.loaded)?;
+        self.bindings.as_mut().unwrap().set_character_animation(&character.player, animation)?;
+        editor.install_room_character(character.clone())?;
+        self.retire_character_playback();
+        Ok(())
+    }
+    #[cfg(feature = "room-character")]
+    pub fn validate_room_character(
+        editor: &Editor,
+        character: &orr_sample::room_character::Document,
+        document: &model_bindings::Document,
+        loaded: &BTreeMap<String, LoadedAsset>,
+    ) -> Result<(), String> {
+        if !editor.game().is_room() || !editor.spec().is_local() || !editor.yard_rows_coherent() {
+            return Err("Room character requires a coherent local Room snapshot".into());
+        }
+        let snapshot = editor.snapshot().ok_or("Room character requires a coherent snapshot")?;
+        let mut index = orr_reflect::SceneIndex::default();
+        for row in editor.rows() {
+            if let Some(guid) = &row.guid {
+                index.insert(guid.clone(), row.entity);
+            }
+        }
+        let assets = loaded.values().map(|asset| {
+            ((asset.package().to_owned(), asset.asset().to_owned()), asset.clone())
+        }).collect();
+        let models = orr_sample::room_project::PreparedModels {
+            // This admission is CPU-only; no filesystem path is read or written.
+            path: PathBuf::new(),
+            document: document.clone(),
+            assets,
+            character: Some(character.clone()),
+        };
+        // Use the exact runtime closure, aggregate budget and composed placement
+        // checks, including all three clips at reachable room corners. Clip edits
+        // must not save a document which the native consumer rejects on reopen.
+        orr_sample::room_view::admit_presentation(snapshot.predicted(), &index, &models)
+    }
     /// Animated bindings are sampled at an absolute time from the same
     /// immutable Yard snapshot used for body poses. Edit/Stop returns the
     /// asset's rest pose; Play tick 0 and Seek 0 sample clip time zero.
@@ -963,38 +1316,67 @@ impl ModelPanel {
         let Some(snapshot) = editor.snapshot() else {
             return Ok(Vec::new());
         };
+        let room_animation = editor.game().is_room() && self.room_character_enabled;
+        #[cfg(not(feature="room-character"))]
+        if room_animation { return Err("Room animated rendering requires explicit editor room-character support".into()); }
+        #[cfg(feature="room-character")]
+        let room_character = if room_animation {
+            Some(editor.room_character().ok_or("Room animated rendering requires an installed character descriptor; reopen the project")?)
+        } else { None };
         let mut placements = Vec::new();
         for (guid, binding) in &bindings.document().bindings {
             if binding.kind != ModelKind::Animated {
                 continue;
+            }
+            #[cfg(feature="room-character")]
+            if room_character.is_some_and(|character| character.player != *guid) {
+                return Err("Room animated binding differs from admitted player".into());
             }
             let Some(row) = editor
                 .rows()
                 .iter()
                 .find(|row| row.guid.as_ref().is_some_and(|g| g.to_string() == *guid))
             else {
+                if room_animation { return Err("Room character GUID is absent from the coherent scene".into()); }
                 continue;
             };
+            #[cfg(feature="room-character")]
+            if room_character.is_some()
+                && !snapshot.predicted().get::<orr_sample::room_game::RoomActor>(row.entity)
+                    .is_some_and(|actor| actor.kind == orr_sample::room_game::PLAYER) {
+                return Err("Room character GUID no longer names the current PLAYER; reopen or repair the project".into());
+            }
             let Some((_, body_pose)) = editor
                 .yard_frame()
                 .poses
                 .iter()
                 .find(|(entity, _)| *entity == row.entity)
             else {
+                if room_animation { return Err("Room character has no current generation-bearing body pose".into()); }
                 continue;
             };
             let Some(loaded) = self.loaded.get(guid) else {
+                if room_animation { return Err("Room character verified asset cache is missing".into()); }
                 continue;
             };
-            if binding.validate(loaded).is_err() {
+            if let Err(error) = binding.validate(loaded) {
+                if room_animation { return Err(format!("Room character binding/cache mismatch: {error}")); }
                 continue;
             }
             let Some(model) = loaded.animated_model().cloned() else {
+                if room_animation { return Err("Room character cache is not animated".into()); }
                 continue;
             };
             let animation = binding
                 .animation
                 .ok_or_else(|| format!("{guid}: animated binding has no clip descriptor"))?;
+            #[cfg(feature="room-character")]
+            let animation = if let Some(character) = room_character {
+                if animation.clip_index != character.searching || animation.playback != PlaybackMode::Loop {
+                    return Err("Room character searching default no longer matches the model binding".into());
+                }
+                AnimationDescriptor { clip_index: character.clip(orr_sample::room_character::state(snapshot.predicted())), playback: PlaybackMode::Loop }
+            } else { animation };
             let duration = model
                 .source()
                 .clips
@@ -1019,17 +1401,42 @@ impl ModelPanel {
                 // Stopped and Edit scenes deliberately show the bind/rest pose.
                 (Mode::Edit, None) => None,
             };
-            let pose = match playback_time {
+            let sample_generic = || match playback_time {
                 Some(time) => model
                     .sample_clip(animation.clip_index, time)
-                    .map_err(|e| format!("{guid}: sample animation clip: {e}"))?,
+                    .map_err(|e| format!("{guid}: sample animation clip: {e}")),
                 None => model
                     .rest_pose()
-                    .map_err(|e| format!("{guid}: sample rest pose: {e}"))?,
+                    .map_err(|e| format!("{guid}: sample rest pose: {e}")),
             };
+            #[cfg(feature="room-character")]
+            let (pose, facing_yaw) = if let Some(character) = room_character {
+                let mut playback = self.room_character_playback.borrow_mut();
+                if playback.0.as_ref().is_none_or(|revision| !std::sync::Arc::ptr_eq(revision, editor.room_character_revision())) {
+                    playback.1.reset();
+                    playback.0 = Some(editor.room_character_revision().clone());
+                }
+                let context = orr_sample::room_character::PlaybackContext {
+                    entity: row.entity,
+                    tick_rate: snapshot.tick_rate(),
+                    rest: playback_time.is_none(),
+                    revision: snapshot.timeline().map_or(0, |timeline| timeline.epoch),
+                };
+                let pose = playback.1.observe(character, &model, snapshot.predicted(), context)?.clone();
+                let yaw = playback.1.facing_yaw(character, &model, snapshot.predicted(), context)?;
+                (pose, yaw)
+            } else { (sample_generic()?, 0.0) };
+            #[cfg(not(feature="room-character"))]
+            let pose = sample_generic()?;
+            #[cfg(feature="room-character")]
+            let instance = if room_character.is_some_and(|character|character.motion.and_then(|motion|motion.facing).is_some()) {
+                orr_sample::room_view::facing_world_matrix(*body_pose, binding.transform, facing_yaw)?
+            } else { Self::animated_instance(*body_pose, binding.transform) };
+            #[cfg(not(feature="room-character"))]
+            let instance = Self::animated_instance(*body_pose, binding.transform);
             placements.push(AnimatedPlacement {
                 entity: row.entity,
-                instance: Self::animated_instance(*body_pose, binding.transform),
+                instance,
                 model,
                 pose,
             });
@@ -1056,18 +1463,27 @@ impl ModelPanel {
         }
     }
     fn discard_bindings(&mut self) {
+        self.cancel_draft_preview();
+        self.batch = Default::default();
         self.bindings = None;
         self.loaded.clear();
+        self.retire_character_playback();
         self.candidate = None;
         self.confirm_discard = false;
         self.error = None;
     }
 
     pub fn show(&mut self, ui: &mut Ui, editor: &Editor) {
+        // Cancellation is safe even when the host is read-only or has changed game.
+        if draft_preview_cancel_button(ui,self.draft_preview_active()) {self.cancel_draft_preview();}
         if editor.game() != EditorGame::Yard3D && !editor.game().is_room() {
             return;
         }
         self.sync_scene(editor);
+        let preview_eligible = self.editable(editor) && editor.selected_guid().is_some()
+            && self.bindings.is_some() && self.candidate.as_ref().is_some_and(|(package,asset,kind,_)|package==&self.package && asset==&self.asset && *kind==self.kind);
+        if draft_preview_start_button(ui,preview_eligible) {self.error=self.begin_draft_preview(editor).err();}
+        ui.weak("Model draft preview is temporary. Assign and Save remain explicit; colliders and game state are unchanged.");
         let blockout_editable = self.editable(editor);
         let blockout_root = if self.scene_matches(editor) {
             self.bindings
@@ -1083,6 +1499,7 @@ impl ModelPanel {
             self.kind = ModelKind::Static;
             self.candidate = None;
         }
+        let orphaned = self.orphaned_guids(editor).map_or(0, |guids| guids.len());
         ui.collapsing("Static model binding", |ui| {
             ui.weak("Presentation only · scene and model saves/undo are separate");
             if !editor.spec().is_local() { ui.label("Remote host paths are not local asset authority"); return; }
@@ -1101,12 +1518,22 @@ impl ModelPanel {
                             );
                             ui.label(label);
                         }
-                        let orphaned = bindings.document().bindings.keys().filter(|guid| !editor.rows().iter().any(|row| row.guid.as_ref().is_some_and(|g| g.to_string() == **guid))).count();
                         if orphaned > 0 { ui.colored_label(egui::Color32::YELLOW, format!("{orphaned} orphan GUID binding(s); no handle rebinding")); }
                     }
                     if !self.scene_matches(editor) { ui.colored_label(egui::Color32::YELLOW, "Bindings belong to a different scene; save/discard before opening this scene's bindings"); }
                     let editable = self.editable(editor);
                     ui.add_enabled_ui(editable, |ui| {
+                        let has_binding = editor.selected_guid().is_some_and(|guid| {
+                            self.bindings.as_ref().is_some_and(|bindings| {
+                                bindings.document().bindings.contains_key(&guid.to_string())
+                            })
+                        });
+                        if ui.add_enabled(orphaned > 0, egui::Button::new("Remove orphan model bindings")).clicked() {
+                            self.error = self.remove_orphaned(editor).map(|_| ()).err();
+                        }
+                        if ui.add_enabled(has_binding, egui::Button::new("Use selected model settings")).clicked() {
+                            self.error = self.use_selected_settings(editor).err();
+                        }
                         ui.horizontal(|ui| {
                             ui.label("Model kind");
                             ui.selectable_value(&mut self.kind, ModelKind::Static, "Static");
@@ -1142,12 +1569,36 @@ impl ModelPanel {
                                 }
                             }
                         }
+                        #[cfg(feature="animated-models")]
+                        {
+                            let eligible=editor.selected_guid().is_some() && self.pose_fit_candidate_matches();
+                            if let Some(sphere)=self.show_pose_fit_controls(ui,eligible,self.editable(editor)) {
+                                self.error=if sphere {self.fit_selected_pose_sphere(editor)} else {self.fit_selected_pose_box(editor)}.err();
+                            }
+                        }
+                        if ui.add_enabled(editor.selected_guid().is_some(), egui::Button::new("Fit rest model to box"))
+                            .on_hover_text("Center verified rest geometry and scale uniformly with 1% space. Resets local rotation; changes the draft only.")
+                            .clicked() { self.error = self.fit_selected_box(editor).err(); }
+                        if ui.add_enabled(editor.selected_guid().is_some(), egui::Button::new("Fit rest model to sphere"))
+                            .on_hover_text("Center the rest bounds inside a sphere with uniform scale and 1% space. Resets local rotation; draft only.")
+                            .clicked() { self.error = self.fit_selected_sphere(editor).err(); }
                         for (label, values) in [("Offset", &mut self.transform.translation), ("Scale", &mut self.transform.scale)] {
                             ui.horizontal(|ui| { ui.label(label); for value in values { ui.add(egui::DragValue::new(value).speed(0.05)); } });
                         }
+                        ui.weak("Local axis quarter turns (degrees); draft only");
+                        for (axis, name) in ["X", "Y", "Z"].into_iter().enumerate() {
+                            ui.horizontal_wrapped(|ui| {
+                                for direction in [-1_i8, 1] {
+                                    let label = format!("Rotate {name} {:+}", i16::from(direction) * 90);
+                                    if ui.button(label).clicked() { self.error = self.rotate_local_quarter(editor, axis, direction).err(); }
+                                }
+                            });
+                        }
+                        if ui.button("Reset model rotation").clicked() { self.error = self.reset_local_rotation(editor).err(); }
                         ui.horizontal(|ui| { ui.label("Local quaternion xyzw"); for value in &mut self.transform.rotation { ui.add(egui::DragValue::new(value).speed(0.01)); } });
                         let assign_label = if self.kind == ModelKind::Static { "Assign static model" } else { "Assign animated model" };
                         if ui.add_enabled(editor.selected_guid().is_some(), egui::Button::new(assign_label)).clicked() { self.error = self.assign(editor).err(); }
+                        self.show_batch(ui, editor);
                         ui.horizontal(|ui| {
                             if ui.button("Remove model").clicked() {
                                 self.error = self.remove(editor).err();
@@ -1176,3 +1627,38 @@ impl ModelPanel {
         });
     }
 }
+
+#[cfg(feature = "animated-models")]
+fn parse_pose_seconds(text: &str, duration: f32) -> Result<f32, String> {
+    let seconds = text.trim().parse::<f64>().map_err(|_| {
+        "Fit pose seconds must be a finite time within the selected clip".to_owned()
+    })?;
+    if !seconds.is_finite()
+        || seconds < 0.0
+        || !duration.is_finite()
+        || seconds > f64::from(duration)
+    {
+        return Err("Fit pose seconds must be finite and within 0..selected clip duration".into());
+    }
+    Ok(seconds as f32)
+}
+#[cfg(all(test, feature = "animated-models"))]
+#[path = "model_panel/pose_fit_panel_tests.rs"]
+mod pose_fit_panel_tests;
+#[cfg(all(test,target_os="linux",feature="animated-models"))]
+#[path="model_panel/pose_fit_integration_tests.rs"]
+mod pose_fit_integration_tests;
+
+fn draft_preview_start_button(ui:&mut Ui,enabled:bool)->bool {
+    ui.add_enabled(enabled,egui::Button::new("Preview model draft on selected object")).clicked()
+}
+fn draft_preview_cancel_button(ui:&mut Ui,active:bool)->bool {
+    active && ui.button("Cancel model draft preview").clicked()
+}
+#[cfg(test)]
+#[path="model_panel/draft_preview_panel_tests.rs"]
+mod draft_preview_panel_tests;
+
+#[cfg(all(test,target_os="linux",feature="animated-models"))]
+#[path="model_panel/draft_preview_integration_tests.rs"]
+mod draft_preview_integration_tests;

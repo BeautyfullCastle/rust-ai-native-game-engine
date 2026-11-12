@@ -1,0 +1,66 @@
+use super::*;
+use super::carried::{click,wait,key,player_position};
+use orr_sample::{room_lighting::Activation,room_game::RoomRun};
+fn choose(h:&mut Harness<'_,EditorApp>,choice:&str) {
+    h.get_by_role_and_label(Role::ComboBox,"Light activation").scroll_to_me();h.run_steps(2);h.get_by_role_and_label(Role::ComboBox,"Light activation").click();h.run_steps(2);h.get_by_label(choice).click();settle(h);
+}
+fn run(h:&Harness<'_,EditorApp>)->RoomRun {*h.state().editor.snapshot().unwrap().predicted().singleton::<RoomRun>()}
+fn active(h:&Harness<'_,EditorApp>)->bool {h.state().editor.room_point_light_settings_for_presentation().unwrap().point_light.is_some()}
+fn start(h:&mut Harness<'_,EditorApp>) {click(h,orr_editor::app::LBL_PLAY);wait(h,"control",|app|app.editor.can_take_control());click(h,"Take control");wait(h,"active input",|app|app.editor.input_phase()==orr_editor::editor::input::Phase::Active);}
+fn pickup(h:&mut Harness<'_,EditorApp>) {key(h,egui::Key::E,true);wait(h,"actual pickup",|app|app.editor.yard_rows_coherent() && app.editor.snapshot().unwrap().predicted().singleton::<RoomRun>().key_collected==1);key(h,egui::Key::E,false);settle(h);}
+fn escape(h:&mut Harness<'_,EditorApp>) {key(h,egui::Key::D,true);wait(h,"reach exit",|app|app.editor.yard_rows_coherent() && player_position(app)[0]>2.0);key(h,egui::Key::D,false);settle(h);key(h,egui::Key::E,true);wait(h,"actual escape",|app|app.editor.yard_rows_coherent() && app.editor.snapshot().unwrap().predicted().singleton::<RoomRun>().won==1);key(h,egui::Key::E,false);settle(h);}
+#[test]
+fn conditional_light_widgets_save_reopen_actual_pickup_victory_seek_stop() {
+    let f=Fixture::new("room-escape-3d-v1");let mut h=f.app(false);settle(&mut h);let before=frame_bytes(&mut h.state_mut().editor);apply_enabled(&mut h);choose(&mut h,"Key collected");click(&mut h,"Apply lighting");let saved=document(&h);assert_eq!(saved.activation,Some(Activation::KeyCollected));assert!(active(&h));click(&mut h,"Undo lighting edit");assert_eq!(document(&h).activation,None);click(&mut h,"Redo lighting edit");click(&mut h,"Save lighting");assert_eq!(frame_bytes(&mut h.state_mut().editor),before);drop(h);
+    let mut h=f.app(false);settle(&mut h);assert_eq!(document(&h),saved);assert!(active(&h));start(&mut h);assert_eq!(run(&h).key_collected,0);assert!(!active(&h));pickup(&mut h);assert_eq!(run(&h).won,0);assert!(active(&h));escape(&mut h);assert!(active(&h));click(&mut h,orr_editor::app::LBL_STOP);wait(&mut h,"edit",|app|app.editor.mode()==Mode::Edit && app.editor.yard_rows_coherent());assert!(active(&h));
+    if h.query_by_label("Light activation").is_none() {click(&mut h,"Room lighting");}choose(&mut h,"Escaped");click(&mut h,"Apply lighting");click(&mut h,"Save lighting");assert_eq!(document(&h).activation,Some(Activation::Escaped));start(&mut h);assert!(!active(&h));pickup(&mut h);assert!(!active(&h));escape(&mut h);assert!(active(&h));h.state_mut().editor.pause();settle(&mut h);h.state_mut().editor.seek(0);wait(&mut h,"seekzero",|app|app.editor.yard_rows_coherent() && app.editor.timeline().is_some_and(|t|t.tick==0));assert!(!active(&h));click(&mut h,orr_editor::app::LBL_STOP);wait(&mut h,"stopedit",|app|app.editor.mode()==Mode::Edit && app.editor.yard_rows_coherent());assert!(active(&h));
+    if h.query_by_label("Light activation").is_none() {click(&mut h,"Room lighting");}choose(&mut h,"Always");click(&mut h,"Apply lighting");assert_eq!(document(&h).activation,None);click(&mut h,"Undo lighting edit");assert_eq!(document(&h).activation,Some(Activation::Escaped));click(&mut h,"Point light enabled");click(&mut h,"Apply lighting");assert_eq!(document(&h),Document::default());f.assert_preserved();
+}
+#[cfg(feature="windows-export")]
+#[test]
+#[ignore="explicit CPU source-hidden export requires ORR_LIGHT_ACTIVATION_RUNTIME"]
+fn conditional_light_source_hidden_export_and_native_headless_actual_pickup() {
+    use orr_sim::{TickInputs,PlayerSlot};use sha2::{Digest,Sha256};
+    let f=Fixture::new("room-escape-3d-v1");let mut h=f.app(false);settle(&mut h);
+    apply_enabled(&mut h);choose(&mut h,"Key collected");click(&mut h,"Carry light with player");type_number(&mut h,"Carried offset X","1");type_number(&mut h,"Carried offset Z","-1");click(&mut h,"Apply lighting");click(&mut h,"Save lighting");let d=document(&h);assert_eq!(d.follow_player,Some([1.0,2.0,-1.0]));drop(h);
+    let bytes=fs::read(f.root.join("room.lighting.json")).unwrap();let source=PathBuf::from(std::env::var_os("ORR_LIGHT_ACTIVATION_RUNTIME").expect("explicit runtime"));let runtime=f._temp.path().join("trusted carried light runtime");fs::copy(source,&runtime).unwrap();let hash:String=Sha256::digest(fs::read(&runtime).unwrap()).iter().map(|b|format!("{b:02x}")).collect();let bundle=f._temp.path().join("deployed carried light game");
+    orr_sample::project_export::export_room(&orr_sample::project_export::ExportOptions {project:f.root.clone(),runtime:runtime.clone(),runtime_sha256:hash,output:bundle.clone(),trusted_runtime:true,source_revision:None}).unwrap();assert_eq!(fs::read(bundle.join("project/room.lighting.json")).unwrap(),bytes);
+    fs::rename(&f.root,f.root.with_extension("hidden")).unwrap();fs::rename(&runtime,runtime.with_extension("hidden")).unwrap();let prepared=PreparedProject::open_with_lighting(&bundle.join("project"),true).unwrap();assert_eq!(prepared.lighting().unwrap().document,d);let mut sim=prepared.scene().simulation().unwrap();
+    for _ in 0..1 {let mut input=TickInputs::new(sim.tick()+1,1);input.set_input(PlayerSlot(0),orr_sample::room_game::RoomInput {move_x:1,buttons:orr_sample::room_game::INTERACT,..Default::default()});sim.step(&input);}
+    let placements=orr_sample::room_view::placements(orr_bridge::FrameView::of(sim.frame()),prepared.scene().index(),prepared.models()).unwrap();
+    let entity=sim.frame().entities().find(|&e|sim.frame().get::<orr_sample::room_game::RoomActor>(e).is_some_and(|actor|actor.kind==orr_sample::room_game::PLAYER)).unwrap();let guid=prepared.scene().index().guid(entity).unwrap();let binding=prepared.models().document.bindings.get(&guid.to_string()).unwrap();assert_eq!(binding.transform,orr_model_bindings::model_bindings::LocalTransform::default());
+    let placed=placements.iter().find(|placed|placed.entity==entity).unwrap();let expected=[placed.instance.translation[0]+1.0,placed.instance.translation[1]+2.0,placed.instance.translation[2]-1.0];assert!(expected[0]>1.0);
+    assert_eq!(sim.frame().singleton::<orr_sample::room_game::RoomRun>().key_collected,1);
+    let initial=std::process::Command::new(bundle.join("run-room-escape")).current_dir(f._temp.path()).args(["--headless","--ticks","0","--check-model-poses"]).output().unwrap();assert!(initial.status.success());let text=String::from_utf8(initial.stdout).unwrap();assert!(text.contains("room lighting active: 0"));assert!(!text.contains("room carried light position:"));
+    let before=sim.frame().to_bytes();assert_eq!(prepared.point_light_settings_for_frame(orr_bridge::FrameView::of(sim.frame())).unwrap().point_light.unwrap().position,expected);assert_eq!(sim.frame().to_bytes(),before);
+    let output=std::process::Command::new(bundle.join("run-room-escape")).current_dir(f._temp.path()).args(["--headless","--ticks","1","--hold","right,interact","--check-model-poses"]).env_remove("DISPLAY").env_remove("WAYLAND_DISPLAY").output().unwrap();assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));let text=String::from_utf8(output.stdout).unwrap();assert!(text.contains("room model poses: 2 frames checked;"));assert!(text.contains("room lighting active: 1"));let actual:[f32;3]=serde_json::from_str(text.lines().find_map(|line|line.strip_prefix("room carried light position: ")).expect("runtime consumes saved follow policy")).unwrap();assert_eq!(actual,expected);
+}
+
+#[test]
+fn before_outcome_widgets_save_reopen_and_actual_game_turns_light_off() {
+    for (choice,activation) in [("Before key pickup",Activation::KeyMissing),("Before escape",Activation::BeforeEscape)] {
+        let f=Fixture::new("room-escape-3d-v1");let mut h=f.app(false);settle(&mut h);apply_enabled(&mut h);choose(&mut h,choice);click(&mut h,"Apply lighting");click(&mut h,"Save lighting");assert_eq!(document(&h).activation,Some(activation));drop(h);
+        let mut h=f.app(false);settle(&mut h);assert_eq!(document(&h).activation,Some(activation));assert!(active(&h));start(&mut h);assert!(active(&h));pickup(&mut h);assert_eq!(active(&h),activation==Activation::BeforeEscape);escape(&mut h);assert!(!active(&h));
+        h.state_mut().editor.pause();settle(&mut h);h.state_mut().editor.seek(0);wait(&mut h,"seek before outcome",|app|app.editor.yard_rows_coherent()&&app.editor.timeline().is_some_and(|t|t.tick==0));assert!(active(&h));
+        click(&mut h,orr_editor::app::LBL_STOP);wait(&mut h,"stop before outcome",|app|app.editor.mode()==Mode::Edit&&app.editor.yard_rows_coherent());assert!(active(&h));f.assert_preserved();
+    }
+}
+
+#[cfg(feature="windows-export")]
+#[test]
+#[ignore="explicit source-hidden native runtime required"]
+fn before_outcome_saved_export_consumes_conditions_without_authoring_sources() {
+    use sha2::{Digest,Sha256};use orr_sim::{TickInputs,PlayerSlot};
+    for (choice,activation) in [("Before key pickup",Activation::KeyMissing),("Before escape",Activation::BeforeEscape)] {
+        let f=Fixture::new("room-escape-3d-v1");let mut h=f.app(false);settle(&mut h);apply_enabled(&mut h);choose(&mut h,choice);click(&mut h,"Carry light with player");click(&mut h,"Apply lighting");click(&mut h,"Save lighting");drop(h);
+        let bytes=fs::read(f.root.join("room.lighting.json")).unwrap();let runtime=f._temp.path().join("trusted runtime");fs::copy(PathBuf::from(std::env::var_os("ORR_LIGHT_ACTIVATION_RUNTIME").expect("explicit runtime")),&runtime).unwrap();let hash:String=Sha256::digest(fs::read(&runtime).unwrap()).iter().map(|b|format!("{b:02x}")).collect();let bundle=f._temp.path().join("before outcome game");
+        orr_sample::project_export::export_room(&orr_sample::project_export::ExportOptions {project:f.root.clone(),runtime:runtime.clone(),runtime_sha256:hash,output:bundle.clone(),trusted_runtime:true,source_revision:None}).unwrap();assert_eq!(fs::read(bundle.join("project/room.lighting.json")).unwrap(),bytes);fs::rename(&f.root,f.root.with_extension("hidden")).unwrap();fs::rename(&runtime,runtime.with_extension("hidden")).unwrap();
+        let prepared=PreparedProject::open_with_lighting(&bundle.join("project"),true).unwrap();assert_eq!(prepared.lighting().unwrap().document.activation,Some(activation));
+        for ticks in [0,1,50] {let mut sim=prepared.scene().simulation().unwrap();for _ in 0..ticks {let mut input=TickInputs::new(sim.tick()+1,1);input.set_input(PlayerSlot(0),orr_sample::room_game::RoomInput {move_x:1,buttons:orr_sample::room_game::INTERACT,..Default::default()});sim.step(&input);}
+            let run=sim.frame().singleton::<RoomRun>();if ticks==1 {assert_eq!(run.key_collected,1);}// A held interact produces only the initial pickup edge, not a later escape.
+            if ticks==50 {assert_eq!(run.key_collected,1);assert_eq!(run.won,0);}
+            let active=match activation {Activation::KeyMissing=>run.key_collected==0,Activation::BeforeEscape=>run.won==0,_=>unreachable!()};
+            let output=std::process::Command::new(bundle.join("run-room-escape")).current_dir(f._temp.path()).args(["--headless","--ticks",&ticks.to_string(),"--hold","right,interact","--check-model-poses"]).env_remove("DISPLAY").env_remove("WAYLAND_DISPLAY").output().unwrap();assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));let text=String::from_utf8(output.stdout).unwrap();assert!(text.contains(&format!("room tick: {ticks} checksum: 0x{:016x}",sim.frame().checksum())));assert!(text.contains(&format!("room lighting active: {}",u8::from(active))));assert_eq!(text.contains("room carried light position:"),active);
+        }
+    }
+}

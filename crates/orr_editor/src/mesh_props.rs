@@ -17,7 +17,7 @@ const MAX_PROP_ASSETS: usize = 6;
 const MAX_PROP_DRAWS: usize = 3584;
 const SCHEMA: u32 = 1;
 const MAX_NAME_BYTES: usize = 64;
-const MAX_SIDECAR_BYTES: u64 = 16 * 1024 * 1024;
+pub(crate) const MAX_SIDECAR_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_PATH_COMPONENTS: usize = 64;
 const SIDECAR_SUFFIX: &str = ".mesh-props.json";
@@ -31,6 +31,8 @@ pub(crate) struct Prop {
     pub id: u64,
     pub name: String,
     pub art: Snapshot,
+    #[cfg(feature = "mesh-prop-shading")]
+    pub shading: Option<crate::mesh_prop_shading::Settings>,
 }
 
 #[derive(Clone, Default)]
@@ -53,6 +55,13 @@ struct PropRecord {
     id: u64,
     name: String,
     art: serde_json::Value,
+    #[cfg(feature = "mesh-prop-shading")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::mesh_prop_shading::deserialize_present"
+    )]
+    shading: Option<crate::mesh_prop_shading::Settings>,
 }
 
 impl Document {
@@ -70,8 +79,16 @@ impl Document {
         let mut models = BTreeMap::new();
         let mut placements = Vec::with_capacity(self.props.len());
         for prop in &self.props {
-            let identity = prop.art.render_identity();
+            let identity = appearance_identity(prop);
             let mut placement = prop.art.placement([orr_fp::FP::ZERO; 3])?;
+            #[cfg(feature = "mesh-prop-shading")]
+            {
+                placement.shading = prop
+                    .shading
+                    .as_ref()
+                    .map(|s| s.materials(&placement.model))
+                    .transpose()?;
+            }
             if let Some(model) = models.get(&identity) {
                 placement.model = std::sync::Arc::clone(model);
             } else {
@@ -82,7 +99,7 @@ impl Document {
         Ok(placements)
     }
 
-    fn encode(&self, scene_filename: &str, graph_revision: [u8; 32]) -> Result<Vec<u8>, String> {
+    pub(crate) fn encode(&self, scene_filename: &str, graph_revision: [u8; 32]) -> Result<Vec<u8>, String> {
         validate_scene_filename(scene_filename)?;
         validate_prop_collection(&self.props)?;
         let mut embedded_bytes = 0usize;
@@ -102,6 +119,8 @@ impl Document {
             props.push(PropRecord {
                 id: prop.id,
                 name: prop.name.clone(),
+                #[cfg(feature = "mesh-prop-shading")]
+                shading: prop.shading.clone(),
                 art: serde_json::from_slice(&art_bytes)
                     .map_err(|error| format!("serialize embedded mesh art: {error}"))?,
             });
@@ -119,7 +138,7 @@ impl Document {
         Ok(bytes)
     }
 
-    fn decode(
+    pub(crate) fn decode(
         bytes: &[u8],
         scene_filename: &str,
         graph_revision: [u8; 32],
@@ -149,6 +168,8 @@ impl Document {
                 Ok(Prop {
                     id: record.id,
                     name: record.name,
+                    #[cfg(feature = "mesh-prop-shading")]
+                    shading: record.shading,
                     art,
                 })
             })
@@ -258,6 +279,14 @@ fn validate_prop_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn appearance_identity(prop: &Prop) -> ([u8; 32], Option<[u8; 32]>) {
+    #[cfg(feature = "mesh-prop-shading")]
+    let shading = prop.shading.as_ref().map(|s| s.identity());
+    #[cfg(not(feature = "mesh-prop-shading"))]
+    let shading = None;
+    (prop.art.render_identity(), shading)
+}
+
 fn validate_prop_collection(props: &[Prop]) -> Result<(), String> {
     if props.len() > MAX_PROPS {
         return Err("mesh props document exceeds the 128-prop limit".into());
@@ -274,7 +303,11 @@ fn validate_prop_collection(props: &[Prop]) -> Result<(), String> {
         if prop.id == 0 || !ids.insert(prop.id) {
             return Err("mesh prop IDs must be nonzero and unique".into());
         }
-        identities.insert(prop.art.render_identity());
+        #[cfg(feature = "mesh-prop-shading")]
+        if let Some(shading) = &prop.shading {
+            shading.validate(prop.art.source_model_arc())?;
+        }
+        identities.insert(appearance_identity(prop));
         draws = draws
             .checked_add(prop.art.source_model_arc().source().primitives.len())
             .ok_or("mesh props primitive-instance draw count overflow")?;

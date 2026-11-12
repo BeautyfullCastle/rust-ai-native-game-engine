@@ -11,6 +11,26 @@ default-run = "arena"
 workspace = true
 
 [features]
+# Explicit scene-embedding experiment; not a production export format.
+coop-defense-embedded-prototype = ["coop-defense", "dep:sha2"]
+# Optional physical gameplay keys and independent explicit settings, reusing private storage.
+coop-defense-controls = ["coop-defense-audio-settings"]
+# Explicit native audio preference storage, independent of game run journals.
+coop-defense-audio-settings = ["coop-defense-audio", "dep:windows-sys"]
+# Dedicated post-release artwork, selected only by the actual combat ledger.
+coop-defense-attack-clip = ["coop-defense-pixel-motion", "coop-defense-pixelfx"]
+# Optional generated character skin: visual idle/charge loop, never attack timing.
+coop-defense-pixel-motion = ["coop-defense"]
+# Embedded, licensed pixelfx atlases driven only by actual combat events.
+coop-defense-pixelfx = ["coop-defense"]
+# Opt-in authored native presentation; hardware output additionally needs audio-native.
+coop-defense-audio = ["coop-defense", "audio", "orr_package/coop-audio-load"]
+# Optional Linux native admission-journal run saves, never enabled by web/default.
+coop-defense-run-save = ["coop-defense", "dep:sha2"]
+coop-defense-presentation = ["dep:egui", "orr_games/coop-defense"]
+coop-defense = ["coop-defense-presentation", "project", "game-ui", "orr_games/coop-defense-scene", "dep:rustix"]
+room-character = ["room-animated-models", "dep:sha2"]
+room-lighting = ["room-project"]
 # Optional finite visual-only Arena background authoring.
 tilemap = ["project", "dep:orr_tilemap"]
 # Bounded CPU-only authored particle documents; no optional renderer integration.
@@ -20,6 +40,10 @@ material-demo = ["particle-demo", "dep:orr_model", "dep:sha2", "orr_render/metal
 # Explicit optional pickup/preset preview; Arena default is unchanged.
 particle-demo = ["orr_games/collect-dodge", "orr_render/imported-scene", "orr_render/particles"]
 room-project = ["project", "orr_games/room-escape", "dep:orr_model", "dep:orr_model_bindings", "orr_render/imported-scene"]
+room-playtest = ["room-project", "dep:rustix", "dep:sha2"]
+room-input-actions = ["room-project", "input-actions"]
+# Explicit Linux x86_64 manifest attachment, not enabled by runtime controls.
+room-controls-attach = ["room-input-actions", "project-export"]
 room-animated-models = ["room-project", "orr_model_bindings/animated-models", "orr_model/animation", "orr_render/animation"]
 # Explicit Linux authoring transaction; does not execute the exporter or runtime.
 image-reimport = ["project-export", "collect-sprites", "dep:semver"]
@@ -27,15 +51,19 @@ linked-prefabs = ["collect-dodge", "orr_reflect/linked-prefabs"]
 # Explicit consuming-route opt-in; unrelated unified sprite dependencies do not enable it.
 collect-ui = ["collect-dodge", "game-ui"]
 collect-sprites = ["collect-dodge"]
+room-progress = ["room-project", "dep:sha2", "dep:tempfile", "dep:rustix"]
 collect-progress = ["collect-dodge", "dep:sha2", "dep:tempfile", "dep:rustix"]
 collect-dodge = ["project", "orr_games/collect-dodge"]
 default = []
+# Every feature that builds on a Windows desktop.
+full = ["audio", "audio-native", "collect-dodge", "collect-progress", "collect-sprites", "collect-ui", "coop-defense", "coop-defense-attack-clip", "coop-defense-audio", "coop-defense-audio-settings", "coop-defense-controls", "coop-defense-embedded-prototype", "coop-defense-pixel-motion", "coop-defense-pixelfx", "coop-defense-presentation", "coop-defense-run-save", "game-ui", "image-reimport", "input-actions", "linked-prefabs", "material-demo", "particle-demo", "particle-preset", "player-settings", "project", "project-create", "project-export", "room-animated-models", "room-character", "room-controls-attach", "room-input-actions", "room-lighting", "room-playtest", "room-progress", "room-project", "runtime-export-support", "sprites", "tilemap"]
 # Optional Linux player preferences; no simulation or default dependencies.
 player-settings = ["project", "game-ui", "dep:tempfile", "dep:rustix"]
 # Offline bounded Arena starter creation; no default/runtime dependency changes.
-project-create = ["project", "dep:sha2", "dep:tempfile", "dep:rustix"]
-project-export = ["project", "dep:sha2", "dep:tempfile", "dep:rustix"]
-project = ["sprites", "orr_reflect/scene", "dep:serde", "dep:serde_json", "dep:png17"]
+project-create = ["project", "orr_package/sprite-authoring", "dep:sha2", "dep:tempfile", "dep:rustix"]
+runtime-export-support = ["dep:rustix"]
+project-export = ["project", "dep:sha2", "dep:tempfile", "runtime-export-support"]
+project = ["sprites", "orr_sprite/png-import", "orr_reflect/scene", "dep:serde", "dep:serde_json", "dep:png17"]
 # Optional native UI needs Rust 1.95 (egui); default remains workspace MSRV.
 game-ui = ["input-actions", "dep:egui", "dep:egui-wgpu", "dep:egui-winit", "dep:orr_package", "dep:ttf-parser"]
 input-actions = ["dep:orr_input"]
@@ -81,10 +109,14 @@ png = "0.18"
 # Window (view layer only): winit 0.30 (raw-window-handle 0.6, same as wgpu 30).
 winit = "0.30"
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1.5", features = ["fs", "process"], optional = true }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", optional = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
+
 [dev-dependencies]
+sha2 = "0.11"
 tempfile = "3"
 # Compile-check browser and native sample identities together.
 orr_web = { path = "../orr_web" }
@@ -170,4 +202,37 @@ test = false
 name = "material_demo"
 path = "src/bin/material_demo.rs"
 required-features = ["material-demo"]
+test = false
+
+[[bin]]
+name = "coop_defense"
+path = "src/bin/coop_defense.rs"
+required-features = ["coop-defense"]
+test = false
+
+[[bin]]
+name = "orr_prepare_stormglass_settings"
+path = "src/bin/orr_prepare_stormglass_settings.rs"
+required-features = ["coop-defense-controls"]
+
+[[bin]]
+name = "orr_new_lit_room"
+path = "src/bin/orr_new_lit_room.rs"
+required-features = ["project-create", "room-lighting"]
+test = false
+
+[[bin]]
+name = "orr_attach_room_controls"
+path = "src/bin/orr_attach_room_controls.rs"
+required-features = ["room-controls-attach"]
+
+[[bin]]
+name = "orr_playtest_room"
+path = "src/bin/orr_playtest_room.rs"
+required-features = ["room-playtest"]
+
+[[bin]]
+name = "stormglass_embedded"
+path = "src/bin/stormglass_embedded.rs"
+required-features = ["coop-defense-embedded-prototype"]
 test = false

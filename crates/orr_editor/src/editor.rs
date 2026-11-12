@@ -55,6 +55,8 @@ use crate::model::{ClientInfo, EntityRow, GuidSelection, History, ProposalDetail
 pub use crate::model::Mode;
 #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
 pub(crate) mod arena_export;
+#[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "navigation-export"))]
+mod navigation_export;
 #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "collect-ui", feature = "project-create"))]
 pub(crate) mod collect_project;
 #[cfg(feature="room-authoring")]
@@ -132,6 +134,8 @@ pub struct Inspect {
 
 /// What the answer to a request that was sent without waiting is for.
 pub mod input;
+#[cfg(feature = "static-gameplay")]
+mod erp_gameplay;
 
 enum Pend {
     Input(u64, input::Op),
@@ -209,6 +213,16 @@ struct MeshCamera {
 pub struct Editor {
     backend: Backend,
     input: input::Input,
+    #[cfg(feature="static-gameplay")]
+    gameplay: Option<input::GameplayCommandState>,
+    #[cfg(feature="static-gameplay")]
+    gameplay_state: J,
+    #[cfg(feature="static-gameplay")]
+    gameplay_lifecycle: Option<input::GameplayLifecycle>,
+    #[cfg(feature="static-gameplay")]
+    gameplay_cleanup_notice: Option<&'static str>,
+    #[cfg(feature = "static-gameplay")]
+    erp_gameplay: erp_gameplay::State,
     types: Arc<TypeRegistry>,
     down: Option<Down>,
     selection: Option<Target>,
@@ -221,10 +235,27 @@ pub struct Editor {
     pub camera3d: orr_render::OrbitCamera,
     #[cfg(feature = "mesh-navigation")]
     mesh_camera: Option<MeshCamera>,
+    #[cfg(feature="room-character")]
+    room_character: Option<orr_sample::room_character::Document>,
+    #[cfg(feature="room-character")]
+    room_character_scene: Option<PathBuf>,
+    #[cfg(feature="room-character")]
+    room_character_source: Arc<()>,
+    #[cfg(feature="room-character")]
+    room_character_revision: Arc<()>,
+    #[cfg(feature="mesh-animated-models")]
+    mesh_animation_revision: u64,
     #[cfg(feature="room-project")]
     room_camera: Option<orr_sample::room_camera::Document>,
     #[cfg(feature="room-project")]
     room_camera_scene: Option<std::path::PathBuf>,
+    #[cfg(feature = "room-lighting")]
+    room_lighting: Option<orr_sample::room_lighting::Document>,
+    #[cfg(feature = "room-lighting")]
+    room_lighting_scene: Option<PathBuf>,
+    // Independent of camera installation and retired at every source replacement.
+    #[cfg(feature = "room-lighting")]
+    room_lighting_source: Arc<()>,
     yard_frame: crate::viewport3d::YardFrame,
     #[cfg(feature = "terrain-physics")]
     terrain_view: crate::terrain_physics::TerrainPhysicsView,
@@ -234,7 +265,7 @@ pub struct Editor {
     navigation_blocker: Option<String>,
     #[cfg(feature = "mesh-navigation")]
     mesh_navigation_blocker: Option<String>,
-    #[cfg(any(feature = "static-game-actions", feature = "arena-project-export", feature = "terrain", feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
+    #[cfg(any(feature = "models", feature = "sprites", feature = "static-gameplay", feature = "static-game-actions", feature = "arena-project-export", feature = "terrain", feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
     scene_load_epoch: u64,
     #[cfg(feature = "tilemap")]
     tilemap_start_scene: Option<(crate::project::PreparedArenaScene, u64)>,
@@ -286,7 +317,7 @@ pub struct Editor {
     script_owner: BTreeMap<String, String>,
 }
 
-#[cfg(any(feature = "static-game-actions", feature = "arena-project-export", feature = "terrain", feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
+#[cfg(any(feature = "models", feature = "sprites", feature = "static-gameplay", feature = "static-game-actions", feature = "arena-project-export", feature = "terrain", feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
 fn next_scene_load_epoch() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -356,8 +387,15 @@ impl Editor {
         input.room_escape = backend.game.is_room();
         #[cfg(feature = "mesh-navigation")]
         { input.mesh_navigation = backend.game.has_mesh_view(); }
+        #[cfg(feature="static-gameplay")]
+        let gameplay=backend.game.gameplay().filter(|handle|handle.validated().command_max_sequence().is_some()).map(|handle|input::GameplayCommandState::new(handle.validated().clone(),J::Null,&mut input));
         let mut e = Self {
             input,
+            #[cfg(feature="static-gameplay")] gameplay,
+            #[cfg(feature="static-gameplay")] gameplay_state:J::Null,
+            #[cfg(feature="static-gameplay")] gameplay_lifecycle:None,
+            #[cfg(feature="static-gameplay")] gameplay_cleanup_notice:None,
+            #[cfg(feature="static-gameplay")] erp_gameplay:erp_gameplay::State::default(),
             backend,
             types,
             down: None,
@@ -367,8 +405,16 @@ impl Editor {
             scene_edit_allowed,
             batch_uncertain: false,
             camera: Camera::new([0.0, 0.0], 20.0),
+            #[cfg(feature="room-character")] room_character: None,
+            #[cfg(feature="room-character")] room_character_scene: None,
+            #[cfg(feature="room-character")] room_character_source: Arc::new(()),
+            #[cfg(feature="room-character")] room_character_revision: Arc::new(()),
+            #[cfg(feature="mesh-animated-models")] mesh_animation_revision: 0,
             #[cfg(feature="room-project")] room_camera: None,
             #[cfg(feature="room-project")] room_camera_scene: None,
+            #[cfg(feature="room-lighting")] room_lighting: None,
+            #[cfg(feature="room-lighting")] room_lighting_scene: None,
+            #[cfg(feature="room-lighting")] room_lighting_source: Arc::new(()),
             camera3d: orr_render::OrbitCamera::new([0.0, 2.0, 0.0], 0.55, 0.5, 16.0),
             #[cfg(feature = "mesh-navigation")]
             mesh_camera: None,
@@ -381,7 +427,7 @@ impl Editor {
             navigation_blocker: None,
             #[cfg(feature = "mesh-navigation")]
             mesh_navigation_blocker: None,
-            #[cfg(any(feature = "static-game-actions", feature = "arena-project-export", feature = "terrain", feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
+            #[cfg(any(feature = "models", feature = "sprites", feature = "static-gameplay", feature = "static-game-actions", feature = "arena-project-export", feature = "terrain", feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
             scene_load_epoch: next_scene_load_epoch(),
             #[cfg(feature = "tilemap")]
             tilemap_start_scene: None,
@@ -512,7 +558,7 @@ impl Editor {
 
     /// Field moved by the viewport, only when selected entity has it.
     pub fn movement_owner(&self) -> Option<Owner> {
-        let component = self.game().position_component();
+        let component = self.game().spatial_position()?.component;
         let row = self.selection.as_ref().and_then(|t| self.row_of(t))?;
         row.components.iter().any(|c| c == component).then(|| Owner::Component(component.to_string()))
     }
@@ -827,7 +873,7 @@ impl Editor {
 
     /// Read-only enablement; the host repeats all admission checks.
     pub fn can_nudge_selection(&self) -> bool {
-        !self.game().is_3d() && self.can_mutate() && self.mode() == Mode::Edit && self.preview.is_none()
+        self.game().spatial_position().is_some() && !self.game().is_3d() && self.can_mutate() && self.mode() == Mode::Edit && self.preview.is_none()
             && self.batch_supported && self.scene_edit_allowed && !self.batch_uncertain
             && !self.history.in_tx && !self.sim.in_tx && !self.gesture.busy()
             && !self.guid_selection.guids().is_empty()
@@ -969,7 +1015,7 @@ impl Editor {
     /// Frames the camera on the scene box (`Scene` singleton), like the sample does.
     pub fn fit_camera(&mut self) {
         #[cfg(feature = "static-games")]
-        if self.game().is_registered() {
+        if self.game().is_registered() || self.game().is_gameplay() {
             // Static primitive games have no builtin Scene singleton or world size.
             let mut low = [f32::INFINITY; 2];
             let mut high = [f32::NEG_INFINITY; 2];
@@ -1086,10 +1132,24 @@ impl Editor {
             return Err("an edit is still pending; wait for it to finish or cancel the drag".into());
         }
         if method.starts_with("sim.") && method != "sim.state" { self.state_generation += 1; }
+        #[cfg(feature="static-gameplay")]
+        if matches!(method,"scene.load"|"sim.seek"|"sim.branch"|"sim.stop") {
+            if let Some(core)=&mut self.gameplay {core.begin_lifecycle(&mut self.input,matches!(method,"scene.load"|"sim.stop"));}
+        }
         let r = self.timed_erp_call(method, params);
         self.ingest();
         match r {
-            Ok(v) => Ok(v),
+            Ok(v) => {
+                #[cfg(feature="static-gameplay")]
+                if matches!(method,"scene.load"|"sim.stop") {if let Some(core)=&mut self.gameplay {if core.after_stop().is_err(){core.fail(&mut self.input,"scene_epoch_exhausted");}}}
+                // Same-tick lifecycle controls can retain the host epoch. Keep
+                // playback history separate from the authoring source fence.
+                #[cfg(feature = "room-character")]
+                if self.game().is_room() && matches!(method, "sim.start" | "sim.stop" | "sim.seek" | "sim.branch" | "scene.load") {
+                    self.room_character_revision = Arc::new(());
+                }
+                Ok(v)
+            },
             Err(ClientError::Rpc(e)) => Err(e.message),
             Err(other) => {
                 self.connection_lost(&other.to_string());
@@ -1187,6 +1247,11 @@ impl Editor {
             }
             "watch.activity" => {
                 if let Some(list) = params.get("entries").and_then(J::as_array) {
+                    // Other ERP clients can issue same-tick controls too.
+                    #[cfg(feature = "room-character")]
+                    if self.game().is_room() && list.iter().any(|entry| entry["ok"] == true && matches!(entry["method"].as_str(), Some("sim.start" | "sim.stop" | "sim.seek" | "sim.branch" | "scene.load"))) {
+                        self.room_character_revision = Arc::new(());
+                    }
                     if list.iter().any(|entry| entry["method"] == "scene.load" && entry["ok"] == true) {
                         self.clear_room_camera();
                         self.select(None);
@@ -1201,6 +1266,8 @@ impl Editor {
     fn on_answer(&mut self, kind: Pend, r: Result<J, orr_remote::RpcError>) {
         match kind {
             Pend::Input(intent, op) => {
+                #[cfg(feature="static-gameplay")]
+                if let Some(core)=&mut self.gameplay {core.answer(&mut self.input,intent,op,r,Instant::now());return;}
                 if let Some(message) = self.input.answer(intent, op, r, Instant::now()) { self.error(message); }
             }
             Pend::Gesture(id, reply) => self.gesture_answer(id, reply, r),
@@ -1279,6 +1346,7 @@ impl Editor {
     }
 
     fn apply_state(&mut self, v: &J) {
+        #[cfg(feature="static-gameplay")] {self.gameplay_state=v.clone(); if let Some(core)=&mut self.gameplay {core.apply_state(&mut self.input,v.clone());}}
         let was = self.sim.mode;
         let next=SimState::from_json(v);
         if self.sim.scene_path != next.scene_path { self.clear_room_camera(); }
@@ -1371,6 +1439,7 @@ impl Editor {
     }
 
     fn connection_lost(&mut self, err: &str) {
+        #[cfg(feature="static-gameplay")] {self.gameplay_lifecycle=None;if let Some(core)=&mut self.gameplay {core.fail(&mut self.input,"control_disconnected");}}
         if self.down.is_some() {
             return;
         }
@@ -1401,6 +1470,8 @@ impl Editor {
     pub fn pump(&mut self) {
         let started = Instant::now();
         self.pump_inner();
+        #[cfg(feature = "static-gameplay")]
+        self.pump_erp_gameplay();
         self.telemetry.pump.record(started.elapsed());
     }
 
@@ -1425,8 +1496,9 @@ impl Editor {
         }
         self.ingest();
         self.check_gesture_timeout();
-        self.pump_input();
         self.refresh_view();
+        self.pump_input();
+        #[cfg(feature="static-gameplay")] self.pump_gameplay_lifecycle();
         if self.down.is_some() {
             return;
         }
@@ -1920,12 +1992,12 @@ impl Editor {
         };
         match self.call("scene.load", if self.game().has_pinned_scene() { json!({"text": text}) } else { json!({"text": text, "path": path.display().to_string()}) }) {
             Ok(r) => {
-                #[cfg(any(feature = "static-game-actions", feature = "arena-project-export", feature = "terrain", feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
+                #[cfg(any(feature = "models", feature = "sprites", feature = "static-gameplay", feature = "static-game-actions", feature = "arena-project-export", feature = "terrain", feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
                 { self.scene_load_epoch = next_scene_load_epoch(); }
                 self.clear_room_camera();
                 self.select(None);
                 self.refit = true;
-                if self.game() == EditorGame::Arena || self.game().has_mesh_view() || self.game().is_registered() {
+                if self.game() == EditorGame::Arena || self.game().has_mesh_view() || self.game().is_registered() || self.game().is_gameplay() {
                     self.refit_checksum = r.get("checksum").and_then(orr_remote::wire::parse_checksum);
                 }
                 self.backend.spec.set_local_scene_path(path.to_path_buf());
@@ -1968,6 +2040,10 @@ impl Editor {
                 let written = r.get("written").and_then(J::as_str).unwrap_or_default().to_string();
                 #[cfg(feature="room-project")]
                 if self.room_camera_scene.as_ref().is_some_and(|path| path != Path::new(&written)) { self.clear_room_camera(); }
+                #[cfg(feature = "room-lighting")]
+                if self.sim.scene_path.as_deref() != Some(written.as_str()) { self.clear_room_lighting(); }
+                #[cfg(feature="room-character")]
+                if self.sim.scene_path.as_deref() != Some(written.as_str()) { self.clear_room_character(); }
                 #[cfg(feature = "tilemap")]
                 { self.tilemap_start_scene = None; }
                 self.sim.scene_path = Some(written.clone());
@@ -2014,10 +2090,11 @@ impl Editor {
             self.error("host supplied no document checksum"); return false;
         };
         let guids = self.guid_selection.guids().to_vec();
-        let component = self.game().position_component();
+        let Some(position)=self.game().spatial_position() else {self.error("This presentation has no spatial position");return false;};
+        let component = position.component;
         let mut patches = Vec::with_capacity(guids.len());
         for guid in &guids {
-            let position = match self.field_of(&Target::Guid(guid.clone()), component, self.game().position_field()) {
+            let position = match self.field_of(&Target::Guid(guid.clone()), component, position.field) {
                 Ok(Value::Vec2(position)) => position,
                 Ok(_) => { self.error("selected position is not a two-dimensional fixed-point value"); return false; }
                 Err(error) => { self.error(error); return false; }
@@ -2028,7 +2105,7 @@ impl Editor {
             patches.push(json!({"guid":guid.to_string(), "value":value_to_json(&Value::Vec2(FPVec2::new(FP::from_raw(x), FP::from_raw(y))))}));
         }
         let params = json!({"label":"move selected entities", "expected_checksum":format!("0x{expected_checksum:016x}"),
-            "component":component, "path":self.game().position_field(), "patches":patches});
+            "component":component, "path":position.field, "patches":patches});
         if match serde_json::to_vec(&params) { Ok(bytes) => bytes.len() > 64 * 1024, Err(_) => true } {
             self.error("selection move exceeds the 64 KiB request limit"); return false;
         }
@@ -2181,7 +2258,7 @@ impl Editor {
         #[cfg(feature = "tilemap")]
         let changed_source = method == "scene.load" || (method == "scene.save" && params.get("write").and_then(J::as_bool) == Some(true));
         let result = self.call(method, params);
-        #[cfg(any(feature = "static-game-actions", feature = "arena-project-export", feature = "terrain", feature = "tilemap"))]
+        #[cfg(any(feature = "models", feature = "sprites", feature = "static-gameplay", feature = "static-game-actions", feature = "arena-project-export", feature = "terrain", feature = "tilemap"))]
         if method == "scene.load" && result.is_ok() { self.scene_load_epoch = next_scene_load_epoch(); }
         #[cfg(feature = "tilemap")]
         if changed_source && result.is_ok() { self.tilemap_start_scene = None; }
@@ -2267,7 +2344,7 @@ impl Editor {
     pub(crate) fn mesh_navigation_mark_edited(&mut self) { self.mark_edited(); }
     #[cfg(feature = "mesh-navigation")]
     pub fn set_mesh_navigation_blocker(&mut self, blocker: Option<String>) { self.mesh_navigation_blocker = blocker; }
-    #[cfg(any(feature = "static-game-actions", feature = "arena-project-export", feature = "terrain", feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
+    #[cfg(any(feature = "models", feature = "sprites", feature = "static-game-actions", feature = "arena-project-export", feature = "terrain", feature = "tilemap", feature = "collect-ui", feature = "room-project", feature = "mesh-navigation", all(windows, target_arch = "x86_64", feature = "room-authoring")))]
     pub(crate) fn scene_load_epoch(&self) -> u64 { self.scene_load_epoch }
     #[cfg(feature = "tilemap")]
     pub(crate) fn admitted_tilemap_scene_matches(&self, expected: &crate::project::PreparedArenaScene) -> bool {
@@ -2276,6 +2353,89 @@ impl Editor {
     }
 
 
+    #[cfg(feature="room-character")]
+    pub fn install_room_character(&mut self, document: orr_sample::room_character::Document) -> Result<(), String> {
+        document.validate()?;
+        if !self.game().is_room() || !self.spec().is_local() || self.path().is_none() { return Err("character requires a local Room project".into()); }
+        self.room_character = Some(document);
+        self.room_character_scene = self.path();
+        Ok(())
+    }
+    #[cfg(feature="room-character")]
+    pub fn room_character_source_token(&self) -> Arc<()> { self.room_character_source.clone() }
+    #[cfg(feature="room-character")]
+    pub(crate) fn room_character_revision(&self) -> &Arc<()> { &self.room_character_revision }
+    #[cfg(feature="room-character")]
+    pub fn room_character(&self) -> Option<&orr_sample::room_character::Document> {
+        if self.game().is_room() && self.spec().is_local() && self.room_character_scene == self.path() { self.room_character.as_ref() } else { None }
+    }
+    #[cfg(feature="room-character")]
+    fn clear_room_character(&mut self) {
+        self.room_character_source = Arc::new(());
+        self.room_character_revision = Arc::new(());
+        self.room_character = None;
+        self.room_character_scene = None;
+    }
+    #[cfg(feature = "room-lighting")]
+    pub fn install_room_lighting(&mut self, document: orr_sample::room_lighting::Document) -> Result<(), String> {
+        // Startup may precede the watch barrier; explicit authoring never bypasses it.
+        if !self.yard_rows_coherent() { self.sync(); }
+        self.validate_room_lighting_document(&document)?;
+        self.room_lighting = Some(document);
+        self.room_lighting_scene = self.path();
+        Ok(())
+    }
+    #[cfg(feature = "room-lighting")]
+    pub fn validate_room_lighting_document(&self, document: &orr_sample::room_lighting::Document) -> Result<(), String> {
+        document.validate()?;
+        if !self.game().is_room() || !self.spec().is_local() || self.path().is_none()
+            || !self.yard_rows_coherent() || self.snapshot().is_none() {
+            return Err("lighting requires a coherent local Room snapshot".into());
+        }
+        Ok(())
+    }
+    #[cfg(feature = "room-lighting")]
+    pub fn room_lighting_source_token(&self) -> Arc<()> { self.room_lighting_source.clone() }
+    #[cfg(feature = "room-lighting")]
+    pub fn room_lighting_document(&self) -> Option<&orr_sample::room_lighting::Document> {
+        if self.game().is_room() && self.spec().is_local() && self.room_lighting_scene == self.path() {
+            self.room_lighting.as_ref()
+        } else { None }
+    }
+    #[cfg(feature = "room-lighting")]
+    pub fn apply_room_environment_for_presentation(&self, lighting: &mut orr_render::Lighting) -> Result<(), String> {
+        if let Some(document) = self.room_lighting_document() {
+            document.validate()?;
+            if let Some(environment) = &document.environment { environment.apply_to(lighting)?; }
+        }
+        Ok(())
+    }
+    #[cfg(feature = "models")]
+    pub fn room_point_light_settings_for_presentation(&self) -> Result<orr_render::PointLightSettings,String> {
+        #[cfg(feature = "room-lighting")]
+        if let Some(document)=self.room_lighting_document() {
+            if self.mode()==Mode::Play {
+                if !self.yard_rows_coherent() {return Err("carried lighting requires coherent presentation snapshot".into());}
+                let snapshot=self.snapshot().ok_or("lighting presentation snapshot unavailable")?;
+                return document.settings_for_frame(snapshot.predicted());
+            }
+            document.validate()?;
+            return Ok(document.settings());
+        }
+        Ok(orr_render::PointLightSettings::default())
+    }
+    #[cfg(feature = "models")]
+    pub fn room_point_light_settings(&self) -> orr_render::PointLightSettings {
+        #[cfg(feature = "room-lighting")]
+        if let Some(document) = self.room_lighting_document() { return document.settings(); }
+        orr_render::PointLightSettings::default()
+    }
+    #[cfg(feature = "room-lighting")]
+    fn clear_room_lighting(&mut self) {
+        self.room_lighting_source = Arc::new(());
+        self.room_lighting = None;
+        self.room_lighting_scene = None;
+    }
     #[cfg(feature="room-project")]
     pub fn install_room_camera(&mut self, document: orr_sample::room_camera::Document) -> Result<(),String> {
         document.validate()?;
@@ -2329,7 +2489,14 @@ impl Editor {
     }
     pub fn presentation_camera3d(&self, size:(u32,u32)) -> Result<orr_render::Camera3D,String> {
         #[cfg(feature="room-project")]
-        if self.has_room_camera() { return self.room_camera.as_ref().unwrap().camera(&self.camera3d,size); }
+        if self.has_room_camera() {
+            let document = self.room_camera.as_ref().unwrap();
+            if self.mode()==Mode::Play {
+                let snapshot=self.snapshot().ok_or("Room follow camera requires a current Frame")?;
+                return document.camera_for_frame(&self.camera3d,size,snapshot.predicted());
+            }
+            return document.camera(&self.camera3d,size);
+        }
         #[cfg(feature = "mesh-navigation")]
         if self.has_mesh_camera() {
             let snapshot = self.snapshot().ok_or("Mesh game camera requires an authoritative Frame")?;
@@ -2361,6 +2528,10 @@ impl Editor {
         self.camera3d.zoom(delta);
     }
     fn clear_room_camera(&mut self) {
+        #[cfg(feature="room-character")]
+        self.clear_room_character();
+        #[cfg(feature = "room-lighting")]
+        self.clear_room_lighting();
         #[cfg(feature = "mesh-navigation")]
         self.clear_mesh_camera();
         #[cfg(feature="room-project")]
@@ -2819,6 +2990,9 @@ impl Editor {
 
     /// Starts a play session from the scene, paused at tick 0. Does nothing
     /// if one already runs.
+    #[cfg(feature="mesh-animated-models")]
+    pub(crate) fn mesh_animation_revision(&self) -> u64 { self.mesh_animation_revision }
+
     pub fn start_play(&mut self) -> bool {
         #[cfg(feature = "mesh-navigation")]
         if self.game().has_mesh_view() && self.sim.mode != Mode::Play {
@@ -2851,6 +3025,8 @@ impl Editor {
         self.end_edit();
         match self.call("sim.start", json!({})) {
             Ok(r) => {
+                #[cfg(feature="mesh-animated-models")]
+                { self.mesh_animation_revision = self.mesh_animation_revision.wrapping_add(1); }
                 self.apply_state(&r);
                 #[cfg(feature = "mesh-navigation")]
                 if self.has_mesh_camera() { self.camera3d = self.mesh_camera.as_ref().unwrap().document.orbit(); }
@@ -2867,6 +3043,7 @@ impl Editor {
 
     /// Play button: starts the session if needed and runs by the clock.
     pub fn play(&mut self) {
+        #[cfg(feature="static-gameplay")] if self.defer_gameplay_lifecycle(input::GameplayLifecycle::Play){return;}
         if self.start_play() {
             self.control(ControlOp::Play);
         }
@@ -2879,6 +3056,7 @@ impl Editor {
 
     /// Step button: runs `n` ticks now (starting the session if needed).
     pub fn step(&mut self, n: u32) {
+        #[cfg(feature="static-gameplay")] if self.defer_gameplay_lifecycle(input::GameplayLifecycle::Step(n)){return;}
         if self.start_play() {
             self.control(ControlOp::Pause);
             self.control(ControlOp::Step(n));
@@ -2887,6 +3065,7 @@ impl Editor {
 
     /// Runs a timeline control (play mode only).
     pub fn control(&mut self, op: ControlOp) {
+        #[cfg(feature="static-gameplay")] if self.defer_gameplay_lifecycle(input::GameplayLifecycle::Control(op)){return;}
         if !matches!(op, ControlOp::Play | ControlOp::SetSpeed(_)) { self.release_control(); }
         if self.sim.mode != Mode::Play {
             return;
@@ -2901,6 +3080,10 @@ impl Editor {
         };
         match self.call(method, params) {
             Ok(r) => {
+                #[cfg(feature="mesh-animated-models")]
+                if matches!(op, ControlOp::Seek(_) | ControlOp::Branch) {
+                    self.mesh_animation_revision = self.mesh_animation_revision.wrapping_add(1);
+                }
                 self.apply_state(&r);
                 if matches!(op, ControlOp::Seek(_) | ControlOp::Branch | ControlOp::Step(_)) {
                     self.mark_changed();
@@ -2929,12 +3112,15 @@ impl Editor {
     /// Ends play. The document is exactly as it was before play; the
     /// recording stays available from [`last_stopped`](Self::last_stopped).
     pub fn stop(&mut self) -> Option<&Stopped> {
+        #[cfg(feature="static-gameplay")] if self.defer_gameplay_lifecycle(input::GameplayLifecycle::Stop){return None;}
         self.release_control();
         if self.sim.mode != Mode::Play {
             return None;
         }
         match self.call("sim.stop", json!({"include_replay": true})) {
             Ok(r) => {
+                #[cfg(feature="mesh-animated-models")]
+                { self.mesh_animation_revision = self.mesh_animation_revision.wrapping_add(1); }
                 let replay = r.get("replay").and_then(J::as_str).and_then(b64_decode).unwrap_or_default();
                 let checksum = r.get("checksum").and_then(orr_remote::wire::parse_checksum).unwrap_or(0);
                 self.stopped = Some(Stopped { tick: r.get("tick").and_then(J::as_u64).unwrap_or(0), checksum, replay });
@@ -2981,17 +3167,30 @@ impl Editor {
                 return false;
             }
         };
+        #[cfg(feature = "room-lighting")]
+        if fresh.game().is_room() && fresh.path() == self.path() {
+            if let Some(document) = self.room_lighting_document() {
+                if let Err(error) = fresh.install_room_lighting(document.clone()) {
+                    self.error(format!("restart lighting rejected: {error}; reopen the complete project"));
+                    return false;
+                }
+            }
+        }
         fresh.log = std::mem::take(&mut self.log);
         if fresh.game() == self.game() {
             fresh.camera = self.camera;
             fresh.initial_camera_fit = false;
         }
+        #[cfg(feature="room-character")]
+        if fresh.game().is_room() && fresh.path()==self.path() { if let Some(character)=self.room_character() { let _ = fresh.install_room_character(character.clone()); } }
         #[cfg(feature="room-project")]
         if self.has_room_camera() && fresh.game().is_room() && fresh.path()==self.path() {
             let _ = fresh.install_room_camera(self.room_camera.as_ref().unwrap().clone());
         }
         fresh.feed.filter = self.feed.filter;
         fresh.agent.expand_methods = std::mem::take(&mut self.agent.expand_methods);
+        #[cfg(feature="static-gameplay")]
+        if let (Some(prior),Some(next))=(&self.gameplay,&mut fresh.gameplay){next.continue_ids_from(prior);}
         *self = fresh;
         if local {
             self.info("simulation host restarted: the scene was opened again; edits that were not saved are lost");
@@ -3387,3 +3586,105 @@ mod work_status_operation_tests {
         assert_eq!(editor.work_status_operations(), Operations::OutcomeUncertain);
     }
 }
+
+#[cfg(all(test, feature = "room-lighting", feature = "project-create", target_os = "linux"))]
+mod room_lighting_coherence_tests {
+    use super::*;
+    use crate::room_lighting_panel::Panel;
+    use orr_sample::{
+        project_create::{CreateOptions, create},
+        room_lighting::Document,
+        room_project::PreparedProject,
+    };
+
+    #[test]
+    fn incoherent_lighting_actions_preserve_live_document_disk_and_scene_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("room");
+        create(&CreateOptions {
+            output: root.clone(),
+            template: "room-escape-3d-v1".into(),
+            seed: "lighting-coherence".into(),
+        })
+        .unwrap();
+        let path = root.join("orr.project.json");
+        let mut manifest: J = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        manifest["entry"]["lighting"] = json!("room.lighting.json");
+        std::fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let bytes = Document::default().to_bytes().unwrap();
+        std::fs::write(root.join("room.lighting.json"), &bytes).unwrap();
+        let mut project = PreparedProject::open_with_lighting(&root, true).unwrap();
+        let lighting = project.take_lighting().unwrap();
+        let mut editor = Editor::start(&HostSpec::PreparedRoom {
+            scene: project.path().to_path_buf(),
+            text: project.scene().text().to_owned(),
+            listen: None,
+            debug_hooks: false,
+        })
+        .unwrap();
+        editor
+            .install_room_lighting(lighting.document.clone())
+            .unwrap();
+        let mut panel = Panel::new_for_editor(lighting, &editor).unwrap();
+        editor.sync();
+        let checksum = editor.checksum();
+        let history = editor.history().entries.len();
+        // Cover row staleness, state/frame disagreement, transactions, and a
+        // pending mutation without making an actual external mutation.
+        for failure in 0..4 {
+            match failure {
+                0 => editor.dirty.rows = true,
+                1 => editor.sim.checksum ^= 1,
+                2 => editor.sim.in_tx = true,
+                _ => {
+                    editor.pending.insert(
+                        u64::MAX,
+                        Pending {
+                            kind: Pend::Input(0, input::Op::Value),
+                            posted_at: Instant::now(),
+                        },
+                    );
+                }
+            }
+            assert!(
+                panel
+                    .apply_for_editor(&mut editor, Document::enabled_default())
+                    .is_err()
+            );
+            assert!(panel.undo_for_editor(&mut editor).is_err());
+            assert!(panel.redo_for_editor(&mut editor).is_err());
+            assert!(panel.save_for_editor(&editor).is_err());
+            assert_eq!(panel.document(), &Document::default());
+            assert_eq!(editor.room_lighting_document(), Some(&Document::default()));
+            assert_eq!(editor.checksum(), checksum);
+            assert_eq!(editor.history().entries.len(), history);
+            assert_eq!(
+                std::fs::read(root.join("room.lighting.json")).unwrap(),
+                bytes
+            );
+            match failure {
+                0 => editor.dirty.rows = false,
+                1 => editor.sim.checksum ^= 1,
+                2 => editor.sim.in_tx = false,
+                _ => {
+                    editor.pending.remove(&u64::MAX);
+                }
+            }
+        }
+        panel
+            .apply_for_editor(&mut editor, Document::enabled_default())
+            .unwrap();
+        assert_eq!(panel.document(), &Document::enabled_default());
+    }
+}
+
+#[cfg(feature="mesh-patrol")]
+#[path="editor/frame_mesh_patrol.rs"]
+mod frame_mesh_patrol;
+
+#[cfg(any(feature="mesh-patrol",feature="terrain-patrol"))]
+#[path="editor/frame_route_points.rs"]
+mod frame_route_points;
+#[cfg(feature="terrain-patrol")]
+#[path="editor/frame_terrain_patrol.rs"]
+mod frame_terrain_patrol;

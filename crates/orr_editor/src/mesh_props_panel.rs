@@ -12,6 +12,8 @@ use orr_remote::mesh_navigation::mesh_from_view;
 use orr_render::Camera3D;
 use std::path::{Path, PathBuf};
 
+mod surface_grid;
+
 const MAX_HISTORY: usize = 4;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -46,6 +48,7 @@ struct HistoryEntry {
 }
 
 pub(crate) struct Panel {
+    game: EditorGame,
     package_root: String,
     asset: String,
     license: String,
@@ -62,11 +65,15 @@ pub(crate) struct Panel {
     surface_pivot: [String; 3],
     material_slots: crate::mesh_material_slots_panel::Panel,
     material_slots_draft: Vec<crate::mesh_material_slots::Settings>,
+    #[cfg(feature = "mesh-prop-shading")]
+    shading: crate::mesh_prop_shading_panel::Panel,
     prefab: crate::mesh_prop_prefab_panel::Panel,
     prefab_candidate: bool,
     grid_columns: String,
     grid_rows: String,
     grid_spacing: [String; 2],
+    surface_grid_max_vertical: String,
+    surface_grid_height_offset: String,
     license_acknowledged: bool,
     confirm_remove: bool,
     confirm_discard_invalid: bool,
@@ -98,6 +105,7 @@ pub(crate) struct Panel {
 impl Default for Panel {
     fn default() -> Self {
         Self {
+            game: EditorGame::MeshNavigation,
             package_root: String::new(),
             asset: String::new(),
             license: String::new(),
@@ -114,11 +122,15 @@ impl Default for Panel {
             surface_pivot: ["0".into(), "0".into(), "0".into()],
             material_slots: crate::mesh_material_slots_panel::Panel::default(),
             material_slots_draft: Vec::new(),
+            #[cfg(feature = "mesh-prop-shading")]
+            shading: crate::mesh_prop_shading_panel::Panel::default(),
             prefab: crate::mesh_prop_prefab_panel::Panel::default(),
             prefab_candidate: false,
             grid_columns: "4".into(),
             grid_rows: "3".into(),
             grid_spacing: ["1.5".into(), "1.5".into()],
+            surface_grid_max_vertical: "4".into(),
+            surface_grid_height_offset: "0".into(),
             license_acknowledged: false,
             confirm_remove: false,
             confirm_discard_invalid: false,
@@ -163,7 +175,7 @@ impl Panel {
         if self.gesture.is_some() && !self.gesture_context_matches(editor) {
             self.cancel_gesture();
         }
-        if editor.game() != EditorGame::MeshNavigation {
+        if !props_game_supported(editor.game()) {
             self.document_pending = true;
             return;
         }
@@ -178,19 +190,22 @@ impl Panel {
             self.confirm_discard_changes = false;
             self.recovery_target = Some(requested_context.clone());
         }
-        if self.scene.as_ref() != Some(&scene)
+        if self.game != editor.game()
+            || self.scene.as_ref() != Some(&scene)
             || self.scene_epoch != Some(scene_epoch)
             || self.graph_revision != Some(graph_revision)
         {
             self.move_enabled = false;
         }
-        if self.scene.as_ref() == Some(&scene)
+        if self.game == editor.game()
+            && self.scene.as_ref() == Some(&scene)
             && self.scene_epoch == Some(scene_epoch)
             && self.graph_revision == Some(graph_revision)
         {
             return;
         }
-        if self.scene.is_some()
+        if self.game == editor.game()
+            && self.scene.is_some()
             && self.scene_epoch == Some(scene_epoch)
             && self.graph_revision == Some(graph_revision)
         {
@@ -225,6 +240,7 @@ impl Panel {
             return;
         }
 
+        self.game = editor.game();
         self.scene = Some(scene.clone());
         self.scene_epoch = Some(scene_epoch);
         self.graph_revision = Some(graph_revision);
@@ -240,7 +256,7 @@ impl Panel {
         self.sidecar_error = None;
         self.sidecar_digest = None;
         self.reset_history(Document::default(), Some(0));
-        match mesh_props::load(&scene, graph_revision) {
+        match load_profile_document(&scene, graph_revision, editor.game()) {
             Ok(Some((document, digest))) => {
                 self.sidecar_digest = Some(digest);
                 self.selected = document.props.first().map(|prop| prop.id);
@@ -266,7 +282,7 @@ impl Panel {
     }
 
     pub(crate) fn show(&mut self, ui: &mut Ui, editor: &Editor, agent_pick_busy: bool) {
-        if editor.game() != EditorGame::MeshNavigation {
+        if !props_game_supported(editor.game()) {
             return;
         }
         self.sync(editor);
@@ -287,14 +303,17 @@ impl Panel {
                 self.cancel_gesture();
             }
             let editable = self.can_edit(editor) && self.gesture.is_none();
-            let selected = self
-                .selected_prop()
-                .map(|prop| (prop.name.clone(), prop.art.clone()));
+            let selected = self.selected_prop().cloned();
             let prefab_editable = editable && !self.pending_prefab() && !self.unapplied_form_dirty();
             if let Some(template) = self.prefab.show(
                 ui,
                 prefab_context(editor),
-                selected.as_ref().map(|(name, art)| (name.as_str(), art)),
+                selected.as_ref().map(|prop| crate::mesh_prop_prefab_panel::SaveSource {
+                    name: &prop.name,
+                    art: &prop.art,
+                    #[cfg(feature = "mesh-prop-shading")]
+                    shading: prop.shading.as_ref(),
+                }),
                 prefab_editable,
             ) {
                 self.accept_prefab(editor, template);
@@ -372,6 +391,11 @@ impl Panel {
                         ui.weak("Load or select a mesh prop before editing material slots.");
                     }
                 });
+                #[cfg(feature = "mesh-prop-shading")]
+                if !editor.game().is_mesh_hazards() { ui.collapsing("Scalar material shading", |ui| {
+                    let model = self.candidate.as_ref().or_else(|| self.selected_prop().map(|prop| &prop.art)).map(|snapshot| std::sync::Arc::clone(snapshot.source_model_arc()));
+                    if let Some(model) = model { self.shading.show(ui, &model); } else { ui.weak("Load or select a prop before editing scalar shading."); }
+                }); }
                 ui.checkbox(&mut self.surface_enabled, "Edit prop UV and pivot");
                 if self.surface_enabled {
                     field(ui, "Prop UV material index", &mut self.surface_material);
@@ -446,6 +470,16 @@ impl Panel {
                     ui.weak("Keep the selected prop as cell [0,0]; add the remaining cells as one undoable cosmetic edit. Nothing is saved automatically.");
                     if ui.button("Stamp selected prop grid").clicked() {
                         self.stamp_grid();
+                    }
+                    field(ui, "Surface grid maximum vertical distance", &mut self.surface_grid_max_vertical);
+                    field(ui, "Surface grid height offset", &mut self.surface_grid_height_offset);
+                    ui.weak("Surface grid: query each new cell from the original pivot height, then add the height offset. Rotation and scale stay unchanged; this is not collision or bottom snapping. Decimal inputs round to Q16; presentation uses f32.");
+                    if ui.add_enabled(
+                        !agent_pick_busy && self.candidate.is_none()
+                            && !editor.history().in_tx && !editor.sim().in_tx,
+                        egui::Button::new("Stamp surface-height prop grid"),
+                    ).clicked() {
+                        self.stamp_surface_grid(editor, agent_pick_busy);
                     }
                 });
             });
@@ -584,7 +618,9 @@ impl Panel {
     }
 
     pub(crate) fn placements(&self, editor: &Editor) -> Vec<SceneModel> {
-        if self.document_pending
+        if self.game != editor.game()
+            || profile_document_allowed(&self.document, editor.game()).is_err()
+            || self.document_pending
             || self.context_stale
             || self.sidecar_error.is_some()
             || (self.placement.is_some() && !self.placement_context_matches(editor))
@@ -828,7 +864,8 @@ impl Panel {
         let Some((scene, graph_revision)) = current_identity(editor) else {
             return false;
         };
-        editor.mode() == Mode::Edit
+        self.game == editor.game()
+            && editor.mode() == Mode::Edit
             && editor.can_mutate()
             && !editor.screenshot_gesture_busy()
             && editor.previewing().is_none()
@@ -879,7 +916,7 @@ impl Panel {
             );
             return;
         };
-        if let Err(error) = validate_document(&updated, graph_revision) {
+        if let Err(error) = validate_profile_document(&updated, graph_revision, self.game) {
             self.error = Some(format!(
                 "Mesh prop move was rejected; original placement restored: {error}"
             ));
@@ -892,7 +929,7 @@ impl Panel {
     }
 
     pub(crate) fn play_blocker(&self, editor: &Editor) -> Option<String> {
-        if editor.game() != EditorGame::MeshNavigation {
+        if !props_game_supported(editor.game()) {
             return None;
         }
         if self.prefab.busy() {
@@ -907,7 +944,8 @@ impl Panel {
         if self.placement.is_some() {
             return Some("Apply or cancel the staged mesh prop placement before Play".into());
         }
-        if self.document_pending
+        if self.game != editor.game()
+            || self.document_pending
             || current_identity(editor).is_none_or(|(scene, revision)| {
                 self.scene.as_ref() != Some(&scene)
                     || self.graph_revision != Some(revision)
@@ -927,10 +965,36 @@ impl Panel {
         if self.dirty() {
             return Some("Save or undo mesh prop changes before Play".into());
         }
+        if profile_document_allowed(&self.document, editor.game()).is_err() {
+            return Some("MeshHazardsV1 props do not support shading".into());
+        }
         if self.document.placements().is_err() {
             return Some("Mesh props cannot be presented for the current graph".into());
         }
         None
+    }
+
+    #[cfg(any(test, feature = "mesh-hazards-export"))]
+    pub(crate) fn matches_saved_sidecar(&self, editor: &Editor, expected: Option<&str>) -> bool {
+        props_game_supported(editor.game())
+            && self.play_blocker(editor).is_none()
+            && !self.unapplied_form_dirty()
+            && self.sidecar_digest.as_deref() == expected
+            && (expected.is_some() || self.document.props.is_empty())
+            && self.placements(editor).len() == self.document.props.len()
+    }
+
+    #[cfg(any(test, feature = "mesh-hazards-export"))]
+    pub(crate) fn document_bytes(&self, editor: &Editor) -> Result<Vec<u8>, String> {
+        if !self.matches_saved_sidecar(editor, self.sidecar_digest.as_deref()) {
+            return Err("Mesh props do not match the clean admitted saved document".into());
+        }
+        let (scene, revision) = current_identity(editor).ok_or("No admitted mesh scene")?;
+        let filename = scene
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("Mesh scene filename is not UTF-8")?;
+        self.document.encode(filename, revision)
     }
 
     pub(crate) fn dirty(&self) -> bool {
@@ -943,7 +1007,7 @@ impl Panel {
     }
 
     pub(crate) fn workspace_save_blocker(&self, editor: &Editor) -> Option<String> {
-        if editor.game() != EditorGame::MeshNavigation {
+        if !props_game_supported(editor.game()) {
             return None;
         }
         if self.prefab.busy() || self.pending_prefab() {
@@ -981,7 +1045,7 @@ impl Panel {
         {
             return Some("Mesh props no longer match the current scene or graph revision".into());
         }
-        if let Err(error) = validate_document(&self.document, revision) {
+        if let Err(error) = validate_profile_document(&self.document, revision, editor.game()) {
             return Some(format!("Mesh props cannot be saved: {error}"));
         }
         if self.document.placements().is_err() {
@@ -1033,6 +1097,8 @@ impl Panel {
             return true;
         };
         let base = self.candidate.as_ref().unwrap_or(&selected.art).clone();
+        #[cfg(feature = "mesh-prop-shading")]
+        if self.shading.settings(base.source_model_arc()).as_ref().map(|value| value != &selected.shading).unwrap_or(true) { return true; }
         let baseline = crate::mesh_rotation::to_degrees(selected.art.rotation())
             .and_then(crate::mesh_rotation::from_degrees)
             .and_then(|rotation| {
@@ -1106,6 +1172,10 @@ impl Panel {
     }
 
     fn stage_prefab(&mut self, template: crate::mesh_prop_prefab::Template) -> Result<(), String> {
+        #[cfg(feature = "mesh-prop-shading")]
+        if self.game.is_mesh_hazards() && template.shading().is_some() {
+            return Err("MeshHazardsV1 props do not support shading".into());
+        }
         if self.graph_revision != Some(template.art().graph_revision()) {
             return Err("Prop prefab does not match the admitted target mesh graph".into());
         }
@@ -1123,6 +1193,8 @@ impl Panel {
                 .ok_or("No unique prop prefab name is available")?
         };
         self.copy_snapshot_fields(template.art());
+        #[cfg(feature = "mesh-prop-shading")]
+        self.shading.load(template.art().source_model_arc(), template.shading());
         self.name = name;
         self.candidate = Some(template.art().clone());
         self.prefab_candidate = true;
@@ -1157,7 +1229,7 @@ impl Panel {
             self.error = Some("Wait for an admitted mesh graph before duplicating a prop".into());
             return;
         };
-        if let Err(error) = validate_document(&document, graph_revision) {
+        if let Err(error) = validate_profile_document(&document, graph_revision, self.game) {
             self.error = Some(error);
             return;
         }
@@ -1369,12 +1441,26 @@ impl Panel {
             }
         };
         let mut document = self.document.clone();
-        document.props.push(Prop { id, name, art });
+        #[cfg(feature = "mesh-prop-shading")]
+        let shading = match self.shading.settings(art.source_model_arc()) {
+            Ok(value) => value,
+            Err(error) => {
+                self.error = Some(error);
+                return;
+            }
+        };
+        document.props.push(Prop {
+            id,
+            name,
+            art,
+            #[cfg(feature = "mesh-prop-shading")]
+            shading,
+        });
         let Some(graph_revision) = self.graph_revision else {
             self.error = Some("Wait for an admitted mesh graph before adding a prop".into());
             return;
         };
-        if let Err(error) = validate_document(&document, graph_revision) {
+        if let Err(error) = validate_profile_document(&document, graph_revision, self.game) {
             self.error = Some(error);
             return;
         }
@@ -1438,12 +1524,22 @@ impl Panel {
         };
         let mut document = self.document.clone();
         document.props[index].name = name;
+        #[cfg(feature = "mesh-prop-shading")]
+        {
+            document.props[index].shading = match self.shading.settings(art.source_model_arc()) {
+                Ok(value) => value,
+                Err(error) => {
+                    self.error = Some(error);
+                    return;
+                }
+            };
+        }
         document.props[index].art = art;
         let Some(graph_revision) = self.graph_revision else {
             self.error = Some("Wait for an admitted mesh graph before updating a prop".into());
             return;
         };
-        if let Err(error) = validate_document(&document, graph_revision) {
+        if let Err(error) = validate_profile_document(&document, graph_revision, self.game) {
             self.error = Some(error);
             return;
         }
@@ -1493,7 +1589,7 @@ impl Panel {
             self.error = Some("Save props only for the matching editable local mesh scene".into());
             return;
         }
-        if let Err(error) = validate_document(&self.document, revision) {
+        if let Err(error) = validate_profile_document(&self.document, revision, editor.game()) {
             self.error = Some(error);
             return;
         }
@@ -1524,6 +1620,7 @@ impl Panel {
                 Some("Wait for an admitted local mesh scene before reloading props".into());
             return;
         };
+        self.game = editor.game();
         self.scene = Some(scene.clone());
         self.scene_epoch = Some(editor.scene_load_epoch());
         self.graph_revision = Some(revision);
@@ -1533,7 +1630,7 @@ impl Panel {
         self.confirm_discard_changes = false;
         self.recovery_target = None;
         self.error = None;
-        match mesh_props::load(&scene, revision) {
+        match load_profile_document(&scene, revision, editor.game()) {
             Ok(Some((document, digest))) => {
                 self.sidecar_digest = Some(digest);
                 self.selected = document.props.first().map(|prop| prop.id);
@@ -1572,7 +1669,8 @@ impl Panel {
         });
         discard_invalid_ready(
             self.confirm_discard_invalid,
-            editor.game() == EditorGame::MeshNavigation
+            self.game == editor.game()
+                && props_game_supported(editor.game())
                 && editor.spec().is_local()
                 && editor.mode() == Mode::Edit
                 && editor.can_mutate()
@@ -1587,7 +1685,7 @@ impl Panel {
     }
 
     fn can_discard_changes(&self, editor: &Editor) -> bool {
-        let editable_context = editor.game() == EditorGame::MeshNavigation
+        let editable_context = props_game_supported(editor.game())
             && !self.prefab.busy()
             && editor.spec().is_local()
             && editor.mode() == Mode::Edit
@@ -1679,17 +1777,18 @@ impl Panel {
         self.gesture.is_none()
             && !self.prefab.busy()
             && self.placement.is_none()
-            && editor.game() == EditorGame::MeshNavigation
+            && props_game_supported(editor.game())
             && editor.spec().is_local()
             && self.matching_edit_context(editor)
     }
 
     fn can_change_history(&self, editor: &Editor) -> bool {
-        self.gesture.is_none()
+        self.game == editor.game()
+            && self.gesture.is_none()
             && !self.prefab.busy()
             && !self.pending_prefab()
             && self.placement.is_none()
-            && editor.game() == EditorGame::MeshNavigation
+            && props_game_supported(editor.game())
             && editor.spec().is_local()
             && editor.mode() == Mode::Edit
             && editor.can_mutate()
@@ -1710,7 +1809,7 @@ impl Panel {
         self.gesture.is_none()
             && self.placement.is_none()
             && !self.dirty()
-            && editor.game() == EditorGame::MeshNavigation
+            && props_game_supported(editor.game())
             && editor.spec().is_local()
             && editor.mode() == Mode::Edit
             && editor.can_mutate()
@@ -1842,9 +1941,13 @@ impl Panel {
         {
             self.name = name;
             self.copy_snapshot_fields(&snapshot);
+            #[cfg(feature = "mesh-prop-shading")]
+            { let settings = self.selected_prop().and_then(|p| p.shading.clone()); self.shading.load(snapshot.source_model_arc(), settings.as_ref()); }
         } else {
             self.material_slots = crate::mesh_material_slots_panel::Panel::default();
             self.material_slots_draft.clear();
+            #[cfg(feature = "mesh-prop-shading")]
+            { self.shading = crate::mesh_prop_shading_panel::Panel::default(); }
         }
     }
 
@@ -1856,6 +1959,8 @@ impl Panel {
     }
 
     fn copy_snapshot_fields(&mut self, snapshot: &Snapshot) {
+        #[cfg(feature = "mesh-prop-shading")]
+        self.shading.load(snapshot.source_model_arc(), None);
         self.position = snapshot.offset().map(format_number);
         self.scale = format_number(snapshot.scale());
         if let Ok(rotation) = crate::mesh_rotation::to_degrees(snapshot.rotation()) {
@@ -1974,8 +2079,42 @@ fn parse_surface(
     }))
 }
 
+fn props_game_supported(game: EditorGame) -> bool {
+    game == EditorGame::MeshNavigation || game.is_mesh_hazards()
+}
+
+fn profile_document_allowed(document: &Document, game: EditorGame) -> Result<(), String> {
+    #[cfg(feature = "mesh-prop-shading")]
+    if game.is_mesh_hazards() && document.props.iter().any(|prop| prop.shading.is_some()) {
+        return Err("MeshHazardsV1 props do not support shading".into());
+    }
+    let _ = (document, game);
+    Ok(())
+}
+
+fn validate_profile_document(
+    document: &Document,
+    revision: [u8; 32],
+    game: EditorGame,
+) -> Result<(), String> {
+    profile_document_allowed(document, game)?;
+    validate_document(document, revision)
+}
+
+fn load_profile_document(
+    scene: &Path,
+    revision: [u8; 32],
+    game: EditorGame,
+) -> Result<Option<(Document, String)>, String> {
+    let loaded = mesh_props::load(scene, revision)?;
+    if let Some((document, _)) = &loaded {
+        validate_profile_document(document, revision, game)?;
+    }
+    Ok(loaded)
+}
+
 fn current_identity(editor: &Editor) -> Option<(PathBuf, [u8; 32])> {
-    if editor.game() != EditorGame::MeshNavigation || !editor.spec().is_local() {
+    if !props_game_supported(editor.game()) || !editor.spec().is_local() {
         return None;
     }
     let scene = editor.path()?;
@@ -2016,6 +2155,8 @@ fn duplicate_prop_document(
         id: new_id,
         name,
         art: source.art.clone(),
+        #[cfg(feature = "mesh-prop-shading")]
+        shading: source.shading.clone(),
     });
     Ok(duplicated)
 }
@@ -2141,6 +2282,8 @@ fn stamp_prop_grid(
                 id: identifier,
                 name,
                 art,
+                #[cfg(feature = "mesh-prop-shading")]
+                shading: source.shading.clone(),
             });
             identifier = identifier.checked_add(1).unwrap_or(1);
         }
@@ -2194,16 +2337,16 @@ fn reported_scene_matches_request(
     spec: &HostSpec,
     reported: Option<&Path>,
 ) -> bool {
-    if game != EditorGame::MeshNavigation {
+    if !props_game_supported(game) {
         return false;
     }
     let requested = match spec {
-        HostSpec::Local { scene, .. } => scene.as_path(),
+        HostSpec::Local { scene, .. } if game == EditorGame::MeshNavigation => scene.as_path(),
         HostSpec::LocalGame {
             scene,
             game: requested_game,
             ..
-        } if *requested_game == EditorGame::MeshNavigation => scene.as_path(),
+        } if *requested_game == game => scene.as_path(),
         _ => return false,
     };
     let Some(reported) = reported else {
@@ -2354,3 +2497,11 @@ fn same_document_placements(left: &Document, right: &Document) -> bool {
 #[cfg(test)]
 #[path = "mesh_props_panel/tests.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "mesh-prop-shading"))]
+#[path = "mesh_props_panel/shaded_prefab_tests.rs"]
+mod shaded_prefab_tests;
+
+#[cfg(all(test, feature = "mesh-hazards"))]
+#[path = "mesh_props_panel/hazards_tests.rs"]
+mod hazards_tests;

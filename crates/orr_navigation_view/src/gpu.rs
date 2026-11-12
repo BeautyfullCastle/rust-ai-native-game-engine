@@ -1,4 +1,6 @@
 //! Offscreen single-model integration; no modifications to existing render APIs.
+#[cfg(any(feature = "authored", test))]
+pub(crate) mod framing;
 use crate::{to_static_model, PathDisplay, Result};
 use orr_fp::FP;
 use orr_navigation::NavigationPath;

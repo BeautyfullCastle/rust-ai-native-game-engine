@@ -4,6 +4,9 @@
 //! belong to the +X/+Z cell; outer edges belong to the final cell. A hole owns its
 //! boundaries under this rule. Heights round once toward negative infinity.
 #![deny(clippy::float_arithmetic)]
+mod grid_expansion;
+pub mod sculpt;
+
 use orr_fp::FP;
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -39,6 +42,7 @@ pub struct Surface {
     pub slope: Option<FP>,
 }
 /// Inclusive dirty cell rectangle. A changed vertex dirties every adjacent cell.
+/// A grid shape change dirties the full current cell rectangle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DirtyRegion {
     pub min: [u32; 2],
@@ -389,30 +393,45 @@ impl TerrainDocument {
                 }
             }
         }
+        self.commit_candidate(candidate);
+        Ok(())
+    }
+    /// Commit an already validated content candidate as one snapshot transaction.
+    fn commit_candidate(&mut self, candidate: Terrain) {
         if candidate != self.terrain {
-            let mut min = [candidate.width - 2, candidate.depth - 2];
-            let mut max = [0, 0];
-            for z in 0..candidate.depth - 1 {
-                for x in 0..candidate.width - 1 {
-                    let cell = (z * (candidate.width - 1) + x) as usize;
-                    let a = (z * candidate.width + x) as usize;
-                    let corners = [
-                        a,
-                        a + 1,
-                        a + candidate.width as usize,
-                        a + candidate.width as usize + 1,
-                    ];
-                    if candidate.holes[cell] != self.terrain.holes[cell]
-                        || corners
-                            .iter()
-                            .any(|&i| candidate.heights[i] != self.terrain.heights[i])
-                    {
-                        min = [min[0].min(x), min[1].min(z)];
-                        max = [max[0].max(x), max[1].max(z)];
+            let shape_changed =
+                candidate.width != self.terrain.width || candidate.depth != self.terrain.depth;
+            if shape_changed {
+                // Old row strides no longer address matching vertices or cells.
+                self.dirty = Some(DirtyRegion {
+                    min: [0, 0],
+                    max: [candidate.width - 2, candidate.depth - 2],
+                });
+            } else {
+                let mut min = [candidate.width - 2, candidate.depth - 2];
+                let mut max = [0, 0];
+                for z in 0..candidate.depth - 1 {
+                    for x in 0..candidate.width - 1 {
+                        let cell = (z * (candidate.width - 1) + x) as usize;
+                        let a = (z * candidate.width + x) as usize;
+                        let corners = [
+                            a,
+                            a + 1,
+                            a + candidate.width as usize,
+                            a + candidate.width as usize + 1,
+                        ];
+                        if candidate.holes[cell] != self.terrain.holes[cell]
+                            || corners
+                                .iter()
+                                .any(|&i| candidate.heights[i] != self.terrain.heights[i])
+                        {
+                            min = [min[0].min(x), min[1].min(z)];
+                            max = [max[0].max(x), max[1].max(z)];
+                        }
                     }
                 }
+                self.dirty = Some(DirtyRegion { min, max });
             }
-            self.dirty = Some(DirtyRegion { min, max });
             if self.undo.len() == MAX_HISTORY {
                 self.undo.remove(0);
             }
@@ -420,7 +439,6 @@ impl TerrainDocument {
                 .push(std::mem::replace(&mut self.terrain, candidate));
             self.redo.clear();
         }
-        Ok(())
     }
     fn mark_all_dirty(&mut self) {
         self.dirty = Some(DirtyRegion {

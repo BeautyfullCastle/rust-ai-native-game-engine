@@ -16,6 +16,12 @@ pub(super) fn fixture(platform: RuntimePlatform) -> Vec<u8> {
         RuntimePlatform::LinuxX86_64 => elf(),
     }
 }
+pub(super) fn camera_fixture(platform: RuntimePlatform) -> Vec<u8> {
+    match platform {
+        RuntimePlatform::WindowsX86_64 => pe_with_camera(),
+        RuntimePlatform::LinuxX86_64 => elf_with_camera(),
+    }
+}
 fn pe() -> Vec<u8> {
     let mut bytes = vec![0; 1536];
     bytes[..2].copy_from_slice(b"MZ");
@@ -91,6 +97,50 @@ fn elf() -> Vec<u8> {
     bytes
 }
 
+fn pe_with_camera() -> Vec<u8> {
+    let mut bytes = pe();
+    bytes.resize(2048, 0);
+    put16(&mut bytes, 70, 3);
+    put32(&mut bytes, 144, 16384);
+    let section = 280;
+    bytes[section..section + 8].copy_from_slice(b".orrhcam");
+    put32(
+        &mut bytes,
+        section + 8,
+        CAMERA_CAPABILITY_MARKER.len() as u32,
+    );
+    put32(&mut bytes, section + 12, 12288);
+    put32(&mut bytes, section + 16, 512);
+    put32(&mut bytes, section + 20, 1536);
+    put32(&mut bytes, section + 36, 0x4000_0040);
+    bytes[1536..1536 + CAMERA_CAPABILITY_MARKER.len()].copy_from_slice(CAMERA_CAPABILITY_MARKER);
+    bytes
+}
+
+fn elf_with_camera() -> Vec<u8> {
+    let mut bytes = elf();
+    bytes.resize(832, 0);
+    put16(&mut bytes, 60, 5);
+    let names = b"\0.text\0.orrhaz\0.shstrtab\0.orrhcam\0";
+    bytes[320..320 + names.len()].copy_from_slice(names);
+    bytes[384..384 + CAMERA_CAPABILITY_MARKER.len()].copy_from_slice(CAMERA_CAPABILITY_MARKER);
+    let section = 768;
+    put32(&mut bytes, section, 25);
+    put32(&mut bytes, section + 4, 1);
+    put64(&mut bytes, section + 8, 2);
+    put64(&mut bytes, section + 16, 0x400180);
+    put64(&mut bytes, section + 24, 384);
+    put64(
+        &mut bytes,
+        section + 32,
+        CAMERA_CAPABILITY_MARKER.len() as u64,
+    );
+    put64(&mut bytes, section + 48, 1);
+    // The enlarged name string table remains the final section payload.
+    put64(&mut bytes, 736, names.len() as u64);
+    bytes
+}
+
 #[test]
 fn valid_platform_fixtures() {
     assert!(matches!(
@@ -103,12 +153,132 @@ fn valid_platform_fixtures() {
     ));
 }
 #[test]
+fn camera_runtime_requires_both_exact_capabilities() {
+    for platform in [RuntimePlatform::WindowsX86_64, RuntimePlatform::LinuxX86_64] {
+        let player_only = fixture(platform);
+        assert!(validate_runtime(&player_only).is_ok());
+        assert!(
+            validate_camera_runtime(&player_only)
+                .unwrap_err()
+                .contains("camera capability section is missing")
+        );
+
+        let both = camera_fixture(platform);
+        assert!(validate_runtime(&both).is_ok());
+        assert_eq!(validate_camera_runtime(&both), Ok(platform));
+    }
+}
+
+#[test]
+fn camera_capability_sections_are_strictly_validated_when_optional_or_required() {
+    // Each mutation keeps the player capability intact and damages only camera metadata.
+    let mut pe_bad_marker = pe_with_camera();
+    pe_bad_marker[1536] ^= 1;
+    let mut pe_bad_name = pe_with_camera();
+    pe_bad_name[280] = b'x';
+    let mut pe_bad_flags = pe_with_camera();
+    put32(&mut pe_bad_flags, 316, 0xe000_0040);
+    let mut pe_bad_size = pe_with_camera();
+    put32(
+        &mut pe_bad_size,
+        288,
+        (CAMERA_CAPABILITY_MARKER.len() - 1) as u32,
+    );
+    let mut pe_bad_padding = pe_with_camera();
+    pe_bad_padding[1536 + CAMERA_CAPABILITY_MARKER.len()] = 1;
+    for bytes in [pe_bad_marker, pe_bad_flags, pe_bad_size, pe_bad_padding] {
+        assert!(validate_runtime(&bytes).is_err());
+        assert!(validate_camera_runtime(&bytes).is_err());
+    }
+    // An unrecognized section name is not a capability; strict camera admission
+    // still rejects it as missing, while the legacy player-only contract remains valid.
+    assert!(validate_runtime(&pe_bad_name).is_ok());
+    assert!(validate_camera_runtime(&pe_bad_name).is_err());
+
+    let mut elf_bad_marker = elf_with_camera();
+    elf_bad_marker[384] ^= 1;
+    let mut elf_bad_name = elf_with_camera();
+    elf_bad_name[768] = 7; // disguises the camera payload as a duplicate player capability
+    let mut elf_bad_flags = elf_with_camera();
+    put64(&mut elf_bad_flags, 776, 3);
+    let mut elf_bad_size = elf_with_camera();
+    put64(
+        &mut elf_bad_size,
+        800,
+        (CAMERA_CAPABILITY_MARKER.len() - 1) as u64,
+    );
+    let mut elf_bad_mapping = elf_with_camera();
+    put64(&mut elf_bad_mapping, 784, 0x500180);
+    for bytes in [
+        elf_bad_marker,
+        elf_bad_name,
+        elf_bad_flags,
+        elf_bad_size,
+        elf_bad_mapping,
+    ] {
+        assert!(validate_runtime(&bytes).is_err());
+        assert!(validate_camera_runtime(&bytes).is_err());
+    }
+}
+
+#[test]
+fn duplicate_camera_sections_are_rejected_in_pe_and_elf() {
+    let mut pe = pe_with_camera();
+    put16(&mut pe, 70, 4);
+    put32(&mut pe, 144, 20480);
+    pe.resize(2560, 0);
+    let section = 320;
+    pe[section..section + 8].copy_from_slice(b".orrhcam");
+    put32(&mut pe, section + 8, CAMERA_CAPABILITY_MARKER.len() as u32);
+    put32(&mut pe, section + 12, 16384);
+    put32(&mut pe, section + 16, 512);
+    put32(&mut pe, section + 20, 2048);
+    put32(&mut pe, section + 36, 0x4000_0040);
+    pe[2048..2048 + CAMERA_CAPABILITY_MARKER.len()].copy_from_slice(CAMERA_CAPABILITY_MARKER);
+    assert!(
+        validate_camera_runtime(&pe)
+            .unwrap_err()
+            .contains("duplicate")
+    );
+
+    let mut elf = elf_with_camera();
+    elf.resize(896, 0);
+    put16(&mut elf, 60, 6);
+    // Second .orrhcam section aliases the same valid, read-only marker payload.
+    let section = 832;
+    elf[416..416 + CAMERA_CAPABILITY_MARKER.len()].copy_from_slice(CAMERA_CAPABILITY_MARKER);
+    put32(&mut elf, section, 25);
+    put32(&mut elf, section + 4, 1);
+    put64(&mut elf, section + 8, 2);
+    put64(&mut elf, section + 16, 0x4001a0);
+    put64(&mut elf, section + 24, 416);
+    put64(
+        &mut elf,
+        section + 32,
+        CAMERA_CAPABILITY_MARKER.len() as u64,
+    );
+    put64(&mut elf, section + 48, 1);
+    assert!(
+        validate_camera_runtime(&elf)
+            .unwrap_err()
+            .contains("duplicate")
+    );
+}
+#[test]
 fn every_truncation_rejected_without_panicking() {
     for bytes in [pe(), elf()] {
         for length in 0..bytes.len() {
             assert!(
                 validate_runtime(&bytes[..length]).is_err(),
                 "length {length}"
+            );
+        }
+    }
+    for bytes in [pe_with_camera(), elf_with_camera()] {
+        for length in 0..bytes.len() {
+            assert!(
+                validate_camera_runtime(&bytes[..length]).is_err(),
+                "camera runtime length {length}"
             );
         }
     }
@@ -367,17 +537,224 @@ fn actual_native_runtime_is_admitted() {
         digest, expected,
         "native runtime differs from the exact build digest"
     );
-    let platform = validate_runtime(&bytes)
-        .expect("native runtime container and exact .orrhaz capability must be admitted");
+    let platform = validate_camera_runtime(&bytes).expect(
+        "native runtime container and exact .orrhaz/.orrhcam capabilities must be admitted",
+    );
     assert!(
         platform.is_current(),
         "runtime must match the native test host"
     );
     eprintln!(
-        "native hazard runtime admitted: path={} bytes={} sha256={} platform={platform:?} marker={}",
+        "native hazard runtime admitted: path={} bytes={} sha256={} platform={platform:?} marker={} + {}",
         path.display(),
         bytes.len(),
         digest,
-        std::str::from_utf8(CAPABILITY_MARKER).unwrap()
+        std::str::from_utf8(CAPABILITY_MARKER).unwrap(),
+        std::str::from_utf8(CAMERA_CAPABILITY_MARKER).unwrap()
     );
+}
+
+pub(super) fn animation_fixture(
+    platform: RuntimePlatform,
+    camera: bool,
+    lighting: bool,
+    hud: bool,
+    props: bool,
+) -> Vec<u8> {
+    let mut capabilities = vec![
+        (CAPABILITY_SECTION, CAPABILITY_MARKER),
+        (ANIMATION_CAPABILITY_SECTION, ANIMATION_CAPABILITY_MARKER),
+    ];
+    for (enabled, name, marker) in [
+        (camera, CAMERA_CAPABILITY_SECTION, CAMERA_CAPABILITY_MARKER),
+        (
+            lighting,
+            LIGHTING_CAPABILITY_SECTION,
+            LIGHTING_CAPABILITY_MARKER,
+        ),
+        (hud, HUD_CAPABILITY_SECTION, HUD_CAPABILITY_MARKER),
+        (props, PROPS_CAPABILITY_SECTION, PROPS_CAPABILITY_MARKER),
+    ] {
+        if enabled {
+            capabilities.push((name, marker));
+        }
+    }
+    match platform {
+        RuntimePlatform::WindowsX86_64 => {
+            let count = capabilities.len() + 1;
+            let mut bytes = pe();
+            bytes.resize(1024 + count * 512, 0);
+            bytes[200..].fill(0);
+            put16(&mut bytes, 70, count as u16);
+            put32(&mut bytes, 144, (count as u32 + 1) * 4096);
+            put32(&mut bytes, 148, 1024);
+            bytes[200..205].copy_from_slice(b".text");
+            put32(&mut bytes, 208, 1);
+            put32(&mut bytes, 212, 4096);
+            put32(&mut bytes, 216, 512);
+            put32(&mut bytes, 220, 1024);
+            put32(&mut bytes, 236, 0x6000_0020);
+            bytes[1024] = 0xc3;
+            for (index, (name, marker)) in capabilities.iter().enumerate() {
+                let section = 240 + index * 40;
+                let payload = 1536 + index * 512;
+                bytes[section..section + name.len()].copy_from_slice(name.as_bytes());
+                put32(&mut bytes, section + 8, marker.len() as u32);
+                put32(&mut bytes, section + 12, (index as u32 + 2) * 4096);
+                put32(&mut bytes, section + 16, 512);
+                put32(&mut bytes, section + 20, payload as u32);
+                put32(&mut bytes, section + 36, 0x4000_0040);
+                bytes[payload..payload + marker.len()].copy_from_slice(marker);
+            }
+            bytes
+        }
+        RuntimePlatform::LinuxX86_64 => {
+            let count = capabilities.len() + 3;
+            let mut bytes = elf();
+            bytes.resize(2048 + count * 64, 0);
+            bytes[288..].fill(0);
+            put64(&mut bytes, 40, 2048);
+            put16(&mut bytes, 60, count as u16);
+            put16(&mut bytes, 62, (count - 1) as u16);
+            put64(&mut bytes, 96, 1024);
+            put64(&mut bytes, 104, 1024);
+            let mut names = b"\0.text\0.shstrtab\0".to_vec();
+            let text = 2112;
+            put32(&mut bytes, text, 1);
+            put32(&mut bytes, text + 4, 1);
+            put64(&mut bytes, text + 8, 6);
+            put64(&mut bytes, text + 16, 0x400100);
+            put64(&mut bytes, text + 24, 256);
+            put64(&mut bytes, text + 32, 1);
+            for (index, (name, marker)) in capabilities.iter().enumerate() {
+                let section = 2176 + index * 64;
+                let payload = 512 + index * 64;
+                put32(&mut bytes, section, names.len() as u32);
+                names.extend_from_slice(name.as_bytes());
+                names.push(0);
+                put32(&mut bytes, section + 4, 1);
+                put64(&mut bytes, section + 8, 2);
+                put64(&mut bytes, section + 16, 0x400000 + payload as u64);
+                put64(&mut bytes, section + 24, payload as u64);
+                put64(&mut bytes, section + 32, marker.len() as u64);
+                put64(&mut bytes, section + 48, 1);
+                bytes[payload..payload + marker.len()].copy_from_slice(marker);
+            }
+            let strings = 2048 + (count - 1) * 64;
+            put32(&mut bytes, strings, 7);
+            put32(&mut bytes, strings + 4, 3);
+            put64(&mut bytes, strings + 24, 1024);
+            put64(&mut bytes, strings + 32, names.len() as u64);
+            bytes[1024..1024 + names.len()].copy_from_slice(&names);
+            bytes
+        }
+    }
+}
+
+#[test]
+fn animation_capability_preserves_legacy_and_requires_each_optional_capability() {
+    for platform in [RuntimePlatform::WindowsX86_64, RuntimePlatform::LinuxX86_64] {
+        assert!(
+            validate_animation_runtime(&fixture(platform), false, false, false, false)
+                .unwrap_err()
+                .contains("animation capability section is missing")
+        );
+        for flags in 0..16 {
+            let requested = [
+                flags & 1 != 0,
+                flags & 2 != 0,
+                flags & 4 != 0,
+                flags & 8 != 0,
+            ];
+            let bytes = animation_fixture(
+                platform,
+                requested[0],
+                requested[1],
+                requested[2],
+                requested[3],
+            );
+            assert_eq!(validate_runtime(&bytes), Ok(platform));
+            assert_eq!(
+                validate_animation_runtime(
+                    &bytes,
+                    requested[0],
+                    requested[1],
+                    requested[2],
+                    requested[3]
+                ),
+                Ok(platform)
+            );
+            for missing in 0..4 {
+                if !requested[missing] {
+                    let mut more = requested;
+                    more[missing] = true;
+                    assert!(
+                        validate_animation_runtime(&bytes, more[0], more[1], more[2], more[3])
+                            .is_err()
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn animation_metadata_is_strict_even_for_legacy_admission() {
+    for platform in [RuntimePlatform::WindowsX86_64, RuntimePlatform::LinuxX86_64] {
+        let original = animation_fixture(platform, false, false, false, false);
+        let (section, payload) = match platform {
+            RuntimePlatform::WindowsX86_64 => (280, 2048),
+            RuntimePlatform::LinuxX86_64 => (2240, 576),
+        };
+        let mut corrupt = original.clone();
+        corrupt[payload] ^= 1;
+        let mut bad_flags = original.clone();
+        let mut bad_size = original.clone();
+        let mut duplicate = original.clone();
+        match platform {
+            RuntimePlatform::WindowsX86_64 => {
+                put32(&mut bad_flags, section + 36, 0xe000_0040);
+                put32(
+                    &mut bad_size,
+                    section + 8,
+                    ANIMATION_CAPABILITY_MARKER.len() as u32 - 1,
+                );
+                duplicate[240..248].copy_from_slice(b".orrhanm");
+                put32(
+                    &mut duplicate,
+                    248,
+                    ANIMATION_CAPABILITY_MARKER.len() as u32,
+                );
+                duplicate[1536..1536 + ANIMATION_CAPABILITY_MARKER.len()]
+                    .copy_from_slice(ANIMATION_CAPABILITY_MARKER);
+            }
+            RuntimePlatform::LinuxX86_64 => {
+                put64(&mut bad_flags, section + 8, 3);
+                put64(
+                    &mut bad_size,
+                    section + 32,
+                    ANIMATION_CAPABILITY_MARKER.len() as u64 - 1,
+                );
+                let name = u32_at(&original, section).unwrap();
+                put32(&mut duplicate, 2176, name);
+                put64(
+                    &mut duplicate,
+                    2208,
+                    ANIMATION_CAPABILITY_MARKER.len() as u64,
+                );
+                duplicate[512..512 + ANIMATION_CAPABILITY_MARKER.len()]
+                    .copy_from_slice(ANIMATION_CAPABILITY_MARKER);
+            }
+        }
+        for bytes in [corrupt, bad_flags, bad_size, duplicate] {
+            assert!(validate_runtime(&bytes).is_err());
+            assert!(validate_animation_runtime(&bytes, false, false, false, false).is_err());
+        }
+        for length in 0..original.len() {
+            assert!(
+                validate_animation_runtime(&original[..length], false, false, false, false)
+                    .is_err()
+            );
+        }
+    }
 }

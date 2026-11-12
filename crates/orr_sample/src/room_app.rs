@@ -26,7 +26,77 @@ use winit::{
     window::{Window, WindowId},
 };
 
-pub const HELP: &str = "room_escape --project PATH [--headless [--ticks 0..6000] [--hold left,right,up,down,interact] [--capture NEW.png]]\nWASD/arrows: world X/Z movement; E: interact; R: restart; Escape: quit.\nMouse left drag: orbit; right/middle drag: pan; wheel: zoom (view only).\nHeadless defaults to zero ticks; capture requires an available GPU adapter.";
+/// Stable CPU presentation receipt: hashes the observed pose, including skin palettes.
+#[cfg(feature = "room-character")]
+pub fn character_pose_digest(pose: &orr_model::animation::Pose) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(b"orr-room-observed-character-pose-v1\0");
+    hash.update((pose.local().len() as u64).to_le_bytes());
+    for trs in pose.local() {
+        for value in trs.translation.iter().chain(&trs.rotation).chain(&trs.scale) {
+            hash.update(value.to_bits().to_le_bytes());
+        }
+    }
+    hash.update((pose.global().len() as u64).to_le_bytes());
+    for matrix in pose.global() {
+        for value in matrix.iter().flatten() { hash.update(value.to_bits().to_le_bytes()); }
+    }
+    hash.update((pose.skin_matrices().len() as u64).to_le_bytes());
+    for palette in pose.skin_matrices() {
+        hash.update((palette.len() as u64).to_le_bytes());
+        for matrix in palette {
+            for value in matrix.iter().flatten() { hash.update(value.to_bits().to_le_bytes()); }
+        }
+    }
+    hash.finalize().iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(feature = "room-character")]
+fn observed_character_digest(
+    project: &PreparedProject,
+    frame: FrameView<'_>,
+    playback: &crate::room_character::PlaybackCursor,
+) -> Result<Option<String>, String> {
+    let Some(character) = project.character() else { return Ok(None); };
+    // Keep the export smoke protocol and all legacy schema receipts unchanged.
+    if character.document.motion.and_then(|motion| motion.pickup).is_none() { return Ok(None); }
+    let document = &character.document;
+    let entity = project.scene().index().entity(&orr_reflect::Guid::parse(&document.player)?)
+        .ok_or("character receipt PLAYER missing")?;
+    let binding = &project.models().document.bindings[&document.player];
+    let model = project.models().assets[&(binding.package.clone(), binding.asset.clone())]
+        .animated_model().ok_or("character receipt model missing")?;
+    let pose = playback.pose(document, model, frame, crate::room_character::PlaybackContext {
+        entity, tick_rate: TICK_RATE, rest: false, revision: 0,
+    })?;
+    Ok(Some(character_pose_digest(pose)))
+}
+
+/// Shared by native presentation and CPU tests; no window is needed to compose it.
+fn window_title(
+    run: &RoomRun,
+    #[cfg(feature = "room-input-actions")] controls: Option<&crate::room_controls::RoomControls>,
+) -> String {
+    let movement = "WASD/arrows move, E interact";
+    #[cfg(feature = "room-input-actions")]
+    let authored = controls.map(crate::room_controls::RoomControls::movement_hint);
+    #[cfg(feature = "room-input-actions")]
+    let movement = authored.as_deref().unwrap_or(movement);
+    let status = if run.won != 0 {
+        "WON"
+    } else if run.key_collected == 0 {
+        "exit locked"
+    } else {
+        "exit unlocked"
+    };
+    format!(
+        "Room Escape | key: {} | {status} | {movement}, R restart, Esc quit | mouse orbit/pan/zoom",
+        run.key_collected
+    )
+}
+
+pub const HELP: &str = "room_escape --project PATH [--headless [--ticks 0..6000] [--hold left,right,up,down,interact] [--capture NEW.png] [--check-model-poses]]\nDefaults: WASD/arrows: world X/Z movement; E: interact.\nAuthored controls override movement/interact keys; see the window title for physical keys.\nR: restart; Escape: quit (reserved).\nMouse left drag: orbit; right/middle drag: pan; wheel: zoom (view only).\nHeadless defaults to zero ticks; capture requires an available GPU adapter.\n--check-model-poses validates every simulated model pose on the CPU, including tick zero.";
 
 #[derive(Debug)]
 pub struct Options {
@@ -35,6 +105,7 @@ pub struct Options {
     pub ticks: u32,
     pub held: RoomInput,
     pub capture: Option<PathBuf>,
+    pub check_model_poses: bool,
 }
 impl Options {
     pub fn parse(args: Vec<String>) -> Result<Self, String> {
@@ -43,6 +114,7 @@ impl Options {
         let mut ticks = 0;
         let mut held = RoomInput::default();
         let mut capture = None;
+        let mut check_model_poses = false;
         let mut seen = HashSet::new();
         let mut args = args.into_iter();
         while let Some(flag) = args.next() {
@@ -56,6 +128,7 @@ impl Options {
                     ))
                 }
                 "--headless" => headless = true,
+                "--check-model-poses" => check_model_poses = true,
                 "--ticks" => {
                     ticks = args
                         .next()
@@ -98,8 +171,15 @@ impl Options {
                 _ => return Err(format!("unknown option: {flag}\n{HELP}")),
             }
         }
-        if !headless && (seen.contains("--ticks") || seen.contains("--hold") || capture.is_some()) {
-            return Err("--ticks, --hold and --capture require --headless".into());
+        if !headless
+            && (seen.contains("--ticks")
+                || seen.contains("--hold")
+                || capture.is_some()
+                || check_model_poses)
+        {
+            return Err(
+                "--ticks, --hold, --capture and --check-model-poses require --headless".into(),
+            );
         }
         Ok(Self {
             project: project.ok_or("--project is required; no fallback room is created")?,
@@ -107,6 +187,7 @@ impl Options {
             ticks,
             held,
             capture,
+            check_model_poses,
         })
     }
 }
@@ -116,13 +197,26 @@ fn step(sim: &mut Simulation<RoomEscapeV1>, input: RoomInput) {
     sim.step(&inputs);
 }
 pub fn run(options: Options) -> Result<(), String> {
-    let project = PreparedProject::open(&options.project)?;
+    let support = if cfg!(all(feature = "room-progress", target_os = "linux")) {
+        crate::room_project::ProgressSupport::MetadataOnly
+    } else {
+        crate::room_project::ProgressSupport::Unsupported
+    };
+    let project = PreparedProject::open_with_progress(
+        &options.project,
+        crate::room_project::RoomProjectCapabilities {
+            lighting: cfg!(feature = "room-lighting"),
+            character: cfg!(feature = "room-character"),
+        },
+        support,
+    )?;
     if options.headless {
-        headless(
+        headless_checked(
             &project,
             options.ticks,
             options.held,
             options.capture.as_deref(),
+            options.check_model_poses,
         )
     } else {
         run_window(project)
@@ -134,14 +228,106 @@ pub fn headless(
     held: RoomInput,
     capture: Option<&Path>,
 ) -> Result<(), String> {
+    headless_checked(project, ticks, held, capture, false)
+}
+
+fn headless_checked(
+    project: &PreparedProject,
+    ticks: u32,
+    held: RoomInput,
+    capture: Option<&Path>,
+    check_model_poses: bool,
+) -> Result<(), String> {
     if ticks > 6000 {
         return Err("--ticks must be between 0 and 6000".into());
     }
     let mut sim = project.scene().simulation()?;
+    #[cfg(feature = "room-character")]
+    let mut character_playback = crate::room_character::PlaybackCursor::default();
+    #[cfg(feature = "room-character")]
+    room_view::observe_character(
+        &mut character_playback,
+        FrameView::of(sim.frame()),
+        project.scene().index(),
+        project.models(),
+        room_view::PresentationTime::default(),
+    )?;
+    let check_poses = |sim: &Simulation<RoomEscapeV1>,
+                       #[cfg(feature = "room-character")]
+                       playback: &crate::room_character::PlaybackCursor|
+     -> Result<room_view::ModelPoseCounts, String> {
+        room_view::check_model_poses(
+            FrameView::of(sim.frame()),
+            project.scene().index(),
+            project.models(),
+            #[cfg(feature = "room-character")]
+            Some(playback),
+        )
+        .map_err(|error| format!("room model pose check at tick {}: {error}", sim.tick()))
+    };
+    let mut pose_counts = None;
+    if check_model_poses {
+        pose_counts = Some(check_poses(
+            &sim,
+            #[cfg(feature = "room-character")]
+            &character_playback,
+        )?);
+    }
     println!("room initial checksum: 0x{:016x}", sim.frame().checksum());
     for _ in 0..ticks {
         step(&mut sim, held);
+        #[cfg(feature = "room-character")]
+        room_view::observe_character(
+            &mut character_playback,
+            FrameView::of(sim.frame()),
+            project.scene().index(),
+            project.models(),
+            room_view::PresentationTime::default(),
+        )?;
+        if check_model_poses {
+            pose_counts = Some(check_poses(
+                &sim,
+                #[cfg(feature = "room-character")]
+                &character_playback,
+            )?);
+        }
     }
+    if let Some(counts) = pose_counts {
+        println!(
+            "room model poses: {} frames checked; final static: {} animated: {}",
+            ticks + 1,
+            counts.static_models,
+            counts.animated_models
+        );
+    }
+    #[cfg(feature = "room-character")]
+    if check_model_poses {
+        if let Some(digest) = observed_character_digest(project, FrameView::of(sim.frame()), &character_playback)? {
+            println!("room character observed pose sha256: {digest}");
+        }
+    }
+    #[cfg(feature = "room-character")]
+    if check_model_poses && project.character().is_some_and(|character|character.document.motion.and_then(|motion|motion.facing).is_some()) {
+        let placed = room_view::observed_character_placement(FrameView::of(sim.frame()),project.scene().index(),project.models(),&character_playback)?.ok_or("observed facing character missing")?;
+        println!("room character observed instance: {}",serde_json::to_string(&placed.transform).map_err(|error|error.to_string())?);
+    }
+    if let Some(camera) = project.camera().filter(|camera| camera.document.follow_player.is_some()) {
+        let resolved = camera.document.camera_for_frame(&camera.document.orbit(),(800,600),FrameView::of(sim.frame()))?;
+        // Normal headless stdout is the exporter's exact smoke protocol.
+        // Emit extra tracking diagnostics only under the explicit pose check.
+        if check_model_poses { println!("room follow camera target: {:?}",resolved.target); }
+    }
+    let lighting=project.point_light_settings_for_frame(FrameView::of(sim.frame()))?;
+    #[cfg(feature = "room-lighting")]
+    if check_model_poses {
+        if project.lighting().is_some_and(|light|light.document.activation.is_some()) {
+            println!("room lighting active: {}",u8::from(lighting.point_light.is_some()));
+        }
+        if project.lighting().is_some_and(|light|light.document.follow_player.is_some()) {
+            if let Some(light)=lighting.point_light {println!("room carried light position: {:?}",light.position);}
+        }
+    }
+    let _=lighting;
     let run = sim.frame().singleton::<RoomRun>();
     println!(
         "room tick: {} checksum: 0x{:016x}\nroom key: {} won: {}",
@@ -161,14 +347,24 @@ pub fn headless(
         let gpu = Wgpu::headless(WgpuOptions::default())?;
         let size = (1024, 768);
         let mut renderer = RoomRenderer::new(&gpu, size, project.models())?;
-        renderer.render(
+        renderer.set_point_light_settings(project.point_light_settings_for_frame(FrameView::of(sim.frame()))?)?;
+        #[cfg(feature = "room-lighting")]
+        renderer.set_environment(project.lighting().and_then(|light| light.document.environment.clone()))?;
+        #[cfg(feature = "room-character")]
+        let render = RoomRenderer::render_with_playback;
+        #[cfg(not(feature = "room-character"))]
+        let render = RoomRenderer::render;
+        render(
+            &mut renderer,
             FrameView::of(sim.frame()),
             project.scene().index(),
             project.models(),
             &match project.camera() {
-                Some(camera) => camera.document.camera(&camera.document.orbit(), size)?,
+                Some(camera) => camera.document.camera_for_frame(&camera.document.orbit(), size, FrameView::of(sim.frame()))?,
                 None => room_view::camera(size),
             },
+            #[cfg(feature = "room-character")]
+            &character_playback,
         )?;
         let rgba = renderer.read_rgba8();
         if rgba.len() != (size.0 * size.1 * 4) as usize {
@@ -242,6 +438,30 @@ impl Keys {
             reserved: 0,
         }
     }
+    #[cfg(feature = "room-input-actions")]
+    fn sample_controls(&mut self, controls: &crate::room_controls::RoomControls) -> RoomInput {
+        if std::mem::take(&mut self.neutral_pending) { return RoomInput::default(); }
+        controls.input_from_held(self.down.iter().filter_map(|code| match code {
+            KeyCode::KeyA => Some(orr_input::Key::A), KeyCode::KeyB => Some(orr_input::Key::B),
+            KeyCode::KeyC => Some(orr_input::Key::C), KeyCode::KeyD => Some(orr_input::Key::D),
+            KeyCode::KeyE => Some(orr_input::Key::E), KeyCode::KeyF => Some(orr_input::Key::F),
+            KeyCode::KeyG => Some(orr_input::Key::G), KeyCode::KeyH => Some(orr_input::Key::H),
+            KeyCode::KeyI => Some(orr_input::Key::I), KeyCode::KeyJ => Some(orr_input::Key::J),
+            KeyCode::KeyK => Some(orr_input::Key::K), KeyCode::KeyL => Some(orr_input::Key::L),
+            KeyCode::KeyM => Some(orr_input::Key::M), KeyCode::KeyN => Some(orr_input::Key::N),
+            KeyCode::KeyO => Some(orr_input::Key::O), KeyCode::KeyP => Some(orr_input::Key::P),
+            KeyCode::KeyQ => Some(orr_input::Key::Q), KeyCode::KeyR => Some(orr_input::Key::R),
+            KeyCode::KeyS => Some(orr_input::Key::S), KeyCode::KeyT => Some(orr_input::Key::T),
+            KeyCode::KeyU => Some(orr_input::Key::U), KeyCode::KeyV => Some(orr_input::Key::V),
+            KeyCode::KeyW => Some(orr_input::Key::W), KeyCode::KeyX => Some(orr_input::Key::X),
+            KeyCode::KeyY => Some(orr_input::Key::Y), KeyCode::KeyZ => Some(orr_input::Key::Z),
+            KeyCode::ArrowLeft => Some(orr_input::Key::ArrowLeft), KeyCode::ArrowRight => Some(orr_input::Key::ArrowRight),
+            KeyCode::ArrowUp => Some(orr_input::Key::ArrowUp), KeyCode::ArrowDown => Some(orr_input::Key::ArrowDown),
+            KeyCode::Space => Some(orr_input::Key::Space), KeyCode::Escape => Some(orr_input::Key::Escape),
+            KeyCode::Enter => Some(orr_input::Key::Enter), KeyCode::Tab => Some(orr_input::Key::Tab),
+            _ => None,
+        }))
+    }
 }
 struct Graphics {
     window: Arc<Window>,
@@ -252,8 +472,12 @@ struct Graphics {
     format: TextureFormat,
 }
 struct App {
+    #[cfg(all(feature = "room-progress", target_os = "linux"))]
+    progress: crate::room_progress::ProgressSession,
     project: PreparedProject,
     sim: Simulation<RoomEscapeV1>,
+    #[cfg(feature = "room-character")]
+    character_playback: crate::room_character::PlaybackCursor,
     graphics: Option<Graphics>,
     keys: Keys,
     focused: bool,
@@ -265,12 +489,79 @@ struct App {
     error: Option<String>,
 }
 impl App {
+    fn new(project: PreparedProject) -> Result<Self, String> {
+        let sim = project.scene().simulation()?;
+        #[cfg(feature = "room-character")]
+        let mut character_playback = crate::room_character::PlaybackCursor::default();
+        #[cfg(feature = "room-character")]
+        room_view::observe_character(
+            &mut character_playback,
+            FrameView::of(sim.frame()),
+            project.scene().index(),
+            project.models(),
+            room_view::PresentationTime::default(),
+        )?;
+        let orbit = project.camera().map_or_else(
+            || OrbitCamera::new([0.0, 0.5, 0.0], 0.65, 1.02, 60.0),
+            |camera| camera.document.orbit(),
+        );
+        #[cfg(all(feature = "room-progress", target_os = "linux"))]
+        let progress = crate::room_progress::ProgressSession::open(&project);
+        Ok(Self {
+            #[cfg(all(feature = "room-progress", target_os = "linux"))]
+            progress,
+            project,
+            sim,
+            #[cfg(feature = "room-character")]
+            character_playback,
+            graphics: None,
+            keys: Keys::default(),
+            focused: false,
+            last: Instant::now(),
+            accumulated: Duration::ZERO,
+            orbit,
+            drag: None,
+            cursor: None,
+            error: None,
+        })
+    }
+
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: String) {
         self.error = Some(error);
         event_loop.exit();
     }
+    fn step_authoritative(&mut self, input: RoomInput) -> Result<(), String> {
+        #[cfg(all(feature = "room-progress", target_os = "linux"))]
+        let before = (self.sim.tick(), self.sim.frame().singleton::<RoomRun>().won);
+        step(&mut self.sim, input);
+        #[cfg(all(feature = "room-progress", target_os = "linux"))]
+        self.progress.observe(
+            before.0,
+            before.1,
+            self.sim.tick(),
+            self.sim.frame().singleton::<RoomRun>().won,
+        );
+        #[cfg(feature = "room-character")]
+        self.observe_character()?;
+        Ok(())
+    }
+    #[cfg(feature = "room-character")]
+    fn observe_character(&mut self) -> Result<(), String> {
+        room_view::observe_character(
+            &mut self.character_playback,
+            FrameView::of(self.sim.frame()),
+            self.project.scene().index(),
+            self.project.models(),
+            room_view::PresentationTime::default(),
+        )
+    }
     fn restart(&mut self) -> Result<(), String> {
         self.sim = self.project.scene().simulation()?;
+        #[cfg(feature = "room-character")]
+        {
+            self.character_playback.reset();
+            self.observe_character()?;
+        }
         if let Some(camera) = self.project.camera() {
             self.orbit = camera.document.orbit();
             self.drag = None;
@@ -285,7 +576,7 @@ impl App {
         let now = Instant::now();
         let elapsed = now.saturating_duration_since(self.last);
         self.last = now;
-        let Some(g) = &mut self.graphics else {
+        let Some(g) = &self.graphics else {
             return Ok(());
         };
         if g.size.0 == 0 || g.size.1 == 0 {
@@ -296,23 +587,47 @@ impl App {
             self.accumulated += elapsed.min(Duration::from_millis(250));
             let interval = Duration::from_secs_f64(1.0 / f64::from(TICK_RATE));
             while self.accumulated >= interval {
-                step(&mut self.sim, self.keys.sample());
+                let input = {
+                    #[cfg(feature = "room-input-actions")]
+                    if let Some(controls) = self.project.controls() {
+                        self.keys.sample_controls(&controls.map)
+                    } else { self.keys.sample() }
+                    #[cfg(not(feature = "room-input-actions"))]
+                    { self.keys.sample() }
+                };
+                self.step_authoritative(input)?;
                 self.accumulated -= interval;
             }
         } else {
             self.accumulated = Duration::ZERO;
         }
+        let g = self.graphics.as_mut().expect("graphics checked above");
         let run = self.sim.frame().singleton::<RoomRun>();
-        g.window.set_title(&format!("Room Escape | key: {} | {} | WASD/arrows move, E interact, R restart, Esc quit | mouse orbit/pan/zoom", run.key_collected, if run.won != 0 { "WON" } else if run.key_collected == 0 { "exit locked" } else { "exit unlocked" }));
+        let title = window_title(
+            run,
+            #[cfg(feature = "room-input-actions")]
+            self.project.controls().map(|controls| &controls.map),
+        );
+        #[cfg(all(feature = "room-progress", target_os = "linux"))]
+        let title = format!("{title} | {}", self.progress.status());
+        g.window.set_title(&title);
+        g.renderer.set_point_light_settings(self.project.point_light_settings_for_frame(FrameView::of(self.sim.frame()))?)?;
+        #[cfg(feature = "room-lighting")]
+        g.renderer.set_environment(self.project.lighting().and_then(|light| light.document.environment.clone()))?;
         // The backend reconfigures lost/outdated surfaces and returns Skip.
         if let Acquire::Frame(surface_frame) = g.rhi.acquire_frame(&mut g.surface) {
             let view = g.rhi.frame_view(&surface_frame);
-            g.renderer.render_to(
+            #[cfg(feature = "room-character")]
+            let render = RoomRenderer::render_to_with_playback;
+            #[cfg(not(feature = "room-character"))]
+            let render = RoomRenderer::render_to;
+            render(
+                &mut g.renderer,
                 FrameView::of(self.sim.frame()),
                 self.project.scene().index(),
                 self.project.models(),
                 &match self.project.camera() {
-                    Some(camera) => camera.document.camera(&self.orbit, g.size)?,
+                    Some(camera) => camera.document.camera_for_frame(&self.orbit, g.size, FrameView::of(self.sim.frame()))?,
                     None => self.orbit.camera(),
                 },
                 orr_render::ImportedSceneTarget {
@@ -321,6 +636,8 @@ impl App {
                     format: g.format,
                     sample_count: 1,
                 },
+                #[cfg(feature = "room-character")]
+                &self.character_playback,
             )?;
             g.rhi.present(surface_frame);
         }
@@ -355,8 +672,11 @@ impl ApplicationHandler for App {
                 },
             )?;
             let format = rhi.surface_format(&surface);
-            let renderer =
+            let mut renderer =
                 RoomRenderer::new_with_format(&rhi, size, self.project.models(), format)?;
+            renderer.set_point_light_settings(self.project.point_light_settings_for_frame(FrameView::of(self.sim.frame()))?)?;
+            #[cfg(feature = "room-lighting")]
+            renderer.set_environment(self.project.lighting().and_then(|light| light.document.environment.clone()))?;
             Ok::<_, String>(Graphics {
                 window,
                 rhi,
@@ -514,24 +834,7 @@ impl ApplicationHandler for App {
     }
 }
 pub fn run_window(project: PreparedProject) -> Result<(), String> {
-    let sim = project.scene().simulation()?;
-    let orbit = project.camera().map_or_else(
-        || OrbitCamera::new([0.0, 0.5, 0.0], 0.65, 1.02, 60.0),
-        |camera| camera.document.orbit(),
-    );
-    let mut app = App {
-        project,
-        sim,
-        graphics: None,
-        keys: Keys::default(),
-        focused: false,
-        last: Instant::now(),
-        accumulated: Duration::ZERO,
-        orbit,
-        drag: None,
-        cursor: None,
-        error: None,
-    };
+    let mut app = App::new(project)?;
     let event_loop = EventLoop::new().map_err(|e| e.to_string())?;
     event_loop.set_control_flow(ControlFlow::WaitUntil(
         Instant::now() + Duration::from_millis(16),
@@ -546,6 +849,70 @@ mod tests {
     fn args(s: &[&str]) -> Vec<String> {
         s.iter().map(|s| s.to_string()).collect()
     }
+    #[test]
+    fn title_preserves_legacy_defaults_and_run_status() {
+        for (key_collected, won, status) in [
+            (0, 0, "exit locked"),
+            (1, 0, "exit unlocked"),
+            (1, 1, "WON"),
+        ] {
+            let run = RoomRun {
+                key_collected,
+                won,
+                ..RoomRun::default()
+            };
+            assert_eq!(
+                window_title(
+                    &run,
+                    #[cfg(feature = "room-input-actions")]
+                    None
+                ),
+                format!("Room Escape | key: {key_collected} | {status} | WASD/arrows move, E interact, R restart, Esc quit | mouse orbit/pan/zoom")
+            );
+        }
+    }
+
+    #[cfg(feature = "room-input-actions")]
+    #[test]
+    fn title_uses_admitted_mapping_and_all_aliases() {
+        use crate::room_controls::RoomControls;
+        use orr_input::{Button, Key};
+        let mut map = RoomControls::default_map();
+        let controls = RoomControls::from_map(&map).unwrap();
+        assert_eq!(
+            window_title(&RoomRun::default(), Some(&controls)),
+            "Room Escape | key: 0 | exit locked | A/ArrowLeft left, D/ArrowRight right, W/ArrowUp forward, S/ArrowDown backward, E interact, R restart, Esc quit | mouse orbit/pan/zoom"
+        );
+        for (action, keys) in map.actions.iter_mut().zip([
+            vec![Key::J, Key::ArrowLeft],
+            vec![Key::L],
+            vec![Key::I],
+            vec![Key::K],
+            vec![Key::Space, Key::Enter, Key::Tab],
+        ]) {
+            action.bindings = keys
+                .into_iter()
+                .map(|key| Button::Keyboard { key })
+                .collect();
+        }
+        // Action order does not determine labels. Read through the real admission path.
+        map.actions.reverse();
+        let controls = RoomControls::load(&serde_json::to_vec(&map).unwrap()).unwrap();
+        assert_eq!(
+            window_title(&RoomRun::default(), Some(&controls)),
+            "Room Escape | key: 0 | exit locked | J/ArrowLeft left, L right, I forward, K backward, Space/Enter/Tab interact, R restart, Esc quit | mouse orbit/pan/zoom"
+        );
+    }
+
+    #[test]
+    fn help_distinguishes_defaults_authored_keys_and_reserved_controls() {
+        assert!(HELP.contains("Defaults: WASD/arrows"));
+        assert!(HELP.contains("Authored controls override movement/interact keys"));
+        assert!(HELP.contains("window title for physical keys"));
+        assert!(HELP.contains("R: restart; Escape: quit (reserved)"));
+        assert!(HELP.contains("Mouse left drag: orbit; right/middle drag: pan; wheel: zoom"));
+    }
+
     #[test]
     fn strict_options() {
         assert!(Options::parse(vec![]).is_err());
@@ -564,6 +931,26 @@ mod tests {
             "left,right,up,interact",
         ]))
         .unwrap();
+        assert!(!options.check_model_poses);
+        assert!(Options::parse(args(&["--project", "x", "--check-model-poses"])).is_err());
+        assert!(Options::parse(args(&[
+            "--project",
+            "x",
+            "--headless",
+            "--check-model-poses",
+            "--check-model-poses"
+        ]))
+        .is_err());
+        assert!(
+            Options::parse(args(&[
+                "--project",
+                "x",
+                "--headless",
+                "--check-model-poses"
+            ]))
+            .unwrap()
+            .check_model_poses
+        );
         assert_eq!(options.ticks, 0);
         assert_eq!(options.held.move_x, 0);
         assert_eq!(options.held.move_z, -1);
@@ -593,4 +980,66 @@ mod tests {
         assert_eq!(keys.sample(), RoomInput::default());
         assert_eq!(keys.sample().move_z, -1);
     }
+    #[cfg(feature = "room-input-actions")]
+    #[test]
+    fn authored_mapping_uses_the_real_keys_admission_seam() {
+        let mut map = crate::room_controls::RoomControls::default_map();
+        map.actions[0].bindings = vec![orr_input::Button::Keyboard { key: orr_input::Key::J }];
+        let controls = crate::room_controls::RoomControls::from_map(&map).unwrap();
+        let mut keys = Keys::default();
+        assert!(keys.event(KeyCode::KeyJ, true, false, false, true));
+        assert_eq!(keys.sample_controls(&controls).move_x, -1);
+        keys.clear();
+        assert_eq!(keys.sample_controls(&controls), RoomInput::default());
+        assert!(!keys.event(KeyCode::KeyJ, true, false, true, true));
+        assert_eq!(keys.sample_controls(&controls), RoomInput::default());
+        keys.event(KeyCode::KeyJ, false, false, false, true);
+        assert!(keys.event(KeyCode::KeyJ, true, false, false, true));
+        assert_eq!(keys.sample_controls(&controls).move_x, -1);
+        keys.clear();
+        assert_eq!(keys.sample_controls(&controls), RoomInput::default());
+        assert!(!keys.event(KeyCode::KeyJ, true, false, false, false));
+        assert_eq!(keys.sample_controls(&controls), RoomInput::default());
+        keys.event(KeyCode::KeyJ, false, false, false, true);
+        assert!(keys.event(KeyCode::KeyJ, true, false, false, true));
+        assert_eq!(keys.sample_controls(&controls).move_x, -1);
+    }
+
+    #[cfg(feature = "room-input-actions")]
+    #[test]
+    fn authored_defaults_keep_alias_cancel_and_held_interact_in_keys_state() {
+        let controls = crate::room_controls::RoomControls::from_map(
+            &crate::room_controls::RoomControls::default_map(),
+        ).unwrap();
+        let mut keys = Keys::default();
+        for code in [KeyCode::KeyA, KeyCode::ArrowLeft, KeyCode::KeyD] {
+            assert!(keys.event(code, true, false, false, true));
+        }
+        assert_eq!(keys.sample_controls(&controls).move_x, 0);
+        assert!(keys.event(KeyCode::KeyE, true, false, false, true));
+        assert_ne!(keys.sample_controls(&controls).buttons & INTERACT, 0);
+        keys.event(KeyCode::KeyE, false, false, false, true);
+        assert_eq!(keys.sample_controls(&controls).buttons & INTERACT, 0);
+    }
 }
+
+#[cfg(all(test, feature = "room-character"))]
+#[path = "room_character_app_tests.rs"]
+mod character_tests;
+
+#[cfg(all(
+    test,
+    feature = "room-progress",
+    feature = "project-create",
+    target_os = "linux"
+))]
+#[path = "room_progress_app_tests.rs"]
+mod progress_tests;
+
+#[cfg(all(test, feature = "room-character", feature = "project-create", target_os = "linux"))]
+#[path = "room_character_pickup_app_tests.rs"]
+mod pickup_tests;
+
+#[cfg(all(test, feature="room-character", feature="project-create", target_os="linux"))]
+#[path="room_character_facing_app_tests.rs"]
+mod facing_tests;

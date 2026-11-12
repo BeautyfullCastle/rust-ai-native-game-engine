@@ -2,7 +2,9 @@
 use super::{checked_directory, ensure_regular, room_runtime};
 use orr_model_bindings::model_bindings::Document;
 use orr_package::{Lock, PackagePreview, Project, ProjectManifest};
-use orr_sample::room_project::{self, PreparedProject};
+use orr_sample::room_project;
+#[cfg(test)]
+use orr_sample::room_project::PreparedProject;
 use std::{
     collections::BTreeMap,
     fs,
@@ -219,7 +221,7 @@ pub(super) fn admit_candidate(
     let files = read_room_files(&project)?;
     // Closed Room admission rejects unknown/opaque scene or sidecar fields,
     // unresolved bindings, unsupported kinds and stale package/file identities.
-    let prepared = PreparedProject::open(root)?;
+    let prepared = super::open_room_project(root)?;
     if prepared.root() != root
         || files.get(prepared.path()).map(Vec::as_slice) != Some(prepared.scene().text().as_bytes())
     {
@@ -239,6 +241,14 @@ pub(super) fn admit_candidate(
         {
             return Err("Room camera changed during removal admission".into());
         }
+    }
+    #[cfg(feature="room-lighting")]
+    if let Some(lighting)=prepared.lighting() {
+        if files.get(&lighting.path)!=Some(&lighting.bytes) || files.get(&lighting.manifest_path)!=Some(&lighting.manifest_bytes) {return Err("Room lighting changed during package admission".into());}
+    }
+    #[cfg(feature="room-character")]
+    if let Some(character)=prepared.character() {
+        if files.get(&character.path)!=Some(&character.bytes) || files.get(&character.manifest_path)!=Some(&character.manifest_bytes) {return Err("Room character changed during package admission".into());}
     }
     for (guid, binding) in &prepared.models().document.bindings {
         let retained = candidate.packages.get(&binding.package).ok_or_else(|| {
@@ -277,7 +287,7 @@ pub(super) fn admit_candidate(
     })
 }
 
-fn read_room_files(project: &Project) -> Result<BTreeMap<PathBuf, Vec<u8>>, String> {
+pub(super) fn read_room_files(project: &Project) -> Result<BTreeMap<PathBuf, Vec<u8>>, String> {
     let manifest_path = project.root().join("orr.project.json");
     let manifest_bytes = read_regular(&manifest_path, 1024 * 1024)?;
     let manifest: ProjectManifest = serde_json::from_slice(&manifest_bytes)
@@ -304,6 +314,9 @@ fn read_room_files(project: &Project) -> Result<BTreeMap<PathBuf, Vec<u8>>, Stri
             path.clone(),
             read_regular(&path, orr_sample::room_camera::MAX_BYTES as u64)?,
         );
+    }
+    for relative in [entry.lighting.as_ref(),entry.character.as_ref()].into_iter().flatten() {
+        let path=project.root().join(relative);files.insert(path.clone(),read_regular(&path,4096)?);
     }
     Ok(files)
 }

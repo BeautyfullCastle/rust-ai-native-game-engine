@@ -4,7 +4,7 @@
 use orr_sample::project_sprites::decode_atlas;
 use orr_sample::project_sprites::relative;
 pub use orr_sample::project_sprites::{
-    load_project_asset, Asset, Binding, Document, Source, MAX_BYTES,
+    load_project_asset, Asset, Binding, Document, Orientation, Source, MAX_BYTES,
 };
 #[cfg(test)]
 use orr_sprite::SpriteDocument;
@@ -15,6 +15,7 @@ use std::{
 };
 const MAX_HISTORY: usize = 128;
 
+#[cfg_attr(feature = "tilemap", derive(Clone))]
 pub struct Bindings {
     pub path: PathBuf,
     document: Document,
@@ -130,6 +131,33 @@ impl Bindings {
         }
         self.commit(next)
     }
+    /// Replace assets/clips/scale while retaining each actor's orientation.
+    /// Used by ordinary assignment; explicitly picked settings use `assign`
+    /// instead so copying identity can also clear a target orientation.
+    pub fn assign_preserving_orientation(
+        &mut self,
+        guids: &[orr_reflect::Guid],
+        binding: &Binding,
+    ) -> Result<(), String> {
+        if guids.is_empty() { return Err("select at least one scene entity".into()); }
+        let mut next = self.document.clone();
+        for guid in guids {
+            let key = guid.to_string();
+            let mut replacement = binding.clone();
+            replacement.orientation = next.bindings.get(&key).and_then(|old| old.orientation);
+            next.bindings.insert(key, replacement);
+        }
+        self.commit(next)
+    }
+    /// Change only one existing actor's orientation in the same whole-document
+    /// history as asset assignment. Reset removes the field but retains v3;
+    /// Undo restores the prior version as well as every authored value.
+    pub fn set_orientation(&mut self, guid: &orr_reflect::Guid, orientation: Option<Orientation>) -> Result<(), String> {
+        let mut next = self.document.clone();
+        let binding = next.bindings.get_mut(guid.as_str()).ok_or("selected entity has no sprite binding")?;
+        binding.orientation = orientation;
+        self.commit(next)
+    }
     /// Follow assignment/removal shares the sprite binding undo history.
     pub fn set_camera_follow(&mut self, guid: Option<orr_reflect::Guid>) -> Result<(), String> {
         let mut next = self.document.clone();
@@ -137,10 +165,13 @@ impl Bindings {
         self.commit(next)
     }
     fn commit(&mut self, mut next: Document) -> Result<(), String> {
-        // Preserve legacy documents until a v2 feature is authored. Migration
+        // Preserve legacy documents until a new feature is authored. Migration
         // is part of the same transaction, so undo restores the prior version.
         if next.version == 1 && next.has_v2_features() {
             next.version = 2;
+        }
+        if next.version < 3 && next.has_v3_features() {
+            next.version = 3;
         }
         next.validate()?;
         if next != self.document {
@@ -162,6 +193,46 @@ impl Bindings {
         if let Some(next) = self.redo.pop() {
             self.undo.push(std::mem::replace(&mut self.document, next));
         }
+    }
+    /// Tilemap-owned history changes only existing actor sources. Asset and
+    /// admission checks belong to TilemapPanel, before this candidate is installed.
+    #[cfg(feature = "tilemap")]
+    pub(crate) fn set_existing_sources(
+        &mut self,
+        guids: &[orr_reflect::Guid],
+        source: Source,
+    ) -> Result<(), String> {
+        if guids.is_empty() {
+            return Err("select at least one already-bound actor".into());
+        }
+        if !matches!(source, Source::Region(_) | Source::Clip(_)) {
+            return Err("tilemap actor appearance supports Region or Clip only".into());
+        }
+        let mut next = self.document.clone();
+        for guid in guids {
+            next.bindings
+                .get_mut(guid.as_str())
+                .ok_or("selected entity has no admitted actor binding")?
+                .source = source.clone();
+        }
+        self.commit(next)
+    }
+    #[cfg(feature = "tilemap")]
+    pub(crate) fn mark_tilemap_saved(&mut self) {
+        self.saved = self.document.clone();
+    }
+    #[cfg(feature = "tilemap")]
+    pub(crate) fn history_available(&self) -> (bool, bool) {
+        (!self.undo.is_empty(), !self.redo.is_empty())
+    }
+    #[cfg(all(test, feature = "tilemap", feature = "project-create", target_os = "linux"))]
+    pub(crate) fn tilemap_history_snapshot(&self) -> (Document, Document, Vec<Document>, Vec<Document>) {
+        (
+            self.document.clone(),
+            self.saved.clone(),
+            self.undo.clone(),
+            self.redo.clone(),
+        )
     }
     pub fn save(&mut self) -> Result<(), String> {
         self.document.validate()?;
@@ -269,6 +340,7 @@ mod tests {
             document: "hero.json".into(),
             source,
             units_per_pixel: 0.125,
+            orientation: None,
         }
     }
 
@@ -455,7 +527,14 @@ mod tests {
             .err()
             .unwrap()
             .contains("version-1"));
-        for version in [0, 3, u32::MAX] {
+        let legacy = open_json(&path, &legacy_json()).unwrap();
+        let mut v3 = legacy_json();
+        v3["version"] = serde_json::json!(3);
+        let admitted = open_json(&path, &v3).unwrap();
+        assert_eq!(admitted.document().version, 3);
+        assert_eq!(admitted.document().bindings, legacy.document().bindings);
+        assert!(admitted.document().bindings.values().all(|binding| binding.orientation.is_none()));
+        for version in [0, 4, u32::MAX] {
             let mut unknown = legacy_json();
             unknown["version"] = serde_json::json!(version);
             assert!(open_json(&path, &unknown)
@@ -691,6 +770,7 @@ mod tests {
             document: "hero.json".into(),
             source: Source::Region(1),
             units_per_pixel: 0.1,
+            orientation: None,
         };
         bindings.assign(&ids, Some(binding.clone())).unwrap();
         bindings.undo();
@@ -723,6 +803,7 @@ mod tests {
             document: "x.json".into(),
             source: Source::Region(1),
             units_per_pixel: f32::NAN,
+            orientation: None,
         };
         assert!(bindings.assign(&ids, Some(invalid)).is_err());
         assert_eq!(bindings.document(), &before);
@@ -843,6 +924,7 @@ mod tests {
                     document: "sprite.json".into(),
                     source: Source::Region(1),
                     units_per_pixel: 0.1,
+                    orientation: None,
                 }),
             )
             .unwrap();
@@ -871,6 +953,7 @@ mod tests {
                     document: "sprite.json".into(),
                     source: Source::Region(1),
                     units_per_pixel: 0.1,
+                    orientation: None,
                 }),
             )
             .unwrap();

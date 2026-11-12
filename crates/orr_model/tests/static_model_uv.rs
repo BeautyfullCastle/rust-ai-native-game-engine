@@ -1466,3 +1466,28 @@ fn cli_windows_nonlocal_prefixes_reject() {
     assert!(!fixture.output.exists());
     fixture.assert_unchanged();
 }
+
+#[test]
+fn shared_file_recipe_matches_memory_transform_without_publishing() {
+    let fixture = CliFixture::new();
+    let expected = transform_model_uv(&fixture.recipe, RECIPE_ID, |_| Ok(fixture.source.clone()))
+        .unwrap()
+        .to_bytes()
+        .unwrap();
+    let actual = authoring::transform_recipe(&fixture.input, RECIPE_ID).unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(fs::read(&fixture.input).unwrap(), fixture.recipe);
+    assert!(!fixture.output.exists());
+}
+
+#[test]
+fn shared_file_recipe_rejects_corruption_without_publishing() {
+    let fixture = CliFixture::new();
+    fs::write(&fixture.input, b"{}").unwrap();
+    assert!(authoring::transform_recipe(&fixture.input, RECIPE_ID).is_err());
+    assert!(!fixture.output.exists());
+    fs::write(&fixture.input, &fixture.recipe).unwrap();
+    fs::write(fixture.temp.join(SOURCE_PATH), b"invalid cooked model").unwrap();
+    assert!(authoring::transform_recipe(&fixture.input, RECIPE_ID).is_err());
+    assert!(!fixture.output.exists());
+}

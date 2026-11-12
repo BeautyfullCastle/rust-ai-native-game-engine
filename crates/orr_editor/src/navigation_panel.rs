@@ -12,6 +12,23 @@ use orr_fp::FP;
 use orr_navigation::{AgentProfile, Navigator, SearchBudget, TerrainGraph};
 use orr_remote::navigation_yard3d::{NavigationAgentSpec, NavigationScenePin, PIN_NAME};
 use serde_json::json;
+#[cfg(feature="terrain-patrol")]
+mod patrol_panel;
+#[cfg(feature="terrain-patrol")]
+#[path="navigation_panel/patrol_routes.rs"]
+pub(crate) mod patrol_routes;
+#[cfg(feature="terrain-patrol")]
+pub(crate) use patrol_panel::PatrolPickRequest;
+#[cfg(feature="terrain-patrol")]
+pub(crate) use patrol_panel::patrol_pick::Token as PatrolPickToken;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Endpoint {
+    Start,
+    Goal,
+    #[cfg(feature="terrain-patrol")]
+    Patrol(usize),
+}
 
 pub struct NavigationPanel {
     pub start: [String; 2],
@@ -22,6 +39,8 @@ pub struct NavigationPanel {
     loaded_scene: Option<String>,
     loaded_pin: Option<NavigationScenePin>,
     saved_pinned_source_mismatch: bool,
+    #[cfg(feature="terrain-patrol")]
+    patrol: patrol_panel::State,
 }
 
 impl Default for NavigationPanel {
@@ -35,6 +54,8 @@ impl Default for NavigationPanel {
             loaded_scene: None,
             loaded_pin: None,
             saved_pinned_source_mismatch: false,
+            #[cfg(feature="terrain-patrol")]
+            patrol: Default::default(),
         }
     }
 }
@@ -65,10 +86,14 @@ impl NavigationPanel {
             self.max_slope = format_fixed(pin.agent.max_slope);
             self.distance_per_tick = format_fixed(pin.agent.distance_per_tick);
         } else {
+            #[cfg(feature="terrain-patrol")]
+            let patrol=std::mem::take(&mut self.patrol);
             *self = Self {
                 loaded_scene: self.loaded_scene.clone(),
                 ..Self::default()
             };
+            #[cfg(feature="terrain-patrol")]
+            {self.patrol=patrol;}
         }
     }
 
@@ -153,6 +178,8 @@ impl NavigationPanel {
         if editor.game() != EditorGame::NavigationYard3D {
             return None;
         }
+        #[cfg(feature="terrain-patrol")]
+        if self.patrol.dirty || self.patrol.stale {return Some("Apply or reload the terrain patrol draft before Play".into());}
         let pin = editor
             .snapshot()
             .map(|s| *s.predicted().singleton::<NavigationScenePin>())?;
@@ -177,7 +204,7 @@ impl NavigationPanel {
         editor.admitted_navigation().error.clone()
     }
 
-    fn source<'a>(
+    pub(crate) fn source<'a>(
         &self,
         editor: &Editor,
         terrain: &'a TerrainPanel,
@@ -270,18 +297,29 @@ impl NavigationPanel {
         result
     }
 
-    pub fn show(&mut self, ui: &mut Ui, editor: &mut Editor, terrain: &TerrainPanel) {
+    pub fn show(
+        &mut self,
+        ui: &mut Ui,
+        editor: &mut Editor,
+        terrain: &TerrainPanel,
+    ) -> Option<Endpoint> {
         if editor.game() != EditorGame::NavigationYard3D {
-            return;
+            return None;
         }
         self.sync_from_editor(editor);
         self.observe_terrain(editor, terrain);
+        let mut pick = None;
         ui.collapsing("Point navigation", |ui| {
             ui.weak("One point agent · terrain triangles · zero radius, headroom and step");
             let context = self.source(editor, terrain);
             if let Err(reason) = &context { ui.label(reason); }
             let enabled = context.is_ok();
             ui.add_enabled_ui(editor.mode() == Mode::Edit, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(enabled, egui::Button::new("Pick navigation start")).clicked() { pick = Some(Endpoint::Start); }
+                    if ui.add_enabled(enabled, egui::Button::new("Pick navigation goal")).clicked() { pick = Some(Endpoint::Goal); }
+                });
+                ui.weak("Viewport picks snap to a walkable cell center; Build validates the complete route");
                 field(ui, "Navigation start X", &mut self.start[0]);
                 field(ui, "Navigation start Z", &mut self.start[1]);
                 field(ui, "Navigation goal X", &mut self.goal[0]);
@@ -292,6 +330,8 @@ impl NavigationPanel {
                     let _ = self.build_route(editor, terrain);
                 }
             });
+            #[cfg(feature="terrain-patrol")]
+            self.show_patrol(ui,editor,terrain);
             if self.route_stale(editor, terrain) {
                 ui.colored_label(egui::Color32::RED, "Terrain or route settings changed. Save terrain if needed, then Build route again");
             }
@@ -314,6 +354,7 @@ impl NavigationPanel {
                 ui.colored_label(egui::Color32::RED, error);
             }
         });
+        pick
     }
 }
 
@@ -324,3 +365,22 @@ fn field(ui: &mut Ui, label: &str, value: &mut String) {
             .labelled_by(label_response.id);
     });
 }
+
+#[cfg(all(test,target_os="linux",feature="terrain-patrol"))]
+#[path="navigation_panel/patrol_integration_tests.rs"]
+mod patrol_integration_tests;
+
+#[cfg(feature="terrain-patrol")]
+#[path="navigation_panel/patrol_route_overlay.rs"]
+mod patrol_route_overlay;
+#[cfg(all(test,target_os="linux",feature="terrain-patrol"))]
+#[path="navigation_panel/patrol_route_overlay_integration_tests.rs"]
+mod patrol_route_overlay_integration_tests;
+
+#[cfg(all(test,target_os="linux",feature="terrain-patrol"))]
+#[path="navigation_panel/patrol_order_integration_tests.rs"]
+mod patrol_order_integration_tests;
+
+#[cfg(feature="terrain-patrol")]
+#[path="navigation_panel/patrol_frame_points.rs"]
+mod patrol_frame_points;

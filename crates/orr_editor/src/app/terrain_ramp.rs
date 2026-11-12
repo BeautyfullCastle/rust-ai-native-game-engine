@@ -65,7 +65,7 @@ impl State {
         self.endpoints = [None; 2];
         self.status = reason.into();
     }
-    fn active(&self) -> bool {
+    pub(super) fn active(&self) -> bool {
         self.staged.is_some() || self.armed.is_some() || self.endpoints.iter().any(Option::is_some)
     }
 }

@@ -346,6 +346,8 @@ pub(super) fn prepare_snapshot(
     let mut settings = snapshot.settings();
     settings.clip = clip;
     settings.idle_clip = None;
+    // A private single-clip preview must not carry gameplay transition policy.
+    settings.crossfade_ticks = None;
     let preview_snapshot = snapshot
         .clone()
         .with_settings(settings)

@@ -214,3 +214,161 @@ fn remove_confirmation_controls_fit_a_fixed_inspector() {
         );
     }
 }
+
+#[cfg(feature = "mesh-hazards")]
+#[test]
+fn hazards_hud_history_save_reopen_and_profile_pins() {
+    let directory = tempfile::tempdir().unwrap();
+    let scene = directory.path().join("hud-hazards.scene.yaml");
+    let mut editor = crate::mesh_hazards_creator::prepare(
+        &scene,
+        &crate::mesh_workspace::mission::Settings::default(),
+        true,
+    )
+    .unwrap();
+    let scene_bytes = std::fs::read(&scene).unwrap();
+    let checksum = editor.checksum();
+    let history_len = editor.history().entries.len();
+    let mut panel = Panel::default();
+    panel.sync(&editor);
+    assert!(panel.can_edit(&editor));
+    assert!(panel.matches_saved_sidecar(None));
+    panel.title = "Hazard route".into();
+    panel.arrived_text = "Route destination reached".into();
+    panel.form_dirty = true;
+    assert!(panel.play_blocker(&editor).is_some());
+    assert!(panel.workspace_save_blocker(&editor).is_some());
+    assert!(!panel.matches_saved_sidecar(None));
+    panel.apply(&editor);
+    assert!(panel.error.is_none(), "{:?}", panel.error);
+    assert_eq!(
+        panel.applied_document(&editor).unwrap().title,
+        "Hazard route"
+    );
+    assert!(panel.play_blocker(&editor).is_some());
+    panel.undo();
+    assert!(panel.applied_document(&editor).is_none());
+    assert!(panel.matches_saved_sidecar(None));
+    panel.redo();
+    assert!(panel.save_workspace_changes(&editor).unwrap());
+    assert!(panel.play_blocker(&editor).is_none());
+    let digest = panel.sidecar_sha.clone().unwrap();
+    assert!(panel.matches_saved_sidecar(Some(&digest)));
+    assert!(!panel.matches_saved_sidecar(None));
+    assert!(!panel.matches_saved_sidecar(Some("wrong")));
+    let mut reopened = Panel::default();
+    reopened.sync(&editor);
+    assert_eq!(reopened.current_document(), panel.current_document());
+    assert_eq!(editor.checksum(), checksum);
+    assert_eq!(editor.history().entries.len(), history_len);
+    assert_eq!(std::fs::read(&scene).unwrap(), scene_bytes);
+    assert!(editor.start_play());
+    panel.sync(&editor);
+    assert!(!panel.can_edit(&editor));
+    assert_eq!(
+        panel.applied_document(&editor).unwrap().title,
+        "Hazard route"
+    );
+    assert!(editor.restart());
+    panel.sync(&editor);
+    assert_eq!(panel.profile, Some(EditorGame::MeshHazardsV1));
+    assert!(panel.matches_saved_sidecar(Some(&digest)));
+
+    // Even identical scene, epoch and graph cannot authorize another profile's draft.
+    panel.profile = Some(EditorGame::MeshNavigation);
+    assert!(!panel.can_edit(&editor));
+    assert!(panel.applied_document(&editor).is_none());
+    assert!(panel.play_blocker(&editor).is_some());
+    panel.form_dirty = true;
+    panel.sync(&editor);
+    assert!(panel.context_stale);
+    assert!(!panel.matches_saved_sidecar(Some(&digest)));
+    panel.confirm_discard_changes = true;
+    panel.discard_changes_and_reload(&editor);
+    assert_eq!(panel.profile, Some(EditorGame::MeshHazardsV1));
+    assert!(!panel.dirty());
+    assert!(panel.matches_saved_sidecar(Some(&digest)));
+
+    panel.confirm_remove = true;
+    panel.remove();
+    assert!(panel.play_blocker(&editor).is_some());
+    panel.undo();
+    assert!(panel.matches_saved_sidecar(Some(&digest)));
+    panel.redo();
+    assert!(panel.save_workspace_changes(&editor).unwrap());
+    assert!(panel.matches_saved_sidecar(None));
+    reopened.reload(&editor);
+    assert!(reopened.current_document().is_none());
+    assert!(!crate::mesh_hud_store::sidecar_path(&scene)
+        .unwrap()
+        .exists());
+}
+
+#[cfg(feature = "mesh-hazards")]
+#[test]
+fn hazards_hud_invalid_sidecar_and_wrong_host_profile_fail_closed() {
+    let directory = tempfile::tempdir().unwrap();
+    let scene = directory.path().join("invalid-hud.scene.yaml");
+    let editor = crate::mesh_hazards_creator::prepare(
+        &scene,
+        &crate::mesh_workspace::mission::Settings::default(),
+        true,
+    )
+    .unwrap();
+    assert!(reported_scene_matches_request(
+        editor.spec(),
+        &scene,
+        EditorGame::MeshHazardsV1
+    ));
+    assert!(!reported_scene_matches_request(
+        editor.spec(),
+        &scene,
+        EditorGame::MeshNavigation
+    ));
+    let path = crate::mesh_hud_store::sidecar_path(&scene).unwrap();
+    std::fs::write(&path, b"invalid").unwrap();
+    let mut panel = Panel::default();
+    panel.sync(&editor);
+    assert!(panel.play_blocker(&editor).unwrap().contains("invalid"));
+    assert!(!panel.can_edit(&editor));
+    assert!(panel.applied_document(&editor).is_none());
+    assert!(!panel.matches_saved_sidecar(None));
+    assert!(!panel.matches_saved_sidecar(panel.sidecar_sha.as_deref()));
+    assert!(panel.can_discard_invalid(&editor));
+    panel.discard_invalid();
+    assert_eq!(std::fs::read(&path).unwrap(), b"invalid");
+    panel.confirm_discard_invalid = true;
+    panel.discard_invalid();
+    assert!(panel.error.is_none(), "{:?}", panel.error);
+    assert!(!path.exists());
+    assert!(panel.can_edit(&editor));
+    assert!(panel.matches_saved_sidecar(None));
+}
+
+#[cfg(feature = "mesh-hazards")]
+#[test]
+fn hazards_hud_external_changes_preserve_unsaved_history() {
+    let directory = tempfile::tempdir().unwrap();
+    let scene = directory.path().join("conflicting-hud.scene.yaml");
+    let editor = crate::mesh_hazards_creator::prepare(
+        &scene,
+        &crate::mesh_workspace::mission::Settings::default(),
+        true,
+    )
+    .unwrap();
+    let mut panel = Panel::default();
+    panel.sync(&editor);
+    panel.apply(&editor);
+    assert!(panel.save_workspace_changes(&editor).unwrap());
+    let path = crate::mesh_hud_store::sidecar_path(&scene).unwrap();
+    panel.title = "Unsaved edit".into();
+    panel.form_dirty = true;
+    panel.apply(&editor);
+    std::fs::write(&path, b"external update").unwrap();
+    assert!(panel.save_workspace_changes(&editor).is_err());
+    assert!(panel.dirty());
+    assert_eq!(panel.current_document().unwrap().title, "Unsaved edit");
+    assert_eq!(std::fs::read(&path).unwrap(), b"external update");
+    assert!(panel.play_blocker(&editor).is_some());
+    assert!(!panel.matches_saved_sidecar(panel.sidecar_sha.as_deref()));
+}

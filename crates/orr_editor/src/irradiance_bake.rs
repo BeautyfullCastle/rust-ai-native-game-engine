@@ -44,6 +44,8 @@ const MAX_FRAME_BODIES: usize = 65536;
 const MAX_ASSET_FILES: usize = 4096;
 const MAX_ASSET_BYTES: u64 = 256 * 1024 * 1024;
 static WORKER_ACTIVE: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+pub(crate) static WORKER_TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BakeCost {
@@ -213,6 +215,8 @@ fn participating_input_key(
         HostSpec::PreparedCollect { .. } => return Err("CollectDodge does not support local 3D asset authoring".into()),
         #[cfg(feature = "room-project")]
         HostSpec::PreparedRoom { scene, .. } => scene,
+        #[cfg(feature = "static-gameplay")]
+        HostSpec::PreparedRegistered { .. } => return Err("Registered gameplay does not provide a local bake input key".into()),
         HostSpec::Remote { .. } => return Err("Remote scene has no local bake input key".into()),
     };
     if editor.sim().scene_path.as_deref() != expected.to_str() {
@@ -405,6 +409,8 @@ fn capture(
         HostSpec::PreparedCollect { .. } => return Err("CollectDodge does not support local 3D asset authoring".into()),
         #[cfg(feature = "room-project")]
         HostSpec::PreparedRoom { scene, .. } => scene,
+        #[cfg(feature = "static-gameplay")]
+        HostSpec::PreparedRegistered { .. } => return Err("Registered gameplay cannot authorize a diffuse bake".into()),
         HostSpec::Remote { .. } => return Err("Remote paths cannot authorize a bake".into()),
     };
     if editor.sim().scene_path.as_deref() != expected.to_str() {
@@ -1500,7 +1506,6 @@ mod tests {
     use orr_render::irradiance::constant_irradiance;
     use orr_view::{RenderItem3, Shape3, Style3, Transform3, Vec3};
     use std::time::Duration;
-    static WORKER_TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn scene() -> BakeScene {
         BakeScene {

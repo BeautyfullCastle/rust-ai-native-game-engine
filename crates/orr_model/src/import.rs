@@ -1,6 +1,6 @@
 //! Bounded original parser for an explicit glTF 2.0/GLB subset. This is not a
 //! general glTF implementation. Unknown schema fields/extensions fail closed.
-//! Indexed triangles, f32 POSITION/NORMAL and optional unused UV0, node TRS/affine matrices, PNG,
+//! Indexed or sequential non-indexed triangles, f32 POSITION/NORMAL and optional unused UV0, node TRS/affine matrices, PNG,
 //! opaque diffuse base-color materials. No network or ambient filesystem reads.
 use crate::*;
 use base64::Engine;
@@ -259,7 +259,23 @@ impl TextureInfo {
     }
 }
 
-fn validate_texture_extensions(doc: &Document, animated: bool) -> Result<(), Error> {
+/// Apply the same admitted base-color UV policy to static/skeletal source
+/// validation and emitted vertices, without changing poses or texture bytes.
+pub(crate) fn primitive_uv(
+    doc: &Document,
+    primitive: &PrimitiveDef,
+    source_uv: [f32; 2],
+) -> Result<[f32; 2], Error> {
+    let texture = diffuse_pbr(&doc.materials[material_index(doc, primitive)?])?
+        .base_color_texture
+        .as_ref();
+    match texture {
+        Some(texture) => texture.transformed_uv(source_uv),
+        None => Ok(source_uv),
+    }
+}
+
+fn validate_texture_extensions(doc: &Document) -> Result<(), Error> {
     let used: BTreeSet<_> = doc.extensions_used.iter().collect();
     let required: BTreeSet<_> = doc.extensions_required.iter().collect();
     if used.len() != doc.extensions_used.len()
@@ -278,15 +294,12 @@ fn validate_texture_extensions(doc: &Document, animated: bool) -> Result<(), Err
             continue;
         };
         if let Some(extension) = &info.extensions {
-            if animated
-                || !doc
-                    .extensions_used
-                    .iter()
-                    .any(|name| name == TEXTURE_TRANSFORM)
+            if !doc
+                .extensions_used
+                .iter()
+                .any(|name| name == TEXTURE_TRANSFORM)
             {
-                return Err(invalid(
-                    "texture transform requires a declared static import",
-                ));
+                return Err(invalid("texture transform requires a declared import"));
             }
             let t = &extension.transform;
             if !t
@@ -303,11 +316,6 @@ fn validate_texture_extensions(doc: &Document, animated: bool) -> Result<(), Err
             return Err(invalid("only effective TEXCOORD_0 is supported"));
         }
     }
-    if animated && (!used.is_empty() || !required.is_empty()) {
-        return Err(invalid(
-            "animated importer does not support texture transforms",
-        ));
-    }
     Ok(())
 }
 #[derive(Deserialize)]
@@ -323,7 +331,8 @@ pub(crate) struct Mesh {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct PrimitiveDef {
     pub(crate) attributes: BTreeMap<String, usize>,
-    pub(crate) indices: usize,
+    #[serde(default, deserialize_with = "present_value")]
+    pub(crate) indices: Option<usize>,
     #[serde(default, deserialize_with = "present_value")]
     pub(crate) material: Option<usize>,
     pub(crate) mode: Option<u32>,
@@ -526,7 +535,7 @@ pub(crate) fn load_resources(
         return Err(invalid("glTF collection budget exceeded"));
     }
     // Admit the entire document before any caller-provided resource resolver.
-    validate_texture_extensions(&doc, animated)?;
+    validate_texture_extensions(&doc)?;
     #[cfg(feature = "animation")]
     if animated {
         crate::animation_import::validate_document_limits(&doc)?;
@@ -624,7 +633,9 @@ pub(crate) fn load_resources(
         if a.count == 0
             || a.count > MAX_INDICES
             || stride < size
-            || (!animated && (a.normalized || matches!(a.kind.as_str(), "VEC4" | "MAT4")))
+            || (!animated
+                && ((a.normalized && !normalized_uv(a))
+                    || matches!(a.kind.as_str(), "VEC4" | "MAT4")))
             || (a.normalized && !matches!(a.component_type, 5121 | 5123))
             || (a.kind == "MAT4" && a.component_type != 5126)
             || stride % component != 0
@@ -795,6 +806,7 @@ pub fn import_with_resolver(
     } = load_resources(asset_id, bytes, resolver, false)?;
     // Validate every source mesh before allocating any decoded geometry.
     let mut primitive_count = 0usize;
+    let mut normalized_uv_count = 0usize;
     for mesh in &doc.meshes {
         primitive_count += mesh.primitives.len();
         if mesh.primitives.is_empty() || primitive_count > MAX_PRIMITIVES {
@@ -802,6 +814,24 @@ pub fn import_with_resolver(
         }
         for p in &mesh.primitives {
             validate_primitive(&doc, p)?;
+            if let Some(a) = p
+                .attributes
+                .get("TEXCOORD_0")
+                .map(|&index| &doc.accessors[index])
+                .filter(|a| normalized_uv(a))
+            {
+                normalized_uv_count = normalized_uv_count
+                    .checked_add(a.count)
+                    .ok_or_else(|| invalid("normalized UV source vertex budget overflow"))?;
+                if normalized_uv_count > MAX_VERTICES {
+                    return Err(invalid("normalized UV source vertex budget exceeded"));
+                }
+                // New integer UVs are validated even on unused meshes. Keep
+                // the legacy float whole-source admission contract unchanged.
+                for vertex in 0..a.count {
+                    primitive_uv(&doc, p, decode_uv(a, &doc, &buffers, vertex))?;
+                }
+            }
         }
     }
     let mut parents = vec![0u32; doc.nodes.len()];
@@ -921,6 +951,59 @@ impl Accessor {
         })
     }
 }
+/// The only normalized accessor form newly admitted by the static importer.
+fn normalized_uv(a: &Accessor) -> bool {
+    a.kind == "VEC2" && a.normalized && matches!(a.component_type, 5121 | 5123)
+}
+
+pub(crate) fn validate_uv(doc: &Document, a: &Accessor) -> Result<(), Error> {
+    let view = &doc.buffer_views[a.buffer_view];
+    if a.kind != "VEC2"
+        || !((a.component_type == 5126 && !a.normalized) || normalized_uv(a))
+        || view.target.is_some_and(|target| target != 34962)
+    {
+        return Err(invalid(
+            "UV attribute must be f32 or normalized unsigned u8/u16 VEC2",
+        ));
+    }
+    if normalized_uv(a) {
+        let (component, elements) = a.layout()?;
+        // glTF vertex offsets/strides are four-byte aligned relative to the
+        // view; the combined offset retains the existing component alignment.
+        if a.byte_offset % 4 != 0 || view.byte_stride.unwrap_or(component * elements) % 4 != 0 {
+            return Err(invalid(
+                "normalized UV vertex offset/stride alignment mismatch",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Called only after shared bounds and primitive type/count admission.
+pub(crate) fn decode_uv(
+    a: &Accessor,
+    doc: &Document,
+    buffers: &[Vec<u8>],
+    vertex: usize,
+) -> [f32; 2] {
+    match a.component_type {
+        5121 => {
+            let bytes = a.bytes(doc, buffers, vertex);
+            [f32::from(bytes[0]) / 255.0, f32::from(bytes[1]) / 255.0]
+        }
+        5123 => {
+            let bytes = a.bytes(doc, buffers, vertex);
+            std::array::from_fn(|channel| {
+                f32::from(u16::from_le_bytes([
+                    bytes[channel * 2],
+                    bytes[channel * 2 + 1],
+                ])) / 65535.0
+            })
+        }
+        _ => a.floats(doc, buffers, vertex),
+    }
+}
+
 fn diffuse_pbr(material: &MaterialDef) -> Result<&Pbr, Error> {
     let pbr = material.pbr_metallic_roughness.as_ref().ok_or_else(|| {
         invalid("default glTF PBR material has metallic=1; importer requires explicit metallic=0 and roughness=1")
@@ -956,7 +1039,7 @@ fn validate_primitive(doc: &Document, p: &PrimitiveDef) -> Result<(), Error> {
         || (requires_uv(doc, p)? && !has_uv)
     {
         return Err(invalid(
-            "requires indexed TRIANGLES with POSITION/NORMAL and only optional TEXCOORD_0 (required for textured materials)",
+            "requires TRIANGLES with POSITION/NORMAL and only optional TEXCOORD_0 (required for textured materials)",
         ));
     }
     material_index(doc, p)?;
@@ -974,7 +1057,10 @@ fn validate_primitive(doc: &Document, p: &PrimitiveDef) -> Result<(), Error> {
         };
         let a = at(&doc.accessors, index, name)?;
         let view = &doc.buffer_views[a.buffer_view];
-        if a.component_type != 5126
+        if name == "TEXCOORD_0" {
+            validate_uv(doc, a)?;
+        }
+        if (name != "TEXCOORD_0" && a.component_type != 5126)
             || a.kind != kind
             || a.count != pos.count
             || view.target.is_some_and(|v| v != 34962)
@@ -987,7 +1073,10 @@ fn validate_primitive(doc: &Document, p: &PrimitiveDef) -> Result<(), Error> {
     {
         return Err(invalid("POSITION bounds required"));
     }
-    let idx = at(&doc.accessors, p.indices, "indices")?;
+    let Some(index) = p.indices else {
+        return validate_sequential_count(pos.count);
+    };
+    let idx = at(&doc.accessors, index, "indices")?;
     let view = &doc.buffer_views[idx.buffer_view];
     if idx.kind != "SCALAR"
         || !matches!(idx.component_type, 5121 | 5123 | 5125)
@@ -999,6 +1088,42 @@ fn validate_primitive(doc: &Document, p: &PrimitiveDef) -> Result<(), Error> {
     }
     Ok(())
 }
+// Called only after the POSITION accessor and primitive topology are admitted.
+// Missing indices mean consecutive vertices, not welding/deduplication.
+pub(crate) fn validate_sequential_count(count: usize) -> Result<(), Error> {
+    if count == 0 || count % 3 != 0 || count > MAX_VERTICES || count > MAX_INDICES {
+        return Err(invalid("invalid non-indexed TRIANGLES vertex count"));
+    }
+    Ok(())
+}
+
+pub(crate) fn primitive_index_count(doc: &Document, p: &PrimitiveDef) -> usize {
+    p.indices.map_or_else(
+        || doc.accessors[p.attributes["POSITION"]].count,
+        |index| doc.accessors[index].count,
+    )
+}
+
+// No allocation; callers first validate descriptors and account for the effective
+// index count in their existing source/expanded budgets.
+pub(crate) fn primitive_index(
+    doc: &Document,
+    buffers: &[Vec<u8>],
+    p: &PrimitiveDef,
+    offset: usize,
+) -> u32 {
+    let Some(index) = p.indices else {
+        return u32::try_from(offset).expect("validated bounded vertex count");
+    };
+    let accessor = &doc.accessors[index];
+    let bytes = accessor.bytes(doc, buffers, offset);
+    match accessor.component_type {
+        5121 => u32::from(bytes[0]),
+        5123 => u32::from(u16::from_le_bytes(bytes.try_into().expect("u16 index"))),
+        _ => u32::from_le_bytes(bytes.try_into().expect("u32 index")),
+    }
+}
+
 struct Builder<'a> {
     doc: &'a Document,
     buffers: &'a [Vec<u8>],
@@ -1030,9 +1155,9 @@ impl Builder<'_> {
                 let texture = diffuse_pbr(&self.doc.materials[material_index(self.doc, p)?])?
                     .base_color_texture
                     .as_ref();
-                let idx = &self.doc.accessors[p.indices];
-                self.vertices += pos.count;
-                self.indices += idx.count;
+                let index_count = primitive_index_count(self.doc, p);
+                self.vertices = self.vertices.saturating_add(pos.count);
+                self.indices = self.indices.saturating_add(index_count);
                 if self.vertices > MAX_VERTICES
                     || self.indices > MAX_INDICES
                     || self.primitives.len() >= MAX_PRIMITIVES
@@ -1057,7 +1182,7 @@ impl Builder<'_> {
                         normal: normal.floats(self.doc, self.buffers, v),
                         uv: {
                             let source_uv =
-                                uv.map_or([0.0; 2], |a| a.floats(self.doc, self.buffers, v));
+                                uv.map_or([0.0; 2], |a| decode_uv(a, self.doc, self.buffers, v));
                             match texture {
                                 Some(texture) => texture.transformed_uv(source_uv)?,
                                 None => source_uv,
@@ -1065,14 +1190,9 @@ impl Builder<'_> {
                         },
                     });
                 }
-                let mut indices = Vec::with_capacity(idx.count);
-                for n in 0..idx.count {
-                    let b = idx.bytes(self.doc, self.buffers, n);
-                    let index = match idx.component_type {
-                        5121 => u32::from(b[0]),
-                        5123 => u32::from(u16::from_le_bytes(b.try_into().expect("u16 index"))),
-                        _ => u32::from_le_bytes(b.try_into().expect("u32 index")),
-                    };
+                let mut indices = Vec::with_capacity(index_count);
+                for n in 0..index_count {
+                    let index = primitive_index(self.doc, self.buffers, p, n);
                     if index as usize >= pos.count {
                         return Err(invalid("index out of bounds"));
                     }
@@ -1210,29 +1330,55 @@ fn decode_png(bytes: &[u8], remaining: usize) -> Result<Image, Error> {
     {
         return Err(invalid("PNG extent or APNG unsupported"));
     }
-    let expected = width as usize * height as usize * 4;
+    let pixels = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or_else(|| invalid("PNG size overflow"))?;
+    let expected = pixels
+        .checked_mul(4)
+        .ok_or_else(|| invalid("PNG size overflow"))?;
     if expected > remaining {
         return Err(invalid("decoded image budget exceeded"));
     }
     let len = reader
         .output_buffer_size()
         .ok_or_else(|| invalid("PNG size overflow"))?;
-    if len != expected {
-        return Err(invalid("PNG must decode to exact RGBA8"));
+    // Only widen the input contract for genuinely opaque, original RGB8 PNGs.
+    // EXPAND/STRIP_16 and the existing RGBA output path remain unchanged.
+    let opaque_rgb = reader.info().color_type == png::ColorType::Rgb
+        && reader.info().bit_depth == png::BitDepth::Eight
+        && reader.info().trns.is_none()
+        && reader.output_color_type() == (png::ColorType::Rgb, png::BitDepth::Eight);
+    let decoded_len = if opaque_rgb { pixels * 3 } else { expected };
+    if len != decoded_len {
+        return Err(invalid("PNG must decode to exact RGBA8 or opaque RGB8"));
     }
-    let mut rgba8 = vec![0; len];
+    // Reserve the final, budgeted size once; no second full-image allocation.
+    let mut rgba8 = vec![0; expected];
     let info = reader
-        .next_frame(&mut rgba8)
+        .next_frame(&mut rgba8[..decoded_len])
         .map_err(|e| invalid(format!("PNG: {e}")))?;
     if info.width != width
         || info.height != height
-        || info.buffer_size() != expected
-        || info.color_type != png::ColorType::Rgba
+        || info.buffer_size() != decoded_len
+        || info.color_type
+            != if opaque_rgb {
+                png::ColorType::Rgb
+            } else {
+                png::ColorType::Rgba
+            }
         || info.bit_depth != png::BitDepth::Eight
     {
         return Err(invalid("PNG frame does not match static RGBA8 image"));
     }
     reader.finish().map_err(|e| invalid(format!("PNG: {e}")))?;
+    if opaque_rgb {
+        // Expand backwards so each source pixel is read before it is overwritten.
+        for pixel in (0..pixels).rev() {
+            let rgb = [rgba8[pixel * 3], rgba8[pixel * 3 + 1], rgba8[pixel * 3 + 2]];
+            rgba8[pixel * 4..pixel * 4 + 3].copy_from_slice(&rgb);
+            rgba8[pixel * 4 + 3] = 255;
+        }
+    }
     Ok(Image {
         width,
         height,
@@ -1243,6 +1389,51 @@ fn decode_png(bytes: &[u8], remaining: usize) -> Result<Image, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn rgb_png(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, width, height);
+            encoder.set_color(png::ColorType::Rgb);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            writer
+                .write_image_data(&vec![17; width as usize * height as usize * 3])
+                .unwrap();
+            writer.finish().unwrap();
+        }
+        bytes
+    }
+    #[test]
+    fn opaque_rgb_budget_is_final_rgba_size_and_exact_boundary_is_accepted() {
+        assert_eq!(
+            decode_png(&rgb_png(1, 1), 4).unwrap().rgba8,
+            [17, 17, 17, 255]
+        );
+        let bytes = rgb_png(2, 2);
+        assert_eq!(
+            decode_png(&bytes, 16).unwrap().rgba8,
+            [17, 17, 17, 255].repeat(4)
+        );
+        for remaining in [0, 12, 15] {
+            assert!(decode_png(&bytes, remaining)
+                .unwrap_err()
+                .to_string()
+                .contains("decoded image budget exceeded"));
+        }
+        // Insufficient final budget must fail before attempting to decode pixels.
+        assert!(decode_png(&bytes[..41], 15)
+            .unwrap_err()
+            .to_string()
+            .contains("decoded image budget exceeded"));
+    }
+    #[test]
+    fn opaque_rgb_extent_remains_bounded() {
+        let bytes = rgb_png(MAX_IMAGE_EXTENT + 1, 1);
+        assert!(decode_png(&bytes, MAX_DECODED_BYTES)
+            .unwrap_err()
+            .to_string()
+            .contains("PNG extent"));
+    }
     #[test]
     fn sha256_known_vectors() {
         assert_eq!(

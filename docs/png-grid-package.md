@@ -3,7 +3,8 @@
 The optional Linux `png_grid_package` example converts one full rectangular
 spritesheet into an installable sprite package, without cropping/re-encoding PNG
 bytes or manually authoring Sprite JSON. It does not install, edit a project,
-create actors, or claim rendering/interactive acceptance.
+create actors, or claim rendering/interactive acceptance. This remains an optional
+live sample CLI, not a new `orr_pkg` command or dispatch path.
 
 ```sh
 cargo run --release -p orr_sample --example png_grid_package --features project-create -- \
@@ -25,6 +26,10 @@ parent and cannot traverse upward or use symlinks. For example:
   "cell_height": 32,
   "columns": 2,
   "rows": 2,
+  "margin_x": 1,
+  "margin_y": 2,
+  "spacing_x": 3,
+  "spacing_y": 4,
   "clips": [
     {"id": "idle", "mode": "loop", "frames": [{"cell": 0, "duration_ms": 200}]},
     {"id": "walk", "mode": "once", "frames": [
@@ -35,8 +40,15 @@ parent and cannot traverse upward or use symlinks. For example:
 ```
 
 Cells have stable zero-based row-major IDs, starting at the top-left. The PNG
-must be exactly `cell_width * columns` by `cell_height * rows`. Every cell gets
-one region; references can repeat or reorder them. `loop` wraps at total duration;
+must be exactly `2 * margin_x + columns * cell_width + (columns - 1) * spacing_x`
+wide and `2 * margin_y + rows * cell_height + (rows - 1) * spacing_y` high
+(69 by 72 pixels for the example). The four optional margin/spacing fields default
+to zero and accept only unsigned 32-bit integers. Margins are symmetric: right
+matches left and bottom matches top, with no extra tail remainder or partial edge
+cells. Spacing separates cells only; spacing on a single-cell axis is unused.
+These are this recipe’s exact symmetric rules, not Tiled format/import compatibility.
+Cell `(column, row)` starts at `margin_x + column * cell_width + column * spacing_x`,
+`margin_y + row * cell_height + row * spacing_y`. Every cell gets one region; references can repeat or reorder them. `loop` wraps at total duration;
 `once` holds the last frame after completion. All frame durations are positive
 integer milliseconds with a non-overflowing total. Clip IDs must be nonempty and
 unique. Unknown/duplicate fields and positional-array records are rejected.
@@ -44,7 +56,8 @@ unique. Unknown/duplicate fields and positional-array records are rejected.
 The existing SpriteDocument contracts impose at most 2048 pixels per dimension,
 4096 cells, 256 clips, 4096 references per clip and 16384 references total. Input
 limits are recipe 1 MiB, compressed PNG 16 MiB, decoded RGBA 16 MiB, and UTF-8
-nonempty license 64 KiB. No margin/spacing, partial edge cells, trim/rotation,
+nonempty license 64 KiB. Full padded dimensions remain subject to these bounds,
+and overflow is rejected before region allocation or PNG decoding. No partial edge cells, trim/rotation,
 pivot guessing, resampling, or external editor format is supported.
 
 Output is `sprites.json`, byte-identical `atlas.png`, byte-identical `LICENSE.txt`,

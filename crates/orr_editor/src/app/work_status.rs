@@ -322,7 +322,7 @@ impl EditorApp {
 /// These labels are a projection of typed blockers, never a second classifier.
 pub(super) fn close_item(id: DomainId) -> Item {
     let (name, action) = match id {
-        DomainId::SpriteBindings => ("Sprite bindings · unsaved", "Use Save bindings in Sprite bindings (view only). Scene Save does not save this sidecar."),
+        DomainId::SpriteBindings => ("Sprite bindings · unsaved", "Use Save bindings, or Save actor appearances in a tilemap project. Scene Save does not save this sidecar."),
         DomainId::Tilemap => ("Tilemap · unsaved", "Use Save tilemap or Undo tile. Scene Save does not save tiles."),
         DomainId::CollectUiDocument => ("Collect UI document · unsaved", "Use Save UI document in Collect UI document. Scene Save does not save this document."),
         DomainId::CollectUiPreview => ("Collect UI preview · unapplied or unfinished", "Finish or cancel the gesture in the authored-screen preview. Apply accepted changes there, then Save UI document."),

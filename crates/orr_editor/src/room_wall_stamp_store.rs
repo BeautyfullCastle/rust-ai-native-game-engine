@@ -230,7 +230,9 @@ fn verify_directory(path: &Path, observed: &Metadata) -> Result<(), String> {
 fn same_directory_stamp(left: &Metadata, right: &Metadata) -> bool {
     #[cfg(windows)]
     {
-        same_metadata_stamp(left, right)
+        // Staging a sibling changes directory timestamps, not its identity.
+        left.creation_time() == right.creation_time()
+            && left.file_attributes() == right.file_attributes()
     }
     #[cfg(target_os = "linux")]
     {
@@ -330,8 +332,7 @@ fn is_reparse(metadata: &Metadata) -> bool {
 fn same_metadata_stamp(left: &Metadata, right: &Metadata) -> bool {
     #[cfg(windows)]
     {
-        left.creation_time() == right.creation_time()
-            && left.file_attributes() == right.file_attributes()
+        same_directory_stamp(left, right)
             && left.len() == right.len()
             && left.last_write_time() == right.last_write_time()
     }

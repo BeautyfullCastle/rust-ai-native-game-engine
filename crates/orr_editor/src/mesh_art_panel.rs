@@ -95,7 +95,7 @@ impl Default for Panel {
 
 impl Panel {
     pub(crate) fn sync(&mut self, editor: &Editor) {
-        if editor.game() != EditorGame::MeshNavigation || !editor.spec().is_local() {
+        if !supports_agent_art(editor.game()) || !editor.spec().is_local() {
             return;
         }
         if !document_frame_ready(
@@ -200,7 +200,7 @@ impl Panel {
     }
 
     pub(crate) fn show(&mut self, ui: &mut Ui, editor: &Editor) {
-        if editor.game() != EditorGame::MeshNavigation {
+        if !supports_agent_art(editor.game()) {
             return;
         }
         self.sync(editor);
@@ -421,7 +421,7 @@ impl Panel {
     }
 
     pub(crate) fn placement(&self, editor: &Editor) -> Option<crate::viewport3d::SceneModel> {
-        if editor.game() != EditorGame::MeshNavigation
+        if !supports_agent_art(editor.game())
             || self.document_pending
             || self.context_stale
             || self.sidecar_error.is_some()
@@ -443,7 +443,7 @@ impl Panel {
     }
 
     pub(crate) fn play_blocker(&self, editor: &Editor) -> Option<String> {
-        if editor.game() != EditorGame::MeshNavigation {
+        if !supports_agent_art(editor.game()) {
             return None;
         }
         if self.import_busy() {
@@ -473,6 +473,9 @@ impl Panel {
         if let Some(error) = &self.presentation_error {
             return Some(format!("Agent art cannot be presented: {error}"));
         }
+        if self.pending_form() {
+            return Some("Apply or reset agent art fields before Play or export".into());
+        }
         if self.facing_form_dirty() {
             return Some("Apply or reset the agent art facing option before Play".into());
         }
@@ -488,6 +491,18 @@ impl Panel {
         None
     }
 
+    #[cfg(any(test, feature = "mesh-hazards-export"))]
+    pub(crate) fn matches_saved_sidecar(&self, expected: Option<&str>) -> bool {
+        !self.document_pending
+            && !self.context_stale
+            && self.sidecar_error.is_none()
+            && self.presentation_error.is_none()
+            && !self.dirty()
+            && !self.pending_form()
+            && self.sidecar_sha.as_deref() == expected
+            && self.current_snapshot().is_some() == expected.is_some()
+    }
+
     pub(crate) fn dirty(&self) -> bool {
         self.current_entry().map(|entry| entry.id) != self.saved_id
             || self.facing_form_dirty()
@@ -495,7 +510,7 @@ impl Panel {
     }
 
     pub(crate) fn workspace_save_blocker(&self, editor: &Editor) -> Option<String> {
-        if editor.game() != EditorGame::MeshNavigation {
+        if !supports_agent_art(editor.game()) {
             return None;
         }
         if self.import_busy() {
@@ -548,6 +563,39 @@ impl Panel {
             Some(error) => Err(error),
             None if self.dirty() => Err("Agent art did not reach a saved state".into()),
             None => Ok(true),
+        }
+    }
+
+    // Compare only tiny authoring fields here: this runs on every UI frame.
+    // The explicit workspace save check below may serialize the bounded model.
+    fn pending_form(&self) -> bool {
+        if self.candidate.is_some() || self.material_slots.dirty() {
+            return true;
+        }
+        let Some(current) = self.current_snapshot() else {
+            return false;
+        };
+        let rotation = crate::mesh_rotation::to_degrees(current.rotation())
+            .map(|angles| angles.map(format_number));
+        if self.offset != current.offset().map(format_number)
+            || self.scale != format_number(current.scale())
+            || rotation.as_ref().ok() != Some(&self.rotation)
+            || self.face_route_direction != (current.facing() == crate::mesh_facing::Facing::Route)
+            || self.tint != current.tint().map(format_number)
+            || self.material_slots_draft != current.material_slots()
+        {
+            return true;
+        }
+        match current.surface() {
+            Some(surface) => {
+                !self.surface_enabled
+                    || self.surface_material != surface.material.to_string()
+                    || self.surface_uv_offset != surface.uv_offset.map(format_number)
+                    || self.surface_uv_scale != surface.uv_scale.map(format_number)
+                    || self.surface_quarter_turns != surface.uv_quarter_turns.to_string()
+                    || self.surface_pivot != surface.pivot.map(format_number)
+            }
+            None => self.surface_enabled,
         }
     }
 
@@ -769,7 +817,7 @@ impl Panel {
     }
 
     fn can_edit_context(&self, editor: &Editor) -> bool {
-        editor.game() == EditorGame::MeshNavigation
+        supports_agent_art(editor.game())
             && editor.spec().is_local()
             && editor.mode() == Mode::Edit
             && editor.can_mutate()
@@ -788,7 +836,7 @@ impl Panel {
 
     fn can_change_history(&self, editor: &Editor) -> bool {
         !self.import_busy()
-            && editor.game() == EditorGame::MeshNavigation
+            && supports_agent_art(editor.game())
             && editor.spec().is_local()
             && !self.document_pending
             && document_frame_ready(
@@ -807,7 +855,7 @@ impl Panel {
     }
 
     fn can_discard_invalid(&self, editor: &Editor) -> bool {
-        editor.game() == EditorGame::MeshNavigation
+        supports_agent_art(editor.game())
             && editor.spec().is_local()
             && editor.mode() == Mode::Edit
             && editor.can_mutate()
@@ -913,7 +961,7 @@ impl Panel {
     }
 
     fn current_identity(&self, editor: &Editor) -> Option<(PathBuf, [u8; 32])> {
-        if editor.game() != EditorGame::MeshNavigation || !editor.spec().is_local() {
+        if !supports_agent_art(editor.game()) || !editor.spec().is_local() {
             return None;
         }
         let scene = editor.path()?;
@@ -1125,21 +1173,25 @@ fn parse_tint(values: &[String; 4]) -> Result<[f32; 4], String> {
     crate::mesh_material::validate(tint)
 }
 
+fn supports_agent_art(game: EditorGame) -> bool {
+    game == EditorGame::MeshNavigation || game.is_mesh_hazards()
+}
+
 fn reported_scene_matches_request(
     game: EditorGame,
     spec: &HostSpec,
     reported: Option<&std::path::Path>,
 ) -> bool {
-    if game != EditorGame::MeshNavigation {
+    if !supports_agent_art(game) {
         return false;
     }
     let requested = match spec {
-        HostSpec::Local { scene, .. } => scene.as_path(),
+        HostSpec::Local { scene, .. } if game == EditorGame::MeshNavigation => scene.as_path(),
         HostSpec::LocalGame {
             scene,
             game: requested_game,
             ..
-        } if *requested_game == EditorGame::MeshNavigation => scene.as_path(),
+        } if *requested_game == game => scene.as_path(),
         _ => return false,
     };
     let Some(reported) = reported else {
@@ -1218,3 +1270,7 @@ fn format_number(value: f32) -> String {
 #[cfg(test)]
 #[path = "mesh_art_panel/tests.rs"]
 mod tests;
+
+#[cfg(all(test,target_os="linux"))]
+#[path="mesh_art_panel/cooked_integration_tests.rs"]
+mod cooked_integration_tests;

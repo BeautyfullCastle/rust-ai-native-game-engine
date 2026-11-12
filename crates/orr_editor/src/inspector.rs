@@ -130,7 +130,7 @@ fn show_field(ui: &mut Ui, base: Id, label: &str, ty: &TypeDesc, value: &Value, 
                     let name = format!("[{i}]");
                     show_field(ui, base, &name, elem, item, &join(path, &name), "", out);
                 }
-            });
+            }).header_response.on_hover_text(&hover);
         }
         (Kind::List { elem, min, max }, Value::Array(items)) => {
             egui::CollapsingHeader::new(format!("{label} [{}]", items.len())).id_salt(id).default_open(true).show(ui, |ui| {
@@ -292,7 +292,16 @@ impl Num {
 fn number_field(ui: &mut Ui, id: Id, canonical: &str, hover: &str, width: f32) -> Option<String> {
     let edit_id = id.with("text");
     let focused = ui.memory(|m| m.has_focus(edit_id));
-    let mut text: String = if focused { ui.data(|d| d.get_temp::<String>(edit_id)).unwrap_or_else(|| canonical.to_string()) } else { canonical.to_string() };
+    // A field drawn earlier can transfer focus before this widget is built.
+    // Preserve the draft for that ordinary blur frame, not for later refocus.
+    let losing_focus = !focused && ui.ctx().read_response(edit_id).is_some_and(|r| r.lost_focus());
+    // Selection changes can remove the widget before it observes lost_focus.
+    // An unfocused field displays canonical data; discard its abandoned draft
+    // too, so a later focus cannot resurrect text cancelled by Escape.
+    if !focused && !losing_focus {
+        ui.data_mut(|d| d.remove_temp::<String>(edit_id));
+    }
+    let mut text: String = if focused || losing_focus { ui.data(|d| d.get_temp::<String>(edit_id)).unwrap_or_else(|| canonical.to_string()) } else { canonical.to_string() };
     let resp = ui.add(egui::TextEdit::singleline(&mut text).id(edit_id).desired_width(width).clip_text(true)).on_hover_text(hover);
     if resp.changed() {
         ui.data_mut(|d| d.insert_temp(edit_id, text.clone()));
@@ -300,7 +309,7 @@ fn number_field(ui: &mut Ui, id: Id, canonical: &str, hover: &str, width: f32) -
     if resp.lost_focus() {
         ui.data_mut(|d| d.remove_temp::<String>(edit_id));
         let cancelled = ui.input(|i| i.key_pressed(egui::Key::Escape));
-        if !cancelled && text != canonical {
+        if !cancelled && ui.is_enabled() && text != canonical {
             return Some(text);
         }
     }

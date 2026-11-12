@@ -46,6 +46,7 @@ fn playback_fields<'fields>(
     face_route: bool,
 ) -> PlaybackFields<'fields> {
     PlaybackFields {
+        crossfade_ticks: None,
         moving_clip,
         idle_clip,
         rate,
@@ -436,4 +437,263 @@ fn animation_preview_clears_when_scene_context_changes() {
     panel.sync(&second_editor);
     assert!(!super::preview::has_preview(&panel));
     assert_eq!(panel.scene.as_deref(), Some(second_scene.as_path()));
+}
+
+#[cfg(all(feature = "mesh-mission", feature = "mesh-animated-models"))]
+#[test]
+fn named_authored_clips_stage_apply_save_and_restore_history() {
+    use egui_kittest::{kittest::Queryable, Harness};
+    let (_directory, editor, panel, original, scene_bytes, sidecar_bytes) = preview_fixture();
+    let clips = original.clips();
+    let clip_label = |index: usize| {
+        let (index, name, duration) = &clips[index];
+        let name = if name.trim().is_empty() {
+            "(unnamed)"
+        } else {
+            name
+        };
+        format!("Clip {index}: {name} ({duration:.3}s)")
+    };
+    let sidecar = crate::mesh_animation_store::sidecar_path(panel.scene.as_ref().unwrap()).unwrap();
+    let checksum = editor.checksum();
+    let mut harness = Harness::builder()
+        .with_size([1200.0, 1800.0])
+        .build_ui_state(
+            |ui, (panel, editor): &mut (Panel, crate::editor::Editor)| panel.show(ui, editor),
+            (panel, editor),
+        );
+    harness.get_by_label("Mesh agent animation").click();
+    harness.run_steps(3);
+    {
+        let (panel, editor) = harness.state_mut();
+        super::preview::request(panel, editor, "1", "16");
+        assert!(super::preview::has_preview(panel));
+    }
+    harness.get_by_label("Moving animation clip").click();
+    harness.run_steps(3);
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, &clip_label(0))
+        .click();
+    harness.run_steps(3);
+    assert!(harness.state().0.form_dirty);
+    assert!(!super::preview::has_preview(&harness.state().0));
+    assert_eq!(
+        harness.state().0.current_snapshot().unwrap().settings(),
+        original.settings()
+    );
+    assert_eq!(std::fs::read(&sidecar).unwrap(), sidecar_bytes);
+    harness.get_by_label("Idle animation clip").click();
+    harness.run_steps(3);
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, &clip_label(1))
+        .click();
+    harness.run_steps(3);
+    harness.get_by_label("Apply mesh animation").click();
+    harness.run_steps(3);
+    let authored = harness.state().0.current_snapshot().unwrap().settings();
+    assert_eq!(authored.clip, clips[0].0);
+    assert_eq!(authored.idle_clip, Some(clips[1].0));
+    harness.get_by_label("Undo mesh animation").click();
+    harness.run_steps(3);
+    assert_eq!(
+        harness.state().0.current_snapshot().unwrap().settings(),
+        original.settings()
+    );
+    assert_eq!(harness.state().0.clip, original.settings().clip.to_string());
+    assert_eq!(
+        harness.state().0.idle_clip,
+        original.settings().idle_clip.unwrap().to_string()
+    );
+    assert!(harness.state().0.idle_clip_enabled);
+    harness.get_by_label("Redo mesh animation").click();
+    harness.run_steps(3);
+    assert_eq!(
+        harness.state().0.current_snapshot().unwrap().settings(),
+        authored
+    );
+    assert_eq!(harness.state().0.clip, authored.clip.to_string());
+    assert_eq!(
+        harness.state().0.idle_clip,
+        authored.idle_clip.unwrap().to_string()
+    );
+    assert!(harness.state().0.idle_clip_enabled);
+    harness.get_by_label("Save mesh animation").click();
+    harness.run_steps(3);
+    assert!(!harness.state().0.dirty(), "{:?}", harness.state().0.error);
+    harness.get_by_label("Reload mesh animation").click();
+    harness.run_steps(3);
+    assert_eq!(
+        harness.state().0.current_snapshot().unwrap().settings(),
+        authored
+    );
+    assert_eq!(harness.state().1.checksum(), checksum);
+    assert_eq!(
+        std::fs::read(harness.state().0.scene.as_ref().unwrap()).unwrap(),
+        scene_bytes
+    );
+}
+
+#[cfg(all(feature = "mesh-mission", feature = "mesh-animated-models"))]
+#[test]
+fn named_authored_clip_list_uses_candidate_metadata_then_saved_fallback() {
+    use egui_kittest::{kittest::Queryable, Harness};
+    for use_candidate in [true, false] {
+        let (_directory, editor, mut panel, saved, _, _) = preview_fixture();
+        let candidate_root = tempfile::tempdir().unwrap();
+        let package = animated_package(candidate_root.path());
+        // Same-length JSON name replacement preserves the GLB chunk layout.
+        let mut bytes = ANIMATED_GLB.to_vec();
+        let occurrences: Vec<_> = bytes
+            .windows(4)
+            .enumerate()
+            .filter_map(|(index, bytes)| (bytes == b"bend").then_some(index))
+            .collect();
+        assert_eq!(occurrences.len(), 1);
+        bytes[occurrences[0]..occurrences[0] + 4].copy_from_slice(b"rest");
+        std::fs::write(package.join("animated.glb"), bytes).unwrap();
+        let candidate = Snapshot::from_package(
+            &package,
+            "animated.glb",
+            "LICENSE.txt",
+            saved.graph_revision(),
+        )
+        .unwrap();
+        assert_eq!(saved.clips()[0].1, "bend");
+        assert_eq!(candidate.clips()[0].1, "rest");
+        if use_candidate {
+            panel.candidate = Some(candidate);
+        }
+        let mut harness = Harness::builder()
+            .with_size([1200.0, 1800.0])
+            .build_ui_state(
+                |ui, (panel, editor): &mut (Panel, crate::editor::Editor)| panel.show(ui, editor),
+                (panel, editor),
+            );
+        harness.get_by_label("Mesh agent animation").click();
+        harness.run_steps(3);
+        harness.get_by_label("Moving animation clip").click();
+        harness.run_steps(3);
+        let duration = saved.clips()[0].2;
+        let (expected, absent) = if use_candidate {
+            ("rest", "bend")
+        } else {
+            ("bend", "rest")
+        };
+        assert!(harness
+            .query_by_role_and_label(
+                egui::accesskit::Role::Button,
+                &format!("Clip 0: {expected} ({duration:.3}s)")
+            )
+            .is_some());
+        assert!(harness
+            .query_by_role_and_label(
+                egui::accesskit::Role::Button,
+                &format!("Clip 0: {absent} ({duration:.3}s)")
+            )
+            .is_none());
+        assert_eq!(
+            harness.state().0.current_snapshot().unwrap().settings(),
+            saved.settings()
+        );
+    }
+}
+
+#[cfg(all(feature = "mesh-mission", feature = "mesh-animated-models"))]
+#[test]
+fn crossfade_compatibility_apply_preserves_value_and_invalid_idle_is_atomic() {
+    let (_directory, editor, mut panel, snapshot, scene_bytes, _) = preview_fixture();
+    let configured = snapshot.clone().with_settings(crate::mesh_animation::Settings {
+        crossfade_ticks: Some(12), ..snapshot.settings()
+    }).unwrap();
+    panel.push_state(Some(configured));
+    panel.copy_current_settings();
+    assert!(panel.save_workspace_changes(&editor).unwrap());
+    let scene = editor.path().unwrap();
+    let sidecar = crate::mesh_animation_store::sidecar_path(&scene).unwrap();
+    let saved = std::fs::read(&sidecar).unwrap();
+    panel.rate = "1.5".into();
+    panel.form_dirty = true;
+    panel.apply(&editor);
+    assert!(panel.error.is_none(), "{:?}", panel.error);
+    let settings = panel.current_snapshot().unwrap().settings();
+    assert_eq!(settings.crossfade_ticks, Some(12));
+    assert_eq!(settings.rate, 1.5);
+    assert_eq!(std::fs::read(&sidecar).unwrap(), saved, "Apply is not Save");
+    let cursor = panel.cursor;
+    let history_len = panel.history.len();
+    panel.idle_clip_enabled = false;
+    panel.form_dirty = true;
+    panel.apply(&editor);
+    assert!(panel.error.as_deref().unwrap().contains("crossfade"));
+    assert_eq!(panel.current_snapshot().unwrap().settings(), settings);
+    assert_eq!(panel.cursor, cursor);
+    assert_eq!(panel.history.len(), history_len);
+    assert_eq!(std::fs::read(&sidecar).unwrap(), saved);
+    assert_eq!(std::fs::read(scene).unwrap(), scene_bytes);
+}
+
+#[cfg(all(feature = "mesh-mission", feature = "mesh-animated-models"))]
+#[test]
+fn crossfade_single_clip_preview_is_private_and_leaves_document_policy_intact() {
+    let (_directory, editor, mut panel, snapshot, scene_bytes, sidecar_bytes) = preview_fixture();
+    let configured = snapshot.clone().with_settings(crate::mesh_animation::Settings {
+        crossfade_ticks: Some(12), ..snapshot.settings()
+    }).unwrap();
+    panel.push_state(Some(configured.clone()));
+    let settings = configured.settings();
+    let cursor = panel.cursor;
+    let (preview, tick) = super::preview::prepare_snapshot(&configured, "0", "12").unwrap();
+    assert_eq!(tick, 12);
+    assert_eq!(preview.settings().idle_clip, None);
+    assert_eq!(preview.settings().crossfade_ticks, None);
+    assert_eq!(configured.settings(), settings);
+    assert_eq!(panel.current_snapshot().unwrap().settings(), settings);
+    assert_eq!(panel.cursor, cursor);
+    let scene = editor.path().unwrap();
+    assert_eq!(std::fs::read(&scene).unwrap(), scene_bytes);
+    assert_eq!(std::fs::read(crate::mesh_animation_store::sidecar_path(&scene).unwrap()).unwrap(), sidecar_bytes);
+}
+
+#[cfg(all(feature="mesh-mission", feature="mesh-animated-models"))]
+#[test]
+fn crossfade_controls_apply_undo_redo_save_reopen_and_reject_invalid_duration() {
+    let (_directory, editor, mut panel, _, _, _) = preview_fixture();
+    panel.crossfade_enabled = true;
+    panel.crossfade_ticks = "6".into();
+    panel.form_dirty = true;
+    panel.apply(&editor);
+    assert!(panel.error.is_none(), "{:?}", panel.error);
+    assert_eq!(panel.current_snapshot().unwrap().settings().crossfade_ticks, Some(6));
+    panel.undo();
+    assert_eq!(panel.current_snapshot().unwrap().settings().crossfade_ticks, None);
+    panel.redo();
+    assert_eq!(panel.current_snapshot().unwrap().settings().crossfade_ticks, Some(6));
+    assert!(panel.save_workspace_changes(&editor).unwrap());
+    let mut reopened = Panel::default();
+    reopened.sync(&editor);
+    assert!(reopened.crossfade_enabled);
+    assert_eq!(reopened.crossfade_ticks, "6");
+    let settings = reopened.current_snapshot().unwrap().settings();
+    let id = reopened.current_entry().unwrap().id;
+    for invalid in ["-1", "121", "NaN", "1.5", "", "+1"] {
+        reopened.crossfade_ticks = invalid.into();
+        reopened.form_dirty = true;
+        reopened.apply(&editor);
+        assert!(reopened.error.is_some());
+        assert_eq!(reopened.current_snapshot().unwrap().settings(), settings);
+        assert_eq!(reopened.current_entry().unwrap().id, id);
+    }
+}
+
+#[cfg(feature = "mesh-hazards")]
+#[test]
+fn hazards_animation_identity_requires_exact_requested_profile() {
+    let scene = PathBuf::from("hazards.scene.yaml");
+    let hazards = HostSpec::local_game(scene.clone(), EditorGame::MeshHazardsV1);
+    let navigation = HostSpec::local_game(scene.clone(), EditorGame::MeshNavigation);
+    assert!(frame_gate(EditorGame::MeshHazardsV1, &hazards, Some(&scene), Mode::Edit, true, 7, 7));
+    assert!(!frame_gate(EditorGame::MeshHazardsV1, &navigation, Some(&scene), Mode::Edit, true, 7, 7));
+    assert!(!frame_gate(EditorGame::MeshNavigation, &hazards, Some(&scene), Mode::Edit, true, 7, 7));
+    assert!(!frame_gate(EditorGame::MeshHazardsV1, &hazards, Some(&scene), Mode::Edit, true, 7, 8));
+    assert!(!frame_gate(EditorGame::MeshHazardsV1, &hazards, Some(Path::new("other.scene.yaml")), Mode::Play, true, 7, 7));
 }

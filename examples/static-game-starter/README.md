@@ -25,6 +25,16 @@ uses a fixed-point selection input and a four-bit Board singleton instead of
 courier motion: left/right selects a switch, Space toggles, matching target wins.
 Holding directions repeats each tick; Space is edge-triggered. Default target 5
 means switches zero and two. Edit Board.target before Play to change the puzzle.
+The upper square row shows the authored target; the lower circle row shows the
+current switches, both ordered zero to three from left to right. Green means on
+and gray means off. The native title and editor hint explain this read-only cue;
+pausing, winning or restarting does not replace the authored target.
+
+The saved `--project` command-mode route instead supplies one-shot Move/Select
+buttons and the same semantic ERP intents. It can complete both unchanged stock
+scenes without relying on keyboard hold duration. See the
+[registered navigation contract](../../docs/registered-starter-navigation.md)
+for controls, interruption handling and the required build-identity migration.
 
 The source `player` binary is deliberately HEADLESS, not a native
 standalone game or packaged export. Both it and the editor host load exactly the
@@ -53,7 +63,7 @@ and `input`. Example delivery win:
 
 The complete trace is validated before running: maximum 64 KiB, 64 steps and
 600 total ticks; positive integer tick counts; exact reflected fields; finite
-held-key input domain only. No scripts or arbitrary commands. Without a trace,
+bounded held-key/navigation-pulse input domain only. No scripts or arbitrary commands. Without a trace,
 the player runs 60 idle ticks. Acceptance launches the actual headless player binary for both games from a
 scene-only temporary working directory and compares nonzero win traces and idle
 checksums. The editor is exercised through its CPU library APIs, not launched as
@@ -100,7 +110,11 @@ pauses without secretly advancing the simulation. Focus regain never resumes.
 In live play, the first naturally consumed tick after explicit resume is neutral;
 a fresh, non-repeat key press after that boundary is needed. Replay viewing
 consumes the recorded inputs unchanged. Synthetic/repeated presses cannot
-re-arm controls. The window title reports pause/win/control instructions.
+re-arm controls. The window title reports pause/win/control instructions and coordinate-reachability
+warnings for authored Delivery scenes. Whole-unit movement preserves fractional
+coordinates: a goal can be unreachable now, after the existing origin restart,
+or both. The registered project presenter shows the same distinction. These
+read-only warnings do not reject scenes, snap positions or change game rules.
 
 `--record /absolute/new.orrp` saves the actual input recording on normal window
 close. `--replay /absolute/existing.orrp` opens a read-only viewer. These options
@@ -120,10 +134,19 @@ one admitted scene, a fixed launcher and a deterministic receipt. The selected
 runtime must be compiled with `ORR_STATIC_STANDALONE_BUILD_SHA` set to the exact
 reviewed 40-hex source revision. `--provenance` fails when that stamp is absent or
 malformed; `--identity --scene PATH` queries full admission without a window.
+`--reachability --scene PATH` separately reports coordinate analysis without a
+window; it cannot be combined with identity, provenance, replay, record or observe.
+The report does not guarantee completion within recording/trace budgets. Games
+without this analysis report `supported: false`, not successful reachability.
 Inputs must be regular single-link files; copy a Cargo-produced hard-linked
 executable into a fresh staging path before packaging. The packager requires matching source stamp and executable SHA-256, then runs
 bounded identity/provenance checks before no-clobber publication. A supplied
 hash/stamp is a mix-up guard, not authentication of arbitrary executable code.
+For Delivery, `bundle.json` includes optional `reachability` analysis of its exact
+admitted scene, separate from immutable identity. This is exporter analysis, not
+a runtime play test; fractional scenes still export. The fixed launcher is
+unchanged. Query a relocated bundle directly with
+`bin/standalone --reachability --scene scene/game.scene.yaml` from its directory.
 
 ```sh
 cargo run -p orr_static_starter --no-default-features --features bundle --bin bundle -- delivery --runtime /absolute/delivery-player --runtime-sha256 HEX64 --scene /absolute/delivery.scene.yaml --output /absolute/new-bundle --source-sha HEX40 --trusted-runtime

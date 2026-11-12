@@ -11,17 +11,10 @@ const required = process.env.ORR_REQUIRE_BROWSER === "1" || process.env.ORR_REQU
 class SkipError extends Error {}
 const skip = (why) => { throw new SkipError(why); };
 
-const flags = {
-  webgl: ["--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"],
-  // Windows WebGPU needs ANGLE's D3D11 adapter even when Dawn uses SwiftShader.
-  // Chromium's webgpu-swiftshader test preset keeps ANGLE initialized for it.
-  webgpu: process.platform === "win32"
-    ? ["--enable-unsafe-webgpu", "--use-webgpu-adapter=swiftshader", "--use-gpu-in-tests"]
-    : ["--enable-unsafe-webgpu", "--enable-unsafe-swiftshader", "--use-webgpu-adapter=swiftshader", "--enable-features=Vulkan", "--use-vulkan=swiftshader", "--use-angle=swiftshader"],
-};
+const { sphereOptions } = require("./sphere_lod_options.cjs");
 
 (async () => {
-  if (!(backend in flags)) throw new Error("SPHERE_LOD_BACKEND must be webgpu or webgl");
+  const launch = sphereOptions(backend, process.env, process.platform);
   const pw = lib.loadPlaywright();
   if (!pw) skip("Playwright not found (set NODE_PATH to its runtime installation)");
   const root = lib.repoRoot();
@@ -34,7 +27,11 @@ const flags = {
   const { server, port } = await lib.serveStatic(web);
   let browser;
   try {
-    browser = await pw.chromium.launch(lib.chromiumOptions(flags[backend]));
+    const options = lib.chromiumOptions(launch.args);
+    options.chromiumSandbox = true;
+    options.headless = launch.headless;
+    console.log("CONFIG " + JSON.stringify({ backend, adapterRequested: launch.adapter, headless: options.headless, chromiumSandbox: true }));
+    browser = await pw.chromium.launch(options);
   } catch (error) {
     server.close();
     skip(`cannot launch Chromium: ${String(error).split("\n")[0]}`);
@@ -46,12 +43,20 @@ const flags = {
     const available = await probe.evaluate(async (which) => {
       if (which === "webgpu") {
         if (!navigator.gpu) return false;
-        return !!(await navigator.gpu.requestAdapter());
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) return false;
+        const info = adapter.info;
+        if (!info) throw new Error("WebGPU adapter diagnostics unavailable");
+        return { vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description, fallback: adapter.isFallbackAdapter === true || info.isFallbackAdapter === true };
       }
       return !!document.createElement("canvas").getContext("webgl2");
     }, backend);
     await probe.close();
     if (!available) skip(`Chromium has no ${backend} adapter/context`);
+    if (backend === "webgpu") {
+      console.log("ADAPTER " + JSON.stringify(available));
+      if (launch.adapter === "hardware" && (available.fallback || /swiftshader|software|llvmpipe|lavapipe|warp|basic render/i.test(JSON.stringify(available)))) throw new Error("hardware requested but fallback/software adapter selected");
+    }
 
     const expected = backend === "webgpu" ? "BrowserWebGpu" : "Gl";
     for (const preset of ["default", "low"]) {

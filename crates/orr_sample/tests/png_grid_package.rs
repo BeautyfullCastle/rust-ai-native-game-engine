@@ -22,15 +22,18 @@ fn recipe() -> Value {
         {"id":"walk","mode":"once","frames":[{"cell":1,"duration_ms":40},{"cell":2,"duration_ms":60},{"cell":1,"duration_ms":20}]}]})
 }
 fn png() -> Vec<u8> {
+    rgba_png(4, 2, &PIXELS)
+}
+fn rgba_png(width: u32, height: u32, pixels: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::new();
     {
-        let mut encoder = png17::Encoder::new(&mut bytes, 4, 2);
+        let mut encoder = png17::Encoder::new(&mut bytes, width, height);
         encoder.set_color(png17::ColorType::Rgba);
         encoder.set_depth(png17::BitDepth::Eight);
         encoder
             .write_header()
             .unwrap()
-            .write_image_data(&PIXELS)
+            .write_image_data(pixels)
             .unwrap();
     }
     bytes
@@ -165,6 +168,191 @@ fn exact_original_png_cells_clips_and_deterministic_package() {
     assert_eq!(m.capabilities, ["sprite".to_string()].into());
     assert!(m.dependencies.is_empty());
     assert_eq!(m.files.len(), 3);
+}
+#[test]
+fn padded_sheet_preserves_bytes_and_literal_row_major_regions() {
+    let f = Fixture::new();
+    f.edit(|r| {
+        r["margin_x"] = 1.into();
+        r["margin_y"] = 2.into();
+        r["spacing_x"] = 3.into();
+        r["spacing_y"] = 1.into();
+    });
+    // 9 x 7, with distinct texels in cells, margins, and gaps.
+    let pixels: Vec<u8> = (0..63).flat_map(|i| [i, 255 - i, i * 3, 255]).collect();
+    let png = rgba_png(9, 7, &pixels);
+    fs::write(f.source().join("sheet.png"), &png).unwrap();
+    let before = snapshot(f.source());
+    let report = import_package(&f.request).unwrap();
+    assert_eq!(
+        (report.width, report.height, report.cells, report.rgba_bytes),
+        (9, 7, 4, 252)
+    );
+    assert_eq!(snapshot(f.source()), before);
+    assert_eq!(fs::read(f.request.out.join("atlas.png")).unwrap(), png);
+    assert_eq!(
+        fs::read(f.request.out.join("LICENSE.txt")).unwrap(),
+        LICENSE
+    );
+    assert_eq!(
+        orr_sample::project_sprites::decode_atlas(&png, 9, 7).unwrap(),
+        pixels
+    );
+    let d = f.document();
+    let cells: Vec<_> = d
+        .regions()
+        .iter()
+        .map(|r| (r.id, r.x, r.y, r.width, r.height))
+        .collect();
+    assert_eq!(
+        cells,
+        [
+            (0, 1, 2, 2, 1),
+            (1, 6, 2, 2, 1),
+            (2, 1, 4, 2, 1),
+            (3, 6, 4, 2, 1)
+        ]
+    );
+    assert_eq!(d.clip("idle").unwrap().sample(30).region, 0);
+    assert_eq!(d.clip("walk").unwrap().sample(40).region, 2);
+    assert!(d.clip("walk").unwrap().sample(120).finished);
+    let output_before = snapshot(&f.request.out);
+    assert!(import_package(&f.request).is_err());
+    assert_eq!(snapshot(&f.request.out), output_before);
+    assert_eq!(snapshot(f.source()), before);
+}
+#[test]
+fn omitted_and_explicit_zero_padding_have_identical_entire_packages() {
+    let omitted = Fixture::new();
+    let explicit = Fixture::new();
+    explicit.edit(|r| {
+        for key in ["margin_x", "margin_y", "spacing_x", "spacing_y"] {
+            r[key] = 0.into();
+        }
+    });
+    import_package(&omitted.request).unwrap();
+    import_package(&explicit.request).unwrap();
+    assert_eq!(
+        snapshot(&omitted.request.out),
+        snapshot(&explicit.request.out)
+    );
+}
+#[test]
+fn singleton_axes_ignore_unused_maximum_spacing() {
+    for vertical in [false, true] {
+        let f = Fixture::new();
+        f.edit(|r| {
+            r["columns"] = if vertical { 1 } else { 4 }.into();
+            r["rows"] = if vertical { 4 } else { 1 }.into();
+            r["margin_x"] = 1.into();
+            r["margin_y"] = 2.into();
+            r["spacing_x"] = if vertical { u32::MAX } else { 3 }.into();
+            r["spacing_y"] = if vertical { 2 } else { u32::MAX }.into();
+        });
+        let (width, height) = if vertical { (4, 14) } else { (19, 5) };
+        fs::write(
+            f.source().join("sheet.png"),
+            rgba_png(width, height, &vec![127; (width * height * 4) as usize]),
+        )
+        .unwrap();
+        import_package(&f.request).unwrap();
+        let d = f.document();
+        let coords: Vec<_> = d.regions().iter().map(|r| (r.x, r.y)).collect();
+        let expected = if vertical {
+            vec![(1, 2), (1, 5), (1, 8), (1, 11)]
+        } else {
+            vec![(1, 2), (6, 2), (11, 2), (16, 2)]
+        };
+        assert_eq!(coords, expected);
+    }
+}
+#[test]
+fn padded_dimension_limit_includes_margins_and_gaps() {
+    for axis in ["x", "y"] {
+        let f = Fixture::new();
+        f.edit(|r| {
+            r["cell_width"] = 1.into();
+            r["cell_height"] = 1.into();
+            r[format!("margin_{axis}")] = 1.into();
+            r[format!("spacing_{axis}")] = 2044.into();
+        });
+        let (width, height) = if axis == "x" { (2048, 2) } else { (2, 2048) };
+        fs::write(
+            f.source().join("sheet.png"),
+            rgba_png(width, height, &vec![255; (width * height * 4) as usize]),
+        )
+        .unwrap();
+        import_package(&f.request).unwrap();
+        assert_eq!(f.document().regions().len(), 4);
+        let rejected = Fixture::new();
+        rejected.edit(|r| {
+            r["cell_width"] = 1.into();
+            r["cell_height"] = 1.into();
+            r[format!("margin_{axis}")] = 1.into();
+            r[format!("spacing_{axis}")] = 2045.into();
+        });
+        rejected.reject();
+    }
+}
+#[test]
+fn padding_fields_reject_invalid_types_duplicates_and_unknown_names() {
+    for key in ["margin_x", "margin_y", "spacing_x", "spacing_y"] {
+        for value in [
+            json!(-1),
+            json!(1.5),
+            json!(4294967296u64),
+            Value::Null,
+            json!("1"),
+            json!(true),
+        ] {
+            let f = Fixture::new();
+            f.edit(|r| r[key] = value);
+            f.reject();
+        }
+        let f = Fixture::new();
+        let original = serde_json::to_string(&recipe()).unwrap();
+        let duplicate = format!("{{\"{key}\":0,\"{key}\":1,{}", &original[1..]);
+        fs::write(&f.request.recipe, duplicate).unwrap();
+        f.reject();
+    }
+    let f = Fixture::new();
+    f.edit(|r| r["margin"] = 1.into());
+    f.reject();
+}
+#[test]
+fn padded_overflow_and_nonexact_dimensions_preserve_sources() {
+    for key in ["margin_x", "margin_y", "spacing_x", "spacing_y"] {
+        for value in [1, u32::MAX] {
+            let f = Fixture::new();
+            f.edit(|r| r[key] = value.into());
+            f.reject();
+        }
+    }
+    // Gap multiplication overflows, separately from adding a single huge gap.
+    for axis in ["x", "y"] {
+        let f = Fixture::new();
+        f.edit(|r| {
+            r[if axis == "x" { "columns" } else { "rows" }] = 3.into();
+            r[format!("spacing_{axis}")] = (u32::MAX / 2 + 1).into();
+        });
+        f.reject();
+    }
+    // Exact symmetric margins are required: neither extra tail nor truncation.
+    for (width, height) in [(8, 7), (10, 7), (9, 6), (9, 8)] {
+        let f = Fixture::new();
+        f.edit(|r| {
+            r["margin_x"] = 1.into();
+            r["margin_y"] = 2.into();
+            r["spacing_x"] = 3.into();
+            r["spacing_y"] = 1.into();
+        });
+        fs::write(
+            f.source().join("sheet.png"),
+            rgba_png(width, height, &vec![255; (width * height * 4) as usize]),
+        )
+        .unwrap();
+        f.reject();
+    }
 }
 #[test]
 fn runtime_loop_once_and_repeated_cell_boundaries() {

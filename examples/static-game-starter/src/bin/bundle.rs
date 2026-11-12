@@ -1,10 +1,13 @@
 //! Package one already-trusted concrete native starter executable.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use orr_static_starter::{
     bundle::{export, Options},
     delivery::DeliveryGame,
     switchboard::SwitchGame,
 };
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use std::{collections::BTreeMap, path::PathBuf};
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn main() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
     let game = args.next().ok_or("usage: bundle <delivery|switchboard> --runtime PATH --runtime-sha256 HEX64 --scene PATH --output NEWPATH --source-sha HEX40 --trusted-runtime")?;
@@ -52,4 +55,10 @@ fn main() -> Result<(), String> {
         serde_json::to_string(&receipt).map_err(|e| e.to_string())?
     );
     Ok(())
+}
+
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+fn main() {
+    eprintln!("error: bundle supports only Linux x86-64 hosts");
+    std::process::exit(1);
 }

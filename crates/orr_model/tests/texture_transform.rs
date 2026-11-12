@@ -1,8 +1,8 @@
 //! Static authoring contract: transform UV0 once, before immutable cooking.
 #![cfg(feature = "import")]
 #![allow(clippy::float_arithmetic)]
-use orr_model::{StaticModel, import::import_with_resolver};
-use serde_json::{Value, json};
+use orr_model::{import::import_with_resolver, StaticModel};
+use serde_json::{json, Value};
 
 const NAME: &str = "KHR_texture_transform";
 fn source() -> Value {
@@ -296,19 +296,34 @@ fn gltf_glb_and_immutable_cook_have_equivalent_geometry_and_pixels_inputs() {
 
 #[cfg(feature = "animation")]
 #[test]
-fn animated_entrypoint_rejects_transform_before_external_resolution() {
+fn animated_entrypoint_accepts_declared_transform_with_shared_resource_admission() {
+    // Formerly a static-only contract. Animated import now supports this same
+    // import-time UV bake; unsupported declarations remain separately rejected.
     for doc in [authored(json!({})), {
         let mut d = source();
         d["extensionsUsed"] = json!([NAME]);
         d
     }] {
-        let error = orr_model::animation_import::import_with_resolver(
+        let model = orr_model::animation_import::import_with_resolver(
             "model.gltf",
             &serde_json::to_vec(&doc).unwrap(),
-            |_| panic!("animated transform reached resolver"),
+            |uri| resource(uri, include_bytes!("fixtures/model.bin")),
         )
-        .unwrap_err();
-        assert!(error.to_string().contains("texture transform"), "{error}");
+        .unwrap();
+        let expected = import(&doc).unwrap();
+        assert_eq!(model.source().materials, expected.source().materials);
+        assert_eq!(model.source().images, expected.source().images);
+        for (a, b) in model
+            .source()
+            .primitives
+            .iter()
+            .zip(&expected.source().primitives)
+        {
+            assert_eq!(
+                a.vertices.iter().map(|v| v.vertex.uv).collect::<Vec<_>>(),
+                b.vertices.iter().map(|v| v.uv).collect::<Vec<_>>()
+            );
+        }
     }
 }
 
@@ -338,12 +353,10 @@ fn transformed_and_factor_only_materials_preserve_optional_uv_and_fallback() {
         transformed.source().primitives[1],
         baseline.source().primitives[1]
     );
-    assert!(
-        transformed.source().primitives[1]
-            .vertices
-            .iter()
-            .all(|v| v.uv == [0.0; 2])
-    );
+    assert!(transformed.source().primitives[1]
+        .vertices
+        .iter()
+        .all(|v| v.uv == [0.0; 2]));
     assert_eq!(transformed.source().materials, baseline.source().materials);
     assert_eq!(transformed.source().images, baseline.source().images);
     let cooked = transformed.to_bytes().unwrap();

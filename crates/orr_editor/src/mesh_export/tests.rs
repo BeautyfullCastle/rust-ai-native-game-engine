@@ -16,6 +16,12 @@ use std::fs;
 const STATIC_GLB: &[u8] = include_bytes!("../../../orr_model/tests/fixtures/model.glb");
 const LICENSE: &[u8] = b"Example license text\n";
 
+#[path = "crossfade_tests.rs"]
+mod crossfade_tests;
+
+#[path = "post_process_tests.rs"]
+mod post_process_tests;
+
 #[path = "facing_tests.rs"]
 mod facing_tests;
 
@@ -716,6 +722,8 @@ fn add_props(scene: &std::path::Path, revision: [u8; 32]) {
     let art = Snapshot::from_package(&package_root, "model.glb", "LICENSE.txt", revision).unwrap();
     let document = Document {
         props: vec![Prop {
+                #[cfg(feature = "mesh-prop-shading")]
+                shading: None,
             id: 1,
             name: "crate".into(),
             art,
@@ -1574,3 +1582,8 @@ fn surface_marker_composes_with_all_existing_player_sections() {
     )
     .is_err());
 }
+
+#[path = "prop_shading_tests.rs"]
+mod prop_shading_tests;
+#[path = "point_light_tests.rs"]
+mod point_light_tests;

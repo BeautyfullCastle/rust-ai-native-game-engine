@@ -37,6 +37,16 @@ pub struct SpriteScene {
 }
 
 impl SpriteScene {
+    /// Camera used by both shape and sprite passes for the current surface size.
+    /// Keep the unconstrained follow pose so a later resize or zoom starts from
+    /// the current target, rather than a center left over from another viewport.
+    pub fn render_camera(&self, viewport: (u32, u32)) -> Camera {
+        let mut camera = self.camera;
+        let half = orr_view::fp_to_f32(orr_testgame::ARENA_HALF);
+        camera.constrain_to_bounds([-half; 2], [half; 2], viewport);
+        camera
+    }
+
     /// Opens only installed, hash-verified assets. There is no embedded fallback.
     pub fn open(root: &Path) -> Result<Self, String> {
         let mut runtime = Runtime::content_only();
@@ -294,9 +304,10 @@ impl SpriteWindow {
             return Ok(());
         };
         let view = self.rhi.frame_view(&frame);
-        self.shapes.draw(view, self.size, list, &scene.camera);
+        let camera = scene.render_camera(self.size);
+        self.shapes.draw(view, self.size, list, &camera);
         self.sprites
-            .draw(view, self.size, &scene.list, &scene.camera)
+            .draw(view, self.size, &scene.list, &camera)
             .map_err(|e| e.to_string())?;
         overlay(&self.rhi, view, self.size)?;
         self.rhi.present(frame);
@@ -466,6 +477,85 @@ mod tests {
         scene.update(Duration::ZERO, None, 0, true, &mut Vec::new());
         assert!(scene.list.sprites.is_empty());
         assert!(scene.follow.target().is_none());
+    }
+
+    #[test]
+    fn actual_arena_follow_stays_inside_map_at_edges_and_after_resize() {
+        let fixture = Fixture::new();
+        fixture.install();
+        let mut scene = SpriteScene::open(&fixture.0).unwrap();
+        let mut bridge = InProc::new(loopback_pair(Loopback::default()), arena_bridge_config());
+        let mut baseline = InProc::new(loopback_pair(Loopback::default()), arena_bridge_config());
+        let mut view = ViewWorld::new(
+            ArenaExtractor {
+                remote_mode: InterpMode::Snapshot,
+                local_slot: 0,
+            },
+            ViewConfig::default(),
+        );
+        let half = orr_view::fp_to_f32(orr_testgame::ARENA_HALF);
+        let mut reached_positive = false;
+        let mut reached_negative = false;
+        for step in 0..1300 {
+            let dt = Duration::from_nanos(16_666_667);
+            let keys = Keys {
+                right: step < 450,
+                up: step < 450,
+                left: step >= 450,
+                down: step >= 450,
+                ..Default::default()
+            };
+            for simulation in [&mut bridge, &mut baseline] {
+                simulation
+                    .set_input(simulation.local_slot(), keys.to_input())
+                    .unwrap();
+                simulation.update(dt);
+            }
+            let update = bridge.poll_view();
+            let control = baseline.poll_view();
+            view.update_from_bridge(dt.as_secs_f32(), &update);
+            let mut items = Vec::new();
+            view.render_items(&mut items);
+            scene.update(
+                dt,
+                update.snapshot.as_ref(),
+                0,
+                update.resync.is_some(),
+                &mut items,
+            );
+            if let Some(sprite) = scene.list.sprites.first() {
+                let follow_pose = scene.camera;
+                let target = scene.follow.target().copied();
+                reached_positive |= sprite.position.iter().all(|v| *v > 1900.0);
+                reached_negative |= sprite.position.iter().all(|v| *v < -1900.0);
+                // The same production camera is consumed by both render passes.
+                // Probe a resize each tick, including a viewport wider than the map.
+                for viewport in [(800, 600), (600, 800), (8000, 600)] {
+                    let camera = scene.render_camera(viewport);
+                    let min = camera.screen_to_world([0.0, viewport.1 as f32], viewport);
+                    let max = camera.screen_to_world([viewport.0 as f32, 0.0], viewport);
+                    for axis in 0..2 {
+                        if max[axis] - min[axis] > half * 2.0 {
+                            assert_eq!(camera.center[axis], 0.0);
+                        } else {
+                            assert!(min[axis] >= -half - 0.001, "{min:?}");
+                            assert!(max[axis] <= half + 0.001, "{max:?}");
+                        }
+                    }
+                    assert_eq!(camera.half_extent, follow_pose.half_extent);
+                }
+                assert_eq!(scene.camera, follow_pose);
+                assert_eq!(scene.follow.target().copied(), target);
+            }
+            assert_eq!(
+                update.snapshot.as_ref().map(|s| s.predicted().checksum()),
+                control.snapshot.as_ref().map(|s| s.predicted().checksum())
+            );
+        }
+        assert!(reached_positive && reached_negative);
+        scene.reset();
+        assert!(scene.follow.target().is_none());
+        assert_eq!(scene.render_camera((800, 600)).center, [0.0; 2]);
     }
 
     fn header_png(width: u32, height: u32) -> Vec<u8> {

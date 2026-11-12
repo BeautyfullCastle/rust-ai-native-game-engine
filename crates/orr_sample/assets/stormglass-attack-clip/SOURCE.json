@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "art": "OpenAI built-in image generation; cyan-reactor correction in a second built-in edit",
+  "referenceSha256": "efcfb8bc0acbffb76c230846c111ba561d74cd6970ac4e2a721d4e981b6c5b56",
+  "geometry": {
+    "atlas": [
+      1774,
+      887
+    ],
+    "columns": 4,
+    "rows": 2,
+    "frames": 8,
+    "pivot": [
+      222,
+      362
+    ],
+    "scale": 0.184,
+    "frameDurationMs": 40
+  },
+  "processing": "Original generated RGBA PNG is embedded unchanged; region rectangles describe its non-divisible grid. No resampling or per-frame recentering.",
+  "scope": "Post-release shot and recovery; no anticipation or projectile-timing change.",
+  "limitations": [
+    "Small redraw differences between poses remain.",
+    "Single fixed forward-facing shot direction; no target aiming."
+  ],
+  "sha256": {
+    "attack.png": "2248b8ee1c32eabc4ef54bf8975f215f304e5605c0d04f6b73504757ff83782f",
+    "sprites.json": "94d32a2cfeddfdfea88c87854fc53568776bc504e76dca392ec5650bb4e7243f",
+    "NOTICE.txt": "258ac5203da8c0d274d5d510e17cba279bfb03fb5e39b18b81bfbc27f28d226f",
+    "PROMPTS.txt": "7bd8c7f1a20ae73f631b24a6a6fbd71330df3db8d98f657e345165c66911c7ef"
+  }
+}

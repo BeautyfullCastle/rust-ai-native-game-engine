@@ -506,7 +506,7 @@ fn raw_static_and_animated_models_import_through_editor_and_survive_reopen() {
 
     menu_click(&mut harness, "File", "Content packages…");
     assert!(harness.query_by_label("Content packages").is_some());
-    click(&mut harness, "Import a raw GLB package");
+    click(&mut harness, "Import a model package");
 
     let malformed = fixture.raw_source.join("malformed.glb");
     let malformed_destination = fixture.package_source.join("malformed package");

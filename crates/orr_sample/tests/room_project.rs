@@ -562,3 +562,7 @@ fn camera_admission_rejects_nonregular_and_symlink_documents() {
     fs::write(f.root.join("other.json"),orr_sample::room_camera::Document::readable_default().to_bytes().unwrap()).unwrap();
     std::os::unix::fs::symlink(f.root.join("other.json"),f.root.join("camera.json")).unwrap();f.rejected();
 }
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[path = "room_pose_checks/room_project.rs"]
+mod pose_checks;

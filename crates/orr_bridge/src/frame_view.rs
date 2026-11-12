@@ -76,6 +76,12 @@ impl<'a> FrameView<'a> {
         self.frame.singleton::<T>()
     }
 
+    /// A read-only optional singleton, including across differing game profiles.
+    pub fn try_singleton<T: Component>(&self) -> Option<&'a T> {
+        self.frame.registry().singleton_id::<T>()?;
+        Some(self.frame.singleton::<T>())
+    }
+
     /// Immutable values in a frame-owned list. This grants no allocation or mutation.
     pub fn list<T: Component>(&self, list: FrameList<T>) -> &'a [T] {
         self.frame.list(list)
@@ -90,6 +96,20 @@ impl<'a> FrameView<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn optional_singleton_handles_present_absent_and_component_only_types() {
+        let mut registry = orr_ecs::ComponentRegistryBuilder::new();
+        registry.register_singleton::<u32>("present");
+        registry.register_component::<u64>("component_only");
+        let mut frame = Frame::new(registry.build());
+        frame.set_singleton(17_u32);
+        let before = frame.to_bytes();
+        let view = FrameView::of(&frame);
+        assert_eq!(view.try_singleton::<u32>(), Some(&17));
+        assert_eq!(view.try_singleton::<u64>(), None);
+        assert_eq!(view.try_singleton::<i32>(), None);
+        assert_eq!(frame.to_bytes(), before);
+    }
     #[test]
     fn frame_list_view_reads_without_changing_authority() {
         let mut registry = orr_ecs::ComponentRegistryBuilder::new();

@@ -1,0 +1,3 @@
+# One command for the full desktop build. See README.md.
+[alias]
+build-all = "build --release --workspace --features orr_editor/full,orr_sample/full"

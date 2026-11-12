@@ -350,13 +350,20 @@ fn validate_write_target(path: &Path) -> Result<(), String> {
         .parent()
         .ok_or("irradiance sidecar requires a parent directory")?;
     let mut current = PathBuf::new();
-    for component in parent.components() {
+    let mut components = parent.components().peekable();
+    while let Some(component) = components.next() {
         match component {
             Component::CurDir => continue,
             Component::ParentDir => {
                 current.pop();
             }
             _ => current.push(component.as_os_str()),
+        }
+        // A bare verbatim Windows drive prefix is a device, not a directory.
+        if matches!(component, Component::Prefix(_))
+            && components.peek() == Some(&Component::RootDir)
+        {
+            continue;
         }
         let metadata = std::fs::symlink_metadata(&current).map_err(|e| e.to_string())?;
         if metadata.file_type().is_symlink() || !metadata.is_dir() {

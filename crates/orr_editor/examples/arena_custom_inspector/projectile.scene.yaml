@@ -1,0 +1,12 @@
+schema: orr.scene/1
+singletons:
+  Score: { kills: [0,0,0,0,0,0,0,0] }
+entities:
+  e_00000001:
+    name: hero
+    Position: { pos: [-300,0] }
+    PlayerTag: { slot: 0 }
+  e_00000002:
+    name: projectile
+    Position: { pos: [0,200] }
+    Bullet: { velocity: [1,0], owner_slot: 0, ttl: 60 }

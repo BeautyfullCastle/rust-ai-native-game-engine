@@ -53,9 +53,15 @@ pub mod cli;
 pub mod diagnostics;
 pub mod editor;
 pub mod inspector;
+#[cfg(feature = "custom-inspector")]
+pub mod custom_inspector;
 pub mod game;
 #[cfg(feature = "static-games")]
 pub mod static_adapter;
+#[cfg(feature = "static-gameplay")]
+pub mod registered_project;
+#[cfg(feature = "static-gameplay")]
+mod registered_gameplay_view;
 pub mod model;
 pub mod script;
 pub mod viewport;
@@ -65,6 +71,14 @@ pub use backend::HostSpec;
 pub use editor::{Editor, Mode, Owner};
 pub use model::Target;
 
+#[cfg(feature = "sprite-package-install")]
+pub(crate) mod sprite_package_install;
+#[cfg(feature = "sprite-grid-authoring")]
+pub(crate) mod sprite_grid_authoring;
+#[cfg(feature = "sprite-rectangle-authoring")]
+pub(crate) mod sprite_rectangle_authoring;
+#[cfg(feature = "sprite-json-authoring")]
+pub(crate) mod sprite_json_authoring;
 #[cfg(feature = "sprites")]
 pub mod sprite_bindings;
 #[cfg(feature = "sprites")]
@@ -141,6 +155,10 @@ mod mesh_surface_package_panel;
 mod mesh_art_panel;
 #[cfg(feature = "mesh-navigation")]
 mod mesh_props;
+#[cfg(feature = "mesh-prop-shading")]
+mod mesh_prop_shading;
+#[cfg(feature = "mesh-prop-shading")]
+mod mesh_prop_shading_panel;
 #[cfg(feature = "mesh-navigation")]
 mod mesh_prop_prefab;
 #[cfg(feature = "mesh-navigation")]
@@ -199,6 +217,8 @@ mod mesh_animation_store;
 mod mesh_animation;
 #[cfg(feature = "mesh-animated-models")]
 mod mesh_animation_panel;
+#[cfg(feature = "mesh-animated-models")]
+mod mesh_animation_import;
 #[cfg(feature="mesh-navigation")]
 mod mesh_scene;
 #[cfg(feature="mesh-navigation")]
@@ -253,6 +273,8 @@ pub mod linked_prefab_panel;
 
 #[cfg(feature="room-project")]
 pub mod room_camera_panel;
+#[cfg(feature = "room-lighting")]
+pub mod room_lighting_panel;
 
 #[cfg(feature = "mesh-hazards-export")]
 pub mod mesh_hazards_player;
@@ -266,3 +288,23 @@ pub(crate) mod room_camera_capture;
 
 #[cfg(feature = "tilemap")]
 pub mod tilemap_panel;
+
+#[cfg(feature="room-character")]
+pub mod room_character_panel;
+
+#[cfg(feature = "terrain-surface")]
+mod terrain_surface;
+#[cfg(feature = "terrain-surface")]
+mod terrain_surface_panel;
+
+#[cfg(all(feature = "mesh-prop-delivery", target_os = "linux", target_arch = "x86_64"))]
+pub mod mesh_prop_delivery;
+
+#[cfg(any(feature = "sprites", feature = "terrain"))]
+mod json_output;
+
+#[cfg(any(feature="mesh-patrol",feature="terrain-patrol"))]
+pub(crate) mod waypoint_order;
+
+#[cfg(feature = "room-input-map-play")]
+pub mod room_input_map_authoring;

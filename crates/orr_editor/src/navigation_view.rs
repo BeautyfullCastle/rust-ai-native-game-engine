@@ -32,6 +32,7 @@ pub fn validate_candidate(
         .map_err(|e| e.to_string())?
         .ok_or("navigation route has no visible terrain triangles")?;
     let candidate = HostNavigationView {
+        pin: NavigationScenePin::new("preview.orrt", terrain, graph, spec)?,
         terrain: terrain.clone(),
         graph: graph.clone(),
         navigator: navigator.clone(),

@@ -5,6 +5,8 @@ use orr_bridge::{BridgeEvent, Lifecycle, LifecycleRecovery, Snapshot, ViewResync
 use serde_json::Value as J;
 
 use crate::wire::debug_error_from_name;
+use crate::frame_delta::FrameStamp;
+use crate::remote::FrameEvidenceOrigin;
 
 const KINDS: usize = 12;
 
@@ -122,6 +124,7 @@ pub(crate) struct ViewMailbox<E> {
     ready: Vec<BridgeEvent<E>>,
     retained: usize,
     snapshot: Option<Snapshot>,
+    frame_evidence: Option<(FrameStamp, FrameEvidenceOrigin)>,
     floor: Option<(u64, u64)>,
     disconnected: bool,
     disconnect_reported: bool,
@@ -136,6 +139,7 @@ pub(crate) struct PreparedFrame {
     summaries: [Tally; KINDS],
     snapshot: Option<Snapshot>,
     reset_generation: Option<u64>,
+    evidence: Option<(FrameStamp, FrameEvidenceOrigin)>,
 }
 
 pub(crate) struct PreparedRenewal {
@@ -170,6 +174,7 @@ impl<E> ViewMailbox<E> {
             ready: Vec::new(),
             retained: 0,
             snapshot: None,
+            frame_evidence: None,
             floor: None,
             disconnected: false,
             disconnect_reported: false,
@@ -223,6 +228,7 @@ impl<E> ViewMailbox<E> {
     /// snapshot. No old staged or ready notification can escape while the
     /// replacement subscription is pending.
     pub fn begin_renewal(&mut self) {
+        self.frame_evidence = None;
         self.waiting = Some(self.received_cursor);
         self.reset_pending = false;
         self.staged.clear();
@@ -231,6 +237,7 @@ impl<E> ViewMailbox<E> {
     }
 
     pub fn commit_renewal(&mut self, prepared: PreparedRenewal) {
+        self.frame_evidence = None;
         let PreparedRenewal {
             subscription,
             cursor,
@@ -269,6 +276,7 @@ impl<E> ViewMailbox<E> {
     }
 
     pub fn disconnect(&mut self) {
+        self.frame_evidence = None;
         self.disconnected = true;
     }
 
@@ -290,6 +298,7 @@ impl<E> ViewMailbox<E> {
     }
 
     fn apply_reset(&mut self, cursor: u64, generation: u64) {
+        self.frame_evidence = None;
         self.generation = generation;
         self.waiting = Some(self.waiting.map_or(cursor, |old| old.max(cursor)));
         self.ready.clear();
@@ -536,7 +545,44 @@ impl<E> ViewMailbox<E> {
             summaries,
             snapshot,
             reset_generation,
+            evidence: None,
         })
+    }
+
+    /// Bind a decoder-validated stamp to this exact publication. The codec's
+    /// timeline epoch is deliberately not equated to the delivery timeline.
+    pub fn prepare_evidenced_frame(
+        &self,
+        metadata: &J,
+        snapshot: Snapshot,
+        evidence: FrameStamp,
+        origin: FrameEvidenceOrigin,
+    ) -> Result<PreparedFrame, String> {
+        let mut prepared = self.prepare_frame(metadata, Some(snapshot))?;
+        let snapshot = prepared.snapshot.as_ref().expect("supplied snapshot");
+        if evidence.scope.stream_generation != prepared.stamp.subscription
+            || evidence.tick != snapshot.tick()
+            || evidence.frame_checksum != snapshot.predicted().checksum()
+        {
+            return Err("frame evidence does not describe its publication".into());
+        }
+        prepared.evidence = Some((evidence, origin));
+        Ok(prepared)
+    }
+
+    /// Only a current, fully covered publication can be used for gameplay
+    /// consumption. Old display snapshots remain visible during recovery but
+    /// cannot become authoritative evidence through this accessor.
+    pub fn frame_evidence(&self) -> Option<(Snapshot, FrameStamp, FrameEvidenceOrigin)> {
+        if self.subscription.is_none()
+            || self.disconnected
+            || self.waiting.is_some()
+            || self.reset_pending
+        {
+            return None;
+        }
+        let (stamp, origin) = self.frame_evidence?;
+        Some((self.snapshot.clone()?, stamp, origin))
     }
 
     /// Commits a frame cut returned by [`Self::prepare_frame`]. There are no
@@ -548,6 +594,7 @@ impl<E> ViewMailbox<E> {
             summaries,
             snapshot,
             reset_generation,
+            evidence,
         } = prepared;
         if let Some(generation) = reset_generation {
             self.apply_reset(stamp.cursor, generation);
@@ -563,6 +610,7 @@ impl<E> ViewMailbox<E> {
         self.history_complete = true;
         self.server_generation = generation;
         self.snapshot = snapshot;
+        self.frame_evidence = evidence;
         if self.waiting.is_some_and(|cursor| cursor <= stamp.cursor) {
             self.waiting = None;
             self.reset_pending = true;
@@ -710,6 +758,98 @@ mod tests {
             key: EventKey::new(tick, 0, 0),
             status: EventStatus::Verified(tick),
         }
+    }
+
+    fn evidenced(capacity: usize) -> ViewMailbox<u64> {
+        let mut mailbox = mailbox(capacity);
+        let frame = snapshot(0);
+        let stamp = evidence_stamp(&frame, 1, 1);
+        let prepared = mailbox.prepare_evidenced_frame(
+            &cut(1, 0, 0, 1), frame, stamp, FrameEvidenceOrigin::FencedFull,
+        ).unwrap();
+        mailbox.commit_frame(prepared);
+        mailbox
+    }
+
+    fn evidence_stamp(snapshot: &Snapshot, play: u64, timeline: u64) -> FrameStamp {
+        FrameStamp {
+            scope: crate::frame_delta::FrameScope {
+                stream_generation: 7, play_epoch: play, timeline_epoch: timeline,
+            },
+            tick: snapshot.tick(),
+            frame_checksum: snapshot.predicted().checksum(),
+        }
+    }
+
+    #[test]
+    fn evidence_rejects_mismatched_frame_or_subscription_without_partial_publication() {
+        let mut mailbox = evidenced(4);
+        let (original, stamp, origin) = mailbox.frame_evidence().unwrap();
+        assert_eq!(original.tick(), stamp.tick);
+        assert_eq!(original.predicted().checksum(), stamp.frame_checksum);
+        assert_eq!(origin, FrameEvidenceOrigin::FencedFull);
+        for invalid in [
+            FrameStamp { tick: 1, ..stamp },
+            FrameStamp { frame_checksum: stamp.frame_checksum ^ 1, ..stamp },
+            FrameStamp { scope: crate::frame_delta::FrameScope { stream_generation: 8, ..stamp.scope }, ..stamp },
+        ] {
+            assert!(mailbox.prepare_evidenced_frame(
+                &cut(1, 0, 0, 1), snapshot(0), invalid, origin,
+            ).is_err());
+            let (still, actual, _) = mailbox.frame_evidence().unwrap();
+            assert_eq!(still.seq(), original.seq());
+            assert_eq!(actual, stamp);
+        }
+        // A display-only frame must remove the previous evidence atomically.
+        mailbox.frame(&cut(1, 0, 0, 1), Some(snapshot(0))).unwrap();
+        assert!(mailbox.frame_evidence().is_none());
+    }
+
+    #[test]
+    fn evidence_is_unavailable_during_gap_reset_renewal_and_disconnect() {
+        let mut mailbox = evidenced(1);
+        mailbox.stage(stamp(1, 2, 1), vec![event(1)]).unwrap();
+        assert!(mailbox.frame_evidence().is_none(), "gap must fence old display");
+        let frame = snapshot(1);
+        let target = evidence_stamp(&frame, 1, 1);
+        let prepared = mailbox.prepare_evidenced_frame(
+            &cut(1, 2, 1, 1), frame, target, FrameEvidenceOrigin::FencedFull,
+        ).unwrap();
+        mailbox.commit_frame(prepared);
+        assert!(mailbox.frame_evidence().is_none(), "reset must be delivered first");
+        assert!(mailbox.poll().resync.is_some());
+        assert_eq!(mailbox.frame_evidence().unwrap().1, target);
+        mailbox.begin_renewal();
+        assert!(mailbox.frame_evidence().is_none());
+        let renewal = mailbox.prepare_renewal(
+            &json!({"subscription":"8","cursor":"0","count":"0"}),
+        ).unwrap();
+        mailbox.commit_renewal(renewal);
+        assert!(mailbox.frame_evidence().is_none());
+        let mut connected = evidenced(1);
+        connected.disconnect();
+        assert!(connected.frame_evidence().is_none());
+        assert!(connected.poll().snapshot.is_some(), "display may retain its last frame");
+    }
+
+    #[test]
+    fn evidence_preserves_origin_and_new_epoch_after_reset_delivery() {
+        let mut mailbox = evidenced(4);
+        let old = mailbox.frame_evidence().unwrap();
+        let frame = snapshot(0);
+        // Codec reset epoch 99 is not presentation delivery timeline 2.
+        let target = evidence_stamp(&frame, 2, 99);
+        let prepared = mailbox.prepare_evidenced_frame(
+            &cut(2, 0, 0, 1), frame, target, FrameEvidenceOrigin::FrameCodec,
+        ).unwrap();
+        mailbox.commit_frame(prepared);
+        assert!(mailbox.frame_evidence().is_none());
+        assert!(mailbox.poll().resync.is_some());
+        let new = mailbox.frame_evidence().unwrap();
+        assert_ne!(old.1.scope, new.1.scope);
+        assert_ne!(old.2, new.2);
+        assert_eq!(new.1, target);
+        assert_eq!(new.2, FrameEvidenceOrigin::FrameCodec);
     }
 
     #[test]

@@ -287,3 +287,14 @@ fn validate_scene_filename(filename: &str) -> Result<(), String> {
 #[cfg(test)]
 #[path = "mesh_hud/tests.rs"]
 mod tests;
+
+/// Reserve built-in hazard status and the measured HDR warning. Small viewports
+/// clip the authored HUD rather than covering essential gameplay diagnostics.
+pub(crate) fn hazards_viewport(viewport: egui::Rect, warning_top: Option<f32>) -> egui::Rect {
+    let top = (viewport.top() + 104.0).min(viewport.bottom());
+    let bottom = warning_top.map_or(viewport.bottom(), |y| (y - 8.0).min(viewport.bottom()));
+    egui::Rect::from_min_max(
+        egui::pos2(viewport.left(), top),
+        egui::pos2(viewport.right(), bottom.max(top)),
+    )
+}

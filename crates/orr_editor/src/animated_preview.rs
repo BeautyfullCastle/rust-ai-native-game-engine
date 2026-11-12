@@ -5,6 +5,9 @@
 //! entity GUID and renders the currently selected model to a private offscreen
 //! texture that a panel can show with `ui.image((texture_id, size))`.
 
+mod step;
+pub use step::PreviewStep;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 

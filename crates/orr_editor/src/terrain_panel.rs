@@ -17,7 +17,34 @@ use orr_render::Camera3D;
 use orr_terrain::Edit;
 use std::{path::PathBuf, sync::Arc};
 
+pub mod flatten;
+pub mod terrace;
+pub mod grid_expand;
+pub mod holes;
+pub mod offset;
+pub mod patch;
+pub mod sculpt;
+pub mod smooth;
+pub mod stamp;
+#[cfg(feature = "terrain-raw16")]
+pub mod raw16;
+#[cfg(feature = "terrain-png16")]
+pub mod png16;
+
 pub struct TerrainPanel {
+    pub flatten: flatten::Spec,
+    pub terrace: terrace::Spec,
+    pub grid_expand: grid_expand::Spec,
+    pub holes: holes::Spec,
+    pub offset: offset::Spec,
+    pub patch: patch::State,
+    pub sculpt: sculpt::Spec,
+    pub smooth: smooth::Spec,
+    pub stamp: stamp::State,
+    #[cfg(feature = "terrain-raw16")]
+    pub raw16: raw16::State,
+    #[cfg(feature = "terrain-png16")]
+    pub png16: png16::State,
     pub document: TerrainSession,
     pub local_path: String,
     pub asset_id: String,
@@ -40,6 +67,19 @@ pub struct TerrainPanel {
 impl Default for TerrainPanel {
     fn default() -> Self {
         Self {
+            flatten: flatten::Spec::default(),
+            terrace: terrace::Spec::default(),
+            grid_expand: grid_expand::Spec::default(),
+            holes: holes::Spec::default(),
+            offset: offset::Spec::default(),
+            patch: patch::State::default(),
+            sculpt: sculpt::Spec::default(),
+            smooth: smooth::Spec::default(),
+            stamp: stamp::State::default(),
+            #[cfg(feature = "terrain-raw16")]
+            raw16: raw16::State::default(),
+            #[cfg(feature = "terrain-png16")]
+            png16: png16::State::default(),
             document: TerrainSession::default(),
             local_path: "terrain.orrt".into(),
             asset_id: "terrain/local.orrt".into(),
@@ -81,6 +121,8 @@ impl TerrainPanel {
             HostSpec::PreparedCollect { .. } => return Err("CollectDodge does not support local 3D asset authoring".into()),
             #[cfg(feature = "room-project")]
             HostSpec::PreparedRoom { scene, .. } => scene,
+            #[cfg(feature = "static-gameplay")]
+            HostSpec::PreparedRegistered { .. } => return Err("Registered gameplay does not provide terrain authoring authority".into()),
             HostSpec::Remote { .. } => {
                 return Err("Remote paths are not local terrain authority".into())
             }
@@ -254,6 +296,8 @@ impl TerrainPanel {
     pub fn discard_for_editor(&mut self, editor: &Editor) -> Result<(), String> {
         let result = (|| {
             Self::require_context(editor)?;
+            #[cfg(feature = "terrain-surface")]
+            self.document.require_appearance_clean()?;
             self.document.discard();
             self.confirm_discard = false;
             Ok(())
@@ -293,6 +337,7 @@ impl TerrainPanel {
             self.document.undo()
         })();
         if matches!(result, Ok(true)) {
+            self.refresh_grid_dimensions();
             self.refresh_selection();
         }
         self.report(result)
@@ -303,6 +348,7 @@ impl TerrainPanel {
             self.document.redo()
         })();
         if matches!(result, Ok(true)) {
+            self.refresh_grid_dimensions();
             self.refresh_selection();
         }
         self.report(result)
@@ -334,10 +380,22 @@ impl TerrainPanel {
         if let Some(terrain) = self.document.terrain() {
             self.asset_id = terrain.asset_id().into();
             self.dimensions = [terrain.width(), terrain.depth()];
+            self.grid_expand = grid_expand::Spec::for_dimensions(self.dimensions);
             self.origin = terrain.origin().map(format_fixed);
             self.spacing = format_fixed(terrain.spacing());
         }
         self.refresh_selection();
+    }
+    /// History can reduce the grid after Undo. Keep the draft and selection
+    /// indices inside the newly admitted dimensions before reading their values.
+    fn refresh_grid_dimensions(&mut self) {
+        let Some(terrain) = self.document.terrain() else { return; };
+        self.dimensions = [terrain.width(), terrain.depth()];
+        self.grid_expand.dimensions = self.dimensions;
+        for axis in 0..2 {
+            self.selected_vertex[axis] = self.selected_vertex[axis].min(self.dimensions[axis] - 1);
+            self.selected_cell[axis] = self.selected_cell[axis].min(self.dimensions[axis] - 2);
+        }
     }
     fn refresh_selection(&mut self) {
         let Some(terrain) = self.document.terrain() else {
@@ -594,6 +652,19 @@ impl TerrainPanel {
                     let _ = self.apply_hole(editor);
                 }
             }
+            self.show_holes(ui, editor, writable);
+            self.show_flatten(ui, editor, writable);
+            self.show_terrace(ui, editor, writable);
+            self.show_grid_expand(ui, editor, writable);
+            self.show_offset(ui, editor, writable);
+            self.show_sculpt(ui, editor, writable);
+            self.show_smooth(ui, editor, writable);
+            self.show_stamp(ui, editor, writable);
+            self.show_patch(ui, editor, writable);
+            #[cfg(feature = "terrain-raw16")]
+            self.show_raw16(ui, editor, writable);
+            #[cfg(feature = "terrain-png16")]
+            self.show_png16(ui, editor, writable);
             ui.horizontal(|ui| {
                 if ui
                     .add_enabled(

@@ -1,4 +1,8 @@
 #[used]
+#[unsafe(link_section = ".orrpntl")]
+static MESH_POINT_LIGHT_MARKER: [u8; 23] = *b"ORR_MESH_POINT_LIGHT_V1";
+
+#[used]
 #[unsafe(link_section = ".orrmesh")]
 static MESH_PLAYER_MARKER: [u8; 18] = *b"ORR_MESH_PLAYER_V1";
 
@@ -27,6 +31,11 @@ static MESH_MATERIAL_SLOTS_MARKER: [u8; 26] = *b"ORR_MESH_MATERIAL_SLOTS_V1";
 #[unsafe(link_section = ".orranim")]
 static MESH_ANIMATION_MARKER: [u8; 21] = *b"ORR_MESH_ANIMATION_V1";
 
+#[cfg(feature = "mesh-animated-models")]
+#[used]
+#[unsafe(link_section = ".orrxfad")]
+static MESH_CROSSFADE_MARKER: [u8; 21] = *b"ORR_MESH_CROSSFADE_V1";
+
 #[used]
 #[unsafe(link_section = ".orrsurf")]
 static MESH_SURFACE_MARKER: [u8; 19] = *b"ORR_MESH_SURFACE_V1";
@@ -34,6 +43,10 @@ static MESH_SURFACE_MARKER: [u8; 19] = *b"ORR_MESH_SURFACE_V1";
 #[used]
 #[unsafe(link_section = ".orrlit")]
 static MESH_LIGHTING_MARKER: [u8; 20] = *b"ORR_MESH_LIGHTING_V1";
+
+#[used]
+#[unsafe(link_section = ".orrpost")]
+static MESH_POST_PROCESS_MARKER: [u8; 24] = *b"ORR_MESH_POST_PROCESS_V1";
 
 #[used]
 #[unsafe(link_section = ".orrctrl")]
@@ -61,6 +74,7 @@ static MESH_MISSION_MARKER: [u8; 19] = *b"ORR_MESH_MISSION_V1";
 static MESH_DENSE_PROPS_MARKER: [u8; 23] = *b"ORR_MESH_DENSE_PROPS_V1";
 
 fn main() {
+    std::hint::black_box(&MESH_POINT_LIGHT_MARKER);
     std::hint::black_box(&MESH_PLAYER_MARKER);
     std::hint::black_box(&MESH_PROPS_MARKER);
     std::hint::black_box(&MESH_ROTATION_MARKER);
@@ -69,8 +83,11 @@ fn main() {
     std::hint::black_box(&MESH_MATERIAL_SLOTS_MARKER);
     #[cfg(feature = "mesh-animated-models")]
     std::hint::black_box(&MESH_ANIMATION_MARKER);
+    #[cfg(feature = "mesh-animated-models")]
+    std::hint::black_box(&MESH_CROSSFADE_MARKER);
     std::hint::black_box(&MESH_SURFACE_MARKER);
     std::hint::black_box(&MESH_LIGHTING_MARKER);
+    std::hint::black_box(&MESH_POST_PROCESS_MARKER);
     std::hint::black_box(&MESH_INPUT_MARKER);
     std::hint::black_box(&MESH_FACING_MARKER);
     std::hint::black_box(&MESH_CHARACTER_MARKER);

@@ -1,0 +1,11 @@
+# Rebase a static model around an explicit pivot
+
+In Model import, choose Cooked static model and Static mode. Supply a local .model.json cooked source outside the installed package store, enable pivot rebasing, inspect the source and explicitly choose it for pivot authoring. Enter model-space X/Y/Z pivot coordinates and a new logical .pivot.json identity, then package name/version, license file, an unused destination and rights acknowledgement. Import creates an immutable model.orrmodel variant. Install and assign it through the existing static-model controls; Save persists that assignment. An existing cooked package asset can be prepared as a separate .model.json input without changing the installed original.
+
+The operation is T(-pivot)*M for every fully composed primitive. Only translation changes; rotation, scale, vertices, normals, UVs, material and image tables stay intact. For example, translation [4,-7,11] with pivot [2,-3,1.5] becomes [2,-4,9.5]. The model's visual geometry moves relative to the actor's origin. Collision is not generated or moved, so check any separately authored collider after assignment. There is no automatic centering or source overwrite.
+
+Pivot decimals convert to f32 before the existing finite, inclusive +/-1,000,000 bound check. Thus 1000000.01 rounds to an accepted 1000000, while 1000000.1 rejects; tiny decimals may become signed zero. Both signs of zero skip subtraction for that axis, preserving its translation bits. A translated result outside admitted transform/world bounds rejects rather than clamps. Even a zero pivot creates the requested new identity and provenance.
+
+The producer validates the complete source, uses one captured cooked input and resolves no historical dependencies. Output provenance records exact recipe bytes and direct cooked-input hashes, retaining earlier provenance transitively through that input. Changing source or authoring inputs revokes consent; import checks the inspected source digest again before publication. Existing recipe and combined-input budgets remain.
+
+Focused CPU tests cover authoring, strict parsing, transforms, immutable publication, history, Save/reopen and Room use. Windows runtime, GPU pixels, native export, physical play and video remain unverified.

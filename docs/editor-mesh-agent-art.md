@@ -4,6 +4,11 @@ The optional `mesh-navigation` editor feature can attach a static model as
 presentation art for a mesh-navigation agent. The model is cosmetic: it does
 not change the navigation graph, route, collision, or simulation state.
 
+The same static art controls are available for a local MeshHazardsV1 scene when
+`mesh-hazards` is enabled. Its [art-bearing delivery profile](mesh-hazards-agent-art.md)
+preserves the saved character in the relocated native hazard player. It does not
+enable mesh geometry or prop editing in the hazard profile.
+
 ## Open a mesh-navigation scene
 
 Build and launch the editor with the optional feature enabled:

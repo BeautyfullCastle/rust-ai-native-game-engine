@@ -3,7 +3,7 @@ use std::{env, path::PathBuf};
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.is_empty() || args[0] == "--help" {
-        println!("orr_pkg <install PROJECT [--dry-run] --path SOURCE [--dependency-path SOURCE]... | remove PROJECT NAME [--dry-run] | restore PROJECT NAME DIGEST [--dry-run] | list PROJECT | explain PROJECT NAME | verify PROJECT [--package NAME] | inspect SOURCE>\nOffline content only. Runtime capabilities must be validated by the consuming host.");
+        println!("orr_pkg <install PROJECT [--dry-run] --path SOURCE [--dependency-path SOURCE]... | keep PROJECT NAME [--dry-run] | remove PROJECT NAME [--dry-run] | restore PROJECT NAME DIGEST [--dry-run] | list PROJECT | explain PROJECT NAME | verify PROJECT [--package NAME] | export-source PROJECT NAME --output NEW_DIR | inspect SOURCE>\nOptional Linux authoring: pack-coop-native --help (requires coop-native-authoring, trusted native runtime); create-coop-native-scene --help (requires coop-native-authoring feature, no Node/WASM); orr_pkg create-assembled/create-uv-model/create-retextured-model --help (requires model-authoring feature); create-animated-sequence --help (requires animation-authoring feature); create-sprite --help (requires sprite-authoring feature); create-coop-audio-bank[-from-wav] --help (requires audio-authoring feature); deployment --help (requires deployment-authoring feature); bootstrap-user-game --help (requires bootstrap-authoring feature); build-coop-recipe/copy-coop-web-assets/pack-coop-offline/create-coop-scene/create-coop-animation/compose-coop-animations --help (requires coop-web-authoring feature).\nOffline content only. Runtime capabilities must be validated by the consuming host.");
         return Ok(());
     }
     let engine = Runtime::content_only().engine_version;
@@ -13,8 +13,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             serde_json::to_string_pretty(&inspect_for_install(&args[1], engine)?)?
         );
     } else {
+        #[cfg(not(target_os = "linux"))]
+        if args[0] == "export-source" {
+            return Err("package source export currently requires Linux".into());
+        }
         let root = args.get(1).ok_or("project directory required")?;
         let project = Project::open_for_install(root, engine)?;
+        if args[0] == "export-source" && args.len() == 5 && args[3] == "--output" {
+            println!("{}", serde_json::to_string_pretty(&project.export_sources(&args[2], &args[4])?)?);
+            eprintln!("Exported inert package sources, not a game/runtime bundle or consuming-host admission. Install the requested source with the listed dependencies. Directory publication is not atomic; failures after creation retain partial output. Redistribution rights are not verified.");
+            return Ok(());
+        }
         if args[0] == "verify" && args.len() == 4 && args[2] == "--package" {
             println!(
                 "{}",
@@ -57,6 +66,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 project.install_with_dependencies(&sources, &candidates)?
             }
+            "keep" if args.len()==4 && args[3]=="--dry-run" => {
+                println!("{}",serde_json::to_string_pretty(&project.preview_keep_dependency(&args[2])?)?);
+                preview_limits();
+                return Ok(());
+            }
+            "keep" if args.len()==3 => {
+                let preview=project.preview_keep_dependency(&args[2])?;
+                project.keep_dependency_checked(&args[2],&preview.previous,&preview.candidate,||Ok(()))?
+            }
             "remove" if args.len() == 4 && args[3] == "--dry-run" => {
                 println!("{}", serde_json::to_string_pretty(&project.preview_remove(&args[2])?)?);
                 preview_limits();
@@ -86,6 +104,136 @@ fn preview_limits() {
     eprintln!("Read-only content/graph preview; no activation or writer reservation. Future write permissions, writer availability and inactive destination objects are not guaranteed. Compiled capability validation is deferred to the consuming host.");
 }
 fn main() {
+    if env::args_os().nth(1).is_some_and(|arg| arg == "pack-coop-native") {
+        #[cfg(all(feature = "coop-native-authoring", target_os = "linux", target_arch = "x86_64"))]
+        std::process::exit(i32::from(orr_package::coop_web_authoring::run_native_bundle_cli(env::args_os().skip(2))));
+        #[cfg(not(all(feature = "coop-native-authoring", target_os = "linux", target_arch = "x86_64")))]
+        { eprintln!("Native bundling requires Linux x86-64 with --features coop-native-authoring; no input/output opened"); std::process::exit(2); }
+    }
+
+    if env::args_os().nth(1).is_some_and(|arg| arg == "create-coop-native-scene") {
+        #[cfg(all(feature = "coop-native-authoring", target_os = "linux"))]
+        std::process::exit(i32::from(orr_package::coop_web_authoring::run_native_scene_cli(env::args_os().skip(2))));
+        #[cfg(not(all(feature = "coop-native-authoring", target_os = "linux")))]
+        { eprintln!("Native Scene authoring requires Linux with --features coop-native-authoring; no input/output opened"); std::process::exit(2); }
+    }
+
+    if env::args_os().nth(1).is_some_and(|arg| arg == "build-coop-recipe" || arg == "copy-coop-web-assets") {
+        #[cfg(all(feature="coop-web-authoring",target_os="linux"))]
+        {
+            let recipe=env::args_os().nth(1).is_some_and(|arg|arg=="build-coop-recipe");
+            let code=if recipe { orr_package::coop_web_authoring::run_recipe_cli(env::args_os().skip(2)) } else { orr_package::coop_web_authoring::run_copy_cli(env::args_os().skip(2)) };
+            std::process::exit(i32::from(code));
+        }
+        #[cfg(not(all(feature="coop-web-authoring",target_os="linux")))]
+        { eprintln!("Web recipe/copy requires Linux with coop-web-authoring; no input/output opened"); std::process::exit(2); }
+    }
+
+    if env::args_os().nth(1).is_some_and(|arg| arg == "pack-coop-offline") {
+        #[cfg(all(feature="coop-web-authoring",target_os="linux"))]
+        std::process::exit(i32::from(orr_package::coop_web_authoring::run_offline_cli(env::args_os().skip(2))));
+        #[cfg(not(all(feature="coop-web-authoring",target_os="linux")))]
+        { eprintln!("Offline web packing requires Linux with coop-web-authoring; no input/output opened"); std::process::exit(2); }
+    }
+
+    if env::args_os().nth(1).is_some_and(|arg| arg == "create-coop-scene") {
+        #[cfg(all(feature = "coop-web-authoring", target_os = "linux"))]
+        std::process::exit(i32::from(orr_package::coop_web_authoring::run_scene_cli(env::args_os().skip(2))));
+        #[cfg(not(all(feature = "coop-web-authoring", target_os = "linux")))]
+        { eprintln!("Web Scene authoring requires Linux with --features coop-web-authoring; no input/output opened"); std::process::exit(2); }
+    }
+
+    if env::args_os().nth(1).is_some_and(|arg| arg == "create-coop-animation" || arg == "compose-coop-animations") {
+        #[cfg(all(feature = "coop-web-authoring", target_os = "linux"))]
+        {
+            let compose=env::args_os().nth(1).is_some_and(|arg|arg=="compose-coop-animations");
+            std::process::exit(i32::from(orr_package::coop_web_authoring::run_cli(env::args_os().skip(2),compose)));
+        }
+        #[cfg(not(all(feature = "coop-web-authoring", target_os = "linux")))]
+        { eprintln!("Web animation authoring requires Linux with --features coop-web-authoring; no input/output opened"); std::process::exit(2); }
+    }
+
+    if env::args_os().nth(1).is_some_and(|arg| arg == "bootstrap-user-game") {
+        #[cfg(all(feature = "bootstrap-authoring", target_os = "linux"))]
+        std::process::exit(i32::from(orr_package::user_game_bootstrap::run_cli(env::args_os().skip(2))));
+        #[cfg(not(all(feature = "bootstrap-authoring", target_os = "linux")))]
+        {
+            eprintln!("Bootstrap requires Linux with --features bootstrap-authoring; no input/output opened");
+            std::process::exit(2);
+        }
+    }
+
+    if env::args_os().nth(1).is_some_and(|arg| arg == "deployment") {
+        #[cfg(all(feature = "deployment-authoring", target_os = "linux"))]
+        std::process::exit(i32::from(orr_package::deployment_manifest::run_cli(env::args_os().skip(2))));
+        #[cfg(not(all(feature = "deployment-authoring", target_os = "linux")))]
+        {
+            eprintln!("Deployment authoring requires a Linux build with --features deployment-authoring; no input or output opened");
+            std::process::exit(2);
+        }
+    }
+
+    if env::args_os().nth(1).is_some_and(|arg| arg == "create-coop-audio-bank" || arg == "create-coop-audio-bank-from-wav") {
+        #[cfg(all(feature = "audio-authoring", target_os = "linux"))]
+        {
+            let kind = if env::args_os().nth(1).is_some_and(|arg| arg == "create-coop-audio-bank-from-wav") { orr_package::coop_audio_bank::InputKind::Wav } else { orr_package::coop_audio_bank::InputKind::Pcm };
+            std::process::exit(i32::from(orr_package::coop_audio_bank::run_cli(env::args_os().skip(2), kind)));
+        }
+        #[cfg(not(all(feature = "audio-authoring", target_os = "linux")))]
+        {
+            eprintln!("Audio bank authoring requires a Linux build with --features audio-authoring; no input or output opened");
+            std::process::exit(2);
+        }
+    }
+
+    if env::args_os().nth(1).is_some_and(|arg| arg == "create-sprite") {
+        #[cfg(all(feature = "sprite-authoring", target_os = "linux"))]
+        std::process::exit(i32::from(orr_package::sprite_package::run_cli(env::args_os().skip(2))));
+        #[cfg(not(all(feature = "sprite-authoring", target_os = "linux")))]
+        {
+            eprintln!("orr_pkg create-sprite requires a Linux build with --features sprite-authoring; no input or output opened");
+            std::process::exit(2);
+        }
+    }
+
+    if env::args_os().nth(1).is_some_and(|arg| arg == "create-animated-sequence") {
+        #[cfg(all(feature = "animation-authoring", target_os = "linux"))]
+        std::process::exit(i32::from(orr_package::animated_sequence_package::run_cli(env::args_os().skip(2))));
+        #[cfg(not(all(feature = "animation-authoring", target_os = "linux")))]
+        {
+            eprintln!("orr_pkg create-animated-sequence requires a Linux build with --features animation-authoring; no input or output opened");
+            std::process::exit(2);
+        }
+    }
+
+    if env::args_os().nth(1).is_some_and(|arg| arg == "create-assembled") {
+        #[cfg(all(feature = "model-authoring", target_os = "linux"))]
+        std::process::exit(i32::from(orr_package::assembled_package::run_cli(env::args_os().skip(2))));
+        #[cfg(not(all(feature = "model-authoring", target_os = "linux")))]
+        {
+            eprintln!("orr_pkg create-assembled requires a Linux build with --features model-authoring; no input or output opened");
+            std::process::exit(2);
+        }
+    }
+
+    if env::args_os().nth(1).is_some_and(|arg| arg == "create-uv-model") {
+        #[cfg(all(feature = "model-authoring", target_os = "linux"))]
+        std::process::exit(i32::from(orr_package::uv_model_package::run_cli(env::args_os().skip(2))));
+        #[cfg(not(all(feature = "model-authoring", target_os = "linux")))]
+        {
+            eprintln!("orr_pkg create-uv-model requires a Linux build with --features model-authoring; no input or output opened");
+            std::process::exit(2);
+        }
+    }
+    if env::args_os().nth(1).is_some_and(|arg| arg == "create-retextured-model") {
+        #[cfg(all(feature = "model-authoring", target_os = "linux"))]
+        std::process::exit(i32::from(orr_package::retexture_model_package::run_cli(env::args_os().skip(2))));
+        #[cfg(not(all(feature = "model-authoring", target_os = "linux")))]
+        {
+            eprintln!("orr_pkg create-retextured-model requires a Linux build with --features model-authoring; no input or output opened");
+            std::process::exit(2);
+        }
+    }
     if let Err(e) = run() {
         eprintln!("orr_pkg: {e}");
         std::process::exit(1);

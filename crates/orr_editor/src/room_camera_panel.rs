@@ -33,7 +33,10 @@ pub struct Panel {
     saved_bytes: Vec<u8>,
     manifest_bytes: Vec<u8>,
     undo: Vec<Document>,
+    redo: Vec<Document>,
     error: Option<String>,
+    match_width: String,
+    match_height: String,
 }
 
 struct RootPin {
@@ -156,7 +159,10 @@ impl Panel {
             saved_bytes: prepared.bytes,
             manifest_bytes: prepared.manifest_bytes,
             undo: Vec::new(),
+            redo: Vec::new(),
             error,
+            match_width: "1280".into(),
+            match_height: "720".into(),
         }
     }
     pub fn document(&self) -> &Document {
@@ -169,6 +175,7 @@ impl Panel {
         // Serialization performs shared validation before any mutation.
         candidate.to_bytes()?;
         if candidate != self.document {
+            self.redo.clear();
             if self.undo.len() == MAX_UNDO {
                 self.undo.remove(0);
             }
@@ -180,7 +187,21 @@ impl Panel {
     }
     pub fn undo(&mut self) -> bool {
         if let Some(previous) = self.undo.pop() {
-            self.document = previous;
+            self.redo
+                .push(std::mem::replace(&mut self.document, previous));
+            self.candidate = self.document.clone();
+            true
+        } else {
+            false
+        }
+    }
+    /// Restore one undone authored camera; transient viewport movement is not history.
+    pub fn redo(&mut self) -> bool {
+        if let Some(next) = self.redo.pop() {
+            if self.undo.len() == MAX_UNDO {
+                self.undo.remove(0);
+            }
+            self.undo.push(std::mem::replace(&mut self.document, next));
             self.candidate = self.document.clone();
             true
         } else {
@@ -226,6 +247,27 @@ impl Panel {
     }
     /// True requests that the editor reset its live camera to this document.
     /// Navigation itself is never captured or silently persisted by this panel.
+    fn stage_matching_projection(&mut self) {
+        let result =
+            (|| {
+                let width =
+                    self.match_width.trim().parse::<u32>().map_err(|_| {
+                        "Projection aspect width must be a positive integer".to_owned()
+                    })?;
+                let height = self.match_height.trim().parse::<u32>().map_err(|_| {
+                    "Projection aspect height must be a positive integer".to_owned()
+                })?;
+                projection_match::match_projection(&self.candidate, (width, height))
+            })();
+        match result {
+            Ok(candidate) => {
+                self.candidate = candidate;
+                self.error = None;
+            }
+            Err(error) => self.error = Some(error),
+        }
+    }
+
     pub fn show(&mut self, ui: &mut egui::Ui, editable: bool) -> bool {
         let mut reset_live = false;
         ui.collapsing("Room camera", |ui| {
@@ -269,6 +311,38 @@ impl Panel {
                         number(ui, "Orthographic half-height", half_height)
                     }
                 }
+                ui.collapsing("Match projection scale", |ui| {
+                for (label,value) in [("Match projection aspect width",&mut self.match_width),("Match projection aspect height",&mut self.match_height)] {
+                    let label=ui.label(label);
+                    ui.add(egui::TextEdit::singleline(value).char_limit(10)).labelled_by(label.id);
+                }
+                ui.weak("Use an explicit aspect width and height, not the live viewport. Switching preserves scale only on the plane through the camera target; depth appearance differs.");
+                if ui.button("Switch projection keeping target-plane scale").clicked() {
+                    self.stage_matching_projection();
+                }
+                });
+                let mut follow = self.candidate.follow_player.is_some();
+                if ui.checkbox(&mut follow,"Follow player during play").changed() {
+                    self.candidate.schema = if follow { 2 } else { 1 };
+                    self.candidate.follow_player = if follow { Some([0.0;3]) } else { None };
+                    self.candidate.target_bounds = None;
+                }
+                if let Some(offset) = self.candidate.follow_player.as_mut() {
+                    for (axis,value) in ["X","Y","Z"].into_iter().zip(offset) { number(ui,&format!("Follow offset {axis}"),value); }
+                    ui.weak("Play follows the PLAYER plus offset. Pan adjusts a session bias; Reset view clears it. Edit/capture keeps the authored target and preserves this offset.");
+                    let mut limited = self.candidate.target_bounds.is_some();
+                    if ui.checkbox(&mut limited,"Limit tracking target").changed() {
+                        self.candidate.schema = if limited { 3 } else { 2 };
+                        self.candidate.target_bounds = limited.then_some(orr_sample::room_camera::TargetBounds {min:[-8.0,0.0,-6.0],max:[8.0,4.0,6.0]});
+                    }
+                    if let Some(bounds) = self.candidate.target_bounds.as_mut() {
+                        for (axis,index) in ["X","Y","Z"].into_iter().zip(0..3) {
+                            number(ui,&format!("Target min {axis}"),&mut bounds.min[index]);
+                            number(ui,&format!("Target max {axis}"),&mut bounds.max[index]);
+                        }
+                        ui.weak("Inclusive target limits apply after offset and pan. Equal endpoints lock an axis. This does not confine the whole view or avoid walls.");
+                    }
+                }
                 if ui.button("Apply camera").clicked() {
                     match self.apply_document(self.candidate.clone()) {
                         Ok(()) => {
@@ -283,6 +357,13 @@ impl Panel {
                     .clicked()
                 {
                     reset_live = self.undo();
+                    self.error = None;
+                }
+                if ui
+                    .add_enabled(!self.redo.is_empty(), egui::Button::new("Redo camera edit"))
+                    .clicked()
+                {
+                    reset_live = self.redo();
                     self.error = None;
                 }
                 if ui.button("Reset camera defaults").clicked() {
@@ -335,6 +416,32 @@ mod tests {
                 manifest_bytes,
             },
         )
+    }
+    #[test]
+    fn invalid_tracking_limits_preserve_applied_history_and_saved_bytes() {
+        let (_dir, prepared) = fixture();
+        let path = prepared.path.clone();
+        let original = prepared.bytes.clone();
+        let mut panel = Panel::new(prepared);
+        let mut valid = panel.document().clone();
+        valid.schema = 3;
+        valid.follow_player = Some([0.0; 3]);
+        valid.target_bounds = Some(orr_sample::room_camera::TargetBounds {
+            min: [-1.0; 3],
+            max: [1.0; 3],
+        });
+        panel.apply_document(valid.clone()).unwrap();
+        let undo = panel.undo.clone();
+        let redo = panel.redo.clone();
+        let saved = panel.saved.clone();
+        let mut invalid = valid.clone();
+        invalid.target_bounds.as_mut().unwrap().min[0] = 2.0;
+        assert!(panel.apply_document(invalid).is_err());
+        assert_eq!(panel.document(), &valid);
+        assert_eq!(panel.undo, undo);
+        assert_eq!(panel.redo, redo);
+        assert_eq!(panel.saved, saved);
+        assert_eq!(std::fs::read(path).unwrap(), original);
     }
     #[test]
     fn widgets_stage_apply_undo_save_reopen() {
@@ -643,3 +750,17 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "room_camera_panel/redo_tests.rs"]
+mod redo_tests;
+
+#[cfg(test)]
+#[path = "room_camera_panel/projection_match_panel_tests.rs"]
+mod projection_match_panel_tests;
+#[path = "room_camera_panel/projection_match.rs"]
+mod projection_match;
+
+#[cfg(all(test,target_os="linux",feature="package-manager",feature="project-create",feature="room-character",feature="room-lighting",feature="windows-export"))]
+#[path="room_camera_panel/projection_match_integration_tests.rs"]
+mod projection_match_integration_tests;

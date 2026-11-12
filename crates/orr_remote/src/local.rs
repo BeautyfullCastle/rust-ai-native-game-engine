@@ -159,6 +159,13 @@ impl LocalHost {
         }
     }
 
+    /// Trusted native startup registration, before clients connect. This waits
+    /// at most five seconds for actual host installation, never for UI work.
+    /// A timeout has an uncertain outcome and must not be retried automatically.
+    pub fn install_editor_gameplay(&self,service:crate::editor_gameplay::EditorGameplayService)->Result<(),String>{
+        self.connector.install_editor_gameplay(service)
+    }
+
     /// Makes in-process connections to the host.
     pub fn connector(&self) -> LocalConnector {
         self.connector.clone()

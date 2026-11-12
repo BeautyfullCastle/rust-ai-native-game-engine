@@ -21,6 +21,9 @@ const MAX_SCALE: f32 = 1000.0;
 const MIN_RATE: f32 = 0.125;
 const MAX_RATE: f32 = 4.0;
 const SCHEMA: u32 = 1;
+const CROSSFADE_SCHEMA: u32 = 2;
+pub(crate) mod playback;
+pub(crate) mod cooked_provenance;
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -39,6 +42,8 @@ pub(crate) struct Settings {
         deserialize_with = "deserialize_idle_clip"
     )]
     pub(crate) idle_clip: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_idle_clip")]
+    pub(crate) crossfade_ticks: Option<u32>,
 }
 
 impl Default for Settings {
@@ -52,6 +57,7 @@ impl Default for Settings {
             rate: 1.0,
             looped: true,
             idle_clip: None,
+            crossfade_ticks: None,
         }
     }
 }
@@ -155,16 +161,8 @@ impl Snapshot {
         let model = load_animated_asset(asset, &asset_bytes)?;
         validate_model(&model)?;
         let cooked = model.to_bytes().map_err(|error| error.to_string())?;
-        if cooked.len() > MAX_SIDECAR_BYTES
-            || model
-                .source()
-                .dependencies
-                .iter()
-                .any(|dependency| dependency.uri != "$source")
-        {
-            return Err(
-                "animated model exceeds the embedded bounds or has external dependencies".into(),
-            );
+        if cooked.len() > MAX_SIDECAR_BYTES {
+            return Err("animated model exceeds the embedded bounds".into());
         }
         let locked_again = orr_package::inspect(&package_root, &runtime)
             .map_err(|error| format!("recheck animation package: {error}"))?;
@@ -381,7 +379,7 @@ impl Snapshot {
             return Err("embedded animated source changed after admission".into());
         }
         let bytes = serde_json::to_vec(&Sidecar {
-            schema: SCHEMA,
+            schema: if settings.crossfade_ticks.is_some() { CROSSFADE_SCHEMA } else { SCHEMA },
             scene_filename: scene_filename.to_owned(),
             graph_revision: self.graph_revision,
             manifest: self.manifest.clone(),
@@ -415,7 +413,7 @@ impl Snapshot {
         validate_scene_filename(scene_filename)?;
         let sidecar: Sidecar = serde_json::from_slice(bytes)
             .map_err(|error| format!("invalid mesh animation sidecar: {error}"))?;
-        if sidecar.schema != SCHEMA
+        if !matches!((sidecar.schema, sidecar.settings.crossfade_ticks), (SCHEMA, None) | (CROSSFADE_SCHEMA, Some(0..=120)))
             || sidecar.scene_filename != scene_filename
             || sidecar.graph_revision != graph_revision
         {
@@ -479,18 +477,11 @@ impl Snapshot {
 }
 
 fn load_animated_asset(asset: &str, bytes: &[u8]) -> Result<AnimatedModel, String> {
-    if let Ok(model) = AnimatedModel::from_bytes(bytes) {
-        return Ok(model);
-    }
-    orr_model::animation_import::import_with_resolver(asset, bytes, |_| {
-        Err(ModelError::message(
-            "mesh animation snapshots do not read external resources",
-        ))
-    })
-    .map_err(|error| format!("import animated asset: {error}"))
+    cooked_provenance::decode(asset, bytes)
 }
 
 fn validate_model(model: &AnimatedModel) -> Result<(), String> {
+    cooked_provenance::validate_metadata(model)?;
     let source = model.source();
     if source.nodes.len() > MAX_NODES || source.clips.is_empty() || source.clips.len() > MAX_CLIPS {
         return Err("animated mesh exceeds node or clip limits".into());
@@ -626,6 +617,14 @@ fn validate_settings(settings: Settings, model: &AnimatedModel) -> Result<Settin
         return Err(
             "mesh animation transform or playback rate is outside its finite bounds".into(),
         );
+    }
+    if settings.crossfade_ticks.is_some_and(|ticks| ticks > 120)
+        || (settings.crossfade_ticks.is_some_and(|ticks| ticks > 0) && settings.idle_clip.is_none())
+    {
+        return Err("mesh crossfade requires 0..120 ticks and a valid idle clip for positive duration".into());
+    }
+    if settings.crossfade_ticks.is_some_and(|ticks| ticks > 0) {
+        playback::validate_pose_budget(model)?;
     }
     let rotation = mesh_rotation::validate_normalize(settings.rotation)?;
     let clip = model

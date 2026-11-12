@@ -12,12 +12,14 @@ Look
 
 Change
   set <entity> Comp.path=value...   edit fields (one undo entry)
+  sset Singleton.path=value...     edit scene-wide settings (one undo entry)
   spawn | despawn | rename | add | remove
   apply <label> <ops...> --check <rule>   propose, verify, accept if it passes (recommended)
   propose | verify | accept | reject | proposals | diff      the same, step by step
   history | undo | redo
 
 Other
+  gameplay describe|control|act|capture  registered game contract, lifecycle, semantic action
   sim start|stop|input|play|pause|step|seek|speed|state
   activity [-f]                what agents did on the host (a live feed with -f)
   save [--write]               scene YAML, or write the host's scene file
@@ -33,6 +35,40 @@ Values are JSON when they parse (pos=[6,18], angle=0.5), else bare strings (kind
 
 /// (name, usage line, help text)
 const COMMANDS: &[(&str, &str, &str)] = &[
+    (
+        "gameplay",
+        "orr gameplay describe [intent] | control play|pause|step|stop | act <intent> | capture --out PATH",
+        "orr gameplay describe [intent] [--timeout-ms N]
+orr gameplay control play|pause|step|stop [--timeout-ms N]
+orr gameplay act <intent> [--payload JSON] [--player N] [--timeout-ms N]
+orr gameplay capture --out PATH [--max-width N] [--max-height N] [--timeout-ms N]
+
+Describe is read-only: lists intent IDs or the requested payload schema and current state.
+Control uses the paired editor lifecycle (not sim.*): mutate once then observe target state.
+Step advances one tick and requires paused Play. Queued is not success; exit 0 means
+observed target state without error/pending cleanup, not exclusive causal proof.
+No automatic retries/reconnects. Lifecycle commands need read and sim_control;
+describe needs only read. Describe intentionally includes the registered contract/schema.
+
+Perform one semantic action in an already running registered game. Uses one connection:
+describe readiness, claim once, fresh describe, submit once, read-only status polling,
+verify consumed + neutral receipts, release once and verify release.
+No automatic Play/Stop, capture, mutation retry or reconnect. Completion is consumption,
+not game victory. A timeout, rejected/uncertain result or failed release exits nonzero.
+The host cleans up a disconnected controller; errors do not trigger another mutation.
+Output (including --json) excludes lease, scope, payload and host error text.
+
+--payload JSON     intent payload (default {}, maximum 64 KiB); may appear in process lists
+--player N         player slot 0..15, additionally bounded by the host (default 0)
+--timeout-ms N     whole operation deadline including connection/auth, 100..60000 (default 10000)
+The global --timeout does not override this command's bounded deadline.
+Prefer ORR_ERP_TOKEN to --token. Act/control require read and sim_control; describe/capture require read.
+Capture saves one bounded PNG locally without replacing any path, after game/build
+identity and PNG validation. It requires read and an available editor framebuffer.
+No force, automatic retry or reconnect. State queries and capture are not atomic.
+PNG saving may succeed before stdout fails; use a new destination, not a blind retry.
+See docs/gameplay-cli.md for acceptance and limitations.",
+    ),
     (
         "status",
         "orr status",
@@ -103,6 +139,25 @@ Examples:
   orr set body_05 Body.pos=[6,18]
   orr set hero orr_physics::Body.kind=dynamic Body.angle=0.5
   orr set e_0000000e Body.vel=[0,0]",
+    ),
+    (
+        "sset",
+        "orr sset <Singleton.path>=<value> [...more]",
+        "orr sset <Singleton.path>=<value> [<Singleton.path>=<value>...]
+
+Directly edit reflected scene-wide settings; all assignments are one undo entry.
+Use singleton names without @ (the @ prefix belongs to get). Discover names and
+fields with `orr schema --types`, `orr schema <type>` and `orr get @Singleton`.
+Short names work only when unambiguous. Nested paths use the host's field syntax.
+Requires read and scene_edit, Edit mode, and a host that admits the changes.
+A rejected assignment rolls back the batch. No automatic retry or save.
+For changes needing replay checks use `orr apply <label> sset ... --check <rule>`.
+
+Examples:
+  orr sset Scene.spawn_batch=3 Scene.height=42.5
+  orr sset CoopDefense::Campaign.last_wave=3 --json
+  orr undo
+  orr save --write",
     ),
     (
         "spawn",

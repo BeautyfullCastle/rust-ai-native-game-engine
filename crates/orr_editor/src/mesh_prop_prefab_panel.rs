@@ -5,6 +5,15 @@ use std::{
     sync::mpsc::{self, Receiver, TryRecvError},
 };
 
+// Borrowed only during the UI call. start_save clones every field together
+// before spawning, so later selection/draft changes cannot mix captured values.
+pub(crate) struct SaveSource<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) art: &'a Snapshot,
+    #[cfg(feature = "mesh-prop-shading")]
+    pub(crate) shading: Option<&'a crate::mesh_prop_shading::Settings>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Context {
     pub scene: PathBuf,
@@ -106,7 +115,7 @@ impl Panel {
         &mut self,
         ui: &mut Ui,
         context: Option<Context>,
-        selected: Option<(&str, &Snapshot)>,
+        selected: Option<SaveSource<'_>>,
         editable: bool,
     ) -> Option<Template> {
         let candidate = self.poll(context.clone());
@@ -152,8 +161,8 @@ impl Panel {
                     .add_enabled(can_save, egui::Button::new("Save selected prop prefab"))
                     .clicked()
                 {
-                    if let (Some(context), Some((name, snapshot))) = (context.as_ref(), selected) {
-                        self.start_save(context.clone(), name, snapshot);
+                    if let (Some(context), Some(selected)) = (context.as_ref(), selected) {
+                        self.start_save(context.clone(), selected);
                     }
                 }
                 let can_load = enabled && self.rights_acknowledged && path_ready;
@@ -179,7 +188,7 @@ impl Panel {
         self.input_generation = self.input_generation.saturating_add(1);
     }
 
-    fn start_save(&mut self, context: Context, name: &str, snapshot: &Snapshot) -> bool {
+    fn start_save(&mut self, context: Context, selected: SaveSource<'_>) -> bool {
         if self.busy() {
             return false;
         }
@@ -194,13 +203,18 @@ impl Panel {
             input_generation: self.input_generation,
             operation: Operation::Save,
         };
-        let prefab_name = name.to_owned();
-        let applied_snapshot = snapshot.clone();
+        let prefab_name = selected.name.to_owned();
+        let applied_snapshot = selected.art.clone();
+        #[cfg(feature = "mesh-prop-shading")]
+        let applied_shading = selected.shading.cloned();
         let (sender, receiver) = mpsc::channel();
         let worker = std::thread::Builder::new()
             .name("orr-mesh-prop-prefab-save".into())
             .spawn(move || {
-                let result = Template::capture(&prefab_name, &applied_snapshot)
+                let captured = Template::capture(&prefab_name, &applied_snapshot);
+                #[cfg(feature = "mesh-prop-shading")]
+                let captured = captured.and_then(|template| template.with_shading(applied_shading));
+                let result = captured
                     .and_then(|template| template.encode().map(|bytes| (template, bytes)))
                     .and_then(|(template, bytes)| {
                         crate::mesh_prop_prefab_store::save_new(&path, &bytes)

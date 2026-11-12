@@ -1,0 +1,56 @@
+use super::*;
+use crate::package_manager::keep_tests::{fixture,files,Fixture};
+use egui_kittest::{Harness,kittest::{Queryable,NodeT}};
+use std::time::{Duration,Instant};
+fn panel(f:&Fixture)->Panel {let mut p=Panel {open:true,..Panel::default()};p.select_project(Some(&f.base.root));p.verified=Some(f.indirect.clone());p.keep.select(f.name.clone());p}
+fn harness(f:&Fixture)->Harness<'static,(Panel,PathBuf,bool)> {Harness::builder().with_size([1700.0,1800.0]).build_ui_state(|ui,state:&mut (Panel,PathBuf,bool)|state.0.show(ui.ctx(),Some(&state.1),if state.2 {Some("Save pending authoring first")}else{None}),(Panel {open:true,..Panel::default()},f.base.root.clone(),false))}
+fn settle(h:&mut Harness<'_,(Panel,PathBuf,bool)>) {h.run_steps(3);}
+fn wait(h:&mut Harness<'_,(Panel,PathBuf,bool)>,ready:impl Fn(&Panel)->bool) {let end=Instant::now()+Duration::from_secs(10);loop {settle(h);if ready(&h.state().0) {return;}assert!(Instant::now()<end,"pending={} verified={} selected={} ready={}: {}",h.state().0.busy(),h.state().0.verified.is_some(),h.state().0.keep.name,h.state().0.keep.ready.is_some(),h.state().0.status);std::thread::sleep(Duration::from_millis(5));}}
+fn click(h:&mut Harness<'_,(Panel,PathBuf,bool)>,label:&str) {h.get_by_label(label).scroll_to_me();h.run_steps(2);assert!(!h.get_by_label(label).accesskit_node().is_disabled(),"button disabled: {label}; {}",h.state().0.status);h.get_by_label(label).click_accesskit();settle(h);}
+fn widgets_keep_and_remove_parent(f:&Fixture) {let mut h=harness(f);settle(&mut h);click(&mut h,"Verify installed packages");wait(&mut h,|p|!p.busy() && p.verified.is_some());let before=files(&f.base.root);click(&mut h,&format!("Select keep {}",f.name));assert_eq!(h.state().0.keep.name,f.name,"selection widget must stage the target");click(&mut h,"Preview dependency keep");wait(&mut h,|p|!p.busy() && p.keep_ready());assert_eq!(files(&f.base.root),before);click(&mut h,"Keep previewed dependency");wait(&mut h,|p|!p.busy() && p.status.contains(" kept for "));assert!(h.state().0.verified.is_none());click(&mut h,"Verify installed packages");wait(&mut h,|p|!p.busy() && p.verified.is_some());assert!(h.state().0.verified.as_ref().unwrap().direct.contains_key(&f.name));click(&mut h,"Select removal keep-parent");click(&mut h,"Preview package removal");wait(&mut h,|p|!p.busy() && p.removal_preview.is_some());click(&mut h,"Remove previewed package");wait(&mut h,|p|!p.busy() && p.verified.as_ref()==Some(&f.original));}
+#[test]
+fn actual_widgets_preview_keep_verify_and_separate_parent_removal_preserve_game_files() {let f=fixture(false);let before=files(&f.base.root);widgets_keep_and_remove_parent(&f);let mut after=files(&f.base.root);after.insert(PathBuf::from("orr.packages.lock.json"),before[std::path::Path::new("orr.packages.lock.json")].clone());assert_eq!(after,before);}
+#[test]
+fn dirty_or_closed_panel_discards_preview_and_stale_completion() {for blocked in [true,false] {let f=fixture(false);let mut p=panel(&f);let id=p.keep_identity().unwrap();let plan=package_manager::plan_keep(&f.base.root,&f.name).unwrap();p.keep.ready=Some((id.clone(),plan));if !blocked {p.open=false;}let mut h=Harness::builder().with_size([1200.0,1000.0]).build_ui_state(move |ui,state:&mut (Panel,PathBuf)|state.0.show(ui.ctx(),Some(&state.1),if blocked {Some("dirty")}else{None}),(p,f.base.root.clone()));h.run_steps(3);assert!(h.state().0.keep.ready.is_none());let plan=package_manager::plan_keep(&f.base.root,&f.name).unwrap();h.state_mut().0.finish_keep_preview(id,Ok(plan));assert!(h.state().0.keep.ready.is_none());}}
+#[test]
+fn changed_project_selection_or_verified_lock_rejects_old_preview() {for change in 0..3 {let f=fixture(false);let mut p=panel(&f);let id=p.keep_identity().unwrap();let plan=package_manager::plan_keep(&f.base.root,&f.name).unwrap();match change {0=>p.project_generation+=1,1=>p.keep.select("missing".into()),_=>p.verified=Some(f.original.clone())}p.finish_keep_preview(id,Ok(plan));assert!(p.keep.ready.is_none());assert!(p.pending.is_none());}}
+#[test]
+fn commit_pending_fences_mutation_and_disconnect_reports_uncertain_without_retry() {let f=fixture(false);let mut p=panel(&f);let before=files(&f.base.root);let (sender,receiver)=mpsc::channel();p.pending=Some(receiver);p.keeping=true;assert!(p.removal_busy());p.start_keep_preview();assert!(p.pending.is_some());drop(sender);p.poll();assert!(!p.busy());assert!(!p.removal_busy());assert!(p.verified.is_none());assert!(p.status.contains("uncertain"));assert!(p.status.contains("no automatic retry"));assert_eq!(files(&f.base.root),before);}
+#[test]
+fn applied_result_is_attributed_to_captured_prior_project() {let f=fixture(false);let mut p=panel(&f);let id=p.keep_identity().unwrap();p.project_generation+=1;p.finish_keep(id,Ok(f.indirect.clone()));assert!(p.verified.is_none());assert!(p.status.contains("prior project"));assert!(p.keep.ready.is_none());}
+#[test]
+fn stale_verified_lock_disables_commit_without_dispatch() {let f=fixture(false);let mut p=panel(&f);let id=p.keep_identity().unwrap();let plan=package_manager::plan_keep(&f.base.root,&f.name).unwrap();p.keep.ready=Some((id,plan));p.verified=Some(f.original.clone());p.start_keep();assert!(p.pending.is_none());assert!(p.keep.ready.is_none());}
+#[cfg(all(feature="room-character",feature="room-lighting",feature="windows-export"))]
+#[test]
+#[ignore="explicit built runtime required for source-hidden native acceptance"]
+fn advanced_profile_widgets_keep_dependency_and_source_hidden_export_runs_actual_game() {
+    use sha2::{Digest,Sha256};use std::process::Command;
+    let f=fixture(true);let before=files(&f.base.root);widgets_keep_and_remove_parent(&f);let prepared=orr_sample::room_project::PreparedProject::open_with_capabilities(&f.base.root,orr_sample::room_project::RoomProjectCapabilities {lighting:true,character:true}).unwrap();for name in ["orr.project.json","room.scene.yaml","room.models.json","room.camera.json","room.character.json","room.lighting.json"] {assert_eq!(std::fs::read(f.base.root.join(name)).unwrap(),before[std::path::Path::new(name)]);}
+    let mut sim=prepared.scene().simulation().unwrap();for _ in 0..8 {let mut inputs=orr_sim::TickInputs::new(sim.tick()+1,1);inputs.set_input(orr_sim::PlayerSlot(0),orr_sample::room_game::RoomInput {move_x:1,buttons:orr_sample::room_game::INTERACT,..Default::default()});sim.step(&inputs);}let expected=format!("room tick: 8 checksum: 0x{:016x}",sim.frame().checksum());
+    let runtime=f.base.temp.path().join("trusted keep runtime");std::fs::copy(PathBuf::from(std::env::var_os("ORR_EDITOR_KEEP_RUNTIME").expect("explicit runtime")),&runtime).unwrap();let hash:String=Sha256::digest(std::fs::read(&runtime).unwrap()).iter().map(|b|format!("{b:02x}")).collect();let bundle=f.base.temp.path().join("retained dependency game");orr_sample::project_export::export_room(&orr_sample::project_export::ExportOptions {project:f.base.root.clone(),runtime:runtime.clone(),runtime_sha256:hash,output:bundle.clone(),trusted_runtime:true,source_revision:None}).unwrap();std::fs::rename(&f.base.root,f.base.root.with_extension("hidden")).unwrap();std::fs::rename(&runtime,runtime.with_extension("hidden")).unwrap();let output=Command::new(bundle.join("run-room-escape")).current_dir(f.base.temp.path()).args(["--headless","--ticks","8","--hold","right,interact","--check-model-poses"]).env_remove("DISPLAY").env_remove("WAYLAND_DISPLAY").output().unwrap();assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));let text=String::from_utf8(output.stdout).unwrap();assert!(text.contains(&expected));assert!(text.contains("room model poses: 9 frames checked;"));assert!(text.contains("room lighting active: 1"));
+}
+
+// Preserve the original pointer route separately from accessibility acceptance.
+#[test]
+fn pointer_route_diagnoses_each_keep_stage() {
+    let f=fixture(false);let mut h=harness(&f);settle(&mut h);
+    for label in ["Verify installed packages".to_owned(),format!("Select keep {}",f.name),"Preview dependency keep".to_owned(),"Keep previewed dependency".to_owned()] {
+        h.get_by_label(&label).scroll_to_me();h.run_steps(2);
+        let early=h.get_by_label(&label).rect();h.run_steps(30);
+        eprintln!("scroll settled stage={label} early={early:?} final={:?}",h.get_by_label(&label).rect());
+        let rect=h.get_by_label(&label).rect();
+        eprintln!("pointer stage={label} rect={rect:?} status={}",h.state().0.status);
+        assert!(!h.get_by_label(&label).accesskit_node().is_disabled(),"disabled: {label}");
+        h.get_by_label(&label).click();settle(&mut h);
+        if label.starts_with("Select keep") {assert_eq!(h.state().0.keep.name,f.name,"pointer selection failed at {rect:?}");}
+        else {
+            let end=Instant::now()+Duration::from_secs(10);
+            loop {settle(&mut h);let p=&h.state().0;
+                let ready=match label.as_str() {"Verify installed packages"=>!p.busy()&&p.verified.is_some(),"Preview dependency keep"=>!p.busy()&&p.keep_ready(),_=>!p.busy()&&p.status.contains(" kept for ")};
+                if ready {break;}
+                assert!(Instant::now()<end,"pointer stage={label} rect={rect:?} pending={} verified={} selected={} ready={}: {}",p.busy(),p.verified.is_some(),p.keep.name,p.keep.ready.is_some(),p.status);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+}

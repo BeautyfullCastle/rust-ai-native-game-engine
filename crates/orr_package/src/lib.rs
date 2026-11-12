@@ -1,5 +1,30 @@
 //! Offline, content-only packages. No script execution, downloads or Cargo edits.
 //! The application supplies its real compiled capabilities through [`Runtime`].
+#[cfg(feature = "stormglass-embedded-distribution")]
+pub mod stormglass_embedded_distribution;
+
+#[cfg(all(windows, feature = "stormglass-windows-stage"))]
+pub mod stormglass_windows_stage;
+
+#[cfg(feature = "stormglass-windows-admission")]
+pub mod stormglass_windows_admission;
+
+#[cfg(all(windows, feature = "stormglass-windows-snapshot"))]
+pub mod stormglass_windows_snapshot;
+
+#[cfg(any(windows, target_os = "linux"))]
+#[path = "source_authoring_core.rs"]
+pub mod source_authoring;
+
+#[cfg(all(feature = "model-authoring", target_os = "linux"))]
+pub mod assembled_package;
+
+#[cfg(all(feature = "model-authoring", target_os = "linux"))]
+pub mod uv_model_package;
+
+#[cfg(all(feature = "model-authoring", target_os = "linux"))]
+pub mod retexture_model_package;
+
 mod preview;
 pub use preview::{PackageChange, PackagePreview, PackageSelection};
 mod explanation;
@@ -8,7 +33,10 @@ mod project_identity;
 pub use project_identity::{format_game_id, ProgressProfile, ProjectProgress};
 mod cached_revision;
 mod checked_remove;
+mod keep_dependency;
 mod restore_removed;
+mod source_export;
+pub use source_export::{ExportedSource, SourceExportReport};
 mod verification;
 pub use verification::PackageVerification;
 
@@ -110,23 +138,90 @@ impl Runtime {
 /// Project metadata. Schema 1 remains metadata-only; schema 2 selects one
 /// entry scene; schema 3 adds explicit CollectDodge progress identity. None
 /// selects packages: the lock alone controls package activation and versions.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectManifest {
     pub schema: u32,
     pub engine: String,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "present_entry"
-    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub entry: Option<ProjectEntry>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "present_progress"
-    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub progress: Option<ProjectProgress>,
+}
+
+// Retain the derived legacy decoders (including their duplicate/unknown-field
+// checks), but remember object versus sequence shape until schema is known.
+// No intermediate JSON value may collapse duplicate keys before validation.
+struct ProjectShape<T> {
+    value: T,
+    object: bool,
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for ProjectShape<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        struct Visitor<T>(std::marker::PhantomData<T>);
+        impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for Visitor<T> {
+            type Value = ProjectShape<T>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("project metadata object or legacy sequence")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> std::result::Result<Self::Value, A::Error> {
+                T::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(|value| ProjectShape { value, object: true })
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                seq: A,
+            ) -> std::result::Result<Self::Value, A::Error> {
+                T::deserialize(serde::de::value::SeqAccessDeserializer::new(seq))
+                    .map(|value| ProjectShape {
+                        value,
+                        object: false,
+                    })
+            }
+        }
+        deserializer.deserialize_any(Visitor(std::marker::PhantomData))
+    }
+}
+
+impl<'de> Deserialize<'de> for ProjectManifest {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            schema: u32,
+            engine: String,
+            #[serde(default, deserialize_with = "present_entry")]
+            entry: Option<ProjectShape<ProjectEntry>>,
+            #[serde(default, deserialize_with = "present_progress")]
+            progress: Option<ProjectProgress>,
+        }
+        let decoded = ProjectShape::<Wire>::deserialize(deserializer)?;
+        let value = decoded.value;
+        if value.entry.as_ref().is_some_and(|e| e.value.lighting.is_some() || e.value.character.is_some()) {
+            if !decoded.object {
+                return Err(serde::de::Error::custom(
+                    "lighting project must be an object",
+                ));
+            }
+            if value.entry.as_ref().is_some_and(|entry| !entry.object) {
+                return Err(serde::de::Error::custom("lighting entry must be an object"));
+            }
+        }
+        Ok(Self {
+            schema: value.schema,
+            engine: value.engine,
+            entry: value.entry.map(|entry| entry.value),
+            progress: value.progress,
+        })
+    }
 }
 
 /// Closed launch profiles supported by the project contract. This is metadata,
@@ -170,6 +265,16 @@ pub struct ProjectEntry {
         deserialize_with = "present_ui"
     )]
     pub ui: Option<ProjectUi>,
+    /// Optional bounded Room-only point-light presentation document. Keep additive fields last.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present_sprites")]
+    pub lighting: Option<String>,
+    /// Optional Room state-selected character clips. Additive: preserve legacy sequence slots.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present_sprites")]
+    pub character: Option<String>,
+    /// Optional Room-only authored physical-key action map. Additive trailing field.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present_sprites")]
+    pub controls: Option<String>,
+
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -200,8 +305,8 @@ pub struct ProjectFont {
 // second spelling of missing launch metadata (including on schema 1).
 fn present_entry<'de, D: serde::Deserializer<'de>>(
     d: D,
-) -> std::result::Result<Option<ProjectEntry>, D::Error> {
-    ProjectEntry::deserialize(d).map(Some)
+) -> std::result::Result<Option<ProjectShape<ProjectEntry>>, D::Error> {
+    ProjectShape::<ProjectEntry>::deserialize(d).map(Some)
 }
 fn present_sprites<'de, D: serde::Deserializer<'de>>(
     d: D,
@@ -228,8 +333,10 @@ impl ProjectManifest {
                 if let Err(message) = progress.validate() {
                     return fail(&message);
                 }
-                if self.entry.as_ref().map(|e| e.game) != Some(ProjectGame::CollectDodgeV1) {
-                    return fail("schema-3 progress requires collect-dodge-v1");
+                if !matches!((self.entry.as_ref().map(|e| e.game), progress.profile),
+                    (Some(ProjectGame::CollectDodgeV1), ProgressProfile::CollectDodgeHighscoreV1) |
+                    (Some(ProjectGame::RoomEscapeV1), ProgressProfile::RoomEscapeClearV1)) {
+                    return fail("schema-3 progress requires the matching game/profile pair");
                 }
             }
             _ => return fail("progress metadata requires schema 3 and schema 3 requires progress"),
@@ -252,9 +359,42 @@ impl ProjectManifest {
                         return fail("entry scene and sprite sidecar must be different files");
                     }
                 }
+                if let Some(character) = &entry.character {
+                    portable(character)?;
+                    let aliases = [Some("orr.project.json"), Some("orr.packages.lock.json"), Some(entry.scene.as_str()),
+                        entry.models.as_deref(), entry.camera.as_deref(), entry.tilemap.as_deref(), entry.lighting.as_deref(),
+                        entry.sprites.as_deref(),
+                        entry.ui.as_ref().and_then(|ui| ui.document.as_deref()), entry.controls.as_deref()];
+                    if entry.game != ProjectGame::RoomEscapeV1 || !matches!(self.schema, 2 | 3)
+                        || character.contains('/') || character.starts_with('.')
+                        || aliases.into_iter().flatten().any(|path| path.eq_ignore_ascii_case(character))
+                    { return fail("character requires a distinct root-level Room presentation document"); }
+                }
+                if let Some(lighting) = &entry.lighting {
+                    portable(lighting)?;
+                    let aliases = [Some("orr.project.json"), Some("orr.packages.lock.json"), Some(entry.scene.as_str()),
+                        entry.models.as_deref(), entry.camera.as_deref(), entry.tilemap.as_deref(),
+                        entry.sprites.as_deref(),
+                        entry.ui.as_ref().and_then(|ui| ui.document.as_deref()), entry.controls.as_deref()];
+                    if entry.game != ProjectGame::RoomEscapeV1 || !matches!(self.schema, 2 | 3)
+                        || lighting.contains('/') || lighting.starts_with('.')
+                        || aliases.into_iter().flatten().any(|path| path.eq_ignore_ascii_case(lighting))
+                    { return fail("lighting requires a distinct root-level Room presentation document"); }
+                }
+                if let Some(controls) = &entry.controls {
+                    portable(controls)?;
+                    let aliases = [Some("orr.project.json"), Some("orr.packages.lock.json"), Some(entry.scene.as_str()),
+                        entry.models.as_deref(), entry.camera.as_deref(), entry.tilemap.as_deref(), entry.lighting.as_deref(),
+                        entry.character.as_deref(), entry.sprites.as_deref(),
+                        entry.ui.as_ref().and_then(|ui| ui.document.as_deref())];
+                    if entry.game != ProjectGame::RoomEscapeV1 || !matches!(self.schema, 2 | 3)
+                        || controls.contains('/') || controls.starts_with('.')
+                        || aliases.into_iter().flatten().any(|path| path.eq_ignore_ascii_case(controls))
+                    { return fail("controls require a distinct root-level Room input document"); }
+                }
                 if let Some(camera) = &entry.camera {
                     portable(camera)?;
-                    if entry.game != ProjectGame::RoomEscapeV1 || self.schema != 2
+                    if entry.game != ProjectGame::RoomEscapeV1 || !matches!(self.schema, 2 | 3)
                         || camera.contains('/') || camera.starts_with('.')
                         || camera.eq_ignore_ascii_case("orr.project.json")
                         || camera.eq_ignore_ascii_case("orr.packages.lock.json")
@@ -269,9 +409,9 @@ impl ProjectManifest {
                     }
                 }
                 if entry.game == ProjectGame::RoomEscapeV1
-                    && (self.schema != 2 || entry.sprites.is_some() || entry.ui.is_some() || entry.models.is_none())
+                    && (!matches!(self.schema, 2 | 3) || entry.sprites.is_some() || entry.ui.is_some() || entry.models.is_none())
                 {
-                    return fail("room-escape-v1 requires schema 2 and models, without sprites/UI/progress");
+                    return fail("room-escape-v1 requires schema 2 or valid progress schema 3 and models, without sprites/UI");
                 }
                 if let Some(ui) = &entry.ui {
                     match (entry.game, ui.profile, &ui.document) {
@@ -464,6 +604,19 @@ impl Project {
         before_publish: impl FnOnce() -> std::result::Result<(), String>,
     ) -> Result<Lock> {
         self.install_transaction(sources, &[], Some(expected), Some(approved), before_publish)
+    }
+    /// Checked activation with explicit dependency candidates. Candidates do not
+    /// become direct selections; the same writer, snapshots and publication
+    /// ordering as `install_checked` apply, including its orphan-cache caveat.
+    pub fn install_checked_with_dependencies(
+        &self,
+        sources: &[PathBuf],
+        candidates: &[PathBuf],
+        expected: &Lock,
+        approved: &Lock,
+        before_publish: impl FnOnce() -> std::result::Result<(), String>,
+    ) -> Result<Lock> {
+        self.install_transaction(sources, candidates, Some(expected), Some(approved), before_publish)
     }
     fn install_transaction(
         &self,
@@ -1017,6 +1170,112 @@ mod tests {
         #[cfg(unix)]
         let root = fs::canonicalize(root).unwrap();
         tempfile::tempdir_in(root).unwrap()
+    }
+
+    #[test]
+    fn lighting_preserves_legacy_positions_and_requires_manifest_objects() {
+        let ui = serde_json::json!({"profile":"collect-authored-v1", "document":"room.ui.json",
+            "font":{"package":"font", "asset":"font.otf"}});
+        let mut sequence = serde_json::json!(["background.json", "room.camera.json", "room-escape-v1", "room.yaml",
+            "room.sprites.json", "room.models.json", ui]);
+        let legacy: ProjectEntry = serde_json::from_value(sequence.clone()).unwrap();
+        assert_eq!(legacy.tilemap.as_deref(), Some("background.json"));
+        assert_eq!(legacy.camera.as_deref(), Some("room.camera.json"));
+        assert_eq!(legacy.lighting, None);
+        sequence.as_array_mut().unwrap().push("room.lighting.json".into());
+        let extended: ProjectEntry = serde_json::from_value(sequence.clone()).unwrap();
+        assert_eq!(extended.ui, legacy.ui);
+        assert_eq!(extended.lighting.as_deref(), Some("room.lighting.json"));
+        let entry = serde_json::json!({"game":"room-escape-v1", "scene":"room.yaml",
+            "lighting":"room.lighting.json"});
+        for schema in [1, 2, 3] {
+            let root_sequence = serde_json::json!([schema, "*", entry]);
+            assert!(serde_json::from_value::<ProjectManifest>(root_sequence).unwrap_err()
+                .to_string().contains("project must be an object"));
+            let entry_sequence = serde_json::json!({"schema":schema,"engine":"*","entry":sequence});
+            assert!(serde_json::from_value::<ProjectManifest>(entry_sequence).unwrap_err()
+                .to_string().contains("entry must be an object"));
+            let old_sequence = serde_json::json!([schema, "*", ["background.json", "room.camera.json", "room-escape-v1", "room.yaml"]]);
+            let old: ProjectManifest = serde_json::from_value(old_sequence).unwrap();
+            assert_eq!(old.entry.unwrap().lighting, None);
+        }
+        for lighting in ["null", "[1]", "42"] {
+            let encoded = format!(r#"{{"schema":2,"engine":"*","entry":{{"game":"room-escape-v1","scene":"room.yaml","lighting":{lighting}}}}}"#);
+            assert!(serde_json::from_str::<ProjectManifest>(&encoded).is_err());
+        }
+        for encoded in [
+            r#"{"schema":2,"engine":"*","entry":{"game":"room-escape-v1","scene":"room.yaml","lighting":"a.json","lighting":"b.json"}}"#,
+            r#"{"schema":2,"schema":2,"engine":"*"}"#,
+            r#"{"schema":2,"engine":"*","unknown":0}"#,
+            r#"{"schema":2,"engine":"*","entry":null}"#,
+            r#"{"schema":2,"engine":"*","progress":null}"#,
+        ] { assert!(serde_json::from_str::<ProjectManifest>(encoded).is_err()); }
+    }
+
+    #[test]
+    fn room_controls_is_trailing_optional_non_null_and_root_distinct() {
+        let legacy: ProjectEntry =
+            serde_json::from_str(r#"{"game":"room-escape-v1","scene":"room.yaml"}"#).unwrap();
+        let serialized = serde_json::to_value(&legacy).unwrap();
+        assert!(serialized.get("controls").is_none());
+        assert_eq!(
+            serde_json::to_string(&legacy).unwrap(),
+            r#"{"game":"room-escape-v1","scene":"room.yaml"}"#
+        );
+        assert_eq!(legacy.controls, None);
+        let mut sequence = serde_json::json!([
+            "tile.json",
+            "camera.json",
+            "room-escape-v1",
+            "room.yaml",
+            "sprites.json",
+            "models.json",
+            {
+                "profile": "arena-korean-v1",
+                "font": { "package": "p", "asset": "a.otf" }
+            },
+            "lighting.json",
+            "character.json"
+        ]);
+        let old: ProjectEntry = serde_json::from_value(sequence.clone()).unwrap();
+        assert_eq!(old.controls, None);
+        sequence.as_array_mut().unwrap().push("room.controls.json".into());
+        let extended: ProjectEntry = serde_json::from_value(sequence).unwrap();
+        assert_eq!(extended.controls.as_deref(), Some("room.controls.json"));
+        let manifest: ProjectManifest = serde_json::from_str(
+            r#"{"schema":2,"engine":"*","entry":{"game":"room-escape-v1","scene":"room.yaml","models":"models.json","controls":"room.controls.json"}}"#,
+        )
+        .unwrap();
+        manifest.validate(&Runtime::content_only()).unwrap();
+        let schema_three: ProjectManifest = serde_json::from_str(
+            r#"{"schema":3,"engine":"*","entry":{"game":"room-escape-v1","scene":"room.yaml","models":"models.json","controls":"room.controls.json"},"progress":{"schema":1,"game_id":"12345678-1234-4234-8234-123456789abc","profile":"room-escape-clear-v1"}}"#,
+        )
+        .unwrap();
+        schema_three.validate(&Runtime::content_only()).unwrap();
+        assert_eq!(
+            schema_three
+                .entry
+                .as_ref()
+                .unwrap()
+                .controls
+                .as_deref(),
+            Some("room.controls.json")
+        );
+        let null: serde_json::Result<ProjectManifest> = serde_json::from_str(
+            r#"{"schema":2,"engine":"*","entry":{"game":"room-escape-v1","scene":"room.yaml","models":"models.json","controls":null}}"#,
+        );
+        assert!(null.is_err());
+        for controls in [
+            "\"room.yaml\"",
+            "\"ORR.PROJECT.JSON\"",
+            "\"sub/controls.json\"",
+        ] {
+            let raw = format!(
+                r#"{{"schema":2,"engine":"*","entry":{{"game":"room-escape-v1","scene":"room.yaml","models":"models.json","controls":{controls}}}}}"#
+            );
+            let parsed: ProjectManifest = serde_json::from_str(&raw).unwrap();
+            assert!(parsed.validate(&Runtime::content_only()).is_err());
+        }
     }
 
     #[test]
@@ -1752,4 +2011,59 @@ mod tests {
         bad["progress"] = serde_json::Value::Null;
         assert!(serde_json::from_value::<ProjectManifest>(bad).is_err());
     }
+    #[test]
+    fn room_progress_closed_pair_preserves_presentation_and_collect_contract() {
+        let room = serde_json::json!({"schema":3,"engine":"*","entry":{"game":"room-escape-v1","scene":"room.yaml","models":"models.json","camera":"camera.json","lighting":"lighting.json","character":"character.json"},"progress":{"schema":1,"game_id":"12345678-1234-4234-8234-123456789abc","profile":"room-escape-clear-v1"}});
+        let validate = |v: serde_json::Value| serde_json::from_value::<ProjectManifest>(v).unwrap().validate(&Runtime::content_only());
+        validate(room.clone()).unwrap();
+        let mut legacy = room.clone();
+        legacy["schema"] = 2.into();
+        legacy.as_object_mut().unwrap().remove("progress");
+        validate(legacy).unwrap();
+        {
+            let profile = "collect-dodge-highscore-v1";
+            let mut crossed = room.clone(); crossed["progress"]["profile"] = profile.into();
+            assert!(validate(crossed).is_err());
+        }
+        let mut collect = room.clone();
+        collect["entry"] = serde_json::json!({"game":"collect-dodge-v1","scene":"level.yaml"});
+        assert!(validate(collect.clone()).is_err());
+        collect["progress"]["profile"] = "collect-dodge-highscore-v1".into();
+        validate(collect).unwrap();
+        for schema in [1, 2, 4] { let mut bad = room.clone(); bad["schema"] = schema.into(); assert!(validate(bad).is_err()); }
+        for field in ["models", "progress"] {
+            let mut bad = room.clone();
+            if field == "models" { bad["entry"].as_object_mut().unwrap().remove(field); }
+            else { bad.as_object_mut().unwrap().remove(field); }
+            assert!(validate(bad).is_err());
+        }
+        let mut aliased = room; aliased["entry"]["camera"] = "room.yaml".into();
+        assert!(validate(aliased).is_err());
+    }
+
 }
+
+#[cfg(all(feature = "animation-authoring", target_os = "linux"))]
+pub mod animated_sequence_package;
+
+#[cfg(feature = "sprite-authoring")]
+pub mod sprite_package;
+
+#[cfg(all(any(feature = "coop-audio-load", feature = "model-authoring", feature = "audio-authoring", feature = "deployment-authoring", feature = "bootstrap-authoring", feature = "coop-web-authoring"), target_os = "linux"))]
+mod authoring_io;
+#[cfg(all(feature = "audio-authoring", target_os = "linux"))]
+pub mod coop_audio_bank;
+
+#[cfg(all(feature = "deployment-authoring", target_os = "linux"))]
+pub mod deployment_manifest;
+
+#[cfg(all(feature = "bootstrap-authoring", target_os = "linux"))]
+pub mod user_game_bootstrap;
+
+#[cfg(all(feature = "coop-web-authoring", target_os = "linux"))]
+pub mod coop_web_authoring;
+
+#[cfg(feature = "coop-audio-admission")]
+mod strict_json;
+#[cfg(feature = "coop-audio-admission")]
+pub mod coop_audio_admission;

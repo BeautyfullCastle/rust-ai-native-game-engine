@@ -16,7 +16,7 @@ pub fn dispatch(ctx: &mut Ctx, cmd: &str, args: &[String]) -> Result<(), CliErr>
         "scene" => scene(ctx, args),
         "get" => get(ctx, args),
         "schema" => schema(ctx, args),
-        "set" => edit(ctx, "set", args),
+        "set" | "sset" => edit(ctx, cmd, args),
         "spawn" => spawn(ctx, args),
         "despawn" | "rename" | "add" | "remove" => edit(ctx, cmd, args),
         "propose" => propose(ctx, args),
@@ -30,6 +30,7 @@ pub fn dispatch(ctx: &mut Ctx, cmd: &str, args: &[String]) -> Result<(), CliErr>
         "undo" => undo(ctx, args),
         "redo" => redo(ctx, args),
         "sim" => sim(ctx, args),
+        "gameplay" => crate::gameplay::run(ctx, args),
         "activity" => activity(ctx, args),
         "save" => save(ctx, args),
         "agents-md" => agents_md(ctx, args),
@@ -362,7 +363,7 @@ fn print_applied(ctx: &mut Ctx, a: &Applied) {
     ctx.emit(&text, &json);
 }
 
-/// `set`, `despawn`, `rename`, `add`, `remove`: one verb of the op syntax as a direct edit.
+/// `set`, `sset`, `despawn`, `rename`, `add`, `remove`: one verb of the op syntax as a direct edit.
 fn edit(ctx: &mut Ctx, verb: &str, args: &[String]) -> Result<(), CliErr> {
     let mut tokens = vec![verb.to_string()];
     tokens.extend_from_slice(&parse(args, &[], true)?.pos);

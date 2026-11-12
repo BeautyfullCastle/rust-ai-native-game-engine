@@ -1,4 +1,5 @@
 //! Closed RoomEscapeV1 project admission. File and package reads finish before startup.
+pub mod recorded_route;
 use orr_ecs::Frame;
 use orr_fp::FrameRng;
 use orr_games::room_escape_game::{self as game, RoomEscapeV1};
@@ -119,14 +120,49 @@ pub fn validate_document(scene: &Scene) -> Result<(), String> {
 pub fn compiled_runtime() -> orr_package::Runtime {
     let mut runtime = orr_package::Runtime::content_only();
     runtime.capabilities.insert("models".into());
+    #[cfg(feature = "room-input-actions")]
+    runtime.capabilities.insert("room-input-actions".into());
     #[cfg(feature = "room-animated-models")]
     runtime.capabilities.insert("animation".into());
     runtime
 }
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RoomProjectCapabilities {
+    pub lighting: bool,
+    pub character: bool,
+}
+#[cfg(feature = "room-character")]
+pub struct PreparedRoomCharacter {
+    pub scene_path: PathBuf,
+    pub path: PathBuf,
+    pub document: crate::room_character::Document,
+    pub bytes: Vec<u8>,
+    pub manifest_bytes: Vec<u8>,
+    pub manifest_path: PathBuf,
+}
 pub struct PreparedModels {
+    #[cfg(feature = "room-character")]
+    pub character: Option<crate::room_character::Document>,
     pub path: PathBuf,
     pub document: Document,
     pub assets: BTreeMap<(String, String), LoadedAsset>,
+}
+impl PreparedModels {
+    pub fn has_character(&self) -> bool {
+        #[cfg(feature = "room-character")]
+        { self.character.is_some() }
+        #[cfg(not(feature = "room-character"))]
+        { false }
+    }
+}
+#[cfg(feature = "room-lighting")]
+pub struct PreparedRoomLighting {
+    pub scene_path: PathBuf,
+    pub path: PathBuf,
+    pub document: crate::room_lighting::Document,
+    pub bytes: Vec<u8>,
+    pub manifest_bytes: Vec<u8>,
+    pub manifest_path: PathBuf,
 }
 pub struct PreparedRoomCamera {
     pub path: PathBuf,
@@ -135,15 +171,43 @@ pub struct PreparedRoomCamera {
     pub manifest_bytes: Vec<u8>,
     pub manifest_path: PathBuf,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProgressSupport { Unsupported, MetadataOnly }
+
 pub struct PreparedProject {
+    progress: Option<orr_package::ProjectProgress>,
+    #[cfg(feature = "room-character")]
+    character: Option<PreparedRoomCharacter>,
+    #[cfg(feature = "room-lighting")]
+    lighting: Option<PreparedRoomLighting>,
     camera: Option<PreparedRoomCamera>,
+    #[cfg(feature = "room-input-actions")]
+    controls: Option<PreparedRoomControls>,
     root: PathBuf,
     path: PathBuf,
     scene: PreparedScene,
     models: PreparedModels,
 }
+#[cfg(feature = "room-input-actions")]
+pub struct PreparedRoomControls {
+    pub path: PathBuf,
+    pub bytes: Vec<u8>,
+    pub map: crate::room_controls::RoomControls,
+}
 impl PreparedProject {
     pub fn open(root: impl AsRef<Path>) -> Result<Self, String> {
+        Self::open_with_lighting(root, false)
+    }
+    /// Lighting requires explicit support from the consuming route, not feature unification.
+    pub fn open_with_lighting(root: impl AsRef<Path>, lighting_supported: bool) -> Result<Self, String> {
+        Self::open_with_capabilities(root, RoomProjectCapabilities { lighting: lighting_supported, character: false })
+    }
+    /// Optional consumers opt in independently, regardless of Cargo feature unification.
+    pub fn open_with_capabilities(root: impl AsRef<Path>, capabilities: RoomProjectCapabilities) -> Result<Self, String> {
+        Self::open_with_progress(root, capabilities, ProgressSupport::Unsupported)
+    }
+    /// Metadata admission only; this method never opens or writes a progress store.
+    pub fn open_with_progress(root: impl AsRef<Path>, capabilities: RoomProjectCapabilities, progress_support: ProgressSupport) -> Result<Self, String> {
         let project = orr_package::Project::open(root.as_ref(), compiled_runtime())
             .map_err(|e| e.to_string())?;
         let before = project
@@ -151,35 +215,61 @@ impl PreparedProject {
             .map_err(|e| format!("room active lock: {e}"))?;
         let manifest = project.manifest().ok_or("room project manifest missing")?;
         let entry = manifest.entry.as_ref().ok_or("room entry missing")?;
-        if manifest.schema != 2
+        if !matches!((manifest.schema, manifest.progress.as_ref()), (2, None) | (3, Some(orr_package::ProjectProgress { profile: orr_package::ProgressProfile::RoomEscapeClearV1, .. })))
             || entry.game != orr_package::ProjectGame::RoomEscapeV1
             || entry.sprites.is_some()
             || entry.ui.is_some()
-            || manifest.progress.is_some()
+            || (manifest.progress.is_some() && progress_support != ProgressSupport::MetadataOnly)
         {
-            return Err("room requires schema2 room-escape-v1 without sprites/UI/progress".into());
+            return Err("room requires schema2 or explicitly supported Room progress schema3 without sprites/UI".into());
         }
-        let camera = if let Some(relative) = &entry.camera {
+        let manifest_path = project.root().join("orr.project.json");
+        let manifest_bytes = crate::project::read_regular(&manifest_path, 1024 * 1024)?;
+        let pinned: orr_package::ProjectManifest = serde_json::from_slice(&manifest_bytes)
+            .map_err(|e| format!("room manifest: {e}"))?;
+        if pinned != *manifest { return Err("room manifest changed during admission".into()); }
+        if entry.lighting.is_some() && !(capabilities.lighting && cfg!(feature = "room-lighting")) {
+            return Err("room lighting requires explicit lighting consumer support".into());
+        }
+        if entry.character.is_some() && !(capabilities.character && cfg!(feature = "room-character")) {
+            return Err("room character requires explicit character consumer support".into());
+        }
+        #[cfg(not(feature = "room-input-actions"))]
+        if entry.controls.is_some() {
+            return Err("Room controls require the room-input-actions feature".into());
+        }
+        #[cfg(feature = "room-input-actions")]
+        let controls = entry.controls.as_ref().map(|relative| {
+            let path = crate::project::entry_file(project.root(), relative)?;
+            let bytes = crate::project::read_regular(&path, orr_input::MAX_FILE_BYTES as u64)?;
+            let map = crate::room_controls::RoomControls::load(&bytes)?;
+            Ok::<_, String>(PreparedRoomControls { path, bytes, map })
+        }).transpose()?;
+        #[cfg(feature = "room-character")]
+        let character = entry.character.as_ref().map(|relative| {
+            let path = crate::project::entry_file(project.root(), relative)?;
+            let bytes = crate::project::read_regular(&path, crate::room_character::MAX_BYTES as u64)?;
+            let document = crate::room_character::Document::parse(&bytes)?;
+            Ok::<_, String>(PreparedRoomCharacter { scene_path: crate::project::entry_file(project.root(), &entry.scene)?, path, document, bytes,
+                manifest_bytes: manifest_bytes.clone(), manifest_path: manifest_path.clone() })
+        }).transpose()?;
+        #[cfg(feature = "room-lighting")]
+        let lighting = entry.lighting.as_ref().map(|relative| {
+            let path = crate::project::entry_file(project.root(), relative)?;
+            let bytes = crate::project::read_regular(&path, crate::room_lighting::MAX_BYTES as u64)?;
+            let document = crate::room_lighting::Document::parse(&bytes)?;
+            Ok::<_, String>(PreparedRoomLighting {
+                scene_path: crate::project::entry_file(project.root(), &entry.scene)?,
+                path, document, bytes, manifest_bytes: manifest_bytes.clone(), manifest_path: manifest_path.clone(),
+            })
+        }).transpose()?;
+        let camera = entry.camera.as_ref().map(|relative| {
             let path = crate::project::entry_file(project.root(), relative)?;
             let bytes = crate::project::read_regular(&path, crate::room_camera::MAX_BYTES as u64)?;
             let document = crate::room_camera::Document::parse(&bytes)?;
-            let manifest_path = project.root().join("orr.project.json");
-            let manifest_bytes = crate::project::read_regular(&manifest_path, 1024 * 1024)?;
-            let pinned: orr_package::ProjectManifest = serde_json::from_slice(&manifest_bytes)
-                .map_err(|e| format!("room camera manifest: {e}"))?;
-            if pinned != *manifest {
-                return Err("room manifest changed during camera admission".into());
-            }
-            Some(PreparedRoomCamera {
-                path,
-                document,
-                bytes,
-                manifest_bytes,
-                manifest_path,
-            })
-        } else {
-            None
-        };
+            Ok::<_, String>(PreparedRoomCamera { path, document, bytes,
+                manifest_bytes: manifest_bytes.clone(), manifest_path: manifest_path.clone() })
+        }).transpose()?;
         let models_relative = entry.models.as_ref().ok_or("room model sidecar missing")?;
         // First profile places the existing sidecar at the root. Its local hints
         // cannot redirect project identity or escape the admitted root.
@@ -249,7 +339,13 @@ impl PreparedProject {
         if before != after {
             return Err("room active lock changed during admission; retry".into());
         }
+        #[cfg(feature = "room-character")]
+        if let Some(character) = &character {
+            character.document.validate_bindings(orr_bridge::FrameView::of(scene.frame()), scene.index(), &document, &assets)?;
+        }
         let models = PreparedModels {
+            #[cfg(feature = "room-character")]
+            character: character.as_ref().map(|c| c.document.clone()),
             path: model_path,
             document,
             assets,
@@ -259,20 +355,51 @@ impl PreparedProject {
             scene.index(),
             &models,
         )?;
+        if crate::project::read_regular(&manifest_path, 1024 * 1024)? != manifest_bytes {
+            return Err("room manifest changed during admission".into());
+        }
         Ok(Self {
+            progress: manifest.progress.clone(),
+            #[cfg(feature = "room-character")]
+            character,
+            #[cfg(feature = "room-lighting")]
+            lighting,
             camera,
+            #[cfg(feature = "room-input-actions")]
+            controls,
             root: project.root().to_path_buf(),
             path,
             scene,
             models,
         })
     }
+    #[cfg(feature = "room-lighting")]
+    pub fn lighting(&self) -> Option<&PreparedRoomLighting> { self.lighting.as_ref() }
+    #[cfg(feature = "room-lighting")]
+    pub fn take_lighting(&mut self) -> Option<PreparedRoomLighting> { self.lighting.take() }
+    pub fn point_light_settings_for_frame(&self, _frame:orr_bridge::FrameView<'_>) -> Result<orr_render::PointLightSettings,String> {
+        #[cfg(feature = "room-lighting")]
+        if let Some(lighting)=&self.lighting {return lighting.document.settings_for_frame(_frame);}
+        Ok(orr_render::PointLightSettings::default())
+    }
+    pub fn point_light_settings(&self) -> orr_render::PointLightSettings {
+        #[cfg(feature = "room-lighting")]
+        if let Some(lighting) = &self.lighting { return lighting.document.settings(); }
+        orr_render::PointLightSettings::default()
+    }
+    #[cfg(feature = "room-character")]
+    pub fn character(&self) -> Option<&PreparedRoomCharacter> { self.character.as_ref() }
+    #[cfg(feature = "room-character")]
+    pub fn take_character(&mut self) -> Option<PreparedRoomCharacter> { self.character.take() }
     pub fn camera(&self) -> Option<&PreparedRoomCamera> {
         self.camera.as_ref()
     }
+    #[cfg(feature = "room-input-actions")]
+    pub fn controls(&self) -> Option<&PreparedRoomControls> { self.controls.as_ref() }
     pub fn take_camera(&mut self) -> Option<PreparedRoomCamera> {
         self.camera.take()
     }
+    pub fn progress(&self) -> Option<&orr_package::ProjectProgress> { self.progress.as_ref() }
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -294,8 +421,18 @@ impl PreparedProject {
 pub fn validate_decoded_model_budget<'a>(
     assets: impl IntoIterator<Item = &'a LoadedAsset>,
 ) -> Result<(), String> {
+    validate_decoded_model_budget_with_extra(assets, 0)
+}
+
+pub fn validate_decoded_model_budget_with_extra<'a>(
+    assets: impl IntoIterator<Item = &'a LoadedAsset>,
+    extra: usize,
+) -> Result<(), String> {
+    if extra > MAX_DECODED_MODEL_BYTES {
+        return Err("room aggregate decoded model limit exceeded".into());
+    }
     let mut identities = BTreeSet::new();
-    let mut decoded = 0usize;
+    let mut decoded = extra;
     for asset in assets {
         if !identities.insert((asset.package(), asset.asset())) {
             continue;
@@ -493,3 +630,11 @@ fn add_bytes(total: usize, count: usize, stride: usize) -> Result<usize, String>
         .and_then(|n| total.checked_add(n))
         .ok_or_else(|| "room decoded model size overflow".into())
 }
+
+#[cfg(all(test, feature = "room-progress", feature = "project-create"))]
+#[cfg(all(test, feature = "room-progress", feature = "project-create", target_os = "linux"))]
+mod progress_admission_tests;
+
+#[cfg(all(test, feature = "project-create", target_os = "linux"))]
+#[path = "room_controls_project_tests.rs"]
+mod room_controls_project_tests;

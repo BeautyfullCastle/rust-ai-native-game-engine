@@ -467,6 +467,12 @@ pub struct LocalConnector {
 }
 
 impl LocalConnector {
+    pub(crate) fn install_editor_gameplay(&self,service:crate::editor_gameplay::EditorGameplayService)->Result<(),String>{
+        let (reply,received)=std::sync::mpsc::channel();
+        self.shared.inbox.send(Inbound::InstallEditorGameplay{service,reply}).map_err(|_|"editor_gameplay_host_stopped".to_string())?;
+        received.recv_timeout(Duration::from_secs(5)).map_err(|_|"editor_gameplay_install_outcome_uncertain".to_string())?
+    }
+
     /// A new connection as client `client` with `caps`. A client called
     /// [`USER_CLIENT`](crate::USER_CLIENT) edits as `Origin::User`.
     /// Fails if the server is gone.

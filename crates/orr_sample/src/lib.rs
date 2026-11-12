@@ -12,6 +12,46 @@
 #![allow(clippy::float_arithmetic)]
 #![allow(clippy::disallowed_types)]
 
+/// Explicitly create one new private Windows Stormglass settings directory.
+/// Existing objects are never changed. Runtime admission still applies at launch.
+#[cfg(all(windows, feature = "coop-defense-controls"))]
+pub fn prepare_stormglass_settings_directory(path: &std::path::Path) -> Result<(), String> {
+    defense_audio_settings::prepare(path, &stormglass_settings_forbidden_roots()?)
+}
+
+/// Point-in-time admission result; neither a write probe nor a future Save guarantee.
+#[cfg(all(windows, feature = "coop-defense-controls"))]
+#[derive(Debug, PartialEq, Eq)]
+pub struct StormglassSettingsStatus {
+    pub audio_saved: bool,
+    pub controls_saved: bool,
+}
+
+/// Check both profiles using native startup admission without creating or changing data.
+#[cfg(all(windows, feature = "coop-defense-controls"))]
+pub fn check_stormglass_settings_directory(
+    path: &std::path::Path,
+) -> Result<StormglassSettingsStatus, String> {
+    let (audio_saved, controls_saved) =
+        defense_audio_settings::check(path, &stormglass_settings_forbidden_roots()?)?;
+    Ok(StormglassSettingsStatus {
+        audio_saved,
+        controls_saved,
+    })
+}
+
+#[cfg(all(windows, feature = "coop-defense-controls"))]
+fn stormglass_settings_forbidden_roots() -> Result<Vec<std::path::PathBuf>, String> {
+    let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+    let parent = executable.parent().ok_or("missing executable parent")?;
+    let mut forbidden = vec![parent.to_owned()];
+    let source = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    if source.exists() {
+        forbidden.push(source);
+    }
+    Ok(forbidden)
+}
+
 pub mod app;
 pub mod arena_view;
 pub mod editor_view;
@@ -57,6 +97,8 @@ pub mod project_compositor;
 
 #[cfg(all(feature = "project-export", target_os = "linux", target_arch = "x86_64"))]
 pub mod project_export;
+#[cfg(all(feature = "runtime-export-support", target_os = "linux", target_arch = "x86_64"))]
+pub mod trusted_runtime;
 #[cfg(all(windows, target_arch = "x86_64", feature = "project-export"))]
 pub mod windows_export;
 #[cfg(all(windows, target_arch = "x86_64", feature = "project-create", feature = "room-project"))]
@@ -74,7 +116,7 @@ pub mod project_create;
 
 #[cfg(all(
     target_os = "linux",
-    any(feature = "project-create", all(feature = "project-export", target_arch = "x86_64"))
+    any(feature = "project-create", all(feature = "project-export", target_arch = "x86_64"), feature = "runtime-export-support")
 ))]
 mod project_publish;
 
@@ -92,8 +134,12 @@ pub mod authored_ui;
 #[cfg(feature = "collect-ui")]
 pub mod collect_ui;
 
-#[cfg(all(feature = "collect-progress", target_os = "linux"))]
+#[cfg(all(any(feature = "collect-progress", feature = "room-progress"), target_os = "linux"))]
 pub mod game_progress;
+#[cfg(all(feature = "room-progress", target_os = "linux"))]
+mod room_progress;
+#[cfg(all(feature = "room-progress", target_os = "linux"))]
+mod room_progress_digest;
 #[cfg(all(feature = "collect-progress", target_os = "linux"))]
 mod collect_progress;
 
@@ -105,6 +151,10 @@ pub mod image_reimport;
 
 #[cfg(feature = "room-project")]
 pub mod room_project;
+#[cfg(feature = "room-project")]
+pub mod room_layout;
+#[cfg(feature = "room-input-actions")]
+pub mod room_controls;
 #[cfg(feature = "room-project")]
 pub mod room_camera;
 #[cfg(feature = "room-project")]
@@ -129,3 +179,42 @@ pub mod particle_preset;
 ))]
 #[path = "../tests/common/project.rs"]
 mod project_fixture;
+
+#[cfg(feature = "room-lighting")]
+pub mod room_lighting;
+
+#[cfg(feature = "room-character")]
+pub mod room_character;
+
+#[cfg(feature = "coop-defense")]
+pub mod defense_app;
+#[cfg(feature = "coop-defense-presentation")]
+pub mod defense_view;
+#[cfg(feature = "coop-defense")]
+pub mod defense_ui;
+
+#[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+pub mod defense_run_save;
+#[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+pub mod defense_run_save_store;
+
+#[cfg(feature = "coop-defense-audio")]
+pub mod defense_audio;
+
+#[cfg(all(feature = "coop-defense-audio-settings", any(test, target_os = "linux", windows)))]
+pub(crate) mod defense_audio_settings;
+
+#[cfg(all(feature = "coop-defense-controls", any(target_os = "linux", windows)))]
+pub(crate) mod defense_controls;
+
+#[cfg(feature = "coop-defense-pixelfx")]
+pub(crate) mod defense_vfx;
+
+#[cfg(feature = "coop-defense-pixel-motion")]
+pub(crate) mod defense_pixel_motion;
+
+#[cfg(all(target_os="linux",feature="project-create",feature="room-lighting"))]
+pub mod room_lit_starter;
+
+#[cfg(all(feature = "room-controls-attach", target_os = "linux", target_arch = "x86_64"))]
+pub mod room_controls_attach;
