@@ -577,7 +577,7 @@ impl Panel {
                     && self.source_generation == source_generation
                 {
                     match result {
-                        Ok(plan) if plan.root() == root => {
+                        Ok(plan) if same_project_root(plan.root(), &root) => {
                             self.update_preview = Some(PreviewedUpdate {
                                 plan,
                                 source_identity,
@@ -636,7 +636,7 @@ impl Panel {
                     && self.restoration_generation == generation
                 {
                     match result {
-                        Ok(preview) if receipt.root() == root => {
+                        Ok(preview) if same_project_root(receipt.root(), &root) => {
                             self.last_removal = Some(receipt);
                             self.restoration_preview = Some(preview);
                             self.status = "Restoration preview ready. Nothing changed; explicitly Restore last removal to reactivate the exact cached selection.".into();
@@ -1297,6 +1297,12 @@ impl Panel {
             Err(error) => self.status = format!("Cannot start package addition: {error}"),
         }
     }
+}
+
+// Plans report the canonical root, which on Windows carries a verbatim drive prefix.
+fn same_project_root(planned: &Path, shown: &Path) -> bool {
+    planned == shown
+        || cfg!(windows) && std::fs::canonicalize(shown).is_ok_and(|canonical| canonical == planned)
 }
 
 fn parse_source_path(source: &str) -> Result<PathBuf, String> {
