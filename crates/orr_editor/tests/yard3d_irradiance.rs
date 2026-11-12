@@ -325,7 +325,7 @@ fn production_editor_irradiance_import_author_save_reopen_and_toggles_preserve_h
     let camera = editor.camera3d;
     let mut comparison = None;
     let mut h = Harness::builder()
-        .with_size([1001.0, 803.0])
+        .with_size([1001.0, 2400.0])
         .with_step_dt(1.0 / 60.0)
         .wgpu()
         .build_eframe(|cc| {
@@ -534,7 +534,7 @@ fn production_editor_irradiance_import_author_save_reopen_and_toggles_preserve_h
         .unwrap()
         .gpu()
         .pipeline_generation();
-    for dimensions in [[1013.0, 817.0], [991.0, 799.0], [1001.0, 803.0]] {
+    for dimensions in [[1013.0, 2414.0], [991.0, 2399.0], [1001.0, 2400.0]] {
         h.set_size(egui::vec2(dimensions[0], dimensions[1]));
         capture(&mut h, &mut reference, "probe-hdr-resized");
         let actual = h.state().viewport3d_gpu().unwrap().gpu();
@@ -568,7 +568,7 @@ fn production_editor_irradiance_import_author_save_reopen_and_toggles_preserve_h
     let mut editor = Editor::open_game(&scene, EditorGame::Yard3D).unwrap();
     editor.camera3d = camera;
     let mut h = Harness::builder()
-        .with_size([1001.0, 803.0])
+        .with_size([1001.0, 2400.0])
         .wgpu()
         .build_eframe(|cc| {
             let mut app = EditorApp::new(editor, cc.wgpu_render_state.clone());
