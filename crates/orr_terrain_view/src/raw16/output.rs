@@ -32,10 +32,34 @@ fn same_file(a: &Metadata, b: &Metadata) -> bool {
         use std::os::unix::fs::MetadataExt;
         a.dev() == b.dev() && a.ino() == b.ino()
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        a.is_dir() == b.is_dir()
+            && a.creation_time() == b.creation_time()
+            && a.file_attributes() == b.file_attributes()
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (a, b);
         false // Fail closed: std does not expose a portable stable file identity.
+    }
+}
+
+fn open_directory(path: &Path) -> std::io::Result<File> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+    }
+    #[cfg(not(windows))]
+    {
+        File::open(path)
     }
 }
 
@@ -81,7 +105,7 @@ impl Parent {
             }
             ancestry.push((current.clone(), metadata));
         }
-        let handle = File::open(&path).map_err(|e| failure("open output parent", e))?;
+        let handle = open_directory(&path).map_err(|e| failure("open output parent", e))?;
         let parent = Self {
             path,
             handle,
