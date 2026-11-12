@@ -95,9 +95,33 @@ target\release\forest_valley.exe
 | Space | 바람과 물 멈춤 |
 | Esc | 종료 |
 
-명령 옵션은 `--seed 숫자`(다른 계곡), `--view 1..6`, `--hour 시각`, `--no-vsync`(프레임률 확인)입니다. `--capture out.png --size 1920x1080`을 붙이면 창 없이 한 장을 그려 PNG로 저장합니다.
+명령 옵션은 `--seed 숫자`(다른 계곡), `--view 1..6`, `--hour 시각`, `--size 너비x높이`, `--no-vsync`(프레임률 확인), `--settings 프리셋.json`(에디터에서 저장한 설정 불러오기)입니다. `--capture out.png`를 붙이면 창 없이 한 장을 그려 PNG로 저장합니다.
 
-렌더러는 `crates/orr_scenery`에 있습니다. 그림자 두 단계, HDR 다중 샘플 장면, 하늘과 안개, 물, 블룸, 빛줄기, 자동 노출, 톤 매핑 순서로 한 프레임을 그립니다.
+#### 에디터에서 설정하기
+
+에디터 메뉴 `Edit > Forest Valley scene…`을 누르면 장면 창이 열립니다. 왼쪽은 실시간 화면이고 오른쪽은 설정 패널입니다. 값을 바꾸면 다음 프레임에 바로 반영됩니다.
+
+![에디터의 장면 창](docs/images/forest-valley-editor.png)
+
+| 묶음 | 설정 |
+|---|---|
+| Quality | 안티에일리어싱(1x, 2x, 4x), 그림자 해상도 |
+| Sun | 시각, 햇빛 세기, 그늘 밝기 |
+| Sky | 하늘 밝기, 해 주변 빛, 구름 양, 구름 속도 |
+| Fog | 안개 농도, 높이에 따른 감소, 옅은 연무 |
+| Shadows | 그림자 켜기, 가장자리 부드러움, 가까운 범위, 먼 범위 |
+| Wind | 바람 세기, 속도 |
+| Water | 깊은 물 색, 투명도, 잔물결, 유속, 물거품, 햇빛 반짝임 |
+| Vegetation | 잎 색조, 잎 투과광, 잎 무늬 대비, 단풍 비율, 풀 표시 거리, 나무 상세 거리 |
+| Ground | 지면 요철, 물 바닥 빛 무늬 |
+| Look | 자동 노출, 노출, 적응 속도, 블룸과 시작 밝기, 빛줄기, 채도, 대비, 비네트, 필름 입자 |
+
+- `Valley seed`를 바꾸면 다른 계곡을 새로 만듭니다.
+- `Save preset`은 시드, 품질, 모든 설정을 `Preset file`에 적힌 JSON 파일로 저장합니다. `Load preset`은 그 파일을 다시 읽습니다. 이 파일은 `forest_valley.exe --settings`로도 쓸 수 있습니다.
+- `Reset settings`는 시드만 남기고 모든 값을 기본값으로 되돌립니다.
+- 화면 위에서 드래그하면 시선이 돌고, 마우스가 화면 위에 있을 때 W A S D로 이동합니다.
+
+렌더러는 `crates/orr_scenery`에 있습니다. 그림자 두 단계, HDR 다중 샘플 장면, 하늘과 안개, 물, 블룸, 빛줄기, 자동 노출, 톤 매핑 순서로 한 프레임을 그립니다. 셰이더가 쓰는 값은 모두 `orr_scenery::Settings`에서 오며, 범위와 설명은 `crates/orr_scenery/src/settings.rs`의 표 하나에 있습니다. 에디터 패널과 파일 읽기가 같은 표를 씁니다.
 
 ## 검증 명령
 

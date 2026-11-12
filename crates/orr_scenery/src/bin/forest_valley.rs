@@ -2,7 +2,7 @@
 #![allow(clippy::float_arithmetic, clippy::disallowed_types)]
 
 use orr_rhi::{Acquire, Rhi, TextureDesc, TextureFormat, TextureUsage, Wgpu, WgpuOptions};
-use orr_scenery::{viewpoints, Camera, Environment, Quality, Renderer, Settings, World};
+use orr_scenery::{viewpoints, Camera, Environment, Motion, Preset, Renderer, World};
 use std::{path::PathBuf, process::ExitCode, sync::Arc, time::Instant};
 use winit::{
     application::ApplicationHandler,
@@ -19,21 +19,15 @@ Without --capture a window opens.\n\
   mouse drag  look around     1..6    jump to a viewpoint\n\
   T / G       later / earlier Space   pause wind and water\n\
   Esc         quit\n\
---settings loads a look saved from the editor (Edit > Forest Valley scene). --hour then replaces its hour (5 to 19).\n\
+--settings loads a preset saved from the editor (Edit > Forest Valley scene). --seed and --hour (5 to 19) then replace its values.\n\
 --size sets the window or the captured image. --no-vsync shows the frame rate the machine can reach.\n\
 --capture draws one frame without a window and writes it as a PNG file.";
 
-const EYE_HEIGHT: f32 = 1.7;
-const WALK_SPEED: f32 = 5.0;
-const FLY_SPEED: f32 = 22.0;
-/// The camera stays this far inside the detailed square.
-const LIMIT: f32 = 470.0;
 const HOURS: std::ops::RangeInclusive<f32> = 5.0..=19.0;
 
 struct Options {
-    seed: u32,
+    preset: Preset,
     view: usize,
-    settings: Settings,
     time: f32,
     capture: Option<PathBuf>,
     size: Option<(u32, u32)>,
@@ -41,14 +35,14 @@ struct Options {
 }
 
 fn parse() -> Result<Option<Options>, String> {
-    let mut options = Options { seed: 7, view: 0, settings: Settings::default(), time: 20.0, capture: None, size: None, vsync: true };
-    let mut hour = None;
+    let mut options = Options { preset: Preset::default(), view: 0, time: 20.0, capture: None, size: None, vsync: true };
+    let (mut seed, mut hour) = (None, None);
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or_else(|| format!("{arg} needs a value\n{HELP}"));
         match arg.as_str() {
             "--help" | "-h" => return Ok(None),
-            "--seed" => options.seed = value()?.parse().map_err(|_| "--seed needs a whole number")?,
+            "--seed" => seed = Some(value()?.parse().map_err(|_| "--seed needs a whole number")?),
             "--view" => {
                 let view: usize = value()?.parse().map_err(|_| "--view needs a number from 1 to 6")?;
                 if !(1..=6).contains(&view) {
@@ -59,7 +53,7 @@ fn parse() -> Result<Option<Options>, String> {
             "--settings" => {
                 let path = value()?;
                 let text = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
-                options.settings = Settings::from_json(&text).map_err(|e| format!("{path}: {e}"))?;
+                options.preset = Preset::from_json(&text).map_err(|e| format!("{path}: {e}"))?;
             }
             "--hour" => {
                 let parsed: f32 = value()?.parse().map_err(|_| "--hour needs a number from 5 to 19")?;
@@ -87,8 +81,11 @@ fn parse() -> Result<Option<Options>, String> {
             _ => return Err(format!("unknown argument {arg}\n{HELP}")),
         }
     }
+    if let Some(seed) = seed {
+        options.preset.seed = seed;
+    }
     if let Some(hour) = hour {
-        options.settings.sun.hour = hour;
+        options.preset.settings.sun.hour = hour;
     }
     Ok(Some(options))
 }
@@ -107,8 +104,8 @@ fn capture(world: &World, camera: &Camera, options: &Options, path: &PathBuf) ->
         view_formats: &[],
     });
     let view = rhi.create_texture_view(&texture, None);
-    let mut renderer = Renderer::new(rhi.clone(), format, world, Quality::default());
-    renderer.render(&view, size, camera, &Environment::at(world, camera, options.time, 0.0), &options.settings);
+    let mut renderer = Renderer::new(rhi.clone(), format, world, options.preset.quality);
+    renderer.render(&view, size, camera, &Environment::at(world, camera, options.time, 0.0), &options.preset.settings);
     let pixels = rhi.read_texture(&texture);
     let file = std::fs::File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), size.0, size.1);
@@ -145,7 +142,7 @@ struct App {
     world: World,
     views: Vec<Camera>,
     camera: Camera,
-    settings: Settings,
+    preset: Preset,
     time: f32,
     paused: bool,
     walking: bool,
@@ -163,41 +160,18 @@ struct App {
 }
 
 impl App {
-    fn ground(&self, x: f32, z: f32) -> f32 {
-        self.world.height(x, z).max(self.world.stream(z).level)
-    }
-
     fn step(&mut self, dt: f32) {
         if !self.paused {
             self.time += dt;
         }
-        let forward = self.camera.forward();
-        let right = self.camera.right();
         let axis = |positive: bool, negative: bool| f32::from(u8::from(positive)) - f32::from(u8::from(negative));
-        let (ahead, side, lift) = (axis(self.keys.forward, self.keys.back), axis(self.keys.right, self.keys.left), axis(self.keys.up, self.keys.down));
-        let speed = if self.walking { WALK_SPEED } else { FLY_SPEED } * if self.keys.fast { 4.0 } else { 1.0 } * dt;
-        let p = &mut self.camera.position;
-        if self.walking {
-            // Walking ignores where the camera looks up or down.
-            let flat = orr_scenery::math::normalize([forward[0], 0.0, forward[2]]);
-            p[0] += (flat[0] * ahead + right[0] * side) * speed;
-            p[2] += (flat[2] * ahead + right[2] * side) * speed;
-        } else {
-            for k in 0..3 {
-                p[k] += (forward[k] * ahead + right[k] * side) * speed;
-            }
-            p[1] += lift * speed;
-        }
-        p[0] = p[0].clamp(-LIMIT, LIMIT);
-        p[2] = p[2].clamp(-LIMIT, LIMIT);
-        let floor = self.ground(self.camera.position[0], self.camera.position[2]);
-        let p = &mut self.camera.position;
-        if self.walking {
-            // Ease to eye height so steps in the ground do not jolt the view.
-            p[1] += (floor + EYE_HEIGHT - p[1]) * (1.0 - (-12.0 * dt).exp());
-        } else {
-            p[1] = p[1].clamp(floor + 0.6, 600.0);
-        }
+        let motion = Motion {
+            ahead: axis(self.keys.forward, self.keys.back),
+            side: axis(self.keys.right, self.keys.left),
+            lift: axis(self.keys.up, self.keys.down),
+            fast: self.keys.fast,
+        };
+        self.camera.travel(&self.world, motion, self.walking, dt);
     }
 
     fn key(&mut self, event_loop: &ActiveEventLoop, code: KeyCode, pressed: bool, repeat: bool) {
@@ -211,8 +185,8 @@ impl App {
             KeyCode::ShiftLeft | KeyCode::ShiftRight => self.keys.fast = pressed,
             _ if !pressed => {}
             // Holding T or G keeps changing the hour.
-            KeyCode::KeyT => self.settings.sun.hour = (self.settings.sun.hour + 0.25).min(*HOURS.end()),
-            KeyCode::KeyG => self.settings.sun.hour = (self.settings.sun.hour - 0.25).max(*HOURS.start()),
+            KeyCode::KeyT => self.preset.settings.sun.hour = (self.preset.settings.sun.hour + 0.25).min(*HOURS.end()),
+            KeyCode::KeyG => self.preset.settings.sun.hour = (self.preset.settings.sun.hour - 0.25).max(*HOURS.start()),
             // A held key must not flip a switch back and forth.
             _ if repeat => {}
             KeyCode::Escape => event_loop.exit(),
@@ -225,8 +199,7 @@ impl App {
                     .unwrap_or(0);
                 self.camera = self.views[index];
                 // Viewpoints above the ground are flying viewpoints.
-                let floor = self.ground(self.camera.position[0], self.camera.position[2]);
-                self.walking = self.camera.position[1] - floor < 3.0;
+                self.walking = self.camera.height_above(&self.world) < 3.0;
             }
             _ => {}
         }
@@ -248,14 +221,14 @@ impl App {
         let environment = Environment::at(&self.world, &self.camera, self.time, dt);
         let Some(graphics) = self.graphics.as_mut() else { return };
         if let Acquire::Frame(frame) = graphics.rhi.acquire_frame(&mut graphics.surface) {
-            graphics.renderer.render(graphics.rhi.frame_view(&frame), graphics.size, &self.camera, &environment, &self.settings);
+            graphics.renderer.render(graphics.rhi.frame_view(&frame), graphics.size, &self.camera, &environment, &self.preset.settings);
             graphics.rhi.present(frame);
             self.frames += 1;
         }
         self.title_timer += dt;
         if self.title_timer >= 0.5 {
             let stats = graphics.renderer.last_frame_stats();
-            let hour = self.settings.sun.hour;
+            let hour = self.preset.settings.sun.hour;
             let minutes = (hour.fract() * 60.0) as u32;
             graphics.window.set_title(&format!(
                 "Forest Valley   {:02}:{minutes:02}   {:.0} fps   {:.1} M triangles   {}",
@@ -285,7 +258,7 @@ impl ApplicationHandler for App {
             let size = window.inner_size();
             let size = (size.width, size.height);
             let (rhi, surface) = Wgpu::for_window(window.clone(), size, self.vsync, WgpuOptions { allow_software_fallback: false, ..Default::default() })?;
-            let renderer = Renderer::new(rhi.clone(), rhi.surface_format(&surface), &self.world, Quality::default());
+            let renderer = Renderer::new(rhi.clone(), rhi.surface_format(&surface), &self.world, self.preset.quality);
             Ok(Graphics { window, rhi, surface, renderer, size })
         });
         match created {
@@ -341,8 +314,7 @@ impl ApplicationHandler for App {
                 if self.looking {
                     if let Some((x, y)) = self.cursor {
                         let (dx, dy) = ((position.x - x) as f32, (position.y - y) as f32);
-                        self.camera.yaw -= dx * 0.0035;
-                        self.camera.pitch = (self.camera.pitch - dy * 0.0035).clamp(-1.45, 1.45);
+                        self.camera.turn(-dx * 0.0035, -dy * 0.0035);
                     }
                     self.cursor = Some((position.x, position.y));
                 }
@@ -367,19 +339,18 @@ fn run() -> Result<(), String> {
         println!("{HELP}");
         return Ok(());
     };
-    let world = World::generate(options.seed);
+    let world = World::generate(options.preset.seed);
     let views = viewpoints(&world);
     let camera = views[options.view];
     if let Some(path) = &options.capture {
         return capture(&world, &camera, &options, path);
     }
-    let floor = world.height(camera.position[0], camera.position[2]).max(world.stream(camera.position[2]).level);
     let mut app = App {
-        walking: camera.position[1] - floor < 3.0,
+        walking: camera.height_above(&world) < 3.0,
         world,
         views,
         camera,
-        settings: options.settings,
+        preset: options.preset,
         time: options.time,
         paused: false,
         keys: Keys::default(),

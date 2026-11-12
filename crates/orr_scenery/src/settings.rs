@@ -327,6 +327,37 @@ impl Settings {
     }
 }
 
+/// A saved scene look: which valley, at which quality, with which settings.
+/// This is the file the editor writes and `forest_valley --settings` reads.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Preset {
+    /// Seed of the generated valley.
+    pub seed: u32,
+    pub quality: Quality,
+    pub settings: Settings,
+}
+
+impl Default for Preset {
+    fn default() -> Self {
+        Self { seed: 7, quality: Quality::default(), settings: Settings::default() }
+    }
+}
+
+impl Preset {
+    pub fn to_json(&self) -> String {
+        serde_json::to_string_pretty(self).expect("a preset is plain numbers")
+    }
+
+    /// Reads a preset saved by [`Preset::to_json`]. Missing values take their
+    /// defaults and every value is brought inside its range. A file with
+    /// other top-level entries is not a preset and is rejected.
+    pub fn from_json(text: &str) -> Result<Self, String> {
+        let preset: Self = serde_json::from_str(text).map_err(|e| format!("scene preset: {e}"))?;
+        Ok(Self { seed: preset.seed, quality: preset.quality.sanitized(), settings: preset.settings.sanitized() })
+    }
+}
+
 /// Choices that need new GPU resources. Pass them to `Renderer::new`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]

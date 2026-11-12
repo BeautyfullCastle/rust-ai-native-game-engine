@@ -10,15 +10,22 @@ description = "Outdoor scene renderer on orr_rhi (sky, terrain, vegetation, wate
 [lints]
 workspace = true
 
+[features]
+default = ["showcase"]
+# The forest_valley window and capture program. A crate that only draws the
+# scene into its own target (the editor) turns this off.
+showcase = ["dep:png", "dep:winit"]
+
 [dependencies]
 orr_rhi = { path = "../orr_rhi" }
 bytemuck = { version = "1", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-png = "0.18"
-winit = "0.30"
+png = { version = "0.18", optional = true }
+winit = { version = "0.30", optional = true }
 
 [[bin]]
 name = "forest_valley"
 path = "src/bin/forest_valley.rs"
 test = false
+required-features = ["showcase"]

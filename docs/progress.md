@@ -11,6 +11,7 @@
 - **Room 제작 흐름**: `orr_new_room`으로 프로젝트 생성 → `orr_editor --room-project`로 열기 → `room_escape --project`로 실행 → `orr_export_windows`로 내보내기 → 내보낸 폴더의 실행 파일만으로 실행.
 - **게임**: Stormglass(`coop_defense`)의 창 실행과 창 없는 600틱 실행, `arena`의 60fps 실행과 오디오 출력.
 - **야외 장면 렌더러**: `forest_valley`가 숲과 계곡 장면을 1600x900 창에서 수직 동기화 60fps로 그린다. 동기화를 끄면 약 100fps다. 구성은 그림자 두 단계, HDR 다중 샘플 장면, 하늘과 안개, 물, 블룸, 빛줄기, 자동 노출, 톤 매핑이다. 코드는 `crates/orr_scenery`에 있고 `orr_rhi`만 쓴다. 관련 이슈는 [#101](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/101)이다.
+- **에디터의 장면 창**: `Edit > Forest Valley scene…`에서 같은 장면을 에디터 안에 띄우고 설정 36개, 켜고 끄기 2개, 색 2개, 품질 2개를 고친다. 값은 다음 프레임에 반영된다. 프리셋을 JSON으로 저장하고 불러온다. 에디터 기능 이름은 `scenery`이고 `full`에 들어 있다.
 - **테스트(기본 구성)**: `cargo test --workspace --release` 2779개 통과, 실패 0개, 무시 26개.
 - **테스트(전체 기능 구성)**: `--features orr_editor/full,orr_sample/full`로 에디터와 샘플 게임을 전체 실행했을 때 3376개 통과, 19개 실패였다. 그 뒤 17건의 원인을 고쳐 해당 테스트를 다시 실행해 통과를 확인했다. 남은 실패는 2건이다.
 
@@ -44,7 +45,7 @@
 3. 전체 기능 구성의 남은 테스트 실패를 없앤다.
 4. Arena 프로젝트 생성과 내보내기를 윈도우로 옮긴다.
 5. 설계 v2의 고정 과제군(배달, 스위치 퍼즐, 액션)으로 무개입 완주율을 처음 측정한다.
-6. `orr_scenery` 렌더러를 에디터 뷰포트와 게임 씬에 연결한다. 지금은 `forest_valley` 시연에서만 쓴다. 에디터의 지형·모델 씬은 여전히 `orr_render`로 그린다.
+6. `orr_scenery` 렌더러로 에디터의 지형·모델 씬을 그린다. 지금은 생성된 Forest Valley 장면만 그린다. 에디터에서 만든 씬(Room, Yard3D, 지형 문서)은 여전히 `orr_render`로 그리고, 장면 창의 설정은 그 씬에 적용되지 않는다.
 
 ## 작업 규칙
 

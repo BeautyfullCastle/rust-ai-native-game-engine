@@ -2,7 +2,7 @@
 #![allow(clippy::float_arithmetic)]
 
 use orr_scenery::settings::{COLORS, GROUPS, SLIDERS, TOGGLES};
-use orr_scenery::{Quality, Settings};
+use orr_scenery::{Preset, Quality, Settings};
 
 #[test]
 fn defaults_are_inside_every_range() {
@@ -118,4 +118,20 @@ fn quality_rounds_to_supported_values() {
     assert_eq!(Quality { antialiasing: 3, shadow_resolution: 3000 }.sanitized(), Quality { antialiasing: 2, shadow_resolution: 2048 });
     assert_eq!(Quality { antialiasing: 0, shadow_resolution: 0 }.sanitized(), Quality { antialiasing: 1, shadow_resolution: 1024 });
     assert_eq!(Quality { antialiasing: 64, shadow_resolution: 1 << 20 }.sanitized(), Quality { antialiasing: 4, shadow_resolution: 4096 });
+}
+
+#[test]
+fn a_preset_keeps_seed_quality_and_settings_through_a_file() {
+    let mut preset = Preset { seed: 31, quality: Quality { antialiasing: 2, shadow_resolution: 1024 }, settings: Settings::default() };
+    preset.settings.sun.hour = 7.25;
+    preset.settings.vegetation.tint = [1.2, 0.9, 0.8];
+    preset.settings.shadows.enabled = false;
+    assert_eq!(Preset::from_json(&preset.to_json()), Ok(preset));
+    assert_eq!(Preset::from_json("{}"), Ok(Preset::default()));
+    // Values outside their range are brought inside it.
+    let loaded = Preset::from_json(r#"{ "seed": 4, "quality": { "antialiasing": 3 }, "settings": { "fog": { "density": 50.0 } } }"#).unwrap();
+    assert_eq!((loaded.seed, loaded.quality.antialiasing, loaded.settings.fog.density), (4, 2, 5.0));
+    assert!(Preset::from_json(r#"{ "seed": -1 }"#).is_err());
+    // A file with other top-level entries is not a preset.
+    assert!(Preset::from_json(r#"{ "sun": { "hour": 9.0 } }"#).is_err());
 }
