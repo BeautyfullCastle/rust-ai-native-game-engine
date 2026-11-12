@@ -74,6 +74,31 @@ target\release\orr.exe status
 
 `orr`는 실행 중인 에디터에 붙어 씬을 읽고 고치는 명령 도구입니다. 명령 목록은 `orr help`로 봅니다.
 
+### 7. 숲과 계곡 장면 보기 (Forest Valley)
+
+```powershell
+target\release\forest_valley.exe
+```
+
+숲이 우거진 산골 계곡을 걸어 다니는 그래픽 시연입니다. 지형, 나무, 바위, 풀, 물이 모두 시드 하나에서 만들어집니다.
+
+![계곡 물가](docs/images/forest-valley-stream.png)
+![계곡 전경](docs/images/forest-valley-aerial.png)
+
+| 키 | 동작 |
+|---|---|
+| W A S D | 이동 (Shift를 누르면 빠르게) |
+| 마우스 드래그 | 시선 돌리기 |
+| F | 걷기와 날기 전환 (날 때 Q 내려가기, E 올라가기) |
+| 1 ~ 6 | 준비된 시점으로 이동 |
+| T / G | 시간을 늦게 / 이르게 (해의 높이와 방향이 바뀜) |
+| Space | 바람과 물 멈춤 |
+| Esc | 종료 |
+
+명령 옵션은 `--seed 숫자`(다른 계곡), `--view 1..6`, `--hour 시각`, `--no-vsync`(프레임률 확인)입니다. `--capture out.png --size 1920x1080`을 붙이면 창 없이 한 장을 그려 PNG로 저장합니다.
+
+렌더러는 `crates/orr_scenery`에 있습니다. 그림자 두 단계, HDR 다중 샘플 장면, 하늘과 안개, 물, 블룸, 빛줄기, 자동 노출, 톤 매핑 순서로 한 프레임을 그립니다.
+
 ## 검증 명령
 
 ```powershell
@@ -99,5 +124,6 @@ cargo clippy --workspace --all-targets
 - `crates/orr_editor`: 에디터
 - `crates/orr_sample`: 게임 실행 파일과 프로젝트 생성·내보내기 도구
 - `crates/orr_games`: 게임 규칙 (창과 GPU에 의존하지 않음)
+- `crates/orr_scenery`: 야외 장면 렌더러와 Forest Valley 시연
 - `crates/orr_remote`, `orr_cli`, `orr_mcp`: 에이전트 연결
 - `examples/`: 사용자 게임 예제

@@ -3576,6 +3576,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "orr_scenery"
+version = "0.0.1"
+dependencies = [
+ "bytemuck",
+ "orr_rhi",
+ "png 0.18.1",
+ "serde",
+ "serde_json",
+ "winit",
+]
+
+[[package]]
 name = "orr_server"
 version = "0.0.1"
 dependencies = [
