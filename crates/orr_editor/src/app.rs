@@ -1334,17 +1334,17 @@ impl EditorApp {
             let inspector = egui::Panel::right("inspector").resizable(true).default_size(340.0);
             let inspector = if self.editor.game().has_mesh_view() { inspector.max_size(340.0) } else { inspector };
             inspector.show(ui, |ui| {
-                #[cfg(feature = "terrain")]
-                if self.editor.game() == crate::game::EditorGame::Yard3D || self.editor.game().is_navigation() {
-                    // Keep expanded terrain, ramp and navigation controls reachable
-                    // without changing the other games' inspector layout.
-                    egui::ScrollArea::vertical()
-                        .id_salt("terrain_authoring_inspector")
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| self.inspector(ui));
+                // The mesh games scroll their own inspector.
+                if self.editor.game().has_mesh_view() {
+                    self.inspector(ui);
                     return;
                 }
-                self.inspector(ui);
+                // Feature panels stack above the component list. Keep all of them reachable
+                // when they are taller than the window.
+                egui::ScrollArea::vertical()
+                    .id_salt("terrain_authoring_inspector")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| self.inspector(ui));
             });
         }
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.viewport(ui));
@@ -2099,11 +2099,7 @@ impl EditorApp {
         {
             let error = if self.models.scene_matches(&self.editor) { self.models.terrain_admission_error() } else { None };
             self.terrain.document.set_render_admission_error(error);
-            if self.editor.game() == crate::game::EditorGame::Yard3D || self.editor.game().is_navigation() {
-                self.terrain.show_in_parent_scroll(ui, &self.editor);
-            } else {
-                self.terrain.show(ui, &self.editor);
-            }
+            self.terrain.show_in_parent_scroll(ui, &self.editor);
             self.terrain_ramp_show(ui);
             #[cfg(feature="terrain-surface")]
             {

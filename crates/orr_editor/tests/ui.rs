@@ -613,3 +613,22 @@ fn arena_viewer_widgets_disable_mutation_but_keep_inspection_and_seek() {
     h.state_mut().editor.seek(10); settle(&mut h);
     assert_eq!(h.state().editor.sim().head_tick,10);
 }
+
+/// Feature panels stack above the component list and are taller than a short window.
+/// Every one of them must stay reachable by scrolling the inspector.
+#[cfg(feature = "terrain-surface")]
+#[test]
+fn stacked_inspector_panels_scroll_into_view_in_a_short_window() {
+    let mut h = Harness::builder()
+        .with_size([1500.0, 300.0])
+        .build_eframe(|_cc| EditorApp::new(demo_editor(), None));
+    h.run_steps(3);
+    h.get_by_label("Reload appearance").scroll_to_me();
+    h.run_steps(3);
+    let button = h.get_by_label("Reload appearance").rect();
+    let bottom_panel_top = h.get_by_label("Timeline").rect().min.y;
+    assert!(
+        button.min.y >= 0.0 && button.max.y <= bottom_panel_top,
+        "Reload appearance is outside the inspector's visible area: {button:?}, bottom panel starts at {bottom_panel_top}"
+    );
+}
