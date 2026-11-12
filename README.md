@@ -43,9 +43,9 @@ target\release\orr_editor.exe --room-project C:\Games\MyRoom
 ### 4. 게임 실행
 
 ```powershell
-target\releaseoom_escape.exe --project C:\Games\MyRoom
+target\release\room_escape.exe --project C:\Games\MyRoom
 target\release\coop_defense.exe
-target\releaserena.exe
+target\release\arena.exe
 ```
 
 - `room_escape`: 방금 만든 Room 프로젝트를 창으로 실행합니다. `--headless --ticks 120 --capture out.png`를 붙이면 창 없이 실행하고 화면을 저장합니다.
