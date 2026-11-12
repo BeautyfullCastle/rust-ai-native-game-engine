@@ -18,6 +18,20 @@ pub struct SourceFiles {
     ancestors: Vec<(PathBuf, File)>,
     protected_scene: Option<(String, PathBuf)>,
 }
+#[cfg(windows)]
+fn open_directory(path: &Path) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+#[cfg(not(windows))]
+fn open_directory(path: &Path) -> std::io::Result<File> {
+    File::open(path)
+}
 #[cfg(unix)]
 fn same(a: &Metadata, b: &Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
@@ -53,7 +67,7 @@ impl SourceFiles {
             if !metadata.is_dir() || metadata.file_type().is_symlink() {
                 return Err("Source directory must contain only real directories".into());
             }
-            let file = File::open(&current).map_err(|e| e.to_string())?;
+            let file = open_directory(&current).map_err(|e| e.to_string())?;
             if !same(&metadata, &file.metadata().map_err(|e| e.to_string())?) {
                 return Err("Source directory changed".into());
             }
