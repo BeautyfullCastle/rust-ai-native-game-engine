@@ -640,6 +640,10 @@ fn checked_path(path: &Path) -> Result<(), String> {
             return Err("Parent traversal is not allowed".into());
         }
         cursor.push(component);
+        // A drive or verbatim prefix such as `\\?\C:` is not a filesystem object.
+        if matches!(component, Component::Prefix(_)) {
+            continue;
+        }
         let meta = fs::symlink_metadata(&cursor).map_err(|e| e.to_string())?;
         if meta.file_type().is_symlink() {
             return Err("Symlink paths are not allowed for appearance files".into());
