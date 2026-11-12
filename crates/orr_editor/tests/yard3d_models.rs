@@ -51,7 +51,7 @@ fn editor(scene: &Path) -> Editor {
 fn headless(scene: &Path) -> Harness<'static, EditorApp> {
     let editor = editor(scene);
     Harness::builder()
-        .with_size([1500.0, 1200.0])
+        .with_size([1500.0, 2400.0])
         .with_step_dt(1.0 / 60.0)
         .build_eframe(move |_| EditorApp::new(editor, None))
 }

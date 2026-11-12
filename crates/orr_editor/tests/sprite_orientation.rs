@@ -83,7 +83,7 @@ fn harness(fixture: &Fixture, collect: bool, gpu: bool) -> Harness<'static, Edit
     };
     if gpu {
         Harness::builder()
-            .with_size([1500.0, 1600.0])
+            .with_size([1500.0, 2400.0])
             .renderer(egui_kittest::wgpu::WgpuTestRenderer::with_render_options(
                 egui_wgpu::RendererOptions {
                     predictable_texture_filtering: false,
@@ -93,7 +93,7 @@ fn harness(fixture: &Fixture, collect: bool, gpu: bool) -> Harness<'static, Edit
             .build_eframe(build)
     } else {
         Harness::builder()
-            .with_size([1500.0, 1600.0])
+            .with_size([1500.0, 2400.0])
             .build_eframe(build)
     }
 }

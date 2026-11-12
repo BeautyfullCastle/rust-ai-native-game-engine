@@ -151,7 +151,7 @@ fn composed_arena_png_bindings_follow_real_control_pause_seek_and_stop() {
     let fixture = Fixture::new();
     let editor = fixture.editor();
     let mut h = Harness::builder()
-        .with_size([1500.0, 1400.0])
+        .with_size([1500.0, 2400.0])
         .with_step_dt(1.0 / 60.0)
         .wgpu()
         .build_eframe(move |cc| EditorApp::new(editor, cc.wgpu_render_state.clone()));
