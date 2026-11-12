@@ -16,26 +16,26 @@
 cargo build-all
 ```
 
-에디터와 모든 게임 실행 파일이 `target\release\` 아래에 생깁니다. `build-all`은 `.cargo/config.toml`에 정의한 별칭이고, 에디터와 샘플 게임의 기능을 모두 켠 릴리스 빌드입니다.
+에디터와 모든 게임 실행 파일이 `target\release\` 아래에 생깁니다. `build-all`은 `.cargo/config.toml`에 정의한 별칭이고, 에디터와 샘플 게임의 기능을 모두 켠 릴리스 빌드입니다. 처음에는 10분쯤 걸립니다. 아래 단계는 이 폴더의 실행 파일을 직접 실행합니다.
 
 ### 2. 에디터
 
 ```powershell
-cargo editor
+targetelease\orr_editor.exe
 ```
 
 기본 물리 씬이 열립니다. 다른 게임으로 열려면 `--game`을 붙입니다.
 
 ```powershell
-cargo editor --game arena
-cargo editor --game yard3d
+targetelease\orr_editor.exe --game arena
+targetelease\orr_editor.exe --game yard3d
 ```
 
 ### 3. 내 게임 프로젝트 만들기 (Room)
 
 ```powershell
-cargo new-room --output C:\Games\MyRoom --seed room-01
-cargo editor --room-project C:\Games\MyRoom
+targetelease\orr_new_room.exe --output C:\Games\MyRoom --seed room-01
+targetelease\orr_editor.exe --room-project C:\Games\MyRoom
 ```
 
 에디터 메뉴의 `File > New Room project…`와 `File > Open Room project…`로도 같은 일을 할 수 있습니다. 에디터에서 `Play`를 누르면 그 자리에서 게임이 돌아갑니다.
@@ -43,13 +43,13 @@ cargo editor --room-project C:\Games\MyRoom
 ### 4. 게임 실행
 
 ```powershell
-cargo room --project C:\Games\MyRoom
-cargo stormglass
-cargo arena
+targeteleaseoom_escape.exe --project C:\Games\MyRoom
+targetelease\coop_defense.exe
+targeteleaserena.exe
 ```
 
-- `room`: 방금 만든 Room 프로젝트를 창으로 실행합니다. `--headless --ticks 120 --capture out.png`를 붙이면 창 없이 실행하고 화면을 저장합니다.
-- `stormglass`: 협동 디펜스 게임 Stormglass Foundry입니다. Space 소환, U 강화, I 투자, P 일시정지, R 재시작입니다.
+- `room_escape`: 방금 만든 Room 프로젝트를 창으로 실행합니다. `--headless --ticks 120 --capture out.png`를 붙이면 창 없이 실행하고 화면을 저장합니다.
+- `coop_defense`: 협동 디펜스 게임 Stormglass Foundry입니다. Space 소환, U 강화, I 투자, P 일시정지, R 재시작입니다.
 - `arena`: 롤백 넷코드 시험용 2인 아레나입니다. WASD 이동, Space 발사입니다.
 
 ### 5. 윈도우용 게임 폴더로 내보내기
@@ -68,7 +68,7 @@ C:\Games\MyRoomExport\run-room-escape.cmd
 ### 6. AI 에이전트 연결
 
 ```powershell
-cargo editor --erp 127.0.0.1:7777 --erp-dev
+targetelease\orr_editor.exe --erp 127.0.0.1:7777 --erp-dev
 target\release\orr.exe status
 ```
 
