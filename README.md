@@ -81,6 +81,8 @@ cargo test --workspace --release
 cargo clippy --workspace --all-targets
 ```
 
+테스트나 `cargo build`를 실행하면 `target\release\`의 실행 파일이 최소 기능 빌드로 바뀝니다. 그 뒤에 에디터나 게임을 실행하려면 `cargo build-all`을 다시 실행합니다. 이때는 바뀐 부분만 다시 빌드합니다.
+
 전체 테스트는 통합 테스트 실행 파일이 500개가 넘어서 한 시간 안팎이 걸립니다. 한 부분만 고쳤을 때는 `cargo test --release -p <크레이트> --test <테스트 파일>`로 좁혀서 실행합니다.
 
 ## 윈도우에서 아직 안 되는 것

@@ -1,45 +1,49 @@
 # Orrery 현재 상태
 
-갱신: 2026-11-05 UTC · [설계 v2](design-v2.md) · [상위 추적 #2](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/2) · [게임 제작 #94](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94)
+갱신: 2026-11-12 · [설계 v2](design-v2.md) · [상위 추적 #2](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/2) · [게임 제작 #94](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94)
 
-## 실제 게임 제작 경로
+## 지금 되는 것
 
-자연어 요구에서 사용자 소유 게임의 작성·실행·수정·재현·전달까지 연결한다. Stormglass Foundry/Coop Defense를 실제 게임 기준으로 삼고 구조화된 API를 기본으로 사용한다. 화면 조작은 보완 QA다. 기능·PR·테스트 수는 게임 완성률이 아니며 **실제 모델 기반 무개입 제작 성공률은 아직 미측정**이다. Mock/scripted 성공으로 대신하지 않는다.
+아래는 2026-11-11~12에 윈도우 11(NVIDIA RTX 4060)에서 직접 실행해 확인한 항목이다. 실행 방법은 [README](../README.md)에 있다.
 
-- 결정론 코어의 고정소수점·순서 고정·롤백·리플레이·시뮬/뷰 경계를 유지한다. 선택적 게임 패키지는 기존 Game/등록/입력 codec/presenter를 사용하며 엔진에 게임별 시뮬레이션을 복제하지 않는다.
-- Stormglass는 공통 ERP/등록 Editor의 편집·Undo/Redo·Save/reopen과 native/WASM 소비를 연결한다. 현재 작성 계약은 Scenario, Campaign, WavePacing, WaveCounts, EnemyHealth, WaveComposition의 **여섯 singleton**이다. 자원·HP·마지막 웨이브·생성 간격·웨이브별 수·적 종류/첫 보스를 작성한다. [범위와 예제](stormglass-authoring.md)를 따르며 보류 중 EnemyMotion을 포함하지 않는다.
-- Browser 로컬 Scene import와 authored-scene offline packing은 구현돼 있다. 단일 HTML에 고정된 WASM/자산/장면을 넣어 전달할 수 있다. [Run Save v1](coop-defense-run-save.md)은 같은 WASM의 유한 입력 기록을 재생하는 저장/복원이며 일반 Frame checkpoint·버전 migration이 아니다. 온라인 협동·계정·매칭·production balance는 완료 주장에 포함하지 않는다.
-- 복원 실패는 기존 게임/기록을 보존한다. 다만 포커스 상실은 별도 안전 이벤트로, 복원 중에도 전투를 일시정지하고 대기 입력/제스처를 취소한다. 실패/취소한 복원이 이를 되돌리거나 명시적 계속 없이 전투를 재개해서는 안 된다.
+- **빌드**: `cargo build-all` 한 줄로 에디터와 게임 실행 파일이 모두 만들어진다.
+- **에디터**: 기본 물리 씬, `--game arena`, Room 프로젝트 열기를 화면 캡처로 확인했다.
+- **Room 제작 흐름**: `orr_new_room`으로 프로젝트 생성 → `orr_editor --room-project`로 열기 → `room_escape --project`로 실행 → `orr_export_windows`로 내보내기 → 내보낸 폴더의 실행 파일만으로 실행.
+- **게임**: Stormglass(`coop_defense`)의 창 실행과 창 없는 600틱 실행, `arena`의 60fps 실행과 오디오 출력.
+- **테스트(기본 구성)**: `cargo test --workspace --release` 2779개 통과, 실패 0개, 무시 26개.
+- **테스트(전체 기능 구성)**: `--features orr_editor/full,orr_sample/full`로 에디터와 샘플 게임을 전체 실행했을 때 3376개 통과, 19개 실패였다. 그 뒤 17건의 원인을 고쳐 해당 테스트를 다시 실행해 통과를 확인했다. 남은 실패는 2건이다.
 
-## 확인한 개발 통합과 실제 증거
+## 2026-11-11~12 정리 내용
 
-[PR #426](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/426)은 MeshHazardsV1의 animation Load → Apply/Undo/Redo → Save/reopen → 원본 숨김 native 소비를 통합했다. 별도 capability·provenance·runtime trust와 기존 schema/default-off 경계를 유지한다. [원래 수용 기록](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/426#issuecomment-6639723379)은 당시 tree에 한정된다.
+- 흩어져 있던 개발 줄기를 `main`에 합쳤다. `main`은 그전까지 실제 작업보다 약 720커밋 뒤처져 있었다.
+- 기능별로 쌓인 GitHub Actions 워크플로 169개를 지웠다.
+- 에디터(`orr_editor`)와 샘플 게임(`orr_sample`)에 모든 기능을 한 번에 켜는 `full` 기능을 추가했다. 기본값은 그대로 최소 구성이다. 모바일과 웹 빌드가 `orr_sample`의 최소 구성에 의존하기 때문이다.
+- 오래된 브랜치에만 있던 작업 8건을 합쳤다: glTF CUBICSPLINE 애니메이션, P2P 메시 정지·이탈, 원뿔 모델 제작, 스프라이트 격자·핑퐁, 설치 패키지 소스 내보내기, 애니메이션 클립 역재생, 지형 카메라 붐, 지형 키보드 코스.
+- 윈도우에서만 드러나던 결함을 고쳤다.
+  - `\\?\C:` 형태의 경로에서 내비게이션·지형·조명 프로브 씬을 열지 못하던 문제
+  - 폴더 핸들을 열지 못해 스프라이트 클립, RAW16 지형, Room 조명, 연결 프리팹 저장이 실패하던 문제
+  - 메시 애니메이션 패키지 가져오기에서 폴더 이동이 거부되던 문제
+  - 패키지 의존성 미리보기가 경로 표기 차이로 버려지던 문제
+  - 모델 바인딩이 `/remote/scene.yaml` 같은 루트 경로를 상대 경로로 받아들이던 문제
 
-[PR #427](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/427)/[#428](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/428)은 복원 중 포커스 상실과 해제된 드래그 부활을, [#434](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/434)는 Ctrl/Cmd+R이 Invest로 소비되던 결함을 수정했다. 실제 WASM/mock-DOM 및 독립 산출물 재실행 증거이며 실제 브라우저 수용은 아니다.
+## 알려진 문제
 
-Native [#429](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/429)는 이전 클릭의 hover 오해석을, [#430](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/430)은 Pause/Continue·포커스 정지를, [#431](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/431)은 선택 Save Copy/Load를 추가했다. [#432](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/432)는 원본 숨김 authored audio → Kira PCM을, [#433](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/433)은 delay2 소비 전 빠른 이동 선택 보존을 검증했다. [#435](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/435)는 승인된 terminal Restart가 포커스 복귀만으로 실행되지 않고 명시적 Continue를 기다리도록 수정했다. 각 PR의 정확한 CI·독립 산출물 기록과 실패 이력을 보존하며 창·장치·스피커 청취 증거로 확대하지 않는다.
+추적 이슈: [#563](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/563)
 
-[PR #436](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/436)은 등록된 기본 Delivery/Switchboard를 실제 완주할 수 있도록 프로젝트 소유 move/select 제어와 단발 입력·정확한 소비 확인을 연결했다. 개발 merge c607d380, 검토 tree ef86ee87의 [정확 head CI](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/41966442733) 및 [독립 산출물 수용](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/436#issuecomment-6649744451)이 통과했다. 고정 130개 테스트·4개 strict 구성·다운로드 실행 파일·native 식별 쿼리 4개를 확인했고, 원래 실패와 새 build ID의 이전 replay 거부를 보존했다.
+- 전체 기능 구성에서 실패하는 테스트가 2건 남아 있다. 목록은 위 이슈에 있다.
+- 모든 기능을 켜면 인스펙터에 패널이 길게 쌓이고, 세로 스크롤이 없어 아래쪽 버튼이 화면 밖으로 밀릴 수 있다.
+- Arena·Collect 프로젝트의 새로 만들기와 내보내기, 게임 진행 저장, 지형 패치 불러오기, `orr_pkg`의 번들·웹 명령은 리눅스 전용이다.
+- 에디터 메뉴(`File > New Room project…`, `File > Export Windows game…`)는 사람이 직접 눌러 보는 확인을 아직 하지 않았다. 같은 기능을 명령 도구로 실행해 확인했다.
+- 리눅스, macOS, 안드로이드, 브라우저 빌드는 이번에 실행하지 않았다.
 
-[PR #437](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/437)은 같은 등록 Stormglass 세션에 읽기 전용 OVS 관측을 연결했다. 개발 merge 2c8be46d, tree 21ac7e52의 [정확 head CI](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/41974416216)와 [독립 다운로드 수용](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/437#issuecomment-6650833158)이 통과했다. 159개 CPU 테스트와 6개 strict 구성을 확인했다. 스트림은 최신 상태이며 epoch-fenced 명령 영수증이 아니다. 원래 실패와 기능 경계 수정·산출물 감사 실패를 보존한다.
+## 다음 작업
 
-[PR #438](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/438)은 작성한 Switchboard 목표를 상단 사각형 행과 native/editor 안내로 표시한다. 기존 현재 원형·규칙·입력·build identity는 유지한다. 개발 merge e145c2a9, tree ef02e10b의 [정확 head CI](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/41985042770)와 [독립 다운로드 재실행](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/438#issuecomment-6652514909)이 통과했다. 187개 CPU·58개 Python 테스트와 7개 strict 구성을 확인했으며 원래 재현·lint 실패와 실제 창 가독성 미검증 범위를 보존한다.
+1. [#104](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/104) 흐름을 에디터 화면에서 사람 손으로 끝까지 진행한다: 새 프로젝트 → 개체 이동과 값 수정 → 실행 취소 → 저장 → Play → 내보내기 → 내보낸 게임 실행.
+2. 인스펙터에 세로 스크롤을 넣고, 현재 게임과 관계없는 패널은 숨긴다.
+3. 전체 기능 구성의 남은 테스트 실패를 없앤다.
+4. Arena 프로젝트 생성과 내보내기를 윈도우로 옮긴다.
+5. 설계 v2의 고정 과제군(배달, 스위치 퍼즐, 액션)으로 무개입 완주율을 처음 측정한다.
 
-[PR #439](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/439)은 Delivery의 현재 위치·원점 재시작 이후 좌표 도달성 경고를 실제 editor presenter, native 제목/조회와 bundle 분석에 연결했다. 소수 좌표 허용·기존 규칙·identity는 유지한다. 개발 merge 1c75e650, tree 5b8fd9e1의 [정확 head CI](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/actions/runs/42000508082)와 [독립 원본 산출물 재실행](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/439#issuecomment-6654700721)이 통과했다. 최초 경고 재현 실패·gate discovery 실패·형식 advisory를 보존하며 좌표 호환성을 완주 보장으로 확대하지 않는다.
+## 작업 규칙
 
-- **과거 Windows 직접 플레이:** 10-wave 승리, 369 kills, 29 merges, core 8/30 및 Wave 2 패배 → R 재시작을 관측했다. [원래 증거](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94#issuecomment-6430939337)는 당시 산출물에만 적용하며 현재 소스의 Windows 재검증으로 옮기지 않는다.
-- **현재 Stormglass 실행 범위:** 실제 native/WASM consumed-input trace와 source-hidden packed 소비, mock-DOM 제어/저장 검사는 실제 브라우저 파일 선택·표시·물리 입력과 별개다. 2026-11-04 Chromium 사전 검사는 페이지 로드 전 Unix socket EPERM으로 실패했고 정식 확대 실행도 executor 초기화에서 실패했다. 실제 브라우저 플레이는 **미검증**이며 다른 환경 실행으로 이 제한을 우회하지 않았다.
-
-## 남은 우선순위와 경계
-
-1. 실제 제작·완주 경로를 우선한다. [Stormglass browser의 오래된 드래그 취소](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94#issuecomment-6655007764)가 먼저 승인된 이동의 목적지 선택을 빈 옛 칸으로 덮는 문제를 실제 WASM·모의 DOM으로 재현했다. 승인된 이동/합성 때 이전 보드 기준 제스처를 정리하는 좁은 UI 수정을 검증 중이다. 캠페인 설정·승패, native 저장/복원, browser authored import/offline 전달 조사에서는 추가 결함을 확인하지 않아 변경하지 않았다.
-2. 허용된 실행 환경이 있을 때 현재 산출물의 브라우저/native-window 플레이를 별도 수용한다. 화면 증거가 없으면 성공률·모바일·Windows·hardware GPU까지 확대하지 않는다.
-3. [설계 v2](design-v2.md)의 사전 고정 과제/seed/oracle·예산·실제 모델 기준선을 준비한다. 모델 호출·업로드·비용은 별도 승인 범위이며 아직 측정 결과가 없다.
-
-Su가 구현·검증·독립 리뷰와 파일 소유권을 조정한다. 종료된 외부 담당에게 새 작업을 배정하지 않는다. Held Collect/CUBICSPLINE과 게시가 거부된 EnemyMotion을 인수하거나 재게시하지 않는다. ERP의 명시적 loopback/token·capability·lease·sequence 계약은 [등록 API 문서](registered-gameplay-api.md)를 유지한다.
-
-## 보존할 검사와 실패
-
-[PR #309의 정확한 Linux-local baseline](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/pull/309#issuecomment-6460288981)과 [후속 PR #404/#405 결합 검증](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94#issuecomment-6616200365)은 당시 source/환경의 증거다. 변경된 경로에는 해당 검사를 새로 실행하고 필수 CI·독립 리뷰 후 개발 브랜치에만 통합한다. Retired/failed/unrun 검사를 성공으로 옮기지 않으며 보안·인증·보호 설정을 우회하지 않는다.
-
-Advisory formatting debt, [원래 compile/중단 기록](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94#issuecomment-6450381753), PR #139/#141의 Windows 실패/미재현 한계, #426의 최초 compile/EXDEV 실패를 보존한다. Raw logs·ZIP·JSON은 git 밖에 source/tree·toolchain·명령·종료 상태와 연결한다. #2의 기존 분모 22는 그대로이며 #94 하위 기능/PR 수로 엔진 완성률을 재계산하지 않는다.
+`main`만 오래 유지한다. 작업마다 짧은 브랜치 하나를 만들고, 빌드와 테스트가 통과하면 바로 `main`에 합친 뒤 브랜치를 지운다. 자세한 규칙은 [AGENTS.md](../AGENTS.md)의 Delivery rules에 있다.
