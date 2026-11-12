@@ -1,6 +1,8 @@
 use super::super::tests::{fixture, settle, terrain};
 use super::*;
+#[cfg(unix)]
 use crate::{editor::Editor, terrain_panel::TerrainPanel};
+#[cfg(unix)]
 use egui_kittest::{Harness, kittest::Queryable};
 use orr_fp::FP;
 use orr_terrain::Terrain;
@@ -226,6 +228,8 @@ fn missing_stale_play_and_changed_geometry_refuse_transforms_without_mutation() 
     }
 }
 
+// Terrain patch asset reads are implemented for Unix only.
+#[cfg(unix)]
 #[test]
 fn widgets_transform_asset_roundtrip_paste_undo_redo_save_reopen_and_consume() {
     for (label, cells, heights, holes, surface, hole, triangle_count) in [

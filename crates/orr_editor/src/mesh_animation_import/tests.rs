@@ -162,7 +162,12 @@ fn rejects_bad_identity_paths_aliases_and_existing_destination() {
     }
     for destination in [
         PathBuf::from("relative"),
-        root.join("inputs/../bad"),
+        // Built as text: `join` resolves `..` on a verbatim Windows root.
+        PathBuf::from(format!(
+            "{}{sep}inputs{sep}..{sep}bad",
+            root.display(),
+            sep = std::path::MAIN_SEPARATOR
+        )),
         root.join("CON"),
         root.join(".orr/out"),
     ] {
@@ -216,6 +221,8 @@ fn injected_source_and_stage_changes_do_not_publish() {
     }
 }
 
+// Windows refuses to rename a directory that has an open handle, so this replacement cannot occur there.
+#[cfg(not(windows))]
 #[test]
 fn replacement_stage_is_not_recursively_removed() {
     let temp = tempfile::tempdir().unwrap();
@@ -239,6 +246,8 @@ fn replacement_stage_is_not_recursively_removed() {
     );
 }
 
+// Windows refuses to rename a directory that has an open handle, so this replacement cannot occur there.
+#[cfg(not(windows))]
 #[test]
 fn replacement_parent_is_not_published_or_cleaned() {
     let temp = tempfile::tempdir().unwrap();
