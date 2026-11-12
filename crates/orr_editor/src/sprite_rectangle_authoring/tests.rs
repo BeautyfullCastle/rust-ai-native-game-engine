@@ -322,7 +322,8 @@ fn acknowledgement_path_metadata_and_license_errors_never_publish() {
     assert!(create_package(req).unwrap_err().contains("acknowledgement"));
     for bad in [
         PathBuf::from("relative.png"),
-        root.join("..").join("outside.png"),
+        // Path::join normalizes `..` on Windows verbatim roots, so build the text directly.
+        PathBuf::from(format!("{}/../outside.png", root.display())),
     ] {
         let mut req = request(&root);
         req.png = bad;
