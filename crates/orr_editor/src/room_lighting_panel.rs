@@ -108,7 +108,7 @@ struct RootPin {
 impl RootPin {
     fn new(parent: &Path) -> Result<Self, String> {
         let path = checked_directory(parent)?;
-        let directory = File::open(&path).map_err(|e| e.to_string())?;
+        let directory = open_directory(&path).map_err(|e| e.to_string())?;
         Ok(Self { path, directory })
     }
     fn recheck(&self, path: &Path) -> Result<(), String> {
@@ -120,6 +120,20 @@ impl RootPin {
         }
         Ok(())
     }
+}
+#[cfg(windows)]
+fn open_directory(path: &Path) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+#[cfg(not(windows))]
+fn open_directory(path: &Path) -> std::io::Result<File> {
+    File::open(path)
 }
 #[cfg(unix)]
 fn same_directory(a: &Metadata, b: &Metadata) -> bool {
