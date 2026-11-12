@@ -21,21 +21,21 @@ cargo build-all
 ### 2. 에디터
 
 ```powershell
-targetelease\orr_editor.exe
+target\release\orr_editor.exe
 ```
 
 기본 물리 씬이 열립니다. 다른 게임으로 열려면 `--game`을 붙입니다.
 
 ```powershell
-targetelease\orr_editor.exe --game arena
-targetelease\orr_editor.exe --game yard3d
+target\release\orr_editor.exe --game arena
+target\release\orr_editor.exe --game yard3d
 ```
 
 ### 3. 내 게임 프로젝트 만들기 (Room)
 
 ```powershell
-targetelease\orr_new_room.exe --output C:\Games\MyRoom --seed room-01
-targetelease\orr_editor.exe --room-project C:\Games\MyRoom
+target\release\orr_new_room.exe --output C:\Games\MyRoom --seed room-01
+target\release\orr_editor.exe --room-project C:\Games\MyRoom
 ```
 
 에디터 메뉴의 `File > New Room project…`와 `File > Open Room project…`로도 같은 일을 할 수 있습니다. 에디터에서 `Play`를 누르면 그 자리에서 게임이 돌아갑니다.
@@ -43,9 +43,9 @@ targetelease\orr_editor.exe --room-project C:\Games\MyRoom
 ### 4. 게임 실행
 
 ```powershell
-targeteleaseoom_escape.exe --project C:\Games\MyRoom
-targetelease\coop_defense.exe
-targeteleaserena.exe
+target\releaseoom_escape.exe --project C:\Games\MyRoom
+target\release\coop_defense.exe
+target\releaserena.exe
 ```
 
 - `room_escape`: 방금 만든 Room 프로젝트를 창으로 실행합니다. `--headless --ticks 120 --capture out.png`를 붙이면 창 없이 실행하고 화면을 저장합니다.
@@ -68,7 +68,7 @@ C:\Games\MyRoomExport\run-room-escape.cmd
 ### 6. AI 에이전트 연결
 
 ```powershell
-targetelease\orr_editor.exe --erp 127.0.0.1:7777 --erp-dev
+target\release\orr_editor.exe --erp 127.0.0.1:7777 --erp-dev
 target\release\orr.exe status
 ```
 
