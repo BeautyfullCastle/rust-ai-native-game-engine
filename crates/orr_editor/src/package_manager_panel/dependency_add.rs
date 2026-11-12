@@ -183,7 +183,7 @@ impl Panel {
             return;
         }
         match result {
-            Ok(plan) if plan.root() == identity.root => {
+            Ok(plan) if super::same_project_root(plan.root(), &identity.root) => {
                 self.dependency_add.ready = Some((identity, plan));
                 self.status="Dependency preview ready; review direct, indirect, and unused entries, then Add explicitly.".into();
             }
