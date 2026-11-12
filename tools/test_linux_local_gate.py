@@ -241,12 +241,13 @@ exit 0
         self.assertEqual(failed.count('tools/linux_local_gate.py'), 1)
         self.assertNotIn('python3 -B tools/test_static_game_actions_observation_pacing.py', failed)
 
-    def test_legacy_phase_coverage(self):
-        self.assertEqual(len(gate.PHASES), 23)
-        self.assertEqual(len({p['name'] for p in gate.PHASES}), 23)
+    def test_baseline_phase_coverage(self):
+        self.assertEqual(len(gate.PHASES), 24)
+        self.assertEqual(len({p['name'] for p in gate.PHASES}), 24)
         self.assertEqual([p['name'] for p in gate.PHASES if p['advisory']], ['format'])
         commands = '\n'.join(p['command'] for p in gate.PHASES)
         self.assertIn('cargo test --locked --workspace --release', commands)
+        self.assertIn('python3 -B tools/test_cli_clock_policy.py', commands)
         self.assertIn('--features standalone-native-acceptance --test standalone_x11 --no-run', commands)
         self.assertIn('int(counts[0]) <= 0', commands)
 

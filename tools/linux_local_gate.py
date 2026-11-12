@@ -97,7 +97,7 @@ def composed_coverage(phases, evidence):
             "receipts": [r for r, _ in evidence], "limitations": LIMITATIONS}
 
 
-# Exact legacy commands, including assembler extraction and nonzero test count.
+# Exact baseline commands, including assembler extraction and nonzero test count.
 # These are definitions for review/testing, NOT an executable replacement gate.
 PHASES = [{'name': 'rustc', 'command': 'rustc --version --verbose', 'advisory': False},
  {'name': 'cargo', 'command': 'cargo --version', 'advisory': False},
@@ -106,6 +106,9 @@ PHASES = [{'name': 'rustc', 'command': 'rustc --version --verbose', 'advisory': 
  {'name': 'sim-float', 'command': 'python3 -B tools/check_sim_float_types.py', 'advisory': False},
  {'name': 'float-fixtures',
   'command': 'python3 -B tools/test_sim_float_guard.py',
+  'advisory': False},
+ {'name': 'cli-clock-policy',
+  'command': 'python3 -B tools/test_cli_clock_policy.py',
   'advisory': False},
  {'name': 'workspace-build',
   'command': 'cargo build --locked --workspace --release',
