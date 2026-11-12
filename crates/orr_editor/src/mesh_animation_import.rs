@@ -59,7 +59,7 @@ pub(crate) struct Report {
 
 // Holding handles prevents identity reuse after an unlinked inode is replaced.
 struct Retained {
-    handle: File,
+    handle: Option<File>,
     identity: (u64, u64),
 }
 
@@ -76,11 +76,16 @@ impl Retained {
             .open(path)
             .map_err(|error| format!("retain file identity: {error}"))?;
         let identity = file_identity(&handle)?;
-        Ok(Self { handle, identity })
+        Ok(Self {
+            handle: Some(handle),
+            identity,
+        })
     }
 
     fn matches(&self, path: &Path) -> bool {
-        file_identity(&self.handle).ok() == Some(self.identity)
+        self.handle
+            .as_ref()
+            .is_none_or(|handle| file_identity(handle).ok() == Some(self.identity))
             && Self::open(path).is_ok_and(|current| current.identity == self.identity)
     }
 }
@@ -141,6 +146,15 @@ struct Stage {
 }
 
 impl Stage {
+    // Windows refuses to rename a directory while any handle is open on a file inside it.
+    // Identity is still compared by reopening each file after the rename.
+    #[cfg(windows)]
+    fn release_file_handles(&mut self) {
+        for (_, retained, _) in &mut self.files {
+            retained.handle = None;
+        }
+    }
+
     fn create(parent_path: &Path) -> Result<Self, String> {
         let parent = Retained::open(parent_path)?;
         let temporary = tempfile::Builder::new()
@@ -287,6 +301,8 @@ fn import_with_hook(
     }
     stage.check_bytes()?;
     refuse_existing(&destination)?;
+    #[cfg(windows)]
+    stage.release_file_handles();
     publish_new_directory(&stage.path, &destination)?;
 
     // From here forward output exists. Never report rollback on durability/readback failure.
@@ -299,13 +315,15 @@ fn import_with_hook(
         stage
             .parent
             .handle
-            .sync_all()
+            .as_ref()
+            .map_or(Ok(()), File::sync_all)
             .map_err(|error| format!("sync destination parent: {error}"))?;
         #[cfg(unix)]
         stage
             .directory
             .handle
-            .sync_all()
+            .as_ref()
+            .map_or(Ok(()), File::sync_all)
             .map_err(|error| format!("sync published directory: {error}"))?;
         let published =
             Snapshot::from_package(&destination, asset, LICENSE, request.graph_revision)?;
