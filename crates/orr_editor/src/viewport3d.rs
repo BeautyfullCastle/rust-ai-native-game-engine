@@ -33,6 +33,13 @@ pub enum SurfaceChoice {
 
 /// The color of a shape whose surface shader cannot be used.
 pub const BROKEN_SURFACE_COLOR: [f32; 4] = [1.0, 0.0, 1.0, 1.0];
+
+/// Draws a model whose surface shader cannot be used, in [`BROKEN_SURFACE_COLOR`].
+#[cfg(feature = "models")]
+const BROKEN_MODEL_SURFACE: &str = "fn surface(in: SurfaceInput) -> Surface { var s = default_surface(in); s.albedo = vec3<f32>(1.0, 0.0, 1.0); return s; }";
+/// Not a valid shader file name, so it never meets a file's shader.
+#[cfg(feature = "models")]
+const BROKEN_MODEL_SURFACE_NAME: &str = "(broken)";
 impl YardFrame {
     pub fn extract(frame: FrameView<'_>) -> Self {
         let mut extracted = Vec::new();
@@ -187,6 +194,9 @@ struct CachedModel {
     model: StaticModelKey,
     renderer: orr_render::ModelRenderer<Wgpu>,
     instances: Vec<orr_render::StaticInstance>,
+    /// Library version of each surface shader added to `renderer`, in the
+    /// viewport's id order, so the ids match the shape renderer's.
+    surface_versions: Vec<u64>,
 }
 /// Private cache identity: explicit tables never alias another appearance or
 /// the legacy None policy, even when the immutable mesh Arc is shared.
@@ -283,6 +293,26 @@ fn static_groups(
     }
     Ok(groups)
 }
+/// The entity of each instance of the group `key`, in the order
+/// [`static_groups`] gives the instances: entity placements, then scene models.
+#[cfg(feature = "models")]
+fn group_entities(key: &StaticModelKey, placements: &[ModelPlacement], scene: &[SceneModel]) -> Vec<Option<Entity>> {
+    let entities = placements.iter().filter(|p| {
+        key.matches(&StaticModelKey {
+            model: p.model.clone(),
+            #[cfg(feature = "mesh-prop-shading")]
+            shading: None,
+        })
+    });
+    let scene = scene.iter().filter(|p| {
+        key.matches(&StaticModelKey {
+            model: p.model.clone(),
+            #[cfg(feature = "mesh-prop-shading")]
+            shading: p.shading.clone(),
+        })
+    });
+    entities.map(|p| Some(p.entity)).chain(scene.map(|_| None)).collect()
+}
 #[cfg(all(test, feature = "mesh-prop-shading"))]
 #[path = "viewport3d/prop_shading_tests.rs"]
 mod prop_shading_tests;
@@ -304,6 +334,9 @@ pub struct Viewport3dGpu {
     renderer: Renderer3D<Wgpu>,
     /// Surface shaders added to `renderer`, in id order, one per name: name, library version, shader.
     surfaces: Vec<(String, u64, orr_render::SurfaceShader)>,
+    /// How each model entity is drawn next, sorted by entity, and the clock its shaders read.
+    #[cfg(feature = "models")]
+    model_surfaces: (Vec<(Entity, SurfaceChoice)>, f32),
     /// Advances only when an accepted frame changes every scene pipeline format.
     pipeline_generation: u64,
     #[cfg(feature = "models")]
@@ -321,6 +354,8 @@ impl Viewport3dGpu {
             target: OffscreenTarget::new(rhi, size.0, size.1, TARGET_FORMAT),
             renderer: Renderer3D::with_settings(rhi.clone(), TARGET_FORMAT, Settings3D::LOW),
             surfaces: Vec::new(),
+            #[cfg(feature = "models")]
+            model_surfaces: (Vec::new(), 0.0),
             pipeline_generation: 0,
             #[cfg(feature = "models")]
             imported: orr_render::ImportedSceneRenderer::new(rhi.clone(), TARGET_FORMAT)
@@ -348,6 +383,60 @@ impl Viewport3dGpu {
         self.surfaces.push((shader.name().to_string(), version, shader.clone()));
         debug_assert_eq!(id.0 as usize, self.surfaces.len() - 1);
         id
+    }
+    /// How the model entities are drawn from the next frame on, with the
+    /// clock in seconds that their shaders read. An entity left out keeps the
+    /// built-in look; ids come from [`Self::surface_id`].
+    #[cfg(feature = "models")]
+    pub fn set_model_surfaces(&mut self, mut choices: Vec<(Entity, SurfaceChoice)>, time: f32) {
+        choices.sort_unstable_by_key(|(entity, _)| (entity.index, entity.version));
+        self.model_surfaces = (choices, time);
+    }
+    /// The id of the magenta shader that marks a model with an unusable shader.
+    #[cfg(feature = "models")]
+    fn broken_model_surface(&mut self) -> orr_render::SurfaceId {
+        if let Some(index) = self.surfaces.iter().position(|(name, _, _)| name == BROKEN_MODEL_SURFACE_NAME) {
+            return orr_render::SurfaceId(index as u32);
+        }
+        let shader = orr_render::SurfaceShader::compile(BROKEN_MODEL_SURFACE_NAME, BROKEN_MODEL_SURFACE).expect("the engine's own shader compiles");
+        self.surface_id(&shader, 0)
+    }
+    /// Gives every cached model renderer the viewport's surface shaders and
+    /// the surface of each of its instances. `entities` holds the entity of
+    /// each instance of each cached model, in the same order.
+    #[cfg(feature = "models")]
+    fn apply_model_surfaces(&mut self, entities: &[Vec<Option<Entity>>]) {
+        let uses_broken = self.model_surfaces.0.iter().any(|(_, choice)| *choice == SurfaceChoice::Broken);
+        let broken = uses_broken.then(|| self.broken_model_surface());
+        let (choices, time) = &self.model_surfaces;
+        for (entry, entities) in self.models.iter_mut().zip(entities) {
+            for (index, (_, version, shader)) in self.surfaces.iter().enumerate() {
+                match entry.surface_versions.get(index) {
+                    None => {
+                        entry.renderer.add_surface(shader);
+                        entry.surface_versions.push(*version);
+                    }
+                    Some(known) if known != version => {
+                        entry.renderer.replace_surface(orr_render::SurfaceId(index as u32), shader);
+                        entry.surface_versions[index] = *version;
+                    }
+                    Some(_) => {}
+                }
+            }
+            let uses: Vec<Option<orr_render::ModelSurface>> = entities
+                .iter()
+                .map(|entity| {
+                    let entity = (*entity)?;
+                    let at = choices.binary_search_by_key(&(entity.index, entity.version), |(e, _)| (e.index, e.version)).ok()?;
+                    match choices[at].1 {
+                        SurfaceChoice::BuiltIn => None,
+                        SurfaceChoice::Shader(surface, params) => Some(orr_render::ModelSurface { surface, params }),
+                        SurfaceChoice::Broken => broken.map(|surface| orr_render::ModelSurface { surface, params: [0.0; orr_render::MAX_SURFACE_FLOATS] }),
+                    }
+                })
+                .collect();
+            entry.renderer.set_instance_surfaces(&uses, *time);
+        }
     }
     #[cfg(feature = "models")]
     pub fn set_point_light_settings(&mut self, settings: orr_render::PointLightSettings) -> Result<(), String> {
@@ -696,6 +785,7 @@ impl Viewport3dGpu {
                     model: model.clone(),
                     renderer: model.renderer(rhi.clone(), format)?,
                     instances: Vec::new(),
+                    surface_versions: Vec::new(),
                 });
             }
         }
@@ -744,6 +834,8 @@ impl Viewport3dGpu {
             ordered.push(entry);
         }
         self.models = ordered;
+        let entities: Vec<Vec<Option<Entity>>> = groups.iter().map(|(model, _)| group_entities(model, placements, scene_models)).collect();
+        self.apply_model_surfaces(&entities);
         #[cfg(feature = "animated-models")]
         {
             self.animated_models.extend(new_animated);
@@ -854,6 +946,10 @@ impl GpuViewport3d {
     /// See [`Viewport3dGpu::surface_id`].
     pub fn surface_id(&mut self, shader: &orr_render::SurfaceShader, version: u64) -> orr_render::SurfaceId {
         self.gpu.surface_id(shader, version)
+    }
+    #[cfg(feature = "models")]
+    pub fn set_model_surfaces(&mut self, choices: Vec<(Entity, SurfaceChoice)>, time: f32) {
+        self.gpu.set_model_surfaces(choices, time);
     }
     #[cfg(feature = "models")]
     pub fn render_post_processed(

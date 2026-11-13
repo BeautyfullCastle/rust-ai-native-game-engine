@@ -13,15 +13,19 @@
 //! }
 //! ```
 //!
-//! - `SurfaceInput` gives the world position, the position in the shape's own
-//!   space (`local`), the normal, the instance color, roughness, metallic,
-//!   emissive strength and the scene time in seconds.
+//! - `SurfaceInput` gives the world position, the position in the object's
+//!   own space (`local`), the normal, the texture coordinates of a model
+//!   (`uv`, zero on shapes), the base color, roughness, metallic, emissive
+//!   strength and the scene time in seconds.
 //! - `Surface` is what the engine lights: `albedo`, `normal`, `roughness`,
 //!   `metallic` and `emissive`. `default_surface(in)` returns the look the
-//!   shape has without a surface shader.
+//!   object has without a surface shader.
 //! - The engine does the rest: the sun and its shadows, ambient light, scene
 //!   lights and their layers, tone mapping and output encoding. A surface
 //!   shader keeps working when that pipeline changes.
+//! - The same file works on the 3D renderer's shapes and, with the `models`
+//!   feature, on static models drawn in an imported scene
+//!   ([`crate::ModelRenderer::add_surface`]). Each is lit by its own lighting.
 //!
 //! # Parameters
 //!
@@ -54,7 +58,12 @@ pub const MAX_SURFACE_FLOATS: usize = 16;
 /// Largest surface shader source, in bytes.
 pub const MAX_SURFACE_SOURCE_BYTES: usize = 64 * 1024;
 
-const GLUE: &str = include_str!("surface_glue.wgsl");
+const CONTRACT: &str = include_str!("surface_contract.wgsl");
+/// The engine side of a surface shader on the 3D renderer's shapes.
+pub(crate) const SHAPE_GLUE: &str = include_str!("surface_glue.wgsl");
+/// The engine side of a surface shader on a static model.
+#[cfg(feature = "models")]
+pub(crate) const MODEL_GLUE: &str = include_str!("surface_model_glue.wgsl");
 
 /// A shape's look decided by a surface shader. Index into the shaders added to a renderer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -148,8 +157,8 @@ fn error(line: usize, column: usize, message: impl Into<String>) -> ShaderError 
 pub struct SurfaceShader {
     name: String,
     params: Vec<SurfaceParam>,
-    /// Glue, parameter struct and user source: everything after the renderer's own shader.
-    tail: String,
+    /// Contract, parameter struct and user source: everything after the engine glue.
+    body: String,
 }
 
 const RESERVED: &[&str] = &["in", "params", "surface", "default_surface", "true", "false", "fn", "let", "var", "struct", "loop", "for", "if", "else", "return"];
@@ -270,48 +279,57 @@ fn deepest_message(error: &dyn std::error::Error) -> String {
     parts.join(": ")
 }
 
+/// Parses and validates `full`, a whole module that ends with the user's file
+/// of `user_len` bytes. Errors name lines of the user's file.
+fn validate(full: &str, user_len: usize) -> Result<naga::Module, ShaderError> {
+    // Lines before the user's source, to turn a line of the whole shader into a line of the user's file.
+    let before = full.len() - user_len;
+    let first_user_line = full[..before].matches('\n').count() + 1;
+    let place = |line: u32, column: u32| -> (usize, usize, bool) {
+        let line = line as usize;
+        if line >= first_user_line {
+            (line - first_user_line + 1, column as usize, true)
+        } else {
+            (0, 0, false)
+        }
+    };
+    let module = naga::front::wgsl::parse_str(full).map_err(|e| {
+        // The first label in the user's file, else the first label at all. Some errors carry none.
+        let locations: Vec<_> = e.labels().filter(|(span, _)| span.is_defined()).map(|(span, _)| span.location(full)).collect();
+        let chosen = locations.iter().find(|l| l.line_number as usize >= first_user_line).or(locations.first());
+        let (line, column, in_user) = chosen.map_or((0, 0, false), |l| place(l.line_number, l.line_position));
+        let mut message = e.message().to_string();
+        // An error inside the engine's part means the user's code does not fit the contract.
+        if message.contains("`surface`") || (chosen.is_some() && !in_user) {
+            message.push_str(" (the shader must define fn surface(in: SurfaceInput) -> Surface)");
+        }
+        error(line, column, message)
+    })?;
+    let mut validator = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::empty());
+    validator.validate(&module).map_err(|e| {
+        // The narrowest span is the expression at fault; wider ones are the enclosing function.
+        let narrowest = e.spans().filter(|(span, _)| span.is_defined()).map(|(span, _)| span.location(full)).min_by_key(|l| l.length);
+        let (line, column, _) = narrowest.map_or((0, 0, false), |l| place(l.line_number, l.line_position));
+        error(line, column, deepest_message(e.as_inner()))
+    })?;
+    Ok(module)
+}
+
 impl SurfaceShader {
-    /// Reads the parameters and validates the shader against the renderer's
-    /// own shader. `name` is how the editor and errors refer to it.
+    /// Reads the parameters and validates the shader against the shape
+    /// renderer's own shader and, with the `models` feature, the model
+    /// shader. `name` is how the editor and errors refer to it.
     pub fn compile(name: &str, source: &str) -> Result<Self, ShaderError> {
         if source.len() > MAX_SURFACE_SOURCE_BYTES {
             return Err(error(0, 0, format!("the shader is larger than {MAX_SURFACE_SOURCE_BYTES} bytes")));
         }
         let params = parse_params(source)?;
-        let tail = format!("{GLUE}\n{}\n{source}", params_wgsl(&params));
-        let shader = Self { name: name.to_string(), params, tail };
-        let engine = engine_source();
-        let full = shader.source_with(&engine);
-        // Lines before the user's source, to turn a line of the whole shader into a line of the user's file.
-        let before = full.len() - source.len();
-        let first_user_line = full[..before].matches('\n').count() + 1;
-        let place = |line: u32, column: u32| -> (usize, usize, bool) {
-            let line = line as usize;
-            if line >= first_user_line {
-                (line - first_user_line + 1, column as usize, true)
-            } else {
-                (0, 0, false)
-            }
-        };
-        let module = naga::front::wgsl::parse_str(&full).map_err(|e| {
-            // The first label in the user's file, else the first label at all. Some errors carry none.
-            let locations: Vec<_> = e.labels().filter(|(span, _)| span.is_defined()).map(|(span, _)| span.location(&full)).collect();
-            let chosen = locations.iter().find(|l| l.line_number as usize >= first_user_line).or(locations.first());
-            let (line, column, in_user) = chosen.map_or((0, 0, false), |l| place(l.line_number, l.line_position));
-            let mut message = e.message().to_string();
-            // An error inside the engine's part means the user's code does not fit the contract.
-            if message.contains("`surface`") || (chosen.is_some() && !in_user) {
-                message.push_str(" (the shader must define fn surface(in: SurfaceInput) -> Surface)");
-            }
-            error(line, column, message)
-        })?;
-        let mut validator = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::empty());
-        validator.validate(&module).map_err(|e| {
-            // The narrowest span is the expression at fault; wider ones are the enclosing function.
-            let narrowest = e.spans().filter(|(span, _)| span.is_defined()).map(|(span, _)| span.location(&full)).min_by_key(|l| l.length);
-            let (line, column, _) = narrowest.map_or((0, 0, false), |l| place(l.line_number, l.line_position));
-            error(line, column, deepest_message(e.as_inner()))
-        })?;
+        let body = format!("{CONTRACT}\n{}\n{source}", params_wgsl(&params));
+        let shader = Self { name: name.to_string(), params, body };
+        let module = validate(&shader.source_for(&engine_source(), SHAPE_GLUE), source.len())?;
+        // The same file must fit models too, so one material works on both.
+        #[cfg(feature = "models")]
+        validate(&shader.source_for(&crate::model_renderer::model_engine_source(), MODEL_GLUE), source.len())?;
         let surface = module.functions.iter().find(|(_, f)| f.name.as_deref() == Some("surface"));
         let expected = |handle: naga::Handle<naga::Type>, name: &str| module.types[handle].name.as_deref() == Some(name);
         match surface {
@@ -352,9 +370,10 @@ impl SurfaceShader {
         out
     }
 
-    /// The whole WGSL module on top of the renderer's own shader `engine`.
-    pub(crate) fn source_with(&self, engine: &str) -> String {
-        format!("{engine}\n{}", self.tail)
+    /// The whole WGSL module: the renderer's own shader `engine`, its surface
+    /// `glue`, then the contract, the parameters and the user's file.
+    pub(crate) fn source_for(&self, engine: &str, glue: &str) -> String {
+        format!("{engine}\n{glue}\n{}", self.body)
     }
 }
 

@@ -78,15 +78,38 @@ fn point_diffuse(world_position:vec3<f32>,normal:vec3<f32>) -> vec3<f32> {
     return globals.point_color_intensity.xyz*globals.point_color_intensity.w
         *diffuse*attenuation*attenuation;
 }
-fn shade(in:Varying, visibility:f32) -> vec4<f32> {
-    let n=in.normal*inverseSqrt(max(dot(in.normal,in.normal),1e-20));
+// What the engine lights: the same fields as `Surface` in the 3D renderer's shader.
+struct Surface {
+    albedo: vec3<f32>,
+    normal: vec3<f32>,
+    roughness: f32,
+    metallic: f32,
+    emissive: vec3<f32>,
+};
+// The point being lit.
+struct ModelPoint { world_position: vec3<f32> };
+// The built-in look of the drawn primitive: its texture times its color.
+fn model_surface(in:Varying) -> Surface {
+    var s: Surface;
+    s.albedo=sample_base(in.uv).rgb*object.color.rgb;
+    s.normal=in.normal*inverseSqrt(max(dot(in.normal,in.normal),1e-20));
+    s.roughness=1.0;
+    s.metallic=0.0;
+    // MATERIAL_SURFACE
+    s.emissive=vec3<f32>(0.0);
+    return s;
+}
+// Engine lighting of a model surface. The built-in look and surface shaders both end here.
+fn shade_surface(in:ModelPoint, s:Surface, visibility:f32) -> vec4<f32> {
+    let n=s.normal;
     let ambient=mix(globals.ground.xyz,globals.sky.xyz,n.y*0.5+0.5)*globals.sky.w;
     // IRRADIANCE_MODEL
     // Models are on the default render layer.
     let sun=globals.sun.xyz*globals.sun.w*max(dot(n,-globals.direction.xyz),0.0)*scene_sun_shadow(visibility)*scene_sun_reaches(1.0);
     let point=point_diffuse(in.world_position,n)+scene_lights_diffuse(in.world_position,n,1.0);
-    var color=sample_base(in.uv).rgb*object.color.rgb*(ambient+sun+point);
+    var color=s.albedo*(ambient+sun+point);
     // MATERIAL_SHADE
+    color+=s.emissive;
     // Finite admitted lighting may exceed half-float range; saturate only at
     // representation limits, never at display white, before the FP16 write.
     if globals.params.w>0.5 { return vec4<f32>(clamp(color,vec3<f32>(0.0),vec3<f32>(65504.0)),1.0); }
@@ -95,6 +118,9 @@ fn shade(in:Varying, visibility:f32) -> vec4<f32> {
     if globals.params.z>0.5 { color=linear_to_srgb(color); }
     // glTF OPAQUE ignores texture/factor alpha.
     return vec4<f32>(color,1.0);
+}
+fn shade(in:Varying, visibility:f32) -> vec4<f32> {
+    return shade_surface(ModelPoint(in.world_position), model_surface(in), visibility);
 }
 
 @group(1) @binding(0) var shared_shadow_map: texture_depth_2d;

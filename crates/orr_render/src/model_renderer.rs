@@ -176,6 +176,8 @@ struct InstanceDraw<B: Rhi> {
     bind: B::BindGroup,
     #[cfg(feature = "imported-scene")]
     shadow: crate::shared_shadow::ObjectBindings<B>,
+    /// Bindings for the surface shader this draw last used.
+    surface: Option<surfaces::SurfaceDraw<B>>,
 }
 #[cfg(feature = "imported-scene")]
 pub(crate) struct PreparedStatic {
@@ -197,6 +199,37 @@ struct Depth<B: Rhi> {
     size: (u32, u32),
 }
 /// Immutable GPU geometry/textures; upload once, then update frame uniforms.
+/// Position, normal and texture coordinates of a model vertex.
+const VERTEX_ATTRS: [VertexAttr; 3] = [
+    VertexAttr {
+        location: 0,
+        format: VertexFormat::Float32x3,
+        offset: 0,
+    },
+    VertexAttr {
+        location: 1,
+        format: VertexFormat::Float32x3,
+        offset: 12,
+    },
+    VertexAttr {
+        location: 2,
+        format: VertexFormat::Float32x2,
+        offset: 24,
+    },
+];
+
+/// The model shader with the scene light functions and, with their features,
+/// the probe and metallic-roughness functions. Model pipelines are built from
+/// it, and surface shaders are validated against it.
+pub(crate) fn model_engine_source() -> String {
+    let source = crate::scene_lights::shader(include_str!("shader_model.wgsl"), "globals");
+    #[cfg(feature = "irradiance-probes")]
+    let source = crate::renderer3d::irradiance::shader(&source, "globals");
+    #[cfg(feature = "metallic-roughness")]
+    let source = crate::material_shading::shader(&source);
+    source
+}
+
 /// Per-primitive stable IDs/material slots remain available in `model()`.
 /// `draw` owns a fresh depth pass; it is not an overlay into Renderer3D's depth.
 pub struct ModelRenderer<B: Rhi> {
@@ -216,6 +249,8 @@ pub struct ModelRenderer<B: Rhi> {
     instance_draws: Vec<InstanceDraw<B>>,
     #[cfg(feature = "imported-scene")]
     local_bounds: Vec<([f32; 3], [f32; 3])>,
+    #[cfg(feature = "imported-scene")]
+    surfaces: surfaces::ModelSurfaces<B>,
     depth: Option<Depth<B>>,
     pub clear: [f64; 4],
 }
@@ -259,32 +294,9 @@ impl<B: Rhi> ModelRenderer<B> {
         if format.is_depth() {
             return Err(ModelRenderError::InvalidTarget);
         }
-        let source = crate::scene_lights::shader(include_str!("shader_model.wgsl"), "globals");
-        #[cfg(feature = "irradiance-probes")]
-        let source = crate::renderer3d::irradiance::shader(&source, "globals");
-        let source = source.as_str();
-        #[cfg(feature = "metallic-roughness")]
-        let material_source = crate::material_shading::shader(source);
-        #[cfg(feature = "metallic-roughness")]
-        let source = material_source.as_str();
-        let shader = rhi.create_shader("static textured model", source);
-        let attrs = [
-            VertexAttr {
-                location: 0,
-                format: VertexFormat::Float32x3,
-                offset: 0,
-            },
-            VertexAttr {
-                location: 1,
-                format: VertexFormat::Float32x3,
-                offset: 12,
-            },
-            VertexAttr {
-                location: 2,
-                format: VertexFormat::Float32x2,
-                offset: 24,
-            },
-        ];
+        let engine_source = model_engine_source();
+        let shader = rhi.create_shader("static textured model", &engine_source);
+        let attrs = VERTEX_ATTRS;
         let pipeline = rhi.create_pipeline(&PipelineDesc::<B> {
             label: "static textured model",
             shader: &shader,
@@ -448,6 +460,8 @@ impl<B: Rhi> ModelRenderer<B> {
             instance_draws: Vec::new(),
             #[cfg(feature = "imported-scene")]
             local_bounds,
+            #[cfg(feature = "imported-scene")]
+            surfaces: surfaces::ModelSurfaces::new(engine_source),
             depth: None,
             clear: crate::DEFAULT_CLEAR_3D,
         })
@@ -589,6 +603,7 @@ impl<B: Rhi> ModelRenderer<B> {
                 uniform,
                 bind,
                 shadow,
+                surface: None,
             });
         }
         self.write_frame(globals);
@@ -596,6 +611,7 @@ impl<B: Rhi> ModelRenderer<B> {
             self.rhi
                 .write_buffer(&draw.uniform, 0, bytemuck::bytes_of(object));
         }
+        self.write_surfaces(prepared.objects.len());
     }
 
     #[cfg(feature = "imported-scene")]
@@ -606,7 +622,8 @@ impl<B: Rhi> ModelRenderer<B> {
         color: &ColorAttachment<'_, B>,
         depth: &DepthAttachment<'_, B>,
     ) {
-        let mut commands = vec![Command::SetPipeline(&self.pipeline)];
+        let mut commands = Vec::new();
+        let mut current: Option<&B::Pipeline> = None;
         for (index, draw) in self
             .instance_draws
             .iter()
@@ -614,8 +631,16 @@ impl<B: Rhi> ModelRenderer<B> {
             .enumerate()
         {
             let geometry = &self.draws[index % self.draws.len()];
+            let (pipeline, bind) = match self.active_surface(index) {
+                Some((gpu, surface)) => (&gpu.main, &surface.main),
+                None => (&self.pipeline, &draw.bind),
+            };
+            if !current.is_some_and(|c| std::ptr::eq(c, pipeline)) {
+                current = Some(pipeline);
+                commands.push(Command::SetPipeline(pipeline));
+            }
             commands.extend([
-                Command::SetBindGroup(0, &draw.bind),
+                Command::SetBindGroup(0, bind),
                 Command::SetVertexBuffer(0, &geometry.vertices),
                 Command::SetIndexBuffer(&geometry.indices),
                 Command::DrawIndexed {
@@ -666,6 +691,7 @@ impl<B: Rhi> ModelRenderer<B> {
     #[cfg(feature = "imported-scene")]
     pub(crate) fn bind_shared_shadow(&mut self, map: &crate::shared_shadow::SharedShadow<B>) {
         self.shadow.bind_map(&self.rhi, map);
+        self.surfaces.bind_map(&self.rhi, map);
     }
     #[cfg(feature = "imported-scene")]
     pub(crate) fn shared_commands<'a>(
@@ -674,15 +700,8 @@ impl<B: Rhi> ModelRenderer<B> {
         depth: bool,
         commands: &mut Vec<Command<'a, B>>,
     ) {
-        commands.push(Command::SetPipeline(if depth {
-            &self.shadow.depth
-        } else {
-            &self.shadow.main
-        }));
-        if !depth {
-            commands.push(Command::SetBindGroup(1, self.shadow.receiver()));
-        }
         let count = ready.map_or(self.draws.len(), |r| r.objects.len());
+        let mut current: Option<&B::Pipeline> = None;
         for i in 0..count {
             let geometry = &self.draws[i % self.draws.len()];
             let binds = if ready.is_some() {
@@ -690,8 +709,22 @@ impl<B: Rhi> ModelRenderer<B> {
             } else {
                 &geometry.shadow
             };
+            // Shadows are cast with the mesh alone; a surface shader changes only how the draw is lit.
+            let surface = (!depth && ready.is_some()).then(|| self.active_surface(i)).flatten();
+            let (pipeline, receiver, bind) = match surface {
+                Some((gpu, surface)) => (&gpu.receiver, Some(gpu.receiver_bind()), &surface.receiver),
+                None if depth => (&self.shadow.depth, None, &binds.depth),
+                None => (&self.shadow.main, Some(self.shadow.receiver()), &binds.main),
+            };
+            if !current.is_some_and(|c| std::ptr::eq(c, pipeline)) {
+                current = Some(pipeline);
+                commands.push(Command::SetPipeline(pipeline));
+                if let Some(receiver) = receiver {
+                    commands.push(Command::SetBindGroup(1, receiver));
+                }
+            }
             commands.extend([
-                Command::SetBindGroup(0, if depth { &binds.depth } else { &binds.main }),
+                Command::SetBindGroup(0, bind),
                 Command::SetVertexBuffer(0, &geometry.vertices),
                 Command::SetIndexBuffer(&geometry.indices),
                 Command::DrawIndexed {
@@ -703,6 +736,11 @@ impl<B: Rhi> ModelRenderer<B> {
         }
     }
 }
+#[cfg(feature = "imported-scene")]
+mod surfaces;
+#[cfg(feature = "imported-scene")]
+pub use surfaces::ModelSurface;
+
 #[cfg(feature = "imported-scene")]
 fn model_local_bounds(model: &StaticModel) -> Vec<([f32; 3], [f32; 3])> {
     model

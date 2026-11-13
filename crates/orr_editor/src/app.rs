@@ -2904,6 +2904,9 @@ impl EditorApp {
         let point_light = self.point_light_settings_for_frame();
         if let Some(rs)=&self.render_state {
             let gpu=self.gpu3d.get_or_insert_with(||crate::viewport3d::GpuViewport3d::with_hdr_support(rs,px,!self.viewport_hdr_disabled));
+            // Model entities with a material are drawn by their shader too.
+            #[cfg(feature = "models")]
+            gpu.set_model_surfaces(choices.clone(), list.time);
             #[cfg(feature = "models")]
             if let Err(error) = point_light.and_then(|settings|gpu.set_point_light_settings(settings)) {
                 ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, error, egui::FontId::proportional(14.0), Color32::RED);

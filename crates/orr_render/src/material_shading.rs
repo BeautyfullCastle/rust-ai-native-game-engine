@@ -101,12 +101,17 @@ pub(crate) fn shader(source: &str) -> String {
     let source = replace_once(source, "// MATERIAL_OBJECT", "material: vec4<f32>,");
     let source = replace_once(
         source,
+        "// MATERIAL_SURFACE",
+        "s.metallic=object.material.x; s.roughness=object.material.y;",
+    );
+    let source = replace_once(
+        source,
         "// MATERIAL_SHADE",
         r#"
     if object.material.w > 0.5 {
-        let base = sample_base(in.uv).rgb * object.color.rgb;
-        let metal = object.material.x;
-        let rough = object.material.y;
+        let base = s.albedo;
+        let metal = s.metallic;
+        let rough = s.roughness;
         var v = -globals.material_view.xyz;
         if globals.material_eye.w < 0.5 {
             v = mr_normalize(globals.material_eye.xyz - in.world_position);
@@ -177,7 +182,7 @@ mod tests {
                 original.matches("@binding(").count()
             );
             assert!(source.contains(
-                "var color=sample_base(in.uv).rgb*object.color.rgb*(ambient+sun+point);"
+                "var color=s.albedo*(ambient+sun+point);"
             ));
             #[cfg(feature = "irradiance-probes")]
             for combined in [

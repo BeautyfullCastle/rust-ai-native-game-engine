@@ -1,35 +1,5 @@
-// The engine side of a surface shader. It sits between the 3D renderer's
-// shader and the user's source. The user's file defines
-//     fn surface(in: SurfaceInput) -> Surface
-// and reads its declared parameters from `params`.
-
-// What a surface shader knows about the point it shades.
-struct SurfaceInput {
-    // World position.
-    world: vec3<f32>,
-    // Position in the shape's own space, before rotation: a unit sphere, box or capsule scaled to its size.
-    local: vec3<f32>,
-    // Unit world-space normal of the shape.
-    normal: vec3<f32>,
-    // Instance color (with the ground checker of a checkered shape), roughness, metallic and emissive strength.
-    color: vec3<f32>,
-    roughness: f32,
-    metallic: f32,
-    emissive: f32,
-    // Seconds of the clock the host gives the renderer (the editor: since it started).
-    time: f32,
-};
-
-// The built-in look of the instance: a start value for a surface shader to change.
-fn default_surface(in: SurfaceInput) -> Surface {
-    var s: Surface;
-    s.albedo = in.color;
-    s.normal = in.normal;
-    s.roughness = in.roughness;
-    s.metallic = in.metallic;
-    s.emissive = in.color * in.emissive;
-    return s;
-}
+// The engine side of a surface shader on the 3D renderer's shapes. It sits
+// between the renderer's shader and the contract (surface_contract.wgsl).
 
 struct SurfaceOut {
     @builtin(position) clip: vec4<f32>,
@@ -71,8 +41,6 @@ fn vs_surface(
     return o;
 }
 
-var<private> surface_raw: array<f32, 16>;
-
 @fragment
 fn fs_surface(in: SurfaceOut) -> @location(0) vec4<f32> {
     for (var k = 0; k < 4; k = k + 1) {
@@ -85,6 +53,7 @@ fn fs_surface(in: SurfaceOut) -> @location(0) vec4<f32> {
     var input: SurfaceInput;
     input.world = in.world;
     input.local = in.local;
+    input.uv = vec2<f32>(0.0);
     input.normal = output_normalize(in.normal);
     // The ground checker of the built-in material is part of the instance color.
     var color = in.color;

@@ -72,6 +72,8 @@ pub use material_shading::{MaterialShading, MaterialShadingError, ScalarMaterial
 pub mod model_renderer;
 #[cfg(feature = "models")]
 pub use model_renderer::{ModelRenderer, ModelRenderError, StaticInstance, StaticInstanceError};
+#[cfg(feature = "imported-scene")]
+pub use model_renderer::ModelSurface;
 
 #[cfg(feature = "animation")]
 pub mod skinned;

@@ -62,7 +62,7 @@ impl<B: Rhi> Renderer3D<B> {
     }
 
     fn build_surface(&self, shader: &SurfaceShader) -> SurfaceGpu<B> {
-        let source = shader.source_with(&self.engine_source);
+        let source = shader.source_for(&self.engine_source, crate::surface::SHAPE_GLUE);
         let module = self.rhi.create_shader(&format!("surface shader {}", shader.name()), &source);
         let layouts = [
             VertexLayout { stride: std::mem::size_of::<Vertex3>() as u64, step: VertexStep::Vertex, attrs: &MESH_ATTRS },

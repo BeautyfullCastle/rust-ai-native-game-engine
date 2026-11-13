@@ -161,3 +161,56 @@ fn the_viewport_draws_the_shape_with_its_shader_and_magenta_when_the_shader_is_b
     assert!(count_near(&mut h, magenta) > 200, "a broken shader shows magenta");
     assert!(count_near(&mut h, red) < red_after / 2);
 }
+
+/// The same material on an entity drawn as a model: the model is drawn by the
+/// shader, and magenta when the shader file is broken.
+#[cfg(feature = "models")]
+#[test]
+fn a_model_entity_with_a_material_is_drawn_by_its_shader() {
+    let Some((_guard, probe)) = gpu() else { return };
+    if probe.is_software() {
+        eprintln!("SKIP: this pixel check needs a hardware adapter");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let scene = project(dir.path());
+    let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+    orr_package::Project::open_for_install(dir.path(), orr_package::Runtime::content_only().engine_version)
+        .unwrap()
+        .install(&[assets.join("imported_scene_demo").canonicalize().unwrap()])
+        .unwrap();
+    let setup = egui_wgpu::WgpuSetup::CreateNew(egui_wgpu::WgpuSetupCreateNew::without_display_handle());
+    let mut h = Harness::builder()
+        .with_size([1400.0, 900.0])
+        .wgpu_setup(setup)
+        .build_eframe(|cc| EditorApp::new(editor(&scene), cc.wgpu_render_state.clone()));
+    settle(&mut h);
+    {
+        let app = h.state_mut();
+        app.models.open_for_editor(&app.editor, true).unwrap();
+        assert!(app.editor.select_named("box_left"));
+        app.models.kind = orr_editor::model_bindings::ModelKind::Static;
+        app.models.package = "sample-imported-scene".into();
+        app.models.asset = "foreground.glb".into();
+        app.models.assign(&app.editor).unwrap();
+    }
+    settle(&mut h);
+    let magenta = [255, 0, 255];
+    let red = [200, 20, 20];
+    let red_before = count_near(&mut h, red);
+
+    add_material(&mut h, "box_left");
+    pick_shader(&mut h, "(none)", "solid");
+    settle(&mut h);
+    let red_after = count_near(&mut h, red);
+    assert!(red_after > red_before + 200, "the shader colored the model: {red_before} red pixels before, {red_after} after");
+    let path = temp_path("surface_shader_model_viewport.png");
+    h.render().unwrap().save(&path).unwrap();
+    eprintln!("viewport image: {}", path.display());
+
+    std::fs::write(dir.path().join("shaders").join("solid.wgsl"), "fn surface(in: SurfaceInput) -> Surface { return 1.0; }").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    settle(&mut h);
+    assert!(count_near(&mut h, magenta) > 200, "a broken shader shows the model magenta");
+    assert!(count_near(&mut h, red) < red_after / 2);
+}
