@@ -61,6 +61,7 @@ fn effects() -> PostProcessSettings {
         strength: 0.7,
         radius: 6,
         iterations: 3,
+        ..Default::default()
     }
 }
 fn source() -> Document {

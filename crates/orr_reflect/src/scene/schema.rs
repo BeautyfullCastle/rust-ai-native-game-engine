@@ -60,7 +60,11 @@ fn desc_schema(desc: &TypeDesc) -> Json {
             Json::obj(vec![("enum", Json::Arr(variants.iter().map(|(n, _)| Json::str(n)).collect()))])
         }
         // JSON Schema counts characters; the limit is in UTF-8 bytes, so it is stated in words.
-        Kind::Text { len } => Json::obj(vec![("type", Json::str("string")), ("description", Json::str(&format!("UTF-8 text of at most {len} bytes, without control characters")))]),
+        Kind::Text { len, asset: None } => Json::obj(vec![("type", Json::str("string")), ("description", Json::str(&format!("UTF-8 text of at most {len} bytes, without control characters")))]),
+        Kind::Text { len, asset: Some(kind) } => Json::obj(vec![
+            ("type", Json::str("string")),
+            ("description", Json::str(&format!("Path of a {kind} asset (.{}) relative to the scene's folder, at most {len} bytes; empty for none", crate::desc::asset_extensions(kind).join(", ."))))
+        ]),
         Kind::Flags { bits, .. } => Json::obj(vec![
             ("type", Json::str("array")),
             ("items", Json::obj(vec![("enum", Json::Arr(bits.iter().map(|(n, _)| Json::str(n)).collect()))])),

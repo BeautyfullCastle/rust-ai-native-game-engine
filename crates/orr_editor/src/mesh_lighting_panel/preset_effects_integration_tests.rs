@@ -74,6 +74,7 @@ fn opt_in_effects_preset_cross_scene_stages_applies_saves_and_reopens_for_cpu_po
             strength: 0.75,
             radius: 7,
             iterations: 3,
+            ..Default::default()
         };
         source.panel.intensity = "3.5".into();
         source.panel.exposure = "1.75".into();

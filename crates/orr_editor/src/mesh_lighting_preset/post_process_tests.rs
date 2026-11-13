@@ -25,6 +25,7 @@ fn effects() -> PostProcessSettings {
         strength: 1.25,
         radius: 6,
         iterations: 3,
+        ..Default::default()
     }
 }
 fn encoded() -> Vec<u8> {

@@ -11,7 +11,9 @@
 //!   affects an entity only when the two share a layer.
 //! - [`Material`]: a surface shader and its parameter values.
 //! - [`Environment`]: sky and ground ambient light of the scene.
-//! - [`PostProcess`]: exposure, tone mapping and bloom of the scene.
+//! - [`PostProcess`]: exposure, tone mapping and the ordered list of post effects.
+//! - [`Camera`]: a camera on an entity; the active one with the highest priority is the main camera.
+//! - [`Terrain`]: ground from a heightmap image, given its look by a [`Material`].
 //!
 //! The values are fixed point, as all scene state is. Simulation systems may
 //! write them (a flickering lamp, a day cycle), so they are part of the
@@ -23,7 +25,7 @@
 
 use bytemuck::{Pod, Zeroable};
 use orr_ecs::{ComponentRegistryBuilder, Frame};
-use orr_fp::{FPVec3, FP};
+use orr_fp::{FPVec2, FPVec3, FP};
 use orr_reflect::{Reflect, TypeRegistry};
 
 /// [`Light::kind`]: parallel light from far away, such as the sun.
@@ -227,7 +229,90 @@ impl Default for Environment {
     }
 }
 
-/// How the finished picture is shown: exposure, tone mapping and bloom.
+/// [`PostEffect::kind`]: an unused slot.
+pub const EFFECT_NONE: u32 = 0;
+/// [`PostEffect::kind`]: glow around bright areas. Params: threshold, strength, radius, passes.
+pub const EFFECT_BLOOM: u32 = 1;
+/// [`PostEffect::kind`]: rays of sunlight through gaps toward the sun. Params: strength, length.
+pub const EFFECT_LIGHT_SHAFTS: u32 = 2;
+/// [`PostEffect::kind`]: exposure follows the brightness of the picture, as an eye adapts.
+/// Params: darkest and brightest exposure, adaptation speed per second, target brightness.
+pub const EFFECT_AUTO_EXPOSURE: u32 = 3;
+/// [`PostEffect::kind`]: saturation, contrast, warmth and green-magenta tint.
+pub const EFFECT_COLOR_GRADE: u32 = 4;
+/// [`PostEffect::kind`]: darker picture corners. Params: strength, radius, softness.
+pub const EFFECT_VIGNETTE: u32 = 5;
+/// [`PostEffect::kind`]: fine moving noise over the picture. Params: strength.
+pub const EFFECT_FILM_GRAIN: u32 = 6;
+/// Slots in [`PostProcess::effects`].
+pub const POST_EFFECTS: usize = 8;
+
+/// One step of the post chain. What the four numbers mean depends on `kind`
+/// (see the `EFFECT_*` constants and [`effect_params`]).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable, Reflect)]
+#[reflect(default)]
+pub struct PostEffect {
+    /// Which effect this slot holds.
+    #[reflect(enumeration = "none=0,bloom=1,light_shafts=2,auto_exposure=3,color_grade=4,vignette=5,film_grain=6")]
+    pub kind: u32,
+    /// Whether the effect runs.
+    #[reflect(bool)]
+    pub enabled: u32,
+    /// The numbers of the effect.
+    #[reflect(range = "-100..=100")]
+    pub params: [FP; 4],
+}
+
+impl Default for PostEffect {
+    fn default() -> Self {
+        Self { kind: EFFECT_NONE, enabled: 0, params: [FP::ZERO; 4] }
+    }
+}
+
+/// Name, smallest value, largest value and default of one effect number.
+pub type EffectParam = (&'static str, FP, FP, FP);
+
+/// The numbers an effect of `kind` reads, in `params` order. Unused numbers are not listed.
+pub fn effect_params(kind: u32) -> &'static [EffectParam] {
+    const fn r(n: i64, d: i64) -> FP {
+        FP::from_ratio(n, d)
+    }
+    const BLOOM_PARAMS: &[EffectParam] = &[("threshold", r(0, 1), r(64, 1), r(1, 1)), ("strength", r(0, 1), r(8, 1), r(15, 100)), ("radius", r(1, 1), r(8, 1), r(4, 1)), ("passes", r(1, 1), r(4, 1), r(2, 1))];
+    const LIGHT_SHAFTS_PARAMS: &[EffectParam] = &[("strength", r(0, 1), r(4, 1), r(6, 10)), ("length", r(1, 10), r(1, 1), r(8, 10))];
+    const AUTO_EXPOSURE_PARAMS: &[EffectParam] = &[("darkest", r(1, 10), r(1, 1), r(55, 100)), ("brightest", r(1, 1), r(16, 1), r(45, 10)), ("speed", r(1, 10), r(20, 1), r(15, 10)), ("target", r(1, 100), r(1, 1), r(165, 1000))];
+    const COLOR_GRADE_PARAMS: &[EffectParam] = &[("saturation", r(0, 1), r(2, 1), r(1, 1)), ("contrast", r(0, 1), r(1, 1), r(0, 1)), ("warmth", r(-1, 1), r(1, 1), r(0, 1)), ("tint", r(-1, 1), r(1, 1), r(0, 1))];
+    const VIGNETTE_PARAMS: &[EffectParam] = &[("strength", r(0, 1), r(1, 1), r(35, 100)), ("radius", r(1, 10), r(15, 10), r(8, 10)), ("softness", r(1, 100), r(1, 1), r(5, 10))];
+    const FILM_GRAIN_PARAMS: &[EffectParam] = &[("strength", r(0, 1), r(1, 1), r(15, 100))];
+    match kind {
+        EFFECT_BLOOM => BLOOM_PARAMS,
+        EFFECT_LIGHT_SHAFTS => LIGHT_SHAFTS_PARAMS,
+        EFFECT_AUTO_EXPOSURE => AUTO_EXPOSURE_PARAMS,
+        EFFECT_COLOR_GRADE => COLOR_GRADE_PARAMS,
+        EFFECT_VIGNETTE => VIGNETTE_PARAMS,
+        EFFECT_FILM_GRAIN => FILM_GRAIN_PARAMS,
+        _ => &[],
+    }
+}
+
+impl PostEffect {
+    /// An enabled effect of `kind` with its default numbers.
+    pub fn new(kind: u32) -> Self {
+        let mut params = [FP::ZERO; 4];
+        for (slot, (_, _, _, default)) in params.iter_mut().zip(effect_params(kind)) {
+            *slot = *default;
+        }
+        Self { kind, enabled: 1, params }
+    }
+}
+
+/// How the finished picture is shown: a list of effects, run in list order,
+/// then exposure and tone mapping once at the end.
+///
+/// Effects on the lit scene (bloom, light shafts) run first, in their list
+/// order; auto exposure measures the result. Exposure and tone mapping follow
+/// exactly once, then the effects on the finished picture (color grade,
+/// vignette, film grain), again in list order.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable, Reflect)]
 #[reflect(default)]
@@ -235,37 +320,141 @@ pub struct PostProcess {
     /// Multiplies the lit picture before tone mapping.
     #[reflect(range = "0.01..=16")]
     pub exposure: FP,
-    /// Scene brightness where bloom starts.
-    #[reflect(range = "0..=64")]
-    pub bloom_threshold: FP,
-    /// How much of the bloom is added to the picture.
-    #[reflect(range = "0..=8")]
-    pub bloom_strength: FP,
     /// How bright colors are brought into the range of the display.
     #[reflect(enumeration = "clamp=0,aces=1")]
     pub tone_mapping: u32,
-    /// Glow around very bright areas.
-    #[reflect(bool)]
-    pub bloom: u32,
-    /// Half width of the bloom blur, in half-resolution pixels.
-    #[reflect(range = "1..=8")]
-    pub bloom_radius: u32,
-    /// Number of blur passes. More passes give a wider, softer glow.
-    #[reflect(range = "1..=4")]
-    pub bloom_iterations: u32,
+    #[reflect(skip)]
+    _pad: u32,
+    /// The effects, in the order they run. Slots of kind `none` are skipped.
+    pub effects: [PostEffect; POST_EFFECTS],
 }
 
 impl Default for PostProcess {
     fn default() -> Self {
+        let mut effects = [PostEffect::default(); POST_EFFECTS];
+        effects[0] = PostEffect { enabled: 0, ..PostEffect::new(EFFECT_BLOOM) };
+        Self { exposure: FP::ONE, tone_mapping: TONE_ACES, _pad: 0, effects }
+    }
+}
+
+impl PostProcess {
+    /// The first enabled effect of `kind`, if any.
+    pub fn effect(&self, kind: u32) -> Option<&PostEffect> {
+        self.effects.iter().find(|e| e.kind == kind && e.enabled != 0)
+    }
+}
+
+/// [`Camera::projection`]: farther things look smaller.
+pub const PROJECTION_PERSPECTIVE: u32 = 0;
+/// [`Camera::projection`]: sizes do not change with distance.
+pub const PROJECTION_ORTHOGRAPHIC: u32 = 1;
+
+/// A camera on an entity. The entity's [`Transform3`] places and turns it; it
+/// looks the way the entity faces. The camera with the highest `priority`
+/// among the active ones is the scene's main camera: the editor's camera view
+/// and a game's player view look through it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable, Reflect)]
+#[reflect(default)]
+pub struct Camera {
+    /// Vertical field of view in degrees, for a perspective camera.
+    #[reflect(range = "1..=179")]
+    pub fov_y: FP,
+    /// Half the height of the view in meters, for an orthographic camera.
+    #[reflect(range = "0.01..=10000")]
+    pub half_height: FP,
+    /// Nearest distance drawn, in meters.
+    #[reflect(range = "0.01..=1000")]
+    pub near: FP,
+    /// Farthest distance drawn, in meters.
+    #[reflect(range = "1..=100000")]
+    pub far: FP,
+    /// How the camera projects the scene.
+    #[reflect(enumeration = "perspective=0,orthographic=1")]
+    pub projection: u32,
+    /// The render layers this camera draws. Entities on no shared layer are not drawn.
+    #[reflect(flags = "default=1,layer2=2,layer3=4,layer4=8,layer5=16,layer6=32,layer7=64,layer8=128")]
+    pub layers: u32,
+    /// Among active cameras, the highest priority is the main camera.
+    #[reflect(range = "-1000..=1000")]
+    pub priority: i32,
+    /// Whether the camera can be the main camera.
+    #[reflect(bool)]
+    pub active: u32,
+}
+
+impl Default for Camera {
+    fn default() -> Self {
         Self {
-            exposure: FP::ONE,
-            bloom_threshold: FP::ONE,
-            bloom_strength: FP::from_ratio(15, 100),
-            tone_mapping: TONE_ACES,
-            bloom: 0,
-            bloom_radius: 4,
-            bloom_iterations: 2,
+            fov_y: FP::from_int(55),
+            half_height: FP::from_int(10),
+            near: FP::from_ratio(1, 10),
+            far: FP::from_int(2000),
+            projection: PROJECTION_PERSPECTIVE,
+            layers: ALL_LAYERS,
+            priority: 0,
+            active: 1,
         }
+    }
+}
+
+/// Most bytes of the heightmap path in [`Terrain::heightmap`].
+pub const TERRAIN_PATH_BYTES: usize = 128;
+
+/// Ground built from a heightmap image on an entity. The entity's
+/// [`Transform3`] places the center of the terrain; its rotation and scale are
+/// not used. A [`Material`] on the same entity gives the terrain its look; the
+/// engine's `terrain` surface shader blends grass, rock and snow by slope and
+/// height. The terrain is drawn only; collision stays with the game's own
+/// terrain data.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable, Reflect)]
+#[reflect(default)]
+pub struct Terrain {
+    /// Grayscale PNG next to the scene file. Black is the lowest point, white the highest.
+    #[reflect(asset = "heightmap")]
+    pub heightmap: [u8; TERRAIN_PATH_BYTES],
+    /// Size of the terrain in meters along x and z.
+    #[reflect(range = "1..=20000")]
+    pub size: FPVec2,
+    /// Height in meters of a white pixel above a black one.
+    #[reflect(range = "0..=5000")]
+    pub height: FP,
+    /// Most grid points along each side; a larger image is sampled down.
+    #[reflect(range = "8..=480")]
+    pub resolution: u32,
+    /// Whether the terrain casts sun shadows.
+    #[reflect(bool)]
+    pub cast_shadows: u32,
+}
+
+impl Default for Terrain {
+    fn default() -> Self {
+        Self {
+            heightmap: [0; TERRAIN_PATH_BYTES],
+            size: FPVec2::new(FP::from_int(200), FP::from_int(200)),
+            height: FP::from_int(30),
+            resolution: 256,
+            cast_shadows: 1,
+        }
+    }
+}
+
+impl Terrain {
+    /// The heightmap path, empty when none is set.
+    pub fn heightmap_path(&self) -> &str {
+        let end = self.heightmap.iter().position(|b| *b == 0).unwrap_or(TERRAIN_PATH_BYTES);
+        core::str::from_utf8(&self.heightmap[..end]).unwrap_or("")
+    }
+
+    /// Sets the heightmap path, cut to [`TERRAIN_PATH_BYTES`] at a character boundary.
+    pub fn set_heightmap(&mut self, path: &str) {
+        let mut end = path.len().min(TERRAIN_PATH_BYTES);
+        while !path.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.heightmap = [0; TERRAIN_PATH_BYTES];
+        self.heightmap[..end].copy_from_slice(&path.as_bytes()[..end]);
     }
 }
 
@@ -283,6 +472,10 @@ pub mod names {
     pub const ENVIRONMENT: &str = "orr_gfx::Environment";
     /// [`super::PostProcess`].
     pub const POST_PROCESS: &str = "orr_gfx::PostProcess";
+    /// [`super::Camera`].
+    pub const CAMERA: &str = "orr_gfx::Camera";
+    /// [`super::Terrain`].
+    pub const TERRAIN: &str = "orr_gfx::Terrain";
 }
 
 /// Registers the components and singletons with a game's simulation.
@@ -292,6 +485,8 @@ pub fn register(builder: &mut ComponentRegistryBuilder) {
     builder.register_component::<Light>(names::LIGHT);
     builder.register_component::<RenderLayers>(names::RENDER_LAYERS);
     builder.register_component::<Material>(names::MATERIAL);
+    builder.register_component::<Camera>(names::CAMERA);
+    builder.register_component::<Terrain>(names::TERRAIN);
     builder.register_singleton::<Environment>(names::ENVIRONMENT);
     builder.register_singleton::<PostProcess>(names::POST_PROCESS);
 }
@@ -322,6 +517,8 @@ pub fn register_reflect(types: &mut TypeRegistry) {
     types.register_component::<Light>(names::LIGHT);
     types.register_component::<RenderLayers>(names::RENDER_LAYERS);
     types.register_component::<Material>(names::MATERIAL);
+    types.register_component::<Camera>(names::CAMERA);
+    types.register_component::<Terrain>(names::TERRAIN);
     types.register_singleton_with_init::<Environment>(names::ENVIRONMENT, init_environment);
     types.register_singleton_with_init::<PostProcess>(names::POST_PROCESS, init_post_process);
 }

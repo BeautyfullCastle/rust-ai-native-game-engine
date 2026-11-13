@@ -347,6 +347,7 @@ mod tests {
             strength: 0.5,
             radius: 2,
             iterations: 1,
+            ..Default::default()
         };
         let document = document.with_post_process(effects).unwrap();
         assert_eq!(

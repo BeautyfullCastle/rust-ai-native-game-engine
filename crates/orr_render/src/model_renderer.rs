@@ -156,6 +156,9 @@ pub(crate) struct Globals {
 #[cfg(feature = "imported-scene")]
 impl Globals {
     /// Replace only the admitted main matrix, preserving shadow/material fields.
+    pub(crate) fn view_proj(&self) -> [[f32; 4]; 4] {
+        self.view_proj
+    }
     pub(crate) fn set_view_proj(&mut self, matrix: [[f32; 4]; 4]) {
         self.view_proj = matrix;
     }

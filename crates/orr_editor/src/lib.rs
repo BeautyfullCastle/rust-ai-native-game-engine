@@ -100,6 +100,7 @@ pub mod animated_panel;
 pub mod viewport3d;
 pub mod surface_library;
 pub mod material_panel;
+pub mod post_panel;
 #[cfg(feature = "models")]
 pub mod model_bindings;
 #[cfg(feature = "models")]

@@ -28,6 +28,10 @@ pub struct PostProcessSettings {
     pub radius: u32,
     /// Horizontal + vertical pairs, 1..=4.
     pub iterations: u32,
+    /// Effects beyond bloom, in the order they run (see [`crate::ScreenEffect`]).
+    /// `None` slots are skipped. With every slot empty the chain is the bloom
+    /// chain alone, unchanged.
+    pub effects: [Option<crate::ScreenEffect>; crate::post_effects::MAX_SCREEN_EFFECTS],
 }
 impl Default for PostProcessSettings {
     fn default() -> Self {
@@ -38,6 +42,7 @@ impl Default for PostProcessSettings {
             strength: 0.15,
             radius: 4,
             iterations: 2,
+            effects: [None; crate::post_effects::MAX_SCREEN_EFFECTS],
         }
     }
 }
@@ -52,7 +57,13 @@ impl PostProcessSettings {
         {
             return Err(ImportedSceneError::InvalidPostProcess);
         }
+        if !self.effects.iter().flatten().all(|effect| effect.is_valid()) {
+            return Err(ImportedSceneError::InvalidPostProcess);
+        }
         Ok(())
+    }
+    fn has_effects(&self) -> bool {
+        self.effects.iter().any(Option::is_some)
     }
     fn bloom_active(self) -> bool {
         self.bloom && self.strength > 0.0
@@ -97,6 +108,11 @@ pub(crate) fn validate<B: Rhi>(
         return Err(ImportedSceneError::UnsupportedHdr);
     }
     let bytes = color_bytes(size).ok_or(ImportedSceneError::PostProcessBudget)?;
+    let bytes = if settings.has_effects() {
+        crate::post_effects::effect_bytes(size).and_then(|extra| bytes.checked_add(extra)).ok_or(ImportedSceneError::PostProcessBudget)?
+    } else {
+        bytes
+    };
     let retained = previous
         .filter(|p| p.size() != size)
         .map_or(0, |p| p.bytes());
@@ -134,6 +150,9 @@ pub struct PostProcessor<B: Rhi> {
     vertical_params: B::Buffer,
     final_params: B::Buffer,
     sampler: B::Sampler,
+    /// Made when a frame first asks for an effect beyond bloom.
+    effects: std::cell::RefCell<Option<crate::post_effects::EffectChain<B>>>,
+    format: TextureFormat,
 }
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -201,6 +220,8 @@ impl<B: Rhi> PostProcessor<B> {
             vertical_params,
             final_params,
             sampler,
+            effects: std::cell::RefCell::new(None),
+            format,
         }
     }
     #[allow(clippy::too_many_arguments)]
@@ -308,7 +329,8 @@ impl<B: Rhi> PostProcessor<B> {
         self.targets.size
     }
     pub fn bytes(&self) -> u64 {
-        color_bytes(self.size()).expect("admitted dimensions")
+        let effects = self.effects.borrow().as_ref().map_or(0, |e| crate::post_effects::effect_bytes(e.size()).expect("admitted dimensions"));
+        color_bytes(self.size()).expect("admitted dimensions") + effects
     }
     pub fn scene_texture(&self) -> &B::Texture {
         &self.targets.scene.texture
@@ -316,6 +338,7 @@ impl<B: Rhi> PostProcessor<B> {
     pub(crate) fn scene_view(&self) -> &B::TextureView {
         &self.targets.scene.view
     }
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn encode(
         &self,
         rhi: &B,
@@ -324,6 +347,8 @@ impl<B: Rhi> PostProcessor<B> {
         format: TextureFormat,
         settings: PostProcessSettings,
         lighting: &Lighting,
+        depth: &B::TextureView,
+        view_proj: [[f32; 4]; 4],
     ) {
         let write =
             |buffer, params: Params| rhi.write_buffer(buffer, 0, bytemuck::bytes_of(&params));
@@ -392,6 +417,25 @@ impl<B: Rhi> PostProcessor<B> {
                     &self.targets.half[0].view,
                 );
             }
+        }
+        if settings.has_effects() {
+            let mut chain = self.effects.borrow_mut();
+            if chain.as_ref().is_none_or(|c| c.size() != self.size()) || self.format != format {
+                *chain = Some(crate::post_effects::EffectChain::new(rhi, self.size(), format));
+            }
+            let effects: Vec<crate::ScreenEffect> = settings.effects.iter().flatten().copied().collect();
+            let inputs = crate::post_effects::FrameInputs {
+                scene: &self.targets.scene.view,
+                bloom: &self.targets.half[0].view,
+                bloom_strength: if settings.bloom_active() { settings.strength } else { 0.0 },
+                depth,
+                sampler: &self.sampler,
+                view_proj,
+                lighting,
+                format,
+            };
+            chain.as_ref().expect("made above").encode(rhi, encoder, target, &effects, &inputs);
+            return;
         }
         write(
             &self.final_params,

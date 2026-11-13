@@ -55,7 +55,8 @@ mod value;
 mod scene;
 
 pub use desc::{
-    range_text, FieldDesc, IntKind, Kind, Range, TaggedDesc, TypeDesc, VariantDesc, ViewField,
+    asset_extensions, range_text, FieldDesc, IntKind, Kind, Range, TaggedDesc, TypeDesc, VariantDesc, ViewField,
+    ASSET_KINDS,
 };
 pub use orr_reflect_derive::Reflect;
 pub use reflect::Reflect;

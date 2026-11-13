@@ -18,6 +18,8 @@
 //!   (a shape) a kind combo plus the fields of that kind, lists have
 //!   add/remove buttons. Ranges are shown as hover text and respected by the
 //!   drag; typed values outside them are refused by the document with a message.
+//! - An asset path is a text field and a list of the matching files under the
+//!   scene's folder (see [`set_asset_root`]).
 
 use egui::{Id, Sense, Ui};
 use orr_fp::{FPVec2, FPVec3, FP};
@@ -220,6 +222,25 @@ fn scalar(ui: &mut Ui, id: Id, ty: &TypeDesc, value: &Value, path: &str, label: 
                 fixed_field(ui, id.with(axis), &join(path, axis), &format!("{label}.{axis}"), Num::Fp, raw, range, hover, out);
             }
         }
+        (Kind::Text { asset: Some(kind), .. }, Value::Text(current)) => {
+            if let Some(text) = number_field(ui, id, current, hover, 200.0) {
+                out.push(InspEvent::Set { path: path.to_string(), value: Value::Text(text) });
+            }
+            let files = asset_files(ui.ctx(), kind);
+            egui::ComboBox::from_id_salt(id.with("pick")).selected_text("Pick").width(60.0).show_ui(ui, |ui| {
+                if ui.selectable_label(current.is_empty(), "(none)").clicked() && !current.is_empty() {
+                    out.push(InspEvent::Set { path: path.to_string(), value: Value::Text(String::new()) });
+                }
+                for file in files.iter() {
+                    if ui.selectable_label(file == current, file).clicked() && file != current {
+                        out.push(InspEvent::Set { path: path.to_string(), value: Value::Text(file.clone()) });
+                    }
+                }
+                if files.is_empty() {
+                    ui.weak(format!("No .{} files next to the scene", orr_reflect::asset_extensions(kind).join(", .")));
+                }
+            });
+        }
         (Kind::Text { .. }, Value::Text(current)) => {
             if let Some(text) = number_field(ui, id, current, hover, 200.0) {
                 out.push(InspEvent::Set { path: path.to_string(), value: Value::Text(text) });
@@ -295,6 +316,61 @@ impl Num {
 
 /// A text field that holds its text while it has focus and reports the text
 /// once when it loses focus with a different value. Escape cancels.
+/// The folder asset paths are relative to: the open scene's folder.
+#[derive(Clone)]
+struct AssetRoot(Option<std::path::PathBuf>);
+
+/// Files of one asset kind under the asset root, and when they were listed.
+#[derive(Clone)]
+struct AssetListing(std::sync::Arc<Vec<String>>, f64);
+
+/// Tells the inspector which folder asset paths start from. The editor calls
+/// it every frame with the open scene's folder; `None` lists no files.
+pub fn set_asset_root(ctx: &egui::Context, root: Option<&std::path::Path>) {
+    ctx.data_mut(|d| d.insert_temp(Id::new("orr_asset_root"), AssetRoot(root.map(std::path::Path::to_path_buf))));
+}
+
+/// The files of asset kind `kind` under the asset root, as paths with `/`.
+/// The folder is read again at most once a second.
+fn asset_files(ctx: &egui::Context, kind: &str) -> std::sync::Arc<Vec<String>> {
+    let root = ctx.data(|d| d.get_temp::<AssetRoot>(Id::new("orr_asset_root"))).and_then(|r| r.0);
+    let key = Id::new(("orr_asset_files", kind, root.clone()));
+    let now = ctx.input(|i| i.time);
+    if let Some(AssetListing(files, at)) = ctx.data(|d| d.get_temp::<AssetListing>(key)) {
+        if now - at < 1.0 {
+            return files;
+        }
+    }
+    let files = std::sync::Arc::new(root.as_deref().map_or_else(Vec::new, |root| list_assets(root, orr_reflect::asset_extensions(kind))));
+    ctx.data_mut(|d| d.insert_temp(key, AssetListing(files.clone(), now)));
+    files
+}
+
+/// Files under `root` that end in one of `extensions`, four folders deep at
+/// most, skipping hidden and build folders. At most 200, sorted.
+fn list_assets(root: &std::path::Path, extensions: &[&str]) -> Vec<String> {
+    fn visit(dir: &std::path::Path, prefix: &str, depth: u32, extensions: &[&str], out: &mut Vec<String>) {
+        let Ok(read) = std::fs::read_dir(dir) else { return };
+        for entry in read.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') || name == "target" || out.len() >= 200 {
+                continue;
+            }
+            let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
+            let Ok(kind) = entry.file_type() else { continue };
+            if kind.is_dir() && depth < 4 {
+                visit(&entry.path(), &path, depth + 1, extensions, out);
+            } else if kind.is_file() && name.rsplit_once('.').is_some_and(|(_, e)| extensions.contains(&e.to_ascii_lowercase().as_str())) {
+                out.push(path);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    visit(root, "", 0, extensions, &mut out);
+    out.sort();
+    out
+}
+
 fn number_field(ui: &mut Ui, id: Id, canonical: &str, hover: &str, width: f32) -> Option<String> {
     let edit_id = id.with("text");
     let focused = ui.memory(|m| m.has_focus(edit_id));

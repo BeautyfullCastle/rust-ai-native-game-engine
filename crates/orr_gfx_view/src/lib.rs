@@ -13,9 +13,12 @@
 use orr_bridge::FrameView;
 use orr_ecs::Entity;
 use orr_fp::{FPVec3, FP};
-use orr_gfx::{Environment, Light, PostProcess, RenderLayers, Transform3, LIGHT_DIRECTIONAL, LIGHT_SPOT, TONE_CLAMP};
+use orr_gfx::{
+    Environment, Light, PostEffect, PostProcess, RenderLayers, Transform3, EFFECT_AUTO_EXPOSURE, EFFECT_BLOOM, EFFECT_COLOR_GRADE, EFFECT_FILM_GRAIN,
+    EFFECT_LIGHT_SHAFTS, EFFECT_VIGNETTE, LIGHT_DIRECTIONAL, LIGHT_SPOT, PROJECTION_ORTHOGRAPHIC, TONE_CLAMP,
+};
 use orr_physics3d::Body;
-use orr_render::{Lighting, RenderList3D, SceneLight, SceneLightKind, SceneLights};
+use orr_render::{Camera3D, Lighting, Projection, RenderList3D, SceneLight, SceneLightKind, SceneLights, ScreenEffect};
 
 /// Bloom as the scene asks for it. The caller passes it to the post chain it uses.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -46,6 +49,8 @@ pub struct SceneLook {
     pub scene_lights: SceneLights,
     /// `Some` when the scene turns bloom on.
     pub bloom: Option<Bloom>,
+    /// The enabled effects beyond bloom, in the scene's order.
+    pub effects: Vec<ScreenEffect>,
     /// Every light of the scene in entity order, switched off ones included, for editor markers.
     pub lights: Vec<PlacedLight>,
     /// Enabled lights beyond the frame limit of `orr_render::MAX_SCENE_LIGHTS`. They give no light.
@@ -109,7 +114,7 @@ pub fn layers_of(frame: FrameView<'_>, entity: Entity) -> u32 {
 /// without any [`Light`] component, and its ambient light is kept while the
 /// scene's [`Environment`] has its default values. Its shadow area is always kept.
 pub fn scene_look(frame: FrameView<'_>, fallback: &Lighting) -> SceneLook {
-    let mut look = SceneLook { lighting: *fallback, scene_lights: SceneLights::default(), bloom: None, lights: Vec::new(), dropped_lights: 0 };
+    let mut look = SceneLook { lighting: *fallback, scene_lights: SceneLights::default(), bloom: None, effects: Vec::new(), lights: Vec::new(), dropped_lights: 0 };
     // An environment left at its default values keeps the ambient light of the game.
     // Simulation systems can write any value, so every value is brought into
     // the range the inspector allows before the renderer sees it.
@@ -121,13 +126,8 @@ pub fn scene_look(frame: FrameView<'_>, fallback: &Lighting) -> SceneLook {
     if let Some(post) = frame.try_singleton::<PostProcess>() {
         look.lighting.exposure = f(post.exposure).clamp(0.01, 16.0);
         look.lighting.tonemap = post.tone_mapping != TONE_CLAMP;
-        if post.bloom != 0 {
-            look.bloom = Some(Bloom {
-                threshold: f(post.bloom_threshold).clamp(0.0, 64.0),
-                strength: f(post.bloom_strength).clamp(0.0, 8.0),
-                radius: post.bloom_radius.clamp(1, 8),
-                iterations: post.bloom_iterations.clamp(1, 4),
-            });
+        for effect in post.effects.iter().filter(|e| e.enabled != 0) {
+            read_effect(effect, &mut look);
         }
     }
     if !frame.registers::<Light>() || frame.count::<Light>() == 0 {
@@ -178,6 +178,107 @@ pub fn scene_look(frame: FrameView<'_>, fallback: &Lighting) -> SceneLook {
         look.lights.push(PlacedLight { entity, light: scene_light, sun, enabled });
     }
     look
+}
+
+/// Effect number `i` of `effect`, inside the range [`orr_gfx::effect_params`] gives it.
+fn effect_number(effect: &PostEffect, i: usize) -> f32 {
+    let (_, low, high, _) = orr_gfx::effect_params(effect.kind).get(i).copied().unwrap_or(("", FP::ZERO, FP::ZERO, FP::ZERO));
+    f(effect.params[i].max(low).min(high))
+}
+
+fn read_effect(effect: &PostEffect, look: &mut SceneLook) {
+    let p = |i| effect_number(effect, i);
+    let screen = match effect.kind {
+        // The first bloom wins; bloom has its own place in the chain.
+        EFFECT_BLOOM => {
+            if look.bloom.is_none() {
+                look.bloom = Some(Bloom { threshold: p(0), strength: p(1), radius: p(2).round() as u32, iterations: p(3).round() as u32 });
+            }
+            None
+        }
+        EFFECT_LIGHT_SHAFTS => Some(ScreenEffect::LightShafts { strength: p(0), length: p(1) }),
+        EFFECT_AUTO_EXPOSURE => Some(ScreenEffect::AutoExposure { darkest: p(0).min(p(1)), brightest: p(1), speed: p(2), target: p(3) }),
+        EFFECT_COLOR_GRADE => Some(ScreenEffect::ColorGrade { saturation: p(0), contrast: p(1), warmth: p(2), tint: p(3) }),
+        EFFECT_VIGNETTE => Some(ScreenEffect::Vignette { strength: p(0), radius: p(1), softness: p(2) }),
+        EFFECT_FILM_GRAIN => Some(ScreenEffect::FilmGrain { strength: p(0) }),
+        _ => None,
+    };
+    // Fixed point rounds differently from the renderer's float ranges; the effect is brought into them.
+    if let Some(screen) = screen.filter(|_| look.effects.len() < orr_render::post_effects::MAX_SCREEN_EFFECTS) {
+        look.effects.push(screen.clamped());
+    }
+}
+
+/// The scene's main camera as the renderer takes it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CameraLook {
+    pub entity: Entity,
+    pub camera: Camera3D,
+    /// The render layers the camera draws.
+    pub layers: u32,
+}
+
+/// The active [`orr_gfx::Camera`] with the highest priority; among equal
+/// priorities the first in entity order. `None` when the scene has none.
+pub fn main_camera(frame: FrameView<'_>) -> Option<CameraLook> {
+    if !frame.registers::<orr_gfx::Camera>() {
+        return None;
+    }
+    let mut best: Option<(i32, Entity, orr_gfx::Camera)> = None;
+    for (entity, camera) in frame.iter::<orr_gfx::Camera>() {
+        if camera.active != 0 && best.as_ref().is_none_or(|(priority, _, _)| camera.priority > *priority) {
+            best = Some((camera.priority, entity, *camera));
+        }
+    }
+    let (_, entity, camera) = best?;
+    let (eye, facing) = placement(frame, entity);
+    let near = f(camera.near).clamp(0.01, 1000.0);
+    let far = f(camera.far).clamp(near + 0.01, 100_000.0);
+    let projection = if camera.projection == PROJECTION_ORTHOGRAPHIC {
+        Projection::Orthographic { half_height: f(camera.half_height).clamp(0.01, 10_000.0), near: -far, far }
+    } else {
+        Projection::Perspective { fov_y: f(camera.fov_y).clamp(1.0, 179.0).to_radians(), near, far }
+    };
+    // Looking straight up or down, the world's up is no help; z is then the camera's up.
+    let up = if facing[1].abs() > 0.999 { [0.0, 0.0, 1.0] } else { [0.0, 1.0, 0.0] };
+    let target = [eye[0] + facing[0], eye[1] + facing[1], eye[2] + facing[2]];
+    Some(CameraLook { entity, camera: Camera3D { eye, target, up, projection }, layers: camera.layers & orr_gfx::ALL_LAYERS })
+}
+
+/// A terrain of one entity as the view reads it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TerrainRef {
+    pub entity: Entity,
+    /// Path of the heightmap image, relative to the scene's folder; empty for none.
+    pub heightmap: String,
+    /// World position of the terrain's center at height zero.
+    pub center: [f32; 3],
+    /// Size in meters along x and z.
+    pub size: [f32; 2],
+    /// Height in meters of a white pixel.
+    pub height: f32,
+    /// Most grid points per side.
+    pub resolution: u32,
+    pub cast_shadows: bool,
+}
+
+/// Every entity's terrain, in entity order. Empty for a game without `orr_gfx` terrains.
+pub fn terrains(frame: FrameView<'_>) -> Vec<TerrainRef> {
+    if !frame.registers::<orr_gfx::Terrain>() {
+        return Vec::new();
+    }
+    frame
+        .iter::<orr_gfx::Terrain>()
+        .map(|(entity, terrain)| TerrainRef {
+            entity,
+            heightmap: terrain.heightmap_path().to_string(),
+            center: placement(frame, entity).0,
+            size: [f(terrain.size.x).clamp(1.0, 20_000.0), f(terrain.size.y).clamp(1.0, 20_000.0)],
+            height: f(terrain.height).clamp(0.0, 5000.0),
+            resolution: terrain.resolution.clamp(8, 480),
+            cast_shadows: terrain.cast_shadows != 0,
+        })
+        .collect()
 }
 
 impl SceneLook {

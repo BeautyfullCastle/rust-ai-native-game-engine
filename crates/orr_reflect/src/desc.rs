@@ -240,6 +240,9 @@ pub enum Kind {
     Text {
         /// Size of the byte array: the most bytes the text can have.
         len: usize,
+        /// When set, the text is the path of an asset of this kind (see
+        /// [`ASSET_KINDS`]), relative to the scene's folder. Empty means none.
+        asset: Option<String>,
     },
     /// A fixed size array.
     Array {
@@ -369,7 +372,11 @@ impl TypeDesc {
     }
     /// UTF-8 text in a `[u8; len]` field.
     pub fn text(len: usize) -> Self {
-        Self::new(Kind::Text { len })
+        Self::new(Kind::Text { len, asset: None })
+    }
+    /// The path of an asset of kind `asset` (one of [`ASSET_KINDS`]) in a `[u8; len]` field.
+    pub fn asset(len: usize, asset: &str) -> Self {
+        Self::new(Kind::Text { len, asset: Some(asset.to_string()) })
     }
     /// A fixed size array.
     pub fn array(elem: TypeDesc, len: usize) -> Self {
@@ -398,7 +405,7 @@ impl TypeDesc {
             Kind::Vec2 { .. } => 16,
             Kind::Vec3 { .. } => 24,
             Kind::Array { elem, len } => elem.size() * len,
-            Kind::Text { len } => *len,
+            Kind::Text { len, .. } => *len,
             Kind::Struct { size, .. } => *size,
             Kind::Tagged(t) => t.size,
             Kind::List { .. } => 0,
@@ -518,7 +525,7 @@ impl TypeDesc {
                 let stride = elem.size();
                 Value::Array((0..*len).map(|i| elem.read(&bytes[i * stride..])).collect())
             }
-            Kind::Text { len } => {
+            Kind::Text { len, .. } => {
                 let bytes = &bytes[..*len];
                 let end = bytes.iter().position(|b| *b == 0).unwrap_or(*len);
                 Value::Text(String::from_utf8_lossy(&bytes[..end]).into_owned())
@@ -583,14 +590,17 @@ impl TypeDesc {
                 }
                 Ok(())
             }
-            (Kind::Text { len }, Value::Text(text)) => {
+            (Kind::Text { len, asset }, Value::Text(text)) => {
                 if text.len() > *len {
                     return Err(ReflectError::OutOfRange(format!("text of {} bytes is longer than {len} bytes", text.len())));
                 }
                 if text.chars().any(char::is_control) {
                     return Err(ReflectError::Invalid("text must not contain control characters".into()));
                 }
-                Ok(())
+                match asset {
+                    Some(kind) => check_asset_path(kind, text),
+                    None => Ok(()),
+                }
             }
             (Kind::Array { elem, len }, Value::Array(items)) => {
                 if items.len() != *len {
@@ -637,7 +647,8 @@ impl TypeDesc {
             Kind::Entity => "entity".into(),
             Kind::Enum { .. } => "enum".into(),
             Kind::Flags { .. } => "flags".into(),
-            Kind::Text { .. } => "text".into(),
+            Kind::Text { asset: None, .. } => "text".into(),
+            Kind::Text { asset: Some(kind), .. } => format!("{kind} asset path"),
             Kind::Array { .. } | Kind::List { .. } => "array".into(),
             Kind::Struct { .. } => "struct".into(),
             Kind::Tagged(_) => "tagged value".into(),
@@ -686,7 +697,7 @@ impl TypeDesc {
                 let raw = names.iter().fold(0u64, |acc, n| acc | bits.iter().find(|(b, _)| b == n).map_or(0, |(_, m)| *m));
                 put_ne_uint(&mut bytes[..*width], raw);
             }
-            (Kind::Text { len }, Value::Text(text)) => {
+            (Kind::Text { len, .. }, Value::Text(text)) => {
                 let field = &mut bytes[..*len];
                 field.fill(0);
                 field[..text.len()].copy_from_slice(text.as_bytes());
@@ -954,4 +965,39 @@ fn set_in_value(desc: &TypeDesc, v: &mut Value, path: &[PathSeg], new: Value) ->
         }
         _ => Err(ReflectError::BadPath(format!("cannot look up {first:?} in a {}", desc.expected_name()))),
     }
+}
+
+/// The kinds of asset a component can name, with the file extensions of each.
+pub const ASSET_KINDS: &[(&str, &[&str])] = &[
+    ("terrain", &["orrt"]),
+    ("heightmap", &["png"]),
+    ("texture", &["png"]),
+    ("model", &["glb", "gltf"]),
+    ("shader", &["wgsl"]),
+];
+
+/// The file extensions of the asset kind `kind`, or none for a kind not in [`ASSET_KINDS`].
+pub fn asset_extensions(kind: &str) -> &'static [&'static str] {
+    ASSET_KINDS.iter().find(|(name, _)| *name == kind).map_or(&[], |(_, extensions)| extensions)
+}
+
+/// An asset path is empty (no asset) or a relative path with `/` between
+/// folders, without `..`, that ends in an extension of its kind.
+fn check_asset_path(kind: &str, path: &str) -> Result<(), ReflectError> {
+    if path.is_empty() {
+        return Ok(());
+    }
+    let bad = |why: &str| Err(ReflectError::Invalid(format!("'{path}' is not a {kind} asset path: {why}")));
+    if path.starts_with('/') || path.contains('\\') || path.contains(':') {
+        return bad("use a path relative to the scene's folder, with / between folders");
+    }
+    if path.split('/').any(|part| part.is_empty() || part == "." || part == "..") {
+        return bad("the path must not have empty parts, . or ..");
+    }
+    let extensions = asset_extensions(kind);
+    let extension = path.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
+    if !extensions.iter().any(|e| extension.as_deref() == Some(*e)) {
+        return bad(&format!("the file must end in .{}", extensions.join(" or .")));
+    }
+    Ok(())
 }

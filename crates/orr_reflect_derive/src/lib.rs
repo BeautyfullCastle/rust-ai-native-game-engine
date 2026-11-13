@@ -60,6 +60,7 @@ struct FieldAttrs {
     flags: Option<String>,
     range: Option<String>,
     text: bool,
+    asset: Option<String>,
 }
 
 fn field_attrs(attrs: &[syn::Attribute]) -> syn::Result<FieldAttrs> {
@@ -81,8 +82,10 @@ fn field_attrs(attrs: &[syn::Attribute]) -> syn::Result<FieldAttrs> {
                 out.range = Some(m.value()?.parse::<syn::LitStr>()?.value());
             } else if m.path.is_ident("text") {
                 out.text = true;
+            } else if m.path.is_ident("asset") {
+                out.asset = Some(m.value()?.parse::<syn::LitStr>()?.value());
             } else {
-                return Err(m.error("unknown reflect attribute (skip, bool, enumeration, flags, range, text)"));
+                return Err(m.error("unknown reflect attribute (skip, bool, enumeration, flags, range, text, asset)"));
             }
             Ok(())
         })?;
@@ -145,7 +148,9 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         let fstr = fname.to_string();
         let fty = &f.ty;
         let span = fname.span();
-        let mut ty: TokenStream2 = if attrs.text {
+        let mut ty: TokenStream2 = if let Some(kind) = &attrs.asset {
+            quote! { ::orr_reflect::TypeDesc::asset(::core::mem::size_of::<#fty>(), #kind) }
+        } else if attrs.text {
             quote! { ::orr_reflect::TypeDesc::text(::core::mem::size_of::<#fty>()) }
         } else if attrs.bool_ {
             quote! { ::orr_reflect::TypeDesc::bool_of_width(::core::mem::size_of::<#fty>()) }

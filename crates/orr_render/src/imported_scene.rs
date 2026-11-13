@@ -697,7 +697,8 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
                 width: target.size.0,
                 height: target.size.1,
                 format: TextureFormat::Depth32Float,
-                usage: TextureUsage::RENDER_ATTACHMENT,
+                // Post effects (light shafts) read the depth of the finished scene.
+                usage: TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING,
                 sample_count: 1,
                 view_formats: &[],
             });
@@ -885,6 +886,8 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
                 self.format,
                 self.post_process,
                 lighting,
+                &self.depth.as_ref().expect("accepted frame owns depth").view,
+                globals.view_proj(),
             );
         }
         self.rhi.submit(encoder);

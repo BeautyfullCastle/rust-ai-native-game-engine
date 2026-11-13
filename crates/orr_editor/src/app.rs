@@ -382,6 +382,8 @@ pub struct EditorApp {
     surfaces: crate::surface_library::SurfaceLibrary,
     /// An inspector edit of a material is open: its undo step ends when the pointer is released.
     material_gesture: bool,
+    /// True while a drag in the post-process section is one open undo step.
+    post_gesture: bool,
     viewport_hdr_disabled: bool,
     #[cfg(feature = "static-gameplay")]
     registered_gameplay_view: crate::registered_gameplay_view::State,
@@ -562,17 +564,21 @@ impl EditorApp {
             let requested = self.mesh_lighting.applied_post_process(&self.editor).unwrap_or_default();
             return self.mesh_post_process_runtime.select(self.editor.scene_load_epoch(), self.editor.path(), requested);
         }
-        // Bloom turned on in the scene's orr_gfx::PostProcess is saved with the scene and wins
+        // Effects turned on in the scene's orr_gfx::PostProcess are saved with the scene and win
         // over the view-only choice of the Viewport effects menu.
-        if let Some(bloom) = self.editor.yard_frame().look.as_ref().and_then(|look| look.bloom) {
-            return orr_render::PostProcessSettings {
-                enabled: true,
-                bloom: true,
-                threshold: bloom.threshold,
-                strength: bloom.strength,
-                radius: bloom.radius,
-                iterations: bloom.iterations,
-            };
+        if let Some(look) = self.editor.yard_frame().look.as_ref().filter(|look| look.bloom.is_some() || !look.effects.is_empty()) {
+            let mut settings = orr_render::PostProcessSettings { enabled: true, bloom: false, ..Default::default() };
+            if let Some(bloom) = look.bloom {
+                settings.bloom = true;
+                settings.threshold = bloom.threshold;
+                settings.strength = bloom.strength;
+                settings.radius = bloom.radius;
+                settings.iterations = bloom.iterations;
+            }
+            for (slot, effect) in settings.effects.iter_mut().zip(&look.effects) {
+                *slot = Some(*effect);
+            }
+            return settings;
         }
         self.ui.yard_post_process
     }
@@ -588,7 +594,7 @@ impl EditorApp {
     }
 
     pub fn new(editor: Editor, render_state: Option<egui_wgpu::RenderState>) -> Self {
-        Self { #[cfg(feature = "custom-inspector")] custom_inspectors: crate::custom_inspector::Registry::default(), #[cfg(feature="terrain-surface")] terrain_surface: crate::terrain_surface_panel::Panel::default(), #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))] arena_export: arena_export::State::default(), #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "navigation-export"))] navigation_export: navigation_export::State::default(), editor, #[cfg(feature="mesh-navigation")] mesh_light_pointer_owned: false, #[cfg(feature="mesh-navigation")] mesh_light_waiting_release: false, #[cfg(feature="mesh-navigation")] mesh_light_scroll_quarantined: false, #[cfg(feature="mesh-navigation")] mesh_camera_preview_owned: false, #[cfg(feature="mesh-navigation")] mesh_camera_preview_buttons: 0, #[cfg(feature="mesh-navigation")] mesh_camera_preview_scroll: false, #[cfg(feature="mesh-navigation")] mesh_camera_preview_fenced_frame: None, #[cfg(feature="mesh-patrol")] mesh_patrol_frame: Default::default(), #[cfg(feature="terrain-patrol")] terrain_patrol_frame: Default::default(), #[cfg(feature="room-character")] room_character: None, #[cfg(feature="tilemap")] tilemap: None, #[cfg(feature="mesh-export")] mesh_player_session: mesh_player_session::State::default(), #[cfg(feature="mesh-mission")] mesh_game_creator: crate::mesh_game_creator::Panel::default(), #[cfg(feature="mesh-export")] mesh_recorded_playback: mesh_recorded_playback::State::default(), #[cfg(feature="mesh-export")] mesh_player_input_allowed: true, #[cfg(feature="mesh-navigation")] mesh_play_controls: crate::mesh_play_controls::Panel::default(), #[cfg(all(any(windows,target_os="linux"),target_arch="x86_64",feature="room-authoring"))] room_wall_stamps: crate::room_wall_stamp_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_lighting: crate::mesh_lighting_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_post_process_runtime: crate::mesh_lighting::post_process_runtime::RuntimePolicy::default(), #[cfg(feature="mesh-navigation")] mesh_hud: crate::mesh_hud_panel::Panel::default(), #[cfg(feature="mesh-mission")] mesh_mission: crate::mesh_mission_panel::Panel::default(), #[cfg(feature="mesh-hazards")] mesh_hazards: crate::mesh_hazards_panel::Panel::default(), #[cfg(feature="mesh-hazards")] mesh_hazard_pointer_owned: false, #[cfg(all(windows,target_arch="x86_64",feature="mesh-navigation"))] mesh_copy: crate::mesh_workspace::copy_panel::Panel::default(), #[cfg(feature="mesh-animated-models")] mesh_animation: crate::mesh_animation_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_camera: crate::mesh_camera_panel::Panel::default(), #[cfg(feature="mesh-export")] mesh_export: crate::mesh_export_panel::Panel::default(), #[cfg(feature="mesh-hazards-export")] mesh_hazards_export: crate::mesh_hazards_export_panel::Panel::default(), #[cfg(feature="scenery")] scenery: crate::scenery_window::Panel::default(), #[cfg(feature="package-manager")] package_manager: crate::package_manager_panel::Panel::default(), #[cfg(feature="package-manager")] package_model_preview: package_model_preview::PreviewWindow::default(), #[cfg(all(feature="package-manager",feature="room-animated-models"))] variant_model_preview: variant_model_preview::PreviewWindow::default(), #[cfg(feature="room-authoring")] room_authoring: crate::room_authoring_panel::Panel::default(), #[cfg(feature="room-authoring")] room_wall_pointer_owned: false, #[cfg(feature="room-authoring")] room_actor_pointer_owned: false, #[cfg(feature="room-authoring")] room_wall_placement_pointer_owned: false, #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))] windows_projects: crate::windows_project_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-export"))] windows_export: crate::windows_export_panel::Panel::default(), #[cfg(feature="room-lighting")] room_lighting: None, #[cfg(feature="room-lighting")] room_light_pointer_owned: false, #[cfg(feature="room-project")] room_camera: None, #[cfg(feature="room-project")] room_camera_capture: room_camera_capture::Capture::default(), #[cfg(feature="linked-prefabs")] linked_prefabs: crate::linked_prefab_panel::Panel::default(), #[cfg(feature="collect-ui")] collect_ui: None, #[cfg(feature="collect-ui")] collect_ui_preview: collect_ui_preview::PreviewWindow::default(), #[cfg(feature="project-ui")] project_ui: None, #[cfg(feature="navigation")] navigation: crate::navigation_panel::NavigationPanel::default(), #[cfg(feature="navigation")] navigation_endpoint: navigation_endpoint_pick::State::default(), #[cfg(feature="mesh-navigation")] mesh_navigation: crate::mesh_navigation::Panel::default(), #[cfg(feature="terrain")] terrain_ramp: terrain_ramp::State::default(), #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, surfaces: Default::default(), material_gesture: false, viewport_hdr_disabled: false, #[cfg(feature = "static-gameplay")] registered_gameplay_view: crate::registered_gameplay_view::State::default(), #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), #[cfg(feature="models")] blockout_uv_density: blockout_uv_density::Panel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
+        Self { #[cfg(feature = "custom-inspector")] custom_inspectors: crate::custom_inspector::Registry::default(), #[cfg(feature="terrain-surface")] terrain_surface: crate::terrain_surface_panel::Panel::default(), #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))] arena_export: arena_export::State::default(), #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "navigation-export"))] navigation_export: navigation_export::State::default(), editor, #[cfg(feature="mesh-navigation")] mesh_light_pointer_owned: false, #[cfg(feature="mesh-navigation")] mesh_light_waiting_release: false, #[cfg(feature="mesh-navigation")] mesh_light_scroll_quarantined: false, #[cfg(feature="mesh-navigation")] mesh_camera_preview_owned: false, #[cfg(feature="mesh-navigation")] mesh_camera_preview_buttons: 0, #[cfg(feature="mesh-navigation")] mesh_camera_preview_scroll: false, #[cfg(feature="mesh-navigation")] mesh_camera_preview_fenced_frame: None, #[cfg(feature="mesh-patrol")] mesh_patrol_frame: Default::default(), #[cfg(feature="terrain-patrol")] terrain_patrol_frame: Default::default(), #[cfg(feature="room-character")] room_character: None, #[cfg(feature="tilemap")] tilemap: None, #[cfg(feature="mesh-export")] mesh_player_session: mesh_player_session::State::default(), #[cfg(feature="mesh-mission")] mesh_game_creator: crate::mesh_game_creator::Panel::default(), #[cfg(feature="mesh-export")] mesh_recorded_playback: mesh_recorded_playback::State::default(), #[cfg(feature="mesh-export")] mesh_player_input_allowed: true, #[cfg(feature="mesh-navigation")] mesh_play_controls: crate::mesh_play_controls::Panel::default(), #[cfg(all(any(windows,target_os="linux"),target_arch="x86_64",feature="room-authoring"))] room_wall_stamps: crate::room_wall_stamp_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_lighting: crate::mesh_lighting_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_post_process_runtime: crate::mesh_lighting::post_process_runtime::RuntimePolicy::default(), #[cfg(feature="mesh-navigation")] mesh_hud: crate::mesh_hud_panel::Panel::default(), #[cfg(feature="mesh-mission")] mesh_mission: crate::mesh_mission_panel::Panel::default(), #[cfg(feature="mesh-hazards")] mesh_hazards: crate::mesh_hazards_panel::Panel::default(), #[cfg(feature="mesh-hazards")] mesh_hazard_pointer_owned: false, #[cfg(all(windows,target_arch="x86_64",feature="mesh-navigation"))] mesh_copy: crate::mesh_workspace::copy_panel::Panel::default(), #[cfg(feature="mesh-animated-models")] mesh_animation: crate::mesh_animation_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_camera: crate::mesh_camera_panel::Panel::default(), #[cfg(feature="mesh-export")] mesh_export: crate::mesh_export_panel::Panel::default(), #[cfg(feature="mesh-hazards-export")] mesh_hazards_export: crate::mesh_hazards_export_panel::Panel::default(), #[cfg(feature="scenery")] scenery: crate::scenery_window::Panel::default(), #[cfg(feature="package-manager")] package_manager: crate::package_manager_panel::Panel::default(), #[cfg(feature="package-manager")] package_model_preview: package_model_preview::PreviewWindow::default(), #[cfg(all(feature="package-manager",feature="room-animated-models"))] variant_model_preview: variant_model_preview::PreviewWindow::default(), #[cfg(feature="room-authoring")] room_authoring: crate::room_authoring_panel::Panel::default(), #[cfg(feature="room-authoring")] room_wall_pointer_owned: false, #[cfg(feature="room-authoring")] room_actor_pointer_owned: false, #[cfg(feature="room-authoring")] room_wall_placement_pointer_owned: false, #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))] windows_projects: crate::windows_project_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-export"))] windows_export: crate::windows_export_panel::Panel::default(), #[cfg(feature="room-lighting")] room_lighting: None, #[cfg(feature="room-lighting")] room_light_pointer_owned: false, #[cfg(feature="room-project")] room_camera: None, #[cfg(feature="room-project")] room_camera_capture: room_camera_capture::Capture::default(), #[cfg(feature="linked-prefabs")] linked_prefabs: crate::linked_prefab_panel::Panel::default(), #[cfg(feature="collect-ui")] collect_ui: None, #[cfg(feature="collect-ui")] collect_ui_preview: collect_ui_preview::PreviewWindow::default(), #[cfg(feature="project-ui")] project_ui: None, #[cfg(feature="navigation")] navigation: crate::navigation_panel::NavigationPanel::default(), #[cfg(feature="navigation")] navigation_endpoint: navigation_endpoint_pick::State::default(), #[cfg(feature="mesh-navigation")] mesh_navigation: crate::mesh_navigation::Panel::default(), #[cfg(feature="terrain")] terrain_ramp: terrain_ramp::State::default(), #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, surfaces: Default::default(), material_gesture: false, post_gesture: false, viewport_hdr_disabled: false, #[cfg(feature = "static-gameplay")] registered_gameplay_view: crate::registered_gameplay_view::State::default(), #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), #[cfg(feature="models")] blockout_uv_density: blockout_uv_density::Panel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
     }
 
     #[cfg(feature="package-manager")]
@@ -2272,6 +2278,10 @@ impl EditorApp {
         let surfaces = &mut self.surfaces;
         let material_gesture = &mut self.material_gesture;
         let mut material_shown = false;
+        let post_gesture = &mut self.post_gesture;
+        let mut post_shown = false;
+        // Asset fields list files from the open scene's folder.
+        crate::inspector::set_asset_root(ui.ctx(), self.editor.path().as_deref().and_then(std::path::Path::parent));
         let editor = &self.editor;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             if !(editor.can_mutate() && editor.previewing().is_none()) { ui.disable(); }
@@ -2345,6 +2355,12 @@ impl EditorApp {
                 let base = egui::Id::new(("singleton", name));
                 egui::CollapsingHeader::new(name).id_salt(base).default_open(editor.game() == crate::game::EditorGame::Arena && name == "Score").show(ui, |ui| {
                     let mut evs = Vec::new();
+                    if name == orr_gfx::names::POST_PROCESS {
+                        post_shown = true;
+                        crate::post_panel::show(ui, base, ty.desc(), value, post_gesture, &mut evs);
+                        events.extend(evs.drain(..).map(|e| (Owner::Singleton(name.clone()), e)));
+                        return;
+                    }
                     #[cfg(not(feature = "custom-inspector"))]
                     show_component(ui, base, ty.desc(), value, &mut evs);
                     #[cfg(feature = "custom-inspector")]
@@ -2369,6 +2385,10 @@ impl EditorApp {
         if self.material_gesture && !material_shown {
             self.material_gesture = false;
             events.push((Owner::Component(orr_gfx::names::MATERIAL.into()), InspEvent::End));
+        }
+        if self.post_gesture && !post_shown {
+            self.post_gesture = false;
+            events.push((Owner::Singleton(orr_gfx::names::POST_PROCESS.into()), InspEvent::End));
         }
         for (owner, ev) in events {
             match ev {

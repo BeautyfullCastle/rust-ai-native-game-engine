@@ -46,6 +46,7 @@ fn post_process_bundle_roundtrip_requires_new_runtime_and_preserves_settings() {
         strength: 0.8,
         radius: 3,
         iterations: 1,
+        ..Default::default()
     };
     let document = crate::mesh_lighting::Document::from_lighting(orr_render::Lighting::default())
         .unwrap()

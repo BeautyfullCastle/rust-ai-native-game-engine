@@ -40,6 +40,8 @@ impl From<Settings> for PostProcessSettings {
             strength: value.strength,
             radius: value.radius,
             iterations: value.iterations,
+            // The mesh lighting profile stores bloom only.
+            ..Default::default()
         }
     }
 }

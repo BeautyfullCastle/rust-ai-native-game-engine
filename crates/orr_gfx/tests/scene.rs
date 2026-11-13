@@ -55,12 +55,16 @@ singletons:
     ambient: 0.5
   orr_gfx::PostProcess:
     exposure: 1.5
-    bloom_threshold: 1
-    bloom_strength: 0.3
     tone_mapping: clamp
-    bloom: true
-    bloom_radius: 3
-    bloom_iterations: 2
+    effects:
+      - { kind: bloom, enabled: true, params: [1, 0.3, 3, 2] }
+      - { kind: vignette, enabled: true, params: [0.4, 0.8, 0.5, 0] }
+      - { kind: none, enabled: false, params: [0, 0, 0, 0] }
+      - { kind: none, enabled: false, params: [0, 0, 0, 0] }
+      - { kind: none, enabled: false, params: [0, 0, 0, 0] }
+      - { kind: none, enabled: false, params: [0, 0, 0, 0] }
+      - { kind: none, enabled: false, params: [0, 0, 0, 0] }
+      - { kind: none, enabled: false, params: [0, 0, 0, 0] }
 ";
     let types = types();
     let scene = Scene::parse(text, &types).unwrap_or_else(|e| panic!("{e}"));
@@ -83,7 +87,8 @@ singletons:
     let environment = frame.singleton::<Environment>();
     assert_eq!(environment.ambient, FP::from_ratio(1, 2));
     let post = frame.singleton::<PostProcess>();
-    assert_eq!((post.tone_mapping, post.bloom, post.bloom_radius), (TONE_CLAMP, 1, 3));
+    assert_eq!((post.tone_mapping, post.effects[0].kind, post.effects[0].params[2]), (TONE_CLAMP, orr_gfx::EFFECT_BLOOM, FP::from_int(3)));
+    assert_eq!(post.effects[1].kind, orr_gfx::EFFECT_VIGNETTE);
 
     // Writing the frame back gives the same scene.
     let again = Scene::unbake(&types, &frame, Some(&index)).unwrap();
@@ -131,7 +136,7 @@ fn values_outside_their_ranges_are_rejected_in_scene_files() {
 #[test]
 fn the_schema_documents_every_field() {
     let schema = types().json_schema();
-    for needle in ["orr_gfx::Light", "Half angle in degrees", "The render layers this light affects", "orr_gfx::PostProcess", "Glow around very bright areas"] {
+    for needle in ["orr_gfx::Light", "Half angle in degrees", "The render layers this light affects", "orr_gfx::PostProcess", "The effects, in the order they run", "orr_gfx::Camera", "orr_gfx::Terrain", "Grayscale PNG next to the scene file"] {
         assert!(schema.contains(needle), "the JSON schema lacks {needle:?}");
     }
 }
@@ -169,4 +174,43 @@ fn a_material_names_its_shader_as_text_in_the_scene_file() {
     let control = text.replace("shader: stripes", "shader: \"a\tb\"");
     assert!(Scene::parse(&control, &types).is_err());
     assert_eq!(Material::new(&"y".repeat(100)).shader_name().len(), SHADER_NAME_BYTES);
+}
+
+#[test]
+fn a_camera_and_a_terrain_round_trip_through_a_scene_file() {
+    let types = types();
+    let text = "schema: orr.scene/1
+entities:
+  e_00000001:
+    name: eye
+    orr_gfx::Camera:
+      fov_y: 40
+      half_height: 10
+      near: 0.5
+      far: 3000
+      projection: perspective
+      layers: [default, layer2]
+      priority: 2
+      active: true
+  e_00000002:
+    name: ground
+    orr_gfx::Terrain:
+      heightmap: terrain/valley.png
+      size: [800, 600]
+      height: 120
+      resolution: 256
+      cast_shadows: true
+";
+    let scene = Scene::parse(text, &types).unwrap_or_else(|e| panic!("{e}"));
+    let mut frame = frame();
+    let index = scene.bake(&types, &mut frame).unwrap();
+    let ground = index.entity(&Guid::parse("e_00000002").unwrap()).unwrap();
+    assert_eq!(frame.get::<orr_gfx::Terrain>(ground).unwrap().heightmap_path(), "terrain/valley.png");
+    // Writing the frame back keeps both components as written; it adds the default singletons.
+    let again = Scene::unbake(&types, &frame, Some(&index)).unwrap().to_yaml();
+    let entities = &text[text.find("entities:").unwrap()..];
+    assert!(again.ends_with(entities), "{again}");
+    // A heightmap must be a relative PNG path.
+    let bad = text.replace("terrain/valley.png", "../valley.png");
+    assert!(Scene::parse(&bad, &types).is_err());
 }

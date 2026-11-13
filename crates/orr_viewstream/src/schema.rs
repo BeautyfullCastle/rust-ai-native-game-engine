@@ -113,8 +113,11 @@ fn field_json(name: &str, offset: usize, ty: &TypeDesc, doc: &str) -> J {
         Kind::Vec2 { .. } => "fixed_vec2".to_string(),
         Kind::Vec3 { .. } => "fixed_vec3".to_string(),
         Kind::Entity => "entity".to_string(),
-        Kind::Text { len } => {
+        Kind::Text { len, asset } => {
             m.insert("len".into(), json!(len));
+            if let Some(kind) = asset {
+                m.insert("asset".into(), json!(kind));
+            }
             "text".to_string()
         }
         Kind::Enum { variants, .. } => {

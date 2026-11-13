@@ -212,3 +212,18 @@ fn set_singleton_and_paths_parse() {
         assert!(parse_path(bad).is_err(), "{bad}");
     }
 }
+
+#[test]
+fn asset_paths_are_relative_and_end_in_an_extension_of_their_kind() {
+    let desc = orr_reflect::TypeDesc::asset(64, "terrain");
+    assert!(matches!(&desc.kind, Kind::Text { len: 64, asset: Some(kind) } if kind == "terrain"));
+    for good in ["", "valley.orrt", "terrain/valley.ORRT"] {
+        assert!(desc.check(&Value::Text(good.into()), true).is_ok(), "{good}");
+    }
+    for bad in ["valley.png", "/abs/valley.orrt", "C:/valley.orrt", "a\\valley.orrt", "../valley.orrt", "a//valley.orrt", "valley"] {
+        let error = desc.check(&Value::Text(bad.into()), true).unwrap_err().to_string();
+        assert!(error.contains("terrain asset path"), "{bad}: {error}");
+    }
+    assert_eq!(orr_reflect::asset_extensions("model"), ["glb", "gltf"]);
+    assert!(orr_reflect::asset_extensions("unknown").is_empty());
+}

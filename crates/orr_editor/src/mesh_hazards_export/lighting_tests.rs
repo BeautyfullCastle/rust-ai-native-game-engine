@@ -93,6 +93,7 @@ impl Fixture {
                     strength: 0.7,
                     radius: 3,
                     iterations: 2,
+                    ..Default::default()
                 })
                 .unwrap();
         }
