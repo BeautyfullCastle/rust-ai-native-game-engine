@@ -100,6 +100,10 @@ pub use shared_shadow::{MAX_IMPORTED_CASTERS, SHARED_SHADOW_MAP_SIZE};
 pub mod post_effects;
 pub use post_effects::ScreenEffect;
 #[cfg(feature = "imported-scene")]
+pub mod render_pass;
+#[cfg(feature = "imported-scene")]
+pub use render_pass::{PassFrame, PassShadow, PassStage, RenderPass};
+#[cfg(feature = "imported-scene")]
 pub mod post_process;
 #[cfg(feature = "imported-scene")]
 pub use post_process::{PostProcessSettings, PostProcessor, MAX_POST_PROCESS_BYTES, MAX_HDR_RADIANCE};

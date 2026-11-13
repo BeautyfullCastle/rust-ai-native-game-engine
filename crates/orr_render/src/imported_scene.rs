@@ -196,8 +196,27 @@ pub struct ImportedSceneRenderer<B: Rhi> {
     pub irradiance: Option<crate::IrradianceGrid>,
     post_processor: Option<crate::PostProcessor<B>>,
     post_process_generation: u64,
+    /// Added passes, in the order they were added (see [`crate::render_pass`]).
+    passes: Vec<Box<dyn crate::RenderPass<B>>>,
 }
 impl<B: Rhi> ImportedSceneRenderer<B> {
+    /// Adds a pass that draws in the stages it names from the next frame on.
+    /// At most [`crate::render_pass::MAX_RENDER_PASSES`] passes are taken.
+    pub fn add_pass(&mut self, pass: Box<dyn crate::RenderPass<B>>) -> Result<(), ImportedSceneError> {
+        if self.passes.len() >= crate::render_pass::MAX_RENDER_PASSES {
+            return Err(ImportedSceneError::BatchLimit);
+        }
+        self.passes.push(pass);
+        Ok(())
+    }
+    /// The first added pass of type `T`, to change what it draws.
+    pub fn pass_mut<T: crate::RenderPass<B>>(&mut self) -> Option<&mut T> {
+        self.passes.iter_mut().find_map(|pass| pass.as_any_mut().downcast_mut::<T>())
+    }
+    /// Removes every added pass of type `T`.
+    pub fn remove_passes<T: crate::RenderPass<B>>(&mut self) {
+        self.passes.retain_mut(|pass| !pass.as_any_mut().is::<T>());
+    }
     /// Create a coordinator without allocating GPU resources.
     pub fn new(rhi: B, format: TextureFormat) -> Result<Self, ImportedSceneError> {
         if format.is_depth() {
@@ -216,6 +235,7 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
             irradiance: None,
             post_processor: None,
             post_process_generation: 0,
+            passes: Vec::new(),
         })
     }
     pub fn format(&self) -> TextureFormat {
@@ -744,6 +764,25 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
                 }
             }
         }
+        // What added passes see of this frame; every pass prepares before anything is encoded.
+        let pass_frame = crate::PassFrame {
+            view_proj: globals.view_proj(),
+            camera,
+            lighting,
+            size: target.size,
+            color_format: self.scene_format(),
+            depth_format: TextureFormat::Depth32Float,
+            shadow: shadow_ready.as_ref().zip(self.shadow.as_ref()).map(|(ready, map)| crate::PassShadow {
+                view: &map.view,
+                sampler: &map.sampler,
+                light_vp: ready.matrix.0,
+                params: ready.params,
+                map_id: map.id,
+            }),
+        };
+        for pass in &mut self.passes {
+            pass.prepare(&self.rhi, &pass_frame);
+        }
         let mut encoder = self.rhi.create_encoder("imported scene frame");
         if shadow_ready.is_some() {
             let mut commands = Vec::new();
@@ -778,6 +817,10 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
                 }),
                 &commands,
             );
+            let map = DepthAttachment { view: &self.shadow.as_ref().expect("validated shadow map").view, clear: None, store: true };
+            for pass in self.passes.iter().filter(|p| p.stages().contains(&crate::PassStage::Shadow)) {
+                pass.encode(&self.rhi, crate::PassStage::Shadow, &pass_frame, &mut encoder, None, &map);
+            }
         }
         let depth = &self.depth.as_ref().expect("accepted frame owns depth").view;
         let scene_view = self
@@ -866,6 +909,16 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
                     }
                 }
                 _ => unreachable!("prepared batches preserve order and kind"),
+            }
+        }
+        // Added passes after the batches: opaque, then sky, then transparent.
+        {
+            let color = ColorAttachment { view: scene_view, clear: None, resolve: None };
+            let depth = DepthAttachment { view: depth, clear: None, store: true };
+            for stage in [crate::PassStage::Opaque, crate::PassStage::Sky, crate::PassStage::Transparent] {
+                for pass in self.passes.iter().filter(|p| p.stages().contains(&stage)) {
+                    pass.encode(&self.rhi, stage, &pass_frame, &mut encoder, Some(&color), &depth);
+                }
             }
         }
         #[cfg(feature = "particles")]
