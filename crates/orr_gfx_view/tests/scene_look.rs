@@ -286,6 +286,6 @@ fn a_terrain_is_read_with_its_heightmap_size_and_center() {
     assert_eq!(terrains.len(), 1);
     let t = &terrains[0];
     assert_eq!((t.entity, t.heightmap.as_str(), t.center, t.size, t.height), (e, "terrain/valley.png", [10.0, -2.0, 4.0], [200.0, 200.0], 80.0));
-    assert_eq!(t.resolution, 480, "the grid is bounded");
+    assert_eq!(t.resolution, 352, "the grid is bounded");
     assert!(t.cast_shadows);
 }

@@ -10,6 +10,9 @@
 //! `orr_gfx` types keeps the lighting passed as `fallback`.
 #![allow(clippy::float_arithmetic)]
 
+#[cfg(feature = "models")]
+pub mod terrain_mesh;
+
 use orr_bridge::FrameView;
 use orr_ecs::Entity;
 use orr_fp::{FPVec3, FP};
@@ -275,7 +278,7 @@ pub fn terrains(frame: FrameView<'_>) -> Vec<TerrainRef> {
             center: placement(frame, entity).0,
             size: [f(terrain.size.x).clamp(1.0, 20_000.0), f(terrain.size.y).clamp(1.0, 20_000.0)],
             height: f(terrain.height).clamp(0.0, 5000.0),
-            resolution: terrain.resolution.clamp(8, 480),
+            resolution: terrain.resolution.clamp(8, 352),
             cast_shadows: terrain.cast_shadows != 0,
         })
         .collect()

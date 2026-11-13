@@ -421,7 +421,7 @@ pub struct Terrain {
     #[reflect(range = "0..=5000")]
     pub height: FP,
     /// Most grid points along each side; a larger image is sampled down.
-    #[reflect(range = "8..=480")]
+    #[reflect(range = "8..=352")]
     pub resolution: u32,
     /// Whether the terrain casts sun shadows.
     #[reflect(bool)]

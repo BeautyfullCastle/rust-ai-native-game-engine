@@ -9,7 +9,13 @@ description = "Reads the rendering components of a scene (orr_gfx) into renderer
 [lints]
 workspace = true
 
+[features]
+# The terrain mesh builder: heightmap PNG to a static model.
+models = ["dep:orr_model", "dep:png"]
+
 [dependencies]
+orr_model = { path = "../orr_model", optional = true }
+png = { version = "0.17", optional = true }
 orr_gfx = { path = "../orr_gfx" }
 orr_bridge = { path = "../orr_bridge" }
 orr_ecs = { path = "../orr_ecs" }
@@ -18,6 +24,7 @@ orr_physics3d = { path = "../orr_physics3d" }
 orr_render = { path = "../orr_render" }
 
 [dev-dependencies]
+png = "0.17"
 bytemuck = "1"
 # The post chain's validation checks the bloom values the reader produces.
 orr_render = { path = "../orr_render", features = ["imported-scene"] }

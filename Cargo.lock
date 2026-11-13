@@ -3278,9 +3278,11 @@ dependencies = [
  "orr_ecs",
  "orr_fp",
  "orr_gfx",
+ "orr_model",
  "orr_physics3d",
  "orr_reflect",
  "orr_render",
+ "png 0.17.16",
 ]
 
 [[package]]

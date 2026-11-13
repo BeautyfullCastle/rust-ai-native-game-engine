@@ -18,6 +18,11 @@ pub struct YardFrame {
     pub look: Option<orr_gfx_view::SceneLook>,
     /// Entities with a surface shader (`orr_gfx::Material`), from the same frame.
     pub materials: Vec<orr_gfx_view::MaterialRef>,
+    /// Entities with an `orr_gfx::Terrain`, from the same frame.
+    pub terrains: Vec<orr_gfx_view::TerrainRef>,
+    /// The scene's main camera (`orr_gfx::Camera`) and the drawn entities on
+    /// none of its layers, from the same frame.
+    pub camera: Option<(orr_gfx_view::CameraLook, Vec<Entity>)>,
 }
 
 /// How one entity of the frame is drawn.
@@ -44,18 +49,28 @@ impl YardFrame {
     pub fn extract(frame: FrameView<'_>) -> Self {
         let mut extracted = Vec::new();
         orr_sample::yard3d_view::YardExtractor.extract(frame, &mut extracted);
+        let items: Vec<RenderItem3> = extracted
+            .into_iter()
+            .map(|item| RenderItem3 {
+                entity: item.entity,
+                transform: item.transform,
+                style: item.style,
+            })
+            .collect();
+        let terrains = orr_gfx_view::terrains(frame);
+        // The drawn entities (shapes and terrains) that are on none of the main camera's layers.
+        let camera = orr_gfx_view::main_camera(frame).map(|camera| {
+            let mut unseen: Vec<Entity> = items.iter().map(|item| item.entity).chain(terrains.iter().map(|t| t.entity)).collect();
+            unseen.retain(|e| orr_gfx_view::layers_of(frame, *e) & camera.layers == 0);
+            (camera, unseen)
+        });
         Self {
-            items: extracted
-                .into_iter()
-                .map(|item| RenderItem3 {
-                    entity: item.entity,
-                    transform: item.transform,
-                    style: item.style,
-                })
-                .collect(),
+            items,
             poses: orr_sample::yard3d_view::editor_body_poses(frame),
             look: Some(orr_gfx_view::scene_look(frame, &orr_sample::yard3d_view::yard_lighting())),
             materials: orr_gfx_view::materials(frame),
+            terrains,
+            camera,
         }
     }
     /// The frame drawn with the built-in material for every entity.
