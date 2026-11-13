@@ -18,6 +18,8 @@
 #![allow(clippy::float_arithmetic)]
 
 pub mod math;
+#[cfg(feature = "passes")]
+pub mod passes;
 pub mod mesh;
 pub mod renderer;
 pub mod settings;

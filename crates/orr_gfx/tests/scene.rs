@@ -40,6 +40,7 @@ entities:
       inner_angle: 15
       outer_angle: 25
       shadow_strength: 1
+      shadow_range: 0
       kind: spot
       enabled: true
       cast_shadows: false
@@ -65,6 +66,18 @@ singletons:
       - { kind: none, enabled: false, params: [0, 0, 0, 0] }
       - { kind: none, enabled: false, params: [0, 0, 0, 0] }
       - { kind: none, enabled: false, params: [0, 0, 0, 0] }
+  orr_gfx::Sky:
+    brightness: 1.5
+    sun_glow: 1
+    cloud_cover: 0.34
+    cloud_speed: 1
+    fog_density: 1
+    fog_falloff: 0.03
+    fog_height: 0
+    haze: 0.08
+    wind_strength: 1
+    wind_speed: 1
+    enabled: false
 ";
     let types = types();
     let scene = Scene::parse(text, &types).unwrap_or_else(|e| panic!("{e}"));

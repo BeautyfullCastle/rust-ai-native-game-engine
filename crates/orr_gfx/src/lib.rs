@@ -14,6 +14,8 @@
 //! - [`PostProcess`]: exposure, tone mapping and the ordered list of post effects.
 //! - [`Camera`]: a camera on an entity; the active one with the highest priority is the main camera.
 //! - [`Terrain`]: ground from a heightmap image, given its look by a [`Material`].
+//! - [`Sky`]: the drawn sky, fog and wind of an outdoor scene.
+//! - [`Water`]: a water surface; [`Scatter`]: trees, rocks or grass spread over a terrain.
 //!
 //! The values are fixed point, as all scene state is. Simulation systems may
 //! write them (a flickering lamp, a day cycle), so they are part of the
@@ -98,6 +100,10 @@ pub struct Light {
     /// How dark the shadows of this light are: 0 is no shadow, 1 is full shadow.
     #[reflect(range = "0..=1")]
     pub shadow_strength: FP,
+    /// Radius in meters of the area with sun shadows. The area follows the
+    /// view. Zero keeps the game's own shadow area. Only the sun uses it.
+    #[reflect(range = "0..=5000")]
+    pub shadow_range: FP,
     /// What the light is.
     #[reflect(enumeration = "directional=0,point=1,spot=2")]
     pub kind: u32,
@@ -121,6 +127,7 @@ impl Default for Light {
             inner_angle: FP::from_int(20),
             outer_angle: FP::from_int(30),
             shadow_strength: FP::ONE,
+            shadow_range: FP::ZERO,
             kind: LIGHT_POINT,
             enabled: 1,
             cast_shadows: 0,
@@ -398,6 +405,175 @@ impl Default for Camera {
     }
 }
 
+/// The sky, fog and wind of an outdoor scene. With `enabled` the renderer
+/// draws a sky with sun disc and clouds behind everything, the scene gets
+/// height fog, and vegetation moves in the wind. The sun is the scene's sun
+/// [`Light`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable, Reflect)]
+#[reflect(default)]
+pub struct Sky {
+    /// Brightness of the sky.
+    #[reflect(range = "0..=8")]
+    pub brightness: FP,
+    /// Size of the bright glow around the sun.
+    #[reflect(range = "0..=4")]
+    pub sun_glow: FP,
+    /// Share of the sky covered by clouds.
+    #[reflect(range = "0..=1")]
+    pub cloud_cover: FP,
+    /// How fast the clouds drift.
+    #[reflect(range = "0..=10")]
+    pub cloud_speed: FP,
+    /// Thickness of the fog at `fog_height`.
+    #[reflect(range = "0..=20")]
+    pub fog_density: FP,
+    /// How fast the fog thins with height, per meter.
+    #[reflect(range = "0..=1")]
+    pub fog_falloff: FP,
+    /// Height in meters where the fog has its full thickness.
+    #[reflect(range = "-1000..=5000")]
+    pub fog_height: FP,
+    /// Share of the fog that takes the sky color, far away.
+    #[reflect(range = "0..=1")]
+    pub haze: FP,
+    /// How far vegetation moves in the wind.
+    #[reflect(range = "0..=4")]
+    pub wind_strength: FP,
+    /// How fast the wind changes.
+    #[reflect(range = "0..=4")]
+    pub wind_speed: FP,
+    /// Whether the sky, fog and wind are drawn.
+    #[reflect(bool)]
+    pub enabled: u32,
+    #[reflect(skip)]
+    _pad: u32,
+}
+
+impl Default for Sky {
+    fn default() -> Self {
+        Self {
+            brightness: FP::from_ratio(3, 2),
+            sun_glow: FP::ONE,
+            cloud_cover: FP::from_ratio(34, 100),
+            cloud_speed: FP::ONE,
+            fog_density: FP::ONE,
+            fog_falloff: FP::from_ratio(3, 100),
+            fog_height: FP::ZERO,
+            haze: FP::from_ratio(8, 100),
+            wind_strength: FP::ONE,
+            wind_speed: FP::ONE,
+            enabled: 0,
+            _pad: 0,
+        }
+    }
+}
+
+/// A water surface on an entity: a level rectangle centered on the entity's
+/// [`Transform3`] position. Over a [`Terrain`] the water is clear where it is
+/// shallow and takes its color where it is deep; it reflects the sky.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable, Reflect)]
+#[reflect(default)]
+pub struct Water {
+    /// Size of the surface in meters along x and z.
+    #[reflect(range = "1..=20000")]
+    pub size: FPVec2,
+    /// Linear color of deep water.
+    #[reflect(range = "0..=1")]
+    pub color: FPVec3,
+    /// How deep light reaches; higher is clearer.
+    #[reflect(range = "0.05..=10")]
+    pub clarity: FP,
+    /// Height of the ripples.
+    #[reflect(range = "0..=4")]
+    pub ripples: FP,
+    /// Direction and speed of the current, meters per second along x and z.
+    #[reflect(range = "-10..=10")]
+    pub flow: FPVec2,
+    /// Strength of the sun's glints.
+    #[reflect(range = "0..=4")]
+    pub glint: FP,
+    /// The terrain under the water, for its depth. None gives deep water everywhere.
+    pub terrain: orr_ecs::Entity,
+}
+
+impl Default for Water {
+    fn default() -> Self {
+        Self {
+            size: FPVec2::new(FP::from_int(100), FP::from_int(100)),
+            color: FPVec3::new(FP::from_ratio(12, 1000), FP::from_ratio(5, 100), FP::from_ratio(4, 100)),
+            clarity: FP::ONE,
+            ripples: FP::ONE,
+            flow: FPVec2::new(FP::ZERO, FP::from_ratio(3, 10)),
+            glint: FP::ONE,
+            terrain: orr_ecs::Entity::NONE,
+        }
+    }
+}
+
+/// [`Scatter::kind`]: needle trees.
+pub const SCATTER_CONIFER: u32 = 0;
+/// [`Scatter::kind`]: leaf trees; some turn early in autumn.
+pub const SCATTER_BROADLEAF: u32 = 1;
+/// [`Scatter::kind`]: boulders with moss on top.
+pub const SCATTER_ROCK: u32 = 2;
+/// [`Scatter::kind`]: grass tufts, flowers and ferns.
+pub const SCATTER_GRASS: u32 = 3;
+/// Most objects one [`Scatter`] places.
+pub const MAX_SCATTER: u32 = 20000;
+
+/// Objects spread over a [`Terrain`]: trees, rocks or grass in a rectangle
+/// centered on the entity's [`Transform3`] position. The same seed always
+/// gives the same places. Places outside the height range, steeper than
+/// `max_slope` or under water are left empty.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable, Reflect)]
+#[reflect(default)]
+pub struct Scatter {
+    /// The terrain to stand on.
+    pub terrain: orr_ecs::Entity,
+    /// Size of the area in meters along x and z.
+    #[reflect(range = "1..=20000")]
+    pub area: FPVec2,
+    /// Lowest and highest ground, in meters of world height.
+    #[reflect(range = "-10000..=10000")]
+    pub heights: FPVec2,
+    /// Steepest ground in degrees.
+    #[reflect(range = "0..=90")]
+    pub max_slope: FP,
+    /// Smallest and largest size, as a factor of the natural size.
+    #[reflect(range = "0.05..=20")]
+    pub scale: FPVec2,
+    /// What is placed.
+    #[reflect(enumeration = "conifer=0,broadleaf=1,rock=2,grass=3")]
+    pub kind: u32,
+    /// How many places are tried.
+    #[reflect(range = "0..=20000")]
+    pub count: u32,
+    /// Changes the places.
+    pub seed: u32,
+    /// Whether trees and rocks cast sun shadows.
+    #[reflect(bool)]
+    pub cast_shadows: u32,
+}
+
+impl Default for Scatter {
+    fn default() -> Self {
+        Self {
+            terrain: orr_ecs::Entity::NONE,
+            area: FPVec2::new(FP::from_int(100), FP::from_int(100)),
+            heights: FPVec2::new(FP::from_int(-10000), FP::from_int(10000)),
+            max_slope: FP::from_int(35),
+            scale: FPVec2::new(FP::from_ratio(8, 10), FP::from_ratio(13, 10)),
+            kind: SCATTER_CONIFER,
+            count: 200,
+            seed: 1,
+            cast_shadows: 1,
+        }
+    }
+}
+
 /// Most bytes of the heightmap path in [`Terrain::heightmap`].
 pub const TERRAIN_PATH_BYTES: usize = 128;
 
@@ -476,6 +652,12 @@ pub mod names {
     pub const CAMERA: &str = "orr_gfx::Camera";
     /// [`super::Terrain`].
     pub const TERRAIN: &str = "orr_gfx::Terrain";
+    /// [`super::Sky`].
+    pub const SKY: &str = "orr_gfx::Sky";
+    /// [`super::Water`].
+    pub const WATER: &str = "orr_gfx::Water";
+    /// [`super::Scatter`].
+    pub const SCATTER: &str = "orr_gfx::Scatter";
 }
 
 /// Registers the components and singletons with a game's simulation.
@@ -487,19 +669,29 @@ pub fn register(builder: &mut ComponentRegistryBuilder) {
     builder.register_component::<Material>(names::MATERIAL);
     builder.register_component::<Camera>(names::CAMERA);
     builder.register_component::<Terrain>(names::TERRAIN);
+    builder.register_component::<Water>(names::WATER);
+    builder.register_component::<Scatter>(names::SCATTER);
     builder.register_singleton::<Environment>(names::ENVIRONMENT);
+    builder.register_singleton::<Sky>(names::SKY);
     builder.register_singleton::<PostProcess>(names::POST_PROCESS);
 }
 
 /// Gives the singletons their default values in a new frame.
 pub fn init(frame: &mut Frame) {
     frame.set_singleton(Environment::default());
+    frame.set_singleton(Sky::default());
     frame.set_singleton(PostProcess::default());
 }
 
 fn init_environment(frame: &mut Frame, present: bool) {
     if !present {
         frame.set_singleton(Environment::default());
+    }
+}
+
+fn init_sky(frame: &mut Frame, present: bool) {
+    if !present {
+        frame.set_singleton(Sky::default());
     }
 }
 
@@ -519,6 +711,9 @@ pub fn register_reflect(types: &mut TypeRegistry) {
     types.register_component::<Material>(names::MATERIAL);
     types.register_component::<Camera>(names::CAMERA);
     types.register_component::<Terrain>(names::TERRAIN);
+    types.register_component::<Water>(names::WATER);
+    types.register_component::<Scatter>(names::SCATTER);
     types.register_singleton_with_init::<Environment>(names::ENVIRONMENT, init_environment);
+    types.register_singleton_with_init::<Sky>(names::SKY, init_sky);
     types.register_singleton_with_init::<PostProcess>(names::POST_PROCESS, init_post_process);
 }

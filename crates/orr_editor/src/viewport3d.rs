@@ -23,6 +23,10 @@ pub struct YardFrame {
     /// The scene's main camera (`orr_gfx::Camera`) and the drawn entities on
     /// none of its layers, from the same frame.
     pub camera: Option<(orr_gfx_view::CameraLook, Vec<Entity>)>,
+    /// The drawn sky (`orr_gfx::Sky`), water surfaces and scatters, from the same frame.
+    pub sky: Option<orr_gfx_view::SkyLook>,
+    pub waters: Vec<orr_gfx_view::WaterRef>,
+    pub scatters: Vec<orr_gfx_view::ScatterRef>,
 }
 
 /// How one entity of the frame is drawn.
@@ -71,6 +75,9 @@ impl YardFrame {
             materials: orr_gfx_view::materials(frame),
             terrains,
             camera,
+            sky: orr_gfx_view::sky(frame),
+            waters: orr_gfx_view::waters(frame),
+            scatters: orr_gfx_view::scatters(frame),
         }
     }
     /// The frame drawn with the built-in material for every entity.
@@ -352,6 +359,9 @@ pub struct Viewport3dGpu {
     /// How each model entity is drawn next, sorted by entity, and the clock its shaders read.
     #[cfg(feature = "models")]
     model_surfaces: (Vec<(Entity, SurfaceChoice)>, f32),
+    /// Sky, water and vegetation for the outdoor pass, and its clock.
+    #[cfg(feature = "outdoor")]
+    outdoor: (orr_scenery::passes::OutdoorScene, f32),
     /// Advances only when an accepted frame changes every scene pipeline format.
     pipeline_generation: u64,
     #[cfg(feature = "models")]
@@ -371,10 +381,18 @@ impl Viewport3dGpu {
             surfaces: Vec::new(),
             #[cfg(feature = "models")]
             model_surfaces: (Vec::new(), 0.0),
+            #[cfg(feature = "outdoor")]
+            outdoor: (Default::default(), 0.0),
             pipeline_generation: 0,
             #[cfg(feature = "models")]
-            imported: orr_render::ImportedSceneRenderer::new(rhi.clone(), TARGET_FORMAT)
-                .expect("color format"),
+            imported: {
+                #[cfg_attr(not(feature = "outdoor"), allow(unused_mut))]
+                let mut imported = orr_render::ImportedSceneRenderer::new(rhi.clone(), TARGET_FORMAT).expect("color format");
+                // Sky, water and vegetation of the scene draw as one added pass.
+                #[cfg(feature = "outdoor")]
+                imported.add_pass(Box::new(orr_scenery::passes::OutdoorPass::new(rhi))).expect("the first pass");
+                imported
+            },
             #[cfg(feature = "models")]
             models: Vec::new(),
             #[cfg(feature = "animated-models")]
@@ -406,6 +424,11 @@ impl Viewport3dGpu {
     pub fn set_model_surfaces(&mut self, mut choices: Vec<(Entity, SurfaceChoice)>, time: f32) {
         choices.sort_unstable_by_key(|(entity, _)| (entity.index, entity.version));
         self.model_surfaces = (choices, time);
+    }
+    /// The sky, water and vegetation the outdoor pass draws from the next frame on.
+    #[cfg(feature = "outdoor")]
+    pub fn set_outdoor(&mut self, scene: orr_scenery::passes::OutdoorScene, time: f32) {
+        self.outdoor = (scene, time);
     }
     /// The id of the magenta shader that marks a model with an unusable shader.
     #[cfg(feature = "models")]
@@ -865,6 +888,15 @@ impl Viewport3dGpu {
             }
             self.animated_models = ordered;
         }
+        #[cfg(feature = "outdoor")]
+        {
+            let rhi = self.renderer.rhi().clone();
+            let (scene, time) = &self.outdoor;
+            if let Some(pass) = self.imported.pass_mut::<orr_scenery::passes::OutdoorPass<Wgpu>>() {
+                pass.set_scene(&rhi, scene);
+                pass.set_time(*time);
+            }
+        }
         self.imported.post_process = settings;
         // The scene's lights reach every batch: procedural shapes, models and skinned models.
         self.imported.scene_lights = list.scene_lights;
@@ -965,6 +997,10 @@ impl GpuViewport3d {
     #[cfg(feature = "models")]
     pub fn set_model_surfaces(&mut self, choices: Vec<(Entity, SurfaceChoice)>, time: f32) {
         self.gpu.set_model_surfaces(choices, time);
+    }
+    #[cfg(feature = "outdoor")]
+    pub fn set_outdoor(&mut self, scene: orr_scenery::passes::OutdoorScene, time: f32) {
+        self.gpu.set_outdoor(scene, time);
     }
     #[cfg(feature = "models")]
     pub fn render_post_processed(

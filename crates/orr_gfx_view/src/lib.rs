@@ -58,6 +58,9 @@ pub struct SceneLook {
     pub lights: Vec<PlacedLight>,
     /// Enabled lights beyond the frame limit of `orr_render::MAX_SCENE_LIGHTS`. They give no light.
     pub dropped_lights: u32,
+    /// True when the sun gives its own shadow range: the caller centers the
+    /// shadow area on the view each frame (see [`SceneLook::follow_view`]).
+    pub shadow_follows_view: bool,
 }
 
 fn f(v: FP) -> f32 {
@@ -117,7 +120,7 @@ pub fn layers_of(frame: FrameView<'_>, entity: Entity) -> u32 {
 /// without any [`Light`] component, and its ambient light is kept while the
 /// scene's [`Environment`] has its default values. Its shadow area is always kept.
 pub fn scene_look(frame: FrameView<'_>, fallback: &Lighting) -> SceneLook {
-    let mut look = SceneLook { lighting: *fallback, scene_lights: SceneLights::default(), bloom: None, effects: Vec::new(), lights: Vec::new(), dropped_lights: 0 };
+    let mut look = SceneLook { lighting: *fallback, scene_lights: SceneLights::default(), bloom: None, effects: Vec::new(), lights: Vec::new(), dropped_lights: 0, shadow_follows_view: false };
     // An environment left at its default values keeps the ambient light of the game.
     // Simulation systems can write any value, so every value is brought into
     // the range the inspector allows before the renderer sees it.
@@ -129,6 +132,20 @@ pub fn scene_look(frame: FrameView<'_>, fallback: &Lighting) -> SceneLook {
     if let Some(post) = frame.try_singleton::<PostProcess>() {
         look.lighting.exposure = f(post.exposure).clamp(0.01, 16.0);
         look.lighting.tonemap = post.tone_mapping != TONE_CLAMP;
+        // The sky's height fog comes first: it belongs to the lit scene, before every effect.
+        if let Some(sky) = sky(frame) {
+            look.effects.push(
+                ScreenEffect::HeightFog {
+                    density: sky.fog_density * 0.0017,
+                    falloff: sky.fog_falloff,
+                    height: sky.fog_height,
+                    haze: sky.haze,
+                    sky_brightness: sky.brightness,
+                    sun_glow: sky.sun_glow,
+                }
+                .clamped(),
+            );
+        }
         for effect in post.effects.iter().filter(|e| e.enabled != 0) {
             read_effect(effect, &mut look);
         }
@@ -172,6 +189,11 @@ pub fn scene_look(frame: FrameView<'_>, fallback: &Lighting) -> SceneLook {
             look.lighting.color = scene_light.color;
             look.lighting.intensity = scene_light.intensity;
             look.lighting.shadows = light.cast_shadows != 0;
+            let range = f(light.shadow_range).clamp(0.0, 5000.0);
+            if range >= 0.5 {
+                look.lighting.shadow_radius = range;
+                look.shadow_follows_view = true;
+            }
             look.scene_lights.sun_layers = scene_light.layers;
             look.scene_lights.sun_shadow_strength = f(light.shadow_strength);
         } else if look.scene_lights.push(scene_light).is_err() {
@@ -248,6 +270,122 @@ pub fn main_camera(frame: FrameView<'_>) -> Option<CameraLook> {
     Some(CameraLook { entity, camera: Camera3D { eye, target, up, projection }, layers: camera.layers & orr_gfx::ALL_LAYERS })
 }
 
+/// The scene's [`orr_gfx::Sky`] in renderer units.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SkyLook {
+    pub brightness: f32,
+    pub sun_glow: f32,
+    pub cloud_cover: f32,
+    pub cloud_speed: f32,
+    pub fog_density: f32,
+    pub fog_falloff: f32,
+    pub fog_height: f32,
+    pub haze: f32,
+    pub wind_strength: f32,
+    pub wind_speed: f32,
+}
+
+/// The scene's sky when it is switched on.
+pub fn sky(frame: FrameView<'_>) -> Option<SkyLook> {
+    let sky = frame.try_singleton::<orr_gfx::Sky>().filter(|s| s.enabled != 0)?;
+    Some(SkyLook {
+        brightness: f(sky.brightness).clamp(0.0, 8.0),
+        sun_glow: f(sky.sun_glow).clamp(0.0, 4.0),
+        cloud_cover: f(sky.cloud_cover).clamp(0.0, 1.0),
+        cloud_speed: f(sky.cloud_speed).clamp(0.0, 10.0),
+        fog_density: f(sky.fog_density).clamp(0.0, 20.0),
+        fog_falloff: f(sky.fog_falloff).clamp(0.0, 1.0),
+        fog_height: f(sky.fog_height).clamp(-1000.0, 5000.0),
+        haze: f(sky.haze).clamp(0.0, 1.0),
+        wind_strength: f(sky.wind_strength).clamp(0.0, 4.0),
+        wind_speed: f(sky.wind_speed).clamp(0.0, 4.0),
+    })
+}
+
+/// A water surface of one entity as the view reads it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WaterRef {
+    pub entity: Entity,
+    /// World position of the center of the surface; its height is the water level.
+    pub center: [f32; 3],
+    pub size: [f32; 2],
+    pub color: [f32; 3],
+    pub clarity: f32,
+    pub ripples: f32,
+    pub flow: [f32; 2],
+    pub glint: f32,
+    /// The terrain under the water, if any.
+    pub terrain: Option<Entity>,
+}
+
+/// Every entity's water surface, in entity order.
+pub fn waters(frame: FrameView<'_>) -> Vec<WaterRef> {
+    if !frame.registers::<orr_gfx::Water>() {
+        return Vec::new();
+    }
+    frame
+        .iter::<orr_gfx::Water>()
+        .map(|(entity, w)| WaterRef {
+            entity,
+            center: placement(frame, entity).0,
+            size: [f(w.size.x).clamp(1.0, 20_000.0), f(w.size.y).clamp(1.0, 20_000.0)],
+            color: unit_color(w.color),
+            clarity: f(w.clarity).clamp(0.05, 10.0),
+            ripples: f(w.ripples).clamp(0.0, 4.0),
+            flow: [f(w.flow.x).clamp(-10.0, 10.0), f(w.flow.y).clamp(-10.0, 10.0)],
+            glint: f(w.glint).clamp(0.0, 4.0),
+            terrain: (w.terrain != Entity::NONE).then_some(w.terrain),
+        })
+        .collect()
+}
+
+/// Objects spread over a terrain, as the view reads an [`orr_gfx::Scatter`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScatterRef {
+    pub entity: Entity,
+    pub terrain: Option<Entity>,
+    /// World position of the center of the area.
+    pub center: [f32; 3],
+    pub area: [f32; 2],
+    /// Lowest and highest ground in world height.
+    pub heights: [f32; 2],
+    /// Steepest ground, in degrees.
+    pub max_slope: f32,
+    /// Smallest and largest size factor.
+    pub scale: [f32; 2],
+    /// One of the `orr_gfx::SCATTER_*` kinds.
+    pub kind: u32,
+    pub count: u32,
+    pub seed: u32,
+    pub cast_shadows: bool,
+}
+
+/// Every entity's scatter, in entity order.
+pub fn scatters(frame: FrameView<'_>) -> Vec<ScatterRef> {
+    if !frame.registers::<orr_gfx::Scatter>() {
+        return Vec::new();
+    }
+    frame
+        .iter::<orr_gfx::Scatter>()
+        .map(|(entity, s)| {
+            let low = f(s.scale.x).clamp(0.05, 20.0);
+            ScatterRef {
+                entity,
+                terrain: (s.terrain != Entity::NONE).then_some(s.terrain),
+                center: placement(frame, entity).0,
+                area: [f(s.area.x).clamp(1.0, 20_000.0), f(s.area.y).clamp(1.0, 20_000.0)],
+                heights: [f(s.heights.x).min(f(s.heights.y)), f(s.heights.x).max(f(s.heights.y))],
+                max_slope: f(s.max_slope).clamp(0.0, 90.0),
+                scale: [low, f(s.scale.y).clamp(low, 20.0)],
+                kind: s.kind.min(orr_gfx::SCATTER_GRASS),
+                count: s.count.min(orr_gfx::MAX_SCATTER),
+                seed: s.seed,
+                cast_shadows: s.cast_shadows != 0,
+            }
+        })
+        .collect()
+}
+
 /// A terrain of one entity as the view reads it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TerrainRef {
@@ -285,6 +423,18 @@ pub fn terrains(frame: FrameView<'_>) -> Vec<TerrainRef> {
 }
 
 impl SceneLook {
+    /// Centers the sun's shadow area in front of a camera at `eye` looking at
+    /// `target`, when the sun asks for that; otherwise leaves `lighting` alone.
+    pub fn follow_view(&self, lighting: &mut Lighting, eye: [f32; 3], target: [f32; 3]) {
+        if !self.shadow_follows_view {
+            return;
+        }
+        let d = [target[0] - eye[0], target[1] - eye[1], target[2] - eye[2]];
+        let length = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1e-6);
+        let reach = lighting.shadow_radius * 0.5;
+        lighting.shadow_center = [eye[0] + d[0] / length * reach, eye[1] + d[1] / length * reach, eye[2] + d[2] / length * reach].map(|c| c.clamp(-1.0e6, 1.0e6));
+    }
+
     /// Puts the lighting into a render list.
     pub fn apply(&self, list: &mut RenderList3D) {
         list.lighting = self.lighting;

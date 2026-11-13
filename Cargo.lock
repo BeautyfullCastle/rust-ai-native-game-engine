@@ -3613,6 +3613,7 @@ name = "orr_scenery"
 version = "0.0.1"
 dependencies = [
  "bytemuck",
+ "orr_render",
  "orr_rhi",
  "png 0.18.1",
  "serde",

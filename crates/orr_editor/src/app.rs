@@ -2820,13 +2820,16 @@ impl EditorApp {
         let hidden: Vec<orr_ecs::Entity> = Vec::new();
         // Terrains are models built from their heightmaps.
         #[cfg(feature="models")]
-        let terrain_problem = {
+        let (terrain_problem, terrain_heights) = {
             let (models, problem) = self.terrain_models.refresh(self.editor.path().as_deref(), &self.editor.yard_frame().terrains);
-            for (entity, center, model) in models {
-                placements.push(crate::viewport3d::ModelPlacement { entity, model, instance: orr_render::StaticInstance { translation: center, ..Default::default() } });
+            let heights: Vec<(orr_ecs::Entity, crate::terrain_models::Heights)> = models.iter().map(|t| (t.entity, t.heights.clone())).collect();
+            for t in models {
+                placements.push(crate::viewport3d::ModelPlacement { entity: t.entity, model: t.model, instance: orr_render::StaticInstance { translation: t.center, ..Default::default() } });
             }
-            problem
+            (problem, heights)
         };
+        #[cfg(all(feature="models", not(feature="outdoor")))]
+        let _ = &terrain_heights;
         // Looking through the scene's camera hides what its layers do not draw.
         let camera_view = self.ui.camera_view.then(|| self.editor.yard_frame().camera.clone()).flatten();
         let mut hidden = hidden;
@@ -2845,6 +2848,10 @@ impl EditorApp {
             choices.binary_search_by_key(&(entity.index, entity.version), |(e, _)| (e.index, e.version)).map_or(crate::viewport3d::SurfaceChoice::BuiltIn, |i| choices[i].1)
         });
         list.time = ui.input(|input| input.time) as f32;
+        // A sun with its own shadow range keeps the shadow area in front of the view.
+        if let Some(look) = &self.editor.yard_frame().look {
+            look.follow_view(&mut list.lighting, camera.eye, camera.target);
+        }
         #[cfg(feature="room-lighting")]
         if let Err(error) = self.editor.apply_room_environment_for_presentation(&mut list.lighting) {
             ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,error,egui::FontId::proportional(14.0),Color32::RED);
@@ -2953,6 +2960,8 @@ impl EditorApp {
             // Model entities with a material are drawn by their shader too.
             #[cfg(feature = "models")]
             gpu.set_model_surfaces(choices.clone(), list.time);
+            #[cfg(feature = "outdoor")]
+            gpu.set_outdoor(crate::outdoor_scene::scene(self.editor.yard_frame(), &terrain_heights), list.time);
             #[cfg(feature = "models")]
             if let Err(error) = point_light.and_then(|settings|gpu.set_point_light_settings(settings)) {
                 ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, error, egui::FontId::proportional(14.0), Color32::RED);

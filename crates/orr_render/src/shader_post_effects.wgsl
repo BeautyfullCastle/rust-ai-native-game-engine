@@ -16,6 +16,18 @@ struct Effects {
     // Entry i uses list[2i] = (kind, p0, p1, p2) and list[2i + 1] = (p3, 0, 0, 0).
     // Kinds: 4 color grade, 5 vignette, 6 film grain.
     list: array<vec4<f32>, 16>,
+    // x: density, y: falloff per meter, z: height of full density, w: uniform haze share.
+    fog: vec4<f32>,
+    // x: sky brightness, y: sun glow, z: 1 when height fog is on.
+    fog_sky: vec4<f32>,
+    // xyz: camera position.
+    eye: vec4<f32>,
+    // xyz: unit vector toward the sun.
+    sun_dir: vec4<f32>,
+    // rgb: sun color without intensity.
+    sun_tint: vec4<f32>,
+    // Clip space back to world space.
+    inv_view_proj: mat4x4<f32>,
 };
 
 @group(0) @binding(0) var scene: texture_2d<f32>;
@@ -94,6 +106,46 @@ fn interleaved(p: vec2<f32>) -> f32 {
     return vec4<f32>(mix(before, sum / total, fx.frame.x), 0.0, 0.0, 1.0);
 }
 
+// Clear sky radiance in direction `d`, the haze color of the fog.
+fn sky_base(d: vec3<f32>) -> vec3<f32> {
+    let sun = fx.sun_dir.xyz;
+    let day = smoothstep(-0.05, 0.4, sun.y);
+    let zenith = mix(vec3<f32>(0.05, 0.075, 0.2), vec3<f32>(0.055, 0.2, 0.66), day);
+    let horizon = mix(vec3<f32>(0.78, 0.4, 0.2), vec3<f32>(0.46, 0.66, 0.92), day);
+    let up = max(d.y, 0.0);
+    var c = mix(horizon, zenith, pow(up, 0.42));
+    let mu = max(dot(d, sun), 0.0);
+    let glow = (0.08 * pow(mu, 6.0) + 0.3 * pow(mu, 48.0)) * fx.fog_sky.y;
+    c = c + fx.sun_tint.rgb * glow * (0.3 + 0.7 * (1.0 - up)) * smoothstep(-0.1, 0.05, sun.y);
+    c = mix(c, horizon * 0.72, 1.0 - smoothstep(-0.3, 0.0, d.y));
+    return c * fx.fog_sky.x;
+}
+
+// Height fog with an exact integral along the view ray, tinted by the sky behind it.
+fn height_fog(color: vec3<f32>, uv: vec2<f32>, pos: vec2<i32>) -> vec3<f32> {
+    let d = textureLoad(depth, pos, 0);
+    if (d >= 0.99999) {
+        return color;
+    }
+    let clip = vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, d, 1.0);
+    let w = fx.inv_view_proj * clip;
+    let world = w.xyz / w.w;
+    let ray = world - fx.eye.xyz;
+    let dist = length(ray);
+    let dir = ray / max(dist, 1e-4);
+    let falloff = fx.fog.y;
+    let start = fx.fog.x * exp(-falloff * (fx.eye.y - fx.fog.z));
+    let slope = falloff * dir.y;
+    var optical = start * dist;
+    if (abs(slope) > 1e-5) {
+        optical = start * (1.0 - exp(-slope * dist)) / slope;
+    }
+    optical = optical + dist * fx.fog.x * fx.fog.w;
+    let transmittance = exp(-max(optical, 0.0));
+    let toward = normalize(vec3<f32>(dir.x, abs(dir.y) * 0.3 + 0.04, dir.z));
+    return color * transmittance + sky_base(toward) * (1.0 - transmittance);
+}
+
 fn aces(x: vec3<f32>) -> vec3<f32> {
     return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), vec3<f32>(0.0), vec3<f32>(1.0));
 }
@@ -116,6 +168,9 @@ fn grade(c: vec3<f32>, saturation: f32, contrast: f32, warmth: f32, tint: f32) -
     let uv = in.position.xy / size;
     let source = textureLoad(scene, pos, 0);
     var c = source.rgb;
+    if (fx.fog_sky.z > 0.5) {
+        c = height_fog(c, uv, pos);
+    }
     if (fx.display.w > 0.0) {
         c = c + textureSampleLevel(bloom, linear_sampler, uv, 0.0).rgb * fx.display.w;
     }

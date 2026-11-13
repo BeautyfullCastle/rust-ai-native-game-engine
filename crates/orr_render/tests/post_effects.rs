@@ -154,3 +154,18 @@ fn effect_numbers_out_of_range_are_refused() {
     settings.effects[0] = Some(ScreenEffect::FilmGrain { strength: 0.5 });
     assert!(settings.validate().is_ok());
 }
+
+#[test]
+fn height_fog_turns_far_geometry_toward_the_sky_color() {
+    let Some(g) = gpu() else { return };
+    let mut day = light(1.0);
+    day.direction = [0.3, -0.8, -0.5];
+    let camera = Camera3D::perspective([0.0, 0.0, 5.0], [0.0; 3], 50.0);
+    let fog = [ScreenEffect::HeightFog { density: 0.05, falloff: 0.0, height: 0.0, haze: 0.0, sky_brightness: 1.5, sun_glow: 1.0 }];
+    // A red wall 4 meters away fills the view.
+    let clear = render_from(&g, &camera, [0.8, 0.05, 0.05], 20.0, &day, &[]);
+    let foggy = render_from(&g, &camera, [0.8, 0.05, 0.05], 20.0, &day, &fog);
+    let (a, b) = (px(&clear, 32, 32), px(&foggy, 32, 32));
+    assert!(a[0] > a[2] + 100, "without fog the wall is red: {a:?}");
+    assert!(b[2] > a[2] + 40 && b[0] < a[0], "fog brings in the sky color: {a:?} clear, {b:?} foggy");
+}

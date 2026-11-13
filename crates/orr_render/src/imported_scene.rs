@@ -941,6 +941,7 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
                 lighting,
                 &self.depth.as_ref().expect("accepted frame owns depth").view,
                 globals.view_proj(),
+                camera.eye,
             );
         }
         self.rhi.submit(encoder);

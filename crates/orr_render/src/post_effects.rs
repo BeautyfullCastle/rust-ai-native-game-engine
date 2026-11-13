@@ -27,6 +27,12 @@ pub enum ScreenEffect {
     Vignette { strength: f32, radius: f32, softness: f32 },
     /// Moving noise. `strength` 0..=1.
     FilmGrain { strength: f32 },
+    /// Fog that thickens toward `height` (meters), tinted by the sky. Applied
+    /// to the lit scene by its depth, before everything else. `density`
+    /// 0..=0.05 per meter, `falloff` 0..=1 per meter, `haze` 0..=1 is a thin
+    /// fog everywhere; `sky_brightness` 0..=8 and `sun_glow` 0..=4 shape the
+    /// sky color the fog takes.
+    HeightFog { density: f32, falloff: f32, height: f32, haze: f32, sky_brightness: f32, sun_glow: f32 },
 }
 
 impl ScreenEffect {
@@ -37,6 +43,9 @@ impl ScreenEffect {
             Self::ColorGrade { saturation, contrast, warmth, tint } => vec![(saturation, 0.0, 2.0), (contrast, 0.0, 1.0), (warmth, -1.0, 1.0), (tint, -1.0, 1.0)],
             Self::Vignette { strength, radius, softness } => vec![(strength, 0.0, 1.0), (radius, 0.1, 1.5), (softness, 0.01, 1.0)],
             Self::FilmGrain { strength } => vec![(strength, 0.0, 1.0)],
+            Self::HeightFog { density, falloff, height, haze, sky_brightness, sun_glow } => {
+                vec![(density, 0.0, 0.05), (falloff, 0.0, 1.0), (height, -10000.0, 10000.0), (haze, 0.0, 1.0), (sky_brightness, 0.0, 8.0), (sun_glow, 0.0, 4.0)]
+            }
         }
     }
 
@@ -53,6 +62,14 @@ impl ScreenEffect {
             Self::ColorGrade { saturation, contrast, warmth, tint } => Self::ColorGrade { saturation: c(saturation, 0.0, 2.0), contrast: c(contrast, 0.0, 1.0), warmth: c(warmth, -1.0, 1.0), tint: c(tint, -1.0, 1.0) },
             Self::Vignette { strength, radius, softness } => Self::Vignette { strength: c(strength, 0.0, 1.0), radius: c(radius, 0.1, 1.5), softness: c(softness, 0.01, 1.0) },
             Self::FilmGrain { strength } => Self::FilmGrain { strength: c(strength, 0.0, 1.0) },
+            Self::HeightFog { density, falloff, height, haze, sky_brightness, sun_glow } => Self::HeightFog {
+                density: c(density, 0.0, 0.05),
+                falloff: c(falloff, 0.0, 1.0),
+                height: c(height, -10000.0, 10000.0),
+                haze: c(haze, 0.0, 1.0),
+                sky_brightness: c(sky_brightness, 0.0, 8.0),
+                sun_glow: c(sun_glow, 0.0, 4.0),
+            },
         }
     }
 
@@ -79,6 +96,39 @@ struct Uniform {
     exposure: [f32; 4],
     frame: [f32; 4],
     list: [[f32; 4]; 16],
+    fog: [f32; 4],
+    fog_sky: [f32; 4],
+    eye: [f32; 4],
+    sun_dir: [f32; 4],
+    sun_tint: [f32; 4],
+    inv_view_proj: [[f32; 4]; 4],
+}
+
+/// The inverse of a column-major 4 x 4 matrix, or the identity when it has none.
+fn inverse(m: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
+    let a: [f64; 16] = std::array::from_fn(|i| f64::from(m[i / 4][i % 4]));
+    let mut inv = [0.0f64; 16];
+    inv[0] = a[5] * a[10] * a[15] - a[5] * a[11] * a[14] - a[9] * a[6] * a[15] + a[9] * a[7] * a[14] + a[13] * a[6] * a[11] - a[13] * a[7] * a[10];
+    inv[4] = -a[4] * a[10] * a[15] + a[4] * a[11] * a[14] + a[8] * a[6] * a[15] - a[8] * a[7] * a[14] - a[12] * a[6] * a[11] + a[12] * a[7] * a[10];
+    inv[8] = a[4] * a[9] * a[15] - a[4] * a[11] * a[13] - a[8] * a[5] * a[15] + a[8] * a[7] * a[13] + a[12] * a[5] * a[11] - a[12] * a[7] * a[9];
+    inv[12] = -a[4] * a[9] * a[14] + a[4] * a[10] * a[13] + a[8] * a[5] * a[14] - a[8] * a[6] * a[13] - a[12] * a[5] * a[10] + a[12] * a[6] * a[9];
+    inv[1] = -a[1] * a[10] * a[15] + a[1] * a[11] * a[14] + a[9] * a[2] * a[15] - a[9] * a[3] * a[14] - a[13] * a[2] * a[11] + a[13] * a[3] * a[10];
+    inv[5] = a[0] * a[10] * a[15] - a[0] * a[11] * a[14] - a[8] * a[2] * a[15] + a[8] * a[3] * a[14] + a[12] * a[2] * a[11] - a[12] * a[3] * a[10];
+    inv[9] = -a[0] * a[9] * a[15] + a[0] * a[11] * a[13] + a[8] * a[1] * a[15] - a[8] * a[3] * a[13] - a[12] * a[1] * a[11] + a[12] * a[3] * a[9];
+    inv[13] = a[0] * a[9] * a[14] - a[0] * a[10] * a[13] - a[8] * a[1] * a[14] + a[8] * a[2] * a[13] + a[12] * a[1] * a[10] - a[12] * a[2] * a[9];
+    inv[2] = a[1] * a[6] * a[15] - a[1] * a[7] * a[14] - a[5] * a[2] * a[15] + a[5] * a[3] * a[14] + a[13] * a[2] * a[7] - a[13] * a[3] * a[6];
+    inv[6] = -a[0] * a[6] * a[15] + a[0] * a[7] * a[14] + a[4] * a[2] * a[15] - a[4] * a[3] * a[14] - a[12] * a[2] * a[7] + a[12] * a[3] * a[6];
+    inv[10] = a[0] * a[5] * a[15] - a[0] * a[7] * a[13] - a[4] * a[1] * a[15] + a[4] * a[3] * a[13] + a[12] * a[1] * a[7] - a[12] * a[3] * a[5];
+    inv[14] = -a[0] * a[5] * a[14] + a[0] * a[6] * a[13] + a[4] * a[1] * a[14] - a[4] * a[2] * a[13] - a[12] * a[1] * a[6] + a[12] * a[2] * a[5];
+    inv[3] = -a[1] * a[6] * a[11] + a[1] * a[7] * a[10] + a[5] * a[2] * a[11] - a[5] * a[3] * a[10] - a[9] * a[2] * a[7] + a[9] * a[3] * a[6];
+    inv[7] = a[0] * a[6] * a[11] - a[0] * a[7] * a[10] - a[4] * a[2] * a[11] + a[4] * a[3] * a[10] + a[8] * a[2] * a[7] - a[8] * a[3] * a[6];
+    inv[11] = -a[0] * a[5] * a[11] + a[0] * a[7] * a[9] + a[4] * a[1] * a[11] - a[4] * a[3] * a[9] - a[8] * a[1] * a[7] + a[8] * a[3] * a[5];
+    inv[15] = a[0] * a[5] * a[10] - a[0] * a[6] * a[9] - a[4] * a[1] * a[10] + a[4] * a[2] * a[9] + a[8] * a[1] * a[6] - a[8] * a[2] * a[5];
+    let det = a[0] * inv[0] + a[1] * inv[4] + a[2] * inv[8] + a[3] * inv[12];
+    if det.abs() < 1e-30 || !det.is_finite() {
+        return [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+    }
+    std::array::from_fn(|c| std::array::from_fn(|r| (inv[c * 4 + r] / det) as f32))
 }
 
 struct Color<B: Rhi> {
@@ -123,6 +173,7 @@ pub(crate) struct FrameInputs<'a, B: Rhi> {
     pub depth: &'a B::TextureView,
     pub sampler: &'a B::Sampler,
     pub view_proj: [[f32; 4]; 4],
+    pub eye: [f32; 3],
     pub lighting: &'a Lighting,
     pub format: TextureFormat,
 }
@@ -167,11 +218,16 @@ impl<B: Rhi> EffectChain<B> {
         let clip: [f32; 4] = std::array::from_fn(|row| m[0][row] * toward[0] + m[1][row] * toward[1] + m[2][row] * toward[2]);
         let sun_uv = if clip[3] > 1e-4 { [clip[0] / clip[3] * 0.5 + 0.5, 0.5 - clip[1] / clip[3] * 0.5] } else { [0.0; 2] };
         let shaft_strength = shafts.filter(|_| clip[3] > 1e-4).map_or(0.0, |(s, _)| s);
-        let sun_color = frame.lighting.color.map(|c| c * frame.lighting.intensity);
+        // Shafts take the sun's color, not its intensity: exposure already follows the lit scene.
+        let sun_color = frame.lighting.color.map(|c| c * 1.3);
         let adapt = match (auto, last) {
             (Some((_, _, speed, _)), Some(last)) => 1.0 - (-speed * now.duration_since(last).as_secs_f32().min(1.0)).exp(),
             _ => 1.0,
         };
+        let fog = effects.iter().find_map(|e| match e {
+            ScreenEffect::HeightFog { density, falloff, height, haze, sky_brightness, sun_glow } => Some(([*density, *falloff, *height, *haze], [*sky_brightness, *sun_glow, 1.0, 0.0])),
+            _ => None,
+        });
         let mut list = [[0.0; 4]; 16];
         let mut count = 0;
         for effect in effects {
@@ -194,6 +250,12 @@ impl<B: Rhi> EffectChain<B> {
             exposure: auto.map_or([0.0, 1.0, 1.0, 0.165], |(darkest, brightest, _, target)| [1.0, darkest, brightest, target]),
             frame: [adapt, (number % 1024) as f32, count as f32, 0.0],
             list,
+            fog: fog.map_or([0.0; 4], |(f, _)| f),
+            fog_sky: fog.map_or([0.0; 4], |(_, s)| s),
+            eye: [frame.eye[0], frame.eye[1], frame.eye[2], 0.0],
+            sun_dir: [toward[0], toward[1], toward[2], 0.0],
+            sun_tint: [frame.lighting.color[0], frame.lighting.color[1], frame.lighting.color[2], 0.0],
+            inv_view_proj: inverse(m),
         };
         rhi.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&uniform));
         let pass = |encoder: &mut B::Encoder, label, pipeline, bind: &B::BindGroup, view| {
@@ -226,6 +288,7 @@ impl<B: Rhi> EffectChain<B> {
             Binding::Sampler { binding: 2, sampler: frame.sampler },
             Binding::Uniform { binding: 3, buffer: &self.uniform },
             Binding::Texture { binding: 4, view: &self.shafts.view },
+            Binding::Texture { binding: 6, view: frame.depth },
             Binding::Texture { binding: 7, view: current },
         ]);
         pass(encoder, "post final with effects", &self.final_pipeline, &final_bind, target);

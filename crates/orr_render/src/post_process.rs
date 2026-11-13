@@ -349,6 +349,7 @@ impl<B: Rhi> PostProcessor<B> {
         lighting: &Lighting,
         depth: &B::TextureView,
         view_proj: [[f32; 4]; 4],
+        eye: [f32; 3],
     ) {
         let write =
             |buffer, params: Params| rhi.write_buffer(buffer, 0, bytemuck::bytes_of(&params));
@@ -431,6 +432,7 @@ impl<B: Rhi> PostProcessor<B> {
                 depth,
                 sampler: &self.sampler,
                 view_proj,
+                eye,
                 lighting,
                 format,
             };

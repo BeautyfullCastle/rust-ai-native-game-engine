@@ -103,6 +103,8 @@ pub mod material_panel;
 pub mod post_panel;
 #[cfg(feature = "models")]
 pub mod terrain_models;
+#[cfg(feature = "outdoor")]
+pub mod outdoor_scene;
 #[cfg(feature = "models")]
 pub mod model_bindings;
 #[cfg(feature = "models")]

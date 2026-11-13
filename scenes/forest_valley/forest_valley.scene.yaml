@@ -1,0 +1,415 @@
+# Forest Valley built only from engine components. Written by
+# `cargo run -p orr_scenery --example forest_valley_scene`.
+schema: orr.scene/1
+singletons:
+  Yard3dScene: { rain_batch: 0, rain_interval: 0, max_entities: 128, rain_seed: 42 }
+  orr_gfx::Environment:
+    sky_color: [0.42, 0.58, 0.9]
+    ground_color: [0.22, 0.2, 0.12]
+    ambient: 1
+  orr_gfx::Sky:
+    brightness: 1.5
+    sun_glow: 1
+    cloud_cover: 0.34
+    cloud_speed: 1
+    fog_density: 1
+    fog_falloff: 0.03
+    fog_height: 35.9
+    haze: 0.08
+    wind_strength: 1
+    wind_speed: 1
+    enabled: true
+  orr_gfx::PostProcess:
+    exposure: 1
+    tone_mapping: aces
+    effects:
+      - { kind: auto_exposure, enabled: true, params: [0.55, 4.5, 2.2, 0.165] }
+      - { kind: bloom, enabled: true, params: [0.9, 0.1, 4, 2] }
+      - { kind: light_shafts, enabled: true, params: [0.35, 0.85, 0, 0] }
+      - { kind: color_grade, enabled: true, params: [1.08, 0.18, 0.15, 0] }
+      - { kind: vignette, enabled: true, params: [0.3, 0.85, 0.5, 0] }
+      - { kind: film_grain, enabled: true, params: [0.04, 0, 0, 0] }
+      - { kind: none, enabled: false, params: [0, 0, 0, 0] }
+      - { kind: none, enabled: false, params: [0, 0, 0, 0] }
+entities:
+  e_00000001:
+    name: valley
+    orr_gfx::Transform3:
+      position: [0, 18.0, 0]
+      rotation: [0, 0, 0]
+      scale: [1, 1, 1]
+    orr_gfx::Terrain:
+      heightmap: terrain/valley.png
+      size: [1024, 1024]
+      height: 266.0
+      resolution: 352
+      cast_shadows: true
+    orr_gfx::Material:
+      shader: terrain
+      values: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+      overrides: 0
+  e_00000002:
+    name: far_ridges
+    orr_gfx::Transform3:
+      position: [0, 7.0, 0]
+      rotation: [0, 0, 0]
+      scale: [1, 1, 1]
+    orr_gfx::Terrain:
+      heightmap: terrain/ridges.png
+      size: [6144, 6144]
+      height: 431.0
+      resolution: 256
+      cast_shadows: false
+    orr_gfx::Material:
+      shader: terrain
+      values: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+      overrides: 0
+  e_00000003:
+    name: sun
+    orr_gfx::Transform3:
+      position: [0, 200, 0]
+      rotation: [22.936, 41.800, 0.000]
+      scale: [1, 1, 1]
+    orr_gfx::Light:
+      color: [1, 0.9, 0.76]
+      intensity: 8.5
+      range: 10
+      inner_angle: 20
+      outer_angle: 30
+      shadow_strength: 1
+      shadow_range: 140
+      kind: directional
+      enabled: true
+      cast_shadows: true
+      layers: [default, layer2, layer3, layer4, layer5, layer6, layer7, layer8]
+  e_00000004:
+    name: camera
+    orr_gfx::Transform3:
+      position: [45.242, 37.513, 156.000]
+      rotation: [-4.927, -154.419, 0.000]
+      scale: [1, 1, 1]
+    orr_gfx::Camera:
+      fov_y: 55
+      half_height: 10
+      near: 0.3
+      far: 9000
+      projection: perspective
+      layers: [default, layer2, layer3, layer4, layer5, layer6, layer7, layer8]
+      priority: 0
+      active: true
+  e_00000005:
+    name: pool_00
+    orr_gfx::Transform3:
+      position: [-54.28, 63.900, -476.00]
+      rotation: [0, 0, 0]
+      scale: [1, 1, 1]
+    orr_gfx::Water:
+      size: [260, 72]
+      color: [0.012, 0.05, 0.04]
+      clarity: 1
+      ripples: 1
+      flow: [0, 0.6]
+      glint: 1
+      terrain: e_00000001
+  e_00000006:
+    name: pool_01
+    orr_gfx::Transform3:
+      position: [-28.12, 59.876, -404.00]
+      rotation: [0, 0, 0]
+      scale: [1, 1, 1]
+    orr_gfx::Water:
+      size: [260, 72]
+      color: [0.012, 0.05, 0.04]
+      clarity: 1
+      ripples: 1
+      flow: [0, 0.6]
+      glint: 1
+      terrain: e_00000001
+  e_00000007:
+    name: pool_02
+    orr_gfx::Transform3:
+      position: [-53.29, 56.109, -332.00]
+      rotation: [0, 0, 0]
+      scale: [1, 1, 1]
+    orr_gfx::Water:
+      size: [260, 72]
+      color: [0.012, 0.05, 0.04]
+      clarity: 1
+      ripples: 1
+      flow: [0, 0.6]
+      glint: 1
+      terrain: e_00000001
+  e_00000008:
+    name: pool_03
+    orr_gfx::Transform3:
+      position: [-56.79, 54.061, -260.00]
+      rotation: [0, 0, 0]
+      scale: [1, 1, 1]
+    orr_gfx::Water:
+      size: [260, 72]
+      color: [0.012, 0.05, 0.04]
+      clarity: 1
+      ripples: 1
+      flow: [0, 0.6]
+      glint: 1
+      terrain: e_00000001
+  e_00000009:
+    name: pool_04
+    orr_gfx::Transform3:
+      position: [-62.01, 51.982, -188.00]
+      rotation: [0, 0, 0]
+      scale: [1, 1, 1]
+    orr_gfx::Water:
+      size: [260, 72]
+      color: [0.012, 0.05, 0.04]
+      clarity: 1
+      ripples: 1
+      flow: [0, 0.6]
+      glint: 1
+      terrain: e_00000001
+  e_0000000a:
+    name: pool_05
+    orr_gfx::Transform3:
+      position: [3.54, 48.078, -116.00]
+      rotation: [0, 0, 0]
+      scale: [1, 1, 1]
+    orr_gfx::Water:
+      size: [260, 72]
+      color: [0.012, 0.05, 0.04]
+      clarity: 1
+      ripples: 1
+      flow: [0, 0.6]
+      glint: 1
+      terrain: e_00000001
+  e_0000000b:
+    name: pool_06
+    orr_gfx::Transform3:
+      position: [40.89, 45.702, -44.00]
+      rotation: [0, 0, 0]
+      scale: [1, 1, 1]
+    orr_gfx::Water:
+      size: [260, 72]
+      color: [0.012, 0.05, 0.04]
+      clarity: 1
+      ripples: 1
+      flow: [0, 0.6]
+      glint: 1
+      terrain: e_00000001
+  e_0000000c:
+    name: pool_07
+    orr_gfx::Transform3:
+      position: [68.03, 41.474, 28.00]
+      rotation: [0, 0, 0]
+      scale: [1, 1, 1]
+    orr_gfx::Water:
+      size: [260, 72]
+      color: [0.012, 0.05, 0.04]
+      clarity: 1
+      ripples: 1
+      flow: [0, 0.6]
+      glint: 1
+      terrain: e_00000001
+  e_0000000d:
+    name: pool_08
+    orr_gfx::Transform3:
+      position: [40.32, 39.243, 100.00]
+      rotation: [0, 0, 0]
+      scale: [1, 1, 1]
+    orr_gfx::Water:
+      size: [260, 72]
+      color: [0.012, 0.05, 0.04]
+      clarity: 1
+      ripples: 1
+      flow: [0, 0.6]
+      glint: 1
+      terrain: e_00000001
+  e_0000000e:
+    name: pool_09
+    orr_gfx::Transform3:
+      position: [39.83, 35.882, 172.00]
+      rotation: [0, 0, 0]
+      scale: [1, 1, 1]
+    orr_gfx::Water:
+      size: [260, 72]
+      color: [0.012, 0.05, 0.04]
+      clarity: 1
+      ripples: 1
+      flow: [0, 0.6]
+      glint: 1
+      terrain: e_00000001
+  e_0000000f:
+    name: pool_10
+    orr_gfx::Transform3:
+      position: [47.59, 31.477, 244.00]
+      rotation: [0, 0, 0]
+      scale: [1, 1, 1]
+    orr_gfx::Water:
+      size: [260, 72]
+      color: [0.012, 0.05, 0.04]
+      clarity: 1
+      ripples: 1
+      flow: [0, 0.6]
+      glint: 1
+      terrain: e_00000001
+  e_00000010:
+    name: pool_11
+    orr_gfx::Transform3:
+      position: [57.41, 28.624, 316.00]
+      rotation: [0, 0, 0]
+      scale: [1, 1, 1]
+    orr_gfx::Water:
+      size: [260, 72]
+      color: [0.012, 0.05, 0.04]
+      clarity: 1
+      ripples: 1
+      flow: [0, 0.6]
+      glint: 1
+      terrain: e_00000001
+  e_00000011:
+    name: pool_12
+    orr_gfx::Transform3:
+      position: [25.58, 26.655, 388.00]
+      rotation: [0, 0, 0]
+      scale: [1, 1, 1]
+    orr_gfx::Water:
+      size: [260, 72]
+      color: [0.012, 0.05, 0.04]
+      clarity: 1
+      ripples: 1
+      flow: [0, 0.6]
+      glint: 1
+      terrain: e_00000001
+  e_00000012:
+    name: pool_13
+    orr_gfx::Transform3:
+      position: [-34.44, 23.047, 460.00]
+      rotation: [0, 0, 0]
+      scale: [1, 1, 1]
+    orr_gfx::Water:
+      size: [260, 72]
+      color: [0.012, 0.05, 0.04]
+      clarity: 1
+      ripples: 1
+      flow: [0, 0.6]
+      glint: 1
+      terrain: e_00000001
+  e_00000013:
+    name: pool_14
+    orr_gfx::Transform3:
+      position: [-64.61, 20.154, 532.00]
+      rotation: [0, 0, 0]
+      scale: [1, 1, 1]
+    orr_gfx::Water:
+      size: [260, 72]
+      color: [0.012, 0.05, 0.04]
+      clarity: 1
+      ripples: 1
+      flow: [0, 0.6]
+      glint: 1
+      terrain: e_00000001
+  e_00000014:
+    name: pool_15
+    orr_gfx::Transform3:
+      position: [-66.36, 18.166, 604.00]
+      rotation: [0, 0, 0]
+      scale: [1, 1, 1]
+    orr_gfx::Water:
+      size: [260, 72]
+      color: [0.012, 0.05, 0.04]
+      clarity: 1
+      ripples: 1
+      flow: [0, 0.6]
+      glint: 1
+      terrain: e_00000001
+  e_00000015:
+    name: pool_16
+    orr_gfx::Transform3:
+      position: [-32.61, 15.472, 676.00]
+      rotation: [0, 0, 0]
+      scale: [1, 1, 1]
+    orr_gfx::Water:
+      size: [260, 72]
+      color: [0.012, 0.05, 0.04]
+      clarity: 1
+      ripples: 1
+      flow: [0, 0.6]
+      glint: 1
+      terrain: e_00000001
+  e_00000016:
+    name: pool_17
+    orr_gfx::Transform3:
+      position: [-42.62, 12.238, 748.00]
+      rotation: [0, 0, 0]
+      scale: [1, 1, 1]
+    orr_gfx::Water:
+      size: [260, 72]
+      color: [0.012, 0.05, 0.04]
+      clarity: 1
+      ripples: 1
+      flow: [0, 0.6]
+      glint: 1
+      terrain: e_00000001
+  e_00000017:
+    name: firs
+    orr_gfx::Transform3:
+      position: [0.0, 0, 0.0]
+      rotation: [0, 0, 0]
+      scale: [1, 1, 1]
+    orr_gfx::Scatter:
+      terrain: e_00000001
+      area: [1004, 1004]
+      heights: [11.3, 400]
+      max_slope: 36
+      scale: [0.8, 1.3]
+      kind: conifer
+      count: 9000
+      seed: 11
+      cast_shadows: true
+  e_00000018:
+    name: broadleaves
+    orr_gfx::Transform3:
+      position: [0.0, 0, 0.0]
+      rotation: [0, 0, 0]
+      scale: [1, 1, 1]
+    orr_gfx::Scatter:
+      terrain: e_00000001
+      area: [1004, 1004]
+      heights: [11.3, 400]
+      max_slope: 28
+      scale: [0.75, 1.2]
+      kind: broadleaf
+      count: 2600
+      seed: 12
+      cast_shadows: true
+  e_00000019:
+    name: boulders
+    orr_gfx::Transform3:
+      position: [0.0, 0, 0.0]
+      rotation: [0, 0, 0]
+      scale: [1, 1, 1]
+    orr_gfx::Scatter:
+      terrain: e_00000001
+      area: [1004, 1004]
+      heights: [11.3, 400]
+      max_slope: 60
+      scale: [0.4, 2.2]
+      kind: rock
+      count: 1200
+      seed: 13
+      cast_shadows: true
+  e_0000001a:
+    name: meadow
+    orr_gfx::Transform3:
+      position: [45.2, 0, 156.0]
+      rotation: [0, 0, 0]
+      scale: [1, 1, 1]
+    orr_gfx::Scatter:
+      terrain: e_00000001
+      area: [240, 240]
+      heights: [11.3, 400]
+      max_slope: 32
+      scale: [0.7, 1.4]
+      kind: grass
+      count: 20000
+      seed: 14
+      cast_shadows: false
