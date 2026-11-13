@@ -15,6 +15,8 @@ use crate::mesh::MeshKind;
 /// - `emissive`: adds `color * emissive` (self lit).
 /// - `checker`: multiplies the color with a 2 unit checker pattern in world
 ///   xz (for ground planes: it makes shadows and distance readable).
+/// - `layers`: the render layers the surface is on. A light affects it only
+///   when the two share a layer (see [`crate::SceneLights`]).
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Material {
     pub color: [f32; 3],
@@ -22,12 +24,19 @@ pub struct Material {
     pub metallic: f32,
     pub emissive: f32,
     pub checker: bool,
+    pub layers: u32,
 }
 
 impl Material {
-    /// A plain dielectric of `color` (roughness 0.6).
+    /// A plain dielectric of `color` (roughness 0.6) on the default layer.
     pub const fn new(color: [f32; 3]) -> Self {
-        Self { color, roughness: 0.6, metallic: 0.0, emissive: 0.0, checker: false }
+        Self { color, roughness: 0.6, metallic: 0.0, emissive: 0.0, checker: false, layers: crate::DEFAULT_RENDER_LAYER }
+    }
+
+    /// Puts the surface on the render layers of `layers`.
+    pub const fn on_layers(mut self, layers: u32) -> Self {
+        self.layers = layers;
+        self
     }
 
     pub const fn rough(mut self, roughness: f32) -> Self {
@@ -65,7 +74,7 @@ pub struct Instance3D {
     pub flags: f32,
     /// Base color (linear), alpha unused.
     pub color: [f32; 4],
-    /// Roughness, metallic, emissive, unused.
+    /// Roughness, metallic, emissive, render layers (0 is read as the default layer).
     pub material: [f32; 4],
 }
 
@@ -78,7 +87,7 @@ impl Instance3D {
             scale,
             flags: if m.checker { 1.0 } else { 0.0 },
             color: [m.color[0], m.color[1], m.color[2], 1.0],
-            material: [m.roughness, m.metallic, m.emissive, 0.0],
+            material: [m.roughness, m.metallic, m.emissive, (m.layers & crate::ALL_RENDER_LAYERS) as f32],
         }
     }
 }
@@ -148,6 +157,8 @@ pub struct RenderList3D {
     pub planes: Vec<Instance3D>,
     pub lines: Vec<LineInstance3D>,
     pub lighting: Lighting,
+    /// Lights beyond the sun of `lighting`, and the layers the sun affects.
+    pub scene_lights: crate::SceneLights,
 }
 
 impl RenderList3D {
@@ -155,7 +166,7 @@ impl RenderList3D {
         Self::default()
     }
 
-    /// Empties the instances and lines; the lighting stays.
+    /// Empties the instances and lines; the lighting and the scene lights stay.
     pub fn clear(&mut self) {
         self.spheres.clear();
         self.boxes.clear();

@@ -29,6 +29,13 @@ pub(crate) struct PreparedProcedural {
     lines: u32,
     stats: FrameStats,
 }
+
+impl PreparedProcedural {
+    /// Gives the batch the scene lights of the frame, which every batch of the frame shares.
+    pub(crate) fn set_scene_lights(&mut self, lights: &crate::SceneLights) {
+        self.globals.scene_lights = lights.uniform();
+    }
+}
 impl PreparedProcedural {
     /// Replace only the main matrix; directional-light/shadow data is unchanged.
     pub(crate) fn set_view_proj(&mut self, matrix: [[f32; 4]; 4]) {

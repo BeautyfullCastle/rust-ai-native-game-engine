@@ -300,9 +300,19 @@ impl<B: Bridge<Yard3D>> App<B> {
         self.items.clear();
         self.view.render_items(&mut self.items);
         self.list.clear();
-        self.list.lighting = yard_lighting();
-        self.list.lighting.shadows = self.shadows;
-        self.list.lighting.tonemap = self.tonemap;
+        // The scene's lights, environment and post-processing replace the
+        // default Yard lighting. The shadow and tone mapping keys still switch them off.
+        let fallback = yard_lighting();
+        let look = snapshot.as_ref().map(|s| orr_gfx_view::scene_look(s.predicted(), &fallback));
+        match &look {
+            Some(look) => look.apply(&mut self.list),
+            None => {
+                self.list.lighting = fallback;
+                self.list.scene_lights = orr_render::SceneLights::default();
+            }
+        }
+        self.list.lighting.shadows &= self.shadows;
+        self.list.lighting.tonemap &= self.tonemap;
         fill_list(&self.items, &mut self.list);
         if self.debug {
             if let Some(s) = &snapshot {
@@ -578,7 +588,11 @@ pub fn run_headless(scene: YardConfig, net: Loopback, limit: HeadlessLimit) -> Y
         items.clear();
         view.render_items(&mut items);
         list.clear();
-        list.lighting = yard_lighting();
+        let fallback = yard_lighting();
+        match snapshot.as_ref() {
+            Some(s) => orr_gfx_view::scene_look(s.predicted(), &fallback).apply(&mut list),
+            None => list.lighting = fallback,
+        }
         fill_list(&items, &mut list);
         instances = list.instance_count();
         list_ms.push(ms(t.elapsed()));

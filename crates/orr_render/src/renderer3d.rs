@@ -327,6 +327,7 @@ struct Globals {
     viewport: [f32; 4],
     point_position_range: [f32; 4],
     point_color_intensity: [f32; 4],
+    scene_lights: crate::scene_lights::SceneLightsUniform,
     #[cfg(feature = "irradiance-probes")]
     irradiance: crate::IrradianceUniform,
 }
@@ -498,13 +499,10 @@ impl<B: Rhi> Renderer3D<B> {
 
     fn build(rhi: B, format: TextureFormat, settings: Settings3D, policy: Option<SphereLod3D>) -> Self {
         let samples = rhi.supported_samples(format, settings.msaa);
+        let source = crate::scene_lights::shader(SHADER, "g");
         #[cfg(feature = "irradiance-probes")]
-        let source = irradiance::shader(SHADER, "g");
-        #[cfg(feature = "irradiance-probes")]
-        let source = source.as_str();
-        #[cfg(not(feature = "irradiance-probes"))]
-        let source = SHADER;
-        let shader = rhi.create_shader("orr_render 3d", source);
+        let source = irradiance::shader(&source, "g");
+        let shader = rhi.create_shader("orr_render 3d", &source);
 
         let mesh_layout = VertexLayout {
             stride: std::mem::size_of::<Vertex3>() as u64,
@@ -808,6 +806,7 @@ impl<B: Rhi> Renderer3D<B> {
             viewport: [w, h, if self.format == TextureFormat::Rgba16Float { 1.0 } else { 0.0 }, 0.0],
             point_position_range: [0.0; 4],
             point_color_intensity: [0.0; 4],
+            scene_lights: crate::scene_lights::SceneLightsUniform::none(),
             #[cfg(feature = "irradiance-probes")]
             irradiance: crate::IrradianceUniform::zeroed(),
         }
@@ -850,7 +849,8 @@ impl<B: Rhi> Renderer3D<B> {
             stats.attachment_reallocations = stats.attachment_allocations;
         }
         let light_vp = light_view_proj(&list.lighting, self.settings.shadow_map_size);
-        let globals = self.globals(camera, size, &list.lighting, &light_vp);
+        let mut globals = self.globals(camera, size, &list.lighting, &light_vp);
+        globals.scene_lights = list.scene_lights.uniform();
         let shadow_globals = Globals {
             view_proj: light_vp.0,
             ..globals
@@ -1064,24 +1064,26 @@ mod tests {
     #[cfg(feature = "irradiance-probes")]
     #[test]
     fn probe_globals_remain_below_portable_uniform_limit() {
-        assert_eq!(std::mem::size_of::<Globals>(), 9568);
+        assert_eq!(std::mem::size_of::<Globals>(), 10096);
         assert!(std::mem::size_of::<Globals>() <= 16 * 1024);
     }
 
     #[test]
     fn globals_layout_includes_point_light_uniforms() {
-        // Match shader3d.wgsl: retain the 256-byte prefix, then two vec4s.
+        // Match shader3d.wgsl: retain the 256-byte prefix, then two vec4s, then
+        // the scene lights (one vec4 and eight lights of four vec4s).
         // gpu3d upload budgets count two complete uniforms on every draw.
         assert_eq!(std::mem::offset_of!(Globals, viewport), 240);
         assert_eq!(std::mem::offset_of!(Globals, point_position_range), 256);
         assert_eq!(std::mem::offset_of!(Globals, point_color_intensity), 272);
+        assert_eq!(std::mem::offset_of!(Globals, scene_lights), 288);
         #[cfg(not(feature = "irradiance-probes"))]
-        assert_eq!(std::mem::size_of::<Globals>(), 288);
+        assert_eq!(std::mem::size_of::<Globals>(), 816);
         #[cfg(feature = "irradiance-probes")]
         {
-            assert_eq!(std::mem::offset_of!(Globals, irradiance), 288);
+            assert_eq!(std::mem::offset_of!(Globals, irradiance), 816);
             assert_eq!(std::mem::size_of::<crate::IrradianceUniform>(), 4 * 16 + 64 * 9 * 16);
-            assert_eq!(std::mem::size_of::<Globals>(), 288 + 4 * 16 + 64 * 9 * 16);
+            assert_eq!(std::mem::size_of::<Globals>(), 816 + 4 * 16 + 64 * 9 * 16);
         }
     }
 

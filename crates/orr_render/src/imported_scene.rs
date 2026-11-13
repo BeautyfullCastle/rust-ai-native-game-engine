@@ -185,9 +185,12 @@ pub struct ImportedSceneRenderer<B: Rhi> {
     /// Legacy clear semantics are unchanged when HDR is disabled.
     pub clear: [f64; 4],
     pub post_process: crate::PostProcessSettings,
+    /// Lights beyond the sun and the layers the sun affects. Every batch of a frame reads them.
+    pub scene_lights: crate::SceneLights,
     /// Optional diffuse irradiance. Validated before any frame resource/cache mutation.
     /// No coefficient storage is replicated per instance: each asset renderer has
-    /// one 9280-byte globals extension (procedural renderers have two). Existing
+    /// one 9280-byte globals extension next to its 528 bytes of scene lights
+    /// (procedural renderers have two of each). Existing
     /// viewport asset limits bound retained storage; toggles allocate no variants.
     #[cfg(feature = "irradiance-probes")]
     pub irradiance: Option<crate::IrradianceGrid>,
@@ -208,6 +211,7 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
             shadow: None,
             clear: crate::DEFAULT_CLEAR_3D,
             post_process: crate::PostProcessSettings::default(),
+            scene_lights: crate::SceneLights::default(),
             #[cfg(feature = "irradiance-probes")]
             irradiance: None,
             post_processor: None,
@@ -516,6 +520,7 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
         {
             globals.irradiance = irradiance;
         }
+        globals.scene_lights = self.scene_lights.uniform();
         point.validate().map_err(ImportedSceneError::PointLight)?;
         if let Some(light) = &point.point_light {
             globals.point_position_range = [
@@ -616,7 +621,10 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
                         point,
                         shadow_ready.as_ref(),
                     )
-                    .map(|ready| PreparedBatch::Procedural(Box::new(ready)))
+                    .map(|mut ready| {
+                        ready.set_scene_lights(&self.scene_lights);
+                        PreparedBatch::Procedural(Box::new(ready))
+                    })
                     .map_err(ImportedSceneError::Procedural),
                 #[cfg(feature = "animation")]
                 ImportedBatch::Skinned {
@@ -1376,7 +1384,8 @@ mod tests {
     fn probe_globals_remain_below_portable_uniform_limit() {
         assert_eq!(std::mem::size_of::<crate::IrradianceUniform>(), 9280);
         let material_globals = if cfg!(feature = "metallic-roughness") { 32 } else { 0 };
-        assert_eq!(std::mem::size_of::<crate::model_renderer::Globals>(), 9536 + material_globals);
+        // 256 bytes of camera and sun values, 528 bytes of scene lights, 9280 bytes of probes.
+        assert_eq!(std::mem::size_of::<crate::model_renderer::Globals>(), 9536 + 528 + material_globals);
         assert!(std::mem::size_of::<crate::model_renderer::Globals>() <= 16 * 1024);
     }
 

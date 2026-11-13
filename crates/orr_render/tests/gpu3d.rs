@@ -8,20 +8,22 @@
 
 use orr_render::orr_rhi::{Rhi, TextureFormat, Wgpu, WgpuOptions};
 use orr_render::{
-    Camera3D, Lighting, Material, OffscreenTarget, RenderList3D, Renderer3D, Settings3D, SphereLod3D, IDENTITY_ROT,
+    Camera3D, Lighting, Material, OffscreenTarget, RenderList3D, Renderer3D, SceneLight, SceneLightKind, Settings3D, SphereLod3D,
+    IDENTITY_ROT,
 };
 use std::sync::{Mutex, MutexGuard};
 
 static SERIAL: Mutex<()> = Mutex::new(());
 
 // Every draw uploads main + shadow Globals, including empty/no-shadow frames.
-// Each uniform is two mat4 (128 bytes) + ten vec4 (160 bytes); the private
-// renderer3d layout test pins its 288-byte size and point-light field offsets.
+// Each uniform is two mat4 (128 bytes) + ten vec4 (160 bytes) + the scene lights
+// (one vec4 and eight lights of four vec4s, 528 bytes); the private renderer3d
+// layout test pins its 816-byte size and field offsets.
 #[cfg(not(feature = "irradiance-probes"))]
-const GLOBAL_UPLOAD_BYTES: u64 = 2 * 288;
+const GLOBAL_UPLOAD_BYTES: u64 = 2 * 816;
 // SH9 appends four vec4 headers and 64 probes of nine padded vec4 coefficients.
 #[cfg(feature = "irradiance-probes")]
-const GLOBAL_UPLOAD_BYTES: u64 = 2 * (288 + 4 * 16 + 64 * 9 * 16);
+const GLOBAL_UPLOAD_BYTES: u64 = 2 * (816 + 4 * 16 + 64 * 9 * 16);
 
 fn gpu() -> Option<(MutexGuard<'static, ()>, Wgpu)> {
     let guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
@@ -1351,4 +1353,135 @@ fn sphere_lod_mixed_materials_and_unequal_depth_occlusion_survive_both_input_ord
             assert!(right[0] > 180 && right[1] > 150 && right[2] < 20, "settings {settings:?}, near_first={near_first}: far yellow sphere must keep its material, got {right:?}");
         }
     }
+}
+
+/// A matte sphere at the origin seen from +z, with no sun and no ambient light.
+fn dark_sphere_scene() -> (RenderList3D, Camera3D) {
+    let mut list = RenderList3D::new();
+    list.lighting = unlit();
+    list.sphere([0.0; 3], IDENTITY_ROT, 1.0, &white());
+    (list, Camera3D::perspective([0.0, 0.0, 5.0], [0.0; 3], 40.0))
+}
+
+#[test]
+fn a_point_scene_light_lights_the_near_side_and_ends_at_its_range() {
+    let Some((_g, gpu)) = gpu() else { return };
+    let (mut list, cam) = dark_sphere_scene();
+    let dark = render(&gpu, (128, 128), &list, &cam);
+    assert_eq!(luma(px(&dark, 128, 64, 64)), 0.0, "nothing lights the sphere yet");
+    // A light to the left of the sphere, a little toward the camera.
+    let light = SceneLight { kind: SceneLightKind::Point, position: [-3.0, 0.0, 1.5], intensity: 2.0, range: 8.0, ..SceneLight::default() };
+    list.scene_lights.push(light).unwrap();
+    let lit = render(&gpu, (128, 128), &list, &cam);
+    let (left, right) = (px(&lit, 128, 64 - 22, 64), px(&lit, 128, 64 + 22, 64));
+    assert!(luma(left) > 0.1 && luma(left) > luma(right) * 4.0, "left {left:?} right {right:?}");
+    assert_eq!(luma(px(&lit, 128, 4, 4)), 0.0, "the background stays black");
+    // The same light with a range shorter than its distance to the sphere lights nothing.
+    list.scene_lights.clear();
+    list.scene_lights.push(SceneLight { range: 1.5, ..light }).unwrap();
+    assert_eq!(render(&gpu, (128, 128), &list, &cam), dark);
+    // A colored light colors the surface.
+    list.scene_lights.clear();
+    list.scene_lights.push(SceneLight { color: [1.0, 0.0, 0.0], ..light }).unwrap();
+    let red = px(&render(&gpu, (128, 128), &list, &cam), 128, 64 - 22, 64);
+    assert!(red[0] > 60 && red[1] == 0 && red[2] == 0, "{red:?}");
+}
+
+#[test]
+fn a_spot_scene_light_lights_only_inside_its_cone() {
+    let Some((_g, gpu)) = gpu() else { return };
+    let mut list = RenderList3D::new();
+    list.lighting = unlit();
+    // A wall facing the camera.
+    list.cuboid([0.0, 0.0, -0.5], IDENTITY_ROT, [4.0, 4.0, 0.5], &white());
+    let cam = Camera3D::perspective([0.0, 0.0, 8.0], [0.0; 3], 50.0);
+    let spot = SceneLight {
+        kind: SceneLightKind::Spot,
+        position: [0.0, 0.0, 6.0],
+        direction: [0.0, 0.0, -1.0],
+        intensity: 3.0,
+        range: 30.0,
+        inner_angle: 0.10,
+        outer_angle: 0.16,
+        ..SceneLight::default()
+    };
+    list.scene_lights.push(spot).unwrap();
+    let img = render(&gpu, (128, 128), &list, &cam);
+    let (center, edge) = (px(&img, 128, 64, 64), px(&img, 128, 64 + 40, 64));
+    assert!(luma(center) > 0.2, "the middle of the cone is lit: {center:?}");
+    assert_eq!(luma(edge), 0.0, "outside the cone the wall is dark: {edge:?}");
+    // Turned away from the wall, the spot lights nothing.
+    list.scene_lights.clear();
+    list.scene_lights.push(SceneLight { direction: [0.0, 0.0, 1.0], ..spot }).unwrap();
+    assert_eq!(luma(px(&render(&gpu, (128, 128), &list, &cam), 128, 64, 64)), 0.0);
+    // A directional scene light has no position: it lights the whole wall evenly.
+    list.scene_lights.clear();
+    list.scene_lights
+        .push(SceneLight { kind: SceneLightKind::Directional, direction: [0.0, 0.0, -1.0], intensity: 0.5, ..SceneLight::default() })
+        .unwrap();
+    let even = render(&gpu, (128, 128), &list, &cam);
+    assert_eq!(px(&even, 128, 64, 64), px(&even, 128, 64 + 40, 64));
+    assert!(luma(px(&even, 128, 64, 64)) > 0.1);
+}
+
+#[test]
+fn lights_affect_only_surfaces_that_share_a_render_layer() {
+    let Some((_g, gpu)) = gpu() else { return };
+    let mut list = RenderList3D::new();
+    list.lighting = unlit();
+    // Left sphere on the default layer, right sphere on layer 2 (mask 0b10).
+    list.sphere([-1.2, 0.0, 0.0], IDENTITY_ROT, 1.0, &white());
+    list.sphere([1.2, 0.0, 0.0], IDENTITY_ROT, 1.0, &white().on_layers(0b10));
+    let cam = Camera3D::perspective([0.0, 0.0, 7.0], [0.0; 3], 40.0);
+    let toward_wall = SceneLight { kind: SceneLightKind::Directional, direction: [0.0, 0.0, -1.0], intensity: 1.0, ..SceneLight::default() };
+    let centers = |img: &[u8]| (luma(px(img, 128, 34, 64)), luma(px(img, 128, 94, 64)));
+
+    list.scene_lights.push(SceneLight { layers: 0b10, ..toward_wall }).unwrap();
+    let (left, right) = centers(&render(&gpu, (128, 128), &list, &cam));
+    assert!(left == 0.0 && right > 0.3, "a light for layer 2 lights only the right sphere: {left} {right}");
+
+    list.scene_lights.clear();
+    list.scene_lights.push(SceneLight { layers: 0b01, ..toward_wall }).unwrap();
+    let (left, right) = centers(&render(&gpu, (128, 128), &list, &cam));
+    assert!(left > 0.3 && right == 0.0, "a light for the default layer lights only the left sphere: {left} {right}");
+
+    list.scene_lights.clear();
+    list.scene_lights.push(SceneLight { layers: 0b11, ..toward_wall }).unwrap();
+    let (left, right) = centers(&render(&gpu, (128, 128), &list, &cam));
+    assert!(left > 0.3 && (left - right).abs() < 0.02, "a light for both layers lights both: {left} {right}");
+
+    // A light with no layer lights nothing.
+    list.scene_lights.clear();
+    list.scene_lights.push(SceneLight { layers: 0, ..toward_wall }).unwrap();
+    let (left, right) = centers(&render(&gpu, (128, 128), &list, &cam));
+    assert!(left == 0.0 && right == 0.0, "a light with no layer lights nothing: {left} {right}");
+
+    // A surface with no layer is on the default layer.
+    let mut unlayered = RenderList3D::new();
+    unlayered.lighting = unlit();
+    unlayered.sphere([-1.2, 0.0, 0.0], IDENTITY_ROT, 1.0, &white().on_layers(0));
+    unlayered.scene_lights.push(SceneLight { layers: 0b01, ..toward_wall }).unwrap();
+    let (left, _) = centers(&render(&gpu, (128, 128), &unlayered, &cam));
+    assert!(left > 0.3, "a surface with layer mask 0 is lit by a default-layer light: {left}");
+
+    // The sun has a layer mask too.
+    list.scene_lights.clear();
+    list.lighting = Lighting { direction: [0.0, 0.0, -1.0], intensity: 1.0, ambient: 0.0, shadows: false, tonemap: false, ..Lighting::default() };
+    list.scene_lights.sun_layers = 0b10;
+    let (left, right) = centers(&render(&gpu, (128, 128), &list, &cam));
+    assert!(left == 0.0 && right > 0.3, "the sun set to layer 2 lights only the right sphere: {left} {right}");
+}
+
+#[test]
+fn eight_scene_lights_add_up() {
+    let Some((_g, gpu)) = gpu() else { return };
+    let (mut list, cam) = dark_sphere_scene();
+    let one = SceneLight { kind: SceneLightKind::Directional, direction: [0.0, 0.0, -1.0], intensity: 0.05, ..SceneLight::default() };
+    list.scene_lights.push(one).unwrap();
+    let single = luma(px(&render(&gpu, (128, 128), &list, &cam), 128, 64, 64));
+    for _ in 1..orr_render::MAX_SCENE_LIGHTS {
+        list.scene_lights.push(one).unwrap();
+    }
+    let all = luma(px(&render(&gpu, (128, 128), &list, &cam), 128, 64, 64));
+    assert!((all / single - 8.0).abs() < 0.6, "one light {single}, eight lights {all}");
 }

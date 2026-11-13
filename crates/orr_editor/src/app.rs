@@ -524,6 +524,18 @@ impl EditorApp {
             let requested = self.mesh_lighting.applied_post_process(&self.editor).unwrap_or_default();
             return self.mesh_post_process_runtime.select(self.editor.scene_load_epoch(), self.editor.path(), requested);
         }
+        // Bloom turned on in the scene's orr_gfx::PostProcess is saved with the scene and wins
+        // over the view-only choice of the Viewport effects menu.
+        if let Some(bloom) = self.editor.yard_frame().look.as_ref().and_then(|look| look.bloom) {
+            return orr_render::PostProcessSettings {
+                enabled: true,
+                bloom: true,
+                threshold: bloom.threshold,
+                strength: bloom.strength,
+                radius: bloom.radius,
+                iterations: bloom.iterations,
+            };
+        }
         self.ui.yard_post_process
     }
 
@@ -2016,6 +2028,9 @@ impl EditorApp {
             if self.editor.game().is_3d() && !self.editor.game().is_room() && !self.editor.game().is_navigation() && !self.editor.game().has_mesh_view() && ui.add_enabled(self.editor.mode()==Mode::Edit, egui::Button::new(if self.editor.game().is_terrain() { "+ Terrain Sphere" } else { "+ 3D Box" })).clicked() {
                 self.editor.spawn_yard_body(orr_fp::FPVec3::new(FP::ZERO,FP::from_int(5),FP::ZERO));
             }
+            if self.editor.supports_scene_lights() && ui.add_enabled(self.editor.mode()==Mode::Edit, egui::Button::new("+ Light")).on_hover_text("Add an entity with a point light (orr_gfx::Light) above the scene center. Change its kind, color, range, shadows and layers in the inspector.").clicked() {
+                self.editor.spawn_light(orr_fp::FPVec3::new(FP::ZERO,FP::from_int(4),FP::ZERO));
+            }
             if ui.add_enabled(!self.editor.game().is_room() && self.editor.selection().is_some() && self.editor.selected_guids().len() <= 1, egui::Button::new("Delete")).on_disabled_hover_text("Room walls use the validated removal action in Room level authoring.").clicked() {
                 self.editor.delete_selected();
             }
@@ -2723,6 +2738,19 @@ impl EditorApp {
         }
         if let Some(item) = self.editor.yard_frame().items.iter().find(|item| Some(item.entity) == selected) {
             selection_outline::append(&mut list, item);
+        }
+        // Lights have no body to draw: a marker shows where each one is and where it points.
+        if let Some(look) = &self.editor.yard_frame().look {
+            look.draw_markers(&mut list, selected);
+            if look.dropped_lights > 0 {
+                ui.painter().text(
+                    rect.left_top() + egui::vec2(8.0, 8.0),
+                    egui::Align2::LEFT_TOP,
+                    format!("{} lights give no light: a frame holds the sun and {} more lights", look.dropped_lights, orr_render::MAX_SCENE_LIGHTS),
+                    egui::FontId::proportional(13.0),
+                    Color32::from_rgb(255, 190, 80),
+                );
+            }
         }
         #[cfg(feature="mesh-navigation")]
         let list = {

@@ -91,6 +91,7 @@ orr_package = { path = "../orr_package", optional = true }
 orr_audio = { path = "../orr_audio", optional = true }
 orr_bridge = { path = "../orr_bridge" }
 orr_view = { path = "../orr_view" }
+orr_gfx_view = { path = "../orr_gfx_view" }
 orr_viewstream = { path = "../orr_viewstream" }
 orr_render = { path = "../orr_render" }
 orr_testgame = { path = "../orr_testgame" }

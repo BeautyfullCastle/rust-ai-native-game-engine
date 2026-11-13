@@ -148,6 +148,8 @@ pub(crate) struct Globals {
     material_eye: [f32; 4],
     #[cfg(feature = "metallic-roughness")]
     material_view: [f32; 4],
+    /// The scene lights follow the material fields; the WGSL globals keep the same order.
+    pub(crate) scene_lights: crate::scene_lights::SceneLightsUniform,
     #[cfg(feature = "irradiance-probes")]
     pub(crate) irradiance: crate::IrradianceUniform,
 }
@@ -257,13 +259,10 @@ impl<B: Rhi> ModelRenderer<B> {
         if format.is_depth() {
             return Err(ModelRenderError::InvalidTarget);
         }
+        let source = crate::scene_lights::shader(include_str!("shader_model.wgsl"), "globals");
         #[cfg(feature = "irradiance-probes")]
-        let source =
-            crate::renderer3d::irradiance::shader(include_str!("shader_model.wgsl"), "globals");
-        #[cfg(feature = "irradiance-probes")]
+        let source = crate::renderer3d::irradiance::shader(&source, "globals");
         let source = source.as_str();
-        #[cfg(not(feature = "irradiance-probes"))]
-        let source = include_str!("shader_model.wgsl");
         #[cfg(feature = "metallic-roughness")]
         let material_source = crate::material_shading::shader(source);
         #[cfg(feature = "metallic-roughness")]
@@ -850,6 +849,7 @@ pub(crate) fn prepare_globals(
         point_color_intensity: [0.0; 4],
         light_vp: orr_model::IDENTITY,
         shadow: [0.0; 4],
+        scene_lights: crate::scene_lights::SceneLightsUniform::none(),
         #[cfg(feature = "metallic-roughness")]
         material_eye: vector(
             camera.eye,

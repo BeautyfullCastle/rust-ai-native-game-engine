@@ -128,12 +128,13 @@ fn offscreen_sampling_tracks_msaa_3d_and_linear_2d_compositing() {
     // The fallback must not alter renderer upload accounting. This frontier
     // has an optional 9,280-byte SH9 extension in EACH frame uniform. Keep an
     // independent ABI expectation rather than importing private Globals size.
+    // 288 bytes of camera and sun values, then 528 bytes of scene lights.
     #[cfg(not(feature = "irradiance-probes"))]
-    let globals_bytes = 288_u64;
+    let globals_bytes = 288_u64 + 528;
     #[cfg(feature = "irradiance-probes")]
     let globals_bytes = {
         assert_eq!(std::mem::size_of::<orr_render::IrradianceUniform>(), 4 * 16 + 64 * 9 * 16);
-        288_u64 + 4 * 16 + 64 * 9 * 16
+        288_u64 + 528 + 4 * 16 + 64 * 9 * 16
     };
     // A UNORM target needs neither alternate views nor a sample-mirror copy.
     // Compare its unchanged renderer contract to the sRGB target on each draw.

@@ -46,6 +46,12 @@ impl<'a> FrameView<'a> {
         self.frame.alive_count()
     }
 
+    /// Whether the game of this frame registered the component type `T`.
+    /// View code that serves several games asks before it reads an optional type.
+    pub fn registers<T: Component>(&self) -> bool {
+        self.frame.registry().component_id::<T>().is_some()
+    }
+
     /// `e`'s component `T`, if it has one. Panics if `T` is not registered.
     pub fn get<T: Component>(&self, e: Entity) -> Option<&'a T> {
         self.frame.get::<T>(e)

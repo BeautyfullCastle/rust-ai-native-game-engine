@@ -76,7 +76,9 @@ fn skinned_material_table_rejection_has_no_rhi_effects() {
 }
 
 fn assert_globals(effects: &Effects, label: &str) {
+    // 288 bytes of camera, sun and material values, then 528 bytes of scene lights.
     let bytes = 288
+        + 528
         + if cfg!(feature = "irradiance-probes") {
             9280
         } else {

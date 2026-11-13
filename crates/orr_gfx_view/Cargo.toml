@@ -1,0 +1,24 @@
+[package]
+name = "orr_gfx_view"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Reads the rendering components of a scene (orr_gfx) into renderer inputs (view layer)"
+
+[lints]
+workspace = true
+
+[dependencies]
+orr_gfx = { path = "../orr_gfx" }
+orr_bridge = { path = "../orr_bridge" }
+orr_ecs = { path = "../orr_ecs" }
+orr_fp = { path = "../orr_fp", features = ["float-interop"] }
+orr_physics3d = { path = "../orr_physics3d" }
+orr_render = { path = "../orr_render" }
+
+[dev-dependencies]
+bytemuck = "1"
+# The post chain's validation checks the bloom values the reader produces.
+orr_render = { path = "../orr_render", features = ["imported-scene"] }
+orr_reflect = { path = "../orr_reflect", features = ["scene"] }

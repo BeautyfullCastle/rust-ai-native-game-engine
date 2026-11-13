@@ -13,6 +13,9 @@ pub const TARGET_FORMAT: TextureFormat = TextureFormat::Rgba8Unorm;
 pub struct YardFrame {
     pub items: Vec<RenderItem3>,
     pub poses: Vec<(Entity, Transform3)>,
+    /// The scene's lights, environment and post-processing (`orr_gfx`
+    /// components), read from the same frame. `None` before the first frame.
+    pub look: Option<orr_gfx_view::SceneLook>,
 }
 impl YardFrame {
     pub fn extract(frame: FrameView<'_>) -> Self {
@@ -28,6 +31,7 @@ impl YardFrame {
                 })
                 .collect(),
             poses: orr_sample::yard3d_view::editor_body_poses(frame),
+            look: Some(orr_gfx_view::scene_look(frame, &orr_sample::yard3d_view::yard_lighting())),
         }
     }
     pub fn list(&self, hidden: &[Entity], selected: Option<Entity>) -> RenderList3D {
@@ -35,6 +39,9 @@ impl YardFrame {
             lighting: orr_sample::yard3d_view::yard_lighting(),
             ..RenderList3D::default()
         };
+        if let Some(look) = &self.look {
+            look.apply(&mut list);
+        }
         // Keep the Yard sun's shadow policy. The composed path admits all
         // procedural, static and sampled skinned casters before drawing one
         // shared shadow map for this immutable host frame.
@@ -694,6 +701,8 @@ impl Viewport3dGpu {
             self.animated_models = ordered;
         }
         self.imported.post_process = settings;
+        // The scene's lights reach every batch: procedural shapes, models and skinned models.
+        self.imported.scene_lights = list.scene_lights;
         #[cfg(feature = "irradiance-probes")]
         { self.imported.irradiance = grid.cloned(); }
         self.target.resize(size.0, size.1);

@@ -35,6 +35,7 @@ orr_ecs = { path = "../orr_ecs" }
 orr_fp = { path = "../orr_fp" }
 orr_physics = { path = "../orr_physics" }
 orr_physics3d = { path = "../orr_physics3d" }
+orr_gfx = { path = "../orr_gfx" }
 orr_reflect = { path = "../orr_reflect", default-features = false }
 bytemuck = { version = "1", features = ["derive"] }
 

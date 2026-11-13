@@ -113,7 +113,9 @@ pub(crate) fn shader(source: &str) -> String {
         }
         let l = -globals.direction.xyz;
         color = mr_brdf(n, v, l, base, metal, rough)
-            * globals.sun.xyz * globals.sun.w * max(dot(n, l), 0.0) * visibility;
+            * globals.sun.xyz * globals.sun.w * max(dot(n, l), 0.0) * scene_sun_shadow(visibility) * scene_sun_reaches(1.0);
+        // Scene lights add diffuse light only; metals receive none.
+        color += base * (1.0 - metal) * scene_lights_diffuse(in.world_position, n, 1.0);
         // The existing hemisphere/probe signal is approximate diffuse lighting,
         // not specular IBL. Its legacy units are retained; metals receive none.
         color += base * (1.0 - metal) * 0.96 * ambient;

@@ -195,13 +195,10 @@ impl<B: Rhi> SkinnedModelRenderer<B> {
         if format.is_depth() {
             return Err(SkinnedRenderError::InvalidTarget);
         }
+        let source = crate::scene_lights::shader(include_str!("shader_skinned.wgsl"), "globals");
         #[cfg(feature = "irradiance-probes")]
-        let source =
-            crate::renderer3d::irradiance::shader(include_str!("shader_skinned.wgsl"), "globals");
-        #[cfg(feature = "irradiance-probes")]
+        let source = crate::renderer3d::irradiance::shader(&source, "globals");
         let source = source.as_str();
-        #[cfg(not(feature = "irradiance-probes"))]
-        let source = include_str!("shader_skinned.wgsl");
         #[cfg(feature = "metallic-roughness")]
         let material_source = crate::material_shading::shader(source);
         #[cfg(feature = "metallic-roughness")]

@@ -1763,6 +1763,7 @@ mod tests {
                 roughness: 0.6,
                 metallic: 0.25,
                 checker: true,
+                layers: Style3::DEFAULT_LAYER,
             },
         };
         append_procedural(&mut target, &item, &AtomicBool::new(false)).unwrap();

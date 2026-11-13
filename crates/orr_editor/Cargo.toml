@@ -116,6 +116,8 @@ orr_reflect = { path = "../orr_reflect", features = ["scene"] }
 orr_bridge = { path = "../orr_bridge" }
 orr_rhi = { path = "../orr_rhi" }
 orr_render = { path = "../orr_render" }
+orr_gfx = { path = "../orr_gfx" }
+orr_gfx_view = { path = "../orr_gfx_view" }
 orr_view = { path = "../orr_view" }
 # The game's view plugin: its frame type for the bridge, reflect descriptors and draw mapping.
 orr_sample = { path = "../orr_sample" }

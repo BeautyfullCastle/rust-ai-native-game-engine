@@ -14,6 +14,7 @@ fn item(shape: Shape3) -> RenderItem3 {
             roughness: 0.5,
             metallic: 0.0,
             checker: false,
+            layers: Style3::DEFAULT_LAYER,
         },
     }
 }

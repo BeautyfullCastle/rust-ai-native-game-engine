@@ -21,6 +21,9 @@ struct Globals {
     viewport: vec4<f32>,
     point_position_range: vec4<f32>,
     point_color_intensity: vec4<f32>,
+    // x: number of scene lights, y: render layers the sun affects, z: strength of the sun's shadows.
+    scene_light_info: vec4<f32>,
+    scene_lights: array<SceneLight, 8>,
     // IRRADIANCE_GLOBAL
 };
 
@@ -58,6 +61,7 @@ struct MainOut {
     @location(2) color: vec3<f32>,
     @location(3) material: vec3<f32>,
     @location(4) flags: f32,
+    @location(5) @interpolate(flat) layers: f32,
 };
 
 @vertex
@@ -71,6 +75,7 @@ fn vs_main(i: MeshIn) -> MainOut {
     o.color = i.color.rgb;
     o.material = i.material.xyz;
     o.flags = i.scale_flags.w;
+    o.layers = i.material.w;
     return o;
 }
 
@@ -148,7 +153,7 @@ fn fs_main(in: MainOut) -> @location(0) vec4<f32> {
     if (g.params.x > 0.5) {
         vis = shadow_visibility(in.world, n);
     }
-    let radiance = g.light_color.rgb * g.light_dir.w * ndl * vis;
+    let radiance = g.light_color.rgb * g.light_dir.w * ndl * scene_sun_shadow(vis) * scene_sun_reaches(in.layers);
 
     // Blinn-Phong, normalized, shininess from roughness.
     let h = output_normalize(l + v);
@@ -166,6 +171,7 @@ fn fs_main(in: MainOut) -> @location(0) vec4<f32> {
     // IRRADIANCE_PROCEDURAL
     var color = diffuse_color * (radiance + hemi) + fresnel * spec_shape * radiance + hemi * f0 * 0.35 * (1.0 - rough);
     color = color + diffuse_color * point_diffuse(in.world, n) + base * in.material.z;
+    color = color + diffuse_color * scene_lights_diffuse(in.world, n, in.layers);
 
     // Scene-linear HDR bypasses every display transform. Bound FP16 writes.
     if (g.viewport.z > 0.5) {

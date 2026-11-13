@@ -1,0 +1,19 @@
+[package]
+name = "orr_gfx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Scene components that describe rendering: transform, light, render layers, environment and post-processing (fixed-point data; the view layer reads it)"
+
+[lints]
+workspace = true
+
+[dependencies]
+orr_fp = { path = "../orr_fp" }
+orr_ecs = { path = "../orr_ecs" }
+orr_reflect = { path = "../orr_reflect", default-features = false }
+bytemuck = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+orr_reflect = { path = "../orr_reflect", default-features = false, features = ["scene"] }

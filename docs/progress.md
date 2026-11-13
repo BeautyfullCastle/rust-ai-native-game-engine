@@ -12,6 +12,7 @@
 - **게임**: Stormglass(`coop_defense`)의 창 실행과 창 없는 600틱 실행, `arena`의 60fps 실행과 오디오 출력.
 - **야외 장면 렌더러**: `forest_valley`가 숲과 계곡 장면을 1600x900 창에서 수직 동기화 60fps로 그린다. 동기화를 끄면 약 100fps다. 구성은 그림자 두 단계, HDR 다중 샘플 장면, 하늘과 안개, 물, 블룸, 빛줄기, 자동 노출, 톤 매핑이다. 코드는 `crates/orr_scenery`에 있고 `orr_rhi`만 쓴다. 관련 이슈는 [#101](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/101)이다.
 - **에디터의 장면 창**: `Edit > Forest Valley scene…`에서 같은 장면을 에디터 안에 띄우고 설정 36개, 켜고 끄기 2개, 색 2개, 품질 2개를 고친다. 값은 다음 프레임에 반영된다. 프리셋을 JSON으로 저장하고 불러온다. 에디터 기능 이름은 `scenery`이고 `full`에 들어 있다.
+- **씬 렌더링 컴포넌트**: 조명(`orr_gfx::Light`, directional·point·spot, 레이어 마스크, 그림자), 렌더 레이어, 환경광, 후처리를 엔티티 컴포넌트와 씬 싱글턴으로 설정한다. 씬 파일·인스펙터·`orr` 명령·실행 취소가 모두 같은 경로를 쓴다. 지금은 Yard3D에 적용했다. 구조와 다음 단계(터레인 컴포넌트, 셰이더 규약, 렌더 단계 확장, 후처리 효과 목록)는 [rendering-architecture.md](rendering-architecture.md)에 있다.
 - **테스트(기본 구성)**: `cargo test --workspace --release` 2779개 통과, 실패 0개, 무시 26개.
 - **테스트(전체 기능 구성)**: `--features orr_editor/full,orr_sample/full`로 에디터와 샘플 게임을 전체 실행했을 때 3376개 통과, 19개 실패였다. 그 뒤 17건의 원인을 고쳐 해당 테스트를 다시 실행해 통과를 확인했다. 남은 실패는 2건이다.
 

@@ -2567,6 +2567,30 @@ impl Editor {
         }
     }
 
+    /// Whether the scene's game has the rendering components of `orr_gfx`.
+    pub fn supports_scene_lights(&self) -> bool {
+        self.types().get(orr_gfx::names::LIGHT).is_some() && self.types().get(orr_gfx::names::TRANSFORM).is_some()
+    }
+
+    /// Adds an entity with a point light at `pos`, selects it, and returns whether that worked.
+    /// One undo entry. The light starts with the default values of `orr_gfx::Light`.
+    pub fn spawn_light(&mut self, pos: orr_fp::FPVec3) -> bool {
+        if !self.supports_scene_lights() {
+            self.error("This game has no scene lights (orr_gfx::Light)"); return false;
+        }
+        if self.mode()!=Mode::Edit || !self.can_mutate() || self.previewing().is_some() {
+            self.error("Lights can be added only in edit mode"); return false;
+        }
+        let params=json!({"name":self.fresh_light_name(),"components":{
+            orr_gfx::names::TRANSFORM:{"position":value_to_json(&Value::Vec3(pos))},
+            orr_gfx::names::LIGHT:{"kind":"point"}
+        }});
+        match self.call("world.spawn",params) {
+            Ok(r)=>{ let t=r.get("guid").and_then(J::as_str).and_then(Target::parse); self.mark_acknowledged_edit(&r);self.select(t);self.inspect=None;self.dirty.inspect=true;true }
+            Err(e)=>{self.error(format!("add light: {e}"));false}
+        }
+    }
+
     /// Atomic exact XYZ and whole unit-quaternion edit, one document undo entry.
     /// No float presentation transform is ever written back to the host.
     pub fn set_yard_transform(&mut self, pos:orr_fp::FPVec3, rotation:[FP;4])->bool {
@@ -2736,8 +2760,16 @@ impl Editor {
     }
 
     fn fresh_name(&self) -> String {
+        self.fresh_name_with("new_body")
+    }
+
+    fn fresh_light_name(&self) -> String {
+        self.fresh_name_with("light")
+    }
+
+    fn fresh_name_with(&self, prefix: &str) -> String {
         (1..)
-            .map(|n| format!("new_body_{n}"))
+            .map(|n| format!("{prefix}_{n}"))
             .find(|c| !self.rows.iter().any(|r| r.name.as_deref() == Some(c.as_str())))
             .expect("an unused name exists")
     }

@@ -29,7 +29,7 @@ impl Extractor3 for YardExtractor {
         out.reserve(frame.count::<Body>() as usize);
         for (entity, body) in frame.iter::<Body>() {
             let Some(collider) = frame.get::<Collider>(entity) else { continue };
-            out.push(extract_body(entity, body, collider));
+            out.push(extract_body(entity, body, collider, orr_gfx_view::layers_of(frame, entity)));
         }
     }
 }
@@ -75,7 +75,7 @@ pub fn editor_bake_bodies(frame: FrameView<'_>) -> Result<Vec<EditorBakeBody>, S
     Ok(frame.iter::<Body>().map(|(entity, body)| {
         let collider = frame.get::<Collider>(entity);
         let item = collider.map(|collider| {
-            let extracted = extract_body(entity, body, collider);
+            let extracted = extract_body(entity, body, collider, orr_gfx_view::layers_of(frame, entity));
             RenderItem3 { entity, transform: extracted.transform, style: extracted.style }
         });
         EditorBakeBody {
@@ -104,7 +104,7 @@ pub fn editor_static_bake_bodies<'a>(frame: FrameView<'a>) -> Result<impl Iterat
             is_static: true,
             pose: fp_to_transform3(body.pos, body.rot),
             item: collider.map(|collider| {
-                let extracted = extract_body(entity, body, collider);
+                let extracted = extract_body(entity, body, collider, orr_gfx_view::layers_of(frame, entity));
                 RenderItem3 { entity, transform: extracted.transform, style: extracted.style }
             }),
             supported_shape: collider.is_none_or(|collider| matches!(collider.shape.kind,
@@ -113,7 +113,8 @@ pub fn editor_static_bake_bodies<'a>(frame: FrameView<'a>) -> Result<impl Iterat
     }))
 }
 
-fn extract_body(entity: Entity, body: &Body, collider: &Collider) -> Extracted3 {
+/// `layers` are the entity's render layers (see `orr_gfx::RenderLayers`).
+fn extract_body(entity: Entity, body: &Body, collider: &Collider, layers: u32) -> Extracted3 {
     let shape = &collider.shape;
     let mut transform = fp_to_transform3(body.pos, body.rot);
     let dynamic = body.kind == BODY_DYNAMIC;
@@ -129,6 +130,7 @@ fn extract_body(entity: Entity, body: &Body, collider: &Collider) -> Extracted3 
                     roughness: 0.95,
                     metallic: 0.0,
                     checker: true,
+                    layers,
                 };
                 return Extracted3 { entity, transform, mode: InterpMode::None, style };
             }
@@ -155,6 +157,7 @@ fn extract_body(entity: Entity, body: &Body, collider: &Collider) -> Extracted3 
         roughness: material.0,
         metallic: material.1,
         checker: false,
+        layers,
     };
     Extracted3 { entity, transform, mode: if dynamic { InterpMode::Prediction } else { InterpMode::None }, style }
 }
@@ -164,7 +167,7 @@ pub fn fill_list(items: &[RenderItem3], list: &mut RenderList3D) {
     for item in items {
         let (p, r) = (item.transform.pos.to_array(), item.transform.rot.to_array());
         let s = &item.style;
-        let m = Material { color: [s.color[0], s.color[1], s.color[2]], roughness: s.roughness, metallic: s.metallic, emissive: 0.0, checker: s.checker };
+        let m = Material { color: [s.color[0], s.color[1], s.color[2]], roughness: s.roughness, metallic: s.metallic, emissive: 0.0, checker: s.checker, layers: s.layers };
         match s.shape {
             Shape3::Sphere { radius } => list.sphere(p, r, radius, &m),
             Shape3::Box { half } => list.cuboid(p, r, half, &m),

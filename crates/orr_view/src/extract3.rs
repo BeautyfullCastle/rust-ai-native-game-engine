@@ -44,12 +44,17 @@ pub struct Style3 {
     pub metallic: f32,
     /// Ground checker pattern.
     pub checker: bool,
+    /// Render layers the entity is drawn on. A light affects it when the two share a layer.
+    pub layers: u32,
 }
 
 impl Style3 {
-    /// A plain dielectric of `color`.
+    /// The render layer of an entity that names none.
+    pub const DEFAULT_LAYER: u32 = 1;
+
+    /// A plain dielectric of `color` on the default render layer.
     pub fn new(shape: Shape3, color: [f32; 3]) -> Self {
-        Self { shape, color: [color[0], color[1], color[2], 1.0], roughness: 0.6, metallic: 0.0, checker: false }
+        Self { shape, color: [color[0], color[1], color[2], 1.0], roughness: 0.6, metallic: 0.0, checker: false, layers: Self::DEFAULT_LAYER }
     }
 }
 
