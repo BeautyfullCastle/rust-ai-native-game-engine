@@ -1185,7 +1185,9 @@ impl EditorApp {
         self.frames += 1;
 
         // Disarm before ingesting a late claim/update; focus returning is not intent.
-        let keyboard_viewport = if self.editor.game().is_room() { "room_keyboard_viewport" } else { "arena_keyboard_viewport" };
+        let keyboard_viewport = if self.editor.game().is_room() { "room_keyboard_viewport" }
+            else if self.editor.game() == crate::game::EditorGame::Yard3D { "yard_keyboard_viewport" }
+            else { "arena_keyboard_viewport" };
         let input_focus = ctx.memory(|m| m.focused()) == Some(egui::Id::new(keyboard_viewport));
         let outside_click = ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !self.ui.viewport_rect.is_some_and(|r| r.contains(p))));
         // Registered presenters own focus inside their complete viewport, including
@@ -2500,7 +2502,30 @@ impl EditorApp {
             let response=ui.interact(rect,egui::Id::new("mesh_keyboard_viewport"),Sense::click_and_drag());
             response.widget_info(||egui::WidgetInfo::labeled(egui::WidgetType::Other,true,"Mesh gameplay viewport"));
             (rect,response)
+        } else if self.editor.game() == crate::game::EditorGame::Yard3D {
+            // A fixed id keeps keyboard focus on the viewport from frame to frame.
+            let (rect,_)=ui.allocate_exact_size(ui.available_size(),Sense::hover());
+            (rect,ui.interact(rect,egui::Id::new("yard_keyboard_viewport"),Sense::click_and_drag()))
         } else { ui.allocate_exact_size(ui.available_size(),Sense::click_and_drag()) };
+        // Yard3D: held keys fly the scene's dragon (A and D turn, W and S climb and dive, E boosts).
+        if self.editor.game() == crate::game::EditorGame::Yard3D {
+            if self.ui.take_control {
+                self.ui.take_control=false;
+                if self.ui.dialog.is_none() && ui.input(|i|i.focused) { resp.request_focus(); self.editor.take_control(0,true); }
+            }
+            let focused=resp.has_focus() && self.ui.dialog.is_none() && ui.input(|i|i.focused && !i.key_pressed(Key::Escape));
+            let keys=ui.input(|i|crate::editor::input::Keys {
+                x:i8::from(i.key_down(Key::D)||i.key_down(Key::ArrowRight))-i8::from(i.key_down(Key::A)||i.key_down(Key::ArrowLeft)),
+                y:i8::from(i.key_down(Key::W)||i.key_down(Key::ArrowUp))-i8::from(i.key_down(Key::S)||i.key_down(Key::ArrowDown)),
+                fire:i.key_down(Key::E),
+            });
+            // Focus arrives a frame after the claim: only active input is released when the viewport loses focus.
+            if focused || self.editor.input_phase() == crate::editor::input::Phase::Active { self.editor.arena_keys(focused,keys); }
+            if resp.has_focus() {
+                let controlled=focused && self.editor.input_phase()==crate::editor::input::Phase::Active;
+                ui.memory_mut(|memory|memory.set_focus_lock_filter(resp.id,egui::EventFilter { horizontal_arrows:controlled,vertical_arrows:controlled,..Default::default() }));
+            }
+        }
         if self.editor.game().is_room() {
             if self.ui.take_control {
                 self.ui.take_control=false;
@@ -2840,8 +2865,9 @@ impl EditorApp {
         }
         let camera = camera_view.as_ref().map_or(camera, |(look, _)| look.camera);
         let choices = self.surface_choices();
-        if !choices.is_empty() {
-            // Surface shaders can animate with time.
+        let frame_now = self.editor.yard_frame();
+        if !choices.is_empty() || frame_now.sky.is_some() || !frame_now.waters.is_empty() || !frame_now.dragons.is_empty() {
+            // Surface shaders, clouds, water and dragons move with time.
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(16));
         }
         let mut list=self.editor.yard_frame().list_with_surfaces(&hidden,None,&|entity| {
@@ -2962,6 +2988,8 @@ impl EditorApp {
             gpu.set_model_surfaces(choices.clone(), list.time);
             #[cfg(feature = "outdoor")]
             gpu.set_outdoor(crate::outdoor_scene::scene(self.editor.yard_frame(), &terrain_heights), list.time);
+            #[cfg(feature = "outdoor")]
+            gpu.set_dragons(self.editor.yard_frame().dragons.iter().map(|(path, bank)| orr_scenery::dragon::DragonLook { path: path.clone(), bank: *bank, time: list.time }).collect());
             #[cfg(feature = "models")]
             if let Err(error) = point_light.and_then(|settings|gpu.set_point_light_settings(settings)) {
                 ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, error, egui::FontId::proportional(14.0), Color32::RED);

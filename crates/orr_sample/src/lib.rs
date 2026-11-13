@@ -67,6 +67,7 @@ pub mod physics_view;
 pub mod relay_view;
 pub mod yard3d_app;
 pub use orr_games::yard3d_game;
+pub use orr_games::dragon;
 pub mod yard3d_host;
 pub mod yard3d_stream;
 pub mod yard3d_view;

@@ -113,3 +113,70 @@ fn forest_valley_is_drawn_from_engine_components_through_the_scene_camera() {
         .count();
     assert_eq!(magenta, 0, "the terrain shader compiles");
 }
+
+/// Holds `keys` down for `ticks` simulation ticks of realtime Play.
+fn hold(h: &mut Harness<'_, EditorApp>, keys: &[egui::Key], ticks: u64) {
+    for key in keys {
+        h.input_mut().events.push(egui::Event::Key { key: *key, physical_key: Some(*key), pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+    }
+    let start = h.state().editor.sim().head_tick;
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while h.state().editor.sim().head_tick < start + ticks {
+        assert!(std::time::Instant::now() < end, "{:?}", h.state().editor.status());
+        h.state_mut().editor.sync();
+        h.run_steps(1);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    for key in keys {
+        h.input_mut().events.push(egui::Event::Key { key: *key, physical_key: Some(*key), pressed: false, repeat: false, modifiers: egui::Modifiers::NONE });
+    }
+}
+
+#[test]
+fn the_dragon_flies_over_the_valley_with_the_keys_and_the_camera_follows() {
+    use orr_editor::editor::input::Phase;
+    let Some((_guard, probe)) = gpu() else { return };
+    if probe.is_software() {
+        eprintln!("SKIP: this picture check needs a hardware adapter");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let scene = scene_copy(dir.path());
+    let setup = egui_wgpu::WgpuSetup::CreateNew(egui_wgpu::WgpuSetupCreateNew::without_display_handle());
+    let mut h = Harness::builder().with_size([1600.0, 1000.0]).wgpu_setup(setup).build_eframe(|cc| {
+        let mut editor = Editor::open_game(&scene, EditorGame::Yard3D).unwrap();
+        editor.sync();
+        EditorApp::new(editor, cc.wgpu_render_state.clone())
+    });
+    frames(&mut h, 4);
+    let start = h.state().editor.yard_frame().dragons[0].0[0];
+    h.get_by_label("Camera view").click();
+    h.state_mut().editor.play();
+    frames(&mut h, 4);
+    h.get_by_label("Take control").click();
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while h.state().editor.input_phase() != Phase::Active {
+        assert!(std::time::Instant::now() < end, "{:?} {:?} {}", h.state().editor.input_phase(), h.state().editor.status(), h.state().editor.input_hint());
+        h.state_mut().editor.sync();
+        h.run_steps(1);
+    }
+    // Climb while turning right, then fly on.
+    hold(&mut h, &[egui::Key::D, egui::Key::W], 90);
+    hold(&mut h, &[egui::Key::E], 60);
+    frames(&mut h, 6);
+    let (path, bank) = h.state().editor.yard_frame().dragons[0].clone();
+    let head = path[0];
+    let moved = ((head[0] - start[0]).powi(2) + (head[2] - start[2]).powi(2)).sqrt();
+    assert!(moved > 40.0, "the dragon flew: {start:?} to {head:?}");
+    assert!(head[1] > start[1] + 5.0, "it climbed: {start:?} to {head:?}");
+    let _ = bank;
+    let image = h.render().expect("kittest wgpu render");
+    let rect = h.state().ui.viewport_rect.expect("the viewport was drawn");
+    let (width, _) = image.dimensions();
+    if let Some(folder) = std::env::var_os("ORR_FOREST_CAPTURE") {
+        let folder = PathBuf::from(folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        save_crop(&folder.join("forest_valley_dragon.png"), image.as_raw(), width, rect);
+        eprintln!("captured into {}", folder.display());
+    }
+}

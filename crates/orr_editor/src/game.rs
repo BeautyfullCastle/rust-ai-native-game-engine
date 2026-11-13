@@ -139,7 +139,8 @@ impl EditorGame {
         #[cfg(feature = "room-project")] { self == Self::RoomEscape }
         #[cfg(not(feature = "room-project"))] { false }
     }
-    pub fn has_keyboard(self) -> bool { self == Self::Arena || self.is_collect() || self.is_room() || self.is_registered() }
+    /// Whether held keys drive a player. In Yard3D they fly the scene's dragon (`orr_games::dragon`).
+    pub fn has_keyboard(self) -> bool { self == Self::Arena || self == Self::Yard3D || self.is_collect() || self.is_room() || self.is_registered() }
     /// Spatial-only legacy API. Use `spatial_position` for optional capabilities.
     pub fn position_field(self) -> &'static str {
         #[cfg(feature = "static-gameplay")]

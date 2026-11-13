@@ -15,6 +15,7 @@
 - **씬 렌더링 컴포넌트**: 조명(`orr_gfx::Light`, directional·point·spot, 레이어 마스크, 그림자), 렌더 레이어, 환경광, 후처리를 엔티티 컴포넌트와 씬 싱글턴으로 설정한다. 씬 파일·인스펙터·`orr` 명령·실행 취소가 모두 같은 경로를 쓴다. 지금은 Yard3D에 적용했다. 구조와 다음 단계(터레인 컴포넌트, 셰이더 규약, 렌더 단계 확장, 후처리 효과 목록)는 [rendering-architecture.md](rendering-architecture.md)에 있다.
 - **표면 셰이더**: 씬 파일 옆 `shaders/*.wgsl`에 `fn surface(in: SurfaceInput) -> Surface`를 쓰면 `orr_gfx::Material` 컴포넌트로 물체에 적용된다. 조명·그림자·레이어·톤 매핑은 엔진이 맡는다. 오류는 파일 줄 번호로 보이고, 파일을 저장하면 에디터가 다시 읽는다. 절차 도형, 정적 모델, 지형에 적용된다(스키닝 모델은 아직). 자세한 내용은 [rendering-architecture.md](rendering-architecture.md) 1.6절.
 - **엔진 렌더 컴포넌트 3단계**: 에셋 참조, `Camera`, `PostProcess` 효과 목록(빛줄기, 자동 노출, 색 보정, 비네트, 필름 입자, 높이 안개), `Terrain`(높이맵 + 표면 셰이더), `Sky`, `Water`, `Scatter`, 렌더 패스 등록(`RenderPass`). Forest Valley를 이 컴포넌트만으로 된 씬(`scenes/forest_valley`)으로 다시 만들었다. 자세한 내용은 [rendering-architecture.md](rendering-architecture.md) 1.7절부터.
+- **용 비행**: Forest Valley 씬에 동양식 용(`orr_games::Dragon`)이 있다. 에디터 Play에서 `Take control` 후 A/D, W/S, E로 난다. 카메라가 뒤따르고, 몸통은 렌더 패스(`orr_scenery::dragon::DragonPass`)가 경로를 따라 매 프레임 만든다. 자세한 내용은 [rendering-architecture.md](rendering-architecture.md) 1.15절.
 - **테스트(기본 구성)**: `cargo test --workspace --release` 2779개 통과, 실패 0개, 무시 26개.
 - **테스트(전체 기능 구성)**: `--features orr_editor/full,orr_sample/full`로 에디터와 샘플 게임을 전체 실행했을 때 3376개 통과, 19개 실패였다. 그 뒤 17건의 원인을 고쳐 해당 테스트를 다시 실행해 통과를 확인했다. 남은 실패는 2건이다.
 

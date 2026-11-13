@@ -29,6 +29,8 @@ pub(super) struct Input {
     pub enabled: bool,
     pub collect_dodge: bool,
     pub room_escape: bool,
+    /// Yard3D: held keys fly the scene's dragon (A and D turn, W and S climb and dive, E boosts).
+    pub yard3d: bool,
     #[cfg(feature = "static-games")]
     pub registered: Option<crate::static_adapter::RegisteredGame>,
     #[cfg(feature = "mesh-navigation")]
@@ -264,6 +266,13 @@ impl Input {
         }
         let value = if self.room_escape { json!({"move_x":self.latest.x,"move_z":-self.latest.y,"buttons":if self.effective_keys().fire {vec!["interact"]}else{vec![]}}) }
         else if self.collect_dodge { json!({"x":self.latest.x,"y":self.latest.y,"buttons":if self.effective_keys().fire {vec!["restart"]}else{vec![]}}) }
+        else if self.yard3d {
+            use orr_sample::dragon::{DRAGON_BOOST, DRAGON_CLIMB, DRAGON_DIVE, DRAGON_LEFT, DRAGON_RIGHT};
+            let keys = self.effective_keys();
+            let bit = |held: bool, bit: u32| if held { bit } else { 0 };
+            let buttons = bit(keys.x < 0, DRAGON_LEFT) | bit(keys.x > 0, DRAGON_RIGHT) | bit(keys.y > 0, DRAGON_CLIMB) | bit(keys.y < 0, DRAGON_DIVE) | bit(keys.fire, DRAGON_BOOST);
+            json!({"buttons":buttons,"origin":[0,0,0],"dir":[0,0,0]})
+        }
         else { self.effective_keys().value() };
         self.sent = Some(self.effective_keys());
         value

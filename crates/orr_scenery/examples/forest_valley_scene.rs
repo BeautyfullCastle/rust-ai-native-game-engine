@@ -82,7 +82,7 @@ fn main() {
     text.push_str("schema: orr.scene/1\nsingletons:\n");
     text.push_str("  Yard3dScene: { rain_batch: 0, rain_interval: 0, max_entities: 128, rain_seed: 42 }\n");
     writeln!(text, "  orr_gfx::Environment:\n    sky_color: [0.42, 0.58, 0.9]\n    ground_color: [0.22, 0.2, 0.12]\n    ambient: 1").unwrap();
-    text.push_str("  orr_gfx::Sky:\n    brightness: 1.5\n    sun_glow: 1\n    cloud_cover: 0.34\n    cloud_speed: 1\n    fog_density: 1\n    fog_falloff: 0.03\n");
+    text.push_str("  orr_gfx::Sky:\n    brightness: 1.5\n    sun_glow: 1\n    cloud_cover: 0.34\n    cloud_speed: 1\n    fog_density: 0.7\n    fog_falloff: 0.03\n");
     writeln!(text, "    fog_height: {:.1}\n    haze: 0.08\n    wind_strength: 1\n    wind_speed: 1\n    enabled: true", world.stream(view.position[2]).level).unwrap();
     text.push_str("  orr_gfx::PostProcess:\n    exposure: 1\n    tone_mapping: aces\n    effects:\n");
     for line in [
@@ -96,6 +96,25 @@ fn main() {
         "{ kind: none, enabled: false, params: [0, 0, 0, 0] }",
     ] {
         writeln!(text, "      - {line}").unwrap();
+    }
+    // A coarse copy of the ground for the dragon's flight: the highest point near each grid point.
+    text.push_str("  orr_games::DragonGround:\n    center: [0, 0]\n    size: 1024\n    heights:\n");
+    for j in 0..32 {
+        let mut row = Vec::new();
+        for i in 0..32 {
+            let (x, z) = ((i as f32 / 31.0 - 0.5) * 1024.0, (j as f32 / 31.0 - 0.5) * 1024.0);
+            let mut high = f32::MIN;
+            for dz in -2..=2 {
+                for dx in -2..=2 {
+                    let (sx, sz) = (x + dx as f32 * 8.0, z + dz as f32 * 8.0);
+                    high = high.max(world.height(sx, sz).max(world.stream(sz).level));
+                }
+            }
+            row.push(format!("{high:.1}"));
+        }
+        for h in row {
+            writeln!(text, "      - {h}").unwrap();
+        }
     }
     text.push_str("entities:\n");
 
@@ -115,9 +134,28 @@ fn main() {
     writeln!(text, "    orr_gfx::Transform3:\n      position: [0, 200, 0]\n      rotation: {}\n      scale: [1, 1, 1]", v3(facing([-sun[0], -sun[1], -sun[2]]))).unwrap();
     text.push_str("    orr_gfx::Light:\n      color: [1, 0.9, 0.76]\n      intensity: 8.5\n      range: 10\n      inner_angle: 20\n      outer_angle: 30\n      shadow_strength: 1\n      shadow_range: 140\n      kind: directional\n      enabled: true\n      cast_shadows: true\n      layers: [default, layer2, layer3, layer4, layer5, layer6, layer7, layer8]\n");
 
+    // The dragon starts ahead of the camera, above the valley, flying the way the camera looks.
+    let flat = {
+        let l = (look[0] * look[0] + look[2] * look[2]).sqrt();
+        [look[0] / l, 0.0, look[2] / l]
+    };
+    let start = [view.position[0] + flat[0] * 40.0, 0.0, view.position[2] + flat[2] * 40.0];
+    let start = [start[0], world.height(start[0], start[2]).max(world.stream(start[2]).level) + 30.0, start[2]];
+    let dragon = entity(&mut text, "dragon");
+    text.push_str("    orr_games::Dragon:\n");
+    writeln!(text, "      position: {}\n      yaw: {:.2}\n      pitch: 0\n      bank: 0\n      speed: 20\n      cruise_speed: 20\n      boost_speed: 45", v3(start), flat[0].atan2(flat[2]).to_degrees()).unwrap();
+    text.push_str("      turn_rate: 70\n      climb_rate: 45\n      clearance: 14\n      ceiling: 600\n      bounds: 480\n      player: 0\n      next: 0\n      trail:\n");
+    // A straight path behind the head, oldest first, so the body lies out before the first tick.
+    for k in 0..48 {
+        let back = 1.25 * (48 - k) as f32;
+        writeln!(text, "        - {}", v3([start[0] - flat[0] * back, start[1], start[2] - flat[2] * back])).unwrap();
+    }
+
     entity(&mut text, "camera");
     writeln!(text, "    orr_gfx::Transform3:\n      position: {}\n      rotation: {}\n      scale: [1, 1, 1]", v3(view.position), v3(facing(look))).unwrap();
     text.push_str("    orr_gfx::Camera:\n      fov_y: 55\n      half_height: 10\n      near: 0.3\n      far: 9000\n      projection: perspective\n      layers: [default, layer2, layer3, layer4, layer5, layer6, layer7, layer8]\n      priority: 0\n      active: true\n");
+    // In Play the camera follows the dragon.
+    writeln!(text, "    orr_games::DragonCamera:\n      target: {dragon}\n      distance: 34\n      height: 9").unwrap();
 
     // One water surface per pool of the stream; the shader hides it where the ground is higher.
     for k in 0..18 {

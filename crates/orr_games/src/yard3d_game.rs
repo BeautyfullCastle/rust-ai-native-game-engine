@@ -115,6 +115,7 @@ pub fn register_reflect(types: &mut TypeRegistry) {
     orr_physics3d::register_reflect(types);
     types.register_singleton::<Scene>("Yard3dScene");
     orr_gfx::register_reflect(types);
+    crate::dragon::register_reflect(types);
 }
 
 impl Game for Yard3D {
@@ -127,15 +128,17 @@ impl Game for Yard3D {
         register(builder);
         builder.register_singleton::<Scene>("Yard3dScene");
         orr_gfx::register(builder);
+        crate::dragon::register(builder);
     }
 
     fn setup(frame: &mut Frame, config: &YardConfig) {
         build_scene(frame, config);
         orr_gfx::init(frame);
+        crate::dragon::init(frame);
     }
 
     fn systems() -> Vec<Box<dyn System<Self>>> {
-        vec![Box::new(PlayerSystem), Box::new(RainSystem), Box::new(PhysicsSystem::<Yard3D>::new()), Box::new(BoundsSystem)]
+        vec![Box::new(PlayerSystem), Box::new(DragonSystem), Box::new(RainSystem), Box::new(PhysicsSystem::<Yard3D>::new()), Box::new(BoundsSystem)]
     }
 }
 
@@ -240,6 +243,46 @@ fn floor_hit(origin: FPVec3, dir: FPVec3) -> Option<FPVec3> {
 }
 
 /// Turns each player's input into shots and spawns.
+/// Flies every [`crate::dragon::Dragon`] with its player's input and moves the cameras that follow one.
+struct DragonSystem;
+
+impl System<Yard3D> for DragonSystem {
+    fn name(&self) -> &'static str {
+        "DragonSystem"
+    }
+
+    fn run(&mut self, ctx: &mut SimContext<Yard3D>) {
+        use crate::dragon::{camera_place, fly, settle_trail, Dragon, DragonCamera, DragonGround};
+        if ctx.frame.count::<Dragon>() == 0 {
+            return;
+        }
+        let ground = *ctx.frame.singleton::<DragonGround>();
+        let dt = FP::ONE / FP::from_int(TICK_RATE as i32);
+        let players = u32::from(ctx.inputs.player_count());
+        let dragons: Vec<Entity> = ctx.frame.dense::<Dragon>().0.to_vec();
+        for e in dragons {
+            let Some(mut dragon) = ctx.frame.get::<Dragon>(e).copied() else { continue };
+            settle_trail(&mut dragon);
+            // Inputs come from the network or a replay file: only the dragon bits are read.
+            let buttons = if dragon.player < players { ctx.inputs.input(PlayerSlot(dragon.player as u8)).buttons } else { 0 };
+            fly(&mut dragon, buttons, &ground, dt, ctx.tick);
+            if let Some(slot) = ctx.frame.get_mut::<Dragon>(e) {
+                *slot = dragon;
+            }
+        }
+        let cameras: Vec<Entity> = ctx.frame.dense::<DragonCamera>().0.to_vec();
+        for e in cameras {
+            let Some(camera) = ctx.frame.get::<DragonCamera>(e).copied() else { continue };
+            let Some(dragon) = ctx.frame.get::<Dragon>(camera.target).copied() else { continue };
+            let (position, rotation) = camera_place(&dragon, &camera, &ground);
+            let mut transform = ctx.frame.get::<orr_gfx::Transform3>(e).copied().unwrap_or_default();
+            transform.position = position;
+            transform.rotation = rotation;
+            ctx.frame.add(e, transform);
+        }
+    }
+}
+
 struct PlayerSystem;
 
 impl System<Yard3D> for PlayerSystem {

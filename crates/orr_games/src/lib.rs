@@ -11,6 +11,7 @@
 #![deny(clippy::disallowed_types)]
 
 pub mod physics_game;
+pub mod dragon;
 pub mod yard3d_game;
 
 #[cfg(feature = "terrain-physics")]

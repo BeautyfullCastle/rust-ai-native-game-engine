@@ -385,6 +385,7 @@ impl Editor {
         { input.registered = backend.game.registered(); }
         input.collect_dodge = backend.game.is_collect();
         input.room_escape = backend.game.is_room();
+        input.yard3d = backend.game == crate::game::EditorGame::Yard3D;
         #[cfg(feature = "mesh-navigation")]
         { input.mesh_navigation = backend.game.has_mesh_view(); }
         #[cfg(feature="static-gameplay")]

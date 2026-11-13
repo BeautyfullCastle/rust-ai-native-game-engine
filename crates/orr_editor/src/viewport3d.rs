@@ -27,6 +27,26 @@ pub struct YardFrame {
     pub sky: Option<orr_gfx_view::SkyLook>,
     pub waters: Vec<orr_gfx_view::WaterRef>,
     pub scatters: Vec<orr_gfx_view::ScatterRef>,
+    /// Each dragon (`orr_games::Dragon`) as its head's path, newest first, and its roll in degrees.
+    pub dragons: Vec<(Vec<[f32; 3]>, f32)>,
+}
+
+/// The dragons of `frame`: the head, then its trail from the newest point to the oldest.
+fn dragons(frame: FrameView<'_>) -> Vec<(Vec<[f32; 3]>, f32)> {
+    use orr_sample::dragon::{Dragon, DRAGON_TRAIL};
+    if !frame.registers::<Dragon>() {
+        return Vec::new();
+    }
+    let v = |p: orr_fp::FPVec3| [p.x.to_f32(), p.y.to_f32(), p.z.to_f32()];
+    frame
+        .iter::<Dragon>()
+        .map(|(_, d)| {
+            let newest = d.next as usize % DRAGON_TRAIL;
+            let mut path = vec![v(d.position)];
+            path.extend((1..=DRAGON_TRAIL).map(|k| v(d.trail[(newest + DRAGON_TRAIL - k) % DRAGON_TRAIL])));
+            (path, d.bank.to_f32())
+        })
+        .collect()
 }
 
 /// How one entity of the frame is drawn.
@@ -78,6 +98,7 @@ impl YardFrame {
             sky: orr_gfx_view::sky(frame),
             waters: orr_gfx_view::waters(frame),
             scatters: orr_gfx_view::scatters(frame),
+            dragons: dragons(frame),
         }
     }
     /// The frame drawn with the built-in material for every entity.
@@ -362,6 +383,9 @@ pub struct Viewport3dGpu {
     /// Sky, water and vegetation for the outdoor pass, and its clock.
     #[cfg(feature = "outdoor")]
     outdoor: (orr_scenery::passes::OutdoorScene, f32),
+    /// Dragons for the dragon pass.
+    #[cfg(feature = "outdoor")]
+    dragons: Vec<orr_scenery::dragon::DragonLook>,
     /// Advances only when an accepted frame changes every scene pipeline format.
     pipeline_generation: u64,
     #[cfg(feature = "models")]
@@ -383,6 +407,8 @@ impl Viewport3dGpu {
             model_surfaces: (Vec::new(), 0.0),
             #[cfg(feature = "outdoor")]
             outdoor: (Default::default(), 0.0),
+            #[cfg(feature = "outdoor")]
+            dragons: Vec::new(),
             pipeline_generation: 0,
             #[cfg(feature = "models")]
             imported: {
@@ -391,6 +417,8 @@ impl Viewport3dGpu {
                 // Sky, water and vegetation of the scene draw as one added pass.
                 #[cfg(feature = "outdoor")]
                 imported.add_pass(Box::new(orr_scenery::passes::OutdoorPass::new(rhi))).expect("the first pass");
+                #[cfg(feature = "outdoor")]
+                imported.add_pass(Box::new(orr_scenery::dragon::DragonPass::new(rhi))).expect("the second pass");
                 imported
             },
             #[cfg(feature = "models")]
@@ -429,6 +457,11 @@ impl Viewport3dGpu {
     #[cfg(feature = "outdoor")]
     pub fn set_outdoor(&mut self, scene: orr_scenery::passes::OutdoorScene, time: f32) {
         self.outdoor = (scene, time);
+    }
+    /// The dragons the dragon pass draws from the next frame on.
+    #[cfg(feature = "outdoor")]
+    pub fn set_dragons(&mut self, dragons: Vec<orr_scenery::dragon::DragonLook>) {
+        self.dragons = dragons;
     }
     /// The id of the magenta shader that marks a model with an unusable shader.
     #[cfg(feature = "models")]
@@ -896,6 +929,10 @@ impl Viewport3dGpu {
                 pass.set_scene(&rhi, scene);
                 pass.set_time(*time);
             }
+            let dragons = std::mem::take(&mut self.dragons);
+            if let Some(pass) = self.imported.pass_mut::<orr_scenery::dragon::DragonPass<Wgpu>>() {
+                pass.set_dragons(dragons);
+            }
         }
         self.imported.post_process = settings;
         // The scene's lights reach every batch: procedural shapes, models and skinned models.
@@ -1001,6 +1038,10 @@ impl GpuViewport3d {
     #[cfg(feature = "outdoor")]
     pub fn set_outdoor(&mut self, scene: orr_scenery::passes::OutdoorScene, time: f32) {
         self.gpu.set_outdoor(scene, time);
+    }
+    #[cfg(feature = "outdoor")]
+    pub fn set_dragons(&mut self, dragons: Vec<orr_scenery::dragon::DragonLook>) {
+        self.gpu.set_dragons(dragons);
     }
     #[cfg(feature = "models")]
     pub fn render_post_processed(

@@ -527,6 +527,11 @@ fn discover(erp: &mut ErpClient) -> Result<(EditorGame, RemoteIdentity, String, 
         types.register_component::<orr_sample::room_game::RoomInput>("RoomInput");
         serde_json::from_str(&types.type_json_schema("RoomInput").expect("registered room input")).expect("reflected room JSON schema")
     } else { expected_input };
+    let expected_input = if game == EditorGame::Yard3D {
+        let mut types = orr_reflect::TypeRegistry::new();
+        types.register_component::<orr_sample::yard3d_game::YardInput>("YardInput");
+        serde_json::from_str(&types.type_json_schema("YardInput").expect("registered Yard3D input")).expect("reflected Yard3D JSON schema")
+    } else { expected_input };
     #[cfg(feature = "mesh-navigation")]
     let expected_input = if game.has_mesh_view() {
         let mut types = orr_reflect::TypeRegistry::new();

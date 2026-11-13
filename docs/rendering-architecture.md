@@ -255,6 +255,17 @@ cargo run -p orr_scenery --example forest_valley_scene -- scenes/forest_valley
 
 에디터 테스트 `crates/orr_editor/tests/forest_valley_ui.rs`가 이 씬을 열고 카메라 시점으로 그림을 확인한다. `ORR_FOREST_CAPTURE` 환경 변수를 주면 화면을 저장한다.
 
+### 1.15 용 비행 (`orr_games::dragon`)
+
+Forest Valley 위를 동양식 용이 난다. 비행은 시뮬에서 고정소수점으로 계산된다. 그래서 모든 피어에서 같고 리플레이도 된다.
+
+- `orr_games::Dragon`(컴포넌트): 머리 위치, 방향(yaw), 기울기(pitch), 선회 기울기(bank), 속도, 순항·가속 속도, 선회·상승 속도, 지면 여유 높이, 최고 높이, 머무는 영역, 조종하는 플레이어, 머리가 지나간 경로 48점(3틱마다 한 점).
+- `orr_games::DragonCamera`(컴포넌트): 같은 엔티티의 `Transform3`를 용의 머리 뒤 위쪽에 두고 머리를 보게 한다. 같은 엔티티의 `orr_gfx::Camera`가 따라서 용을 비춘다.
+- `orr_games::DragonGround`(싱글턴): 지면 높이 32×32 격자. 시뮬은 높이맵 파일을 읽지 않으므로 씬 생성기가 이 격자를 써 둔다. 용은 지면 + 여유 높이 아래로 내려가지 않는다.
+- 입력: Yard3D 입력(`YardInput::buttons`)의 `DRAGON_*` 비트. 에디터에서는 Play, `Take control`을 누른 뒤 A/D로 선회, W/S로 상승과 하강, E로 가속한다.
+- 그리기: `orr_scenery::dragon::DragonPass`가 그림자와 불투명 단계에 등록된 렌더 패스다. 매 프레임 경로를 따라 34 m 몸통을 다시 만든다. 몸통에는 머리, 뿔, 수염, 눈, 갈기, 다리 넷, 꼬리 털이 있다. 비늘, 배 비늘판, 갈기는 패스의 셰이더가 그린다. 몸통은 헤엄치듯 굽이친다. 그림자는 공유 그림자 맵에 드리운다.
+- 에디터 테스트 `forest_valley_ui.rs`의 `the_dragon_flies_over_the_valley_with_the_keys_and_the_camera_follows`가 키로 비행을 확인하고 화면을 저장한다.
+
 ### 1.14 지금의 한계
 
 - Yard3D만 `orr_gfx`를 등록했다. Room, 지형, 내비게이션, 메시 게임은 아직 각자의 조명 별도 파일을 쓴다.
@@ -271,6 +282,7 @@ cargo run -p orr_scenery --example forest_valley_scene -- scenes/forest_valley
 - 렌더 패스는 `ImportedSceneRenderer`에만 등록된다. 절차 도형만 그리는 `Renderer3D` 단독 경로에는 없다.
 - 그림자 맵은 하나(1024²)다. Forest Valley 원래 렌더러의 계단식 그림자 두 장보다 먼 곳의 그림자가 거칠다.
 - `Scatter`는 지형 높이와 경사, 물만 본다. 원래 Forest Valley의 숲 밀도 지도(빈터, 강가 비우기)는 아직 없다.
+- 용의 지면 충돌은 32×32 격자의 근삿값이다. 나무와는 부딪히지 않는다. 용의 몸통은 표면 셰이더가 아니라 패스 자체 셰이더로 그린다.
 - 씬 파일 형식은 모든 필드를 요구한다. 이번에 `Light::shadow_range`가 추가되고 `PostProcess`가 효과 목록으로 바뀌었다. 그래서 전에 저장한 씬의 `orr_gfx::Light`와 `orr_gfx::PostProcess`는 새 형식으로 고쳐야 열린다.
 
 ## 2. 아직 안 되는 것과 설계

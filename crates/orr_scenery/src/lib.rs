@@ -19,6 +19,8 @@
 
 pub mod math;
 #[cfg(feature = "passes")]
+pub mod dragon;
+#[cfg(feature = "passes")]
 pub mod passes;
 pub mod mesh;
 pub mod renderer;
