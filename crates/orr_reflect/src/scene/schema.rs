@@ -59,6 +59,8 @@ fn desc_schema(desc: &TypeDesc) -> Json {
         Kind::Enum { variants, .. } => {
             Json::obj(vec![("enum", Json::Arr(variants.iter().map(|(n, _)| Json::str(n)).collect()))])
         }
+        // JSON Schema counts characters; the limit is in UTF-8 bytes, so it is stated in words.
+        Kind::Text { len } => Json::obj(vec![("type", Json::str("string")), ("description", Json::str(&format!("UTF-8 text of at most {len} bytes, without control characters")))]),
         Kind::Flags { bits, .. } => Json::obj(vec![
             ("type", Json::str("array")),
             ("items", Json::obj(vec![("enum", Json::Arr(bits.iter().map(|(n, _)| Json::str(n)).collect()))])),

@@ -28,6 +28,8 @@ orr_sprite = { path = "../orr_sprite", optional = true }
 orr_rhi = { path = "../orr_rhi" }
 orr_view = { path = "../orr_view" }
 bytemuck = { version = "1", features = ["derive"] }
+# Validates surface shaders on the CPU before they reach the GPU (the version wgpu uses).
+naga = { version = "30", features = ["wgsl-in"] }
 
 [dev-dependencies]
 winit = "0.30"

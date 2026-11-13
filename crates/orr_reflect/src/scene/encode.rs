@@ -176,6 +176,7 @@ fn flow(v: &Value) -> String {
         Value::Entity(_) | Value::EntityGuid(None) => "null".to_string(),
         Value::EntityGuid(Some(g)) => g.clone(),
         Value::Enum(n) => fmt_string(n),
+        Value::Text(text) => fmt_string(text),
         Value::Flags(names) => format!("[{}]", names.iter().map(|n| fmt_string(n)).collect::<Vec<_>>().join(", ")),
         Value::Array(items) => format!("[{}]", items.iter().map(flow).collect::<Vec<_>>().join(", ")),
         Value::Struct(fields) => flow_map(None, fields),

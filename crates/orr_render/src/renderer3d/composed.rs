@@ -49,7 +49,7 @@ impl PreparedProcedural {
 }
 
 fn procedural_draw_count(list: &RenderList3D) -> Result<usize, ProceduralSceneError> {
-    let mut total = list.lines.len();
+    let mut total = list.lines.len() + list.surfaces.len();
     for kind in MeshKind::ALL {
         total = total
             .checked_add(list.instances(kind).len())
@@ -62,7 +62,8 @@ fn procedural_draw_count(list: &RenderList3D) -> Result<usize, ProceduralSceneEr
         .iter()
         .filter(|&&kind| !list.instances(kind).is_empty())
         .count()
-        + usize::from(!list.lines.is_empty()))
+        + usize::from(!list.lines.is_empty())
+        + surfaces::surface_draws(list).0)
 }
 
 pub(crate) fn validate_procedural_list(
@@ -70,9 +71,13 @@ pub(crate) fn validate_procedural_list(
     hdr: bool,
 ) -> Result<usize, ProceduralSceneError> {
     let draws = procedural_draw_count(list)?;
-    for kind in MeshKind::ALL {
-        let instances = list.instances(kind);
-        for instance in instances {
+    if list.surfaces.iter().any(|s| !s.params.iter().all(|v| v.is_finite() && v.abs() <= 1e6)) || !list.time.is_finite() {
+        return Err(ProceduralSceneError::InvalidInstance);
+    }
+    // Surface instances follow the same rules as the built-in ones.
+    let all = MeshKind::ALL.iter().flat_map(|&kind| list.instances(kind).iter()).chain(list.surfaces.iter().map(|s| &s.instance));
+    {
+        for instance in all {
             let norm = dot(
                 [instance.rot[0], instance.rot[1], instance.rot[2]],
                 [instance.rot[0], instance.rot[1], instance.rot[2]],
@@ -142,6 +147,7 @@ impl<B: Rhi> Renderer3D<B> {
         // The coordinator validates common camera/light data first. Its lighting
         // is authoritative; the standalone list's light/clear settings are ignored.
         let mut globals = self.globals(camera, size, lighting, &Mat4::IDENTITY);
+        globals.viewport[3] = list.time;
         globals.shadow = [0.0; 4];
         globals.params[0] = 0.0;
         if let Some(ready) = shadow {
@@ -182,8 +188,13 @@ impl<B: Rhi> Renderer3D<B> {
         prepared: &mut PreparedProcedural,
     ) {
         let clock = CpuClock::start();
+        let mut surface_stats = FrameStats::default();
+        self.prepare_surfaces(list, &mut surface_stats);
         let rhi = &self.rhi;
         let stats = &mut prepared.stats;
+        stats.upload_calls += surface_stats.upload_calls;
+        stats.upload_bytes += surface_stats.upload_bytes;
+        stats.buffer_reallocations += surface_stats.buffer_reallocations;
         stats.upload(rhi, &self.globals, 0, bytemuck::bytes_of(&prepared.globals));
         if stats.mesh_instances > 0 {
             stats.buffer_reallocations +=
@@ -254,6 +265,7 @@ impl<B: Rhi> Renderer3D<B> {
                 }
             }
         }
+        self.surface_main_commands(prepared.globals.params[0] > 0.5, &mut commands, &mut prepared.stats.main);
         if prepared.lines > 0 {
             commands.extend([
                 Command::SetPipeline(&self.line_pipeline),
@@ -278,6 +290,7 @@ impl<B: Rhi> Renderer3D<B> {
     }
 
     pub(crate) fn bind_shared_shadow(&mut self, map: &crate::shared_shadow::SharedShadow<B>) {
+        self.bind_surfaces_to_shared_shadow(map);
         if self
             .composed_main_bind
             .as_ref()
@@ -330,6 +343,7 @@ impl<B: Rhi> Renderer3D<B> {
                 });
             }
         }
+        self.surface_shadow_commands(&self.composed_shadow_bind, commands, &mut ready.stats.shadow);
         ready.stats.shadow.passes = 1;
     }
 

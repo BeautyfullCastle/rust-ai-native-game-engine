@@ -135,3 +135,38 @@ fn the_schema_documents_every_field() {
         assert!(schema.contains(needle), "the JSON schema lacks {needle:?}");
     }
 }
+
+#[test]
+fn a_material_names_its_shader_as_text_in_the_scene_file() {
+    use orr_gfx::{Material, MATERIAL_VALUES, SHADER_NAME_BYTES};
+    let types = types();
+    let values: Vec<String> = (0..MATERIAL_VALUES).map(|i| if i == 3 { "12.5".into() } else { "0".into() }).collect();
+    let text = format!("schema: orr.scene/1\nentities:\n  e_00000001:\n    orr_gfx::Material:\n      shader: stripes\n      values: [{}]\n      overrides: 8\n", values.join(", "));
+    let scene = Scene::parse(&text, &types).unwrap_or_else(|e| panic!("{e}"));
+    let mut frame = frame();
+    let index = scene.bake(&types, &mut frame).unwrap();
+    let e = index.entity(&Guid::parse("e_00000001").unwrap()).unwrap();
+    let material = frame.get::<Material>(e).unwrap();
+    assert_eq!(material.shader_name(), "stripes");
+    assert_eq!((material.values[3], material.overrides), (FP::from_ratio(25, 2), 8));
+    let written = Scene::unbake(&types, &frame, Some(&index)).unwrap().to_yaml();
+    assert!(written.contains("shader: stripes"), "{written}");
+
+    // A name that needs quotes in YAML is written with them and reads back the same.
+    let mut odd = *material;
+    odd.shader = Material::new("true").shader;
+    frame.add(e, odd);
+    let written = Scene::unbake(&types, &frame, Some(&index)).unwrap().to_yaml();
+    assert!(written.contains("shader: \"true\""), "{written}");
+    let again = Scene::parse(&written, &types).unwrap();
+    let mut other = self::frame();
+    let index = again.bake(&types, &mut other).unwrap();
+    assert_eq!(other.get::<Material>(index.entity(&Guid::parse("e_00000001").unwrap()).unwrap()).unwrap().shader_name(), "true");
+
+    // Text longer than the field and text with control characters are refused.
+    let long = text.replace("shader: stripes", &format!("shader: {}", "x".repeat(SHADER_NAME_BYTES + 1)));
+    assert!(Scene::parse(&long, &types).is_err());
+    let control = text.replace("shader: stripes", "shader: \"a\tb\"");
+    assert!(Scene::parse(&control, &types).is_err());
+    assert_eq!(Material::new(&"y".repeat(100)).shader_name().len(), SHADER_NAME_BYTES);
+}

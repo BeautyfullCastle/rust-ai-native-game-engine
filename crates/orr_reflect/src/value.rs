@@ -32,6 +32,8 @@ pub enum Value {
     Enum(String),
     /// A set of named bits, by name, in declaration order.
     Flags(Vec<String>),
+    /// Text of a text field.
+    Text(String),
     /// A fixed or variable length list.
     Array(Vec<Value>),
     /// A struct: `(field name, value)` in declaration order.
@@ -54,6 +56,7 @@ impl Value {
             Value::EntityGuid(_) => "entity reference",
             Value::Enum(_) => "enum",
             Value::Flags(_) => "flags",
+            Value::Text(_) => "text",
             Value::Array(_) => "array",
             Value::Struct(_) => "struct",
             Value::Variant(..) => "tagged value",

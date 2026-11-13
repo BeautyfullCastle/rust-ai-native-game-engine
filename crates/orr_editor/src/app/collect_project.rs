@@ -252,6 +252,7 @@ impl EditorApp {
                 crate::project::install_collect_presentation(&mut replacement, project, ctx);
                 replacement.gpu = self.gpu.take();
                 replacement.gpu3d = self.gpu3d.take();
+                replacement.surfaces = std::mem::take(&mut self.surfaces);
                 replacement
                     .editor
                     .info(format!("Collect project ready: {}", path.display()));

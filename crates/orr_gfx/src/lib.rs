@@ -9,6 +9,7 @@
 //! - [`Light`]: a directional, point or spot light on an entity.
 //! - [`RenderLayers`]: the render layers an entity is drawn on. A light
 //!   affects an entity only when the two share a layer.
+//! - [`Material`]: a surface shader and its parameter values.
 //! - [`Environment`]: sky and ground ambient light of the scene.
 //! - [`PostProcess`]: exposure, tone mapping and bloom of the scene.
 //!
@@ -153,6 +154,53 @@ impl Default for RenderLayers {
     }
 }
 
+/// Most bytes of a surface shader name in [`Material::shader`].
+pub const SHADER_NAME_BYTES: usize = 48;
+/// Parameter values a [`Material`] holds.
+pub const MATERIAL_VALUES: usize = 16;
+
+/// A surface shader on an entity. The entity's shape is drawn with the shader
+/// instead of the built-in material, and the engine still lights it.
+///
+/// The editor reads the shader from `shaders/<shader>.wgsl` next to the scene
+/// file. The shader declares its parameters (`// @param tint color`); their
+/// numbers are stored here in declaration order.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable, Reflect)]
+pub struct Material {
+    /// Name of the surface shader: letters, digits, `_` and `-`.
+    #[reflect(text)]
+    pub shader: [u8; SHADER_NAME_BYTES],
+    /// Parameter values in the order the shader declares them.
+    pub values: [FP; MATERIAL_VALUES],
+    /// Bit i set: `values[i]` is used. Bit i clear: the shader's default is used.
+    #[reflect(range = "0..=65535")]
+    pub overrides: u32,
+    #[reflect(skip)]
+    _pad: u32,
+}
+
+impl Material {
+    /// A material with the shader `name` and the shader's default values.
+    /// A name longer than [`SHADER_NAME_BYTES`] is cut.
+    pub fn new(name: &str) -> Self {
+        let mut shader = [0; SHADER_NAME_BYTES];
+        // Cut at a character boundary so the stored text stays valid UTF-8.
+        let mut len = name.len().min(SHADER_NAME_BYTES);
+        while !name.is_char_boundary(len) {
+            len -= 1;
+        }
+        shader[..len].copy_from_slice(&name.as_bytes()[..len]);
+        Self { shader, values: [FP::ZERO; MATERIAL_VALUES], overrides: 0, _pad: 0 }
+    }
+
+    /// The shader name, without the zero padding.
+    pub fn shader_name(&self) -> &str {
+        let end = self.shader.iter().position(|b| *b == 0).unwrap_or(SHADER_NAME_BYTES);
+        core::str::from_utf8(&self.shader[..end]).unwrap_or("")
+    }
+}
+
 /// Ambient light of the scene: light from the sky above and from the ground below.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable, Reflect)]
@@ -229,6 +277,8 @@ pub mod names {
     pub const LIGHT: &str = "orr_gfx::Light";
     /// [`super::RenderLayers`].
     pub const RENDER_LAYERS: &str = "orr_gfx::RenderLayers";
+    /// [`super::Material`].
+    pub const MATERIAL: &str = "orr_gfx::Material";
     /// [`super::Environment`].
     pub const ENVIRONMENT: &str = "orr_gfx::Environment";
     /// [`super::PostProcess`].
@@ -241,6 +291,7 @@ pub fn register(builder: &mut ComponentRegistryBuilder) {
     builder.register_component::<Transform3>(names::TRANSFORM);
     builder.register_component::<Light>(names::LIGHT);
     builder.register_component::<RenderLayers>(names::RENDER_LAYERS);
+    builder.register_component::<Material>(names::MATERIAL);
     builder.register_singleton::<Environment>(names::ENVIRONMENT);
     builder.register_singleton::<PostProcess>(names::POST_PROCESS);
 }
@@ -270,6 +321,7 @@ pub fn register_reflect(types: &mut TypeRegistry) {
     types.register_component::<Transform3>(names::TRANSFORM);
     types.register_component::<Light>(names::LIGHT);
     types.register_component::<RenderLayers>(names::RENDER_LAYERS);
+    types.register_component::<Material>(names::MATERIAL);
     types.register_singleton_with_init::<Environment>(names::ENVIRONMENT, init_environment);
     types.register_singleton_with_init::<PostProcess>(names::POST_PROCESS, init_post_process);
 }

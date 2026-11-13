@@ -236,7 +236,7 @@ the order below, so even a `strstr` reader can find them. Example (shortened):
   exactly `input.size` bytes. Field types: `u8`..`u64`, `i8`..`i64`, `bool`,
   `fixed` (an `i64` holding value x 65536), `fixed32` (an `i32`, same scale),
   `fixed_vec2`/`fixed_vec3` (2 or 3 `fixed`), `entity` (`u32` index, `u32`
-  version), `enum` (`values`), `flags` (`bits`), `array` (`len`, `elem`),
+  version), `enum` (`values`), `flags` (`bits`), `text` (`len`: the most UTF-8 bytes), `array` (`len`, `elem`),
   `struct` (`fields`). Unknown types are `opaque`.
 - `command.size`: size of the game's command encoding (0 = none).
 - `kinds`, `events`: the game's vocabulary.

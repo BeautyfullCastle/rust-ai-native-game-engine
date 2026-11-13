@@ -348,6 +348,14 @@ fn decode_value(desc: &TypeDesc, node: &Node, ctx: &Ctx<'_>) -> Result<Value, Di
             }
             _ => Err(expected("an entity GUID like e_7f3a91c2 or null", node)),
         },
+        Kind::Text { .. } => match &node.kind {
+            NodeKind::Scalar { text, .. } => {
+                let value = Value::Text(text.clone());
+                desc.check(&value, true).map_err(|e| Diag::new(node.pos, e.to_string()))?;
+                Ok(value)
+            }
+            _ => Err(expected("text", node)),
+        },
         Kind::Enum { variants, .. } => match &node.kind {
             NodeKind::Scalar { text, .. } if variants.iter().any(|(n, _)| n == text) => Ok(Value::Enum(text.clone())),
             NodeKind::Scalar { text, .. } => Err(Diag::new(

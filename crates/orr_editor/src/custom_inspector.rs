@@ -97,6 +97,7 @@ impl Snapshot {
                 | Kind::Vec2 { .. }
                 | Kind::Enum { .. }
                 | Kind::Flags { .. }
+                | Kind::Text { .. }
         ) {
             return Err("custom edits require a scalar or Vec2 field".into());
         }

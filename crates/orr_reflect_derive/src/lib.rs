@@ -18,6 +18,8 @@
 //! - `enumeration = "name=0,other=1"`: an unsigned integer field with named values.
 //! - `flags = "sensor=1,solid=2"`: an unsigned integer field with named bits.
 //! - `range = "0.05..=1000"`: allowed values, inclusive (either end may be empty).
+//! - `text`: a `[u8; N]` field that holds UTF-8 text of at most N bytes, padded
+//!   with zero bytes. Scene files and the inspector show it as a string.
 //!
 //! Doc comments on the struct and its fields become descriptions in the
 //! schema and the inspector.
@@ -57,6 +59,7 @@ struct FieldAttrs {
     enumeration: Option<String>,
     flags: Option<String>,
     range: Option<String>,
+    text: bool,
 }
 
 fn field_attrs(attrs: &[syn::Attribute]) -> syn::Result<FieldAttrs> {
@@ -76,8 +79,10 @@ fn field_attrs(attrs: &[syn::Attribute]) -> syn::Result<FieldAttrs> {
                 out.flags = Some(m.value()?.parse::<syn::LitStr>()?.value());
             } else if m.path.is_ident("range") {
                 out.range = Some(m.value()?.parse::<syn::LitStr>()?.value());
+            } else if m.path.is_ident("text") {
+                out.text = true;
             } else {
-                return Err(m.error("unknown reflect attribute (skip, bool, enumeration, flags, range)"));
+                return Err(m.error("unknown reflect attribute (skip, bool, enumeration, flags, range, text)"));
             }
             Ok(())
         })?;
@@ -140,7 +145,9 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         let fstr = fname.to_string();
         let fty = &f.ty;
         let span = fname.span();
-        let mut ty: TokenStream2 = if attrs.bool_ {
+        let mut ty: TokenStream2 = if attrs.text {
+            quote! { ::orr_reflect::TypeDesc::text(::core::mem::size_of::<#fty>()) }
+        } else if attrs.bool_ {
             quote! { ::orr_reflect::TypeDesc::bool_of_width(::core::mem::size_of::<#fty>()) }
         } else if let Some(text) = &attrs.enumeration {
             let vals = named_values(text, span)?;

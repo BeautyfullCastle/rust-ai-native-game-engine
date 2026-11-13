@@ -16,7 +16,23 @@ pub struct YardFrame {
     /// The scene's lights, environment and post-processing (`orr_gfx`
     /// components), read from the same frame. `None` before the first frame.
     pub look: Option<orr_gfx_view::SceneLook>,
+    /// Entities with a surface shader (`orr_gfx::Material`), from the same frame.
+    pub materials: Vec<orr_gfx_view::MaterialRef>,
 }
+
+/// How one entity of the frame is drawn.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SurfaceChoice {
+    /// The built-in material.
+    BuiltIn,
+    /// A surface shader of the viewport's renderer, with its parameter values.
+    Shader(orr_render::SurfaceId, [f32; orr_render::MAX_SURFACE_FLOATS]),
+    /// The entity names a shader that cannot be used: drawn magenta so the problem shows.
+    Broken,
+}
+
+/// The color of a shape whose surface shader cannot be used.
+pub const BROKEN_SURFACE_COLOR: [f32; 4] = [1.0, 0.0, 1.0, 1.0];
 impl YardFrame {
     pub fn extract(frame: FrameView<'_>) -> Self {
         let mut extracted = Vec::new();
@@ -32,9 +48,15 @@ impl YardFrame {
                 .collect(),
             poses: orr_sample::yard3d_view::editor_body_poses(frame),
             look: Some(orr_gfx_view::scene_look(frame, &orr_sample::yard3d_view::yard_lighting())),
+            materials: orr_gfx_view::materials(frame),
         }
     }
+    /// The frame drawn with the built-in material for every entity.
     pub fn list(&self, hidden: &[Entity], selected: Option<Entity>) -> RenderList3D {
+        self.list_with_surfaces(hidden, selected, &|_| SurfaceChoice::BuiltIn)
+    }
+    /// The frame with each entity drawn as `surface` chooses.
+    pub fn list_with_surfaces(&self, hidden: &[Entity], selected: Option<Entity>, surface: &dyn Fn(Entity) -> SurfaceChoice) -> RenderList3D {
         let mut list = RenderList3D {
             lighting: orr_sample::yard3d_view::yard_lighting(),
             ..RenderList3D::default()
@@ -51,7 +73,18 @@ impl YardFrame {
             .copied()
             .filter(|item| !hidden.contains(&item.entity))
             .collect();
-        orr_sample::yard3d_view::fill_list(&visible, &mut list);
+        for item in &visible {
+            match surface(item.entity) {
+                SurfaceChoice::BuiltIn => orr_sample::yard3d_view::fill_list(std::slice::from_ref(item), &mut list),
+                SurfaceChoice::Shader(id, params) => list.with_surface(id, params, |list| orr_sample::yard3d_view::fill_list(std::slice::from_ref(item), list)),
+                SurfaceChoice::Broken => {
+                    let mut broken = *item;
+                    broken.style.color = BROKEN_SURFACE_COLOR;
+                    broken.style.checker = false;
+                    orr_sample::yard3d_view::fill_list(std::slice::from_ref(&broken), &mut list);
+                }
+            }
+        }
         if let Some(item) = self.items.iter().find(|item| Some(item.entity) == selected) {
             let p = item.transform.pos.to_array();
             let r = half_extents(item.style.shape)
@@ -269,6 +302,8 @@ pub struct Viewport3dGpu {
     point_light: orr_render::PointLightSettings,
     target: OffscreenTarget<Wgpu>,
     renderer: Renderer3D<Wgpu>,
+    /// Surface shaders added to `renderer`, in id order, one per name: name, library version, shader.
+    surfaces: Vec<(String, u64, orr_render::SurfaceShader)>,
     /// Advances only when an accepted frame changes every scene pipeline format.
     pipeline_generation: u64,
     #[cfg(feature = "models")]
@@ -285,6 +320,7 @@ impl Viewport3dGpu {
             point_light: orr_render::PointLightSettings::default(),
             target: OffscreenTarget::new(rhi, size.0, size.1, TARGET_FORMAT),
             renderer: Renderer3D::with_settings(rhi.clone(), TARGET_FORMAT, Settings3D::LOW),
+            surfaces: Vec::new(),
             pipeline_generation: 0,
             #[cfg(feature = "models")]
             imported: orr_render::ImportedSceneRenderer::new(rhi.clone(), TARGET_FORMAT)
@@ -294,6 +330,24 @@ impl Viewport3dGpu {
             #[cfg(feature = "animated-models")]
             animated_models: Vec::new(),
         }
+    }
+    /// The renderer's id of the shader named `shader.name()`. The first time a
+    /// name is asked for, the shader is added; when the library has a newer
+    /// version of it, the shader is replaced under the same id. So saving a
+    /// shader file many times keeps one pipeline per name.
+    pub fn surface_id(&mut self, shader: &orr_render::SurfaceShader, version: u64) -> orr_render::SurfaceId {
+        if let Some(index) = self.surfaces.iter().position(|(name, _, _)| name == shader.name()) {
+            let id = orr_render::SurfaceId(index as u32);
+            if self.surfaces[index].1 != version {
+                self.renderer.replace_surface(id, shader);
+                self.surfaces[index] = (shader.name().to_string(), version, shader.clone());
+            }
+            return id;
+        }
+        let id = self.renderer.add_surface(shader);
+        self.surfaces.push((shader.name().to_string(), version, shader.clone()));
+        debug_assert_eq!(id.0 as usize, self.surfaces.len() - 1);
+        id
     }
     #[cfg(feature = "models")]
     pub fn set_point_light_settings(&mut self, settings: orr_render::PointLightSettings) -> Result<(), String> {
@@ -668,6 +722,10 @@ impl Viewport3dGpu {
         }
         if let Some(renderer) = replacement_renderer {
             self.renderer = renderer;
+            // The new renderer gets the same surface shaders in the same order, so their ids stay valid.
+            for (_, _, shader) in &self.surfaces {
+                self.renderer.add_surface(shader);
+            }
             self.models.clear();
             #[cfg(feature = "animated-models")]
             self.animated_models.clear();
@@ -792,6 +850,10 @@ impl GpuViewport3d {
     }
     pub fn gpu(&self) -> &Viewport3dGpu {
         &self.gpu
+    }
+    /// See [`Viewport3dGpu::surface_id`].
+    pub fn surface_id(&mut self, shader: &orr_render::SurfaceShader, version: u64) -> orr_render::SurfaceId {
+        self.gpu.surface_id(shader, version)
     }
     #[cfg(feature = "models")]
     pub fn render_post_processed(

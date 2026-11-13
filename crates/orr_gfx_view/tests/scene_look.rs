@@ -200,3 +200,28 @@ fn the_look_fills_a_render_list_and_draws_light_markers() {
     look.draw_markers(&mut list, Some(lamp));
     assert!(list.lines[0].width > thin, "the selected light's marker is wider");
 }
+
+#[test]
+fn materials_give_overridden_values_and_shader_defaults_elsewhere() {
+    let shader = orr_render::SurfaceShader::compile(
+        "stripes",
+        "// @param tint color = 0.5, 0.25, 1\n// @param stripes float 1..40 = 8\nfn surface(in: SurfaceInput) -> Surface { return default_surface(in); }",
+    )
+    .unwrap();
+    let mut frame = gfx_frame();
+    let plain = frame.spawn();
+    let e = frame.spawn();
+    let mut material = orr_gfx::Material::new("stripes");
+    material.values[1] = FP::from_ratio(3, 4);
+    material.values[3] = int(100);
+    material.values[2] = int(9);
+    material.overrides = 0b1010;
+    frame.add(e, material);
+    let found = orr_gfx_view::materials(FrameView::of(&frame));
+    assert_eq!(found.len(), 1);
+    assert_eq!((found[0].entity, found[0].shader.as_str()), (e, "stripes"));
+    let values = found[0].values_for(&shader);
+    // Bit 1 takes the stored 0.75; bit 3 takes 100, clamped to the declared 40; bit 2 is not set.
+    assert_eq!(&values[..4], &[0.5, 0.75, 1.0, 40.0]);
+    assert!(orr_gfx_view::materials(FrameView::of(&frame)).iter().all(|m| m.entity != plain));
+}

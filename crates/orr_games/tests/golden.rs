@@ -62,10 +62,10 @@ fn golden_phys_mixer150() {
 fn golden_yard60() {
     // The checksum covers the registered type list, so these values depend on every
     // type Yard3D registers, the orr_gfx rendering components included.
-    assert_eq!(yard(YardConfig::new(60), 300), 0xcc8f_03c8_61a2_15e5);
+    assert_eq!(yard(YardConfig::new(60), 300), 0x7460_fd33_eaed_348a);
 }
 
 #[test]
 fn golden_yard150() {
-    assert_eq!(yard(YardConfig::new(150), 200), 0x7a5c_49cc_1528_2777);
+    assert_eq!(yard(YardConfig::new(150), 200), 0x14a5_9f88_0e83_d07a);
 }

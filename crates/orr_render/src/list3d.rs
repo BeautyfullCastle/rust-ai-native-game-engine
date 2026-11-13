@@ -147,6 +147,16 @@ impl Default for Lighting {
     }
 }
 
+/// One shape drawn with a surface shader instead of the built-in material.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SurfaceInstance {
+    pub surface: crate::SurfaceId,
+    pub kind: MeshKind,
+    pub instance: Instance3D,
+    /// Parameter values, laid out as the shader declares them.
+    pub params: [f32; crate::MAX_SURFACE_FLOATS],
+}
+
 /// One frame of 3D drawing. Fill it each frame (`clear` keeps the buffers'
 /// capacity), then give it to a [`crate::Renderer3D`].
 #[derive(Clone, Debug, Default)]
@@ -159,6 +169,10 @@ pub struct RenderList3D {
     pub lighting: Lighting,
     /// Lights beyond the sun of `lighting`, and the layers the sun affects.
     pub scene_lights: crate::SceneLights,
+    /// Shapes drawn with surface shaders (see [`RenderList3D::with_surface`]).
+    pub surfaces: Vec<SurfaceInstance>,
+    /// Seconds since the scene started. Surface shaders read it as `in.time`.
+    pub time: f32,
 }
 
 impl RenderList3D {
@@ -166,21 +180,42 @@ impl RenderList3D {
         Self::default()
     }
 
-    /// Empties the instances and lines; the lighting and the scene lights stay.
+    /// Empties the instances, surface instances and lines; the lighting, the
+    /// scene lights and the time stay.
     pub fn clear(&mut self) {
         self.spheres.clear();
         self.boxes.clear();
         self.capsules.clear();
         self.planes.clear();
         self.lines.clear();
+        self.surfaces.clear();
     }
 
+    /// Shapes with the built-in material. Surface instances are not counted.
     pub fn instance_count(&self) -> usize {
         self.spheres.len() + self.boxes.len() + self.capsules.len() + self.planes.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.instance_count() == 0 && self.lines.is_empty()
+        self.instance_count() == 0 && self.lines.is_empty() && self.surfaces.is_empty()
+    }
+
+    /// Draws the shapes that `draw` adds with the surface shader `surface`
+    /// and the parameter values `params`, instead of the built-in material.
+    /// The shapes keep their material values; the shader reads them as
+    /// `in.color`, `in.roughness`, `in.metallic` and `in.emissive`.
+    pub fn with_surface(&mut self, surface: crate::SurfaceId, params: [f32; crate::MAX_SURFACE_FLOATS], draw: impl FnOnce(&mut Self)) {
+        let before = MeshKind::ALL.map(|kind| self.instances(kind).len());
+        draw(self);
+        for (kind, start) in MeshKind::ALL.into_iter().zip(before) {
+            let added: Vec<Instance3D> = match kind {
+                MeshKind::Sphere => self.spheres.drain(start..).collect(),
+                MeshKind::Box => self.boxes.drain(start..).collect(),
+                MeshKind::Capsule => self.capsules.drain(start..).collect(),
+                MeshKind::Plane => self.planes.drain(start..).collect(),
+            };
+            self.surfaces.extend(added.into_iter().map(|instance| SurfaceInstance { surface, kind, instance, params }));
+        }
     }
 
     /// The instance slice of one mesh kind.

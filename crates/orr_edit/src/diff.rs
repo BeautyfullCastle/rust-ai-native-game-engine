@@ -152,6 +152,7 @@ pub fn format_value(v: &Value) -> String {
         Value::EntityGuid(None) => "none".to_string(),
         Value::EntityGuid(Some(g)) => g.clone(),
         Value::Enum(n) => n.clone(),
+        Value::Text(text) => format!("{text:?}"),
         Value::Flags(f) if f.is_empty() => "[]".to_string(),
         Value::Flags(f) => f.join("|"),
         Value::Array(a) => format!("[{}]", a.iter().map(format_value).collect::<Vec<_>>().join(", ")),

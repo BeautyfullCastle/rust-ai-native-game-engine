@@ -46,6 +46,9 @@ use crate::stats::{CpuClock, FrameStats, PassStats};
 
 #[cfg(feature = "imported-scene")]
 mod composed;
+mod surfaces;
+#[cfg(feature = "imported-scene")]
+pub(crate) use surfaces::surface_draws;
 #[cfg(feature = "imported-scene")]
 pub use composed::{ProceduralSceneError, MAX_PROCEDURAL_INSTANCES};
 #[cfg(feature = "imported-scene")]
@@ -54,7 +57,6 @@ pub(crate) use composed::{validate_procedural_list, PreparedProcedural};
 #[cfg(feature = "irradiance-probes")]
 pub(crate) mod irradiance;
 
-const SHADER: &str = include_str!("shader3d.wgsl");
 const DEPTH: TextureFormat = TextureFormat::Depth32Float;
 
 /// Background color of [`Renderer3D`] (linear).
@@ -464,7 +466,7 @@ pub struct Renderer3D<B: Rhi> {
     line_bind: B::BindGroup,
     _shadow_texture: B::Texture,
     shadow_view: B::TextureView,
-    _sampler: B::Sampler,
+    sampler: B::Sampler,
     mesh_vertices: B::Buffer,
     mesh_indices: B::Buffer,
     mesh_ranges: [(std::ops::Range<u32>, i32); 4],
@@ -474,6 +476,12 @@ pub struct Renderer3D<B: Rhi> {
     last_frame_stats: FrameStats,
     sphere_lod: Option<SphereLodState>,
     last_sphere_lod_stats: SphereLodStats3D,
+    /// The shader every pipeline of this renderer is built from; surface shaders extend it.
+    engine_source: String,
+    surfaces: Vec<surfaces::SurfaceGpu<B>>,
+    surface_instances: Growing<B>,
+    surface_params: Growing<B>,
+    surface_frame: surfaces::SurfaceFrame,
 }
 
 impl<B: Rhi> Renderer3D<B> {
@@ -499,9 +507,7 @@ impl<B: Rhi> Renderer3D<B> {
 
     fn build(rhi: B, format: TextureFormat, settings: Settings3D, policy: Option<SphereLod3D>) -> Self {
         let samples = rhi.supported_samples(format, settings.msaa);
-        let source = crate::scene_lights::shader(SHADER, "g");
-        #[cfg(feature = "irradiance-probes")]
-        let source = irradiance::shader(&source, "g");
+        let source = crate::surface::engine_source();
         let shader = rhi.create_shader("orr_render 3d", &source);
 
         let mesh_layout = VertexLayout {
@@ -676,6 +682,8 @@ impl<B: Rhi> Renderer3D<B> {
 
         let instances = Growing::new(&rhi, "3d instances", std::mem::size_of::<Instance3D>());
         let lines = Growing::new(&rhi, "3d lines", std::mem::size_of::<LineInstance3D>());
+        let surface_instances = Growing::new(&rhi, "3d surface instances", std::mem::size_of::<Instance3D>());
+        let surface_params = Growing::new(&rhi, "3d surface parameters", crate::MAX_SURFACE_FLOATS * 4);
         Self {
             rhi,
             format,
@@ -696,12 +704,17 @@ impl<B: Rhi> Renderer3D<B> {
             line_bind,
             _shadow_texture: shadow_texture,
             shadow_view,
-            _sampler: sampler,
+            sampler,
             mesh_vertices,
             mesh_indices,
             mesh_ranges: meshes.ranges,
             instances,
             lines,
+            engine_source: source,
+            surfaces: Vec::new(),
+            surface_instances,
+            surface_params,
+            surface_frame: surfaces::SurfaceFrame::default(),
             attachments: None,
             last_frame_stats: FrameStats::default(),
             last_sphere_lod_stats: SphereLodStats3D {
@@ -849,8 +862,10 @@ impl<B: Rhi> Renderer3D<B> {
             stats.attachment_reallocations = stats.attachment_allocations;
         }
         let light_vp = light_view_proj(&list.lighting, self.settings.shadow_map_size);
+        self.prepare_surfaces(list, &mut stats);
         let mut globals = self.globals(camera, size, &list.lighting, &light_vp);
         globals.scene_lights = list.scene_lights.uniform();
+        globals.viewport[3] = list.time;
         let shadow_globals = Globals {
             view_proj: light_vp.0,
             ..globals
@@ -952,15 +967,19 @@ impl<B: Rhi> Renderer3D<B> {
         };
 
         let mut encoder = rhi.create_encoder("3d frame");
-        if list.lighting.shadows && total > 0 {
-            let mut commands: Vec<Command<B>> = vec![
-                Command::SetPipeline(&self.shadow_pipeline),
-                Command::SetBindGroup(0, &self.shadow_bind),
-                Command::SetVertexBuffer(0, &self.mesh_vertices),
-                Command::SetVertexBuffer(1, &self.instances.buffer),
-                Command::SetIndexBuffer(&self.mesh_indices),
-            ];
-            draw_meshes(&mut commands, false, &mut stats.shadow);
+        if list.lighting.shadows && (total > 0 || !self.surface_frame.is_empty()) {
+            let mut commands: Vec<Command<B>> = Vec::new();
+            if total > 0 {
+                commands.extend([
+                    Command::SetPipeline(&self.shadow_pipeline),
+                    Command::SetBindGroup(0, &self.shadow_bind),
+                    Command::SetVertexBuffer(0, &self.mesh_vertices),
+                    Command::SetVertexBuffer(1, &self.instances.buffer),
+                    Command::SetIndexBuffer(&self.mesh_indices),
+                ]);
+                draw_meshes(&mut commands, false, &mut stats.shadow);
+            }
+            self.surface_shadow_commands(&self.shadow_bind, &mut commands, &mut stats.shadow);
             rhi.encode_pass(
                 &mut encoder,
                 "3d shadow",
@@ -998,6 +1017,7 @@ impl<B: Rhi> Renderer3D<B> {
             commands.push(Command::SetIndexBuffer(&self.mesh_indices));
             draw_meshes(&mut commands, true, &mut stats.main);
         }
+        self.surface_main_commands(false, &mut commands, &mut stats.main);
         if !list.lines.is_empty() {
             commands.push(Command::SetPipeline(&self.line_pipeline));
             commands.push(Command::SetBindGroup(0, &self.line_bind));

@@ -577,7 +577,7 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
                 return Err(ImportedSceneError::FormatMismatch);
             }
             if let ImportedBatch::Procedural { list, .. } = batch {
-                procedural_instances += list.instance_count() + list.lines.len();
+                procedural_instances += list.instance_count() + list.surfaces.len() + list.lines.len();
                 if procedural_instances > crate::renderer3d::MAX_PROCEDURAL_INSTANCES {
                     return Err(ImportedSceneError::Procedural(
                         ProceduralSceneError::InstanceLimit,
@@ -908,6 +908,7 @@ fn procedural_casters(list: &RenderList3D) -> usize {
     usize::from(!list.spheres.is_empty())
         + usize::from(!list.boxes.is_empty())
         + usize::from(!list.capsules.is_empty())
+        + crate::renderer3d::surface_draws(list).1
 }
 
 #[cfg(test)]

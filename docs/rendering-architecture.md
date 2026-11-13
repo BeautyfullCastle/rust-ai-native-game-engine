@@ -87,12 +87,84 @@ orr sset orr_gfx::PostProcess.bloom=true orr_gfx::PostProcess.exposure=1.3
 - 셰이더 조각 `scene_lights.wgsl`이 절차 도형, 정적 모델, 스키닝 모델 셰이더 셋에 모두 붙는다. 함수는 `scene_lights_diffuse`, `scene_sun_reaches`, `scene_sun_shadow`다.
 - 검증: `crates/orr_render/tests/gpu3d.rs`의 조명 테스트 4개가 실제 GPU 픽셀로 범위·원뿔·레이어·합산을 확인한다.
 
-### 1.6 1단계의 한계
+### 1.6 표면 셰이더 (2단계)
+
+게임 개발자가 엔진 코드를 고치지 않고 물체의 표면 모양을 WGSL로 바꾼다.
+
+```mermaid
+flowchart LR
+    A["shaders/이름.wgsl<br/>fn surface(in) -> Surface"] --> B["SurfaceShader::compile<br/>naga로 CPU 검사"]
+    B -->|오류| C["파일의 줄·칸 번호<br/>에디터는 마젠타로 표시"]
+    B -->|통과| D["엔진 셰이더와 결합<br/>shade_surface가 조명"]
+    E["orr_gfx::Material<br/>shader, values, overrides"] --> D
+    D --> F["머티리얼별 파이프라인<br/>그림자 패스에도 참여"]
+```
+
+**규약.** 사용자 파일은 함수 하나를 정의한다.
+
+```wgsl
+// @param tint color = 0.9, 0.3, 0.1
+// @param stripes float 0.5..20 = 3
+fn surface(in: SurfaceInput) -> Surface {
+    var s = default_surface(in);
+    let band = step(0.5, fract(in.world.y * params.stripes));
+    s.albedo = mix(in.color, params.tint, band);
+    return s;
+}
+```
+
+| 이름 | 내용 |
+|---|---|
+| `SurfaceInput` | `world`(월드 위치), `local`(도형 자체 좌표), `normal`, `color`(바닥 체커 포함), `roughness`, `metallic`, `emissive`, `time`(호스트 시계의 초. 에디터는 실행 후 경과 시간) |
+| `Surface` | `albedo`, `normal`, `roughness`, `metallic`, `emissive` |
+| `default_surface(in)` | 셰이더가 없을 때의 모양. 여기서 출발해 바꾼다 |
+| `params` | `// @param`으로 선언한 값. 종류는 `float`, `vec2`, `vec3`, `vec4`, `color`. 범위 `최소..최대`와 기본값은 선택. 모두 합쳐 숫자 16개까지 |
+
+- 조명, 태양 그림자, 환경광, 씬 조명과 레이어, 톤 매핑, 출력 인코딩은 엔진(`shade_surface`)이 한다. 기본 머티리얼도 같은 함수를 지난다. 그래서 렌더 경로가 바뀌어도 사용자 셰이더는 그대로 동작한다.
+- 셰이더를 쓴 물체도 그림자를 드리운다. 에디터 전체 기능 경로(합성 렌더러)에서도 그려진다.
+- 언어는 WGSL이다. 파일은 64 KiB까지다.
+- 검사는 렌더러가 쓰는 것과 같은 엔진 셰이더(조명 프로브 기능 포함)를 대상으로 한다.
+- 검사로 찾을 수 없는 문제가 있다. 끝나지 않는 반복문(`loop {}`)은 GPU를 멈추게 하므로 반복은 횟수를 정해서 쓴다.
+- 매개변수 이름은 WGSL 예약어(`type`, `target` 등)를 쓸 수 없다.
+
+**오류.** `SurfaceShader::compile`이 GPU에 넘기기 전에 naga로 해석과 검증을 한다. 오류는 사용자 파일 기준 줄과 칸으로 보고한다. 예: `shaders/stripes.wgsl line 7, column 14: no definition in scope for identifier: 'band2'`. 함수 모양이 규약과 다르면 규약을 함께 알려 준다. naga가 위치를 주지 않는 오류는 줄 번호 없이 보고한다.
+
+**씬 데이터.** `orr_gfx::Material` 컴포넌트:
+
+| 필드 | 의미 |
+|---|---|
+| `shader` | 셰이더 이름(텍스트, 48바이트까지). 에디터는 씬 파일 옆 `shaders/<이름>.wgsl`을 읽는다 |
+| `values` | 매개변수 숫자 16개, 셰이더가 선언한 순서 |
+| `overrides` | 비트 i가 켜져 있으면 `values[i]`를 쓰고, 꺼져 있으면 셰이더의 기본값을 쓴다. 그래서 새 머티리얼과 셰이더를 바꾼 머티리얼은 셰이더의 기본 모양으로 시작한다 |
+
+이 컴포넌트를 위해 리플렉션에 텍스트 필드 종류(`#[reflect(text)]`, `Kind::Text`)를 추가했다. 씬 파일에는 문자열로, 인스펙터에는 입력란으로, `orr` 명령에는 JSON 문자열로 나온다.
+
+**에디터.**
+
+1. 씬 파일 옆 `shaders` 폴더에 `.wgsl` 파일을 둔다. 예제 3개가 `scenes/shaders/`에 있다(`stripes`, `glow_pulse`, `rock`).
+2. 엔티티를 선택하고 `+ Add component`에서 `orr_gfx::Material`을 고른다.
+3. 머티리얼 칸의 `Shader` 목록에서 셰이더를 고른다. 매개변수가 선언한 이름으로 나온다. 색은 색상 버튼, 범위가 있는 숫자는 슬라이더다.
+4. 셰이더 파일을 다른 편집기에서 고쳐 저장하면 0.5초 안에 다시 읽는다. 같은 이름의 셰이더는 GPU 파이프라인 하나를 바꿔 쓴다. 오류가 있으면 인스펙터에 줄 번호와 함께 빨간 글씨로 나오고 물체는 마젠타로 그려진다.
+5. `Use the shader's defaults`는 `overrides`를 0으로 되돌린다. 모든 변경은 실행 취소된다.
+
+에이전트 명령 예:
+
+```powershell
+orr add box_left orr_gfx::Material '{"shader":"stripes"}'
+orr set box_left orr_gfx::Material.values[3]=6 orr_gfx::Material.overrides=8
+```
+
+### 1.7 1·2단계의 한계
 
 - Yard3D만 `orr_gfx`를 등록했다. Room, 지형, 내비게이션, 메시 게임은 아직 각자의 조명 별도 파일을 쓴다.
 - 조명 프로브 굽기(`Bake`)는 씬 조명을 읽지 않고 게임 기본 조명으로 굽는다.
 - 웹, 안드로이드, FFI 클라이언트는 씬 조명을 그리지 않는다. 데스크톱 실행 파일과 에디터만 그린다.
 - 에디터 뷰포트에서 조명 표지를 클릭해 선택할 수는 없다. 계층 창에서 선택한다.
+- 표면 셰이더는 절차 도형(구, 상자, 캡슐, 평면)에만 적용된다. 가져온 glTF 모델과 지형은 아직 아니다.
+- 표면 셰이더는 에디터에서만 그려진다. 데스크톱 실행 파일(`yard3d`)은 씬 파일을 읽지 않으므로 기본 머티리얼로 그린다.
+- 텍스처를 셰이더에 넘기는 방법은 아직 없다. 에셋 참조가 먼저 필요하다.
+- 셰이더 오류는 에디터에만 보인다. `orr` 명령의 응답에는 나오지 않는다.
+- 셰이더 검사기(naga)가 `orr_render`의 필수 의존성이어서 웹 빌드 크기가 늘어난다.
 
 ## 2. 아직 안 되는 것과 설계
 
@@ -109,7 +181,7 @@ orr sset orr_gfx::PostProcess.bloom=true orr_gfx::PostProcess.exposure=1.3
 - 선행 과제: 리플렉션에 `AssetRef` 형식이 없다. 지금은 `[u8; 256]` 바이트 배열로 경로를 넣는다. `orr_reflect`에 에셋 참조 종류와 인스펙터의 에셋 선택 위젯을 먼저 추가한다(`docs/asset-pipeline-v1.md`의 후속 설계 항목).
 - 지형 전용 셰이더(레이어 혼합, 경사 기반 바위)를 만든다. `orr_scenery`의 `terrain.wgsl`이 출발점이다.
 
-### 2.2 머티리얼과 셰이더 규약
+### 2.2 머티리얼과 셰이더 규약 (1.6에 일부 구현)
 
 지금은 셰이더가 엔진 안에 고정되어 있다. 게임은 자기 셰이더를 넣을 수 없다. 기존 셰이더 조합은 주석 표지를 문자열로 바꾸는 방식이다.
 
@@ -168,7 +240,7 @@ fn surface(in: SurfaceInput) -> Surface;
 1. 조명·렌더 레이어·환경광·후처리 기본값 컴포넌트, 에디터 `+ Light`, 조명 표지 (완료)
 2. 리플렉션의 에셋 참조 종류와 인스펙터 에셋 선택 위젯
 3. 터레인 컴포넌트와 레이어 혼합 지형 셰이더
-4. 머티리얼 컴포넌트와 표면 함수 셰이더 규약, 셰이더 오류 보고
+4. 머티리얼 컴포넌트와 표면 함수 셰이더 규약, 셰이더 오류 보고 (절차 도형까지 완료. 모델·지형·텍스처는 남음)
 5. 렌더 단계와 `RenderPass` 등록
 6. 후처리 효과 목록과 `orr_scenery` 효과 이전
 7. 카메라 컴포넌트와 레이어 마스크

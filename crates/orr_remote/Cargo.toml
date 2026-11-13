@@ -57,6 +57,7 @@ orr_relay_net = { path = "../orr_relay_net", optional = true }
 
 [dev-dependencies]
 orr_testgame = { path = "../orr_testgame" }
+orr_gfx = { path = "../orr_gfx" }
 orr_sample = { path = "../orr_sample" }
 orr_physics = { path = "../orr_physics" }
 orr_view = { path = "../orr_view" }

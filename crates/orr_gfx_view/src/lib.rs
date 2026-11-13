@@ -222,3 +222,43 @@ impl SceneLook {
         }
     }
 }
+
+/// A material of one entity as the view reads it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MaterialRef {
+    pub entity: Entity,
+    /// Name of the surface shader.
+    pub shader: String,
+    values: [f32; orr_gfx::MATERIAL_VALUES],
+    overrides: u32,
+}
+
+impl MaterialRef {
+    /// The numbers the shader receives: the stored value where the material
+    /// overrides it, the shader's default elsewhere, all inside the declared ranges.
+    pub fn values_for(&self, shader: &orr_render::SurfaceShader) -> [f32; orr_render::MAX_SURFACE_FLOATS] {
+        let mut values = shader.default_values();
+        for (i, value) in values.iter_mut().enumerate().take(orr_gfx::MATERIAL_VALUES) {
+            if self.overrides & (1 << i) != 0 {
+                *value = self.values[i];
+            }
+        }
+        shader.clamp(&values)
+    }
+}
+
+/// Every entity's material, in entity order. Empty for a game without `orr_gfx` materials.
+pub fn materials(frame: FrameView<'_>) -> Vec<MaterialRef> {
+    if !frame.registers::<orr_gfx::Material>() {
+        return Vec::new();
+    }
+    frame
+        .iter::<orr_gfx::Material>()
+        .map(|(entity, material)| MaterialRef {
+            entity,
+            shader: material.shader_name().to_string(),
+            values: material.values.map(f),
+            overrides: material.overrides,
+        })
+        .collect()
+}

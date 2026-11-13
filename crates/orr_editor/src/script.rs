@@ -50,6 +50,7 @@ pub fn parse_like(current: &Value, text: &str) -> Result<Value, String> {
             _ => Err("expected true or false".to_string()),
         },
         Value::Enum(_) => Ok(Value::Enum(text.to_string())),
+        Value::Text(_) => Ok(Value::Text(text.to_string())),
         Value::Vec2(_) => nums(2).map(|v| Value::Vec2(FPVec2::new(v[0], v[1]))),
         Value::Vec3(_) => nums(3).map(|v| Value::Vec3(FPVec3::new(v[0], v[1], v[2]))),
         other => Err(format!("cannot set a {} from text", other.kind_name())),

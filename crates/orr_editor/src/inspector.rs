@@ -173,6 +173,7 @@ pub(crate) fn zero_value(ty: &TypeDesc) -> Value {
         Kind::Entity => Value::EntityGuid(None),
         Kind::Enum { variants, .. } => Value::Enum(variants.first().map(|(n, _)| n.clone()).unwrap_or_default()),
         Kind::Flags { .. } => Value::Flags(Vec::new()),
+        Kind::Text { .. } => Value::Text(String::new()),
         Kind::Array { elem, len } => Value::Array((0..*len).map(|_| zero_value(elem)).collect()),
         Kind::List { .. } => Value::Array(Vec::new()),
         Kind::Struct { fields, .. } => Value::Struct(fields.iter().map(|f| (f.name.clone(), zero_value(&f.ty))).collect()),
@@ -217,6 +218,11 @@ fn scalar(ui: &mut Ui, id: Id, ty: &TypeDesc, value: &Value, path: &str, label: 
             for (axis, raw) in [("x", v.x.raw()), ("y", v.y.raw()), ("z", v.z.raw())] {
                 ui.label(axis);
                 fixed_field(ui, id.with(axis), &join(path, axis), &format!("{label}.{axis}"), Num::Fp, raw, range, hover, out);
+            }
+        }
+        (Kind::Text { .. }, Value::Text(current)) => {
+            if let Some(text) = number_field(ui, id, current, hover, 200.0) {
+                out.push(InspEvent::Set { path: path.to_string(), value: Value::Text(text) });
             }
         }
         (Kind::Enum { variants, .. }, Value::Enum(cur)) => {

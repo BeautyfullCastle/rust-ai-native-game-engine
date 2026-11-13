@@ -17,7 +17,7 @@ struct Globals {
     params: vec4<f32>,
     // x: shadow map texel size (uv), y: normal offset (world units), z: depth bias.
     shadow: vec4<f32>,
-    // x, y: viewport size in pixels, z: scene-linear HDR output.
+    // x, y: viewport size in pixels, z: scene-linear HDR output, w: time in seconds.
     viewport: vec4<f32>,
     point_position_range: vec4<f32>,
     point_color_intensity: vec4<f32>,
@@ -131,20 +131,38 @@ fn output_normalize(v: vec3<f32>) -> vec3<f32> {
     return normalize(v);
 }
 
-@fragment
-fn fs_main(in: MainOut) -> @location(0) vec4<f32> {
-    let n = output_normalize(in.normal);
+// What a surface looks like at one point. The built-in material fills it from
+// the instance data; a surface shader (see surface_glue.wgsl) fills it with
+// its own `surface` function. The engine lights it the same way in both cases.
+struct Surface {
+    // Linear base color.
+    albedo: vec3<f32>,
+    // Unit world-space normal.
+    normal: vec3<f32>,
+    // 0.04 is glossy, 1 is matte.
+    roughness: f32,
+    // 0 is a dielectric, 1 a metal.
+    metallic: f32,
+    // Light the surface gives off, added after lighting.
+    emissive: vec3<f32>,
+};
+
+// Where the shaded point is: world position and render layers.
+struct SurfacePoint {
+    world: vec3<f32>,
+    layers: f32,
+};
+
+// Lights a surface: sun with shadows, hemisphere ambient, the point light,
+// scene lights, then the display transform of the target.
+fn shade_surface(in: SurfacePoint, s: Surface) -> vec4<f32> {
+    let n = s.normal;
     let v = output_normalize(g.cam_pos.xyz - in.world);
     let l = g.light_dir.xyz;
 
-    var base = in.color;
-    if (in.flags > 0.5) {
-        let cell = floor(in.world.x * 0.5) + floor(in.world.z * 0.5);
-        let odd = fract(cell * 0.5) > 0.25;
-        base = base * select(1.0, 0.72, odd);
-    }
-    let rough = clamp(in.material.x, 0.04, 1.0);
-    let metal = clamp(in.material.y, 0.0, 1.0);
+    let base = s.albedo;
+    let rough = clamp(s.roughness, 0.04, 1.0);
+    let metal = clamp(s.metallic, 0.0, 1.0);
     let diffuse_color = base * (1.0 - metal);
     let f0 = mix(vec3<f32>(0.04), base, metal);
 
@@ -170,7 +188,7 @@ fn fs_main(in: MainOut) -> @location(0) vec4<f32> {
     let hemi = mix(g.ground.rgb, g.sky.rgb, n.y * 0.5 + 0.5) * g.sky.w;
     // IRRADIANCE_PROCEDURAL
     var color = diffuse_color * (radiance + hemi) + fresnel * spec_shape * radiance + hemi * f0 * 0.35 * (1.0 - rough);
-    color = color + diffuse_color * point_diffuse(in.world, n) + base * in.material.z;
+    color = color + diffuse_color * point_diffuse(in.world, n) + s.emissive;
     color = color + diffuse_color * scene_lights_diffuse(in.world, n, in.layers);
 
     // Scene-linear HDR bypasses every display transform. Bound FP16 writes.
@@ -187,6 +205,24 @@ fn fs_main(in: MainOut) -> @location(0) vec4<f32> {
         color = linear_to_srgb(color);
     }
     return vec4<f32>(color, 1.0);
+}
+
+// The built-in material: instance color, roughness, metallic, emissive and the ground checker.
+@fragment
+fn fs_main(in: MainOut) -> @location(0) vec4<f32> {
+    var base = in.color;
+    if (in.flags > 0.5) {
+        let cell = floor(in.world.x * 0.5) + floor(in.world.z * 0.5);
+        let odd = fract(cell * 0.5) > 0.25;
+        base = base * select(1.0, 0.72, odd);
+    }
+    var s: Surface;
+    s.albedo = base;
+    s.normal = output_normalize(in.normal);
+    s.roughness = in.material.x;
+    s.metallic = in.material.y;
+    s.emissive = base * in.material.z;
+    return shade_surface(SurfacePoint(in.world, in.layers), s);
 }
 
 // ---- debug lines ----

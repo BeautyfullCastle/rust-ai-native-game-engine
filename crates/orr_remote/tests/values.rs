@@ -352,3 +352,25 @@ fn the_schema_describes_the_values_the_methods_return_and_accept() {
         validate(collider, &collider["properties"]["shape"], &back["value"]).unwrap();
     }
 }
+
+#[test]
+fn text_fields_travel_as_json_strings_and_partial_writes_take_defaults() {
+    use orr_reflect::{Reflect, TypeRegistry};
+    let mut types = TypeRegistry::new();
+    orr_gfx::register_reflect(&mut types);
+    let desc = orr_gfx::Material::describe();
+    // `orr add box orr_gfx::Material '{"shader":"stripes"}'`: the other fields keep their defaults.
+    let value = json_to_value(&desc, &json!({"shader": "stripes"}), true).unwrap();
+    let Value::Struct(fields) = &value else { panic!("{value:?}") };
+    assert_eq!(fields.iter().find(|(n, _)| n == "shader").map(|(_, v)| v), Some(&Value::Text("stripes".into())));
+    assert_eq!(value_to_json(&Value::Text("stripes".into())), json!("stripes"));
+    // `orr set box orr_gfx::Material.values[3]=6`.
+    let element = orr_remote::json::desc_at_path(&desc, "values[3]").unwrap();
+    assert_eq!(json_to_value(&element, &json!(6), false).unwrap(), Value::Fixed(FP::from_int(6)));
+    // A number is not text, and text too long for the field is refused when it is written.
+    let shader = orr_remote::json::desc_at_path(&desc, "shader").unwrap();
+    assert!(json_to_value(&shader, &json!(3), false).is_err());
+    let long = json_to_value(&shader, &json!("x".repeat(49)), false).unwrap();
+    assert!(shader.check(&long, true).is_err());
+    assert!(types.get("orr_gfx::Material").is_some());
+}

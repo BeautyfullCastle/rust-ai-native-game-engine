@@ -235,6 +235,12 @@ pub enum Kind {
         /// Names and bit masks.
         bits: Vec<(String, u64)>,
     },
+    /// UTF-8 text in a fixed byte array, padded with zero bytes. Shader names
+    /// and file names in components use it.
+    Text {
+        /// Size of the byte array: the most bytes the text can have.
+        len: usize,
+    },
     /// A fixed size array.
     Array {
         /// Element type.
@@ -361,6 +367,10 @@ impl TypeDesc {
     pub fn flags(width: usize, bits: &[(&str, u64)]) -> Self {
         Self::new(Kind::Flags { width, bits: bits.iter().map(|(n, v)| ((*n).to_string(), *v)).collect() })
     }
+    /// UTF-8 text in a `[u8; len]` field.
+    pub fn text(len: usize) -> Self {
+        Self::new(Kind::Text { len })
+    }
     /// A fixed size array.
     pub fn array(elem: TypeDesc, len: usize) -> Self {
         Self::new(Kind::Array { elem: Box::new(elem), len })
@@ -388,6 +398,7 @@ impl TypeDesc {
             Kind::Vec2 { .. } => 16,
             Kind::Vec3 { .. } => 24,
             Kind::Array { elem, len } => elem.size() * len,
+            Kind::Text { len } => *len,
             Kind::Struct { size, .. } => *size,
             Kind::Tagged(t) => t.size,
             Kind::List { .. } => 0,
@@ -507,6 +518,11 @@ impl TypeDesc {
                 let stride = elem.size();
                 Value::Array((0..*len).map(|i| elem.read(&bytes[i * stride..])).collect())
             }
+            Kind::Text { len } => {
+                let bytes = &bytes[..*len];
+                let end = bytes.iter().position(|b| *b == 0).unwrap_or(*len);
+                Value::Text(String::from_utf8_lossy(&bytes[..end]).into_owned())
+            }
             Kind::Struct { fields, .. } => {
                 Value::Struct(fields.iter().map(|f| (f.name.clone(), f.ty.read(&bytes[f.offset..]))).collect())
             }
@@ -567,6 +583,15 @@ impl TypeDesc {
                 }
                 Ok(())
             }
+            (Kind::Text { len }, Value::Text(text)) => {
+                if text.len() > *len {
+                    return Err(ReflectError::OutOfRange(format!("text of {} bytes is longer than {len} bytes", text.len())));
+                }
+                if text.chars().any(char::is_control) {
+                    return Err(ReflectError::Invalid("text must not contain control characters".into()));
+                }
+                Ok(())
+            }
             (Kind::Array { elem, len }, Value::Array(items)) => {
                 if items.len() != *len {
                     return Err(ReflectError::Invalid(format!("expected {len} elements, found {}", items.len())));
@@ -612,6 +637,7 @@ impl TypeDesc {
             Kind::Entity => "entity".into(),
             Kind::Enum { .. } => "enum".into(),
             Kind::Flags { .. } => "flags".into(),
+            Kind::Text { .. } => "text".into(),
             Kind::Array { .. } | Kind::List { .. } => "array".into(),
             Kind::Struct { .. } => "struct".into(),
             Kind::Tagged(_) => "tagged value".into(),
@@ -659,6 +685,11 @@ impl TypeDesc {
             (Kind::Flags { width, bits }, Value::Flags(names)) => {
                 let raw = names.iter().fold(0u64, |acc, n| acc | bits.iter().find(|(b, _)| b == n).map_or(0, |(_, m)| *m));
                 put_ne_uint(&mut bytes[..*width], raw);
+            }
+            (Kind::Text { len }, Value::Text(text)) => {
+                let field = &mut bytes[..*len];
+                field.fill(0);
+                field[..text.len()].copy_from_slice(text.as_bytes());
             }
             (Kind::Array { elem, .. }, Value::Array(items)) => {
                 let stride = elem.size();

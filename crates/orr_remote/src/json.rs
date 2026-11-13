@@ -93,6 +93,7 @@ pub fn value_to_json(v: &Value) -> J {
         Value::EntityGuid(None) => J::Null,
         Value::EntityGuid(Some(g)) => J::String(g.clone()),
         Value::Enum(n) => J::String(n.clone()),
+        Value::Text(text) => J::String(text.clone()),
         Value::Flags(names) => J::Array(names.iter().map(|n| J::String(n.clone())).collect()),
         Value::Array(items) => J::Array(items.iter().map(value_to_json).collect()),
         Value::Struct(fields) => J::Object(fields.iter().map(|(n, x)| (n.clone(), value_to_json(x))).collect()),
@@ -259,6 +260,10 @@ pub fn json_to_value(desc: &TypeDesc, j: &J, partial: bool) -> Result<Value, Str
                 }
             }
             other => Err(format!("expected an entity GUID like e_7f3a91c2 or null, found {}", json_kind(other))),
+        },
+        Kind::Text { .. } => match j {
+            J::String(s) => Ok(Value::Text(s.clone())),
+            other => Err(format!("expected text, found {}", json_kind(other))),
         },
         Kind::Enum { variants, .. } => match j {
             J::String(s) if variants.iter().any(|(n, _)| n == s) => Ok(Value::Enum(s.clone())),

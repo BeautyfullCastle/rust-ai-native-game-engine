@@ -3510,6 +3510,7 @@ dependencies = [
  "orr_edit",
  "orr_fp",
  "orr_games",
+ "orr_gfx",
  "orr_navigation",
  "orr_navigation_runtime",
  "orr_physics",
@@ -3536,6 +3537,7 @@ name = "orr_render"
 version = "0.0.1"
 dependencies = [
  "bytemuck",
+ "naga",
  "orr_ecs",
  "orr_model",
  "orr_package",

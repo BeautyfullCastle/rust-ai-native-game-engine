@@ -198,7 +198,7 @@ fn check_value(
                 check_value(value, ids, depth + 1, budget)?;
             }
         }
-        Value::Enum(text) => budget.string(text)?,
+        Value::Enum(text) | Value::Text(text) => budget.string(text)?,
         Value::Flags(flags) => {
             if flags.len() > FRAGMENT_MAX_VALUES {
                 return Err(invalid("fragment flag count exceeds value limit"));
