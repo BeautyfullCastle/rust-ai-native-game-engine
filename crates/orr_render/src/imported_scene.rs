@@ -213,10 +213,7 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
     pub fn pass_mut<T: crate::RenderPass<B>>(&mut self) -> Option<&mut T> {
         self.passes.iter_mut().find_map(|pass| pass.as_any_mut().downcast_mut::<T>())
     }
-    /// Removes every added pass of type `T`.
-    pub fn remove_passes<T: crate::RenderPass<B>>(&mut self) {
-        self.passes.retain_mut(|pass| !pass.as_any_mut().is::<T>());
-    }
+
     /// Create a coordinator without allocating GPU resources.
     pub fn new(rhi: B, format: TextureFormat) -> Result<Self, ImportedSceneError> {
         if format.is_depth() {

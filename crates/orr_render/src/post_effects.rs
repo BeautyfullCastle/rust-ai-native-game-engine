@@ -7,8 +7,9 @@ use orr_rhi::{Binding, Blend, BufferDesc, BufferUsage, ColorAttachment, Command,
 use std::cell::Cell;
 use std::time::Instant;
 
-/// Slots in [`crate::PostProcessSettings::effects`].
-pub const MAX_SCREEN_EFFECTS: usize = 8;
+/// Slots in [`crate::PostProcessSettings::effects`]: the eight of a scene's
+/// effect list and the sky's height fog.
+pub const MAX_SCREEN_EFFECTS: usize = 9;
 
 /// One effect of the post chain. Effects on the lit scene (light shafts) and
 /// auto exposure run before exposure and tone mapping; the others run after
@@ -217,7 +218,9 @@ impl<B: Rhi> EffectChain<B> {
         let m = frame.view_proj;
         let clip: [f32; 4] = std::array::from_fn(|row| m[0][row] * toward[0] + m[1][row] * toward[1] + m[2][row] * toward[2]);
         let sun_uv = if clip[3] > 1e-4 { [clip[0] / clip[3] * 0.5 + 0.5, 0.5 - clip[1] / clip[3] * 0.5] } else { [0.0; 2] };
-        let shaft_strength = shafts.filter(|_| clip[3] > 1e-4).map_or(0.0, |(s, _)| s);
+        // An orthographic matrix keeps w at 1: the sun at infinity has no place on its screen.
+        let perspective = m[0][3].abs() + m[1][3].abs() + m[2][3].abs() > 1e-6;
+        let shaft_strength = shafts.filter(|_| perspective && clip[3] > 1e-4).map_or(0.0, |(s, _)| s);
         // Shafts take the sun's color, not its intensity: exposure already follows the lit scene.
         let sun_color = frame.lighting.color.map(|c| c * 1.3);
         let adapt = match (auto, last) {

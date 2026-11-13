@@ -129,11 +129,8 @@ pub fn scene_look(frame: FrameView<'_>, fallback: &Lighting) -> SceneLook {
         look.lighting.ground = unit_color(environment.ground_color);
         look.lighting.ambient = f(environment.ambient).clamp(0.0, 10.0);
     }
-    if let Some(post) = frame.try_singleton::<PostProcess>() {
-        look.lighting.exposure = f(post.exposure).clamp(0.01, 16.0);
-        look.lighting.tonemap = post.tone_mapping != TONE_CLAMP;
-        // The sky's height fog comes first: it belongs to the lit scene, before every effect.
-        if let Some(sky) = sky(frame) {
+    // The sky's height fog comes first: it belongs to the lit scene, before every effect.
+    if let Some(sky) = sky(frame) {
             look.effects.push(
                 ScreenEffect::HeightFog {
                     density: sky.fog_density * 0.0017,
@@ -145,7 +142,10 @@ pub fn scene_look(frame: FrameView<'_>, fallback: &Lighting) -> SceneLook {
                 }
                 .clamped(),
             );
-        }
+    }
+    if let Some(post) = frame.try_singleton::<PostProcess>() {
+        look.lighting.exposure = f(post.exposure).clamp(0.01, 16.0);
+        look.lighting.tonemap = post.tone_mapping != TONE_CLAMP;
         for effect in post.effects.iter().filter(|e| e.enabled != 0) {
             read_effect(effect, &mut look);
         }
@@ -228,6 +228,8 @@ fn read_effect(effect: &PostEffect, look: &mut SceneLook) {
         EFFECT_FILM_GRAIN => Some(ScreenEffect::FilmGrain { strength: p(0) }),
         _ => None,
     };
+    // Each kind runs once: a second entry of the same kind is left out.
+    let screen = screen.filter(|s| !look.effects.iter().any(|e| std::mem::discriminant(e) == std::mem::discriminant(s)));
     // Fixed point rounds differently from the renderer's float ranges; the effect is brought into them.
     if let Some(screen) = screen.filter(|_| look.effects.len() < orr_render::post_effects::MAX_SCREEN_EFFECTS) {
         look.effects.push(screen.clamped());

@@ -344,13 +344,6 @@ impl Default for PostProcess {
     }
 }
 
-impl PostProcess {
-    /// The first enabled effect of `kind`, if any.
-    pub fn effect(&self, kind: u32) -> Option<&PostEffect> {
-        self.effects.iter().find(|e| e.kind == kind && e.enabled != 0)
-    }
-}
-
 /// [`Camera::projection`]: farther things look smaller.
 pub const PROJECTION_PERSPECTIVE: u32 = 0;
 /// [`Camera::projection`]: sizes do not change with distance.
@@ -623,15 +616,6 @@ impl Terrain {
         core::str::from_utf8(&self.heightmap[..end]).unwrap_or("")
     }
 
-    /// Sets the heightmap path, cut to [`TERRAIN_PATH_BYTES`] at a character boundary.
-    pub fn set_heightmap(&mut self, path: &str) {
-        let mut end = path.len().min(TERRAIN_PATH_BYTES);
-        while !path.is_char_boundary(end) {
-            end -= 1;
-        }
-        self.heightmap = [0; TERRAIN_PATH_BYTES];
-        self.heightmap[..end].copy_from_slice(&path.as_bytes()[..end]);
-    }
 }
 
 /// Scene names of the types, the same in the simulation and in scene files.

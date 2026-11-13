@@ -150,9 +150,4 @@ fn a_sky_pass_fills_only_what_the_scene_leaves_open_and_sees_the_shadow_map() {
     let shadowed = Lighting { shadows: true, intensity: 1.0, shadow_radius: 5.0, ..flat };
     render(&g, &mut scene, &mut renderer, &shadowed);
     assert!(scene.pass_mut::<FlatSky>().unwrap().saw_shadow);
-
-    // A removed pass draws no more.
-    scene.remove_passes::<FlatSky>();
-    let image = render(&g, &mut scene, &mut renderer, &flat);
-    assert_ne!(px(&image, 2, 2), [0, 255, 0]);
 }

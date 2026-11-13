@@ -314,8 +314,6 @@ impl Num {
     }
 }
 
-/// A text field that holds its text while it has focus and reports the text
-/// once when it loses focus with a different value. Escape cancels.
 /// The folder asset paths are relative to: the open scene's folder.
 #[derive(Clone)]
 struct AssetRoot(Option<std::path::PathBuf>);
@@ -371,6 +369,8 @@ fn list_assets(root: &std::path::Path, extensions: &[&str]) -> Vec<String> {
     out
 }
 
+/// A text field that holds its text while it has focus and reports the text
+/// once when it loses focus with a different value. Escape cancels.
 fn number_field(ui: &mut Ui, id: Id, canonical: &str, hover: &str, width: f32) -> Option<String> {
     let edit_id = id.with("text");
     let focused = ui.memory(|m| m.has_focus(edit_id));

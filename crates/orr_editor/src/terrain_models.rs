@@ -23,6 +23,9 @@ struct Entry {
     checked: Instant,
 }
 
+/// A decoded heightmap and the file time and size it was read at.
+type Decoded = (Option<(SystemTime, u64)>, Result<(u32, u32, Arc<Vec<f32>>), String>);
+
 /// One drawable terrain: its entity, center, mesh and heights.
 pub struct TerrainModel {
     pub entity: Entity,
@@ -35,6 +38,8 @@ pub struct TerrainModel {
 #[derive(Default)]
 pub struct TerrainModels {
     entries: BTreeMap<(u32, u32), Entry>,
+    /// Decoded heightmaps by path, so changing a terrain's numbers does not read the file again.
+    decoded: BTreeMap<PathBuf, Decoded>,
 }
 
 fn stamp(path: &Path) -> Option<(SystemTime, u64)> {
@@ -42,11 +47,18 @@ fn stamp(path: &Path) -> Option<(SystemTime, u64)> {
     Some((meta.modified().ok()?, meta.len()))
 }
 
-fn build(path: &Path, terrain: &TerrainRef) -> Result<(Arc<orr_model::StaticModel>, Heights), String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", terrain.heightmap))?;
-    let (width, height, heights) = orr_gfx_view::terrain_mesh::read_heightmap(&bytes).map_err(|e| format!("{}: {e}", terrain.heightmap))?;
-    let model = orr_gfx_view::terrain_mesh::terrain_model(terrain, width, height, &heights)?;
-    Ok((Arc::new(model), (width, height, Arc::new(heights))))
+fn decode(path: &Path, shown: &str) -> Result<(u32, u32, Arc<Vec<f32>>), String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("{shown}: {e}"))?;
+    let (width, height, heights) = orr_gfx_view::terrain_mesh::read_heightmap(&bytes).map_err(|e| format!("{shown}: {e}"))?;
+    Ok((width, height, Arc::new(heights)))
+}
+
+/// The mesh and the drawn grid heights of `terrain` from a decoded heightmap.
+fn build(decoded: &(u32, u32, Arc<Vec<f32>>), terrain: &TerrainRef) -> Result<(Arc<orr_model::StaticModel>, Heights), String> {
+    let (width, height, heights) = decoded;
+    let model = orr_gfx_view::terrain_mesh::terrain_model(terrain, *width, *height, heights)?;
+    let (grid, samples) = orr_gfx_view::terrain_mesh::terrain_grid(terrain, *width, *height, heights);
+    Ok((Arc::new(model), (grid, grid, Arc::new(samples))))
 }
 
 impl TerrainModels {
@@ -65,6 +77,11 @@ impl TerrainModels {
                 problem.get_or_insert_with(|| "Save the scene to a file first: heightmaps are read from its folder".to_string());
                 continue;
             };
+            // The path came from the frame; simulation systems can write any bytes there.
+            if orr_reflect::TypeDesc::asset(orr_gfx::TERRAIN_PATH_BYTES, "heightmap").check(&orr_reflect::Value::Text(terrain.heightmap.clone()), true).is_err() {
+                problem.get_or_insert_with(|| format!("'{}' is not a heightmap path next to the scene", terrain.heightmap));
+                continue;
+            }
             let path = root.join(&terrain.heightmap);
             let numbers = (terrain.heightmap.clone(), terrain.size.map(f32::to_bits), terrain.height.to_bits(), terrain.resolution);
             let fresh = self.entries.get(&id).is_some_and(|e| (e.key.0.clone(), e.key.1, e.key.2, e.key.3) == numbers && now.duration_since(e.checked) < CHECK_INTERVAL);
@@ -74,7 +91,11 @@ impl TerrainModels {
                 match self.entries.get_mut(&id) {
                     Some(entry) if entry.key == key => entry.checked = now,
                     _ => {
-                        let model = build(&path, terrain);
+                        let fresh = self.decoded.get(&path).is_some_and(|(stamp, _)| *stamp == current);
+                        if !fresh {
+                            self.decoded.insert(path.clone(), (current, decode(&path, &terrain.heightmap)));
+                        }
+                        let model = self.decoded[&path].1.clone().and_then(|d| build(&d, terrain));
                         self.entries.insert(id, Entry { key, model, checked: now });
                     }
                 }

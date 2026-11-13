@@ -27,10 +27,12 @@ flowchart LR
 | 이름 | 종류 | 필드 | 의미 |
 |---|---|---|---|
 | `orr_gfx::Transform3` | 컴포넌트 | `position`, `rotation`(도, pitch·yaw·roll), `scale` | 물리 바디가 없는 엔티티(조명, 표지)의 위치. 바디가 있으면 바디가 위치를 정한다. |
-| `orr_gfx::Light` | 컴포넌트 | `kind`(directional·point·spot), `color`, `intensity`, `range`, `inner_angle`, `outer_angle`, `enabled`, `cast_shadows`, `shadow_strength`, `layers` | 엔티티에 붙는 조명. 위치와 방향은 엔티티의 바디나 `Transform3`에서 온다. |
+| `orr_gfx::Light` | 컴포넌트 | `kind`(directional·point·spot), `color`, `intensity`, `range`, `inner_angle`, `outer_angle`, `enabled`, `cast_shadows`, `shadow_strength`, `shadow_range`, `layers` | 엔티티에 붙는 조명. 위치와 방향은 엔티티의 바디나 `Transform3`에서 온다. |
 | `orr_gfx::RenderLayers` | 컴포넌트 | `layers`(8비트 마스크) | 엔티티가 그려지는 레이어. 없으면 기본 레이어(1번)다. |
 | `orr_gfx::Environment` | 싱글턴 | `sky_color`, `ground_color`, `ambient` | 하늘·지면 반구 환경광. 기본값 그대로면 게임의 기본 환경광을 쓴다. |
-| `orr_gfx::PostProcess` | 싱글턴 | `exposure`, `tone_mapping`(clamp·aces), `bloom`, `bloom_threshold`, `bloom_strength`, `bloom_radius`, `bloom_iterations` | 최종 화면 처리. |
+| `orr_gfx::PostProcess` | 싱글턴 | `exposure`, `tone_mapping`(clamp·aces), `effects`(효과 8칸, 1.9절) | 최종 화면 처리. |
+| `orr_gfx::Camera`, `Terrain`, `Water`, `Scatter` | 컴포넌트 | 1.8, 1.10, 1.12절 | 카메라, 지형, 수면, 식생 배치. |
+| `orr_gfx::Sky` | 싱글턴 | 1.12절 | 하늘, 안개, 바람. |
 
 규칙:
 
@@ -174,7 +176,7 @@ orr set box_left orr_gfx::Material.values[3]=6 orr_gfx::Material.overrides=8
 - `layers`: 카메라가 그리는 렌더 레이어
 - `priority`, `active`
 
-활성 카메라 가운데 우선순위가 가장 높은 것이 씬의 주 카메라다(`orr_gfx_view::main_camera`). 에디터 툴바의 `Camera view`를 켜면 주 카메라로 본다. 이때 카메라의 레이어에 없는 엔티티는 그려지지 않는다.
+활성 카메라 가운데 우선순위가 가장 높은 것이 씬의 주 카메라다(`orr_gfx_view::main_camera`). 에디터 툴바의 `Camera view`를 켜면 주 카메라로 본다. 이때 카메라의 레이어에 없는 도형, 모델, 지형은 그려지지 않는다. 하늘, 수면, 식생 배치는 아직 레이어를 보지 않는다.
 
 ### 1.9 포스트 효과 목록 (`orr_gfx::PostProcess`)
 
@@ -224,7 +226,7 @@ flowchart LR
 | `Transparent` | 입자와 후처리 앞. 깊이는 유지된다 |
 
 - 패스는 매 프레임 `PassFrame`을 받는다. 여기에는 카메라와 조명, 크기와 형식, 그리고 그림자 맵(뷰, 비교 샘플러, 빛 행렬, 매개변수)이 들어 있다. 패스는 `prepare`에서 버퍼를 쓰고, 단계마다 `encode`로 그린다.
-- 주인은 `pass_mut::<T>()`로 패스에 다시 접근하고, `remove_passes::<T>()`로 뺀다. 렌더러 하나에 패스는 16개까지 들어간다.
+- 주인은 `pass_mut::<T>()`로 패스에 다시 접근해 그릴 내용을 바꾼다. 렌더러 하나에 패스는 16개까지 들어간다.
 
 ### 1.12 야외 장면: 하늘, 물, 식생
 
@@ -263,12 +265,13 @@ cargo run -p orr_scenery --example forest_valley_scene -- scenes/forest_valley
 - 텍스처를 표면 셰이더에 넘기는 방법은 아직 없다. 에셋 참조는 생겼지만 머티리얼의 텍스처 칸은 아직 없다.
 - 셰이더 오류는 에디터에만 보인다. `orr` 명령의 응답에는 나오지 않는다.
 - 셰이더 검사기(naga)가 `orr_render`의 필수 의존성이어서 웹 빌드 크기가 늘어난다.
-- 빛줄기는 원근 카메라에서만 그려진다. 높이 안개와 자동 노출은 HDR 후처리가 켜져 있을 때만 적용된다.
+- 빛줄기는 원근 카메라에서만 그려진다. 높이 안개도 원근 카메라를 기준으로 계산한다. 높이 안개와 자동 노출은 HDR 후처리가 켜져 있을 때만 적용된다.
+- 같은 종류의 효과를 목록에 두 번 넣으면 첫 번째만 쓴다.
 - 사용자 후처리 패스(`post` 단계)는 아직 없다. 효과는 엔진의 목록에서만 고른다.
 - 렌더 패스는 `ImportedSceneRenderer`에만 등록된다. 절차 도형만 그리는 `Renderer3D` 단독 경로에는 없다.
 - 그림자 맵은 하나(1024²)다. Forest Valley 원래 렌더러의 계단식 그림자 두 장보다 먼 곳의 그림자가 거칠다.
 - `Scatter`는 지형 높이와 경사, 물만 본다. 원래 Forest Valley의 숲 밀도 지도(빈터, 강가 비우기)는 아직 없다.
-- 씬 파일 형식은 모든 필드를 요구한다. 이번에 `Light::shadow_range`가 추가되어, 전에 저장한 씬의 `orr_gfx::Light`에 이 줄을 넣어야 열린다.
+- 씬 파일 형식은 모든 필드를 요구한다. 이번에 `Light::shadow_range`가 추가되고 `PostProcess`가 효과 목록으로 바뀌었다. 그래서 전에 저장한 씬의 `orr_gfx::Light`와 `orr_gfx::PostProcess`는 새 형식으로 고쳐야 열린다.
 
 ## 2. 아직 안 되는 것과 설계
 

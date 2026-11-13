@@ -28,7 +28,7 @@ use orr_render::{PassFrame, PassStage, Projection, RenderPass};
 use std::any::Any;
 use std::sync::Arc;
 
-const COMMON: &str = include_str!("shaders/common.wgsl");
+pub(crate) const COMMON: &str = include_str!("shaders/common.wgsl");
 const DEPTH: TextureFormat = TextureFormat::Depth32Float;
 /// Trees closer than the first distance use the detailed mesh, closer than the second the middle one.
 const LOD_DISTANCE: [f32; 2] = [95.0, 260.0];
@@ -39,14 +39,14 @@ const GRASS_DISTANCE: f32 = 85.0;
 /// Farthest a tree or rock is drawn.
 const FAR_DISTANCE: f32 = 3000.0;
 
-fn lighting_source() -> String {
+pub(crate) fn lighting_source() -> String {
     let lighting = include_str!("shaders/lighting.wgsl");
     let shading = &lighting[lighting.find("struct Surface").expect("lighting.wgsl defines Surface")..];
     format!("{}\n{shading}", include_str!("shaders/pass_lighting.wgsl"))
 }
 
 /// Heights of one terrain, as the view reads its heightmap.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct HeightField {
     /// World position of the terrain's center at height zero.
     pub center: V3,
@@ -58,6 +58,14 @@ pub struct HeightField {
     pub depth: u32,
     /// Heights 0..1, row by row from the -z edge.
     pub heights: Arc<Vec<f32>>,
+}
+
+/// Two height fields are the same when they place the same heights the same
+/// way; the heights themselves are compared by identity, not value by value.
+impl PartialEq for HeightField {
+    fn eq(&self, other: &Self) -> bool {
+        self.center == other.center && self.size == other.size && self.height == other.height && self.width == other.width && self.depth == other.depth && Arc::ptr_eq(&self.heights, &other.heights)
+    }
 }
 
 impl HeightField {
@@ -149,28 +157,28 @@ pub struct OutdoorScene {
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct Globals {
-    view_proj: Mat4,
-    shadow0: Mat4,
-    shadow1: Mat4,
-    cam_right: [f32; 4],
-    cam_up: [f32; 4],
-    cam_forward: [f32; 4],
-    camera: [f32; 4],
-    sun_dir: [f32; 4],
-    sun_color: [f32; 4],
-    ambient_sky: [f32; 4],
-    ambient_ground: [f32; 4],
-    fog: [f32; 4],
-    viewport: [f32; 4],
-    cascades: [f32; 4],
-    sky: [f32; 4],
-    shadow: [f32; 4],
-    wind: [f32; 4],
-    water_color: [f32; 4],
-    water: [f32; 4],
-    leaf_tint: [f32; 4],
-    detail: [f32; 4],
+pub(crate) struct Globals {
+    pub(crate) view_proj: Mat4,
+    pub(crate) shadow0: Mat4,
+    pub(crate) shadow1: Mat4,
+    pub(crate) cam_right: [f32; 4],
+    pub(crate) cam_up: [f32; 4],
+    pub(crate) cam_forward: [f32; 4],
+    pub(crate) camera: [f32; 4],
+    pub(crate) sun_dir: [f32; 4],
+    pub(crate) sun_color: [f32; 4],
+    pub(crate) ambient_sky: [f32; 4],
+    pub(crate) ambient_ground: [f32; 4],
+    pub(crate) fog: [f32; 4],
+    pub(crate) viewport: [f32; 4],
+    pub(crate) cascades: [f32; 4],
+    pub(crate) sky: [f32; 4],
+    pub(crate) shadow: [f32; 4],
+    pub(crate) wind: [f32; 4],
+    pub(crate) water_color: [f32; 4],
+    pub(crate) water: [f32; 4],
+    pub(crate) leaf_tint: [f32; 4],
+    pub(crate) detail: [f32; 4],
 }
 
 #[repr(C)]
@@ -250,6 +258,8 @@ pub struct OutdoorPass<B: Rhi> {
     shadow_draws: Vec<(u32, u32, u32)>,
     binds: Option<Binds<B>>,
     time: f32,
+    /// True once objects and water were made for `scene`.
+    placed: bool,
 }
 
 const PROP_ATTRS: [VertexAttr; 4] = [
@@ -365,15 +375,17 @@ impl<B: Rhi> OutdoorPass<B> {
             shadow_draws: Vec::new(),
             binds: None,
             time: 0.0,
+            placed: false,
         }
     }
 
     /// What the pass draws from the next frame on. Objects and water meshes
     /// are made again only when the scene changed.
     pub fn set_scene(&mut self, rhi: &B, scene: &OutdoorScene) {
-        if *scene == self.scene && (!self.objects.is_empty() || scene.scatters.is_empty()) {
+        if self.placed && *scene == self.scene {
             return;
         }
+        self.placed = true;
         self.scene = scene.clone();
         self.objects = self.place_objects();
         self.waters = scene.waters.iter().map(|w| water_mesh(rhi, w)).collect();
@@ -383,11 +395,6 @@ impl<B: Rhi> OutdoorPass<B> {
     /// The clock in seconds that wind, clouds and water ripples follow.
     pub fn set_time(&mut self, seconds: f32) {
         self.time = if seconds.is_finite() { seconds } else { 0.0 };
-    }
-
-    /// How many trees, rocks and tufts the scene places.
-    pub fn object_count(&self) -> usize {
-        self.objects.len()
     }
 
     fn place_objects(&self) -> Vec<Object> {
@@ -464,48 +471,7 @@ impl<B: Rhi> OutdoorPass<B> {
     }
 
     fn globals(&self, frame: &PassFrame<'_, B>) -> Globals {
-        let camera = frame.camera;
-        let forward = normalize(sub(camera.target, camera.eye));
-        let right = normalize(cross(forward, camera.up));
-        let up = cross(right, forward);
-        let aspect = frame.size.0 as f32 / frame.size.1.max(1) as f32;
-        let tangent = match camera.projection {
-            Projection::Perspective { fov_y, .. } => (fov_y * 0.5).tan(),
-            Projection::Orthographic { .. } => 0.6,
-        };
-        let wide = |v: V3, w: f32| [v[0], v[1], v[2], w];
-        let lighting = frame.lighting;
-        let toward = normalize(scale(lighting.direction, -1.0));
-        let sky = self.scene.sky.unwrap_or(OutdoorSky { brightness: 1.5, sun_glow: 1.0, cloud_cover: 0.34, cloud_speed: 1.0, wind_strength: 1.0, wind_speed: 1.0 });
-        let ambient = |c: V3| scale(c, lighting.ambient);
-        let (shadow0, cascades, shadow) = match &frame.shadow {
-            Some(s) => (s.light_vp, [s.params[0], 0.0, s.params[1], s.params[2]], [1.5, 1.0, 0.0, 0.0]),
-            None => ([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]], [0.0; 4], [1.5, 0.0, 0.0, 0.0]),
-        };
-        Globals {
-            view_proj: frame.view_proj,
-            shadow0,
-            shadow1: shadow0,
-            cam_right: wide(scale(right, tangent * aspect), 0.0),
-            cam_up: wide(scale(up, tangent), 0.0),
-            cam_forward: wide(forward, 0.0),
-            camera: wide(camera.eye, self.time),
-            sun_dir: wide(toward, lighting.intensity),
-            sun_color: wide(lighting.color, 0.0),
-            ambient_sky: wide(ambient(lighting.sky), 0.0),
-            ambient_ground: wide(ambient(lighting.ground), 0.0),
-            // Fog is the post chain's height fog, the same for every object.
-            fog: [0.0; 4],
-            viewport: [frame.size.0 as f32, frame.size.1 as f32, 0.0, GRASS_DISTANCE],
-            cascades,
-            sky: [sky.brightness, sky.sun_glow, 0.86 - 0.7 * sky.cloud_cover, sky.cloud_speed],
-            shadow,
-            wind: [sky.wind_strength, sky.wind_speed, 0.0, 0.0],
-            water_color: [0.012, 0.05, 0.04, 1.0],
-            water: [1.0, 1.0, 1.0, 1.0],
-            leaf_tint: [1.0, 1.0, 1.0, 1.0],
-            detail: [1.0, 0.14, 0.9, 0.5],
-        }
+        frame_globals(frame, self.scene.sky, self.time)
     }
 
     /// Sorts the objects into draws by mesh: culled to `planes`, with the level of detail from the distance to `eye`.
@@ -530,6 +496,52 @@ impl<B: Rhi> OutdoorPass<B> {
             };
             out.push((o.meshes[level], o.raw));
         }
+    }
+}
+
+/// The scenery shaders' uniforms for one frame of the imported scene.
+pub(crate) fn frame_globals<B: Rhi>(frame: &PassFrame<'_, B>, sky: Option<OutdoorSky>, time: f32) -> Globals {
+    let camera = frame.camera;
+    let forward = normalize(sub(camera.target, camera.eye));
+    let right = normalize(cross(forward, camera.up));
+    let up = cross(right, forward);
+    let aspect = frame.size.0 as f32 / frame.size.1.max(1) as f32;
+    let tangent = match camera.projection {
+        Projection::Perspective { fov_y, .. } => (fov_y * 0.5).tan(),
+        Projection::Orthographic { .. } => 0.6,
+    };
+    let wide = |v: V3, w: f32| [v[0], v[1], v[2], w];
+    let lighting = frame.lighting;
+    let toward = normalize(scale(lighting.direction, -1.0));
+    let sky = sky.unwrap_or(OutdoorSky { brightness: 1.5, sun_glow: 1.0, cloud_cover: 0.34, cloud_speed: 1.0, wind_strength: 1.0, wind_speed: 1.0 });
+    let ambient = |c: V3| scale(c, lighting.ambient);
+    let (shadow0, cascades, shadow) = match &frame.shadow {
+        Some(s) => (s.light_vp, [s.params[0], 0.0, s.params[1], s.params[2]], [1.5, 1.0, 0.0, 0.0]),
+        None => ([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]], [0.0; 4], [1.5, 0.0, 0.0, 0.0]),
+    };
+    Globals {
+        view_proj: frame.view_proj,
+        shadow0,
+        shadow1: shadow0,
+        cam_right: wide(scale(right, tangent * aspect), 0.0),
+        cam_up: wide(scale(up, tangent), 0.0),
+        cam_forward: wide(forward, 0.0),
+        camera: wide(camera.eye, time),
+        sun_dir: wide(toward, lighting.intensity),
+        sun_color: wide(lighting.color, 0.0),
+        ambient_sky: wide(ambient(lighting.sky), 0.0),
+        ambient_ground: wide(ambient(lighting.ground), 0.0),
+        // Fog is the post chain's height fog, the same for every object.
+        fog: [0.0; 4],
+        viewport: [frame.size.0 as f32, frame.size.1 as f32, 0.0, GRASS_DISTANCE],
+        cascades,
+        sky: [sky.brightness, sky.sun_glow, 0.86 - 0.7 * sky.cloud_cover, sky.cloud_speed],
+        shadow,
+        wind: [sky.wind_strength, sky.wind_speed, 0.0, 0.0],
+        water_color: [0.012, 0.05, 0.04, 1.0],
+        water: [1.0, 1.0, 1.0, 1.0],
+        leaf_tint: [1.0, 1.0, 1.0, 1.0],
+        detail: [1.0, 0.14, 0.9, 0.5],
     }
 }
 

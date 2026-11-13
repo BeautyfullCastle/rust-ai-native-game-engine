@@ -7,7 +7,7 @@ struct Effects {
     display: vec4<f32>,
     // x, y: the sun in texture coordinates, z: shaft strength (0 is off), w: width / height.
     sun: vec4<f32>,
-    // rgb: sun color times intensity, w: how much each shaft step keeps (0..1).
+    // rgb: color of the shafts (the sun's color, not its intensity), w: how much each shaft step keeps (0..1).
     sun_color: vec4<f32>,
     // x: 1 for auto exposure, y: darkest exposure, z: brightest exposure, w: target brightness.
     exposure: vec4<f32>,
@@ -134,7 +134,7 @@ fn height_fog(color: vec3<f32>, uv: vec2<f32>, pos: vec2<i32>) -> vec3<f32> {
     let dist = length(ray);
     let dir = ray / max(dist, 1e-4);
     let falloff = fx.fog.y;
-    let start = fx.fog.x * exp(-falloff * (fx.eye.y - fx.fog.z));
+    let start = fx.fog.x * exp(clamp(-falloff * (fx.eye.y - fx.fog.z), -80.0, 80.0));
     let slope = falloff * dir.y;
     var optical = start * dist;
     if (abs(slope) > 1e-5) {

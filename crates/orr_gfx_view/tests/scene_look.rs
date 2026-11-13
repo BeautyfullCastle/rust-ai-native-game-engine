@@ -280,7 +280,7 @@ fn a_terrain_is_read_with_its_heightmap_size_and_center() {
     let e = frame.spawn();
     frame.add(e, Transform3 { position: FPVec3::new(int(10), int(-2), int(4)), ..Transform3::default() });
     let mut terrain = orr_gfx::Terrain { height: int(80), resolution: 9000, ..orr_gfx::Terrain::default() };
-    terrain.set_heightmap("terrain/valley.png");
+    terrain.heightmap[..18].copy_from_slice(b"terrain/valley.png");
     frame.add(e, terrain);
     let terrains = orr_gfx_view::terrains(FrameView::of(&frame));
     assert_eq!(terrains.len(), 1);

@@ -59,15 +59,29 @@ fn sample(width: u32, height: u32, heights: &[f32], u: f32, v: f32) -> f32 {
     top * (1.0 - ty) + bottom * ty
 }
 
+/// The grid the terrain is drawn on: points per side and the 0..1 heights at
+/// them, row by row from the -z edge. Whatever stands on the terrain should
+/// use these heights, so it meets the drawn ground.
+pub fn terrain_grid(terrain: &TerrainRef, width: u32, height: u32, heights: &[f32]) -> (u32, Vec<f32>) {
+    let grid = terrain.resolution.clamp(8, MAX_TERRAIN_GRID).min(width.max(height)).max(2);
+    let mut out = Vec::with_capacity((grid * grid) as usize);
+    for j in 0..grid {
+        for i in 0..grid {
+            out.push(sample(width, height, heights, i as f32 / (grid - 1) as f32, j as f32 / (grid - 1) as f32));
+        }
+    }
+    (grid, out)
+}
+
 /// The mesh of `terrain` from a heightmap of `width` x `height` pixels. The
 /// mesh is centered on the terrain's own origin; the entity's position places it.
 pub fn terrain_model(terrain: &TerrainRef, width: u32, height: u32, heights: &[f32]) -> Result<StaticModel, String> {
-    let grid = terrain.resolution.clamp(8, MAX_TERRAIN_GRID).min(width.max(height)).max(2);
+    let (grid, samples) = terrain_grid(terrain, width, height, heights);
     let [size_x, size_z] = terrain.size;
     let step = [size_x / (grid - 1) as f32, size_z / (grid - 1) as f32];
     let point = |i: u32, j: u32| -> [f32; 3] {
         let (u, v) = (i as f32 / (grid - 1) as f32, j as f32 / (grid - 1) as f32);
-        [(u - 0.5) * size_x, sample(width, height, heights, u, v) * terrain.height, (v - 0.5) * size_z]
+        [(u - 0.5) * size_x, samples[(j * grid + i) as usize] * terrain.height, (v - 0.5) * size_z]
     };
     let mut vertices = Vec::with_capacity((grid * grid) as usize);
     for j in 0..grid {
