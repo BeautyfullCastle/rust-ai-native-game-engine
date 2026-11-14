@@ -2751,7 +2751,8 @@ impl EditorApp {
                 resp.request_focus();
             }
             let keyboard_focused = keyboard_enabled && resp.has_focus() && !ui.ctx().text_edit_focused();
-            if resp.has_focus() {
+            // Other games set their own filter above; this one would drop their Escape and Tab locks.
+            if resp.has_focus() && self.editor.game().has_mesh_view() {
                 ui.memory_mut(|memory|memory.set_focus_lock_filter(resp.id,egui::EventFilter {horizontal_arrows:keyboard_focused,vertical_arrows:keyboard_focused,..Default::default()}));
             }
             let direction = ui.input(crate::mesh_play_controls::keyboard_direction);
