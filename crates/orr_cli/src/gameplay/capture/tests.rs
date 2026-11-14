@@ -236,3 +236,11 @@ fn capture_redacts_decoded_strings_before_json_escaping() {
     assert_eq!(parsed["width"], 2);
     assert!(!encoded.contains("test-only-quote") && !encoded.contains("query-secret"));
 }
+#[cfg(windows)]
+#[test]
+fn capture_accepts_verbatim_canonical_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = std::fs::canonicalize(dir.path()).unwrap().join("frame.png");
+    assert!(path.to_str().unwrap().starts_with(r"\\?\"));
+    assert!(validate_path(&path).is_ok());
+}

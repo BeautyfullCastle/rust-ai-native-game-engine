@@ -34,6 +34,10 @@ fn validate_path(path: &Path) -> Result<(), CliErr> {
     let mut cursor = PathBuf::new();
     for part in parent(path).components() {
         cursor.push(part);
+        // A drive or verbatim prefix such as `\\?\C:` is not a filesystem object.
+        if matches!(part, std::path::Component::Prefix(_)) {
+            continue;
+        }
         let metadata = std::fs::symlink_metadata(&cursor).map_err(|_| invalid())?;
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
             return Err(invalid());

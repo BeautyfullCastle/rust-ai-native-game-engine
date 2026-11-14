@@ -122,7 +122,7 @@ fn viewport_focus_keeps_playback_controls_and_paused_timeline() {
 fn viewport_focus_reveals_explicit_navigation_but_not_passive_close_review() {
     let mut h = harness();
     toggle(&mut h, "Focus viewport");
-    toggle(&mut h, "Unsaved work");
+    toggle(&mut h, "Unsaved: 0");
     assert!(!h.state().ui.viewport_focus);
     assert_eq!(h.state().ui.bottom_tab, BottomTab::UnsavedWork);
     toggle(&mut h, "Focus viewport");
@@ -138,6 +138,7 @@ fn viewport_focus_reveals_explicit_navigation_but_not_passive_close_review() {
     ));
     settle(&mut h);
     assert!(h.state().editor.is_dirty());
+    assert!(h.query_by_label("Unsaved: 1").is_some());
     toggle(&mut h, "Focus viewport");
     let rect = h.state().ui.viewport_rect;
     h.input_mut()

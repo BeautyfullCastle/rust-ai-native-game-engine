@@ -2,6 +2,7 @@
 
 결정론 롤백 ECS 게임엔진입니다. Rust로 작성했고, 에디터와 게임 런타임, AI 에이전트용 명령 도구를 함께 제공합니다.
 
+- 처음 쓰는 사람: [docs/getting-started.md](docs/getting-started.md) (코드로 첫 게임, 에디터, 프로젝트 만들기와 내보내기)
 - 설계: [docs/design-v2.md](docs/design-v2.md), [docs/design-v1.md](docs/design-v1.md)
 - 현재 상태와 다음 작업: [docs/progress.md](docs/progress.md)
 - AI 에이전트 사용법: [AGENTS.md](AGENTS.md)
