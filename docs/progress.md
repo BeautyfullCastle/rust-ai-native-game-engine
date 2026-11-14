@@ -1,6 +1,6 @@
 # Orrery 현재 상태
 
-갱신: 2026-11-12 · [설계 v2](design-v2.md) · [상위 추적 #2](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/2) · [게임 제작 #94](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94)
+갱신: 2026-11-14 · [설계 v2](design-v2.md) · [상위 추적 #2](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/2) · [게임 제작 #94](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94)
 
 ## 지금 되는 것
 
@@ -18,6 +18,10 @@
 - **용 비행**: Forest Valley 씬에 동양식 용(`orr_games::Dragon`)이 있다. 에디터 Play에서 `Take control` 후 A/D, W/S, E로 난다. 카메라가 뒤따르고, 몸통은 렌더 패스(`orr_scenery::dragon::DragonPass`)가 경로를 따라 매 프레임 만든다. 자세한 내용은 [rendering-architecture.md](rendering-architecture.md) 1.15절.
 - **재질 텍스처와 스키닝 모델**: 표면 셰이더가 `// @texture` 줄로 PNG 이미지를 최대 4장 선언하고 읽는다. 이미지는 밉 단계와 반복 샘플러로 걸러진다. `orr_gfx::Material`의 `texture_0`~`texture_3`이 경로를 가지고, 인스펙터 재질 칸에서 고른다. 같은 셰이더가 스키닝 모델에도 적용된다. Forest Valley 지형이 풀·바위 디테일 이미지를 쓴다. [rendering-architecture.md](rendering-architecture.md) 1.16절.
 - **캐스케이드 그림자**: 해 그림자가 최대 4단계로 시점을 따라간다. 가까운 그림자는 선명하고 먼 그림자도 보인다. `orr_gfx::Light::shadow_cascades`로 정한다. [rendering-architecture.md](rendering-architecture.md) 1.17절.
+- **입문 문서**: [getting-started.md](getting-started.md). 준비물, 코드로 첫 게임(`cargo run -p orr_sim --example hello`), 시뮬레이션 규칙, 에디터, Room 프로젝트 만들기·실행·내보내기, 에이전트 연결, 문제 해결. 절차는 윈도우에서 직접 따라가 확인했다. 그 과정에서 `type Command = ();`, `orr_sim::fn_systems`, 일반 경로로 출력하는 `orr_new_room`·`orr_export_windows`, 에디터 상태 막대의 `Unsaved: N`을 추가했다.
+- **후처리 효과 추가**: `ssao`(주변광 차폐), `toon`(밝기 단계), `outline`(깊이 외곽선), `fxaa`, `upscale`(장면을 작게 그리고 FSR 1 방식 EASU 확대와 RCAS 선명화). `PostProcess` 효과 목록에서 고른다. [rendering-architecture.md](rendering-architecture.md) 1.9절.
+- **애니메이션 블렌딩**: 본 마스크, 마스크 블렌드, 가산 블렌드, 1D 블렌드 스페이스, 상태 머신(파라미터, 조건부 전환, 크로스페이드, exit time, 클립 이벤트, 루트 모션), 레이어를 쌓는 `Animator`, 투 본 IK. 코드 API이며 에디터 편집 화면은 아직 없다. [animation.md](animation.md).
+- **에디터 `--camera-view`**: 씬 카메라 시점으로 시작한다. `--screenshot`과 함께 쓰면 씬 카메라 화면을 저장한다.
 - **테스트(기본 구성)**: `cargo test --workspace --release` 2779개 통과, 실패 0개, 무시 26개.
 - **테스트(전체 기능 구성)**: `--features orr_editor/full,orr_sample/full`로 에디터와 샘플 게임을 전체 실행했을 때 3376개 통과, 19개 실패였다. 그 뒤 17건의 원인을 고쳐 해당 테스트를 다시 실행해 통과를 확인했다. 남은 실패는 2건이다.
 
@@ -41,6 +45,8 @@
 - Arena·Collect 프로젝트의 새로 만들기와 내보내기, 게임 진행 저장, 지형 패치 불러오기, `orr_pkg`의 번들·웹 명령은 리눅스 전용이다.
 - 에디터 메뉴(`File > New Room project…`, `File > Export Windows game…`)는 사람이 직접 눌러 보는 확인을 아직 하지 않았다. 같은 기능을 명령 도구로 실행해 확인했다.
 - 리눅스, macOS, 안드로이드, 브라우저 빌드는 이번에 실행하지 않았다.
+- 2026-11-14 기준 main에서 원래부터 실패하는 테스트 2건: `crates/orr_editor/tests/measure.rs`의 `drag_to_viewport_latency`(두 번째 드래그 이동이 화면에 반영되지 않음), `crates/orr_wasm_bench/tests/checksums.rs`의 `physics3d_1000_tick` 골든 체크섬 불일치.
+- TAA와 시간 누적 업스케일(FSR 2 이상)은 아직 없다. 프레임 사이 움직임 벡터를 만들지 않는다.
 
 ## 다음 작업
 

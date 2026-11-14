@@ -12,6 +12,13 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, sync::Arc};
 
+mod graph;
+mod ik;
+pub use graph::{
+    AnimationLayer, AnimationState, Animator, BlendSpace1D, BoneMask, ClipEvent, Condition, LayerBlend, Motion, StateMachine, Transition, MAX_EVENTS,
+    MAX_LAYERS, MAX_STATES, MAX_TRANSITIONS,
+};
+
 pub type Matrix4 = [[f32; 4]; 4];
 pub const MAX_JOINTS: usize = 64;
 pub const MAX_SKINS: usize = 16;
