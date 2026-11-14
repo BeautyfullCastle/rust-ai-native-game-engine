@@ -16,7 +16,9 @@ pub trait System<G: Game>: Send {
 }
 
 /// Any plain `fn(&mut SimContext<G>)` (or non-capturing closure coercible to
-/// one) is a [`System`] whose name is its item path.
+/// one) is a [`System`]. Its name is the function pointer type, so every
+/// function system reports the same name; implement [`System`] on a type
+/// when a distinct diagnostic name matters.
 impl<G: Game> System<G> for fn(&mut SimContext<G>) {
     fn name(&self) -> &'static str {
         core::any::type_name::<Self>()
@@ -24,4 +26,30 @@ impl<G: Game> System<G> for fn(&mut SimContext<G>) {
     fn run(&mut self, ctx: &mut SimContext<G>) {
         (self)(ctx)
     }
+}
+
+/// Builds a [`crate::Game::systems`] pipeline from plain functions, run in
+/// array order.
+///
+/// ```
+/// # use orr_sim::{fn_systems, Game, SimContext, System};
+/// # struct Demo;
+/// # impl Game for Demo {
+/// #     type Input = u32; type Command = (); type Event = (); type Config = ();
+/// #     fn register(_: &mut orr_sim::ComponentRegistryBuilder) {}
+/// #     fn setup(_: &mut orr_sim::Frame, _: &()) {}
+/// fn systems() -> Vec<Box<dyn System<Self>>> {
+///     fn_systems([gravity, bounce])
+/// }
+/// # }
+/// # fn gravity(_: &mut SimContext<Demo>) {}
+/// # fn bounce(_: &mut SimContext<Demo>) {}
+/// ```
+pub fn fn_systems<G: Game, const N: usize>(
+    systems: [fn(&mut SimContext<G>); N],
+) -> Vec<Box<dyn System<G>>> {
+    systems
+        .into_iter()
+        .map(|system| Box::new(system) as Box<dyn System<G>>)
+        .collect()
 }

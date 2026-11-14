@@ -40,3 +40,22 @@ pub fn encode_pod<T: bytemuck::Pod>(v: &T, out: &mut Vec<u8>) {
 pub fn decode_pod<T: bytemuck::Pod>(bytes: &[u8]) -> Option<T> {
     bytemuck::try_pod_read_unaligned(bytes).ok()
 }
+
+/// `type Command = ();` for a game that takes no commands. It encodes to no
+/// bytes and decodes only from empty input.
+///
+/// ```
+/// use orr_sim::SimCommand;
+///
+/// let mut bytes = Vec::new();
+/// ().encode(&mut bytes);
+/// assert!(bytes.is_empty());
+/// assert_eq!(<()>::decode(&bytes), Some(()));
+/// assert_eq!(<()>::decode(&[0]), None);
+/// ```
+impl SimCommand for () {
+    fn encode(&self, _out: &mut Vec<u8>) {}
+    fn decode(bytes: &[u8]) -> Option<Self> {
+        bytes.is_empty().then_some(())
+    }
+}
