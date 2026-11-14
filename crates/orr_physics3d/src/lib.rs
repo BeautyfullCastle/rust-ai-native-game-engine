@@ -110,7 +110,8 @@
 //!
 //! # Not included yet
 //!
-//! Convex hulls, joints, continuous collision detection, sensors/triggers,
+//! Convex hulls, motorized or limited joints (ball, rod and rope joints exist),
+//! continuous collision detection, sensors/triggers,
 //! gyroscopic torque (angular velocity is integrated as a world-frame
 //! vector, which is stable but not exact for spinning non-spherical
 //! bodies), a circular friction cone (each tangent is clamped on its
@@ -124,6 +125,7 @@ mod collide;
 mod checked_solver;
 mod fastmath;
 mod geom;
+mod joints;
 mod query;
 mod reflection;
 mod sleep;
@@ -135,6 +137,7 @@ mod system;
 mod manifold_tests;
 mod types;
 
+pub use joints::{add_joint, register_joints, Joint, JOINT_BALL, JOINT_ROD, JOINT_ROPE};
 pub use query::{raycast, sphere_cast, QueryFilter, RayHit};
 pub use reflection::register_reflect;
 pub use sleep::{apply_impulse, is_asleep, set_velocity, wake, wake_all};

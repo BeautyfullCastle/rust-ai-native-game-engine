@@ -255,8 +255,14 @@ pub(crate) fn store_friction(cons: &[Constraint], pool: &mut [ContactPt]) {
 /// Odd sweeps walk the constraints backwards, which spreads the
 /// information through a stack in both directions.
 pub(crate) fn solve(cons: &mut [Constraint], pool: &mut [ContactPt], vw: &mut [Vw], iterations: u32) {
+    solve_range(cons, pool, vw, 0, iterations);
+}
+
+/// Iterations `first..first + iterations` of [`solve`]: the contact order still
+/// alternates by iteration number when the iterations are run one at a time.
+pub(crate) fn solve_range(cons: &mut [Constraint], pool: &mut [ContactPt], vw: &mut [Vw], first: u32, iterations: u32) {
     let n = cons.len();
-    for it in 0..iterations {
+    for it in first..first + iterations {
         for k in 0..n {
             let c = &mut cons[if it & 1 == 0 { k } else { n - 1 - k }];
             let (a, b) = (c.a as usize, c.b as usize);
