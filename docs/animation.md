@@ -1,6 +1,6 @@
 # 스켈레탈 애니메이션
 
-갱신: 2026-11-14. 코드: `crates/orr_model/src/animation.rs`, `animation/graph.rs`, `animation/ik.rs` (기능 이름 `animation`). 테스트: `crates/orr_model/tests/animation_runtime.rs`, `animation_graph.rs`.
+갱신: 2026-11-15. 코드: `crates/orr_model/src/animation.rs`, `animation/graph.rs`, `animation/ik.rs` (기능 이름 `animation`). 테스트: `crates/orr_model/tests/animation_runtime.rs`, `animation_graph.rs`.
 
 애니메이션은 화면 쪽 기능이다. 시뮬레이션에 들어가지 않고 `f32` 초 단위로 돈다. 그래서 롤백·리플레이·체크섬과 무관하다. 게임 규칙이 애니메이션 시점에 맞춰야 하면(공격 판정 등) 시뮬레이션 쪽에서 틱으로 따로 센다.
 
@@ -29,9 +29,11 @@ flowchart LR
 | 마스크 블렌드 | `blend_masked(base, over, weight, mask)` | 상체만 다른 동작 |
 | 가산 블렌드 | `add_pose(base, additive, reference, weight, mask)` | `additive`가 `reference`에서 달라진 만큼 `base`에 더함 |
 | 1D 블렌드 스페이스 | `BlendSpace1D::new(model, [(0.0, idle), (1.5, walk), (4.0, run)])` | 이웃한 두 클립을 같은 위상으로 샘플해 섞음. 주기 길이도 섞음 |
+| 2D 블렌드 스페이스 | `BlendSpace2D::new(model, [([0.0, 0.0], idle), ([0.0, 2.0], forward), ([2.0, 0.0], right)])` | 그라디언트 밴드 가중치. 점 위에서는 그 클립만, 사이에서는 가까운 클립을 섞음. 상태에서는 `Motion::Blend2D { space, x, y }` |
 | 상태 머신 | `StateMachine` | 아래 2절 |
 | 레이어 | `Animator { layers }`, `LayerBlend::{Override, Additive}` | 첫 레이어가 기본. 최대 8개 |
 | 투 본 IK | `two_bone_ik(pose, "foot", target, pole)` | 아래 3절 |
+| 룩앳 | `look_at(pose, "head", forward, target, max_angle, weight)` | 노드의 앞 축을 목표 쪽으로, 최대 각도와 가중치만큼 돌림 |
 | 스키닝 | `orr_render`의 스키닝 렌더러, 표면 셰이더 | `Pose::skin_matrices`를 올림 |
 
 ## 2. 상태 머신
@@ -87,11 +89,10 @@ let pose = machine.pose(&model)?;
 
 ## 4. 한계
 
-- 블렌드 스페이스는 1D만 있다. 2D(방향 × 속도)는 없다.
 - 모프 타깃(블렌드 셰이프)은 가져오지도 그리지도 않는다.
 - 상태 머신과 레이어는 코드 API다. 에디터에서 그래프를 편집하는 화면과 씬 파일 형식은 아직 없다.
 - 리타기팅(다른 뼈대로 클립 옮기기)은 없다.
-- IK는 투 본만 있다. 룩앳, FABRIK 같은 다관절 IK는 없다.
+- IK는 투 본과 룩앳만 있다. FABRIK 같은 다관절 IK는 없다.
 
 ## 5. 다른 문서
 
