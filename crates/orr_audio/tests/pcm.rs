@@ -583,3 +583,51 @@ fn invalid_gain_leaves_control_mix_unchanged_and_pause_matches_lifecycle() {
     assert_eq!(render(&mut direct, 512), render(&mut control, 512));
     assert_eq!(direct.stats(), control.stats());
 }
+
+/// Energy of the left and right channels.
+fn channels(samples: &[f32]) -> (f32, f32) {
+    samples.chunks_exact(2).fold((0.0, 0.0), |(l, r), s| (l + s[0] * s[0], r + s[1] * s[1]))
+}
+
+fn play_at(position: [f32; 3]) -> Vec<f32> {
+    let mut audio = mixer();
+    send(&mut audio, 1, EventStatus::Verified(()), &clip().at(position, 1.0, 20.0));
+    render(&mut audio, 2400)
+}
+
+#[test]
+fn a_spatial_clip_pans_toward_its_side_and_fades_with_distance() {
+    let (left, right) = channels(&play_at([3.0, 0.0, 0.0]));
+    assert!(right > left * 4.0, "a sound to the right is in the right speaker: {left} left, {right} right");
+    let (left, right) = channels(&play_at([-3.0, 0.0, 0.0]));
+    assert!(left > right * 4.0, "a sound to the left is in the left speaker: {left} left, {right} right");
+    let near = channels(&play_at([0.0, 0.0, -2.0]));
+    let far = channels(&play_at([0.0, 0.0, -8.0]));
+    assert!((near.0 - near.1).abs() < near.0 * 0.05, "straight ahead is centered: {near:?}");
+    assert!(near.0 > far.0 * 4.0, "farther is quieter: {near:?} near, {far:?} far");
+    assert!(silent(&play_at([30.0, 0.0, 0.0])), "beyond its far distance a sound is silent");
+}
+
+#[test]
+fn a_playing_spatial_sound_follows_the_listener() {
+    let mut audio = mixer();
+    send(&mut audio, 1, EventStatus::Verified(()), &clip().at([3.0, 0.0, 0.0], 1.0, 20.0));
+    let (left, right) = channels(&render(&mut audio, 1200));
+    assert!(right > left * 4.0);
+    // The listener walks past the sound: it is now on the listener's left.
+    audio.set_listener(orr_audio::Listener { position: [6.0, 0.0, 0.0], right: [1.0, 0.0, 0.0] });
+    render(&mut audio, 1200);
+    let (left, right) = channels(&render(&mut audio, 1200));
+    assert!(left > right * 4.0, "after the move the sound is on the left: {left} left, {right} right");
+}
+
+#[test]
+fn an_emitter_is_at_full_volume_within_its_near_distance() {
+    let listener = orr_audio::Listener::default();
+    let emitter = orr_audio::Emitter { position: [0.5, 0.0, 0.0], near: 1.0, far: 10.0 };
+    let (volume, pan) = emitter.heard_by(&listener);
+    assert_eq!(volume, 0.0);
+    assert!((pan - 1.0).abs() < 1e-6);
+    let (twice, _) = orr_audio::Emitter { position: [0.0, 0.0, 2.0], ..emitter }.heard_by(&listener);
+    assert!((twice + 6.02).abs() < 0.05, "twice the near distance is half the amplitude: {twice} dB");
+}

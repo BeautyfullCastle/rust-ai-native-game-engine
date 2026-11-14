@@ -1,4 +1,6 @@
 //! Presentation-only rollback-aware one-shot audio, using Kira's real mixer.
+//! A clip placed with [`Clip::at`] is heard from [`EventAudio::set_listener`]:
+//! its volume falls with distance and it pans toward its side.
 //!
 //! The default build has no device or codec dependencies. [`OfflineAudio`] renders
 //! PCM into a caller-owned buffer; `native` enables CPAL output. Nothing feeds back
@@ -16,7 +18,7 @@ use kira::backend::Backend;
 use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle, StaticSoundSettings};
 use kira::sound::PlaybackState;
 use kira::track::MainTrackBuilder;
-use kira::{AudioManager, AudioManagerSettings, Capacities, Frame, Tween};
+use kira::{AudioManager, AudioManagerSettings, Capacities, Decibels, Frame, Panning, Tween};
 use orr_bridge::{BridgeEvent, EventKey, EventStatus, Lifecycle, ViewResync, ViewUpdate};
 
 mod offline;
@@ -31,10 +33,70 @@ impl fmt::Display for AudioError {
 }
 impl std::error::Error for AudioError {}
 
+/// Where a sound comes from in the world, and how far it carries.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Emitter {
+    pub position: [f32; 3],
+    /// Within this many meters the sound plays at full volume.
+    pub near: f32,
+    /// At this many meters and beyond the sound is silent.
+    pub far: f32,
+}
+
+/// The ear that spatial sounds are heard from.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Listener {
+    pub position: [f32; 3],
+    /// The listener's right, toward the right speaker. It need not be a unit vector.
+    pub right: [f32; 3],
+}
+impl Default for Listener {
+    fn default() -> Self {
+        Self { position: [0.0; 3], right: [1.0, 0.0, 0.0] }
+    }
+}
+
+impl Emitter {
+    /// Volume in decibels (0 is full, -60 silent) and left-right placement (-1 left,
+    /// 1 right) of this emitter for `listener`: full volume within `near`, falling
+    /// with distance after it and reaching silence at `far`.
+    pub fn heard_by(&self, listener: &Listener) -> (f32, f32) {
+        let offset: [f32; 3] = std::array::from_fn(|i| self.position[i] - listener.position[i]);
+        let distance = offset.iter().map(|v| v * v).sum::<f32>().sqrt();
+        let near = self.near.max(1e-3);
+        let far = self.far.max(near + 1e-3);
+        // Inverse distance past `near`, faded to zero over the last fifth before `far`.
+        let fade = ((far - distance) / (0.2 * (far - near))).clamp(0.0, 1.0);
+        let amplitude = (near / distance.max(near)) * fade;
+        let volume = if amplitude <= 0.001 { Decibels::SILENCE.0 } else { (20.0 * amplitude.log10()).max(Decibels::SILENCE.0) };
+        let right_length = listener.right.iter().map(|v| v * v).sum::<f32>().sqrt();
+        let pan = if distance > 1e-4 && right_length > 1e-6 {
+            offset.iter().zip(&listener.right).map(|(o, r)| o * r).sum::<f32>() / (distance * right_length)
+        } else {
+            0.0
+        };
+        (volume, pan.clamp(-1.0, 1.0))
+    }
+}
+
 /// Validated, owned PCM shared cheaply by every instance. No decoder or asset IO.
 #[derive(Clone)]
-pub struct Clip(StaticSoundData);
+pub struct Clip {
+    data: StaticSoundData,
+    emitter: Option<Emitter>,
+}
 impl Clip {
+    /// This clip played from `position`, heard through [`EventAudio::set_listener`]:
+    /// full volume within `near` meters, silent from `far` meters on.
+    pub fn at(mut self, position: [f32; 3], near: f32, far: f32) -> Self {
+        self.emitter = Some(Emitter { position, near, far });
+        self
+    }
+
+    pub fn emitter(&self) -> Option<Emitter> {
+        self.emitter
+    }
+
     pub fn from_stereo(sample_rate: u32, frames: Vec<[f32; 2]>) -> Result<Self, AudioError> {
         if !(8_000..=192_000).contains(&sample_rate) || frames.is_empty() {
             return Err(AudioError(
@@ -59,12 +121,15 @@ impl Clip {
             .into_iter()
             .map(|[left, right]| Frame::new(left, right))
             .collect();
-        Ok(Self(StaticSoundData {
-            sample_rate,
-            frames,
-            settings: StaticSoundSettings::default(),
-            slice: None,
-        }))
+        Ok(Self {
+            data: StaticSoundData {
+                sample_rate,
+                frames,
+                settings: StaticSoundSettings::default(),
+                slice: None,
+            },
+            emitter: None,
+        })
     }
 }
 
@@ -119,6 +184,7 @@ struct Voice {
     // A detached fading voice must not be confirmed/canceled as a replacement.
     key: Option<EventKey>,
     handle: StaticSoundHandle,
+    emitter: Option<Emitter>,
 }
 
 /// One owner of mixer, voice handles and bounded completion tombstones.
@@ -139,6 +205,7 @@ pub struct EventAudio<B: Backend> {
     paused: bool,
     disconnected: bool,
     stats: AudioStats,
+    listener: Listener,
 }
 pub type OfflineAudio = EventAudio<OfflineBackend>;
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
@@ -236,6 +303,7 @@ impl<B: Backend> EventAudio<B> {
             manager,
             config,
             voices: Vec::new(),
+            listener: Listener::default(),
             history: BTreeMap::new(),
             retired_through: None,
             source: None,
@@ -400,6 +468,27 @@ impl<B: Backend> EventAudio<B> {
         }
     }
 
+    /// Moves the ear of spatial sounds. Playing spatial sounds follow it over
+    /// a few milliseconds, so a moving listener does not click.
+    pub fn set_listener(&mut self, listener: Listener) {
+        if !listener.position.iter().chain(&listener.right).all(|v| v.is_finite()) {
+            return;
+        }
+        self.listener = listener;
+        let tween = Tween { duration: Duration::from_millis(20), ..Tween::default() };
+        for voice in self.voices.iter_mut().filter(|v| v.key.is_some()) {
+            if let Some(emitter) = voice.emitter {
+                let (volume, pan) = emitter.heard_by(&listener);
+                voice.handle.set_volume(Decibels(volume), tween);
+                voice.handle.set_panning(Panning(pan), tween);
+            }
+        }
+    }
+
+    pub fn listener(&self) -> Listener {
+        self.listener
+    }
+
     /// Low-level ordered event input, for adapters without a ViewUpdate. Call
     /// reset on any source/epoch change; never feed both this and update for one batch.
     pub fn event<E>(
@@ -461,11 +550,17 @@ impl<B: Backend> EventAudio<B> {
                     self.stats.dropped = self.stats.dropped.saturating_add(1);
                     return;
                 }
-                match self.manager.play(clip.0) {
+                let mut data = clip.data;
+                if let Some(emitter) = clip.emitter {
+                    let (volume, pan) = emitter.heard_by(&self.listener);
+                    data = data.volume(Decibels(volume)).panning(Panning(pan));
+                }
+                match self.manager.play(data) {
                     Ok(handle) => {
                         self.voices.push(Voice {
                             key: Some(key),
                             handle,
+                            emitter: clip.emitter,
                         });
                         self.stats.started = self.stats.started.saturating_add(1);
                     }
