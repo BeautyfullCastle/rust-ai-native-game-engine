@@ -402,7 +402,7 @@ fn rejects_excessive_graph_and_source_vertices_before_graph_admission() {
 }
 
 #[test]
-fn rejects_external_model_dependencies_and_leaves_package_bytes_unchanged() {
+fn imports_extra_model_dependency_records_and_leaves_package_bytes_unchanged() {
     let temporary = tempfile::tempdir().unwrap();
     let mut source = flat_model(orr_model::IDENTITY).source().clone();
     source.dependencies.push(Dependency {
@@ -413,7 +413,10 @@ fn rejects_external_model_dependencies_and_leaves_package_bytes_unchanged() {
     let package_root = package(temporary.path(), &model);
     let model_path = package_root.join("floor.orrmodel");
     let original_bytes = fs::read(&model_path).unwrap();
-    let result = Snapshot::from_package(&package_root, "floor.orrmodel", "LICENSE.txt", revision());
-    assert!(result.err().unwrap().contains("external dependencies"));
+    let snapshot =
+        Snapshot::from_package(&package_root, "floor.orrmodel", "LICENSE.txt", revision()).unwrap();
+    let dependencies = &snapshot.source_model_arc().source().dependencies;
+    assert_eq!(dependencies.len(), 2);
+    assert_eq!(dependencies[1].uri, "textures/external.bin");
     assert_eq!(fs::read(model_path).unwrap(), original_bytes);
 }
