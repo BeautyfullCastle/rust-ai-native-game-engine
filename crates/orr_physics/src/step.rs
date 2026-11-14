@@ -117,6 +117,9 @@ pub struct Scratch {
     carried: Vec<ContactCache>,
     new_overlaps: Vec<OverlapPair>,
     asleep_end: u32,
+    joints: Vec<crate::joints::JointRow>,
+    /// Per body: held by a joint, so it does not fall asleep.
+    held: Vec<bool>,
 }
 
 fn pair_key(lo: u32, hi: u32) -> u64 {
@@ -655,7 +658,7 @@ impl Scratch {
         for &i in &self.movers {
             let i = i as usize;
             let mut t = 0;
-            if enabled && self.flags[i] & F_DYN != 0 {
+            if enabled && self.flags[i] & F_DYN != 0 && !self.held.get(i).copied().unwrap_or(false) {
                 let x = self.vw[i];
                 let still = x.v.dotf(x.v) <= lin2 && x.w.abs() <= cfg.sleep_angular_speed;
                 if still {
@@ -839,8 +842,17 @@ pub fn step_probed(frame: &mut Frame, sc: &mut Scratch, events: &mut Vec<Trigger
         sc.integrate_velocities(bd, &cfg);
         probe(Phase::Integrate);
         solver::prepare(&mut sc.cons, &sc.xfs, &mut sc.vw, &cfg);
+        sc.joints = crate::joints::prepare(frame, &sc.ents, &sc.bslot, bd, &sc.xfs, cfg.dt, &mut sc.held);
         probe(Phase::Prepare);
-        solver::solve(&mut sc.cons, &mut sc.vw, cfg.velocity_iterations);
+        if sc.joints.is_empty() {
+            solver::solve(&mut sc.cons, &mut sc.vw, cfg.velocity_iterations);
+        } else {
+            // Joints after contacts in every iteration, as in the contact-only order.
+            for _ in 0..cfg.velocity_iterations {
+                solver::solve(&mut sc.cons, &mut sc.vw, 1);
+                crate::joints::solve(&mut sc.joints, &mut sc.vw);
+            }
+        }
         sc.clamp_velocities(&cfg);
         probe(Phase::Solve);
         sc.update_sleep(bd, &cfg);
