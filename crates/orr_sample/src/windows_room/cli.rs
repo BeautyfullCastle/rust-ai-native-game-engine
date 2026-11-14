@@ -25,7 +25,7 @@ pub fn run(program_name: &str, args: Vec<OsString>, legacy_usage_exit: bool) -> 
     };
     match authoring::create(&options) {
         Ok(report) => {
-            println!("created project: {}", report.output.display());
+            println!("created project: {}", orr_sample::windows_path::display(&report.output));
             println!("template: room-escape-3d-v1");
             println!(
                 "project initial checksum: 0x{:016x}",

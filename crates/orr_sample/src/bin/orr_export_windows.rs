@@ -74,7 +74,7 @@ fn main() -> std::process::ExitCode {
     };
     match export(&options) {
         Ok(report) => {
-            println!("exported: {}", report.output.display());
+            println!("exported: {}", orr_sample::windows_path::display(&report.output));
             println!("content digest: {}", report.content_digest);
             println!("project files: {}", report.project_files);
             std::process::ExitCode::SUCCESS

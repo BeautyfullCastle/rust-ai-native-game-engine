@@ -102,6 +102,8 @@ pub mod project_export;
 pub mod trusted_runtime;
 #[cfg(all(windows, target_arch = "x86_64", feature = "project-export"))]
 pub mod windows_export;
+#[cfg(windows)]
+pub mod windows_path;
 #[cfg(all(windows, target_arch = "x86_64", feature = "project-create", feature = "room-project"))]
 pub mod windows_project;
 #[cfg(all(windows, target_arch = "x86_64", feature = "room-project", any(feature="project-create", all(test, feature="project-export"))))]
