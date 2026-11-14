@@ -87,6 +87,10 @@ impl Parent {
         let mut ancestry = Vec::new();
         for component in path.components() {
             current.push(component.as_os_str());
+            // A drive or verbatim prefix such as `\\?\C:` is not a filesystem object.
+            if matches!(component, Component::Prefix(_)) {
+                continue;
+            }
             if current
                 .file_name()
                 .is_some_and(|n| n.as_encoded_bytes().eq_ignore_ascii_case(b".orr"))
@@ -332,3 +336,20 @@ fn publish(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use crate::raw16::export_tests::{recipe, terrain};
+
+    #[test]
+    fn publishes_into_verbatim_canonical_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = fs::canonicalize(dir.path()).unwrap().join("height.raw");
+        assert!(output.to_str().unwrap().starts_with(r"\\?\"));
+        let r = recipe();
+        let t = terrain(&r, [-100, -99, 0, 65435]);
+        export_new_checked(&output, &t, &r, || Ok(())).unwrap();
+        assert_eq!(fs::read(&output).unwrap(), export_raw16(&t, &r).unwrap());
+    }
+}
