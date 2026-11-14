@@ -193,12 +193,91 @@ impl BlendSpace1D {
     }
 }
 
+/// Clips placed on a plane of two parameters, such as strafing speed and
+/// forward speed. Each clip's weight falls off toward every other clip
+/// (gradient band interpolation), so any point between them mixes the nearby
+/// clips and a point on a clip plays that clip alone.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BlendSpace2D {
+    points: Vec<([f32; 2], u32)>,
+}
+
+impl BlendSpace2D {
+    pub fn new(model: &AnimatedModel, points: Vec<([f32; 2], u32)>) -> Result<Self, Error> {
+        if points.is_empty() || points.len() > super::MAX_CLIPS {
+            return Err(invalid("a blend space needs 1 to 32 points"));
+        }
+        for (i, &(at, clip)) in points.iter().enumerate() {
+            if !at.iter().all(|v| v.is_finite()) {
+                return Err(invalid("nonfinite blend space position"));
+            }
+            if points[..i].iter().any(|(other, _)| *other == at) {
+                return Err(invalid("two blend space points share a position"));
+            }
+            model.clip_duration(clip)?;
+        }
+        Ok(Self { points })
+    }
+
+    /// Weight of each point at `at`, summing to 1.
+    pub fn weights(&self, at: [f32; 2]) -> Vec<f32> {
+        let mut weights: Vec<f32> = self
+            .points
+            .iter()
+            .enumerate()
+            .map(|(i, (p, _))| {
+                let toward = [at[0] - p[0], at[1] - p[1]];
+                self.points.iter().enumerate().filter(|(j, _)| *j != i).fold(1.0f32, |weight, (_, (q, _))| {
+                    let edge = [q[0] - p[0], q[1] - p[1]];
+                    let along = (toward[0] * edge[0] + toward[1] * edge[1]) / (edge[0] * edge[0] + edge[1] * edge[1]);
+                    weight.min(1.0 - along)
+                })
+                .max(0.0)
+            })
+            .collect();
+        let total: f32 = weights.iter().sum();
+        if total > 0.0 {
+            weights.iter_mut().for_each(|w| *w /= total);
+        } else {
+            // Outside every band: the nearest point plays alone.
+            let nearest = self.nearest(at);
+            weights.iter_mut().enumerate().for_each(|(i, w)| *w = if i == nearest { 1.0 } else { 0.0 });
+        }
+        weights
+    }
+
+    fn nearest(&self, at: [f32; 2]) -> usize {
+        let distance = |p: [f32; 2]| (p[0] - at[0]).powi(2) + (p[1] - at[1]).powi(2);
+        (0..self.points.len()).min_by(|&a, &b| distance(self.points[a].0).total_cmp(&distance(self.points[b].0))).expect("at least one point")
+    }
+
+    /// Length of one cycle at `at`: the clips' lengths, weighted.
+    pub fn duration(&self, model: &AnimatedModel, at: [f32; 2]) -> Result<f32, Error> {
+        self.weights(at).iter().zip(&self.points).try_fold(0.0, |sum, (w, (_, clip))| Ok(sum + w * model.clip_duration(*clip)?))
+    }
+
+    /// The pose at `at`, every weighted clip sampled at `phase` (0..=1) of its length.
+    pub fn sample(&self, model: &AnimatedModel, at: [f32; 2], phase: f32) -> Result<Pose, Error> {
+        let mut blended: Option<(Pose, f32)> = None;
+        for (w, (_, clip)) in self.weights(at).into_iter().zip(&self.points).filter(|(w, _)| *w > 0.0) {
+            let pose = model.sample_clip(*clip, phase * model.clip_duration(*clip)?)?;
+            blended = Some(match blended {
+                None => (pose, w),
+                Some((so_far, total)) => (model.blend_poses(&so_far, &pose, (w / (total + w)).clamp(0.0, 1.0))?, total + w),
+            });
+        }
+        Ok(blended.expect("weights sum to one").0)
+    }
+}
+
 /// What a state plays.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Motion {
     Clip(u32),
     /// A blend space driven by the float parameter `parameter`.
     Blend { space: BlendSpace1D, parameter: String },
+    /// A 2D blend space driven by the float parameters `x` and `y`.
+    Blend2D { space: BlendSpace2D, x: String, y: String },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -369,6 +448,7 @@ impl StateMachine {
         match &self.states[state].motion {
             Motion::Clip(clip) => model.clip_duration(*clip),
             Motion::Blend { space, parameter } => space.duration(model, self.float(parameter)),
+            Motion::Blend2D { space, x, y } => space.duration(model, [self.float(x), self.float(y)]),
         }
     }
 
@@ -477,6 +557,7 @@ impl StateMachine {
         match &self.states[state].motion {
             Motion::Clip(clip) => model.sample_clip(*clip, phase * model.clip_duration(*clip)?),
             Motion::Blend { space, parameter } => space.sample(model, self.float(parameter), phase),
+            Motion::Blend2D { space, x, y } => space.sample(model, [self.float(x), self.float(y)], phase),
         }
     }
 

@@ -234,3 +234,43 @@ fn invalid_machines_are_refused() {
     let mut machine = StateMachine::new(&model, vec![state("idle", IDLE)], vec![], vec![]).unwrap();
     assert!(machine.update(&model, f32::NAN).is_err());
 }
+
+#[test]
+fn a_2d_blend_space_plays_a_clip_alone_on_its_point_and_mixes_between_points() {
+    let model = leg();
+    let space = BlendSpace2D::new(&model, vec![([0.0, 0.0], IDLE), ([2.0, 0.0], WALK), ([0.0, 2.0], RUN)]).unwrap();
+    let on_walk = space.weights([2.0, 0.0]);
+    close(on_walk[1], 1.0);
+    let between = space.weights([1.0, 0.0]);
+    close(between[0], 0.5);
+    close(between[1], 0.5);
+    close(between[2], 0.0);
+    close(space.weights([9.0, 9.0]).iter().sum::<f32>(), 1.0);
+    let expected = model.blend_poses(&model.sample_clip(IDLE, 0.5).unwrap(), &model.sample_clip(WALK, 0.5).unwrap(), 0.5).unwrap();
+    close_pose(&space.sample(&model, [1.0, 0.0], 0.5).unwrap(), &expected);
+    assert!(BlendSpace2D::new(&model, vec![([1.0, 1.0], IDLE), ([1.0, 1.0], RUN)]).is_err());
+
+    let state = AnimationState { name: "strafe".into(), motion: Motion::Blend2D { space, x: "side".into(), y: "ahead".into() }, looping: true, speed: 1.0 };
+    let mut machine = StateMachine::new(&model, vec![state], vec![], vec![]).unwrap();
+    machine.set_float("ahead", 2.0);
+    machine.update(&model, 0.25).unwrap();
+    close(machine.phase(), 0.5);
+    close_pose(&machine.pose(&model).unwrap(), &model.sample_clip(RUN, 0.25).unwrap());
+}
+
+#[test]
+fn look_at_turns_a_node_toward_a_point_within_its_limit() {
+    let model = leg();
+    let rest = model.rest_pose().unwrap();
+    // The knee's own -y axis runs down to the foot; aim it sideways at knee height.
+    let turned = model.look_at(&rest, "knee", [0.0, -1.0, 0.0], [5.0, -1.0, 0.0], 3.2, 1.0).unwrap();
+    let f = foot(&turned);
+    close(f[0], 1.0);
+    close(f[1], -1.0);
+    let limited = model.look_at(&rest, "knee", [0.0, -1.0, 0.0], [5.0, -1.0, 0.0], 0.5, 1.0).unwrap();
+    let g = foot(&limited);
+    close(g[0], 0.5f32.sin());
+    let half = model.look_at(&rest, "knee", [0.0, -1.0, 0.0], [5.0, -1.0, 0.0], 3.2, 0.5).unwrap();
+    close(foot(&half)[0], std::f32::consts::FRAC_PI_4.sin());
+    assert!(model.look_at(&rest, "knee", [0.0; 3], [1.0, 0.0, 0.0], 1.0, 1.0).is_err());
+}

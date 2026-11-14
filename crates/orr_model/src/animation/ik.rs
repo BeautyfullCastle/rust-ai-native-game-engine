@@ -32,6 +32,12 @@ fn angle(a: Vec3, b: Vec3) -> f32 {
     dot(a, b).clamp(-1.0, 1.0).acos()
 }
 
+/// `v` rotated by the unit quaternion `q`.
+fn quat_rotate(q: [f32; 4], v: Vec3) -> Vec3 {
+    let r = quat_mul(quat_mul(q, [v[0], v[1], v[2], 0.0]), quat_conjugate(q));
+    [r[0], r[1], r[2]]
+}
+
 fn axis_angle(axis: Vec3, radians: f32) -> [f32; 4] {
     let (s, c) = (radians * 0.5).sin_cos();
     [axis[0] * s, axis[1] * s, axis[2] * s, c]
@@ -61,6 +67,24 @@ impl AnimatedModel {
         let mut local = pose.local.clone();
         local[node].rotation = normalize_quaternion(quat_mul(local[node].rotation, in_local));
         self.pose_from_local(local)
+    }
+
+    /// Turns `node` so its `forward` axis (in the node's own space) points at
+    /// `target` (model space), by at most `max_angle` radians and blended by
+    /// `weight` (0..=1). A head or a turret follows a point this way.
+    pub fn look_at(&self, pose: &Pose, node: &str, forward: Vec3, target: Vec3, max_angle: f32, weight: f32) -> Result<Pose, Error> {
+        self.validate_pose(pose)?;
+        if !forward.iter().chain(&target).all(|v| v.is_finite()) || !max_angle.is_finite() || max_angle < 0.0 || !weight.is_finite() || !(0.0..=1.0).contains(&weight) {
+            return Err(invalid("invalid look-at target, axis, angle or weight"));
+        }
+        let index = self.node_index(node).ok_or_else(|| invalid("look-at node not found"))? as usize;
+        let local_forward = unit(forward).ok_or_else(|| invalid("look-at forward axis is zero"))?;
+        let rotation = self.model_rotation(pose, index);
+        let now = quat_rotate(rotation, local_forward);
+        let Some(wanted) = unit(sub(target, position(pose, index))) else { return Ok(pose.clone()) };
+        let Some(axis) = unit(cross(now, wanted)) else { return Ok(pose.clone()) };
+        let turn = angle(now, wanted).min(max_angle) * weight;
+        self.rotate_node(pose, index, axis_angle(axis, turn))
     }
 
     /// Bends the parent and grandparent of `end` so that `end` reaches
