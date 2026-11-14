@@ -51,6 +51,47 @@ pub enum ScreenEffect {
     /// with an edge-adaptive filter followed by contrast-adaptive sharpening, after
     /// AMD FidelityFX Super Resolution 1 (EASU and RCAS). `sharpness` 0..=1.
     Upscale { scale: f32, sharpness: f32 },
+    /// Temporal anti-aliasing: the scene is drawn a different part of a pixel
+    /// off every frame and blended with the previous frames, reprojected by
+    /// depth through the camera's motion. `blend` 0.05..=0.5 is the share of
+    /// the new frame. With [`ScreenEffect::Upscale`] the history is kept at the
+    /// target size, which upscales over time instead of from one frame.
+    Taa { blend: f32 },
+}
+
+/// Whether `effects` ask for temporal anti-aliasing, which jitters the scene.
+pub fn temporal(effects: &[Option<ScreenEffect>]) -> bool {
+    effects.iter().flatten().any(|e| matches!(e, ScreenEffect::Taa { .. }))
+}
+
+fn halton(mut index: u32, base: u32) -> f32 {
+    let (mut result, mut fraction) = (0.0, 1.0);
+    while index > 0 {
+        fraction /= base as f32;
+        result += fraction * (index % base) as f32;
+        index /= base;
+    }
+    result
+}
+
+/// Subpixel offset of frame `frame` for a scene of `size`: in clip space, and as
+/// the texture-coordinate shift that brings a jittered picture back to place.
+/// Sixteen frames of the Halton (2, 3) sequence.
+pub(crate) fn jitter(frame: u32, size: (u32, u32)) -> ([f32; 2], [f32; 2]) {
+    let index = frame % 16 + 1;
+    let pixel = [halton(index, 2) - 0.5, halton(index, 3) - 0.5];
+    let clip = [pixel[0] * 2.0 / size.0.max(1) as f32, pixel[1] * 2.0 / size.1.max(1) as f32];
+    (clip, [clip[0] * 0.5, -clip[1] * 0.5])
+}
+
+/// `view_proj` with its picture moved by `clip` in clip space.
+pub(crate) fn jittered(view_proj: [[f32; 4]; 4], clip: [f32; 2]) -> [[f32; 4]; 4] {
+    let mut m = view_proj;
+    for column in &mut m {
+        column[0] += clip[0] * column[3];
+        column[1] += clip[1] * column[3];
+    }
+    m
 }
 
 /// The size the scene is drawn at for a target of `size`: smaller when an
@@ -72,6 +113,7 @@ impl ScreenEffect {
             Self::Outline { thickness, sensitivity, darkness } => vec![(thickness, 0.5, 4.0), (sensitivity, 0.01, 1.0), (darkness, 0.0, 1.0)],
             Self::Fxaa { strength } => vec![(strength, 0.0, 1.0)],
             Self::Upscale { scale, sharpness } => vec![(scale, 0.5, 1.0), (sharpness, 0.0, 1.0)],
+            Self::Taa { blend } => vec![(blend, 0.05, 0.5)],
             Self::LightShafts { strength, length } => vec![(strength, 0.0, 4.0), (length, 0.1, 1.0)],
             Self::AutoExposure { darkest, brightest, speed, target } => vec![(darkest, 0.1, 16.0), (brightest, 0.1, 16.0), (speed, 0.1, 20.0), (target, 0.01, 1.0)],
             Self::ColorGrade { saturation, contrast, warmth, tint } => vec![(saturation, 0.0, 2.0), (contrast, 0.0, 1.0), (warmth, -1.0, 1.0), (tint, -1.0, 1.0)],
@@ -111,6 +153,7 @@ impl ScreenEffect {
             }
             Self::Fxaa { strength } => Self::Fxaa { strength: c(strength, 0.0, 1.0) },
             Self::Upscale { scale, sharpness } => Self::Upscale { scale: c(scale, 0.5, 1.0), sharpness: c(sharpness, 0.0, 1.0) },
+            Self::Taa { blend } => Self::Taa { blend: c(blend, 0.05, 0.5) },
         }
     }
 
@@ -144,6 +187,10 @@ pub(crate) fn effect_bytes(render: (u32, u32), output: (u32, u32), effects: &[Sc
     if asked.upscale.is_some() {
         texels = texels.checked_add(area(output)?)?;
     }
+    if asked.taa.is_some() {
+        let history = area(if asked.upscale.is_some() { output } else { render })?;
+        texels = texels.checked_add(history.checked_mul(2)?)?;
+    }
     texels.checked_mul(8)
 }
 
@@ -166,6 +213,8 @@ struct Uniform {
     ao: [f32; 4],
     present: [f32; 4],
     sizes: [f32; 4],
+    prev_view_proj: [[f32; 4]; 4],
+    taa: [f32; 4],
 }
 
 /// The inverse of a column-major 4 x 4 matrix, or the identity when it has none.
@@ -249,6 +298,18 @@ impl<B: Rhi> OnDemand<B> {
     }
 }
 
+/// What the temporal history holds between frames.
+#[derive(Clone, Copy)]
+struct History {
+    /// Which of the two histories the next frame writes.
+    write: usize,
+    /// Whether the other one holds a frame of `size`.
+    valid: bool,
+    /// The unjittered world-to-clip matrix of that frame.
+    view_proj: [[f32; 4]; 4],
+    size: (u32, u32),
+}
+
 /// GPU objects of the effects, made when a frame first asks for an effect.
 pub(crate) struct EffectChain<B: Rhi> {
     shafts_pipeline: B::Pipeline,
@@ -261,6 +322,7 @@ pub(crate) struct EffectChain<B: Rhi> {
     fxaa_float_pipeline: B::Pipeline,
     easu_pipeline: B::Pipeline,
     rcas_pipeline: B::Pipeline,
+    taa_pipeline: B::Pipeline,
     uniform: B::Buffer,
     shafts: Color<B>,
     ao: OnDemand<B>,
@@ -270,6 +332,9 @@ pub(crate) struct EffectChain<B: Rhi> {
     display: OnDemand<B>,
     aa: OnDemand<B>,
     upscaled: OnDemand<B>,
+    /// Temporal history, written and read in turn.
+    history: [OnDemand<B>; 2],
+    temporal: Cell<History>,
     size: (u32, u32),
     /// Which of `adapted` the next frame writes, the time of the last frame, and a frame number.
     state: Cell<(usize, Option<Instant>, u32)>,
@@ -288,6 +353,8 @@ pub(crate) struct FrameInputs<'a, B: Rhi> {
     pub format: TextureFormat,
     /// Size of the target; larger than the scene when it is upscaled.
     pub output_size: (u32, u32),
+    /// Texture-coordinate shift that undoes this frame's jitter.
+    pub jitter: [f32; 2],
 }
 
 /// What each effect asks of this frame, read from the effect list.
@@ -297,6 +364,7 @@ struct Asked {
     ssao: Option<(f32, f32)>,
     fxaa: Option<f32>,
     upscale: Option<f32>,
+    taa: Option<f32>,
     fog: Option<([f32; 4], [f32; 4])>,
     list: [[f32; 4]; 16],
     count: usize,
@@ -304,7 +372,7 @@ struct Asked {
 
 impl Asked {
     fn read(effects: &[ScreenEffect]) -> Self {
-        let mut asked = Self { shafts: None, auto: None, ssao: None, fxaa: None, upscale: None, fog: None, list: [[0.0; 4]; 16], count: 0 };
+        let mut asked = Self { shafts: None, auto: None, ssao: None, fxaa: None, upscale: None, taa: None, fog: None, list: [[0.0; 4]; 16], count: 0 };
         for effect in effects {
             // Effects on the finished picture keep list order; the first of a kind wins elsewhere.
             let entry = match *effect {
@@ -332,6 +400,10 @@ impl Asked {
                     asked.upscale.get_or_insert(sharpness);
                     None
                 }
+                ScreenEffect::Taa { blend } => {
+                    asked.taa.get_or_insert(blend);
+                    None
+                }
                 ScreenEffect::ColorGrade { saturation, contrast, warmth, tint } => Some(([4.0, saturation, contrast, warmth], tint)),
                 ScreenEffect::Vignette { strength, radius, softness } => Some(([5.0, strength, radius, softness], 0.0)),
                 ScreenEffect::FilmGrain { strength } => Some(([6.0, strength, 0.0, 0.0], 0.0)),
@@ -349,7 +421,12 @@ impl Asked {
 
     /// Anti-aliasing and upscaling read the finished picture from a target of its own.
     fn presenting(&self) -> bool {
-        self.fxaa.is_some() || self.upscale.is_some()
+        self.fxaa.is_some() || self.upscale.is_some() || self.taa.is_some()
+    }
+
+    /// Size of the temporal history: the target size when it upscales.
+    fn history_size(&self, render: (u32, u32), output: (u32, u32)) -> (u32, u32) {
+        if self.upscale.is_some() { output } else { render }
     }
 }
 
@@ -369,6 +446,7 @@ impl<B: Rhi> EffectChain<B> {
             fxaa_float_pipeline: pipeline("post fxaa before upscaling", "fs_fxaa_float", TextureFormat::Rgba16Float),
             easu_pipeline: pipeline("post edge-adaptive upscale", "fs_easu", TextureFormat::Rgba16Float),
             rcas_pipeline: pipeline("post contrast-adaptive sharpening", "fs_rcas", format),
+            taa_pipeline: pipeline("post temporal anti-aliasing", "fs_taa", TextureFormat::Rgba16Float),
             uniform: rhi.create_buffer(&BufferDesc { label: "post effects", size: std::mem::size_of::<Uniform>() as u64, usage: BufferUsage::UNIFORM | BufferUsage::COPY_DST }),
             shafts: color(rhi, "post light shafts", half),
             ao: OnDemand::new("post ambient occlusion"),
@@ -377,6 +455,8 @@ impl<B: Rhi> EffectChain<B> {
             display: OnDemand::new("post finished picture"),
             aa: OnDemand::new("post anti-aliased picture"),
             upscaled: OnDemand::new("post upscaled picture"),
+            history: [OnDemand::new("post temporal history a"), OnDemand::new("post temporal history b")],
+            temporal: Cell::new(History { write: 0, valid: false, view_proj: [[0.0; 4]; 4], size: (0, 0) }),
             size,
             state: Cell::new((0, None, 0)),
         }
@@ -389,7 +469,7 @@ impl<B: Rhi> EffectChain<B> {
     /// Bytes of the targets made so far.
     pub fn bytes(&self) -> u64 {
         let fixed = u64::from(self.size.0.div_ceil(2)) * u64::from(self.size.1.div_ceil(2)) + 64 * 36 + 2;
-        fixed * 8 + self.ao.bytes() + self.display.bytes() + self.aa.bytes() + self.upscaled.bytes()
+        fixed * 8 + self.ao.bytes() + self.display.bytes() + self.aa.bytes() + self.upscaled.bytes() + self.history[0].bytes() + self.history[1].bytes()
     }
 
     fn uniform(&self, asked: &Asked, frame: &FrameInputs<'_, B>, adapt: f32, number: u32) -> Uniform {
@@ -422,7 +502,15 @@ impl<B: Rhi> EffectChain<B> {
             ao: asked.ssao.map_or([0.0; 4], |(strength, radius)| [strength, radius, 1.0, 0.0]),
             present: [if frame.format.is_srgb() { 1.0 } else { 0.0 }, asked.upscale.unwrap_or(0.0), asked.fxaa.unwrap_or(0.0), 0.0],
             sizes: [self.size.0 as f32, self.size.1 as f32, frame.output_size.0 as f32, frame.output_size.1 as f32],
+            prev_view_proj: self.temporal.get().view_proj,
+            taa: [asked.taa.unwrap_or(1.0), if self.history_ready(asked, frame) { 1.0 } else { 0.0 }, frame.jitter[0], frame.jitter[1]],
         }
+    }
+
+    /// Whether the history holds a previous frame of the size this frame resolves at.
+    fn history_ready(&self, asked: &Asked, frame: &FrameInputs<'_, B>) -> bool {
+        let history = self.temporal.get();
+        history.valid && history.size == asked.history_size(self.size, frame.output_size)
     }
 
     /// Records the effect passes and the final pass into `target`.
@@ -475,6 +563,11 @@ impl<B: Rhi> EffectChain<B> {
         }
         let next = if asked.auto.is_some() { 1 - write } else { write };
         self.state.set((next, asked.auto.map(|_| now), number.wrapping_add(1)));
+        let write = self.temporal.get().write;
+        self.temporal.set(match asked.taa {
+            Some(_) => History { write: 1 - write, valid: true, view_proj: frame.view_proj, size: asked.history_size(self.size, frame.output_size) },
+            None => History { write, valid: false, view_proj: frame.view_proj, size: (0, 0) },
+        });
     }
 
     /// Anti-aliases and upscales the finished `display` picture into `target`.
@@ -488,19 +581,38 @@ impl<B: Rhi> EffectChain<B> {
             ])
         };
         let load = |pipeline, source| rhi.create_bind_group(pipeline, 0, &[Binding::Uniform { binding: 3, buffer: &self.uniform }, Binding::Texture { binding: 9, view: source }]);
-        let aa = (asked.fxaa.is_some() && asked.upscale.is_some()).then(|| self.aa.view(rhi, self.size));
-        if asked.fxaa.is_some() {
-            let (out, pipeline) = match aa.as_deref() {
-                Some(view) => (view, &self.fxaa_float_pipeline),
-                None => (target, &self.fxaa_pipeline),
-            };
-            pass(encoder, "post fxaa", pipeline, &read(pipeline, display), out);
-        }
-        if asked.upscale.is_some() {
-            let source = aa.as_deref().unwrap_or(display);
+        let resolved = asked.taa.map(|_| self.resolve(rhi, encoder, display, asked, frame));
+        let source = resolved.as_deref().unwrap_or(display);
+        if asked.upscale.is_some() && resolved.is_none() {
+            let aa = asked.fxaa.map(|_| self.aa.view(rhi, self.size));
+            if let Some(aa) = aa.as_deref() {
+                pass(encoder, "post fxaa", &self.fxaa_float_pipeline, &read(&self.fxaa_float_pipeline, source), aa);
+            }
             let upscaled = self.upscaled.view(rhi, frame.output_size);
-            pass(encoder, "post edge-adaptive upscale", &self.easu_pipeline, &load(&self.easu_pipeline, source), &upscaled);
+            pass(encoder, "post edge-adaptive upscale", &self.easu_pipeline, &load(&self.easu_pipeline, aa.as_deref().unwrap_or(source)), &upscaled);
             pass(encoder, "post contrast-adaptive sharpening", &self.rcas_pipeline, &load(&self.rcas_pipeline, &upscaled), target);
+        } else if asked.fxaa.is_some() {
+            pass(encoder, "post fxaa", &self.fxaa_pipeline, &read(&self.fxaa_pipeline, source), target);
+        } else {
+            // Sharpening is zero without an upscale: this pass only stores the picture in the target.
+            pass(encoder, "post contrast-adaptive sharpening", &self.rcas_pipeline, &load(&self.rcas_pipeline, source), target);
         }
+    }
+
+    /// Blends `display` into the temporal history and returns the history written.
+    fn resolve(&self, rhi: &B, encoder: &mut B::Encoder, display: &B::TextureView, asked: &Asked, frame: &FrameInputs<'_, B>) -> Ref<'_, B::TextureView> {
+        let write = self.temporal.get().write;
+        let size = asked.history_size(self.size, frame.output_size);
+        let out = self.history[write].view(rhi, size);
+        let previous = self.history[1 - write].view(rhi, size);
+        let bind = rhi.create_bind_group(&self.taa_pipeline, 0, &[
+            Binding::Sampler { binding: 2, sampler: frame.sampler },
+            Binding::Uniform { binding: 3, buffer: &self.uniform },
+            Binding::Texture { binding: 6, view: frame.depth },
+            Binding::Texture { binding: 9, view: display },
+            Binding::Texture { binding: 10, view: &previous },
+        ]);
+        fullscreen(rhi, encoder, "post temporal anti-aliasing", &self.taa_pipeline, &bind, &out);
+        out
     }
 }

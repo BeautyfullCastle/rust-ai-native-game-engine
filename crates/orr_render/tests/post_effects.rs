@@ -267,3 +267,89 @@ fn the_scene_draws_smaller_only_with_an_upscale_effect() {
     assert_eq!(render_size(&[Some(ScreenEffect::Upscale { scale: 0.5, sharpness: 0.2 })], (1, 1)), (1, 1));
 }
 
+
+/// Draws `frames` frames with one renderer, so temporal effects keep their history;
+/// `camera(i)` is the camera of frame `i`. Returns the last picture.
+#[allow(clippy::too_many_arguments)] // The same scene arguments as render_instances, plus frames.
+fn render_frames(g: &Wgpu, camera: impl Fn(usize) -> Camera3D, color: [f32; 3], instances: &[StaticInstance], light: &Lighting, effects: &[ScreenEffect], frames: usize) -> Vec<u8> {
+    let mut scene = ImportedSceneRenderer::new(g.clone(), FORMAT).unwrap();
+    scene.post_process = PostProcessSettings { enabled: true, bloom: false, ..Default::default() };
+    for (slot, effect) in scene.post_process.effects.iter_mut().zip(effects) {
+        *slot = Some(*effect);
+    }
+    let mut renderer = ModelRenderer::new(g.clone(), TextureFormat::Rgba16Float, square(color)).unwrap();
+    let texture = g.create_texture(&TextureDesc {
+        label: "temporal effect test",
+        width: SIZE,
+        height: SIZE,
+        format: FORMAT,
+        usage: TextureUsage::RENDER_ATTACHMENT | TextureUsage::COPY_SRC,
+        sample_count: 1,
+        view_formats: &[],
+    });
+    let view = g.create_texture_view(&texture, None);
+    for frame in 0..frames {
+        scene
+            .draw(
+                ImportedSceneTarget { view: &view, size: (SIZE, SIZE), format: FORMAT, sample_count: 1 },
+                &camera(frame),
+                light,
+                &PointLightSettings::default(),
+                &mut [ImportedBatch::StaticInstances { renderer: &mut renderer, instances }],
+            )
+            .unwrap();
+    }
+    g.read_texture(&texture)
+}
+
+fn tilted() -> [StaticInstance; 1] {
+    let turn = std::f32::consts::FRAC_PI_8;
+    [StaticInstance { rotation: [0.0, 0.0, turn.sin(), turn.cos()], scale: [1.2; 3], ..Default::default() }]
+}
+
+/// Pixels whose red lies strictly between the clear background (149) and the white square (255).
+fn in_between(image: &[u8]) -> usize {
+    (0..SIZE * SIZE).filter(|i| (156..250).contains(&image[(*i * 4) as usize])).count()
+}
+
+#[test]
+fn taa_smooths_a_stair_stepped_edge_over_frames() {
+    let Some(g) = gpu() else { return };
+    let plain = render_frames(&g, |_| ortho(), [1.0; 3], &tilted(), &light(1.0), &[], 16);
+    let taa = render_frames(&g, |_| ortho(), [1.0; 3], &tilted(), &light(1.0), &[ScreenEffect::Taa { blend: 0.1 }], 16);
+    assert!(in_between(&taa) > in_between(&plain) + 20, "{} plain, {} taa", in_between(&plain), in_between(&taa));
+    for (x, y) in [(32, 32), (1, 1)] {
+        assert!(px(&plain, x, y)[0].abs_diff(px(&taa, x, y)[0]) <= 2, "flat area at {x},{y} keeps its color");
+    }
+}
+
+#[test]
+fn taa_leaves_no_trail_after_the_camera_jumps() {
+    let Some(g) = gpu() else { return };
+    let moved = || Camera3D::orthographic([0.9, 0.0, 5.0], [0.9, 0.0, 0.0], 1.0);
+    let effects = [ScreenEffect::Taa { blend: 0.1 }];
+    let jumped = render_frames(&g, |frame| if frame < 12 { ortho() } else { moved() }, [1.0; 3], &tilted(), &light(1.0), &effects, 13);
+    let fresh = render_frames(&g, |_| moved(), [1.0; 3], &tilted(), &light(1.0), &[], 1);
+    let before = render_frames(&g, |_| ortho(), [1.0; 3], &tilted(), &light(1.0), &[], 1);
+    // Pixels the square covered before the jump and open background after it, away from
+    // the square's new edge, where anti-aliasing rightly mixes the two.
+    let open = |x: u32| (x.saturating_sub(2)..=(x + 2).min(SIZE - 1)).all(|n| px(&fresh, n, 32)[0] <= 152);
+    let uncovered: Vec<u32> = (0..SIZE).filter(|&x| px(&before, x, 32)[0] >= 250 && open(x)).collect();
+    assert!(uncovered.len() >= 3, "the jump uncovers background: {uncovered:?}");
+    for x in uncovered {
+        assert!(px(&jumped, x, 32)[0].abs_diff(px(&fresh, x, 32)[0]) <= 12, "no trail at {x}: {:?} after the jump, {:?} fresh", px(&jumped, x, 32), px(&fresh, x, 32));
+    }
+}
+
+#[test]
+fn temporal_upscaling_keeps_flat_colors_and_smooths_edges() {
+    let Some(g) = gpu() else { return };
+    let effects = [ScreenEffect::Upscale { scale: 0.5, sharpness: 0.3 }, ScreenEffect::Taa { blend: 0.1 }];
+    let plain = render_frames(&g, |_| ortho(), [1.0; 3], &tilted(), &light(1.0), &[], 1);
+    let upscaled = render_frames(&g, |_| ortho(), [1.0; 3], &tilted(), &light(1.0), &effects, 24);
+    for (x, y) in [(32, 32), (1, 1), (62, 62)] {
+        let (a, b) = (px(&plain, x, y), px(&upscaled, x, y));
+        assert!((0..3).all(|c| a[c].abs_diff(b[c]) <= 3), "flat color at {x},{y}: {a:?} plain, {b:?} upscaled");
+    }
+    assert!(in_between(&upscaled) > in_between(&plain) + 20, "{} plain, {} upscaled", in_between(&plain), in_between(&upscaled));
+}

@@ -340,6 +340,8 @@ pub const EFFECT_FXAA: u32 = 10;
 /// [`PostEffect::kind`]: draws the scene smaller and upscales it with edge-adaptive
 /// filtering and sharpening, after AMD FSR 1. Params: scale, sharpness.
 pub const EFFECT_UPSCALE: u32 = 11;
+/// [`PostEffect::kind`]: temporal anti-aliasing; with `upscale`, upscaling over frames. Params: blend.
+pub const EFFECT_TAA: u32 = 12;
 /// Slots in [`PostProcess::effects`].
 pub const POST_EFFECTS: usize = 8;
 
@@ -350,7 +352,7 @@ pub const POST_EFFECTS: usize = 8;
 #[reflect(default)]
 pub struct PostEffect {
     /// Which effect this slot holds.
-    #[reflect(enumeration = "none=0,bloom=1,light_shafts=2,auto_exposure=3,color_grade=4,vignette=5,film_grain=6,ssao=7,toon=8,outline=9,fxaa=10,upscale=11")]
+    #[reflect(enumeration = "none=0,bloom=1,light_shafts=2,auto_exposure=3,color_grade=4,vignette=5,film_grain=6,ssao=7,toon=8,outline=9,fxaa=10,upscale=11,taa=12")]
     pub kind: u32,
     /// Whether the effect runs.
     #[reflect(bool)]
@@ -385,6 +387,7 @@ pub fn effect_params(kind: u32) -> &'static [EffectParam] {
     const OUTLINE_PARAMS: &[EffectParam] = &[("thickness", r(1, 2), r(4, 1), r(1, 1)), ("sensitivity", r(1, 100), r(1, 1), r(5, 100)), ("darkness", r(0, 1), r(1, 1), r(85, 100))];
     const FXAA_PARAMS: &[EffectParam] = &[("strength", r(0, 1), r(1, 1), r(1, 1))];
     const UPSCALE_PARAMS: &[EffectParam] = &[("scale", r(1, 2), r(1, 1), r(75, 100)), ("sharpness", r(0, 1), r(1, 1), r(5, 10))];
+    const TAA_PARAMS: &[EffectParam] = &[("blend", r(5, 100), r(1, 2), r(1, 10))];
     match kind {
         EFFECT_BLOOM => BLOOM_PARAMS,
         EFFECT_LIGHT_SHAFTS => LIGHT_SHAFTS_PARAMS,
@@ -397,6 +400,7 @@ pub fn effect_params(kind: u32) -> &'static [EffectParam] {
         EFFECT_OUTLINE => OUTLINE_PARAMS,
         EFFECT_FXAA => FXAA_PARAMS,
         EFFECT_UPSCALE => UPSCALE_PARAMS,
+        EFFECT_TAA => TAA_PARAMS,
         _ => &[],
     }
 }

@@ -36,6 +36,10 @@ struct Effects {
     present: vec4<f32>,
     // xy: size the scene is drawn at, zw: size of the target.
     sizes: vec4<f32>,
+    // The previous frame's unjittered world-to-clip matrix.
+    prev_view_proj: mat4x4<f32>,
+    // x: share of the new frame, y: 1 when the history holds a frame, zw: shift that undoes the jitter.
+    taa: vec4<f32>,
 };
 
 @group(0) @binding(0) var scene: texture_2d<f32>;
@@ -49,6 +53,8 @@ struct Effects {
 @group(0) @binding(8) var occlusion: texture_2d<f32>;
 // The display-encoded picture that anti-aliasing and upscaling read.
 @group(0) @binding(9) var picture: texture_2d<f32>;
+// The temporal history of the previous frame.
+@group(0) @binding(10) var history: texture_2d<f32>;
 
 struct Screen { @builtin(position) position: vec4<f32> };
 
@@ -451,4 +457,41 @@ fn picture_at(pos: vec2<i32>) -> vec4<f32> {
     let lobe = max(-(0.25 - 1.0 / 16.0), min(max(lobes.r, max(lobes.g, lobes.b)), 0.0)) * fx.present.y;
     let c = (lobe * (b + d + f + h) + e.rgb) / (4.0 * lobe + 1.0);
     return for_target(vec4<f32>(c, e.a));
+}
+
+// Temporal anti-aliasing: this frame's picture, moved back by its jitter, is
+// blended into the previous frames. Each pixel finds where it was last frame
+// from depth and the previous camera; that history is clamped to the range of
+// the current neighborhood so moved or uncovered surfaces do not leave trails.
+@fragment fn fs_taa(in: Screen) -> @location(0) vec4<f32> {
+    let out_size = vec2<f32>(textureDimensions(history));
+    let uv = in.position.xy / out_size;
+    let at = uv + fx.taa.zw;
+    let current = textureSampleLevel(picture, linear_sampler, at, 0.0);
+    let center = vec2<i32>(at * vec2<f32>(textureDimensions(picture)));
+    var low = vec3<f32>(1e9);
+    var high = vec3<f32>(-1e9);
+    for (var y = -1; y <= 1; y = y + 1) {
+        for (var x = -1; x <= 1; x = x + 1) {
+            let c = picture_at(center + vec2<i32>(x, y)).rgb;
+            low = min(low, c);
+            high = max(high, c);
+        }
+    }
+    if (fx.taa.y < 0.5) {
+        return current;
+    }
+    let depth_size = vec2<i32>(textureDimensions(depth));
+    let d = textureLoad(depth, clamp(vec2<i32>(at * vec2<f32>(depth_size)), vec2<i32>(0), depth_size - 1), 0);
+    let w = fx.inv_view_proj * vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, d, 1.0);
+    let before = fx.prev_view_proj * vec4<f32>(w.xyz / w.w, 1.0);
+    if (before.w <= 1e-6) {
+        return current;
+    }
+    let previous_uv = vec2<f32>(before.x / before.w * 0.5 + 0.5, 0.5 - before.y / before.w * 0.5);
+    if (any(previous_uv < vec2<f32>(0.0)) || any(previous_uv > vec2<f32>(1.0))) {
+        return current;
+    }
+    let past = clamp(textureSampleLevel(history, linear_sampler, previous_uv, 0.0).rgb, low, high);
+    return vec4<f32>(mix(past, current.rgb, fx.taa.x), current.a);
 }

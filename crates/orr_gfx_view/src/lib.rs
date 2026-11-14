@@ -18,7 +18,7 @@ use orr_ecs::Entity;
 use orr_fp::{FPVec3, FP};
 use orr_gfx::{
     Environment, Light, PostEffect, PostProcess, RenderLayers, Transform3, EFFECT_AUTO_EXPOSURE, EFFECT_BLOOM, EFFECT_COLOR_GRADE, EFFECT_FILM_GRAIN,
-    EFFECT_FXAA, EFFECT_LIGHT_SHAFTS, EFFECT_OUTLINE, EFFECT_SSAO, EFFECT_TOON, EFFECT_UPSCALE, EFFECT_VIGNETTE, LIGHT_DIRECTIONAL, LIGHT_SPOT, PROJECTION_ORTHOGRAPHIC, TONE_CLAMP,
+    EFFECT_FXAA, EFFECT_LIGHT_SHAFTS, EFFECT_OUTLINE, EFFECT_SSAO, EFFECT_TAA, EFFECT_TOON, EFFECT_UPSCALE, EFFECT_VIGNETTE, LIGHT_DIRECTIONAL, LIGHT_SPOT, PROJECTION_ORTHOGRAPHIC, TONE_CLAMP,
 };
 use orr_physics3d::Body;
 use orr_render::{Camera3D, Lighting, Projection, RenderList3D, SceneLight, SceneLightKind, SceneLights, ScreenEffect};
@@ -236,6 +236,7 @@ fn read_effect(effect: &PostEffect, look: &mut SceneLook) {
         EFFECT_OUTLINE => Some(ScreenEffect::Outline { thickness: p(0), sensitivity: p(1), darkness: p(2) }),
         EFFECT_FXAA => Some(ScreenEffect::Fxaa { strength: p(0) }),
         EFFECT_UPSCALE => Some(ScreenEffect::Upscale { scale: p(0), sharpness: p(1) }),
+        EFFECT_TAA => Some(ScreenEffect::Taa { blend: p(0) }),
         _ => None,
     };
     // Each kind runs once: a second entry of the same kind is left out.
