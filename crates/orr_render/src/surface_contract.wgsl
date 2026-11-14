@@ -37,6 +37,29 @@ fn default_surface(in: SurfaceInput) -> Surface {
     return s;
 }
 
+// The surface normal bent by a tangent-space normal map. `texel` is the map's
+// color as read (0..1, flat is 0.5, 0.5, 1); `strength` 0 keeps `in.normal` and
+// 1 uses the map as drawn. The tangent frame comes from how world position and
+// texture coordinates change across the screen, so meshes need no tangents.
+// Shapes have no texture coordinates and keep their normal. Call it outside
+// branches that differ between neighboring pixels: it reads screen derivatives.
+fn normal_map(in: SurfaceInput, texel: vec3<f32>, strength: f32) -> vec3<f32> {
+    let dp1 = dpdx(in.world);
+    let dp2 = dpdy(in.world);
+    let duv1 = dpdx(in.uv);
+    let duv2 = dpdy(in.uv);
+    let n = in.normal;
+    // Framebuffer y runs down, the opposite of the usual derivation: both crosses are flipped.
+    let across2 = cross(n, dp2);
+    let across1 = cross(dp1, n);
+    let tangent = across2 * duv1.x + across1 * duv2.x;
+    let bitangent = across2 * duv1.y + across1 * duv2.y;
+    let scale = inverseSqrt(max(max(dot(tangent, tangent), dot(bitangent, bitangent)), 1e-20));
+    let m = texel * 2.0 - 1.0;
+    let bent = tangent * scale * m.x * strength + bitangent * scale * m.y * strength + n * max(m.z, 1e-3);
+    return normalize(bent);
+}
+
 var<private> surface_raw: array<f32, 16>;
 
 // Surface textures. The glue of each renderer binds `surface_texture_0` to

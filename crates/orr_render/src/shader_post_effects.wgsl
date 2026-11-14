@@ -40,6 +40,14 @@ struct Effects {
     prev_view_proj: mat4x4<f32>,
     // x: share of the new frame, y: 1 when the history holds a frame, zw: shift that undoes the jitter.
     taa: vec4<f32>,
+    // The last frame's unjittered world-to-clip matrix, for motion blur.
+    last_view_proj: mat4x4<f32>,
+    // Reflections: strength, ray length (m), surface thickness (m), how far up a surface must face.
+    ssr: vec4<f32>,
+    // Depth of field: focus distance (m), sharp range (m), largest blur radius (pixels).
+    dof: vec4<f32>,
+    // x: motion blur strength, y: longest streak (pixels), z: chromatic aberration strength.
+    blur: vec4<f32>,
 };
 
 @group(0) @binding(0) var scene: texture_2d<f32>;
@@ -494,4 +502,147 @@ fn picture_at(pos: vec2<i32>) -> vec4<f32> {
     }
     let past = clamp(textureSampleLevel(history, linear_sampler, previous_uv, 0.0).rgb, low, high);
     return vec4<f32>(mix(past, current.rgb, fx.taa.x), current.a);
+}
+
+// Zero. Every scene stage pass binds the scene, sampler, uniform and depth;
+// this use keeps all four in each pass's layout when it reads fewer.
+fn stage_inputs_keep() -> f32 {
+    let n = textureDimensions(depth).x + textureDimensions(scene).x;
+    return f32(min(n, 0u)) * fx.blur.w + step(2.0, textureSampleLevel(scene, linear_sampler, vec2<f32>(0.0), 0.0).a);
+}
+
+// Unit normal of the surface at `pos`, from its depth neighbors, facing the eye.
+fn normal_at(pos: vec2<i32>) -> vec3<f32> {
+    let p = world_at(pos);
+    let dx = nearer(p, world_at(pos + vec2<i32>(1, 0)), world_at(pos - vec2<i32>(1, 0)));
+    let dy = nearer(p, world_at(pos + vec2<i32>(0, 1)), world_at(pos - vec2<i32>(0, 1)));
+    var n = normalize(cross(dx, dy));
+    if (dot(n, fx.eye.xyz - p) < 0.0) { n = -n; }
+    return n;
+}
+
+fn is_sky(pos: vec2<i32>) -> bool {
+    let size = vec2<i32>(textureDimensions(depth));
+    return textureLoad(depth, clamp(pos, vec2<i32>(0), size - 1), 0) >= 0.99999;
+}
+
+// Screen-space reflections: march the reflected view ray in 32 steps and take
+// the first scene point it passes behind, within the surface thickness.
+@fragment fn fs_ssr(in: Screen) -> @location(0) vec4<f32> {
+    let pos = vec2<i32>(in.position.xy);
+    let base = textureLoad(scene, pos, 0) + vec4<f32>(0.0, 0.0, 0.0, stage_inputs_keep());
+    if (is_sky(pos)) {
+        return base;
+    }
+    let p = world_at(pos);
+    let n = normal_at(pos);
+    if (n.y < fx.ssr.w) {
+        return base;
+    }
+    let view = normalize(p - fx.eye.xyz);
+    let ray = reflect(view, n);
+    let size = vec2<f32>(textureDimensions(scene));
+    let steps = 32;
+    let step_length = fx.ssr.y / f32(steps);
+    var t = step_length * (0.5 + interleaved(in.position.xy));
+    for (var i = 0; i < steps; i = i + 1) {
+        let q = p + ray * t;
+        let clip = fx.view_proj * vec4<f32>(q, 1.0);
+        if (clip.w <= 1e-4) { break; }
+        let uv = vec2<f32>(clip.x / clip.w * 0.5 + 0.5, 0.5 - clip.y / clip.w * 0.5);
+        if (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))) { break; }
+        let texel = vec2<i32>(uv * size);
+        if (!is_sky(texel)) {
+            let surface = world_at(texel);
+            let behind = length(q - fx.eye.xyz) - length(surface - fx.eye.xyz);
+            if (behind > 0.0 && behind < fx.ssr.z) {
+                // Grazing views reflect more; rays that leave near the screen's edge fade out.
+                let facing = max(dot(-view, n), 0.0);
+                let fresnel = 0.04 + 0.96 * pow(1.0 - facing, 5.0);
+                let edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+                let fade = smoothstep(0.0, 0.1, edge) * (1.0 - f32(i) / f32(steps));
+                let reflected = textureLoad(scene, texel, 0).rgb;
+                return vec4<f32>(mix(base.rgb, reflected, clamp(fx.ssr.x * (0.25 + 0.75 * fresnel) * fade, 0.0, 1.0)), base.a);
+            }
+        }
+        t = t + step_length;
+    }
+    return base;
+}
+
+// Camera motion blur: average 12 samples along where this pixel's surface moved
+// on screen since the last frame, scaled by the shutter.
+@fragment fn fs_motion_blur(in: Screen) -> @location(0) vec4<f32> {
+    let pos = vec2<i32>(in.position.xy) + vec2<i32>(i32(stage_inputs_keep()));
+    let size = vec2<f32>(textureDimensions(scene));
+    let uv = in.position.xy / size;
+    let d = textureLoad(depth, pos, 0);
+    let w = fx.inv_view_proj * vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, d, 1.0);
+    let before = fx.last_view_proj * vec4<f32>(w.xyz / w.w, 1.0);
+    let base = textureLoad(scene, pos, 0);
+    if (before.w <= 1e-6) {
+        return base;
+    }
+    let last_uv = vec2<f32>(before.x / before.w * 0.5 + 0.5, 0.5 - before.y / before.w * 0.5);
+    var motion = (uv - last_uv) * size * fx.blur.x;
+    let streak = length(motion);
+    if (streak < 0.5) {
+        return base;
+    }
+    motion = motion * min(1.0, fx.blur.y / streak);
+    var sum = vec3<f32>(0.0);
+    let samples = 12;
+    for (var i = 0; i < samples; i = i + 1) {
+        let offset = (f32(i) + interleaved(in.position.xy)) / f32(samples) - 0.5;
+        sum = sum + textureSampleLevel(scene, linear_sampler, uv + motion * offset / size, 0.0).rgb;
+    }
+    return vec4<f32>(sum / f32(samples), base.a);
+}
+
+// Blur radius in pixels of the surface at `pos`.
+fn circle_of_confusion(pos: vec2<i32>) -> f32 {
+    let distance = eye_distance(pos);
+    let off = max(abs(distance - fx.dof.x) - fx.dof.y * 0.5, 0.0);
+    return clamp(off / max(fx.dof.x, 0.1), 0.0, 1.0) * fx.dof.z;
+}
+
+// Depth of field: a 16-sample disc as wide as this pixel's blur. A sharper
+// sample nearer the eye than this pixel does not spread onto it.
+@fragment fn fs_dof(in: Screen) -> @location(0) vec4<f32> {
+    let pos = vec2<i32>(in.position.xy);
+    let base = textureLoad(scene, pos, 0) + vec4<f32>(0.0, 0.0, 0.0, stage_inputs_keep());
+    let radius = circle_of_confusion(pos);
+    if (radius < 0.5) {
+        return base;
+    }
+    let here = eye_distance(pos);
+    let turn = interleaved(in.position.xy) * 6.2831853;
+    var sum = base.rgb;
+    var weight = 1.0;
+    let samples = 16;
+    for (var i = 0; i < samples; i = i + 1) {
+        let t = sqrt((f32(i) + 0.5) / f32(samples));
+        let angle = turn + f32(i) * 2.3999632;
+        let q = pos + vec2<i32>(round(vec2<f32>(cos(angle), sin(angle)) * t * radius));
+        let size = vec2<i32>(textureDimensions(scene));
+        let qc = clamp(q, vec2<i32>(0), size - 1);
+        let reach = circle_of_confusion(qc);
+        // A sample in front spreads only as far as its own blur.
+        let w = select(1.0, 0.0, eye_distance(qc) < here && reach < t * radius);
+        sum = sum + textureLoad(scene, qc, 0).rgb * w;
+        weight = weight + w;
+    }
+    return vec4<f32>(sum / weight, base.a);
+}
+
+// Chromatic aberration: red is read a little outward and blue inward, more toward the edges.
+@fragment fn fs_chroma(in: Screen) -> @location(0) vec4<f32> {
+    let size = vec2<f32>(textureDimensions(scene));
+    let uv = in.position.xy / size;
+    let from_center = uv - 0.5;
+    let shift = from_center * dot(from_center, from_center) * fx.blur.z * 0.06;
+    let base = textureSampleLevel(scene, linear_sampler, uv, 0.0) + vec4<f32>(0.0, 0.0, 0.0, stage_inputs_keep());
+    let red = textureSampleLevel(scene, linear_sampler, uv + shift, 0.0).r;
+    let blue = textureSampleLevel(scene, linear_sampler, uv - shift, 0.0).b;
+    return vec4<f32>(red, base.g, blue, base.a);
 }

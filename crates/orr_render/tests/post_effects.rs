@@ -353,3 +353,97 @@ fn temporal_upscaling_keeps_flat_colors_and_smooths_edges() {
     }
     assert!(in_between(&upscaled) > in_between(&plain) + 20, "{} plain, {} upscaled", in_between(&plain), in_between(&upscaled));
 }
+
+/// Draws one renderer per (color, instances) group for `frames` frames, the camera of frame `i`
+/// from `camera(i)`, and returns the last picture.
+fn render_groups(g: &Wgpu, camera: impl Fn(usize) -> Camera3D, groups: &[([f32; 3], Vec<StaticInstance>)], light: &Lighting, effects: &[ScreenEffect], frames: usize) -> Vec<u8> {
+    let mut scene = ImportedSceneRenderer::new(g.clone(), FORMAT).unwrap();
+    scene.post_process = PostProcessSettings { enabled: true, bloom: false, ..Default::default() };
+    for (slot, effect) in scene.post_process.effects.iter_mut().zip(effects) {
+        *slot = Some(*effect);
+    }
+    let mut renderers: Vec<ModelRenderer<Wgpu>> = groups.iter().map(|(color, _)| ModelRenderer::new(g.clone(), TextureFormat::Rgba16Float, square(*color)).unwrap()).collect();
+    let texture = g.create_texture(&TextureDesc {
+        label: "scene stage test",
+        width: SIZE,
+        height: SIZE,
+        format: FORMAT,
+        usage: TextureUsage::RENDER_ATTACHMENT | TextureUsage::COPY_SRC,
+        sample_count: 1,
+        view_formats: &[],
+    });
+    let view = g.create_texture_view(&texture, None);
+    for frame in 0..frames {
+        let mut batches: Vec<ImportedBatch<'_, Wgpu>> =
+            renderers.iter_mut().zip(groups).map(|(renderer, (_, instances))| ImportedBatch::StaticInstances { renderer, instances }).collect();
+        scene
+            .draw(ImportedSceneTarget { view: &view, size: (SIZE, SIZE), format: FORMAT, sample_count: 1 }, &camera(frame), light, &PointLightSettings::default(), &mut batches)
+            .unwrap();
+    }
+    g.read_texture(&texture)
+}
+
+/// A dark floor facing up and a red wall standing on it, 1 meter back.
+fn floor_and_wall() -> Vec<([f32; 3], Vec<StaticInstance>)> {
+    let half = std::f32::consts::FRAC_PI_4;
+    let floor = StaticInstance { rotation: [-half.sin(), 0.0, 0.0, half.cos()], scale: [8.0; 3], ..Default::default() };
+    let wall = StaticInstance { translation: [0.0, 0.5, -1.0], scale: [1.5, 1.0, 1.0], ..Default::default() };
+    vec![([0.05; 3], vec![floor]), ([0.9, 0.05, 0.05], vec![wall])]
+}
+
+#[test]
+fn reflections_put_the_wall_on_the_floor_in_front_of_it() {
+    let Some(g) = gpu() else { return };
+    let camera = |_| Camera3D::perspective([0.0, 0.6, 3.0], [0.0, 0.2, -1.0], 50.0);
+    let plain = render_groups(&g, camera, &floor_and_wall(), &light(1.0), &[], 1);
+    let ssr = [ScreenEffect::Ssr { strength: 1.0, distance: 6.0, thickness: 0.5, floors: 0.9 }];
+    let mirrored = render_groups(&g, camera, &floor_and_wall(), &light(1.0), &ssr, 1);
+    // Redness of the lower half of the picture, where only floor is.
+    let red = |image: &[u8]| (SIZE * 3 / 4..SIZE).flat_map(|y| (0..SIZE).map(move |x| (x, y))).map(|(x, y)| i64::from(px(image, x, y)[0]) - i64::from(px(image, x, y)[1])).sum::<i64>();
+    assert!(red(&mirrored) > red(&plain) + 2000, "the floor shows the red wall: {} plain, {} with reflections", red(&plain), red(&mirrored));
+    // The wall itself faces the camera, not up: it does not reflect.
+    let (a, b) = (px(&plain, 32, 20), px(&mirrored, 32, 20));
+    assert!((0..3).all(|c| a[c].abs_diff(b[c]) <= 3), "the wall is unchanged: {a:?} {b:?}");
+}
+
+#[test]
+fn depth_of_field_blurs_what_is_out_of_focus_only() {
+    let Some(g) = gpu() else { return };
+    let camera = |_| Camera3D::perspective([0.0, 0.0, 3.0], [0.0; 3], 50.0);
+    let square = vec![([1.0; 3], vec![StaticInstance::default()])];
+    let plain = render_groups(&g, camera, &square, &light(1.0), &[], 1);
+    let focused = render_groups(&g, camera, &square, &light(1.0), &[ScreenEffect::DepthOfField { focus: 3.0, range: 0.5, blur: 8.0 }], 1);
+    let blurred = render_groups(&g, camera, &square, &light(1.0), &[ScreenEffect::DepthOfField { focus: 0.5, range: 0.2, blur: 8.0 }], 1);
+    assert!(in_between(&focused) <= in_between(&plain) + 4, "in focus stays sharp: {} plain, {} focused", in_between(&plain), in_between(&focused));
+    assert!(in_between(&blurred) > in_between(&plain) + 40, "out of focus blurs: {} plain, {} blurred", in_between(&plain), in_between(&blurred));
+}
+
+#[test]
+fn motion_blur_streaks_only_when_the_camera_moved() {
+    let Some(g) = gpu() else { return };
+    let square = vec![([1.0; 3], vec![StaticInstance { scale: [1.2; 3], ..Default::default() }])];
+    let effects = [ScreenEffect::MotionBlur { strength: 1.0, limit: 32.0 }];
+    let still = render_groups(&g, |_| ortho(), &square, &light(1.0), &effects, 2);
+    let panning = |frame: usize| {
+        let x = frame as f32 * 0.15;
+        Camera3D::orthographic([x, 0.0, 5.0], [x, 0.0, 0.0], 1.0)
+    };
+    let sharp = render_groups(&g, panning, &square, &light(1.0), &[], 2);
+    let streaked = render_groups(&g, panning, &square, &light(1.0), &effects, 2);
+    assert!(in_between(&still) <= 4, "a still camera has no streaks: {}", in_between(&still));
+    assert!(in_between(&streaked) > in_between(&sharp) + 40, "a moving camera streaks the edges: {} sharp, {} blurred", in_between(&sharp), in_between(&streaked));
+}
+
+#[test]
+fn chromatic_aberration_splits_colors_toward_the_edges_only() {
+    let Some(g) = gpu() else { return };
+    let square = vec![([1.0; 3], vec![StaticInstance { scale: [1.6; 3], ..Default::default() }])];
+    let plain = render_groups(&g, |_| ortho(), &square, &light(1.0), &[], 1);
+    let split = render_groups(&g, |_| ortho(), &square, &light(1.0), &[ScreenEffect::ChromaticAberration { strength: 1.0 }], 1);
+    assert_eq!(px(&plain, 32, 32), px(&split, 32, 32), "the center is unchanged");
+    let fringe = (0..SIZE).flat_map(|y| (0..SIZE).map(move |x| (x, y))).filter(|&(x, y)| {
+        let (a, b) = (px(&plain, x, y), px(&split, x, y));
+        a[0].abs_diff(b[0]) > 20 || a[2].abs_diff(b[2]) > 20
+    });
+    assert!(fringe.count() > 20, "the square's edges near the border get color fringes");
+}
