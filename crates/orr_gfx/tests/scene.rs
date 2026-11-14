@@ -229,3 +229,31 @@ entities:
     let bad = text.replace("terrain/valley.png", "../valley.png");
     assert!(Scene::parse(&bad, &types).is_err());
 }
+
+#[test]
+fn every_effect_number_at_either_end_of_its_range_reads_from_a_scene_file() {
+    let kinds = [
+        "bloom", "light_shafts", "auto_exposure", "color_grade", "vignette", "film_grain", "ssao", "toon", "outline", "fxaa", "upscale", "taa", "ssr",
+        "depth_of_field", "motion_blur", "chromatic_aberration", "volumetric_fog",
+    ];
+    let types = types();
+    for (index, name) in kinds.iter().enumerate() {
+        let params = orr_gfx::effect_params(index as u32 + 1);
+        assert!(!params.is_empty(), "{name} declares its numbers");
+        for end in [0, 1] {
+            let mut numbers = ["0".to_owned(), "0".to_owned(), "0".to_owned(), "0".to_owned()];
+            for (slot, (_, low, high, _)) in numbers.iter_mut().zip(params) {
+                *slot = if end == 0 { *low } else { *high }.to_string();
+            }
+            let none = "      - { kind: none, enabled: false, params: [0, 0, 0, 0] }\n".repeat(7);
+            let text = format!(
+                "schema: orr.scene/1\nentities: {{}}\nsingletons:\n  orr_gfx::PostProcess:\n    exposure: 1\n    tone_mapping: aces\n    effects:\n      - {{ kind: {name}, enabled: true, params: [{}] }}\n{none}",
+                numbers.join(", ")
+            );
+            let scene = Scene::parse(&text, &types).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let mut frame = frame();
+            scene.bake(&types, &mut frame).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(frame.singleton::<PostProcess>().effects[0].kind, index as u32 + 1, "{name}");
+        }
+    }
+}

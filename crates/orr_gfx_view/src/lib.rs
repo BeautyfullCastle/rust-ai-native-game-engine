@@ -17,7 +17,7 @@ use orr_bridge::FrameView;
 use orr_ecs::Entity;
 use orr_fp::{FPVec3, FP};
 use orr_gfx::{
-    Environment, Light, PostEffect, PostProcess, RenderLayers, Transform3, EFFECT_AUTO_EXPOSURE, EFFECT_BLOOM, EFFECT_CHROMATIC_ABERRATION, EFFECT_COLOR_GRADE, EFFECT_DEPTH_OF_FIELD, EFFECT_FILM_GRAIN, EFFECT_MOTION_BLUR, EFFECT_SSR,
+    Environment, Light, PostEffect, PostProcess, RenderLayers, Transform3, EFFECT_AUTO_EXPOSURE, EFFECT_BLOOM, EFFECT_CHROMATIC_ABERRATION, EFFECT_COLOR_GRADE, EFFECT_DEPTH_OF_FIELD, EFFECT_FILM_GRAIN, EFFECT_MOTION_BLUR, EFFECT_SSR, EFFECT_VOLUMETRIC_FOG,
     EFFECT_FXAA, EFFECT_LIGHT_SHAFTS, EFFECT_OUTLINE, EFFECT_SSAO, EFFECT_TAA, EFFECT_TOON, EFFECT_UPSCALE, EFFECT_VIGNETTE, LIGHT_DIRECTIONAL, LIGHT_SPOT, PROJECTION_ORTHOGRAPHIC, TONE_CLAMP,
 };
 use orr_physics3d::Body;
@@ -242,6 +242,7 @@ fn read_effect(effect: &PostEffect, look: &mut SceneLook) {
         EFFECT_DEPTH_OF_FIELD => Some(ScreenEffect::DepthOfField { focus: p(0), range: p(1), blur: p(2) }),
         EFFECT_MOTION_BLUR => Some(ScreenEffect::MotionBlur { strength: p(0), limit: p(1) }),
         EFFECT_CHROMATIC_ABERRATION => Some(ScreenEffect::ChromaticAberration { strength: p(0) }),
+        EFFECT_VOLUMETRIC_FOG => Some(ScreenEffect::VolumetricFog { density: p(0), anisotropy: p(1), distance: p(2), intensity: p(3) }),
         _ => None,
     };
     // Each kind runs once: a second entry of the same kind is left out.

@@ -184,7 +184,7 @@ orr set box_left orr_gfx::Material.values[3]=6 orr_gfx::Material.overrides=8
 
 ```mermaid
 flowchart LR
-    A[장면 HDR<br/>upscale이 있으면 축소 크기] --> ST[ssr → motion_blur →<br/>depth_of_field → chromatic_aberration]
+    A[장면 HDR<br/>upscale이 있으면 축소 크기] --> ST[volumetric_fog → ssr → motion_blur →<br/>depth_of_field → chromatic_aberration]
     ST --> O[주변광 차폐 ssao]
     O --> F[높이 안개<br/>Sky가 켜져 있으면]
     F --> B[bloom, 빛줄기<br/>목록 순서]
@@ -216,6 +216,7 @@ flowchart LR
 | `depth_of_field` | focus (m), range (m), blur (픽셀) |
 | `motion_blur` | strength (셔터, 0~2), limit (픽셀) |
 | `chromatic_aberration` | strength |
+| `volumetric_fog` | density (미터당), anisotropy (0~0.95), distance (m), intensity |
 
 - `ssao`: 깊이에서 위치와 노멀을 복원해 반경 안에서 표면보다 솟은 점을 12개 샘플로 센다. 절반 해상도로 계산하고 최종 패스에서 네 번 샘플해 부드럽게 한다. 장면 색 전체에 곱해지므로 직사광이 비치는 면도 어두워진다(주변광만 분리된 G-buffer가 없음).
 - `toon`: 톤 매핑 뒤 밝기를 단계로 나눈다. 색조는 유지한다. 재질별 셰이딩이 아니라 화면 전체에 적용된다.
@@ -223,7 +224,8 @@ flowchart LR
 - `fxaa`: 톤 매핑과 효과가 끝난 그림에 적용한다.
 - `upscale`: 장면, 깊이, 등록된 렌더 패스, 입자를 `scale` 크기로 그리고 마지막에 대상 크기로 키운다. 확대는 AMD FSR 1의 EASU 방식(엣지 방향으로 늘인 Lanczos 근사 12탭, 가까운 4텍셀로 링잉 제한), 선명화는 RCAS 방식이다. AMD 원본 코드를 그대로 옮긴 것이 아니라 같은 수식을 WGSL로 다시 쓴 것이다. 후처리가 꺼져 있으면 축소하지 않는다.
 - `taa`: 켜져 있으면 매 프레임 투영 행렬을 Halton(2, 3) 16개 순서로 서브픽셀만큼 옮긴다(지터). 장면 배치, 등록된 패스가 모두 같은 행렬로 그린다. 표시 단계에서 현재 그림을 지터만큼 되돌려 읽고, 깊이와 이전 프레임의 카메라 행렬로 각 픽셀의 이전 위치를 찾아 히스토리를 읽는다. 히스토리는 현재 3×3 이웃의 최소·최대 범위로 제한해서 가려졌다 드러난 곳에 잔상이 남지 않게 한다. 히스토리 크기가 바뀌거나 첫 프레임이면 현재 그림만 쓴다.
-- 장면 단계 효과(`ssr`, `motion_blur`, `depth_of_field`, `chromatic_aberration`)는 톤 매핑 전의 HDR 장면에 이 순서로 적용되고, 결과가 최종 패스의 입력이 된다. 두 장의 버퍼를 번갈아 쓴다.
+- `volumetric_fog`: 시선을 따라 24단계 걸으며 각 점이 해 그림자 캐스케이드에서 빛을 받는지 보고, 받은 빛을 Henyey-Greenstein 위상 함수로 눈 쪽으로 산란시킨다. 앞쪽 안개만큼 뒤의 장면은 흐려진다. 그래서 틈으로 들어오는 빛줄기와 그늘진 공기가 생긴다. 해 그림자가 없는 프레임은 안개가 고르게 빛난다. `light_shafts`(화면 공간에서 하늘이 보이는지만 봄)와 달리 실제 그림자를 따른다. 해 하나만 산란시킨다(스포트·점광원은 아님).
+- 장면 단계 효과(`volumetric_fog`, `ssr`, `motion_blur`, `depth_of_field`, `chromatic_aberration`)는 톤 매핑 전의 HDR 장면에 이 순서로 적용되고, 결과가 최종 패스의 입력이 된다. 두 장의 버퍼를 번갈아 쓴다.
 - `ssr`: 깊이로 복원한 노멀로 시선을 반사해 화면 공간에서 32단계 추적한다. 반사 광선이 지나간 장면 점이 `thickness` 안쪽에 있으면 그 색을 섞는다. 비스듬히 볼수록(프레넬) 강하고, 화면 가장자리와 먼 단계에서 약해진다. G-buffer에 재질 거칠기가 없어서 모든 불투명 면이 같은 세기로 반사한다. `floors`로 위를 향한 면만 고른다. 물처럼 깊이를 쓰지 않는 투명한 면은 반사하지 않는다(물 셰이더가 하늘 반사를 따로 그린다). 화면 밖의 것은 반사하지 못한다.
 - `motion_blur`: 깊이와 이전 프레임의 카메라 행렬로 픽셀이 화면에서 움직인 양을 구해 그 방향으로 12번 샘플한다. 카메라 움직임만 반영한다. 첫 프레임과 효과를 켠 직후 프레임은 흐리지 않는다.
 - `depth_of_field`: 초점 거리에서 `range`의 절반보다 먼 정도에 비례해 흐림 반경을 정하고, 원반 16개 샘플로 모은다. 초점이 맞은 앞쪽 물체가 뒤의 흐린 배경에 번지지 않게 한다. 반대 방향(흐린 앞쪽이 선명한 뒤쪽을 덮는 것)은 근사다.

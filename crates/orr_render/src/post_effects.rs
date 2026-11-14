@@ -3,7 +3,7 @@
 //! the HDR post chain of [`crate::PostProcessor`]; exposure and tone mapping
 //! still happen once, in the final pass.
 use crate::Lighting;
-use orr_rhi::{Binding, Blend, BufferDesc, BufferUsage, ColorAttachment, Command, PipelineDesc, Rhi, TextureDesc, TextureFormat, TextureUsage};
+use orr_rhi::{Binding, Blend, BufferDesc, BufferUsage, ColorAttachment, Command, PipelineDesc, Rhi, SamplerDesc, TextureDesc, TextureFormat, TextureUsage};
 use std::cell::{Cell, Ref, RefCell};
 use std::time::Instant;
 
@@ -73,6 +73,12 @@ pub enum ScreenEffect {
     MotionBlur { strength: f32, limit: f32 },
     /// Red and blue split toward the edges of the picture. `strength` 0..=1.
     ChromaticAberration { strength: f32 },
+    /// Sunlight scattered in fog, stepped along each view ray through the sun's
+    /// shadow cascades: beams through gaps, darker air in shadow. `density`
+    /// 0..=0.5 per meter, `anisotropy` 0..=0.95 is how much light scatters
+    /// forward (toward a viewer looking at the sun), `distance` 1..=1000 meters
+    /// of ray, `intensity` 0..=8 scales the scattered light.
+    VolumetricFog { density: f32, anisotropy: f32, distance: f32, intensity: f32 },
 }
 
 /// Whether `effects` ask for temporal anti-aliasing, which jitters the scene.
@@ -134,6 +140,7 @@ impl ScreenEffect {
             Self::DepthOfField { focus, range, blur } => vec![(focus, 0.1, 10000.0), (range, 0.0, 1000.0), (blur, 0.0, 16.0)],
             Self::MotionBlur { strength, limit } => vec![(strength, 0.0, 2.0), (limit, 1.0, 64.0)],
             Self::ChromaticAberration { strength } => vec![(strength, 0.0, 1.0)],
+            Self::VolumetricFog { density, anisotropy, distance, intensity } => vec![(density, 0.0, 0.5), (anisotropy, 0.0, 0.95), (distance, 1.0, 1000.0), (intensity, 0.0, 8.0)],
             Self::LightShafts { strength, length } => vec![(strength, 0.0, 4.0), (length, 0.1, 1.0)],
             Self::AutoExposure { darkest, brightest, speed, target } => vec![(darkest, 0.1, 16.0), (brightest, 0.1, 16.0), (speed, 0.1, 20.0), (target, 0.01, 1.0)],
             Self::ColorGrade { saturation, contrast, warmth, tint } => vec![(saturation, 0.0, 2.0), (contrast, 0.0, 1.0), (warmth, -1.0, 1.0), (tint, -1.0, 1.0)],
@@ -183,6 +190,12 @@ impl ScreenEffect {
             Self::DepthOfField { focus, range, blur } => Self::DepthOfField { focus: c(focus, 0.1, 10000.0), range: c(range, 0.0, 1000.0), blur: c(blur, 0.0, 16.0) },
             Self::MotionBlur { strength, limit } => Self::MotionBlur { strength: c(strength, 0.0, 2.0), limit: c(limit, 1.0, 64.0) },
             Self::ChromaticAberration { strength } => Self::ChromaticAberration { strength: c(strength, 0.0, 1.0) },
+            Self::VolumetricFog { density, anisotropy, distance, intensity } => Self::VolumetricFog {
+                density: c(density, 0.0, 0.5),
+                anisotropy: c(anisotropy, 0.0, 0.95),
+                distance: c(distance, 1.0, 1000.0),
+                intensity: c(intensity, 0.0, 8.0),
+            },
         }
     }
 
@@ -251,6 +264,7 @@ struct Uniform {
     ssr: [f32; 4],
     dof: [f32; 4],
     blur: [f32; 4],
+    volume: [f32; 4],
 }
 
 /// The inverse of a column-major 4 x 4 matrix, or the identity when it has none.
@@ -363,6 +377,10 @@ pub(crate) struct EffectChain<B: Rhi> {
     blur_pipeline: B::Pipeline,
     dof_pipeline: B::Pipeline,
     chroma_pipeline: B::Pipeline,
+    volume_pipeline: B::Pipeline,
+    /// Bound for volumetric fog when the frame has no shared sun shadow: one
+    /// texel of depth and a cascades uniform with zero cascades.
+    no_shadow: (B::Texture, B::TextureView, B::Sampler, B::Buffer),
     uniform: B::Buffer,
     shafts: Color<B>,
     ao: OnDemand<B>,
@@ -397,6 +415,8 @@ pub(crate) struct FrameInputs<'a, B: Rhi> {
     pub format: TextureFormat,
     /// Size of the target; larger than the scene when it is upscaled.
     pub output_size: (u32, u32),
+    /// The frame's shared sun shadow map, comparison sampler and cascades uniform.
+    pub shadow: Option<(&'a B::TextureView, &'a B::Sampler, &'a B::Buffer)>,
     /// Texture-coordinate shift that undoes this frame's jitter.
     pub jitter: [f32; 2],
 }
@@ -413,6 +433,7 @@ struct Asked {
     dof: Option<[f32; 4]>,
     blur: Option<[f32; 4]>,
     chroma: Option<f32>,
+    volume: Option<[f32; 4]>,
     fog: Option<([f32; 4], [f32; 4])>,
     list: [[f32; 4]; 16],
     count: usize,
@@ -420,7 +441,7 @@ struct Asked {
 
 impl Asked {
     fn read(effects: &[ScreenEffect]) -> Self {
-        let mut asked = Self { shafts: None, auto: None, ssao: None, fxaa: None, upscale: None, taa: None, ssr: None, dof: None, blur: None, chroma: None, fog: None, list: [[0.0; 4]; 16], count: 0 };
+        let mut asked = Self { shafts: None, auto: None, ssao: None, fxaa: None, upscale: None, taa: None, ssr: None, dof: None, blur: None, chroma: None, volume: None, fog: None, list: [[0.0; 4]; 16], count: 0 };
         for effect in effects {
             // Effects on the finished picture keep list order; the first of a kind wins elsewhere.
             let entry = match *effect {
@@ -468,6 +489,10 @@ impl Asked {
                     asked.chroma.get_or_insert(strength);
                     None
                 }
+                ScreenEffect::VolumetricFog { density, anisotropy, distance, intensity } => {
+                    asked.volume.get_or_insert([density, anisotropy, distance, intensity]);
+                    None
+                }
                 ScreenEffect::ColorGrade { saturation, contrast, warmth, tint } => Some(([4.0, saturation, contrast, warmth], tint)),
                 ScreenEffect::Vignette { strength, radius, softness } => Some(([5.0, strength, radius, softness], 0.0)),
                 ScreenEffect::FilmGrain { strength } => Some(([6.0, strength, 0.0, 0.0], 0.0)),
@@ -490,7 +515,7 @@ impl Asked {
 
     /// Passes on the lit scene before the final pass.
     fn stage_count(&self) -> usize {
-        [self.ssr.is_some(), self.blur.is_some(), self.dof.is_some(), self.chroma.is_some()].iter().filter(|on| **on).count()
+        [self.volume.is_some(), self.ssr.is_some(), self.blur.is_some(), self.dof.is_some(), self.chroma.is_some()].iter().filter(|on| **on).count()
     }
 
     /// Size of the temporal history: the target size when it upscales.
@@ -501,7 +526,9 @@ impl Asked {
 
 impl<B: Rhi> EffectChain<B> {
     pub fn new(rhi: &B, size: (u32, u32), format: TextureFormat) -> Self {
-        let shader = rhi.create_shader("post effects", include_str!("shader_post_effects.wgsl"));
+        // Volumetric fog reads the sun's cascades; only its entry point uses them.
+        let source = [include_str!("shader_post_effects.wgsl"), crate::SHADOW_CASCADES_WGSL].concat();
+        let shader = rhi.create_shader("post effects", &source);
         let pipeline = |label, entry, format| rhi.create_pipeline(&PipelineDesc::color(label, &shader, ("vs_fullscreen", entry), &[], format, Blend::Opaque));
         let half = (size.0.div_ceil(2), size.1.div_ceil(2));
         Self {
@@ -520,6 +547,22 @@ impl<B: Rhi> EffectChain<B> {
             blur_pipeline: pipeline("post motion blur", "fs_motion_blur", TextureFormat::Rgba16Float),
             dof_pipeline: pipeline("post depth of field", "fs_dof", TextureFormat::Rgba16Float),
             chroma_pipeline: pipeline("post chromatic aberration", "fs_chroma", TextureFormat::Rgba16Float),
+            volume_pipeline: pipeline("post volumetric fog", "fs_volumetric", TextureFormat::Rgba16Float),
+            no_shadow: {
+                let texture = rhi.create_texture(&TextureDesc {
+                    label: "post no shadow",
+                    width: 1,
+                    height: 1,
+                    format: TextureFormat::Depth32Float,
+                    usage: TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING,
+                    sample_count: 1,
+                    view_formats: &[],
+                });
+                let view = rhi.create_texture_view(&texture, None);
+                let buffer = rhi.create_buffer(&BufferDesc { label: "post no cascades", size: crate::SHADOW_CASCADES_UNIFORM_BYTES, usage: BufferUsage::UNIFORM | BufferUsage::COPY_DST });
+                rhi.write_buffer(&buffer, 0, &[0; crate::SHADOW_CASCADES_UNIFORM_BYTES as usize]);
+                (texture, view, rhi.create_sampler(&SamplerDesc::SHADOW), buffer)
+            },
             uniform: rhi.create_buffer(&BufferDesc { label: "post effects", size: std::mem::size_of::<Uniform>() as u64, usage: BufferUsage::UNIFORM | BufferUsage::COPY_DST }),
             shafts: color(rhi, "post light shafts", half),
             ao: OnDemand::new("post ambient occlusion"),
@@ -586,6 +629,7 @@ impl<B: Rhi> EffectChain<B> {
                 let [strength, limit, ..] = asked.blur.unwrap_or([0.0; 4]);
                 [strength, limit, asked.chroma.unwrap_or(0.0), 0.0]
             },
+            volume: asked.volume.unwrap_or([0.0; 4]),
         }
     }
 
@@ -655,10 +699,11 @@ impl<B: Rhi> EffectChain<B> {
         });
     }
 
-    /// Runs reflections, motion blur, depth of field and color fringes on the lit
-    /// scene, in that order, and returns the last result; `None` when none is asked.
+    /// Runs volumetric fog, reflections, motion blur, depth of field and color
+    /// fringes on the lit scene, in that order, and returns the last result; `None` when none is asked.
     fn stage(&self, rhi: &B, encoder: &mut B::Encoder, asked: &Asked, frame: &FrameInputs<'_, B>) -> Option<Ref<'_, B::TextureView>> {
         let passes: Vec<(&str, &B::Pipeline)> = [
+            (asked.volume.is_some(), "post volumetric fog", &self.volume_pipeline),
             (asked.ssr.is_some(), "post screen-space reflections", &self.ssr_pipeline),
             (asked.blur.is_some() && self.last_view_proj.get().is_some(), "post motion blur", &self.blur_pipeline),
             (asked.dof.is_some(), "post depth of field", &self.dof_pipeline),
@@ -677,12 +722,22 @@ impl<B: Rhi> EffectChain<B> {
         let target = |index: usize| -> &B::TextureView { if index % 2 == 0 { &first } else { second.as_deref().expect("two or more passes") } };
         for (index, (label, pipeline)) in passes.iter().enumerate() {
             let source: &B::TextureView = if index == 0 { frame.scene } else { target(index - 1) };
-            let bind = rhi.create_bind_group(pipeline, 0, &[
+            let mut bindings = vec![
                 Binding::Texture { binding: 0, view: source },
                 Binding::Sampler { binding: 2, sampler: frame.sampler },
                 Binding::Uniform { binding: 3, buffer: &self.uniform },
                 Binding::Texture { binding: 6, view: frame.depth },
-            ]);
+            ];
+            if std::ptr::eq(*pipeline, &self.volume_pipeline) {
+                let (_, view, sampler, buffer) = &self.no_shadow;
+                let (map, compare, cascades) = frame.shadow.unwrap_or((view, sampler, buffer));
+                bindings.extend([
+                    Binding::Texture { binding: 11, view: map },
+                    Binding::Sampler { binding: 12, sampler: compare },
+                    Binding::Uniform { binding: 13, buffer: cascades },
+                ]);
+            }
+            let bind = rhi.create_bind_group(pipeline, 0, &bindings);
             fullscreen(rhi, encoder, label, pipeline, &bind, target(index));
         }
         Some(if (passes.len() - 1) % 2 == 0 { first } else { second.expect("two or more passes") })
