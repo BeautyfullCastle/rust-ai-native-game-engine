@@ -8,22 +8,16 @@ struct ModelSurfaceValues {
     time: vec4<f32>,
 };
 @group(0) @binding(3) var<uniform> surface_values: ModelSurfaceValues;
+@group(0) @binding(4) var surface_texture_0: texture_2d<f32>;
+@group(0) @binding(5) var surface_texture_1: texture_2d<f32>;
+@group(0) @binding(6) var surface_texture_2: texture_2d<f32>;
+@group(0) @binding(7) var surface_texture_3: texture_2d<f32>;
+@group(0) @binding(8) var surface_sampler: sampler;
 
 struct ModelSurfaceOut {
     @builtin(position) position: vec4<f32>, @location(0) normal: vec3<f32>, @location(1) uv: vec2<f32>,
     @location(2) world_position: vec3<f32>, @location(3) local: vec3<f32>,
 };
-
-@vertex fn vs_model_surface(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>, @location(2) uv: vec2<f32>) -> ModelSurfaceOut {
-    var out: ModelSurfaceOut;
-    let world = model_world(position);
-    out.position = globals.view_proj * world;
-    out.world_position = world.xyz;
-    out.normal = (object.normal * vec4<f32>(normal, 0.0)).xyz;
-    out.uv = uv;
-    out.local = position;
-    return out;
-}
 
 fn lit_model_surface(in: ModelSurfaceOut, visibility: f32) -> vec4<f32> {
     for (var k = 0; k < 4; k = k + 1) {
@@ -47,7 +41,7 @@ fn lit_model_surface(in: ModelSurfaceOut, visibility: f32) -> vec4<f32> {
     input.roughness = base.roughness;
     input.metallic = base.metallic;
     input.emissive = 0.0;
-    input.time = surface_values.time.x;
+    input.time = surface_values.time.x + surface_textures_keep();
     var s = surface(input);
     // A zero or broken normal from the shader falls back to the mesh normal.
     let length2 = dot(s.normal, s.normal);

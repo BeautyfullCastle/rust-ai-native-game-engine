@@ -1076,6 +1076,10 @@ entities:
       shader: terrain
       values: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
       overrides: 0
+      texture_0: textures/grass.png
+      texture_1: textures/rock.png
+      texture_2: ''
+      texture_3: ''
   e_00000002:
     name: far_ridges
     orr_gfx::Transform3:
@@ -1092,6 +1096,10 @@ entities:
       shader: terrain
       values: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
       overrides: 0
+      texture_0: textures/grass.png
+      texture_1: textures/rock.png
+      texture_2: ''
+      texture_3: ''
   e_00000003:
     name: sun
     orr_gfx::Transform3:
@@ -1105,11 +1113,12 @@ entities:
       inner_angle: 20
       outer_angle: 30
       shadow_strength: 1
-      shadow_range: 140
+      shadow_range: 260
       kind: directional
       enabled: true
       cast_shadows: true
       layers: [default, layer2, layer3, layer4, layer5, layer6, layer7, layer8]
+      shadow_cascades: 4
   e_00000004:
     name: dragon
     orr_games::Dragon:

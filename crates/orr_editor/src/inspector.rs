@@ -330,7 +330,7 @@ pub fn set_asset_root(ctx: &egui::Context, root: Option<&std::path::Path>) {
 
 /// The files of asset kind `kind` under the asset root, as paths with `/`.
 /// The folder is read again at most once a second.
-fn asset_files(ctx: &egui::Context, kind: &str) -> std::sync::Arc<Vec<String>> {
+pub(crate) fn asset_files(ctx: &egui::Context, kind: &str) -> std::sync::Arc<Vec<String>> {
     let root = ctx.data(|d| d.get_temp::<AssetRoot>(Id::new("orr_asset_root"))).and_then(|r| r.0);
     let key = Id::new(("orr_asset_files", kind, root.clone()));
     let now = ctx.input(|i| i.time);

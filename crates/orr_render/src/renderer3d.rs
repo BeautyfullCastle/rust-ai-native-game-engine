@@ -463,6 +463,8 @@ pub struct Renderer3D<B: Rhi> {
     composed_shadow_bind: B::BindGroup,
     #[cfg(feature = "imported-scene")]
     composed_main_bind: Option<(u64, B::BindGroup)>,
+    /// A cascades uniform with zero cascades: the renderer's own shadow map.
+    no_cascades: B::Buffer,
     line_bind: B::BindGroup,
     _shadow_texture: B::Texture,
     shadow_view: B::TextureView,
@@ -482,6 +484,7 @@ pub struct Renderer3D<B: Rhi> {
     surface_instances: Growing<B>,
     surface_params: Growing<B>,
     surface_frame: surfaces::SurfaceFrame,
+    surface_textures: crate::surface_texture::TextureTable<B>,
 }
 
 impl<B: Rhi> Renderer3D<B> {
@@ -598,11 +601,14 @@ impl<B: Rhi> Renderer3D<B> {
             view_formats: &[],
         });
         let shadow_view = rhi.create_texture_view(&shadow_texture, None);
-        let sampler = rhi.create_sampler(&SamplerDesc {
-            linear: true,
-            compare: true,
-        });
+        let sampler = rhi.create_sampler(&SamplerDesc { linear: true, compare: true, repeat: false, mipmaps: false });
 
+        let no_cascades = rhi.create_buffer(&BufferDesc {
+            label: "3d no shadow cascades",
+            size: crate::SHADOW_CASCADES_UNIFORM_BYTES,
+            usage: BufferUsage::UNIFORM | BufferUsage::COPY_DST,
+        });
+        rhi.write_buffer(&no_cascades, 0, &[0; crate::SHADOW_CASCADES_UNIFORM_BYTES as usize]);
         let main_bind = rhi.create_bind_group(
             &main_pipeline,
             0,
@@ -618,6 +624,10 @@ impl<B: Rhi> Renderer3D<B> {
                 Binding::Sampler {
                     binding: 2,
                     sampler: &sampler,
+                },
+                Binding::Uniform {
+                    binding: 3,
+                    buffer: &no_cascades,
                 },
             ],
         );
@@ -701,6 +711,7 @@ impl<B: Rhi> Renderer3D<B> {
             composed_shadow_bind,
             #[cfg(feature = "imported-scene")]
             composed_main_bind: None,
+            no_cascades,
             line_bind,
             _shadow_texture: shadow_texture,
             shadow_view,
@@ -715,6 +726,7 @@ impl<B: Rhi> Renderer3D<B> {
             surface_instances,
             surface_params,
             surface_frame: surfaces::SurfaceFrame::default(),
+            surface_textures: crate::surface_texture::TextureTable::default(),
             attachments: None,
             last_frame_stats: FrameStats::default(),
             last_sphere_lod_stats: SphereLodStats3D {

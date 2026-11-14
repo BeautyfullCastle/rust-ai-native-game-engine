@@ -61,6 +61,10 @@ pub struct SceneLook {
     /// True when the sun gives its own shadow range: the caller centers the
     /// shadow area on the view each frame (see [`SceneLook::follow_view`]).
     pub shadow_follows_view: bool,
+    /// Cascades of the sun's shadows, 1 to 4, for
+    /// `orr_render::ImportedSceneRenderer::shadow_cascades`. More than one
+    /// only while the shadow area follows the view.
+    pub shadow_cascades: u32,
 }
 
 fn f(v: FP) -> f32 {
@@ -120,7 +124,7 @@ pub fn layers_of(frame: FrameView<'_>, entity: Entity) -> u32 {
 /// without any [`Light`] component, and its ambient light is kept while the
 /// scene's [`Environment`] has its default values. Its shadow area is always kept.
 pub fn scene_look(frame: FrameView<'_>, fallback: &Lighting) -> SceneLook {
-    let mut look = SceneLook { lighting: *fallback, scene_lights: SceneLights::default(), bloom: None, effects: Vec::new(), lights: Vec::new(), dropped_lights: 0, shadow_follows_view: false };
+    let mut look = SceneLook { lighting: *fallback, scene_lights: SceneLights::default(), bloom: None, effects: Vec::new(), lights: Vec::new(), dropped_lights: 0, shadow_follows_view: false, shadow_cascades: 1 };
     // An environment left at its default values keeps the ambient light of the game.
     // Simulation systems can write any value, so every value is brought into
     // the range the inspector allows before the renderer sees it.
@@ -193,6 +197,7 @@ pub fn scene_look(frame: FrameView<'_>, fallback: &Lighting) -> SceneLook {
             if range >= 0.5 {
                 look.lighting.shadow_radius = range;
                 look.shadow_follows_view = true;
+                look.shadow_cascades = light.shadow_cascades.clamp(1, orr_render::MAX_SHADOW_CASCADES);
             }
             look.scene_lights.sun_layers = scene_light.layers;
             look.scene_lights.sun_shadow_strength = f(light.shadow_strength);
@@ -487,6 +492,8 @@ pub struct MaterialRef {
     pub shader: String,
     values: [f32; orr_gfx::MATERIAL_VALUES],
     overrides: u32,
+    /// The image path of each texture slot, empty for the shader's default.
+    pub textures: [String; orr_gfx::MATERIAL_TEXTURES],
 }
 
 impl MaterialRef {
@@ -515,6 +522,7 @@ pub fn materials(frame: FrameView<'_>) -> Vec<MaterialRef> {
             shader: material.shader_name().to_string(),
             values: material.values.map(f),
             overrides: material.overrides,
+            textures: std::array::from_fn(|slot| material.texture_path(slot).to_string()),
         })
         .collect()
 }

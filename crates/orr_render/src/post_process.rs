@@ -194,10 +194,7 @@ impl<B: Rhi> PostProcessor<B> {
         let horizontal_params = uniform("HDR horizontal parameters");
         let vertical_params = uniform("HDR vertical parameters");
         let final_params = uniform("HDR final display parameters");
-        let sampler = rhi.create_sampler(&SamplerDesc {
-            linear: true,
-            compare: false,
-        });
+        let sampler = rhi.create_sampler(&SamplerDesc { linear: true, compare: false, repeat: false, mipmaps: false });
         let targets = Self::targets(
             rhi,
             size,

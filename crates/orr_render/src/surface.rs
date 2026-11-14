@@ -24,8 +24,9 @@
 //!   lights and their layers, tone mapping and output encoding. A surface
 //!   shader keeps working when that pipeline changes.
 //! - The same file works on the 3D renderer's shapes and, with the `models`
-//!   feature, on static models drawn in an imported scene
-//!   ([`crate::ModelRenderer::add_surface`]). Each is lit by its own lighting.
+//!   feature, on static and skinned models drawn in an imported scene
+//!   ([`crate::ModelRenderer::add_surface`],
+//!   `SkinnedModelRenderer::add_surface`). Each is lit by its own lighting.
 //!
 //! # Parameters
 //!
@@ -41,6 +42,31 @@
 //! from 0 to 1). A range `min..max` is optional; it bounds the editor control.
 //! All parameters together hold at most [`MAX_SURFACE_FLOATS`] numbers.
 //!
+//! # Textures
+//!
+//! Comment lines that start with `// @texture` declare images a person picks
+//! per entity in the editor, at most [`MAX_SURFACE_TEXTURES`]. Each becomes a
+//! function of its name that reads the image at texture coordinates, repeating
+//! outside 0 to 1, filtered for the size the image has on screen:
+//!
+//! ```wgsl
+//! // @texture grass color
+//! // @texture bumps data = 0.5, 0.5, 1, 1
+//! fn surface(in: SurfaceInput) -> Surface {
+//!     var s = default_surface(in);
+//!     s.albedo = grass(in.world.xz * 0.25).rgb;
+//!     return s;
+//! }
+//! ```
+//!
+//! A `color` image holds sRGB colors and is read as linear color; a `data`
+//! image holds numbers from 0 to 1 and is read as they are. The optional
+//! four numbers are what the function returns while no image is picked:
+//! white for `color` and zero for `data` when they are left out. The filter
+//! measures how fast the coordinates change between neighboring pixels, so
+//! read textures outside branches that depend on the pixel: inside one, the
+//! filter can pick a wrong size along the branch's edges.
+//!
 //! # Errors
 //!
 //! [`SurfaceShader::compile`] parses and validates the whole shader on the
@@ -55,6 +81,8 @@ use std::fmt;
 
 /// Numbers that the parameters of one surface shader can hold together.
 pub const MAX_SURFACE_FLOATS: usize = 16;
+/// Images one surface shader can read.
+pub const MAX_SURFACE_TEXTURES: usize = 4;
 /// Largest surface shader source, in bytes.
 pub const MAX_SURFACE_SOURCE_BYTES: usize = 64 * 1024;
 
@@ -63,7 +91,10 @@ const CONTRACT: &str = include_str!("surface_contract.wgsl");
 pub(crate) const SHAPE_GLUE: &str = include_str!("surface_glue.wgsl");
 /// The engine side of a surface shader on a static model.
 #[cfg(feature = "models")]
-pub(crate) const MODEL_GLUE: &str = include_str!("surface_model_glue.wgsl");
+pub(crate) const MODEL_GLUE: &str = concat!(include_str!("surface_model_glue.wgsl"), include_str!("surface_model_vertex.wgsl"));
+/// The engine side of a surface shader on a skinned model.
+#[cfg(feature = "animation")]
+pub(crate) const SKINNED_GLUE: &str = concat!(include_str!("surface_model_glue.wgsl"), include_str!("surface_skinned_vertex.wgsl"));
 
 /// A shape's look decided by a surface shader. Index into the shaders added to a renderer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -112,6 +143,24 @@ impl ParamKind {
     }
 }
 
+/// How a surface texture's pixels are read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TextureKind {
+    /// sRGB colors, read as linear color.
+    Color,
+    /// Numbers from 0 to 1, read as they are.
+    Data,
+}
+
+/// One declared texture. Its slot is its place among the declared textures.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SurfaceTextureSlot {
+    pub name: String,
+    pub kind: TextureKind,
+    /// What the shader reads while no image is picked.
+    pub default: [f32; 4],
+}
+
 /// One declared parameter.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SurfaceParam {
@@ -157,11 +206,12 @@ fn error(line: usize, column: usize, message: impl Into<String>) -> ShaderError 
 pub struct SurfaceShader {
     name: String,
     params: Vec<SurfaceParam>,
+    textures: Vec<SurfaceTextureSlot>,
     /// Contract, parameter struct and user source: everything after the engine glue.
     body: String,
 }
 
-const RESERVED: &[&str] = &["in", "params", "surface", "default_surface", "true", "false", "fn", "let", "var", "struct", "loop", "for", "if", "else", "return"];
+const RESERVED: &[&str] = &["in", "params", "surface", "default_surface", "surface_sampler", "surface_textures_keep", "surface_texture_0", "surface_texture_1", "surface_texture_2", "surface_texture_3", "true", "false", "fn", "let", "var", "struct", "loop", "for", "if", "else", "return"];
 
 fn identifier(text: &str) -> bool {
     let mut chars = text.chars();
@@ -237,7 +287,57 @@ fn parse_params(source: &str) -> Result<Vec<SurfaceParam>, ShaderError> {
     Ok(params)
 }
 
-fn params_wgsl(params: &[SurfaceParam]) -> String {
+fn parse_textures(source: &str, params: &[SurfaceParam]) -> Result<Vec<SurfaceTextureSlot>, ShaderError> {
+    let mut textures: Vec<SurfaceTextureSlot> = Vec::new();
+    for (index, line) in source.lines().enumerate() {
+        let number = index + 1;
+        let trimmed = line.trim_start();
+        let Some(rest) = trimmed.strip_prefix("// @texture").filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace)) else { continue };
+        let column = line.len() - trimmed.len() + 1;
+        let (declaration, default) = match rest.split_once('=') {
+            Some((declaration, default)) => (declaration, Some(default)),
+            None => (rest, None),
+        };
+        let usage = "write `// @texture <name> <color|data> [= r, g, b, a]`";
+        let words: Vec<&str> = declaration.split_whitespace().collect();
+        let [name, kind] = words.as_slice() else { return Err(error(number, column, usage)) };
+        if !identifier(name) {
+            return Err(error(number, column, format!("'{name}' is not a usable texture name")));
+        }
+        if textures.iter().any(|t| t.name == *name) || params.iter().any(|p| p.name == *name) {
+            return Err(error(number, column, format!("the name '{name}' is declared twice")));
+        }
+        let kind = match *kind {
+            "color" => TextureKind::Color,
+            "data" => TextureKind::Data,
+            other => return Err(error(number, column, format!("'{other}' is not a texture kind: {usage}"))),
+        };
+        let mut values = match kind {
+            TextureKind::Color => [1.0; 4],
+            TextureKind::Data => [0.0; 4],
+        };
+        if let Some(default) = default {
+            let parts: Vec<&str> = default.split(',').map(str::trim).collect();
+            if parts.len() != 4 {
+                return Err(error(number, column, format!("'{name}' needs 4 default numbers, found {}", parts.len())));
+            }
+            for (slot, part) in values.iter_mut().zip(&parts) {
+                let value: f32 = part.parse().map_err(|_| error(number, column, format!("'{part}' is not a number")))?;
+                if !(0.0..=1.0).contains(&value) {
+                    return Err(error(number, column, format!("the default {value} of '{name}' is outside 0..1")));
+                }
+                *slot = value;
+            }
+        }
+        if textures.len() == MAX_SURFACE_TEXTURES {
+            return Err(error(number, column, format!("a shader reads at most {MAX_SURFACE_TEXTURES} textures")));
+        }
+        textures.push(SurfaceTextureSlot { name: name.to_string(), kind, default: values });
+    }
+    Ok(textures)
+}
+
+fn params_wgsl(params: &[SurfaceParam], textures: &[SurfaceTextureSlot]) -> String {
     let mut fields = String::new();
     let mut reads = String::new();
     for p in params {
@@ -255,14 +355,20 @@ fn params_wgsl(params: &[SurfaceParam]) -> String {
         // WGSL has no empty structs.
         fields.push_str("    unused: f32,\n");
     }
-    format!("struct SurfaceParams {{\n{fields}}};\nvar<private> params: SurfaceParams;\nfn surface_params() -> SurfaceParams {{\n    var p: SurfaceParams;\n{reads}    return p;\n}}\n")
+    let mut samplers = String::new();
+    for (slot, texture) in textures.iter().enumerate() {
+        samplers.push_str(&format!("fn {}(uv: vec2<f32>) -> vec4<f32> {{ return textureSample(surface_texture_{slot}, surface_sampler, uv); }}\n", texture.name));
+    }
+    format!("struct SurfaceParams {{\n{fields}}};\nvar<private> params: SurfaceParams;\nfn surface_params() -> SurfaceParams {{\n    var p: SurfaceParams;\n{reads}    return p;\n}}\n{samplers}")
 }
 
 /// The 3D renderer's own shader, with the scene light functions and, with the
 /// `irradiance-probes` feature, the probe functions. The renderer builds its
 /// pipelines from it, and surface shaders are validated against it.
 pub(crate) fn engine_source() -> String {
-    let source = crate::scene_lights::shader(include_str!("shader3d.wgsl"), "g");
+    // The shapes read the shared map through their own shadow map binding.
+    let cascades = crate::SHADOW_CASCADES_WGSL.replace("shared_shadow_map", "shadow_map").replace("shared_shadow_sampler", "shadow_samp");
+    let source = crate::scene_lights::shader(include_str!("shader3d.wgsl"), "g") + &cascades;
     #[cfg(feature = "irradiance-probes")]
     let source = crate::renderer3d::irradiance::shader(&source, "g");
     source
@@ -324,12 +430,15 @@ impl SurfaceShader {
             return Err(error(0, 0, format!("the shader is larger than {MAX_SURFACE_SOURCE_BYTES} bytes")));
         }
         let params = parse_params(source)?;
-        let body = format!("{CONTRACT}\n{}\n{source}", params_wgsl(&params));
-        let shader = Self { name: name.to_string(), params, body };
+        let textures = parse_textures(source, &params)?;
+        let body = format!("{CONTRACT}\n{}\n{source}", params_wgsl(&params, &textures));
+        let shader = Self { name: name.to_string(), params, textures, body };
         let module = validate(&shader.source_for(&engine_source(), SHAPE_GLUE), source.len())?;
         // The same file must fit models too, so one material works on both.
         #[cfg(feature = "models")]
         validate(&shader.source_for(&crate::model_renderer::model_engine_source(), MODEL_GLUE), source.len())?;
+        #[cfg(feature = "animation")]
+        validate(&shader.source_for(&crate::skinned::skinned_engine_source(), SKINNED_GLUE), source.len())?;
         let surface = module.functions.iter().find(|(_, f)| f.name.as_deref() == Some("surface"));
         let expected = |handle: naga::Handle<naga::Type>, name: &str| module.types[handle].name.as_deref() == Some(name);
         match surface {
@@ -344,6 +453,11 @@ impl SurfaceShader {
 
     pub fn params(&self) -> &[SurfaceParam] {
         &self.params
+    }
+
+    /// The declared textures, in slot order.
+    pub fn textures(&self) -> &[SurfaceTextureSlot] {
+        &self.textures
     }
 
     /// The parameter values an entity starts with.
@@ -457,6 +571,35 @@ fn surface(in: SurfaceInput) -> Surface {
         let many: String = (0..5).map(|i| format!("// @param p{i} vec4\n")).collect::<String>() + body;
         let error = SurfaceShader::compile("many", &many).unwrap_err();
         assert_eq!(error.line, 5, "{error}");
+    }
+
+    #[test]
+    fn declared_textures_become_functions_of_their_names() {
+        let source = "// @texture grass color\n// @texture bumps data = 0.5, 0.5, 1, 1\nfn surface(in: SurfaceInput) -> Surface {\n    var s = default_surface(in);\n    s.albedo = grass(in.world.xz).rgb * bumps(in.uv).z;\n    return s;\n}\n";
+        let shader = SurfaceShader::compile("textured", source).unwrap();
+        let slots: Vec<_> = shader.textures().iter().map(|t| (t.name.as_str(), t.kind, t.default)).collect();
+        assert_eq!(slots, [("grass", TextureKind::Color, [1.0; 4]), ("bumps", TextureKind::Data, [0.5, 0.5, 1.0, 1.0])]);
+    }
+
+    #[test]
+    fn bad_texture_declarations_are_reported_on_their_line() {
+        let body = "fn surface(in: SurfaceInput) -> Surface { return default_surface(in); }";
+        for case in [
+            ("// header", "// @texture grass colour", "not a texture kind"),
+            ("// header", "// @texture grass", "write `// @texture"),
+            ("// header", "// @texture params color", "not a usable texture name"),
+            ("// header", "// @texture grass data = 1, 2, 0, 0", "outside 0..1"),
+            ("// header", "// @texture grass data = 1, 1", "needs 4 default numbers"),
+            ("// @param grass float", "// @texture grass color", "declared twice"),
+        ] {
+            let source = format!("{}\n{}\n{body}", case.0, case.1);
+            let (declaration, needle) = (case.1, case.2);
+            let error = SurfaceShader::compile("bad", &source).unwrap_err();
+            assert_eq!(error.line, 2, "{declaration}: {error}");
+            assert!(error.message.contains(needle), "{declaration}: {error}");
+        }
+        let many: String = (0..5).map(|i| format!("// @texture t{i} color\n")).collect::<String>() + body;
+        assert_eq!(SurfaceShader::compile("many", &many).unwrap_err().line, 5);
     }
 
     #[test]

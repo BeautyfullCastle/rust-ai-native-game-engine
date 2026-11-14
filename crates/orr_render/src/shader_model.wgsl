@@ -125,16 +125,9 @@ fn shade(in:Varying, visibility:f32) -> vec4<f32> {
 
 @group(1) @binding(0) var shared_shadow_map: texture_depth_2d;
 @group(1) @binding(1) var shared_shadow_sampler: sampler_comparison;
-fn shared_visibility(world:vec3<f32>, n:vec3<f32>) -> f32 {
-    let lp=globals.light_vp*vec4<f32>(world+n*globals.shadow.y,1.0);
-    let uv=vec2<f32>(lp.x*0.5+0.5,0.5-lp.y*0.5);
-    if uv.x<0.0 || uv.x>1.0 || uv.y<0.0 || uv.y>1.0 || lp.z<0.0 || lp.z>1.0 { return 1.0; }
-    var sum=0.0;
-    for (var y=-1; y<=1; y=y+1) { for (var x=-1; x<=1; x=x+1) {
-        sum+=textureSampleCompareLevel(shared_shadow_map,shared_shadow_sampler,uv+vec2<f32>(f32(x),f32(y))*globals.shadow.x,lp.z-globals.shadow.z);
-    } }
-    return sum/9.0;
-}
+@group(1) @binding(2) var<uniform> shadow_cascades: ShadowCascades;
+// The shared sun shadow in cascades (shadow_cascades.wgsl, added after this file).
+fn shared_visibility(world:vec3<f32>, n:vec3<f32>) -> f32 { return cascaded_visibility(world,n); }
 @fragment fn fs_main(in:Varying) -> @location(0) vec4<f32> { return shade(in,1.0); }
 @fragment fn fs_composed(in:Varying) -> @location(0) vec4<f32> {
     let n=in.normal*inverseSqrt(max(dot(in.normal,in.normal),1e-20));

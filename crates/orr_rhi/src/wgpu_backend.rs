@@ -437,11 +437,18 @@ impl Rhi for Wgpu {
     }
 
     fn create_texture(&self, desc: &TextureDesc) -> wgpu::Texture {
+        self.create_texture_mipmapped(desc, 1)
+    }
+
+    fn create_texture_mipmapped(&self, desc: &TextureDesc, mip_levels: u32) -> wgpu::Texture {
         let view_formats: Vec<wgpu::TextureFormat> = desc.view_formats.iter().map(|&f| to_wgpu_format(f)).collect();
+        let (width, height) = (desc.width.max(1), desc.height.max(1));
+        // Multisampled textures have one level.
+        let levels = if desc.sample_count > 1 { 1 } else { mip_levels.clamp(1, crate::mip_level_count(width, height)) };
         self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some(desc.label),
-            size: wgpu::Extent3d { width: desc.width.max(1), height: desc.height.max(1), depth_or_array_layers: 1 },
-            mip_level_count: 1,
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: levels,
             sample_count: desc.sample_count.max(1),
             dimension: wgpu::TextureDimension::D2,
             format: to_wgpu_format(desc.format),
@@ -466,6 +473,14 @@ impl Rhi for Wgpu {
         texture: &wgpu::Texture,
         upload: &TextureUpload<'_>,
     ) -> Result<(), TextureUploadError> {
+        self.write_texture_rgba8_mip(texture, 0, upload)
+    }
+
+    fn write_texture_rgba8_mip(&self, texture: &wgpu::Texture, level: u32, upload: &TextureUpload<'_>) -> Result<(), TextureUploadError> {
+        if level >= texture.mip_level_count() {
+            return Err(TextureUploadError::MipLevelOutOfRange);
+        }
+        let (width, height) = crate::mip_level_size(texture.width(), texture.height(), level);
         if texture.dimension() != wgpu::TextureDimension::D2 || texture.depth_or_array_layers() != 1 {
             return Err(TextureUploadError::UnsupportedTexture);
         }
@@ -478,8 +493,8 @@ impl Rhi for Wgpu {
         crate::validate_texture_upload(
             &TextureDesc {
                 label: "upload validation",
-                width: texture.width(),
-                height: texture.height(),
+                width,
+                height,
                 format,
                 usage,
                 sample_count: texture.sample_count(),
@@ -490,7 +505,7 @@ impl Rhi for Wgpu {
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture,
-                mip_level: 0,
+                mip_level: level,
                 origin: wgpu::Origin3d { x: upload.origin[0], y: upload.origin[1], z: 0 },
                 aspect: wgpu::TextureAspect::All,
             },
@@ -511,13 +526,21 @@ impl Rhi for Wgpu {
 
     fn create_sampler(&self, desc: &SamplerDesc) -> wgpu::Sampler {
         let filter = if desc.linear { wgpu::FilterMode::Linear } else { wgpu::FilterMode::Nearest };
+        // Comparison samplers always clamp: a shadow map never repeats.
+        let address = if desc.repeat && !desc.compare { wgpu::AddressMode::Repeat } else { wgpu::AddressMode::ClampToEdge };
+        let mip = if desc.linear { wgpu::MipmapFilterMode::Linear } else { wgpu::MipmapFilterMode::Nearest };
+        let (mipmap_filter, lod_max_clamp, anisotropy_clamp) = if desc.mipmaps { (mip, 32.0, if desc.linear { 8 } else { 1 }) } else { (wgpu::MipmapFilterMode::Nearest, 0.0, 1) };
         self.device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("orr sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            address_mode_u: address,
+            address_mode_v: address,
+            address_mode_w: address,
             mag_filter: filter,
             min_filter: filter,
+            mipmap_filter,
+            lod_min_clamp: 0.0,
+            lod_max_clamp,
+            anisotropy_clamp,
             compare: desc.compare.then_some(wgpu::CompareFunction::LessEqual),
             ..Default::default()
         })
@@ -718,6 +741,7 @@ impl Rhi for Wgpu {
                 Command::DrawIndexed { indices, base_vertex, instances } => {
                     pass.draw_indexed(indices.clone(), *base_vertex, instances.clone())
                 }
+                Command::SetViewport { x, y, width, height } => pass.set_viewport(*x, *y, *width, *height, 0.0, 1.0),
             }
         }
     }

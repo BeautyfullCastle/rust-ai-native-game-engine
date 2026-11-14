@@ -154,10 +154,7 @@ impl<B: Rhi> SpriteRenderer<B> {
             },
         )?;
         let view = rhi.create_texture_view(&texture, None);
-        let sampler = rhi.create_sampler(&SamplerDesc {
-            linear: false,
-            compare: false,
-        });
+        let sampler = rhi.create_sampler(&SamplerDesc { linear: false, compare: false, repeat: false, mipmaps: false });
         let globals = rhi.create_buffer(&BufferDesc {
             label: "sprite camera",
             size: 16,

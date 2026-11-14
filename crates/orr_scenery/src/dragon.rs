@@ -378,7 +378,10 @@ pub struct DragonPass<B: Rhi> {
     globals: B::Buffer,
     shadow_globals: B::Buffer,
     no_shadow: (B::Texture, B::TextureView),
+    no_cascades: B::Buffer,
     sampler: B::Sampler,
+    /// This frame's globals; each shadow cascade draws them with its own matrix.
+    frame_globals: Globals,
     dragons: Vec<DragonLook>,
     meshes: Vec<Mesh<B>>,
     binds: Option<(u64, B::BindGroup, B::BindGroup)>,
@@ -419,7 +422,9 @@ impl<B: Rhi> DragonPass<B> {
             globals: uniform("dragon globals"),
             shadow_globals: uniform("dragon shadow globals"),
             no_shadow: (no_shadow, view),
-            sampler: rhi.create_sampler(&SamplerDesc { linear: true, compare: true }),
+            no_cascades: crate::passes::no_cascades(rhi),
+            frame_globals: bytemuck::Zeroable::zeroed(),
+            sampler: rhi.create_sampler(&SamplerDesc { linear: true, compare: true, repeat: false, mipmaps: false }),
             dragons: Vec::new(),
             meshes: Vec::new(),
             binds: None,
@@ -465,16 +470,13 @@ impl<B: Rhi> RenderPass<B> for DragonPass<B> {
         }
         let globals = frame_globals(frame, None, self.dragons[0].time);
         rhi.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
-        let mut shadow = globals;
-        if let Some(s) = &frame.shadow {
-            shadow.view_proj = s.light_vp;
-        }
-        rhi.write_buffer(&self.shadow_globals, 0, bytemuck::bytes_of(&shadow));
+        self.frame_globals = globals;
         let map_id = frame.shadow.as_ref().map_or(0, |s| s.map_id);
         if self.binds.as_ref().is_none_or(|(id, ..)| *id != map_id) {
             let map = frame.shadow.as_ref().map_or(&self.no_shadow.1, |s| s.view);
             let pipeline = &self.pipeline.as_ref().expect("made above").1;
-            let main = rhi.create_bind_group(pipeline, 0, &[Binding::Uniform { binding: 0, buffer: &self.globals }, Binding::Texture { binding: 1, view: map }, Binding::Sampler { binding: 3, sampler: &self.sampler }]);
+            let cascades = frame.shadow.as_ref().map_or(&self.no_cascades, |s| s.cascades);
+            let main = rhi.create_bind_group(pipeline, 0, &[Binding::Uniform { binding: 0, buffer: &self.globals }, Binding::Texture { binding: 1, view: map }, Binding::Sampler { binding: 3, sampler: &self.sampler }, Binding::Uniform { binding: 4, buffer: cascades }]);
             let cast = rhi.create_bind_group(&self.shadow_pipeline, 0, &[Binding::Uniform { binding: 0, buffer: &self.shadow_globals }]);
             self.binds = Some((map_id, main, cast));
         }
@@ -508,7 +510,16 @@ impl<B: Rhi> RenderPass<B> for DragonPass<B> {
             PassStage::Opaque => (pipeline, main, "dragon"),
             _ => return,
         };
-        let mut commands = vec![Command::SetPipeline(pipeline), Command::SetBindGroup(0, bind)];
+        let mut commands = Vec::new();
+        if let (PassStage::Shadow, Some(shadow)) = (stage, &frame.shadow) {
+            // The renderer submits each cascade before the next, so this write reaches only this one.
+            let mut globals = self.frame_globals;
+            globals.view_proj = shadow.light_vp;
+            rhi.write_buffer(&self.shadow_globals, 0, bytemuck::bytes_of(&globals));
+            let [x, y, width, height] = shadow.viewport;
+            commands.push(Command::SetViewport { x, y, width, height });
+        }
+        commands.extend([Command::SetPipeline(pipeline), Command::SetBindGroup(0, bind)]);
         for mesh in self.meshes.iter().take(self.dragons.len()) {
             commands.extend([Command::SetVertexBuffer(0, &mesh.vertices), Command::SetIndexBuffer(&mesh.indices), Command::DrawIndexed { indices: 0..mesh.count, base_vertex: 0, instances: 0..1 }]);
         }

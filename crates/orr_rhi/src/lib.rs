@@ -237,6 +237,8 @@ pub enum TextureUploadError {
     InvalidRowStride,
     SizeOverflow,
     InvalidDataLength { expected: u64, actual: usize },
+    /// The mip level is not one the texture has.
+    MipLevelOutOfRange,
 }
 
 impl std::fmt::Display for TextureUploadError {
@@ -254,11 +256,22 @@ impl std::fmt::Display for TextureUploadError {
             Self::InvalidDataLength { expected, actual } => {
                 write!(f, "upload needs {expected} bytes, got {actual}")
             }
+            Self::MipLevelOutOfRange => f.write_str("upload mip level is not one the texture has"),
         }
     }
 }
 
 impl std::error::Error for TextureUploadError {}
+
+/// Mip levels of a full chain for a `width` × `height` texture: halving down to one pixel.
+pub fn mip_level_count(width: u32, height: u32) -> u32 {
+    32 - width.max(height).max(1).leading_zeros()
+}
+
+/// Width and height of mip `level` of a `width` × `height` texture.
+pub fn mip_level_size(width: u32, height: u32, level: u32) -> (u32, u32) {
+    ((width >> level.min(31)).max(1), (height >> level.min(31)).max(1))
+}
 
 fn validate_texture_upload(desc: &TextureDesc<'_>, upload: &TextureUpload<'_>) -> Result<(), TextureUploadError> {
     use TextureUploadError as E;
@@ -433,6 +446,22 @@ pub struct SamplerDesc {
     /// A comparison (shadow) sampler: `textureSampleCompare` passes where the
     /// reference is `<=` the stored depth. Clamps to the edge.
     pub compare: bool,
+    /// Repeats the texture outside 0 to 1 instead of clamping to its edge.
+    pub repeat: bool,
+    /// Filters between mip levels (linear when `linear` is set, with up to
+    /// 8x anisotropic filtering) instead of reading level 0 only.
+    pub mipmaps: bool,
+}
+
+impl SamplerDesc {
+    /// Filtering, clamped to the edge, level 0 only.
+    pub const LINEAR: Self = Self { linear: true, compare: false, repeat: false, mipmaps: false };
+    /// Nearest pixel, clamped to the edge, level 0 only.
+    pub const NEAREST: Self = Self { linear: false, compare: false, repeat: false, mipmaps: false };
+    /// A shadow map comparison, filtered.
+    pub const SHADOW: Self = Self { linear: true, compare: true, repeat: false, mipmaps: false };
+    /// Repeating, filtered between mip levels: for material textures.
+    pub const MATERIAL: Self = Self { linear: true, compare: false, repeat: true, mipmaps: true };
 }
 
 /// One binding of a bind group.
@@ -475,6 +504,10 @@ pub enum Command<'a, B: Rhi> {
         base_vertex: i32,
         instances: Range<u32>,
     },
+    /// Draws the following commands into the rectangle `x, y, width, height`
+    /// of the attachments, in pixels from the top left, with the full depth
+    /// range. A pass starts with the whole attachment.
+    SetViewport { x: f32, y: f32, width: f32, height: f32 },
 }
 
 /// What a surface frame acquire found.
@@ -508,6 +541,15 @@ pub trait Rhi: Clone + 'static {
 
     fn create_texture(&self, desc: &TextureDesc) -> Self::Texture;
 
+    /// A single-sample texture with `mip_levels` mip levels, at most a full
+    /// chain (see [`mip_level_count`]). Fill each level with
+    /// [`Self::write_texture_rgba8_mip`]. A backend without mip levels
+    /// creates level 0 only and refuses uploads to the others.
+    fn create_texture_mipmapped(&self, desc: &TextureDesc, mip_levels: u32) -> Self::Texture {
+        let _ = mip_levels;
+        self.create_texture(desc)
+    }
+
     /// Enqueues a GPU-only, byte-preserving copy of a whole single-sample color
     /// texture. Both textures must have equal dimensions and copy-compatible
     /// formats (identical, or differing only in sRGB encoding), with COPY_SRC
@@ -526,6 +568,16 @@ pub trait Rhi: Clone + 'static {
         _upload: &TextureUpload<'_>,
     ) -> Result<(), TextureUploadError> {
         Err(TextureUploadError::UnsupportedBackend)
+    }
+
+    /// [`Self::write_texture_rgba8`] into mip `level`; the upload must fit
+    /// that level's size (see [`mip_level_size`]).
+    fn write_texture_rgba8_mip(&self, texture: &Self::Texture, level: u32, upload: &TextureUpload<'_>) -> Result<(), TextureUploadError> {
+        if level == 0 {
+            self.write_texture_rgba8(texture, upload)
+        } else {
+            Err(TextureUploadError::MipLevelOutOfRange)
+        }
     }
 
     /// A view of the whole texture. `format: None` uses the texture's format;

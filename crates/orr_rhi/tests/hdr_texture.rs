@@ -87,7 +87,7 @@ fn rgba16f_render_filter_blend_and_padded_readback_preserve_hdr() {
         TextureFormat::Rgba16Float,
         Blend::Alpha,
     ));
-    let sampler = gpu.create_sampler(&SamplerDesc { linear: true, compare: false });
+    let sampler = gpu.create_sampler(&SamplerDesc { linear: true, compare: false, repeat: false, mipmaps: false });
     let bindings = gpu.create_bind_group(
         &sample_pipeline,
         0,

@@ -121,6 +121,34 @@ struct InstanceDraw<B: Rhi> {
     bind: B::BindGroup,
     #[cfg(feature = "imported-scene")]
     shadow: crate::shared_shadow::ObjectBindings<B>,
+    /// Bindings of the draw's surface shader, built when it first uses one.
+    #[cfg(feature = "imported-scene")]
+    surface: Option<crate::model_surfaces::SurfaceDraw<B>>,
+}
+
+/// Vertex attributes of [`Vertex`]: position, normal, uv, four joints, weights.
+const SKINNED_ATTRS: [VertexAttr; 8] = [
+    VertexAttr { location: 0, format: VertexFormat::Float32x3, offset: 0 },
+    VertexAttr { location: 1, format: VertexFormat::Float32x3, offset: 12 },
+    VertexAttr { location: 2, format: VertexFormat::Float32x2, offset: 24 },
+    // Existing RHI scalar integer formats suffice, including WebGPU.
+    VertexAttr { location: 3, format: VertexFormat::Uint32, offset: 32 },
+    VertexAttr { location: 4, format: VertexFormat::Uint32, offset: 36 },
+    VertexAttr { location: 5, format: VertexFormat::Uint32, offset: 40 },
+    VertexAttr { location: 6, format: VertexFormat::Uint32, offset: 44 },
+    VertexAttr { location: 7, format: VertexFormat::Float32x4, offset: 48 },
+];
+
+/// The skinned model shader with the scene light functions and, with their
+/// features, probes and material shading. The renderer builds its pipelines
+/// from it, and surface shaders are validated against it.
+pub(crate) fn skinned_engine_source() -> String {
+    let source = crate::scene_lights::shader(include_str!("shader_skinned.wgsl"), "globals") + crate::SHADOW_CASCADES_WGSL;
+    #[cfg(feature = "irradiance-probes")]
+    let source = crate::renderer3d::irradiance::shader(&source, "globals");
+    #[cfg(feature = "metallic-roughness")]
+    let source = crate::material_shading::shader(&source);
+    source
 }
 /// Fully validated CPU state. Kept separate until the entire scene is admitted.
 pub(crate) struct PreparedSkinned {
@@ -153,6 +181,8 @@ pub struct SkinnedModelRenderer<B: Rhi> {
     draws: Vec<InstanceDraw<B>>,
     depth: Option<Depth<B>>,
     bounds: Vec<SkinnedBounds>,
+    #[cfg(feature = "imported-scene")]
+    surfaces: crate::model_surfaces::ModelSurfaces<B>,
     pub clear: [f64; 4],
 }
 impl<B: Rhi> SkinnedModelRenderer<B> {
@@ -195,58 +225,9 @@ impl<B: Rhi> SkinnedModelRenderer<B> {
         if format.is_depth() {
             return Err(SkinnedRenderError::InvalidTarget);
         }
-        let source = crate::scene_lights::shader(include_str!("shader_skinned.wgsl"), "globals");
-        #[cfg(feature = "irradiance-probes")]
-        let source = crate::renderer3d::irradiance::shader(&source, "globals");
-        let source = source.as_str();
-        #[cfg(feature = "metallic-roughness")]
-        let material_source = crate::material_shading::shader(source);
-        #[cfg(feature = "metallic-roughness")]
-        let source = material_source.as_str();
-        let shader = rhi.create_shader("skinned textured model", source);
-        let attrs = [
-            VertexAttr {
-                location: 0,
-                format: VertexFormat::Float32x3,
-                offset: 0,
-            },
-            VertexAttr {
-                location: 1,
-                format: VertexFormat::Float32x3,
-                offset: 12,
-            },
-            VertexAttr {
-                location: 2,
-                format: VertexFormat::Float32x2,
-                offset: 24,
-            },
-            // Existing RHI scalar integer formats suffice, including WebGPU.
-            VertexAttr {
-                location: 3,
-                format: VertexFormat::Uint32,
-                offset: 32,
-            },
-            VertexAttr {
-                location: 4,
-                format: VertexFormat::Uint32,
-                offset: 36,
-            },
-            VertexAttr {
-                location: 5,
-                format: VertexFormat::Uint32,
-                offset: 40,
-            },
-            VertexAttr {
-                location: 6,
-                format: VertexFormat::Uint32,
-                offset: 44,
-            },
-            VertexAttr {
-                location: 7,
-                format: VertexFormat::Float32x4,
-                offset: 48,
-            },
-        ];
+        let engine_source = skinned_engine_source();
+        let shader = rhi.create_shader("skinned textured model", &engine_source);
+        let attrs = SKINNED_ATTRS;
         let pipeline = rhi.create_pipeline(&PipelineDesc::<B> {
             label: "skinned textured model",
             shader: &shader,
@@ -362,6 +343,11 @@ impl<B: Rhi> SkinnedModelRenderer<B> {
             draws: Vec::new(),
             depth: None,
             bounds: Vec::new(),
+            #[cfg(feature = "imported-scene")]
+            surfaces: crate::model_surfaces::ModelSurfaces::new(
+                engine_source,
+                crate::model_surfaces::VertexInput { glue: crate::surface::SKINNED_GLUE, vs_entry: "vs_skinned_surface", stride: 64, attrs: SKINNED_ATTRS.to_vec() },
+            ),
             clear: crate::DEFAULT_CLEAR_3D,
         })
     }
@@ -554,6 +540,8 @@ impl<B: Rhi> SkinnedModelRenderer<B> {
                 bind,
                 #[cfg(feature = "imported-scene")]
                 shadow,
+                #[cfg(feature = "imported-scene")]
+                surface: None,
             });
         }
         self.rhi
@@ -562,6 +550,59 @@ impl<B: Rhi> SkinnedModelRenderer<B> {
             self.rhi
                 .write_buffer(&draw.uniform, 0, bytemuck::bytes_of(object));
         }
+        #[cfg(feature = "imported-scene")]
+        for index in 0..count {
+            let primitive = &self.model.source().primitives[index % self.geometry.len()];
+            let image = &self.views[self.model.source().materials[primitive.material as usize].image as usize];
+            let draw = &mut self.draws[index];
+            let inputs = crate::model_surfaces::DrawInputs { globals: &self.globals, image, object: &draw.uniform };
+            self.surfaces.write(&self.rhi, index / self.geometry.len(), &mut draw.surface, inputs);
+        }
+    }
+
+    /// Writes only the globals, for a shadow cascade's matrix.
+    #[cfg(feature = "imported-scene")]
+    pub(crate) fn write_globals(&self, globals: &Globals) {
+        self.rhi.write_buffer(&self.globals, 0, bytemuck::bytes_of(globals));
+    }
+
+    /// Adds surface shader pipelines on this model's skinned vertices and
+    /// returns the id that [`Self::set_instance_surfaces`] uses to pick it.
+    /// [`crate::SurfaceShader::compile`] validated the shader against this
+    /// renderer's own shader, so this creates no invalid GPU object.
+    #[cfg(feature = "imported-scene")]
+    pub fn add_surface(&mut self, shader: &crate::SurfaceShader) -> crate::SurfaceId {
+        self.surfaces.add(&self.rhi, self.format, shader)
+    }
+
+    /// Replaces the shader of `id` with `shader`, keeping the id. An id this
+    /// renderer does not have is left alone.
+    #[cfg(feature = "imported-scene")]
+    pub fn replace_surface(&mut self, id: crate::SurfaceId, shader: &crate::SurfaceShader) {
+        self.surfaces.replace(&self.rhi, self.format, id, shader);
+    }
+
+    /// Adds an image for surface shader texture slots and returns the id that
+    /// [`crate::ModelSurface::textures`] uses to pick it.
+    #[cfg(feature = "imported-scene")]
+    pub fn add_texture(&mut self, texture: &crate::SurfaceTexture) -> crate::TextureId {
+        self.surfaces.add_texture(&self.rhi, texture)
+    }
+
+    /// Replaces the image of `id`, keeping the id. An id this renderer does
+    /// not have is left alone.
+    #[cfg(feature = "imported-scene")]
+    pub fn replace_texture(&mut self, id: crate::TextureId, texture: &crate::SurfaceTexture) {
+        self.surfaces.replace_texture(&self.rhi, id, texture);
+    }
+
+    /// Surface shaders of the instances that the next frames draw in an
+    /// imported scene, by instance index. `None`, a missing entry and an id
+    /// this renderer does not have keep the built-in look. `time` is the clock
+    /// in seconds that the shaders read.
+    #[cfg(feature = "imported-scene")]
+    pub fn set_instance_surfaces(&mut self, surfaces: &[Option<crate::ModelSurface>], time: f32) {
+        self.surfaces.set_uses(surfaces, time);
     }
 
     /// Records into caller-owned attachments without allocating private depth.
@@ -572,12 +613,22 @@ impl<B: Rhi> SkinnedModelRenderer<B> {
         color: &ColorAttachment<'_, B>,
         depth: &DepthAttachment<'_, B>,
     ) {
-        let mut commands = vec![Command::SetPipeline(&self.pipeline)];
+        let mut commands = Vec::new();
+        let mut current: Option<&B::Pipeline> = None;
         for i in 0..prepared.objects.len() {
             let draw = &self.draws[i];
             let geometry = &self.geometry[i % self.geometry.len()];
+            // A draw with a surface shader uses its pipeline; the others the built-in look.
+            #[cfg(feature = "imported-scene")]
+            let (pipeline, bind) = self.surfaces.active(i / self.geometry.len(), draw.surface.as_ref()).map_or((&self.pipeline, &draw.bind), |(gpu, surface)| (&gpu.main, &surface.main));
+            #[cfg(not(feature = "imported-scene"))]
+            let (pipeline, bind) = (&self.pipeline, &draw.bind);
+            if !current.is_some_and(|c| std::ptr::eq(c, pipeline)) {
+                current = Some(pipeline);
+                commands.push(Command::SetPipeline(pipeline));
+            }
             commands.extend([
-                Command::SetBindGroup(0, &draw.bind),
+                Command::SetBindGroup(0, bind),
                 Command::SetVertexBuffer(0, &geometry.vertices),
                 Command::SetIndexBuffer(&geometry.indices),
                 Command::DrawIndexed {
@@ -603,6 +654,7 @@ impl<B: Rhi> SkinnedModelRenderer<B> {
     #[cfg(feature = "imported-scene")]
     pub(crate) fn bind_shared_shadow(&mut self, map: &crate::shared_shadow::SharedShadow<B>) {
         self.shadow.bind_map(&self.rhi, map);
+        self.surfaces.bind_map(&self.rhi, map);
     }
     #[cfg(feature = "imported-scene")]
     pub(crate) fn shared_commands<'a>(
@@ -611,19 +663,26 @@ impl<B: Rhi> SkinnedModelRenderer<B> {
         depth: bool,
         commands: &mut Vec<Command<'a, B>>,
     ) {
-        commands.push(Command::SetPipeline(if depth {
-            &self.shadow.depth
-        } else {
-            &self.shadow.main
-        }));
-        if !depth {
-            commands.push(Command::SetBindGroup(1, self.shadow.receiver()));
-        }
+        let mut current: Option<&B::Pipeline> = None;
         for i in 0..ready.objects.len() {
             let geometry = &self.geometry[i % self.geometry.len()];
             let binds = &self.draws[i].shadow;
+            // Shadows are cast with the mesh alone; a surface shader changes only how the draw is lit.
+            let surface = (!depth).then(|| self.surfaces.active(i / self.geometry.len(), self.draws[i].surface.as_ref())).flatten();
+            let (pipeline, receiver, bind) = match surface {
+                Some((gpu, surface)) => (&gpu.receiver, Some(gpu.receiver_bind()), &surface.receiver),
+                None if depth => (&self.shadow.depth, None, &binds.depth),
+                None => (&self.shadow.main, Some(self.shadow.receiver()), &binds.main),
+            };
+            if !current.is_some_and(|c| std::ptr::eq(c, pipeline)) {
+                current = Some(pipeline);
+                commands.push(Command::SetPipeline(pipeline));
+                if let Some(receiver) = receiver {
+                    commands.push(Command::SetBindGroup(1, receiver));
+                }
+            }
             commands.extend([
-                Command::SetBindGroup(0, if depth { &binds.depth } else { &binds.main }),
+                Command::SetBindGroup(0, bind),
                 Command::SetVertexBuffer(0, &geometry.vertices),
                 Command::SetIndexBuffer(&geometry.indices),
                 Command::DrawIndexed {

@@ -6,6 +6,7 @@
 
 use crate::inspector::{show_component, InspEvent};
 use crate::surface_library::SurfaceLibrary;
+use crate::texture_library::TextureLibrary;
 use egui::{Color32, RichText, Ui};
 use orr_reflect::{decimal, TypeDesc, Value};
 use orr_render::ParamKind;
@@ -15,6 +16,8 @@ struct Stored {
     shader: String,
     values: Vec<f32>,
     overrides: u32,
+    /// The image path of each texture slot.
+    textures: Vec<String>,
 }
 
 fn read(value: &Value) -> Option<Stored> {
@@ -24,7 +27,8 @@ fn read(value: &Value) -> Option<Stored> {
     let Some(Value::Array(items)) = field("values") else { return None };
     let Some(Value::Int(overrides)) = field("overrides") else { return None };
     let values = items.iter().map(|v| if let Value::Fixed(f) = v { decimal::fp_to_decimal(*f).parse().unwrap_or(0.0) } else { 0.0 }).collect();
-    Some(Stored { shader: shader.clone(), values, overrides: *overrides as u32 })
+    let textures = (0..orr_gfx::MATERIAL_TEXTURES).map(|slot| if let Some(Value::Text(path)) = field(&format!("texture_{slot}")) { path.clone() } else { String::new() }).collect();
+    Some(Stored { shader: shader.clone(), values, overrides: *overrides as u32, textures })
 }
 
 fn fixed(v: f32) -> Value {
@@ -65,8 +69,9 @@ fn single(label: &str, edits: Vec<InspEvent>, open: &mut bool, out: &mut Vec<Ins
 
 /// Draws the material section. `desc` and `value` are the reflected component.
 /// `open` is true while an edit of this section is open; the caller keeps it between frames.
-pub fn show(ui: &mut Ui, id: egui::Id, desc: &TypeDesc, value: &Value, library: &mut SurfaceLibrary, open: &mut bool, out: &mut Vec<InspEvent>) {
-    contents(ui, id, desc, value, library, open, out);
+#[allow(clippy::too_many_arguments)]
+pub fn show(ui: &mut Ui, id: egui::Id, desc: &TypeDesc, value: &Value, library: &mut SurfaceLibrary, textures: &TextureLibrary, open: &mut bool, out: &mut Vec<InspEvent>) {
+    contents(ui, id, desc, value, library, textures, open, out);
     // Every way out of the section ends an open edit once the pointer is released.
     if *open && !ui.input(|i| i.pointer.any_down()) {
         *open = false;
@@ -74,7 +79,8 @@ pub fn show(ui: &mut Ui, id: egui::Id, desc: &TypeDesc, value: &Value, library: 
     }
 }
 
-fn contents(ui: &mut Ui, id: egui::Id, desc: &TypeDesc, value: &Value, library: &mut SurfaceLibrary, open: &mut bool, out: &mut Vec<InspEvent>) {
+#[allow(clippy::too_many_arguments)]
+fn contents(ui: &mut Ui, id: egui::Id, desc: &TypeDesc, value: &Value, library: &mut SurfaceLibrary, textures: &TextureLibrary, open: &mut bool, out: &mut Vec<InspEvent>) {
     let Some(stored) = read(value) else {
         show_component(ui, id, desc, value, out);
         return;
@@ -154,6 +160,37 @@ fn contents(ui: &mut Ui, id: egui::Id, desc: &TypeDesc, value: &Value, library: 
             ui.end_row();
         }
     });
+    if !shader.textures().is_empty() {
+        let files = crate::inspector::asset_files(ui.ctx(), "texture");
+        egui::Grid::new(id.with("textures")).num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
+            for (slot, declared) in shader.textures().iter().enumerate() {
+                let current = stored.textures.get(slot).cloned().unwrap_or_default();
+                let field = format!("texture_{slot}");
+                ui.label(&declared.name);
+                let shown = if current.is_empty() { "(default)" } else { current.as_str() };
+                egui::ComboBox::from_id_salt(id.with(("texture", slot))).selected_text(shown).width(180.0).show_ui(ui, |ui| {
+                    if ui.selectable_label(current.is_empty(), "(default)").clicked() && !current.is_empty() {
+                        single("Clear material texture", vec![InspEvent::Set { path: field.clone(), value: Value::Text(String::new()) }], open, out);
+                    }
+                    for file in files.iter() {
+                        if ui.selectable_label(*file == current, file).clicked() && *file != current {
+                            single("Pick material texture", vec![InspEvent::Set { path: field.clone(), value: Value::Text(file.clone()) }], open, out);
+                        }
+                    }
+                    if files.is_empty() {
+                        ui.weak("No .png files next to the scene");
+                    }
+                });
+                ui.end_row();
+                let problem = if current.is_empty() { None } else { textures.get(&current, declared.kind).and_then(|entry| entry.result.as_ref().err()) };
+                if let Some(problem) = problem {
+                    ui.label("");
+                    ui.label(RichText::new(format!("{problem} · the shader's default is used")).color(Color32::from_rgb(255, 110, 110)));
+                    ui.end_row();
+                }
+            }
+        });
+    }
     if stored.overrides != 0 && ui.small_button("Use the shader's defaults").clicked() {
         single("Reset material", vec![InspEvent::Set { path: "overrides".into(), value: Value::Int(0) }], open, out);
     }

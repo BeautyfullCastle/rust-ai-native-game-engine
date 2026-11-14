@@ -45,3 +45,24 @@ fn rgba8_upload_readback_and_rejection_preserve_pixels() {
         assert_eq!(gpu.write_texture_rgba8(&no_copy, &upload), Err(TextureUploadError::MissingCopyDst));
     }
 }
+
+#[test]
+#[ignore = "requires a working GPU adapter; run with --ignored --nocapture"]
+fn each_mip_level_takes_an_upload_of_its_own_size() {
+    let gpu = Wgpu::headless(WgpuOptions::default()).expect("GPU upload evidence requires an available adapter");
+    assert_eq!((orr_rhi::mip_level_count(4, 4), orr_rhi::mip_level_count(5, 2), orr_rhi::mip_level_count(1, 1)), (3, 3, 1));
+    assert_eq!(orr_rhi::mip_level_size(5, 2, 2), (1, 1));
+    let texture = gpu.create_texture_mipmapped(
+        &TextureDesc { label: "mips", width: 4, height: 4, format: TextureFormat::Rgba8Unorm, usage: TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_DST, sample_count: 1, view_formats: &[] },
+        3,
+    );
+    let level = |width: u32, height: u32| vec![7u8; (width * height * 4) as usize];
+    fn upload(width: u32, height: u32, data: &[u8]) -> TextureUpload<'_> {
+        TextureUpload { origin: [0, 0], width, height, bytes_per_row: width * 4, data }
+    }
+    let (two, one) = (level(2, 2), level(1, 1));
+    assert_eq!(gpu.write_texture_rgba8_mip(&texture, 1, &upload(2, 2, &two)), Ok(()));
+    assert_eq!(gpu.write_texture_rgba8_mip(&texture, 2, &upload(1, 1, &one)), Ok(()));
+    assert_eq!(gpu.write_texture_rgba8_mip(&texture, 1, &upload(4, 4, &level(4, 4))), Err(TextureUploadError::OutOfBounds), "level 1 is 2 x 2");
+    assert_eq!(gpu.write_texture_rgba8_mip(&texture, 3, &upload(1, 1, &one)), Err(TextureUploadError::MipLevelOutOfRange));
+}

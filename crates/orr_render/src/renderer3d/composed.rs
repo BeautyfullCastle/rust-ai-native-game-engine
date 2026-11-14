@@ -289,6 +289,13 @@ impl<B: Rhi> Renderer3D<B> {
         prepared.stats.cpu_encode_time = clock.elapsed();
     }
 
+    /// Writes the frame's globals again with a shadow cascade's matrix, which the casters read.
+    pub(crate) fn write_shadow_matrix(&self, prepared: &PreparedProcedural, light_vp: [[f32; 4]; 4]) {
+        let mut globals = prepared.globals;
+        globals.light_vp = light_vp;
+        self.rhi.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
+    }
+
     pub(crate) fn bind_shared_shadow(&mut self, map: &crate::shared_shadow::SharedShadow<B>) {
         self.bind_surfaces_to_shared_shadow(map);
         if self
@@ -313,6 +320,10 @@ impl<B: Rhi> Renderer3D<B> {
                         Binding::Sampler {
                             binding: 2,
                             sampler: &map.sampler,
+                        },
+                        Binding::Uniform {
+                            binding: 3,
+                            buffer: &map.cascades,
                         },
                     ],
                 ),

@@ -16,6 +16,8 @@
 - **표면 셰이더**: 씬 파일 옆 `shaders/*.wgsl`에 `fn surface(in: SurfaceInput) -> Surface`를 쓰면 `orr_gfx::Material` 컴포넌트로 물체에 적용된다. 조명·그림자·레이어·톤 매핑은 엔진이 맡는다. 오류는 파일 줄 번호로 보이고, 파일을 저장하면 에디터가 다시 읽는다. 절차 도형, 정적 모델, 지형에 적용된다(스키닝 모델은 아직). 자세한 내용은 [rendering-architecture.md](rendering-architecture.md) 1.6절.
 - **엔진 렌더 컴포넌트 3단계**: 에셋 참조, `Camera`, `PostProcess` 효과 목록(빛줄기, 자동 노출, 색 보정, 비네트, 필름 입자, 높이 안개), `Terrain`(높이맵 + 표면 셰이더), `Sky`, `Water`, `Scatter`, 렌더 패스 등록(`RenderPass`). Forest Valley를 이 컴포넌트만으로 된 씬(`scenes/forest_valley`)으로 다시 만들었다. 자세한 내용은 [rendering-architecture.md](rendering-architecture.md) 1.7절부터.
 - **용 비행**: Forest Valley 씬에 동양식 용(`orr_games::Dragon`)이 있다. 에디터 Play에서 `Take control` 후 A/D, W/S, E로 난다. 카메라가 뒤따르고, 몸통은 렌더 패스(`orr_scenery::dragon::DragonPass`)가 경로를 따라 매 프레임 만든다. 자세한 내용은 [rendering-architecture.md](rendering-architecture.md) 1.15절.
+- **재질 텍스처와 스키닝 모델**: 표면 셰이더가 `// @texture` 줄로 PNG 이미지를 최대 4장 선언하고 읽는다. 이미지는 밉 단계와 반복 샘플러로 걸러진다. `orr_gfx::Material`의 `texture_0`~`texture_3`이 경로를 가지고, 인스펙터 재질 칸에서 고른다. 같은 셰이더가 스키닝 모델에도 적용된다. Forest Valley 지형이 풀·바위 디테일 이미지를 쓴다. [rendering-architecture.md](rendering-architecture.md) 1.16절.
+- **캐스케이드 그림자**: 해 그림자가 최대 4단계로 시점을 따라간다. 가까운 그림자는 선명하고 먼 그림자도 보인다. `orr_gfx::Light::shadow_cascades`로 정한다. [rendering-architecture.md](rendering-architecture.md) 1.17절.
 - **테스트(기본 구성)**: `cargo test --workspace --release` 2779개 통과, 실패 0개, 무시 26개.
 - **테스트(전체 기능 구성)**: `--features orr_editor/full,orr_sample/full`로 에디터와 샘플 게임을 전체 실행했을 때 3376개 통과, 19개 실패였다. 그 뒤 17건의 원인을 고쳐 해당 테스트를 다시 실행해 통과를 확인했다. 남은 실패는 2건이다.
 
@@ -36,8 +38,6 @@
 
 추적 이슈: [#563](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/563)
 
-- 전체 기능 구성에서 실패하는 테스트가 2건 남아 있다. 목록은 위 이슈에 있다.
-- 현재 게임과 관계없는 패널이 인스펙터에 보인다. 예: Room 프로젝트에 Terrain appearance 패널이 표시된다. 인스펙터 전체가 세로로 스크롤되므로 모든 패널에 닿을 수는 있다.
 - Arena·Collect 프로젝트의 새로 만들기와 내보내기, 게임 진행 저장, 지형 패치 불러오기, `orr_pkg`의 번들·웹 명령은 리눅스 전용이다.
 - 에디터 메뉴(`File > New Room project…`, `File > Export Windows game…`)는 사람이 직접 눌러 보는 확인을 아직 하지 않았다. 같은 기능을 명령 도구로 실행해 확인했다.
 - 리눅스, macOS, 안드로이드, 브라우저 빌드는 이번에 실행하지 않았다.
@@ -45,11 +45,9 @@
 ## 다음 작업
 
 1. [#104](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/104) 흐름을 에디터 화면에서 사람 손으로 끝까지 진행한다: 새 프로젝트 → 개체 이동과 값 수정 → 실행 취소 → 저장 → Play → 내보내기 → 내보낸 게임 실행.
-2. 인스펙터에서 현재 게임과 관계없는 패널을 숨긴다.
-3. 전체 기능 구성의 남은 테스트 실패를 없앤다.
-4. Arena 프로젝트 생성과 내보내기를 윈도우로 옮긴다.
-5. 설계 v2의 고정 과제군(배달, 스위치 퍼즐, 액션)으로 무개입 완주율을 처음 측정한다.
-6. `orr_scenery` 렌더러로 에디터의 지형·모델 씬을 그린다. 지금은 생성된 Forest Valley 장면만 그린다. 에디터에서 만든 씬(Room, Yard3D, 지형 문서)은 여전히 `orr_render`로 그리고, 장면 창의 설정은 그 씬에 적용되지 않는다.
+2. Arena 프로젝트 생성과 내보내기를 윈도우로 옮긴다.
+3. 설계 v2의 고정 과제군(배달, 스위치 퍼즐, 액션)으로 무개입 완주율을 처음 측정한다.
+4. `orr_scenery` 렌더러로 에디터의 지형·모델 씬을 그린다. 지금은 생성된 Forest Valley 장면만 그린다. 에디터에서 만든 씬(Room, Yard3D, 지형 문서)은 여전히 `orr_render`로 그리고, 장면 창의 설정은 그 씬에 적용되지 않는다.
 
 ## 작업 규칙
 

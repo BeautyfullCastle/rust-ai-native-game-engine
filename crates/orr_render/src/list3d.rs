@@ -155,6 +155,9 @@ pub struct SurfaceInstance {
     pub instance: Instance3D,
     /// Parameter values, laid out as the shader declares them.
     pub params: [f32; crate::MAX_SURFACE_FLOATS],
+    /// The image of each texture slot (see [`crate::Renderer3D::add_texture`]);
+    /// `None` reads the slot's declared default.
+    pub textures: [Option<crate::TextureId>; crate::MAX_SURFACE_TEXTURES],
 }
 
 /// One frame of 3D drawing. Fill it each frame (`clear` keeps the buffers'
@@ -205,6 +208,11 @@ impl RenderList3D {
     /// The shapes keep their material values; the shader reads them as
     /// `in.color`, `in.roughness`, `in.metallic` and `in.emissive`.
     pub fn with_surface(&mut self, surface: crate::SurfaceId, params: [f32; crate::MAX_SURFACE_FLOATS], draw: impl FnOnce(&mut Self)) {
+        self.with_textured_surface(surface, params, [None; crate::MAX_SURFACE_TEXTURES], draw);
+    }
+
+    /// [`Self::with_surface`] with an image in each texture slot of the shader.
+    pub fn with_textured_surface(&mut self, surface: crate::SurfaceId, params: [f32; crate::MAX_SURFACE_FLOATS], textures: [Option<crate::TextureId>; crate::MAX_SURFACE_TEXTURES], draw: impl FnOnce(&mut Self)) {
         let before = MeshKind::ALL.map(|kind| self.instances(kind).len());
         draw(self);
         for (kind, start) in MeshKind::ALL.into_iter().zip(before) {
@@ -214,7 +222,7 @@ impl RenderList3D {
                 MeshKind::Capsule => self.capsules.drain(start..).collect(),
                 MeshKind::Plane => self.planes.drain(start..).collect(),
             };
-            self.surfaces.extend(added.into_iter().map(|instance| SurfaceInstance { surface, kind, instance, params }));
+            self.surfaces.extend(added.into_iter().map(|instance| SurfaceInstance { surface, kind, instance, params, textures }));
         }
     }
 

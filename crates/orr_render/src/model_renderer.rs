@@ -180,7 +180,7 @@ struct InstanceDraw<B: Rhi> {
     #[cfg(feature = "imported-scene")]
     shadow: crate::shared_shadow::ObjectBindings<B>,
     /// Bindings for the surface shader this draw last used.
-    surface: Option<surfaces::SurfaceDraw<B>>,
+    surface: Option<crate::model_surfaces::SurfaceDraw<B>>,
 }
 #[cfg(feature = "imported-scene")]
 pub(crate) struct PreparedStatic {
@@ -225,7 +225,7 @@ const VERTEX_ATTRS: [VertexAttr; 3] = [
 /// the probe and metallic-roughness functions. Model pipelines are built from
 /// it, and surface shaders are validated against it.
 pub(crate) fn model_engine_source() -> String {
-    let source = crate::scene_lights::shader(include_str!("shader_model.wgsl"), "globals");
+    let source = crate::scene_lights::shader(include_str!("shader_model.wgsl"), "globals") + crate::SHADOW_CASCADES_WGSL;
     #[cfg(feature = "irradiance-probes")]
     let source = crate::renderer3d::irradiance::shader(&source, "globals");
     #[cfg(feature = "metallic-roughness")]
@@ -253,7 +253,7 @@ pub struct ModelRenderer<B: Rhi> {
     #[cfg(feature = "imported-scene")]
     local_bounds: Vec<([f32; 3], [f32; 3])>,
     #[cfg(feature = "imported-scene")]
-    surfaces: surfaces::ModelSurfaces<B>,
+    surfaces: crate::model_surfaces::ModelSurfaces<B>,
     depth: Option<Depth<B>>,
     pub clear: [f64; 4],
 }
@@ -464,7 +464,7 @@ impl<B: Rhi> ModelRenderer<B> {
             #[cfg(feature = "imported-scene")]
             local_bounds,
             #[cfg(feature = "imported-scene")]
-            surfaces: surfaces::ModelSurfaces::new(engine_source),
+            surfaces: surfaces::model_surfaces(engine_source),
             depth: None,
             clear: crate::DEFAULT_CLEAR_3D,
         })
@@ -742,7 +742,7 @@ impl<B: Rhi> ModelRenderer<B> {
 #[cfg(feature = "imported-scene")]
 mod surfaces;
 #[cfg(feature = "imported-scene")]
-pub use surfaces::ModelSurface;
+pub use crate::model_surfaces::ModelSurface;
 
 #[cfg(feature = "imported-scene")]
 fn model_local_bounds(model: &StaticModel) -> Vec<([f32; 3], [f32; 3])> {

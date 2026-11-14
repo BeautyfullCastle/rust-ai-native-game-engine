@@ -6,7 +6,8 @@ use super::{Renderer3D, DEPTH, INSTANCE_ATTRS, MESH_ATTRS};
 use crate::list3d::{Instance3D, RenderList3D, SurfaceInstance};
 use crate::mesh::{MeshKind, Vertex3};
 use crate::stats::{FrameStats, PassStats};
-use crate::surface::{SurfaceId, SurfaceShader, MAX_SURFACE_FLOATS};
+use crate::surface::{SurfaceId, SurfaceShader, MAX_SURFACE_FLOATS, MAX_SURFACE_TEXTURES};
+use crate::surface_texture::{default_textures, GpuTexture, SurfaceTexture, TextureId};
 use orr_rhi::{Binding, Blend, Command, Cull, DepthState, PipelineDesc, Rhi, VertexAttr, VertexFormat, VertexLayout, VertexStep};
 
 /// Parameters of one instance: four vec4 at locations 8 to 11.
@@ -20,15 +21,26 @@ const PARAM_ATTRS: [VertexAttr; 4] = [
 pub(super) struct SurfaceGpu<B: Rhi> {
     pipeline: B::Pipeline,
     main_bind: B::BindGroup,
+    /// What each slot reads while an instance picks no image.
+    defaults: Vec<GpuTexture<B>>,
+    /// Repeats and filters between mip levels.
+    sampler: B::Sampler,
+    /// Texture bindings (group 1) of the image sets this frame draws, by stamps.
+    texture_binds: Vec<([u64; MAX_SURFACE_TEXTURES], B::BindGroup)>,
     /// Bound to the shared shadow map of the composed path, with that map's id.
     #[cfg(feature = "imported-scene")]
     composed_bind: Option<(u64, B::BindGroup)>,
 }
 
-/// Instances of one frame grouped by shader and mesh kind.
+/// The images of one group of instances.
+type Images = [Option<TextureId>; MAX_SURFACE_TEXTURES];
+
+/// Instances of one frame grouped by shader, images and mesh kind.
 #[derive(Default)]
 pub(super) struct SurfaceFrame {
-    groups: Vec<(SurfaceId, MeshKind, std::ops::Range<u32>)>,
+    groups: Vec<(SurfaceId, Images, MeshKind, std::ops::Range<u32>)>,
+    /// Stamps of the textures each group binds, by group.
+    stamps: Vec<[u64; MAX_SURFACE_TEXTURES]>,
     order: Vec<u32>,
     instances: Vec<Instance3D>,
     params: Vec<[f32; MAX_SURFACE_FLOATS]>,
@@ -43,10 +55,10 @@ impl SurfaceFrame {
 /// Draw calls a list's surface instances need, and how many of them cast shadows.
 #[cfg(feature = "imported-scene")]
 pub(crate) fn surface_draws(list: &RenderList3D) -> (usize, usize) {
-    let mut keys: Vec<(SurfaceId, MeshKind)> = list.surfaces.iter().map(|s| (s.surface, s.kind)).collect();
-    keys.sort_unstable_by_key(|(id, kind)| (*id, *kind as u8));
+    let mut keys: Vec<(SurfaceId, Images, u8)> = list.surfaces.iter().map(|s| (s.surface, s.textures, s.kind as u8)).collect();
+    keys.sort_unstable();
     keys.dedup();
-    let casters = keys.iter().filter(|(_, kind)| *kind != MeshKind::Plane).count();
+    let casters = keys.iter().filter(|(_, _, kind)| *kind != MeshKind::Plane as u8).count();
     (keys.len(), casters)
 }
 
@@ -89,11 +101,15 @@ impl<B: Rhi> Renderer3D<B> {
                 Binding::Uniform { binding: 0, buffer: &self.globals },
                 Binding::Texture { binding: 1, view: &self.shadow_view },
                 Binding::Sampler { binding: 2, sampler: &self.sampler },
+                Binding::Uniform { binding: 3, buffer: &self.no_cascades },
             ],
         );
         SurfaceGpu {
             pipeline,
             main_bind,
+            defaults: default_textures(&self.rhi, shader),
+            sampler: self.rhi.create_sampler(&orr_rhi::SamplerDesc::MATERIAL),
+            texture_binds: Vec::new(),
             #[cfg(feature = "imported-scene")]
             composed_bind: None,
         }
@@ -108,27 +124,57 @@ impl<B: Rhi> Renderer3D<B> {
         let gpu = self.build_surface(shader);
         self.surfaces[id.0 as usize] = gpu;
     }
-    /// Groups the list's surface instances by shader and mesh kind and uploads them.
+    /// Adds an image for surface shader texture slots and returns the id that
+    /// render list instances use to pick it (see [`RenderList3D::with_textured_surface`]).
+    pub fn add_texture(&mut self, texture: &SurfaceTexture) -> TextureId {
+        self.surface_textures.add(&self.rhi, texture)
+    }
+
+    /// Replaces the image of `id`, keeping the id. An id this renderer does
+    /// not have is left alone.
+    pub fn replace_texture(&mut self, id: TextureId, texture: &SurfaceTexture) {
+        self.surface_textures.replace(&self.rhi, id, texture);
+    }
+
+    /// Groups the list's surface instances by shader, images and mesh kind and uploads them.
     /// Instances of an id this renderer does not have are skipped.
     pub(super) fn prepare_surfaces(&mut self, list: &RenderList3D, stats: &mut FrameStats) {
         let frame = &mut self.surface_frame;
         frame.groups.clear();
+        frame.stamps.clear();
         frame.order.clear();
         frame.instances.clear();
         frame.params.clear();
         let known = self.surfaces.len() as u32;
         frame.order.extend((0..list.surfaces.len() as u32).filter(|&i| list.surfaces[i as usize].surface.0 < known));
-        let key = |s: &SurfaceInstance| (s.surface, s.kind as u8);
+        let key = |s: &SurfaceInstance| (s.surface, s.textures, s.kind as u8);
         frame.order.sort_by_key(|&i| key(&list.surfaces[i as usize]));
         for &i in &frame.order {
             let s = &list.surfaces[i as usize];
             let at = frame.instances.len() as u32;
             match frame.groups.last_mut() {
-                Some((id, kind, range)) if *id == s.surface && *kind == s.kind => range.end = at + 1,
-                _ => frame.groups.push((s.surface, s.kind, at..at + 1)),
+                Some((id, images, kind, range)) if *id == s.surface && *images == s.textures && *kind == s.kind => range.end = at + 1,
+                _ => frame.groups.push((s.surface, s.textures, s.kind, at..at + 1)),
             }
             frame.instances.push(s.instance);
             frame.params.push(s.params);
+        }
+        // Each group's texture binding: built when its images are new, dropped when no group uses it.
+        for (id, images, _, _) in &frame.groups {
+            let gpu = &mut self.surfaces[id.0 as usize];
+            let textures = self.surface_textures.resolve(images, &gpu.defaults);
+            let stamps = textures.map(|t| t.stamp);
+            if !gpu.texture_binds.iter().any(|(s, _)| *s == stamps) {
+                let mut entries: Vec<Binding<'_, B>> = (0..MAX_SURFACE_TEXTURES).map(|k| Binding::Texture { binding: k as u32, view: &textures[k].view }).collect();
+                entries.push(Binding::Sampler { binding: MAX_SURFACE_TEXTURES as u32, sampler: &gpu.sampler });
+                let bind = self.rhi.create_bind_group(&gpu.pipeline, 1, &entries);
+                gpu.texture_binds.push((stamps, bind));
+            }
+            frame.stamps.push(stamps);
+        }
+        for (index, gpu) in self.surfaces.iter_mut().enumerate() {
+            let used: Vec<&[u64; MAX_SURFACE_TEXTURES]> = frame.groups.iter().zip(&frame.stamps).filter(|((id, ..), _)| id.0 as usize == index).map(|(_, s)| s).collect();
+            gpu.texture_binds.retain(|(s, _)| used.contains(&s));
         }
         if frame.instances.is_empty() {
             return;
@@ -153,7 +199,7 @@ impl<B: Rhi> Renderer3D<B> {
             Command::SetVertexBuffer(1, &self.surface_instances.buffer),
             Command::SetIndexBuffer(&self.mesh_indices),
         ]);
-        for (_, kind, instances) in &self.surface_frame.groups {
+        for (_, _, kind, instances) in &self.surface_frame.groups {
             if *kind == MeshKind::Plane {
                 continue;
             }
@@ -167,10 +213,12 @@ impl<B: Rhi> Renderer3D<B> {
     /// group of the composed path's shared shadow map.
     pub(super) fn surface_main_commands<'a>(&'a self, composed: bool, commands: &mut Vec<Command<'a, B>>, pass: &mut PassStats) {
         let mut current = None;
-        for (id, kind, instances) in &self.surface_frame.groups {
+        let mut images = None;
+        for ((id, _, kind, instances), stamps) in self.surface_frame.groups.iter().zip(&self.surface_frame.stamps) {
             let gpu = &self.surfaces[id.0 as usize];
             if current != Some(*id) {
                 current = Some(*id);
+                images = None;
                 let bind = if composed { self.composed_surface_bind(gpu) } else { &gpu.main_bind };
                 commands.extend([
                     Command::SetPipeline(&gpu.pipeline),
@@ -180,6 +228,11 @@ impl<B: Rhi> Renderer3D<B> {
                     Command::SetVertexBuffer(2, &self.surface_params.buffer),
                     Command::SetIndexBuffer(&self.mesh_indices),
                 ]);
+            }
+            if images != Some(stamps) {
+                images = Some(stamps);
+                let (_, bind) = gpu.texture_binds.iter().find(|(s, _)| s == stamps).expect("built in prepare_surfaces");
+                commands.push(Command::SetBindGroup(1, bind));
             }
             let (indices, base_vertex) = self.mesh_ranges[*kind as usize].clone();
             pass.draw(instances.end - instances.start);
@@ -209,6 +262,7 @@ impl<B: Rhi> Renderer3D<B> {
                         Binding::Uniform { binding: 0, buffer: &self.globals },
                         Binding::Texture { binding: 1, view: &map.view },
                         Binding::Sampler { binding: 2, sampler: &map.sampler },
+                        Binding::Uniform { binding: 3, buffer: &map.cascades },
                     ],
                 );
                 gpu.composed_bind = Some((map.id, bind));

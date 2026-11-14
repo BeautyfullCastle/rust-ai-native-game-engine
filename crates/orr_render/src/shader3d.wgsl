@@ -30,6 +30,8 @@ struct Globals {
 @group(0) @binding(0) var<uniform> g: Globals;
 @group(0) @binding(1) var shadow_map: texture_depth_2d;
 @group(0) @binding(2) var shadow_samp: sampler_comparison;
+// The shared map's cascades in a composed scene; zero cascades on the renderer's own map.
+@group(0) @binding(3) var<uniform> shadow_cascades: ShadowCascades;
 
 const PI: f32 = 3.14159265;
 
@@ -86,6 +88,9 @@ fn vs_shadow(i: MeshIn) -> @builtin(position) vec4<f32> {
 }
 
 fn shadow_visibility(world: vec3<f32>, n: vec3<f32>) -> f32 {
+    if (shadow_cascades.eye.w > 0.5) {
+        return cascaded_visibility(world, n);
+    }
     let p = world + n * g.shadow.y;
     let lp = g.light_vp * vec4<f32>(p, 1.0);
     let uv = vec2<f32>(lp.x * 0.5 + 0.5, 0.5 - lp.y * 0.5);

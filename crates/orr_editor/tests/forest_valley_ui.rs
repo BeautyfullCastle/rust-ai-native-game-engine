@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 fn scene_copy(dir: &Path) -> PathBuf {
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scenes/forest_valley");
-    for sub in ["terrain", "shaders"] {
+    for sub in ["terrain", "shaders", "textures"] {
         std::fs::create_dir_all(dir.join(sub)).unwrap();
         for entry in std::fs::read_dir(source.join(sub)).unwrap() {
             let entry = entry.unwrap();

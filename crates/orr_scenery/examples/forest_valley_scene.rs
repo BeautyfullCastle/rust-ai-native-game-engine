@@ -7,8 +7,9 @@
 //! cargo run -p orr_scenery --example forest_valley_scene -- scenes/forest_valley
 //! ```
 //!
-//! The folder then holds `forest_valley.scene.yaml` and `terrain/*.png`; the
-//! shader `shaders/terrain.wgsl` is kept in the repository.
+//! The folder then holds `forest_valley.scene.yaml`, `terrain/*.png` and the
+//! repeating detail images `textures/*.png`; the shader `shaders/terrain.wgsl`
+//! is kept in the repository.
 #![allow(clippy::float_arithmetic)]
 
 use orr_scenery::world::{HALF, GRID};
@@ -31,6 +32,80 @@ fn write_png16(path: &std::path::Path, side: usize, heights: &[f32], low: f32, h
     writer.write_image_data(&data).unwrap();
 }
 
+/// Side of the repeating detail images, in pixels.
+const DETAIL_SIDE: usize = 512;
+
+fn hash2(x: i32, y: i32, seed: u32) -> f32 {
+    let mut h = (x as u32).wrapping_mul(0x8da6_b343) ^ (y as u32).wrapping_mul(0xd816_3841) ^ seed.wrapping_mul(0xcb1a_b31f);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0x5bd1_e995);
+    h ^= h >> 15;
+    (h & 0xffff) as f32 / 65535.0
+}
+
+/// Value noise that repeats every `px` cells across and `py` cells down, at `u`, `v` from 0 to 1.
+fn periodic_noise(u: f32, v: f32, px: i32, py: i32, seed: u32) -> f32 {
+    let (x, y) = (u * px as f32, v * py as f32);
+    let (ix, iy) = (x.floor() as i32, y.floor() as i32);
+    let (fx, fy) = (x - ix as f32, y - iy as f32);
+    let (sx, sy) = (fx * fx * (3.0 - 2.0 * fx), fy * fy * (3.0 - 2.0 * fy));
+    let at = |dx: i32, dy: i32| hash2((ix + dx).rem_euclid(px), (iy + dy).rem_euclid(py), seed);
+    let top = at(0, 0) + (at(1, 0) - at(0, 0)) * sx;
+    let bottom = at(0, 1) + (at(1, 1) - at(0, 1)) * sx;
+    top + (bottom - top) * sy
+}
+
+/// A repeating RGB detail image whose average is linear 0.5, so a shader can
+/// multiply a color by twice its value without changing the color on average.
+/// `pixel` returns linear RGB around 1 for each `u`, `v`.
+fn write_detail(path: &std::path::Path, pixel: impl Fn(f32, f32) -> [f32; 3]) {
+    let mut linear = Vec::with_capacity(DETAIL_SIDE * DETAIL_SIDE);
+    for y in 0..DETAIL_SIDE {
+        for x in 0..DETAIL_SIDE {
+            linear.push(pixel(x as f32 / DETAIL_SIDE as f32, y as f32 / DETAIL_SIDE as f32));
+        }
+    }
+    let mut mean = [0.0f32; 3];
+    for p in &linear {
+        for c in 0..3 {
+            mean[c] += p[c] / linear.len() as f32;
+        }
+    }
+    let encode = |c: f32| {
+        let c = c.clamp(0.0, 1.0);
+        let s = if c <= 0.003_130_8 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
+        (s * 255.0).round() as u8
+    };
+    let data: Vec<u8> = linear.iter().flat_map(|p| [0, 1, 2].map(|c| encode(p[c] / mean[c] * 0.5))).collect();
+    let file = std::fs::File::create(path).unwrap();
+    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), DETAIL_SIDE as u32, DETAIL_SIDE as u32);
+    encoder.set_color(png::ColorType::Rgb);
+    let mut writer = encoder.write_header().unwrap();
+    writer.write_image_data(&data).unwrap();
+}
+
+/// Grass: thin blades, longer than wide, in two crossing layers, with dark gaps and drier patches.
+fn grass_detail(u: f32, v: f32) -> [f32; 3] {
+    let blades = periodic_noise(u, v, 192, 32, 1) * 0.35 + periodic_noise(u, v, 40, 160, 2) * 0.25 + periodic_noise(u, v, 112, 112, 5) * 0.4;
+    let blades = ((blades - 0.5) * 2.2 + 0.5).clamp(0.0, 1.0);
+    let gaps = ((periodic_noise(u, v, 64, 64, 3) - 0.66) * 5.0).clamp(0.0, 1.0);
+    let dry = ((periodic_noise(u, v, 6, 6, 4) - 0.45) * 2.0).clamp(0.0, 1.0);
+    let light = (0.35 + 1.1 * blades) * (1.0 - 0.7 * gaps);
+    [light * (0.95 + 0.25 * dry), light, light * (0.95 - 0.2 * dry)]
+}
+
+/// Rock: grain at three sizes, thin broken cracks and faint lichen.
+fn rock_detail(u: f32, v: f32) -> [f32; 3] {
+    let broad = periodic_noise(u, v, 8, 8, 11) * 0.5 + periodic_noise(u, v, 16, 16, 12) * 0.3 + periodic_noise(u, v, 32, 32, 13) * 0.2;
+    let line = ((periodic_noise(u, v, 10, 10, 14) - 0.5).abs() * 60.0).clamp(0.0, 1.0);
+    let broken = ((periodic_noise(u, v, 24, 24, 17) - 0.35) * 3.0).clamp(0.0, 1.0);
+    let crack = (1.0 - line) * broken;
+    let grain = periodic_noise(u, v, 128, 128, 15) * 0.6 + periodic_noise(u, v, 256, 256, 18) * 0.4;
+    let lichen = ((periodic_noise(u, v, 12, 12, 16) - 0.68) * 5.0).clamp(0.0, 1.0);
+    let light = (0.55 + 0.9 * broad) * (0.75 + 0.5 * grain) * (1.0 - 0.6 * crack);
+    [light * (1.0 + 0.08 * lichen), light * (1.0 + 0.16 * lichen), light * (1.0 - 0.12 * lichen)]
+}
+
 fn v3(v: [f32; 3]) -> String {
     format!("[{:.3}, {:.3}, {:.3}]", v[0], v[1], v[2])
 }
@@ -45,6 +120,9 @@ fn facing(d: [f32; 3]) -> [f32; 3] {
 fn main() {
     let out = PathBuf::from(std::env::args().nth(1).unwrap_or_else(|| "scenes/forest_valley".into()));
     std::fs::create_dir_all(out.join("terrain")).unwrap();
+    std::fs::create_dir_all(out.join("textures")).unwrap();
+    write_detail(&out.join("textures/grass.png"), grass_detail);
+    write_detail(&out.join("textures/rock.png"), rock_detail);
     let world = World::generate(SEED);
     let settings = Settings::default();
 
@@ -119,7 +197,7 @@ fn main() {
     text.push_str("entities:\n");
 
     let terrain_material = |text: &mut String| {
-        text.push_str("    orr_gfx::Material:\n      shader: terrain\n      values: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]\n      overrides: 0\n");
+        text.push_str("    orr_gfx::Material:\n      shader: terrain\n      values: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]\n      overrides: 0\n      texture_0: textures/grass.png\n      texture_1: textures/rock.png\n      texture_2: ''\n      texture_3: ''\n");
     };
     let valley = entity(&mut text, "valley");
     writeln!(text, "    orr_gfx::Transform3:\n      position: [0, {low:.1}, 0]\n      rotation: [0, 0, 0]\n      scale: [1, 1, 1]").unwrap();
@@ -132,7 +210,7 @@ fn main() {
 
     entity(&mut text, "sun");
     writeln!(text, "    orr_gfx::Transform3:\n      position: [0, 200, 0]\n      rotation: {}\n      scale: [1, 1, 1]", v3(facing([-sun[0], -sun[1], -sun[2]]))).unwrap();
-    text.push_str("    orr_gfx::Light:\n      color: [1, 0.9, 0.76]\n      intensity: 8.5\n      range: 10\n      inner_angle: 20\n      outer_angle: 30\n      shadow_strength: 1\n      shadow_range: 140\n      kind: directional\n      enabled: true\n      cast_shadows: true\n      layers: [default, layer2, layer3, layer4, layer5, layer6, layer7, layer8]\n");
+    text.push_str("    orr_gfx::Light:\n      color: [1, 0.9, 0.76]\n      intensity: 8.5\n      range: 10\n      inner_angle: 20\n      outer_angle: 30\n      shadow_strength: 1\n      shadow_range: 260\n      kind: directional\n      enabled: true\n      cast_shadows: true\n      layers: [default, layer2, layer3, layer4, layer5, layer6, layer7, layer8]\n      shadow_cascades: 4\n");
 
     // The dragon starts ahead of the camera, above the valley, flying the way the camera looks.
     let flat = {

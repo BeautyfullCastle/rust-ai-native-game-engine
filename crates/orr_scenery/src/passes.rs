@@ -39,10 +39,17 @@ const GRASS_DISTANCE: f32 = 85.0;
 /// Farthest a tree or rock is drawn.
 const FAR_DISTANCE: f32 = 3000.0;
 
+/// A cascades uniform with no cascades, for frames without the shared shadow map.
+pub(crate) fn no_cascades<B: Rhi>(rhi: &B) -> B::Buffer {
+    let buffer = rhi.create_buffer(&BufferDesc { label: "no shadow cascades", size: orr_render::SHADOW_CASCADES_UNIFORM_BYTES, usage: BufferUsage::UNIFORM | BufferUsage::COPY_DST });
+    rhi.write_buffer(&buffer, 0, &[0; orr_render::SHADOW_CASCADES_UNIFORM_BYTES as usize]);
+    buffer
+}
+
 pub(crate) fn lighting_source() -> String {
     let lighting = include_str!("shaders/lighting.wgsl");
     let shading = &lighting[lighting.find("struct Surface").expect("lighting.wgsl defines Surface")..];
-    format!("{}\n{shading}", include_str!("shaders/pass_lighting.wgsl"))
+    format!("{}\n{}\n{shading}", include_str!("shaders/pass_lighting.wgsl"), orr_render::SHADOW_CASCADES_WGSL)
 }
 
 /// Heights of one terrain, as the view reads its heightmap.
@@ -248,14 +255,18 @@ pub struct OutdoorPass<B: Rhi> {
     globals: B::Buffer,
     shadow_globals: B::Buffer,
     no_shadow: (B::Texture, B::TextureView),
+    /// A cascades uniform with no cascades, bound while the frame has no shadow map.
+    no_cascades: B::Buffer,
     shadow_sampler: B::Sampler,
+    /// This frame's globals; each shadow cascade draws them with its own matrix.
+    frame_globals: Globals,
     scene: OutdoorScene,
     objects: Vec<Object>,
     waters: Vec<WaterMesh<B>>,
     instances: Option<(B::Buffer, u64)>,
-    /// Draw ranges of this frame: (mesh, first instance, count), main then shadow.
+    /// Draw ranges of this frame: (mesh, first instance, count), main then one list per shadow cascade.
     draws: Vec<(u32, u32, u32)>,
-    shadow_draws: Vec<(u32, u32, u32)>,
+    shadow_draws: Vec<Vec<(u32, u32, u32)>>,
     binds: Option<Binds<B>>,
     time: f32,
     /// True once objects and water were made for `scene`.
@@ -366,7 +377,9 @@ impl<B: Rhi> OutdoorPass<B> {
             globals: rhi.create_buffer(&globals_desc("outdoor globals")),
             shadow_globals: rhi.create_buffer(&globals_desc("outdoor shadow globals")),
             no_shadow: (no_shadow, no_shadow_view),
-            shadow_sampler: rhi.create_sampler(&SamplerDesc { linear: true, compare: true }),
+            no_cascades: no_cascades(rhi),
+            frame_globals: Globals::zeroed(),
+            shadow_sampler: rhi.create_sampler(&SamplerDesc { linear: true, compare: true, repeat: false, mipmaps: false }),
             scene: OutdoorScene::default(),
             objects: Vec::new(),
             waters: Vec::new(),
@@ -590,11 +603,7 @@ impl<B: Rhi> RenderPass<B> for OutdoorPass<B> {
         self.pipelines(rhi, frame.color_format);
         let globals = self.globals(frame);
         rhi.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
-        let mut shadow_globals = globals;
-        if let Some(shadow) = &frame.shadow {
-            shadow_globals.view_proj = shadow.light_vp;
-        }
-        rhi.write_buffer(&self.shadow_globals, 0, bytemuck::bytes_of(&shadow_globals));
+        self.frame_globals = globals;
         for water in &self.waters {
             let mut g = globals;
             g.water_color = [water.color[0], water.color[1], water.color[2], water.clarity];
@@ -607,8 +616,9 @@ impl<B: Rhi> RenderPass<B> for OutdoorPass<B> {
         let pipelines = self.pipelines.as_ref().expect("made above");
         if self.binds.as_ref().is_none_or(|b| b.map_id != map_id) || self.waters.iter().any(|w| w.bind.is_none()) {
             let map = frame.shadow.as_ref().map_or(&self.no_shadow.1, |s| s.view);
+            let cascades = frame.shadow.as_ref().map_or(&self.no_cascades, |s| s.cascades);
             let lit = |pipeline: &B::Pipeline, globals: &B::Buffer| {
-                rhi.create_bind_group(pipeline, 0, &[Binding::Uniform { binding: 0, buffer: globals }, Binding::Texture { binding: 1, view: map }, Binding::Sampler { binding: 3, sampler: &self.shadow_sampler }])
+                rhi.create_bind_group(pipeline, 0, &[Binding::Uniform { binding: 0, buffer: globals }, Binding::Texture { binding: 1, view: map }, Binding::Sampler { binding: 3, sampler: &self.shadow_sampler }, Binding::Uniform { binding: 4, buffer: cascades }])
             };
             let props = lit(&pipelines.props, &self.globals);
             let sky = rhi.create_bind_group(&pipelines.sky, 0, &[Binding::Uniform { binding: 0, buffer: &self.globals }]);
@@ -623,12 +633,17 @@ impl<B: Rhi> RenderPass<B> for OutdoorPass<B> {
         // Cull and sort the objects for the camera and for the shadow map.
         let mut main = Vec::new();
         self.sort(&frustum_planes(&frame.view_proj), frame.camera.eye, false, &mut main);
-        let mut cast = Vec::new();
+        // One caster list per cascade, culled by that cascade's box.
+        let mut casts: Vec<Vec<(u32, InstanceRaw)>> = Vec::new();
         if let Some(shadow) = &frame.shadow {
-            self.sort(&frustum_planes(&shadow.light_vp), frame.camera.eye, true, &mut cast);
+            for light_vp in shadow.cascade_light_vp.iter().take(shadow.cascade_count) {
+                let mut cast = Vec::new();
+                self.sort(&frustum_planes(light_vp), frame.camera.eye, true, &mut cast);
+                cast.sort_unstable_by_key(|(mesh, _)| *mesh);
+                casts.push(cast);
+            }
         }
         main.sort_unstable_by_key(|(mesh, _)| *mesh);
-        cast.sort_unstable_by_key(|(mesh, _)| *mesh);
         let ranges = |list: &[(u32, InstanceRaw)], offset: u32| {
             let mut out: Vec<(u32, u32, u32)> = Vec::new();
             for (i, (mesh, _)) in list.iter().enumerate() {
@@ -640,8 +655,16 @@ impl<B: Rhi> RenderPass<B> for OutdoorPass<B> {
             out
         };
         self.draws = ranges(&main, 0);
-        self.shadow_draws = ranges(&cast, main.len() as u32);
-        let raw: Vec<InstanceRaw> = main.iter().chain(&cast).map(|(_, r)| *r).collect();
+        let mut offset = main.len() as u32;
+        self.shadow_draws = casts
+            .iter()
+            .map(|cast| {
+                let draws = ranges(cast, offset);
+                offset += cast.len() as u32;
+                draws
+            })
+            .collect();
+        let raw: Vec<InstanceRaw> = main.iter().chain(casts.iter().flatten()).map(|(_, r)| *r).collect();
         let bytes = (raw.len() * std::mem::size_of::<InstanceRaw>()) as u64;
         if self.instances.as_ref().is_none_or(|(_, size)| *size < bytes) {
             let size = bytes.next_power_of_two().max(1024);
@@ -664,8 +687,17 @@ impl<B: Rhi> RenderPass<B> for OutdoorPass<B> {
             commands
         };
         match stage {
-            PassStage::Shadow if frame.shadow.is_some() && !self.shadow_draws.is_empty() => {
-                rhi.encode_pass(encoder, "outdoor shadow casters", None, Some(depth), &props(&self.prop_shadow, shadow_bind, &self.shadow_draws));
+            PassStage::Shadow => {
+                let Some(shadow) = &frame.shadow else { return };
+                let Some(draws) = self.shadow_draws.get(shadow.cascade).filter(|d| !d.is_empty()) else { return };
+                // The renderer submits each cascade before the next, so this write reaches only this one.
+                let mut globals = self.frame_globals;
+                globals.view_proj = shadow.light_vp;
+                rhi.write_buffer(&self.shadow_globals, 0, bytemuck::bytes_of(&globals));
+                let [x, y, width, height] = shadow.viewport;
+                let mut commands = vec![Command::SetViewport { x, y, width, height }];
+                commands.extend(props(&self.prop_shadow, shadow_bind, draws));
+                rhi.encode_pass(encoder, "outdoor shadow casters", None, Some(depth), &commands);
             }
             PassStage::Opaque if !self.draws.is_empty() => {
                 rhi.encode_pass(encoder, "outdoor vegetation", color, Some(depth), &props(&pipelines.props, props_bind, &self.draws));

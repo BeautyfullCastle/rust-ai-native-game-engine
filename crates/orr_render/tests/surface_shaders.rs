@@ -212,3 +212,29 @@ fn surface_shaders_draw_in_the_composed_scene_path() {
     let shaded = floor_under(&list, &mut procedural);
     assert!(shaded[0] + 60 < lit[0], "the surface-shaded box shades the floor: {shaded:?} with, {lit:?} without");
 }
+
+#[test]
+fn shapes_with_the_same_shader_read_the_images_they_pick() {
+    let Some(gpu) = gpu() else { return };
+    let mut renderer = Renderer3D::with_settings(gpu.clone(), TextureFormat::Rgba8Unorm, Settings3D { msaa: 1, ..Settings3D::LOW });
+    renderer.clear = [0.0, 0.0, 0.0, 1.0];
+    let source = "// @texture picture data = 0, 0, 1, 1\nfn surface(in: SurfaceInput) -> Surface { var s = default_surface(in); s.albedo = picture(vec2<f32>(0.5)).rgb; return s; }";
+    let shader = renderer.add_surface(&SurfaceShader::compile("picture", source).unwrap());
+    let solid = |rgba| orr_render::SurfaceTexture::solid(orr_render::TextureKind::Data, rgba);
+    let red = renderer.add_texture(&solid([1.0, 0.0, 0.0, 1.0]));
+    let green = renderer.add_texture(&solid([0.0, 1.0, 0.0, 1.0]));
+    let camera = Camera3D::orthographic([0.0, 0.0, 5.0], [0.0; 3], 2.0);
+    let gray = Material::new([0.5, 0.5, 0.5]).rough(1.0);
+    let mut list = RenderList3D::new();
+    list.lighting = flat_light();
+    list.with_textured_surface(shader, params(&[]), [Some(red), None, None, None], |list| list.cuboid([-1.3, 0.0, 0.0], IDENTITY_ROT, [0.5; 3], &gray));
+    list.with_textured_surface(shader, params(&[]), [Some(green), None, None, None], |list| list.cuboid([0.0, 0.0, 0.0], IDENTITY_ROT, [0.5; 3], &gray));
+    list.with_surface(shader, params(&[]), |list| list.cuboid([1.3, 0.0, 0.0], IDENTITY_ROT, [0.5; 3], &gray));
+    let img = render(&gpu, &mut renderer, &list, &camera);
+    assert_eq!([px(&img, 17, 48), px(&img, 48, 48), px(&img, 79, 48)], [[255, 0, 0], [0, 255, 0], [0, 0, 255]]);
+
+    // A replaced image keeps its id; the next frame reads the new one.
+    renderer.replace_texture(red, &solid([1.0, 1.0, 1.0, 1.0]));
+    let img = render(&gpu, &mut renderer, &list, &camera);
+    assert_eq!(px(&img, 17, 48), [255, 255, 255]);
+}

@@ -1,6 +1,12 @@
 // The engine side of a surface shader on the 3D renderer's shapes. It sits
 // between the renderer's shader and the contract (surface_contract.wgsl).
 
+@group(1) @binding(0) var surface_texture_0: texture_2d<f32>;
+@group(1) @binding(1) var surface_texture_1: texture_2d<f32>;
+@group(1) @binding(2) var surface_texture_2: texture_2d<f32>;
+@group(1) @binding(3) var surface_texture_3: texture_2d<f32>;
+@group(1) @binding(4) var surface_sampler: sampler;
+
 struct SurfaceOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) world: vec3<f32>,
@@ -65,7 +71,7 @@ fn fs_surface(in: SurfaceOut) -> @location(0) vec4<f32> {
     input.roughness = in.material.x;
     input.metallic = in.material.y;
     input.emissive = in.material.z;
-    input.time = g.viewport.w;
+    input.time = g.viewport.w + surface_textures_keep();
     var s = surface(input);
     // A zero or broken normal from the shader falls back to the shape's normal.
     let length2 = dot(s.normal, s.normal);

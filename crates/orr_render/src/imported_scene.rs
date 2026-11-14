@@ -187,6 +187,11 @@ pub struct ImportedSceneRenderer<B: Rhi> {
     pub post_process: crate::PostProcessSettings,
     /// Lights beyond the sun and the layers the sun affects. Every batch of a frame reads them.
     pub scene_lights: crate::SceneLights,
+    /// Cascades of the sun shadow, 1 to 4. One covers the sphere of
+    /// `Lighting::shadow_center` and `shadow_radius`. Two to four follow the
+    /// camera: each covers a farther stretch of the view, up to 1.5 ×
+    /// `shadow_radius`, so near shadows are sharp and far ones still show.
+    pub shadow_cascades: u32,
     /// Optional diffuse irradiance. Validated before any frame resource/cache mutation.
     /// No coefficient storage is replicated per instance: each asset renderer has
     /// one 9280-byte globals extension next to its 528 bytes of scene lights
@@ -228,6 +233,7 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
             clear: crate::DEFAULT_CLEAR_3D,
             post_process: crate::PostProcessSettings::default(),
             scene_lights: crate::SceneLights::default(),
+            shadow_cascades: 1,
             #[cfg(feature = "irradiance-probes")]
             irradiance: None,
             post_processor: None,
@@ -404,7 +410,7 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
             grid.validate().map_err(ImportedSceneError::Irradiance)?;
         }
         self.validate_target(size, self.format, 1)?;
-        prepare_shared_globals(self.scene_format(), size, camera, lighting)
+        prepare_shared_globals(self.scene_format(), size, camera, lighting, self.shadow_cascades)
             .map_err(ImportedSceneError::Model)?;
         point.validate().map_err(ImportedSceneError::PointLight)?;
         let model_batch_count = models
@@ -531,7 +537,7 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
             return Err(ImportedSceneError::BatchLimit);
         }
         let (mut globals, shadow_ready) =
-            prepare_shared_globals(self.scene_format(), target.size, camera, lighting)
+            prepare_shared_globals(self.scene_format(), target.size, camera, lighting, self.shadow_cascades)
                 .map_err(ImportedSceneError::Model)?;
         #[cfg(feature = "irradiance-probes")]
         {
@@ -747,8 +753,9 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
                 _ => unreachable!("prepared batches preserve order and kind"),
             }
         }
-        if shadow_ready.is_some() {
+        if let Some(ready) = &shadow_ready {
             let map = self.shadow.as_ref().expect("validated shadow map");
+            self.rhi.write_buffer(&map.cascades, 0, bytemuck::bytes_of(&ready.uniform));
             for batch in batches.iter_mut() {
                 match batch {
                     ImportedBatch::Static(r)
@@ -775,14 +782,39 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
                 light_vp: ready.matrix.0,
                 params: ready.params,
                 map_id: map.id,
+                cascades: &map.cascades,
+                cascade: 0,
+                cascade_count: ready.cascades.len(),
+                cascade_light_vp: ready.uniform.vp,
+                viewport: ready.cascades[0].viewport,
             }),
         };
         for pass in &mut self.passes {
             pass.prepare(&self.rhi, &pass_frame);
         }
         let mut encoder = self.rhi.create_encoder("imported scene frame");
-        if shadow_ready.is_some() {
-            let mut commands = Vec::new();
+        if let Some(shadow) = &shadow_ready {
+          for (k, cascade) in shadow.cascades.iter().enumerate() {
+            // Casters draw with the cascade's matrix, written into every batch's
+            // globals. Each cascade is submitted before the next one rewrites them.
+            if k > 0 {
+                let done = std::mem::replace(&mut encoder, self.rhi.create_encoder("imported scene shadow cascade"));
+                self.rhi.submit(done);
+            }
+            let mut cascade_globals = globals;
+            cascade_globals.light_vp = cascade.light_vp;
+            // The first cascade's matrix is already in the globals every batch wrote.
+            for (batch, ready) in batches.iter().zip(&prepared).filter(|_| k > 0) {
+                match (batch, ready) {
+                    (ImportedBatch::Static(r), PreparedBatch::Static) | (ImportedBatch::StaticInstances { renderer: r, .. }, PreparedBatch::StaticInstances(_)) => r.write_frame(&cascade_globals),
+                    (ImportedBatch::Procedural { renderer, .. }, PreparedBatch::Procedural(ready)) => renderer.write_shadow_matrix(ready, cascade.light_vp),
+                    #[cfg(feature = "animation")]
+                    (ImportedBatch::Skinned { renderer, .. }, PreparedBatch::Skinned(_)) => renderer.write_globals(&cascade_globals),
+                    _ => unreachable!("validated prepared batch kind"),
+                }
+            }
+            let [x, y, width, height] = cascade.viewport;
+            let mut commands = vec![orr_rhi::Command::SetViewport { x, y, width, height }];
             for (batch, ready) in batches.iter().zip(&mut prepared) {
                 match (batch, ready) {
                     (ImportedBatch::Static(r), PreparedBatch::Static) => {
@@ -809,15 +841,21 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
                 None,
                 Some(&DepthAttachment {
                     view: &self.shadow.as_ref().expect("validated shadow map").view,
-                    clear: Some(1.0),
+                    // The first cascade clears the whole map.
+                    clear: (k == 0).then_some(1.0),
                     store: true,
                 }),
                 &commands,
             );
             let map = DepthAttachment { view: &self.shadow.as_ref().expect("validated shadow map").view, clear: None, store: true };
+            let cascade_frame = crate::PassFrame {
+                shadow: pass_frame.shadow.as_ref().map(|s| crate::PassShadow { light_vp: cascade.light_vp, cascade: k, viewport: cascade.viewport, ..*s }),
+                ..pass_frame
+            };
             for pass in self.passes.iter().filter(|p| p.stages().contains(&crate::PassStage::Shadow)) {
-                pass.encode(&self.rhi, crate::PassStage::Shadow, &pass_frame, &mut encoder, None, &map);
+                pass.encode(&self.rhi, crate::PassStage::Shadow, &cascade_frame, &mut encoder, None, &map);
             }
+          }
         }
         let depth = &self.depth.as_ref().expect("accepted frame owns depth").view;
         let scene_view = self
@@ -1178,11 +1216,14 @@ mod tests {
                     Command::SetVertexBuffer(_, b) | Command::SetIndexBuffer(b) => {
                         buffers.push(**b)
                     }
-                    Command::SetBindGroup(_, b) => {
+                    Command::SetBindGroup(group, b) => {
                         let binds = self.2.borrow();
                         let (bound_buffers, bound_textures) = binds.get(b).expect("recorded bind");
                         buffers.extend(bound_buffers.iter().copied());
-                        uniforms.extend(bound_buffers.iter().copied());
+                        // Group 0 holds each batch's globals; group 1 the shared shadow map and its cascades.
+                        if *group == 0 {
+                            uniforms.extend(bound_buffers.iter().copied());
+                        }
                         textures.extend(bound_textures.iter().copied());
                     }
                     _ => {}
@@ -2229,7 +2270,7 @@ mod tests {
         assert!(
             first
                 .textures
-                .contains(&(TextureFormat::Depth32Float, 1, (1024, 1024)))
+                .contains(&(TextureFormat::Depth32Float, 1, (SHARED_SHADOW_MAP_SIZE, SHARED_SHADOW_MAP_SIZE)))
         );
         // Main and depth use exactly the same uploaded object/instance/geometry buffers.
         let mut shadow_buffers = first.pass_buffers[0].clone();
@@ -2242,6 +2283,9 @@ mod tests {
             .collect::<Vec<_>>();
         main_buffers.sort_unstable();
         main_buffers.dedup();
+        // Receivers also bind the map's cascades uniform, which casters do not read.
+        let cascades = scene.shadow.as_ref().unwrap().cascades;
+        main_buffers.retain(|buffer| *buffer != cascades);
         assert_eq!(shadow_buffers, main_buffers);
         let mut written = first.written_buffers.clone();
         written.sort_unstable();

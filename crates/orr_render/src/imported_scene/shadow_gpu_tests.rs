@@ -135,7 +135,7 @@ fn read_shadow(g: &Wgpu, scene: &ImportedSceneRenderer<Wgpu>) -> Vec<u8> {
     let size = SHARED_SHADOW_MAP_SIZE;
     let t = target(g, (size, size), FORMAT);
     let view = g.create_texture_view(&t, None);
-    let shader = g.create_shader("inspect actual shared map", SHADER);
+    let shader = g.create_shader("inspect actual shared map", &SHADER.replace("1024.0", &format!("{}.0", SHARED_SHADOW_MAP_SIZE)));
     let pipeline = g.create_pipeline(&PipelineDesc::color(
         "inspect actual shared map",
         &shader,
@@ -144,10 +144,7 @@ fn read_shadow(g: &Wgpu, scene: &ImportedSceneRenderer<Wgpu>) -> Vec<u8> {
         FORMAT,
         Blend::Opaque,
     ));
-    let sampler = g.create_sampler(&SamplerDesc {
-        linear: false,
-        compare: true,
-    });
+    let sampler = g.create_sampler(&SamplerDesc { linear: false, compare: true, repeat: false, mipmaps: false });
     let group = g.create_bind_group(
         &pipeline,
         0,
@@ -531,7 +528,7 @@ fn shared_shadow_gpu_all_cross_type_cast_receive_pairs_and_reversed_batches() {
                     false,
                 );
                 assert_receiver_shadow(&baseline, &shadowed, &cam, [-0.53, 0.0, 0.0], &label);
-                assert_eq!(scene.shadow_map_size(), Some(1024));
+                assert_eq!(scene.shadow_map_size(), Some(SHARED_SHADOW_MAP_SIZE));
                 assert_eq!(scene.shadow_map_generation(), 1);
                 let map = read_shadow(&g, &scene);
                 assert!(
@@ -629,7 +626,7 @@ fn shared_shadow_gpu_all_cross_type_cast_receive_pairs_and_reversed_batches() {
                 );
                 assert_eq!(scene.shadow_map_generation(), 1);
                 capture(&format!("{label}-main"), &shadowed, (SIZE, SIZE), false);
-                capture(&format!("{label}-depth"), &map, (1024, 1024), true);
+                capture(&format!("{label}-depth"), &map, (SHARED_SHADOW_MAP_SIZE, SHARED_SHADOW_MAP_SIZE), true);
             }
         }
     }
@@ -691,12 +688,13 @@ fn light_project(p: [f32; 3], lighting: &Lighting) -> [f32; 3] {
     let side = unit(cross(forward, helper));
     let up = cross(side, forward);
     let radius = lighting.shadow_radius;
-    let texel = 2.0 * radius / 1024.0;
+    let texels = SHARED_SHADOW_MAP_SIZE as f32;
+    let texel = 2.0 * radius / texels;
     let centered =
         |axis| dot(p, axis) - (dot(lighting.shadow_center, axis) / texel).round() * texel;
     [
-        (centered(side) / radius * 0.5 + 0.5) * 1024.0,
-        (0.5 - centered(up) / radius * 0.5) * 1024.0,
+        (centered(side) / radius * 0.5 + 0.5) * texels,
+        (0.5 - centered(up) / radius * 0.5) * texels,
         (centered(forward) + 3.0 * radius - 0.1) / (6.0 * radius - 0.1),
     ]
 }
@@ -765,10 +763,10 @@ fn assert_shadow_oracle(map: &[u8], surfaces: &[Surface], lighting: &Lighting, l
     }).collect();
     let mut maximum_width = 0.0_f64;
     // Full actual texture is read; a regular 2x2 sample grid bounds CPU cost.
-    for y in (0..1024).step_by(2) {
-        for x in (0..1024).step_by(2) {
+    for y in (0..SHARED_SHADOW_MAP_SIZE).step_by(2) {
+        for x in (0..SHARED_SHADOW_MAP_SIZE).step_by(2) {
             let (near, expected) = oracle_sample(&triangles, x, y);
-            let at = (y as usize * 1024 + x as usize) * 4;
+            let at = (y as usize * SHARED_SHADOW_MAP_SIZE as usize + x as usize) * 4;
             let actual = &map[at..at + 4];
             if expected.is_some() {
                 assert_eq!(
@@ -951,7 +949,7 @@ fn shared_shadow_gpu_actual_depth_matches_independent_cpu_skinning_and_light_pro
                     (SIZE, SIZE),
                     false,
                 );
-                capture(&format!("analytic-{label}-depth"), &map, (1024, 1024), true);
+                capture(&format!("analytic-{label}-depth"), &map, (SHARED_SHADOW_MAP_SIZE, SHARED_SHADOW_MAP_SIZE), true);
                 previous_map = Some(map);
                 previous_main = Some(pixels);
             }
@@ -1061,9 +1059,10 @@ fn shared_shadow_gpu_two_independent_poses_repeat_empty_and_resize_without_stale
                 "independent main pose region {index}"
             );
         }
-        for y in 0..1024usize {
-            let (start, end) = if index == 0 { (0, 512) } else { (512, 1024) };
-            let range = (y * 1024 + start) * 4..(y * 1024 + end) * 4;
+        let (full, half) = (SHARED_SHADOW_MAP_SIZE as usize, SHARED_SHADOW_MAP_SIZE as usize / 2);
+        for y in 0..full {
+            let (start, end) = if index == 0 { (0, half) } else { (half, full) };
+            let range = (y * full + start) * 4..(y * full + end) * 4;
             assert_eq!(
                 first_map[range.clone()],
                 single_map[range],
@@ -1118,8 +1117,9 @@ fn shared_shadow_gpu_two_independent_poses_repeat_empty_and_resize_without_stale
             "changing first pose changed second pose main pixels"
         );
     }
-    for y in 0..1024usize {
-        let range = (y * 1024 + 512) * 4..(y + 1) * 1024 * 4;
+    let (full, half) = (SHARED_SHADOW_MAP_SIZE as usize, SHARED_SHADOW_MAP_SIZE as usize / 2);
+    for y in 0..full {
+        let range = (y * full + half) * 4..(y + 1) * full * 4;
         assert_eq!(
             first_map[range.clone()],
             changed_map[range],
@@ -1154,7 +1154,7 @@ fn shared_shadow_gpu_two_independent_poses_repeat_empty_and_resize_without_stale
     );
     assert_eq!(scene.depth_size(), Some(resized_size));
     assert_eq!(scene.depth_generation(), 2);
-    assert_eq!(scene.shadow_map_size(), Some(1024));
+    assert_eq!(scene.shadow_map_size(), Some(SHARED_SHADOW_MAP_SIZE));
     assert_eq!(scene.shadow_map_generation(), 1);
     let empty = draw(
         &g,

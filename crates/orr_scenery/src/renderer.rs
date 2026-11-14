@@ -329,8 +329,8 @@ impl<B: Rhi> Renderer<B> {
 
         let shadow_usage = TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING;
         let shadow_maps = std::array::from_fn(|i| target(&rhi, "scenery shadow map", (shadow_size[i], shadow_size[i]), DEPTH, shadow_usage, 1));
-        let shadow_sampler = rhi.create_sampler(&SamplerDesc { linear: true, compare: true });
-        let linear_sampler = rhi.create_sampler(&SamplerDesc { linear: true, compare: false });
+        let shadow_sampler = rhi.create_sampler(&SamplerDesc { linear: true, compare: true, repeat: false, mipmaps: false });
+        let linear_sampler = rhi.create_sampler(&SamplerDesc { linear: true, compare: false, repeat: false, mipmaps: false });
 
         let terrain_shader = rhi.create_shader("scenery terrain", &[COMMON, LIGHTING, include_str!("shaders/terrain.wgsl")].concat());
         let prop_shader = rhi.create_shader("scenery props", &[COMMON, LIGHTING, include_str!("shaders/props.wgsl")].concat());

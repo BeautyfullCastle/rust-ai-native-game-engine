@@ -116,6 +116,14 @@ pub struct Light {
     /// The render layers this light affects. A light with no layer lights nothing.
     #[reflect(flags = "default=1,layer2=2,layer3=4,layer4=8,layer5=16,layer6=32,layer7=64,layer8=128")]
     pub layers: u32,
+    /// Cascades of the sun's shadows while its area follows the view
+    /// (`shadow_range` above zero): 1 to 4. Each covers a farther stretch of
+    /// the view, so near shadows are sharp and far ones still show.
+    #[reflect(range = "1..=4")]
+    pub shadow_cascades: u32,
+    /// Always zero. It keeps the layout free of padding.
+    #[reflect(skip)]
+    pub reserved: u32,
 }
 
 impl Default for Light {
@@ -132,6 +140,8 @@ impl Default for Light {
             enabled: 1,
             cast_shadows: 0,
             layers: ALL_LAYERS,
+            shadow_cascades: 4,
+            reserved: 0,
         }
     }
 }
@@ -167,13 +177,20 @@ impl Default for RenderLayers {
 pub const SHADER_NAME_BYTES: usize = 48;
 /// Parameter values a [`Material`] holds.
 pub const MATERIAL_VALUES: usize = 16;
+/// Texture slots a [`Material`] holds, one per texture the shader declares.
+pub const MATERIAL_TEXTURES: usize = 4;
+/// Most bytes of one texture path in a [`Material`].
+pub const MATERIAL_TEXTURE_PATH_BYTES: usize = 128;
 
 /// A surface shader on an entity. The entity's shape is drawn with the shader
 /// instead of the built-in material, and the engine still lights it.
 ///
 /// The editor reads the shader from `shaders/<shader>.wgsl` next to the scene
 /// file. The shader declares its parameters (`// @param tint color`); their
-/// numbers are stored here in declaration order.
+/// numbers are stored here in declaration order. It also declares textures
+/// (`// @texture grass color`); `texture_0` to `texture_3` hold the PNG path
+/// of each, from the scene's folder, in declaration order. An empty path
+/// reads the shader's default for that texture.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable, Reflect)]
 pub struct Material {
@@ -187,6 +204,35 @@ pub struct Material {
     pub overrides: u32,
     #[reflect(skip)]
     _pad: u32,
+    /// The image of the shader's first declared texture.
+    #[reflect(asset = "texture")]
+    pub texture_0: [u8; MATERIAL_TEXTURE_PATH_BYTES],
+    /// The image of the shader's second declared texture.
+    #[reflect(asset = "texture")]
+    pub texture_1: [u8; MATERIAL_TEXTURE_PATH_BYTES],
+    /// The image of the shader's third declared texture.
+    #[reflect(asset = "texture")]
+    pub texture_2: [u8; MATERIAL_TEXTURE_PATH_BYTES],
+    /// The image of the shader's fourth declared texture.
+    #[reflect(asset = "texture")]
+    pub texture_3: [u8; MATERIAL_TEXTURE_PATH_BYTES],
+}
+
+/// `text` as zero-padded bytes, cut at a character boundary.
+fn padded<const N: usize>(text: &str) -> [u8; N] {
+    let mut bytes = [0; N];
+    let mut len = text.len().min(N);
+    while !text.is_char_boundary(len) {
+        len -= 1;
+    }
+    bytes[..len].copy_from_slice(&text.as_bytes()[..len]);
+    bytes
+}
+
+/// The text of zero-padded `bytes`; empty when it is not UTF-8.
+fn unpadded(bytes: &[u8]) -> &str {
+    let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
+    core::str::from_utf8(&bytes[..end]).unwrap_or("")
 }
 
 impl Material {
@@ -200,7 +246,38 @@ impl Material {
             len -= 1;
         }
         shader[..len].copy_from_slice(&name.as_bytes()[..len]);
-        Self { shader, values: [FP::ZERO; MATERIAL_VALUES], overrides: 0, _pad: 0 }
+        Self {
+            shader,
+            values: [FP::ZERO; MATERIAL_VALUES],
+            overrides: 0,
+            _pad: 0,
+            texture_0: [0; MATERIAL_TEXTURE_PATH_BYTES],
+            texture_1: [0; MATERIAL_TEXTURE_PATH_BYTES],
+            texture_2: [0; MATERIAL_TEXTURE_PATH_BYTES],
+            texture_3: [0; MATERIAL_TEXTURE_PATH_BYTES],
+        }
+    }
+
+    fn texture_slot(&self, slot: usize) -> Option<&[u8; MATERIAL_TEXTURE_PATH_BYTES]> {
+        [&self.texture_0, &self.texture_1, &self.texture_2, &self.texture_3].get(slot).copied()
+    }
+
+    /// The image path of texture `slot`, empty when none is set or the slot does not exist.
+    pub fn texture_path(&self, slot: usize) -> &str {
+        self.texture_slot(slot).map_or("", |bytes| unpadded(bytes))
+    }
+
+    /// Sets the image path of texture `slot`; a slot past [`MATERIAL_TEXTURES`]
+    /// is ignored. A path longer than [`MATERIAL_TEXTURE_PATH_BYTES`] is cut.
+    pub fn set_texture(&mut self, slot: usize, path: &str) {
+        let bytes = padded(path);
+        match slot {
+            0 => self.texture_0 = bytes,
+            1 => self.texture_1 = bytes,
+            2 => self.texture_2 = bytes,
+            3 => self.texture_3 = bytes,
+            _ => {}
+        }
     }
 
     /// The shader name, without the zero padding.

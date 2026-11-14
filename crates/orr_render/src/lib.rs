@@ -35,6 +35,13 @@ pub mod renderer;
 pub mod renderer3d;
 pub mod scene_lights;
 pub mod surface;
+
+/// The cascade functions every shader that reads the shared sun shadow map
+/// includes (`cascaded_visibility`); see shadow_cascades.wgsl.
+pub const SHADOW_CASCADES_WGSL: &str = include_str!("shadow_cascades.wgsl");
+/// Bytes of the `ShadowCascades` uniform of [`SHADOW_CASCADES_WGSL`].
+pub const SHADOW_CASCADES_UNIFORM_BYTES: u64 = 416;
+pub mod surface_texture;
 mod stats;
 pub mod targets;
 pub mod text;
@@ -44,7 +51,8 @@ pub use camera3d::{Camera3D, OrbitCamera, Projection};
 pub use list3d::{Instance3D, Lighting, LineInstance3D, Material, RenderList3D, SurfaceInstance, IDENTITY_ROT};
 pub use mesh::{MeshKind, MeshSet, Vertex3, DEFAULT_SEGMENTS};
 pub use renderer3d::{light_view_proj, Renderer3D, Settings3D, SphereLod3D, SphereLodError3D, SphereLodStats3D, DEFAULT_CLEAR_3D};
-pub use surface::{ParamKind, ShaderError, SurfaceId, SurfaceParam, SurfaceShader, MAX_SURFACE_FLOATS};
+pub use surface::{ParamKind, ShaderError, SurfaceId, SurfaceParam, SurfaceShader, SurfaceTextureSlot, TextureKind, MAX_SURFACE_FLOATS, MAX_SURFACE_TEXTURES};
+pub use surface_texture::{SurfaceTexture, TextureId, MAX_SURFACE_TEXTURE_SIZE};
 pub use scene_lights::{SceneLight, SceneLightError, SceneLightKind, SceneLights, ALL_RENDER_LAYERS, DEFAULT_RENDER_LAYER, MAX_SCENE_LIGHTS, RENDER_LAYER_COUNT};
 pub use extract::{extract_items, instance_of};
 pub use list::{LineInstance, RenderList, ShapeInstance};
@@ -73,7 +81,9 @@ pub mod model_renderer;
 #[cfg(feature = "models")]
 pub use model_renderer::{ModelRenderer, ModelRenderError, StaticInstance, StaticInstanceError};
 #[cfg(feature = "imported-scene")]
-pub use model_renderer::ModelSurface;
+mod model_surfaces;
+#[cfg(feature = "imported-scene")]
+pub use model_surfaces::ModelSurface;
 
 #[cfg(feature = "animation")]
 pub mod skinned;
@@ -96,6 +106,8 @@ pub use renderer3d::ProceduralSceneError;
 mod shared_shadow;
 #[cfg(feature = "imported-scene")]
 pub use shared_shadow::{MAX_IMPORTED_CASTERS, SHARED_SHADOW_MAP_SIZE};
+/// Most cascades of the shared sun shadow map.
+pub const MAX_SHADOW_CASCADES: u32 = 4;
 
 pub mod post_effects;
 pub use post_effects::ScreenEffect;

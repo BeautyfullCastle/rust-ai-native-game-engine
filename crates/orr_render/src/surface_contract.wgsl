@@ -38,3 +38,16 @@ fn default_surface(in: SurfaceInput) -> Surface {
 }
 
 var<private> surface_raw: array<f32, 16>;
+
+// Surface textures. The glue of each renderer binds `surface_texture_0` to
+// `surface_texture_3`, each with its whole mip chain, and `surface_sampler`,
+// which repeats and filters between mip levels.
+
+// Zero. The renderers bind all four slots and the sampler for every shader,
+// and this use keeps each in the pipeline's binding layout when a shader
+// reads fewer. Texture values are at most 1, so the step is always zero.
+fn surface_textures_keep() -> f32 {
+    let n = textureDimensions(surface_texture_0).x + textureDimensions(surface_texture_1).x
+        + textureDimensions(surface_texture_2).x + textureDimensions(surface_texture_3).x;
+    return f32(min(n, 0u)) + step(2.0, textureSampleLevel(surface_texture_0, surface_sampler, vec2<f32>(0.0), 0.0).x);
+}

@@ -45,6 +45,7 @@ entities:
       enabled: true
       cast_shadows: false
       layers: [default, layer3]
+      shadow_cascades: 2
   e_00000002:
     name: hero
     orr_gfx::RenderLayers:
@@ -90,7 +91,7 @@ singletons:
     assert_eq!(light.kind, LIGHT_SPOT);
     assert_eq!((light.intensity, light.range), (FP::from_ratio(5, 2), FP::from_int(6)));
     assert_eq!((light.enabled, light.cast_shadows), (1, 0));
-    assert_eq!(light.layers, 0b101);
+    assert_eq!((light.layers, light.shadow_cascades), (0b101, 2));
     let transform = frame.get::<Transform3>(lamp).unwrap();
     assert_eq!(transform.position, FPVec3::new(FP::from_ratio(3, 2), FP::from_int(3), FP::from_int(-2)));
     assert_eq!(transform.rotation.x, FP::from_int(60));
@@ -159,7 +160,7 @@ fn a_material_names_its_shader_as_text_in_the_scene_file() {
     use orr_gfx::{Material, MATERIAL_VALUES, SHADER_NAME_BYTES};
     let types = types();
     let values: Vec<String> = (0..MATERIAL_VALUES).map(|i| if i == 3 { "12.5".into() } else { "0".into() }).collect();
-    let text = format!("schema: orr.scene/1\nentities:\n  e_00000001:\n    orr_gfx::Material:\n      shader: stripes\n      values: [{}]\n      overrides: 8\n", values.join(", "));
+    let text = format!("schema: orr.scene/1\nentities:\n  e_00000001:\n    orr_gfx::Material:\n      shader: stripes\n      values: [{}]\n      overrides: 8\n      texture_0: textures/grass.png\n      texture_1: ''\n      texture_2: ''\n      texture_3: ''\n", values.join(", "));
     let scene = Scene::parse(&text, &types).unwrap_or_else(|e| panic!("{e}"));
     let mut frame = frame();
     let index = scene.bake(&types, &mut frame).unwrap();
@@ -167,8 +168,9 @@ fn a_material_names_its_shader_as_text_in_the_scene_file() {
     let material = frame.get::<Material>(e).unwrap();
     assert_eq!(material.shader_name(), "stripes");
     assert_eq!((material.values[3], material.overrides), (FP::from_ratio(25, 2), 8));
+    assert_eq!((material.texture_path(0), material.texture_path(1), material.texture_path(9)), ("textures/grass.png", "", ""));
     let written = Scene::unbake(&types, &frame, Some(&index)).unwrap().to_yaml();
-    assert!(written.contains("shader: stripes"), "{written}");
+    assert!(written.contains("shader: stripes") && written.contains("texture_0: textures/grass.png"), "{written}");
 
     // A name that needs quotes in YAML is written with them and reads back the same.
     let mut odd = *material;
