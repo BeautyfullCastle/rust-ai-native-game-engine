@@ -111,6 +111,9 @@ pub struct Scratch {
     static_points: Vec<StaticContact>,
     static_cache: Vec<ContactCache>,
     current_binv: Vec<BodyInv>,
+    joints: Vec<crate::joints::JointRow>,
+    /// Per body: held by a joint, so it does not fall asleep.
+    held: Vec<bool>,
     /// External support seen in the incoming cache or any substep. Endpoint
     /// contacts clear this bit; a remaining bit prohibits sleep this tick.
     static_support_lost: Vec<bool>,
@@ -549,10 +552,23 @@ impl Scratch {
                     self.vw[i].v += g;
                 }
             }
+            if !self.joints.is_empty() {
+                crate::joints::begin_substep(&mut self.joints, &self.pw, h, integrate_rot);
+            }
             if !self.cons.is_empty() {
                 solver::update_targets(&self.cons, &mut self.pool, &self.pw, cfg, h);
                 solver::warm_start(&self.cons, &self.pool, &mut self.vw);
-                solver::solve(&mut self.cons, &mut self.pool, &mut self.vw, cfg.velocity_iterations);
+            }
+            if self.joints.is_empty() {
+                if !self.cons.is_empty() {
+                    solver::solve(&mut self.cons, &mut self.pool, &mut self.vw, cfg.velocity_iterations);
+                }
+            } else {
+                // Joints after contacts in every iteration.
+                for it in 0..cfg.velocity_iterations {
+                    solver::solve_range(&mut self.cons, &mut self.pool, &mut self.vw, it, 1);
+                    crate::joints::solve(&mut self.joints, &mut self.vw);
+                }
             }
             for &i in &self.movers {
                 let i = i as usize;
@@ -872,7 +888,7 @@ impl Scratch {
         for &i in &self.movers {
             let i = i as usize;
             let mut t = 0;
-            if enabled && self.flags[i] & F_DYN != 0 {
+            if enabled && self.flags[i] & F_DYN != 0 && !self.held.get(i).copied().unwrap_or(false) {
                 let x = self.vw[i];
                 let support_lost = self.static_support_lost.get(i).copied().unwrap_or(false);
                 let supported = self.static_sleep_supported.get(i).copied().unwrap_or(true);
@@ -1214,6 +1230,7 @@ fn step_impl<E>(
         } else {
             solver::prepare(&mut sc.cons, &mut sc.pool, &sc.binv, &sc.vw, &cfg);
         }
+        sc.joints = crate::joints::prepare(frame, &sc.ents, &sc.bslot, bd, &sc.binv, &mut sc.held);
         probe(Phase::Prepare);
         if let Some(source) = source.as_mut() {
             sc.run_static_substeps(bd, cd, old_cache, &cfg, source)?;
