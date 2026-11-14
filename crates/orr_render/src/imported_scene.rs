@@ -1003,6 +1003,7 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
                 camera.eye,
                 target.size,
                 jitter,
+                self.shadow.as_ref().filter(|_| shadow_ready.is_some()).map(|map| (&map.view, &map.sampler, &map.cascades)),
             );
         }
         self.rhi.submit(encoder);

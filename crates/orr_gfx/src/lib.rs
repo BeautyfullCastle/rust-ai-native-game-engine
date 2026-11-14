@@ -351,6 +351,9 @@ pub const EFFECT_DEPTH_OF_FIELD: u32 = 14;
 pub const EFFECT_MOTION_BLUR: u32 = 15;
 /// [`PostEffect::kind`]: red and blue split toward the picture's edges. Params: strength.
 pub const EFFECT_CHROMATIC_ABERRATION: u32 = 16;
+/// [`PostEffect::kind`]: sunlight scattered in fog through the sun's shadows.
+/// Params: density per meter, anisotropy, distance in meters, intensity.
+pub const EFFECT_VOLUMETRIC_FOG: u32 = 17;
 /// Slots in [`PostProcess::effects`].
 pub const POST_EFFECTS: usize = 8;
 
@@ -361,13 +364,14 @@ pub const POST_EFFECTS: usize = 8;
 #[reflect(default)]
 pub struct PostEffect {
     /// Which effect this slot holds.
-    #[reflect(enumeration = "none=0,bloom=1,light_shafts=2,auto_exposure=3,color_grade=4,vignette=5,film_grain=6,ssao=7,toon=8,outline=9,fxaa=10,upscale=11,taa=12,ssr=13,depth_of_field=14,motion_blur=15,chromatic_aberration=16")]
+    #[reflect(enumeration = "none=0,bloom=1,light_shafts=2,auto_exposure=3,color_grade=4,vignette=5,film_grain=6,ssao=7,toon=8,outline=9,fxaa=10,upscale=11,taa=12,ssr=13,depth_of_field=14,motion_blur=15,chromatic_aberration=16,volumetric_fog=17")]
     pub kind: u32,
     /// Whether the effect runs.
     #[reflect(bool)]
     pub enabled: u32,
-    /// The numbers of the effect.
-    #[reflect(range = "-100..=100")]
+    /// The numbers of the effect. Each effect's own range is in [`effect_params`];
+    /// distances in meters reach 10000.
+    #[reflect(range = "-10000..=10000")]
     pub params: [FP; 4],
 }
 
@@ -401,6 +405,7 @@ pub fn effect_params(kind: u32) -> &'static [EffectParam] {
     const DEPTH_OF_FIELD_PARAMS: &[EffectParam] = &[("focus", r(1, 10), r(10000, 1), r(10, 1)), ("range", r(0, 1), r(1000, 1), r(5, 1)), ("blur", r(0, 1), r(16, 1), r(6, 1))];
     const MOTION_BLUR_PARAMS: &[EffectParam] = &[("strength", r(0, 1), r(2, 1), r(1, 2)), ("limit", r(1, 1), r(64, 1), r(24, 1))];
     const CHROMATIC_ABERRATION_PARAMS: &[EffectParam] = &[("strength", r(0, 1), r(1, 1), r(3, 10))];
+    const VOLUMETRIC_FOG_PARAMS: &[EffectParam] = &[("density", r(0, 1), r(1, 2), r(2, 100)), ("anisotropy", r(0, 1), r(95, 100), r(6, 10)), ("distance", r(1, 1), r(1000, 1), r(80, 1)), ("intensity", r(0, 1), r(8, 1), r(1, 1))];
     match kind {
         EFFECT_BLOOM => BLOOM_PARAMS,
         EFFECT_LIGHT_SHAFTS => LIGHT_SHAFTS_PARAMS,
@@ -418,6 +423,7 @@ pub fn effect_params(kind: u32) -> &'static [EffectParam] {
         EFFECT_DEPTH_OF_FIELD => DEPTH_OF_FIELD_PARAMS,
         EFFECT_MOTION_BLUR => MOTION_BLUR_PARAMS,
         EFFECT_CHROMATIC_ABERRATION => CHROMATIC_ABERRATION_PARAMS,
+        EFFECT_VOLUMETRIC_FOG => VOLUMETRIC_FOG_PARAMS,
         _ => &[],
     }
 }

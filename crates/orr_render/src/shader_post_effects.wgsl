@@ -48,6 +48,8 @@ struct Effects {
     dof: vec4<f32>,
     // x: motion blur strength, y: longest streak (pixels), z: chromatic aberration strength.
     blur: vec4<f32>,
+    // Volumetric fog: density per meter, anisotropy, ray length (m), intensity.
+    volume: vec4<f32>,
 };
 
 @group(0) @binding(0) var scene: texture_2d<f32>;
@@ -63,6 +65,10 @@ struct Effects {
 @group(0) @binding(9) var picture: texture_2d<f32>;
 // The temporal history of the previous frame.
 @group(0) @binding(10) var history: texture_2d<f32>;
+// The frame's shared sun shadow, for volumetric fog (shadow_cascades.wgsl is added after this file).
+@group(0) @binding(11) var shared_shadow_map: texture_depth_2d;
+@group(0) @binding(12) var shared_shadow_sampler: sampler_comparison;
+@group(0) @binding(13) var<uniform> shadow_cascades: ShadowCascades;
 
 struct Screen { @builtin(position) position: vec4<f32> };
 
@@ -645,4 +651,35 @@ fn circle_of_confusion(pos: vec2<i32>) -> f32 {
     let red = textureSampleLevel(scene, linear_sampler, uv + shift, 0.0).r;
     let blue = textureSampleLevel(scene, linear_sampler, uv - shift, 0.0).b;
     return vec4<f32>(red, base.g, blue, base.a);
+}
+
+// Volumetric fog: 24 steps along the view ray to the surface (or the ray's
+// length), each lit by the sun as far as the cascades let it through, scattered
+// toward the eye by a Henyey-Greenstein phase and dimmed by the fog in front.
+@fragment fn fs_volumetric(in: Screen) -> @location(0) vec4<f32> {
+    let pos = vec2<i32>(in.position.xy);
+    let base = textureLoad(scene, pos, 0) + vec4<f32>(0.0, 0.0, 0.0, stage_inputs_keep());
+    let end = world_at(pos);
+    let to_end = end - fx.eye.xyz;
+    let length_to_end = select(length(to_end), fx.volume.z, is_sky(pos));
+    let span = min(length_to_end, fx.volume.z);
+    let dir = to_end / max(length(to_end), 1e-4);
+    let steps = 24;
+    let dt = span / f32(steps);
+    let density = fx.volume.x;
+    let g = fx.volume.y;
+    let mu = dot(dir, fx.sun_dir.xyz);
+    let phase = (1.0 - g * g) / (12.566371 * pow(max(1.0 + g * g - 2.0 * g * mu, 1e-4), 1.5));
+    let sun = fx.sun_tint.rgb * fx.volume.w;
+    var light = vec3<f32>(0.0);
+    var through = 1.0;
+    let start = interleaved(in.position.xy);
+    for (var i = 0; i < steps; i = i + 1) {
+        let p = fx.eye.xyz + dir * (f32(i) + start) * dt;
+        let lit = cascaded_visibility(p, vec3<f32>(0.0));
+        let step_through = exp(-density * dt);
+        light = light + sun * lit * phase * through * (1.0 - step_through);
+        through = through * step_through;
+    }
+    return vec4<f32>(base.rgb * through + light, base.a);
 }

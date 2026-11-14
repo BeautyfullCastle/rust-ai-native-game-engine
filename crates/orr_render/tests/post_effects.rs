@@ -555,3 +555,40 @@ fn spot_shadows_alone_leave_the_sun_unshadowed_on_shapes() {
         assert_eq!(px(&plain, x, y), px(&spotted, x, y), "the sunlit shape at {x},{y} gets no shadow from an unused map");
     }
 }
+
+/// A dark wall 11 meters ahead of a camera at eye height and, with `roof`, a wide plate 2 meters overhead.
+fn under_a_roof(roof: bool) -> Vec<([f32; 3], Vec<StaticInstance>)> {
+    let half = std::f32::consts::FRAC_PI_4;
+    let wall = StaticInstance { translation: [0.0, 1.0, -6.0], scale: [16.0; 3], ..Default::default() };
+    let mut groups = vec![([0.05; 3], vec![wall])];
+    if roof {
+        let plate = StaticInstance { translation: [0.0, 3.0, 0.0], rotation: [half.sin(), 0.0, 0.0, half.cos()], scale: [40.0; 3] };
+        groups.push(([0.05; 3], vec![plate]));
+    }
+    groups
+}
+
+fn sun_from_above() -> Lighting {
+    let mut sun = light(0.05);
+    sun.intensity = 2.0;
+    sun.direction = [0.0, -1.0, 0.0];
+    sun.shadows = true;
+    sun.shadow_center = [0.0, 1.0, 0.0];
+    sun.shadow_radius = 20.0;
+    sun
+}
+
+#[test]
+fn volumetric_fog_lights_the_air_except_in_shadow() {
+    let Some(g) = gpu() else { return };
+    let camera = |_| Camera3D::perspective([0.0, 1.0, 5.0], [0.0, 1.0, -5.0], 50.0);
+    let fog = [ScreenEffect::VolumetricFog { density: 0.1, anisotropy: 0.0, distance: 20.0, intensity: 4.0 }];
+    // Mean red of the lower half, under the roof line.
+    let lower = |image: &[u8]| (SIZE / 2..SIZE).flat_map(|y| (0..SIZE).map(move |x| (x, y))).map(|(x, y)| f32::from(px(image, x, y)[0])).sum::<f32>() / (SIZE * SIZE / 2) as f32;
+    let clear = render_groups(&g, camera, &under_a_roof(false), &sun_from_above(), &[], 1);
+    let open = render_groups(&g, camera, &under_a_roof(false), &sun_from_above(), &fog, 1);
+    let roofed = render_groups(&g, camera, &under_a_roof(true), &sun_from_above(), &fog, 1);
+    let (a, b, c) = (lower(&clear), lower(&open), lower(&roofed));
+    assert!(b > a + 20.0, "sunlit fog brightens the view: {a} clear, {b} fog");
+    assert!(c + 15.0 < b, "fog in the roof's shadow gets far less light: {b} open, {c} roofed");
+}
