@@ -155,7 +155,8 @@ fn show_field(ui: &mut Ui, base: Id, label: &str, ty: &TypeDesc, value: &Value, 
             });
         }
         _ => {
-            ui.horizontal(|ui| {
+            // A row wider than the panel wraps instead of widening it, which would shift the viewport mid-drag.
+            ui.horizontal_wrapped(|ui| {
                 ui.label(label).on_hover_text(&hover);
                 scalar(ui, id, ty, value, path, label, &hover, out);
             });
