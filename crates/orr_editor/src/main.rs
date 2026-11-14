@@ -144,6 +144,7 @@ fn main() {
                 let (_,_,_,models)=project.into_parts();
                 app.models.install_room(models).unwrap_or_else(|error|fail(&format!("room presentation: {error}")));
             }
+            app.ui.camera_view = args.camera_view;
             if let Some(job) = shot {
                 app = app.with_screenshot(job);
             }

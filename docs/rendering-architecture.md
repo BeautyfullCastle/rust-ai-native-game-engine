@@ -1,6 +1,6 @@
 # 렌더링 구조: 씬 컴포넌트에서 화면까지
 
-갱신: 2026-11-13. 관련 이슈: [#101](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/101) (HDR·조명·프로브), [#102](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/102) (지형).
+갱신: 2026-11-14. 관련 이슈: [#101](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/101) (HDR·조명·프로브), [#102](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/102) (지형).
 
 이 문서는 렌더링 기능을 엔진 사용자가 어떻게 켜고 끄고 설정하는지 정한다. 원칙은 하나다. **씬에 보이는 것과 보이는 방식은 모두 씬 데이터다.** 조명, 렌더 레이어, 환경광, 후처리는 엔티티의 컴포넌트나 씬 싱글턴으로 존재한다. 그래서 씬 파일에 저장되고, 에디터 인스펙터와 `orr` 명령으로 같은 방식으로 고치며, 실행 취소된다.
 
@@ -184,12 +184,16 @@ orr set box_left orr_gfx::Material.values[3]=6 orr_gfx::Material.overrides=8
 
 ```mermaid
 flowchart LR
-    A[장면 HDR] --> F[높이 안개<br/>Sky가 켜져 있으면]
+    A[장면 HDR<br/>upscale이 있으면 축소 크기] --> O[주변광 차폐 ssao]
+    O --> F[높이 안개<br/>Sky가 켜져 있으면]
     F --> B[bloom, 빛줄기<br/>목록 순서]
     B --> X[자동 노출 측정]
     X --> E[노출 × 톤 매핑<br/>딱 한 번]
-    E --> D[색 보정, 비네트, 필름 입자<br/>목록 순서]
+    E --> D[색 보정, 비네트, 필름 입자,<br/>툰, 외곽선<br/>목록 순서]
     D --> S[sRGB 인코딩]
+    S --> AA[fxaa]
+    AA --> U[upscale: EASU 확대 → RCAS 선명화]
+    U --> T[대상]
 ```
 
 | 종류 | 숫자 |
@@ -200,6 +204,17 @@ flowchart LR
 | `color_grade` | saturation, contrast, warmth, tint |
 | `vignette` | strength, radius, softness |
 | `film_grain` | strength |
+| `ssao` | strength (0~2), radius (미터) |
+| `toon` | bands (2~8), softness |
+| `outline` | thickness (픽셀), sensitivity, darkness |
+| `fxaa` | strength |
+| `upscale` | scale (0.5~1), sharpness |
+
+- `ssao`: 깊이에서 위치와 노멀을 복원해 반경 안에서 표면보다 솟은 점을 12개 샘플로 센다. 절반 해상도로 계산하고 최종 패스에서 네 번 샘플해 부드럽게 한다. 장면 색 전체에 곱해지므로 직사광이 비치는 면도 어두워진다(주변광만 분리된 G-buffer가 없음).
+- `toon`: 톤 매핑 뒤 밝기를 단계로 나눈다. 색조는 유지한다. 재질별 셰이딩이 아니라 화면 전체에 적용된다.
+- `outline`: 눈에서의 거리가 이웃 픽셀과 `sensitivity` 비율 이상 다르면 선을 그린다. 노멀이 꺾이는 면 경계는 잡지 않는다.
+- `fxaa`: 톤 매핑과 효과가 끝난 그림에 적용한다.
+- `upscale`: 장면, 깊이, 등록된 렌더 패스, 입자를 `scale` 크기로 그리고 마지막에 대상 크기로 키운다. 확대는 AMD FSR 1의 EASU 방식(엣지 방향으로 늘인 Lanczos 근사 12탭, 가까운 4텍셀로 링잉 제한), 선명화는 RCAS 방식이다. AMD 원본 코드를 그대로 옮긴 것이 아니라 같은 수식을 WGSL로 다시 쓴 것이다. 후처리가 꺼져 있으면 축소하지 않는다.
 
 - 범위는 `orr_gfx::effect_params`에 있다. 인스펙터는 이 범위로 이름 붙은 슬라이더를 그린다. 효과 추가, 켜기와 끄기, 위아래 이동, 제거도 인스펙터에서 한다.
 - 렌더러 쪽 형식은 `orr_render::ScreenEffect`이고, `PostProcessSettings::effects`에 들어간다. 효과 칸이 모두 비어 있으면 예전 bloom 체인이 그대로 돈다.
@@ -304,6 +319,8 @@ Forest Valley 위를 동양식 용이 난다. 비행은 시뮬에서 고정소�
 - 셰이더 검사기(naga)가 `orr_render`의 필수 의존성이어서 웹 빌드 크기가 늘어난다.
 - 빛줄기는 원근 카메라에서만 그려진다. 높이 안개도 원근 카메라를 기준으로 계산한다. 높이 안개와 자동 노출은 HDR 후처리가 켜져 있을 때만 적용된다.
 - 같은 종류의 효과를 목록에 두 번 넣으면 첫 번째만 쓴다.
+- 시간 누적 안티에일리어싱(TAA)과 시간 누적 업스케일(FSR 2 이상)은 없다. 프레임 사이 움직임 벡터를 만들지 않는다.
+- 툰 셰이딩은 화면 후처리다. 재질마다 단계 수를 다르게 하려면 표면 셰이더에서 직접 계산한다.
 - 사용자 후처리 패스(`post` 단계)는 아직 없다. 효과는 엔진의 목록에서만 고른다.
 - 렌더 패스는 `ImportedSceneRenderer`에만 등록된다. 절차 도형만 그리는 `Renderer3D` 단독 경로에는 없다.
 - 캐스케이드는 단계마다 그림자 그리기를 따로 제출한다. 단계 수만큼 그리는 호출이 늘어난다. `Renderer3D` 단독 경로(합성 렌더러 밖)는 캐스케이드 없이 자기 그림자 맵 하나를 쓴다.
