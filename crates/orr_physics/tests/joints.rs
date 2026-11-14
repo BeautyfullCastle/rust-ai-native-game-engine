@@ -29,7 +29,7 @@ fn hanging(kind: u32, offset: FPVec2, length: FP) -> (Frame, Entity, Entity) {
     let shape = Shape::circle(fp!(0.2));
     let ball = spawn_body(&mut f, Body::new_dynamic(FPVec2::new(FP::ZERO, fp!(10)) + offset, &shape, FP::ONE), Collider::new(shape));
     let anchor_b = if kind == JOINT_PIN { -offset } else { FPVec2::ZERO };
-    add_joint(&mut f, Joint { a: pivot, b: ball, anchor_a: FPVec2::ZERO, anchor_b, length, kind, _pad: 0 });
+    add_joint(&mut f, Joint::new(kind, pivot, ball, FPVec2::ZERO, anchor_b, length));
     (f, pivot, ball)
 }
 
@@ -109,4 +109,74 @@ fn a_frame_without_joints_registered_steps_as_before() {
     let ball = spawn_body(&mut f, Body::new_dynamic(FPVec2::new(FP::ZERO, fp!(5)), &shape, FP::ONE), Collider::new(shape));
     run(&mut f, &mut Scratch::new(), 30);
     assert!(y(&f, ball) < 5.0, "it falls");
+}
+
+fn angle(f: &Frame, e: Entity) -> f64 {
+    f.get::<Body>(e).unwrap().angle.raw() as f64 / 65536.0
+}
+
+/// A wheel pinned at its center to a fixed hub, with no gravity on it.
+fn wheel(joint: impl Fn(Entity, Entity) -> Joint) -> (Frame, Entity) {
+    let mut f = new_frame();
+    // Joined bodies still collide; the hub's empty mask keeps it from rubbing on the wheel.
+    let hub = spawn_body(&mut f, Body::new_static(FPVec2::new(FP::ZERO, fp!(10)), FP::ZERO), Collider { mask: 0, ..Collider::new(Shape::circle(fp!(0.1))) });
+    let shape = Shape::circle(fp!(1));
+    let wheel = spawn_body(&mut f, Body::new_dynamic(FPVec2::new(FP::ZERO, fp!(10)), &shape, FP::ONE), Collider::new(shape));
+    add_joint(&mut f, joint(hub, wheel));
+    (f, wheel)
+}
+
+#[test]
+fn a_pin_motor_spins_a_wheel_up_to_its_speed_within_its_torque() {
+    let (mut f, w) = wheel(|hub, w| Joint::new(JOINT_PIN, hub, w, FPVec2::ZERO, FPVec2::ZERO, FP::ZERO).with_motor(fp!(2), fp!(100)));
+    run(&mut f, &mut Scratch::new(), 30);
+    let omega = f.get::<Body>(w).unwrap().omega.raw() as f64 / 65536.0;
+    assert!((omega - 2.0).abs() < 0.01, "the strong motor holds 2 rad/s: {omega}");
+    // A weak motor only gets part of the way in the same time.
+    let (mut f, w) = wheel(|hub, w| Joint::new(JOINT_PIN, hub, w, FPVec2::ZERO, FPVec2::ZERO, FP::ZERO).with_motor(fp!(2), fp!(0.5)));
+    run(&mut f, &mut Scratch::new(), 30);
+    let omega = f.get::<Body>(w).unwrap().omega.raw() as f64 / 65536.0;
+    assert!(omega > 0.1 && omega < 1.9, "the weak motor is still speeding up: {omega}");
+}
+
+#[test]
+fn a_pin_limit_holds_a_swing_between_its_angles() {
+    // A ball level with its pivot swings down; the limit stops it a quarter turn early.
+    let mut f = new_frame();
+    let pivot = spawn_body(&mut f, Body::new_static(FPVec2::new(FP::ZERO, fp!(10)), FP::ZERO), Collider::new(Shape::circle(fp!(0.1))));
+    let shape = Shape::circle(fp!(0.2));
+    let ball = spawn_body(&mut f, Body::new_dynamic(FPVec2::new(fp!(3), fp!(10)), &shape, FP::ONE), Collider::new(shape));
+    let joint = Joint::new(JOINT_PIN, pivot, ball, FPVec2::ZERO, FPVec2::new(fp!(-3), FP::ZERO), FP::ZERO).with_limits(fp!(-0.5), fp!(0.5));
+    add_joint(&mut f, joint);
+    let mut sc = Scratch::new();
+    let mut lowest = f64::MAX;
+    for _ in 0..120 {
+        run(&mut f, &mut sc, 1);
+        let a = angle(&f, ball);
+        assert!((-0.55..=0.55).contains(&a), "the swing stays within the limits: {a}");
+        assert!((distance(&f, pivot, ball) - 3.0).abs() < 0.08, "the pin still holds");
+        lowest = lowest.min(a);
+    }
+    assert!(lowest < -0.45, "it reaches the lower limit: {lowest}");
+    let rest = angle(&f, ball);
+    assert!((rest + 0.5).abs() < 0.03, "it comes to rest on the lower limit: {rest}");
+}
+
+#[test]
+fn a_motor_and_limits_are_deterministic_across_rollback() {
+    let scene = || wheel(|hub, w| Joint::new(JOINT_PIN, hub, w, FPVec2::ZERO, FPVec2::ZERO, FP::ZERO).with_motor(fp!(3), fp!(5)).with_limits(fp!(-1), fp!(1))).0;
+    let mut a = scene();
+    let mut sa = Scratch::new();
+    run(&mut a, &mut sa, 20);
+    let snapshot = a.clone();
+    run(&mut a, &mut sa, 40);
+    let ahead = a.checksum();
+    let mut b = scene();
+    run(&mut b, &mut Scratch::new(), 60);
+    assert_eq!(b.checksum(), ahead, "two runs agree");
+    a.copy_from(&snapshot);
+    run(&mut a, &mut Scratch::new(), 40);
+    assert_eq!(a.checksum(), ahead, "a rollback replays to the same state");
+    let turned = angle(&a, a.dense::<Body>().0[1]);
+    assert!((turned - 1.0).abs() < 0.05, "the motor drives the wheel to the upper limit and holds it there: {turned}");
 }
