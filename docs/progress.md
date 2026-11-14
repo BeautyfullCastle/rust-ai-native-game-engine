@@ -20,7 +20,8 @@
 - **캐스케이드 그림자**: 해 그림자가 최대 4단계로 시점을 따라간다. 가까운 그림자는 선명하고 먼 그림자도 보인다. `orr_gfx::Light::shadow_cascades`로 정한다. [rendering-architecture.md](rendering-architecture.md) 1.17절.
 - **입문 문서**: [getting-started.md](getting-started.md). 준비물, 코드로 첫 게임(`cargo run -p orr_sim --example hello`), 시뮬레이션 규칙, 에디터, Room 프로젝트 만들기·실행·내보내기, 에이전트 연결, 문제 해결. 절차는 윈도우에서 직접 따라가 확인했다. 그 과정에서 `type Command = ();`, `orr_sim::fn_systems`, 일반 경로로 출력하는 `orr_new_room`·`orr_export_windows`, 에디터 상태 막대의 `Unsaved: N`을 추가했다.
 - **후처리 효과 추가**: `ssao`(주변광 차폐), `toon`(밝기 단계), `outline`(깊이 외곽선), `fxaa`, `upscale`(장면을 작게 그리고 FSR 1 방식 EASU 확대와 RCAS 선명화), `taa`(지터와 깊이 재투영, 이웃 범위 제한. `upscale`과 함께면 대상 해상도로 시간 누적 업스케일), `ssr`(화면 공간 반사), `depth_of_field`, `motion_blur`(카메라), `chromatic_aberration`. 표면 셰이더용 `normal_map` 도우미(탄젠트 데이터 없이 화면 미분으로). `PostProcess` 효과 목록에서 고른다. [rendering-architecture.md](rendering-architecture.md) 1.9절.
-- **애니메이션 블렌딩**: 본 마스크, 마스크 블렌드, 가산 블렌드, 1D 블렌드 스페이스, 상태 머신(파라미터, 조건부 전환, 크로스페이드, exit time, 클립 이벤트, 루트 모션), 레이어를 쌓는 `Animator`, 투 본 IK. 코드 API이며 에디터 편집 화면은 아직 없다. [animation.md](animation.md).
+- **스포트라이트 그림자**: `Light::cast_shadows`를 켠 스포트라이트 최대 4개가 그림자를 드리운다. [rendering-architecture.md](rendering-architecture.md) 1.18절.
+- **애니메이션 블렌딩**: 본 마스크, 마스크 블렌드, 가산 블렌드, 1D·2D 블렌드 스페이스, 룩앳, 상태 머신(파라미터, 조건부 전환, 크로스페이드, exit time, 클립 이벤트, 루트 모션), 레이어를 쌓는 `Animator`, 투 본 IK. 코드 API이며 에디터 편집 화면은 아직 없다. [animation.md](animation.md).
 - **에디터 `--camera-view`**: 씬 카메라 시점으로 시작한다. `--screenshot`과 함께 쓰면 씬 카메라 화면을 저장한다.
 - **테스트(기본 구성)**: `cargo test --workspace --release` 2779개 통과, 실패 0개, 무시 26개.
 - **테스트(전체 기능 구성)**: `--features orr_editor/full,orr_sample/full`로 에디터와 샘플 게임을 전체 실행했을 때 3376개 통과, 19개 실패였다. 그 뒤 17건의 원인을 고쳐 해당 테스트를 다시 실행해 통과를 확인했다. 남은 실패는 2건이다.
