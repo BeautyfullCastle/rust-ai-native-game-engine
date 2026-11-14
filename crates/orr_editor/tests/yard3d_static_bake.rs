@@ -1102,10 +1102,15 @@ fn terrain_attachment_suspends_baked_receipts_without_mutating_probes_and_detach
     }
     app.terrain.document.discard();app.irradiance.set_terrain_attached(false);
     app.irradiance.refresh_baked_validity(&app.editor, &app.models);
-    assert!(app.irradiance.is_validating_bake(), "detach starts source revalidation");
-    // Race: cancel validation with a transient attach/detach before it drains.
-    app.irradiance.set_terrain_attached(true);
-    app.irradiance.set_terrain_attached(false);
+    // Background validation may already be finished when this poll returns.
+    if app.irradiance.is_validating_bake() {
+        // Race: cancel validation with a transient attach/detach before it drains.
+        app.irradiance.set_terrain_attached(true);
+        app.irradiance.set_terrain_attached(false);
+    } else {
+        assert_eq!(app.irradiance.grid_for_editor(&app.editor), Some(&document.grid),
+            "detach revalidated the source");
+    }
     await_verified_grid(&mut app);
     assert_eq!(app.irradiance.grid_for_editor(&app.editor), Some(&document.grid));
     assert_eq!(std::fs::read(&path).unwrap(), bytes);

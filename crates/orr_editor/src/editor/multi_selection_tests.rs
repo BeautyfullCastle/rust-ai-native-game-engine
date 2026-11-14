@@ -36,6 +36,7 @@ fn stale_guid_selection_does_not_follow_a_reused_entity_handle() {
         entity: handle,
         guid: Some(replacement.clone()),
         name: Some("replacement".into()),
+        role: None,
         components: vec!["orr_physics::Body".into()],
     }];
     editor.dirty.rows = false;

@@ -159,17 +159,19 @@ pub struct EntityRow {
     pub guid: Option<Guid>,
     /// Display name.
     pub name: Option<String>,
+    /// What the game calls this entity when it has no name, such as a Room actor kind.
+    pub role: Option<String>,
     /// Reflected component type names, sorted.
     pub components: Vec<String>,
 }
 
 impl EntityRow {
-    /// Display text of an entity in lists: its name, else its GUID, else its frame handle.
+    /// Display text of an entity in lists: its name, else its role, else its GUID, else its frame handle.
     pub fn label(&self) -> String {
-        match (&self.name, &self.guid) {
-            (Some(n), _) => n.clone(),
-            (None, Some(g)) => g.to_string(),
-            (None, None) => format!("entity {}v{} (play)", self.entity.index, self.entity.version),
+        match (&self.name, &self.role, &self.guid) {
+            (Some(n), _, _) | (None, Some(n), _) => n.clone(),
+            (None, None, Some(g)) => g.to_string(),
+            (None, None, None) => format!("entity {}v{} (play)", self.entity.index, self.entity.version),
         }
     }
 
@@ -183,7 +185,7 @@ impl EntityRow {
         let guid = j.get("guid").and_then(J::as_str).and_then(|g| Guid::parse(g).ok());
         let name = j.get("name").and_then(J::as_str).map(str::to_string);
         let components = j.get("components")?.as_array()?.iter().filter_map(|c| c.as_str().map(str::to_string)).collect();
-        Some(EntityRow { entity, guid, name, components })
+        Some(EntityRow { entity, guid, name, role: None, components })
     }
 }
 

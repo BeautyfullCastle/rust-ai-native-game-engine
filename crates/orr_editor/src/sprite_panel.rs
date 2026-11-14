@@ -1078,6 +1078,7 @@ mod tests {
             entity,
             guid: Some(orr_reflect::Guid::from_u32(1)),
             name: None,
+            role: None,
             components: vec![],
         };
         assert_eq!(

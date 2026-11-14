@@ -2136,7 +2136,7 @@ impl EditorApp {
         ui.add(egui::TextEdit::singleline(&mut self.ui.filter).hint_text("filter").desired_width(f32::INFINITY));
         ui.separator();
         let filter = self.ui.filter.to_lowercase();
-        let rows: Vec<(String, Target, String)> = self
+        let rows: Vec<(String, Target, Vec<String>, String)> = self
             .editor
             .rows()
             .iter()
@@ -2145,16 +2145,19 @@ impl EditorApp {
                 if !filter.is_empty() && !label.to_lowercase().contains(&filter) {
                     return None;
                 }
-                Some((label, row.target(), row.components.join(", ")))
+                let tip = match &row.guid {
+                    Some(guid) => format!("{guid}\n{}", row.components.join(", ")),
+                    None => row.components.join(", "),
+                };
+                Some((label, row.target(), row.components.clone(), tip))
             })
             .collect();
         let row_h = ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y;
         let mut clicked: Option<Target> = None;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, row_h, rows.len(), |ui, range| {
-            for (label, target, tip) in &rows[range] {
+            for (label, target, components, tip) in &rows[range] {
                 let selected = self.editor.is_selected(target);
-                let components: Vec<String> = tip.split(", ").map(str::to_string).collect();
-                let (mark, color) = crate::theme::entity_mark(&components);
+                let (mark, color) = crate::theme::entity_mark(components);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     ui.add_sized([16.0, row_h - 2.0], egui::Label::new(RichText::new(mark).size(12.0).color(color)).selectable(false));
@@ -2236,9 +2239,11 @@ impl EditorApp {
             let error = if self.models.scene_matches(&self.editor) { self.models.terrain_admission_error() } else { None };
             self.terrain.document.set_render_admission_error(error);
             self.terrain.show_in_parent_scroll(ui, &self.editor);
-            self.terrain_ramp_show(ui);
+            // Local terrain authoring exists in Yard3D and the navigation scene only.
+            let local_terrain = self.editor.game() == crate::game::EditorGame::Yard3D || self.editor.game().is_navigation();
+            if local_terrain { self.terrain_ramp_show(ui); }
             #[cfg(feature="terrain-surface")]
-            {
+            if local_terrain {
                 self.terrain_surface.show(ui, &self.editor, &self.terrain);
                 self.terrain.document.set_appearance_busy(self.terrain_surface.state.busy());
             }
@@ -2262,15 +2267,15 @@ impl EditorApp {
         #[cfg(feature = "sprites")]
         self.sprites.show(ui, &self.editor);
         #[cfg(feature = "tilemap")]
-        if let Some(panel) = &mut self.tilemap { panel.show(ui, &self.editor, &mut self.sprites); }
+        if let Some(panel) = self.tilemap.as_mut().filter(|_| self.editor.game() == crate::game::EditorGame::Arena) { panel.show(ui, &self.editor, &mut self.sprites); }
         #[cfg(feature = "project-ui")]
-        if let Some(preview) = &self.project_ui { preview.show(ui); }
+        if let Some(preview) = self.project_ui.as_ref().filter(|_| self.editor.game() == crate::game::EditorGame::Arena) { preview.show(ui); }
         #[cfg(feature="collect-ui")]
-        if let Some(panel) = &mut self.collect_ui { panel.show(ui, !self.editor.is_playing_mode()); }
+        if let Some(panel) = self.collect_ui.as_mut().filter(|_| self.editor.game().is_collect()) { panel.show(ui, !self.editor.is_playing_mode()); }
         #[cfg(feature="collect-ui")]
-        if self.collect_ui.is_some() { self.collect_ui_preview_button(ui); }
+        if self.collect_ui.is_some() && self.editor.game().is_collect() { self.collect_ui_preview_button(ui); }
         #[cfg(feature = "animated-models")]
-        if ui.add_enabled(self.editor.game() == crate::game::EditorGame::Arena && self.editor.spec().is_local(), egui::Button::new("Animated model authoring")).on_hover_text("Presentation bindings require a local Arena scene").clicked() { self.ui.animated_window = true; }
+        if self.editor.game() == crate::game::EditorGame::Arena && ui.add_enabled(self.editor.spec().is_local(), egui::Button::new("Animated model authoring")).on_hover_text("Presentation bindings require a local Arena scene").clicked() { self.ui.animated_window = true; }
         #[cfg(feature="room-project")]
         {
             #[cfg(feature = "room-lighting")]
@@ -2775,7 +2780,8 @@ impl EditorApp {
                 resp.request_focus();
             }
             let keyboard_focused = keyboard_enabled && resp.has_focus() && !ui.ctx().text_edit_focused();
-            if resp.has_focus() {
+            // Other games set their own filter above; this one would drop their Escape and Tab locks.
+            if resp.has_focus() && self.editor.game().has_mesh_view() {
                 ui.memory_mut(|memory|memory.set_focus_lock_filter(resp.id,egui::EventFilter {horizontal_arrows:keyboard_focused,vertical_arrows:keyboard_focused,..Default::default()}));
             }
             let direction = ui.input(crate::mesh_play_controls::keyboard_direction);
