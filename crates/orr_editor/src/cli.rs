@@ -36,6 +36,8 @@ editor's ERP) that is already running.
   --screenshot-settle   additionally wait for a current paused frame, refreshed
                         panels and expired agent pulses (10 second deadline)
   --size <WxH>          window size in points (default 1600x900)
+  --camera-view         look through the scene's camera at start (scenes
+                        with an orr_gfx::Camera)
   --erp <addr>          serve ERP (JSON-RPC over WebSocket) on this address,
                         e.g. 127.0.0.1:7777, so AI agents can edit and play
                         the open scene (same undo history as the window)
@@ -73,6 +75,8 @@ pub struct Args {
     pub screenshot_settle: bool,
     /// `--size`.
     pub size: (f32, f32),
+    /// `--camera-view`.
+    pub camera_view: bool,
     /// `--erp`.
     pub erp: Option<std::net::SocketAddr>,
     /// `--erp-token`, as given.
@@ -87,7 +91,7 @@ pub struct Args {
 
 impl Default for Args {
     fn default() -> Self {
-        Self { collect_project: None, room_project: None, project: None, game: None, scene: None, select: None, play_ticks: None, script: None, screenshot: None, frames: 30, screenshot_settle: false, size: (1600.0, 900.0), erp: None, erp_tokens: Vec::new(), erp_dev: false, connect: None, token: None }
+        Self { collect_project: None, room_project: None, project: None, game: None, scene: None, select: None, play_ticks: None, script: None, screenshot: None, frames: 30, screenshot_settle: false, size: (1600.0, 900.0), camera_view: false, erp: None, erp_tokens: Vec::new(), erp_dev: false, connect: None, token: None }
     }
 }
 
@@ -120,6 +124,7 @@ impl Args {
                 "--script" => out.script = Some(PathBuf::from(value("--script")?)),
                 "--screenshot" => out.screenshot = Some(PathBuf::from(value("--screenshot")?)),
                 "--screenshot-settle" => out.screenshot_settle = true,
+                "--camera-view" => out.camera_view = true,
                 "--play-ticks" => out.play_ticks = Some(value("--play-ticks")?.parse().map_err(|_| "--play-ticks needs a whole number".to_string())?),
                 "--frames" => out.frames = value("--frames")?.parse().map_err(|_| "--frames needs a whole number".to_string())?,
                 "--size" => {
@@ -181,7 +186,8 @@ mod tests {
 
     #[test]
     fn parses_flags() {
-        let a = parse("--scene a.yaml --screenshot /tmp/x.png --frames 12 --play-ticks 90 --select body_05 --size 800x600").unwrap();
+        let a = parse("--scene a.yaml --screenshot /tmp/x.png --frames 12 --play-ticks 90 --select body_05 --size 800x600 --camera-view").unwrap();
+        assert!(a.camera_view);
         assert_eq!(a.scene, Some(PathBuf::from("a.yaml")));
         assert_eq!(a.screenshot, Some(PathBuf::from("/tmp/x.png")));
         assert_eq!((a.frames, a.play_ticks, a.select.as_deref(), a.size), (12, Some(90), Some("body_05"), (800.0, 600.0)));
