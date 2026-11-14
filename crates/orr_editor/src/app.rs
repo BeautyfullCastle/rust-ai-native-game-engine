@@ -386,6 +386,8 @@ pub struct EditorApp {
     material_gesture: bool,
     /// True while a drag in the post-process section is one open undo step.
     post_gesture: bool,
+    /// True once the editor's look is applied to the context.
+    themed: bool,
     #[cfg(feature = "models")]
     terrain_models: crate::terrain_models::TerrainModels,
     viewport_hdr_disabled: bool,
@@ -598,7 +600,7 @@ impl EditorApp {
     }
 
     pub fn new(editor: Editor, render_state: Option<egui_wgpu::RenderState>) -> Self {
-        Self { #[cfg(feature = "custom-inspector")] custom_inspectors: crate::custom_inspector::Registry::default(), #[cfg(feature="terrain-surface")] terrain_surface: crate::terrain_surface_panel::Panel::default(), #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))] arena_export: arena_export::State::default(), #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "navigation-export"))] navigation_export: navigation_export::State::default(), editor, #[cfg(feature="mesh-navigation")] mesh_light_pointer_owned: false, #[cfg(feature="mesh-navigation")] mesh_light_waiting_release: false, #[cfg(feature="mesh-navigation")] mesh_light_scroll_quarantined: false, #[cfg(feature="mesh-navigation")] mesh_camera_preview_owned: false, #[cfg(feature="mesh-navigation")] mesh_camera_preview_buttons: 0, #[cfg(feature="mesh-navigation")] mesh_camera_preview_scroll: false, #[cfg(feature="mesh-navigation")] mesh_camera_preview_fenced_frame: None, #[cfg(feature="mesh-patrol")] mesh_patrol_frame: Default::default(), #[cfg(feature="terrain-patrol")] terrain_patrol_frame: Default::default(), #[cfg(feature="room-character")] room_character: None, #[cfg(feature="tilemap")] tilemap: None, #[cfg(feature="mesh-export")] mesh_player_session: mesh_player_session::State::default(), #[cfg(feature="mesh-mission")] mesh_game_creator: crate::mesh_game_creator::Panel::default(), #[cfg(feature="mesh-export")] mesh_recorded_playback: mesh_recorded_playback::State::default(), #[cfg(feature="mesh-export")] mesh_player_input_allowed: true, #[cfg(feature="mesh-navigation")] mesh_play_controls: crate::mesh_play_controls::Panel::default(), #[cfg(all(any(windows,target_os="linux"),target_arch="x86_64",feature="room-authoring"))] room_wall_stamps: crate::room_wall_stamp_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_lighting: crate::mesh_lighting_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_post_process_runtime: crate::mesh_lighting::post_process_runtime::RuntimePolicy::default(), #[cfg(feature="mesh-navigation")] mesh_hud: crate::mesh_hud_panel::Panel::default(), #[cfg(feature="mesh-mission")] mesh_mission: crate::mesh_mission_panel::Panel::default(), #[cfg(feature="mesh-hazards")] mesh_hazards: crate::mesh_hazards_panel::Panel::default(), #[cfg(feature="mesh-hazards")] mesh_hazard_pointer_owned: false, #[cfg(all(windows,target_arch="x86_64",feature="mesh-navigation"))] mesh_copy: crate::mesh_workspace::copy_panel::Panel::default(), #[cfg(feature="mesh-animated-models")] mesh_animation: crate::mesh_animation_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_camera: crate::mesh_camera_panel::Panel::default(), #[cfg(feature="mesh-export")] mesh_export: crate::mesh_export_panel::Panel::default(), #[cfg(feature="mesh-hazards-export")] mesh_hazards_export: crate::mesh_hazards_export_panel::Panel::default(), #[cfg(feature="scenery")] scenery: crate::scenery_window::Panel::default(), #[cfg(feature="package-manager")] package_manager: crate::package_manager_panel::Panel::default(), #[cfg(feature="package-manager")] package_model_preview: package_model_preview::PreviewWindow::default(), #[cfg(all(feature="package-manager",feature="room-animated-models"))] variant_model_preview: variant_model_preview::PreviewWindow::default(), #[cfg(feature="room-authoring")] room_authoring: crate::room_authoring_panel::Panel::default(), #[cfg(feature="room-authoring")] room_wall_pointer_owned: false, #[cfg(feature="room-authoring")] room_actor_pointer_owned: false, #[cfg(feature="room-authoring")] room_wall_placement_pointer_owned: false, #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))] windows_projects: crate::windows_project_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-export"))] windows_export: crate::windows_export_panel::Panel::default(), #[cfg(feature="room-lighting")] room_lighting: None, #[cfg(feature="room-lighting")] room_light_pointer_owned: false, #[cfg(feature="room-project")] room_camera: None, #[cfg(feature="room-project")] room_camera_capture: room_camera_capture::Capture::default(), #[cfg(feature="linked-prefabs")] linked_prefabs: crate::linked_prefab_panel::Panel::default(), #[cfg(feature="collect-ui")] collect_ui: None, #[cfg(feature="collect-ui")] collect_ui_preview: collect_ui_preview::PreviewWindow::default(), #[cfg(feature="project-ui")] project_ui: None, #[cfg(feature="navigation")] navigation: crate::navigation_panel::NavigationPanel::default(), #[cfg(feature="navigation")] navigation_endpoint: navigation_endpoint_pick::State::default(), #[cfg(feature="mesh-navigation")] mesh_navigation: crate::mesh_navigation::Panel::default(), #[cfg(feature="terrain")] terrain_ramp: terrain_ramp::State::default(), #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, surfaces: Default::default(), material_gesture: false, post_gesture: false, #[cfg(feature = "models")] terrain_models: Default::default(), viewport_hdr_disabled: false, #[cfg(feature = "static-gameplay")] registered_gameplay_view: crate::registered_gameplay_view::State::default(), #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), #[cfg(feature="models")] blockout_uv_density: blockout_uv_density::Panel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
+        Self { #[cfg(feature = "custom-inspector")] custom_inspectors: crate::custom_inspector::Registry::default(), #[cfg(feature="terrain-surface")] terrain_surface: crate::terrain_surface_panel::Panel::default(), #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))] arena_export: arena_export::State::default(), #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "navigation-export"))] navigation_export: navigation_export::State::default(), editor, #[cfg(feature="mesh-navigation")] mesh_light_pointer_owned: false, #[cfg(feature="mesh-navigation")] mesh_light_waiting_release: false, #[cfg(feature="mesh-navigation")] mesh_light_scroll_quarantined: false, #[cfg(feature="mesh-navigation")] mesh_camera_preview_owned: false, #[cfg(feature="mesh-navigation")] mesh_camera_preview_buttons: 0, #[cfg(feature="mesh-navigation")] mesh_camera_preview_scroll: false, #[cfg(feature="mesh-navigation")] mesh_camera_preview_fenced_frame: None, #[cfg(feature="mesh-patrol")] mesh_patrol_frame: Default::default(), #[cfg(feature="terrain-patrol")] terrain_patrol_frame: Default::default(), #[cfg(feature="room-character")] room_character: None, #[cfg(feature="tilemap")] tilemap: None, #[cfg(feature="mesh-export")] mesh_player_session: mesh_player_session::State::default(), #[cfg(feature="mesh-mission")] mesh_game_creator: crate::mesh_game_creator::Panel::default(), #[cfg(feature="mesh-export")] mesh_recorded_playback: mesh_recorded_playback::State::default(), #[cfg(feature="mesh-export")] mesh_player_input_allowed: true, #[cfg(feature="mesh-navigation")] mesh_play_controls: crate::mesh_play_controls::Panel::default(), #[cfg(all(any(windows,target_os="linux"),target_arch="x86_64",feature="room-authoring"))] room_wall_stamps: crate::room_wall_stamp_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_lighting: crate::mesh_lighting_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_post_process_runtime: crate::mesh_lighting::post_process_runtime::RuntimePolicy::default(), #[cfg(feature="mesh-navigation")] mesh_hud: crate::mesh_hud_panel::Panel::default(), #[cfg(feature="mesh-mission")] mesh_mission: crate::mesh_mission_panel::Panel::default(), #[cfg(feature="mesh-hazards")] mesh_hazards: crate::mesh_hazards_panel::Panel::default(), #[cfg(feature="mesh-hazards")] mesh_hazard_pointer_owned: false, #[cfg(all(windows,target_arch="x86_64",feature="mesh-navigation"))] mesh_copy: crate::mesh_workspace::copy_panel::Panel::default(), #[cfg(feature="mesh-animated-models")] mesh_animation: crate::mesh_animation_panel::Panel::default(), #[cfg(feature="mesh-navigation")] mesh_camera: crate::mesh_camera_panel::Panel::default(), #[cfg(feature="mesh-export")] mesh_export: crate::mesh_export_panel::Panel::default(), #[cfg(feature="mesh-hazards-export")] mesh_hazards_export: crate::mesh_hazards_export_panel::Panel::default(), #[cfg(feature="scenery")] scenery: crate::scenery_window::Panel::default(), #[cfg(feature="package-manager")] package_manager: crate::package_manager_panel::Panel::default(), #[cfg(feature="package-manager")] package_model_preview: package_model_preview::PreviewWindow::default(), #[cfg(all(feature="package-manager",feature="room-animated-models"))] variant_model_preview: variant_model_preview::PreviewWindow::default(), #[cfg(feature="room-authoring")] room_authoring: crate::room_authoring_panel::Panel::default(), #[cfg(feature="room-authoring")] room_wall_pointer_owned: false, #[cfg(feature="room-authoring")] room_actor_pointer_owned: false, #[cfg(feature="room-authoring")] room_wall_placement_pointer_owned: false, #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))] windows_projects: crate::windows_project_panel::Panel::default(), #[cfg(all(windows, target_arch="x86_64", feature="windows-export"))] windows_export: crate::windows_export_panel::Panel::default(), #[cfg(feature="room-lighting")] room_lighting: None, #[cfg(feature="room-lighting")] room_light_pointer_owned: false, #[cfg(feature="room-project")] room_camera: None, #[cfg(feature="room-project")] room_camera_capture: room_camera_capture::Capture::default(), #[cfg(feature="linked-prefabs")] linked_prefabs: crate::linked_prefab_panel::Panel::default(), #[cfg(feature="collect-ui")] collect_ui: None, #[cfg(feature="collect-ui")] collect_ui_preview: collect_ui_preview::PreviewWindow::default(), #[cfg(feature="project-ui")] project_ui: None, #[cfg(feature="navigation")] navigation: crate::navigation_panel::NavigationPanel::default(), #[cfg(feature="navigation")] navigation_endpoint: navigation_endpoint_pick::State::default(), #[cfg(feature="mesh-navigation")] mesh_navigation: crate::mesh_navigation::Panel::default(), #[cfg(feature="terrain")] terrain_ramp: terrain_ramp::State::default(), #[cfg(feature="terrain")] terrain: crate::terrain_panel::TerrainPanel::default(), ui: UiState::default(), render_state, gpu: None, gpu3d: None, surfaces: Default::default(), material_gesture: false, post_gesture: false, themed: false, #[cfg(feature = "models")] terrain_models: Default::default(), viewport_hdr_disabled: false, #[cfg(feature = "static-gameplay")] registered_gameplay_view: crate::registered_gameplay_view::State::default(), #[cfg(feature="irradiance-probes")] irradiance: crate::irradiance_panel::IrradiancePanel::default(), #[cfg(feature="models")] models: crate::model_panel::ModelPanel::default(), #[cfg(feature="models")] blockout_uv_density: blockout_uv_density::Panel::default(), shot: None, remote_capture: None, encoder: None, ui_settled_reported: false, frames: 0, last_title: String::new(), #[cfg(feature = "sprites")] sprites: crate::sprite_panel::SpritePanel::default(), #[cfg(feature = "animated-models")] animated_models: crate::animated_panel::AnimatedPanel::default() }
     }
 
     #[cfg(feature="package-manager")]
@@ -1174,6 +1176,10 @@ impl EditorApp {
 
 impl eframe::App for EditorApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        if !self.themed {
+            crate::theme::apply(ui.ctx());
+            self.themed = true;
+        }
         self.with_close_review(ui, Self::editor_ui);
     }
 }
@@ -1387,13 +1393,13 @@ impl EditorApp {
         }
         self.shortcuts(&ctx);
 
-        egui::Panel::top("top").show(ui, |ui| self.top_bar(ui));
+        egui::Panel::top("top").frame(crate::theme::bar_frame()).show(ui, |ui| self.top_bar(ui));
         #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "project-create", feature = "collect-ui"))]
         if self.collect_project_modal(&ctx) { return; }
         if self.editor.down().is_some() {
             egui::Panel::top("down").show(ui, |ui| self.down_banner(ui));
         }
-        egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
+        egui::Panel::bottom("status").frame(crate::theme::bar_frame()).show(ui, |ui| self.status_bar(ui));
         // Keep panel IDs and their persisted sizes intact while hidden.
         if !self.ui.viewport_focus {
             // The Agent tab needs more room than the timeline; each has its own remembered height.
@@ -1402,9 +1408,9 @@ impl EditorApp {
             let (bottom_id, bottom_h) = if self.ui.bottom_tab == BottomTab::ArenaExport { ("bottom_arena_export", 350.0) } else { (bottom_id, bottom_h) };
             #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "navigation-export"))]
             let (bottom_id, bottom_h) = if self.ui.bottom_tab == BottomTab::NavigationExport { ("bottom_navigation_export", 350.0) } else { (bottom_id, bottom_h) };
-            egui::Panel::bottom(bottom_id).resizable(true).default_size(bottom_h).show(ui, |ui| self.bottom(ui));
-            egui::Panel::left("hierarchy").resizable(true).default_size(230.0).show(ui, |ui| self.hierarchy(ui));
-            let inspector = egui::Panel::right("inspector").resizable(true).default_size(340.0);
+            egui::Panel::bottom(bottom_id).resizable(true).default_size(bottom_h).frame(crate::theme::panel_frame()).show(ui, |ui| self.bottom(ui));
+            egui::Panel::left("hierarchy").resizable(true).default_size(230.0).frame(crate::theme::panel_frame()).show(ui, |ui| self.hierarchy(ui));
+            let inspector = egui::Panel::right("inspector").resizable(true).default_size(340.0).frame(crate::theme::panel_frame());
             let inspector = if self.editor.game().has_mesh_view() { inspector.max_size(340.0) } else { inspector };
             inspector.show(ui, |ui| {
                 // The mesh games scroll their own inspector.
@@ -1420,7 +1426,7 @@ impl EditorApp {
                     .show(ui, |ui| self.inspector(ui));
             });
         }
-        egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.viewport(ui));
+        egui::CentralPanel::default().frame(egui::Frame::NONE.fill(crate::theme::BG)).show(ui, |ui| self.viewport(ui));
 
         // A scrub widget can disappear after selection/navigation changes.
         // Release still closes its gesture even if that widget saw no End.
@@ -1632,7 +1638,7 @@ impl EditorApp {
                 ui.label("Legacy replay-only mesh bundle · live goal input unavailable");
             }
         });
-        egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.yard_viewport(ui));
+        egui::CentralPanel::default().frame(egui::Frame::NONE.fill(crate::theme::BG)).show(ui, |ui| self.yard_viewport(ui));
         self.screenshot(&ctx);
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
     }
@@ -1916,23 +1922,33 @@ impl EditorApp {
             ui.separator();
             let playing = self.editor.timeline().is_some_and(|t| t.playing);
             let start_blocker = self.playback_start_blocker();
-            if ui.add_enabled(live && !playing && start_blocker.is_none(), egui::Button::new(LBL_PLAY)).on_disabled_hover_text(start_blocker.as_deref().unwrap_or("Playback is already running or the host is unavailable")).clicked() {
-                self.play_from_ui();
-            }
-            if ui.add_enabled(live && playing, egui::Button::new(LBL_PAUSE)).clicked() {
-                self.editor.pause();
-            }
-            if ui.add_enabled(live && !playing && start_blocker.is_none(), egui::Button::new(LBL_STEP)).on_disabled_hover_text(start_blocker.as_deref().unwrap_or("Pause playback or reconnect the host before stepping")).clicked() {
-                self.step_from_ui();
-            }
-            if ui.add_enabled(live && self.editor.is_playing_mode(), egui::Button::new(LBL_STOP)).clicked() {
-                self.editor.stop();
-            }
-            ui.separator();
-            match self.editor.mode() {
-                Mode::Edit => ui.label(RichText::new("EDIT").strong()),
-                Mode::Play => ui.label(RichText::new("PLAY").strong().color(Color32::from_rgb(255, 150, 60))),
+            egui::Frame::new().fill(crate::theme::INPUT).corner_radius(egui::CornerRadius::same(crate::theme::RADIUS)).inner_margin(egui::Margin::same(2)).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    let can_play = live && !playing && start_blocker.is_none();
+                    // Play is the main action of the bar: it takes the accent while it is available.
+                    let play = if can_play { egui::Button::new(RichText::new(LBL_PLAY).strong().color(crate::theme::BG)).fill(crate::theme::ACCENT) } else { egui::Button::new(LBL_PLAY) };
+                    if ui.add_enabled(can_play, play).on_disabled_hover_text(start_blocker.as_deref().unwrap_or("Playback is already running or the host is unavailable")).clicked() {
+                        self.play_from_ui();
+                    }
+                    if ui.add_enabled(live && playing, egui::Button::new(LBL_PAUSE)).clicked() {
+                        self.editor.pause();
+                    }
+                    if ui.add_enabled(live && !playing && start_blocker.is_none(), egui::Button::new(LBL_STEP)).on_disabled_hover_text(start_blocker.as_deref().unwrap_or("Pause playback or reconnect the host before stepping")).clicked() {
+                        self.step_from_ui();
+                    }
+                    if ui.add_enabled(live && self.editor.is_playing_mode(), egui::Button::new(LBL_STOP)).clicked() {
+                        self.editor.stop();
+                    }
+                });
+            });
+            let (mode, color) = match self.editor.mode() {
+                Mode::Edit => ("EDIT", crate::theme::TEXT_STRONG),
+                Mode::Play => ("PLAY", Color32::from_rgb(255, 150, 60)),
             };
+            egui::Frame::new().fill(crate::theme::CARD_HEADER).stroke(egui::Stroke::new(1.0, color.gamma_multiply(0.5))).corner_radius(egui::CornerRadius::same(crate::theme::RADIUS)).inner_margin(egui::Margin::symmetric(6, 1)).show(ui, |ui| {
+                ui.label(RichText::new(mode).strong().size(11.5).color(color));
+            });
             ui.weak(self.editor.game().name());
             if self.editor.game().is_3d() {
                 let has_camera = self.editor.yard_frame().camera.is_some();
@@ -2075,7 +2091,7 @@ impl EditorApp {
     // ---- hierarchy ----
 
     fn hierarchy(&mut self, ui: &mut Ui) {
-        ui.heading("Hierarchy");
+        crate::theme::panel_title(ui, "Hierarchy");
         ui.horizontal(|ui| {
             if !(self.editor.can_mutate() && self.editor.previewing().is_none()) { ui.disable(); }
             if self.editor.game() == crate::game::EditorGame::PhysGame && ui.button("+ Body").on_hover_text("Spawn a dynamic circle at the view center").clicked() {
@@ -2112,9 +2128,15 @@ impl EditorApp {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, row_h, rows.len(), |ui, range| {
             for (label, target, tip) in &rows[range] {
                 let selected = self.editor.is_selected(target);
-                if ui.selectable_label(selected, label).on_hover_text(tip).clicked() {
-                    clicked = Some(target.clone());
-                }
+                let components: Vec<String> = tip.split(", ").map(str::to_string).collect();
+                let (mark, color) = crate::theme::entity_mark(&components);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.add_sized([16.0, row_h - 2.0], egui::Label::new(RichText::new(mark).size(12.0).color(color)).selectable(false));
+                    if ui.selectable_label(selected, label).on_hover_text(tip).clicked() {
+                        clicked = Some(target.clone());
+                    }
+                });
             }
         });
         if let Some(t) = clicked {
@@ -2135,7 +2157,7 @@ impl EditorApp {
     // ---- inspector ----
 
     fn inspector(&mut self, ui: &mut Ui) {
-        ui.heading("Inspector");
+        crate::theme::panel_title(ui, "Inspector");
         #[cfg(feature="mesh-navigation")]
         if self.editor.game().has_mesh_view() {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
@@ -2300,13 +2322,19 @@ impl EditorApp {
                 (Some(_), Some(ins)) => {
                     let row = ins.row.as_ref();
                     let key = ins.target.param();
-                    ui.label(RichText::new(row.map_or_else(|| key.clone(), EntityRow::label)).strong());
+                    ui.horizontal(|ui| {
+                        let mark = row.map_or(("\u{25C6}", crate::theme::TEXT_WEAK), |r| crate::theme::entity_mark(&r.components));
+                        ui.label(RichText::new(mark.0).size(15.0).color(mark.1));
+                        ui.label(RichText::new(row.map_or_else(|| key.clone(), EntityRow::label)).strong().size(15.0).color(crate::theme::TEXT_STRONG));
+                    });
                     ui.weak(&key);
-                    ui.separator();
+                    ui.add_space(2.0);
                     for (name, value) in &ins.components {
                         let Some(ty) = types.get(name) else { continue };
                         let base = egui::Id::new(("inspector", &key, name));
-                        egui::CollapsingHeader::new(RichText::new(name).strong()).id_salt(base).default_open(true).show(ui, |ui| {
+                        crate::theme::card_frame().show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        egui::CollapsingHeader::new(crate::theme::type_name(name)).id_salt(base).default_open(true).show(ui, |ui| {
                             let mut evs = Vec::new();
                             if name == orr_gfx::names::MATERIAL {
                                 material_shown = true;
@@ -2330,9 +2358,13 @@ impl EditorApp {
                             }
                             }
                             events.extend(evs.into_iter().map(|e| (Owner::Component(name.clone()), e)));
-                            if ui.small_button("Remove component").clicked() {
-                                remove = Some(name.clone());
-                            }
+                            // One row, right-aligned: the action is there when wanted and quiet otherwise.
+                            ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 18.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.add(egui::Button::new(RichText::new("Remove component").size(11.5).color(crate::theme::TEXT_WEAK)).frame(false)).clicked() {
+                                    remove = Some(name.clone());
+                                }
+                            });
+                        });
                         });
                     }
                     let have: Vec<&str> = row.map(|r| r.components.iter().map(String::as_str).collect()).unwrap_or_default();
@@ -2358,12 +2390,14 @@ impl EditorApp {
                     ui.weak("Select an entity in the hierarchy or click an entity in the viewport.");
                 }
             }
-            ui.separator();
-            ui.label(RichText::new("Singletons").strong());
+            ui.add_space(6.0);
+            crate::theme::section_title(ui, "Singletons");
             for (name, value) in editor.singletons() {
                 let Some(ty) = types.get(name) else { continue };
                 let base = egui::Id::new(("singleton", name));
-                egui::CollapsingHeader::new(name).id_salt(base).default_open(editor.game() == crate::game::EditorGame::Arena && name == "Score").show(ui, |ui| {
+                crate::theme::card_frame().show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                egui::CollapsingHeader::new(crate::theme::type_name(name)).id_salt(base).default_open(editor.game() == crate::game::EditorGame::Arena && name == "Score").show(ui, |ui| {
                     let mut evs = Vec::new();
                     if name == orr_gfx::names::POST_PROCESS {
                         post_shown = true;
@@ -2388,6 +2422,7 @@ impl EditorApp {
                         }
                     }
                     events.extend(evs.into_iter().map(|e| (Owner::Singleton(name.clone()), e)));
+                });
                 });
             }
         });

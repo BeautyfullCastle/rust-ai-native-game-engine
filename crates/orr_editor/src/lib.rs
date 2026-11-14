@@ -101,6 +101,7 @@ pub mod viewport3d;
 pub mod surface_library;
 pub mod material_panel;
 pub mod post_panel;
+pub mod theme;
 #[cfg(feature = "models")]
 pub mod terrain_models;
 #[cfg(feature = "outdoor")]
