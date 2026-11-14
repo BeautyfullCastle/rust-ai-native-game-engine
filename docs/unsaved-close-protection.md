@@ -4,7 +4,7 @@ The authoring editor refuses a native root-window close when its current invento
 
 ## Popup-free interaction
 
-The status bar always reserves a fixed-width **Unsaved work** control. After a refused close it reads **Close blocked**. Refusing a close does not open a popup, select another tab, transfer focus, consume Escape, or require an acknowledgement. Normal editing, explicit saves, ERP work, and screenshot polling continue.
+The status bar always reserves a fixed-width control that reads **Unsaved: N**, where N is the number of rows in the unsaved work list (0 when nothing is listed). After a refused close it reads **Close blocked**. Refusing a close does not open a popup, select another tab, transfer focus, consume Escape, or require an acknowledgement. Normal editing, explicit saves, ERP work, and screenshot polling continue.
 
 Click the status control or the **Unsaved work details** bottom tab to inspect the embedded read-only list. Each row identifies its existing Save, Apply, Undo, or gesture-resolution location. **Clear close status** only clears the last-close indicator. It does not save, discard, cancel a draft, or grant permission for a later exit.
 

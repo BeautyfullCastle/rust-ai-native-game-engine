@@ -75,9 +75,9 @@ impl EditorApp {
     /// reflow the viewport or a staged authored-screen preview.
     pub(super) fn close_review_status(&mut self, ui: &mut Ui) {
         let label = if self.ui.close_review.blocked {
-            "Close blocked"
+            "Close blocked".to_owned()
         } else {
-            "Unsaved work"
+            format!("Unsaved: {}", self.close_review_items().len())
         };
         if ui
             .add_sized(
