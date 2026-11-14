@@ -148,7 +148,8 @@
 //! # Not included yet
 //!
 //! Continuous collision detection for bodies (shape casts exist for
-//! queries only), joints, rounded polygons, casts with a rotating caster.
+//! queries only), motorized or limited joints, rounded polygons, casts with
+//! a rotating caster.
 #![deny(clippy::disallowed_types)]
 #![deny(clippy::float_arithmetic)]
 #![warn(missing_docs)]
@@ -158,6 +159,7 @@ mod cast;
 mod collide;
 mod fastmath;
 mod geom;
+mod joints;
 mod query;
 mod reflection;
 mod sleep;
@@ -170,6 +172,7 @@ pub use query::{
     circle_cast, circle_cast_ignoring, move_and_slide, move_and_slide_capsule, raycast, shape_cast, CapsuleCharacterParams,
     CharacterMove, CharacterParams, QueryFilter, RayHit, ShapeHit,
 };
+pub use joints::{add_joint, register_joints, Joint, JOINT_PIN, JOINT_ROD, JOINT_ROPE};
 pub use reflection::register_reflect;
 pub use sleep::{apply_impulse, is_asleep, set_velocity, wake, wake_all};
 pub use step::{step, step_probed, Phase, Scratch, StepStats};
