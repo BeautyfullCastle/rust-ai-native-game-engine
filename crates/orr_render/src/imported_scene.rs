@@ -524,10 +524,12 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
             None => <crate::IrradianceUniform as bytemuck::Zeroable>::zeroed(),
         };
         self.validate_target(target.size, target.format, target.sample_count)?;
+        // With an upscale effect the scene draws smaller and the post chain fills the target.
+        let size = if self.post_process.enabled { crate::post_effects::render_size(&self.post_process.effects, target.size) } else { target.size };
         #[cfg(feature = "particles")]
         let particle_ready = if let Some(batch) = &particles {
             if batch.renderer.format() != self.scene_format() { return Err(ImportedSceneError::FormatMismatch); }
-            Some(batch.renderer.prepare(camera, target.size, batch.items).map_err(ImportedSceneError::Particles)?)
+            Some(batch.renderer.prepare(camera, size, batch.items).map_err(ImportedSceneError::Particles)?)
         } else { None };
         #[cfg(feature = "particles")]
         let particle_passes = usize::from(particle_ready.as_ref().is_some_and(|p| p.particle_count() > 0));
@@ -537,7 +539,7 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
             return Err(ImportedSceneError::BatchLimit);
         }
         let (mut globals, shadow_ready) =
-            prepare_shared_globals(self.scene_format(), target.size, camera, lighting, self.shadow_cascades)
+            prepare_shared_globals(self.scene_format(), size, camera, lighting, self.shadow_cascades)
                 .map_err(ImportedSceneError::Model)?;
         #[cfg(feature = "irradiance-probes")]
         {
@@ -639,7 +641,7 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
                     .prepare_composed(
                         list,
                         camera,
-                        target.size,
+                        size,
                         lighting,
                         point,
                         shadow_ready.as_ref(),
@@ -681,17 +683,17 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
             if self
                 .post_processor
                 .as_ref()
-                .is_none_or(|p| p.size() != target.size)
+                .is_none_or(|p| p.size() != size)
             {
                 if let Some(p) = self.post_processor.as_mut() {
                     // Retire older in-flight generations before allocating the
                     // admitted old + new peak. Only resource transitions stall.
                     self.rhi.wait_idle();
-                    p.resize(&self.rhi, target.size);
+                    p.resize(&self.rhi, size);
                 } else {
                     self.post_processor = Some(crate::PostProcessor::new(
                         &self.rhi,
-                        target.size,
+                        size,
                         self.format,
                     ));
                 }
@@ -713,12 +715,12 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
         if self
             .depth
             .as_ref()
-            .is_none_or(|depth| depth.size != target.size)
+            .is_none_or(|depth| depth.size != size)
         {
             let texture = self.rhi.create_texture(&TextureDesc {
                 label: "imported scene shared depth",
-                width: target.size.0,
-                height: target.size.1,
+                width: size.0,
+                height: size.1,
                 format: TextureFormat::Depth32Float,
                 // Post effects (light shafts) read the depth of the finished scene.
                 usage: TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING,
@@ -729,7 +731,7 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
             self.depth = Some(Depth {
                 _texture: texture,
                 view,
-                size: target.size,
+                size,
             });
             self.depth_generation = self.depth_generation.saturating_add(1);
         }
@@ -773,7 +775,7 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
             view_proj: globals.view_proj(),
             camera,
             lighting,
-            size: target.size,
+            size,
             color_format: self.scene_format(),
             depth_format: TextureFormat::Depth32Float,
             shadow: shadow_ready.as_ref().zip(self.shadow.as_ref()).map(|(ready, map)| crate::PassShadow {
@@ -961,9 +963,9 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
             // Metadata is entirely determined by the completed preflight and
             // the scene-owned attachments. No further fallible frame admission.
             batch.renderer.upload_and_encode(&mut encoder, crate::particle_renderer::ParticleTarget {
-                color: scene_view, depth, size: target.size, color_format: self.scene_format(),
+                color: scene_view, depth, size: size, color_format: self.scene_format(),
                 depth_format: TextureFormat::Depth32Float, sample_count: 1,
-                depth_size: target.size, depth_sample_count: 1,
+                depth_size: size, depth_sample_count: 1,
             }, ready).expect("preflighted scene particle target");
         }
         if let Some(post) = &self.post_processor {
@@ -977,6 +979,7 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
                 &self.depth.as_ref().expect("accepted frame owns depth").view,
                 globals.view_proj(),
                 camera.eye,
+                target.size,
             );
         }
         self.rhi.submit(encoder);

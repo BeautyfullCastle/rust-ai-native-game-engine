@@ -328,6 +328,18 @@ pub const EFFECT_COLOR_GRADE: u32 = 4;
 pub const EFFECT_VIGNETTE: u32 = 5;
 /// [`PostEffect::kind`]: fine moving noise over the picture. Params: strength.
 pub const EFFECT_FILM_GRAIN: u32 = 6;
+/// [`PostEffect::kind`]: creases and contact areas darken (screen-space ambient occlusion).
+/// Params: strength, radius in meters.
+pub const EFFECT_SSAO: u32 = 7;
+/// [`PostEffect::kind`]: cel shading, brightness in flat steps. Params: bands, softness.
+pub const EFFECT_TOON: u32 = 8;
+/// [`PostEffect::kind`]: dark lines where depth jumps. Params: thickness in pixels, sensitivity, darkness.
+pub const EFFECT_OUTLINE: u32 = 9;
+/// [`PostEffect::kind`]: fast approximate anti-aliasing. Params: strength.
+pub const EFFECT_FXAA: u32 = 10;
+/// [`PostEffect::kind`]: draws the scene smaller and upscales it with edge-adaptive
+/// filtering and sharpening, after AMD FSR 1. Params: scale, sharpness.
+pub const EFFECT_UPSCALE: u32 = 11;
 /// Slots in [`PostProcess::effects`].
 pub const POST_EFFECTS: usize = 8;
 
@@ -338,7 +350,7 @@ pub const POST_EFFECTS: usize = 8;
 #[reflect(default)]
 pub struct PostEffect {
     /// Which effect this slot holds.
-    #[reflect(enumeration = "none=0,bloom=1,light_shafts=2,auto_exposure=3,color_grade=4,vignette=5,film_grain=6")]
+    #[reflect(enumeration = "none=0,bloom=1,light_shafts=2,auto_exposure=3,color_grade=4,vignette=5,film_grain=6,ssao=7,toon=8,outline=9,fxaa=10,upscale=11")]
     pub kind: u32,
     /// Whether the effect runs.
     #[reflect(bool)]
@@ -368,6 +380,11 @@ pub fn effect_params(kind: u32) -> &'static [EffectParam] {
     const COLOR_GRADE_PARAMS: &[EffectParam] = &[("saturation", r(0, 1), r(2, 1), r(1, 1)), ("contrast", r(0, 1), r(1, 1), r(0, 1)), ("warmth", r(-1, 1), r(1, 1), r(0, 1)), ("tint", r(-1, 1), r(1, 1), r(0, 1))];
     const VIGNETTE_PARAMS: &[EffectParam] = &[("strength", r(0, 1), r(1, 1), r(35, 100)), ("radius", r(1, 10), r(15, 10), r(8, 10)), ("softness", r(1, 100), r(1, 1), r(5, 10))];
     const FILM_GRAIN_PARAMS: &[EffectParam] = &[("strength", r(0, 1), r(1, 1), r(15, 100))];
+    const SSAO_PARAMS: &[EffectParam] = &[("strength", r(0, 1), r(2, 1), r(1, 1)), ("radius", r(5, 100), r(10, 1), r(1, 1))];
+    const TOON_PARAMS: &[EffectParam] = &[("bands", r(2, 1), r(8, 1), r(3, 1)), ("softness", r(0, 1), r(1, 1), r(1, 10))];
+    const OUTLINE_PARAMS: &[EffectParam] = &[("thickness", r(1, 2), r(4, 1), r(1, 1)), ("sensitivity", r(1, 100), r(1, 1), r(5, 100)), ("darkness", r(0, 1), r(1, 1), r(85, 100))];
+    const FXAA_PARAMS: &[EffectParam] = &[("strength", r(0, 1), r(1, 1), r(1, 1))];
+    const UPSCALE_PARAMS: &[EffectParam] = &[("scale", r(1, 2), r(1, 1), r(75, 100)), ("sharpness", r(0, 1), r(1, 1), r(5, 10))];
     match kind {
         EFFECT_BLOOM => BLOOM_PARAMS,
         EFFECT_LIGHT_SHAFTS => LIGHT_SHAFTS_PARAMS,
@@ -375,6 +392,11 @@ pub fn effect_params(kind: u32) -> &'static [EffectParam] {
         EFFECT_COLOR_GRADE => COLOR_GRADE_PARAMS,
         EFFECT_VIGNETTE => VIGNETTE_PARAMS,
         EFFECT_FILM_GRAIN => FILM_GRAIN_PARAMS,
+        EFFECT_SSAO => SSAO_PARAMS,
+        EFFECT_TOON => TOON_PARAMS,
+        EFFECT_OUTLINE => OUTLINE_PARAMS,
+        EFFECT_FXAA => FXAA_PARAMS,
+        EFFECT_UPSCALE => UPSCALE_PARAMS,
         _ => &[],
     }
 }

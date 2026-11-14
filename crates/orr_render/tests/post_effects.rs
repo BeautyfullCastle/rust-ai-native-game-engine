@@ -1,5 +1,6 @@
 //! Post effects of the imported scene's HDR chain, checked on the picture:
-//! vignette, color grade, light shafts and auto exposure.
+//! vignette, color grade, light shafts, auto exposure, ambient occlusion,
+//! toon steps, outlines, FXAA and upscaling.
 #![cfg(feature = "imported-scene")]
 #![allow(clippy::float_arithmetic)]
 
@@ -62,6 +63,10 @@ fn render(g: &Wgpu, color: [f32; 3], scale: f32, light: &Lighting, effects: &[Sc
 }
 
 fn render_from(g: &Wgpu, camera: &Camera3D, color: [f32; 3], scale: f32, light: &Lighting, effects: &[ScreenEffect]) -> Vec<u8> {
+    render_instances(g, camera, color, &[StaticInstance { scale: [scale; 3], ..Default::default() }], light, effects)
+}
+
+fn render_instances(g: &Wgpu, camera: &Camera3D, color: [f32; 3], instances: &[StaticInstance], light: &Lighting, effects: &[ScreenEffect]) -> Vec<u8> {
     let mut scene = ImportedSceneRenderer::new(g.clone(), FORMAT).unwrap();
     scene.post_process = PostProcessSettings { enabled: true, bloom: false, ..Default::default() };
     for (slot, effect) in scene.post_process.effects.iter_mut().zip(effects) {
@@ -69,7 +74,6 @@ fn render_from(g: &Wgpu, camera: &Camera3D, color: [f32; 3], scale: f32, light: 
     }
     // With HDR on, batches draw into the scene's linear RGBA16F target.
     let mut renderer = ModelRenderer::new(g.clone(), TextureFormat::Rgba16Float, square(color)).unwrap();
-    let instances = [StaticInstance { scale: [scale; 3], ..Default::default() }];
     let texture = g.create_texture(&TextureDesc {
         label: "post effect test",
         width: SIZE,
@@ -86,7 +90,7 @@ fn render_from(g: &Wgpu, camera: &Camera3D, color: [f32; 3], scale: f32, light: 
             camera,
             light,
             &PointLightSettings::default(),
-            &mut [ImportedBatch::StaticInstances { renderer: &mut renderer, instances: &instances }],
+            &mut [ImportedBatch::StaticInstances { renderer: &mut renderer, instances }],
         )
         .unwrap();
     g.read_texture(&texture)
@@ -169,3 +173,97 @@ fn height_fog_turns_far_geometry_toward_the_sky_color() {
     assert!(a[0] > a[2] + 100, "without fog the wall is red: {a:?}");
     assert!(b[2] > a[2] + 40 && b[0] < a[0], "fog brings in the sky color: {a:?} clear, {b:?} foggy");
 }
+
+fn ortho() -> Camera3D {
+    Camera3D::orthographic([0.0, 0.0, 5.0], [0.0; 3], 1.0)
+}
+
+/// A wide square in the back and a small one 0.4 meters in front of it, both facing the camera.
+fn step_scene() -> [StaticInstance; 2] {
+    [
+        StaticInstance { scale: [4.0; 3], ..Default::default() },
+        StaticInstance { translation: [0.0, 0.0, 0.4], scale: [0.5; 3], ..Default::default() },
+    ]
+}
+
+#[test]
+fn ambient_occlusion_darkens_the_floor_beside_a_raised_square_only() {
+    let Some(g) = gpu() else { return };
+    let effects = [ScreenEffect::Ssao { strength: 2.0, radius: 1.5 }];
+    let plain = render_instances(&g, &ortho(), [0.6; 3], &step_scene(), &light(1.0), &[]);
+    let occluded = render_instances(&g, &ortho(), [0.6; 3], &step_scene(), &light(1.0), &effects);
+    // The raised square ends near x = 40; the floor just past it sits in the crease.
+    let a = px(&plain, 44, 32)[0];
+    let b = (40..48).map(|x| px(&occluded, x, 32)[0]).min().unwrap();
+    assert!(b + 20 < a, "the floor next to the raised square is darker: {a} plain, {b} occluded");
+    let (a, b) = (px(&plain, 4, 4)[0], px(&occluded, 4, 4)[0]);
+    assert!(a.abs_diff(b) <= 3, "open floor far from it keeps its light: {a} plain, {b} occluded");
+    let (a, b) = (px(&plain, 32, 32)[0], px(&occluded, 32, 32)[0]);
+    assert!(a.abs_diff(b) <= 3, "the top of the raised square is open: {a} plain, {b} occluded");
+}
+
+#[test]
+fn toon_steps_put_nearby_brightness_in_one_band() {
+    let Some(g) = gpu() else { return };
+    let effects = [ScreenEffect::Toon { bands: 2.0, softness: 0.0 }];
+    let (dark, light_) = (render(&g, [0.3; 3], 4.0, &light(1.0), &[]), render(&g, [0.4; 3], 4.0, &light(1.0), &[]));
+    let (dark_toon, light_toon) = (render(&g, [0.3; 3], 4.0, &light(1.0), &effects), render(&g, [0.4; 3], 4.0, &light(1.0), &effects));
+    assert!(px(&light_, 32, 32)[0] > px(&dark, 32, 32)[0] + 10, "the plain pictures differ");
+    let (a, b) = (px(&dark_toon, 32, 32), px(&light_toon, 32, 32));
+    assert!(a[0].abs_diff(b[0]) <= 2, "both land on the same step: {a:?} and {b:?}");
+    assert!(a[0].abs_diff(a[2]) <= 2, "gray stays gray: {a:?}");
+    let shade = [ScreenEffect::Toon { bands: 4.0, softness: 0.0 }];
+    let (plain, stepped) = (render(&g, [0.03; 3], 4.0, &light(1.0), &[]), render(&g, [0.03; 3], 4.0, &light(1.0), &shade));
+    assert!(px(&stepped, 32, 32)[0] >= px(&plain, 32, 32)[0], "the darkest step is not black: {:?}", px(&stepped, 32, 32));
+}
+
+#[test]
+fn an_outline_follows_the_depth_step_and_leaves_flat_areas() {
+    let Some(g) = gpu() else { return };
+    let effects = [ScreenEffect::Outline { thickness: 1.0, sensitivity: 0.02, darkness: 1.0 }];
+    let plain = render_instances(&g, &ortho(), [0.6; 3], &step_scene(), &light(1.0), &[]);
+    let lined = render_instances(&g, &ortho(), [0.6; 3], &step_scene(), &light(1.0), &effects);
+    let darkest = (37..44).map(|x| px(&lined, x, 32)[0]).min().unwrap();
+    assert!(darkest < 30, "a dark line at the edge of the raised square: {darkest}");
+    for (x, y) in [(32, 32), (4, 4)] {
+        assert!(px(&plain, x, y)[0].abs_diff(px(&lined, x, y)[0]) <= 2, "flat area at {x},{y} is unchanged");
+    }
+}
+
+#[test]
+fn fxaa_softens_a_stair_stepped_diagonal_edge() {
+    let Some(g) = gpu() else { return };
+    let turn = std::f32::consts::FRAC_PI_8;
+    let tilted = [StaticInstance { rotation: [0.0, 0.0, turn.sin(), turn.cos()], scale: [1.2; 3], ..Default::default() }];
+    let plain = render_instances(&g, &ortho(), [1.0; 3], &tilted, &light(1.0), &[]);
+    let smooth = render_instances(&g, &ortho(), [1.0; 3], &tilted, &light(1.0), &[ScreenEffect::Fxaa { strength: 1.0 }]);
+    // Red is 149 on the clear background and 255 on the square; anti-aliased edge pixels fall between.
+    let between = |image: &[u8]| (0..SIZE * SIZE).filter(|i| (156..250).contains(&image[(*i * 4) as usize])).count();
+    assert!(between(&smooth) > between(&plain) + 20, "edge pixels take in-between values: {} plain, {} fxaa", between(&plain), between(&smooth));
+    assert!(px(&plain, 32, 32)[0].abs_diff(px(&smooth, 32, 32)[0]) <= 2, "the flat inside is unchanged");
+}
+
+#[test]
+fn upscaling_from_half_size_keeps_flat_colors_and_the_target_size() {
+    let Some(g) = gpu() else { return };
+    let effects = [ScreenEffect::Upscale { scale: 0.5, sharpness: 0.5 }];
+    let plain = render(&g, [0.6, 0.3, 0.1], 1.0, &light(1.0), &[]);
+    let upscaled = render(&g, [0.6, 0.3, 0.1], 1.0, &light(1.0), &effects);
+    assert_eq!(upscaled.len(), (SIZE * SIZE * 4) as usize);
+    for (x, y) in [(32, 32), (2, 2), (61, 61)] {
+        let (a, b) = (px(&plain, x, y), px(&upscaled, x, y));
+        assert!((0..3).all(|c| a[c].abs_diff(b[c]) <= 3), "flat color at {x},{y}: {a:?} plain, {b:?} upscaled");
+    }
+    // The square's edge is still where it was, within the half-size grid.
+    let inside = |image: &[u8]| (0..SIZE).filter(|x| px(image, *x, 32)[0] > 100).count() as i64;
+    assert!((inside(&plain) - inside(&upscaled)).abs() <= 2, "{} plain, {} upscaled", inside(&plain), inside(&upscaled));
+}
+
+#[test]
+fn the_scene_draws_smaller_only_with_an_upscale_effect() {
+    use orr_render::post_effects::render_size;
+    assert_eq!(render_size(&[None], (1920, 1080)), (1920, 1080));
+    assert_eq!(render_size(&[Some(ScreenEffect::Upscale { scale: 0.75, sharpness: 0.2 })], (1920, 1080)), (1440, 810));
+    assert_eq!(render_size(&[Some(ScreenEffect::Upscale { scale: 0.5, sharpness: 0.2 })], (1, 1)), (1, 1));
+}
+

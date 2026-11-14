@@ -107,14 +107,16 @@ pub(crate) fn validate<B: Rhi>(
     {
         return Err(ImportedSceneError::UnsupportedHdr);
     }
-    let bytes = color_bytes(size).ok_or(ImportedSceneError::PostProcessBudget)?;
+    let render = crate::post_effects::render_size(&settings.effects, size);
+    let bytes = color_bytes(render).ok_or(ImportedSceneError::PostProcessBudget)?;
     let bytes = if settings.has_effects() {
-        crate::post_effects::effect_bytes(size).and_then(|extra| bytes.checked_add(extra)).ok_or(ImportedSceneError::PostProcessBudget)?
+        let effects: Vec<crate::ScreenEffect> = settings.effects.iter().flatten().copied().collect();
+        crate::post_effects::effect_bytes(render, size, &effects).and_then(|extra| bytes.checked_add(extra)).ok_or(ImportedSceneError::PostProcessBudget)?
     } else {
         bytes
     };
     let retained = previous
-        .filter(|p| p.size() != size)
+        .filter(|p| p.size() != render)
         .map_or(0, |p| p.bytes());
     if bytes
         .checked_add(retained)
@@ -326,7 +328,7 @@ impl<B: Rhi> PostProcessor<B> {
         self.targets.size
     }
     pub fn bytes(&self) -> u64 {
-        let effects = self.effects.borrow().as_ref().map_or(0, |e| crate::post_effects::effect_bytes(e.size()).expect("admitted dimensions"));
+        let effects = self.effects.borrow().as_ref().map_or(0, |e| e.bytes());
         color_bytes(self.size()).expect("admitted dimensions") + effects
     }
     pub fn scene_texture(&self) -> &B::Texture {
@@ -347,6 +349,7 @@ impl<B: Rhi> PostProcessor<B> {
         depth: &B::TextureView,
         view_proj: [[f32; 4]; 4],
         eye: [f32; 3],
+        output_size: (u32, u32),
     ) {
         let write =
             |buffer, params: Params| rhi.write_buffer(buffer, 0, bytemuck::bytes_of(&params));
@@ -432,6 +435,7 @@ impl<B: Rhi> PostProcessor<B> {
                 eye,
                 lighting,
                 format,
+                output_size,
             };
             chain.as_ref().expect("made above").encode(rhi, encoder, target, &effects, &inputs);
             return;
@@ -496,5 +500,29 @@ mod tests {
             .is_err()
         );
         assert!(color_bytes((u32::MAX, u32::MAX)).is_none());
+    }
+
+    /// Color and effect targets of a frame, as admission counts them.
+    fn frame_bytes(size: (u32, u32), effects: &[crate::ScreenEffect]) -> u64 {
+        let mut slots = [None; crate::post_effects::MAX_SCREEN_EFFECTS];
+        for (slot, effect) in slots.iter_mut().zip(effects) {
+            *slot = Some(*effect);
+        }
+        let render = crate::post_effects::render_size(&slots, size);
+        color_bytes(render).unwrap() + crate::post_effects::effect_bytes(render, size, effects).unwrap()
+    }
+
+    #[test]
+    fn effect_targets_are_counted_only_for_the_effects_in_use() {
+        use crate::ScreenEffect;
+        let grade = ScreenEffect::ColorGrade { saturation: 1.0, contrast: 0.2, warmth: 0.0, tint: 0.0 };
+        let ssao = ScreenEffect::Ssao { strength: 1.0, radius: 1.0 };
+        let fxaa = ScreenEffect::Fxaa { strength: 1.0 };
+        let upscale = ScreenEffect::Upscale { scale: 0.5, sharpness: 0.5 };
+        let uhd = (3840, 2160);
+        assert!(frame_bytes(uhd, &[grade]) <= MAX_POST_PROCESS_BYTES, "4K with ordinary effects stays admitted");
+        assert!(frame_bytes(uhd, &[grade, ssao]) > frame_bytes(uhd, &[grade]));
+        assert!(frame_bytes(uhd, &[grade, upscale]) < frame_bytes(uhd, &[grade]), "a half-size scene needs less than a full one");
+        assert!(frame_bytes((2560, 1440), &[grade, ssao, fxaa]) <= MAX_POST_PROCESS_BYTES, "1440p with SSAO and FXAA is admitted");
     }
 }

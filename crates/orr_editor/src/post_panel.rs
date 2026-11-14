@@ -10,7 +10,9 @@ use egui::{RichText, Ui};
 use orr_reflect::{decimal, TypeDesc, Value};
 
 /// Effect kind names in `orr_gfx` kind order; index 0 is an empty slot.
-const KINDS: [&str; 7] = ["none", "bloom", "light_shafts", "auto_exposure", "color_grade", "vignette", "film_grain"];
+const KINDS: [&str; 12] = [
+    "none", "bloom", "light_shafts", "auto_exposure", "color_grade", "vignette", "film_grain", "ssao", "toon", "outline", "fxaa", "upscale",
+];
 
 #[derive(Clone)]
 struct Effect {
