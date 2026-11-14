@@ -339,3 +339,45 @@ fn a_skinned_model_is_drawn_with_its_surface_shader_in_every_pose() {
         near([textured[first], textured[first + 1], textured[first + 2]], [0, 255, 0], "the picked image");
     }
 }
+
+/// The test square with texture coordinates that follow its position, so u runs along +x.
+fn square_with_uv() -> StaticModel {
+    let mut source = square().source().clone();
+    for v in &mut source.primitives[0].vertices {
+        v.uv = [v.position[0] + 0.5, 0.5 - v.position[1]];
+    }
+    StaticModel::new(source).unwrap()
+}
+
+/// A normal map that tilts the normal by `tilt` along u (texel x), as a constant texel.
+fn tilted_normal(tilt: &str) -> String {
+    format!(
+        "fn surface(in: SurfaceInput) -> Surface {{
+    var s = default_surface(in);
+    s.albedo = vec3<f32>(1.0);
+    s.normal = normal_map(in, vec3<f32>(0.5 + {tilt}, 0.5, 0.85), 1.0);
+    return s;
+}}
+"
+    )
+}
+
+#[test]
+fn a_normal_map_turns_the_lit_side_toward_or_away_from_the_sun() {
+    let Some(g) = gpu() else { return };
+    let mut brightness = Vec::new();
+    for tilt in ["0.0", "0.35", "-0.35"] {
+        let mut scene = ImportedSceneRenderer::new(g.clone(), FORMAT).unwrap();
+        let mut renderer = ModelRenderer::new(g.clone(), FORMAT, square_with_uv()).unwrap();
+        let id = renderer.add_surface(&SurfaceShader::compile("normal map", &tilted_normal(tilt)).unwrap());
+        renderer.set_instance_surfaces(&[Some(ModelSurface::new(id, values(&[])))], 0.0);
+        let mut light = sunny();
+        light.shadows = false;
+        let image = render(&g, &mut scene, &mut renderer, &[at(0.0, 0.0, 0.0, 1.6)], &light);
+        brightness.push(px(&image, 0.0, 0.0)[0]);
+    }
+    let [flat, away, toward] = [brightness[0], brightness[1], brightness[2]];
+    // The sun travels toward +x: a normal bent toward -x faces it, one bent toward +x turns away.
+    assert!(toward > flat + 10, "bent toward the sun is brighter: {toward} vs flat {flat}");
+    assert!(away + 10 < flat, "bent away from the sun is darker: {away} vs flat {flat}");
+}

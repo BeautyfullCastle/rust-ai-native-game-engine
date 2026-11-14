@@ -15,7 +15,7 @@ use std::{collections::BTreeSet, sync::Arc};
 mod graph;
 mod ik;
 pub use graph::{
-    AnimationLayer, AnimationState, Animator, BlendSpace1D, BoneMask, ClipEvent, Condition, LayerBlend, Motion, StateMachine, Transition, MAX_EVENTS,
+    AnimationLayer, AnimationState, Animator, BlendSpace1D, BlendSpace2D, BoneMask, ClipEvent, Condition, LayerBlend, Motion, StateMachine, Transition, MAX_EVENTS,
     MAX_LAYERS, MAX_STATES, MAX_TRANSITIONS,
 };
 

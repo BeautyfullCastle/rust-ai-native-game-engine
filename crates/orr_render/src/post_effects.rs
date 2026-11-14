@@ -57,6 +57,22 @@ pub enum ScreenEffect {
     /// the new frame. With [`ScreenEffect::Upscale`] the history is kept at the
     /// target size, which upscales over time instead of from one frame.
     Taa { blend: f32 },
+    /// Screen-space reflections: surfaces mirror what is on screen along their
+    /// reflected view ray, stronger at grazing angles. `strength` 0..=1,
+    /// `distance` 0.5..=200 meters of ray, `thickness` 0.05..=5 meters a surface
+    /// is taken to be, `floors` 0..=1 limits reflections to surfaces facing up
+    /// that much (0 reflects on every surface, 0.9 only on near-level floors and water).
+    Ssr { strength: f32, distance: f32, thickness: f32, floors: f32 },
+    /// Depth of field: points away from `focus` meters blur. `range` 0..=1000
+    /// meters around the focus stays sharp, `blur` 0..=16 pixels is the largest
+    /// blur radius. `focus` 0.1..=10000.
+    DepthOfField { focus: f32, range: f32, blur: f32 },
+    /// Camera motion blur along each pixel's motion since the last frame.
+    /// `strength` 0..=2 is the share of a frame the shutter stays open,
+    /// `limit` 1..=64 pixels caps the streak.
+    MotionBlur { strength: f32, limit: f32 },
+    /// Red and blue split toward the edges of the picture. `strength` 0..=1.
+    ChromaticAberration { strength: f32 },
 }
 
 /// Whether `effects` ask for temporal anti-aliasing, which jitters the scene.
@@ -114,6 +130,10 @@ impl ScreenEffect {
             Self::Fxaa { strength } => vec![(strength, 0.0, 1.0)],
             Self::Upscale { scale, sharpness } => vec![(scale, 0.5, 1.0), (sharpness, 0.0, 1.0)],
             Self::Taa { blend } => vec![(blend, 0.05, 0.5)],
+            Self::Ssr { strength, distance, thickness, floors } => vec![(strength, 0.0, 1.0), (distance, 0.5, 200.0), (thickness, 0.05, 5.0), (floors, 0.0, 1.0)],
+            Self::DepthOfField { focus, range, blur } => vec![(focus, 0.1, 10000.0), (range, 0.0, 1000.0), (blur, 0.0, 16.0)],
+            Self::MotionBlur { strength, limit } => vec![(strength, 0.0, 2.0), (limit, 1.0, 64.0)],
+            Self::ChromaticAberration { strength } => vec![(strength, 0.0, 1.0)],
             Self::LightShafts { strength, length } => vec![(strength, 0.0, 4.0), (length, 0.1, 1.0)],
             Self::AutoExposure { darkest, brightest, speed, target } => vec![(darkest, 0.1, 16.0), (brightest, 0.1, 16.0), (speed, 0.1, 20.0), (target, 0.01, 1.0)],
             Self::ColorGrade { saturation, contrast, warmth, tint } => vec![(saturation, 0.0, 2.0), (contrast, 0.0, 1.0), (warmth, -1.0, 1.0), (tint, -1.0, 1.0)],
@@ -154,6 +174,15 @@ impl ScreenEffect {
             Self::Fxaa { strength } => Self::Fxaa { strength: c(strength, 0.0, 1.0) },
             Self::Upscale { scale, sharpness } => Self::Upscale { scale: c(scale, 0.5, 1.0), sharpness: c(sharpness, 0.0, 1.0) },
             Self::Taa { blend } => Self::Taa { blend: c(blend, 0.05, 0.5) },
+            Self::Ssr { strength, distance, thickness, floors } => Self::Ssr {
+                strength: c(strength, 0.0, 1.0),
+                distance: c(distance, 0.5, 200.0),
+                thickness: c(thickness, 0.05, 5.0),
+                floors: c(floors, 0.0, 1.0),
+            },
+            Self::DepthOfField { focus, range, blur } => Self::DepthOfField { focus: c(focus, 0.1, 10000.0), range: c(range, 0.0, 1000.0), blur: c(blur, 0.0, 16.0) },
+            Self::MotionBlur { strength, limit } => Self::MotionBlur { strength: c(strength, 0.0, 2.0), limit: c(limit, 1.0, 64.0) },
+            Self::ChromaticAberration { strength } => Self::ChromaticAberration { strength: c(strength, 0.0, 1.0) },
         }
     }
 
@@ -187,6 +216,9 @@ pub(crate) fn effect_bytes(render: (u32, u32), output: (u32, u32), effects: &[Sc
     if asked.upscale.is_some() {
         texels = texels.checked_add(area(output)?)?;
     }
+    if asked.stage_count() > 0 {
+        texels = texels.checked_add(full.checked_mul(2.min(asked.stage_count() as u64))?)?;
+    }
     if asked.taa.is_some() {
         let history = area(if asked.upscale.is_some() { output } else { render })?;
         texels = texels.checked_add(history.checked_mul(2)?)?;
@@ -215,6 +247,10 @@ struct Uniform {
     sizes: [f32; 4],
     prev_view_proj: [[f32; 4]; 4],
     taa: [f32; 4],
+    last_view_proj: [[f32; 4]; 4],
+    ssr: [f32; 4],
+    dof: [f32; 4],
+    blur: [f32; 4],
 }
 
 /// The inverse of a column-major 4 x 4 matrix, or the identity when it has none.
@@ -323,6 +359,10 @@ pub(crate) struct EffectChain<B: Rhi> {
     easu_pipeline: B::Pipeline,
     rcas_pipeline: B::Pipeline,
     taa_pipeline: B::Pipeline,
+    ssr_pipeline: B::Pipeline,
+    blur_pipeline: B::Pipeline,
+    dof_pipeline: B::Pipeline,
+    chroma_pipeline: B::Pipeline,
     uniform: B::Buffer,
     shafts: Color<B>,
     ao: OnDemand<B>,
@@ -335,6 +375,10 @@ pub(crate) struct EffectChain<B: Rhi> {
     /// Temporal history, written and read in turn.
     history: [OnDemand<B>; 2],
     temporal: Cell<History>,
+    /// The scene after reflections, motion blur, depth of field and color fringes, in turn.
+    stages: [OnDemand<B>; 2],
+    /// The unjittered world-to-clip matrix of the last frame, for motion blur.
+    last_view_proj: Cell<Option<[[f32; 4]; 4]>>,
     size: (u32, u32),
     /// Which of `adapted` the next frame writes, the time of the last frame, and a frame number.
     state: Cell<(usize, Option<Instant>, u32)>,
@@ -365,6 +409,10 @@ struct Asked {
     fxaa: Option<f32>,
     upscale: Option<f32>,
     taa: Option<f32>,
+    ssr: Option<[f32; 4]>,
+    dof: Option<[f32; 4]>,
+    blur: Option<[f32; 4]>,
+    chroma: Option<f32>,
     fog: Option<([f32; 4], [f32; 4])>,
     list: [[f32; 4]; 16],
     count: usize,
@@ -372,7 +420,7 @@ struct Asked {
 
 impl Asked {
     fn read(effects: &[ScreenEffect]) -> Self {
-        let mut asked = Self { shafts: None, auto: None, ssao: None, fxaa: None, upscale: None, taa: None, fog: None, list: [[0.0; 4]; 16], count: 0 };
+        let mut asked = Self { shafts: None, auto: None, ssao: None, fxaa: None, upscale: None, taa: None, ssr: None, dof: None, blur: None, chroma: None, fog: None, list: [[0.0; 4]; 16], count: 0 };
         for effect in effects {
             // Effects on the finished picture keep list order; the first of a kind wins elsewhere.
             let entry = match *effect {
@@ -404,6 +452,22 @@ impl Asked {
                     asked.taa.get_or_insert(blend);
                     None
                 }
+                ScreenEffect::Ssr { strength, distance, thickness, floors } => {
+                    asked.ssr.get_or_insert([strength, distance, thickness, floors]);
+                    None
+                }
+                ScreenEffect::DepthOfField { focus, range, blur } => {
+                    asked.dof.get_or_insert([focus, range, blur, 0.0]);
+                    None
+                }
+                ScreenEffect::MotionBlur { strength, limit } => {
+                    asked.blur.get_or_insert([strength, limit, 0.0, 0.0]);
+                    None
+                }
+                ScreenEffect::ChromaticAberration { strength } => {
+                    asked.chroma.get_or_insert(strength);
+                    None
+                }
                 ScreenEffect::ColorGrade { saturation, contrast, warmth, tint } => Some(([4.0, saturation, contrast, warmth], tint)),
                 ScreenEffect::Vignette { strength, radius, softness } => Some(([5.0, strength, radius, softness], 0.0)),
                 ScreenEffect::FilmGrain { strength } => Some(([6.0, strength, 0.0, 0.0], 0.0)),
@@ -422,6 +486,11 @@ impl Asked {
     /// Anti-aliasing and upscaling read the finished picture from a target of its own.
     fn presenting(&self) -> bool {
         self.fxaa.is_some() || self.upscale.is_some() || self.taa.is_some()
+    }
+
+    /// Passes on the lit scene before the final pass.
+    fn stage_count(&self) -> usize {
+        [self.ssr.is_some(), self.blur.is_some(), self.dof.is_some(), self.chroma.is_some()].iter().filter(|on| **on).count()
     }
 
     /// Size of the temporal history: the target size when it upscales.
@@ -447,6 +516,10 @@ impl<B: Rhi> EffectChain<B> {
             easu_pipeline: pipeline("post edge-adaptive upscale", "fs_easu", TextureFormat::Rgba16Float),
             rcas_pipeline: pipeline("post contrast-adaptive sharpening", "fs_rcas", format),
             taa_pipeline: pipeline("post temporal anti-aliasing", "fs_taa", TextureFormat::Rgba16Float),
+            ssr_pipeline: pipeline("post screen-space reflections", "fs_ssr", TextureFormat::Rgba16Float),
+            blur_pipeline: pipeline("post motion blur", "fs_motion_blur", TextureFormat::Rgba16Float),
+            dof_pipeline: pipeline("post depth of field", "fs_dof", TextureFormat::Rgba16Float),
+            chroma_pipeline: pipeline("post chromatic aberration", "fs_chroma", TextureFormat::Rgba16Float),
             uniform: rhi.create_buffer(&BufferDesc { label: "post effects", size: std::mem::size_of::<Uniform>() as u64, usage: BufferUsage::UNIFORM | BufferUsage::COPY_DST }),
             shafts: color(rhi, "post light shafts", half),
             ao: OnDemand::new("post ambient occlusion"),
@@ -457,6 +530,8 @@ impl<B: Rhi> EffectChain<B> {
             upscaled: OnDemand::new("post upscaled picture"),
             history: [OnDemand::new("post temporal history a"), OnDemand::new("post temporal history b")],
             temporal: Cell::new(History { write: 0, valid: false, view_proj: [[0.0; 4]; 4], size: (0, 0) }),
+            stages: [OnDemand::new("post scene stage a"), OnDemand::new("post scene stage b")],
+            last_view_proj: Cell::new(None),
             size,
             state: Cell::new((0, None, 0)),
         }
@@ -469,7 +544,7 @@ impl<B: Rhi> EffectChain<B> {
     /// Bytes of the targets made so far.
     pub fn bytes(&self) -> u64 {
         let fixed = u64::from(self.size.0.div_ceil(2)) * u64::from(self.size.1.div_ceil(2)) + 64 * 36 + 2;
-        fixed * 8 + self.ao.bytes() + self.display.bytes() + self.aa.bytes() + self.upscaled.bytes() + self.history[0].bytes() + self.history[1].bytes()
+        fixed * 8 + self.ao.bytes() + self.display.bytes() + self.aa.bytes() + self.upscaled.bytes() + self.history[0].bytes() + self.history[1].bytes() + self.stages[0].bytes() + self.stages[1].bytes()
     }
 
     fn uniform(&self, asked: &Asked, frame: &FrameInputs<'_, B>, adapt: f32, number: u32) -> Uniform {
@@ -504,6 +579,13 @@ impl<B: Rhi> EffectChain<B> {
             sizes: [self.size.0 as f32, self.size.1 as f32, frame.output_size.0 as f32, frame.output_size.1 as f32],
             prev_view_proj: self.temporal.get().view_proj,
             taa: [asked.taa.unwrap_or(1.0), if self.history_ready(asked, frame) { 1.0 } else { 0.0 }, frame.jitter[0], frame.jitter[1]],
+            last_view_proj: self.last_view_proj.get().unwrap_or(frame.view_proj),
+            ssr: asked.ssr.unwrap_or([0.0; 4]),
+            dof: asked.dof.unwrap_or([0.0; 4]),
+            blur: {
+                let [strength, limit, ..] = asked.blur.unwrap_or([0.0; 4]);
+                [strength, limit, asked.chroma.unwrap_or(0.0), 0.0]
+            },
         }
     }
 
@@ -544,10 +626,12 @@ impl<B: Rhi> EffectChain<B> {
             ]);
             pass(encoder, "post eye adaptation", &self.adapt_pipeline, &adapt, current);
         }
+        let staged = self.stage(rhi, encoder, &asked, frame);
+        let scene = staged.as_deref().unwrap_or(frame.scene);
         let display = asked.presenting().then(|| self.display.view(rhi, self.size));
         let final_pipeline = if display.is_some() { &self.final_float_pipeline } else { &self.final_pipeline };
         let final_bind = rhi.create_bind_group(final_pipeline, 0, &[
-            Binding::Texture { binding: 0, view: frame.scene },
+            Binding::Texture { binding: 0, view: scene },
             Binding::Texture { binding: 1, view: frame.bloom },
             Binding::Sampler { binding: 2, sampler: frame.sampler },
             Binding::Uniform { binding: 3, buffer: &self.uniform },
@@ -563,11 +647,45 @@ impl<B: Rhi> EffectChain<B> {
         }
         let next = if asked.auto.is_some() { 1 - write } else { write };
         self.state.set((next, asked.auto.map(|_| now), number.wrapping_add(1)));
+        self.last_view_proj.set(Some(frame.view_proj));
         let write = self.temporal.get().write;
         self.temporal.set(match asked.taa {
             Some(_) => History { write: 1 - write, valid: true, view_proj: frame.view_proj, size: asked.history_size(self.size, frame.output_size) },
             None => History { write, valid: false, view_proj: frame.view_proj, size: (0, 0) },
         });
+    }
+
+    /// Runs reflections, motion blur, depth of field and color fringes on the lit
+    /// scene, in that order, and returns the last result; `None` when none is asked.
+    fn stage(&self, rhi: &B, encoder: &mut B::Encoder, asked: &Asked, frame: &FrameInputs<'_, B>) -> Option<Ref<'_, B::TextureView>> {
+        let passes: Vec<(&str, &B::Pipeline)> = [
+            (asked.ssr.is_some(), "post screen-space reflections", &self.ssr_pipeline),
+            (asked.blur.is_some() && self.last_view_proj.get().is_some(), "post motion blur", &self.blur_pipeline),
+            (asked.dof.is_some(), "post depth of field", &self.dof_pipeline),
+            (asked.chroma.is_some(), "post chromatic aberration", &self.chroma_pipeline),
+        ]
+        .into_iter()
+        .filter(|(on, ..)| *on)
+        .map(|(_, label, pipeline)| (label, pipeline))
+        .collect();
+        if passes.is_empty() {
+            return None;
+        }
+        // A single pass needs one target; more alternate between two.
+        let first = self.stages[0].view(rhi, self.size);
+        let second = (passes.len() > 1).then(|| self.stages[1].view(rhi, self.size));
+        let target = |index: usize| -> &B::TextureView { if index % 2 == 0 { &first } else { second.as_deref().expect("two or more passes") } };
+        for (index, (label, pipeline)) in passes.iter().enumerate() {
+            let source: &B::TextureView = if index == 0 { frame.scene } else { target(index - 1) };
+            let bind = rhi.create_bind_group(pipeline, 0, &[
+                Binding::Texture { binding: 0, view: source },
+                Binding::Sampler { binding: 2, sampler: frame.sampler },
+                Binding::Uniform { binding: 3, buffer: &self.uniform },
+                Binding::Texture { binding: 6, view: frame.depth },
+            ]);
+            fullscreen(rhi, encoder, label, pipeline, &bind, target(index));
+        }
+        Some(if (passes.len() - 1) % 2 == 0 { first } else { second.expect("two or more passes") })
     }
 
     /// Anti-aliases and upscales the finished `display` picture into `target`.

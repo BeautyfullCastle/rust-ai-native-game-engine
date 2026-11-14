@@ -342,6 +342,15 @@ pub const EFFECT_FXAA: u32 = 10;
 pub const EFFECT_UPSCALE: u32 = 11;
 /// [`PostEffect::kind`]: temporal anti-aliasing; with `upscale`, upscaling over frames. Params: blend.
 pub const EFFECT_TAA: u32 = 12;
+/// [`PostEffect::kind`]: screen-space reflections. Params: strength, distance in meters,
+/// thickness in meters, floors (how far up a surface must face to reflect, 0 is any).
+pub const EFFECT_SSR: u32 = 13;
+/// [`PostEffect::kind`]: depth of field. Params: focus distance and sharp range in meters, blur in pixels.
+pub const EFFECT_DEPTH_OF_FIELD: u32 = 14;
+/// [`PostEffect::kind`]: camera motion blur. Params: strength (shutter), limit in pixels.
+pub const EFFECT_MOTION_BLUR: u32 = 15;
+/// [`PostEffect::kind`]: red and blue split toward the picture's edges. Params: strength.
+pub const EFFECT_CHROMATIC_ABERRATION: u32 = 16;
 /// Slots in [`PostProcess::effects`].
 pub const POST_EFFECTS: usize = 8;
 
@@ -352,7 +361,7 @@ pub const POST_EFFECTS: usize = 8;
 #[reflect(default)]
 pub struct PostEffect {
     /// Which effect this slot holds.
-    #[reflect(enumeration = "none=0,bloom=1,light_shafts=2,auto_exposure=3,color_grade=4,vignette=5,film_grain=6,ssao=7,toon=8,outline=9,fxaa=10,upscale=11,taa=12")]
+    #[reflect(enumeration = "none=0,bloom=1,light_shafts=2,auto_exposure=3,color_grade=4,vignette=5,film_grain=6,ssao=7,toon=8,outline=9,fxaa=10,upscale=11,taa=12,ssr=13,depth_of_field=14,motion_blur=15,chromatic_aberration=16")]
     pub kind: u32,
     /// Whether the effect runs.
     #[reflect(bool)]
@@ -388,6 +397,10 @@ pub fn effect_params(kind: u32) -> &'static [EffectParam] {
     const FXAA_PARAMS: &[EffectParam] = &[("strength", r(0, 1), r(1, 1), r(1, 1))];
     const UPSCALE_PARAMS: &[EffectParam] = &[("scale", r(1, 2), r(1, 1), r(75, 100)), ("sharpness", r(0, 1), r(1, 1), r(5, 10))];
     const TAA_PARAMS: &[EffectParam] = &[("blend", r(5, 100), r(1, 2), r(1, 10))];
+    const SSR_PARAMS: &[EffectParam] = &[("strength", r(0, 1), r(1, 1), r(6, 10)), ("distance", r(1, 2), r(200, 1), r(30, 1)), ("thickness", r(5, 100), r(5, 1), r(1, 2)), ("floors", r(0, 1), r(1, 1), r(9, 10))];
+    const DEPTH_OF_FIELD_PARAMS: &[EffectParam] = &[("focus", r(1, 10), r(10000, 1), r(10, 1)), ("range", r(0, 1), r(1000, 1), r(5, 1)), ("blur", r(0, 1), r(16, 1), r(6, 1))];
+    const MOTION_BLUR_PARAMS: &[EffectParam] = &[("strength", r(0, 1), r(2, 1), r(1, 2)), ("limit", r(1, 1), r(64, 1), r(24, 1))];
+    const CHROMATIC_ABERRATION_PARAMS: &[EffectParam] = &[("strength", r(0, 1), r(1, 1), r(3, 10))];
     match kind {
         EFFECT_BLOOM => BLOOM_PARAMS,
         EFFECT_LIGHT_SHAFTS => LIGHT_SHAFTS_PARAMS,
@@ -401,6 +414,10 @@ pub fn effect_params(kind: u32) -> &'static [EffectParam] {
         EFFECT_FXAA => FXAA_PARAMS,
         EFFECT_UPSCALE => UPSCALE_PARAMS,
         EFFECT_TAA => TAA_PARAMS,
+        EFFECT_SSR => SSR_PARAMS,
+        EFFECT_DEPTH_OF_FIELD => DEPTH_OF_FIELD_PARAMS,
+        EFFECT_MOTION_BLUR => MOTION_BLUR_PARAMS,
+        EFFECT_CHROMATIC_ABERRATION => CHROMATIC_ABERRATION_PARAMS,
         _ => &[],
     }
 }

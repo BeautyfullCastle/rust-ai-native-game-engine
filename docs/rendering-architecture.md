@@ -184,7 +184,8 @@ orr set box_left orr_gfx::Material.values[3]=6 orr_gfx::Material.overrides=8
 
 ```mermaid
 flowchart LR
-    A[장면 HDR<br/>upscale이 있으면 축소 크기] --> O[주변광 차폐 ssao]
+    A[장면 HDR<br/>upscale이 있으면 축소 크기] --> ST[ssr → motion_blur →<br/>depth_of_field → chromatic_aberration]
+    ST --> O[주변광 차폐 ssao]
     O --> F[높이 안개<br/>Sky가 켜져 있으면]
     F --> B[bloom, 빛줄기<br/>목록 순서]
     B --> X[자동 노출 측정]
@@ -211,6 +212,10 @@ flowchart LR
 | `fxaa` | strength |
 | `upscale` | scale (0.5~1), sharpness |
 | `taa` | blend (0.05~0.5, 새 프레임의 비율) |
+| `ssr` | strength, distance (m), thickness (m), floors (0~1) |
+| `depth_of_field` | focus (m), range (m), blur (픽셀) |
+| `motion_blur` | strength (셔터, 0~2), limit (픽셀) |
+| `chromatic_aberration` | strength |
 
 - `ssao`: 깊이에서 위치와 노멀을 복원해 반경 안에서 표면보다 솟은 점을 12개 샘플로 센다. 절반 해상도로 계산하고 최종 패스에서 네 번 샘플해 부드럽게 한다. 장면 색 전체에 곱해지므로 직사광이 비치는 면도 어두워진다(주변광만 분리된 G-buffer가 없음).
 - `toon`: 톤 매핑 뒤 밝기를 단계로 나눈다. 색조는 유지한다. 재질별 셰이딩이 아니라 화면 전체에 적용된다.
@@ -218,11 +223,29 @@ flowchart LR
 - `fxaa`: 톤 매핑과 효과가 끝난 그림에 적용한다.
 - `upscale`: 장면, 깊이, 등록된 렌더 패스, 입자를 `scale` 크기로 그리고 마지막에 대상 크기로 키운다. 확대는 AMD FSR 1의 EASU 방식(엣지 방향으로 늘인 Lanczos 근사 12탭, 가까운 4텍셀로 링잉 제한), 선명화는 RCAS 방식이다. AMD 원본 코드를 그대로 옮긴 것이 아니라 같은 수식을 WGSL로 다시 쓴 것이다. 후처리가 꺼져 있으면 축소하지 않는다.
 - `taa`: 켜져 있으면 매 프레임 투영 행렬을 Halton(2, 3) 16개 순서로 서브픽셀만큼 옮긴다(지터). 장면 배치, 등록된 패스가 모두 같은 행렬로 그린다. 표시 단계에서 현재 그림을 지터만큼 되돌려 읽고, 깊이와 이전 프레임의 카메라 행렬로 각 픽셀의 이전 위치를 찾아 히스토리를 읽는다. 히스토리는 현재 3×3 이웃의 최소·최대 범위로 제한해서 가려졌다 드러난 곳에 잔상이 남지 않게 한다. 히스토리 크기가 바뀌거나 첫 프레임이면 현재 그림만 쓴다.
+- 장면 단계 효과(`ssr`, `motion_blur`, `depth_of_field`, `chromatic_aberration`)는 톤 매핑 전의 HDR 장면에 이 순서로 적용되고, 결과가 최종 패스의 입력이 된다. 두 장의 버퍼를 번갈아 쓴다.
+- `ssr`: 깊이로 복원한 노멀로 시선을 반사해 화면 공간에서 32단계 추적한다. 반사 광선이 지나간 장면 점이 `thickness` 안쪽에 있으면 그 색을 섞는다. 비스듬히 볼수록(프레넬) 강하고, 화면 가장자리와 먼 단계에서 약해진다. G-buffer에 재질 거칠기가 없어서 모든 불투명 면이 같은 세기로 반사한다. `floors`로 위를 향한 면만 고른다. 물처럼 깊이를 쓰지 않는 투명한 면은 반사하지 않는다(물 셰이더가 하늘 반사를 따로 그린다). 화면 밖의 것은 반사하지 못한다.
+- `motion_blur`: 깊이와 이전 프레임의 카메라 행렬로 픽셀이 화면에서 움직인 양을 구해 그 방향으로 12번 샘플한다. 카메라 움직임만 반영한다. 첫 프레임과 효과를 켠 직후 프레임은 흐리지 않는다.
+- `depth_of_field`: 초점 거리에서 `range`의 절반보다 먼 정도에 비례해 흐림 반경을 정하고, 원반 16개 샘플로 모은다. 초점이 맞은 앞쪽 물체가 뒤의 흐린 배경에 번지지 않게 한다. 반대 방향(흐린 앞쪽이 선명한 뒤쪽을 덮는 것)은 근사다.
+- `chromatic_aberration`: 화면 가운데에서 멀수록 빨강을 바깥, 파랑을 안쪽에서 읽는다.
 - `taa`와 `upscale`을 함께 켜면 히스토리를 대상 크기로 둔다. 축소된 장면이 프레임마다 다른 서브픽셀을 채우므로 여러 프레임에 걸쳐 대상 해상도의 그림이 모인다(FSR 2 계열의 시간 누적 업스케일). 이때 EASU는 쓰지 않고 RCAS로 선명하게 한다.
 
 - 범위는 `orr_gfx::effect_params`에 있다. 인스펙터는 이 범위로 이름 붙은 슬라이더를 그린다. 효과 추가, 켜기와 끄기, 위아래 이동, 제거도 인스펙터에서 한다.
 - 렌더러 쪽 형식은 `orr_render::ScreenEffect`이고, `PostProcessSettings::effects`에 들어간다. 효과 칸이 모두 비어 있으면 예전 bloom 체인이 그대로 돈다.
 - 노출과 톤 매핑은 구조상 한 번만 일어난다. 그래서 감마나 톤 매핑이 두 번 적용될 수 없다.
+
+### 1.9.1 노멀 맵
+
+표면 셰이더는 `normal_map(in, texel, strength)`로 노멀 맵을 적용한다. `texel`은 노멀 맵 이미지에서 읽은 색(평평하면 0.5, 0.5, 1), `strength`는 0이면 원래 노멀, 1이면 그림 그대로다. 탄젠트는 화면에서 위치와 텍스처 좌표가 바뀌는 비율로 계산하므로 메시에 탄젠트 데이터가 필요 없다. 텍스처 좌표가 없는 절차 도형은 원래 노멀을 유지한다. 화면 미분을 쓰므로 이웃 픽셀끼리 다른 분기 안에서 부르지 않는다.
+
+```wgsl
+// @texture bumps data = 0.5, 0.5, 1, 1
+fn surface(in: SurfaceInput) -> Surface {
+    var s = default_surface(in);
+    s.normal = normal_map(in, bumps(in.uv * 4.0).rgb, 1.0);
+    return s;
+}
+```
 
 ### 1.10 터레인 (`orr_gfx::Terrain`)
 
