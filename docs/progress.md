@@ -20,7 +20,7 @@
 - **캐스케이드 그림자**: 해 그림자가 최대 4단계로 시점을 따라간다. 가까운 그림자는 선명하고 먼 그림자도 보인다. `orr_gfx::Light::shadow_cascades`로 정한다. [rendering-architecture.md](rendering-architecture.md) 1.17절.
 - **입문 문서**: [getting-started.md](getting-started.md). 준비물, 코드로 첫 게임(`cargo run -p orr_sim --example hello`), 시뮬레이션 규칙, 에디터, Room 프로젝트 만들기·실행·내보내기, 에이전트 연결, 문제 해결. 절차는 윈도우에서 직접 따라가 확인했다. 그 과정에서 `type Command = ();`, `orr_sim::fn_systems`, 일반 경로로 출력하는 `orr_new_room`·`orr_export_windows`, 에디터 상태 막대의 `Unsaved: N`을 추가했다.
 - **후처리 효과 추가**: `ssao`(주변광 차폐), `toon`(밝기 단계), `outline`(깊이 외곽선), `fxaa`, `upscale`(장면을 작게 그리고 FSR 1 방식 EASU 확대와 RCAS 선명화), `taa`(지터와 깊이 재투영, 이웃 범위 제한. `upscale`과 함께면 대상 해상도로 시간 누적 업스케일), `ssr`(화면 공간 반사), `depth_of_field`, `motion_blur`(카메라), `chromatic_aberration`, `volumetric_fog`(해 그림자 캐스케이드를 따르는 빛줄기). 표면 셰이더용 `normal_map` 도우미(탄젠트 데이터 없이 화면 미분으로). `PostProcess` 효과 목록에서 고른다. [rendering-architecture.md](rendering-architecture.md) 1.9절.
-- **2D 물리 조인트**: 핀, 막대, 밧줄. 결정론 고정소수점으로 접촉과 함께 푼다. 쓰는 게임만 `register_joints`로 켠다. [physics-joints.md](physics-joints.md).
+- **물리 조인트**: 2D 핀·막대·밧줄, 3D 볼·막대·밧줄. 결정론 고정소수점으로 접촉과 함께 푼다. 쓰는 게임만 `register_joints`로 켠다. [physics-joints.md](physics-joints.md).
 - **공간 음향**: `Clip::at`으로 소리에 위치를 주면 거리에 따라 작아지고 방향에 따라 좌우로 나뉜다. 듣는 위치가 움직이면 재생 중인 소리도 따라간다. [audio.md](audio.md).
 - **스포트라이트 그림자**: `Light::cast_shadows`를 켠 스포트라이트 최대 4개가 그림자를 드리운다. [rendering-architecture.md](rendering-architecture.md) 1.18절.
 - **애니메이션 블렌딩**: 본 마스크, 마스크 블렌드, 가산 블렌드, 1D·2D 블렌드 스페이스, 룩앳, 상태 머신(파라미터, 조건부 전환, 크로스페이드, exit time, 클립 이벤트, 루트 모션), 레이어를 쌓는 `Animator`, 투 본 IK. 코드 API이며 에디터 편집 화면은 아직 없다. [animation.md](animation.md).

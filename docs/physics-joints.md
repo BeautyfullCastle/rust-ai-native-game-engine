@@ -1,6 +1,6 @@
-# 2D 물리 조인트
+# 물리 조인트 (2D, 3D)
 
-갱신: 2026-11-15. 코드: `crates/orr_physics/src/joints.rs`. 테스트: `crates/orr_physics/tests/joints.rs`.
+갱신: 2026-11-15. 코드: `crates/orr_physics/src/joints.rs`(2D), `crates/orr_physics3d/src/joints.rs`(3D). 테스트: 각 크레이트의 `tests/joints.rs`.
 
 두 바디를 잇는 조인트다. 시뮬레이션 안에서 고정소수점으로 계산되므로 롤백, 리플레이, 체크섬에 그대로 들어간다.
 
@@ -27,10 +27,15 @@ add_joint(frame, Joint { a: door_frame, b: door, anchor_a, anchor_b, length: FP:
 - 풀이: 접촉과 같은 순차 임펄스 반복에서, 반복마다 접촉 다음에 조인트를 푼다. 남은 위치 오차는 틱마다 20%씩 속도 항으로 줄인다(Baumgarte). 조인트는 조인트 엔티티 번호 순서로 풀어서 결정론이 유지된다.
 - `register_joints`를 부르지 않은 게임은 스텝이 예전과 똑같다. 골든 체크섬도 그대로다.
 
+## 3D
+
+`orr_physics3d`에도 같은 구조의 조인트가 있다. 종류는 `JOINT_BALL`(두 고정점을 붙이고 모든 방향으로 돎), `JOINT_ROD`, `JOINT_ROPE`다. 고정점은 각 바디의 회전 전 좌표이고, 매 서브스텝마다 그 서브스텝까지 움직인 자세로 고정점과 유효 질량(3×3)을 다시 계산한다. 접촉의 반복 순서(홀짝으로 번갈아)를 유지한 채 반복마다 접촉 다음에 조인트를 푼다.
+
+- 정적 접촉 제공자 경로(`step_with_static_contacts`, 지형 충돌)에서는 조인트를 풀지 않는다.
+
 ## 한계
 
 - 조인트에 매달린 동적 바디는 잠들지 않는다(접촉으로 묶인 섬과 조인트를 합치지 않음). `add_joint`가 두 바디를 깨운다.
 - 모터, 각도 제한, 스프링(부드러운 조인트), 프리즘(미끄럼) 조인트는 없다.
 - 위치 보정이 속도 항(Baumgarte)이라 무거운 사슬은 늘어날 수 있다. 반복 횟수(`PhysicsConfig::velocity_iterations`)를 올리면 줄어든다.
-- 3D 물리(`orr_physics3d`)에는 아직 조인트가 없다.
 - 에디터 인스펙터에서 조인트를 만들거나 고치는 화면은 없다(리플렉션 미등록).
