@@ -26,11 +26,17 @@ const PART_MANE: f32 = 2.0;
 const PART_HORN: f32 = 3.0;
 const PART_WHISKER: f32 = 4.0;
 const PART_EYE: f32 = 5.0;
+const PART_DARK: f32 = 6.0;
+const PART_TEETH: f32 = 7.0;
 
 const JADE: V3 = [0.03, 0.2, 0.1];
 const BELLY: V3 = [0.78, 0.62, 0.3];
 const MANE: V3 = [0.7, 0.07, 0.03];
 const GOLD: V3 = [0.85, 0.6, 0.18];
+const GOLD_EYE: V3 = [0.95, 0.62, 0.08];
+const ANTLER: V3 = [0.86, 0.74, 0.48];
+const IVORY: V3 = [0.93, 0.9, 0.8];
+const DARK: V3 = [0.015, 0.012, 0.01];
 
 /// One dragon as the view reads it.
 #[derive(Clone, Debug, PartialEq)]
@@ -97,12 +103,15 @@ impl Path {
 /// Body radius `s` meters back from the snout tip.
 fn radius(s: f32) -> f32 {
     let t = s / BODY_LENGTH;
-    if s < 2.6 {
-        // Snout to the back of the head.
-        0.35 + 0.65 * smooth(s / 2.6)
+    if s < 1.4 {
+        // A long muzzle that stays broad to its tip.
+        0.5 + 0.3 * smooth(s / 1.4)
+    } else if s < 2.6 {
+        // Cheeks and the back of the head.
+        0.8 + 0.25 * smooth((s - 1.4) / 1.2)
     } else if s < 4.5 {
         // A slimmer neck.
-        1.0 - 0.18 * smooth((s - 2.6) / 1.9)
+        1.05 - 0.23 * smooth((s - 2.6) / 1.9)
     } else if t < 0.55 {
         0.82 + 0.34 * smooth((s - 4.5) / (0.55 * BODY_LENGTH - 4.5))
     } else {
@@ -124,6 +133,14 @@ impl Builder {
     fn vertex(&mut self, position: V3, normal: V3, color: V3, params: V3) -> u32 {
         self.vertices.push(PropVertex { position, normal: normalize(normal), color, params });
         (self.vertices.len() - 1) as u32
+    }
+
+    /// A sphere of `radius` around `center`, as a tube along x.
+    fn sphere(&mut self, center: V3, radius: f32, color: V3, part: f32) {
+        let rings = 7;
+        let centers: Vec<V3> = (0..rings).map(|k| add(center, [radius * (k as f32 / (rings - 1) as f32 * 2.0 - 1.0), 0.0, 0.0])).collect();
+        let radii: Vec<f32> = (0..rings).map(|k| { let x = k as f32 / (rings - 1) as f32 * 2.0 - 1.0; radius * (1.0 - x * x).max(0.0).sqrt() }).collect();
+        self.tube(&centers, &radii, 8, color, part);
     }
 
     /// A tapering tube through `centers` with `sides` sides.
@@ -184,9 +201,14 @@ pub fn dragon_mesh(look: &DragonLook) -> (Vec<PropVertex>, Vec<u32>) {
         let r = radius(s);
         for k in 0..SIDES {
             let a = k as f32 / SIDES as f32 * std::f32::consts::TAU;
-            // A slightly flat, deep body: wider than tall at the belly.
-            let n = add(scale(right, a.cos()), scale(up, a.sin()));
-            let offset = add(scale(right, a.cos() * r), scale(up, a.sin() * r * 0.9));
+            // A slightly flat, deep body. The head is flatter and squarer: a long muzzle, not a round snout.
+            let head = 1.0 - smooth((s - 2.8) / 1.2);
+            let p = 1.0 - 0.4 * head;
+            let (width, height) = (1.0, 0.9 - 0.2 * head);
+            let (ca, sa) = (a.cos(), a.sin());
+            let (x, y) = (ca.signum() * ca.abs().powf(p), sa.signum() * sa.abs().powf(p));
+            let n = add(scale(right, x / width), scale(up, y / (height * height)));
+            let offset = add(scale(right, x * r * width), scale(up, y * r * height));
             let belly = a.sin() < -0.45;
             let (color, part) = if belly { (BELLY, PART_BELLY) } else { (JADE, PART_SCALES) };
             b.vertex(add(c, offset), n, color, [part, s, a]);
@@ -207,7 +229,7 @@ pub fn dragon_mesh(look: &DragonLook) -> (Vec<PropVertex>, Vec<u32>) {
     }
 
     // Mane: red blades along the spine from behind the head to the hips, leaning back.
-    let mut s = 2.2;
+    let mut s = 2.9;
     while s < BODY_LENGTH * 0.92 {
         let (f, right, up) = frame(s);
         let c = center(s);
@@ -233,28 +255,85 @@ pub fn dragon_mesh(look: &DragonLook) -> (Vec<PropVertex>, Vec<u32>) {
         b.indices.extend_from_slice(&[a, d, end]);
     }
 
-    // Horns sweep up and back from the top of the head; whiskers trail from the snout.
-    let (f, right, up) = frame(1.6);
-    let head = center(1.6);
+    // The face: a lower jaw with teeth, eyes under brow ridges, nostrils with
+    // long whiskers, branching antlers, a beard and fins on the cheeks.
+    let at = |s: f32, side: f32, out: f32, rise: f32, ahead: f32| -> V3 {
+        let (f, right, up) = frame(s);
+        let r = radius(s);
+        add(center(s), add(scale(right, side * out * r), add(scale(up, rise * r), scale(f, ahead))))
+    };
+    // Lower jaw, a little open at the front.
+    let jaw: Vec<V3> = (0..8)
+        .map(|k| {
+            let s = 0.25 + 2.3 * k as f32 / 7.0;
+            let open = 0.32 * (1.0 - s / 2.55);
+            add(at(s, 0.0, 0.0, -0.55, 0.0), scale(frame(s).2, -open))
+        })
+        .collect();
+    let jaw_radii: Vec<f32> = (0..8).map(|k| 0.26 + 0.2 * k as f32 / 7.0).collect();
+    b.tube(&jaw, &jaw_radii, 8, BELLY, PART_BELLY);
     for side in [-1.0f32, 1.0] {
-        let root = add(head, add(scale(up, 0.75), scale(right, 0.35 * side)));
-        let horn: Vec<V3> = (0..6).map(|k| { let t = k as f32 / 5.0; add(root, add(scale(f, -1.6 * t), add(scale(up, 0.9 * t - 0.25 * t * t), scale(right, 0.35 * side * t)))) }).collect();
-        b.tube(&horn, &[0.13, 0.11, 0.09, 0.07, 0.05, 0.02], 6, GOLD, PART_HORN);
-        let (fs, rs, us) = frame(0.3);
-        let snout = add(center(0.3), add(scale(rs, 0.33 * side), scale(us, 0.05)));
-        let whisker: Vec<V3> = (0..10)
+        // Teeth along the upper jaw; the front pair are fangs.
+        for (k, s) in [0.32f32, 0.62, 0.92, 1.22, 1.52].into_iter().enumerate() {
+            let root = at(s, side, 0.62, -0.42, 0.0);
+            let long = if k == 0 { 0.42 } else { 0.22 };
+            b.tube(&[root, add(root, scale(frame(s).2, -long))], &[0.065, 0.004], 4, IVORY, PART_TEETH);
+        }
+        // Eyes: a golden eyeball with a dark pupil, under a ridge of brow.
+        let eye = at(2.1, side, 0.9, 0.3, 0.0);
+        b.sphere(eye, 0.24, GOLD_EYE, PART_EYE);
+        b.sphere(add(eye, add(scale(frame(2.1).1, side * 0.17), scale(frame(2.1).0, 0.05))), 0.11, DARK, PART_DARK);
+        let brow: Vec<V3> = (0..5).map(|k| at(1.7 + 0.22 * k as f32, side, 0.8, 0.66 + 0.06 * (k as f32 - 2.0).abs(), 0.0)).collect();
+        b.tube(&brow, &[0.06, 0.12, 0.14, 0.12, 0.06], 6, JADE, PART_SCALES);
+        // Nostrils, and the whiskers that grow from them and stream back in an S.
+        let nostril = at(0.18, side, 0.42, 0.38, 0.0);
+        b.sphere(nostril, 0.08, DARK, PART_DARK);
+        let (fs, rs, us) = frame(0.18);
+        let whisker: Vec<V3> = (0..16)
             .map(|k| {
-                let t = k as f32 / 9.0;
-                let sway = (look.time * 2.4 + t * 4.0 + side).sin() * 0.45 * t;
-                add(snout, add(scale(fs, -4.2 * t), add(scale(rs, side * (1.2 * t + sway)), scale(us, -0.6 * t * t))))
+                let t = k as f32 / 15.0;
+                let sway = (look.time * 2.2 + t * 5.0 + side).sin() * 0.55 * t;
+                let forward = 0.7 * t - 6.5 * t * t;
+                let out = side * (0.25 + 1.3 * t + sway);
+                let rise = 0.5 * (t * std::f32::consts::PI).sin() - 0.9 * t;
+                add(nostril, add(scale(fs, forward), add(scale(rs, out), scale(us, rise))))
             })
             .collect();
-        let radii: Vec<f32> = (0..10).map(|k| 0.05 * (1.0 - k as f32 / 10.0) + 0.01).collect();
+        let radii: Vec<f32> = (0..16).map(|k| 0.055 * (1.0 - k as f32 / 16.0) + 0.008).collect();
         b.tube(&whisker, &radii, 4, GOLD, PART_WHISKER);
-        // An eye on each side of the head.
-        let eye = add(head, add(scale(right, 0.62 * side), add(scale(up, 0.35), scale(f, 0.55))));
-        let ring: Vec<V3> = vec![sub(eye, scale(right, 0.14 * side)), eye, add(eye, scale(right, 0.08 * side))];
-        b.tube(&ring, &[0.02, 0.17, 0.02], 6, [0.95, 0.75, 0.1], PART_EYE);
+        // Antlers: a beam that sweeps back and up, with two tines.
+        let (f, right, up) = frame(2.5);
+        let root = at(2.5, side, 0.38, 0.7, 0.0);
+        let beam = |t: f32| add(root, add(scale(f, -2.3 * t), add(scale(up, 1.5 * t - 0.45 * t * t), scale(right, side * 0.55 * t))));
+        let beam_points: Vec<V3> = (0..7).map(|k| beam(k as f32 / 6.0)).collect();
+        b.tube(&beam_points, &[0.15, 0.13, 0.11, 0.09, 0.07, 0.05, 0.015], 6, ANTLER, PART_HORN);
+        for (t, rise, lean) in [(0.4f32, 0.75f32, 0.35f32), (0.72, 0.55, 0.15)] {
+            let start = beam(t);
+            let tip = add(start, add(scale(up, rise), add(scale(f, lean), scale(right, side * 0.12))));
+            b.tube(&[start, add(start, scale(sub(tip, start), 0.5)), tip], &[0.08, 0.055, 0.012], 5, ANTLER, PART_HORN);
+        }
+        // Fins fanned out behind the cheeks.
+        for k in 0..3 {
+            let s = 2.55 + 0.22 * k as f32;
+            let (f, right, up) = frame(s);
+            let root = at(s, side, 0.85, -0.1, 0.0);
+            let a = b.vertex(add(root, scale(up, 0.14)), right, MANE, [PART_MANE, s, 0.0]);
+            let d = b.vertex(sub(root, scale(up, 0.14)), right, MANE, [PART_MANE, s, 0.0]);
+            let tip = b.vertex(add(root, add(scale(f, -1.0), add(scale(right, side * 0.75), scale(up, 0.25 * (k as f32 - 1.0))))), right, MANE, [PART_MANE, s, 1.0]);
+            b.indices.extend_from_slice(&[a, d, tip]);
+        }
+    }
+    // A beard of red strands under the chin.
+    for k in 0..6 {
+        let s = 0.7 + 0.3 * k as f32;
+        let (f, right, up) = frame(s);
+        let root = at(s, 0.0, 0.0, -0.95, 0.0);
+        let spread = (k as f32 - 2.5) * 0.08;
+        let sway = (look.time * 3.0 + k as f32).sin() * 0.12;
+        let a = b.vertex(add(root, scale(right, 0.1)), f, MANE, [PART_MANE, s, 0.0]);
+        let d = b.vertex(sub(root, scale(right, 0.1)), f, MANE, [PART_MANE, s, 0.0]);
+        let tip = b.vertex(add(root, add(scale(up, -0.85), add(scale(f, -0.7), scale(right, spread + sway)))), f, MANE, [PART_MANE, s, 1.0]);
+        b.indices.extend_from_slice(&[a, d, tip]);
     }
 
     // Four legs, each reaching down and forward with three claws.

@@ -6,7 +6,7 @@ struct DragonIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) color: vec3<f32>,
-    // x: part (0 scales, 1 belly, 2 mane, 3 horn, 4 whisker, 5 eye), y: meters along the body, z: angle around it.
+    // x: part (0 scales, 1 belly, 2 mane, 3 horn, 4 whisker, 5 eye, 6 pupil and nostril, 7 teeth), y: meters along the body, z: angle around it.
     @location(3) params: vec3<f32>,
 };
 
@@ -76,6 +76,13 @@ fn fs_dragon(in: DragonOut, @builtin(front_facing) front: bool) -> @location(0) 
     } else if (part == 5) {
         s.roughness = 0.1;
         s.specular = 3.0;
+    } else if (part == 6) {
+        // Wet and dark: pupils and nostrils.
+        s.roughness = 0.08;
+        s.specular = 2.5;
+    } else if (part == 7) {
+        s.roughness = 0.3;
+        s.specular = 1.2;
     }
     let shadow = sun_shadow(in.world, n);
     var color = shade(s, in.world, shadow);

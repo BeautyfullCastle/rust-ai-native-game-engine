@@ -180,3 +180,68 @@ fn the_dragon_flies_over_the_valley_with_the_keys_and_the_camera_follows() {
         eprintln!("captured into {}", folder.display());
     }
 }
+
+/// A fixed-point vector value of `v`, for setting a field from the test.
+fn vec3(v: [f32; 3]) -> orr_reflect::Value {
+    let fp = |c: f32| orr_reflect::decimal::parse_fp(&format!("{c:.3}")).unwrap();
+    orr_reflect::Value::Vec3(orr_fp::FPVec3::new(fp(v[0]), fp(v[1]), fp(v[2])))
+}
+
+#[test]
+fn the_dragon_is_seen_face_to_face_through_a_scene_camera_moved_in_front_of_its_head() {
+    use orr_editor::editor::Owner;
+    let Some((_guard, probe)) = gpu() else { return };
+    if probe.is_software() {
+        eprintln!("SKIP: this picture check needs a hardware adapter");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let scene = scene_copy(dir.path());
+    let setup = egui_wgpu::WgpuSetup::CreateNew(egui_wgpu::WgpuSetupCreateNew::without_display_handle());
+    let mut h = Harness::builder().with_size([1600.0, 1000.0]).wgpu_setup(setup).build_eframe(|cc| {
+        let mut editor = Editor::open_game(&scene, EditorGame::Yard3D).unwrap();
+        editor.sync();
+        EditorApp::new(editor, cc.wgpu_render_state.clone())
+    });
+    frames(&mut h, 4);
+    // The head and the way it faces, from the dragon's path.
+    let path = h.state().editor.yard_frame().dragons[0].0.clone();
+    let (head, behind) = (path[0], path[1]);
+    let ahead = { let d = [head[0] - behind[0], 0.0, head[2] - behind[2]]; let l = (d[0] * d[0] + d[2] * d[2]).sqrt(); [d[0] / l, 0.0, d[2] / l] };
+    let right = [ahead[2], 0.0, -ahead[0]];
+    // In front of the snout, a little to the side and above, looking back at the face.
+    let eye = [head[0] + ahead[0] * 9.0 + right[0] * 3.5, head[1] + 1.6, head[2] + ahead[2] * 9.0 + right[2] * 3.5];
+    let target = [head[0] + ahead[0] * 1.5, head[1] + 0.3, head[2] + ahead[2] * 1.5];
+    let d = [target[0] - eye[0], target[1] - eye[1], target[2] - eye[2]];
+    let flat = (d[0] * d[0] + d[2] * d[2]).sqrt();
+    let rotation = [(-d[1]).atan2(flat).to_degrees(), d[0].atan2(d[2]).to_degrees(), 0.0];
+    assert!(h.state_mut().editor.select_named("camera"));
+    frames(&mut h, 2);
+    let transform = Owner::Component(orr_gfx::names::TRANSFORM.into());
+    assert!(h.state_mut().editor.set_field(&transform, "position", vec3(eye)));
+    assert!(h.state_mut().editor.set_field(&transform, "rotation", vec3(rotation)));
+    let camera = Owner::Component(orr_gfx::names::CAMERA.into());
+    assert!(h.state_mut().editor.set_field(&camera, "fov_y", orr_reflect::Value::Fixed(orr_fp::FP::from_int(38))));
+    h.state_mut().editor.select(None);
+    h.get_by_label("Camera view").click();
+    frames(&mut h, 30);
+    let image = h.render().expect("kittest wgpu render");
+    let rect = h.state().ui.viewport_rect.expect("the viewport was drawn");
+    let (width, _) = image.dimensions();
+    if let Some(folder) = std::env::var_os("ORR_FOREST_CAPTURE") {
+        let folder = PathBuf::from(folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        save_crop(&folder.join("dragon_face.png"), image.as_raw(), width, rect);
+        eprintln!("captured into {}", folder.display());
+    }
+    // The red mane and the golden horns are in the middle of the view.
+    let rgba = image.as_raw();
+    let center = (rect.min.y as u32 + rect.height() as u32 / 4..rect.max.y as u32 - rect.height() as u32 / 4)
+        .flat_map(|y| (rect.min.x as u32 + rect.width() as u32 / 4..rect.max.x as u32 - rect.width() as u32 / 4).map(move |x| (x, y)))
+        .filter(|&(x, y)| {
+            let i = ((y * width + x) * 4) as usize;
+            rgba[i] > 150 && rgba[i] > rgba[i + 1] + 70 && rgba[i + 2] < 90
+        })
+        .count();
+    assert!(center > 200, "the dragon's mane fills part of the view: {center} red pixels");
+}
