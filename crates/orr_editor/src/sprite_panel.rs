@@ -604,7 +604,7 @@ impl SpritePanel {
         };
         let saved = binding.orientation;
         let mut draft = saved.unwrap_or_default();
-        ui.collapsing("Selected sprite orientation", |ui| {
+        crate::theme::collapsing(ui, "Selected sprite orientation", |ui| {
             ui.weak("Mirrors use the original atlas axes, then quarter turns rotate counter-clockwise around the sprite center. Collision stays unchanged.");
             let enabled = self.editable(editor) && editor.spec().is_local() && editor.can_mutate() && !editor.sim().in_tx;
             ui.add_enabled_ui(enabled, |ui| {
@@ -705,7 +705,7 @@ impl SpritePanel {
         if editor.mode() != Mode::Edit {
             self.preview_playing = false;
         }
-        ui.collapsing("Sprite bindings (view only)", |ui| {
+        crate::theme::collapsing(ui, "Sprite bindings (view only)", |ui| {
             if self.tilemap_pinned {
                 ui.weak("Tilemap shares these admitted atlases. Use Actor appearance in the Tilemap panel for existing actors. Sprite Load/Assign/Remove/Close, generic history/Save, reload and image reimport remain unavailable until a whole-project reopen.");
                 return;
@@ -823,7 +823,7 @@ impl SpritePanel {
                     self.report(result);
                 }
                 #[cfg(all(feature = "image-reimport", target_os = "linux", target_arch = "x86_64"))]
-                ui.collapsing("Explicit PNG replacement", |ui| {
+                crate::theme::collapsing(ui, "Explicit PNG replacement", |ui| {
                     ui.weak("Same dimensions and sprite layout only. New immutable package version; not a scene Undo operation.");
                     ui.label("Replacement PNG path"); ui.text_edit_singleline(&mut self.replacement_image);
                     ui.label("New package version"); ui.text_edit_singleline(&mut self.replacement_version);

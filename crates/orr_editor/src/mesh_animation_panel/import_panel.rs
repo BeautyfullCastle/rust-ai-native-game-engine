@@ -175,7 +175,7 @@ fn show_inputs(ui: &mut egui::Ui, state: &mut State, editable: bool) -> bool {
 }
 pub(super) fn show(ui: &mut egui::Ui, panel: &mut Panel, editor: &Editor) {
     // Source suffix selects the existing importer; no implicit format fallback.
-    ui.collapsing("Import animation source", |ui| {
+    crate::theme::collapsing(ui, "Import animation source", |ui| {
         ui.label("Create a new local animation package from a self-contained GLB or a fully embedded cooked .animated.json model, with a separate UTF-8 license. Use .glb for raw input or .animated.json/.orrmodel.json for cooked input. Existing destinations are never replaced.");
         ui.weak("Cooked import preserves animation bytes; it does not resolve historical dependencies, scripts or external resources. Apply and Save remain explicit.");
         let editable=panel.can_edit(editor);

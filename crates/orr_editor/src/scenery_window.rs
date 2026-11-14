@@ -312,7 +312,7 @@ impl Panel {
         }
 
         ui.separator();
-        egui::CollapsingHeader::new("Quality").default_open(true).show(ui, |ui| {
+        crate::theme::header("Quality").default_open(true).show(ui, |ui| {
             let quality = &mut self.preset.quality;
             egui::ComboBox::from_label("Antialiasing").selected_text(format!("{}x", quality.antialiasing)).show_ui(ui, |ui| {
                 for samples in Quality::ANTIALIASING {
@@ -327,7 +327,7 @@ impl Panel {
         });
         let settings = &mut self.preset.settings;
         for group in GROUPS {
-            egui::CollapsingHeader::new(group).default_open(true).show(ui, |ui| {
+            crate::theme::header(group).default_open(true).show(ui, |ui| {
                 for toggle in TOGGLES.iter().filter(|toggle| toggle.group == group) {
                     let mut value = (toggle.get)(settings);
                     if ui.checkbox(&mut value, toggle.name).on_hover_text(toggle.help).changed() {

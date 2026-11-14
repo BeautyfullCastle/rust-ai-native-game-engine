@@ -344,7 +344,7 @@ impl Panel {
         self.sync_inspection(project_root, project_generation, source_generation);
         #[cfg(feature = "room-animated-models")]
         self.service_variant_preview(project_root, project_generation, source_generation);
-        egui::CollapsingHeader::new("Import a model package")
+        crate::theme::header("Import a model package")
             .default_open(false)
             .show(ui, |ui| {
                 if self.cylinder.enabled {

@@ -106,7 +106,7 @@ impl TerrainPanel {
     }
 
     pub(super) fn show_grid_expand(&mut self, ui: &mut egui::Ui, editor: &Editor, writable: bool) {
-        ui.collapsing("Expand terrain grid", |ui| {
+        crate::theme::collapsing(ui, "Expand terrain grid", |ui| {
             let permitted = writable && self.require_attached(editor).is_ok();
             let Some(terrain) = self.document.terrain() else {
                 return;

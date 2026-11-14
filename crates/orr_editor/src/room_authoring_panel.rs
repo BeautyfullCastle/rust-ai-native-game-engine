@@ -204,7 +204,7 @@ impl Panel {
                     ui.label("Authoring requires a mutable local Room in Edit mode with no preview or active gesture.");
                 }
                 ui.separator();
-                egui::CollapsingHeader::new("Manage existing Room walls")
+                crate::theme::header("Manage existing Room walls")
                     .default_open(false)
                     .show(ui, |ui| {
                         self.wall_list_and_editor(ui, editor, editable, removal_blocker);
@@ -226,7 +226,7 @@ impl Panel {
         editable: bool,
         removal_blocker: Option<&str>,
     ) {
-        ui.heading("Room walls");
+        crate::theme::heading(ui, "Room walls");
         if ui.button("Read Room walls").clicked() {
             self.status = match self.refresh_walls(editor) {
                 Ok(count) => format!("Read {count} Room wall(s)."),

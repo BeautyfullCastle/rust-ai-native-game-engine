@@ -45,7 +45,7 @@ impl Panel {
         stale: bool,
     ) -> Option<Grid> {
         let mut changed = false;
-        let response = egui::CollapsingHeader::new("Walkable grid")
+        let response = crate::theme::header("Walkable grid")
             .default_open(false)
             .show(ui, |ui| {
                 ui.label("Excluded cells are holes in the walkable surface, not physical walls.");

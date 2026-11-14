@@ -254,7 +254,7 @@ impl Panel {
             return;
         }
         self.sync(editor);
-        ui.collapsing("Mesh hazards", |ui| {
+        crate::theme::collapsing(ui, "Mesh hazards", |ui| {
             ui.weak("Spherical hazards use exact fixed-point coordinates. Runtime loss state is read-only.");
             #[cfg(feature="mesh-hazards-export")]
             ui.weak("Create a scene with File > New hazard game. File > Export hazard game supports scene-only bundles with enabled hazards; workspace copying and composed presentations remain unsupported.");

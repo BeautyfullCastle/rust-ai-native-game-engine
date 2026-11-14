@@ -207,7 +207,7 @@ impl EditorApp {
         if self.terrain.document.terrain().is_none() {
             return;
         }
-        egui::CollapsingHeader::new("Terrain ramp").default_open(true).show(ui, |ui| {
+        crate::theme::header("Terrain ramp").default_open(true).show(ui, |ui| {
             ui.weak("Axis-aligned finite ramp · cyan is prospective geometry, not applied terrain");
             let writable = self.terrain_ramp_pin().is_some();
             ui.add_enabled_ui(writable, |ui| {

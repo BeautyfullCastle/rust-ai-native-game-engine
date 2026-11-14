@@ -48,7 +48,7 @@ impl Panel {
         profile: AgentProfile,
     ) -> Option<StaticMeshGraph> {
         let mut candidate = None;
-        ui.collapsing("Import walkable model", |ui| {
+        crate::theme::collapsing(ui, "Import walkable model", |ui| {
             ui.label("Imports a verified static model as walkable geometry; source files are not modified.");
             let mut changed = false;
             changed |= field(

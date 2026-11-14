@@ -58,7 +58,7 @@ impl TerrainPanel {
     }
 
     pub(super) fn show_holes(&mut self, ui: &mut egui::Ui, editor: &Editor, writable: bool) {
-        ui.collapsing("Terrain hole rectangle", |ui| {
+        crate::theme::collapsing(ui, "Terrain hole rectangle", |ui| {
             ui.weak("Carve holes or restore existing heights. Inclusive cell coordinates, not vertices. Save is separate.");
             index_field(ui, "Hole minimum X", &mut self.holes.min[0]);
             index_field(ui, "Hole minimum Z", &mut self.holes.min[1]);

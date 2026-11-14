@@ -245,7 +245,7 @@ fn feed_ui(ui: &mut Ui, editor: &Editor) {
                 continue;
             }
             let open = editor.agent().expand_methods.contains(&e.method);
-            egui::CollapsingHeader::new(job).id_salt(("agent_row", e.seq)).default_open(open).show(ui, |ui| detail_ui(ui, editor, e));
+            crate::theme::header(job).id_salt(("agent_row", e.seq)).default_open(open).show(ui, |ui| detail_ui(ui, editor, e));
         }
     });
 }
@@ -476,6 +476,6 @@ fn report_widget(ui: &mut Ui, report: &J, inputs: &str) {
         table(ui, "agent_metric_grid", &hot);
     }
     if !cold.is_empty() {
-        egui::CollapsingHeader::new(RichText::new(format!("{} unchanged metrics", cold.len())).weak()).id_salt("agent_metric_cold").show(ui, |ui| table(ui, "agent_metric_grid_cold", &cold));
+        crate::theme::header(RichText::new(format!("{} unchanged metrics", cold.len())).weak()).id_salt("agent_metric_cold").show(ui, |ui| table(ui, "agent_metric_grid_cold", &cold));
     }
 }

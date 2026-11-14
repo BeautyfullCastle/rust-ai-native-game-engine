@@ -41,7 +41,7 @@ impl TerrainPanel {
     }
 
     pub(super) fn show_sculpt(&mut self, ui: &mut egui::Ui, editor: &Editor, writable: bool) {
-        ui.collapsing("Radial terrain sculpt", |ui| {
+        crate::theme::collapsing(ui, "Radial terrain sculpt", |ui| {
             ui.weak("Raise or lower a circular hill with parabolic falloff. Clipped at terrain edges; holes stay holes.");
             index_field(ui, "Sculpt center X", &mut self.sculpt.center[0]);
             index_field(ui, "Sculpt center Z", &mut self.sculpt.center[1]);

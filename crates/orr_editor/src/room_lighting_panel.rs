@@ -457,7 +457,7 @@ impl Panel {
         let can_edit = editable && source_ok;
         self.sync_viewport_pick(editor.as_deref());
         let mut reset_live = false;
-        ui.collapsing("Room lighting", |ui| {
+        crate::theme::collapsing(ui, "Room lighting", |ui| {
             ui.label(if self.document != self.saved {
                 "Lighting (unsaved)"
             } else {

@@ -79,7 +79,7 @@ impl Preview {
     }
 
     pub fn show(&self, ui: &mut egui::Ui) {
-        ui.collapsing("Saved game UI (read-only)", |ui| {
+        crate::theme::collapsing(ui, "Saved game UI (read-only)", |ui| {
             ui.label("Preset: arena-korean-v1");
             ui.label(format!(
                 "Font: {}/{} ({} bytes)",

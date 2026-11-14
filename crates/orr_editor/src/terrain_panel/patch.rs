@@ -245,7 +245,7 @@ impl TerrainPanel {
     }
 
     pub(super) fn show_patch(&mut self, ui: &mut egui::Ui, editor: &Editor, writable: bool) {
-        ui.collapsing("Terrain patch clipboard", |ui| {
+        crate::theme::collapsing(ui, "Terrain patch clipboard", |ui| {
             ui.weak("Copy inclusive cells and their enclosing heights. Paste replaces heights and holes; no clipping. Save is separate. Invalid Copy clears the clipboard.");
             index_field(ui, "Patch source minimum X", &mut self.patch.source_min[0]);
             index_field(ui, "Patch source minimum Z", &mut self.patch.source_min[1]);

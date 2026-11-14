@@ -70,7 +70,7 @@ impl TerrainPanel {
     }
 
     pub(super) fn show_flatten(&mut self, ui: &mut egui::Ui, editor: &Editor, writable: bool) {
-        ui.collapsing("Flatten terrain rectangle", |ui| {
+        crate::theme::collapsing(ui, "Flatten terrain rectangle", |ui| {
             ui.weak("Inclusive vertex indices; no clipping or falloff. Holes stay holes.");
             index_field(ui, "Flatten minimum X", &mut self.flatten.min[0]);
             index_field(ui, "Flatten minimum Z", &mut self.flatten.min[1]);

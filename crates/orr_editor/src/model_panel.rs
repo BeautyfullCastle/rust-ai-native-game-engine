@@ -1500,7 +1500,7 @@ impl ModelPanel {
             self.candidate = None;
         }
         let orphaned = self.orphaned_guids(editor).map_or(0, |guids| guids.len());
-        ui.collapsing("Static model binding", |ui| {
+        crate::theme::collapsing(ui, "Static model binding", |ui| {
             ui.weak("Presentation only · scene and model saves/undo are separate");
             if !editor.spec().is_local() { ui.label("Remote host paths are not local asset authority"); return; }
             ui.add_enabled_ui(editor.mode() == Mode::Edit && editor.can_mutate(), |ui| {

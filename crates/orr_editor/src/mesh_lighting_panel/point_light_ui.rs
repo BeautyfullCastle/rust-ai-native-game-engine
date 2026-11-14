@@ -94,7 +94,7 @@ impl Panel {
             self.point_light = enabled.then(defaults);
         }
         if let Some(light) = self.point_light.as_mut() {
-            ui.collapsing("Point light settings",|ui| {
+            crate::theme::collapsing(ui, "Point light settings",|ui| {
                 ui.weak("One unshadowed point light in world coordinates. Changes are drafts until Apply game lighting and Save; they never change physics.");
                 for(axis,value)in ["X","Y","Z"].into_iter().zip(&mut light.position) {changed|=number(ui,&format!("Point light position {axis}"),value,-1e9,1e9);}
                 for(channel,value)in ["R","G","B"].into_iter().zip(&mut light.color) {changed|=number(ui,&format!("Point light linear {channel}"),value,0.0,1e4);}

@@ -339,7 +339,7 @@ impl AnimatedPanel {
         if self.players.is_playing() {
             ui.ctx().request_repaint();
         }
-        egui::CollapsingHeader::new("Animated model bindings (presentation only)")
+        crate::theme::header("Animated model bindings (presentation only)")
             .default_open(true).show(ui, |ui| {
             ui.weak("Separate binding save/undo. Dedicated animation package project. Preview does not move Arena bodies or change colliders.");
             if !editor.spec().is_local() {

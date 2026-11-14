@@ -325,7 +325,7 @@ impl Panel {
             self.error = None;
             self.notice = None;
         }
-        egui::CollapsingHeader::new("Linked prefabs").default_open(true).show(ui, |ui| {
+        crate::theme::header("Linked prefabs").default_open(true).show(ui, |ui| {
             ui.label("CollectDodgeV1 · 1–8 non-player actors · fixed topology");
             ui.label("Source filename (beside scene)");
             ui.text_edit_singleline(&mut self.source);

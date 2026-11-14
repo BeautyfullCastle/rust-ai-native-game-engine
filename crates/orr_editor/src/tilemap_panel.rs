@@ -622,7 +622,7 @@ impl TilemapPanel {
     }
     pub fn show(&mut self, ui: &mut egui::Ui, editor: &Editor, sprites: &mut SpritePanel) {
         self.refresh_pattern(editor, sprites);
-        ui.heading("Tile background");
+        crate::theme::heading(ui, "Tile background");
         ui.label("Replaces Arena floor presentation only. Empty / transparent cells show clear background, not collision or navmesh.");
         ui.label("Scene Save / Save As does not save or retarget this tilemap. Package mutation remains unsupported. Saved tilemaps can use Arena Export when built with arena-project-export and tilemap.");
         if ui

@@ -84,7 +84,7 @@ impl TerrainPanel {
     }
 
     pub(super) fn show_smooth(&mut self, ui: &mut egui::Ui, editor: &Editor, writable: bool) {
-        ui.collapsing("Smooth terrain rectangle", |ui| {
+        crate::theme::collapsing(ui, "Smooth terrain rectangle", |ui| {
             ui.weak(
                 "One original 3×3 average pass; signed FP rounds toward zero. Save is separate.",
             );

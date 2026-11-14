@@ -47,7 +47,7 @@ impl BlockoutPanel {
     /// picker suggestion: existing assigned immutable geometry never changes.
     pub fn show(&mut self, ui: &mut egui::Ui, root: Result<PathBuf, String>, editable: bool) -> Option<BakeResult> {
         let mut baked = None;
-        ui.collapsing("Box blockout", |ui| {
+        crate::theme::collapsing(ui, "Box blockout", |ui| {
             ui.weak("Six faces · presentation only · no collision generation");
             let root = match root { Ok(root) => root, Err(ref error) => { ui.label(error); return; } };
             let matches = self.document.as_ref().is_none_or(|doc| root.canonicalize().is_ok_and(|root| root == doc.root()));

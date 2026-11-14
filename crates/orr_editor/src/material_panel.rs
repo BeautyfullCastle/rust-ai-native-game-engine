@@ -157,5 +157,5 @@ fn contents(ui: &mut Ui, id: egui::Id, desc: &TypeDesc, value: &Value, library: 
     if stored.overrides != 0 && ui.small_button("Use the shader's defaults").clicked() {
         single("Reset material", vec![InspEvent::Set { path: "overrides".into(), value: Value::Int(0) }], open, out);
     }
-    egui::CollapsingHeader::new("Stored fields").id_salt(id.with("raw")).default_open(false).show(ui, |ui| show_component(ui, id.with("raw_fields"), desc, value, out));
+    crate::theme::header("Stored fields").id_salt(id.with("raw")).default_open(false).show(ui, |ui| show_component(ui, id.with("raw_fields"), desc, value, out));
 }

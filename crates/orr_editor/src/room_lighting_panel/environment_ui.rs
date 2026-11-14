@@ -13,7 +13,7 @@ impl Panel {
         let Some(environment) = self.candidate.environment.as_mut() else {
             return;
         };
-        ui.collapsing("Environment lighting controls",|ui| {
+        crate::theme::collapsing(ui, "Environment lighting controls",|ui| {
             ui.weak("Sun and sky values are linear-light presentation settings. Apply and Save remain explicit; they do not change game physics.");
             for (axis,value) in ["X","Y","Z"].into_iter().zip(&mut environment.direction) {number_bounded(ui,&format!("Sun direction {axis}"),value,-1.0,1.0);}
             for (channel,value) in ["R","G","B"].into_iter().zip(&mut environment.color) {number_bounded(ui,&format!("Sun linear {channel}"),value,0.0,1.0);}

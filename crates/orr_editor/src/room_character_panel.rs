@@ -357,7 +357,7 @@ impl Panel {
             && editor.can_mutate()
             && editor.previewing().is_none()
             && editor.yard_rows_coherent();
-        ui.collapsing("Room character", |ui| {
+        crate::theme::collapsing(ui, "Room character", |ui| {
             ui.label(format!("Player {}", self.document.player));
             if self.has_unapplied_changes() {
                 ui.colored_label(egui::Color32::YELLOW, "Character draft has unapplied changes: Apply or Reset character draft before saving");

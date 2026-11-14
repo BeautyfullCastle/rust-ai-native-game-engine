@@ -50,6 +50,8 @@ pub fn apply(ctx: &egui::Context) {
         v.faint_bg_color = CARD;
         v.code_bg_color = CARD_HEADER;
         v.hyperlink_color = ACCENT;
+        // Section headers are full-width bars.
+        v.collapsing_header_frame = true;
         v.selection.bg_fill = ACCENT_FILL;
         // Selected text is strong white on the amber fill.
         v.selection.stroke = Stroke::new(1.0, TEXT_STRONG);
@@ -94,18 +96,58 @@ pub fn panel_frame() -> egui::Frame {
     egui::Frame::new().fill(PANEL).inner_margin(Margin::same(8)).stroke(Stroke::new(1.0, LINE))
 }
 
-/// A panel title: strong text with a short accent line under it.
+/// A panel title as a tab on a header strip across the top of the panel,
+/// with the accent along the tab's top edge.
 pub fn panel_title(ui: &mut Ui, title: &str) {
-    let response = ui.label(egui::RichText::new(title).strong().size(15.0).color(TEXT_STRONG));
-    let y = response.rect.bottom() + 2.0;
-    ui.painter().line_segment([egui::pos2(response.rect.left(), y), egui::pos2(response.rect.left() + 28.0, y)], Stroke::new(2.0, ACCENT));
-    ui.add_space(6.0);
+    let margin = 8.0;
+    let full = ui.max_rect();
+    let top = ui.cursor().top() - margin;
+    let strip = egui::Rect::from_min_max(egui::pos2(full.left() - margin, top), egui::pos2(full.right() + margin, top + 28.0));
+    ui.painter().rect_filled(strip, CornerRadius::ZERO, BAR);
+    ui.painter().line_segment([strip.left_bottom(), strip.right_bottom()], Stroke::new(1.0, LINE));
+    let galley = ui.painter().layout_no_wrap(title.to_string(), egui::FontId::proportional(13.0), TEXT_STRONG);
+    let tab = egui::Rect::from_min_size(egui::pos2(strip.left() + 6.0, strip.top() + 4.0), egui::vec2(galley.size().x + 24.0, strip.height() - 4.0));
+    ui.painter().rect_filled(tab, CornerRadius { nw: 3, ne: 3, sw: 0, se: 0 }, PANEL);
+    ui.painter().line_segment([tab.left_top() + egui::vec2(1.0, 0.5), tab.right_top() + egui::vec2(-1.0, 0.5)], Stroke::new(2.0, ACCENT));
+    let text = egui::Rect::from_min_size(egui::pos2(tab.left() + 12.0, tab.center().y - galley.size().y / 2.0), galley.size());
+    ui.put(text, egui::Label::new(egui::RichText::new(title).size(13.0).strong().color(TEXT_STRONG)).selectable(false));
+    // The content starts under the strip.
+    let below = strip.bottom() + 6.0 - ui.cursor().top();
+    if below > 0.0 {
+        ui.add_space(below);
+    }
+}
+
+/// A heading inside a panel or a window.
+pub fn heading(ui: &mut Ui, text: impl Into<String>) -> egui::Response {
+    ui.label(egui::RichText::new(text.into()).strong().size(14.0).color(TEXT_STRONG))
 }
 
 /// A small section title inside a panel, such as "Singletons".
 pub fn section_title(ui: &mut Ui, title: &str) {
     ui.add_space(4.0);
     ui.label(egui::RichText::new(title).strong().size(12.5).color(TEXT_WEAK));
+}
+
+/// The fold mark of a section header: a bar at the left edge, amber while
+/// the section is open and gray while it is closed. It is not an arrow; the
+/// whole header is the control.
+pub fn fold_mark(ui: &mut Ui, openness: f32, response: &egui::Response) {
+    let rect = response.rect;
+    let bar = egui::Rect::from_center_size(egui::pos2(rect.left() + 1.0, rect.center().y), egui::vec2(3.0, rect.height() + 4.0));
+    let rest = if response.hovered() { TEXT_WEAK } else { LINE };
+    let color = egui::lerp(egui::Rgba::from(rest)..=egui::Rgba::from(ACCENT), openness);
+    ui.painter().rect_filled(bar, CornerRadius::same(1), Color32::from(color));
+}
+
+/// A section that folds: a full-width header bar with [`fold_mark`].
+pub fn header(text: impl Into<egui::WidgetText>) -> egui::CollapsingHeader {
+    egui::CollapsingHeader::new(text).icon(fold_mark)
+}
+
+/// `ui.collapsing` with the editor's section header.
+pub fn collapsing<R>(ui: &mut Ui, heading: impl Into<egui::WidgetText>, add_contents: impl FnOnce(&mut Ui) -> R) -> egui::CollapsingResponse<R> {
+    header(heading).show(ui, add_contents)
 }
 
 /// The frame of an inspector card.

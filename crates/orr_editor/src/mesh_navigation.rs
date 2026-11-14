@@ -669,7 +669,7 @@ impl Panel {
             return;
         }
         self.sync(editor);
-        ui.collapsing("Static-mesh navigation", |ui| {
+        crate::theme::collapsing(ui, "Static-mesh navigation", |ui| {
             let can_cook = self.geometry_blocker(editor).is_none() && self.graph.is_some();
             self.surface_package.show(ui, editor.path().as_deref(), editor.scene_load_epoch(), self.graph.as_ref().map(StaticMeshGraph::revision), can_cook);
             self.show_geometry_vertex(ui, editor);

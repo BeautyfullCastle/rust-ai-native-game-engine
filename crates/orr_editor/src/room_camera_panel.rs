@@ -270,7 +270,7 @@ impl Panel {
 
     pub fn show(&mut self, ui: &mut egui::Ui, editable: bool) -> bool {
         let mut reset_live = false;
-        ui.collapsing("Room camera", |ui| {
+        crate::theme::collapsing(ui, "Room camera", |ui| {
             ui.label(if self.dirty() {
                 "Camera (unsaved)"
             } else {
@@ -311,7 +311,7 @@ impl Panel {
                         number(ui, "Orthographic half-height", half_height)
                     }
                 }
-                ui.collapsing("Match projection scale", |ui| {
+                crate::theme::collapsing(ui, "Match projection scale", |ui| {
                 for (label,value) in [("Match projection aspect width",&mut self.match_width),("Match projection aspect height",&mut self.match_height)] {
                     let label=ui.label(label);
                     ui.add(egui::TextEdit::singleline(value).char_limit(10)).labelled_by(label.id);

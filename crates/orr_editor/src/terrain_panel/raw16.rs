@@ -208,7 +208,7 @@ impl TerrainPanel {
         self.report(result)
     }
     pub(super) fn show_raw16(&mut self, ui: &mut egui::Ui, editor: &Editor, writable: bool) {
-        ui.collapsing("Import RAW16 heights", |ui| {
+        crate::theme::collapsing(ui, "Import RAW16 heights", |ui| {
             ui.weak("Unsigned RAW16, current dimensions only. Heights replace; holes and X/Z stay unchanged.");
             ui.weak("Trusted stable local input; explicit Preview then Apply. One Undo, Save is separate.");
             if let Some(t) = self.document.terrain() {

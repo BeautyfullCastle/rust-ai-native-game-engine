@@ -81,7 +81,7 @@ impl Panel {
         blocker: Option<&str>,
     ) {
         self.sync_layout_import(editor, blocker);
-        egui::CollapsingHeader::new("Import Room layout recipe").show(ui, |ui| {
+        crate::theme::header("Import Room layout recipe").show(ui, |ui| {
             ui.label("Paste schema-1 JSON (at most 64 KiB). Replaces all walls and moves PLAYER, KEY and EXIT.");
             ui.add(egui::TextEdit::multiline(&mut self.layout_import.text)
                 .id_salt("room_layout_recipe").char_limit(orr_sample::room_layout::MAX_BYTES)

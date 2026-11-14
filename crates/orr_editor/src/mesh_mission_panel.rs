@@ -123,7 +123,7 @@ impl Panel {
             return;
         }
         self.sync(editor);
-        ui.collapsing("Mesh mission", |ui| {
+        crate::theme::collapsing(ui, "Mesh mission", |ui| {
             ui.weak("Collectibles and an exit are scene gameplay state. Reaching the route endpoint alone never declares a win.");
             self.show_mission_picking(ui, editor);
             if !editor.game().is_mesh_navigation() {

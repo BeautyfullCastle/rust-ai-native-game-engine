@@ -91,7 +91,7 @@ impl TerrainPanel {
     }
 
     pub(super) fn show_terrace(&mut self, ui: &mut egui::Ui, editor: &Editor, writable: bool) {
-        ui.collapsing("Terrace terrain rectangle", |ui| {
+        crate::theme::collapsing(ui, "Terrace terrain rectangle", |ui| {
             ui.weak("Floor heights to base + n * positive step (including negative bands). Inclusive vertices; holes and outside heights stay unchanged.");
             index_field(ui, "Terrace minimum X", &mut self.terrace.min[0]);
             index_field(ui, "Terrace minimum Z", &mut self.terrace.min[1]);

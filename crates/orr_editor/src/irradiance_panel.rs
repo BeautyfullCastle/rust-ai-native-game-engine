@@ -1058,7 +1058,7 @@ impl IrradiancePanel {
             return;
         }
         self.sync_for_editor(editor);
-        ui.collapsing("Irradiance probes", |ui| {
+        crate::theme::collapsing(ui, "Irradiance probes", |ui| {
             ui.weak("Diffuse SH9 · separate sidecar save and undo");
             if !editor.spec().is_local() {
                 ui.label("Remote host paths cannot open local irradiance assets");
@@ -1198,7 +1198,7 @@ impl IrradiancePanel {
                         let _ = self.apply_coefficient_gain(editor);
                     }
 
-                    ui.collapsing("Selected SH9 coefficients", |ui| {
+                    crate::theme::collapsing(ui, "Selected SH9 coefficients", |ui| {
                         if let Some(grid) = self.bindings.as_ref().map(|b| &b.document().grid) {
                             if let Some(index) = grid.node_index(self.selected_node) {
                                 for (i, c) in grid.coefficients[index].iter().enumerate() {
@@ -1211,7 +1211,7 @@ impl IrradiancePanel {
                         }
                         ui.weak("Import full signed SH9 JSON to retain directional irradiance");
                     });
-                    ui.collapsing("Import full SH9", |ui| {
+                    crate::theme::collapsing(ui, "Import full SH9", |ui| {
                         ui.horizontal(|ui| {
                             ui.label("JSON file");
                             ui.text_edit_singleline(&mut self.import_path);

@@ -478,7 +478,7 @@ impl State {
     fn show(&mut self, ui: &mut Ui, context: Option<Context>, blocked_by_other: bool) {
         self.sync(context.clone());
         self.blocked_by_other = blocked_by_other;
-        egui::CollapsingHeader::new("Create sprite package from rectangles")
+        crate::theme::header("Create sprite package from rectangles")
             .default_open(false)
             .show(ui, |ui| {
                 ui.weak("Inspect a PNG explicitly, then define 1..=256 independent atlas rectangles. Creation writes a new source package only; it does not install, load or assign it.");

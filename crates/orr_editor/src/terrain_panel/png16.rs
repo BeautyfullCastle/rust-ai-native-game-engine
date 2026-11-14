@@ -210,7 +210,7 @@ impl TerrainPanel {
         self.report(result)
     }
     pub(super) fn show_png16(&mut self, ui: &mut egui::Ui, editor: &Editor, writable: bool) {
-        ui.collapsing("PNG16 height replacement", |ui| {
+        crate::theme::collapsing(ui, "PNG16 height replacement", |ui| {
             ui.weak("16-bit grayscale PNG, current dimensions only. Heights replace; holes and X/Z stay unchanged.");
             ui.weak("Stored sample values, no color correction or resizing. PNG byte order is fixed.");
             ui.weak("Trusted stable local input; explicit Preview then Apply. One Undo, Save is separate.");

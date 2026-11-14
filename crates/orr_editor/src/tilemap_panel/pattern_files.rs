@@ -80,7 +80,7 @@ impl TilemapPanel {
         editor: &Editor,
         sprites: &SpritePanel,
     ) {
-        ui.collapsing("Reusable pattern files", |ui| {
+        crate::theme::collapsing(ui, "Reusable pattern files", |ui| {
             let label = ui.label("Pattern file");
             ui.text_edit_singleline(&mut self.pattern_file).labelled_by(label.id);
             ui.label("Absolute .json path. Save creates a new file; Load only replaces the copied pattern. Matching installed artwork is required.");

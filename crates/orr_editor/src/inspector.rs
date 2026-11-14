@@ -97,7 +97,7 @@ fn show_field(ui: &mut Ui, base: Id, label: &str, ty: &TypeDesc, value: &Value, 
     let hover = hover_text(doc, ty);
     match (&ty.kind, value) {
         (Kind::Struct { fields, .. }, Value::Struct(vals)) => {
-            egui::CollapsingHeader::new(label).id_salt(id).default_open(true).show(ui, |ui| {
+            crate::theme::header(label).id_salt(id).default_open(true).show(ui, |ui| {
                 for f in fields {
                     if let Some((_, v)) = vals.iter().find(|(n, _)| n == &f.name) {
                         show_field(ui, base, &f.name, &f.ty, v, &join(path, &f.name), &f.doc, out);
@@ -106,7 +106,7 @@ fn show_field(ui: &mut Ui, base: Id, label: &str, ty: &TypeDesc, value: &Value, 
             });
         }
         (Kind::Tagged(t), Value::Variant(kind, vals)) => {
-            egui::CollapsingHeader::new(label).id_salt(id).default_open(true).show(ui, |ui| {
+            crate::theme::header(label).id_salt(id).default_open(true).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("kind");
                     egui::ComboBox::from_id_salt(id.with("kind")).selected_text(kind.as_str()).show_ui(ui, |ui| {
@@ -127,7 +127,7 @@ fn show_field(ui: &mut Ui, base: Id, label: &str, ty: &TypeDesc, value: &Value, 
             });
         }
         (Kind::Array { elem, .. }, Value::Array(items)) => {
-            egui::CollapsingHeader::new(format!("{label} [{}]", items.len())).id_salt(id).default_open(true).show(ui, |ui| {
+            crate::theme::header(format!("{label} [{}]", items.len())).id_salt(id).default_open(true).show(ui, |ui| {
                 for (i, item) in items.iter().enumerate() {
                     let name = format!("[{i}]");
                     show_field(ui, base, &name, elem, item, &join(path, &name), "", out);
@@ -135,7 +135,7 @@ fn show_field(ui: &mut Ui, base: Id, label: &str, ty: &TypeDesc, value: &Value, 
             }).header_response.on_hover_text(&hover);
         }
         (Kind::List { elem, min, max }, Value::Array(items)) => {
-            egui::CollapsingHeader::new(format!("{label} [{}]", items.len())).id_salt(id).default_open(true).show(ui, |ui| {
+            crate::theme::header(format!("{label} [{}]", items.len())).id_salt(id).default_open(true).show(ui, |ui| {
                 for (i, item) in items.iter().enumerate() {
                     let name = format!("[{i}]");
                     show_field(ui, base, &name, elem, item, &join(path, &name), "", out);

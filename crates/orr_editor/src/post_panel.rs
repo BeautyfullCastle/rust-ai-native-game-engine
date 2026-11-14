@@ -177,5 +177,5 @@ fn contents(ui: &mut Ui, id: egui::Id, desc: &TypeDesc, value: &Value, open: &mu
             }
         });
     });
-    egui::CollapsingHeader::new("Stored fields").id_salt(id.with("raw")).default_open(false).show(ui, |ui| show_component(ui, id.with("raw_fields"), desc, value, out));
+    crate::theme::header("Stored fields").id_salt(id.with("raw")).default_open(false).show(ui, |ui| show_component(ui, id.with("raw_fields"), desc, value, out));
 }

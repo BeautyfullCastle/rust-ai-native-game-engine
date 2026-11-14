@@ -398,7 +398,7 @@ impl Panel {
     pub(super) fn show_patrol(&mut self, ui: &mut Ui, editor: &mut Editor) {
         self.patrol.order_busy = self.patrol_pick_owns_input();
         self.sync_patrol(editor);
-        ui.collapsing("Waypoint patrol",|ui| {
+        crate::theme::collapsing(ui, "Waypoint patrol",|ui| {
             ui.weak("Point-agent waypoints; radius, headroom and clearance are not checked. Staging does not change game state.");
             let current=self.patrol_context(editor);let editable=current.is_ok();
             if let Err(reason)=&current {ui.label(reason);}

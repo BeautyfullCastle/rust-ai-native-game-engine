@@ -345,7 +345,7 @@ impl State {
     fn show(&mut self, ui: &mut Ui, context: Option<Context>) {
         self.sync(context.clone());
         let installer_busy = self.installer_busy;
-        ui.collapsing("Create sprite package from PNG grid", |ui| {
+        crate::theme::collapsing(ui, "Create sprite package from PNG grid", |ui| {
             ui.weak("Inspect a PNG explicitly, then create one regular row-major grid and one named clip, up to 256 cells. No image preview, packing, installation, loading or assignment is performed.");
             let enabled = context.is_some() && !self.busy() && !self.exhausted() && !installer_busy;
             ui.add_enabled_ui(enabled, |ui| {

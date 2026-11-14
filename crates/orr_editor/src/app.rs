@@ -1413,6 +1413,8 @@ impl EditorApp {
             let inspector = egui::Panel::right("inspector").resizable(true).default_size(340.0).frame(crate::theme::panel_frame());
             let inspector = if self.editor.game().has_mesh_view() { inspector.max_size(340.0) } else { inspector };
             inspector.show(ui, |ui| {
+                // The title stays put above the scrolling content.
+                crate::theme::panel_title(ui, "Inspector");
                 // The mesh games scroll their own inspector.
                 if self.editor.game().has_mesh_view() {
                     self.inspector(ui);
@@ -2157,7 +2159,6 @@ impl EditorApp {
     // ---- inspector ----
 
     fn inspector(&mut self, ui: &mut Ui) {
-        crate::theme::panel_title(ui, "Inspector");
         #[cfg(feature="mesh-navigation")]
         if self.editor.game().has_mesh_view() {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
@@ -2334,7 +2335,7 @@ impl EditorApp {
                         let base = egui::Id::new(("inspector", &key, name));
                         crate::theme::card_frame().show(ui, |ui| {
                         ui.set_width(ui.available_width());
-                        egui::CollapsingHeader::new(crate::theme::type_name(name)).id_salt(base).default_open(true).show(ui, |ui| {
+                        crate::theme::header(crate::theme::type_name(name)).id_salt(base).default_open(true).show(ui, |ui| {
                             let mut evs = Vec::new();
                             if name == orr_gfx::names::MATERIAL {
                                 material_shown = true;
@@ -2397,7 +2398,7 @@ impl EditorApp {
                 let base = egui::Id::new(("singleton", name));
                 crate::theme::card_frame().show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                egui::CollapsingHeader::new(crate::theme::type_name(name)).id_salt(base).default_open(editor.game() == crate::game::EditorGame::Arena && name == "Score").show(ui, |ui| {
+                crate::theme::header(crate::theme::type_name(name)).id_salt(base).default_open(editor.game() == crate::game::EditorGame::Arena && name == "Score").show(ui, |ui| {
                     let mut evs = Vec::new();
                     if name == orr_gfx::names::POST_PROCESS {
                         post_shown = true;
@@ -2463,7 +2464,7 @@ impl EditorApp {
                 self.ui.yard_transform_target=target;
             }
         }
-        ui.collapsing("Exact 3D transform",|ui|{
+        crate::theme::collapsing(ui, "Exact 3D transform",|ui|{
             ui.add_enabled_ui(self.editor.mode()==Mode::Edit && self.editor.can_mutate() && self.editor.selected_guids().len()==1,|ui|{
                 for (i,axis) in ["X","Y","Z"].into_iter().enumerate(){ui.horizontal(|ui|{let label=ui.label(format!("Position {axis}"));ui.add(egui::TextEdit::singleline(&mut self.ui.yard_xyz[i]).id(egui::Id::new(("yard_xyz",i))).hint_text(format!("Position {axis}"))).labelled_by(label.id);});}
                 ui.label("Unit quaternion (x, y, z, w)");

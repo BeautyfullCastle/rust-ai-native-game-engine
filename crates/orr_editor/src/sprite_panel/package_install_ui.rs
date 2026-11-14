@@ -226,7 +226,7 @@ impl State {
     fn show(&mut self, ui: &mut Ui, context: Option<Context>, authoring_busy: bool) -> bool {
         self.sync(context.clone());
         let mut install_clicked = false;
-        egui::CollapsingHeader::new("Install local sprite package")
+        crate::theme::header("Install local sprite package")
             .default_open(false)
             .show(ui, |ui| {
                 ui.weak("Preview package contents and the one-package lock change before an explicit local install. Preview does not write, load or assign assets.");

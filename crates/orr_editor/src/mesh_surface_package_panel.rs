@@ -43,7 +43,7 @@ impl Panel {
         graph_revision: Option<[u8; 32]>,
         can_edit: bool,
     ) {
-        egui::CollapsingHeader::new("Cook GLB as walkable package")
+        crate::theme::header("Cook GLB as walkable package")
             .default_open(false)
             .show(ui, |ui| {
                 ui.label("Cook a self-contained GLB and license into a new package. This does not stage or apply geometry.");

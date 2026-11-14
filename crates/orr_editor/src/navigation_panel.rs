@@ -309,7 +309,7 @@ impl NavigationPanel {
         self.sync_from_editor(editor);
         self.observe_terrain(editor, terrain);
         let mut pick = None;
-        ui.collapsing("Point navigation", |ui| {
+        crate::theme::collapsing(ui, "Point navigation", |ui| {
             ui.weak("One point agent · terrain triangles · zero radius, headroom and step");
             let context = self.source(editor, terrain);
             if let Err(reason) = &context { ui.label(reason); }

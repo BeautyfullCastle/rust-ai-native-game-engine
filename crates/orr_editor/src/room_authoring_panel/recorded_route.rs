@@ -111,7 +111,7 @@ impl Panel {
         blocker: Option<&str>,
     ) {
         self.sync_recorded_route(editor, blocker);
-        egui::CollapsingHeader::new("Recorded Room regression route").show(ui, |ui| {
+        crate::theme::header("Recorded Room regression route").show(ui, |ui| {
             ui.label("Play, then Stop. Prepare checks the existing recording against the saved project. Copy exports logical schema-1 JSON, not physical keys. Default-controls/static projects only.");
             if ui.add_enabled(self.route_ready(editor, blocker), egui::Button::new("Prepare last Room route")).clicked() {
                 self.status = match self.prepare_recorded_route(editor, blocker) {

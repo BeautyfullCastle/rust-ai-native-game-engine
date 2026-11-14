@@ -80,7 +80,7 @@ impl TerrainPanel {
     }
 
     pub(super) fn show_offset(&mut self, ui: &mut egui::Ui, editor: &Editor, writable: bool) {
-        ui.collapsing("Offset terrain rectangle", |ui| {
+        crate::theme::collapsing(ui, "Offset terrain rectangle", |ui| {
             ui.weak("Add a signed height delta while preserving shape. No clipping or falloff. Holes stay holes.");
             index_field(ui, "Offset minimum X", &mut self.offset.min[0]);
             index_field(ui, "Offset minimum Z", &mut self.offset.min[1]);

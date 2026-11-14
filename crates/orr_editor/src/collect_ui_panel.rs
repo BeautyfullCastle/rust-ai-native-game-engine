@@ -194,7 +194,7 @@ impl Panel {
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui, editable: bool) {
-        ui.collapsing("Collect UI document", |ui| {
+        crate::theme::collapsing(ui, "Collect UI document", |ui| {
             ui.label(format!(
                 "{} nodes{}",
                 self.document.nodes.len(),

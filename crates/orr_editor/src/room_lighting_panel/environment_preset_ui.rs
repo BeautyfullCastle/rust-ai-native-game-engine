@@ -3,7 +3,7 @@ use super::environment_preset::{self, Preset};
 use super::*;
 impl Panel {
     pub(super) fn show_environment_presets(&mut self, ui: &mut egui::Ui, editable: bool) {
-        ui.collapsing("Room environment presets", |ui| {
+        crate::theme::collapsing(ui, "Room environment presets", |ui| {
             ui.weak("Use an absolute .room-environment-preset.json path. Save creates a new preset from applied environment settings. Load stages only the environment; Apply lighting and Save lighting remain explicit.");
             let id = ui.make_persistent_id(("room_environment_preset_path", &self.path));
             let mut path = ui.ctx().data_mut(|data| data.get_temp::<String>(id).unwrap_or_default());

@@ -167,7 +167,7 @@ impl TerrainPanel {
         {
             self.stamp.candidate = None;
         }
-        ui.collapsing("Stamp terrain relief", |ui| {
+        crate::theme::collapsing(ui, "Stamp terrain relief", |ui| {
             ui.weak("Add a diamond hill or depression around the selected vertex. No clipping; touching holes is refused.");
             ui.label(format!("Center vertex: [{}, {}]. Full diamond limit: {MAX_EDITS} vertices (radius 1..=44), including zero-weight rim.", self.selected_vertex[0], self.selected_vertex[1]));
             let before = self.stamp.fields.clone();

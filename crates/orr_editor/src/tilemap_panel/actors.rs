@@ -230,7 +230,7 @@ impl TilemapPanel {
         sprites: &mut SpritePanel,
     ) {
         ui.separator();
-        ui.heading("Actor appearance");
+        crate::theme::heading(ui, "Actor appearance");
         ui.weak("Existing actors only: change Region or Clip within their admitted atlas. Scale, orientation, follow, actor count and tile rendering stay unchanged.");
         let Some(bindings) = &sprites.bindings else {
             ui.label("This project has no actor sidecar.");

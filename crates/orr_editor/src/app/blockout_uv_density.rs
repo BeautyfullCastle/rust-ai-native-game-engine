@@ -207,7 +207,7 @@ impl Panel {
         if editor.game() != crate::game::EditorGame::Yard3D && !editor.game().is_room() {
             return;
         }
-        ui.collapsing("Recipe-space UV density", |ui| {
+        crate::theme::collapsing(ui, "Recipe-space UV density", |ui| {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
             ui.weak("Uses box recipe dimensions; binding scale is excluded");
             ui.weak("Explicit recalculation after resizing; no automatic density lock");

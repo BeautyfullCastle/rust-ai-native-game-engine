@@ -382,7 +382,7 @@ impl State {
     fn show(&mut self, ui: &mut Ui, context: Option<Context>, blocked_by_other: bool) {
         self.sync(context.clone());
         self.blocked_by_other = blocked_by_other;
-        egui::CollapsingHeader::new("Create sprite package from JSON")
+        crate::theme::header("Create sprite package from JSON")
             .default_open(false)
             .show(ui, |ui| {
                 ui.weak("Inspect a sprite JSON document and its referenced PNG, then create a source package. Creation does not install, load or assign assets.");

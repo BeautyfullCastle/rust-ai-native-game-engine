@@ -286,7 +286,7 @@ impl Panel {
             return;
         }
         self.sync(editor);
-        ui.collapsing("Mesh props", |ui| {
+        crate::theme::collapsing(ui, "Mesh props", |ui| {
             ui.label("Static cosmetic props are saved in a separate scene sidecar and do not affect navigation physics.");
             ui.weak("Up to 128 cosmetic props share at most six immutable appearances; graph and agent art keep their reserved GPU asset slots.");
             ui.add_enabled_ui(
@@ -374,7 +374,7 @@ impl Panel {
                 {
                     field(ui, label, &mut self.tint[channel]);
                 }
-                ui.collapsing("Per-material-slot overrides", |ui| {
+                crate::theme::collapsing(ui, "Per-material-slot overrides", |ui| {
                     let model = self
                         .candidate
                         .as_ref()
@@ -392,7 +392,7 @@ impl Panel {
                     }
                 });
                 #[cfg(feature = "mesh-prop-shading")]
-                if !editor.game().is_mesh_hazards() { ui.collapsing("Scalar material shading", |ui| {
+                if !editor.game().is_mesh_hazards() { crate::theme::collapsing(ui, "Scalar material shading", |ui| {
                     let model = self.candidate.as_ref().or_else(|| self.selected_prop().map(|prop| &prop.art)).map(|snapshot| std::sync::Arc::clone(snapshot.source_model_arc()));
                     if let Some(model) = model { self.shading.show(ui, &model); } else { ui.weak("Load or select a prop before editing scalar shading."); }
                 }); }
@@ -459,7 +459,7 @@ impl Panel {
                 }
             });
             let staged_position = self.placement.as_ref().and_then(|placement| placement.position);
-            ui.collapsing("Prop grid", |ui| {
+            crate::theme::collapsing(ui, "Prop grid", |ui| {
                 let enabled = editable && !self.pending_prefab() && self.selected_prop().is_some()
                     && !self.unapplied_form_dirty() && !self.material_slots.dirty();
                 ui.add_enabled_ui(enabled, |ui| {

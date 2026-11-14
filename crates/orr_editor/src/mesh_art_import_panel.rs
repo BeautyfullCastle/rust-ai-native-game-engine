@@ -44,7 +44,7 @@ impl Panel {
         can_edit: bool,
     ) -> Option<Report> {
         let completed = self.poll(current_scene, scene_epoch, graph_revision);
-        egui::CollapsingHeader::new("Import agent art source")
+        crate::theme::header("Import agent art source")
             .default_open(false)
             .show(ui, |ui| {
                 ui.label("Import a local self-contained GLB or fully embedded cooked static model and license into a new agent-art package. Use .glb, .model.json, .orrmodel.json or legacy .orrmodel.");

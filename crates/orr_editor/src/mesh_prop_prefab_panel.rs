@@ -119,7 +119,7 @@ impl Panel {
         editable: bool,
     ) -> Option<Template> {
         let candidate = self.poll(context.clone());
-        egui::CollapsingHeader::new("Prop prefab")
+        crate::theme::header("Prop prefab")
             .default_open(false)
             .show(ui, |ui| {
                 ui.label("Save an applied prop as a reusable local asset, or load a candidate for explicit Add.");

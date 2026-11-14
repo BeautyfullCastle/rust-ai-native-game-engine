@@ -504,7 +504,7 @@ impl TerrainPanel {
     fn show_with_scroll(&mut self, ui: &mut Ui, editor: &Editor, parent_scrolled: bool) {
         #[cfg(feature = "terrain-physics")]
         if editor.game().is_terrain() {
-            ui.collapsing("Terrain collision", |ui| {
+            crate::theme::collapsing(ui, "Terrain collision", |ui| {
                 let admitted = editor.admitted_terrain();
                 ui.label("Admitted Frame-owned terrain · dynamic spheres only");
                 ui.weak("No hidden floor, mixed rain or input spawning. Terrain and body edits are blocked during Play");
@@ -521,7 +521,7 @@ impl TerrainPanel {
             return;
         }
         self.sync_for_editor(editor);
-        ui.collapsing("Terrain authoring", |ui| {
+        crate::theme::collapsing(ui, "Terrain authoring", |ui| {
             let mut content = |ui: &mut Ui| {
                 ui.weak("Presentation only · terrain Save/Undo are separate from the scene");
                 let context = Self::require_context(editor);
@@ -530,7 +530,7 @@ impl TerrainPanel {
                 }
                 ui.add_enabled_ui(context.is_ok(), |ui| {
                     text_field(ui, "Terrain scene-relative path", &mut self.local_path);
-                    ui.collapsing("New terrain settings", |ui| {
+                    crate::theme::collapsing(ui, "New terrain settings", |ui| {
                         text_field(ui, "Terrain asset ID", &mut self.asset_id);
                         index_field(ui, "Terrain width", &mut self.dimensions[0]);
                         index_field(ui, "Terrain depth", &mut self.dimensions[1]);
@@ -551,7 +551,7 @@ impl TerrainPanel {
                             let _ = self.open_for_editor(editor);
                         }
                     });
-                    ui.collapsing("Installed terrain package", |ui| {
+                    crate::theme::collapsing(ui, "Installed terrain package", |ui| {
                         text_field(ui, "Terrain project root", &mut self.project);
                         text_field(ui, "Terrain package name", &mut self.package);
                         text_field(ui, "Terrain asset path in package", &mut self.asset);

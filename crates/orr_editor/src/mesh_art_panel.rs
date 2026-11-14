@@ -222,7 +222,7 @@ impl Panel {
             self.error = None;
             self.status = "Imported raw agent art is selected but not applied; use Apply agent art and Save agent art explicitly.".into();
         }
-        ui.collapsing("Mesh agent art", |ui| {
+        crate::theme::collapsing(ui, "Mesh agent art", |ui| {
             if self.document_pending {
                 ui.label("Waiting for the requested scene to become the authoritative editor document.");
             }
@@ -302,7 +302,7 @@ impl Panel {
                     text_field(ui, label, &mut self.tint[channel]);
                 }
                 ui.checkbox(&mut self.surface_enabled, "Edit art UV and pivot");
-                ui.collapsing("Per-material-slot overrides", |ui| {
+                crate::theme::collapsing(ui, "Per-material-slot overrides", |ui| {
                     let snapshot = self.candidate.as_ref().or_else(|| {
                         self.history.get(self.cursor).and_then(|entry| entry.snapshot.as_ref())
                     });

@@ -83,7 +83,7 @@ impl Panel {
         let mut canceled = false;
         egui::Modal::new(egui::Id::new("new-mesh-game-modal")).show(context, |ui| {
                 ui.set_min_width(500.0);
-                ui.heading(if hazard_mode { "New hazard game" } else { "New mesh game" });
+                crate::theme::heading(ui, if hazard_mode { "New hazard game" } else { "New mesh game" });
                 ui.label("Create a new local mesh scene with a walkable floor and point-navigation collectibles.");
                 ui.label("This starter uses deterministic point navigation; it does not add physics or collision.");
                 if let Some(reason) = blocked {

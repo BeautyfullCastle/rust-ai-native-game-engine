@@ -133,7 +133,7 @@ impl super::EditorApp {
         }
         ui.label("Room Play controls (admitted project or explicit session override)");
         ui.label(self.ui.room_controls.router.bindings.movement_hint());
-        ui.collapsing("Room controls for Play", |ui| {
+        crate::theme::collapsing(ui, "Room controls for Play", |ui| {
             ui.label(self.ui.room_controls.router.bindings.movement_hint());
             ui.small("Open or edit a map, then Use for Play. Project files are not changed. Scene reload/restart restores the admitted project snapshot (defaults for a bare scene); authoring edits are retained.");
             let editable = self.editor.spec().is_local() && self.editor.mode() == Mode::Edit

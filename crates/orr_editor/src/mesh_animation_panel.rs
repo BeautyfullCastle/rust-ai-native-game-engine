@@ -210,7 +210,7 @@ impl Panel {
             return;
         }
         self.sync(editor);
-        ui.collapsing("Mesh agent animation", |ui| {
+        crate::theme::collapsing(ui, "Mesh agent animation", |ui| {
             ui.label("Optional package-backed skeletal animation follows the admitted mesh agent. It does not mutate the scene or physics.");
             ui.label("A bounded self-contained snapshot is saved beside the scene; source package files are not needed after loading.");
             ui.weak("Animation art overrides only static agent art while active; removing animation restores the preserved static art.");

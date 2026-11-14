@@ -67,7 +67,7 @@ impl ModelPanel {
         Ok(removed)
     }
     pub(super) fn show_batch(&mut self, ui: &mut egui::Ui, editor: &Editor) {
-        ui.collapsing("Batch model targets", |ui| {
+        crate::theme::collapsing(ui, "Batch model targets", |ui| {
             if !self.editable(editor) { ui.label("Wait for coherent local Edit mode"); return; }
             let Ok(scene) = Self::local_scene(editor) else { return; };
             if self.batch.scene.as_ref() != Some(&scene) {

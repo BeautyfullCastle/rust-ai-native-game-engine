@@ -176,7 +176,7 @@ impl Panel {
             return;
         }
         self.sync(editor);
-        ui.collapsing("Mesh game camera", |ui| {
+        crate::theme::collapsing(ui, "Mesh game camera", |ui| {
             if self.document_pending {
                 ui.label("Waiting for the requested local mesh scene and admitted graph.");
             }

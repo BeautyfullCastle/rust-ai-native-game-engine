@@ -296,7 +296,7 @@ impl State {
             return;
         }
         self.selected = self.selected.min(self.catalog.len() - 1);
-        ui.collapsing("Command intent", |ui| {
+        crate::theme::collapsing(ui, "Command intent", |ui| {
             egui::ComboBox::from_id_salt("registered_gameplay_intent")
                 .selected_text(&self.catalog[self.selected].0)
                 .show_ui(ui, |ui| {
@@ -304,7 +304,7 @@ impl State {
                         ui.selectable_value(&mut self.selected, index, name);
                     }
                 });
-            ui.collapsing("Payload schema", |ui| {
+            crate::theme::collapsing(ui, "Payload schema", |ui| {
                 ui.monospace(&self.catalog[self.selected].1);
             });
             ui.label("Explicit JSON payload");

@@ -406,7 +406,7 @@ impl NavigationPanel {
     }
     pub(super) fn show_patrol(&mut self, ui: &mut Ui, editor: &mut Editor, terrain: &TerrainPanel) {
         self.sync_patrol(editor, terrain);
-        ui.collapsing("Terrain waypoint patrol",|ui|{
+        crate::theme::collapsing(ui, "Terrain waypoint patrol",|ui|{
             ui.weak("Point routes on the admitted terrain; no radius, headroom or step-clearance guarantee. Staging never moves the agent.");
             let current=self.patrol_context(editor,terrain);let editable=current.is_ok();if let Err(reason)=&current {ui.label(reason);}
             if self.patrol.controls(ui,editable){if let Err(error)=self.apply_patrol(editor,terrain){self.error=Some(format!("Apply terrain patrol failed: {error}"));}}

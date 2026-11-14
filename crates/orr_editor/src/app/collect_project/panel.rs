@@ -100,7 +100,7 @@ impl Panel {
         let mut cancel = false;
         egui::Modal::new(egui::Id::new("collect_project_dialog")).show(context, |ui| {
             ui.set_width(520.0);
-            ui.heading(match kind { Kind::New => "New Collect project", Kind::Open => "Open Collect project" });
+            crate::theme::heading(ui, match kind { Kind::New => "New Collect project", Kind::Open => "Open Collect project" });
             if kind == Kind::New {
                 ui.label("Create a playable Collect starter with sprites and Korean HUD/menu screens.");
                 ui.label("Choose an absent absolute directory with an existing, non-symlink parent. Existing files are never overwritten.");

@@ -9,7 +9,7 @@ pub(crate) struct Panel {
 impl Panel {
     pub(crate) fn show(&mut self, ui: &mut egui::Ui, editor: &Editor, terrain: &TerrainPanel) {
         self.state.sync(editor, terrain);
-        egui::CollapsingHeader::new("Terrain appearance").default_open(true).show(ui, |ui| {
+        crate::theme::header("Terrain appearance").default_open(true).show(ui, |ui| {
             ui.weak("Presentation only. One opaque PNG, at most 512 × 512. Terrain and host history are unchanged.");
             ui.weak("Terrain Open does not reload appearance; use Reload appearance for external sidecar changes.");
             let editable = State::editable(editor).is_ok() && !self.state.operation_blocked;
