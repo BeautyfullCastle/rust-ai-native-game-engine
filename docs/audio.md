@@ -35,6 +35,23 @@ worker before forwarding an error, so polling is not a complete health monitor.
 Its shutdown worker polls at 500 ms; dropping the owner queues immediate voice
 stops and requests backend shutdown, but is not a synchronous device-close fence.
 
+## Spatial sound
+
+A clip placed in the world with `Clip::at(position, near, far)` is heard from
+the listener set by `EventAudio::set_listener(Listener { position, right })`.
+
+- Volume: full within `near` meters, then inverse distance (twice the distance
+  is half the amplitude, -6 dB), faded to silence over the last fifth before `far`.
+- Placement: the sound pans toward the side it is on, from the angle between the
+  listener's `right` and the direction to the sound.
+- A playing sound follows the listener: `set_listener` retunes the volume and
+  panning of every playing spatial voice over 20 ms, so movement does not click.
+- `Emitter::heard_by` returns the volume in decibels and the panning, for a
+  caller that wants to show or log them.
+- Not modeled: Doppler pitch shift, occlusion by walls, reverb, elevation (a
+  sound above and one below sound the same), and moving emitters (a voice keeps
+  the position it started at).
+
 ## Event ownership and bounds
 
 - Consume `Bridge::poll_view()` once and pass its full ordered `ViewUpdate` to
