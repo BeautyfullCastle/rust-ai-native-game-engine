@@ -180,6 +180,7 @@ pub fn scene_look(frame: FrameView<'_>, fallback: &Lighting) -> SceneLook {
             inner_angle: inner,
             outer_angle: f(light.outer_angle).clamp(0.1, 89.0).to_radians().max(inner),
             layers: light.layers & orr_gfx::ALL_LAYERS,
+            shadows: light.cast_shadows != 0,
         };
         if !enabled {
             look.lights.push(PlacedLight { entity, light: scene_light, sun: false, enabled });

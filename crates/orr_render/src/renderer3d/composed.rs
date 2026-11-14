@@ -153,7 +153,8 @@ impl<B: Rhi> Renderer3D<B> {
         if let Some(ready) = shadow {
             globals.light_vp = ready.matrix.0;
             globals.shadow = ready.params;
-            globals.params[0] = 1.0;
+            // A frame whose only shadows are spot shadows has no sun cascade to read.
+            globals.params[0] = if ready.cascades.is_empty() { 0.0 } else { 1.0 };
         }
         if let Some(light) = point.point_light {
             globals.point_position_range = [
@@ -324,6 +325,10 @@ impl<B: Rhi> Renderer3D<B> {
                         Binding::Uniform {
                             binding: 3,
                             buffer: &map.cascades,
+                        },
+                        Binding::Texture {
+                            binding: 4,
+                            view: &map.spot_view,
                         },
                     ],
                 ),

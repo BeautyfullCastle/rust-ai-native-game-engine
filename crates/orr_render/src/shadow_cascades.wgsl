@@ -16,6 +16,13 @@ struct ShadowCascades {
     eye: vec4<f32>,
     // xyz: the view direction, w: the part of each cascade's far end where it fades into the next.
     forward: vec4<f32>,
+    // World to each spot shadow's clip space.
+    spot_vp: array<mat4x4<f32>, 4>,
+    // xy: the spot tile's origin in the spot map, z: its size, both in texture coordinates; w: depth bias.
+    spot_tiles: array<vec4<f32>, 4>,
+    // x: number of spot tiles, y: one texel of the spot map in texture coordinates,
+    // z: normal offset per meter of distance from the light.
+    spot_info: vec4<f32>,
 };
 
 // Visibility of the sun in cascade `k`, or -1 where the point is outside it.

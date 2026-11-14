@@ -143,8 +143,10 @@ fn shade(in:Varying, visibility:f32) -> vec4<f32> {
 @group(1) @binding(0) var shared_shadow_map: texture_depth_2d;
 @group(1) @binding(1) var shared_shadow_sampler: sampler_comparison;
 @group(1) @binding(2) var<uniform> shadow_cascades: ShadowCascades;
-// The shared sun shadow in cascades (shadow_cascades.wgsl, added after this file).
-fn shared_visibility(world:vec3<f32>, n:vec3<f32>) -> f32 { return cascaded_visibility(world,n); }
+@group(1) @binding(3) var spot_shadow_map: texture_depth_2d;
+// The shared sun shadow in cascades (shadow_cascades.wgsl, added after this file),
+// after the spot shadows of the scene lights at the same point.
+fn shared_visibility(world:vec3<f32>, n:vec3<f32>) -> f32 { scene_spot_fill(world,n); return cascaded_visibility(world,n); }
 @fragment fn fs_main(in:Varying) -> @location(0) vec4<f32> { return shade(in,1.0); }
 @fragment fn fs_composed(in:Varying) -> @location(0) vec4<f32> {
     let n=in.normal*inverseSqrt(max(dot(in.normal,in.normal),1e-20));

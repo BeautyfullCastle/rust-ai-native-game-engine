@@ -40,7 +40,7 @@ pub mod surface;
 /// includes (`cascaded_visibility`); see shadow_cascades.wgsl.
 pub const SHADOW_CASCADES_WGSL: &str = include_str!("shadow_cascades.wgsl");
 /// Bytes of the `ShadowCascades` uniform of [`SHADOW_CASCADES_WGSL`].
-pub const SHADOW_CASCADES_UNIFORM_BYTES: u64 = 416;
+pub const SHADOW_CASCADES_UNIFORM_BYTES: u64 = 752;
 pub mod surface_texture;
 mod stats;
 pub mod targets;
@@ -53,7 +53,10 @@ pub use mesh::{MeshKind, MeshSet, Vertex3, DEFAULT_SEGMENTS};
 pub use renderer3d::{light_view_proj, Renderer3D, Settings3D, SphereLod3D, SphereLodError3D, SphereLodStats3D, DEFAULT_CLEAR_3D};
 pub use surface::{ParamKind, ShaderError, SurfaceId, SurfaceParam, SurfaceShader, SurfaceTextureSlot, TextureKind, MAX_SURFACE_FLOATS, MAX_SURFACE_TEXTURES};
 pub use surface_texture::{SurfaceTexture, TextureId, MAX_SURFACE_TEXTURE_SIZE};
-pub use scene_lights::{SceneLight, SceneLightError, SceneLightKind, SceneLights, ALL_RENDER_LAYERS, DEFAULT_RENDER_LAYER, MAX_SCENE_LIGHTS, RENDER_LAYER_COUNT};
+pub use scene_lights::{
+    SceneLight, SceneLightError, SceneLightKind, SceneLights, ALL_RENDER_LAYERS, DEFAULT_RENDER_LAYER, MAX_SCENE_LIGHTS, MAX_SPOT_SHADOWS, RENDER_LAYER_COUNT,
+    SPOT_SHADOW_MAP_SIZE,
+};
 pub use extract::{extract_items, instance_of};
 pub use list::{LineInstance, RenderList, ShapeInstance};
 pub use renderer::{Renderer, DEFAULT_CLEAR};

@@ -136,7 +136,7 @@ impl<B: Rhi> ModelSurfaces<B> {
     pub fn bind_map(&mut self, rhi: &B, map: &SharedShadow<B>) {
         for gpu in &mut self.gpus {
             if gpu.receiver_bind.as_ref().is_none_or(|(id, _)| *id != map.id) {
-                let bind = rhi.create_bind_group(&gpu.receiver, 1, &[Binding::Texture { binding: 0, view: &map.view }, Binding::Sampler { binding: 1, sampler: &map.sampler }, Binding::Uniform { binding: 2, buffer: &map.cascades }]);
+                let bind = rhi.create_bind_group(&gpu.receiver, 1, &[Binding::Texture { binding: 0, view: &map.view }, Binding::Sampler { binding: 1, sampler: &map.sampler }, Binding::Uniform { binding: 2, buffer: &map.cascades }, Binding::Texture { binding: 3, view: &map.spot_view }]);
                 gpu.receiver_bind = Some((map.id, bind));
             }
         }

@@ -7,12 +7,17 @@
 //!
 //! All lights use the bounded diffuse model of the single point light: the
 //! light reaches zero at its range. This is a stylized model, not a
-//! photometric one. Only the sun casts shadows.
+//! photometric one. The sun and up to [`MAX_SPOT_SHADOWS`] spot lights cast
+//! shadows; point lights do not.
 
 use bytemuck::{Pod, Zeroable};
 
 /// Lights that one frame can hold in addition to the sun.
 pub const MAX_SCENE_LIGHTS: usize = 8;
+/// Spot lights that cast shadows in one frame; later ones light without shadows.
+pub const MAX_SPOT_SHADOWS: usize = 4;
+/// Width and height of the spot shadow map, which holds one tile of half this size per spot light.
+pub const SPOT_SHADOW_MAP_SIZE: u32 = 2048;
 /// Number of render layers. A layer mask uses the low bits.
 pub const RENDER_LAYER_COUNT: u32 = 8;
 /// The layer of a surface that names no layer.
@@ -47,6 +52,8 @@ pub struct SceneLight {
     pub outer_angle: f32,
     /// Render layers this light affects.
     pub layers: u32,
+    /// Whether a spot light casts shadows. Ignored for other kinds.
+    pub shadows: bool,
 }
 
 impl Default for SceneLight {
@@ -61,6 +68,7 @@ impl Default for SceneLight {
             inner_angle: 0.35,
             outer_angle: 0.5,
             layers: ALL_RENDER_LAYERS,
+            shadows: false,
         }
     }
 }
@@ -146,6 +154,18 @@ impl SceneLights {
         self.count = 0;
     }
 
+    /// The spot lights that cast shadows, at most [`MAX_SPOT_SHADOWS`], with
+    /// their index in [`SceneLights::lights`] and their world-to-clip matrix.
+    pub(crate) fn spot_shadows(&self) -> Vec<(usize, [[f32; 4]; 4])> {
+        self.lights()
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.kind == SceneLightKind::Spot && l.shadows)
+            .take(MAX_SPOT_SHADOWS)
+            .map(|(index, light)| (index, spot_matrix(light)))
+            .collect()
+    }
+
     pub(crate) fn uniform(&self) -> SceneLightsUniform {
         let strength = if self.sun_shadow_strength.is_finite() { self.sun_shadow_strength.clamp(0.0, 1.0) } else { 1.0 };
         let mut uniform = SceneLightsUniform {
@@ -166,11 +186,28 @@ impl SceneLights {
                 [light.position[0], light.position[1], light.position[2], light.range],
                 [light.color[0], light.color[1], light.color[2], light.intensity],
                 [light.direction[0] / length, light.direction[1] / length, light.direction[2] / length, kind],
-                [inner, outer, (light.layers & ALL_RENDER_LAYERS) as f32, 0.0],
+                [inner, outer, (light.layers & ALL_RENDER_LAYERS) as f32, -1.0],
             ];
+        }
+        // w of the cone row is the light's spot shadow tile, -1 without one.
+        for (tile, (index, _)) in self.spot_shadows().iter().enumerate() {
+            uniform.lights[*index][3][3] = tile as f32;
         }
         uniform
     }
+}
+
+/// World to clip space of a spot light's cone, square and a little wider than its outer angle.
+fn spot_matrix(light: &SceneLight) -> [[f32; 4]; 4] {
+    use crate::math3::{cross, dot, normalize, Mat4};
+    let forward = normalize(light.direction);
+    let helper = if forward[1].abs() > 0.95 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
+    let up = normalize(cross(cross(forward, helper), forward));
+    let target = [light.position[0] + forward[0], light.position[1] + forward[1], light.position[2] + forward[2]];
+    let view = Mat4::look_at(light.position, target, if dot(up, up) > 0.5 { up } else { helper });
+    let fov = (2.0 * light.outer_angle + 0.05).min(3.0);
+    let near = (light.range * 0.002).max(0.02);
+    Mat4::perspective(fov, 1.0, near, light.range.max(near * 2.0)).mul(&view).0
 }
 
 /// [`SceneLights`] as the shaders read it: 528 bytes.
@@ -191,8 +228,9 @@ impl SceneLightsUniform {
 
 /// Appends the scene light functions to a shader whose globals are named `global`.
 /// The shader declares `scene_light_info` and `scene_lights` in its globals itself.
-pub(crate) fn shader(source: &str, global: &str) -> String {
-    format!("{source}\n{}", include_str!("scene_lights.wgsl").replace("SCENE_GLOBAL", global))
+/// `sampler` names the shader's shadow comparison sampler, which spot shadows share.
+pub(crate) fn shader(source: &str, global: &str, sampler: &str) -> String {
+    format!("{source}\n{}", include_str!("scene_lights.wgsl").replace("SCENE_GLOBAL", global).replace("SCENE_SHADOW_SAMPLER", sampler))
 }
 
 #[cfg(test)]
@@ -247,6 +285,7 @@ mod tests {
                 inner_angle: 0.3,
                 outer_angle: 0.3,
                 layers: 0xFFFF_FF06,
+                shadows: true,
             })
             .unwrap();
         let uniform = lights.uniform();
@@ -254,7 +293,8 @@ mod tests {
         assert_eq!(uniform.lights[0][0], [1.0, 2.0, 3.0, 12.0]);
         assert_eq!(uniform.lights[0][1], [0.5, 0.25, 1.0, 3.0]);
         assert_eq!(uniform.lights[0][2], [0.0, -1.0, 0.0, 2.0]);
-        let [inner, outer, layers, _] = uniform.lights[0][3];
+        let [inner, outer, layers, tile] = uniform.lights[0][3];
+        assert_eq!(tile, 0.0, "the first shadowed spot takes tile 0");
         assert!((inner - 0.3_f32.cos()).abs() < 1.0e-6 && outer < inner);
         assert_eq!(layers, 6.0);
         assert_eq!(std::mem::size_of::<SceneLightsUniform>(), 16 + MAX_SCENE_LIGHTS * 64);

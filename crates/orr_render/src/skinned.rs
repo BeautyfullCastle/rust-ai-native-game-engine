@@ -143,7 +143,7 @@ const SKINNED_ATTRS: [VertexAttr; 8] = [
 /// features, probes and material shading. The renderer builds its pipelines
 /// from it, and surface shaders are validated against it.
 pub(crate) fn skinned_engine_source() -> String {
-    let source = crate::scene_lights::shader(include_str!("shader_skinned.wgsl"), "globals") + crate::SHADOW_CASCADES_WGSL;
+    let source = crate::scene_lights::shader(include_str!("shader_skinned.wgsl"), "globals", "shared_shadow_sampler") + crate::SHADOW_CASCADES_WGSL;
     #[cfg(feature = "irradiance-probes")]
     let source = crate::renderer3d::irradiance::shader(&source, "globals");
     #[cfg(feature = "metallic-roughness")]

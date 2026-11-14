@@ -225,7 +225,7 @@ const VERTEX_ATTRS: [VertexAttr; 3] = [
 /// the probe and metallic-roughness functions. Model pipelines are built from
 /// it, and surface shaders are validated against it.
 pub(crate) fn model_engine_source() -> String {
-    let source = crate::scene_lights::shader(include_str!("shader_model.wgsl"), "globals") + crate::SHADOW_CASCADES_WGSL;
+    let source = crate::scene_lights::shader(include_str!("shader_model.wgsl"), "globals", "shared_shadow_sampler") + crate::SHADOW_CASCADES_WGSL;
     #[cfg(feature = "irradiance-probes")]
     let source = crate::renderer3d::irradiance::shader(&source, "globals");
     #[cfg(feature = "metallic-roughness")]

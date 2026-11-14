@@ -24,6 +24,9 @@ pub struct ShadowCascadesUniform {
     pub ranges: [[f32; 4]; 4],
     pub eye: [f32; 4],
     pub forward: [f32; 4],
+    pub spot_vp: [[[f32; 4]; 4]; 4],
+    pub spot_tiles: [[f32; 4]; 4],
+    pub spot_info: [f32; 4],
 }
 
 /// One cascade of a frame: what its casters draw with and where.
@@ -132,7 +135,14 @@ impl PreparedShadow {
         }
         let size = SHARED_SHADOW_MAP_SIZE as f32;
         // One cascade: the whole map, any distance along the view.
-        let uniform = ShadowCascadesUniform { vp: [matrix.0; 4], tiles: [[0.0, 0.0, 1.0, params[2]]; 4], ranges: [[params[1], 1.0e30, params[0], 0.0]; 4], eye: [0.0, 0.0, 0.0, 1.0], forward: [0.0, 0.0, 1.0, 0.0] };
+        let uniform = ShadowCascadesUniform {
+            vp: [matrix.0; 4],
+            tiles: [[0.0, 0.0, 1.0, params[2]]; 4],
+            ranges: [[params[1], 1.0e30, params[0], 0.0]; 4],
+            eye: [0.0, 0.0, 0.0, 1.0],
+            forward: [0.0, 0.0, 1.0, 0.0],
+            ..bytemuck::Zeroable::zeroed()
+        };
         let cascades = vec![ShadowCascade { light_vp: matrix.0, viewport: [0.0, 0.0, size, size] }];
         Ok(Some(Self { matrix, params, cascades, uniform }))
     }
@@ -141,6 +151,31 @@ impl PreparedShadow {
     /// 1.5 × `lighting.shadow_radius` from the eye. Each cascade covers a
     /// sphere around its stretch of the view and is drawn into a quarter of
     /// the map; one cascade keeps the sphere of [`Self::prepare`].
+    /// No sun shadow, for a frame whose only shadows are spot shadows.
+    pub fn none() -> Self {
+        let size = SHARED_SHADOW_MAP_SIZE as f32;
+        Self { matrix: Mat4::IDENTITY, params: [1.0 / size, 0.0, 0.0004, 1.0], cascades: Vec::new(), uniform: bytemuck::Zeroable::zeroed() }
+    }
+
+    /// Writes the spot shadows of `lights` into the uniform and returns where each one draws.
+    pub fn add_spots(&mut self, lights: &crate::SceneLights) -> Vec<ShadowCascade> {
+        let tile = crate::scene_lights::SPOT_SHADOW_MAP_SIZE / 2;
+        let size = crate::scene_lights::SPOT_SHADOW_MAP_SIZE as f32;
+        let spots = lights.spot_shadows();
+        let mut draws = Vec::with_capacity(spots.len());
+        for (k, (index, matrix)) in spots.iter().enumerate() {
+            let light = lights.lights()[*index];
+            let (x, y) = ((k as u32 % 2) * tile, (k as u32 / 2) * tile);
+            self.uniform.spot_vp[k] = *matrix;
+            self.uniform.spot_tiles[k] = [x as f32 / size, y as f32 / size, tile as f32 / size, 0.0006];
+            // One texel of the cone at one meter, times 1.5.
+            let texel_per_meter = 2.0 * (light.outer_angle + 0.025).tan() / tile as f32;
+            self.uniform.spot_info = [spots.len() as f32, 1.0 / size, 1.5 * texel_per_meter, 0.0];
+            draws.push(ShadowCascade { light_vp: *matrix, viewport: [x as f32, y as f32, tile as f32, tile as f32] });
+        }
+        draws
+    }
+
     pub fn prepare_cascaded(lighting: &Lighting, camera: &Camera3D, aspect: f32, count: u32) -> Result<Option<Self>, ModelRenderError> {
         let Some(single) = Self::prepare(lighting)? else { return Ok(None) };
         let count = count.clamp(1, MAX_SHADOW_CASCADES);
@@ -201,9 +236,16 @@ pub(crate) fn prepare_shared_globals(
     Ok((globals, shadow))
 }
 
+static NEXT_SHADOW_ID: AtomicU64 = AtomicU64::new(1);
+
 pub(crate) struct SharedShadow<B: Rhi> {
     _texture: B::Texture,
     pub view: B::TextureView,
+    _spot_texture: B::Texture,
+    /// Spot light shadows, one tile each (see [`crate::scene_lights::SPOT_SHADOW_MAP_SIZE`]).
+    /// One texel until a frame has a spot light with shadows.
+    pub spot_view: B::TextureView,
+    spot_size: u32,
     pub sampler: B::Sampler,
     /// The frame's [`ShadowCascadesUniform`].
     pub cascades: B::Buffer,
@@ -211,7 +253,6 @@ pub(crate) struct SharedShadow<B: Rhi> {
 }
 impl<B: Rhi> SharedShadow<B> {
     pub fn new(rhi: &B) -> Self {
-        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         let texture = rhi.create_texture(&TextureDesc {
             label: "shared directional shadow map",
             width: SHARED_SHADOW_MAP_SIZE,
@@ -222,6 +263,7 @@ impl<B: Rhi> SharedShadow<B> {
             view_formats: &[],
         });
         let view = rhi.create_texture_view(&texture, None);
+        let (spot_texture, spot_view) = spot_map(rhi, 1);
         let sampler = rhi.create_sampler(&SamplerDesc::SHADOW);
         let cascades = rhi.create_buffer(&BufferDesc {
             label: "shadow cascades",
@@ -231,13 +273,42 @@ impl<B: Rhi> SharedShadow<B> {
         Self {
             _texture: texture,
             view,
+            _spot_texture: spot_texture,
+            spot_view,
+            spot_size: 1,
             sampler,
             cascades,
-            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+            id: NEXT_SHADOW_ID.fetch_add(1, Ordering::Relaxed),
         }
     }
 }
 /// Inferred layouts are pipeline-specific even when their entries look identical.
+impl<B: Rhi> SharedShadow<B> {
+    /// Grows the spot map to its full size. Its id changes, so bindings of the old one are made again.
+    pub fn grow_spot_map(&mut self, rhi: &B) {
+        let size = crate::scene_lights::SPOT_SHADOW_MAP_SIZE;
+        if self.spot_size != size {
+            (self._spot_texture, self.spot_view) = spot_map(rhi, size);
+            self.spot_size = size;
+            self.id = NEXT_SHADOW_ID.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+fn spot_map<B: Rhi>(rhi: &B, size: u32) -> (B::Texture, B::TextureView) {
+    let texture = rhi.create_texture(&TextureDesc {
+        label: "spot light shadow map",
+        width: size,
+        height: size,
+        format: TextureFormat::Depth32Float,
+        usage: TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING,
+        sample_count: 1,
+        view_formats: &[],
+    });
+    let view = rhi.create_texture_view(&texture, None);
+    (texture, view)
+}
+
 pub(crate) struct ShadowPipelines<B: Rhi> {
     pub main: B::Pipeline,
     pub depth: B::Pipeline,
@@ -353,6 +424,10 @@ impl<B: Rhi> ShadowPipelines<B> {
                         Binding::Uniform {
                             binding: 2,
                             buffer: &map.cascades,
+                        },
+                        Binding::Texture {
+                            binding: 3,
+                            view: &map.spot_view,
                         },
                     ],
                 ),

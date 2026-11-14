@@ -102,6 +102,8 @@ impl<B: Rhi> Renderer3D<B> {
                 Binding::Texture { binding: 1, view: &self.shadow_view },
                 Binding::Sampler { binding: 2, sampler: &self.sampler },
                 Binding::Uniform { binding: 3, buffer: &self.no_cascades },
+                // No spot tiles here: the renderer's own map stands in.
+                Binding::Texture { binding: 4, view: &self.shadow_view },
             ],
         );
         SurfaceGpu {
@@ -263,6 +265,7 @@ impl<B: Rhi> Renderer3D<B> {
                         Binding::Texture { binding: 1, view: &map.view },
                         Binding::Sampler { binding: 2, sampler: &map.sampler },
                         Binding::Uniform { binding: 3, buffer: &map.cascades },
+                        Binding::Texture { binding: 4, view: &map.spot_view },
                     ],
                 );
                 gpu.composed_bind = Some((map.id, bind));

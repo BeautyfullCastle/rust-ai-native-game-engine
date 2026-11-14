@@ -368,7 +368,7 @@ fn params_wgsl(params: &[SurfaceParam], textures: &[SurfaceTextureSlot]) -> Stri
 pub(crate) fn engine_source() -> String {
     // The shapes read the shared map through their own shadow map binding.
     let cascades = crate::SHADOW_CASCADES_WGSL.replace("shared_shadow_map", "shadow_map").replace("shared_shadow_sampler", "shadow_samp");
-    let source = crate::scene_lights::shader(include_str!("shader3d.wgsl"), "g") + &cascades;
+    let source = crate::scene_lights::shader(include_str!("shader3d.wgsl"), "g", "shadow_samp") + &cascades;
     #[cfg(feature = "irradiance-probes")]
     let source = crate::renderer3d::irradiance::shader(&source, "g");
     source
