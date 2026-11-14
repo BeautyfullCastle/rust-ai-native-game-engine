@@ -357,7 +357,24 @@ fn temporal_upscaling_keeps_flat_colors_and_smooths_edges() {
 /// Draws one renderer per (color, instances) group for `frames` frames, the camera of frame `i`
 /// from `camera(i)`, and returns the last picture.
 fn render_groups(g: &Wgpu, camera: impl Fn(usize) -> Camera3D, groups: &[([f32; 3], Vec<StaticInstance>)], light: &Lighting, effects: &[ScreenEffect], frames: usize) -> Vec<u8> {
+    render_lit_groups(g, camera, groups, light, &[], effects, frames)
+}
+
+/// [`render_groups`] with scene lights.
+#[allow(clippy::too_many_arguments)] // render_groups' arguments plus the lights.
+fn render_lit_groups(
+    g: &Wgpu,
+    camera: impl Fn(usize) -> Camera3D,
+    groups: &[([f32; 3], Vec<StaticInstance>)],
+    light: &Lighting,
+    lights: &[orr_render::SceneLight],
+    effects: &[ScreenEffect],
+    frames: usize,
+) -> Vec<u8> {
     let mut scene = ImportedSceneRenderer::new(g.clone(), FORMAT).unwrap();
+    for scene_light in lights {
+        scene.scene_lights.push(*scene_light).unwrap();
+    }
     scene.post_process = PostProcessSettings { enabled: true, bloom: false, ..Default::default() };
     for (slot, effect) in scene.post_process.effects.iter_mut().zip(effects) {
         *slot = Some(*effect);
@@ -446,4 +463,95 @@ fn chromatic_aberration_splits_colors_toward_the_edges_only() {
         a[0].abs_diff(b[0]) > 20 || a[2].abs_diff(b[2]) > 20
     });
     assert!(fringe.count() > 20, "the square's edges near the border get color fringes");
+}
+
+/// A gray floor facing up and a small square floating 1.2 meters over it, off to the side.
+fn floor_and_caster() -> Vec<([f32; 3], Vec<StaticInstance>)> {
+    let half = std::f32::consts::FRAC_PI_4;
+    let up = [-half.sin(), 0.0, 0.0, half.cos()];
+    let floor = StaticInstance { rotation: up, scale: [8.0; 3], ..Default::default() };
+    let caster = StaticInstance { translation: [-0.8, 1.2, 0.0], rotation: up, scale: [0.6; 3] };
+    vec![([0.7; 3], vec![floor]), ([0.7; 3], vec![caster])]
+}
+
+fn spot_from_above(shadows: bool) -> orr_render::SceneLight {
+    orr_render::SceneLight {
+        kind: orr_render::SceneLightKind::Spot,
+        position: [0.0, 4.0, 0.0],
+        direction: [0.0, -1.0, 0.0],
+        intensity: 3.0,
+        range: 10.0,
+        inner_angle: 0.5,
+        outer_angle: 0.7,
+        shadows,
+        ..Default::default()
+    }
+}
+
+fn image_red(image: &[u8], pixel: u32) -> u8 {
+    image[(pixel * 4) as usize]
+}
+
+#[test]
+fn a_spot_light_casts_a_shadow_with_and_without_a_sun_shadow() {
+    let Some(g) = gpu() else { return };
+    let camera = |_| Camera3D::perspective([0.0, 6.0, 2.5], [0.0; 3], 50.0);
+    let mut dark = light(0.05);
+    dark.tonemap = false;
+    let mut sunny = dark;
+    sunny.shadows = true;
+    sunny.intensity = 0.2;
+    sunny.direction = [0.3, -1.0, 0.2];
+    for scene_light in [dark, sunny] {
+        let lit = render_lit_groups(&g, camera, &floor_and_caster(), &scene_light, &[spot_from_above(false)], &[], 1);
+        let shadowed = render_lit_groups(&g, camera, &floor_and_caster(), &scene_light, &[spot_from_above(true)], &[], 1);
+        // The shadow falls on the floor beyond the caster, away from the light.
+        let darker = (0..SIZE * SIZE).filter(|i| image_red(&lit, *i) > image_red(&shadowed, *i) + 60).count();
+        assert!(darker > 40, "the caster's spot shadow darkens the floor: {darker} pixels (sun shadow {})", scene_light.shadows);
+        // A corner outside the spot's cone is the same either way.
+        assert!(px(&lit, 1, 1)[0].abs_diff(px(&shadowed, 1, 1)[0]) <= 2);
+    }
+}
+
+#[test]
+fn spot_shadows_alone_leave_the_sun_unshadowed_on_shapes() {
+    let Some(g) = gpu() else { return };
+    let draw = |with_spot: bool| {
+        let mut scene = ImportedSceneRenderer::new(g.clone(), FORMAT).unwrap();
+        if with_spot {
+            // Far to the side: it lights nothing in view, but its shadow turns on the shared path.
+            scene.scene_lights.push(orr_render::SceneLight { position: [40.0, 4.0, 0.0], range: 3.0, ..spot_from_above(true) }).unwrap();
+        }
+        let mut list = orr_render::RenderList3D::new();
+        // In front of the origin, where a stray read of the zero-filled sun map would shadow it.
+        list.cuboid([0.0, 0.0, 0.5], orr_render::IDENTITY_ROT, [3.0, 3.0, 0.02], &orr_render::Material::new([0.8; 3]).rough(1.0));
+        let mut renderer = orr_render::Renderer3D::with_settings(g.clone(), FORMAT, orr_render::Settings3D::LOW);
+        let mut sun = light(0.2);
+        sun.intensity = 1.0;
+        sun.direction = [0.0, 0.0, -1.0];
+        let texture = g.create_texture(&TextureDesc {
+            label: "spot-only shadow test",
+            width: SIZE,
+            height: SIZE,
+            format: FORMAT,
+            usage: TextureUsage::RENDER_ATTACHMENT | TextureUsage::COPY_SRC,
+            sample_count: 1,
+            view_formats: &[],
+        });
+        let view = g.create_texture_view(&texture, None);
+        scene
+            .draw(
+                ImportedSceneTarget { view: &view, size: (SIZE, SIZE), format: FORMAT, sample_count: 1 },
+                &ortho(),
+                &sun,
+                &PointLightSettings::default(),
+                &mut [ImportedBatch::Procedural { renderer: &mut renderer, list: &list }],
+            )
+            .unwrap();
+        g.read_texture(&texture)
+    };
+    let (plain, spotted) = (draw(false), draw(true));
+    for (x, y) in [(32, 32), (8, 50)] {
+        assert_eq!(px(&plain, x, y), px(&spotted, x, y), "the sunlit shape at {x},{y} gets no shadow from an unused map");
+    }
 }

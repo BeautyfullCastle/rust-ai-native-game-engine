@@ -32,6 +32,8 @@ struct Globals {
 @group(0) @binding(2) var shadow_samp: sampler_comparison;
 // The shared map's cascades in a composed scene; zero cascades on the renderer's own map.
 @group(0) @binding(3) var<uniform> shadow_cascades: ShadowCascades;
+// Spot light shadows in a composed scene; any depth texture with zero spot tiles otherwise.
+@group(0) @binding(4) var spot_shadow_map: texture_depth_2d;
 
 const PI: f32 = 3.14159265;
 
@@ -162,6 +164,7 @@ struct SurfacePoint {
 // scene lights, then the display transform of the target.
 fn shade_surface(in: SurfacePoint, s: Surface) -> vec4<f32> {
     let n = s.normal;
+    scene_spot_fill(in.world, n);
     let v = output_normalize(g.cam_pos.xyz - in.world);
     let l = g.light_dir.xyz;
 

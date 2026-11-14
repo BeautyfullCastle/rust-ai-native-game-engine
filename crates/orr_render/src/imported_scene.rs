@@ -541,9 +541,15 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
         if batches.len().checked_add(particle_passes).is_none_or(|n| n > MAX_IMPORTED_BATCHES) {
             return Err(ImportedSceneError::BatchLimit);
         }
-        let (mut globals, shadow_ready) =
+        let (mut globals, mut shadow_ready) =
             prepare_shared_globals(self.scene_format(), size, camera, lighting, self.shadow_cascades)
                 .map_err(ImportedSceneError::Model)?;
+        // Spot lights with shadows need the shared shadow path even without a sun shadow.
+        let spot_draws = if self.scene_lights.spot_shadows().is_empty() {
+            Vec::new()
+        } else {
+            shadow_ready.get_or_insert_with(crate::shared_shadow::PreparedShadow::none).add_spots(&self.scene_lights)
+        };
         #[cfg(feature = "irradiance-probes")]
         {
             globals.irradiance = irradiance;
@@ -730,6 +736,9 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
         if shadow_ready.is_some() && self.shadow.is_none() {
             self.shadow = Some(SharedShadow::new(&self.rhi));
         }
+        if !spot_draws.is_empty() {
+            self.shadow.as_mut().expect("made above").grow_spot_map(&self.rhi);
+        }
         // This path never allocates a
         // renderer's standalone depth target, including on the first frame.
         if self
@@ -808,7 +817,7 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
                 cascade: 0,
                 cascade_count: ready.cascades.len(),
                 cascade_light_vp: ready.uniform.vp,
-                viewport: ready.cascades[0].viewport,
+                viewport: ready.cascades.first().map_or([0.0; 4], |c| c.viewport),
             }),
         };
         for pass in &mut self.passes {
@@ -823,40 +832,11 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
                 let done = std::mem::replace(&mut encoder, self.rhi.create_encoder("imported scene shadow cascade"));
                 self.rhi.submit(done);
             }
-            let mut cascade_globals = globals;
-            cascade_globals.light_vp = cascade.light_vp;
             // The first cascade's matrix is already in the globals every batch wrote.
-            for (batch, ready) in batches.iter().zip(&prepared).filter(|_| k > 0) {
-                match (batch, ready) {
-                    (ImportedBatch::Static(r), PreparedBatch::Static) | (ImportedBatch::StaticInstances { renderer: r, .. }, PreparedBatch::StaticInstances(_)) => r.write_frame(&cascade_globals),
-                    (ImportedBatch::Procedural { renderer, .. }, PreparedBatch::Procedural(ready)) => renderer.write_shadow_matrix(ready, cascade.light_vp),
-                    #[cfg(feature = "animation")]
-                    (ImportedBatch::Skinned { renderer, .. }, PreparedBatch::Skinned(_)) => renderer.write_globals(&cascade_globals),
-                    _ => unreachable!("validated prepared batch kind"),
-                }
+            if k > 0 {
+                write_caster_matrix(batches, &prepared, &globals, cascade.light_vp);
             }
-            let [x, y, width, height] = cascade.viewport;
-            let mut commands = vec![orr_rhi::Command::SetViewport { x, y, width, height }];
-            for (batch, ready) in batches.iter().zip(&mut prepared) {
-                match (batch, ready) {
-                    (ImportedBatch::Static(r), PreparedBatch::Static) => {
-                        r.shared_commands(None, true, &mut commands)
-                    }
-                    (
-                        ImportedBatch::StaticInstances { renderer, .. },
-                        PreparedBatch::StaticInstances(ready),
-                    ) => renderer.shared_commands(Some(ready), true, &mut commands),
-                    (
-                        ImportedBatch::Procedural { renderer, .. },
-                        PreparedBatch::Procedural(ready),
-                    ) => renderer.composed_shadow_commands(ready, &mut commands),
-                    #[cfg(feature = "animation")]
-                    (ImportedBatch::Skinned { renderer, .. }, PreparedBatch::Skinned(ready)) => {
-                        renderer.shared_commands(ready, true, &mut commands)
-                    }
-                    _ => unreachable!("validated prepared batch kind"),
-                }
-            }
+            let commands = caster_commands(batches, &mut prepared, cascade.viewport);
             self.rhi.encode_pass(
                 &mut encoder,
                 "shared directional shadow",
@@ -878,6 +858,28 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
                 pass.encode(&self.rhi, crate::PassStage::Shadow, &cascade_frame, &mut encoder, None, &map);
             }
           }
+        }
+        if !spot_draws.is_empty() {
+            let spot_map = &self.shadow.as_ref().expect("validated shadow map").spot_view;
+            for (k, spot) in spot_draws.iter().enumerate() {
+                // Each spot rewrites the casters' light matrix: what read the previous one goes first.
+                let done = std::mem::replace(&mut encoder, self.rhi.create_encoder("imported scene spot shadow"));
+                self.rhi.submit(done);
+                write_caster_matrix(batches, &prepared, &globals, spot.light_vp);
+                let commands = caster_commands(batches, &mut prepared, spot.viewport);
+                self.rhi.encode_pass(
+                    &mut encoder,
+                    "spot light shadow",
+                    None,
+                    // The first spot clears the whole spot map.
+                    Some(&DepthAttachment { view: spot_map, clear: (k == 0).then_some(1.0), store: true }),
+                    &commands,
+                );
+            }
+            // The scene draws with the frame's own matrices again.
+            let done = std::mem::replace(&mut encoder, self.rhi.create_encoder("imported scene after spot shadows"));
+            self.rhi.submit(done);
+            write_caster_matrix(batches, &prepared, &globals, globals.light_vp);
         }
         let depth = &self.depth.as_ref().expect("accepted frame owns depth").view;
         let scene_view = self
@@ -1018,6 +1020,38 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
         }
         Ok(())
     }
+}
+
+/// Writes `light_vp` as the shadow casters' matrix into every batch.
+fn write_caster_matrix<B: Rhi>(batches: &[ImportedBatch<'_, B>], prepared: &[PreparedBatch], globals: &crate::model_renderer::Globals, light_vp: [[f32; 4]; 4]) {
+    let mut caster_globals = *globals;
+    caster_globals.light_vp = light_vp;
+    for (batch, ready) in batches.iter().zip(prepared) {
+        match (batch, ready) {
+            (ImportedBatch::Static(r), PreparedBatch::Static) | (ImportedBatch::StaticInstances { renderer: r, .. }, PreparedBatch::StaticInstances(_)) => r.write_frame(&caster_globals),
+            (ImportedBatch::Procedural { renderer, .. }, PreparedBatch::Procedural(ready)) => renderer.write_shadow_matrix(ready, light_vp),
+            #[cfg(feature = "animation")]
+            (ImportedBatch::Skinned { renderer, .. }, PreparedBatch::Skinned(_)) => renderer.write_globals(&caster_globals),
+            _ => unreachable!("validated prepared batch kind"),
+        }
+    }
+}
+
+/// The depth-only draws of every batch's shadow casters into `viewport` of a shadow map.
+fn caster_commands<'a, B: Rhi>(batches: &'a [ImportedBatch<'_, B>], prepared: &'a mut [PreparedBatch], viewport: [f32; 4]) -> Vec<orr_rhi::Command<'a, B>> {
+    let [x, y, width, height] = viewport;
+    let mut commands = vec![orr_rhi::Command::SetViewport { x, y, width, height }];
+    for (batch, ready) in batches.iter().zip(prepared) {
+        match (batch, ready) {
+            (ImportedBatch::Static(r), PreparedBatch::Static) => r.shared_commands(None, true, &mut commands),
+            (ImportedBatch::StaticInstances { renderer, .. }, PreparedBatch::StaticInstances(ready)) => renderer.shared_commands(Some(ready), true, &mut commands),
+            (ImportedBatch::Procedural { renderer, .. }, PreparedBatch::Procedural(ready)) => renderer.composed_shadow_commands(ready, &mut commands),
+            #[cfg(feature = "animation")]
+            (ImportedBatch::Skinned { renderer, .. }, PreparedBatch::Skinned(ready)) => renderer.shared_commands(ready, true, &mut commands),
+            _ => unreachable!("validated prepared batch kind"),
+        }
+    }
+    commands
 }
 
 fn procedural_casters(list: &RenderList3D) -> usize {
@@ -2279,23 +2313,26 @@ mod tests {
         assert_eq!(first.submits, 1);
         assert_eq!(first.encoders, 1);
         let map = scene.shadow.as_ref().unwrap().view;
+        let spot_map = scene.shadow.as_ref().unwrap().spot_view;
         assert!(first.pass_textures[0].is_empty());
         assert_eq!(
             first.pass_textures[2],
-            vec![map],
-            "procedural main samples coordinator map only"
+            vec![map, spot_map],
+            "procedural main samples the coordinator's sun and spot maps only"
         );
         assert!(first.pass_textures[1].contains(&map));
         assert_eq!(first.shadow_passes.len(), 1);
         assert!(first.shadow_passes[0].1);
         assert!(first.shadow_passes[0].2);
         assert_eq!(first.shadow_passes[0].3, renderer.draw_count() * 2 + 1);
-        assert_eq!(first.textures.len(), 2);
+        // Scene depth, the sun map and a one-texel spot map: no spot light casts shadows here.
+        assert_eq!(first.textures.len(), 3);
         assert!(
             first
                 .textures
                 .contains(&(TextureFormat::Depth32Float, 1, (SHARED_SHADOW_MAP_SIZE, SHARED_SHADOW_MAP_SIZE)))
         );
+        assert!(first.textures.contains(&(TextureFormat::Depth32Float, 1, (1, 1))));
         // Main and depth use exactly the same uploaded object/instance/geometry buffers.
         let mut shadow_buffers = first.pass_buffers[0].clone();
         shadow_buffers.sort_unstable();
@@ -2420,7 +2457,7 @@ mod tests {
         let other_map = other.shadow.as_ref().unwrap().view;
         assert_ne!(map, other_map);
         let changed = rhi.take();
-        assert_eq!(changed.pass_textures[2], vec![other_map]);
+        assert_eq!(changed.pass_textures[2], vec![other_map, other.shadow.as_ref().unwrap().spot_view]);
         run(&mut other, &light, (64, 64), &mut renderer, &mut procedural).unwrap();
         assert_eq!(
             rhi.take().allocations,
@@ -2434,7 +2471,7 @@ mod tests {
             rebound.allocations, 2,
             "replace just the two receiver binding generations"
         );
-        assert_eq!(rebound.pass_textures[2], vec![map]);
+        assert_eq!(rebound.pass_textures[2], vec![map, spot_map]);
     }
     #[cfg(feature = "particles")]
     mod particle_composition {

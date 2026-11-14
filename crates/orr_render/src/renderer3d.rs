@@ -629,6 +629,11 @@ impl<B: Rhi> Renderer3D<B> {
                     binding: 3,
                     buffer: &no_cascades,
                 },
+                // No spot tiles here: the renderer's own map stands in.
+                Binding::Texture {
+                    binding: 4,
+                    view: &shadow_view,
+                },
             ],
         );
         let shadow_bind = rhi.create_bind_group(
