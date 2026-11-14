@@ -244,7 +244,7 @@ target\release\orr.exe status
 ## 9. 다음에 읽을 문서
 
 - [design-v1.md](design-v1.md): 결정론, 롤백, ECS의 설계와 확정 결정
-- [rendering-architecture.md](rendering-architecture.md): 조명, 재질, 표면 셰이더, 후처리 효과(SSAO, 툰, 외곽선, FXAA, 업스케일 포함)
+- [rendering-architecture.md](rendering-architecture.md): 조명, 재질, 표면 셰이더, 후처리 효과(SSAO, 툰, 외곽선, FXAA, TAA, 업스케일 포함)
 - [animation.md](animation.md): 스켈레탈 애니메이션, 상태 머신, 블렌드 스페이스, 레이어, IK
 - [examples/static-game-starter](../examples/static-game-starter/README.md): 내 Rust 게임을 에디터와 런타임에 등록하는 예제
 - [progress.md](progress.md): 지금 되는 것과 알려진 문제
