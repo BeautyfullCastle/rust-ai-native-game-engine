@@ -201,6 +201,8 @@ pub struct ImportedSceneRenderer<B: Rhi> {
     pub irradiance: Option<crate::IrradianceGrid>,
     post_processor: Option<crate::PostProcessor<B>>,
     post_process_generation: u64,
+    /// Frames drawn with temporal anti-aliasing, for its jitter sequence.
+    taa_frame: u32,
     /// Added passes, in the order they were added (see [`crate::render_pass`]).
     passes: Vec<Box<dyn crate::RenderPass<B>>>,
 }
@@ -238,6 +240,7 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
             irradiance: None,
             post_processor: None,
             post_process_generation: 0,
+            taa_frame: 0,
             passes: Vec::new(),
         })
     }
@@ -678,6 +681,23 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
             }
         }
 
+        // Temporal anti-aliasing moves the picture by a different part of a pixel every frame.
+        let unjittered = globals.view_proj();
+        let jitter = if self.post_process.enabled && crate::post_effects::temporal(&self.post_process.effects) {
+            let (clip, uv) = crate::post_effects::jitter(self.taa_frame, size);
+            let view_proj = crate::post_effects::jittered(unjittered, clip);
+            globals.set_view_proj(view_proj);
+            for ready in &mut prepared {
+                if let PreparedBatch::Procedural(ready) = ready {
+                    ready.set_view_proj(view_proj);
+                }
+            }
+            self.taa_frame = self.taa_frame.wrapping_add(1);
+            uv
+        } else {
+            [0.0; 2]
+        };
+
         // All fallible validation is finished, including the final batch/pose.
         if self.post_process.enabled {
             if self
@@ -977,9 +997,10 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
                 self.post_process,
                 lighting,
                 &self.depth.as_ref().expect("accepted frame owns depth").view,
-                globals.view_proj(),
+                unjittered,
                 camera.eye,
                 target.size,
+                jitter,
             );
         }
         self.rhi.submit(encoder);

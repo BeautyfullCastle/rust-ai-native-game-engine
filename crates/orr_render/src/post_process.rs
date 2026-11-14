@@ -350,6 +350,7 @@ impl<B: Rhi> PostProcessor<B> {
         view_proj: [[f32; 4]; 4],
         eye: [f32; 3],
         output_size: (u32, u32),
+        jitter: [f32; 2],
     ) {
         let write =
             |buffer, params: Params| rhi.write_buffer(buffer, 0, bytemuck::bytes_of(&params));
@@ -436,6 +437,7 @@ impl<B: Rhi> PostProcessor<B> {
                 lighting,
                 format,
                 output_size,
+                jitter,
             };
             chain.as_ref().expect("made above").encode(rhi, encoder, target, &effects, &inputs);
             return;
