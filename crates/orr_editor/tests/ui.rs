@@ -619,9 +619,11 @@ fn arena_viewer_widgets_disable_mutation_but_keep_inspection_and_seek() {
 #[cfg(feature = "terrain-surface")]
 #[test]
 fn stacked_inspector_panels_scroll_into_view_in_a_short_window() {
+    let scene = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scenes/yard3d_authoring.scene.yaml");
+    let editor = orr_editor::Editor::open_game(&scene, orr_editor::game::EditorGame::Yard3D).unwrap();
     let mut h = Harness::builder()
         .with_size([1500.0, 300.0])
-        .build_eframe(|_cc| EditorApp::new(demo_editor(), None));
+        .build_eframe(move |_cc| EditorApp::new(editor, None));
     h.run_steps(3);
     h.get_by_label("Reload appearance").scroll_to_me();
     h.run_steps(3);
@@ -631,4 +633,14 @@ fn stacked_inspector_panels_scroll_into_view_in_a_short_window() {
         button.min.y >= 0.0 && button.max.y <= bottom_panel_top,
         "Reload appearance is outside the inspector's visible area: {button:?}, bottom panel starts at {bottom_panel_top}"
     );
+}
+
+/// Game-specific inspector panels stay hidden in a game they do not apply to.
+#[cfg(feature = "terrain-surface")]
+#[test]
+fn terrain_appearance_panel_is_hidden_in_a_physics_scene() {
+    let mut h = harness();
+    settle(&mut h);
+    assert!(h.query_by_label("Reload appearance").is_none());
+    assert!(h.query_by_label("Terrain appearance").is_none());
 }

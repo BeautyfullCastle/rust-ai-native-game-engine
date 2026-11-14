@@ -2213,9 +2213,11 @@ impl EditorApp {
             let error = if self.models.scene_matches(&self.editor) { self.models.terrain_admission_error() } else { None };
             self.terrain.document.set_render_admission_error(error);
             self.terrain.show_in_parent_scroll(ui, &self.editor);
-            self.terrain_ramp_show(ui);
+            // Local terrain authoring exists in Yard3D and the navigation scene only.
+            let local_terrain = self.editor.game() == crate::game::EditorGame::Yard3D || self.editor.game().is_navigation();
+            if local_terrain { self.terrain_ramp_show(ui); }
             #[cfg(feature="terrain-surface")]
-            {
+            if local_terrain {
                 self.terrain_surface.show(ui, &self.editor, &self.terrain);
                 self.terrain.document.set_appearance_busy(self.terrain_surface.state.busy());
             }
@@ -2239,15 +2241,15 @@ impl EditorApp {
         #[cfg(feature = "sprites")]
         self.sprites.show(ui, &self.editor);
         #[cfg(feature = "tilemap")]
-        if let Some(panel) = &mut self.tilemap { panel.show(ui, &self.editor, &mut self.sprites); }
+        if let Some(panel) = self.tilemap.as_mut().filter(|_| self.editor.game() == crate::game::EditorGame::Arena) { panel.show(ui, &self.editor, &mut self.sprites); }
         #[cfg(feature = "project-ui")]
-        if let Some(preview) = &self.project_ui { preview.show(ui); }
+        if let Some(preview) = self.project_ui.as_ref().filter(|_| self.editor.game() == crate::game::EditorGame::Arena) { preview.show(ui); }
         #[cfg(feature="collect-ui")]
-        if let Some(panel) = &mut self.collect_ui { panel.show(ui, !self.editor.is_playing_mode()); }
+        if let Some(panel) = self.collect_ui.as_mut().filter(|_| self.editor.game().is_collect()) { panel.show(ui, !self.editor.is_playing_mode()); }
         #[cfg(feature="collect-ui")]
-        if self.collect_ui.is_some() { self.collect_ui_preview_button(ui); }
+        if self.collect_ui.is_some() && self.editor.game().is_collect() { self.collect_ui_preview_button(ui); }
         #[cfg(feature = "animated-models")]
-        if ui.add_enabled(self.editor.game() == crate::game::EditorGame::Arena && self.editor.spec().is_local(), egui::Button::new("Animated model authoring")).on_hover_text("Presentation bindings require a local Arena scene").clicked() { self.ui.animated_window = true; }
+        if self.editor.game() == crate::game::EditorGame::Arena && ui.add_enabled(self.editor.spec().is_local(), egui::Button::new("Animated model authoring")).on_hover_text("Presentation bindings require a local Arena scene").clicked() { self.ui.animated_window = true; }
         #[cfg(feature="room-project")]
         {
             #[cfg(feature = "room-lighting")]
