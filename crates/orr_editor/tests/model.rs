@@ -386,7 +386,17 @@ fn guid(n: u32) -> orr_reflect::Guid {
 }
 
 fn row(entity: orr_ecs::Entity, guid: Option<orr_reflect::Guid>) -> EntityRow {
-    EntityRow { entity, guid, name: None, components: Vec::new() }
+    EntityRow { entity, guid, name: None, role: None, components: Vec::new() }
+}
+
+#[test]
+fn row_label_prefers_name_then_role_then_guid() {
+    let mut r = row(orr_ecs::Entity { index: 1, version: 0 }, Some(guid(7)));
+    assert_eq!(r.label(), guid(7).to_string());
+    r.role = Some("Wall".into());
+    assert_eq!(r.label(), "Wall");
+    r.name = Some("north wall".into());
+    assert_eq!(r.label(), "north wall");
 }
 
 #[test]

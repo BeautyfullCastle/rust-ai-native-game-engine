@@ -2113,7 +2113,7 @@ impl EditorApp {
         ui.add(egui::TextEdit::singleline(&mut self.ui.filter).hint_text("filter").desired_width(f32::INFINITY));
         ui.separator();
         let filter = self.ui.filter.to_lowercase();
-        let rows: Vec<(String, Target, String)> = self
+        let rows: Vec<(String, Target, Vec<String>, String)> = self
             .editor
             .rows()
             .iter()
@@ -2122,16 +2122,19 @@ impl EditorApp {
                 if !filter.is_empty() && !label.to_lowercase().contains(&filter) {
                     return None;
                 }
-                Some((label, row.target(), row.components.join(", ")))
+                let tip = match &row.guid {
+                    Some(guid) => format!("{guid}\n{}", row.components.join(", ")),
+                    None => row.components.join(", "),
+                };
+                Some((label, row.target(), row.components.clone(), tip))
             })
             .collect();
         let row_h = ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y;
         let mut clicked: Option<Target> = None;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, row_h, rows.len(), |ui, range| {
-            for (label, target, tip) in &rows[range] {
+            for (label, target, components, tip) in &rows[range] {
                 let selected = self.editor.is_selected(target);
-                let components: Vec<String> = tip.split(", ").map(str::to_string).collect();
-                let (mark, color) = crate::theme::entity_mark(&components);
+                let (mark, color) = crate::theme::entity_mark(components);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     ui.add_sized([16.0, row_h - 2.0], egui::Label::new(RichText::new(mark).size(12.0).color(color)).selectable(false));

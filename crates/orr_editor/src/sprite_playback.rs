@@ -313,6 +313,7 @@ mod tests {
             entity: old,
             guid: Some(Guid::parse("e_00000001").unwrap()),
             name: None,
+            role: None,
             components: Vec::new(),
         }];
         let mut bodies = [Drawable {

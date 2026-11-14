@@ -503,8 +503,8 @@ impl Editor {
     }
 
     fn read_rows(&mut self) -> Result<(), String> {
-        let r = self.timed_erp_call("world.query", json!({"limit": ROWS_LIMIT})).map_err(|e| format!("world.query: {e}"))?;
-        self.rows = rows_of(&r);
+        let r = self.timed_erp_call("world.query", rows_params(self.backend.game)).map_err(|e| format!("world.query: {e}"))?;
+        self.rows = rows_of(&r, self.backend.game);
         self.yard_rows_checksum=r.get("checksum").and_then(orr_remote::wire::parse_checksum);
         self.yard_rows_tick=r.get("tick").and_then(J::as_u64).unwrap_or(u64::MAX);
         self.yard_rows_generation=self.change_gen;
@@ -1275,7 +1275,7 @@ impl Editor {
             Pend::Rows(gen) => {
                 self.inflight.rows = false;
                 if let Ok(v) = r {
-                    self.rows = rows_of(&v);
+                    self.rows = rows_of(&v, self.backend.game);
                     self.yard_rows_checksum=v.get("checksum").and_then(orr_remote::wire::parse_checksum);
                     self.yard_rows_tick=v.get("tick").and_then(J::as_u64).unwrap_or(u64::MAX);
                     self.yard_rows_generation=gen;
@@ -1339,7 +1339,7 @@ impl Editor {
                 }
                 if let (Ok(v), Some(p)) = (r, self.preview.as_mut()) {
                     if p.id == id && p.generation == generation {
-                        p.rows = rows_of(&v);
+                        p.rows = rows_of(&v, self.backend.game);
                     }
                 }
             }
@@ -1703,7 +1703,7 @@ impl Editor {
             self.dirty.rows = false;
             self.inflight.rows = true;
             let gen = self.change_gen;
-            self.post("world.query", json!({"limit": ROWS_LIMIT}), Pend::Rows(gen));
+            self.post("world.query", rows_params(self.backend.game), Pend::Rows(gen));
         }
         let due = self.last_inspect.is_none_or(|t| now.duration_since(t) >= INSPECT_EVERY);
         if due && self.dirty.inspect {
@@ -3290,9 +3290,34 @@ fn parse_capture_view(value: &J) -> Option<(u64, u64)> {
     ))
 }
 
-fn rows_of(v: &J) -> Vec<EntityRow> {
-    v.get("entities").and_then(J::as_array).map(|a| a.iter().filter_map(EntityRow::from_json).collect()).unwrap_or_default()
+/// Room rows need component values to name unnamed actors; other games read names only.
+fn rows_params(game: EditorGame) -> J {
+    if game.is_room() { json!({"limit": ROWS_LIMIT, "values": true}) } else { json!({"limit": ROWS_LIMIT}) }
 }
+
+fn rows_of(v: &J, game: EditorGame) -> Vec<EntityRow> {
+    let Some(entities) = v.get("entities").and_then(J::as_array) else { return Vec::new() };
+    entities.iter().filter_map(|j| {
+        let mut row = EntityRow::from_json(j)?;
+        if game.is_room() && row.name.is_none() { row.role = room_role(j); }
+        Some(row)
+    }).collect()
+}
+
+/// The Room actor kind of a `world.query` entity, such as "Wall".
+#[cfg(feature = "room-project")]
+fn room_role(entity: &J) -> Option<String> {
+    use orr_sample::room_game::{EXIT, FLOOR, KEY, PLAYER, WALL};
+    let kind = entity.get("values")?.get("RoomEscapeV1::Actor")?.get("kind")?.as_u64()?;
+    let role = match u32::try_from(kind).ok()? {
+        PLAYER => "Player", KEY => "Key", EXIT => "Exit", WALL => "Wall", FLOOR => "Floor",
+        _ => return None,
+    };
+    Some(role.to_string())
+}
+
+#[cfg(not(feature = "room-project"))]
+fn room_role(_: &J) -> Option<String> { None }
 
 fn singletons_of(types: &TypeRegistry, v: &J) -> Vec<(String, Value)> {
     let mut out = Vec::new();
