@@ -22,9 +22,9 @@ const GOLDEN: &[(&str, u64, u64)] = &[
     ("ecs_checksum_100k", 2, 0xdda4ba9f777d8d94),
     ("ecs_copy_100k", 2, 0xeed25d4fbbbec6ca),
     ("physics2d_1000_tick", 20, 0x12dcd11a181432fa),
-    // Yard3D registers the orr_gfx rendering components since 2026-11-13; the checksum
+    // Yard3D registers the orr_gfx rendering components (Decal since 2026-11-15); the checksum
     // covers registered types, so it moved with them (see orr_games/tests/golden.rs).
-    ("physics3d_1000_tick", 10, 0xfc7a234838c75357),
+    ("physics3d_1000_tick", 10, 0xc70a2105c6c51237),
 ];
 
 #[test]

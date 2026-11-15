@@ -17,8 +17,8 @@ use orr_bridge::FrameView;
 use orr_ecs::Entity;
 use orr_fp::{FPVec3, FP};
 use orr_gfx::{
-    Environment, Light, PostEffect, PostProcess, RenderLayers, Transform3, EFFECT_AUTO_EXPOSURE, EFFECT_BLOOM, EFFECT_CHROMATIC_ABERRATION, EFFECT_COLOR_GRADE, EFFECT_DEPTH_OF_FIELD, EFFECT_FILM_GRAIN, EFFECT_MOTION_BLUR, EFFECT_SSR, EFFECT_VOLUMETRIC_FOG,
-    EFFECT_FXAA, EFFECT_LIGHT_SHAFTS, EFFECT_OUTLINE, EFFECT_SSAO, EFFECT_TAA, EFFECT_TOON, EFFECT_UPSCALE, EFFECT_VIGNETTE, LIGHT_DIRECTIONAL, LIGHT_SPOT, PROJECTION_ORTHOGRAPHIC, TONE_CLAMP,
+    Decal, Environment, Light, PostEffect, PostProcess, RenderLayers, Transform3, EFFECT_AUTO_EXPOSURE, EFFECT_BLOOM, EFFECT_CHROMATIC_ABERRATION, EFFECT_COLOR_GRADE, EFFECT_DEPTH_OF_FIELD, EFFECT_FILM_GRAIN, EFFECT_MOTION_BLUR, EFFECT_SSR, EFFECT_VOLUMETRIC_FOG,
+    DECAL_SQUARE, EFFECT_FXAA, EFFECT_LIGHT_SHAFTS, EFFECT_OUTLINE, EFFECT_SSAO, EFFECT_TAA, EFFECT_TOON, EFFECT_UPSCALE, EFFECT_VIGNETTE, LIGHT_DIRECTIONAL, LIGHT_SPOT, PROJECTION_ORTHOGRAPHIC, TONE_CLAMP,
 };
 use orr_physics3d::Body;
 use orr_render::{Camera3D, Lighting, Projection, RenderList3D, SceneLight, SceneLightKind, SceneLights, ScreenEffect};
@@ -65,6 +65,8 @@ pub struct SceneLook {
     /// `orr_render::ImportedSceneRenderer::shadow_cascades`. More than one
     /// only while the shadow area follows the view.
     pub shadow_cascades: u32,
+    /// The enabled decals in entity order. The renderer draws the first `orr_render::MAX_DECALS`.
+    pub decals: Vec<orr_render::Decal>,
 }
 
 fn f(v: FP) -> f32 {
@@ -124,7 +126,7 @@ pub fn layers_of(frame: FrameView<'_>, entity: Entity) -> u32 {
 /// without any [`Light`] component, and its ambient light is kept while the
 /// scene's [`Environment`] has its default values. Its shadow area is always kept.
 pub fn scene_look(frame: FrameView<'_>, fallback: &Lighting) -> SceneLook {
-    let mut look = SceneLook { lighting: *fallback, scene_lights: SceneLights::default(), bloom: None, effects: Vec::new(), lights: Vec::new(), dropped_lights: 0, shadow_follows_view: false, shadow_cascades: 1 };
+    let mut look = SceneLook { lighting: *fallback, scene_lights: SceneLights::default(), bloom: None, effects: Vec::new(), lights: Vec::new(), dropped_lights: 0, shadow_follows_view: false, shadow_cascades: 1, decals: Vec::new() };
     // An environment left at its default values keeps the ambient light of the game.
     // Simulation systems can write any value, so every value is brought into
     // the range the inspector allows before the renderer sees it.
@@ -154,6 +156,7 @@ pub fn scene_look(frame: FrameView<'_>, fallback: &Lighting) -> SceneLook {
             read_effect(effect, &mut look);
         }
     }
+    look.decals = decals(frame);
     if !frame.registers::<Light>() || frame.count::<Light>() == 0 {
         return look;
     }
@@ -209,6 +212,51 @@ pub fn scene_look(frame: FrameView<'_>, fallback: &Lighting) -> SceneLook {
         look.lights.push(PlacedLight { entity, light: scene_light, sun, enabled });
     }
     look
+}
+
+/// The enabled decals, placed by their entities like lights.
+fn decals(frame: FrameView<'_>) -> Vec<orr_render::Decal> {
+    if !frame.registers::<Decal>() {
+        return Vec::new();
+    }
+    frame
+        .iter::<Decal>()
+        .filter(|(_, decal)| decal.enabled != 0 && decal.opacity > FP::ZERO)
+        .map(|(entity, decal)| {
+            let (center, direction, up) = orientation(frame, entity);
+            orr_render::Decal {
+                center: center.map(|c| c.clamp(-1.0e6, 1.0e6)),
+                direction,
+                up,
+                size: v3(decal.size).map(|s| s.clamp(0.01, 100.0)),
+                color: { let [r, g, b] = unit_color(decal.color); [r, g, b, f(decal.opacity).clamp(0.0, 1.0)] },
+                shape: if decal.shape == DECAL_SQUARE { orr_render::DecalShape::Square } else { orr_render::DecalShape::Round },
+                softness: f(decal.softness).clamp(0.0, 1.0),
+                region: None,
+            }
+        })
+        .collect()
+}
+
+/// Position, facing direction and top of an entity, read like [`placement`].
+/// A [`Transform3`]'s roll turns the top around the facing direction.
+fn orientation(frame: FrameView<'_>, entity: Entity) -> ([f32; 3], [f32; 3], [f32; 3]) {
+    if frame.registers::<Body>() {
+        if let Some(body) = frame.get::<Body>(entity) {
+            let q = [f(body.rot.x), f(body.rot.y), f(body.rot.z), f(body.rot.w)];
+            return (v3(body.pos), rotate(q, [0.0, 0.0, 1.0]), rotate(q, [0.0, 1.0, 0.0]));
+        }
+    }
+    let Some(transform) = frame.get::<Transform3>(entity) else {
+        return ([0.0; 3], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]);
+    };
+    let degrees = v3(transform.rotation);
+    let forward = facing(degrees);
+    let (pitch, yaw, roll) = (degrees[0].to_radians(), degrees[1].to_radians(), degrees[2].to_radians());
+    let up = [pitch.sin() * yaw.sin(), pitch.cos(), pitch.sin() * yaw.cos()];
+    let right = [forward[1] * up[2] - forward[2] * up[1], forward[2] * up[0] - forward[0] * up[2], forward[0] * up[1] - forward[1] * up[0]];
+    let (s, c) = roll.sin_cos();
+    (v3(transform.position), forward, std::array::from_fn(|i| up[i] * c + right[i] * s))
 }
 
 /// Effect number `i` of `effect`, inside the range [`orr_gfx::effect_params`] gives it.
@@ -458,6 +506,7 @@ impl SceneLook {
     pub fn apply(&self, list: &mut RenderList3D) {
         list.lighting = self.lighting;
         list.scene_lights = self.scene_lights;
+        list.decals.clone_from(&self.decals);
     }
 
     /// Draws a marker for every light, so a person can see and pick lights in

@@ -693,6 +693,55 @@ impl Default for Scatter {
     }
 }
 
+/// [`Decal::shape`]: an ellipse filling the decal's width and height.
+pub const DECAL_ROUND: u32 = 0;
+/// [`Decal::shape`]: the whole width and height.
+pub const DECAL_SQUARE: u32 = 1;
+
+/// A color projected onto the surfaces in a box, such as dirt, a scorch mark
+/// or paint. The entity's [`Transform3`] places the center of the box and the
+/// decal is projected along the direction the entity faces; roll turns it
+/// around that direction. The surfaces' lit color is multiplied by the
+/// color, so a decal darkens or tints and never lightens. Surfaces turned
+/// away from the direction are left alone. A frame draws up to 32 decals.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable, Reflect)]
+#[reflect(default)]
+pub struct Decal {
+    /// Linear red, green and blue the surface is multiplied by.
+    #[reflect(range = "0..=1")]
+    pub color: FPVec3,
+    /// 0 leaves the surface as it is, 1 multiplies it by the whole color.
+    #[reflect(range = "0..=1")]
+    pub opacity: FP,
+    /// Width, height and depth of the box in meters. Depth runs along the facing direction.
+    #[reflect(range = "0.01..=100")]
+    pub size: FPVec3,
+    /// Share of the edge that fades: 0 is a hard edge, 1 fades from the center.
+    #[reflect(range = "0..=1")]
+    pub softness: FP,
+    /// The decal's outline.
+    #[reflect(enumeration = "round=0,square=1")]
+    pub shape: u32,
+    /// A disabled decal is not drawn.
+    #[reflect(bool)]
+    pub enabled: u32,
+}
+
+impl Default for Decal {
+    /// A dark round spot one meter wide.
+    fn default() -> Self {
+        Self {
+            color: FPVec3::new(FP::from_ratio(1, 10), FP::from_ratio(1, 10), FP::from_ratio(1, 10)),
+            opacity: FP::ONE,
+            size: FPVec3::new(FP::ONE, FP::ONE, FP::ONE),
+            softness: FP::from_ratio(3, 10),
+            shape: DECAL_ROUND,
+            enabled: 1,
+        }
+    }
+}
+
 /// Most bytes of the heightmap path in [`Terrain::heightmap`].
 pub const TERRAIN_PATH_BYTES: usize = 128;
 
@@ -768,6 +817,8 @@ pub mod names {
     pub const WATER: &str = "orr_gfx::Water";
     /// [`super::Scatter`].
     pub const SCATTER: &str = "orr_gfx::Scatter";
+    /// [`super::Decal`].
+    pub const DECAL: &str = "orr_gfx::Decal";
 }
 
 /// Registers the components and singletons with a game's simulation.
@@ -781,6 +832,7 @@ pub fn register(builder: &mut ComponentRegistryBuilder) {
     builder.register_component::<Terrain>(names::TERRAIN);
     builder.register_component::<Water>(names::WATER);
     builder.register_component::<Scatter>(names::SCATTER);
+    builder.register_component::<Decal>(names::DECAL);
     builder.register_singleton::<Environment>(names::ENVIRONMENT);
     builder.register_singleton::<Sky>(names::SKY);
     builder.register_singleton::<PostProcess>(names::POST_PROCESS);
@@ -823,6 +875,7 @@ pub fn register_reflect(types: &mut TypeRegistry) {
     types.register_component::<Terrain>(names::TERRAIN);
     types.register_component::<Water>(names::WATER);
     types.register_component::<Scatter>(names::SCATTER);
+    types.register_component::<Decal>(names::DECAL);
     types.register_singleton_with_init::<Environment>(names::ENVIRONMENT, init_environment);
     types.register_singleton_with_init::<Sky>(names::SKY, init_sky);
     types.register_singleton_with_init::<PostProcess>(names::POST_PROCESS, init_post_process);
