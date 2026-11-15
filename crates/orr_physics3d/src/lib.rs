@@ -139,7 +139,7 @@ mod types;
 
 pub use joints::{add_joint, register_joints, Joint, JOINT_BALL, JOINT_HINGE, JOINT_LIMIT, JOINT_MOTOR, JOINT_ROD, JOINT_ROPE};
 pub use query::{raycast, sphere_cast, QueryFilter, RayHit};
-pub use reflection::register_reflect;
+pub use reflection::{register_joints_reflect, register_reflect};
 pub use sleep::{apply_impulse, is_asleep, set_velocity, wake, wake_all};
 pub use step::{step, step_probed, Phase, Scratch, StepStats};
 pub use static_contacts::{validate_static_sleeping_support, step_with_static_contacts, StaticContact, StaticContactBody, StaticContactError, StaticContactObject};

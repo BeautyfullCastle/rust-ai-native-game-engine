@@ -289,3 +289,21 @@ fn a_ball_joint_cone_is_deterministic_across_rollback() {
     run(&mut a, &mut Scratch::new(), 40);
     assert_eq!(a.checksum(), ahead, "a rollback replays to the same state");
 }
+
+#[test]
+fn a_joint_added_as_a_plain_component_is_recorded_at_its_first_step() {
+    let limits = |j: Joint| j.with_limits(fp!(-0.5), fp!(0.5));
+    let (mut added, _, _) = door(limits);
+    // The same door with the joint put on an entity directly, as a scene file or the inspector does.
+    let mut plain = new_frame(true);
+    let pivot = spawn_body(&mut plain, Body::new_static(v3(FP::ZERO, fp!(10), FP::ZERO)), Collider::new(Shape::sphere(fp!(0.1))));
+    let shape = Shape::sphere(fp!(0.2));
+    let ball = spawn_body(&mut plain, Body::new_dynamic(v3(fp!(3), fp!(10), FP::ZERO), &shape, FP::ONE), Collider::new(shape));
+    let z = v3(FP::ZERO, FP::ZERO, FP::ONE);
+    let e = plain.spawn();
+    plain.add(e, limits(Joint::hinge(pivot, ball, FPVec3::ZERO, v3(fp!(-3), FP::ZERO, FP::ZERO), z)));
+    assert_eq!(plain.get::<Joint>(e).unwrap().ref_a, FPVec3::ZERO, "not recorded before stepping");
+    run(&mut added, &mut Scratch::new(), 60);
+    run(&mut plain, &mut Scratch::new(), 60);
+    assert_eq!(added.checksum(), plain.checksum(), "both doors swing the same and hold the same limits");
+}

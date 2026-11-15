@@ -1153,6 +1153,7 @@ fn step_impl<E>(
     let st = *frame.singleton::<PhysicsState>();
     let cfg = st.config;
     assert!(cfg.dt.raw() > 0, "orr_physics3d: call orr_physics3d::init before step");
+    crate::joints::settle(frame);
 
     // Read phase: everything is computed from shared borrows of the frame.
     {

@@ -108,11 +108,12 @@ pub struct Scene {
 
 pub struct Yard3D;
 
-/// Registers the types used by Yard3D scene documents, including the
-/// rendering components of `orr_gfx` (lights, render layers, environment,
-/// post-processing).
+/// Registers the types used by Yard3D scene documents, including physics
+/// joints and the rendering components of `orr_gfx` (lights, render layers,
+/// environment, post-processing).
 pub fn register_reflect(types: &mut TypeRegistry) {
     orr_physics3d::register_reflect(types);
+    orr_physics3d::register_joints_reflect(types);
     types.register_singleton::<Scene>("Yard3dScene");
     orr_gfx::register_reflect(types);
     crate::dragon::register_reflect(types);
@@ -126,6 +127,7 @@ impl Game for Yard3D {
 
     fn register(builder: &mut ComponentRegistryBuilder) {
         register(builder);
+        orr_physics3d::register_joints(builder);
         builder.register_singleton::<Scene>("Yard3dScene");
         orr_gfx::register(builder);
         crate::dragon::register(builder);
