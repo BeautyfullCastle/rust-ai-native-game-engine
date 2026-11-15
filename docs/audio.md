@@ -38,7 +38,7 @@ stops and requests backend shutdown, but is not a synchronous device-close fence
 ## Spatial sound
 
 A clip placed in the world with `Clip::at(position, near, far)` is heard from
-the listener set by `EventAudio::set_listener(Listener { position, right })`.
+the listener set by `EventAudio::set_listener(Listener { position, right, velocity })`.
 
 - Volume: full within `near` meters, then inverse distance (twice the distance
   is half the amplitude, -6 dB), faded to silence over the last fifth before `far`.
@@ -46,11 +46,23 @@ the listener set by `EventAudio::set_listener(Listener { position, right })`.
   listener's `right` and the direction to the sound.
 - A playing sound follows the listener: `set_listener` retunes the volume and
   panning of every playing spatial voice over 20 ms, so movement does not click.
-- `Emitter::heard_by` returns the volume in decibels and the panning, for a
-  caller that wants to show or log them.
-- Not modeled: Doppler pitch shift, occlusion by walls, reverb, elevation (a
-  sound above and one below sound the same), and moving emitters (a voice keeps
-  the position it started at).
+- Doppler: a source that moves (`Clip::moving(velocity)`) or a listener that
+  moves (`Listener::velocity`, meters per second) shifts the pitch by the
+  playback rate `(c + v_listener) / (c + v_source)`, with both speeds taken
+  along the line from the listener toward the source and `c` = 343 m/s
+  (`SPEED_OF_SOUND`). Each speed counts as at most 0.9 c and the rate stays
+  within 1/2..=2 (`MAX_DOPPLER`). Motion across the line of sight changes nothing.
+  `AudioConfig::doppler` scales both speeds: 1 is physical (the default), 0 turns
+  the effect off, values up to 10 exaggerate it.
+- A moving source: `EventAudio::move_emitter(key, position, velocity)` moves the
+  playing voice of an event, and its volume, panning and pitch glide to the new
+  values over 20 ms. Call it each frame for a car or a projectile passing by.
+- `Emitter::heard_by` returns the volume in decibels and the panning, and
+  `Emitter::doppler` the playback rate, for a caller that wants to show or log them.
+- Not modeled: occlusion by walls, reverb, elevation (a sound above and one below
+  sound the same), and the travel time of sound (a far sound starts at once). The
+  rate changes the clip's length too: a clip closing in at a fifth of the speed of
+  sound plays 20 percent shorter.
 
 ## Event ownership and bounds
 
