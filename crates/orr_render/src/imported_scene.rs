@@ -192,8 +192,10 @@ pub struct ImportedSceneRenderer<B: Rhi> {
     /// camera: each covers a farther stretch of the view, up to 1.5 ×
     /// `shadow_radius`, so near shadows are sharp and far ones still show.
     pub shadow_cascades: u32,
-    /// Culling of procedural shapes in the main pass (see [`crate::visibility`]). Both kinds are on by default.
+    /// Culling in the main pass of procedural shapes and of instanced static and
+    /// skinned models (see [`crate::visibility`]). Both kinds are on by default.
     pub culling: crate::Culling,
+    culled_model_draws: usize,
     /// Decals projected onto the opaque scene, up to [`crate::MAX_DECALS`] (see [`crate::decals`]).
     pub decals: Vec<crate::Decal>,
     decal_pass: Option<crate::decals::DecalPass<B>>,
@@ -212,6 +214,13 @@ pub struct ImportedSceneRenderer<B: Rhi> {
     passes: Vec<Box<dyn crate::RenderPass<B>>>,
 }
 impl<B: Rhi> ImportedSceneRenderer<B> {
+    /// Model draws (one per instance and primitive) culling left out of the
+    /// main pass of the last drawn frame. Procedural shapes count in their
+    /// renderer's `FrameStats::culled_instances`.
+    pub fn culled_model_draws(&self) -> usize {
+        self.culled_model_draws
+    }
+
     /// Adds a pass that draws in the stages it names from the next frame on.
     /// At most [`crate::render_pass::MAX_RENDER_PASSES`] passes are taken.
     pub fn add_pass(&mut self, pass: Box<dyn crate::RenderPass<B>>) -> Result<(), ImportedSceneError> {
@@ -247,6 +256,7 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
             scene_lights: crate::SceneLights::default(),
             shadow_cascades: 1,
             culling: crate::Culling::default(),
+            culled_model_draws: 0,
             decals: Vec::new(),
             decal_pass: None,
             #[cfg(feature = "irradiance-probes")]
@@ -719,6 +729,7 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
         };
 
         // All fallible validation is finished, including the final batch/pose.
+        self.culled_model_draws = cull_models(self.culling, camera, unjittered, batches, &mut prepared);
         if self.post_process.enabled {
             if self
                 .post_processor
@@ -1041,6 +1052,34 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
         }
         Ok(())
     }
+}
+
+/// Culls instanced static and skinned model draws, with the boxes and planes of
+/// every procedural batch as occluders. Returns how many draws it left out.
+fn cull_models<B: Rhi>(culling: crate::Culling, camera: &Camera3D, view_proj: [[f32; 4]; 4], batches: &[ImportedBatch<'_, B>], prepared: &mut [PreparedBatch]) -> usize {
+    if !(culling.frustum || culling.occlusion) {
+        return 0;
+    }
+    let (mut boxes, mut planes) = (Vec::new(), Vec::new());
+    if culling.occlusion {
+        for batch in batches {
+            if let ImportedBatch::Procedural { list, .. } = batch {
+                boxes.extend_from_slice(list.instances(crate::MeshKind::Box));
+                planes.extend_from_slice(list.instances(crate::MeshKind::Plane));
+            }
+        }
+    }
+    let view = crate::visibility::View { view_proj, eye: camera.eye, forward: camera.forward() };
+    let culler = crate::visibility::Culler::new(view, culling, [&[], &boxes, &[], &planes]);
+    prepared
+        .iter_mut()
+        .map(|ready| match ready {
+            PreparedBatch::StaticInstances(ready) => ready.cull(&culler),
+            #[cfg(feature = "animation")]
+            PreparedBatch::Skinned(ready) => ready.cull(&culler),
+            _ => 0,
+        })
+        .sum()
 }
 
 /// Writes `light_vp` as the shadow casters' matrix into every batch.
@@ -2610,6 +2649,8 @@ mod tests {
                       for sentinel in [false, true] {
                         let rhi = Mock::default();
                         let mut scene = ImportedSceneRenderer::new(rhi.clone(), FORMAT).unwrap();
+                        // Culling by the sentinel matrix would drop every draw and leave no bindings to check.
+                        scene.culling = crate::Culling { frustum: false, occlusion: false };
                         let mut a = model(&rhi, FORMAT);
                         let mut b = model(&rhi, FORMAT);
                         let mut p = Renderer3D::with_settings(rhi.clone(), FORMAT, crate::Settings3D::LOW);
