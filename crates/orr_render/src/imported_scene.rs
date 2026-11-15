@@ -545,7 +545,7 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
             prepare_shared_globals(self.scene_format(), size, camera, lighting, self.shadow_cascades)
                 .map_err(ImportedSceneError::Model)?;
         // Spot lights with shadows need the shared shadow path even without a sun shadow.
-        let spot_draws = if self.scene_lights.spot_shadows().is_empty() {
+        let spot_draws = if self.scene_lights.shadow_tiles().is_empty() {
             Vec::new()
         } else {
             shadow_ready.get_or_insert_with(crate::shared_shadow::PreparedShadow::none).add_spots(&self.scene_lights)
@@ -985,7 +985,7 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
             // Metadata is entirely determined by the completed preflight and
             // the scene-owned attachments. No further fallible frame admission.
             batch.renderer.upload_and_encode(&mut encoder, crate::particle_renderer::ParticleTarget {
-                color: scene_view, depth, size: size, color_format: self.scene_format(),
+                color: scene_view, depth, size, color_format: self.scene_format(),
                 depth_format: TextureFormat::Depth32Float, sample_count: 1,
                 depth_size: size, depth_sample_count: 1,
             }, ready).expect("preflighted scene particle target");

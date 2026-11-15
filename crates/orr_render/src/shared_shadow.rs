@@ -24,8 +24,8 @@ pub struct ShadowCascadesUniform {
     pub ranges: [[f32; 4]; 4],
     pub eye: [f32; 4],
     pub forward: [f32; 4],
-    pub spot_vp: [[[f32; 4]; 4]; 4],
-    pub spot_tiles: [[f32; 4]; 4],
+    pub spot_vp: [[[f32; 4]; 4]; crate::scene_lights::MAX_SHADOW_TILES],
+    pub spot_tiles: [[f32; 4]; crate::scene_lights::MAX_SHADOW_TILES],
     pub spot_info: [f32; 4],
 }
 
@@ -157,21 +157,26 @@ impl PreparedShadow {
         Self { matrix: Mat4::IDENTITY, params: [1.0 / size, 0.0, 0.0004, 1.0], cascades: Vec::new(), uniform: bytemuck::Zeroable::zeroed() }
     }
 
-    /// Writes the spot shadows of `lights` into the uniform and returns where each one draws.
+    /// Writes the spot and point light shadows of `lights` into the uniform and
+    /// returns where each tile draws: a 2 x 2 grid of the spot map up to four
+    /// tiles, a 4 x 4 grid beyond that.
     pub fn add_spots(&mut self, lights: &crate::SceneLights) -> Vec<ShadowCascade> {
-        let tile = crate::scene_lights::SPOT_SHADOW_MAP_SIZE / 2;
+        let tiles = lights.shadow_tiles();
+        let grid = if tiles.len() <= 4 { 2 } else { 4 };
+        let tile = crate::scene_lights::SPOT_SHADOW_MAP_SIZE / grid;
         let size = crate::scene_lights::SPOT_SHADOW_MAP_SIZE as f32;
-        let spots = lights.spot_shadows();
-        let mut draws = Vec::with_capacity(spots.len());
-        for (k, (index, matrix)) in spots.iter().enumerate() {
-            let light = lights.lights()[*index];
-            let (x, y) = ((k as u32 % 2) * tile, (k as u32 / 2) * tile);
-            self.uniform.spot_vp[k] = *matrix;
+        let mut draws = Vec::with_capacity(tiles.len());
+        let mut offset = 0.0_f32;
+        for (k, shadow) in tiles.iter().enumerate() {
+            let (x, y) = ((k as u32 % grid) * tile, (k as u32 / grid) * tile);
+            self.uniform.spot_vp[k] = shadow.matrix;
             self.uniform.spot_tiles[k] = [x as f32 / size, y as f32 / size, tile as f32 / size, 0.0006];
-            // One texel of the cone at one meter, times 1.5.
-            let texel_per_meter = 2.0 * (light.outer_angle + 0.025).tan() / tile as f32;
-            self.uniform.spot_info = [spots.len() as f32, 1.0 / size, 1.5 * texel_per_meter, 0.0];
-            draws.push(ShadowCascade { light_vp: *matrix, viewport: [x as f32, y as f32, tile as f32, tile as f32] });
+            // One texel of the widest view at one meter, times 1.5.
+            offset = offset.max(1.5 * shadow.width_per_meter / tile as f32);
+            draws.push(ShadowCascade { light_vp: shadow.matrix, viewport: [x as f32, y as f32, tile as f32, tile as f32] });
+        }
+        if !tiles.is_empty() {
+            self.uniform.spot_info = [tiles.len() as f32, 1.0 / size, offset, 0.0];
         }
         draws
     }
@@ -242,8 +247,8 @@ pub(crate) struct SharedShadow<B: Rhi> {
     _texture: B::Texture,
     pub view: B::TextureView,
     _spot_texture: B::Texture,
-    /// Spot light shadows, one tile each (see [`crate::scene_lights::SPOT_SHADOW_MAP_SIZE`]).
-    /// One texel until a frame has a spot light with shadows.
+    /// Spot and point light shadows in tiles (see [`crate::scene_lights::SPOT_SHADOW_MAP_SIZE`]).
+    /// One texel until a frame has a spot or point light with shadows.
     pub spot_view: B::TextureView,
     spot_size: u32,
     pub sampler: B::Sampler,

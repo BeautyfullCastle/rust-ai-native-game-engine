@@ -9,24 +9,39 @@ struct SceneLight {
     // xyz: unit direction the light travels, w: 0 directional, 1 point, 2 spot.
     direction_kind: vec4<f32>,
     // x: cosine of the inner cone angle, y: cosine of the outer one, z: layers the light affects,
-    // w: the spot shadow tile, -1 without one.
+    // w: the light's first shadow tile (a point light has six, one per cube face), -1 without one.
     cone_layers: vec4<f32>,
 };
 
-// How much of each scene light reaches the point being shaded, from its spot
-// shadow. Entry points that receive shadows fill it with scene_spot_fill.
+// How much of each scene light reaches the point being shaded, from its spot or
+// point light shadow. Entry points that receive shadows fill it with scene_spot_fill.
 var<private> scene_spot_visibility: array<f32, 8> = array<f32, 8>(1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0);
 
-// Fills scene_spot_visibility for the lights with a spot shadow tile, from
-// `spot_shadow_map` and the spot matrices of `shadow_cascades`.
+// Fills scene_spot_visibility for the lights with shadow tiles, from
+// `spot_shadow_map` and the tile matrices of `shadow_cascades`. A point light
+// reads the cube face along the largest axis of the direction from it.
 fn scene_spot_fill(world: vec3<f32>, n: vec3<f32>) {
     let count = i32(SCENE_GLOBAL.scene_light_info.x);
     let tiles = i32(shadow_cascades.spot_info.x);
     let texel = shadow_cascades.spot_info.y;
     for (var i = 0; i < count; i = i + 1) {
         let light = SCENE_GLOBAL.scene_lights[i];
-        let slot = i32(light.cone_layers.w);
-        if (slot < 0 || slot >= tiles) {
+        var slot = i32(light.cone_layers.w);
+        if (slot < 0) {
+            continue;
+        }
+        if (light.direction_kind.w > 0.5 && light.direction_kind.w < 1.5) {
+            let d = world - light.position_range.xyz;
+            let a = abs(d);
+            var face = select(1, 0, d.x >= 0.0);
+            if (a.y > a.x && a.y >= a.z) {
+                face = select(3, 2, d.y >= 0.0);
+            } else if (a.z > a.x && a.z > a.y) {
+                face = select(5, 4, d.z >= 0.0);
+            }
+            slot = slot + face;
+        }
+        if (slot >= tiles) {
             continue;
         }
         // The normal offset grows with distance, as a texel of the cone does.
@@ -91,8 +106,9 @@ fn scene_lights_diffuse(world: vec3<f32>, normal: vec3<f32>, layers: f32) -> vec
             let falloff = max(1.0 - dist / light.position_range.w, 0.0);
             reach = falloff * falloff;
             if (light.direction_kind.w > 1.5) {
-                reach = reach * smoothstep(light.cone_layers.y, light.cone_layers.x, dot(-toward, light.direction_kind.xyz)) * scene_spot_visibility[i];
+                reach = reach * smoothstep(light.cone_layers.y, light.cone_layers.x, dot(-toward, light.direction_kind.xyz));
             }
+            reach = reach * scene_spot_visibility[i];
         }
         sum = sum + light.color_intensity.xyz * light.color_intensity.w * max(dot(normal, toward), 0.0) * reach;
     }

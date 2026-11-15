@@ -28,9 +28,10 @@ pub(super) fn observe(g: &Wgpu, asset: &StaticModel, cam: &Camera3D, size: (u32,
         .replace("// IRRADIANCE_MODEL", "ambient = probe_diffuse(in.world_position, n, ambient);");
     let common = include_str!("../../src/renderer3d/irradiance.wgsl")
         .replace("PROBE_GLOBAL", "globals");
-    // Production appends the scene light functions after the model shader.
-    let lights = include_str!("../../src/scene_lights.wgsl").replace("SCENE_GLOBAL", "globals");
-    let source = format!("{common}\n{expanded}\n{lights}\n{}", r#"
+    // Production appends the scene light functions and the shadow cascades after the model shader.
+    let lights = include_str!("../../src/scene_lights.wgsl").replace("SCENE_GLOBAL", "globals").replace("SCENE_SHADOW_SAMPLER", "shared_shadow_sampler");
+    let cascades = orr_render::SHADOW_CASCADES_WGSL;
+    let source = format!("{common}\n{expanded}\n{lights}\n{cascades}\n{}", r#"
 struct Diagnostic { mode: u32, axis: u32, sentinel: u32, padding: u32 };
 @group(0) @binding(3) var<uniform> diag_config: Diagnostic;
 @fragment fn fs_diagnostic(in: Varying) -> @location(0) vec4<f32> {

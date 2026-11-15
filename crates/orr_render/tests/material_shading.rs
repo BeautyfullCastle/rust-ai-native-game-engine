@@ -1136,7 +1136,7 @@ fn composed_shadow_removes_only_sun_for_dielectric_and_metal() {
                     &mut [ImportedBatch::Static(&mut renderer)],
                 )
                 .unwrap();
-            assert_eq!(scene.shadow_map_size(), (shadow_index == 1).then_some(1024));
+            assert_eq!(scene.shadow_map_size(), (shadow_index == 1).then_some(orr_render::SHARED_SHADOW_MAP_SIZE));
             let pixels = g.read_texture(&texture);
             for (sample, x) in samples.iter_mut().zip([32_u32, 16]) {
                 let world_x = 2.0 * (f64::from(x) + 0.5) / 65.0 - 1.0;

@@ -7,8 +7,9 @@
 //!
 //! All lights use the bounded diffuse model of the single point light: the
 //! light reaches zero at its range. This is a stylized model, not a
-//! photometric one. The sun and up to [`MAX_SPOT_SHADOWS`] spot lights cast
-//! shadows; point lights do not.
+//! photometric one. The sun, up to [`MAX_SPOT_SHADOWS`] spot lights and up to
+//! [`MAX_POINT_SHADOWS`] point lights cast shadows. A point light's shadow is
+//! six square tiles, one per face of a cube around it.
 
 use bytemuck::{Pod, Zeroable};
 
@@ -16,7 +17,12 @@ use bytemuck::{Pod, Zeroable};
 pub const MAX_SCENE_LIGHTS: usize = 8;
 /// Spot lights that cast shadows in one frame; later ones light without shadows.
 pub const MAX_SPOT_SHADOWS: usize = 4;
-/// Width and height of the spot shadow map, which holds one tile of half this size per spot light.
+/// Point lights that cast shadows in one frame; later ones light without shadows.
+pub const MAX_POINT_SHADOWS: usize = 2;
+/// Shadow tiles of one frame: one per spot light and six per point light.
+pub const MAX_SHADOW_TILES: usize = MAX_SPOT_SHADOWS + 6 * MAX_POINT_SHADOWS;
+/// Width and height of the spot shadow map, which spot and point light shadows
+/// share. Up to four tiles it holds tiles of half this size, beyond that of a quarter.
 pub const SPOT_SHADOW_MAP_SIZE: u32 = 2048;
 /// Number of render layers. A layer mask uses the low bits.
 pub const RENDER_LAYER_COUNT: u32 = 8;
@@ -52,7 +58,7 @@ pub struct SceneLight {
     pub outer_angle: f32,
     /// Render layers this light affects.
     pub layers: u32,
-    /// Whether a spot light casts shadows. Ignored for other kinds.
+    /// Whether a spot or point light casts shadows. Ignored for directional lights.
     pub shadows: bool,
 }
 
@@ -154,16 +160,31 @@ impl SceneLights {
         self.count = 0;
     }
 
-    /// The spot lights that cast shadows, at most [`MAX_SPOT_SHADOWS`], with
-    /// their index in [`SceneLights::lights`] and their world-to-clip matrix.
-    pub(crate) fn spot_shadows(&self) -> Vec<(usize, [[f32; 4]; 4])> {
-        self.lights()
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| l.kind == SceneLightKind::Spot && l.shadows)
-            .take(MAX_SPOT_SHADOWS)
-            .map(|(index, light)| (index, spot_matrix(light)))
-            .collect()
+    /// The shadow tiles of this frame in tile order: each with the index of its
+    /// light in [`SceneLights::lights`], its world-to-clip matrix and the width
+    /// of its view at one meter from the light. A spot light takes one tile (at
+    /// most [`MAX_SPOT_SHADOWS`] of them), a point light six in
+    /// [`POINT_FACES`] order (at most [`MAX_POINT_SHADOWS`]).
+    pub(crate) fn shadow_tiles(&self) -> Vec<ShadowTile> {
+        let (mut spots, mut points) = (0, 0);
+        let mut tiles = Vec::new();
+        for (index, light) in self.lights().iter().enumerate().filter(|(_, l)| l.shadows) {
+            match light.kind {
+                SceneLightKind::Spot if spots < MAX_SPOT_SHADOWS => {
+                    spots += 1;
+                    let fov = spot_fov(light);
+                    tiles.push(ShadowTile { light: index, matrix: light_matrix(light, light.direction, fov), width_per_meter: 2.0 * (fov / 2.0).tan() });
+                }
+                SceneLightKind::Point if points < MAX_POINT_SHADOWS => {
+                    points += 1;
+                    for face in POINT_FACES {
+                        tiles.push(ShadowTile { light: index, matrix: light_matrix(light, face, POINT_FACE_FOV), width_per_meter: 2.0 * (POINT_FACE_FOV / 2.0).tan() });
+                    }
+                }
+                _ => {}
+            }
+        }
+        tiles
     }
 
     pub(crate) fn uniform(&self) -> SceneLightsUniform {
@@ -189,23 +210,43 @@ impl SceneLights {
                 [inner, outer, (light.layers & ALL_RENDER_LAYERS) as f32, -1.0],
             ];
         }
-        // w of the cone row is the light's spot shadow tile, -1 without one.
-        for (tile, (index, _)) in self.spot_shadows().iter().enumerate() {
-            uniform.lights[*index][3][3] = tile as f32;
+        // w of the cone row is the light's first shadow tile, -1 without one.
+        for (tile, shadow) in self.shadow_tiles().iter().enumerate().rev() {
+            uniform.lights[shadow.light][3][3] = tile as f32;
         }
         uniform
     }
 }
 
-/// World to clip space of a spot light's cone, square and a little wider than its outer angle.
-fn spot_matrix(light: &SceneLight) -> [[f32; 4]; 4] {
+/// One square view a light's shadow is drawn from.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ShadowTile {
+    pub light: usize,
+    pub matrix: [[f32; 4]; 4],
+    /// Width of the view at one meter from the light.
+    pub width_per_meter: f32,
+}
+
+/// The faces of a point light's shadow cube, in tile order: +x, -x, +y, -y, +z, -z.
+/// The shaders pick the face by the largest axis of the direction from the light.
+pub(crate) const POINT_FACES: [[f32; 3]; 6] = [[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, -1.0]];
+/// A cube face's field of view: a quarter turn and a little more, so the
+/// 3 x 3 filter at a face's edge still reads inside it.
+const POINT_FACE_FOV: f32 = std::f32::consts::FRAC_PI_2 + 0.04;
+
+/// A spot light's field of view: square and a little wider than its outer angle.
+fn spot_fov(light: &SceneLight) -> f32 {
+    (2.0 * light.outer_angle + 0.05).min(3.0)
+}
+
+/// World to clip space of a square view from `light` along `direction`, out to its range.
+fn light_matrix(light: &SceneLight, direction: [f32; 3], fov: f32) -> [[f32; 4]; 4] {
     use crate::math3::{cross, dot, normalize, Mat4};
-    let forward = normalize(light.direction);
+    let forward = normalize(direction);
     let helper = if forward[1].abs() > 0.95 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
     let up = normalize(cross(cross(forward, helper), forward));
     let target = [light.position[0] + forward[0], light.position[1] + forward[1], light.position[2] + forward[2]];
     let view = Mat4::look_at(light.position, target, if dot(up, up) > 0.5 { up } else { helper });
-    let fov = (2.0 * light.outer_angle + 0.05).min(3.0);
     let near = (light.range * 0.002).max(0.02);
     Mat4::perspective(fov, 1.0, near, light.range.max(near * 2.0)).mul(&view).0
 }
