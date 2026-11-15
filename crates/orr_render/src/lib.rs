@@ -113,6 +113,8 @@ pub use shared_shadow::{MAX_IMPORTED_CASTERS, SHARED_SHADOW_MAP_SIZE};
 pub const MAX_SHADOW_CASCADES: u32 = 4;
 
 pub mod decals;
+pub mod visibility;
+pub use visibility::Culling;
 pub use decals::{Decal, DecalAtlasError, DecalShape, MAX_DECALS, MAX_DECAL_ATLAS_SIZE};
 pub mod post_effects;
 pub use post_effects::ScreenEffect;

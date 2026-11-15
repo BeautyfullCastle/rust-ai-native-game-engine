@@ -192,6 +192,8 @@ pub struct ImportedSceneRenderer<B: Rhi> {
     /// camera: each covers a farther stretch of the view, up to 1.5 ×
     /// `shadow_radius`, so near shadows are sharp and far ones still show.
     pub shadow_cascades: u32,
+    /// Culling of procedural shapes in the main pass (see [`crate::visibility`]). Both kinds are on by default.
+    pub culling: crate::Culling,
     /// Decals projected onto the opaque scene, up to [`crate::MAX_DECALS`] (see [`crate::decals`]).
     pub decals: Vec<crate::Decal>,
     decal_pass: Option<crate::decals::DecalPass<B>>,
@@ -244,6 +246,7 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
             post_process: crate::PostProcessSettings::default(),
             scene_lights: crate::SceneLights::default(),
             shadow_cascades: 1,
+            culling: crate::Culling::default(),
             decals: Vec::new(),
             decal_pass: None,
             #[cfg(feature = "irradiance-probes")]
@@ -664,6 +667,7 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
                         lighting,
                         point,
                         shadow_ready.as_ref(),
+                        self.culling,
                     )
                     .map(|mut ready| {
                         ready.set_scene_lights(&self.scene_lights);
