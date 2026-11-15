@@ -15,7 +15,7 @@ use crate::{
 use bytemuck::{Pod, Zeroable};
 use orr_model::{
     IDENTITY, Wrap,
-    animation::{AnimatedModel, Matrix4, Pose},
+    animation::{morph_vertex, AnimatedModel, AnimatedPrimitive, Matrix4, MorphWeights, Pose, SkinnedVertex},
 };
 use orr_rhi::{
     Binding, Blend, BufferDesc, BufferUsage, ColorAttachment, Command, Cull, DepthAttachment,
@@ -80,7 +80,7 @@ impl<'a> SkinnedInstance<'a> {
     /// GPU. This is the same pose, external-transform, and current-bound check
     /// used by frame preparation.
     pub fn validate_for(&self, model: &AnimatedModel) -> Result<SkinnedBounds, SkinnedRenderError> {
-        validate_skinned_instance(model, self)
+        validate_skinned_instance(model, self, &model.rest_weights())
     }
 }
 
@@ -154,6 +154,19 @@ pub(crate) fn skinned_engine_source() -> String {
 pub(crate) struct PreparedSkinned {
     objects: Vec<Object>,
     bounds: Vec<SkinnedBounds>,
+    /// Per draw: the vertices after morph targets, when its weights move them.
+    morphed: Vec<Option<Vec<Vertex>>>,
+}
+
+/// The GPU vertex of `v` with position, normal and UV from `vertex`.
+fn gpu_vertex(p: &AnimatedPrimitive, v: &SkinnedVertex, vertex: orr_model::Vertex) -> Vertex {
+    Vertex {
+        position: vertex.position,
+        normal: vertex.normal,
+        uv: vertex.uv,
+        joints: if p.skin.is_some() { v.joints } else { [0; 4] },
+        weights: if p.skin.is_some() { v.weights } else { [1.0, 0.0, 0.0, 0.0] },
+    }
 }
 
 struct Depth<B: Rhi> {
@@ -183,6 +196,10 @@ pub struct SkinnedModelRenderer<B: Rhi> {
     bounds: Vec<SkinnedBounds>,
     #[cfg(feature = "imported-scene")]
     surfaces: crate::model_surfaces::ModelSurfaces<B>,
+    /// Morph weights by instance index; an instance without an entry uses the model's defaults.
+    morph_weights: Vec<MorphWeights>,
+    /// Per draw: its own vertex buffer once its morph weights moved the vertices.
+    morph_buffers: Vec<Option<B::Buffer>>,
     pub clear: [f64; 4],
 }
 impl<B: Rhi> SkinnedModelRenderer<B> {
@@ -298,21 +315,7 @@ impl<B: Rhi> SkinnedModelRenderer<B> {
             .primitives
             .iter()
             .map(|p| {
-                let vertices: Vec<_> = p
-                    .vertices
-                    .iter()
-                    .map(|v| Vertex {
-                        position: v.vertex.position,
-                        normal: v.vertex.normal,
-                        uv: v.vertex.uv,
-                        joints: if p.skin.is_some() { v.joints } else { [0; 4] },
-                        weights: if p.skin.is_some() {
-                            v.weights
-                        } else {
-                            [1.0, 0.0, 0.0, 0.0]
-                        },
-                    })
-                    .collect();
+                let vertices: Vec<_> = p.vertices.iter().map(|v| gpu_vertex(p, v, v.vertex)).collect();
                 Geometry {
                     vertices: upload(
                         "original skinned vertices",
@@ -348,6 +351,8 @@ impl<B: Rhi> SkinnedModelRenderer<B> {
                 engine_source,
                 crate::model_surfaces::VertexInput { glue: crate::surface::SKINNED_GLUE, vs_entry: "vs_skinned_surface", stride: 64, attrs: SKINNED_ATTRS.to_vec() },
             ),
+            morph_weights: Vec::new(),
+            morph_buffers: Vec::new(),
             clear: crate::DEFAULT_CLEAR_3D,
         })
     }
@@ -457,10 +462,21 @@ impl<B: Rhi> SkinnedModelRenderer<B> {
         let count = self.draw_count(instances.len())?;
         // Every pose (including singular blended normals) and placement is checked
         // before the first GPU write. Failed submission keeps old pixels/bounds.
+        let rest = self.model.rest_weights();
+        let weights = |i: usize| self.morph_weights.get(i).unwrap_or(&rest);
         let bounds: Vec<_> = instances
             .iter()
-            .map(|i| i.validate_for(&self.model))
+            .enumerate()
+            .map(|(i, instance)| validate_skinned_instance(&self.model, instance, weights(i)))
             .collect::<Result<_, _>>()?;
+        let mut morphed = Vec::with_capacity(count);
+        for i in 0..instances.len() {
+            for (index, p) in self.model.source().primitives.iter().enumerate() {
+                // Zero weights leave the shared vertices as they are.
+                let morph = self.model.primitive_morph(index, weights(i)).filter(|(_, w)| w.iter().any(|w| *w != 0.0));
+                morphed.push(morph.map(|morph| p.vertices.iter().enumerate().map(|(n, v)| gpu_vertex(p, v, morph_vertex(v.vertex, n, Some(morph)))).collect()));
+            }
+        }
         let mut objects = Vec::with_capacity(count);
         for instance in instances {
             let normal = validate_placement(instance.transform)?;
@@ -494,7 +510,7 @@ impl<B: Rhi> SkinnedModelRenderer<B> {
                 });
             }
         }
-        Ok(PreparedSkinned { objects, bounds })
+        Ok(PreparedSkinned { objects, bounds, morphed })
     }
 
     /// Allocate only uniform slots, then upload the already validated frame.
@@ -549,6 +565,14 @@ impl<B: Rhi> SkinnedModelRenderer<B> {
         for (draw, object) in self.draws.iter().zip(&prepared.objects) {
             self.rhi
                 .write_buffer(&draw.uniform, 0, bytemuck::bytes_of(object));
+        }
+        self.morph_buffers.resize_with(self.morph_buffers.len().max(count), || None);
+        for (buffer, vertices) in self.morph_buffers.iter_mut().zip(&prepared.morphed) {
+            let Some(vertices) = vertices else { continue };
+            let bytes: &[u8] = bytemuck::cast_slice(vertices);
+            let rhi = &self.rhi;
+            let buffer = buffer.get_or_insert_with(|| rhi.create_buffer(&BufferDesc { label: "morphed skinned vertices", size: bytes.len() as u64, usage: BufferUsage::VERTEX | BufferUsage::COPY_DST }));
+            self.rhi.write_buffer(buffer, 0, bytes);
         }
         #[cfg(feature = "imported-scene")]
         for index in 0..count {
@@ -605,6 +629,21 @@ impl<B: Rhi> SkinnedModelRenderer<B> {
         self.surfaces.set_uses(surfaces, time);
     }
 
+    /// Sets the morph weights of each instance, by instance index (see
+    /// `AnimatedModel::sample_weights`). An instance without an entry uses the
+    /// model's default weights. Weights that do not fit the model's targets
+    /// fail the next draw.
+    pub fn set_morph_weights(&mut self, weights: &[MorphWeights]) {
+        self.morph_weights.clear();
+        self.morph_weights.extend_from_slice(weights);
+    }
+
+    /// The vertex buffer of draw `i`: its morphed copy when this frame moved its vertices.
+    fn vertices(&self, prepared: &PreparedSkinned, i: usize) -> &B::Buffer {
+        let morphed = prepared.morphed[i].is_some().then(|| self.morph_buffers[i].as_ref()).flatten();
+        morphed.unwrap_or(&self.geometry[i % self.geometry.len()].vertices)
+    }
+
     /// Records into caller-owned attachments without allocating private depth.
     pub(crate) fn encode_frame(
         &self,
@@ -629,7 +668,7 @@ impl<B: Rhi> SkinnedModelRenderer<B> {
             }
             commands.extend([
                 Command::SetBindGroup(0, bind),
-                Command::SetVertexBuffer(0, &geometry.vertices),
+                Command::SetVertexBuffer(0, self.vertices(prepared, i)),
                 Command::SetIndexBuffer(&geometry.indices),
                 Command::DrawIndexed {
                     indices: 0..geometry.count,
@@ -683,7 +722,7 @@ impl<B: Rhi> SkinnedModelRenderer<B> {
             }
             commands.extend([
                 Command::SetBindGroup(0, bind),
-                Command::SetVertexBuffer(0, &geometry.vertices),
+                Command::SetVertexBuffer(0, self.vertices(ready, i)),
                 Command::SetIndexBuffer(&geometry.indices),
                 Command::DrawIndexed {
                     indices: 0..geometry.count,
@@ -730,13 +769,15 @@ pub(crate) fn validate_skinned_instances(
     Ok(draws)
 }
 
+/// Checks `instance` with morph `weights` and returns its world bounds.
 fn validate_skinned_instance(
     model: &AnimatedModel,
     instance: &SkinnedInstance<'_>,
+    weights: &[Vec<f32>],
 ) -> Result<SkinnedBounds, SkinnedRenderError> {
     validate_placement(instance.transform)?;
     let deformed = model
-        .deform(instance.pose)
+        .deform_morphed(instance.pose, weights)
         .map_err(SkinnedRenderError::InvalidPose)?;
     let mut bounds = SkinnedBounds {
         min: [f32::INFINITY; 3],

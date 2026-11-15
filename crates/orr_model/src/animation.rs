@@ -14,6 +14,8 @@ use std::{collections::BTreeSet, sync::Arc};
 
 mod graph;
 mod ik;
+mod morph;
+pub use morph::{morph_vertex, MorphChannel, MorphTarget, MorphWeights, Morphs, PrimitiveMorph, MAX_MORPH_TARGETS, MAX_MORPH_WEIGHT};
 pub use graph::{
     AnimationLayer, AnimationState, Animator, BlendSpace1D, BlendSpace2D, BoneMask, ClipEvent, Condition, LayerBlend, Motion, StateMachine, Transition, MAX_EVENTS,
     MAX_LAYERS, MAX_STATES, MAX_TRANSITIONS,
@@ -182,6 +184,9 @@ pub struct AnimatedSource {
     pub skins: Vec<Skin>,
     pub primitives: Vec<AnimatedPrimitive>,
     pub clips: Vec<AnimationClip>,
+    /// Morph targets and their weight tracks. Left out of the file when empty.
+    #[serde(default, skip_serializing_if = "Morphs::is_empty")]
+    pub morph: Morphs,
 }
 pub type AnimatedModelSource = AnimatedSource;
 
@@ -325,9 +330,11 @@ impl AnimatedModel {
             )?;
         }
         let (mut keys, mut animation_bytes) = (0usize, 0usize);
-        for clip in &source.clips {
+        for (index, clip) in source.clips.iter().enumerate() {
             validate_name(&clip.name)?;
-            if clip.channels.is_empty() || clip.channels.len() > MAX_CHANNELS {
+            // A clip of only morph weights has no joint channels.
+            let morphs_only = source.morph.channels.iter().any(|c| c.clip as usize == index);
+            if (clip.channels.is_empty() && !morphs_only) || clip.channels.len() > MAX_CHANNELS {
                 return Err(invalid("clip channel count exceeds limit or is empty"));
             }
             let mut targets = BTreeSet::new();
@@ -464,6 +471,7 @@ impl AnimatedModel {
                 }
             }
         }
+        morph::validate(&source, &mut decoded_bytes)?;
         for image in &source.images {
             add_budget(
                 &mut decoded_bytes,
@@ -517,6 +525,12 @@ impl AnimatedModel {
             return Err(invalid("cooked animated model exceeds byte limit"));
         }
         Ok(bytes)
+    }
+    /// Seconds to the last key of clip `clip`, its morph weight tracks included.
+    pub fn clip_duration(&self, clip: u32) -> Result<f32, Error> {
+        let joints = self.source.clips.get(clip as usize).ok_or_else(|| invalid("animation clip out of range"))?.duration();
+        let morphs = self.source.morph.channels.iter().filter(|c| c.clip == clip).filter_map(|c| c.times.last().copied());
+        Ok(morphs.fold(joints, f32::max))
     }
     pub fn rest_pose(&self) -> Result<Pose, Error> {
         self.pose_from_local(self.source.nodes.iter().map(|n| n.rest).collect())
@@ -657,15 +671,23 @@ impl AnimatedModel {
     /// are renormalized to account for the validation tolerance. Placement is
     /// deliberately omitted, so returned primitive transforms are identity.
     pub fn deform(&self, pose: &Pose) -> Result<Vec<Primitive>, Error> {
+        self.deform_morphed(pose, &self.rest_weights())
+    }
+    /// [`Self::deform`] with morph `weights` (see [`Self::sample_weights`]).
+    pub fn deform_morphed(&self, pose: &Pose, weights: &[Vec<f32>]) -> Result<Vec<Primitive>, Error> {
         self.validate_pose(pose)?;
+        self.validate_weights(weights)?;
         self.source
             .primitives
             .iter()
-            .map(|primitive| {
+            .enumerate()
+            .map(|(index, primitive)| {
+                let morph = self.primitive_morph(index, weights);
                 let vertices = primitive
                     .vertices
                     .iter()
-                    .map(|v| deform_vertex(primitive, v, pose))
+                    .enumerate()
+                    .map(|(i, v)| deform_vertex(primitive, v, morph_vertex(v.vertex, i, morph), pose))
                     .collect::<Result<Vec<_>, Error>>()?;
                 Ok(Primitive {
                     id: primitive.id.clone(),
@@ -680,14 +702,20 @@ impl AnimatedModel {
     /// Exact current-pose vertex bounds, before caller/entity placement.
     /// Runs the same validation/deformation oracle without allocating geometry.
     pub fn bounds(&self, pose: &Pose) -> Result<Bounds, Error> {
+        self.bounds_morphed(pose, &self.rest_weights())
+    }
+    /// [`Self::bounds`] with morph `weights`.
+    pub fn bounds_morphed(&self, pose: &Pose, weights: &[Vec<f32>]) -> Result<Bounds, Error> {
         self.validate_pose(pose)?;
+        self.validate_weights(weights)?;
         let mut bounds = Bounds {
             min: [f32::INFINITY; 3],
             max: [f32::NEG_INFINITY; 3],
         };
-        for primitive in &self.source.primitives {
-            for source_vertex in &primitive.vertices {
-                let vertex = deform_vertex(primitive, source_vertex, pose)?;
+        for (index, primitive) in self.source.primitives.iter().enumerate() {
+            let morph = self.primitive_morph(index, weights);
+            for (i, source_vertex) in primitive.vertices.iter().enumerate() {
+                let vertex = deform_vertex(primitive, source_vertex, morph_vertex(source_vertex.vertex, i, morph), pose)?;
                 for i in 0..3 {
                     bounds.min[i] = bounds.min[i].min(vertex.position[i]);
                     bounds.max[i] = bounds.max[i].max(vertex.position[i]);
@@ -853,12 +881,7 @@ impl AnimationPlayer {
         let clip = self
             .clip
             .ok_or_else(|| invalid("no animation clip selected"))?;
-        model
-            .source
-            .clips
-            .get(clip as usize)
-            .map(AnimationClip::duration)
-            .ok_or_else(|| invalid("animation clip out of range"))
+        model.clip_duration(clip)
     }
 }
 
@@ -935,9 +958,11 @@ pub fn multiply(a: Matrix4, b: Matrix4) -> Matrix4 {
     }
     out
 }
+/// `base` is the vertex after its morph targets; `vertex` gives its skin influences.
 fn deform_vertex(
     primitive: &AnimatedPrimitive,
     vertex: &SkinnedVertex,
+    base: Vertex,
     pose: &Pose,
 ) -> Result<Vertex, Error> {
     let matrix = match primitive.skin {
@@ -948,8 +973,8 @@ fn deform_vertex(
     if determinant(matrix) <= 0.0 {
         return Err(invalid("mirrored animation transform or blend"));
     }
-    let position = transform_point(matrix, vertex.vertex.position);
-    let normal = transform_vector(normal_transform, vertex.vertex.normal);
+    let position = transform_point(matrix, base.position);
+    let normal = transform_vector(normal_transform, base.normal);
     let length2 = dot3(normal, normal);
     if !position.iter().all(|x| x.is_finite() && x.abs() <= 1.0e9)
         || !length2.is_finite()
@@ -963,7 +988,7 @@ fn deform_vertex(
     Ok(Vertex {
         position,
         normal: normal.map(|v| v * inverse_length),
-        uv: vertex.vertex.uv,
+        uv: base.uv,
     })
 }
 fn blend_matrix(vertex: &SkinnedVertex, palette: &[Matrix4]) -> Matrix4 {

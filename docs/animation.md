@@ -87,13 +87,32 @@ let pose = machine.pose(&model)?;
 
 닿지 않는 목표는 그 방향으로 다리를 편다. 사슬에 크기가 고르지 않은(nonuniform) 스케일이 있으면 결과는 근사다.
 
-## 4. 한계
+## 4. 모프 타깃 (블렌드 셰이프)
 
-- 모프 타깃(블렌드 셰이프)은 가져오지도 그리지도 않는다.
+정점마다 위치와 노멀의 오프셋을 가진 타깃을 가중치로 섞는다. 표정, 눈 깜빡임 같은 변형이다. 가중치 0은 모델링한 그대로, 1은 오프셋 전체를 더한다.
+
+```rust
+// 클립 "face"의 0.4초 시점 가중치로 그림
+let weights = model.sample_weights(face, 0.4)?;
+renderer.set_morph_weights(&[weights]); // 인스턴스 순서대로, 없으면 모델 기본값
+renderer.draw(view, size, &camera, &lighting, &[SkinnedInstance::new(&pose)])?;
+```
+
+- 가져오기: 애니메이션 모델 임포터가 glTF 프리미티브의 `targets`(POSITION 필수, NORMAL 선택, f32 VEC3, 정점마다 하나)와 기본 가중치(노드의 `weights`, 없으면 메시의 `weights`, 없으면 0)를 읽는다. 애니메이션의 `weights` 채널(STEP, LINEAR)도 읽는다. 프리미티브 하나에 타깃은 최대 8개(`MAX_MORPH_TARGETS`), 가중치 크기는 16 이하다. 정적 모델 임포터는 모프 타깃을 계속 거부한다.
+- 데이터: `AnimatedSource::morph`(`Morphs`)에 프리미티브별 타깃(`PrimitiveMorph`)과 클립별 가중치 트랙(`MorphChannel`)이 있다. 비어 있으면 쿠킹 파일에 쓰지 않으므로 모프 없는 모델의 바이트는 그대로다.
+- 가중치는 `Pose` 밖에 둔다. 포즈 그래프(상태 머신, 레이어, 블렌드 스페이스)는 관절만 섞는다. `rest_weights()`가 기본값, `sample_weights(clip, time)`이 클립의 값을 준다. 시간은 트랙마다 끝에서 멈춘다. 가중치 트랙만 있는 클립도 되고, `clip_duration`과 재생기는 그 트랙의 길이를 센다.
+- 변형 순서: 타깃 오프셋을 먼저 더하고 그 정점을 스키닝한다. CPU 기준 구현은 `deform_morphed`, `bounds_morphed`다.
+- 그리기: `SkinnedModelRenderer::set_morph_weights`로 인스턴스마다 가중치를 준다. 가중치가 0이 아닌 그리기는 CPU에서 오프셋을 더한 정점을 그 그리기 전용 정점 버퍼에 매 프레임 올리고, 0이면 공유 정점 버퍼를 그대로 쓴다. 저장 버퍼가 없는 WebGL2에서도 같은 경로로 돈다. 경계 상자와 그림자도 같은 정점을 쓴다.
+
+## 5. 한계
+
+- 모프 타깃의 CUBICSPLINE 가중치 트랙, 희소(sparse) 접근자, 탄젠트 오프셋은 없다. 타깃 이름은 glTF에 표준 자리가 없어 `target0`, `target1`로 붙는다.
+- 모프는 정점 수 × 0이 아닌 타깃 수만큼 CPU에서 계산하고 그리기마다 정점 버퍼를 올린다. 정점이 많은 얼굴을 여러 인스턴스 그리면 비용이 커진다.
+- 클립 잘라내기, 이어 붙이기, 포즈 굽기 도구는 가중치 트랙을 옮기지 않는다. 에디터의 클립 길이 표시는 관절 채널만 본다.
 - 상태 머신과 레이어는 코드 API다. 에디터에서 그래프를 편집하는 화면과 씬 파일 형식은 아직 없다.
 - 리타기팅(다른 뼈대로 클립 옮기기)은 없다.
 - IK는 투 본과 룩앳만 있다. FABRIK 같은 다관절 IK는 없다.
 
-## 5. 다른 문서
+## 6. 다른 문서
 
 이전부터 있던 클립 도구와 에디터 경로는 기능별 문서에 있다: `animation-clip-extract.md`(잘라내기·속도·역재생), `animation-clip-sequence.md`, `animation-cubic-spline.md`, `animation-pose-bake.md`, `editor-animated-models.md`, `editor-animation-preview-step.md`.
