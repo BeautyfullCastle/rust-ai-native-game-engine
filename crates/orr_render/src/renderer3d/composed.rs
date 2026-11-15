@@ -26,6 +26,10 @@ impl std::error::Error for ProceduralSceneError {}
 pub(crate) struct PreparedProcedural {
     globals: Globals,
     ranges: [std::ops::Range<u32>; 4],
+    /// Instances of each kind the main pass draws: the first ones of its range.
+    visible: [u32; 4],
+    /// Each kind's instances with the visible ones first, when culling reordered them.
+    ordered: Option<[Vec<Instance3D>; 4]>,
     lines: u32,
     stats: FrameStats,
 }
@@ -126,6 +130,7 @@ impl<B: Rhi> Renderer3D<B> {
     }
 
     /// CPU-only validation and preparation; no retained cache or statistics changes.
+    #[allow(clippy::too_many_arguments)] // The coordinator's per-frame camera, light and culling inputs.
     pub(crate) fn prepare_composed(
         &self,
         list: &RenderList3D,
@@ -134,6 +139,7 @@ impl<B: Rhi> Renderer3D<B> {
         lighting: &Lighting,
         point: &PointLightSettings,
         shadow: Option<&crate::shared_shadow::PreparedShadow>,
+        culling: crate::Culling,
     ) -> Result<PreparedProcedural, ProceduralSceneError> {
         self.composed_draw_count(list)?;
         validate_procedural_list(list, self.format == TextureFormat::Rgba16Float)?;
@@ -170,11 +176,22 @@ impl<B: Rhi> Renderer3D<B> {
                 light.intensity,
             ];
         }
+        let all = MeshKind::ALL.map(|kind| list.instances(kind));
+        let (visible, ordered) = if culling.frustum || culling.occlusion {
+            let view = crate::visibility::View { view_proj: globals.view_proj, eye: camera.eye, forward: camera.forward() };
+            let (ordered, visible) = crate::visibility::partition(&view, culling, all);
+            (visible, Some(ordered))
+        } else {
+            (all.map(|i| i.len() as u32), None)
+        };
         Ok(PreparedProcedural {
             globals,
             ranges,
+            visible,
+            ordered,
             lines: list.lines.len() as u32,
             stats: FrameStats {
+                culled_instances: u64::from(first) - visible.iter().map(|&v| u64::from(v)).sum::<u64>(),
                 mesh_instances: u64::from(first),
                 line_instances: list.lines.len() as u64,
                 msaa_samples: 1,
@@ -201,7 +218,7 @@ impl<B: Rhi> Renderer3D<B> {
             stats.buffer_reallocations +=
                 u32::from(self.instances.reserve(rhi, stats.mesh_instances as usize));
             for kind in MeshKind::ALL {
-                let instances = list.instances(kind);
+                let instances = prepared.ordered.as_ref().map_or(list.instances(kind), |o| &o[kind as usize][..]);
                 if !instances.is_empty() {
                     stats.upload(
                         rhi,
@@ -254,7 +271,9 @@ impl<B: Rhi> Renderer3D<B> {
                 Command::SetIndexBuffer(&self.mesh_indices),
             ]);
             for kind in MeshKind::ALL {
-                let instances = prepared.ranges[kind as usize].clone();
+                // Culled instances sit after the visible ones; only the shadow pass draws them.
+                let start = prepared.ranges[kind as usize].start;
+                let instances = start..start + prepared.visible[kind as usize];
                 if !instances.is_empty() {
                     let (indices, base_vertex) = self.mesh_ranges[kind as usize].clone();
                     prepared.stats.main.draw(instances.end - instances.start);

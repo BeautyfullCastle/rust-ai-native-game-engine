@@ -35,6 +35,8 @@ pub struct FrameStats {
     /// Submitted input instances, before repeating any in the shadow pass.
     pub shape_instances: u64,
     pub mesh_instances: u64,
+    /// Of `mesh_instances`, how many culling left out of the main pass (see [`crate::visibility`]).
+    pub culled_instances: u64,
     pub line_instances: u64,
     pub main: PassStats,
     pub shadow: PassStats,
