@@ -20,6 +20,8 @@
 //!   drag; typed values outside them are refused by the document with a message.
 //! - An asset path is a text field and a list of the matching files under the
 //!   scene's folder (see [`set_asset_root`]).
+//! - An entity reference in a scene is a combo box of the scene's entities
+//!   (see [`set_entity_choices`]) with "none" first. During play it is read only.
 
 use egui::{Id, Sense, Ui};
 use orr_fp::{FPVec2, FPVec3, FP};
@@ -269,7 +271,22 @@ fn scalar(ui: &mut Ui, id: Id, ty: &TypeDesc, value: &Value, path: &str, label: 
             }
         }
         (Kind::Entity, Value::EntityGuid(g)) => {
-            ui.weak(g.as_deref().unwrap_or("none"));
+            let choices = entity_choices(ui.ctx());
+            let label_of = |guid: &str| choices.iter().find(|(c, _)| c == guid).map_or_else(|| guid.to_string(), |(_, l)| l.clone());
+            let shown = g.as_deref().map_or_else(|| "none".to_string(), label_of);
+            egui::ComboBox::from_id_salt(id).selected_text(shown).show_ui(ui, |ui| {
+                if ui.selectable_label(g.is_none(), "none").clicked() && g.is_some() {
+                    out.push(InspEvent::Set { path: path.to_string(), value: Value::EntityGuid(None) });
+                }
+                for (guid, label) in choices.iter() {
+                    let current = g.as_deref() == Some(guid.as_str());
+                    if ui.selectable_label(current, label).on_hover_text(guid).clicked() && !current {
+                        out.push(InspEvent::Set { path: path.to_string(), value: Value::EntityGuid(Some(guid.clone())) });
+                    }
+                }
+            })
+            .response
+            .on_hover_text(hover);
         }
         (Kind::Entity, Value::Entity(e)) => {
             ui.weak(format!("entity {}v{}", e.index, e.version));
@@ -325,6 +342,19 @@ struct AssetListing(std::sync::Arc<Vec<String>>, f64);
 
 /// Tells the inspector which folder asset paths start from. The editor calls
 /// it every frame with the open scene's folder; `None` lists no files.
+#[derive(Clone, Default)]
+struct EntityChoices(std::sync::Arc<Vec<(String, String)>>);
+
+/// Sets the entities that entity fields offer: each one's scene GUID and the
+/// label shown for it, in the order of the list.
+pub fn set_entity_choices(ctx: &egui::Context, choices: Vec<(String, String)>) {
+    ctx.data_mut(|d| d.insert_temp(Id::new("orr_entity_choices"), EntityChoices(std::sync::Arc::new(choices))));
+}
+
+fn entity_choices(ctx: &egui::Context) -> std::sync::Arc<Vec<(String, String)>> {
+    ctx.data(|d| d.get_temp::<EntityChoices>(Id::new("orr_entity_choices"))).unwrap_or_default().0
+}
+
 pub fn set_asset_root(ctx: &egui::Context, root: Option<&std::path::Path>) {
     ctx.data_mut(|d| d.insert_temp(Id::new("orr_asset_root"), AssetRoot(root.map(std::path::Path::to_path_buf))));
 }

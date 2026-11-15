@@ -2344,6 +2344,9 @@ impl EditorApp {
         let mut post_shown = false;
         // Asset fields list files from the open scene's folder.
         crate::inspector::set_asset_root(ui.ctx(), self.editor.path().as_deref().and_then(std::path::Path::parent));
+        // Entity fields (a joint's bodies, a scatter's terrain) pick from the scene's entities.
+        let choices = self.editor.rows().iter().filter_map(|r| r.guid.as_ref().map(|g| (g.to_string(), r.label()))).collect();
+        crate::inspector::set_entity_choices(ui.ctx(), choices);
         let editor = &self.editor;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             if !(editor.can_mutate() && editor.previewing().is_none()) { ui.disable(); }

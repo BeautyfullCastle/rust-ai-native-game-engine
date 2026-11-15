@@ -124,19 +124,45 @@ pub fn register_joints(builder: &mut ComponentRegistryBuilder) {
     builder.register_component::<Joint>("orr_physics3d::Joint");
 }
 
+/// Records the axis and the zero angle of a hinge or limited ball joint in
+/// both bodies' frames from their current poses. A joint whose bodies are
+/// missing, or whose axis is zero, is left unrecorded.
+fn record(frame: &Frame, joint: &mut Joint) {
+    let (Some(a), Some(b)) = (frame.get::<Body>(joint.a), frame.get::<Body>(joint.b)) else { return };
+    let n = a.rot.rotate_vec3(joint.axis_a).normalize();
+    if n == FPVec3::ZERO {
+        return;
+    }
+    let r = across(n);
+    joint.axis_a = a.rot.inverse_rotate_vec3(n);
+    joint.axis_b = b.rot.inverse_rotate_vec3(n);
+    joint.ref_a = a.rot.inverse_rotate_vec3(r);
+    joint.ref_b = b.rot.inverse_rotate_vec3(r);
+}
+
+/// Records the joints that came in without [`add_joint`] (a scene file, the
+/// editor's inspector) from the poses at the start of their first step. A
+/// recorded joint has a nonzero `ref_a`.
+pub(crate) fn settle(frame: &mut Frame) {
+    if frame.registry().component_id::<Joint>().is_none() {
+        return;
+    }
+    let (je, jd) = frame.dense::<Joint>();
+    let pending: Vec<(Entity, Joint)> = je.iter().zip(jd).filter(|(_, j)| j.has_axis() && j.ref_a == FPVec3::ZERO).map(|(&e, &j)| (e, j)).collect();
+    for (e, mut joint) in pending {
+        record(frame, &mut joint);
+        if let Some(stored) = frame.get_mut::<Joint>(e) {
+            *stored = joint;
+        }
+    }
+}
+
 /// Spawns an entity holding `joint` and wakes both bodies. For a hinge or a
 /// limited ball joint it also records the axis and the zero angle in both
 /// bodies' frames from their current poses. Bodies held by a joint do not fall asleep.
 pub fn add_joint(frame: &mut Frame, mut joint: Joint) -> Entity {
     if joint.has_axis() {
-        if let (Some(a), Some(b)) = (frame.get::<Body>(joint.a), frame.get::<Body>(joint.b)) {
-            let n = a.rot.rotate_vec3(joint.axis_a).normalize();
-            let r = across(n);
-            joint.axis_a = a.rot.inverse_rotate_vec3(n);
-            joint.axis_b = b.rot.inverse_rotate_vec3(n);
-            joint.ref_a = a.rot.inverse_rotate_vec3(r);
-            joint.ref_b = b.rot.inverse_rotate_vec3(r);
-        }
+        record(frame, &mut joint);
     }
     let e = frame.spawn();
     frame.add(e, joint);
