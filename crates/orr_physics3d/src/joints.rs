@@ -3,7 +3,9 @@
 //! it), a rod keeps them a fixed distance apart, and a rope keeps them at most
 //! that far apart. A hinge is a ball joint that also keeps one axis of each
 //! body lined up, so they turn about that axis only, and it can drive the turn
-//! with a motor and hold it between two angles. Joints are an opt-in component: a game that never calls
+//! with a motor and hold it between two angles. A ball joint can be limited
+//! to a cone of swing around an axis and a range of twist about it, as a
+//! shoulder or a ragdoll's neck. Joints are an opt-in component: a game that never calls
 //! [`register_joints`] steps exactly as before.
 
 use bytemuck::{Pod, Zeroable};
@@ -25,7 +27,8 @@ pub const JOINT_HINGE: u32 = 3;
 
 /// [`Joint::flags`]: a hinge's motor drives the turn toward [`Joint::motor_speed`].
 pub const JOINT_MOTOR: u32 = 1;
-/// [`Joint::flags`]: a hinge holds its angle between [`Joint::lower`] and [`Joint::upper`].
+/// [`Joint::flags`]: a hinge holds its angle between [`Joint::lower`] and [`Joint::upper`];
+/// a ball joint holds its swing within [`Joint::swing`] and its twist between them.
 pub const JOINT_LIMIT: u32 = 2;
 
 /// A joint between bodies `a` and `b`, as a component on an entity of its own.
@@ -47,7 +50,7 @@ pub struct Joint {
     pub kind: u32,
     /// [`JOINT_MOTOR`] and [`JOINT_LIMIT`], for a hinge; 0 for none.
     pub flags: u32,
-    /// Hinge axis in `a`'s own frame.
+    /// Hinge axis, or the axis a limited ball joint swings and twists around, in `a`'s own frame.
     pub axis_a: FPVec3,
     /// The same axis in `b`'s own frame; [`add_joint`] fills it.
     pub axis_b: FPVec3,
@@ -55,14 +58,16 @@ pub struct Joint {
     pub ref_a: FPVec3,
     /// The same direction in `b`'s frame when the joint was added; [`add_joint`] fills it.
     pub ref_b: FPVec3,
-    /// Lowest hinge angle in radians, above `-pi`, with [`JOINT_LIMIT`].
+    /// Lowest hinge angle or ball joint twist in radians, above `-pi`, with [`JOINT_LIMIT`].
     pub lower: FP,
-    /// Highest hinge angle in radians, below `pi`, with [`JOINT_LIMIT`].
+    /// Highest hinge angle or ball joint twist in radians, below `pi`, with [`JOINT_LIMIT`].
     pub upper: FP,
     /// Turn rate of `b` against `a` about the axis, in radians per second, the motor aims for.
     pub motor_speed: FP,
     /// Largest torque the motor applies; 0 lets it do nothing.
     pub max_motor_torque: FP,
+    /// Largest angle in radians between the two bodies' axes of a ball joint with [`JOINT_LIMIT`], below `pi`.
+    pub swing: FP,
 }
 
 impl Joint {
@@ -89,6 +94,23 @@ impl Joint {
     pub fn with_limits(self, lower: FP, upper: FP) -> Joint {
         Joint { flags: self.flags | JOINT_LIMIT, lower, upper, ..self }
     }
+
+    /// The same ball joint kept within `swing` radians of `axis` (in `a`'s own
+    /// frame) and twisted about it between `lower` and `upper` radians, both
+    /// measured from the pose when it was added.
+    #[must_use]
+    pub fn with_cone(self, axis: FPVec3, swing: FP, lower: FP, upper: FP) -> Joint {
+        Joint { flags: self.flags | JOINT_LIMIT, axis_a: axis, swing, lower, upper, ..self }
+    }
+
+    /// Whether [`add_joint`] records the axis and the zero angle for this joint.
+    fn has_axis(&self) -> bool {
+        self.kind == JOINT_HINGE || self.has_cone()
+    }
+
+    fn has_cone(&self) -> bool {
+        self.kind == JOINT_BALL && self.flags & JOINT_LIMIT != 0
+    }
 }
 
 /// A unit direction across `n`.
@@ -102,11 +124,11 @@ pub fn register_joints(builder: &mut ComponentRegistryBuilder) {
     builder.register_component::<Joint>("orr_physics3d::Joint");
 }
 
-/// Spawns an entity holding `joint` and wakes both bodies. For a hinge it
-/// also records the axis and the zero angle in both bodies' frames from their
-/// current poses. Bodies held by a joint do not fall asleep.
+/// Spawns an entity holding `joint` and wakes both bodies. For a hinge or a
+/// limited ball joint it also records the axis and the zero angle in both
+/// bodies' frames from their current poses. Bodies held by a joint do not fall asleep.
 pub fn add_joint(frame: &mut Frame, mut joint: Joint) -> Entity {
-    if joint.kind == JOINT_HINGE {
+    if joint.has_axis() {
         if let (Some(a), Some(b)) = (frame.get::<Body>(joint.a), frame.get::<Body>(joint.b)) {
             let n = a.rot.rotate_vec3(joint.axis_a).normalize();
             let r = across(n);
@@ -158,6 +180,7 @@ pub(crate) struct JointRow {
     /// Rope: the impulse this substep, which may only pull.
     total: FP,
     hinge: Option<Hinge>,
+    cone: Option<Cone>,
 }
 
 /// One turn axis of a hinge: its effective mass with the anchors held
@@ -193,6 +216,28 @@ struct Hinge {
     inv_h: FP,
     motor_max: FP,
     motor_total: FP,
+    lower_total: FP,
+    upper_total: FP,
+}
+
+/// The swing and twist limits of a ball joint.
+#[derive(Clone, Copy)]
+struct Cone {
+    axis_a: FPVec3,
+    axis_b: FPVec3,
+    ref_a: FPVec3,
+    ref_b: FPVec3,
+    swing: FP,
+    lower: FP,
+    upper: FP,
+    // Refreshed per substep. A row with zero mass is left out.
+    /// A turn that closes the swing, and how far the swing is inside its bound.
+    close: TurnAxis,
+    room: FP,
+    twist: TurnAxis,
+    angle: FP,
+    inv_h: FP,
+    swing_total: FP,
     lower_total: FP,
     upper_total: FP,
 }
@@ -267,6 +312,23 @@ pub(crate) fn prepare(frame: &Frame, ents: &[Entity], bslot: &[u32], bd: &[Body]
                 lower_total: FP::ZERO,
                 upper_total: FP::ZERO,
             }),
+            cone: joint.has_cone().then_some(Cone {
+                axis_a: joint.axis_a,
+                axis_b: joint.axis_b,
+                ref_a: joint.ref_a,
+                ref_b: joint.ref_b,
+                swing: joint.swing,
+                lower: joint.lower,
+                upper: joint.upper,
+                close: TurnAxis::default(),
+                room: FP::ZERO,
+                twist: TurnAxis::default(),
+                angle: FP::ZERO,
+                inv_h: FP::ZERO,
+                swing_total: FP::ZERO,
+                lower_total: FP::ZERO,
+                upper_total: FP::ZERO,
+            }),
         });
     }
     rows
@@ -334,6 +396,10 @@ pub(crate) fn begin_substep(rows: &mut [JointRow], pw: &[Vw], h: FP, rotate: fn(
                 begin_hinge(row, &mut hinge, rot_a, rot_b, h);
                 row.hinge = Some(hinge);
             }
+            if let (true, Some(mut cone)) = (row.active, row.cone) {
+                begin_cone(row, &mut cone, rot_a, rot_b, inv_h);
+                row.cone = Some(cone);
+            }
             continue;
         }
         let distance = gap.length();
@@ -380,6 +446,28 @@ fn begin_hinge(row: &JointRow, hinge: &mut Hinge, rot_a: FPQuat, rot_b: FPQuat, 
     hinge.upper_total = FP::ZERO;
 }
 
+/// The swing of the axes and the twist about their bisector at this substep's pose.
+fn begin_cone(row: &JointRow, cone: &mut Cone, rot_a: FPQuat, rot_b: FPQuat, inv_h: FP) {
+    let (na, nb) = (rot_a.rotate_vec3(cone.axis_a), rot_b.rotate_vec3(cone.axis_b));
+    let bend = na.cross(nb);
+    let sine = bend.length();
+    // Below about a thousandth of a radian the swing direction is noise, and the swing is inside any cone.
+    cone.close = if sine > FP::from_ratio(1, 1000) { turn_axis(row, -(bend / sine)) } else { TurnAxis::default() };
+    cone.room = cone.swing - sine.atan2(na.dot(nb));
+    let mid = na + nb;
+    let length = mid.length();
+    // With the axes almost opposite there is no twist axis, so the twist rows wait.
+    cone.twist = if length > FP::from_ratio(1, 100) { turn_axis(row, mid / length) } else { TurnAxis::default() };
+    let t = cone.twist.axis;
+    let flat = |r: FPVec3| r - t * t.dot(r);
+    let (ra, rb) = (flat(rot_a.rotate_vec3(cone.ref_a)), flat(rot_b.rotate_vec3(cone.ref_b)));
+    cone.angle = t.dot(ra.cross(rb)).atan2(ra.dot(rb));
+    cone.inv_h = inv_h;
+    cone.swing_total = FP::ZERO;
+    cone.lower_total = FP::ZERO;
+    cone.upper_total = FP::ZERO;
+}
+
 /// A turn about `axis` paired with the anchor impulse `-K^-1 c` that keeps
 /// the anchors together; its effective mass is the Schur complement of `K`.
 fn turn_axis(row: &JointRow, axis: FPVec3) -> TurnAxis {
@@ -387,6 +475,27 @@ fn turn_axis(row: &JointRow, axis: FPVec3) -> TurnAxis {
     let couple = -row.k.solve(c);
     let k = axis.dot(row.iia.mul_vec(axis) + row.iib.mul_vec(axis)) + c.dot(couple);
     TurnAxis { axis, mass: if k > FP::ZERO { FP::ONE / k } else { FP::ZERO }, couple, c, bias: FP::ZERO }
+}
+
+impl TurnAxis {
+    /// The same turn the other way round.
+    fn flip(self) -> TurnAxis {
+        TurnAxis { axis: -self.axis, couple: -self.couple, c: -self.c, ..self }
+    }
+}
+
+/// A one-sided limit: a turn of `b` about `t.axis` grows `room`, the
+/// distance inside the bound, which may not go below zero. Speculative: a
+/// bound not yet reached only stops a turn that would pass it this substep.
+fn limit(row: &JointRow, t: &TurnAxis, room: FP, inv_h: FP, total: &mut FP, va: &mut Vw, vb: &mut Vw) {
+    if t.mass == FP::ZERO {
+        return;
+    }
+    let bias = if room < FP::ZERO { room * BAUMGARTE * inv_h } else { room * inv_h };
+    let lambda = -(t.mass * (t.axis.dot(vb.w - va.w) + bias));
+    let sum = (*total + lambda).max(FP::ZERO);
+    turn(row, t, va, vb, sum - *total);
+    *total = sum;
 }
 
 /// Applies a turn impulse `lambda` about `t.axis` (on `b`, against `a`) with its anchor impulse.
@@ -411,18 +520,8 @@ fn solve_hinge(row: &JointRow, hinge: &mut Hinge, va: &mut Vw, vb: &mut Vw) {
             turn(row, &n, va, vb, lambda);
         }
         if hinge.flags & JOINT_LIMIT != 0 {
-            // Speculative: a bound not yet reached only stops a turn that would pass it this substep.
-            let bias = |c: FP| if c < FP::ZERO { c * BAUMGARTE * hinge.inv_h } else { c * hinge.inv_h };
-            let lambda = -(n.mass * (n.axis.dot(vb.w - va.w) + bias(hinge.angle - hinge.lower)));
-            let total = (hinge.lower_total + lambda).max(FP::ZERO);
-            let lambda = total - hinge.lower_total;
-            hinge.lower_total = total;
-            turn(row, &n, va, vb, lambda);
-            let lambda = -(n.mass * (n.axis.dot(va.w - vb.w) + bias(hinge.upper - hinge.angle)));
-            let total = (hinge.upper_total + lambda).max(FP::ZERO);
-            let lambda = total - hinge.upper_total;
-            hinge.upper_total = total;
-            turn(row, &n, va, vb, -lambda);
+            limit(row, &n, hinge.angle - hinge.lower, hinge.inv_h, &mut hinge.lower_total, va, vb);
+            limit(row, &n.flip(), hinge.upper - hinge.angle, hinge.inv_h, &mut hinge.upper_total, va, vb);
         }
     }
     let [s, u] = hinge.across;
@@ -433,6 +532,13 @@ fn solve_hinge(row: &JointRow, hinge: &mut Hinge, va: &mut Vw, vb: &mut Vw) {
     turn(row, &u, va, vb, i12 * rs + i22 * ru);
 }
 
+/// The swing and twist limits of a ball joint.
+fn solve_cone(row: &JointRow, cone: &mut Cone, va: &mut Vw, vb: &mut Vw) {
+    limit(row, &cone.close, cone.room, cone.inv_h, &mut cone.swing_total, va, vb);
+    limit(row, &cone.twist, cone.angle - cone.lower, cone.inv_h, &mut cone.lower_total, va, vb);
+    limit(row, &cone.twist.flip(), cone.upper - cone.angle, cone.inv_h, &mut cone.upper_total, va, vb);
+}
+
 /// One iteration over every active joint.
 pub(crate) fn solve(rows: &mut [JointRow], vw: &mut [Vw]) {
     for row in rows.iter_mut().filter(|r| r.active) {
@@ -440,6 +546,10 @@ pub(crate) fn solve(rows: &mut [JointRow], vw: &mut [Vw]) {
         if let Some(mut hinge) = row.hinge {
             solve_hinge(row, &mut hinge, &mut va, &mut vb);
             row.hinge = Some(hinge);
+        }
+        if let Some(mut cone) = row.cone {
+            solve_cone(row, &mut cone, &mut va, &mut vb);
+            row.cone = Some(cone);
         }
         let relative = (vb.v + vb.w.cross(row.rb)) - (va.v + va.w.cross(row.ra));
         let impulse = if row.kind == JOINT_BALL || row.kind == JOINT_HINGE {

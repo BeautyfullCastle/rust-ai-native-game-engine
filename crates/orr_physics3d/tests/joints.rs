@@ -200,3 +200,92 @@ fn a_hinge_is_deterministic_across_rollback() {
     run(&mut a, &mut Scratch::new(), 40);
     assert_eq!(a.checksum(), ahead, "a rollback replays to the same state");
 }
+
+/// A ball 3 from a fixed pivot at (0, 10, 0) along +x on a ball joint, limited by `joint`.
+fn arm(joint: impl Fn(Joint) -> Joint) -> (Frame, Entity, Entity) {
+    let mut fr = new_frame(true);
+    let pivot = spawn_body(&mut fr, Body::new_static(v3(FP::ZERO, fp!(10), FP::ZERO)), Collider::new(Shape::sphere(fp!(0.1))));
+    let shape = Shape::sphere(fp!(0.2));
+    let ball = spawn_body(&mut fr, Body::new_dynamic(v3(fp!(3), fp!(10), FP::ZERO), &shape, FP::ONE), Collider::new(shape));
+    add_joint(&mut fr, joint(Joint::new(JOINT_BALL, pivot, ball, FPVec3::ZERO, v3(fp!(-3), FP::ZERO, FP::ZERO), FP::ZERO)));
+    (fr, pivot, ball)
+}
+
+/// Angle in radians between +x and the direction from `a` to `b`.
+fn off_x(fr: &Frame, a: Entity, b: Entity) -> f64 {
+    let d = fr.get::<Body>(b).unwrap().pos - fr.get::<Body>(a).unwrap().pos;
+    (f(d.x) / distance(fr, a, b)).clamp(-1.0, 1.0).acos()
+}
+
+#[test]
+fn a_ball_joint_cone_holds_the_swing_in_every_direction() {
+    let x = v3(FP::ONE, FP::ZERO, FP::ZERO);
+    let (mut fr, pivot, ball) = arm(|j| j.with_cone(x, fp!(0.5), fp!(-3), fp!(3)));
+    // Down under gravity and sideways from the push.
+    fr.get_mut::<Body>(ball).unwrap().vel = v3(FP::ZERO, FP::ZERO, fp!(4));
+    let mut sc = Scratch::new();
+    let mut widest = 0.0f64;
+    for _ in 0..120 {
+        run(&mut fr, &mut sc, 1);
+        let swing = off_x(&fr, pivot, ball);
+        assert!(swing < 0.56, "the swing stays inside the cone: {swing}");
+        assert!((distance(&fr, pivot, ball) - 3.0).abs() < 0.1, "the anchors stay together");
+        widest = widest.max(swing);
+    }
+    assert!(widest > 0.45, "it reaches the edge of the cone: {widest}");
+    let rest = off_x(&fr, pivot, ball);
+    assert!((rest - 0.5).abs() < 0.04, "it comes to rest on the edge below the pivot: {rest}");
+}
+
+#[test]
+fn a_ball_joint_twist_stays_between_its_angles() {
+    let mut fr = new_frame(true);
+    let hub = spawn_body(&mut fr, Body::new_static(v3(FP::ZERO, fp!(10), FP::ZERO)), Collider { mask: 0, ..Collider::new(Shape::sphere(fp!(0.1))) });
+    let shape = Shape::sphere(fp!(1));
+    let w = spawn_body(&mut fr, Body::new_dynamic(v3(FP::ZERO, fp!(10), FP::ZERO), &shape, FP::ONE), Collider::new(shape));
+    let y_axis = v3(FP::ZERO, FP::ONE, FP::ZERO);
+    add_joint(&mut fr, Joint::new(JOINT_BALL, hub, w, FPVec3::ZERO, FPVec3::ZERO, FP::ZERO).with_cone(y_axis, fp!(1), fp!(-0.3), fp!(0.3)));
+    fr.get_mut::<Body>(w).unwrap().omega = v3(FP::ZERO, fp!(5), FP::ZERO);
+    let mut sc = Scratch::new();
+    for _ in 0..60 {
+        run(&mut fr, &mut sc, 1);
+        let q = fr.get::<Body>(w).unwrap().rot;
+        let twist = 2.0 * f(q.y).atan2(f(q.w));
+        assert!((-0.33..=0.33).contains(&twist), "the twist stays within its range: {twist}");
+    }
+    let q = fr.get::<Body>(w).unwrap().rot;
+    let twist = 2.0 * f(q.y).atan2(f(q.w));
+    assert!((twist - 0.3).abs() < 0.03, "it stops on the upper twist: {twist}");
+}
+
+#[test]
+fn inside_its_cone_a_ball_joint_moves_as_a_free_one() {
+    let x = v3(FP::ONE, FP::ZERO, FP::ZERO);
+    let (mut free, _, a) = arm(|j| j);
+    let (mut wide, _, b) = arm(|j| j.with_cone(x, fp!(3), fp!(-3), fp!(3)));
+    run(&mut free, &mut Scratch::new(), 40);
+    run(&mut wide, &mut Scratch::new(), 40);
+    assert_eq!(*free.get::<Body>(a).unwrap(), *wide.get::<Body>(b).unwrap(), "a bound far away adds nothing");
+}
+
+#[test]
+fn a_ball_joint_cone_is_deterministic_across_rollback() {
+    let x = v3(FP::ONE, FP::ZERO, FP::ZERO);
+    let scene = || {
+        let (mut fr, _, ball) = arm(|j| j.with_cone(x, fp!(0.4), fp!(-0.2), fp!(0.2)));
+        fr.get_mut::<Body>(ball).unwrap().omega = v3(fp!(4), FP::ZERO, fp!(1));
+        fr
+    };
+    let mut a = scene();
+    let mut sa = Scratch::new();
+    run(&mut a, &mut sa, 30);
+    let snapshot = a.clone();
+    run(&mut a, &mut sa, 40);
+    let ahead = a.checksum();
+    let mut b = scene();
+    run(&mut b, &mut Scratch::new(), 70);
+    assert_eq!(b.checksum(), ahead, "two runs agree");
+    a.copy_from(&snapshot);
+    run(&mut a, &mut Scratch::new(), 40);
+    assert_eq!(a.checksum(), ahead, "a rollback replays to the same state");
+}
