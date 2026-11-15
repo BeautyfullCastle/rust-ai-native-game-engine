@@ -43,6 +43,17 @@ pub struct PlacedLight {
     pub enabled: bool,
 }
 
+/// One physics joint of the scene, placed in the world for editor markers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlacedJoint {
+    pub entity: Entity,
+    /// World positions of the anchors on the first and the second body.
+    pub anchor_a: [f32; 3],
+    pub anchor_b: [f32; 3],
+    /// World direction of a hinge's or a limited ball joint's axis.
+    pub axis: Option<[f32; 3]>,
+}
+
 /// What a scene says about its lighting and its final picture, in renderer terms.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SceneLook {
@@ -67,6 +78,8 @@ pub struct SceneLook {
     pub shadow_cascades: u32,
     /// The enabled decals in entity order. The renderer draws the first `orr_render::MAX_DECALS`.
     pub decals: Vec<orr_render::Decal>,
+    /// The physics joints whose two bodies exist, in entity order, for editor markers.
+    pub joints: Vec<PlacedJoint>,
 }
 
 fn f(v: FP) -> f32 {
@@ -126,7 +139,7 @@ pub fn layers_of(frame: FrameView<'_>, entity: Entity) -> u32 {
 /// without any [`Light`] component, and its ambient light is kept while the
 /// scene's [`Environment`] has its default values. Its shadow area is always kept.
 pub fn scene_look(frame: FrameView<'_>, fallback: &Lighting) -> SceneLook {
-    let mut look = SceneLook { lighting: *fallback, scene_lights: SceneLights::default(), bloom: None, effects: Vec::new(), lights: Vec::new(), dropped_lights: 0, shadow_follows_view: false, shadow_cascades: 1, decals: Vec::new() };
+    let mut look = SceneLook { lighting: *fallback, scene_lights: SceneLights::default(), bloom: None, effects: Vec::new(), lights: Vec::new(), dropped_lights: 0, shadow_follows_view: false, shadow_cascades: 1, decals: Vec::new(), joints: Vec::new() };
     // An environment left at its default values keeps the ambient light of the game.
     // Simulation systems can write any value, so every value is brought into
     // the range the inspector allows before the renderer sees it.
@@ -157,6 +170,7 @@ pub fn scene_look(frame: FrameView<'_>, fallback: &Lighting) -> SceneLook {
         }
     }
     look.decals = decals(frame);
+    look.joints = joints(frame);
     if !frame.registers::<Light>() || frame.count::<Light>() == 0 {
         return look;
     }
@@ -234,6 +248,28 @@ fn decals(frame: FrameView<'_>) -> Vec<orr_render::Decal> {
                 softness: f(decal.softness).clamp(0.0, 1.0),
                 region: None,
             }
+        })
+        .collect()
+}
+
+/// The joints between two existing bodies, with their anchors placed by the bodies' poses.
+fn joints(frame: FrameView<'_>) -> Vec<PlacedJoint> {
+    if !frame.registers::<orr_physics3d::Joint>() || !frame.registers::<Body>() {
+        return Vec::new();
+    }
+    let quat = |b: &Body| [f(b.rot.x), f(b.rot.y), f(b.rot.z), f(b.rot.w)];
+    let anchor = |b: &Body, local: FPVec3| {
+        let r = rotate(quat(b), v3(local));
+        let p = v3(b.pos);
+        [p[0] + r[0], p[1] + r[1], p[2] + r[2]]
+    };
+    frame
+        .iter::<orr_physics3d::Joint>()
+        .filter_map(|(entity, joint)| {
+            let (a, b) = (frame.get::<Body>(joint.a)?, frame.get::<Body>(joint.b)?);
+            let limited_ball = joint.kind == orr_physics3d::JOINT_BALL && joint.flags & orr_physics3d::JOINT_LIMIT != 0;
+            let axis = (joint.kind == orr_physics3d::JOINT_HINGE || limited_ball).then(|| rotate(quat(a), v3(joint.axis_a)));
+            Some(PlacedJoint { entity, anchor_a: anchor(a, joint.anchor_a), anchor_b: anchor(b, joint.anchor_b), axis })
         })
         .collect()
 }
@@ -513,8 +549,34 @@ impl SceneLook {
     /// an editor view: a small cross at a point or spot light, and a line along
     /// the direction of a directional or spot light. The marker has the light's
     /// color; the sun's is yellow and a switched off light's is gray. The
-    /// selected light's marker is wider.
+    /// selected light's marker is wider. A joint is a cyan line between its
+    /// anchors with a cross at the first one and, for a hinge or a limited
+    /// ball joint, a line along its axis.
     pub fn draw_markers(&self, list: &mut RenderList3D, selected: Option<Entity>) {
+        self.draw_joint_markers(list, selected);
+        self.draw_light_markers(list, selected);
+    }
+
+    fn draw_joint_markers(&self, list: &mut RenderList3D, selected: Option<Entity>) {
+        for joint in &self.joints {
+            let width = if selected == Some(joint.entity) { 3.0 } else { 1.5 };
+            let color = [0.2, 0.9, 1.0, 1.0];
+            let p = joint.anchor_a;
+            list.line(p, joint.anchor_b, width, color);
+            for axis in 0..3 {
+                let mut offset = [0.0; 3];
+                offset[axis] = 0.12;
+                list.line([p[0] - offset[0], p[1] - offset[1], p[2] - offset[2]], [p[0] + offset[0], p[1] + offset[1], p[2] + offset[2]], width, color);
+            }
+            if let Some(axis) = joint.axis {
+                let length = axis.iter().map(|c| c * c).sum::<f32>().sqrt().max(1.0e-6);
+                let end = |s: f32| std::array::from_fn(|i| p[i] + axis[i] / length * s);
+                list.line(end(-0.6), end(0.6), width, [1.0, 0.5, 0.1, 1.0]);
+            }
+        }
+    }
+
+    fn draw_light_markers(&self, list: &mut RenderList3D, selected: Option<Entity>) {
         for placed in &self.lights {
             let light = &placed.light;
             let highlight = selected == Some(placed.entity);

@@ -311,3 +311,32 @@ fn decals_follow_their_entities_and_reach_the_render_list() {
     look.apply(&mut list);
     assert_eq!(list.decals, look.decals);
 }
+
+#[test]
+fn joints_are_placed_by_their_bodies_and_drawn_as_markers() {
+    let mut builder = ComponentRegistryBuilder::new();
+    orr_physics3d::register(&mut builder);
+    orr_physics3d::register_joints(&mut builder);
+    orr_gfx::register(&mut builder);
+    let mut frame = Frame::new(builder.build());
+    orr_gfx::init(&mut frame);
+    let shape = orr_physics3d::Shape::sphere(FP::ONE);
+    let body = |frame: &mut Frame, x: i32| orr_physics3d::spawn_body(frame, orr_physics3d::Body::new_static(FPVec3::new(int(x), int(2), FP::ZERO)), orr_physics3d::Collider::new(shape));
+    let (a, b) = (body(&mut frame, 0), body(&mut frame, 4));
+    let z = FPVec3::new(FP::ZERO, FP::ZERO, FP::ONE);
+    let hinge = orr_physics3d::add_joint(&mut frame, orr_physics3d::Joint::hinge(a, b, FPVec3::new(int(1), FP::ZERO, FP::ZERO), FPVec3::new(int(-1), FP::ZERO, FP::ZERO), z));
+    // A joint to a missing body is not drawn.
+    let gone = frame.spawn();
+    orr_physics3d::add_joint(&mut frame, orr_physics3d::Joint::new(orr_physics3d::JOINT_ROD, a, gone, FPVec3::ZERO, FPVec3::ZERO, FP::ONE));
+    let look = scene_look(FrameView::of(&frame), &fallback());
+    assert_eq!(look.joints.len(), 1);
+    let joint = look.joints[0];
+    assert_eq!(joint.entity, hinge);
+    assert!(close(joint.anchor_a, [1.0, 2.0, 0.0]) && close(joint.anchor_b, [3.0, 2.0, 0.0]));
+    assert!(close(joint.axis.unwrap(), [0.0, 0.0, 1.0]));
+    let mut list = RenderList3D::default();
+    look.draw_markers(&mut list, Some(hinge));
+    // The line between the anchors, a cross of three lines and the axis.
+    assert_eq!(list.lines.len(), 5);
+    assert!(list.lines.iter().all(|l| l.width == 3.0), "the selected joint is drawn wider");
+}
