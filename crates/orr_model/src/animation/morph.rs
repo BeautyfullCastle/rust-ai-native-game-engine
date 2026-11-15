@@ -73,9 +73,13 @@ fn weight_ok(w: f32) -> bool {
 
 /// Checks the targets and tracks against the rest of `source`.
 pub(super) fn validate(source: &AnimatedSource, decoded: &mut usize) -> Result<(), Error> {
-    let morph = &source.morph;
+    validate_targets(source, decoded)?;
+    validate_channels(source, decoded)
+}
+
+fn validate_targets(source: &AnimatedSource, decoded: &mut usize) -> Result<(), Error> {
     let mut last = None;
-    for p in &morph.primitives {
+    for p in &source.morph.primitives {
         let primitive = source.primitives.get(p.primitive as usize).ok_or_else(|| invalid("morph primitive out of range"))?;
         if last.is_some_and(|l| l >= p.primitive) {
             return Err(invalid("morph primitives must be in increasing order"));
@@ -94,7 +98,11 @@ pub(super) fn validate(source: &AnimatedSource, decoded: &mut usize) -> Result<(
             add_budget(decoded, target.name.len() + (target.positions.len() + target.normals.len()) * 12, MAX_DECODED_BYTES, "decoded model")?;
         }
     }
-    for channel in &morph.channels {
+    Ok(())
+}
+
+fn validate_channels(source: &AnimatedSource, decoded: &mut usize) -> Result<(), Error> {
+    for channel in &source.morph.channels {
         if channel.clip as usize >= source.clips.len() {
             return Err(invalid("morph channel clip out of range"));
         }
@@ -159,7 +167,8 @@ impl AnimatedModel {
     }
 
     /// The targets of primitive `index` with their weights, when it has any.
-    pub(super) fn morph_of<'a>(&'a self, index: usize, weights: &'a [Vec<f32>]) -> Option<(&'a PrimitiveMorph, &'a [f32])> {
+    /// `weights` must have passed [`Self::validate_weights`].
+    pub fn primitive_morph<'a>(&'a self, index: usize, weights: &'a [Vec<f32>]) -> Option<(&'a PrimitiveMorph, &'a [f32])> {
         let primitives = &self.source.morph.primitives;
         let slot = primitives.binary_search_by_key(&(index as u32), |p| p.primitive).ok()?;
         Some((&primitives[slot], &weights[slot]))

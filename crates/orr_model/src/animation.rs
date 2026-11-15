@@ -682,7 +682,7 @@ impl AnimatedModel {
             .iter()
             .enumerate()
             .map(|(index, primitive)| {
-                let morph = self.morph_of(index, weights);
+                let morph = self.primitive_morph(index, weights);
                 let vertices = primitive
                     .vertices
                     .iter()
@@ -713,7 +713,7 @@ impl AnimatedModel {
             max: [f32::NEG_INFINITY; 3],
         };
         for (index, primitive) in self.source.primitives.iter().enumerate() {
-            let morph = self.morph_of(index, weights);
+            let morph = self.primitive_morph(index, weights);
             for (i, source_vertex) in primitive.vertices.iter().enumerate() {
                 let vertex = deform_vertex(primitive, source_vertex, morph_vertex(source_vertex.vertex, i, morph), pose)?;
                 for i in 0..3 {
