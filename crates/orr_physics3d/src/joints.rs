@@ -1,7 +1,9 @@
 //! Joints between two bodies, solved with the contacts in every substep: a
 //! ball joint holds two anchor points together (the bodies turn freely about
 //! it), a rod keeps them a fixed distance apart, and a rope keeps them at most
-//! that far apart. Joints are an opt-in component: a game that never calls
+//! that far apart. A hinge is a ball joint that also keeps one axis of each
+//! body lined up, so they turn about that axis only, and it can drive the turn
+//! with a motor and hold it between two angles. Joints are an opt-in component: a game that never calls
 //! [`register_joints`] steps exactly as before.
 
 use bytemuck::{Pod, Zeroable};
@@ -18,6 +20,14 @@ pub const JOINT_ROD: u32 = 1;
 /// [`Joint::kind`]: the two anchors stay at most [`Joint::length`] apart.
 pub const JOINT_ROPE: u32 = 2;
 
+/// [`Joint::kind`]: a ball joint that turns only about [`Joint::axis_a`].
+pub const JOINT_HINGE: u32 = 3;
+
+/// [`Joint::flags`]: a hinge's motor drives the turn toward [`Joint::motor_speed`].
+pub const JOINT_MOTOR: u32 = 1;
+/// [`Joint::flags`]: a hinge holds its angle between [`Joint::lower`] and [`Joint::upper`].
+pub const JOINT_LIMIT: u32 = 2;
+
 /// A joint between bodies `a` and `b`, as a component on an entity of its own.
 /// Both bodies need a [`crate::Collider`] to take part in the step.
 #[repr(C)]
@@ -33,10 +43,58 @@ pub struct Joint {
     pub anchor_b: FPVec3,
     /// Distance between the anchors for a rod or rope; unused by a ball joint.
     pub length: FP,
-    /// [`JOINT_BALL`], [`JOINT_ROD`] or [`JOINT_ROPE`].
+    /// [`JOINT_BALL`], [`JOINT_ROD`], [`JOINT_ROPE`] or [`JOINT_HINGE`].
     pub kind: u32,
-    /// Explicit padding, keep 0.
-    pub _pad: u32,
+    /// [`JOINT_MOTOR`] and [`JOINT_LIMIT`], for a hinge; 0 for none.
+    pub flags: u32,
+    /// Hinge axis in `a`'s own frame.
+    pub axis_a: FPVec3,
+    /// The same axis in `b`'s own frame; [`add_joint`] fills it.
+    pub axis_b: FPVec3,
+    /// A direction across the axis in `a`'s frame that the angle is measured from; [`add_joint`] fills it.
+    pub ref_a: FPVec3,
+    /// The same direction in `b`'s frame when the joint was added; [`add_joint`] fills it.
+    pub ref_b: FPVec3,
+    /// Lowest hinge angle in radians, above `-pi`, with [`JOINT_LIMIT`].
+    pub lower: FP,
+    /// Highest hinge angle in radians, below `pi`, with [`JOINT_LIMIT`].
+    pub upper: FP,
+    /// Turn rate of `b` against `a` about the axis, in radians per second, the motor aims for.
+    pub motor_speed: FP,
+    /// Largest torque the motor applies; 0 lets it do nothing.
+    pub max_motor_torque: FP,
+}
+
+impl Joint {
+    /// A ball joint, rod or rope with no motor and no limits.
+    #[must_use]
+    pub fn new(kind: u32, a: Entity, b: Entity, anchor_a: FPVec3, anchor_b: FPVec3, length: FP) -> Joint {
+        Joint { a, b, anchor_a, anchor_b, length, kind, ..Joint::zeroed() }
+    }
+
+    /// A hinge about `axis`, given in `a`'s own frame.
+    #[must_use]
+    pub fn hinge(a: Entity, b: Entity, anchor_a: FPVec3, anchor_b: FPVec3, axis: FPVec3) -> Joint {
+        Joint { axis_a: axis, ..Joint::new(JOINT_HINGE, a, b, anchor_a, anchor_b, FP::ZERO) }
+    }
+
+    /// The same hinge with a motor turning `b` against `a` at `speed`, with at most `max_torque`.
+    #[must_use]
+    pub fn with_motor(self, speed: FP, max_torque: FP) -> Joint {
+        Joint { flags: self.flags | JOINT_MOTOR, motor_speed: speed, max_motor_torque: max_torque, ..self }
+    }
+
+    /// The same hinge held between `lower` and `upper` radians from where it was added.
+    #[must_use]
+    pub fn with_limits(self, lower: FP, upper: FP) -> Joint {
+        Joint { flags: self.flags | JOINT_LIMIT, lower, upper, ..self }
+    }
+}
+
+/// A unit direction across `n`.
+fn across(n: FPVec3) -> FPVec3 {
+    let e = if n.x.abs() < FP::from_ratio(6, 10) { FPVec3::new(FP::ONE, FP::ZERO, FP::ZERO) } else { FPVec3::new(FP::ZERO, FP::ONE, FP::ZERO) };
+    n.cross(e).normalize()
 }
 
 /// Registers [`Joint`]. Call it after [`crate::register`] in a game that uses joints.
@@ -44,9 +102,20 @@ pub fn register_joints(builder: &mut ComponentRegistryBuilder) {
     builder.register_component::<Joint>("orr_physics3d::Joint");
 }
 
-/// Spawns an entity holding `joint` and wakes both bodies. Bodies held by a
-/// joint do not fall asleep.
-pub fn add_joint(frame: &mut Frame, joint: Joint) -> Entity {
+/// Spawns an entity holding `joint` and wakes both bodies. For a hinge it
+/// also records the axis and the zero angle in both bodies' frames from their
+/// current poses. Bodies held by a joint do not fall asleep.
+pub fn add_joint(frame: &mut Frame, mut joint: Joint) -> Entity {
+    if joint.kind == JOINT_HINGE {
+        if let (Some(a), Some(b)) = (frame.get::<Body>(joint.a), frame.get::<Body>(joint.b)) {
+            let n = a.rot.rotate_vec3(joint.axis_a).normalize();
+            let r = across(n);
+            joint.axis_a = a.rot.inverse_rotate_vec3(n);
+            joint.axis_b = b.rot.inverse_rotate_vec3(n);
+            joint.ref_a = a.rot.inverse_rotate_vec3(r);
+            joint.ref_b = b.rot.inverse_rotate_vec3(r);
+        }
+    }
     let e = frame.spawn();
     frame.add(e, joint);
     crate::wake(frame, joint.a);
@@ -78,8 +147,8 @@ pub(crate) struct JointRow {
     active: bool,
     ra: FPVec3,
     rb: FPVec3,
-    /// Ball: the inverse of the effective mass matrix.
-    k_inv: FPMat3,
+    /// Ball and hinge: the effective mass matrix `K`, kept as its adjugate rows and determinant.
+    k: Solve3,
     /// Ball: the position error as a velocity to remove.
     bias: FPVec3,
     axis: FPVec3,
@@ -88,6 +157,44 @@ pub(crate) struct JointRow {
     bias_axis: FP,
     /// Rope: the impulse this substep, which may only pull.
     total: FP,
+    hinge: Option<Hinge>,
+}
+
+/// One turn axis of a hinge: its effective mass with the anchors held
+/// together, and the anchor impulse per unit of turn impulse that holds them.
+#[derive(Clone, Copy, Default)]
+struct TurnAxis {
+    axis: FPVec3,
+    mass: FP,
+    couple: FPVec3,
+    /// How a turn about `axis` moves the anchors apart, per unit.
+    c: FPVec3,
+    /// Alignment rows: the misalignment as a velocity to remove.
+    bias: FP,
+}
+
+#[derive(Clone, Copy)]
+struct Hinge {
+    flags: u32,
+    axis_a: FPVec3,
+    axis_b: FPVec3,
+    ref_a: FPVec3,
+    ref_b: FPVec3,
+    lower: FP,
+    upper: FP,
+    motor_speed: FP,
+    max_torque: FP,
+    // Refreshed per substep.
+    across: [TurnAxis; 2],
+    /// The inverse of the 2x2 effective mass of the two alignment rows, solved together.
+    across_inv: [FP; 3],
+    turn: TurnAxis,
+    angle: FP,
+    inv_h: FP,
+    motor_max: FP,
+    motor_total: FP,
+    lower_total: FP,
+    upper_total: FP,
 }
 
 /// Body index of `e` in the step's ascending entity list.
@@ -134,15 +241,64 @@ pub(crate) fn prepare(frame: &Frame, ents: &[Entity], bslot: &[u32], bd: &[Body]
             active: false,
             ra: FPVec3::ZERO,
             rb: FPVec3::ZERO,
-            k_inv: FPMat3::ZERO,
+            k: Solve3::default(),
             bias: FPVec3::ZERO,
             axis: FPVec3::ZERO,
             mass: FP::ZERO,
             bias_axis: FP::ZERO,
             total: FP::ZERO,
+            hinge: (joint.kind == JOINT_HINGE).then_some(Hinge {
+                flags: joint.flags,
+                axis_a: joint.axis_a,
+                axis_b: joint.axis_b,
+                ref_a: joint.ref_a,
+                ref_b: joint.ref_b,
+                lower: joint.lower,
+                upper: joint.upper,
+                motor_speed: joint.motor_speed,
+                max_torque: joint.max_motor_torque,
+                across: [TurnAxis::default(); 2],
+                across_inv: [FP::ZERO; 3],
+                turn: TurnAxis::default(),
+                angle: FP::ZERO,
+                inv_h: FP::ZERO,
+                motor_max: FP::ZERO,
+                motor_total: FP::ZERO,
+                lower_total: FP::ZERO,
+                upper_total: FP::ZERO,
+            }),
         });
     }
     rows
+}
+
+/// Solves `K x = v` for a 3x3 `K` without forming `K^-1`: the entries of a
+/// light body's `K^-1` far from its anchor fall to a few fixed point units.
+#[derive(Clone, Copy, Default)]
+struct Solve3 {
+    /// The adjugate's rows: the cross products of `K`'s columns.
+    rows: [FPVec3; 3],
+    det: FP,
+}
+
+impl Solve3 {
+    fn new(k: &FPMat3) -> Solve3 {
+        let (c0, c1, c2) = (k.col(0), k.col(1), k.col(2));
+        let rows = [c1.cross(c2), c2.cross(c0), c0.cross(c1)];
+        Solve3 { rows, det: c0.dot(rows[0]) }
+    }
+
+    fn solve(&self, v: FPVec3) -> FPVec3 {
+        if self.det == FP::ZERO {
+            return FPVec3::ZERO;
+        }
+        // Each product carries 32 fraction bits; dividing by the 16-bit determinant leaves 16.
+        let x = |r: FPVec3| {
+            let n = i128::from(r.x.raw()) * i128::from(v.x.raw()) + i128::from(r.y.raw()) * i128::from(v.y.raw()) + i128::from(r.z.raw()) * i128::from(v.z.raw());
+            FP::from_raw((n / i128::from(self.det.raw())).clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64)
+        };
+        FPVec3::new(x(self.rows[0]), x(self.rows[1]), x(self.rows[2]))
+    }
 }
 
 /// `I^-1 * [r]x * [r]x^T`-style term: `-[r]x I^-1 [r]x`.
@@ -168,14 +324,16 @@ pub(crate) fn begin_substep(rows: &mut [JointRow], pw: &[Vw], h: FP, rotate: fn(
         let gap = (row.pos_b + pw[row.b].v + row.rb) - (row.pos_a + pw[row.a].v + row.ra);
         row.total = FP::ZERO;
         row.active = true;
-        if row.kind == JOINT_BALL {
+        if row.kind == JOINT_BALL || row.kind == JOINT_HINGE {
             let m = row.ima + row.imb;
             let k = add(&add(&FPMat3::from_diag(FPVec3::new(m, m, m)), &arm(&row.iia, row.ra)), &arm(&row.iib, row.rb));
-            match k.inverse() {
-                Some(inverse) => row.k_inv = inverse,
-                None => row.active = false,
-            }
+            row.k = Solve3::new(&k);
+            row.active = row.k.det != FP::ZERO;
             row.bias = gap * (BAUMGARTE * inv_h);
+            if let (true, Some(mut hinge)) = (row.active, row.hinge) {
+                begin_hinge(row, &mut hinge, rot_a, rot_b, h);
+                row.hinge = Some(hinge);
+            }
             continue;
         }
         let distance = gap.length();
@@ -196,13 +354,96 @@ pub(crate) fn begin_substep(rows: &mut [JointRow], pw: &[Vw], h: FP, rotate: fn(
     }
 }
 
+/// The hinge's axes, misalignment and angle at this substep's pose.
+fn begin_hinge(row: &JointRow, hinge: &mut Hinge, rot_a: FPQuat, rot_b: FPQuat, h: FP) {
+    let inv_h = FP::ONE / h;
+    let n = rot_a.rotate_vec3(hinge.axis_a);
+    let misaligned = n.cross(rot_b.rotate_vec3(hinge.axis_b));
+    let t1 = across(n);
+    let t2 = n.cross(t1);
+    for (slot, t) in hinge.across.iter_mut().zip([t1, t2]) {
+        *slot = turn_axis(row, t);
+        slot.bias = t.dot(misaligned) * BAUMGARTE * inv_h;
+    }
+    let [s, u] = hinge.across;
+    let k = |a: &TurnAxis, b: &TurnAxis| a.axis.dot(row.iia.mul_vec(b.axis) + row.iib.mul_vec(b.axis)) + a.c.dot(b.couple);
+    let (k11, k12, k22) = (k(&s, &s), k(&s, &u), k(&u, &u));
+    let det = k11 * k22 - k12 * k12;
+    hinge.across_inv = if det > FP::ZERO { [k22 / det, -(k12 / det), k11 / det] } else { [FP::ZERO; 3] };
+    hinge.turn = turn_axis(row, n);
+    let (ra, rb) = (rot_a.rotate_vec3(hinge.ref_a), rot_b.rotate_vec3(hinge.ref_b));
+    hinge.angle = n.dot(ra.cross(rb)).atan2(ra.dot(rb));
+    hinge.inv_h = inv_h;
+    hinge.motor_max = hinge.max_torque * h;
+    hinge.motor_total = FP::ZERO;
+    hinge.lower_total = FP::ZERO;
+    hinge.upper_total = FP::ZERO;
+}
+
+/// A turn about `axis` paired with the anchor impulse `-K^-1 c` that keeps
+/// the anchors together; its effective mass is the Schur complement of `K`.
+fn turn_axis(row: &JointRow, axis: FPVec3) -> TurnAxis {
+    let c = row.iib.mul_vec(axis).cross(row.rb) + row.iia.mul_vec(axis).cross(row.ra);
+    let couple = -row.k.solve(c);
+    let k = axis.dot(row.iia.mul_vec(axis) + row.iib.mul_vec(axis)) + c.dot(couple);
+    TurnAxis { axis, mass: if k > FP::ZERO { FP::ONE / k } else { FP::ZERO }, couple, c, bias: FP::ZERO }
+}
+
+/// Applies a turn impulse `lambda` about `t.axis` (on `b`, against `a`) with its anchor impulse.
+fn turn(row: &JointRow, t: &TurnAxis, va: &mut Vw, vb: &mut Vw, lambda: FP) {
+    let p = t.couple * lambda;
+    let spin = t.axis * lambda;
+    va.v -= p * row.ima;
+    va.w -= row.iia.mul_vec(row.ra.cross(p) + spin);
+    vb.v += p * row.imb;
+    vb.w += row.iib.mul_vec(row.rb.cross(p) + spin);
+}
+
+/// The motor, the limits and the axis alignment of a hinge.
+fn solve_hinge(row: &JointRow, hinge: &mut Hinge, va: &mut Vw, vb: &mut Vw) {
+    let n = hinge.turn;
+    if n.mass > FP::ZERO {
+        if hinge.flags & JOINT_MOTOR != 0 {
+            let lambda = -(n.mass * (n.axis.dot(vb.w - va.w) - hinge.motor_speed));
+            let total = (hinge.motor_total + lambda).clamp(-hinge.motor_max, hinge.motor_max);
+            let lambda = total - hinge.motor_total;
+            hinge.motor_total = total;
+            turn(row, &n, va, vb, lambda);
+        }
+        if hinge.flags & JOINT_LIMIT != 0 {
+            // Speculative: a bound not yet reached only stops a turn that would pass it this substep.
+            let bias = |c: FP| if c < FP::ZERO { c * BAUMGARTE * hinge.inv_h } else { c * hinge.inv_h };
+            let lambda = -(n.mass * (n.axis.dot(vb.w - va.w) + bias(hinge.angle - hinge.lower)));
+            let total = (hinge.lower_total + lambda).max(FP::ZERO);
+            let lambda = total - hinge.lower_total;
+            hinge.lower_total = total;
+            turn(row, &n, va, vb, lambda);
+            let lambda = -(n.mass * (n.axis.dot(va.w - vb.w) + bias(hinge.upper - hinge.angle)));
+            let total = (hinge.upper_total + lambda).max(FP::ZERO);
+            let lambda = total - hinge.upper_total;
+            hinge.upper_total = total;
+            turn(row, &n, va, vb, -lambda);
+        }
+    }
+    let [s, u] = hinge.across;
+    let [i11, i12, i22] = hinge.across_inv;
+    let w = vb.w - va.w;
+    let (rs, ru) = (-(s.axis.dot(w) + s.bias), -(u.axis.dot(w) + u.bias));
+    turn(row, &s, va, vb, i11 * rs + i12 * ru);
+    turn(row, &u, va, vb, i12 * rs + i22 * ru);
+}
+
 /// One iteration over every active joint.
 pub(crate) fn solve(rows: &mut [JointRow], vw: &mut [Vw]) {
     for row in rows.iter_mut().filter(|r| r.active) {
         let (mut va, mut vb) = (vw[row.a], vw[row.b]);
+        if let Some(mut hinge) = row.hinge {
+            solve_hinge(row, &mut hinge, &mut va, &mut vb);
+            row.hinge = Some(hinge);
+        }
         let relative = (vb.v + vb.w.cross(row.rb)) - (va.v + va.w.cross(row.ra));
-        let impulse = if row.kind == JOINT_BALL {
-            row.k_inv.mul_vec(-(relative + row.bias))
+        let impulse = if row.kind == JOINT_BALL || row.kind == JOINT_HINGE {
+            row.k.solve(-(relative + row.bias))
         } else {
             let mut lambda = -(row.mass * (relative.dot(row.axis) + row.bias_axis));
             if row.kind == JOINT_ROPE {

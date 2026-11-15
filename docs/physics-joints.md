@@ -48,10 +48,25 @@ add_joint(frame, Joint::new(JOINT_PIN, door_frame, door, anchor_a, anchor_b, FP:
 `orr_physics3d`에도 같은 구조의 조인트가 있다. 종류는 `JOINT_BALL`(두 고정점을 붙이고 모든 방향으로 돎), `JOINT_ROD`, `JOINT_ROPE`다. 고정점은 각 바디의 회전 전 좌표이고, 매 서브스텝마다 그 서브스텝까지 움직인 자세로 고정점과 유효 질량(3×3)을 다시 계산한다. 접촉의 반복 순서(홀짝으로 번갈아)를 유지한 채 반복마다 접촉 다음에 조인트를 푼다.
 
 - 정적 접촉 제공자 경로(`step_with_static_contacts`, 지형 충돌)에서는 조인트를 풀지 않는다.
+- 점 제약의 3×3 유효 질량은 역행렬을 만들지 않고 여인수와 행렬식으로 푼다(i128 누적). 가볍고 고정점에서 먼 바디는 `K^-1` 원소가 고정소수점 몇 단위로 떨어져 정밀도가 사라지기 때문이다.
+
+### 힌지 (`JOINT_HINGE`)
+
+```rust
+// 문: 문틀 기준 y축으로 돌고, 닫힌 자리에서 0 ~ 1.6라디안만 열림
+add_joint(frame, Joint::hinge(frame_body, door, hinge_on_frame, hinge_on_door, FPVec3::new(FP::ZERO, FP::ONE, FP::ZERO)).with_limits(FP::ZERO, fp!(1.6)));
+// 바퀴: 차축(x) 둘레로 초당 8라디안, 토크 60까지
+add_joint(frame, Joint::hinge(chassis, wheel, axle, FPVec3::ZERO, FPVec3::new(FP::ONE, FP::ZERO, FP::ZERO)).with_motor(fp!(8), fp!(60)));
+```
+
+- 볼 조인트에 두 바디의 축을 맞추는 회전 제약 두 줄(축에 수직인 두 방향)을 더한 것이다. 두 줄은 2×2 블록으로 함께 푼다.
+- 축은 `a`의 회전 전 좌표로 준다. `add_joint`가 그 순간 자세로 `b` 쪽 축(`axis_b`)과 각도 기준 방향(`ref_a`, `ref_b`)을 채운다. 각도는 `b`가 `a`에 대해 축 둘레로 돈 양이고, 추가한 순간이 0이다.
+- 모터, 제한의 의미와 풀이는 2D 핀과 같다(speculative 제한, 틱이 아니라 서브스텝마다 임펄스 상한 `max_motor_torque * h`).
+- 회전 임펄스(정렬, 모터, 제한)는 모두 고정점이 벌어지지 않게 짝이 되는 선형 임펄스와 함께 넣고, 유효 질량은 3×3 고정점 질량의 Schur complement다.
 
 ## 한계
 
 - 조인트에 매달린 동적 바디는 잠들지 않는다(접촉으로 묶인 섬과 조인트를 합치지 않음). `add_joint`가 두 바디를 깨운다.
-- 3D 관절에는 모터와 각도 제한이 없다. 스프링(부드러운 조인트), 프리즘(미끄럼) 조인트는 2D, 3D 모두 없다.
+- 3D 볼 조인트에는 원뿔(스윙)·비틀림 제한이 없다(힌지만 각도 제한이 있음). 스프링(부드러운 조인트), 프리즘(미끄럼) 조인트는 2D, 3D 모두 없다.
 - 위치 보정이 속도 항(Baumgarte)이라 무거운 사슬은 늘어날 수 있다. 반복 횟수(`PhysicsConfig::velocity_iterations`)를 올리면 줄어든다.
 - 에디터 인스펙터에서 조인트를 만들거나 고치는 화면은 없다(리플렉션 미등록).
