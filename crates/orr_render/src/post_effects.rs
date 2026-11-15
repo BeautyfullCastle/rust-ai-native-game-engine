@@ -268,7 +268,7 @@ struct Uniform {
 }
 
 /// The inverse of a column-major 4 x 4 matrix, or the identity when it has none.
-fn inverse(m: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
+pub(crate) fn inverse(m: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
     let a: [f64; 16] = std::array::from_fn(|i| f64::from(m[i / 4][i % 4]));
     let mut inv = [0.0f64; 16];
     inv[0] = a[5] * a[10] * a[15] - a[5] * a[11] * a[14] - a[9] * a[6] * a[15] + a[9] * a[7] * a[14] + a[13] * a[6] * a[11] - a[13] * a[7] * a[10];

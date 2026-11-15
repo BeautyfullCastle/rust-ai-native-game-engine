@@ -289,3 +289,25 @@ fn a_terrain_is_read_with_its_heightmap_size_and_center() {
     assert_eq!(t.resolution, 352, "the grid is bounded");
     assert!(t.cast_shadows);
 }
+
+#[test]
+fn decals_follow_their_entities_and_reach_the_render_list() {
+    let mut frame = gfx_frame();
+    let decal = orr_gfx::Decal { size: FPVec3::new(int(2), int(1), int(500)), shape: orr_gfx::DECAL_SQUARE, ..orr_gfx::Decal::default() };
+    // Facing straight down; the second one also rolled a quarter turn.
+    for (rotation, enabled) in [([90, 0, 0], 1), ([90, 0, 90], 1), ([0, 0, 0], 0)] {
+        let e = frame.spawn();
+        frame.add(e, Transform3 { position: FPVec3::new(int(1), int(2), int(3)), rotation: FPVec3::new(int(rotation[0]), int(rotation[1]), int(rotation[2])), ..Transform3::default() });
+        frame.add(e, orr_gfx::Decal { enabled, ..decal });
+    }
+    let look = scene_look(FrameView::of(&frame), &fallback());
+    assert_eq!(look.decals.len(), 2, "the disabled decal is left out");
+    let [flat, rolled] = [look.decals[0], look.decals[1]];
+    assert!(close(flat.center, [1.0, 2.0, 3.0]) && close(flat.direction, [0.0, -1.0, 0.0]) && close(flat.up, [0.0, 0.0, 1.0]));
+    assert!(close(rolled.direction, [0.0, -1.0, 0.0]) && close(rolled.up, [-1.0, 0.0, 0.0]));
+    assert!(close(flat.size, [2.0, 1.0, 100.0]), "the depth is brought into range: {:?}", flat.size);
+    assert!(flat.shape == orr_render::DecalShape::Square && (flat.color[3] - 1.0).abs() < 1e-6);
+    let mut list = RenderList3D::default();
+    look.apply(&mut list);
+    assert_eq!(list.decals, look.decals);
+}
