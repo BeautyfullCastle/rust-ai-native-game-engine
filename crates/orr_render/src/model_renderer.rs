@@ -185,6 +185,23 @@ struct InstanceDraw<B: Rhi> {
 #[cfg(feature = "imported-scene")]
 pub(crate) struct PreparedStatic {
     objects: Vec<Object>,
+    /// World-space box (min, max) of each object's vertices.
+    bounds: Vec<([f32; 3], [f32; 3])>,
+    /// Objects culling left out of the main pass; empty when nothing was culled.
+    hidden: Vec<bool>,
+}
+
+#[cfg(feature = "imported-scene")]
+impl PreparedStatic {
+    /// Marks the objects `culler` finds hidden and returns how many there are.
+    pub(crate) fn cull(&mut self, culler: &crate::visibility::Culler) -> usize {
+        self.hidden = self.bounds.iter().map(|&(min, max)| !culler.shows_box(min, max)).collect();
+        self.hidden.iter().filter(|&&h| h).count()
+    }
+
+    fn shows(&self, index: usize) -> bool {
+        !self.hidden.get(index).copied().unwrap_or(false)
+    }
 }
 struct Draw<B: Rhi> {
     #[cfg(feature = "imported-scene")]
@@ -632,6 +649,7 @@ impl<B: Rhi> ModelRenderer<B> {
             .iter()
             .take(prepared.objects.len())
             .enumerate()
+            .filter(|&(index, _)| prepared.shows(index))
         {
             let geometry = &self.draws[index % self.draws.len()];
             let (pipeline, bind) = match self.active_surface(index) {
@@ -706,6 +724,10 @@ impl<B: Rhi> ModelRenderer<B> {
         let count = ready.map_or(self.draws.len(), |r| r.objects.len());
         let mut current: Option<&B::Pipeline> = None;
         for i in 0..count {
+            // Culled objects still cast shadows; only the lit pass skips them.
+            if !depth && ready.is_some_and(|r| !r.shows(i)) {
+                continue;
+            }
             let geometry = &self.draws[i % self.draws.len()];
             let binds = if ready.is_some() {
                 &self.instance_draws[i].shadow
@@ -794,6 +816,7 @@ fn prepare_static_instances(
     instances: &[StaticInstance],
 ) -> Result<PreparedStatic, StaticInstanceError> {
     let mut objects = Vec::with_capacity(static_instance_draw_count(model, instances.len())?);
+    let mut world_bounds = Vec::with_capacity(objects.capacity());
     for instance in instances {
         let placement = instance.matrix()?;
         for (p, &(min, max)) in model.source().primitives.iter().zip(bounds) {
@@ -806,6 +829,7 @@ fn prepare_static_instances(
                 return Err(StaticInstanceError::InvalidPlacement);
             }
             // A transformed AABB bounds every vertex, including rotated/sheared nodes.
+            let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
             for corner in 0..8 {
                 let local = std::array::from_fn(|axis| {
                     if corner & (1 << axis) == 0 {
@@ -814,14 +838,16 @@ fn prepare_static_instances(
                         max[axis]
                     }
                 });
-                if !world
-                    .transform_point4(local)
-                    .iter()
-                    .all(|v| v.is_finite() && v.abs() <= 1e9)
-                {
+                let point = world.transform_point4(local);
+                if !point.iter().all(|v| v.is_finite() && v.abs() <= 1e9) {
                     return Err(StaticInstanceError::InvalidPlacement);
                 }
+                for axis in 0..3 {
+                    lo[axis] = lo[axis].min(point[axis]);
+                    hi[axis] = hi[axis].max(point[axis]);
+                }
             }
+            world_bounds.push((lo, hi));
             let material = &model.source().materials[p.material as usize];
             let wrap = |value| match value {
                 Wrap::Clamp => 0,
@@ -843,7 +869,7 @@ fn prepare_static_instances(
             });
         }
     }
-    Ok(PreparedStatic { objects })
+    Ok(PreparedStatic { objects, bounds: world_bounds, hidden: Vec::new() })
 }
 
 /// Pure validation and uniform preparation, shared by standalone and composed paths.

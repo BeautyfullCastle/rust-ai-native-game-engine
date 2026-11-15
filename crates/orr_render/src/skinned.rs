@@ -156,6 +156,24 @@ pub(crate) struct PreparedSkinned {
     bounds: Vec<SkinnedBounds>,
     /// Per draw: the vertices after morph targets, when its weights move them.
     morphed: Vec<Option<Vec<Vertex>>>,
+    /// Draws culling left out of the main pass; empty when nothing was culled.
+    hidden: Vec<bool>,
+}
+
+impl PreparedSkinned {
+    /// Marks the draws of every instance whose current bounds `culler` finds
+    /// hidden and returns how many draws that is.
+    #[cfg(feature = "imported-scene")]
+    pub(crate) fn cull(&mut self, culler: &crate::visibility::Culler) -> usize {
+        let per_instance = self.objects.len().checked_div(self.bounds.len()).unwrap_or(0);
+        let shown: Vec<bool> = self.bounds.iter().map(|b| culler.shows_box(b.min, b.max)).collect();
+        self.hidden = (0..self.objects.len()).map(|i| !shown[i / per_instance]).collect();
+        self.hidden.iter().filter(|&&h| h).count()
+    }
+
+    fn shows(&self, index: usize) -> bool {
+        !self.hidden.get(index).copied().unwrap_or(false)
+    }
 }
 
 /// The GPU vertex of `v` with position, normal and UV from `vertex`.
@@ -510,7 +528,7 @@ impl<B: Rhi> SkinnedModelRenderer<B> {
                 });
             }
         }
-        Ok(PreparedSkinned { objects, bounds, morphed })
+        Ok(PreparedSkinned { objects, bounds, morphed, hidden: Vec::new() })
     }
 
     /// Allocate only uniform slots, then upload the already validated frame.
@@ -654,7 +672,7 @@ impl<B: Rhi> SkinnedModelRenderer<B> {
     ) {
         let mut commands = Vec::new();
         let mut current: Option<&B::Pipeline> = None;
-        for i in 0..prepared.objects.len() {
+        for i in (0..prepared.objects.len()).filter(|&i| prepared.shows(i)) {
             let draw = &self.draws[i];
             let geometry = &self.geometry[i % self.geometry.len()];
             // A draw with a surface shader uses its pipeline; the others the built-in look.
@@ -704,6 +722,10 @@ impl<B: Rhi> SkinnedModelRenderer<B> {
     ) {
         let mut current: Option<&B::Pipeline> = None;
         for i in 0..ready.objects.len() {
+            // Culled draws still cast shadows; only the lit pass skips them.
+            if !depth && !ready.shows(i) {
+                continue;
+            }
             let geometry = &self.geometry[i % self.geometry.len()];
             let binds = &self.draws[i].shadow;
             // Shadows are cast with the mesh alone; a surface shader changes only how the draw is lit.

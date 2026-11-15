@@ -345,6 +345,7 @@ pub(crate) struct PrimitiveDef {
     #[serde(default, rename = "extras")]
     pub(crate) _extras: Option<serde_json::Value>,
 }
+#[cfg(feature = "animation")]
 impl PrimitiveDef {
     /// The morph targets, empty when there are none.
     pub(crate) fn morph_targets(&self) -> &[BTreeMap<String, usize>] {

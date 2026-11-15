@@ -206,6 +206,36 @@ impl OcclusionBuffer {
     }
 }
 
+/// The frustum and occlusion tests of one frame, for the bounding sphere of anything drawn.
+pub struct Culler {
+    view: View,
+    frustum: bool,
+    occlusion: Option<OcclusionBuffer>,
+}
+
+impl Culler {
+    /// Builds the occlusion buffer from the boxes and planes of `occluders` (by kind) when `culling` asks for it.
+    pub fn new(view: View, culling: Culling, occluders: [&[Instance3D]; 4]) -> Self {
+        let occlusion = culling.occlusion.then(|| OcclusionBuffer::build(&view, occluders));
+        Self { view, frustum: culling.frustum, occlusion }
+    }
+
+    /// Whether a sphere may show: it touches the view and no occluder hides it.
+    pub fn shows(&self, center: [f32; 3], radius: f32) -> bool {
+        if self.frustum && !self.view.sees_sphere(center, radius) {
+            return false;
+        }
+        !self.occlusion.as_ref().is_some_and(|b| b.hides(&self.view, center, radius))
+    }
+
+    /// Whether a world-space axis-aligned box may show, tested by the sphere around it.
+    pub fn shows_box(&self, min: [f32; 3], max: [f32; 3]) -> bool {
+        let center = std::array::from_fn(|i| (min[i] + max[i]) * 0.5);
+        let half = std::array::from_fn(|i| (max[i] - min[i]) * 0.5);
+        self.shows(center, dot3(half, half).sqrt())
+    }
+}
+
 /// The world faces of a box or plane instance, each with its corners in order around it.
 fn faces(kind: MeshKind, i: &Instance3D) -> Vec<[[f32; 3]; 4]> {
     let world = |local: [f32; 3]| {
@@ -230,16 +260,13 @@ fn faces(kind: MeshKind, i: &Instance3D) -> Vec<[[f32; 3]; 4]> {
 /// The instances of each kind reordered with the visible ones first (in list
 /// order, then the hidden ones in list order), and how many are visible.
 pub fn partition(view: &View, culling: Culling, instances: [&[Instance3D]; 4]) -> ([Vec<Instance3D>; 4], [u32; 4]) {
-    let occlusion = culling.occlusion.then(|| OcclusionBuffer::build(view, instances));
+    let culler = Culler::new(*view, culling, instances);
     let mut counts = [0u32; 4];
     let ordered = std::array::from_fn(|k| {
         let kind = MeshKind::ALL[k];
         let (mut shown, mut hidden) = (Vec::with_capacity(instances[k].len()), Vec::new());
         for instance in instances[k] {
-            let radius = bounding_radius(kind, instance);
-            let outside = culling.frustum && !view.sees_sphere(instance.pos, radius);
-            let covered = !outside && occlusion.as_ref().is_some_and(|b| b.hides(view, instance.pos, radius));
-            if outside || covered { hidden.push(*instance) } else { shown.push(*instance) }
+            if culler.shows(instance.pos, bounding_radius(kind, instance)) { shown.push(*instance) } else { hidden.push(*instance) }
         }
         counts[k] = shown.len() as u32;
         shown.extend(hidden);
