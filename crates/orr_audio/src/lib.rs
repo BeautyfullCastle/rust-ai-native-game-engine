@@ -1,6 +1,8 @@
 //! Presentation-only rollback-aware one-shot audio, using Kira's real mixer.
 //! A clip placed with [`Clip::at`] is heard from [`EventAudio::set_listener`]:
-//! its volume falls with distance and it pans toward its side.
+//! its volume falls with distance and it pans toward its side. A source or a
+//! listener that moves ([`Clip::moving`], [`Listener::velocity`],
+//! [`EventAudio::move_emitter`]) shifts its pitch by the Doppler effect.
 //!
 //! The default build has no device or codec dependencies. [`OfflineAudio`] renders
 //! PCM into a caller-owned buffer; `native` enables CPAL output. Nothing feeds back
@@ -18,7 +20,7 @@ use kira::backend::Backend;
 use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle, StaticSoundSettings};
 use kira::sound::PlaybackState;
 use kira::track::MainTrackBuilder;
-use kira::{AudioManager, AudioManagerSettings, Capacities, Decibels, Frame, Panning, Tween};
+use kira::{AudioManager, AudioManagerSettings, Capacities, Decibels, Frame, Panning, PlaybackRate, Tween};
 use orr_bridge::{BridgeEvent, EventKey, EventStatus, Lifecycle, ViewResync, ViewUpdate};
 
 mod offline;
@@ -33,6 +35,11 @@ impl fmt::Display for AudioError {
 }
 impl std::error::Error for AudioError {}
 
+/// Meters per second sound travels, for the Doppler effect.
+pub const SPEED_OF_SOUND: f32 = 343.0;
+/// The Doppler effect changes pitch by at most this factor up or down.
+pub const MAX_DOPPLER: f32 = 2.0;
+
 /// Where a sound comes from in the world, and how far it carries.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Emitter {
@@ -41,6 +48,8 @@ pub struct Emitter {
     pub near: f32,
     /// At this many meters and beyond the sound is silent.
     pub far: f32,
+    /// Meters per second the source moves, for the Doppler effect.
+    pub velocity: [f32; 3],
 }
 
 /// The ear that spatial sounds are heard from.
@@ -49,11 +58,17 @@ pub struct Listener {
     pub position: [f32; 3],
     /// The listener's right, toward the right speaker. It need not be a unit vector.
     pub right: [f32; 3],
+    /// Meters per second the listener moves, for the Doppler effect.
+    pub velocity: [f32; 3],
 }
 impl Default for Listener {
     fn default() -> Self {
-        Self { position: [0.0; 3], right: [1.0, 0.0, 0.0] }
+        Self { position: [0.0; 3], right: [1.0, 0.0, 0.0], velocity: [0.0; 3] }
     }
+}
+
+fn dot(a: &[f32; 3], b: &[f32; 3]) -> f32 {
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
 impl Emitter {
@@ -77,6 +92,21 @@ impl Emitter {
         };
         (volume, pan.clamp(-1.0, 1.0))
     }
+
+    /// Playback rate of this emitter for `listener` from the Doppler effect:
+    /// above 1 while they close in, below 1 while they move apart, within
+    /// `1 / MAX_DOPPLER..=MAX_DOPPLER`. `scale` multiplies both speeds (0 turns the effect off).
+    pub fn doppler(&self, listener: &Listener, scale: f32) -> f32 {
+        let offset: [f32; 3] = std::array::from_fn(|i| self.position[i] - listener.position[i]);
+        let distance = dot(&offset, &offset).sqrt();
+        if scale <= 0.0 || distance < 1e-3 {
+            return 1.0;
+        }
+        // Speeds along the line from the listener toward the source; neither may reach the speed of sound.
+        let along = |v: &[f32; 3]| (dot(v, &offset) / distance * scale).clamp(-0.9 * SPEED_OF_SOUND, 0.9 * SPEED_OF_SOUND);
+        let rate = (SPEED_OF_SOUND + along(&listener.velocity)) / (SPEED_OF_SOUND + along(&self.velocity));
+        rate.clamp(1.0 / MAX_DOPPLER, MAX_DOPPLER)
+    }
 }
 
 /// Validated, owned PCM shared cheaply by every instance. No decoder or asset IO.
@@ -89,7 +119,16 @@ impl Clip {
     /// This clip played from `position`, heard through [`EventAudio::set_listener`]:
     /// full volume within `near` meters, silent from `far` meters on.
     pub fn at(mut self, position: [f32; 3], near: f32, far: f32) -> Self {
-        self.emitter = Some(Emitter { position, near, far });
+        self.emitter = Some(Emitter { position, near, far, velocity: [0.0; 3] });
+        self
+    }
+
+    /// This placed clip's source moving at `velocity` meters per second, for
+    /// the Doppler effect. A clip without [`Clip::at`] is not changed.
+    pub fn moving(mut self, velocity: [f32; 3]) -> Self {
+        if let Some(emitter) = &mut self.emitter {
+            emitter.velocity = velocity;
+        }
         self
     }
 
@@ -139,6 +178,9 @@ pub struct AudioConfig {
     pub max_voices: usize,
     pub history_capacity: usize,
     pub cancel_fade: Duration,
+    /// Strength of the Doppler effect, 0..=10: 1 is physical, 0 turns it off,
+    /// and more exaggerates it as games often do.
+    pub doppler: f32,
 }
 impl Default for AudioConfig {
     fn default() -> Self {
@@ -146,6 +188,7 @@ impl Default for AudioConfig {
             max_voices: 32,
             history_capacity: 4096,
             cancel_fade: Duration::from_millis(15),
+            doppler: 1.0,
         }
     }
 }
@@ -158,6 +201,9 @@ impl AudioConfig {
         }
         if self.cancel_fade > Duration::from_secs(1) {
             return Err(AudioError("cancel fade must be at most one second".into()));
+        }
+        if !(0.0..=10.0).contains(&self.doppler) {
+            return Err(AudioError("doppler strength must be 0..=10".into()));
         }
         Ok(self)
     }
@@ -210,6 +256,16 @@ pub struct EventAudio<B: Backend> {
 pub type OfflineAudio = EventAudio<OfflineBackend>;
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub type NativeAudio = EventAudio<kira::backend::cpal::CpalBackend>;
+
+/// Turns a playing voice toward how `emitter` sounds to `listener`, over a few
+/// milliseconds so the change does not click.
+fn follow(voice: &mut Voice, emitter: &Emitter, listener: &Listener, doppler: f32) {
+    let tween = Tween { duration: Duration::from_millis(20), ..Tween::default() };
+    let (volume, pan) = emitter.heard_by(listener);
+    voice.handle.set_volume(Decibels(volume), tween);
+    voice.handle.set_panning(Panning(pan), tween);
+    voice.handle.set_playback_rate(PlaybackRate(f64::from(emitter.doppler(listener, doppler))), tween);
+}
 
 fn settings<B: Backend>(
     config: AudioConfig,
@@ -471,16 +527,32 @@ impl<B: Backend> EventAudio<B> {
     /// Moves the ear of spatial sounds. Playing spatial sounds follow it over
     /// a few milliseconds, so a moving listener does not click.
     pub fn set_listener(&mut self, listener: Listener) {
-        if !listener.position.iter().chain(&listener.right).all(|v| v.is_finite()) {
+        if !listener.position.iter().chain(&listener.right).chain(&listener.velocity).all(|v| v.is_finite()) {
             return;
         }
         self.listener = listener;
-        let tween = Tween { duration: Duration::from_millis(20), ..Tween::default() };
+        let (listener, doppler) = (self.listener, self.config.doppler);
         for voice in self.voices.iter_mut().filter(|v| v.key.is_some()) {
             if let Some(emitter) = voice.emitter {
-                let (volume, pan) = emitter.heard_by(&listener);
-                voice.handle.set_volume(Decibels(volume), tween);
-                voice.handle.set_panning(Panning(pan), tween);
+                follow(voice, &emitter, &listener, doppler);
+            }
+        }
+    }
+
+    /// Moves the source of the playing sound of event `key`, as a car driving
+    /// by. Its volume, pan and pitch follow over a few milliseconds. A sound
+    /// that was not placed with [`Clip::at`], or no longer plays, is left alone.
+    pub fn move_emitter(&mut self, key: EventKey, position: [f32; 3], velocity: [f32; 3]) {
+        if !position.iter().chain(&velocity).all(|v| v.is_finite()) {
+            return;
+        }
+        let (listener, doppler) = (self.listener, self.config.doppler);
+        for voice in self.voices.iter_mut().filter(|v| v.key == Some(key)) {
+            if let Some(emitter) = &mut voice.emitter {
+                emitter.position = position;
+                emitter.velocity = velocity;
+                let emitter = *emitter;
+                follow(voice, &emitter, &listener, doppler);
             }
         }
     }
@@ -553,7 +625,8 @@ impl<B: Backend> EventAudio<B> {
                 let mut data = clip.data;
                 if let Some(emitter) = clip.emitter {
                     let (volume, pan) = emitter.heard_by(&self.listener);
-                    data = data.volume(Decibels(volume)).panning(Panning(pan));
+                    let rate = emitter.doppler(&self.listener, self.config.doppler);
+                    data = data.volume(Decibels(volume)).panning(Panning(pan)).playback_rate(PlaybackRate(f64::from(rate)));
                 }
                 match self.manager.play(data) {
                     Ok(handle) => {

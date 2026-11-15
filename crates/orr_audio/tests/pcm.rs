@@ -615,7 +615,7 @@ fn a_playing_spatial_sound_follows_the_listener() {
     let (left, right) = channels(&render(&mut audio, 1200));
     assert!(right > left * 4.0);
     // The listener walks past the sound: it is now on the listener's left.
-    audio.set_listener(orr_audio::Listener { position: [6.0, 0.0, 0.0], right: [1.0, 0.0, 0.0] });
+    audio.set_listener(orr_audio::Listener { position: [6.0, 0.0, 0.0], ..Default::default() });
     render(&mut audio, 1200);
     let (left, right) = channels(&render(&mut audio, 1200));
     assert!(left > right * 4.0, "after the move the sound is on the left: {left} left, {right} right");
@@ -624,10 +624,68 @@ fn a_playing_spatial_sound_follows_the_listener() {
 #[test]
 fn an_emitter_is_at_full_volume_within_its_near_distance() {
     let listener = orr_audio::Listener::default();
-    let emitter = orr_audio::Emitter { position: [0.5, 0.0, 0.0], near: 1.0, far: 10.0 };
+    let emitter = orr_audio::Emitter { position: [0.5, 0.0, 0.0], near: 1.0, far: 10.0, velocity: [0.0; 3] };
     let (volume, pan) = emitter.heard_by(&listener);
     assert_eq!(volume, 0.0);
     assert!((pan - 1.0).abs() < 1e-6);
     let (twice, _) = orr_audio::Emitter { position: [0.0, 0.0, 2.0], ..emitter }.heard_by(&listener);
     assert!((twice + 6.02).abs() < 0.05, "twice the near distance is half the amplitude: {twice} dB");
+}
+
+/// Frequency in hertz of the left channel of `samples`: half-periods between
+/// its first and last zero crossings, so leading silence does not count.
+fn frequency(samples: &[f32]) -> f32 {
+    let left: Vec<f32> = samples.iter().step_by(2).copied().collect();
+    let crossings: Vec<usize> = left.windows(2).enumerate().filter(|(_, w)| (w[0] < 0.0) != (w[1] < 0.0)).map(|(i, _)| i).collect();
+    let (Some(first), Some(last)) = (crossings.first(), crossings.last()) else { return 0.0 };
+    (crossings.len() - 1) as f32 / 2.0 / ((last - first).max(1) as f32 / RATE as f32)
+}
+
+#[test]
+fn doppler_follows_the_closing_speed_and_stays_bounded() {
+    use orr_audio::{Emitter, Listener, MAX_DOPPLER, SPEED_OF_SOUND};
+    let c = SPEED_OF_SOUND;
+    let source = |velocity| Emitter { position: [10.0, 0.0, 0.0], near: 1.0, far: 100.0, velocity };
+    let still = Listener::default();
+    let close = |a: f32, b: f32| (a - b).abs() < 1e-4;
+    // A source closing in at a tenth of the speed of sound, then leaving at it.
+    assert!(close(source([-0.1 * c, 0.0, 0.0]).doppler(&still, 1.0), 1.0 / 0.9));
+    assert!(close(source([0.1 * c, 0.0, 0.0]).doppler(&still, 1.0), 1.0 / 1.1));
+    // The listener closing in instead.
+    let running = Listener { velocity: [0.1 * c, 0.0, 0.0], ..still };
+    assert!(close(source([0.0; 3]).doppler(&running, 1.0), 1.1));
+    // Moving across the line of sight, turned off, or on top of the listener: no change.
+    assert!(close(source([0.0, 0.0, 50.0]).doppler(&still, 1.0), 1.0));
+    assert!(close(source([-0.1 * c, 0.0, 0.0]).doppler(&still, 0.0), 1.0));
+    assert!(close(Emitter { position: [0.0; 3], ..source([-100.0, 0.0, 0.0]) }.doppler(&still, 1.0), 1.0));
+    // Faster than sound: each speed counts as at most 0.9 of the speed of sound, and the rate stays within the bound.
+    assert!(close(source([-10.0 * c, 0.0, 0.0]).doppler(&still, 1.0), MAX_DOPPLER));
+    assert!(close(source([10.0 * c, 0.0, 0.0]).doppler(&still, 1.0), 1.0 / 1.9));
+}
+
+#[test]
+fn a_source_closing_in_plays_higher_and_moving_it_later_changes_the_pitch() {
+    // Straight ahead, so both speakers carry it, and coming closer.
+    let ahead = [0.0, 0.0, -10.0];
+    let toward = [0.0, 0.0, 0.2 * orr_audio::SPEED_OF_SOUND];
+    let mut audio = mixer();
+    send(&mut audio, 1, EventStatus::Verified(()), &clip().at(ahead, 50.0, 100.0).moving(toward));
+    let heard = frequency(&render(&mut audio, 2400));
+    assert!((heard - 330.0 / 0.8).abs() < 6.0, "330 Hz closing at a fifth of the speed of sound sounds at {heard} Hz");
+
+    let mut audio = mixer();
+    send(&mut audio, 1, EventStatus::Verified(()), &clip().at(ahead, 50.0, 100.0));
+    let still = frequency(&render(&mut audio, 1600));
+    assert!((still - 330.0).abs() < 6.0, "a still source keeps its pitch: {still} Hz");
+    audio.move_emitter(key(1), ahead, toward);
+    render(&mut audio, 480); // the change glides in over 20 ms
+    let moved = frequency(&render(&mut audio, 1600));
+    assert!((moved - 330.0 / 0.8).abs() < 8.0, "after it starts moving it sounds at {moved} Hz");
+
+    // Turned off in the config, the same source keeps its pitch.
+    let mut audio = OfflineAudio::new_offline(AudioConfig { doppler: 0.0, ..AudioConfig::default() }, RATE).unwrap();
+    send(&mut audio, 1, EventStatus::Verified(()), &clip().at(ahead, 50.0, 100.0).moving(toward));
+    let off = frequency(&render(&mut audio, 2400));
+    assert!((off - 330.0).abs() < 6.0, "with the effect off it stays at {off} Hz");
+    assert!(OfflineAudio::new_offline(AudioConfig { doppler: 11.0, ..AudioConfig::default() }, RATE).is_err());
 }
