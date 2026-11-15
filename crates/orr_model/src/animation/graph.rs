@@ -129,10 +129,6 @@ impl AnimatedModel {
             .collect();
         self.pose_from_local(local)
     }
-
-    fn clip_duration(&self, clip: u32) -> Result<f32, Error> {
-        self.source.clips.get(clip as usize).map(super::AnimationClip::duration).ok_or_else(|| invalid("animation clip out of range"))
-    }
 }
 
 /// Clips placed along one parameter, such as idle at 0, walk at 1.5 and run at

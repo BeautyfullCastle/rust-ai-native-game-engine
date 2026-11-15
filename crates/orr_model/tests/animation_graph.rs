@@ -35,6 +35,7 @@ fn leg() -> AnimatedModel {
         m
     };
     AnimatedModel::new(AnimatedSource {
+        morph: Default::default(),
         format: "orr_animated_model".into(),
         version: 1,
         asset_id: "leg.gltf".into(),

@@ -135,6 +135,7 @@ mod enabled {
         let mut ib1 = IDENTITY;
         ib1[3] = [0., -1., 1., 1.];
         AnimatedModel::new(AnimatedSource {
+            morph: Default::default(),
             format: "orr_animated_model".into(),
             version: 1,
             asset_id: "actors/original.glb".into(),

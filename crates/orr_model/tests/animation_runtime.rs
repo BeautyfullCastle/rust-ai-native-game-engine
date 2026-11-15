@@ -19,6 +19,7 @@ fn source() -> AnimatedSource {
         weights: [1.0, 0.0, 0.0, 0.0],
     };
     AnimatedSource {
+        morph: Default::default(),
         format: "orr_animated_model".into(),
         version: 1,
         asset_id: "character.gltf".into(),

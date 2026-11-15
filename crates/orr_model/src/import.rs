@@ -322,6 +322,9 @@ fn validate_texture_extensions(doc: &Document) -> Result<(), Error> {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Mesh {
     pub(crate) primitives: Vec<PrimitiveDef>,
+    /// Default morph target weights; only animated models read them.
+    #[serde(default)]
+    pub(crate) weights: Option<Vec<f32>>,
     #[serde(rename = "name")]
     pub(crate) _name: Option<String>,
     #[serde(default, rename = "extras")]
@@ -336,8 +339,17 @@ pub(crate) struct PrimitiveDef {
     #[serde(default, deserialize_with = "present_value")]
     pub(crate) material: Option<usize>,
     pub(crate) mode: Option<u32>,
+    /// Morph targets; only animated models accept them.
+    #[serde(default, deserialize_with = "present_value")]
+    pub(crate) targets: Option<Vec<BTreeMap<String, usize>>>,
     #[serde(default, rename = "extras")]
     pub(crate) _extras: Option<serde_json::Value>,
+}
+impl PrimitiveDef {
+    /// The morph targets, empty when there are none.
+    pub(crate) fn morph_targets(&self) -> &[BTreeMap<String, usize>] {
+        self.targets.as_deref().unwrap_or_default()
+    }
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -351,6 +363,9 @@ pub(crate) struct Node {
     pub(crate) translation: Option<[f32; 3]>,
     pub(crate) rotation: Option<[f32; 4]>,
     pub(crate) scale: Option<[f32; 3]>,
+    /// Morph target weights of this node's mesh, over the mesh's own.
+    #[serde(default)]
+    pub(crate) weights: Option<Vec<f32>>,
     #[serde(rename = "name")]
     pub(crate) _name: Option<String>,
     #[serde(default, rename = "extras")]
@@ -513,9 +528,10 @@ pub(crate) fn load_resources(
     if !animated
         && (doc.skins.is_some()
             || doc.animations.is_some()
-            || doc.nodes.iter().any(|node| node.skin.is_some()))
+            || doc.nodes.iter().any(|node| node.skin.is_some() || node.weights.is_some())
+            || doc.meshes.iter().any(|mesh| mesh.weights.is_some() || mesh.primitives.iter().any(|p| p.targets.is_some())))
     {
-        return Err(invalid("static importer does not support skins/animations"));
+        return Err(invalid("static importer does not support skins/animations/morph targets"));
     }
     if doc.asset.version != "2.0" || doc.asset.min_version.as_deref().is_some_and(|s| s != "2.0") {
         return Err(invalid("unsupported glTF version/extensions"));

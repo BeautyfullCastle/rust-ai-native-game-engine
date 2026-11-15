@@ -3,8 +3,9 @@
 //! The shared resource parser retains the static importer's image/material and
 //! containment checks. This entrypoint adds TRS nodes, four influences, skins,
 //! and STEP/LINEAR TRS channels. Untargeted matrix nodes may encode a bounded
-//! positive-scale TRS. Morph targets, extra influence sets, targeted matrices,
-//! sparse accessors, unknown extensions and CUBICSPLINE fail closed.
+//! positive-scale TRS. Morph targets (POSITION and NORMAL offsets) and STEP/LINEAR
+//! weights channels are read; extra influence sets, targeted matrices,
+//! sparse accessors, unknown extensions and CUBICSPLINE weights fail closed.
 //! Declared base-color KHR_texture_transform is baked into UV0 at import only.
 //! See https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#skins
 //! and https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#animations.
@@ -41,9 +42,10 @@ pub fn import_with_resolver(
     validate_document_limits(&doc)?;
     let (nodes, parents, active) = hierarchy(&doc)?;
     let skins = read_skins(&doc, &buffers, &parents, &active)?;
-    let clips = read_clips(&doc, &buffers)?;
-    let primitives = read_primitives(&doc, &buffers, asset_id, &active)?;
+    let (clips, channels) = read_clips(&doc, &buffers)?;
+    let (primitives, morphs) = read_primitives(&doc, &buffers, asset_id, &active)?;
     AnimatedModel::new(AnimatedSource {
+        morph: Morphs { primitives: morphs, channels },
         format: "orr_animated_model".into(),
         version: 1,
         asset_id: asset_id.into(),
@@ -290,8 +292,16 @@ fn interpolation(sampler: &AnimationSampler) -> Result<Interpolation, Error> {
         _ => Err(invalid("unsupported animation interpolation")),
     }
 }
-fn read_clips(doc: &Document, buffers: &[Vec<u8>]) -> Result<Vec<AnimationClip>, Error> {
+/// Target count of the mesh on node `node`, when every primitive of it has the same nonzero count.
+fn node_targets(doc: &Document, node: usize) -> Option<usize> {
+    let mesh = &doc.meshes[doc.nodes[node].mesh?];
+    let count = mesh.primitives.first()?.morph_targets().len();
+    (count > 0 && mesh.primitives.iter().all(|p| p.morph_targets().len() == count)).then_some(count)
+}
+
+fn read_clips(doc: &Document, buffers: &[Vec<u8>]) -> Result<(Vec<AnimationClip>, Vec<MorphChannel>), Error> {
     let mut clips = Vec::new();
+    let mut morph_channels = Vec::new();
     let mut aggregate_keys = 0usize;
     let mut aggregate_bytes = 0usize;
     let mut sampler_keys = 0usize;
@@ -305,15 +315,17 @@ fn read_clips(doc: &Document, buffers: &[Vec<u8>]) -> Result<Vec<AnimationClip>,
             data_accessor(doc, input)?;
             data_accessor(doc, output)?;
             sampler_keys = sampler_keys.saturating_add(output.count);
+            // Morph weights: a scalar per target per key, checked against the target count per channel.
+            let scalar = output.kind == "SCALAR" && !cubic && input.count > 0 && output.count % input.count == 0;
             if sampler_keys > MAX_ANIMATION_KEYS
                 || input.component_type != 5126
                 || input.normalized
                 || input.kind != "SCALAR"
                 || output.component_type != 5126
                 || output.normalized
-                || !matches!(output.kind.as_str(), "VEC3" | "VEC4")
+                || !(scalar || matches!(output.kind.as_str(), "VEC3" | "VEC4"))
                 || (cubic && input.count < 2)
-                || input.count.checked_mul(if cubic { 3 } else { 1 }) != Some(output.count)
+                || (!scalar && input.count.checked_mul(if cubic { 3 } else { 1 }) != Some(output.count))
             {
                 return Err(invalid(
                     "animation sampler count/type/key budget mismatch; only f32 output supported",
@@ -356,10 +368,28 @@ fn read_clips(doc: &Document, buffers: &[Vec<u8>]) -> Result<Vec<AnimationClip>,
             if !targets.insert((channel.target.node, path)) {
                 return Err(invalid("duplicate animation channel target/path"));
             }
+            if path == "weights" {
+                let k = node_targets(doc, channel.target.node).ok_or_else(|| invalid("weights animation needs a node whose mesh has morph targets"))?;
+                if output.kind != "SCALAR" || input.count.checked_mul(k) != Some(output.count) {
+                    return Err(invalid("weights animation needs one f32 per morph target per key; cubic weights unsupported"));
+                }
+                aggregate_keys = aggregate_keys.saturating_add(output.count);
+                aggregate_bytes = aggregate_bytes.saturating_add(input.count.saturating_mul(4)).saturating_add(output.count.saturating_mul(4));
+                if aggregate_keys > MAX_ANIMATION_KEYS || aggregate_bytes > MAX_ANIMATION_BYTES {
+                    return Err(invalid("animation output shape/aggregate key budget mismatch"));
+                }
+                morph_channels.push(MorphChannel {
+                    clip: clips.len() as u32,
+                    node: channel.target.node as u32,
+                    interpolation: interpolation(sampler)?,
+                    times: (0..input.count).map(|i| input.floats::<1>(doc, buffers, i)[0]).collect(),
+                    weights: (0..output.count).map(|i| output.floats::<1>(doc, buffers, i)[0]).collect(),
+                });
+                continue;
+            }
             let kind = match path {
                 "translation" | "scale" => "VEC3",
                 "rotation" => "VEC4",
-                "weights" => return Err(invalid("morph animation unsupported")),
                 _ => return Err(invalid("unsupported animation target path")),
             };
             aggregate_keys = aggregate_keys.saturating_add(output.count);
@@ -409,7 +439,52 @@ fn read_clips(doc: &Document, buffers: &[Vec<u8>]) -> Result<Vec<AnimationClip>,
             channels,
         });
     }
-    Ok(clips)
+    Ok((clips, morph_channels))
+}
+
+/// Checks the morph targets of a primitive: POSITION and optional NORMAL
+/// offsets, f32 VEC3, one per vertex.
+fn validate_targets(doc: &Document, p: &PrimitiveDef, vertices: usize) -> Result<(), Error> {
+    if p.targets.as_ref().is_some_and(|t| t.is_empty() || t.len() > MAX_MORPH_TARGETS) {
+        return Err(invalid("morph targets must be present with 1 to 8 entries"));
+    }
+    for target in p.morph_targets() {
+        if !target.contains_key("POSITION") || target.keys().any(|k| k != "POSITION" && k != "NORMAL") {
+            return Err(invalid("morph targets need POSITION and may have NORMAL only"));
+        }
+        for &index in target.values() {
+            let a = at(&doc.accessors, index, "morph target")?;
+            vertex_accessor(doc, a)?;
+            if a.component_type != 5126 || a.normalized || a.kind != "VEC3" || a.count != vertices {
+                return Err(invalid("morph target offsets must be f32 VEC3, one per vertex"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The morph targets and default weights of `primitive` on `node`, read as offsets per vertex.
+fn read_morph(doc: &Document, buffers: &[Vec<u8>], node: &crate::import::Node, mesh: &crate::import::Mesh, primitive: &PrimitiveDef, index: usize) -> Result<Option<PrimitiveMorph>, Error> {
+    if primitive.morph_targets().is_empty() {
+        return Ok(None);
+    }
+    let read = |accessor: Option<&usize>| -> Vec<[f32; 3]> {
+        accessor.map_or_else(Vec::new, |&a| {
+            let a = &doc.accessors[a];
+            (0..a.count).map(|i| a.floats::<3>(doc, buffers, i)).collect()
+        })
+    };
+    let targets = primitive
+        .morph_targets()
+        .iter()
+        .enumerate()
+        .map(|(i, target)| MorphTarget { name: format!("target{i}"), positions: read(target.get("POSITION")), normals: read(target.get("NORMAL")) })
+        .collect::<Vec<_>>();
+    let weights = node.weights.clone().or_else(|| mesh.weights.clone()).unwrap_or_else(|| vec![0.0; targets.len()]);
+    if weights.len() != targets.len() {
+        return Err(invalid("morph weights count differs from the target count"));
+    }
+    Ok(Some(PrimitiveMorph { primitive: index as u32, targets, weights }))
 }
 
 fn validate_primitive(doc: &Document, p: &PrimitiveDef) -> Result<bool, Error> {
@@ -427,6 +502,7 @@ fn validate_primitive(doc: &Document, p: &PrimitiveDef) -> Result<bool, Error> {
     {
         return Err(invalid("requires TRIANGLES with POSITION/NORMAL, optional UV0 (required for textured materials), and at most JOINTS_0/WEIGHTS_0; additional influences unsupported"));
     }
+    validate_targets(doc, p, at(&doc.accessors, p.attributes["POSITION"], "POSITION")?.count)?;
     crate::import::material_index(doc, p)?;
     let pos = at(&doc.accessors, p.attributes["POSITION"], "POSITION")?;
     if pos.count > MAX_VERTICES {
@@ -596,12 +672,15 @@ fn read_primitives(
     buffers: &[Vec<u8>],
     asset_id: &str,
     active: &[bool],
-) -> Result<Vec<AnimatedPrimitive>, Error> {
+) -> Result<(Vec<AnimatedPrimitive>, Vec<PrimitiveMorph>), Error> {
     let (mut count, mut source_vertices, mut source_indices) = (0usize, 0usize, 0usize);
     for mesh in &doc.meshes {
         count = count.saturating_add(mesh.primitives.len());
         if mesh.primitives.is_empty() || count > MAX_PRIMITIVES {
             return Err(invalid("primitive budget exceeded"));
+        }
+        if mesh.weights.as_ref().is_some_and(|w| mesh.primitives.iter().any(|p| p.morph_targets().len() != w.len())) {
+            return Err(invalid("mesh weights need one morph target per weight on every primitive"));
         }
         for primitive in &mesh.primitives {
             let has_skin = validate_primitive(doc, primitive)?;
@@ -650,7 +729,11 @@ fn read_primitives(
     }
     let (mut vertices_total, mut indices_total) = (0usize, 0usize);
     let mut primitives = Vec::new();
+    let mut morphs = Vec::new();
     for (node_id, node) in doc.nodes.iter().enumerate() {
+        if node.weights.as_ref().is_some_and(|w| node.mesh.is_none_or(|m| doc.meshes[m].primitives.iter().any(|p| p.morph_targets().len() != w.len()))) {
+            return Err(invalid("node weights need a mesh with one morph target per weight"));
+        }
         let Some(mesh_id) = node.mesh else {
             continue;
         };
@@ -724,6 +807,7 @@ fn read_primitives(
                 }
                 indices.push(index);
             }
+            morphs.extend(read_morph(doc, buffers, node, mesh, primitive, primitives.len())?);
             primitives.push(AnimatedPrimitive {
                 id: format!("{asset_id}#node={node_id}/mesh={mesh_id}/primitive={slot}"),
                 node: node_id as u32,
@@ -734,5 +818,5 @@ fn read_primitives(
             });
         }
     }
-    Ok(primitives)
+    Ok((primitives, morphs))
 }
