@@ -40,7 +40,7 @@ pub mod surface;
 /// includes (`cascaded_visibility`); see shadow_cascades.wgsl.
 pub const SHADOW_CASCADES_WGSL: &str = include_str!("shadow_cascades.wgsl");
 /// Bytes of the `ShadowCascades` uniform of [`SHADOW_CASCADES_WGSL`].
-pub const SHADOW_CASCADES_UNIFORM_BYTES: u64 = 752;
+pub const SHADOW_CASCADES_UNIFORM_BYTES: u64 = 1712;
 pub mod surface_texture;
 mod stats;
 pub mod targets;

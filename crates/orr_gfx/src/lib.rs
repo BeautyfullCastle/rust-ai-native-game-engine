@@ -110,7 +110,7 @@ pub struct Light {
     /// A disabled light gives no light and casts no shadow.
     #[reflect(bool)]
     pub enabled: u32,
-    /// Whether the light casts shadows. The sun and up to four spot lights can; point lights cannot.
+    /// Whether the light casts shadows. The sun, up to four spot lights and up to two point lights can.
     #[reflect(bool)]
     pub cast_shadows: u32,
     /// The render layers this light affects. A light with no layer lights nothing.

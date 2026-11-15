@@ -513,6 +513,42 @@ fn a_spot_light_casts_a_shadow_with_and_without_a_sun_shadow() {
     }
 }
 
+fn point_at(position: [f32; 3], shadows: bool) -> orr_render::SceneLight {
+    orr_render::SceneLight { kind: orr_render::SceneLightKind::Point, position, intensity: 3.0, range: 10.0, shadows, ..Default::default() }
+}
+
+#[test]
+fn a_point_light_casts_a_shadow_from_whichever_cube_face_sees_the_caster() {
+    let Some(g) = gpu() else { return };
+    let camera = |_| Camera3D::perspective([0.0, 6.0, 2.5], [0.0; 3], 50.0);
+    let mut dark = light(0.05);
+    dark.tonemap = false;
+    // Straight above, the floor under the caster is in the -y face; low to the side, in the -x face.
+    for position in [[0.0, 4.0, 0.0], [2.5, 1.6, 0.0]] {
+        let lit = render_lit_groups(&g, camera, &floor_and_caster(), &dark, &[point_at(position, false)], &[], 1);
+        let shadowed = render_lit_groups(&g, camera, &floor_and_caster(), &dark, &[point_at(position, true)], &[], 1);
+        let darker = (0..SIZE * SIZE).filter(|i| image_red(&lit, *i) > image_red(&shadowed, *i) + 60).count();
+        assert!(darker > 40, "the caster's point shadow darkens the floor: {darker} pixels, light at {position:?}");
+        // Pixels the caster does not hide from the light are lit the same either way.
+        let same = (0..SIZE * SIZE).filter(|i| image_red(&lit, *i).abs_diff(image_red(&shadowed, *i)) <= 3).count();
+        assert!(same > (SIZE * SIZE * 3 / 4) as usize, "the rest of the floor is unshadowed: {same} pixels match, light at {position:?}");
+    }
+}
+
+#[test]
+fn spot_and_point_shadows_share_the_map_in_smaller_tiles() {
+    let Some(g) = gpu() else { return };
+    let camera = |_| Camera3D::perspective([0.0, 6.0, 2.5], [0.0; 3], 50.0);
+    let mut dark = light(0.05);
+    dark.tonemap = false;
+    // A spot and a point light take seven tiles, so the map switches to its 4 x 4 grid.
+    let lights = |shadows: bool| [spot_from_above(shadows), point_at([2.5, 1.6, 0.0], shadows)];
+    let lit = render_lit_groups(&g, camera, &floor_and_caster(), &dark, &lights(false), &[], 1);
+    let shadowed = render_lit_groups(&g, camera, &floor_and_caster(), &dark, &lights(true), &[], 1);
+    let darker = (0..SIZE * SIZE).filter(|i| image_red(&lit, *i) > image_red(&shadowed, *i) + 30).count();
+    assert!(darker > 60, "both shadows darken the floor: {darker} pixels");
+}
+
 #[test]
 fn spot_shadows_alone_leave_the_sun_unshadowed_on_shapes() {
     let Some(g) = gpu() else { return };
