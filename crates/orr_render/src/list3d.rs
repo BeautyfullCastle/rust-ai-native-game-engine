@@ -176,6 +176,8 @@ pub struct RenderList3D {
     pub surfaces: Vec<SurfaceInstance>,
     /// Seconds since the scene started. Surface shaders read it as `in.time`.
     pub time: f32,
+    /// Decals for `crate::ImportedSceneRenderer::decals`. `Renderer3D` does not draw them.
+    pub decals: Vec<crate::Decal>,
 }
 
 impl RenderList3D {
@@ -183,7 +185,7 @@ impl RenderList3D {
         Self::default()
     }
 
-    /// Empties the instances, surface instances and lines; the lighting, the
+    /// Empties the instances, surface instances, lines and decals; the lighting, the
     /// scene lights and the time stay.
     pub fn clear(&mut self) {
         self.spheres.clear();
@@ -192,6 +194,7 @@ impl RenderList3D {
         self.planes.clear();
         self.lines.clear();
         self.surfaces.clear();
+        self.decals.clear();
     }
 
     /// Shapes with the built-in material. Surface instances are not counted.

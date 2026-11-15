@@ -112,6 +112,8 @@ pub use shared_shadow::{MAX_IMPORTED_CASTERS, SHARED_SHADOW_MAP_SIZE};
 /// Most cascades of the shared sun shadow map.
 pub const MAX_SHADOW_CASCADES: u32 = 4;
 
+pub mod decals;
+pub use decals::{Decal, DecalAtlasError, DecalShape, MAX_DECALS, MAX_DECAL_ATLAS_SIZE};
 pub mod post_effects;
 pub use post_effects::ScreenEffect;
 #[cfg(feature = "imported-scene")]

@@ -1070,6 +1070,7 @@ impl Viewport3dGpu {
         self.imported.post_process = settings;
         // The scene's lights reach every batch: procedural shapes, models and skinned models.
         self.imported.scene_lights = list.scene_lights;
+        self.imported.decals.clone_from(&list.decals);
         #[cfg(feature = "irradiance-probes")]
         { self.imported.irradiance = grid.cloned(); }
         self.target.resize(size.0, size.1);

@@ -192,6 +192,9 @@ pub struct ImportedSceneRenderer<B: Rhi> {
     /// camera: each covers a farther stretch of the view, up to 1.5 ×
     /// `shadow_radius`, so near shadows are sharp and far ones still show.
     pub shadow_cascades: u32,
+    /// Decals projected onto the opaque scene, up to [`crate::MAX_DECALS`] (see [`crate::decals`]).
+    pub decals: Vec<crate::Decal>,
+    decal_pass: Option<crate::decals::DecalPass<B>>,
     /// Optional diffuse irradiance. Validated before any frame resource/cache mutation.
     /// No coefficient storage is replicated per instance: each asset renderer has
     /// one 9280-byte globals extension next to its 528 bytes of scene lights
@@ -216,6 +219,11 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
         self.passes.push(pass);
         Ok(())
     }
+    /// Sets the image decal regions read from: RGBA8 sRGB pixels, rows top to bottom.
+    pub fn set_decal_atlas(&mut self, width: u32, height: u32, rgba: &[u8]) -> Result<(), crate::DecalAtlasError> {
+        let rhi = &self.rhi;
+        self.decal_pass.get_or_insert_with(|| crate::decals::DecalPass::new(rhi)).set_atlas(rhi, width, height, rgba)
+    }
     /// The first added pass of type `T`, to change what it draws.
     pub fn pass_mut<T: crate::RenderPass<B>>(&mut self) -> Option<&mut T> {
         self.passes.iter_mut().find_map(|pass| pass.as_any_mut().downcast_mut::<T>())
@@ -236,6 +244,8 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
             post_process: crate::PostProcessSettings::default(),
             scene_lights: crate::SceneLights::default(),
             shadow_cascades: 1,
+            decals: Vec::new(),
+            decal_pass: None,
             #[cfg(feature = "irradiance-probes")]
             irradiance: None,
             post_processor: None,
@@ -975,6 +985,12 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
             let color = ColorAttachment { view: scene_view, clear: None, resolve: None };
             let depth = DepthAttachment { view: depth, clear: None, store: true };
             for stage in [crate::PassStage::Opaque, crate::PassStage::Sky, crate::PassStage::Transparent] {
+                // Decals land on everything opaque, before the sky and transparent things cover it.
+                if stage == crate::PassStage::Sky && !self.decals.is_empty() {
+                    let (rhi, format) = (&self.rhi, self.scene_format());
+                    let decal_pass = self.decal_pass.get_or_insert_with(|| crate::decals::DecalPass::new(rhi));
+                    decal_pass.encode(rhi, &mut encoder, scene_view, format, depth.view, &self.decals, pass_frame.view_proj);
+                }
                 for pass in self.passes.iter().filter(|p| p.stages().contains(&stage)) {
                     pass.encode(&self.rhi, stage, &pass_frame, &mut encoder, Some(&color), &depth);
                 }

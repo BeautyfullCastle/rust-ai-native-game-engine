@@ -351,6 +351,8 @@ pub enum Blend {
     /// RGB = source.rgb * source.a + destination.rgb; retain destination alpha.
     #[cfg(feature = "additive-blend")]
     Additive,
+    /// RGB = source.rgb * destination.rgb; retain destination alpha.
+    Multiply,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
