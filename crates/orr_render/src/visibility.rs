@@ -265,7 +265,11 @@ fn faces(kind: MeshKind, i: &Instance3D) -> Vec<([[f32; 3]; 4], [f32; 3])> {
 /// The instances of each kind reordered with the visible ones first (in list
 /// order, then the hidden ones in list order), and how many are visible.
 pub fn partition(view: &View, culling: Culling, instances: [&[Instance3D]; 4]) -> ([Vec<Instance3D>; 4], [u32; 4]) {
-    let culler = Culler::new(*view, culling, instances);
+    partition_with(&Culler::new(*view, culling, instances), instances)
+}
+
+/// [`partition`] with a culler the caller also uses for other draws.
+pub(crate) fn partition_with(culler: &Culler, instances: [&[Instance3D]; 4]) -> ([Vec<Instance3D>; 4], [u32; 4]) {
     let mut counts = [0u32; 4];
     let ordered = std::array::from_fn(|k| {
         let kind = MeshKind::ALL[k];

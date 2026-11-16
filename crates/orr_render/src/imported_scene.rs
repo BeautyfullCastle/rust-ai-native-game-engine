@@ -12,7 +12,7 @@ use crate::skinned::{PreparedSkinned, SkinnedInstance, SkinnedModelRenderer, Ski
 use crate::{
     Camera3D, Lighting, RenderList3D, Renderer3D,
     model_renderer::{
-        ModelRenderError, ModelRenderer, PreparedStatic, StaticInstance, StaticInstanceError,
+        ModelRenderError, ModelRenderer, PreparedStatic, StaticCull, StaticInstance, StaticInstanceError,
         static_instance_draw_count, validate_static_instances,
     },
     point_light::{PointLightError, PointLightSettings},
@@ -165,7 +165,7 @@ struct Depth<B: Rhi> {
 }
 
 enum PreparedBatch {
-    Static,
+    Static(StaticCull),
     StaticInstances(PreparedStatic),
     Procedural(Box<PreparedProcedural>),
     #[cfg(feature = "animation")]
@@ -669,7 +669,7 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
         let mut prepared = batches
             .iter()
             .map(|batch| match batch {
-                ImportedBatch::Static(_) => Ok(PreparedBatch::Static),
+                ImportedBatch::Static(renderer) => Ok(PreparedBatch::Static(renderer.prepare_draws())),
                 ImportedBatch::StaticInstances {
                     renderer,
                     instances,
@@ -819,7 +819,7 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
         }
         for (batch, ready) in batches.iter_mut().zip(&mut prepared) {
             match (batch, ready) {
-                (ImportedBatch::Static(renderer), PreparedBatch::Static) => {
+                (ImportedBatch::Static(renderer), PreparedBatch::Static(_)) => {
                     renderer.write_frame(&globals)
                 }
                 (
@@ -979,10 +979,10 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
                 store: true,
             };
             match (batch, ready) {
-                (ImportedBatch::Static(renderer), PreparedBatch::Static) => {
+                (ImportedBatch::Static(renderer), PreparedBatch::Static(cull)) => {
                     if shadow_ready.is_some() {
                         let mut commands = Vec::new();
-                        renderer.shared_commands(None, false, &mut commands);
+                        renderer.shared_commands(None, Some(cull), false, &mut commands);
                         self.rhi.encode_pass(
                             &mut encoder,
                             "shared static receiver",
@@ -991,7 +991,7 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
                             &commands,
                         );
                     } else {
-                        renderer.encode_frame(&mut encoder, &color, &depth)
+                        renderer.encode_frame_culled(cull, &mut encoder, &color, &depth)
                     }
                 }
                 (
@@ -1000,7 +1000,7 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
                 ) => {
                     if shadow_ready.is_some() {
                         let mut commands = Vec::new();
-                        renderer.shared_commands(Some(ready), false, &mut commands);
+                        renderer.shared_commands(Some(ready), None, false, &mut commands);
                         self.rhi.encode_pass(
                             &mut encoder,
                             "shared static instance receiver",
@@ -1114,7 +1114,7 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
     }
 }
 
-/// Culls instanced static and skinned model draws, with the boxes and planes of
+/// Culls static (instanced or not) and skinned model draws, with the boxes and planes of
 /// every procedural batch as occluders. Returns how many draws it left out.
 fn cull_models<B: Rhi>(culling: crate::Culling, camera: &Camera3D, view_proj: [[f32; 4]; 4], batches: &[ImportedBatch<'_, B>], prepared: &mut [PreparedBatch]) -> usize {
     if !(culling.frustum || culling.occlusion) {
@@ -1134,6 +1134,7 @@ fn cull_models<B: Rhi>(culling: crate::Culling, camera: &Camera3D, view_proj: [[
     prepared
         .iter_mut()
         .map(|ready| match ready {
+            PreparedBatch::Static(ready) => ready.cull(&culler),
             PreparedBatch::StaticInstances(ready) => ready.cull(&culler),
             #[cfg(feature = "animation")]
             PreparedBatch::Skinned(ready) => ready.cull(&culler),
@@ -1148,7 +1149,7 @@ fn write_caster_matrix<B: Rhi>(batches: &[ImportedBatch<'_, B>], prepared: &[Pre
     caster_globals.light_vp = light_vp;
     for (batch, ready) in batches.iter().zip(prepared) {
         match (batch, ready) {
-            (ImportedBatch::Static(r), PreparedBatch::Static) | (ImportedBatch::StaticInstances { renderer: r, .. }, PreparedBatch::StaticInstances(_)) => r.write_frame(&caster_globals),
+            (ImportedBatch::Static(r), PreparedBatch::Static(_)) | (ImportedBatch::StaticInstances { renderer: r, .. }, PreparedBatch::StaticInstances(_)) => r.write_frame(&caster_globals),
             (ImportedBatch::Procedural { renderer, .. }, PreparedBatch::Procedural(ready)) => renderer.write_shadow_matrix(ready, light_vp),
             #[cfg(feature = "animation")]
             (ImportedBatch::Skinned { renderer, .. }, PreparedBatch::Skinned(_)) => renderer.write_globals(&caster_globals),
@@ -1163,8 +1164,8 @@ fn caster_commands<'a, B: Rhi>(batches: &'a [ImportedBatch<'_, B>], prepared: &'
     let mut commands = vec![orr_rhi::Command::SetViewport { x, y, width, height }];
     for (batch, ready) in batches.iter().zip(prepared) {
         match (batch, ready) {
-            (ImportedBatch::Static(r), PreparedBatch::Static) => r.shared_commands(None, true, &mut commands),
-            (ImportedBatch::StaticInstances { renderer, .. }, PreparedBatch::StaticInstances(ready)) => renderer.shared_commands(Some(ready), true, &mut commands),
+            (ImportedBatch::Static(r), PreparedBatch::Static(_)) => r.shared_commands(None, None, true, &mut commands),
+            (ImportedBatch::StaticInstances { renderer, .. }, PreparedBatch::StaticInstances(ready)) => renderer.shared_commands(Some(ready), None, true, &mut commands),
             (ImportedBatch::Procedural { renderer, .. }, PreparedBatch::Procedural(ready)) => renderer.composed_shadow_commands(ready, &mut commands),
             #[cfg(feature = "animation")]
             (ImportedBatch::Skinned { renderer, .. }, PreparedBatch::Skinned(ready)) => renderer.shared_commands(ready, true, &mut commands),

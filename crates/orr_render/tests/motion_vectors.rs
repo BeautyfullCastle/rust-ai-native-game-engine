@@ -215,6 +215,79 @@ fn motion_blur_streaks_a_moving_procedural_box_only() {
     assert!(blurred_moving > 0.5, "a moving box is blurred along its motion: {blurred_moving}");
 }
 
+const TINT: &str = "// @param tint color = 0, 1, 0
+fn surface(in: SurfaceInput) -> Surface {
+    var s = default_surface(in);
+    s.albedo = params.tint;
+    return s;
+}
+";
+
+/// Draws still balls, some with a surface shader, that a wall hides in the frames `wall` names,
+/// seen from a still camera. Returns the last picture and how many instances culling left out in each frame.
+fn render_behind_wall(g: &Wgpu, effects: &[ScreenEffect], wall: &[bool]) -> (Vec<u8>, Vec<u64>) {
+    let mut renderer = ImportedSceneRenderer::new(g.clone(), FORMAT).unwrap();
+    renderer.post_process = PostProcessSettings { enabled: true, bloom: false, ..Default::default() };
+    for (slot, effect) in renderer.post_process.effects.iter_mut().zip(effects) {
+        *slot = Some(*effect);
+    }
+    let mut meshes = Renderer3D::with_settings(g.clone(), TextureFormat::Rgba16Float, Settings3D::LOW);
+    let shader = meshes.add_surface(&orr_render::SurfaceShader::compile("tint", TINT).unwrap());
+    let texture = g.create_texture(&TextureDesc {
+        label: "culled motion vector test",
+        width: SIZE,
+        height: SIZE,
+        format: FORMAT,
+        usage: TextureUsage::RENDER_ATTACHMENT | TextureUsage::COPY_SRC,
+        sample_count: 1,
+        view_formats: &[],
+    });
+    let view = g.create_texture_view(&texture, None);
+    let mut culled = Vec::new();
+    for &walled in wall {
+        let mut list = RenderList3D::default();
+        let ball = Material::new([1.0; 3]);
+        for x in [-0.8, 0.0, 0.8] {
+            list.sphere([x, 1.0, 0.0], IDENTITY_ROT, 0.3, &ball);
+        }
+        let mut params = [0.0; orr_render::MAX_SURFACE_FLOATS];
+        params[..3].copy_from_slice(&[0.9, 0.2, 0.2]);
+        for x in [-0.4, 0.4] {
+            list.with_surface(shader, params, |l| l.sphere([x, 1.0, 0.0], IDENTITY_ROT, 0.3, &ball));
+        }
+        if walled {
+            list.cuboid([0.0, 1.0, 4.0], IDENTITY_ROT, [4.0, 2.0, 0.2], &Material::new([0.5; 3]));
+        }
+        renderer
+            .draw(
+                ImportedSceneTarget { view: &view, size: (SIZE, SIZE), format: FORMAT, sample_count: 1 },
+                &Camera3D::perspective([0.0, 1.0, 12.0], [0.0, 1.0, 0.0], 60.0),
+                &light(),
+                &PointLightSettings::default(),
+                &mut [ImportedBatch::Procedural { renderer: &mut meshes, list: &list }],
+            )
+            .unwrap();
+        culled.push(meshes.last_frame_stats().culled_instances);
+    }
+    (g.read_texture(&texture), culled)
+}
+
+#[test]
+fn balls_that_culling_hides_and_shows_again_do_not_streak() {
+    let Some(g) = gpu() else { return };
+    let effects = [ScreenEffect::MotionBlur { strength: 1.0, limit: 32.0 }];
+    // While the wall stands it hides all five balls. In the first run it goes away again in the last frame, in the second run it stays.
+    for wall in [[false, false, true, false], [false, true, true, true]] {
+        let (plain, culled) = render_behind_wall(&g, &[], &wall);
+        let (blurred, _) = render_behind_wall(&g, &effects, &wall);
+        for (frame, &walled) in wall.iter().enumerate() {
+            assert_eq!(culled[frame], if walled { 5 } else { 0 }, "frame {frame}: culling hides every ball exactly while the wall stands");
+        }
+        let difference = mean_difference(&plain, &blurred);
+        assert!(difference < 0.1, "still balls are not blurred when culling toggles {wall:?}: {difference}");
+    }
+}
+
 /// Draws the animated strip model at `x(frame)` in the pose of its clip at `time(frame)` seconds.
 #[cfg(feature = "animation")]
 fn render_strip(g: &Wgpu, effects: &[ScreenEffect], frames: usize, x: impl Fn(usize) -> f32, time: impl Fn(usize) -> f32) -> Vec<u8> {
