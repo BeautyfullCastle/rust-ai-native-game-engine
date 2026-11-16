@@ -3,6 +3,9 @@
 //! its volume falls with distance and it pans toward its side. A source or a
 //! listener that moves ([`Clip::moving`], [`Listener::velocity`],
 //! [`EventAudio::move_emitter`]) shifts its pitch by the Doppler effect.
+//! Reverb zones ([`EventAudio::add_reverb_zone`]) set how much reverb spatial
+//! sounds get from the listener's position, and [`Clip::reverb`] sends any clip
+//! into the same reverb bus.
 //!
 //! The default build has no device or codec dependencies. [`OfflineAudio`] renders
 //! PCM into a caller-owned buffer; `native` enables CPAL output. Nothing feeds back
@@ -19,12 +22,14 @@ use std::time::Duration;
 use kira::backend::Backend;
 use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle, StaticSoundSettings};
 use kira::sound::PlaybackState;
-use kira::track::MainTrackBuilder;
+use kira::track::{MainTrackBuilder, SendTrackBuilder, SendTrackHandle, SendTrackId, TrackBuilder, TrackHandle};
 use kira::{AudioManager, AudioManagerSettings, Capacities, Decibels, Frame, Panning, PlaybackRate, Tween};
 use orr_bridge::{BridgeEvent, EventKey, EventStatus, Lifecycle, ViewResync, ViewUpdate};
 
 mod offline;
+mod reverb;
 pub use offline::OfflineBackend;
+pub use reverb::{ReverbParams, ReverbShape, ReverbZone, ReverbZoneId, MAX_PRE_DELAY, MAX_REVERB_ZONES};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AudioError(pub String);
@@ -114,6 +119,7 @@ impl Emitter {
 pub struct Clip {
     data: StaticSoundData,
     emitter: Option<Emitter>,
+    send: Option<f32>,
 }
 impl Clip {
     /// This clip played from `position`, heard through [`EventAudio::set_listener`]:
@@ -129,6 +135,14 @@ impl Clip {
         if let Some(emitter) = &mut self.emitter {
             emitter.velocity = velocity;
         }
+        self
+    }
+
+    /// This clip sent into the reverb bus at `send` (0 none, 1 full), whether or
+    /// not it is placed. Without it a placed clip is sent as much as the reverb
+    /// zone at the listener says, and any other clip not at all.
+    pub fn reverb(mut self, send: f32) -> Self {
+        self.send = Some(if send.is_finite() { send.clamp(0.0, 1.0) } else { 0.0 });
         self
     }
 
@@ -168,6 +182,7 @@ impl Clip {
                 slice: None,
             },
             emitter: None,
+            send: None,
         })
     }
 }
@@ -231,6 +246,18 @@ struct Voice {
     key: Option<EventKey>,
     handle: StaticSoundHandle,
     emitter: Option<Emitter>,
+    /// The voice's own mixer track, present only when it can be sent to the reverb bus.
+    track: Option<TrackHandle>,
+    /// The send the clip asked for. Without one a placed voice follows the zones.
+    send: Option<f32>,
+}
+
+/// The reverb send track and the parameters its effect reads.
+struct ReverbBus {
+    /// Dropping the handle would unload the track.
+    _handle: SendTrackHandle,
+    id: SendTrackId,
+    shared: Arc<reverb::Shared>,
 }
 
 /// One owner of mixer, voice handles and bounded completion tombstones.
@@ -252,6 +279,12 @@ pub struct EventAudio<B: Backend> {
     disconnected: bool,
     stats: AudioStats,
     listener: Listener,
+    zones: Vec<(ReverbZoneId, ReverbZone)>,
+    next_zone: u32,
+    ambient: ReverbParams,
+    /// What the bus is set to now, from the zones at the listener.
+    current: ReverbParams,
+    bus: Option<ReverbBus>,
 }
 pub type OfflineAudio = EventAudio<OfflineBackend>;
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
@@ -275,8 +308,10 @@ fn settings<B: Backend>(
     AudioManagerSettings {
         // This vertical slice uses only the main track. No hidden unbounded resources.
         capacities: Capacities {
-            sub_track_capacity: 0,
-            send_track_capacity: 0,
+            // One track per voice that can reach the reverb bus, and the bus itself.
+            // Neither exists until a zone, an ambient reverb or a clip send asks for it.
+            sub_track_capacity: config.max_voices * 2,
+            send_track_capacity: 1,
             clock_capacity: 0,
             modulator_capacity: 0,
             listener_capacity: 0,
@@ -286,6 +321,15 @@ fn settings<B: Backend>(
             .sound_capacity(config.max_voices),
         internal_buffer_size: 128,
         backend_settings,
+    }
+}
+
+/// Send level for the linear amount `send`, silent at the lowest amounts.
+fn send_decibels(send: f32) -> Decibels {
+    if send <= 0.001 {
+        Decibels::SILENCE
+    } else {
+        Decibels((20.0 * send.min(1.0).log10()).max(Decibels::SILENCE.0))
     }
 }
 
@@ -360,6 +404,11 @@ impl<B: Backend> EventAudio<B> {
             config,
             voices: Vec::new(),
             listener: Listener::default(),
+            zones: Vec::new(),
+            next_zone: 0,
+            ambient: ReverbParams::OUTDOOR,
+            current: ReverbParams::OUTDOOR,
+            bus: None,
             history: BTreeMap::new(),
             retired_through: None,
             source: None,
@@ -537,6 +586,92 @@ impl<B: Backend> EventAudio<B> {
                 follow(voice, &emitter, &listener, doppler);
             }
         }
+        self.refresh_reverb();
+    }
+
+    /// Adds a reverb zone. While the listener is in it, placed sounds are sent
+    /// into the reverb bus as its parameters say, blending with other zones and
+    /// with the ambient reverb at their edges. Playing sounds follow over 20 ms.
+    /// A sound that started while no zone and no ambient reverb existed has no
+    /// path to the bus and stays dry.
+    pub fn add_reverb_zone(&mut self, zone: ReverbZone) -> Result<ReverbZoneId, AudioError> {
+        if !zone.is_valid() {
+            return Err(AudioError("reverb zone needs finite parameters, a positive size and a fade of 0 or more".into()));
+        }
+        if self.zones.len() >= MAX_REVERB_ZONES {
+            return Err(AudioError(format!("at most {MAX_REVERB_ZONES} reverb zones")));
+        }
+        let id = ReverbZoneId(self.next_zone);
+        self.next_zone = self.next_zone.wrapping_add(1);
+        self.zones.push((id, ReverbZone { params: zone.params.clamped(), ..zone }));
+        self.refresh_reverb();
+        Ok(id)
+    }
+
+    /// Removes a zone. Returns whether it existed.
+    pub fn remove_reverb_zone(&mut self, id: ReverbZoneId) -> bool {
+        let before = self.zones.len();
+        self.zones.retain(|(zone, _)| *zone != id);
+        self.refresh_reverb();
+        self.zones.len() != before
+    }
+
+    /// Removes every zone.
+    pub fn clear_reverb_zones(&mut self) {
+        self.zones.clear();
+        self.refresh_reverb();
+    }
+
+    /// Sets the reverb that applies outside every zone, and in the share of an
+    /// edge that the zones leave over. The default is [`ReverbParams::OUTDOOR`], no reverb.
+    pub fn set_ambient_reverb(&mut self, params: ReverbParams) -> Result<(), AudioError> {
+        if !params.is_valid() {
+            return Err(AudioError("reverb parameters must be finite".into()));
+        }
+        self.ambient = params.clamped();
+        self.refresh_reverb();
+        Ok(())
+    }
+
+    /// The reverb parameters the listener would hear at `position`: the zones
+    /// that cover it, blended by weight, and the ambient reverb for the rest.
+    pub fn reverb_at(&self, position: [f32; 3]) -> ReverbParams {
+        reverb::blend(&self.zones, self.ambient, position)
+    }
+
+    /// Whether placed sounds can need the reverb bus.
+    fn reverb_in_use(&self) -> bool {
+        !self.zones.is_empty() || self.ambient.wet > 0.0
+    }
+
+    /// Creates the reverb bus the first time something needs it.
+    fn ensure_bus(&mut self) -> Option<SendTrackId> {
+        if self.bus.is_none() {
+            self.current = self.reverb_at(self.listener.position);
+            let shared = reverb::Shared::new(self.current);
+            let builder = SendTrackBuilder::new().with_effect(reverb::ReverbBuilder(shared.clone()));
+            let handle = self.manager.add_send_track(builder).ok()?;
+            self.bus = Some(ReverbBus { id: handle.id(), _handle: handle, shared });
+        }
+        self.bus.as_ref().map(|bus| bus.id)
+    }
+
+    /// Moves the bus and the sends of playing zone-driven sounds toward what the
+    /// zones say at the listener. Does nothing while reverb is not in use.
+    fn refresh_reverb(&mut self) {
+        if !self.reverb_in_use() && self.bus.is_none() {
+            return;
+        }
+        self.current = self.reverb_at(self.listener.position);
+        let Some(bus) = &self.bus else { return };
+        bus.shared.store(self.current);
+        let tween = Tween { duration: Duration::from_millis(20), ..Tween::default() };
+        let level = send_decibels(self.current.wet);
+        for voice in self.voices.iter_mut().filter(|v| v.key.is_some() && v.send.is_none() && v.emitter.is_some()) {
+            if let Some(track) = &mut voice.track {
+                let _ = track.set_send(bus.id, level, tween);
+            }
+        }
     }
 
     /// Moves the source of the playing sound of event `key`, as a car driving
@@ -622,18 +757,35 @@ impl<B: Backend> EventAudio<B> {
                     self.stats.dropped = self.stats.dropped.saturating_add(1);
                     return;
                 }
+                let wants_send = clip.send.map_or(clip.emitter.is_some() && self.reverb_in_use(), |send| send > 0.0);
                 let mut data = clip.data;
                 if let Some(emitter) = clip.emitter {
                     let (volume, pan) = emitter.heard_by(&self.listener);
                     let rate = emitter.doppler(&self.listener, self.config.doppler);
                     data = data.volume(Decibels(volume)).panning(Panning(pan)).playback_rate(PlaybackRate(f64::from(rate)));
                 }
-                match self.manager.play(data) {
-                    Ok(handle) => {
+                let send = clip.send;
+                let sub_track = wants_send.then(|| self.ensure_bus()).flatten().and_then(|bus| {
+                    let level = send_decibels(send.unwrap_or(self.current.wet));
+                    let builder = TrackBuilder::new()
+                        .sub_track_capacity(0)
+                        .sound_capacity(1)
+                        .persist_until_sounds_finish(true)
+                        .with_send(bus, level);
+                    self.manager.add_sub_track(builder).ok()
+                });
+                let played = match sub_track {
+                    Some(mut track) => track.play(data).map(|handle| (handle, Some(track))),
+                    None => self.manager.play(data).map(|handle| (handle, None)),
+                };
+                match played {
+                    Ok((handle, track)) => {
                         self.voices.push(Voice {
                             key: Some(key),
                             handle,
                             emitter: clip.emitter,
+                            track,
+                            send,
                         });
                         self.stats.started = self.stats.started.saturating_add(1);
                     }
