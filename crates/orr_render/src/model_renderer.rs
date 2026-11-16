@@ -268,6 +268,8 @@ pub struct ModelRenderer<B: Rhi> {
     #[cfg(feature = "imported-scene")]
     instance_draws: Vec<InstanceDraw<B>>,
     #[cfg(feature = "imported-scene")]
+    velocity: Option<velocity::InstanceVelocity<B>>,
+    #[cfg(feature = "imported-scene")]
     local_bounds: Vec<([f32; 3], [f32; 3])>,
     #[cfg(feature = "imported-scene")]
     surfaces: crate::model_surfaces::ModelSurfaces<B>,
@@ -478,6 +480,8 @@ impl<B: Rhi> ModelRenderer<B> {
             views,
             #[cfg(feature = "imported-scene")]
             instance_draws: Vec::new(),
+            #[cfg(feature = "imported-scene")]
+            velocity: None,
             #[cfg(feature = "imported-scene")]
             local_bounds,
             #[cfg(feature = "imported-scene")]
@@ -763,6 +767,8 @@ impl<B: Rhi> ModelRenderer<B> {
 }
 #[cfg(feature = "imported-scene")]
 mod surfaces;
+#[cfg(feature = "imported-scene")]
+mod velocity;
 #[cfg(feature = "imported-scene")]
 pub use crate::model_surfaces::ModelSurface;
 

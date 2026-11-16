@@ -210,6 +210,11 @@ pub struct ImportedSceneRenderer<B: Rhi> {
     post_process_generation: u64,
     /// Frames drawn with temporal anti-aliasing, for its jitter sequence.
     taa_frame: u32,
+    /// Frames drawn so far, and the unjittered camera matrix of the last one.
+    frame_number: u64,
+    last_clean: Option<(u64, [[f32; 4]; 4])>,
+    /// Motion vectors, made while a temporal effect asks for them.
+    velocity: Option<crate::velocity::Target<B>>,
     /// Added passes, in the order they were added (see [`crate::render_pass`]).
     passes: Vec<Box<dyn crate::RenderPass<B>>>,
 }
@@ -264,6 +269,9 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
             post_processor: None,
             post_process_generation: 0,
             taa_frame: 0,
+            frame_number: 0,
+            last_clean: None,
+            velocity: None,
             passes: Vec::new(),
         })
     }
@@ -728,6 +736,18 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
             [0.0; 2]
         };
 
+        // Motion vectors are drawn only while an effect reads them.
+        self.frame_number += 1;
+        let velocity_frame = (self.post_process.enabled && crate::velocity::wanted(&self.post_process.effects)).then(|| crate::velocity::Frame {
+            camera: crate::velocity::Camera {
+                raster: globals.view_proj(),
+                clean: unjittered,
+                previous: self.last_clean.filter(|&(number, _)| number + 1 == self.frame_number).map_or(unjittered, |(_, matrix)| matrix),
+            },
+            number: self.frame_number,
+        });
+        self.last_clean = Some((self.frame_number, unjittered));
+
         // All fallible validation is finished, including the final batch/pose.
         self.culled_model_draws = cull_models(self.culling, camera, unjittered, batches, &mut prepared);
         if self.post_process.enabled {
@@ -789,6 +809,14 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
             });
             self.depth_generation = self.depth_generation.saturating_add(1);
         }
+        if velocity_frame.is_some() {
+            if self.velocity.as_ref().is_none_or(|target| target.size != size) {
+                self.rhi.wait_idle();
+                self.velocity = Some(crate::velocity::Target::new(&self.rhi, size));
+            }
+        } else if self.velocity.take().is_some() {
+            self.rhi.wait_idle();
+        }
         for (batch, ready) in batches.iter_mut().zip(&mut prepared) {
             match (batch, ready) {
                 (ImportedBatch::Static(renderer), PreparedBatch::Static) => {
@@ -807,6 +835,17 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
                     renderer.write_frame(&globals, ready)
                 }
                 _ => unreachable!("prepared batches preserve order and kind"),
+            }
+        }
+        if let Some(frame) = &velocity_frame {
+            for (batch, ready) in batches.iter_mut().zip(&prepared) {
+                match (batch, ready) {
+                    (ImportedBatch::StaticInstances { renderer, .. }, PreparedBatch::StaticInstances(ready)) => renderer.write_velocity(ready, frame),
+                    (ImportedBatch::Procedural { renderer, list }, PreparedBatch::Procedural(_)) => renderer.write_velocity(list, frame),
+                    #[cfg(feature = "animation")]
+                    (ImportedBatch::Skinned { renderer, .. }, PreparedBatch::Skinned(ready)) => renderer.write_velocity(ready, frame),
+                    _ => {}
+                }
             }
         }
         if let Some(ready) = &shadow_ready {
@@ -1011,6 +1050,26 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
                 }
             }
         }
+        // Where each pixel of the opaque geometry was in the last frame.
+        if let Some(target) = self.velocity.as_ref().filter(|_| velocity_frame.is_some()) {
+            let mut commands = Vec::new();
+            for (batch, ready) in batches.iter().zip(&prepared) {
+                match (batch, ready) {
+                    (ImportedBatch::StaticInstances { renderer, .. }, PreparedBatch::StaticInstances(ready)) => renderer.velocity_commands(ready, &mut commands),
+                    (ImportedBatch::Procedural { renderer, .. }, PreparedBatch::Procedural(_)) => renderer.velocity_commands(&mut commands),
+                    #[cfg(feature = "animation")]
+                    (ImportedBatch::Skinned { renderer, .. }, PreparedBatch::Skinned(ready)) => renderer.velocity_commands(ready, &mut commands),
+                    _ => {}
+                }
+            }
+            self.rhi.encode_pass(
+                &mut encoder,
+                "scene motion vectors",
+                Some(&ColorAttachment { view: &target.view, clear: Some([0.0; 4]), resolve: None }),
+                Some(&DepthAttachment { view: depth, clear: None, store: true }),
+                &commands,
+            );
+        }
         #[cfg(feature = "particles")]
         if let (Some(batch), Some(ready)) = (&mut particles, &particle_ready) {
             // Metadata is entirely determined by the completed preflight and
@@ -1035,6 +1094,7 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
                 target.size,
                 jitter,
                 self.shadow.as_ref().filter(|_| shadow_ready.is_some()).map(|map| (&map.view, &map.sampler, &map.cascades)),
+                self.velocity.as_ref().filter(|_| velocity_frame.is_some()).map(|target| &target.view),
             );
         }
         self.rhi.submit(encoder);
