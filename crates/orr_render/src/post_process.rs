@@ -352,6 +352,7 @@ impl<B: Rhi> PostProcessor<B> {
         output_size: (u32, u32),
         jitter: [f32; 2],
         shadow: Option<(&B::TextureView, &B::Sampler, &B::Buffer)>,
+        velocity: Option<&B::TextureView>,
     ) {
         let write =
             |buffer, params: Params| rhi.write_buffer(buffer, 0, bytemuck::bytes_of(&params));
@@ -440,6 +441,7 @@ impl<B: Rhi> PostProcessor<B> {
                 output_size,
                 jitter,
                 shadow,
+                velocity,
             };
             chain.as_ref().expect("made above").encode(rhi, encoder, target, &effects, &inputs);
             return;

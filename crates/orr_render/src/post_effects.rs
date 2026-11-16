@@ -232,6 +232,10 @@ pub(crate) fn effect_bytes(render: (u32, u32), output: (u32, u32), effects: &[Sc
     if asked.stage_count() > 0 {
         texels = texels.checked_add(full.checked_mul(2.min(asked.stage_count() as u64))?)?;
     }
+    // Motion vectors, drawn by the scene while one of these two effects asks for them.
+    if asked.taa.is_some() || asked.blur.is_some() {
+        texels = texels.checked_add(full)?;
+    }
     if asked.taa.is_some() {
         let history = area(if asked.upscale.is_some() { output } else { render })?;
         texels = texels.checked_add(history.checked_mul(2)?)?;
@@ -265,6 +269,7 @@ struct Uniform {
     dof: [f32; 4],
     blur: [f32; 4],
     volume: [f32; 4],
+    motion: [f32; 4],
 }
 
 /// The inverse of a column-major 4 x 4 matrix, or the identity when it has none.
@@ -378,6 +383,8 @@ pub(crate) struct EffectChain<B: Rhi> {
     dof_pipeline: B::Pipeline,
     chroma_pipeline: B::Pipeline,
     volume_pipeline: B::Pipeline,
+    /// Stands in for the motion vectors when the frame has none; its texels are never read.
+    no_velocity: Color<B>,
     /// Bound for volumetric fog when the frame has no shared sun shadow: one
     /// texel of depth and a cascades uniform with zero cascades.
     no_shadow: (B::Texture, B::TextureView, B::Sampler, B::Buffer),
@@ -419,6 +426,8 @@ pub(crate) struct FrameInputs<'a, B: Rhi> {
     pub shadow: Option<(&'a B::TextureView, &'a B::Sampler, &'a B::Buffer)>,
     /// Texture-coordinate shift that undoes this frame's jitter.
     pub jitter: [f32; 2],
+    /// Where each opaque pixel was in the last frame (see [`crate::velocity`]); `None` when no effect asked for it.
+    pub velocity: Option<&'a B::TextureView>,
 }
 
 /// What each effect asks of this frame, read from the effect list.
@@ -548,6 +557,7 @@ impl<B: Rhi> EffectChain<B> {
             dof_pipeline: pipeline("post depth of field", "fs_dof", TextureFormat::Rgba16Float),
             chroma_pipeline: pipeline("post chromatic aberration", "fs_chroma", TextureFormat::Rgba16Float),
             volume_pipeline: pipeline("post volumetric fog", "fs_volumetric", TextureFormat::Rgba16Float),
+            no_velocity: color(rhi, "post no motion vectors", (1, 1)),
             no_shadow: {
                 let texture = rhi.create_texture(&TextureDesc {
                     label: "post no shadow",
@@ -630,6 +640,7 @@ impl<B: Rhi> EffectChain<B> {
                 [strength, limit, asked.chroma.unwrap_or(0.0), 0.0]
             },
             volume: asked.volume.unwrap_or([0.0; 4]),
+            motion: [if frame.velocity.is_some() { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
         }
     }
 
@@ -728,6 +739,9 @@ impl<B: Rhi> EffectChain<B> {
                 Binding::Uniform { binding: 3, buffer: &self.uniform },
                 Binding::Texture { binding: 6, view: frame.depth },
             ];
+            if std::ptr::eq(*pipeline, &self.blur_pipeline) {
+                bindings.push(Binding::Texture { binding: 14, view: frame.velocity.unwrap_or(&self.no_velocity.view) });
+            }
             if std::ptr::eq(*pipeline, &self.volume_pipeline) {
                 let (_, view, sampler, buffer) = &self.no_shadow;
                 let (map, compare, cascades) = frame.shadow.unwrap_or((view, sampler, buffer));
@@ -784,6 +798,7 @@ impl<B: Rhi> EffectChain<B> {
             Binding::Texture { binding: 6, view: frame.depth },
             Binding::Texture { binding: 9, view: display },
             Binding::Texture { binding: 10, view: &previous },
+            Binding::Texture { binding: 14, view: frame.velocity.unwrap_or(&self.no_velocity.view) },
         ]);
         fullscreen(rhi, encoder, "post temporal anti-aliasing", &self.taa_pipeline, &bind, &out);
         out

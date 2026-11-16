@@ -23,6 +23,9 @@ use orr_rhi::{
     TextureUsage, Topology, VertexAttr, VertexFormat, VertexLayout, VertexStep,
 };
 
+#[cfg(feature = "imported-scene")]
+mod velocity;
+
 /// Submission bounds keep per-frame palette storage and CPU validation bounded.
 pub const MAX_SKINNED_INSTANCES: usize = 256;
 pub const MAX_SKINNED_DRAWS: usize = 4096;
@@ -218,6 +221,8 @@ pub struct SkinnedModelRenderer<B: Rhi> {
     morph_weights: Vec<MorphWeights>,
     /// Per draw: its own vertex buffer once its morph weights moved the vertices.
     morph_buffers: Vec<Option<B::Buffer>>,
+    #[cfg(feature = "imported-scene")]
+    velocity: Option<velocity::PoseVelocity<B>>,
     pub clear: [f64; 4],
 }
 impl<B: Rhi> SkinnedModelRenderer<B> {
@@ -371,6 +376,8 @@ impl<B: Rhi> SkinnedModelRenderer<B> {
             ),
             morph_weights: Vec::new(),
             morph_buffers: Vec::new(),
+            #[cfg(feature = "imported-scene")]
+            velocity: None,
             clear: crate::DEFAULT_CLEAR_3D,
         })
     }

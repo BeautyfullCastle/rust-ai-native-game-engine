@@ -117,6 +117,8 @@ pub mod visibility;
 pub use visibility::Culling;
 pub use decals::{Decal, DecalAtlasError, DecalShape, MAX_DECALS, MAX_DECAL_ATLAS_SIZE};
 pub mod post_effects;
+#[cfg(feature = "imported-scene")]
+mod velocity;
 pub use post_effects::ScreenEffect;
 #[cfg(feature = "imported-scene")]
 pub mod render_pass;

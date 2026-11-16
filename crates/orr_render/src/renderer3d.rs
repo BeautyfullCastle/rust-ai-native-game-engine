@@ -46,6 +46,8 @@ use crate::stats::{CpuClock, FrameStats, PassStats};
 
 #[cfg(feature = "imported-scene")]
 mod composed;
+#[cfg(feature = "imported-scene")]
+mod velocity;
 mod surfaces;
 #[cfg(feature = "imported-scene")]
 pub(crate) use surfaces::surface_draws;
@@ -485,6 +487,9 @@ pub struct Renderer3D<B: Rhi> {
     surface_params: Growing<B>,
     surface_frame: surfaces::SurfaceFrame,
     surface_textures: crate::surface_texture::TextureTable<B>,
+    /// Motion vector state, made when a composed frame first asks for it.
+    #[cfg(feature = "imported-scene")]
+    velocity: Option<velocity::MeshVelocity<B>>,
 }
 
 impl<B: Rhi> Renderer3D<B> {
@@ -732,6 +737,8 @@ impl<B: Rhi> Renderer3D<B> {
             surface_params,
             surface_frame: surfaces::SurfaceFrame::default(),
             surface_textures: crate::surface_texture::TextureTable::default(),
+            #[cfg(feature = "imported-scene")]
+            velocity: None,
             attachments: None,
             last_frame_stats: FrameStats::default(),
             last_sphere_lod_stats: SphereLodStats3D {

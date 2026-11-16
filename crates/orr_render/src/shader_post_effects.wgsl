@@ -50,6 +50,8 @@ struct Effects {
     blur: vec4<f32>,
     // Volumetric fog: density per meter, anisotropy, ray length (m), intensity.
     volume: vec4<f32>,
+    // x: 1 when the velocity texture holds the scene's motion vectors.
+    motion: vec4<f32>,
 };
 
 @group(0) @binding(0) var scene: texture_2d<f32>;
@@ -69,6 +71,8 @@ struct Effects {
 @group(0) @binding(11) var shared_shadow_map: texture_depth_2d;
 @group(0) @binding(12) var shared_shadow_sampler: sampler_comparison;
 @group(0) @binding(13) var<uniform> shadow_cascades: ShadowCascades;
+// Where each opaque pixel was in the last frame: the move in texture coordinates, 1 in alpha where drawn.
+@group(0) @binding(14) var velocity: texture_2d<f32>;
 
 struct Screen { @builtin(position) position: vec4<f32> };
 
@@ -474,9 +478,10 @@ fn picture_at(pos: vec2<i32>) -> vec4<f32> {
 }
 
 // Temporal anti-aliasing: this frame's picture, moved back by its jitter, is
-// blended into the previous frames. Each pixel finds where it was last frame
-// from depth and the previous camera; that history is clamped to the range of
-// the current neighborhood so moved or uncovered surfaces do not leave trails.
+// blended into the previous frames. Each pixel finds where it was last frame:
+// from the motion vector of the object drawn there, or, where none was drawn,
+// from depth and the previous camera. That history is clamped to the range of
+// the current neighborhood so uncovered surfaces do not leave trails.
 @fragment fn fs_taa(in: Screen) -> @location(0) vec4<f32> {
     let out_size = vec2<f32>(textureDimensions(history));
     let uv = in.position.xy / out_size;
@@ -495,14 +500,24 @@ fn picture_at(pos: vec2<i32>) -> vec4<f32> {
     if (fx.taa.y < 0.5) {
         return current;
     }
-    let depth_size = vec2<i32>(textureDimensions(depth));
-    let d = textureLoad(depth, clamp(vec2<i32>(at * vec2<f32>(depth_size)), vec2<i32>(0), depth_size - 1), 0);
-    let w = fx.inv_view_proj * vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, d, 1.0);
-    let before = fx.prev_view_proj * vec4<f32>(w.xyz / w.w, 1.0);
-    if (before.w <= 1e-6) {
-        return current;
+    var previous_uv: vec2<f32>;
+    var moved = vec4<f32>(0.0);
+    if (fx.motion.x > 0.5) {
+        let velocity_size = vec2<i32>(textureDimensions(velocity));
+        moved = textureLoad(velocity, clamp(vec2<i32>(at * vec2<f32>(velocity_size)), vec2<i32>(0), velocity_size - 1), 0);
     }
-    let previous_uv = vec2<f32>(before.x / before.w * 0.5 + 0.5, 0.5 - before.y / before.w * 0.5);
+    if (moved.a > 0.5) {
+        previous_uv = uv - moved.xy;
+    } else {
+        let depth_size = vec2<i32>(textureDimensions(depth));
+        let d = textureLoad(depth, clamp(vec2<i32>(at * vec2<f32>(depth_size)), vec2<i32>(0), depth_size - 1), 0);
+        let w = fx.inv_view_proj * vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, d, 1.0);
+        let before = fx.prev_view_proj * vec4<f32>(w.xyz / w.w, 1.0);
+        if (before.w <= 1e-6) {
+            return current;
+        }
+        previous_uv = vec2<f32>(before.x / before.w * 0.5 + 0.5, 0.5 - before.y / before.w * 0.5);
+    }
     if (any(previous_uv < vec2<f32>(0.0)) || any(previous_uv > vec2<f32>(1.0))) {
         return current;
     }
@@ -576,21 +591,32 @@ fn is_sky(pos: vec2<i32>) -> bool {
     return base;
 }
 
-// Camera motion blur: average 12 samples along where this pixel's surface moved
-// on screen since the last frame, scaled by the shutter.
+// Motion blur: average 12 samples along where this pixel's surface moved on
+// screen since the last frame, scaled by the shutter. The move comes from the
+// motion vector of the object drawn there, or, where none was drawn, from the
+// camera alone.
 @fragment fn fs_motion_blur(in: Screen) -> @location(0) vec4<f32> {
     let pos = vec2<i32>(in.position.xy) + vec2<i32>(i32(stage_inputs_keep()));
     let size = vec2<f32>(textureDimensions(scene));
     let uv = in.position.xy / size;
-    let d = textureLoad(depth, pos, 0);
-    let w = fx.inv_view_proj * vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, d, 1.0);
-    let before = fx.last_view_proj * vec4<f32>(w.xyz / w.w, 1.0);
     let base = textureLoad(scene, pos, 0);
-    if (before.w <= 1e-6) {
-        return base;
+    var moved = vec4<f32>(0.0);
+    if (fx.motion.x > 0.5) {
+        moved = textureLoad(velocity, pos, 0);
     }
-    let last_uv = vec2<f32>(before.x / before.w * 0.5 + 0.5, 0.5 - before.y / before.w * 0.5);
-    var motion = (uv - last_uv) * size * fx.blur.x;
+    var motion: vec2<f32>;
+    if (moved.a > 0.5) {
+        motion = moved.xy * size * fx.blur.x;
+    } else {
+        let d = textureLoad(depth, pos, 0);
+        let w = fx.inv_view_proj * vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, d, 1.0);
+        let before = fx.last_view_proj * vec4<f32>(w.xyz / w.w, 1.0);
+        if (before.w <= 1e-6) {
+            return base;
+        }
+        let last_uv = vec2<f32>(before.x / before.w * 0.5 + 0.5, 0.5 - before.y / before.w * 0.5);
+        motion = (uv - last_uv) * size * fx.blur.x;
+    }
     let streak = length(motion);
     if (streak < 0.5) {
         return base;
