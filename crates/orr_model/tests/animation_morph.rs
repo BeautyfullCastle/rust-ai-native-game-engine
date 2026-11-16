@@ -159,3 +159,69 @@ fn cooked_morph_data_is_checked_on_load() {
     s.morph.channels[0].clip = 99;
     assert!(AnimatedModel::new(s).is_err(), "the clip exists");
 }
+
+fn joint_keys(s: &orr_model::animation::AnimatedSource) -> usize {
+    use orr_model::animation::ChannelValues::{Rotation, Scale, Translation};
+    s.clips
+        .iter()
+        .flat_map(|c| &c.channels)
+        .map(|c| match &c.values {
+            Translation(v) | Scale(v) => v.len(),
+            Rotation(v) => v.len(),
+        })
+        .sum()
+}
+
+#[test]
+fn cooked_morph_channels_must_be_unique_per_clip_and_node() {
+    let model = import(&morphed()).unwrap();
+    let mut s = model.source().clone();
+    let mut other = s.morph.channels[0].clone();
+    other.weights = vec![1.0, 1.0, 0.0, 0.0];
+    s.morph.channels.push(other);
+    assert!(AnimatedModel::new(s.clone()).is_err(), "a second track for the same clip and node");
+    s.morph.channels.swap(0, 1);
+    assert!(AnimatedModel::new(s).is_err(), "the order does not matter");
+}
+
+#[test]
+fn morph_keys_count_against_the_animation_key_budget() {
+    let model = import(&morphed()).unwrap();
+    let channel = &model.source().morph.channels[0];
+    let k = channel.weights.len() / channel.times.len();
+    let room = orr_model::animation::MAX_ANIMATION_KEYS - joint_keys(model.source());
+    let with_keys = |keys: usize| {
+        let mut s = model.source().clone();
+        let n = keys / k;
+        s.morph.channels[0].times = (0..n).map(|i| i as f32).collect();
+        s.morph.channels[0].weights = vec![0.0; n * k];
+        AnimatedModel::new(s)
+    };
+    assert!(with_keys(room).is_ok(), "keys up to the budget");
+    assert!(with_keys(room + k).is_err(), "one more key than the budget");
+}
+
+#[test]
+fn morph_channels_count_against_the_clip_channel_limit() {
+    use orr_model::animation::{AnimationChannel, ChannelValues, MAX_CHANNELS};
+    let model = import(&morphed()).unwrap();
+    let mut s = model.source().clone();
+    let clip = s.morph.channels[0].clip as usize;
+    let mut template = s.nodes[0].clone();
+    template.children.clear();
+    s.nodes.resize(100, template);
+    let track = |node: u32, values| AnimationChannel { node, interpolation: Interpolation::Step, times: vec![0.0], values };
+    s.clips[clip].channels = (0..100u32)
+        .flat_map(|n| {
+            [
+                track(n, ChannelValues::Translation(vec![[0.0; 3]])),
+                track(n, ChannelValues::Scale(vec![[1.0; 3]])),
+                track(n, ChannelValues::Rotation(vec![[0.0, 0.0, 0.0, 1.0]])),
+            ]
+        })
+        .take(MAX_CHANNELS - 1)
+        .collect();
+    assert!(AnimatedModel::new(s.clone()).is_ok(), "joint tracks and one weights track fill the limit");
+    s.clips[clip].channels.push(track(99, ChannelValues::Translation(vec![[0.0; 3]])));
+    assert!(AnimatedModel::new(s).is_err(), "one track past the limit");
+}

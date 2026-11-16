@@ -333,8 +333,9 @@ impl AnimatedModel {
         for (index, clip) in source.clips.iter().enumerate() {
             validate_name(&clip.name)?;
             // A clip of only morph weights has no joint channels.
-            let morphs_only = source.morph.channels.iter().any(|c| c.clip as usize == index);
-            if (clip.channels.is_empty() && !morphs_only) || clip.channels.len() > MAX_CHANNELS {
+            let morph_channels = source.morph.channels.iter().filter(|c| c.clip as usize == index).count();
+            let total = clip.channels.len() + morph_channels;
+            if total == 0 || total > MAX_CHANNELS {
                 return Err(invalid("clip channel count exceeds limit or is empty"));
             }
             let mut targets = BTreeSet::new();
@@ -471,7 +472,7 @@ impl AnimatedModel {
                 }
             }
         }
-        morph::validate(&source, &mut decoded_bytes)?;
+        morph::validate(&source, &mut decoded_bytes, &mut keys, &mut animation_bytes)?;
         for image in &source.images {
             add_budget(
                 &mut decoded_bytes,
