@@ -6,7 +6,7 @@ use orr_sample::arena_game::Arena;
 use orr_sample::physics_game::PhysGame;
 use std::path::PathBuf;
 pub use orr_sample::editor_view::Drawable;
-pub use orr_sample::physics_view::JointView;
+pub use orr_sample::physics_view::{JointView, Pose};
 
 /// Existing spatial fields for picking; absent for embedded gameplay views.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -225,6 +225,15 @@ pub struct Pulse {
     pub started: f64,
 }
 
+/// A viewport drag of a joint's anchor handle in progress.
+#[derive(Clone, Copy, Debug)]
+struct AnchorDrag {
+    joint: orr_ecs::Entity,
+    grab: viewport::AnchorGrab,
+    /// Handle position minus pointer world position at the press.
+    offset: [f32; 2],
+}
+
 /// A viewport drag of a body in progress.
 #[derive(Clone, Copy, Debug)]
 struct BodyDrag {
@@ -262,6 +271,7 @@ pub struct UiState {
     /// Entities an agent just edited, pulsing in the viewport (see [`Pulse`]).
     pub pulses: Vec<Pulse>,
     body_drag: Option<BodyDrag>,
+    anchor_drag: Option<AnchorDrag>,
     yard_transform_target: Option<Target>,
     yard_xyz: [String;3],
     yard_quat: [String;4],
@@ -1413,6 +1423,7 @@ impl EditorApp {
             ctx.stop_dragging();
             self.editor.end_edit();
             self.ui.body_drag = None;
+            self.ui.anchor_drag = None;
         }
         self.shortcuts(&ctx);
 
@@ -1458,6 +1469,7 @@ impl EditorApp {
         if !ctx.input(|i| i.pointer.button_down(PointerButton::Primary)) {
             self.editor.end_edit();
             self.ui.body_drag = None;
+            self.ui.anchor_drag = None;
         }
         self.dialogs(&ctx);
         #[cfg(feature="mesh-mission")]
@@ -3394,11 +3406,32 @@ impl EditorApp {
         #[cfg(not(feature = "tilemap"))]
         let tile_pointer_owned = false;
         if tile_pointer_owned && self.ui.body_drag.take().is_some() { self.editor.cancel_edit(); }
+        if tile_pointer_owned && self.ui.anchor_drag.take().is_some() { self.editor.cancel_edit(); }
         // While a proposal is previewed the viewport is read-only (the frame on screen is not the document's).
         let previewing = self.editor.previewing().map(str::to_string);
         let live = self.editor.down().is_none();
-        // Select and move bodies with the primary button.
+        // A press on an anchor handle of the selected joint grabs the handle; it never picks a body.
         if !tile_pointer_owned && self.editor.can_mutate() && previewing.is_none() && self.editor.selected_guids().len() <= 1
+            && !ui.input(|i| i.modifiers.ctrl || i.modifiers.command) && resp.drag_started_by(PointerButton::Primary) {
+            if let Some(origin) = ui.input(|i| i.pointer.press_origin()) {
+                let world = self.editor.camera.screen_to_world(to_px(origin), px);
+                if let Some(hit) = self.editor.pick_anchor(world, px) {
+                    self.ui.anchor_drag = Some(AnchorDrag { joint: hit.joint, grab: hit.grab, offset: [hit.center[0] - world[0], hit.center[1] - world[1]] });
+                    self.editor.begin_edit("move joint anchor");
+                }
+            }
+        }
+        if let (Some(drag), true) = (self.ui.anchor_drag, resp.dragged_by(PointerButton::Primary)) {
+            if let Some(at) = resp.interact_pointer_pos() {
+                let w = self.editor.camera.screen_to_world(to_px(at), px);
+                self.editor.drag_anchor(drag.joint, drag.grab, [w[0] + drag.offset[0], w[1] + drag.offset[1]]);
+            }
+        }
+        if resp.drag_stopped() && self.ui.anchor_drag.take().is_some() {
+            self.editor.end_edit();
+        }
+        // Select and move bodies with the primary button.
+        if !tile_pointer_owned && self.ui.anchor_drag.is_none() && self.editor.can_mutate() && previewing.is_none() && self.editor.selected_guids().len() <= 1
             && !ui.input(|i| i.modifiers.ctrl || i.modifiers.command) && resp.drag_started_by(PointerButton::Primary) {
             if let Some(origin) = ui.input(|i| i.pointer.press_origin()) {
                 let world = self.editor.camera.screen_to_world(to_px(origin), px);
@@ -3430,7 +3463,9 @@ impl EditorApp {
             if let Some(at) = resp.interact_pointer_pos() {
                 let world = self.editor.camera.screen_to_world(to_px(at), px);
                 let hit = self.editor.pick(world);
-                if ui.input(|i| i.modifiers.ctrl || i.modifiers.command) {
+                if self.editor.pick_anchor(world, px).is_some() {
+                    // A click on an anchor handle keeps the joint selected.
+                } else if ui.input(|i| i.modifiers.ctrl || i.modifiers.command) {
                     if let Some(hit) = hit { self.editor.toggle_selection(hit); }
                 } else { self.editor.select(hit); }
             }
