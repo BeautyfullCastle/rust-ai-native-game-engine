@@ -59,10 +59,64 @@ the listener set by `EventAudio::set_listener(Listener { position, right, veloci
   values over 20 ms. Call it each frame for a car or a projectile passing by.
 - `Emitter::heard_by` returns the volume in decibels and the panning, and
   `Emitter::doppler` the playback rate, for a caller that wants to show or log them.
-- Not modeled: occlusion by walls, reverb, elevation (a sound above and one below
+- Not modeled: occlusion by walls, elevation (a sound above and one below
   sound the same), and the travel time of sound (a far sound starts at once). The
   rate changes the clip's length too: a clip closing in at a fifth of the speed of
   sound plays 20 percent shorter.
+
+## Reverb
+
+One reverb bus is shared by every voice (a send/return setup): each voice has a
+send level, and the bus returns only the reverberated sound, so the dry sound is
+not changed. The reverb is Freeverb-style: 8 damped comb filters in parallel per
+channel into 4 allpass filters in series, the right channel tuned 23 samples
+longer for stereo width, and an optional pre-delay. All buffers are allocated
+when the bus is created; the audio thread allocates nothing.
+
+- `ReverbParams { room_size, damping, pre_delay, wet }`: room size 0..1 (tail
+  length), damping 0..1 (how fast the highs die), pre-delay in seconds up to
+  `MAX_PRE_DELAY` (0.1), and `wet` 0..1, the send level of a placed sound.
+  Presets: `OUTDOOR` (wet 0, no reverb), `SMALL_ROOM`, `HALL`, `CAVE`.
+- A zone is `ReverbZone::sphere(center, radius, params)` or
+  `ReverbZone::cuboid(center, half_extents, params)`, with `.fade(meters)`
+  (default 2). Its weight is 1 inside and falls linearly to 0 over `fade` meters
+  outside. The listener position picks the parameters: overlapping zones are
+  averaged by weight, and `set_ambient_reverb` (default `OUTDOOR`) takes the
+  share the zones leave to 1, so leaving every zone fades the reverb out.
+  `reverb_at(position)` returns the parameters heard at a position.
+- Placed sounds (`Clip::at`) are sent as much as `wet` says. A clip that is not
+  placed has a send of 0 unless it asks: `Clip::reverb(send)` (0..1) sends any
+  clip, placed or not, at that level; the zones then only set the room.
+- `set_listener`, `add_reverb_zone`, `remove_reverb_zone`, `clear_reverb_zones`
+  and `set_ambient_reverb` move the send of every playing zone-driven voice over
+  20 ms, and the bus's room size, damping and pre-delay glide with a 30 ms time
+  constant, so crossing a zone edge does not click.
+- Cost: nothing exists until a zone, a non-silent ambient reverb or a clip send
+  asks for it. With none of them the output is bit-identical to a build without
+  reverb. Once the bus exists it runs for the rest of the session. A voice gets
+  its own mixer track (and a path to the bus) only if reverb was in use when it
+  started; a sound started earlier stays dry. At most `MAX_REVERB_ZONES` (64)
+  zones.
+- Limits: one bus, so one room at a time (the listener's); sounds are not
+  reverberated by the room they are in, only by the room the listener is in; the
+  send does not grow with distance; no early reflections from geometry.
+
+```rust
+use orr_audio::{AudioConfig, Clip, Listener, OfflineAudio, ReverbParams, ReverbZone};
+
+let mut audio = OfflineAudio::new_offline(AudioConfig::default(), 48_000)?;
+// A hall around the origin that fades out over 6 m, a cave elsewhere.
+audio.add_reverb_zone(ReverbZone::sphere([0.0; 3], 20.0, ReverbParams::HALL).fade(6.0))?;
+audio.add_reverb_zone(ReverbZone::cuboid([100.0, 0.0, 0.0], [15.0, 6.0, 15.0], ReverbParams::CAVE))?;
+// Placed sounds get the reverb of the zone the listener stands in.
+let step = footstep.at([2.0, 0.0, -3.0], 1.0, 40.0);
+// A UI sound is not placed: it asks for a send of its own.
+let chime = chime.reverb(0.3);
+audio.set_listener(Listener { position: [100.0, 0.0, 0.0], ..Listener::default() });
+```
+
+`cargo run --release -p orr_audio --example reverb -- <folder>` renders a click
+and tone sequence dry and in the hall to `reverb_dry.wav` and `reverb_hall.wav`.
 
 ## Event ownership and bounds
 
@@ -90,7 +144,7 @@ the listener set by `EventAudio::set_listener(Listener { position, right, veloci
   confirmations, cancellations, completions, duplicates, drops and resets.
 - The audio manager owns source sample memory and voice handles. Dropping it
   requests voice stops and backend shutdown. There is no render-to-simulation path,
-  history sample buffer, asset database, spatialization, streaming music or browser audio integration.
+  history sample buffer, asset database, streaming music or browser audio integration.
 
 ## Verification
 
