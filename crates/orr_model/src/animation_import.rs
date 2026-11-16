@@ -2,10 +2,10 @@
 //!
 //! The shared resource parser retains the static importer's image/material and
 //! containment checks. This entrypoint adds TRS nodes, four influences, skins,
-//! and STEP/LINEAR TRS channels. Untargeted matrix nodes may encode a bounded
-//! positive-scale TRS. Morph targets (POSITION and NORMAL offsets) and STEP/LINEAR
-//! weights channels are read; extra influence sets, targeted matrices,
-//! sparse accessors, unknown extensions and CUBICSPLINE weights fail closed.
+//! and STEP/LINEAR/CUBICSPLINE TRS channels. Untargeted matrix nodes may encode a bounded
+//! positive-scale TRS. Morph targets (POSITION and NORMAL offsets, sparse or dense)
+//! and STEP/LINEAR/CUBICSPLINE weights channels are read; extra influence sets, targeted matrices,
+//! unknown extensions and morph tangent offsets fail closed.
 //! Declared base-color KHR_texture_transform is baked into UV0 at import only.
 //! See https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#skins
 //! and https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#animations.
@@ -275,7 +275,7 @@ fn read_skins(
 }
 
 fn data_accessor(doc: &Document, a: &Accessor) -> Result<(), Error> {
-    let view = &doc.buffer_views[a.buffer_view];
+    let view = &doc.buffer_views[a.view_index()];
     if view.byte_stride.is_some() || view.target.is_some() {
         return Err(invalid(
             "animation/inverse-bind accessor cannot use vertex/index target or stride",
@@ -316,7 +316,8 @@ fn read_clips(doc: &Document, buffers: &[Vec<u8>]) -> Result<(Vec<AnimationClip>
             data_accessor(doc, output)?;
             sampler_keys = sampler_keys.saturating_add(output.count);
             // Morph weights: a scalar per target per key, checked against the target count per channel.
-            let scalar = output.kind == "SCALAR" && !cubic && input.count > 0 && output.count % input.count == 0;
+            let keyed = input.count.saturating_mul(if cubic { 3 } else { 1 });
+            let scalar = output.kind == "SCALAR" && keyed > 0 && output.count % keyed == 0;
             if sampler_keys > MAX_ANIMATION_KEYS
                 || input.component_type != 5126
                 || input.normalized
@@ -370,8 +371,9 @@ fn read_clips(doc: &Document, buffers: &[Vec<u8>]) -> Result<(Vec<AnimationClip>
             }
             if path == "weights" {
                 let k = node_targets(doc, channel.target.node).ok_or_else(|| invalid("weights animation needs a node whose mesh has morph targets"))?;
-                if output.kind != "SCALAR" || input.count.checked_mul(k) != Some(output.count) {
-                    return Err(invalid("weights animation needs one f32 per morph target per key; cubic weights unsupported"));
+                let cubic = interpolation(sampler)? == Interpolation::CubicSpline;
+                if output.kind != "SCALAR" || input.count.checked_mul(k * if cubic { 3 } else { 1 }) != Some(output.count) {
+                    return Err(invalid("weights animation needs one f32 per morph target per key, times three for cubic"));
                 }
                 aggregate_keys = aggregate_keys.saturating_add(output.count);
                 aggregate_bytes = aggregate_bytes.saturating_add(input.count.saturating_mul(4)).saturating_add(output.count.saturating_mul(4));
@@ -561,7 +563,7 @@ fn validate_primitive(doc: &Document, p: &PrimitiveDef) -> Result<bool, Error> {
         return Ok(has_skin);
     };
     let idx = at(&doc.accessors, index, "indices")?;
-    let view = &doc.buffer_views[idx.buffer_view];
+    let view = &doc.buffer_views[idx.view_index()];
     if idx.kind != "SCALAR"
         || !matches!(idx.component_type, 5121 | 5123 | 5125)
         || idx.normalized
@@ -574,7 +576,7 @@ fn validate_primitive(doc: &Document, p: &PrimitiveDef) -> Result<bool, Error> {
     Ok(has_skin)
 }
 fn vertex_accessor(doc: &Document, a: &Accessor) -> Result<(), Error> {
-    let view = &doc.buffer_views[a.buffer_view];
+    let view = &doc.buffer_views[a.view_index()];
     // Vertex attributes are four-byte aligned, even u8/u16 influence streams.
     let (size, count) = a.layout()?;
     if view.target.is_some_and(|n| n != 34962)
