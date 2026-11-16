@@ -1,4 +1,4 @@
-//! Ball joints, rods and ropes between 3D bodies, and their determinism.
+//! Ball joints, rods, ropes, hinges and prismatic joints between 3D bodies, and their determinism.
 // Distances are measured in f64 for the assertions only; the simulation stays fixed point.
 #![allow(clippy::float_arithmetic)]
 use orr_ecs::{ComponentRegistryBuilder, Entity, Frame};
@@ -306,4 +306,183 @@ fn a_joint_added_as_a_plain_component_is_recorded_at_its_first_step() {
     run(&mut added, &mut Scratch::new(), 60);
     run(&mut plain, &mut Scratch::new(), 60);
     assert_eq!(added.checksum(), plain.checksum(), "both doors swing the same and hold the same limits");
+}
+
+fn gravity() -> FPVec3 {
+    PhysicsConfig::default().gravity
+}
+
+fn frame_with(gravity: FPVec3) -> Frame {
+    let mut b = ComponentRegistryBuilder::new();
+    register(&mut b);
+    register_joints(&mut b);
+    let mut fr = Frame::new(b.build());
+    init(&mut fr, PhysicsConfig { gravity, ..PhysicsConfig::default() });
+    fr
+}
+
+fn x_axis() -> FPVec3 {
+    v3(FP::ONE, FP::ZERO, FP::ZERO)
+}
+
+fn px(fr: &Frame, e: Entity) -> f64 {
+    f(fr.get::<Body>(e).unwrap().pos.x)
+}
+
+fn speed_x(fr: &Frame, e: Entity) -> f64 {
+    f(fr.get::<Body>(e).unwrap().vel.x)
+}
+
+/// A static rail body at (0, 10, 0) that collides with nothing and a ball of radius 0.5 at `start`.
+fn rail(gravity: FPVec3, start: FPVec3, joint: impl Fn(Entity, Entity) -> Joint) -> (Frame, Entity, Entity) {
+    let mut fr = frame_with(gravity);
+    let hub = spawn_body(&mut fr, Body::new_static(v3(FP::ZERO, fp!(10), FP::ZERO)), Collider { mask: 0, ..Collider::new(Shape::sphere(fp!(0.1))) });
+    let shape = Shape::sphere(fp!(0.5));
+    let ball = spawn_body(&mut fr, Body::new_dynamic(start, &shape, FP::ONE), Collider::new(shape));
+    add_joint(&mut fr, joint(hub, ball));
+    (fr, hub, ball)
+}
+
+fn at_hub() -> FPVec3 {
+    v3(FP::ZERO, fp!(10), FP::ZERO)
+}
+
+fn slider(a: Entity, b: Entity, anchor_b: FPVec3, axis: FPVec3) -> Joint {
+    Joint::prismatic(a, b, FPVec3::ZERO, anchor_b, axis)
+}
+
+#[test]
+fn a_prismatic_joint_slides_along_its_axis_and_not_across() {
+    // Level rail under gravity: the push slides the ball and gravity cannot pull it off.
+    let (mut fr, _, ball) = rail(gravity(), at_hub(), |a, b| slider(a, b, FPVec3::ZERO, x_axis()));
+    fr.get_mut::<Body>(ball).unwrap().vel = v3(fp!(3), FP::ZERO, fp!(2));
+    run(&mut fr, &mut Scratch::new(), 60);
+    let p = fr.get::<Body>(ball).unwrap().pos;
+    assert!(f(p.x) > 2.5, "it slid along the axis: {}", f(p.x));
+    assert!((f(p.y) - 10.0).abs() < 0.05 && f(p.z).abs() < 0.05, "and not across it: y {} z {}", f(p.y), f(p.z));
+    // A rail at 45 degrees: gravity slides the ball down it, and it stays on the rail line.
+    let diagonal = v3(FP::ONE, FP::ONE, FP::ZERO);
+    let (mut fr, _, ball) = rail(gravity(), at_hub(), |a, b| slider(a, b, FPVec3::ZERO, diagonal));
+    let mut sc = Scratch::new();
+    for _ in 0..90 {
+        run(&mut fr, &mut sc, 1);
+        let p = fr.get::<Body>(ball).unwrap().pos;
+        let across = f(p.x) - (f(p.y) - 10.0);
+        assert!(across.abs() < 0.05 && f(p.z).abs() < 0.05, "the ball stays on the rail line: {across}, z {}", f(p.z));
+    }
+    assert!(px(&fr, ball) < -2.0, "gravity slid it down the rail: {}", px(&fr, ball));
+}
+
+#[test]
+fn a_prismatic_joint_locks_the_rotation() {
+    let (mut fr, _, ball) = rail(FPVec3::ZERO, at_hub(), |a, b| slider(a, b, FPVec3::ZERO, x_axis()));
+    fr.get_mut::<Body>(ball).unwrap().omega = v3(fp!(3), fp!(4), fp!(5));
+    run(&mut fr, &mut Scratch::new(), 40);
+    let q = fr.get::<Body>(ball).unwrap().rot;
+    assert!(f(q.x).abs() < 0.03 && f(q.y).abs() < 0.03 && f(q.z).abs() < 0.03, "it does not turn: {q:?}");
+    // An anchor off its center must not let the ball swing round the rail either.
+    let (mut fr, _, ball) = rail(gravity(), at_hub(), |a, b| slider(a, b, v3(fp!(0.4), FP::ZERO, FP::ZERO), x_axis()));
+    run(&mut fr, &mut Scratch::new(), 60);
+    let b = *fr.get::<Body>(ball).unwrap();
+    assert!(f(b.rot.x).abs() < 0.03 && f(b.rot.y).abs() < 0.03 && f(b.rot.z).abs() < 0.03, "it does not tip: {:?}", b.rot);
+    assert!((f(b.pos.y) - 10.0).abs() < 0.05, "and does not sag: {}", f(b.pos.y));
+}
+
+#[test]
+fn a_prismatic_joint_follows_a_turning_parent() {
+    // Two free bodies, the second slid 3 out on the first's axis, the first turning about z.
+    let mut fr = frame_with(FPVec3::ZERO);
+    let big = Shape::sphere(fp!(0.5));
+    let no_contact = |shape| Collider { mask: 0, ..Collider::new(shape) };
+    let a = spawn_body(&mut fr, Body::new_dynamic(v3(FP::ZERO, fp!(10), FP::ZERO), &big, fp!(500)), no_contact(big));
+    let small = Shape::sphere(fp!(0.5));
+    let ball = spawn_body(&mut fr, Body::new_dynamic(v3(fp!(3), fp!(10), FP::ZERO), &small, FP::ONE), no_contact(small));
+    add_joint(&mut fr, slider(a, ball, FPVec3::ZERO, x_axis()));
+    fr.get_mut::<Body>(a).unwrap().omega = v3(FP::ZERO, FP::ZERO, FP::ONE);
+    let mut sc = Scratch::new();
+    for _ in 0..60 {
+        run(&mut fr, &mut sc, 1);
+        let (ba, bb) = (*fr.get::<Body>(a).unwrap(), *fr.get::<Body>(ball).unwrap());
+        let axis = ba.rot.rotate_vec3(x_axis());
+        let gap = bb.pos - ba.pos;
+        let across = gap - axis * gap.dot(axis);
+        assert!(across.length().raw() as f64 / 65536.0 < 0.1, "the ball stays on the turning axis: {}", f(across.length()));
+        let (ta, tb) = (turn_z(ba.rot), turn_z(bb.rot));
+        assert!((ta - tb).abs() < 0.05, "and turns with it: {ta} {tb}");
+    }
+    assert!(turn_z(fr.get::<Body>(a).unwrap().rot) > 0.5, "the parent really turned");
+}
+
+#[test]
+fn a_prismatic_limit_stops_the_slide_measured_from_where_it_was_added() {
+    // The ball is added to the joint at x = 0.5, so 0 is that pose and the bounds are -0.5 and 2.5.
+    for (push, rest) in [(5, 2.5), (-5, -0.5)] {
+        let (mut fr, _, ball) = rail(FPVec3::ZERO, v3(fp!(0.5), fp!(10), FP::ZERO), |a, b| slider(a, b, FPVec3::ZERO, x_axis()).with_limits(fp!(-1), fp!(2)));
+        fr.get_mut::<Body>(ball).unwrap().vel = v3(FP::from_int(push), FP::ZERO, FP::ZERO);
+        let mut sc = Scratch::new();
+        for _ in 0..120 {
+            run(&mut fr, &mut sc, 1);
+            let x = px(&fr, ball);
+            assert!((-0.56..=2.56).contains(&x), "the slide stays inside the limits: {x}");
+        }
+        assert!((px(&fr, ball) - rest).abs() < 0.03, "it rests on the bound {rest}: {}", px(&fr, ball));
+        assert!(speed_x(&fr, ball).abs() < 0.05, "and has stopped: {}", speed_x(&fr, ball));
+    }
+}
+
+#[test]
+fn a_prismatic_motor_drives_the_slide_at_its_speed_within_its_force() {
+    let (mut fr, _, ball) = rail(FPVec3::ZERO, at_hub(), |a, b| slider(a, b, FPVec3::ZERO, x_axis()).with_motor(fp!(2), fp!(100)));
+    run(&mut fr, &mut Scratch::new(), 30);
+    assert!((speed_x(&fr, ball) - 2.0).abs() < 0.02, "the strong motor holds 2: {}", speed_x(&fr, ball));
+    let v = fr.get::<Body>(ball).unwrap().vel;
+    assert!(f(v.y).abs() < 0.01 && f(v.z).abs() < 0.01, "and moves along nothing else");
+    // A weak motor pushes with a fixed force: the speed follows force / mass * time.
+    let (mut fr, _, ball) = rail(FPVec3::ZERO, at_hub(), |a, b| slider(a, b, FPVec3::ZERO, x_axis()).with_motor(fp!(2), fp!(0.5)));
+    let mass = 1.0 / f(fr.get::<Body>(ball).unwrap().inv_mass);
+    run(&mut fr, &mut Scratch::new(), 30);
+    let seconds = 30.0 * f(PhysicsConfig::default().dt);
+    let expected = 0.5 / mass * seconds;
+    assert!((speed_x(&fr, ball) - expected).abs() < expected * 0.05, "the force cap holds: {} against {expected}", speed_x(&fr, ball));
+    // A motor of speed 0 and plenty of force brakes a moving ball.
+    let (mut fr, _, ball) = rail(FPVec3::ZERO, at_hub(), |a, b| slider(a, b, FPVec3::ZERO, x_axis()).with_motor(FP::ZERO, fp!(100)));
+    fr.get_mut::<Body>(ball).unwrap().vel = v3(fp!(4), FP::ZERO, FP::ZERO);
+    run(&mut fr, &mut Scratch::new(), 10);
+    assert!(speed_x(&fr, ball).abs() < 0.01, "a zero-speed motor with force is a brake: {}", speed_x(&fr, ball));
+}
+
+#[test]
+fn a_prismatic_joint_is_deterministic_across_rollback() {
+    let skew = v3(FP::ONE, fp!(0.5), fp!(-0.3));
+    let scene = || rail(gravity(), at_hub(), |a, b| slider(a, b, v3(fp!(0.2), FP::ZERO, FP::ZERO), skew).with_motor(fp!(1), fp!(3)).with_limits(fp!(-1), fp!(1))).0;
+    let mut a = scene();
+    let mut sa = Scratch::new();
+    run(&mut a, &mut sa, 20);
+    let snapshot = a.clone();
+    run(&mut a, &mut sa, 40);
+    let ahead = a.checksum();
+    let mut b = scene();
+    run(&mut b, &mut Scratch::new(), 60);
+    assert_eq!(b.checksum(), ahead, "two runs agree");
+    a.copy_from(&snapshot);
+    run(&mut a, &mut Scratch::new(), 40);
+    assert_eq!(a.checksum(), ahead, "a rollback replays to the same state");
+}
+
+#[test]
+fn a_prismatic_joint_added_as_a_plain_component_is_recorded_at_its_first_step() {
+    let limited = |j: Joint| j.with_limits(fp!(-0.5), fp!(0.5));
+    let start = v3(fp!(0.3), fp!(10.2), fp!(0.1));
+    let (mut added, _, _) = rail(gravity(), start, |a, b| limited(slider(a, b, FPVec3::ZERO, x_axis())));
+    // The same rail with the joint put on an entity directly, as a scene file or the inspector does.
+    let mut plain = frame_with(gravity());
+    let hub = spawn_body(&mut plain, Body::new_static(v3(FP::ZERO, fp!(10), FP::ZERO)), Collider { mask: 0, ..Collider::new(Shape::sphere(fp!(0.1))) });
+    let shape = Shape::sphere(fp!(0.5));
+    let ball = spawn_body(&mut plain, Body::new_dynamic(start, &shape, FP::ONE), Collider::new(shape));
+    let e = plain.spawn();
+    plain.add(e, limited(slider(hub, ball, FPVec3::ZERO, x_axis())));
+    assert_eq!(plain.get::<Joint>(e).unwrap().axis_b, FPVec3::ZERO, "not recorded before stepping");
+    run(&mut added, &mut Scratch::new(), 60);
+    run(&mut plain, &mut Scratch::new(), 60);
+    assert_eq!(added.checksum(), plain.checksum(), "both rails slide the same and hold the same limits");
 }

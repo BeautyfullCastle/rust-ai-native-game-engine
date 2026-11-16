@@ -13,7 +13,7 @@ use orr_reflect::{
 
 use crate::{
     BODY_DYNAMIC, BODY_KINEMATIC, BODY_STATIC, Body, Collider, ContactCache, JOINT_BALL, JOINT_HINGE,
-    JOINT_LIMIT, JOINT_MOTOR, JOINT_ROD, JOINT_ROPE, Joint, PhysicsConfig, PhysicsState, SHAPE_BOX,
+    JOINT_LIMIT, JOINT_MOTOR, JOINT_PRISMATIC, JOINT_ROD, JOINT_ROPE, Joint, PhysicsConfig, PhysicsState, SHAPE_BOX,
     SHAPE_CAPSULE, SHAPE_SPHERE, Shape,
 };
 
@@ -505,7 +505,8 @@ fn init_physics_state(frame: &mut Frame, present: bool) {
     crate::init(frame, config);
 }
 
-const ANGLE_RANGE: &str = "-3.1415..=3.1415";
+/// Wide enough for a prismatic joint's slide in meters; a hinge angle stays below pi in the solver.
+const LIMIT_RANGE: &str = "-1000..=1000";
 
 impl Reflect for Joint {
     fn describe() -> TypeDesc {
@@ -527,26 +528,32 @@ impl Reflect for Joint {
                     offset_of!(Joint, kind),
                     TypeDesc::enumeration(
                         4,
-                        &[("ball", JOINT_BALL as u64), ("rod", JOINT_ROD as u64), ("rope", JOINT_ROPE as u64), ("hinge", JOINT_HINGE as u64)],
+                        &[
+                            ("ball", JOINT_BALL as u64),
+                            ("rod", JOINT_ROD as u64),
+                            ("rope", JOINT_ROPE as u64),
+                            ("hinge", JOINT_HINGE as u64),
+                            ("prismatic", JOINT_PRISMATIC as u64),
+                        ],
                     ),
                 )
-                .with_doc("What the joint keeps: anchors together, a distance, a most distance, or a hinge."),
+                .with_doc("What the joint keeps: anchors together, a distance, a most distance, a hinge, or a slide along one axis."),
                 FieldDesc::new(
                     "flags",
                     offset_of!(Joint, flags),
                     TypeDesc::flags(4, &[("motor", JOINT_MOTOR as u64), ("limit", JOINT_LIMIT as u64)]),
                 )
-                .with_doc("A hinge's motor and angle limits; a ball joint's swing and twist limits."),
+                .with_doc("A hinge's or slide's motor and limits; a ball joint's swing and twist limits."),
                 FieldDesc::new("axis_a", offset_of!(Joint, axis_a), vec3("-1..=1"))
-                    .with_doc("Hinge axis, or a limited ball joint's axis, in a's own frame."),
-                FieldDesc::new("lower", offset_of!(Joint, lower), fixed(ANGLE_RANGE))
-                    .with_doc("Lowest hinge angle or ball joint twist in radians, from the pose at the first step."),
-                FieldDesc::new("upper", offset_of!(Joint, upper), fixed(ANGLE_RANGE))
-                    .with_doc("Highest hinge angle or ball joint twist in radians."),
+                    .with_doc("Hinge axis, slide axis, or a limited ball joint's axis, in a's own frame."),
+                FieldDesc::new("lower", offset_of!(Joint, lower), fixed(LIMIT_RANGE))
+                    .with_doc("Lowest hinge angle or ball joint twist in radians, or slide in meters, from the pose at the first step."),
+                FieldDesc::new("upper", offset_of!(Joint, upper), fixed(LIMIT_RANGE))
+                    .with_doc("Highest hinge angle or ball joint twist in radians, or slide in meters."),
                 FieldDesc::new("motor_speed", offset_of!(Joint, motor_speed), fixed("-100..=100"))
-                    .with_doc("Turn rate in radians per second a hinge motor aims for."),
+                    .with_doc("Turn rate in radians per second a hinge motor aims for, or slide speed of a slide motor."),
                 FieldDesc::new("max_motor_torque", offset_of!(Joint, max_motor_torque), fixed("0..=100000"))
-                    .with_doc("Largest torque the motor applies."),
+                    .with_doc("Largest torque the motor applies, or force for a slide motor."),
                 FieldDesc::new("swing", offset_of!(Joint, swing), fixed("0..=3.1415"))
                     .with_doc("Largest angle in radians between the axes of a limited ball joint."),
             ],
@@ -859,6 +866,42 @@ mod tests {
         }
         assert_eq!(original.dense::<Body>().1, loaded.dense::<Body>().1, "the loaded door swings like the original");
         assert_eq!(original.dense::<Joint>().1, loaded.dense::<Joint>().1, "and records the same axes");
+    }
+
+    #[test]
+    fn a_prismatic_joint_saved_to_a_scene_and_loaded_back_slides_the_same() {
+        let mut builder = ComponentRegistryBuilder::new();
+        crate::register(&mut builder);
+        crate::register_joints(&mut builder);
+        let frame_registry = builder.build();
+        let mut types = TypeRegistry::new();
+        register_reflect(&mut types);
+        register_joints_reflect(&mut types);
+
+        let mut original = Frame::new(frame_registry.clone());
+        crate::init(&mut original, PhysicsConfig::default());
+        let rail = crate::spawn_body(&mut original, Body::new_static(FPVec3::new(FP::ZERO, fp!(10), FP::ZERO)), Collider::new(Shape::sphere(fp!(0.1))));
+        let shape = Shape::sphere(fp!(0.2));
+        let slider = crate::spawn_body(&mut original, Body::new_dynamic(FPVec3::new(fp!(0.5), fp!(10), FP::ZERO), &shape, FP::ONE), Collider::new(shape));
+        let axis = FPVec3::new(FP::ONE, FP::ONE, FP::ZERO);
+        crate::add_joint(&mut original, Joint::prismatic(rail, slider, FPVec3::ZERO, FPVec3::ZERO, axis).with_motor(fp!(1), fp!(20)).with_limits(fp!(-1), fp!(2)));
+
+        let yaml = Scene::unbake(&types, &original, None).unwrap().to_yaml();
+        assert!(yaml.contains("kind: prismatic"), "the joint is in the scene:
+{yaml}");
+        assert!(!yaml.contains("ref_a") && !yaml.contains("axis_b"), "recorded terms stay out of the file");
+        let mut loaded = Frame::new(frame_registry);
+        Scene::parse(&yaml, &types).unwrap().bake(&types, &mut loaded).unwrap();
+
+        let mut sc = (crate::Scratch::new(), crate::Scratch::new());
+        for tick in 1..=60 {
+            original.set_tick(tick);
+            loaded.set_tick(tick);
+            crate::step(&mut original, &mut sc.0);
+            crate::step(&mut loaded, &mut sc.1);
+        }
+        assert_eq!(original.dense::<Body>().1, loaded.dense::<Body>().1, "the loaded slider moves like the original");
+        assert_eq!(original.dense::<Joint>().1, loaded.dense::<Joint>().1, "and records the same terms");
     }
 
     #[test]

@@ -268,7 +268,8 @@ fn joints(frame: FrameView<'_>) -> Vec<PlacedJoint> {
         .filter_map(|(entity, joint)| {
             let (a, b) = (frame.get::<Body>(joint.a)?, frame.get::<Body>(joint.b)?);
             let limited_ball = joint.kind == orr_physics3d::JOINT_BALL && joint.flags & orr_physics3d::JOINT_LIMIT != 0;
-            let axis = (joint.kind == orr_physics3d::JOINT_HINGE || limited_ball).then(|| rotate(quat(a), v3(joint.axis_a)));
+            let has_axis = joint.kind == orr_physics3d::JOINT_HINGE || joint.kind == orr_physics3d::JOINT_PRISMATIC || limited_ball;
+            let axis = has_axis.then(|| rotate(quat(a), v3(joint.axis_a)));
             Some(PlacedJoint { entity, anchor_a: anchor(a, joint.anchor_a), anchor_b: anchor(b, joint.anchor_b), axis })
         })
         .collect()

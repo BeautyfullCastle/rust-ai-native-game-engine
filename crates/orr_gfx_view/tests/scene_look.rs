@@ -340,3 +340,24 @@ fn joints_are_placed_by_their_bodies_and_drawn_as_markers() {
     assert_eq!(list.lines.len(), 5);
     assert!(list.lines.iter().all(|l| l.width == 3.0), "the selected joint is drawn wider");
 }
+
+#[test]
+fn a_prismatic_joint_is_drawn_with_its_slide_axis_like_a_hinge() {
+    let mut builder = ComponentRegistryBuilder::new();
+    orr_physics3d::register(&mut builder);
+    orr_physics3d::register_joints(&mut builder);
+    orr_gfx::register(&mut builder);
+    let mut frame = Frame::new(builder.build());
+    orr_gfx::init(&mut frame);
+    let shape = orr_physics3d::Shape::sphere(FP::ONE);
+    let body = |frame: &mut Frame, x: i32| orr_physics3d::spawn_body(frame, orr_physics3d::Body::new_static(FPVec3::new(int(x), int(2), FP::ZERO)), orr_physics3d::Collider::new(shape));
+    let (a, b) = (body(&mut frame, 0), body(&mut frame, 4));
+    let y = FPVec3::new(FP::ZERO, FP::ONE, FP::ZERO);
+    let slide = orr_physics3d::add_joint(&mut frame, orr_physics3d::Joint::prismatic(a, b, FPVec3::ZERO, FPVec3::ZERO, y));
+    let look = scene_look(FrameView::of(&frame), &fallback());
+    assert_eq!(look.joints.len(), 1);
+    assert!(close(look.joints[0].axis.unwrap(), [0.0, 1.0, 0.0]));
+    let mut list = RenderList3D::default();
+    look.draw_markers(&mut list, Some(slide));
+    assert_eq!(list.lines.len(), 5, "the line between the anchors, a cross of three lines and the axis");
+}
