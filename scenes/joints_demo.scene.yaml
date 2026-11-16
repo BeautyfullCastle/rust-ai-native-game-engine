@@ -1,0 +1,248 @@
+# Joint demo: prismatic, spring, hinge motor and ball cone, with deterministic gravity.
+# Rain is disabled so editing and play remain small and easy to inspect.
+schema: orr.scene/1
+singletons:
+  Yard3dScene: { rain_batch: 0, rain_interval: 0, max_entities: 128, rain_seed: 42 }
+  orr_physics3d::PhysicsState:
+    config:
+      gravity: [0, -10, 0]
+      dt: 0.0166666667
+      baumgarte: 0.2
+      linear_slop: 0.01
+      contact_margin: 0.02
+      restitution_threshold: 1
+      max_correction_speed: 6
+      max_linear_speed: 500
+      max_angular_speed: 60
+      velocity_iterations: 1
+      substeps: 8
+      sleep_ticks: 30
+      sleep_linear_speed: 0.05
+      sleep_angular_speed: 0.05
+entities:
+  e_00000001:
+    name: ground
+    orr_physics3d::Body:
+      pos: [0, -0.5, 0]
+      rot: { kind: unit, x: 0, y: 0, z: 0, w: 1 }
+      vel: [0, 0, 0]
+      omega: [0, 0, 0]
+      inv_mass: 0
+      inv_inertia: [0, 0, 0]
+      linear_damping: 0
+      angular_damping: 0
+      kind: static
+    orr_physics3d::Collider:
+      shape: { kind: box, half_extents: [24, 0.5, 24] }
+      restitution: 0.1
+      friction: 0.6
+      layer: 1
+      mask: 4294967295
+  e_00000002:
+    name: rail
+    orr_physics3d::Body:
+      pos: [-6, 4, 0]
+      rot: { kind: unit, x: 0, y: 0, z: 0, w: 1 }
+      vel: [0, 0, 0]
+      omega: [0, 0, 0]
+      inv_mass: 0
+      inv_inertia: [0, 0, 0]
+      linear_damping: 0
+      angular_damping: 0
+      kind: static
+    orr_physics3d::Collider:
+      shape: { kind: box, half_extents: [0.1, 0.1, 0.1] }
+      restitution: 0.1
+      friction: 0.6
+      layer: 2
+      mask: 0
+  e_00000003:
+    name: slider
+    orr_physics3d::Body:
+      pos: [-6, 4, 0]
+      rot: { kind: unit, x: 0, y: 0, z: 0, w: 1 }
+      vel: [0, 0, 0]
+      omega: [0, 0, 0]
+      inv_mass: 1
+      inv_inertia: [12.245, 12.245, 12.245]
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics3d::Collider:
+      shape: { kind: box, half_extents: [0.35, 0.35, 0.35] }
+      restitution: 0.1
+      friction: 0.6
+      layer: 1
+      mask: 1
+  e_00000004:
+    name: prismatic
+    orr_physics3d::Joint:
+      a: e_00000002
+      b: e_00000003
+      anchor_a: [0, 0, 0]
+      anchor_b: [0, 0, 0]
+      length: 0
+      kind: prismatic
+      flags: [limit]
+      axis_a: [0.8, -0.6, 0]
+      lower: -2
+      upper: 2.5
+      motor_speed: 0
+      max_motor_torque: 0
+      swing: 0
+  e_00000005:
+    name: spring_hook
+    orr_physics3d::Body:
+      pos: [-2, 6, 0]
+      rot: { kind: unit, x: 0, y: 0, z: 0, w: 1 }
+      vel: [0, 0, 0]
+      omega: [0, 0, 0]
+      inv_mass: 0
+      inv_inertia: [0, 0, 0]
+      linear_damping: 0
+      angular_damping: 0
+      kind: static
+    orr_physics3d::Collider:
+      shape: { kind: box, half_extents: [0.1, 0.1, 0.1] }
+      restitution: 0.1
+      friction: 0.6
+      layer: 2
+      mask: 0
+  e_00000006:
+    name: spring_weight
+    orr_physics3d::Body:
+      pos: [-2, 5, 0]
+      rot: { kind: unit, x: 0, y: 0, z: 0, w: 1 }
+      vel: [0, 0, 0]
+      omega: [0, 0, 0]
+      inv_mass: 1
+      inv_inertia: [12.245, 12.245, 12.245]
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics3d::Collider:
+      shape: { kind: box, half_extents: [0.35, 0.35, 0.35] }
+      restitution: 0.1
+      friction: 0.6
+      layer: 1
+      mask: 1
+  e_00000007:
+    name: spring
+    orr_physics3d::Joint:
+      a: e_00000005
+      b: e_00000006
+      anchor_a: [0, 0, 0]
+      anchor_b: [0, 0, 0]
+      length: 2
+      kind: spring
+      flags: []
+      axis_a: [0, 0, 0]
+      lower: 0
+      upper: 0
+      motor_speed: 1
+      max_motor_torque: 0.05
+      swing: 0
+  e_00000008:
+    name: hinge_post
+    orr_physics3d::Body:
+      pos: [2, 3, 0]
+      rot: { kind: unit, x: 0, y: 0, z: 0, w: 1 }
+      vel: [0, 0, 0]
+      omega: [0, 0, 0]
+      inv_mass: 0
+      inv_inertia: [0, 0, 0]
+      linear_damping: 0
+      angular_damping: 0
+      kind: static
+    orr_physics3d::Collider:
+      shape: { kind: box, half_extents: [0.1, 0.1, 0.1] }
+      restitution: 0.1
+      friction: 0.6
+      layer: 2
+      mask: 0
+  e_00000009:
+    name: hinge_blade
+    orr_physics3d::Body:
+      pos: [2, 3, 0]
+      rot: { kind: unit, x: 0, y: 0, z: 0, w: 1 }
+      vel: [0, 0, 0]
+      omega: [0, 0, 0]
+      inv_mass: 1
+      inv_inertia: [104.167, 1.519, 1.519]
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics3d::Collider:
+      shape: { kind: box, half_extents: [1.4, 0.12, 0.12] }
+      restitution: 0.1
+      friction: 0.6
+      layer: 1
+      mask: 1
+  e_0000000a:
+    name: hinge_motor
+    orr_physics3d::Joint:
+      a: e_00000008
+      b: e_00000009
+      anchor_a: [0, 0, 0]
+      anchor_b: [0, 0, 0]
+      length: 0
+      kind: hinge
+      flags: [motor]
+      axis_a: [0, 0, 1]
+      lower: 0
+      upper: 0
+      motor_speed: 3
+      max_motor_torque: 60
+      swing: 0
+  e_0000000b:
+    name: cone_hook
+    orr_physics3d::Body:
+      pos: [6, 6, 0]
+      rot: { kind: unit, x: 0, y: 0, z: 0, w: 1 }
+      vel: [0, 0, 0]
+      omega: [0, 0, 0]
+      inv_mass: 0
+      inv_inertia: [0, 0, 0]
+      linear_damping: 0
+      angular_damping: 0
+      kind: static
+    orr_physics3d::Collider:
+      shape: { kind: box, half_extents: [0.1, 0.1, 0.1] }
+      restitution: 0.1
+      friction: 0.6
+      layer: 2
+      mask: 0
+  e_0000000c:
+    name: cone_arm
+    orr_physics3d::Body:
+      pos: [6, 5, 0]
+      rot: { kind: unit, x: 0, y: 0, z: 0, w: 1 }
+      vel: [8, 0, 4]
+      omega: [0, 0, 0]
+      inv_mass: 1
+      inv_inertia: [2.957, 104.167, 2.957]
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics3d::Collider:
+      shape: { kind: box, half_extents: [0.12, 1, 0.12] }
+      restitution: 0.1
+      friction: 0.6
+      layer: 1
+      mask: 1
+  e_0000000d:
+    name: ball_cone
+    orr_physics3d::Joint:
+      a: e_0000000b
+      b: e_0000000c
+      anchor_a: [0, 0, 0]
+      anchor_b: [0, 1, 0]
+      length: 0
+      kind: ball
+      flags: [limit]
+      axis_a: [0, -1, 0]
+      lower: -0.5
+      upper: 0.5
+      motor_speed: 0
+      max_motor_torque: 0
+      swing: 0.6
