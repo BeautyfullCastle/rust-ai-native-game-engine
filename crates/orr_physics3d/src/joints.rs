@@ -5,8 +5,10 @@
 //! body lined up, so they turn about that axis only, and it can drive the turn
 //! with a motor and hold it between two angles. A ball joint can be limited
 //! to a cone of swing around an axis and a range of twist about it, as a
-//! shoulder or a ragdoll's neck. Joints are an opt-in component: a game that never calls
-//! [`register_joints`] steps exactly as before.
+//! shoulder or a ragdoll's neck. A prismatic joint lets `b` slide along one
+//! axis of `a` and nothing else, with an optional motor and limits on the
+//! slide, for pistons and sliding doors. Joints are an opt-in component: a game
+//! that never calls [`register_joints`] steps exactly as before.
 
 use bytemuck::{Pod, Zeroable};
 use orr_ecs::{ComponentRegistryBuilder, Entity, Frame};
@@ -24,11 +26,15 @@ pub const JOINT_ROPE: u32 = 2;
 
 /// [`Joint::kind`]: a ball joint that turns only about [`Joint::axis_a`].
 pub const JOINT_HINGE: u32 = 3;
+/// [`Joint::kind`]: `b` slides along [`Joint::axis_a`] and cannot turn against `a`.
+pub const JOINT_PRISMATIC: u32 = 4;
 
-/// [`Joint::flags`]: a hinge's motor drives the turn toward [`Joint::motor_speed`].
+/// [`Joint::flags`]: a hinge's motor drives the turn, and a prismatic joint's motor the
+/// slide, toward [`Joint::motor_speed`].
 pub const JOINT_MOTOR: u32 = 1;
 /// [`Joint::flags`]: a hinge holds its angle between [`Joint::lower`] and [`Joint::upper`];
-/// a ball joint holds its swing within [`Joint::swing`] and its twist between them.
+/// a ball joint holds its swing within [`Joint::swing`] and its twist between them;
+/// a prismatic joint holds its slide between them.
 pub const JOINT_LIMIT: u32 = 2;
 
 /// A joint between bodies `a` and `b`, as a component on an entity of its own.
@@ -46,25 +52,31 @@ pub struct Joint {
     pub anchor_b: FPVec3,
     /// Distance between the anchors for a rod or rope; unused by a ball joint.
     pub length: FP,
-    /// [`JOINT_BALL`], [`JOINT_ROD`], [`JOINT_ROPE`] or [`JOINT_HINGE`].
+    /// [`JOINT_BALL`], [`JOINT_ROD`], [`JOINT_ROPE`], [`JOINT_HINGE`] or [`JOINT_PRISMATIC`].
     pub kind: u32,
-    /// [`JOINT_MOTOR`] and [`JOINT_LIMIT`], for a hinge; 0 for none.
+    /// [`JOINT_MOTOR`] and [`JOINT_LIMIT`], for a hinge or a prismatic joint; 0 for none.
     pub flags: u32,
-    /// Hinge axis, or the axis a limited ball joint swings and twists around, in `a`'s own frame.
+    /// Hinge axis, slide axis of a prismatic joint, or the axis a limited ball joint swings
+    /// and twists around, in `a`'s own frame.
     pub axis_a: FPVec3,
     /// The same axis in `b`'s own frame; [`add_joint`] fills it.
     pub axis_b: FPVec3,
     /// A direction across the axis in `a`'s frame that the angle is measured from; [`add_joint`] fills it.
+    /// A prismatic joint keeps the vector part of the rotation of `b` in `a`'s frame here.
     pub ref_a: FPVec3,
     /// The same direction in `b`'s frame when the joint was added; [`add_joint`] fills it.
+    /// A prismatic joint keeps the real part of that rotation in `x` and the slide at the start in `y`.
     pub ref_b: FPVec3,
     /// Lowest hinge angle or ball joint twist in radians, above `-pi`, with [`JOINT_LIMIT`].
+    /// A prismatic joint's lowest slide along the axis from where it was added.
     pub lower: FP,
     /// Highest hinge angle or ball joint twist in radians, below `pi`, with [`JOINT_LIMIT`].
+    /// A prismatic joint's highest slide along the axis from where it was added.
     pub upper: FP,
     /// Turn rate of `b` against `a` about the axis, in radians per second, the motor aims for.
+    /// A prismatic joint's speed of `b` along the axis.
     pub motor_speed: FP,
-    /// Largest torque the motor applies; 0 lets it do nothing.
+    /// Largest torque the motor applies, or force for a prismatic joint; 0 lets it do nothing.
     pub max_motor_torque: FP,
     /// Largest angle in radians between the two bodies' axes of a ball joint with [`JOINT_LIMIT`], below `pi`.
     pub swing: FP,
@@ -83,13 +95,22 @@ impl Joint {
         Joint { axis_a: axis, ..Joint::new(JOINT_HINGE, a, b, anchor_a, anchor_b, FP::ZERO) }
     }
 
+    /// A joint that lets `b` slide along `axis`, given in `a`'s own frame, and nothing else.
+    /// The anchors are the points that stay on the axis line through `anchor_a`.
+    #[must_use]
+    pub fn prismatic(a: Entity, b: Entity, anchor_a: FPVec3, anchor_b: FPVec3, axis: FPVec3) -> Joint {
+        Joint { axis_a: axis, ..Joint::new(JOINT_PRISMATIC, a, b, anchor_a, anchor_b, FP::ZERO) }
+    }
+
     /// The same hinge with a motor turning `b` against `a` at `speed`, with at most `max_torque`.
+    /// A prismatic joint's motor slides `b` along the axis at `speed`, with at most `max_torque` of force.
     #[must_use]
     pub fn with_motor(self, speed: FP, max_torque: FP) -> Joint {
         Joint { flags: self.flags | JOINT_MOTOR, motor_speed: speed, max_motor_torque: max_torque, ..self }
     }
 
     /// The same hinge held between `lower` and `upper` radians from where it was added.
+    /// A prismatic joint is held between those distances along the axis from where it was added.
     #[must_use]
     pub fn with_limits(self, lower: FP, upper: FP) -> Joint {
         Joint { flags: self.flags | JOINT_LIMIT, lower, upper, ..self }
@@ -105,7 +126,17 @@ impl Joint {
 
     /// Whether [`add_joint`] records the axis and the zero angle for this joint.
     fn has_axis(&self) -> bool {
-        self.kind == JOINT_HINGE || self.has_cone()
+        self.kind == JOINT_HINGE || self.kind == JOINT_PRISMATIC || self.has_cone()
+    }
+
+    /// Whether the recorded terms are still missing. A prismatic joint's `ref_a` can be zero
+    /// once recorded, so its `axis_b` tells.
+    fn unrecorded(&self) -> bool {
+        if self.kind == JOINT_PRISMATIC {
+            self.axis_b == FPVec3::ZERO
+        } else {
+            self.ref_a == FPVec3::ZERO
+        }
     }
 
     fn has_cone(&self) -> bool {
@@ -129,6 +160,10 @@ pub fn register_joints(builder: &mut ComponentRegistryBuilder) {
 /// missing, or whose axis is zero, is left unrecorded.
 fn record(frame: &Frame, joint: &mut Joint) {
     let (Some(a), Some(b)) = (frame.get::<Body>(joint.a), frame.get::<Body>(joint.b)) else { return };
+    if joint.kind == JOINT_PRISMATIC {
+        record_slide(a, b, joint);
+        return;
+    }
     let n = a.rot.rotate_vec3(joint.axis_a).normalize();
     if n == FPVec3::ZERO {
         return;
@@ -140,6 +175,22 @@ fn record(frame: &Frame, joint: &mut Joint) {
     joint.ref_b = b.rot.inverse_rotate_vec3(r);
 }
 
+/// Records a prismatic joint's axis in both bodies' frames, the rotation of
+/// `b` in `a`'s frame to hold, and the slide at the start.
+fn record_slide(a: &Body, b: &Body, joint: &mut Joint) {
+    let axis = joint.axis_a.normalize_or_zero();
+    if axis == FPVec3::ZERO {
+        return;
+    }
+    let rest = a.rot.conjugate() * b.rot;
+    let rest = if rest.w < FP::ZERO { FPQuat::new(-rest.x, -rest.y, -rest.z, -rest.w) } else { rest };
+    let gap = (b.pos + b.rot.rotate_vec3(joint.anchor_b)) - (a.pos + a.rot.rotate_vec3(joint.anchor_a));
+    joint.axis_a = axis;
+    joint.axis_b = b.rot.inverse_rotate_vec3(a.rot.rotate_vec3(axis));
+    joint.ref_a = FPVec3::new(rest.x, rest.y, rest.z);
+    joint.ref_b = FPVec3::new(rest.w, gap.dot(a.rot.rotate_vec3(axis)), FP::ZERO);
+}
+
 /// Records the joints that came in without [`add_joint`] (a scene file, the
 /// editor's inspector) from the poses at the start of their first step. A
 /// recorded joint has a nonzero `ref_a`.
@@ -148,7 +199,7 @@ pub(crate) fn settle(frame: &mut Frame) {
         return;
     }
     let (je, jd) = frame.dense::<Joint>();
-    let pending: Vec<(Entity, Joint)> = je.iter().zip(jd).filter(|(_, j)| j.has_axis() && j.ref_a == FPVec3::ZERO).map(|(&e, &j)| (e, j)).collect();
+    let pending: Vec<(Entity, Joint)> = je.iter().zip(jd).filter(|(_, j)| j.has_axis() && j.unrecorded()).map(|(&e, &j)| (e, j)).collect();
     for (e, mut joint) in pending {
         record(frame, &mut joint);
         if let Some(stored) = frame.get_mut::<Joint>(e) {
@@ -157,8 +208,8 @@ pub(crate) fn settle(frame: &mut Frame) {
     }
 }
 
-/// Spawns an entity holding `joint` and wakes both bodies. For a hinge or a
-/// limited ball joint it also records the axis and the zero angle in both
+/// Spawns an entity holding `joint` and wakes both bodies. For a hinge, a
+/// prismatic joint or a limited ball joint it also records the axis and the zero angle in both
 /// bodies' frames from their current poses. Bodies held by a joint do not fall asleep.
 pub fn add_joint(frame: &mut Frame, mut joint: Joint) -> Entity {
     if joint.has_axis() {
@@ -207,6 +258,42 @@ pub(crate) struct JointRow {
     total: FP,
     hinge: Option<Hinge>,
     cone: Option<Cone>,
+    slide: Option<Slide>,
+}
+
+/// A prismatic joint: the recorded terms and the terms of this substep.
+#[derive(Clone, Copy)]
+struct Slide {
+    flags: u32,
+    axis_a: FPVec3,
+    /// The rotation of `b` in `a`'s frame to hold.
+    rest: FPQuat,
+    /// The slide when the joint was added.
+    start: FP,
+    lower: FP,
+    upper: FP,
+    motor_speed: FP,
+    max_force: FP,
+    // Refreshed per substep.
+    /// The axis in the world.
+    axis: FPVec3,
+    /// From `a`'s center to `b`'s anchor in the world: the lever of `a`'s share of every slide row.
+    lever: FPVec3,
+    /// How far `b` is from where it was added, along the axis.
+    offset: FP,
+    /// One over the effective mass along the axis; 0 skips the motor and the limits.
+    axis_mass: FP,
+    /// The anchor mass of the two directions across the axis.
+    across: Solve3,
+    across_bias: FPVec3,
+    /// The turn mass of the two bodies together.
+    turn: Solve3,
+    turn_bias: FPVec3,
+    inv_h: FP,
+    motor_max: FP,
+    motor_total: FP,
+    lower_total: FP,
+    upper_total: FP,
 }
 
 /// One turn axis of a hinge: its effective mass with the anchors held
@@ -338,6 +425,29 @@ pub(crate) fn prepare(frame: &Frame, ents: &[Entity], bslot: &[u32], bd: &[Body]
                 lower_total: FP::ZERO,
                 upper_total: FP::ZERO,
             }),
+            slide: (joint.kind == JOINT_PRISMATIC && joint.axis_b != FPVec3::ZERO).then_some(Slide {
+                flags: joint.flags,
+                axis_a: joint.axis_a,
+                rest: FPQuat::new(joint.ref_a.x, joint.ref_a.y, joint.ref_a.z, joint.ref_b.x),
+                start: joint.ref_b.y,
+                lower: joint.lower,
+                upper: joint.upper,
+                motor_speed: joint.motor_speed,
+                max_force: joint.max_motor_torque,
+                axis: FPVec3::ZERO,
+                lever: FPVec3::ZERO,
+                offset: FP::ZERO,
+                axis_mass: FP::ZERO,
+                across: Solve3::default(),
+                across_bias: FPVec3::ZERO,
+                turn: Solve3::default(),
+                turn_bias: FPVec3::ZERO,
+                inv_h: FP::ZERO,
+                motor_max: FP::ZERO,
+                motor_total: FP::ZERO,
+                lower_total: FP::ZERO,
+                upper_total: FP::ZERO,
+            }),
             cone: joint.has_cone().then_some(Cone {
                 axis_a: joint.axis_a,
                 axis_b: joint.axis_b,
@@ -412,6 +522,14 @@ pub(crate) fn begin_substep(rows: &mut [JointRow], pw: &[Vw], h: FP, rotate: fn(
         let gap = (row.pos_b + pw[row.b].v + row.rb) - (row.pos_a + pw[row.a].v + row.ra);
         row.total = FP::ZERO;
         row.active = true;
+        if row.kind == JOINT_PRISMATIC {
+            row.active = false;
+            if let Some(mut slide) = row.slide {
+                row.active = begin_slide(row, &mut slide, rot_a, rot_b, gap, h);
+                row.slide = Some(slide);
+            }
+            continue;
+        }
         if row.kind == JOINT_BALL || row.kind == JOINT_HINGE {
             let m = row.ima + row.imb;
             let k = add(&add(&FPMat3::from_diag(FPVec3::new(m, m, m)), &arm(&row.iia, row.ra)), &arm(&row.iib, row.rb));
@@ -444,6 +562,45 @@ pub(crate) fn begin_substep(rows: &mut [JointRow], pw: &[Vw], h: FP, rotate: fn(
         row.mass = FP::ONE / k;
         row.bias_axis = error * BAUMGARTE * inv_h;
     }
+}
+
+/// The slide terms of a prismatic joint at this substep's pose, or `false`
+/// when the axis is zero. `a` is treated as pushed at the point of its body
+/// that lies under `b`'s anchor, so the rows stay right while `a` turns with
+/// `b` slid away from it.
+fn begin_slide(row: &JointRow, slide: &mut Slide, rot_a: FPQuat, rot_b: FPQuat, gap: FPVec3, h: FP) -> bool {
+    let axis = rot_a.rotate_vec3(slide.axis_a);
+    if axis == FPVec3::ZERO {
+        return false;
+    }
+    let inv_h = FP::ONE / h;
+    let along = gap.dot(axis);
+    let lever = row.ra + gap;
+    // The two directions across the axis: the anchor mass `K` restricted to them, plus 1 on the axis
+    // so that the whole matrix can be solved the way a ball joint is.
+    let m = row.ima + row.imb;
+    let k = add(&add(&FPMat3::from_diag(FPVec3::new(m, m, m)), &arm(&row.iia, lever)), &arm(&row.iib, row.rb));
+    let line = FPMat3::from_cols(axis * axis.x, axis * axis.y, axis * axis.z);
+    let flat = FPMat3::from_cols(FPVec3::X - line.col(0), FPVec3::Y - line.col(1), FPVec3::Z - line.col(2));
+    slide.across = Solve3::new(&add(&flat.mul_mat(&k).mul_mat(&flat), &line));
+    slide.across_bias = (gap - axis * along) * (BAUMGARTE * inv_h);
+    slide.turn = Solve3::new(&add(&row.iia, &row.iib));
+    // The turn of `b` away from `a`'s pose times the rotation to hold, as a vector.
+    let off = rot_b * (rot_a * slide.rest).conjugate();
+    let sign = if off.w < FP::ZERO { -FP::TWO } else { FP::TWO };
+    slide.turn_bias = FPVec3::new(off.x, off.y, off.z) * (sign * BAUMGARTE * inv_h);
+    let (na, nb) = (lever.cross(axis), row.rb.cross(axis));
+    let k = m + na.dot(row.iia.mul_vec(na)) + nb.dot(row.iib.mul_vec(nb));
+    slide.axis_mass = if k > FP::ZERO { FP::ONE / k } else { FP::ZERO };
+    slide.axis = axis;
+    slide.lever = lever;
+    slide.offset = along - slide.start;
+    slide.inv_h = inv_h;
+    slide.motor_max = slide.max_force * h;
+    slide.motor_total = FP::ZERO;
+    slide.lower_total = FP::ZERO;
+    slide.upper_total = FP::ZERO;
+    true
 }
 
 /// The hinge's axes, misalignment and angle at this substep's pose.
@@ -558,6 +715,54 @@ fn solve_hinge(row: &JointRow, hinge: &mut Hinge, va: &mut Vw, vb: &mut Vw) {
     turn(row, &u, va, vb, i12 * rs + i22 * ru);
 }
 
+/// Applies an impulse `p` at `b`'s anchor, and at the point of `a` under it.
+fn push(row: &JointRow, slide: &Slide, va: &mut Vw, vb: &mut Vw, p: FPVec3) {
+    va.v -= p * row.ima;
+    va.w -= row.iia.mul_vec(slide.lever.cross(p));
+    vb.v += p * row.imb;
+    vb.w += row.iib.mul_vec(row.rb.cross(p));
+}
+
+/// Velocity of `b`'s anchor against the point of `a` under it.
+fn slide_velocity(row: &JointRow, slide: &Slide, va: &Vw, vb: &Vw) -> FPVec3 {
+    (vb.v + vb.w.cross(row.rb)) - (va.v + va.w.cross(slide.lever))
+}
+
+/// A prismatic joint: the motor and the limits along the axis, then the
+/// rows across the axis and the rows that hold the rotation.
+fn solve_slide(row: &JointRow, slide: &mut Slide, va: &mut Vw, vb: &mut Vw) {
+    let n = slide.axis;
+    if slide.axis_mass > FP::ZERO {
+        if slide.flags & JOINT_MOTOR != 0 {
+            let lambda = -(slide.axis_mass * (slide_velocity(row, slide, va, vb).dot(n) - slide.motor_speed));
+            let total = (slide.motor_total + lambda).clamp(-slide.motor_max, slide.motor_max);
+            let lambda = total - slide.motor_total;
+            slide.motor_total = total;
+            push(row, slide, va, vb, n * lambda);
+        }
+        if slide.flags & JOINT_LIMIT != 0 {
+            // Speculative: a bound not yet reached only stops a slide that would pass it this substep.
+            let bias = |c: FP| if c < FP::ZERO { c * BAUMGARTE * slide.inv_h } else { c * slide.inv_h };
+            let lambda = -(slide.axis_mass * (slide_velocity(row, slide, va, vb).dot(n) + bias(slide.offset - slide.lower)));
+            let total = (slide.lower_total + lambda).max(FP::ZERO);
+            let lambda = total - slide.lower_total;
+            slide.lower_total = total;
+            push(row, slide, va, vb, n * lambda);
+            let lambda = -(slide.axis_mass * (-slide_velocity(row, slide, va, vb).dot(n) + bias(slide.upper - slide.offset)));
+            let total = (slide.upper_total + lambda).max(FP::ZERO);
+            let lambda = total - slide.upper_total;
+            slide.upper_total = total;
+            push(row, slide, va, vb, n * -lambda);
+        }
+    }
+    let relative = slide_velocity(row, slide, va, vb);
+    let across = slide.across.solve(-((relative - n * relative.dot(n)) + slide.across_bias));
+    push(row, slide, va, vb, across - n * across.dot(n));
+    let turn = slide.turn.solve(-((vb.w - va.w) + slide.turn_bias));
+    va.w -= row.iia.mul_vec(turn);
+    vb.w += row.iib.mul_vec(turn);
+}
+
 /// The swing and twist limits of a ball joint.
 fn solve_cone(row: &JointRow, cone: &mut Cone, va: &mut Vw, vb: &mut Vw) {
     limit(row, &cone.close, cone.room, cone.inv_h, &mut cone.swing_total, va, vb);
@@ -569,6 +774,13 @@ fn solve_cone(row: &JointRow, cone: &mut Cone, va: &mut Vw, vb: &mut Vw) {
 pub(crate) fn solve(rows: &mut [JointRow], vw: &mut [Vw]) {
     for row in rows.iter_mut().filter(|r| r.active) {
         let (mut va, mut vb) = (vw[row.a], vw[row.b]);
+        if let Some(mut slide) = row.slide {
+            solve_slide(row, &mut slide, &mut va, &mut vb);
+            row.slide = Some(slide);
+            vw[row.a] = va;
+            vw[row.b] = vb;
+            continue;
+        }
         if let Some(mut hinge) = row.hinge {
             solve_hinge(row, &mut hinge, &mut va, &mut vb);
             row.hinge = Some(hinge);

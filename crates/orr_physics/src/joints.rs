@@ -2,8 +2,10 @@
 //! impulse iterations: a pin holds two anchor points together (a hinge), a
 //! rod keeps them a fixed distance apart, and a rope keeps them at most that
 //! far apart. A pin can also drive its bodies' relative turn with a motor and
-//! hold it between two angles, for wheels, hinges and ragdoll limbs. Joints
-//! are an opt-in component: a game that never calls
+//! hold it between two angles, for wheels, hinges and ragdoll limbs. A
+//! prismatic joint lets `b` slide along one axis of `a` and nothing else, with
+//! an optional motor and limits on the slide, for pistons and sliding doors.
+//! Joints are an opt-in component: a game that never calls
 //! [`register_joints`] steps exactly as before.
 
 use bytemuck::{Pod, Zeroable};
@@ -20,10 +22,14 @@ pub const JOINT_PIN: u32 = 0;
 pub const JOINT_ROD: u32 = 1;
 /// [`Joint::kind`]: the two anchors stay at most [`Joint::length`] apart.
 pub const JOINT_ROPE: u32 = 2;
+/// [`Joint::kind`]: `b` slides along an axis of `a` and cannot turn against it.
+pub const JOINT_PRISMATIC: u32 = 3;
 
-/// [`Joint::flags`]: a pin's motor drives the relative turn toward [`Joint::motor_speed`].
+/// [`Joint::flags`]: a pin's motor drives the relative turn, and a prismatic joint's motor
+/// the slide, toward [`Joint::motor_speed`].
 pub const JOINT_MOTOR: u32 = 1;
-/// [`Joint::flags`]: a pin holds the relative angle between [`Joint::lower`] and [`Joint::upper`].
+/// [`Joint::flags`]: a pin holds the relative angle, and a prismatic joint the slide,
+/// between [`Joint::lower`] and [`Joint::upper`].
 pub const JOINT_LIMIT: u32 = 2;
 
 /// A joint between bodies `a` and `b`, as a component on an entity of its own.
@@ -39,22 +45,26 @@ pub struct Joint {
     pub anchor_a: FPVec2,
     /// Anchor on `b`, in `b`'s own frame.
     pub anchor_b: FPVec2,
-    /// Distance between the anchors for a rod or rope; unused by a pin.
+    /// Distance between the anchors for a rod or rope; the angle in radians of the slide
+    /// axis in `a`'s own frame for a prismatic joint; unused by a pin.
     pub length: FP,
-    /// [`JOINT_PIN`], [`JOINT_ROD`] or [`JOINT_ROPE`].
+    /// [`JOINT_PIN`], [`JOINT_ROD`], [`JOINT_ROPE`] or [`JOINT_PRISMATIC`].
     pub kind: u32,
-    /// [`JOINT_MOTOR`] and [`JOINT_LIMIT`], for a pin; 0 for none.
+    /// [`JOINT_MOTOR`] and [`JOINT_LIMIT`], for a pin or a prismatic joint; 0 for none.
     pub flags: u32,
     /// `b`'s angle minus `a`'s when the joint was added; [`add_joint`] records it.
-    /// The limits are measured from it.
+    /// The limits are measured from it. A prismatic joint holds `b` at this relative angle.
     pub ref_angle: FP,
-    /// Lowest relative angle in radians, above `-pi`, with [`JOINT_LIMIT`].
+    /// Lowest relative angle in radians, above `-pi`, with [`JOINT_LIMIT`]. A prismatic
+    /// joint's lowest slide; [`add_joint`] adds the slide at the start to it.
     pub lower: FP,
-    /// Highest relative angle in radians, below `pi`, with [`JOINT_LIMIT`].
+    /// Highest relative angle in radians, below `pi`, with [`JOINT_LIMIT`]. A prismatic
+    /// joint's highest slide; [`add_joint`] adds the slide at the start to it.
     pub upper: FP,
     /// Relative turn rate (`b` minus `a`) in radians per second the motor aims for.
+    /// A prismatic joint's speed of `b` along the axis.
     pub motor_speed: FP,
-    /// Largest torque the motor applies; 0 lets it do nothing.
+    /// Largest torque the motor applies, or force for a prismatic joint; 0 lets it do nothing.
     pub max_motor_torque: FP,
 }
 
@@ -65,13 +75,24 @@ impl Joint {
         Joint { a, b, anchor_a, anchor_b, length, kind, ..Joint::zeroed() }
     }
 
+    /// A joint that lets `b` slide along `axis`, given in `a`'s own frame, and nothing else.
+    /// The anchors are the points that stay on the axis line through `anchor_a`.
+    #[must_use]
+    pub fn prismatic(a: Entity, b: Entity, anchor_a: FPVec2, anchor_b: FPVec2, axis: FPVec2) -> Joint {
+        let axis = axis.normalize_or_zero();
+        let angle = if axis == FPVec2::ZERO { FP::ZERO } else { axis.y.atan2(axis.x) };
+        Joint::new(JOINT_PRISMATIC, a, b, anchor_a, anchor_b, angle)
+    }
+
     /// The same joint with a motor turning `b` against `a` at `speed`, with at most `max_torque`.
+    /// A prismatic joint's motor slides `b` along the axis at `speed`, with at most `max_torque` of force.
     #[must_use]
     pub fn with_motor(self, speed: FP, max_torque: FP) -> Joint {
         Joint { flags: self.flags | JOINT_MOTOR, motor_speed: speed, max_motor_torque: max_torque, ..self }
     }
 
     /// The same joint held between `lower` and `upper` radians of relative turn.
+    /// A prismatic joint is held between those distances along the axis from where it was added.
     #[must_use]
     pub fn with_limits(self, lower: FP, upper: FP) -> Joint {
         Joint { flags: self.flags | JOINT_LIMIT, lower, upper, ..self }
@@ -84,11 +105,18 @@ pub fn register_joints(builder: &mut ComponentRegistryBuilder) {
 }
 
 /// Spawns an entity holding `joint`, records the bodies' current relative
-/// angle as [`Joint::ref_angle`] and wakes both bodies. Bodies held by a joint
-/// do not fall asleep.
+/// angle as [`Joint::ref_angle`] and wakes both bodies. The limits of a
+/// prismatic joint move by the slide the bodies have now, so this pose is 0.
+/// Bodies held by a joint do not fall asleep.
 pub fn add_joint(frame: &mut Frame, mut joint: Joint) -> Entity {
     if let (Some(a), Some(b)) = (frame.get::<Body>(joint.a), frame.get::<Body>(joint.b)) {
         joint.ref_angle = (b.angle - a.angle).wrap_angle();
+        if joint.kind == JOINT_PRISMATIC && joint.flags & JOINT_LIMIT != 0 {
+            let (xa, xb) = (Xf::new(a.pos, a.angle), Xf::new(b.pos, b.angle));
+            let slide = (xb.apply(joint.anchor_b) - xa.apply(joint.anchor_a)).dot(xa.rot(local_axis(&joint)));
+            joint.lower += slide;
+            joint.upper += slide;
+        }
     }
     let e = frame.spawn();
     frame.add(e, joint);
@@ -99,6 +127,33 @@ pub fn add_joint(frame: &mut Frame, mut joint: Joint) -> Entity {
 
 /// Share of the remaining position error a joint removes per tick.
 const BAUMGARTE: FP = FP::from_ratio(2, 10);
+
+/// A prismatic joint's axis in `a`'s own frame.
+fn local_axis(joint: &Joint) -> FPVec2 {
+    let (s, c) = joint.length.sin_cos();
+    FPVec2::new(c, s)
+}
+
+/// What a prismatic joint needs beyond a pin's terms.
+#[derive(Clone, Copy)]
+struct Slide {
+    /// The axis in the world.
+    axis: FPVec2,
+    /// The direction across the axis.
+    across: FPVec2,
+    /// From `a`'s center to `b`'s anchor in the world: the lever of `a`'s share of every slide row.
+    lever: FPVec2,
+    /// How far `b` is from where it was added, along the axis.
+    offset: FP,
+    /// One over the effective mass along the axis; 0 skips the motor and the limits.
+    axis_mass: FP,
+    /// The 2x2 mass of the row across the axis and the row that holds the turn: `k11`, `k12`, `k22`.
+    block: [FP; 3],
+    /// Position error across the axis, as a velocity to remove.
+    across_bias: FP,
+    /// Relative angle error, as a velocity to remove.
+    turn_bias: FP,
+}
 
 /// One joint prepared for this tick's iterations.
 #[derive(Clone, Copy)]
@@ -135,6 +190,7 @@ pub(crate) struct JointRow {
     lower_total: FP,
     upper_total: FP,
     inv_dt: FP,
+    slide: Slide,
 }
 
 fn rotate(xf: &Xf, v: FPVec2) -> FPVec2 {
@@ -189,7 +245,7 @@ pub(crate) fn prepare(frame: &Frame, ents: &[Entity], bslot: &[u32], bd: &[Body]
             axis: FPVec2::ZERO,
             mass: FP::ZERO,
             total: FP::ZERO,
-            flags: if joint.kind == JOINT_PIN { joint.flags } else { 0 },
+            flags: if joint.kind == JOINT_PIN || joint.kind == JOINT_PRISMATIC { joint.flags } else { 0 },
             angular_mass: FP::ZERO,
             couple: FPVec2::ZERO,
             angle: (bb.angle - ba.angle - joint.ref_angle).wrap_angle(),
@@ -201,7 +257,22 @@ pub(crate) fn prepare(frame: &Frame, ents: &[Entity], bslot: &[u32], bd: &[Body]
             lower_total: FP::ZERO,
             upper_total: FP::ZERO,
             inv_dt,
+            slide: Slide {
+                axis: FPVec2::ZERO,
+                across: FPVec2::ZERO,
+                lever: FPVec2::ZERO,
+                offset: FP::ZERO,
+                axis_mass: FP::ZERO,
+                block: [FP::ZERO; 3],
+                across_bias: FP::ZERO,
+                turn_bias: FP::ZERO,
+            },
         };
+        if joint.kind == JOINT_PRISMATIC {
+            row.slide = slide_terms(&row, &joint, &xfs[a], gap);
+            rows.push(row);
+            continue;
+        }
         if row.flags != 0 {
             (row.angular_mass, row.couple) = turn_mass(&row);
         }
@@ -226,6 +297,86 @@ pub(crate) fn prepare(frame: &Frame, ents: &[Entity], bslot: &[u32], bd: &[Body]
         rows.push(row);
     }
     rows
+}
+
+/// The slide terms of a prismatic joint at this tick's pose. `a` is treated as
+/// pushed at the point of its body that lies under `b`'s anchor, so the rows
+/// stay right while `a` turns with `b` slid away from it.
+fn slide_terms(row: &JointRow, joint: &Joint, xf_a: &Xf, gap: FPVec2) -> Slide {
+    let axis = rotate(xf_a, local_axis(joint));
+    let across = FPVec2::new(-axis.y, axis.x);
+    let lever = row.ra + gap;
+    let (sa, sb) = (lever.perp_dot(across), row.rb.perp_dot(across));
+    let k11 = row.ima + row.imb + row.iia * sa * sa + row.iib * sb * sb;
+    let k12 = row.iia * sa + row.iib * sb;
+    let mut k22 = row.iia + row.iib;
+    // Two bodies that cannot turn leave only the row across the axis.
+    if k22 == FP::ZERO {
+        k22 = FP::ONE;
+    }
+    let (na, nb) = (lever.perp_dot(axis), row.rb.perp_dot(axis));
+    let k = row.ima + row.imb + row.iia * na * na + row.iib * nb * nb;
+    Slide {
+        axis,
+        across,
+        lever,
+        offset: gap.dot(axis),
+        axis_mass: if k > FP::ZERO { FP::ONE / k } else { FP::ZERO },
+        block: [k11, k12, k22],
+        across_bias: gap.dot(across) * (BAUMGARTE * row.inv_dt),
+        turn_bias: row.angle * (BAUMGARTE * row.inv_dt),
+    }
+}
+
+/// Applies an impulse `p` at `b`'s anchor, with the turn impulse `turn` on `b` against `a`.
+fn push(row: &JointRow, va: &mut Vw, vb: &mut Vw, p: FPVec2, turn: FP) {
+    va.v -= p * row.ima;
+    va.w -= row.iia * (row.slide.lever.perp_dot(p) + turn);
+    vb.v += p * row.imb;
+    vb.w += row.iib * (row.rb.perp_dot(p) + turn);
+}
+
+/// Speed of `b`'s anchor against the point of `a` under it, along `dir`.
+fn slide_speed(row: &JointRow, va: &Vw, vb: &Vw, dir: FPVec2) -> FP {
+    ((vb.v + spin(vb.w, row.rb)) - (va.v + spin(va.w, row.slide.lever))).dot(dir)
+}
+
+/// A prismatic joint: the motor and the limits along the axis, then the
+/// row across the axis together with the row that holds the turn.
+fn solve_slide(row: &mut JointRow, va: &mut Vw, vb: &mut Vw) {
+    let s = row.slide;
+    if s.axis_mass > FP::ZERO {
+        if row.flags & JOINT_MOTOR != 0 {
+            let lambda = -(s.axis_mass * (slide_speed(row, va, vb, s.axis) - row.motor_speed));
+            let total = (row.motor_total + lambda).clamp(-row.motor_max, row.motor_max);
+            let lambda = total - row.motor_total;
+            row.motor_total = total;
+            push(row, va, vb, s.axis * lambda, FP::ZERO);
+        }
+        if row.flags & JOINT_LIMIT != 0 {
+            // Speculative: a bound not yet reached only stops a slide that would pass it this tick.
+            let bias = |c: FP| if c < FP::ZERO { c * BAUMGARTE * row.inv_dt } else { c * row.inv_dt };
+            let lambda = -(s.axis_mass * (slide_speed(row, va, vb, s.axis) + bias(s.offset - row.lower)));
+            let total = (row.lower_total + lambda).max(FP::ZERO);
+            let lambda = total - row.lower_total;
+            row.lower_total = total;
+            push(row, va, vb, s.axis * lambda, FP::ZERO);
+            let lambda = -(s.axis_mass * (-slide_speed(row, va, vb, s.axis) + bias(row.upper - s.offset)));
+            let total = (row.upper_total + lambda).max(FP::ZERO);
+            let lambda = total - row.upper_total;
+            row.upper_total = total;
+            push(row, va, vb, s.axis * -lambda, FP::ZERO);
+        }
+    }
+    let [k11, k12, k22] = s.block;
+    let det = k11 * k22 - k12 * k12;
+    if det == FP::ZERO {
+        return;
+    }
+    let r0 = -(slide_speed(row, va, vb, s.across) + s.across_bias);
+    let r1 = -(vb.w - va.w + s.turn_bias);
+    let (across, turn) = ((k22 * r0 - k12 * r1) / det, (k11 * r1 - k12 * r0) / det);
+    push(row, va, vb, s.across * across, turn);
 }
 
 /// The pin's 2x2 anchor mass `K` and its coupling `c` to the turn: a turn
@@ -285,6 +436,12 @@ fn solve_angular(row: &mut JointRow, va: &mut Vw, vb: &mut Vw) {
 pub(crate) fn solve(rows: &mut [JointRow], vw: &mut [Vw]) {
     for row in rows.iter_mut() {
         let (mut va, mut vb) = (vw[row.a], vw[row.b]);
+        if row.kind == JOINT_PRISMATIC {
+            solve_slide(row, &mut va, &mut vb);
+            vw[row.a] = va;
+            vw[row.b] = vb;
+            continue;
+        }
         if row.flags != 0 {
             solve_angular(row, &mut va, &mut vb);
             vw[row.a] = va;
