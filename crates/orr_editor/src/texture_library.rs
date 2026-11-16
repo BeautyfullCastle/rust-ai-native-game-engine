@@ -4,7 +4,7 @@
 //! repaint it in an image editor and see each save in the viewport.
 #![allow(clippy::disallowed_types)]
 
-use orr_render::{SurfaceTexture, TextureKind};
+use orr_render::{SurfaceTexture, TextureKind, MAX_SURFACE_TEXTURE_SIZE};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -44,6 +44,11 @@ fn decode_png(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     let mut decoder = png::Decoder::new(bytes);
     decoder.set_transformations(png::Transformations::normalize_to_color8());
     let mut reader = decoder.read_info().map_err(|e| format!("not a PNG image: {e}"))?;
+    // The header tells the size before any pixel is decoded or allocated.
+    let (header_width, header_height) = reader.info().size();
+    if header_width > MAX_SURFACE_TEXTURE_SIZE || header_height > MAX_SURFACE_TEXTURE_SIZE {
+        return Err(format!("a surface texture must be 1 to {MAX_SURFACE_TEXTURE_SIZE} pixels per side, not {header_width} x {header_height}"));
+    }
     let mut buffer = vec![0; reader.output_buffer_size()];
     let info = reader.next_frame(&mut buffer).map_err(|e| format!("the PNG image cannot be read: {e}"))?;
     let pixels = &buffer[..info.buffer_size()];
@@ -152,6 +157,52 @@ mod tests {
         let second = library.get("textures/grass.png", TextureKind::Color).unwrap();
         assert!(second.version > first.version);
         assert_eq!(second.result.as_ref().unwrap().size(), (8, 8));
+    }
+
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for byte in bytes {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+            }
+        }
+        !crc
+    }
+
+    fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        let mut body = kind.to_vec();
+        body.extend_from_slice(data);
+        out.extend_from_slice(&body);
+        out.extend_from_slice(&crc32(&body).to_be_bytes());
+    }
+
+    /// A PNG whose header declares `width` x `height` RGBA pixels and whose data is a few bytes.
+    fn header_only_png(width: u32, height: u32) -> Vec<u8> {
+        let mut out = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&width.to_be_bytes());
+        ihdr.extend_from_slice(&height.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+        chunk(&mut out, b"IHDR", &ihdr);
+        chunk(&mut out, b"IDAT", &[0x78, 0x9C, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]);
+        chunk(&mut out, b"IEND", &[]);
+        out
+    }
+
+    #[test]
+    fn an_oversized_header_is_refused_before_any_pixel_is_decoded() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("huge.png"), header_only_png(30_000, 30_000)).unwrap();
+        std::fs::write(dir.path().join("wide.png"), header_only_png(MAX_SURFACE_TEXTURE_SIZE + 1, 1)).unwrap();
+        let mut library = TextureLibrary::default();
+        library.set_scene(Some(&dir.path().join("level.scene.yaml")));
+        library.refresh([("huge.png", TextureKind::Color), ("wide.png", TextureKind::Data)]);
+        let huge = library.get("huge.png", TextureKind::Color).unwrap().result.as_ref().unwrap_err();
+        assert_eq!(huge, "huge.png: a surface texture must be 1 to 2048 pixels per side, not 30000 x 30000");
+        let wide = library.get("wide.png", TextureKind::Data).unwrap().result.as_ref().unwrap_err();
+        assert!(wide.contains("not 2049 x 1"), "{wide}");
     }
 
     #[test]
