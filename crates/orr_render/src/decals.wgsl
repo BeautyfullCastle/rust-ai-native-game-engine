@@ -45,14 +45,37 @@ fn world_at(p: vec2<i32>) -> vec3<f32> {
     }
     let world = world_at(p);
     // The nearer neighbour on each axis keeps silhouette edges from bending the normal.
+    // A neighbour outside the view is skipped, since it would clamp back onto this pixel.
+    let size = vec2<i32>(textureDimensions(depth));
+    let has_l = p.x > 0;
+    let has_r = p.x + 1 < size.x;
+    let has_u = p.y > 0;
+    let has_b = p.y + 1 < size.y;
     let l = world - world_at(p - vec2<i32>(1, 0));
     let r = world_at(p + vec2<i32>(1, 0)) - world;
     let u = world - world_at(p - vec2<i32>(0, 1));
     let b = world_at(p + vec2<i32>(0, 1)) - world;
-    let dx = select(l, r, dot(r, r) < dot(l, l));
-    let dy = select(u, b, dot(b, b) < dot(u, u));
+    var dx = vec3<f32>(0.0);
+    if has_l && has_r {
+        dx = select(l, r, dot(r, r) < dot(l, l));
+    } else if has_l {
+        dx = l;
+    } else if has_r {
+        dx = r;
+    }
+    var dy = vec3<f32>(0.0);
+    if has_u && has_b {
+        dy = select(u, b, dot(b, b) < dot(u, u));
+    } else if has_u {
+        dy = u;
+    } else if has_b {
+        dy = b;
+    }
     // Screen x runs right and y down, so this cross points toward the camera.
-    let n = normalize(cross(dy, dx));
+    // A view one pixel wide or high has no difference to build it from: the decal then faces the projection.
+    let c = cross(dy, dx);
+    let known = dot(c, c) > 0.0;
+    let n = select(vec3<f32>(0.0), normalize(c), known);
     var factor = vec3<f32>(1.0);
     let count = u32(decals.info.x);
     for (var i = 0u; i < count; i++) {
@@ -62,7 +85,7 @@ fn world_at(p: vec2<i32>) -> vec3<f32> {
             continue;
         }
         // Surfaces turned away from the projection fade out instead of showing stretched stripes.
-        let angle = smoothstep(0.1, 0.35, dot(n, -normalize(k.forward.xyz)));
+        let angle = select(1.0, smoothstep(0.1, 0.35, dot(n, -normalize(k.forward.xyz))), known);
         let soft = max(k.style.y, 1e-3) * 0.5;
         var tint = k.color.rgb;
         var cover: f32;
