@@ -91,7 +91,8 @@ pub(crate) struct View {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Accessor {
-    pub(crate) buffer_view: usize,
+    /// Absent only on a sparse accessor, whose base values are then zero.
+    pub(crate) buffer_view: Option<usize>,
     #[serde(default)]
     pub(crate) byte_offset: usize,
     pub(crate) component_type: u32,
@@ -102,8 +103,38 @@ pub(crate) struct Accessor {
     pub(crate) normalized: bool,
     pub(crate) min: Option<Vec<f32>>,
     pub(crate) max: Option<Vec<f32>>,
+    pub(crate) sparse: Option<SparseDef>,
     #[serde(rename = "name")]
     pub(crate) _name: Option<String>,
+    #[serde(default, rename = "extras")]
+    pub(crate) _extras: Option<serde_json::Value>,
+}
+/// glTF `accessor.sparse`: `count` elements replace the base values at `indices`.
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SparseDef {
+    pub(crate) count: usize,
+    pub(crate) indices: SparseIndices,
+    pub(crate) values: SparseValues,
+    #[serde(default, rename = "extras")]
+    pub(crate) _extras: Option<serde_json::Value>,
+}
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SparseIndices {
+    pub(crate) buffer_view: usize,
+    #[serde(default)]
+    pub(crate) byte_offset: usize,
+    pub(crate) component_type: u32,
+    #[serde(default, rename = "extras")]
+    pub(crate) _extras: Option<serde_json::Value>,
+}
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SparseValues {
+    pub(crate) buffer_view: usize,
+    #[serde(default)]
+    pub(crate) byte_offset: usize,
     #[serde(default, rename = "extras")]
     pub(crate) _extras: Option<serde_json::Value>,
 }
@@ -524,15 +555,16 @@ pub(crate) fn load_resources(
     if json.len() > MAX_JSON_BYTES {
         return Err(invalid("glTF JSON exceeds byte budget"));
     }
-    let doc: Document =
+    let mut doc: Document =
         serde_json::from_slice(json).map_err(|e| invalid(format!("glTF subset: {e}")))?;
     if !animated
-        && (doc.skins.is_some()
+        && (doc.accessors.iter().any(|a| a.sparse.is_some())
+            || doc.skins.is_some()
             || doc.animations.is_some()
             || doc.nodes.iter().any(|node| node.skin.is_some() || node.weights.is_some())
             || doc.meshes.iter().any(|mesh| mesh.weights.is_some() || mesh.primitives.iter().any(|p| p.targets.is_some())))
     {
-        return Err(invalid("static importer does not support skins/animations/morph targets"));
+        return Err(invalid("static importer does not support skins/animations/morph targets/sparse accessors"));
     }
     if doc.asset.version != "2.0" || doc.asset.min_version.as_deref().is_some_and(|s| s != "2.0") {
         return Err(invalid("unsupported glTF version/extensions"));
@@ -639,9 +671,18 @@ pub(crate) fn load_resources(
     }
     let mut accessor_validation_bytes = 0usize;
     for a in &doc.accessors {
-        let v = at(&doc.buffer_views, a.buffer_view, "buffer view")?;
+        if a.buffer_view.is_none() && a.sparse.is_none() {
+            return Err(invalid("accessor without bufferView must be sparse"));
+        }
         let (component, elements) = a.layout()?;
         let size = component * elements;
+        let Some(view_index) = a.buffer_view else {
+            if a.count == 0 || a.count > MAX_INDICES || a.byte_offset != 0 {
+                return Err(invalid("accessor count/stride/type/alignment"));
+            }
+            continue;
+        };
+        let v = at(&doc.buffer_views, view_index, "buffer view")?;
         let stride = v.byte_stride.unwrap_or(size);
         let offset = v
             .byte_offset
@@ -698,6 +739,7 @@ pub(crate) fn load_resources(
             }
         }
     }
+    resolve_sparse(&mut doc, &mut buffers, &mut accessor_validation_bytes)?;
     let mut images = Vec::new();
     let mut decoded = 0usize;
     for image in &doc.images {
@@ -932,7 +974,81 @@ pub(crate) fn at<'a, T>(items: &'a [T], i: usize, label: &str) -> Result<&'a T, 
         .get(i)
         .ok_or_else(|| invalid(format!("{label} index out of range")))
 }
+/// Replaces every sparse accessor by a dense one in a new buffer, so readers
+/// need no sparse case. Sparse values are f32; indices are strictly
+/// increasing and below the accessor count, as glTF 2.0 requires.
+fn resolve_sparse(doc: &mut Document, buffers: &mut Vec<Vec<u8>>, scan_bytes: &mut usize) -> Result<(), Error> {
+    for index in 0..doc.accessors.len() {
+        let Some(sparse) = doc.accessors[index].sparse.clone() else { continue };
+        let a = &doc.accessors[index];
+        let (component, elements) = a.layout()?;
+        let size = component * elements;
+        let bad = |what: &str| invalid(format!("invalid sparse accessor: {what}"));
+        if a.component_type != 5126 || a.normalized {
+            return Err(bad("values must be f32"));
+        }
+        if sparse.count == 0 || sparse.count > a.count {
+            return Err(bad("count must be 1 to the accessor count"));
+        }
+        let dense_len = a.count.checked_mul(size).ok_or_else(|| bad("size overflow"))?;
+        *scan_bytes = scan_bytes.checked_add(dense_len).filter(|n| *n <= MAX_FILE_BYTES).ok_or_else(|| invalid("accessor value validation byte budget exceeded"))?;
+        let index_size = match sparse.indices.component_type {
+            5121 => 1,
+            5123 => 2,
+            5125 => 4,
+            _ => return Err(bad("index type must be unsigned byte, short or int")),
+        };
+        let iv = at(&doc.buffer_views, sparse.indices.buffer_view, "sparse index view")?;
+        let vv = at(&doc.buffer_views, sparse.values.buffer_view, "sparse value view")?;
+        if iv.byte_stride.is_some() || iv.target.is_some() || vv.byte_stride.is_some() || vv.target.is_some() {
+            return Err(bad("index and value views cannot have a stride or target"));
+        }
+        let index_end = sparse.count.checked_mul(index_size).and_then(|n| n.checked_add(sparse.indices.byte_offset));
+        let value_end = sparse.count.checked_mul(size).and_then(|n| n.checked_add(sparse.values.byte_offset));
+        if index_end.is_none_or(|e| e > iv.byte_length)
+            || value_end.is_none_or(|e| e > vv.byte_length)
+            || (iv.byte_offset + sparse.indices.byte_offset) % index_size != 0
+            || (vv.byte_offset + sparse.values.byte_offset) % component != 0
+        {
+            return Err(bad("index or value range or alignment"));
+        }
+        let mut dense = vec![0u8; dense_len];
+        if a.buffer_view.is_some() {
+            for i in 0..a.count {
+                dense[i * size..(i + 1) * size].copy_from_slice(a.bytes(doc, buffers, i));
+            }
+        }
+        let index_bytes = &buffers[iv.buffer][iv.byte_offset + sparse.indices.byte_offset..];
+        let value_bytes = &buffers[vv.buffer][vv.byte_offset + sparse.values.byte_offset..];
+        let mut previous = None;
+        for k in 0..sparse.count {
+            let raw = &index_bytes[k * index_size..(k + 1) * index_size];
+            let target = raw.iter().rev().fold(0usize, |acc, b| (acc << 8) | *b as usize);
+            if target >= a.count || previous.is_some_and(|p| target <= p) {
+                return Err(bad("indices must be strictly increasing and below the accessor count"));
+            }
+            previous = Some(target);
+            let value = &value_bytes[k * size..(k + 1) * size];
+            if value.chunks_exact(4).any(|c| !f32::from_le_bytes(c.try_into().expect("f32 component")).is_finite()) {
+                return Err(invalid("nonfinite f32 accessor value"));
+            }
+            dense[target * size..(target + 1) * size].copy_from_slice(value);
+        }
+        let accessor = &mut doc.accessors[index];
+        accessor.sparse = None;
+        accessor.byte_offset = 0;
+        accessor.buffer_view = Some(doc.buffer_views.len());
+        doc.buffer_views.push(View { buffer: buffers.len(), byte_offset: 0, byte_length: dense_len, byte_stride: None, target: None, _name: None, _extras: None });
+        buffers.push(dense);
+    }
+    Ok(())
+}
+
 impl Accessor {
+    /// The view that holds the values. Every sparse accessor has one after loading.
+    pub(crate) fn view_index(&self) -> usize {
+        self.buffer_view.expect("accessor values resolved at load")
+    }
     pub(crate) fn layout(&self) -> Result<(usize, usize), Error> {
         let c = match self.component_type {
             5121 => 1,
@@ -951,7 +1067,7 @@ impl Accessor {
         Ok((c, n))
     }
     pub(crate) fn bytes<'a>(&self, doc: &Document, buffers: &'a [Vec<u8>], i: usize) -> &'a [u8] {
-        let v = &doc.buffer_views[self.buffer_view];
+        let v = &doc.buffer_views[self.view_index()];
         let (c, n) = self.layout().expect("validated accessor");
         let start = v.byte_offset + self.byte_offset + i * v.byte_stride.unwrap_or(c * n);
         &buffers[v.buffer][start..start + c * n]
@@ -974,7 +1090,7 @@ fn normalized_uv(a: &Accessor) -> bool {
 }
 
 pub(crate) fn validate_uv(doc: &Document, a: &Accessor) -> Result<(), Error> {
-    let view = &doc.buffer_views[a.buffer_view];
+    let view = &doc.buffer_views[a.view_index()];
     if a.kind != "VEC2"
         || !((a.component_type == 5126 && !a.normalized) || normalized_uv(a))
         || view.target.is_some_and(|target| target != 34962)
@@ -1073,7 +1189,7 @@ fn validate_primitive(doc: &Document, p: &PrimitiveDef) -> Result<(), Error> {
             continue;
         };
         let a = at(&doc.accessors, index, name)?;
-        let view = &doc.buffer_views[a.buffer_view];
+        let view = &doc.buffer_views[a.view_index()];
         if name == "TEXCOORD_0" {
             validate_uv(doc, a)?;
         }
@@ -1094,7 +1210,7 @@ fn validate_primitive(doc: &Document, p: &PrimitiveDef) -> Result<(), Error> {
         return validate_sequential_count(pos.count);
     };
     let idx = at(&doc.accessors, index, "indices")?;
-    let view = &doc.buffer_views[idx.buffer_view];
+    let view = &doc.buffer_views[idx.view_index()];
     if idx.kind != "SCALAR"
         || !matches!(idx.component_type, 5121 | 5123 | 5125)
         || idx.count % 3 != 0

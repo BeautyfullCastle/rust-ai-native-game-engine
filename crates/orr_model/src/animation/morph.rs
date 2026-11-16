@@ -58,10 +58,11 @@ pub struct MorphChannel {
     /// Index into [`AnimatedSource::clips`].
     pub clip: u32,
     pub node: u32,
-    /// Step or linear.
     pub interpolation: Interpolation,
     pub times: Vec<f32>,
-    /// All weights of the first time, then of the second, and so on.
+    /// All weights of the first time, then of the second, and so on. A cubic
+    /// spline track holds three blocks per time: in-tangents, values, then
+    /// out-tangents, each one weight per target.
     pub weights: Vec<f32>,
 }
 
@@ -109,14 +110,16 @@ fn validate_channels(source: &AnimatedSource, decoded: &mut usize, keys: &mut us
             return Err(invalid("morph channel clip out of range, or duplicate morph channel target"));
         }
         let k = targets_on(source, channel.node).ok_or_else(|| invalid("morph channel node has no targets, or differing counts"))?;
-        if channel.interpolation == Interpolation::CubicSpline
-            || channel.times.is_empty()
+        let cubic = channel.interpolation == Interpolation::CubicSpline;
+        let per_key = if cubic { k * 3 } else { k };
+        if channel.times.is_empty()
+            || (cubic && channel.times.len() < 2)
             || channel.times.iter().any(|t| !t.is_finite() || *t < 0.0)
             || channel.times.windows(2).any(|t| t[0] >= t[1])
-            || channel.times.len().checked_mul(k) != Some(channel.weights.len())
-            || !channel.weights.iter().all(|w| weight_ok(*w))
+            || channel.times.len().checked_mul(per_key) != Some(channel.weights.len())
+            || !channel.weights.chunks_exact(per_key).all(|key| key.iter().enumerate().all(|(i, w)| if cubic && i / k != 1 { w.is_finite() } else { weight_ok(*w) }))
         {
-            return Err(invalid("morph channel times/weights; only step and linear"));
+            return Err(invalid("morph channel times/weights"));
         }
         let bytes = (channel.times.len() + channel.weights.len()) * 4;
         add_budget(keys, channel.weights.len(), MAX_ANIMATION_KEYS, "aggregate animation key")?;
@@ -151,11 +154,17 @@ impl AnimatedModel {
         let mut weights = self.rest_weights();
         for channel in self.source.morph.channels.iter().filter(|c| c.clip == clip) {
             let (a, b, t) = sample_interval(&channel.times, time, channel.interpolation);
-            let k = channel.weights.len() / channel.times.len();
-            let (wa, wb) = (&channel.weights[a * k..(a + 1) * k], &channel.weights[b * k..(b + 1) * k]);
+            let sampled: Vec<f32> = if channel.interpolation == Interpolation::CubicSpline {
+                let k = channel.weights.len() / (channel.times.len() * 3);
+                cubic_weights(&channel.weights, k, a, b, t, channel.times[b] as f64 - channel.times[a] as f64)?
+            } else {
+                let k = channel.weights.len() / channel.times.len();
+                let (wa, wb) = (&channel.weights[a * k..(a + 1) * k], &channel.weights[b * k..(b + 1) * k]);
+                wa.iter().zip(wb).map(|(x, y)| x + (y - x) * t).collect()
+            };
             for (p, out) in self.source.morph.primitives.iter().zip(&mut weights) {
                 if self.source.primitives[p.primitive as usize].node == channel.node {
-                    *out = wa.iter().zip(wb).map(|(x, y)| x + (y - x) * t).collect();
+                    out.clone_from(&sampled);
                 }
             }
         }
@@ -178,6 +187,28 @@ impl AnimatedModel {
         let slot = primitives.binary_search_by_key(&(index as u32), |p| p.primitive).ok()?;
         Some((&primitives[slot], &weights[slot]))
     }
+}
+
+/// glTF 2.0 Appendix C: Hermite spline of the weights between keys `a` and
+/// `b`. Tangents are per second, so the out- and in-tangents scale by `delta`,
+/// the seconds between the keys. The result is not clamped, but it must stay
+/// within the weight limit that [`AnimatedModel::validate_weights`] enforces.
+fn cubic_weights(weights: &[f32], k: usize, a: usize, b: usize, t: f32, delta: f64) -> Result<Vec<f32>, Error> {
+    let block = |key: usize, part: usize, i: usize| weights[key * 3 * k + part * k + i] as f64;
+    let t = t as f64;
+    let (t2, t3) = (t * t, t * t * t);
+    let out: Vec<f32> = (0..k)
+        .map(|i| {
+            if a == b || t == 0.0 {
+                return block(a, 1, i) as f32;
+            }
+            ((2.0 * t3 - 3.0 * t2 + 1.0) * block(a, 1, i) + delta * (t3 - 2.0 * t2 + t) * block(a, 2, i) + (-2.0 * t3 + 3.0 * t2) * block(b, 1, i) + delta * (t3 - t2) * block(b, 0, i)) as f32
+        })
+        .collect();
+    if !out.iter().all(|w| weight_ok(*w)) {
+        return Err(invalid("cubic morph weight outside the weight limit"));
+    }
+    Ok(out)
 }
 
 /// Vertex `index` of a primitive with its targets' offsets added by weight.
