@@ -307,3 +307,18 @@ fn a_joint_added_as_a_plain_component_is_recorded_at_its_first_step() {
     run(&mut plain, &mut Scratch::new(), 60);
     assert_eq!(added.checksum(), plain.checksum(), "both doors swing the same and hold the same limits");
 }
+
+#[test]
+fn a_negative_motor_torque_limits_like_its_magnitude_and_zero_torque_does_nothing() {
+    let spun = |torque: FP| {
+        let (mut fr, w) = wheel(|j| j.with_motor(fp!(2), torque));
+        run(&mut fr, &mut Scratch::new(), 30);
+        fr.get::<Body>(w).unwrap().omega.y
+    };
+    let positive = spun(fp!(0.5));
+    let omega = f(positive);
+    assert!(omega > 0.1 && omega < 1.9, "the weak motor is still speeding up: {omega}");
+    assert_eq!(spun(fp!(-0.5)), positive, "a negative torque limits like its magnitude");
+    assert!((f(spun(fp!(-100))) - 2.0).abs() < 0.02, "a strong negative torque still reaches the speed");
+    assert!(f(spun(FP::ZERO)).abs() < 0.01, "no torque turns nothing");
+}

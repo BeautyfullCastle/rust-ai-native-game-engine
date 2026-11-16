@@ -466,7 +466,7 @@ fn begin_hinge(row: &JointRow, hinge: &mut Hinge, rot_a: FPQuat, rot_b: FPQuat, 
     let (ra, rb) = (rot_a.rotate_vec3(hinge.ref_a), rot_b.rotate_vec3(hinge.ref_b));
     hinge.angle = n.dot(ra.cross(rb)).atan2(ra.dot(rb));
     hinge.inv_h = inv_h;
-    hinge.motor_max = hinge.max_torque * h;
+    hinge.motor_max = hinge.max_torque.abs() * h;
     hinge.motor_total = FP::ZERO;
     hinge.lower_total = FP::ZERO;
     hinge.upper_total = FP::ZERO;

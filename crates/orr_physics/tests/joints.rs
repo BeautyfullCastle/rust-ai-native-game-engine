@@ -180,3 +180,18 @@ fn a_motor_and_limits_are_deterministic_across_rollback() {
     let turned = angle(&a, a.dense::<Body>().0[1]);
     assert!((turned - 1.0).abs() < 0.05, "the motor drives the wheel to the upper limit and holds it there: {turned}");
 }
+
+#[test]
+fn a_negative_motor_torque_limits_like_its_magnitude_and_zero_torque_does_nothing() {
+    let spun = |torque: FP| {
+        let (mut f, w) = wheel(|hub, w| Joint::new(JOINT_PIN, hub, w, FPVec2::ZERO, FPVec2::ZERO, FP::ZERO).with_motor(fp!(2), torque));
+        run(&mut f, &mut Scratch::new(), 30);
+        f.get::<Body>(w).unwrap().omega
+    };
+    let positive = spun(fp!(0.5));
+    let omega = positive.raw() as f64 / 65536.0;
+    assert!(omega > 0.1 && omega < 1.9, "the weak motor is still speeding up: {omega}");
+    assert_eq!(spun(fp!(-0.5)), positive, "a negative torque limits like its magnitude");
+    assert!((spun(fp!(-100)).raw() as f64 / 65536.0 - 2.0).abs() < 0.01, "a strong negative torque still reaches the speed");
+    assert!((spun(FP::ZERO).raw() as f64 / 65536.0).abs() < 0.01, "no torque turns nothing");
+}
