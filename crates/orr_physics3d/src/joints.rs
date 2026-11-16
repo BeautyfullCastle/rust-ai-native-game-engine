@@ -526,13 +526,15 @@ struct Solve3 {
     /// The adjugate's rows: the cross products of `K`'s columns.
     rows: [FPVec3; 3],
     det: FP,
+    /// `K`'s columns, for the solve over the free directions when `K` is singular.
+    cols: [FPVec3; 3],
 }
 
 impl Solve3 {
     fn new(k: &FPMat3) -> Solve3 {
         let (c0, c1, c2) = (k.col(0), k.col(1), k.col(2));
         let rows = [c1.cross(c2), c2.cross(c0), c0.cross(c1)];
-        Solve3 { rows, det: c0.dot(rows[0]) }
+        Solve3 { rows, det: c0.dot(rows[0]), cols: [c0, c1, c2] }
     }
 
     fn solve(&self, v: FPVec3) -> FPVec3 {
@@ -545,6 +547,40 @@ impl Solve3 {
             FP::from_raw((n / i128::from(self.det.raw())).clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64)
         };
         FPVec3::new(x(self.rows[0]), x(self.rows[1]), x(self.rows[2]))
+    }
+}
+
+impl Solve3 {
+    /// Solves `K x = v` for a symmetric `K` that may be singular. A singular `K` has
+    /// directions that nothing can turn (a locked axis); the turn is solved over the
+    /// free ones, and the locked ones stay at 0.
+    fn solve_free(&self, v: FPVec3) -> FPVec3 {
+        if self.det != FP::ZERO {
+            return self.solve(v);
+        }
+        let at = |i: usize, j: usize| {
+            let c = self.cols[j];
+            [c.x, c.y, c.z][i]
+        };
+        let get = |i: usize| [v.x, v.y, v.z][i];
+        let minors = [self.rows[0].x, self.rows[1].y, self.rows[2].z];
+        let mut x = [FP::ZERO; 3];
+        // The free plane: drop the axis whose 2x2 minor is largest (the other two form the invertible block), and solve the other two.
+        let drop = (0..3).fold(0, |best, i| if minors[i] > minors[best] { i } else { best });
+        let (j, k) = ((drop + 1) % 3, (drop + 2) % 3);
+        let det2 = minors[drop];
+        if det2 > FP::ZERO {
+            let solve2 = |a: FP, b: FP, c: FP, d: FP| {
+                let n = i128::from(a.raw()) * i128::from(c.raw()) - i128::from(b.raw()) * i128::from(d.raw());
+                FP::from_raw((n / i128::from(det2.raw())).clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64)
+            };
+            x[j] = solve2(at(k, k), at(j, k), get(j), get(k));
+            x[k] = solve2(at(j, j), at(k, j), get(k), get(j));
+        } else if let Some(i) = (0..3).filter(|&i| at(i, i) > FP::ZERO).max_by_key(|&i| at(i, i)) {
+            // A single free direction.
+            x[i] = get(i) / at(i, i);
+        }
+        FPVec3::new(x[0], x[1], x[2])
     }
 }
 
@@ -671,7 +707,16 @@ fn begin_hinge(row: &JointRow, hinge: &mut Hinge, rot_a: FPQuat, rot_b: FPQuat, 
     let k = |a: &TurnAxis, b: &TurnAxis| a.axis.dot(row.iia.mul_vec(b.axis) + row.iib.mul_vec(b.axis)) + a.c.dot(b.couple);
     let (k11, k12, k22) = (k(&s, &s), k(&s, &u), k(&u, &u));
     let det = k11 * k22 - k12 * k12;
-    hinge.across_inv = if det > FP::ZERO { [k22 / det, -(k12 / det), k11 / det] } else { [FP::ZERO; 3] };
+    hinge.across_inv = if det > FP::ZERO {
+        [k22 / det, -(k12 / det), k11 / det]
+    } else if k11 > FP::ZERO && k11 >= k22 {
+        // A locked axis leaves one free direction across the hinge axis; the row of the larger one holds it.
+        [FP::ONE / k11, FP::ZERO, FP::ZERO]
+    } else if k22 > FP::ZERO {
+        [FP::ZERO, FP::ZERO, FP::ONE / k22]
+    } else {
+        [FP::ZERO; 3]
+    };
     hinge.turn = turn_axis(row, n);
     let (ra, rb) = (rot_a.rotate_vec3(hinge.ref_a), rot_b.rotate_vec3(hinge.ref_b));
     hinge.angle = n.dot(ra.cross(rb)).atan2(ra.dot(rb));
@@ -819,7 +864,7 @@ fn solve_slide(row: &JointRow, slide: &mut Slide, va: &mut Vw, vb: &mut Vw) {
     let relative = slide_velocity(row, slide, va, vb);
     let across = slide.across.solve(-((relative - n * relative.dot(n)) + slide.across_bias));
     push(row, slide, va, vb, across - n * across.dot(n));
-    let turn = slide.turn.solve(-((vb.w - va.w) + slide.turn_bias));
+    let turn = slide.turn.solve_free(-((vb.w - va.w) + slide.turn_bias));
     va.w -= row.iia.mul_vec(turn);
     vb.w += row.iib.mul_vec(turn);
 }

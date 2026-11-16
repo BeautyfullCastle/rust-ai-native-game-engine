@@ -646,3 +646,39 @@ fn a_spring_is_deterministic_across_rollback() {
     run(&mut a, &mut Scratch::new(), 40);
     assert_eq!(a.checksum(), ahead, "a rollback replays to the same state");
 }
+
+#[test]
+fn a_prismatic_joint_holds_the_free_axes_of_a_body_with_a_locked_axis() {
+    // The ball cannot turn about y, yet the joint must still stop its turn about x.
+    let (mut fr, _, ball) = rail(FPVec3::ZERO, at_hub(), |a, b| slider(a, b, FPVec3::ZERO, x_axis()));
+    {
+        let b = fr.get_mut::<Body>(ball).unwrap();
+        b.inv_inertia = v3(FP::ONE, FP::ZERO, FP::ONE);
+        b.omega = v3(FP::ONE, FP::ZERO, FP::ZERO);
+    }
+    run(&mut fr, &mut Scratch::new(), 40);
+    let b = *fr.get::<Body>(ball).unwrap();
+    assert!(f(b.omega.x).abs() < 0.05, "it does not keep turning about x: {}", f(b.omega.x));
+    assert!(f(b.rot.x).abs() < 0.03 && f(b.rot.y).abs() < 0.03 && f(b.rot.z).abs() < 0.03, "it does not turn: {:?}", b.rot);
+}
+
+#[test]
+fn a_hinge_holds_its_axis_for_a_body_with_a_locked_axis() {
+    // The door cannot turn about y, yet the hinge must still keep its axis from tipping about x.
+    let mut fr = new_frame(true);
+    let pivot = spawn_body(&mut fr, Body::new_static(v3(FP::ZERO, fp!(10), FP::ZERO)), Collider { mask: 0, ..Collider::new(Shape::sphere(fp!(0.1))) });
+    let shape = Shape::sphere(fp!(0.2));
+    let ball = spawn_body(&mut fr, Body::new_dynamic(v3(fp!(3), fp!(10), FP::ZERO), &shape, FP::ONE), Collider { mask: 0, ..Collider::new(shape) });
+    let z = v3(FP::ZERO, FP::ZERO, FP::ONE);
+    add_joint(&mut fr, Joint::hinge(pivot, ball, FPVec3::ZERO, v3(fp!(-3), FP::ZERO, FP::ZERO), z));
+    {
+        let b = fr.get_mut::<Body>(ball).unwrap();
+        b.inv_inertia = v3(FP::ONE, FP::ZERO, FP::ONE);
+        b.omega = v3(FP::ONE, FP::ZERO, FP::ZERO);
+    }
+    run(&mut fr, &mut Scratch::new(), 40);
+    let b = *fr.get::<Body>(ball).unwrap();
+    let axis = b.rot.rotate_vec3(z);
+    assert!(f(axis.z) > 0.995, "its axis stays on the hinge axis: {}", f(axis.z));
+    assert!(f(b.omega.x).abs() < 0.05, "it does not keep turning about x: {}", f(b.omega.x));
+}
