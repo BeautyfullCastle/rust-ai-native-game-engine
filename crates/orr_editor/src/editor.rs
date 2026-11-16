@@ -45,7 +45,7 @@ use orr_remote::codec::b64_decode;
 use orr_remote::json::{json_to_value, value_to_json};
 use orr_remote::{CaptureError, CaptureRequest, CapturedImage, ClientError, ErpClient, RemoteViewDelivery, ViewMode, ViewState};
 use orr_render::{Camera, RenderList};
-use crate::game::{Drawable, EditorGame, EditorStream};
+use crate::game::{Drawable, EditorGame, EditorStream, JointView};
 use serde_json::{json, Value as J};
 
 use crate::agent::{AgentState, Feed, FeedEntry};
@@ -292,6 +292,7 @@ pub struct Editor {
     #[cfg(all(test, feature = "terrain"))]
     view_recovery_generation: u64,
     bodies: Vec<Drawable>,
+    joints: Vec<JointView>,
     checksum: u64,
     snap_entities: u32,
     preview: Option<Preview>,
@@ -453,6 +454,7 @@ impl Editor {
             #[cfg(all(test, feature = "terrain"))]
             view_recovery_generation: 0,
             bodies: Vec::new(),
+            joints: Vec::new(),
             checksum: 0,
             snap_entities: 0,
             preview: None,
@@ -800,6 +802,11 @@ impl Editor {
     /// edit mode, the live frame in play mode).
     pub fn bodies(&self) -> &[Drawable] {
         &self.bodies
+    }
+
+    /// The joints of the frame on screen, for the viewport markers.
+    pub fn joints(&self) -> &[JointView] {
+        &self.joints
     }
 
     /// The drawable bodies of the staged frame of the previewed proposal, once it has arrived.
@@ -1541,6 +1548,7 @@ impl Editor {
             // acknowledgements of the requests on that independent channel.
             self.snapshot = None;
             self.bodies.clear();
+            self.joints.clear();
             self.checksum = 0;
             self.mark_changed();
             self.dirty.state = true;
@@ -1575,6 +1583,7 @@ impl Editor {
         if self.game().is_3d() && self.snapshot.as_ref().is_some_and(|old| old.timeline().is_some()!=s.timeline().is_some() || (s.timeline().is_some()&&s.tick()<old.tick())) { self.mark_changed(); }
         let frame = s.predicted();
         self.bodies = self.backend.game.drawables(frame);
+        self.joints = self.backend.game.joint_views(frame);
         if self.game().is_3d() {
             self.yard_frame = if self.game().has_mesh_view() {
                 crate::viewport3d::YardFrame::default()
@@ -2920,6 +2929,7 @@ impl Editor {
                         if e.contains("remote identity check:") {
                             self.snapshot = None;
                             self.bodies.clear();
+                            self.joints.clear();
                             self.checksum = 0;
                             self.connection_lost(&e);
                         } else {
@@ -2959,7 +2969,11 @@ impl Editor {
                 };
                 (list, &p.bodies, &p.rows)
             }
-            None => (viewport::build_list(&self.bodies, selected, &self.camera, vp), &self.bodies, &self.rows),
+            None => {
+                let mut list = viewport::build_list(&self.bodies, selected, &self.camera, vp);
+                viewport::add_joints(&mut list, &self.joints, selected, &self.camera, vp);
+                (list, &self.bodies, &self.rows)
+            }
         };
         if !pulses.is_empty() {
             let live: Vec<(Entity, f32)> = pulses

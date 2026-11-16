@@ -147,7 +147,7 @@ add_joint(frame, Joint::new(JOINT_BALL, body, arm, shoulder, FPVec3::ZERO, FP::Z
 - 씬 파일에는 `ref_angle`을 저장하지 않는다. `step`이 `ref_angle`이 아직 없는 조인트(씬 파일이나 인스펙터에서 온 조인트)를 만나면 그 스텝 시작의 상대 각도로 기록한다. 그래서 씬에 저장된 자세가 각도 0이다. 같은 자세에서 `add_joint`로 만든 조인트와 결과가 비트 단위로 같다(테스트로 확인). 없는 상태는 `ref_angle`이 100라디안인 값으로 표시한다. `add_joint`와 `Joint::new`로 만든 조인트는 이 값을 쓰지 않아서 예전과 똑같이 돈다.
 - 프리즘 조인트의 `lower`, `upper`는 씬에서 `add_joint`가 저장하는 값 그대로다. 두 고정점이 벌어진 양을 축에 투영한 값이고, 고정점이 겹쳐 있으면 0이다. 씬에서 읽을 때는 시작 자세를 더하지 않는다.
 - 시연 씬은 `scenes/joints_2d_demo.scene.yaml`이다(핀 진자, 모터 프로펠러, 미끄럼 블록, 스프링). `orr_editor --game physics --scene scenes/joints_2d_demo.scene.yaml`로 연다.
-- 2D 뷰포트에는 조인트 표지가 없다. 조인트는 인스펙터에서만 고친다.
+- 2D 뷰포트도 조인트를 표지로 그린다. 3D와 같은 색과 모양이다. 두 고정점(바디 위치 + 바디 각도만큼 돌린 로컬 고정점)을 잇는 하늘색 선, 첫 고정점의 작은 십자, 프리즘 조인트는 첫 바디 기준 미끄럼 축 방향의 주황색 선이다. 스프링도 막대처럼 그린다. 선택한 조인트는 굵게 그린다. 표지는 바디 위에 얹는 선일 뿐이라 바디 선택(picking)에 영향을 주지 않는다. 조인트는 인스펙터에서 고친다.
 
 ## 한계
 
@@ -155,5 +155,5 @@ add_joint(frame, Joint::new(JOINT_BALL, body, arm, shoulder, FPVec3::ZERO, FP::Z
 - 3D 볼 조인트의 스윙 제한은 원형 원뿔 하나다. 방향마다 각이 다른 타원 원뿔은 없다.
 - 위치 보정이 속도 항(Baumgarte)이라 무거운 사슬은 늘어날 수 있다. 반복 횟수(`PhysicsConfig::velocity_iterations`)를 올리면 줄어든다.
 - Yard3D와 `PhysGame` 외의 게임은 `register_joints`, `register_joints_reflect`를 직접 불러야 한다.
-- 2D 뷰포트에는 조인트 표지가 없다. 고정점을 뷰포트에서 끌어 옮기는 기즈모도 없다. 숫자로 고친다.
+- 고정점을 뷰포트에서 끌어 옮기는 기즈모는 없다. 숫자로 고친다.
 - 인스펙터에서 조인트를 고치면 컴포넌트가 씬 값으로 다시 쓰여 기록이 지워지고, 다음 스텝에 그때 자세로 다시 기록된다. 코드에서 이미 기록된 조인트의 `axis_a`를 바꿀 때는 `ref_a`를 0으로 두어야 다시 기록된다.

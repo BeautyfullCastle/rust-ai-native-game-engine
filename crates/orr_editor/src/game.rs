@@ -6,6 +6,7 @@ use orr_sample::arena_game::Arena;
 use orr_sample::physics_game::PhysGame;
 use std::path::PathBuf;
 pub use orr_sample::editor_view::Drawable;
+pub use orr_sample::physics_view::JointView;
 
 /// Existing spatial fields for picking; absent for embedded gameplay views.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -238,6 +239,14 @@ impl EditorGame {
             Self::MeshNavigation => Vec::new(),
             #[cfg(feature = "mesh-hazards")]
             Self::MeshHazardsV1 => Vec::new(),
+        }
+    }
+
+    /// The joint markers of a frame; only the 2D physics game has joints.
+    pub fn joint_views(self, frame: FrameView<'_>) -> Vec<JointView> {
+        match self {
+            Self::PhysGame => orr_sample::physics_view::joint_views(frame),
+            _ => Vec::new(),
         }
     }
 
