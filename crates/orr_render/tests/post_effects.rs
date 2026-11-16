@@ -506,7 +506,7 @@ fn a_spot_light_casts_a_shadow_with_and_without_a_sun_shadow() {
         let lit = render_lit_groups(&g, camera, &floor_and_caster(), &scene_light, &[spot_from_above(false)], &[], 1);
         let shadowed = render_lit_groups(&g, camera, &floor_and_caster(), &scene_light, &[spot_from_above(true)], &[], 1);
         // The shadow falls on the floor beyond the caster, away from the light.
-        let darker = (0..SIZE * SIZE).filter(|i| image_red(&lit, *i) > image_red(&shadowed, *i) + 60).count();
+        let darker = (0..SIZE * SIZE).filter(|i| u32::from(image_red(&lit, *i)) > u32::from(image_red(&shadowed, *i)) + 60).count();
         assert!(darker > 40, "the caster's spot shadow darkens the floor: {darker} pixels (sun shadow {})", scene_light.shadows);
         // A corner outside the spot's cone is the same either way.
         assert!(px(&lit, 1, 1)[0].abs_diff(px(&shadowed, 1, 1)[0]) <= 2);
@@ -523,11 +523,11 @@ fn a_point_light_casts_a_shadow_from_whichever_cube_face_sees_the_caster() {
     let camera = |_| Camera3D::perspective([0.0, 6.0, 2.5], [0.0; 3], 50.0);
     let mut dark = light(0.05);
     dark.tonemap = false;
-    // Straight above, the floor under the caster is in the -y face; low to the side, in the -x face.
-    for position in [[0.0, 4.0, 0.0], [2.5, 1.6, 0.0]] {
+    // Straight above, the floor under the caster is in the -y face; beside it and a little above, in the -x face (the floor shadow stays within range).
+    for position in [[0.0, 4.0, 0.0], [0.5, 1.8, 0.0]] {
         let lit = render_lit_groups(&g, camera, &floor_and_caster(), &dark, &[point_at(position, false)], &[], 1);
         let shadowed = render_lit_groups(&g, camera, &floor_and_caster(), &dark, &[point_at(position, true)], &[], 1);
-        let darker = (0..SIZE * SIZE).filter(|i| image_red(&lit, *i) > image_red(&shadowed, *i) + 60).count();
+        let darker = (0..SIZE * SIZE).filter(|i| u32::from(image_red(&lit, *i)) > u32::from(image_red(&shadowed, *i)) + 60).count();
         assert!(darker > 40, "the caster's point shadow darkens the floor: {darker} pixels, light at {position:?}");
         // Pixels the caster does not hide from the light are lit the same either way.
         let same = (0..SIZE * SIZE).filter(|i| image_red(&lit, *i).abs_diff(image_red(&shadowed, *i)) <= 3).count();
