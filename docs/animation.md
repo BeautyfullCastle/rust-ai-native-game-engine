@@ -99,7 +99,7 @@ renderer.draw(view, size, &camera, &lighting, &[SkinnedInstance::new(&pose)])?;
 ```
 
 - 가져오기: 애니메이션 모델 임포터가 glTF 프리미티브의 `targets`(POSITION 필수, NORMAL 선택, f32 VEC3, 정점마다 하나)와 기본 가중치(노드의 `weights`, 없으면 메시의 `weights`, 없으면 0)를 읽는다. 애니메이션의 `weights` 채널(STEP, LINEAR)도 읽는다. 프리미티브 하나에 타깃은 최대 8개(`MAX_MORPH_TARGETS`), 가중치 크기는 16 이하다. 정적 모델 임포터는 모프 타깃을 계속 거부한다.
-- 데이터: `AnimatedSource::morph`(`Morphs`)에 프리미티브별 타깃(`PrimitiveMorph`)과 클립별 가중치 트랙(`MorphChannel`)이 있다. 비어 있으면 쿠킹 파일에 쓰지 않으므로 모프 없는 모델의 바이트는 그대로다.
+- 데이터: `AnimatedSource::morph`(`Morphs`)에 프리미티브별 타깃(`PrimitiveMorph`)과 클립별 가중치 트랙(`MorphChannel`)이 있다. 비어 있으면 쿠킹 파일에 쓰지 않으므로 모프 없는 모델의 바이트는 그대로다. 같은 클립과 노드에 가중치 트랙을 둘 이상 두면 거절한다. 가중치 트랙도 관절 채널과 같은 예산(클립당 채널 수, 전체 키 수, 애니메이션 바이트)에 합산한다.
 - 가중치는 `Pose` 밖에 둔다. 포즈 그래프(상태 머신, 레이어, 블렌드 스페이스)는 관절만 섞는다. `rest_weights()`가 기본값, `sample_weights(clip, time)`이 클립의 값을 준다. 시간은 트랙마다 끝에서 멈춘다. 가중치 트랙만 있는 클립도 되고, `clip_duration`과 재생기는 그 트랙의 길이를 센다.
 - 변형 순서: 타깃 오프셋을 먼저 더하고 그 정점을 스키닝한다. CPU 기준 구현은 `deform_morphed`, `bounds_morphed`다.
 - 그리기: `SkinnedModelRenderer::set_morph_weights`로 인스턴스마다 가중치를 준다. 가중치가 0이 아닌 그리기는 CPU에서 오프셋을 더한 정점을 그 그리기 전용 정점 버퍼에 매 프레임 올리고, 0이면 공유 정점 버퍼를 그대로 쓴다. 저장 버퍼가 없는 WebGL2에서도 같은 경로로 돈다. 경계 상자와 그림자도 같은 정점을 쓴다.

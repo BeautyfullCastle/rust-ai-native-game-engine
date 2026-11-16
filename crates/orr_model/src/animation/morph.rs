@@ -5,7 +5,7 @@
 //! Weights live beside the [`super::Pose`], not in it: a pose graph blends
 //! joints only. [`AnimatedModel::rest_weights`] gives the modeled defaults and
 //! [`AnimatedModel::sample_weights`] the weights of a clip at a time.
-use super::{add_budget, sample_interval, AnimatedModel, AnimatedSource, Interpolation};
+use super::{add_budget, MAX_ANIMATION_BYTES, MAX_ANIMATION_KEYS, sample_interval, AnimatedModel, AnimatedSource, Interpolation};
 use std::collections::BTreeSet;
 use crate::{invalid, Error, Vertex, MAX_DECODED_BYTES};
 use serde::{Deserialize, Serialize};
@@ -73,9 +73,9 @@ fn weight_ok(w: f32) -> bool {
 }
 
 /// Checks the targets and tracks against the rest of `source`.
-pub(super) fn validate(source: &AnimatedSource, decoded: &mut usize) -> Result<(), Error> {
+pub(super) fn validate(source: &AnimatedSource, decoded: &mut usize, keys: &mut usize, animation_bytes: &mut usize) -> Result<(), Error> {
     validate_targets(source, decoded)?;
-    validate_channels(source, decoded)
+    validate_channels(source, decoded, keys, animation_bytes)
 }
 
 fn validate_targets(source: &AnimatedSource, decoded: &mut usize) -> Result<(), Error> {
@@ -102,7 +102,7 @@ fn validate_targets(source: &AnimatedSource, decoded: &mut usize) -> Result<(), 
     Ok(())
 }
 
-fn validate_channels(source: &AnimatedSource, decoded: &mut usize) -> Result<(), Error> {
+fn validate_channels(source: &AnimatedSource, decoded: &mut usize, keys: &mut usize, animation_bytes: &mut usize) -> Result<(), Error> {
     let mut seen = BTreeSet::new();
     for channel in &source.morph.channels {
         if channel.clip as usize >= source.clips.len() || !seen.insert((channel.clip, channel.node)) {
@@ -118,7 +118,10 @@ fn validate_channels(source: &AnimatedSource, decoded: &mut usize) -> Result<(),
         {
             return Err(invalid("morph channel times/weights; only step and linear"));
         }
-        add_budget(decoded, (channel.times.len() + channel.weights.len()) * 4, MAX_DECODED_BYTES, "decoded model")?;
+        let bytes = (channel.times.len() + channel.weights.len()) * 4;
+        add_budget(keys, channel.weights.len(), MAX_ANIMATION_KEYS, "aggregate animation key")?;
+        add_budget(animation_bytes, bytes, MAX_ANIMATION_BYTES, "aggregate animation byte")?;
+        add_budget(decoded, bytes, MAX_DECODED_BYTES, "decoded model")?;
     }
     Ok(())
 }
