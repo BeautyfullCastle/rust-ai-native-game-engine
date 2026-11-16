@@ -159,3 +159,16 @@ fn cooked_morph_data_is_checked_on_load() {
     s.morph.channels[0].clip = 99;
     assert!(AnimatedModel::new(s).is_err(), "the clip exists");
 }
+
+#[test]
+fn cooked_morph_channels_must_be_unique_per_clip_and_node() {
+    let model = import(&morphed()).unwrap();
+    let mut s = model.source().clone();
+    let mut other = s.morph.channels[0].clone();
+    other.weights = vec![1.0, 1.0, 0.0, 0.0];
+    s.morph.channels.push(other);
+    assert!(AnimatedModel::new(s.clone()).is_err(), "a second track for the same clip and node");
+    s.morph.channels.swap(0, 1);
+    assert!(AnimatedModel::new(s).is_err(), "the order does not matter");
+}
+

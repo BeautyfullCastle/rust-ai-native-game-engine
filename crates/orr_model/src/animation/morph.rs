@@ -6,6 +6,7 @@
 //! joints only. [`AnimatedModel::rest_weights`] gives the modeled defaults and
 //! [`AnimatedModel::sample_weights`] the weights of a clip at a time.
 use super::{add_budget, sample_interval, AnimatedModel, AnimatedSource, Interpolation};
+use std::collections::BTreeSet;
 use crate::{invalid, Error, Vertex, MAX_DECODED_BYTES};
 use serde::{Deserialize, Serialize};
 
@@ -102,9 +103,10 @@ fn validate_targets(source: &AnimatedSource, decoded: &mut usize) -> Result<(), 
 }
 
 fn validate_channels(source: &AnimatedSource, decoded: &mut usize) -> Result<(), Error> {
+    let mut seen = BTreeSet::new();
     for channel in &source.morph.channels {
-        if channel.clip as usize >= source.clips.len() {
-            return Err(invalid("morph channel clip out of range"));
+        if channel.clip as usize >= source.clips.len() || !seen.insert((channel.clip, channel.node)) {
+            return Err(invalid("morph channel clip out of range, or duplicate morph channel target"));
         }
         let k = targets_on(source, channel.node).ok_or_else(|| invalid("morph channel node has no targets, or differing counts"))?;
         if channel.interpolation == Interpolation::CubicSpline
