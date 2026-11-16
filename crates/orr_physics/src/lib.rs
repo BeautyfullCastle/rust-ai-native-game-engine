@@ -173,7 +173,7 @@ pub use query::{
     CharacterMove, CharacterParams, QueryFilter, RayHit, ShapeHit,
 };
 pub use joints::{add_joint, register_joints, Joint, JOINT_LIMIT, JOINT_MOTOR, JOINT_PIN, JOINT_PRISMATIC, JOINT_ROD, JOINT_ROPE, JOINT_SPRING};
-pub use reflection::register_reflect;
+pub use reflection::{register_joints_reflect, register_reflect};
 pub use sleep::{apply_impulse, is_asleep, set_velocity, wake, wake_all};
 pub use step::{step, step_probed, Phase, Scratch, StepStats};
 pub use system::PhysicsSystem;

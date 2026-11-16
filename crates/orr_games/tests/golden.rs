@@ -45,17 +45,17 @@ fn yard(cfg: YardConfig, ticks: u64) -> u64 {
 fn golden_phys_rain120() {
     let mut c = PhysConfig::new(120, SceneMode::Rain);
     c.spawn_rate = 30;
-    assert_eq!(phys(c, 300), 0xbe97_f50d_87d5_825a);
+    assert_eq!(phys(c, 300), 0xb3e5_f56c_b5ce_7ed2);
 }
 
 #[test]
 fn golden_phys_pile200() {
-    assert_eq!(phys(PhysConfig::new(200, SceneMode::Pile), 200), 0x2e84_7e92_dad1_9a84);
+    assert_eq!(phys(PhysConfig::new(200, SceneMode::Pile), 200), 0xe2f5_103f_1d19_05a2);
 }
 
 #[test]
 fn golden_phys_mixer150() {
-    assert_eq!(phys(PhysConfig::new(150, SceneMode::Mixer), 200), 0x1f2d_9339_56a9_cf6a);
+    assert_eq!(phys(PhysConfig::new(150, SceneMode::Mixer), 200), 0xffd8_7cde_98c2_8721);
 }
 
 #[test]

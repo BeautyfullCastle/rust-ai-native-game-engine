@@ -795,6 +795,7 @@ pub fn step_probed(frame: &mut Frame, sc: &mut Scratch, events: &mut Vec<Trigger
     let st = *frame.singleton::<PhysicsState>();
     let cfg = st.config;
     assert!(cfg.dt.raw() > 0, "orr_physics: call orr_physics::init before step");
+    crate::joints::settle(frame);
 
     // Read phase: everything is computed from shared borrows of the frame.
     {

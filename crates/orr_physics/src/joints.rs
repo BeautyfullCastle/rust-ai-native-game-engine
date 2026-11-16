@@ -113,6 +113,27 @@ impl Joint {
     }
 }
 
+/// [`Joint::ref_angle`] of a joint that came in without [`add_joint`] (a scene file, the
+/// editor's inspector). The first step records the bodies' relative angle in its place.
+pub(crate) const UNRECORDED: FP = FP::from_int(100);
+
+/// Records [`Joint::ref_angle`] of the joints that came in without [`add_joint`] from the
+/// poses at the start of their first step. Joints made by [`add_joint`] are never marked.
+pub(crate) fn settle(frame: &mut Frame) {
+    if frame.registry().component_id::<Joint>().is_none() {
+        return;
+    }
+    let (je, jd) = frame.dense::<Joint>();
+    let pending: Vec<(Entity, Joint)> = je.iter().zip(jd).filter(|(_, j)| j.ref_angle == UNRECORDED).map(|(&e, &j)| (e, j)).collect();
+    for (e, joint) in pending {
+        let (Some(a), Some(b)) = (frame.get::<Body>(joint.a), frame.get::<Body>(joint.b)) else { continue };
+        let angle = (b.angle - a.angle).wrap_angle();
+        if let Some(stored) = frame.get_mut::<Joint>(e) {
+            stored.ref_angle = angle;
+        }
+    }
+}
+
 /// Registers [`Joint`]. Call it after [`crate::register`] in a game that uses joints.
 pub fn register_joints(builder: &mut ComponentRegistryBuilder) {
     builder.register_component::<Joint>("orr_physics::Joint");
