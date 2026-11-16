@@ -5,6 +5,8 @@
 //! hold it between two angles, for wheels, hinges and ragdoll limbs. A
 //! prismatic joint lets `b` slide along one axis of `a` and nothing else, with
 //! an optional motor and limits on the slide, for pistons and sliding doors.
+//! A spring is a rod that gives: it pulls the anchors toward a rest length
+//! with a stiffness set by a frequency and a damping ratio.
 //! Joints are an opt-in component: a game that never calls
 //! [`register_joints`] steps exactly as before.
 
@@ -24,6 +26,10 @@ pub const JOINT_ROD: u32 = 1;
 pub const JOINT_ROPE: u32 = 2;
 /// [`Joint::kind`]: `b` slides along an axis of `a` and cannot turn against it.
 pub const JOINT_PRISMATIC: u32 = 3;
+/// [`Joint::kind`]: a soft rod. The anchors are pulled toward [`Joint::length`] apart like a
+/// spring of frequency [`Joint::motor_speed`] in hertz and damping ratio
+/// [`Joint::max_motor_torque`]. A frequency of 0 makes it as stiff as a rod.
+pub const JOINT_SPRING: u32 = 4;
 
 /// [`Joint::flags`]: a pin's motor drives the relative turn, and a prismatic joint's motor
 /// the slide, toward [`Joint::motor_speed`].
@@ -45,10 +51,10 @@ pub struct Joint {
     pub anchor_a: FPVec2,
     /// Anchor on `b`, in `b`'s own frame.
     pub anchor_b: FPVec2,
-    /// Distance between the anchors for a rod or rope; the angle in radians of the slide
+    /// Distance between the anchors for a rod, rope or spring; the angle in radians of the slide
     /// axis in `a`'s own frame for a prismatic joint; unused by a pin.
     pub length: FP,
-    /// [`JOINT_PIN`], [`JOINT_ROD`], [`JOINT_ROPE`] or [`JOINT_PRISMATIC`].
+    /// [`JOINT_PIN`], [`JOINT_ROD`], [`JOINT_ROPE`], [`JOINT_PRISMATIC`] or [`JOINT_SPRING`].
     pub kind: u32,
     /// [`JOINT_MOTOR`] and [`JOINT_LIMIT`], for a pin or a prismatic joint; 0 for none.
     pub flags: u32,
@@ -62,9 +68,10 @@ pub struct Joint {
     /// joint's highest slide; [`add_joint`] adds the slide at the start to it.
     pub upper: FP,
     /// Relative turn rate (`b` minus `a`) in radians per second the motor aims for.
-    /// A prismatic joint's speed of `b` along the axis.
+    /// A prismatic joint's speed of `b` along the axis. A spring's frequency in hertz; below 0 counts as 0.
     pub motor_speed: FP,
     /// Largest torque the motor applies, or force for a prismatic joint; 0 lets it do nothing.
+    /// A spring's damping ratio: 0 never settles, 1 settles without overshoot; below 0 counts as 0.
     pub max_motor_torque: FP,
 }
 
@@ -82,6 +89,13 @@ impl Joint {
         let axis = axis.normalize_or_zero();
         let angle = if axis == FPVec2::ZERO { FP::ZERO } else { axis.y.atan2(axis.x) };
         Joint::new(JOINT_PRISMATIC, a, b, anchor_a, anchor_b, angle)
+    }
+
+    /// A spring that pulls the anchors toward `length` apart. `hertz` is how often it would
+    /// swing a mass on a fixed anchor per second, and `damping_ratio` how fast that dies out.
+    #[must_use]
+    pub fn spring(a: Entity, b: Entity, anchor_a: FPVec2, anchor_b: FPVec2, length: FP, hertz: FP, damping_ratio: FP) -> Joint {
+        Joint { motor_speed: hertz, max_motor_torque: damping_ratio, ..Joint::new(JOINT_SPRING, a, b, anchor_a, anchor_b, length) }
     }
 
     /// The same joint with a motor turning `b` against `a` at `speed`, with at most `max_torque`.
@@ -128,6 +142,35 @@ pub fn add_joint(frame: &mut Frame, mut joint: Joint) -> Entity {
 /// Share of the remaining position error a joint removes per tick.
 const BAUMGARTE: FP = FP::from_ratio(2, 10);
 
+/// The soft constraint terms of a spring for one step: how much of the position error
+/// becomes velocity, and how much of the impulse the row may use and keep.
+#[derive(Clone, Copy)]
+struct Soft {
+    bias_rate: FP,
+    mass_scale: FP,
+    impulse_scale: FP,
+}
+
+/// Largest spring frequency in hertz and damping ratio the solver uses.
+const SOFT_HERTZ_MAX: FP = FP::from_int(1000);
+const SOFT_DAMPING_MAX: FP = FP::from_int(1000);
+
+/// The soft constraint terms for a step of `h` seconds, or `None` for a frequency of 0 or less,
+/// which is rigid.
+fn soft(hertz: FP, damping_ratio: FP, h: FP) -> Option<Soft> {
+    if hertz <= FP::ZERO {
+        return None;
+    }
+    let omega = FP::TWO_PI * hertz.min(SOFT_HERTZ_MAX);
+    let a1 = FP::TWO * damping_ratio.clamp(FP::ZERO, SOFT_DAMPING_MAX) + h * omega;
+    if a1 <= FP::ZERO {
+        return Some(Soft { bias_rate: FP::ZERO, mass_scale: FP::ZERO, impulse_scale: FP::ONE });
+    }
+    let a2 = h * omega * a1;
+    let a3 = FP::ONE / (FP::ONE + a2);
+    Some(Soft { bias_rate: omega / a1, mass_scale: a2 * a3, impulse_scale: a3 })
+}
+
 /// A prismatic joint's axis in `a`'s own frame.
 fn local_axis(joint: &Joint) -> FPVec2 {
     let (s, c) = joint.length.sin_cos();
@@ -172,8 +215,10 @@ pub(crate) struct JointRow {
     axis: FPVec2,
     /// Rod and rope: one over the effective mass along `axis`.
     mass: FP,
-    /// Rope: the impulse so far, which may only pull.
+    /// Rope: the impulse so far, which may only pull. Spring: the impulse so far.
     total: FP,
+    /// Spring: the soft terms, or `None` when it is rigid.
+    soft: Option<Soft>,
     flags: u32,
     /// One over the effective mass of a turn with the anchors held together; 0 when it cannot turn.
     angular_mass: FP,
@@ -245,6 +290,7 @@ pub(crate) fn prepare(frame: &Frame, ents: &[Entity], bslot: &[u32], bd: &[Body]
             axis: FPVec2::ZERO,
             mass: FP::ZERO,
             total: FP::ZERO,
+            soft: None,
             flags: if joint.kind == JOINT_PIN || joint.kind == JOINT_PRISMATIC { joint.flags } else { 0 },
             angular_mass: FP::ZERO,
             couple: FPVec2::ZERO,
@@ -293,6 +339,12 @@ pub(crate) fn prepare(frame: &Frame, ents: &[Entity], bslot: &[u32], bd: &[Body]
             }
             row.mass = FP::ONE / k;
             row.bias = FPVec2::new(error * BAUMGARTE * inv_dt, FP::ZERO);
+            if joint.kind == JOINT_SPRING {
+                row.soft = soft(joint.motor_speed, joint.max_motor_torque, dt);
+                if let Some(s) = row.soft {
+                    row.bias = FPVec2::new(error * s.bias_rate, FP::ZERO);
+                }
+            }
         }
         rows.push(row);
     }
@@ -461,7 +513,14 @@ pub(crate) fn solve(rows: &mut [JointRow], vw: &mut [Vw]) {
             let rhs = -(relative + row.bias);
             FPVec2::new((k22 * rhs.x - k12 * rhs.y) / det, (k11 * rhs.y - k12 * rhs.x) / det)
         } else {
-            let mut lambda = -(row.mass * (relative.dot(row.axis) + row.bias.x));
+            let speed = relative.dot(row.axis) + row.bias.x;
+            let mut lambda = match row.soft {
+                Some(s) => -(s.mass_scale * row.mass * speed) - s.impulse_scale * row.total,
+                None => -(row.mass * speed),
+            };
+            if row.soft.is_some() {
+                row.total += lambda;
+            }
             if row.kind == JOINT_ROPE {
                 // A rope pulls the anchors together and never pushes them apart.
                 let total = (row.total + lambda).min(FP::ZERO);
