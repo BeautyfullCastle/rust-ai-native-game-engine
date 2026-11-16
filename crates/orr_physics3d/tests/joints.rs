@@ -486,3 +486,56 @@ fn a_prismatic_joint_added_as_a_plain_component_is_recorded_at_its_first_step() 
     run(&mut plain, &mut Scratch::new(), 60);
     assert_eq!(added.checksum(), plain.checksum(), "both rails slide the same and hold the same limits");
 }
+
+#[test]
+fn a_negative_motor_torque_limits_like_its_magnitude_and_zero_torque_does_nothing() {
+    let spun = |torque: FP| {
+        let (mut fr, w) = wheel(|j| j.with_motor(fp!(2), torque));
+        run(&mut fr, &mut Scratch::new(), 30);
+        fr.get::<Body>(w).unwrap().omega.y
+    };
+    let positive = spun(fp!(0.5));
+    let omega = f(positive);
+    assert!(omega > 0.1 && omega < 1.9, "the weak motor is still speeding up: {omega}");
+    assert_eq!(spun(fp!(-0.5)), positive, "a negative torque limits like its magnitude");
+    assert!((f(spun(fp!(-100))) - 2.0).abs() < 0.02, "a strong negative torque still reaches the speed");
+    assert!(f(spun(FP::ZERO)).abs() < 0.01, "no torque turns nothing");
+}
+
+#[test]
+fn a_joint_with_a_zero_axis_is_held_like_a_ball_joint_without_panicking() {
+    let zero = FPVec3::ZERO;
+    let (mut added, pivot, ball) = door(|j| Joint { axis_a: zero, ..j });
+    let (mut coned, ..) = arm(|j| j.with_cone(zero, fp!(0.5), fp!(-1), fp!(1)));
+    // The same joint put on an entity directly, as a scene file or the inspector does.
+    let mut plain = new_frame(true);
+    let p = spawn_body(&mut plain, Body::new_static(v3(FP::ZERO, fp!(10), FP::ZERO)), Collider::new(Shape::sphere(fp!(0.1))));
+    let shape = Shape::sphere(fp!(0.2));
+    let b = spawn_body(&mut plain, Body::new_dynamic(v3(fp!(3), fp!(10), FP::ZERO), &shape, FP::ONE), Collider::new(shape));
+    let e = plain.spawn();
+    plain.add(e, Joint::hinge(p, b, FPVec3::ZERO, v3(fp!(-3), FP::ZERO, FP::ZERO), zero).with_limits(fp!(-0.5), fp!(0.5)));
+    let mut sc = Scratch::new();
+    run(&mut added, &mut sc, 60);
+    run(&mut coned, &mut sc, 60);
+    run(&mut plain, &mut sc, 60);
+    assert!((distance(&added, pivot, ball) - 3.0).abs() < 0.1, "the anchors stay together");
+    assert!(y(&added, ball) < 7.5, "it swings down under the pivot");
+}
+
+#[test]
+fn a_cone_pulls_axes_that_point_opposite_back_inside_its_swing() {
+    for angle in [fp!(3.14159), fp!(3.1412)] {
+        let mut fr = new_frame(true);
+        let at = v3(FP::ZERO, fp!(10), FP::ZERO);
+        let hub = spawn_body(&mut fr, Body::new_static(at), Collider { mask: 0, ..Collider::new(Shape::sphere(fp!(0.1))) });
+        let shape = Shape::sphere(fp!(1));
+        let ball = spawn_body(&mut fr, Body::new_dynamic(at, &shape, FP::ONE), Collider::new(shape));
+        let x = v3(FP::ONE, FP::ZERO, FP::ZERO);
+        add_joint(&mut fr, Joint::new(JOINT_BALL, hub, ball, FPVec3::ZERO, FPVec3::ZERO, FP::ZERO).with_cone(x, fp!(0.5), fp!(-3), fp!(3)));
+        fr.get_mut::<Body>(ball).unwrap().rot = FPQuat::from_axis_angle(v3(FP::ZERO, FP::ONE, FP::ZERO), angle);
+        run(&mut fr, &mut Scratch::new(), 90);
+        let axis = fr.get::<Body>(ball).unwrap().rot.rotate_vec3(x);
+        let swing = f(axis.x).clamp(-1.0, 1.0).acos();
+        assert!(swing < 0.6, "the swing is back inside the cone from {}: {swing}", f(angle));
+    }
+}

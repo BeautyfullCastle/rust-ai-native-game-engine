@@ -252,7 +252,7 @@ pub(crate) fn prepare(frame: &Frame, ents: &[Entity], bslot: &[u32], bd: &[Body]
             lower: joint.lower,
             upper: joint.upper,
             motor_speed: joint.motor_speed,
-            motor_max: joint.max_motor_torque * dt,
+            motor_max: joint.max_motor_torque.abs() * dt,
             motor_total: FP::ZERO,
             lower_total: FP::ZERO,
             upper_total: FP::ZERO,

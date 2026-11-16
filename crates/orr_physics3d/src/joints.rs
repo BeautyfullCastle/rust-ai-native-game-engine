@@ -164,7 +164,7 @@ fn record(frame: &Frame, joint: &mut Joint) {
         record_slide(a, b, joint);
         return;
     }
-    let n = a.rot.rotate_vec3(joint.axis_a).normalize();
+    let n = a.rot.rotate_vec3(joint.axis_a).normalize_or_zero();
     if n == FPVec3::ZERO {
         return;
     }
@@ -405,7 +405,7 @@ pub(crate) fn prepare(frame: &Frame, ents: &[Entity], bslot: &[u32], bd: &[Body]
             mass: FP::ZERO,
             bias_axis: FP::ZERO,
             total: FP::ZERO,
-            hinge: (joint.kind == JOINT_HINGE).then_some(Hinge {
+            hinge: (joint.kind == JOINT_HINGE && joint.axis_a != FPVec3::ZERO).then_some(Hinge {
                 flags: joint.flags,
                 axis_a: joint.axis_a,
                 axis_b: joint.axis_b,
@@ -448,7 +448,7 @@ pub(crate) fn prepare(frame: &Frame, ents: &[Entity], bslot: &[u32], bd: &[Body]
                 lower_total: FP::ZERO,
                 upper_total: FP::ZERO,
             }),
-            cone: joint.has_cone().then_some(Cone {
+            cone: (joint.has_cone() && joint.axis_a != FPVec3::ZERO).then_some(Cone {
                 axis_a: joint.axis_a,
                 axis_b: joint.axis_b,
                 ref_a: joint.ref_a,
@@ -596,7 +596,7 @@ fn begin_slide(row: &JointRow, slide: &mut Slide, rot_a: FPQuat, rot_b: FPQuat, 
     slide.lever = lever;
     slide.offset = along - slide.start;
     slide.inv_h = inv_h;
-    slide.motor_max = slide.max_force * h;
+    slide.motor_max = slide.max_force.abs() * h;
     slide.motor_total = FP::ZERO;
     slide.lower_total = FP::ZERO;
     slide.upper_total = FP::ZERO;
@@ -623,7 +623,7 @@ fn begin_hinge(row: &JointRow, hinge: &mut Hinge, rot_a: FPQuat, rot_b: FPQuat, 
     let (ra, rb) = (rot_a.rotate_vec3(hinge.ref_a), rot_b.rotate_vec3(hinge.ref_b));
     hinge.angle = n.dot(ra.cross(rb)).atan2(ra.dot(rb));
     hinge.inv_h = inv_h;
-    hinge.motor_max = hinge.max_torque * h;
+    hinge.motor_max = hinge.max_torque.abs() * h;
     hinge.motor_total = FP::ZERO;
     hinge.lower_total = FP::ZERO;
     hinge.upper_total = FP::ZERO;
@@ -634,9 +634,17 @@ fn begin_cone(row: &JointRow, cone: &mut Cone, rot_a: FPQuat, rot_b: FPQuat, inv
     let (na, nb) = (rot_a.rotate_vec3(cone.axis_a), rot_b.rotate_vec3(cone.axis_b));
     let bend = na.cross(nb);
     let sine = bend.length();
-    // Below about a thousandth of a radian the swing direction is noise, and the swing is inside any cone.
-    cone.close = if sine > FP::from_ratio(1, 1000) { turn_axis(row, -(bend / sine)) } else { TurnAxis::default() };
-    cone.room = cone.swing - sine.atan2(na.dot(nb));
+    // Below about a thousandth of a radian the swing direction is noise; aligned axes are inside any cone.
+    let cosine = na.dot(nb);
+    cone.close = if sine > FP::from_ratio(1, 1000) {
+        turn_axis(row, -(bend / sine))
+    } else if cosine < FP::ZERO {
+        // Opposite axes have no swing direction of their own, so any direction across `na` serves.
+        turn_axis(row, -across(na))
+    } else {
+        TurnAxis::default()
+    };
+    cone.room = cone.swing - sine.atan2(cosine);
     let mid = na + nb;
     let length = mid.length();
     // With the axes almost opposite there is no twist axis, so the twist rows wait.
