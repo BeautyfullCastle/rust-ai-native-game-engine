@@ -209,10 +209,11 @@ pub struct Scene {
 
 pub struct PhysGame;
 
-/// Registers every reflected type `PhysGame` uses (physics types, `PaddleTag`
+/// Registers every reflected type `PhysGame` uses (physics types, joints, `PaddleTag`
 /// and the `Scene` singleton) under the names of its `ComponentRegistry`.
 pub fn register_reflect(types: &mut TypeRegistry) {
     orr_physics::register_reflect(types);
+    orr_physics::register_joints_reflect(types);
     types.register_component::<PaddleTag>("PaddleTag");
     types.register_singleton::<Scene>("Scene");
 }
@@ -225,6 +226,7 @@ impl Game for PhysGame {
 
     fn register(builder: &mut ComponentRegistryBuilder) {
         orr_physics::register(builder);
+        orr_physics::register_joints(builder);
         builder.register_component::<PaddleTag>("PaddleTag");
         builder.register_singleton::<Scene>("Scene");
     }

@@ -1,0 +1,286 @@
+# 2D joint demo: pin pendulum, motor propeller, prismatic slider and spring.
+# Rain is disabled; the joints move under gravity and the motor.
+schema: orr.scene/1
+singletons:
+  Scene: { half_w: 20, height: 40, spawn_batch: 0, spawn_interval: 0, max_entities: 20000, mode: 0 }
+  orr_physics::PhysicsState:
+    config:
+      gravity: [0, -10]
+      dt: 0.01666
+      baumgarte: 0.2
+      linear_slop: 0.01
+      contact_margin: 0.02
+      restitution_threshold: 1
+      max_correction_speed: 6
+      max_linear_speed: 40
+      max_angular_speed: 60
+      velocity_iterations: 8
+      sleep_ticks: 30
+      sleep_linear_speed: 0.05
+      sleep_angular_speed: 0.05
+entities:
+  e_00000001:
+    name: floor
+    orr_physics::Body:
+      pos: [0, -2]
+      angle: 0
+      vel: [0, 0]
+      omega: 0
+      inv_mass: 0
+      inv_inertia: 0
+      linear_damping: 0
+      angular_damping: 0
+      kind: static
+    orr_physics::Collider:
+      shape: { kind: box, half_extents: [23, 2] }
+      restitution: 0
+      friction: 0.4
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_00000002:
+    name: wall_left
+    orr_physics::Body:
+      pos: [-21, 40]
+      angle: 0
+      vel: [0, 0]
+      omega: 0
+      inv_mass: 0
+      inv_inertia: 0
+      linear_damping: 0
+      angular_damping: 0
+      kind: static
+    orr_physics::Collider:
+      shape: { kind: box, half_extents: [1, 80] }
+      restitution: 0
+      friction: 0.4
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_00000003:
+    name: wall_right
+    orr_physics::Body:
+      pos: [21, 40]
+      angle: 0
+      vel: [0, 0]
+      omega: 0
+      inv_mass: 0
+      inv_inertia: 0
+      linear_damping: 0
+      angular_damping: 0
+      kind: static
+    orr_physics::Collider:
+      shape: { kind: box, half_extents: [1, 80] }
+      restitution: 0
+      friction: 0.4
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_00000004:
+    name: pendulum_pivot
+    orr_physics::Body:
+      pos: [-14, 18]
+      angle: 0
+      vel: [0, 0]
+      omega: 0
+      inv_mass: 0
+      inv_inertia: 0
+      linear_damping: 0
+      angular_damping: 0
+      kind: static
+    orr_physics::Collider:
+      shape: { kind: circle, radius: 0.2 }
+      restitution: 0
+      friction: 0.4
+      layer: 2
+      mask: 0
+      flags: []
+  e_00000005:
+    name: pendulum_bar
+    orr_physics::Body:
+      pos: [-11, 18]
+      angle: 0
+      vel: [0, 0]
+      omega: 0
+      inv_mass: 0.33333
+      inv_inertia: 0.110345
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape: { kind: box, half_extents: [3, 0.25] }
+      restitution: 0
+      friction: 0.4
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_00000006:
+    name: pendulum_pin
+    orr_physics::Joint:
+      a: e_00000004
+      b: e_00000005
+      anchor_a: [0, 0]
+      anchor_b: [-3, 0]
+      length: 0
+      kind: pin
+      flags: []
+      lower: -1
+      upper: 1
+      motor_speed: 0
+      max_motor_torque: 0
+  e_00000007:
+    name: motor_hub
+    orr_physics::Body:
+      pos: [0, 8]
+      angle: 0
+      vel: [0, 0]
+      omega: 0
+      inv_mass: 0
+      inv_inertia: 0
+      linear_damping: 0
+      angular_damping: 0
+      kind: static
+    orr_physics::Collider:
+      shape: { kind: circle, radius: 0.2 }
+      restitution: 0
+      friction: 0.4
+      layer: 2
+      mask: 0
+      flags: []
+  e_00000008:
+    name: motor_propeller
+    orr_physics::Body:
+      pos: [0, 8]
+      angle: 0
+      vel: [0, 0]
+      omega: 0
+      inv_mass: 0.27778
+      inv_inertia: 0.091675
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape: { kind: box, half_extents: [3, 0.3] }
+      restitution: 0
+      friction: 0.4
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_00000009:
+    name: motor_pin
+    orr_physics::Joint:
+      a: e_00000007
+      b: e_00000008
+      anchor_a: [0, 0]
+      anchor_b: [0, 0]
+      length: 0
+      kind: pin
+      flags: [motor]
+      lower: -1
+      upper: 1
+      motor_speed: 2
+      max_motor_torque: 500
+  e_00000010:
+    name: slider_rail
+    orr_physics::Body:
+      pos: [4, 14]
+      angle: 0
+      vel: [0, 0]
+      omega: 0
+      inv_mass: 0
+      inv_inertia: 0
+      linear_damping: 0
+      angular_damping: 0
+      kind: static
+    orr_physics::Collider:
+      shape: { kind: circle, radius: 0.2 }
+      restitution: 0
+      friction: 0.4
+      layer: 2
+      mask: 0
+      flags: []
+  e_00000011:
+    name: slider_block
+    orr_physics::Body:
+      pos: [4, 14]
+      angle: 0
+      vel: [0, 0]
+      omega: 0
+      inv_mass: 0.390625
+      inv_inertia: 0.91553
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape: { kind: box, half_extents: [0.8, 0.8] }
+      restitution: 0
+      friction: 0.4
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_00000012:
+    name: slider_prismatic
+    orr_physics::Joint:
+      a: e_00000010
+      b: e_00000011
+      anchor_a: [0, 0]
+      anchor_b: [0, 0]
+      length: -0.5
+      kind: prismatic
+      flags: [limit]
+      lower: -3
+      upper: 5
+      motor_speed: 0
+      max_motor_torque: 0
+  e_00000013:
+    name: spring_hook
+    orr_physics::Body:
+      pos: [14, 16]
+      angle: 0
+      vel: [0, 0]
+      omega: 0
+      inv_mass: 0
+      inv_inertia: 0
+      linear_damping: 0
+      angular_damping: 0
+      kind: static
+    orr_physics::Collider:
+      shape: { kind: circle, radius: 0.2 }
+      restitution: 0
+      friction: 0.4
+      layer: 2
+      mask: 0
+      flags: []
+  e_00000014:
+    name: spring_weight
+    orr_physics::Body:
+      pos: [14, 12]
+      angle: 0
+      vel: [0, 0]
+      omega: 0
+      inv_mass: 0.390625
+      inv_inertia: 0.91553
+      linear_damping: 0
+      angular_damping: 0
+      kind: dynamic
+    orr_physics::Collider:
+      shape: { kind: box, half_extents: [0.8, 0.8] }
+      restitution: 0
+      friction: 0.4
+      layer: 1
+      mask: 4294967295
+      flags: []
+  e_00000015:
+    name: spring
+    orr_physics::Joint:
+      a: e_00000013
+      b: e_00000014
+      anchor_a: [0, 0]
+      anchor_b: [0, 0]
+      length: 3
+      kind: spring
+      flags: []
+      lower: 0
+      upper: 0
+      motor_speed: 1.5
+      max_motor_torque: 0.1

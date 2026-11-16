@@ -27,7 +27,7 @@ add_joint(frame, Joint::new(JOINT_PIN, door_frame, door, anchor_a, anchor_b, FP:
 - 고정점(`anchor_a`, `anchor_b`)은 각 바디의 무게중심 기준, 회전 전 좌표다.
 - 두 바디 모두 `Collider`가 있어야 스텝에 들어간다. 움직이지 않는 바디(정적)에 이으면 세상에 고정된 점이 된다.
 - 풀이: 접촉과 같은 순차 임펄스 반복에서, 반복마다 접촉 다음에 조인트를 푼다. 남은 위치 오차는 틱마다 20%씩 속도 항으로 줄인다(Baumgarte). 조인트는 조인트 엔티티 번호 순서로 풀어서 결정론이 유지된다.
-- `register_joints`를 부르지 않은 게임은 스텝이 예전과 똑같다. 골든 체크섬도 그대로다.
+- `register_joints`를 부르지 않은 게임은 스텝이 예전과 똑같다. 골든 체크섬도 그대로다. `PhysGame`은 이제 `register_joints`를 부르므로 컴포넌트 목록이 달라져, 그 세 골든(`golden_phys_*`)만 새 값으로 바꿨다. 시뮬레이션 동작은 같다.
 - 조인트로 이은 두 바디도 서로 충돌한다. 겹쳐 있는 바퀴와 차체처럼 충돌하면 안 되면 `Collider`의 `layer`/`mask`로 거른다.
 
 ### 모터와 각도 제한 (2D 핀)
@@ -138,11 +138,22 @@ add_joint(frame, Joint::new(JOINT_BALL, body, arm, shoulder, FPVec3::ZERO, FP::Z
 - 씬 파일에는 이 필드들만 저장한다. `b` 쪽 축과 각도 기준(`axis_b`, `ref_a`, `ref_b`)은 저장하지 않는다. `step`이 각도 기준이 아직 없는 조인트(`ref_a`가 0)를 만나면 그 스텝 시작의 자세로 기록한다. 그래서 씬에 저장된 자세, 또는 인스펙터에서 조인트를 붙인 자세가 각도 0이다. `add_joint`로 만든 조인트와 결과가 비트 단위로 같다(테스트로 확인).
 - 뷰포트는 조인트를 표지로 그린다. 두 고정점을 잇는 하늘색 선(스프링도 막대처럼 그린다), 첫 고정점의 작은 십자, 힌지와 프리즘 조인트와 제한된 볼 조인트는 축 방향의 주황색 선이다. 선택한 조인트는 굵게 그린다.
 
+## 에디터와 씬 파일 (2D)
+
+`orr_physics::register_joints_reflect`가 `orr_physics::Joint`를 리플렉션에 등록한다. 2D 물리 게임(`PhysGame`, 에디터의 `physics` 게임)은 `register_joints`와 함께 이것을 부른다. 그래서 이 게임의 씬에서는 3D와 같은 일이 된다.
+
+- 인스펙터의 "+ Add component"로 `orr_physics::Joint`를 붙이고, `a`, `b`를 엔티티 목록에서 고른다.
+- `kind`(pin, rod, rope, prismatic, spring), `flags`(motor, limit), 고정점, `length`, `lower`, `upper`, `motor_speed`, `max_motor_torque`를 고친다. 프리즘 조인트의 `length`는 미끄럼 축의 각도(라디안)이고, 스프링의 진동수와 감쇠비는 `motor_speed`와 `max_motor_torque` 칸에 넣는다.
+- 씬 파일에는 `ref_angle`을 저장하지 않는다. `step`이 `ref_angle`이 아직 없는 조인트(씬 파일이나 인스펙터에서 온 조인트)를 만나면 그 스텝 시작의 상대 각도로 기록한다. 그래서 씬에 저장된 자세가 각도 0이다. 같은 자세에서 `add_joint`로 만든 조인트와 결과가 비트 단위로 같다(테스트로 확인). 없는 상태는 `ref_angle`이 100라디안인 값으로 표시한다. `add_joint`와 `Joint::new`로 만든 조인트는 이 값을 쓰지 않아서 예전과 똑같이 돈다.
+- 프리즘 조인트의 `lower`, `upper`는 씬에서 `add_joint`가 저장하는 값 그대로다. 두 고정점이 벌어진 양을 축에 투영한 값이고, 고정점이 겹쳐 있으면 0이다. 씬에서 읽을 때는 시작 자세를 더하지 않는다.
+- 시연 씬은 `scenes/joints_2d_demo.scene.yaml`이다(핀 진자, 모터 프로펠러, 미끄럼 블록, 스프링). `orr_editor --game physics --scene scenes/joints_2d_demo.scene.yaml`로 연다.
+- 2D 뷰포트에는 조인트 표지가 없다. 조인트는 인스펙터에서만 고친다.
+
 ## 한계
 
 - 조인트에 매달린 동적 바디는 잠들지 않는다(접촉으로 묶인 섬과 조인트를 합치지 않음). `add_joint`가 두 바디를 깨운다.
 - 3D 볼 조인트의 스윙 제한은 원형 원뿔 하나다. 방향마다 각이 다른 타원 원뿔은 없다.
 - 위치 보정이 속도 항(Baumgarte)이라 무거운 사슬은 늘어날 수 있다. 반복 횟수(`PhysicsConfig::velocity_iterations`)를 올리면 줄어든다.
-- 에디터와 씬 파일은 3D 조인트만 다룬다. 2D 조인트(`orr_physics::Joint`)는 리플렉션에 등록되지 않았다. Yard3D 외의 3D 게임은 `register_joints`, `register_joints_reflect`를 직접 불러야 한다.
-- 고정점을 뷰포트에서 끌어 옮기는 기즈모는 없다. 숫자로 고친다.
+- Yard3D와 `PhysGame` 외의 게임은 `register_joints`, `register_joints_reflect`를 직접 불러야 한다.
+- 2D 뷰포트에는 조인트 표지가 없다. 고정점을 뷰포트에서 끌어 옮기는 기즈모도 없다. 숫자로 고친다.
 - 인스펙터에서 조인트를 고치면 컴포넌트가 씬 값으로 다시 쓰여 기록이 지워지고, 다음 스텝에 그때 자세로 다시 기록된다. 코드에서 이미 기록된 조인트의 `axis_a`를 바꿀 때는 `ref_a`를 0으로 두어야 다시 기록된다.

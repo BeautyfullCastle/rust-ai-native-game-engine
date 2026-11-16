@@ -32,11 +32,14 @@
 //! the centered points, so the first save can change such values by the
 //! centering offset. After that the text is stable.
 
+use core::mem::{offset_of, size_of};
+
 use orr_fp::{fp, FPVec2, FP};
-use orr_reflect::{Reflect, TaggedDesc, TypeDesc, TypeRegistry, Value, VariantDesc, ViewField};
+use orr_reflect::{FieldDesc, Reflect, TaggedDesc, TypeDesc, TypeRegistry, Value, VariantDesc, ViewField};
 
 use crate::types::{MAX_POLY_VERTS, SHAPE_CAPSULE, SHAPE_CIRCLE, SHAPE_POLYGON};
-use crate::{Body, Collider, PhysicsConfig, PhysicsState, Shape};
+use crate::joints::UNRECORDED;
+use crate::{Body, Collider, Joint, PhysicsConfig, PhysicsState, Shape, JOINT_LIMIT, JOINT_MOTOR, JOINT_PIN, JOINT_PRISMATIC, JOINT_ROD, JOINT_ROPE, JOINT_SPRING};
 
 const SIZE_RANGE: &str = "0.05..=1000";
 const POINT_RANGE: &str = "-1000..=1000";
@@ -232,4 +235,70 @@ pub fn register_reflect(types: &mut TypeRegistry) {
         let config = if present { frame.singleton::<PhysicsState>().config } else { PhysicsConfig::default() };
         crate::init(frame, config);
     });
+}
+
+impl Reflect for Joint {
+    fn describe() -> TypeDesc {
+        let vec2 = |range| TypeDesc::vec2().with_range_str(range);
+        let fixed = |range| TypeDesc::fixed().with_range_str(range);
+        TypeDesc::structure(
+            size_of::<Joint>(),
+            vec![
+                FieldDesc::new("a", offset_of!(Joint, a), TypeDesc::entity()).with_doc("The first body."),
+                FieldDesc::new("b", offset_of!(Joint, b), TypeDesc::entity()).with_doc("The second body."),
+                FieldDesc::new("anchor_a", offset_of!(Joint, anchor_a), vec2("-1000..=1000"))
+                    .with_doc("Anchor on a, in a's own frame (from its center of mass, unrotated)."),
+                FieldDesc::new("anchor_b", offset_of!(Joint, anchor_b), vec2("-1000..=1000"))
+                    .with_doc("Anchor on b, in b's own frame."),
+                FieldDesc::new("length", offset_of!(Joint, length), fixed("-3.1416..=1000"))
+                    .with_doc("Distance between the anchors of a rod, the most of a rope, or the rest length of a spring. A prismatic joint's slide axis as an angle in radians in a's own frame."),
+                FieldDesc::new(
+                    "kind",
+                    offset_of!(Joint, kind),
+                    TypeDesc::enumeration(
+                        4,
+                        &[
+                            ("pin", JOINT_PIN as u64),
+                            ("rod", JOINT_ROD as u64),
+                            ("rope", JOINT_ROPE as u64),
+                            ("prismatic", JOINT_PRISMATIC as u64),
+                            ("spring", JOINT_SPRING as u64),
+                        ],
+                    ),
+                )
+                .with_doc("What the joint keeps: anchors together, a distance, a most distance, a slide along one axis, or a soft distance."),
+                FieldDesc::new(
+                    "flags",
+                    offset_of!(Joint, flags),
+                    TypeDesc::flags(4, &[("motor", JOINT_MOTOR as u64), ("limit", JOINT_LIMIT as u64)]),
+                )
+                .with_doc("A pin's or slide's motor and limits."),
+                FieldDesc::new("lower", offset_of!(Joint, lower), fixed("-1000..=1000"))
+                    .with_doc("Lowest relative angle of a pin in radians, measured from the pose at the first step, or lowest slide of a prismatic joint in meters, as the gap between the anchors along the axis (0 when the anchors coincide)."),
+                FieldDesc::new("upper", offset_of!(Joint, upper), fixed("-1000..=1000"))
+                    .with_doc("Highest relative angle of a pin in radians, or highest slide of a prismatic joint in meters."),
+                FieldDesc::new("motor_speed", offset_of!(Joint, motor_speed), fixed("-100..=100"))
+                    .with_doc("Turn rate in radians per second a pin motor aims for, or slide speed of a prismatic motor. A spring's frequency in hertz; 0 is rigid like a rod."),
+                FieldDesc::new("max_motor_torque", offset_of!(Joint, max_motor_torque), fixed("0..=100000"))
+                    .with_doc("Largest torque the motor applies, or force for a prismatic motor. A spring's damping ratio: 0 never settles, 1 settles without overshoot."),
+            ],
+        )
+        .with_doc("A joint between two bodies, on an entity of its own. The zero angle is recorded from the poses at the first step.")
+    }
+
+    fn default_value() -> Self {
+        Joint {
+            length: FP::ONE,
+            lower: -FP::ONE,
+            upper: FP::ONE,
+            ref_angle: UNRECORDED,
+            ..Joint::new(JOINT_PIN, orr_ecs::Entity::NONE, orr_ecs::Entity::NONE, FPVec2::ZERO, FPVec2::ZERO, FP::ZERO)
+        }
+    }
+}
+
+/// Registers [`Joint`] for scene files, the inspector and the `orr` command.
+/// Call it in a game that calls [`crate::register_joints`].
+pub fn register_joints_reflect(types: &mut TypeRegistry) {
+    types.register_component::<Joint>("orr_physics::Joint");
 }
