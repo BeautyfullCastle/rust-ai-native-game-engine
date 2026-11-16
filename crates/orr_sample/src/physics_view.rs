@@ -3,7 +3,7 @@
 
 use orr_bridge::FrameView;
 use orr_ecs::Entity;
-use orr_physics::{Body, Collider, BODY_DYNAMIC, BODY_KINEMATIC, SHAPE_CAPSULE, SHAPE_CIRCLE};
+use orr_physics::{Body, Collider, Joint, BODY_DYNAMIC, BODY_KINEMATIC, JOINT_PRISMATIC, SHAPE_CAPSULE, SHAPE_CIRCLE};
 use orr_view::{fp_to_f32, fp_to_vec2, Extracted, Extractor, InterpMode, RenderItem, Shape, Style, Transform2, Vec2};
 
 use crate::physics_game::{layout, PaddleTag, PhysInput};
@@ -164,4 +164,43 @@ pub fn body_views(frame: FrameView<'_>) -> Vec<BodyView> {
         out.push(BodyView { entity, pos: [p.x, p.y], angle: fp_to_f32(body.angle), style, turn, outline });
     }
     out
+}
+
+/// One joint with both of its bodies in the frame, placed in the world for editor markers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct JointView {
+    /// The joint's own entity.
+    pub entity: Entity,
+    /// World position of the anchor on the first body.
+    pub a: [f32; 2],
+    /// World position of the anchor on the second body.
+    pub b: [f32; 2],
+    /// World direction of a prismatic joint's slide axis (unit length).
+    pub axis: Option<[f32; 2]>,
+}
+
+/// The joints whose two bodies exist, in entity order. An anchor is the body position plus the
+/// local anchor turned by the body angle. A prismatic joint keeps its axis angle in the frame of
+/// its first body, so the world axis turns with that body.
+pub fn joint_views(frame: FrameView<'_>) -> Vec<JointView> {
+    if !frame.registers::<Joint>() {
+        return Vec::new();
+    }
+    let anchor = |body: &Body, local: orr_fp::FPVec2| {
+        let (s, c) = fp_to_f32(body.angle).sin_cos();
+        let l = fp_to_vec2(local);
+        let p = fp_to_vec2(body.pos);
+        [p.x + c * l.x - s * l.y, p.y + s * l.x + c * l.y]
+    };
+    frame
+        .iter::<Joint>()
+        .filter_map(|(entity, joint)| {
+            let (a, b) = (frame.get::<Body>(joint.a)?, frame.get::<Body>(joint.b)?);
+            let axis = (joint.kind == JOINT_PRISMATIC).then(|| {
+                let (s, c) = (fp_to_f32(a.angle) + fp_to_f32(joint.length)).sin_cos();
+                [c, s]
+            });
+            Some(JointView { entity, a: anchor(a, joint.anchor_a), b: anchor(b, joint.anchor_b), axis })
+        })
+        .collect()
 }

@@ -21,6 +21,7 @@ use orr_reflect::Guid;
 use orr_render::orr_rhi::{Rhi, TextureFormat, Wgpu};
 use orr_render::{instance_of, Camera, OffscreenTarget, RenderList, Renderer};
 use orr_sample::editor_view::{Drawable, Outline};
+use orr_sample::physics_view::JointView;
 use orr_view::{RenderItem, Transform2, Vec2};
 
 use crate::model::{EntityRow, Summary};
@@ -150,6 +151,33 @@ pub fn build_list(bodies: &[Drawable], selected: Option<Entity>, camera: &Camera
         list.cross(b.pos, 4.0 / camera.pixels_per_unit(vp.0, vp.1), 2.0, HIGHLIGHT);
     }
     list
+}
+
+/// Joint marker color: the line between the anchors and the cross on the first one.
+pub const JOINT_COLOR: [f32; 4] = [0.2, 0.9, 1.0, 1.0];
+/// Color of the slide axis of a prismatic joint.
+pub const JOINT_AXIS_COLOR: [f32; 4] = [1.0, 0.5, 0.1, 1.0];
+const JOINT_WIDTH: f32 = 1.5;
+const JOINT_WIDTH_SELECTED: f32 = 3.0;
+/// Half size of the cross on the first anchor, in pixels.
+const JOINT_CROSS_PX: f32 = 5.0;
+/// Half length of the axis line, in world units.
+const JOINT_AXIS_HALF: f32 = 0.6;
+
+/// Adds the joint markers on top of the lines of a list: a line between the anchors, a cross on
+/// the first anchor and, for a prismatic joint, a line along the slide axis. The selected joint
+/// is drawn wider. Markers are only lines, so they never take part in picking.
+pub fn add_joints(list: &mut RenderList, joints: &[JointView], selected: Option<Entity>, camera: &Camera, vp: (u32, u32)) {
+    let cross = JOINT_CROSS_PX / camera.pixels_per_unit(vp.0, vp.1);
+    for joint in joints {
+        let width = if selected == Some(joint.entity) { JOINT_WIDTH_SELECTED } else { JOINT_WIDTH };
+        list.line(joint.a, joint.b, width, JOINT_COLOR);
+        list.cross(joint.a, cross, width, JOINT_COLOR);
+        if let Some(axis) = joint.axis {
+            let end = |s: f32| [joint.a[0] + axis[0] * s, joint.a[1] + axis[1] * s];
+            list.line(end(-JOINT_AXIS_HALF), end(JOINT_AXIS_HALF), width, JOINT_AXIS_COLOR);
+        }
+    }
 }
 
 /// Which entities a proposal touches, by GUID: `(changed, added, removed)`.
