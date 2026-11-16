@@ -342,3 +342,21 @@ fn a_joint_with_a_zero_axis_is_held_like_a_ball_joint_without_panicking() {
     assert!((distance(&added, pivot, ball) - 3.0).abs() < 0.1, "the anchors stay together");
     assert!(y(&added, ball) < 7.5, "it swings down under the pivot");
 }
+
+#[test]
+fn a_cone_pulls_axes_that_point_opposite_back_inside_its_swing() {
+    for angle in [fp!(3.14159), fp!(3.1412)] {
+        let mut fr = new_frame(true);
+        let at = v3(FP::ZERO, fp!(10), FP::ZERO);
+        let hub = spawn_body(&mut fr, Body::new_static(at), Collider { mask: 0, ..Collider::new(Shape::sphere(fp!(0.1))) });
+        let shape = Shape::sphere(fp!(1));
+        let ball = spawn_body(&mut fr, Body::new_dynamic(at, &shape, FP::ONE), Collider::new(shape));
+        let x = v3(FP::ONE, FP::ZERO, FP::ZERO);
+        add_joint(&mut fr, Joint::new(JOINT_BALL, hub, ball, FPVec3::ZERO, FPVec3::ZERO, FP::ZERO).with_cone(x, fp!(0.5), fp!(-3), fp!(3)));
+        fr.get_mut::<Body>(ball).unwrap().rot = FPQuat::from_axis_angle(v3(FP::ZERO, FP::ONE, FP::ZERO), angle);
+        run(&mut fr, &mut Scratch::new(), 90);
+        let axis = fr.get::<Body>(ball).unwrap().rot.rotate_vec3(x);
+        let swing = f(axis.x).clamp(-1.0, 1.0).acos();
+        assert!(swing < 0.6, "the swing is back inside the cone from {}: {swing}", f(angle));
+    }
+}

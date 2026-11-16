@@ -477,9 +477,17 @@ fn begin_cone(row: &JointRow, cone: &mut Cone, rot_a: FPQuat, rot_b: FPQuat, inv
     let (na, nb) = (rot_a.rotate_vec3(cone.axis_a), rot_b.rotate_vec3(cone.axis_b));
     let bend = na.cross(nb);
     let sine = bend.length();
-    // Below about a thousandth of a radian the swing direction is noise, and the swing is inside any cone.
-    cone.close = if sine > FP::from_ratio(1, 1000) { turn_axis(row, -(bend / sine)) } else { TurnAxis::default() };
-    cone.room = cone.swing - sine.atan2(na.dot(nb));
+    // Below about a thousandth of a radian the swing direction is noise; aligned axes are inside any cone.
+    let cosine = na.dot(nb);
+    cone.close = if sine > FP::from_ratio(1, 1000) {
+        turn_axis(row, -(bend / sine))
+    } else if cosine < FP::ZERO {
+        // Opposite axes have no swing direction of their own, so any direction across `na` serves.
+        turn_axis(row, -across(na))
+    } else {
+        TurnAxis::default()
+    };
+    cone.room = cone.swing - sine.atan2(cosine);
     let mid = na + nb;
     let length = mid.length();
     // With the axes almost opposite there is no twist axis, so the twist rows wait.
