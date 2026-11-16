@@ -30,6 +30,8 @@ pub(crate) struct PreparedProcedural {
     visible: [u32; 4],
     /// Each kind's instances with the visible ones first, when culling reordered them.
     ordered: Option<[Vec<Instance3D>; 4]>,
+    /// For each of the list's surface shader shapes, whether the main pass draws it; `None` draws all.
+    surface_shown: Option<Vec<bool>>,
     lines: u32,
     stats: FrameStats,
 }
@@ -177,18 +179,22 @@ impl<B: Rhi> Renderer3D<B> {
             ];
         }
         let all = MeshKind::ALL.map(|kind| list.instances(kind));
-        let (visible, ordered) = if culling.frustum || culling.occlusion {
+        let (visible, ordered, surface_shown) = if culling.frustum || culling.occlusion {
             let view = crate::visibility::View { view_proj: globals.view_proj, eye: camera.eye, forward: camera.forward() };
-            let (ordered, visible) = crate::visibility::partition(&view, culling, all);
-            (visible, Some(ordered))
+            // Surface shader shapes are tested like the built-in ones; only the built-in boxes and planes occlude.
+            let culler = crate::visibility::Culler::new(view, culling, all);
+            let (ordered, visible) = crate::visibility::partition_with(&culler, all);
+            let shown = list.surfaces.iter().map(|s| culler.shows(s.instance.pos, crate::visibility::bounding_radius(s.kind, &s.instance))).collect();
+            (visible, Some(ordered), Some(shown))
         } else {
-            (all.map(|i| i.len() as u32), None)
+            (all.map(|i| i.len() as u32), None, None)
         };
         Ok(PreparedProcedural {
             globals,
             ranges,
             visible,
             ordered,
+            surface_shown,
             lines: list.lines.len() as u32,
             stats: FrameStats {
                 culled_instances: u64::from(first) - visible.iter().map(|&v| u64::from(v)).sum::<u64>(),
@@ -207,9 +213,10 @@ impl<B: Rhi> Renderer3D<B> {
     ) {
         let clock = CpuClock::start();
         let mut surface_stats = FrameStats::default();
-        self.prepare_surfaces(list, &mut surface_stats);
+        self.prepare_surfaces(list, prepared.surface_shown.as_deref(), &mut surface_stats);
         let rhi = &self.rhi;
         let stats = &mut prepared.stats;
+        stats.culled_instances += surface_stats.culled_instances;
         stats.upload_calls += surface_stats.upload_calls;
         stats.upload_bytes += surface_stats.upload_bytes;
         stats.buffer_reallocations += surface_stats.buffer_reallocations;

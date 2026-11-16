@@ -185,15 +185,23 @@ struct InstanceDraw<B: Rhi> {
 #[cfg(feature = "imported-scene")]
 pub(crate) struct PreparedStatic {
     objects: Vec<Object>,
-    /// World-space box (min, max) of each object's vertices.
+    cull: StaticCull,
+}
+
+/// What culling decides about the draws of a model: each draw's world box and
+/// whether the main pass leaves it out.
+#[cfg(feature = "imported-scene")]
+#[derive(Default)]
+pub(crate) struct StaticCull {
+    /// World-space box (min, max) of each draw's vertices.
     bounds: Vec<([f32; 3], [f32; 3])>,
-    /// Objects culling left out of the main pass; empty when nothing was culled.
+    /// Draws culling left out of the main pass; empty when nothing was culled.
     hidden: Vec<bool>,
 }
 
 #[cfg(feature = "imported-scene")]
-impl PreparedStatic {
-    /// Marks the objects `culler` finds hidden and returns how many there are.
+impl StaticCull {
+    /// Marks the draws `culler` finds hidden and returns how many there are.
     pub(crate) fn cull(&mut self, culler: &crate::visibility::Culler) -> usize {
         self.hidden = self.bounds.iter().map(|&(min, max)| !culler.shows_box(min, max)).collect();
         self.hidden.iter().filter(|&&h| h).count()
@@ -201,6 +209,18 @@ impl PreparedStatic {
 
     fn shows(&self, index: usize) -> bool {
         !self.hidden.get(index).copied().unwrap_or(false)
+    }
+}
+
+#[cfg(feature = "imported-scene")]
+impl PreparedStatic {
+    /// Marks the objects `culler` finds hidden and returns how many there are.
+    pub(crate) fn cull(&mut self, culler: &crate::visibility::Culler) -> usize {
+        self.cull.cull(culler)
+    }
+
+    fn shows(&self, index: usize) -> bool {
+        self.cull.shows(index)
     }
 }
 struct Draw<B: Rhi> {
@@ -271,6 +291,9 @@ pub struct ModelRenderer<B: Rhi> {
     velocity: Option<velocity::InstanceVelocity<B>>,
     #[cfg(feature = "imported-scene")]
     local_bounds: Vec<([f32; 3], [f32; 3])>,
+    /// World-space box of each draw of the model placed as it is stored.
+    #[cfg(feature = "imported-scene")]
+    draw_bounds: Vec<([f32; 3], [f32; 3])>,
     #[cfg(feature = "imported-scene")]
     surfaces: crate::model_surfaces::ModelSurfaces<B>,
     depth: Option<Depth<B>>,
@@ -465,6 +488,14 @@ impl<B: Rhi> ModelRenderer<B> {
         }
         #[cfg(feature = "imported-scene")]
         let local_bounds = model_local_bounds(&model);
+        #[cfg(feature = "imported-scene")]
+        let draw_bounds = model
+            .source()
+            .primitives
+            .iter()
+            .zip(&local_bounds)
+            .map(|(p, &(min, max))| world_box(&crate::math3::Mat4(p.transform), min, max))
+            .collect();
         Ok(Self {
             rhi,
             format,
@@ -484,6 +515,8 @@ impl<B: Rhi> ModelRenderer<B> {
             velocity: None,
             #[cfg(feature = "imported-scene")]
             local_bounds,
+            #[cfg(feature = "imported-scene")]
+            draw_bounds,
             #[cfg(feature = "imported-scene")]
             surfaces: surfaces::model_surfaces(engine_source),
             depth: None,
@@ -560,6 +593,12 @@ impl<B: Rhi> ModelRenderer<B> {
     #[cfg(feature = "imported-scene")]
     pub(crate) fn draw_count(&self) -> usize {
         self.draws.len()
+    }
+
+    /// The model's draws as one non-instanced batch places them, ready to be culled.
+    #[cfg(feature = "imported-scene")]
+    pub(crate) fn prepare_draws(&self) -> StaticCull {
+        StaticCull { bounds: self.draw_bounds.clone(), hidden: Vec::new() }
     }
 
     #[cfg(feature = "imported-scene")]
@@ -691,14 +730,44 @@ impl<B: Rhi> ModelRenderer<B> {
     }
 
     /// Records into caller-owned attachments without allocating private depth.
+    /// The draws `cull` left out are skipped.
+    #[cfg(feature = "imported-scene")]
+    pub(crate) fn encode_frame_culled(
+        &self,
+        cull: &StaticCull,
+        encoder: &mut B::Encoder,
+        color: &ColorAttachment<'_, B>,
+        depth: &DepthAttachment<'_, B>,
+    ) {
+        self.encode_draws(Some(cull), encoder, color, depth);
+    }
+
+    /// Records into caller-owned attachments without allocating private depth.
     pub(crate) fn encode_frame(
         &self,
         encoder: &mut B::Encoder,
         color: &ColorAttachment<'_, B>,
         depth: &DepthAttachment<'_, B>,
     ) {
+        #[cfg(feature = "imported-scene")]
+        self.encode_draws(None, encoder, color, depth);
+        #[cfg(not(feature = "imported-scene"))]
+        self.encode_draws(encoder, color, depth);
+    }
+
+    fn encode_draws(
+        &self,
+        #[cfg(feature = "imported-scene")] cull: Option<&StaticCull>,
+        encoder: &mut B::Encoder,
+        color: &ColorAttachment<'_, B>,
+        depth: &DepthAttachment<'_, B>,
+    ) {
         let mut commands = vec![Command::SetPipeline(&self.pipeline)];
-        for draw in &self.draws {
+        for (_index, draw) in self.draws.iter().enumerate() {
+            #[cfg(feature = "imported-scene")]
+            if cull.is_some_and(|c| !c.shows(_index)) {
+                continue;
+            }
             commands.extend([
                 Command::SetBindGroup(0, &draw.bind),
                 Command::SetVertexBuffer(0, &draw.vertices),
@@ -722,6 +791,7 @@ impl<B: Rhi> ModelRenderer<B> {
     pub(crate) fn shared_commands<'a>(
         &'a self,
         ready: Option<&PreparedStatic>,
+        whole: Option<&StaticCull>,
         depth: bool,
         commands: &mut Vec<Command<'a, B>>,
     ) {
@@ -729,7 +799,7 @@ impl<B: Rhi> ModelRenderer<B> {
         let mut current: Option<&B::Pipeline> = None;
         for i in 0..count {
             // Culled objects still cast shadows; only the lit pass skips them.
-            if !depth && ready.is_some_and(|r| !r.shows(i)) {
+            if !depth && (ready.is_some_and(|r| !r.shows(i)) || whole.is_some_and(|w| !w.shows(i))) {
                 continue;
             }
             let geometry = &self.draws[i % self.draws.len()];
@@ -790,6 +860,21 @@ fn model_local_bounds(model: &StaticModel) -> Vec<([f32; 3], [f32; 3])> {
             (min, max)
         })
         .collect()
+}
+
+/// The box around the corners of the box (`min`, `max`) moved by `world`.
+#[cfg(feature = "imported-scene")]
+fn world_box(world: &crate::math3::Mat4, min: [f32; 3], max: [f32; 3]) -> ([f32; 3], [f32; 3]) {
+    let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+    for corner in 0..8 {
+        let local = std::array::from_fn(|axis| if corner & (1 << axis) == 0 { min[axis] } else { max[axis] });
+        let point = world.transform_point4(local);
+        for axis in 0..3 {
+            lo[axis] = lo[axis].min(point[axis]);
+            hi[axis] = hi[axis].max(point[axis]);
+        }
+    }
+    (lo, hi)
 }
 
 #[cfg(feature = "imported-scene")]
@@ -875,7 +960,7 @@ fn prepare_static_instances(
             });
         }
     }
-    Ok(PreparedStatic { objects, bounds: world_bounds, hidden: Vec::new() })
+    Ok(PreparedStatic { objects, cull: StaticCull { bounds: world_bounds, hidden: Vec::new() } })
 }
 
 /// Pure validation and uniform preparation, shared by standalone and composed paths.

@@ -122,6 +122,57 @@ fn static_models_off_screen_or_behind_a_wall_are_culled_without_changing_the_pic
     assert!(all == frustum && all == both, "culling never changes a pixel, shadows included");
 }
 
+/// One model of three squares, each placed by its own node transform: in front of
+/// the wall, behind it, and off the left of the picture turned to the low sun.
+fn placed_squares() -> StaticModel {
+    let mut source = square().source().clone();
+    let first = source.primitives[0].clone();
+    let at = |x: f32, y: f32, z: f32| [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [x, y, z, 1.0]];
+    let turned_and_big = [[0.0, 0.0, -3.0, 0.0], [0.0, 3.0, 0.0, 0.0], [3.0, 0.0, 0.0, 0.0], [-12.0, 3.0, 0.0, 1.0]];
+    source.primitives = [at(2.0, 1.0, 7.0), at(0.0, 1.0, 0.0), turned_and_big]
+        .into_iter()
+        .enumerate()
+        .map(|(index, transform)| {
+            let mut p = first.clone();
+            p.id = format!("{}#{index}", first.id);
+            p.transform = transform;
+            p
+        })
+        .collect();
+    StaticModel::new(source).unwrap()
+}
+
+fn draw_static_batch(g: &Wgpu, culling: Culling) -> (Vec<u8>, usize) {
+    let (texture, view) = target(g);
+    let mut scene = ImportedSceneRenderer::new(g.clone(), FORMAT).unwrap();
+    scene.culling = culling;
+    let mut procedural = Renderer3D::with_settings(g.clone(), FORMAT, Settings3D::LOW);
+    let mut model = ModelRenderer::new(g.clone(), scene.scene_format(), placed_squares()).unwrap();
+    let list = walls();
+    scene
+        .draw(
+            ImportedSceneTarget { view: &view, size: (SIZE, SIZE), format: FORMAT, sample_count: 1 },
+            &camera(),
+            &light(),
+            &PointLightSettings::default(),
+            &mut [ImportedBatch::Procedural { renderer: &mut procedural, list: &list }, ImportedBatch::Static(&mut model)],
+        )
+        .unwrap();
+    (g.read_texture(&texture), scene.culled_model_draws())
+}
+
+#[test]
+fn draws_of_a_static_batch_off_screen_or_behind_a_wall_are_culled_one_by_one_without_changing_the_picture() {
+    let Some(g) = gpu() else { return };
+    let (all, none_culled) = draw_static_batch(&g, Culling { frustum: false, occlusion: false });
+    let (frustum, frustum_culled) = draw_static_batch(&g, Culling { frustum: true, occlusion: false });
+    let (both, both_culled) = draw_static_batch(&g, Culling::default());
+    assert_eq!(none_culled, 0);
+    assert_eq!(frustum_culled, 1, "the square off the left of the picture");
+    assert_eq!(both_culled, 2, "and the square behind the wall");
+    assert!(all == frustum && all == both, "culling never changes a pixel, shadows included");
+}
+
 #[cfg(feature = "animation")]
 fn animated() -> orr_model::animation::AnimatedModel {
     let imported = orr_model::animation_import::import_with_resolver(

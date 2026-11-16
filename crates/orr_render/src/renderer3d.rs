@@ -886,7 +886,7 @@ impl<B: Rhi> Renderer3D<B> {
             stats.attachment_reallocations = stats.attachment_allocations;
         }
         let light_vp = light_view_proj(&list.lighting, self.settings.shadow_map_size);
-        self.prepare_surfaces(list, &mut stats);
+        self.prepare_surfaces(list, None, &mut stats);
         let mut globals = self.globals(camera, size, &list.lighting, &light_vp);
         globals.scene_lights = list.scene_lights.uniform();
         globals.viewport[3] = list.time;

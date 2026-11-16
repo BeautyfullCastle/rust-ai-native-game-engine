@@ -39,6 +39,8 @@ type Images = [Option<TextureId>; MAX_SURFACE_TEXTURES];
 #[derive(Default)]
 pub(super) struct SurfaceFrame {
     groups: Vec<(SurfaceId, Images, MeshKind, std::ops::Range<u32>)>,
+    /// How many instances at the start of each group the main pass draws; culled ones follow them.
+    shown: Vec<u32>,
     /// Stamps of the textures each group binds, by group.
     stamps: Vec<[u64; MAX_SURFACE_TEXTURES]>,
     order: Vec<u32>,
@@ -139,24 +141,34 @@ impl<B: Rhi> Renderer3D<B> {
     }
 
     /// Groups the list's surface instances by shader, images and mesh kind and uploads them.
-    /// Instances of an id this renderer does not have are skipped.
-    pub(super) fn prepare_surfaces(&mut self, list: &RenderList3D, stats: &mut FrameStats) {
+    /// Instances of an id this renderer does not have are skipped. `shown` says per instance
+    /// whether the main pass draws it (`None`: all); inside a group the shown ones come first,
+    /// and the shadow pass draws the whole group.
+    pub(super) fn prepare_surfaces(&mut self, list: &RenderList3D, shown: Option<&[bool]>, stats: &mut FrameStats) {
         let frame = &mut self.surface_frame;
         frame.groups.clear();
+        frame.shown.clear();
         frame.stamps.clear();
         frame.order.clear();
         frame.instances.clear();
         frame.params.clear();
         let known = self.surfaces.len() as u32;
         frame.order.extend((0..list.surfaces.len() as u32).filter(|&i| list.surfaces[i as usize].surface.0 < known));
+        let is_shown = |i: u32| shown.is_none_or(|shown| shown[i as usize]);
         let key = |s: &SurfaceInstance| (s.surface, s.textures, s.kind as u8);
-        frame.order.sort_by_key(|&i| key(&list.surfaces[i as usize]));
+        frame.order.sort_by_key(|&i| (key(&list.surfaces[i as usize]), !is_shown(i)));
         for &i in &frame.order {
             let s = &list.surfaces[i as usize];
             let at = frame.instances.len() as u32;
             match frame.groups.last_mut() {
                 Some((id, images, kind, range)) if *id == s.surface && *images == s.textures && *kind == s.kind => range.end = at + 1,
-                _ => frame.groups.push((s.surface, s.textures, s.kind, at..at + 1)),
+                _ => {
+                    frame.groups.push((s.surface, s.textures, s.kind, at..at + 1));
+                    frame.shown.push(0);
+                }
+            }
+            if is_shown(i) {
+                *frame.shown.last_mut().expect("pushed above") += 1;
             }
             frame.instances.push(s.instance);
             frame.params.push(s.params);
@@ -187,6 +199,7 @@ impl<B: Rhi> Renderer3D<B> {
         stats.upload(rhi, &self.surface_instances.buffer, 0, bytemuck::cast_slice(&frame.instances));
         stats.upload(rhi, &self.surface_params.buffer, 0, bytemuck::cast_slice(&frame.params));
         stats.mesh_instances += frame.instances.len() as u64;
+        stats.culled_instances += frame.instances.len() as u64 - frame.shown.iter().map(|&n| u64::from(n)).sum::<u64>();
     }
 
     /// Shadow casting surface instances, drawn with the shadow pipeline bound to `bind`.
@@ -216,7 +229,11 @@ impl<B: Rhi> Renderer3D<B> {
     pub(super) fn surface_main_commands<'a>(&'a self, composed: bool, commands: &mut Vec<Command<'a, B>>, pass: &mut PassStats) {
         let mut current = None;
         let mut images = None;
-        for ((id, _, kind, instances), stamps) in self.surface_frame.groups.iter().zip(&self.surface_frame.stamps) {
+        for (((id, _, kind, range), stamps), &shown) in self.surface_frame.groups.iter().zip(&self.surface_frame.stamps).zip(&self.surface_frame.shown) {
+            if shown == 0 {
+                continue;
+            }
+            let instances = &(range.start..range.start + shown);
             let gpu = &self.surfaces[id.0 as usize];
             if current != Some(*id) {
                 current = Some(*id);
