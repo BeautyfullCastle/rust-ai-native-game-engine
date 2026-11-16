@@ -10,6 +10,7 @@
 | 막대 | `JOINT_ROD` | 두 고정점 사이를 `length`로 유지한다. |
 | 밧줄 | `JOINT_ROPE` | 두 고정점 사이를 `length` 이하로 유지한다. 당기기만 하고 밀지 않는다. |
 | 프리즘(미끄럼) | `JOINT_PRISMATIC` | `b`가 `a`의 한 축을 따라서만 미끄러진다. 상대 회전은 잠근다. |
+| 스프링 | `JOINT_SPRING` | 두 고정점을 `length`로 당기는 부드러운 막대. 세기는 진동수(Hz)와 감쇠비로 정한다. |
 
 ```rust
 use orr_physics::{add_joint, register, register_joints, Joint, JOINT_PIN};
@@ -60,9 +61,27 @@ add_joint(frame, Joint::prismatic(wall, door, anchor_a, anchor_b, FPVec2::X).wit
 - 모터(`with_motor(speed, max_force)`)는 `b`가 `a`에 대해 축을 따라 `speed`로 움직이게 하되, 틱당 임펄스를 `max_force * dt`로 자른다. 속도를 0으로 하면 브레이크가 된다.
 - `a`가 도는 중에도 맞게 풀리도록, `a`가 받는 힘의 작용점은 `b`의 고정점 밑에 있는 `a`의 점으로 계산한다.
 
+### 스프링 (`JOINT_SPRING`)
+
+```rust
+// 서스펜션: 1.5Hz로 출렁이고, 감쇠비 0.5라서 두어 번 흔들리다 멈춘다
+add_joint(frame, Joint::spring(chassis, wheel, mount, FPVec2::ZERO, fp!(0.6), fp!(1.5), fp!(0.5)));
+// 감쇠비 1: 넘치지 않고 제자리로 돌아온다
+add_joint(frame, Joint::spring(hook, bob, FPVec2::ZERO, FPVec2::ZERO, fp!(2), FP::ONE, FP::ONE));
+```
+
+- `Joint::spring(a, b, anchor_a, anchor_b, length, hertz, damping_ratio)`다. 두 고정점이 `length`보다 멀면 당기고 가까우면 민다. `length`는 쉬는 길이다. 막대처럼 딱 붙들지 않고, 벗어난 만큼 힘이 걸린다.
+- 진동수 `hertz`는 정적인 고정점에 질량을 달았을 때 1초에 몇 번 오가는지다. 주기는 약 `1 / hertz`초다. 감쇠비 `damping_ratio`는 0이면 감쇠가 없고, 1이면 넘치지 않고 가장 빨리 멈춘다.
+- 새 종류를 만든 이유: 막대에 옵션을 붙이면 막대의 안 쓰던 필드에 우연히 값이 남은 기존 조인트가 달라질 수 있다. 새 종류는 기존 종류의 동작을 비트 단위로 그대로 둔다. 스프링은 막대의 풀이를 그대로 쓰고 계수만 부드럽게 바꾼다.
+- `Joint` 레이아웃은 그대로다. 진동수는 `motor_speed`, 감쇠비는 `max_motor_torque`에 들어간다. 스프링에서 모터와 제한(`flags`)은 무시한다.
+- 진동수가 0이거나 음수이면 막대와 비트 단위로 똑같이 푼다. 감쇠비가 음수이면 0으로 본다. 진동수는 1000Hz, 감쇠비는 1000까지만 쓴다.
+- 풀이는 Box2D의 soft step이다. 스텝 길이 `h`, `omega = 2 pi * hertz`로 `a1 = 2 * 감쇠비 + h * omega`, `a2 = h * omega * a1`, `a3 = 1 / (1 + a2)`를 구한다. 위치 오차는 `omega / a1`의 비율로 속도 항이 되고, 임펄스는 `a2 * a3`배의 질량 비율로 쓴다. 이미 쓴 임펄스의 `a3`배를 뺀다(그 스텝 안에서 누적). 막대와 달리 오차를 20%씩 지우는 Baumgarte를 쓰지 않는다. 2D는 틱마다, 3D는 서브스텝마다 계수를 구한다.
+- 풀이가 암시적이라 감쇠비 0이어도 스윙마다 에너지가 조금 줄어든다. 60Hz에서 1Hz 스프링은 한 번 흔들 때 진폭이 4분의 1쯤 준다. 진동수가 높을수록(스텝당 `h * omega`가 클수록) 더 빨리 준다.
+- 쉬는 길이가 거의 0이거나 두 고정점이 거의 겹치면(0.001 이하) 방향을 알 수 없어 그 스텝은 쉰다.
+
 ## 3D
 
-`orr_physics3d`에도 같은 구조의 조인트가 있다. 종류는 `JOINT_BALL`(두 고정점을 붙이고 모든 방향으로 돎), `JOINT_ROD`, `JOINT_ROPE`다. 고정점은 각 바디의 회전 전 좌표이고, 매 서브스텝마다 그 서브스텝까지 움직인 자세로 고정점과 유효 질량(3×3)을 다시 계산한다. 접촉의 반복 순서(홀짝으로 번갈아)를 유지한 채 반복마다 접촉 다음에 조인트를 푼다.
+`orr_physics3d`에도 같은 구조의 조인트가 있다. 종류는 `JOINT_BALL`(두 고정점을 붙이고 모든 방향으로 돎), `JOINT_ROD`, `JOINT_ROPE`, `JOINT_SPRING`이다. 스프링은 2D와 같고 `Joint::spring(a, b, anchor_a, anchor_b, length, hertz, damping_ratio)`로 만든다(서브스텝마다 계수를 구한다). 고정점은 각 바디의 회전 전 좌표이고, 매 서브스텝마다 그 서브스텝까지 움직인 자세로 고정점과 유효 질량(3×3)을 다시 계산한다. 접촉의 반복 순서(홀짝으로 번갈아)를 유지한 채 반복마다 접촉 다음에 조인트를 푼다.
 
 - 정적 접촉 제공자 경로(`step_with_static_contacts`, 지형 충돌)에서는 조인트를 풀지 않는다.
 - 점 제약의 3×3 유효 질량은 역행렬을 만들지 않고 여인수와 행렬식으로 푼다(i128 누적). 가볍고 고정점에서 먼 바디는 `K^-1` 원소가 고정소수점 몇 단위로 떨어져 정밀도가 사라지기 때문이다.
@@ -115,14 +134,14 @@ add_joint(frame, Joint::new(JOINT_BALL, body, arm, shoulder, FPVec3::ZERO, FP::Z
 
 - 인스펙터의 "+ Add component"로 아무 엔티티에나 `orr_physics3d::Joint`를 붙인다. 조인트는 바디와 다른 자기 엔티티에 둔다.
 - `a`, `b` 필드는 씬의 엔티티 목록에서 고른다(콤보 상자, "none"이 맨 위). 엔티티를 가리키는 다른 필드(`Scatter::terrain` 등)도 같은 방식이다. 플레이 중에는 읽기만 된다.
-- `kind`(ball, rod, rope, hinge, prismatic), `flags`(motor, limit), 고정점, 길이, 축, 각도 범위, 모터, `swing`을 고친다.
+- `kind`(ball, rod, rope, hinge, prismatic, spring), `flags`(motor, limit), 고정점, 길이, 축, 각도 범위, 모터, `swing`을 고친다. 스프링은 진동수를 `motor_speed`, 감쇠비를 `max_motor_torque` 칸에 넣는다(인스펙터 설명에 적혀 있다).
 - 씬 파일에는 이 필드들만 저장한다. `b` 쪽 축과 각도 기준(`axis_b`, `ref_a`, `ref_b`)은 저장하지 않는다. `step`이 각도 기준이 아직 없는 조인트(`ref_a`가 0)를 만나면 그 스텝 시작의 자세로 기록한다. 그래서 씬에 저장된 자세, 또는 인스펙터에서 조인트를 붙인 자세가 각도 0이다. `add_joint`로 만든 조인트와 결과가 비트 단위로 같다(테스트로 확인).
-- 뷰포트는 조인트를 표지로 그린다. 두 고정점을 잇는 하늘색 선, 첫 고정점의 작은 십자, 힌지와 프리즘 조인트와 제한된 볼 조인트는 축 방향의 주황색 선이다. 선택한 조인트는 굵게 그린다.
+- 뷰포트는 조인트를 표지로 그린다. 두 고정점을 잇는 하늘색 선(스프링도 막대처럼 그린다), 첫 고정점의 작은 십자, 힌지와 프리즘 조인트와 제한된 볼 조인트는 축 방향의 주황색 선이다. 선택한 조인트는 굵게 그린다.
 
 ## 한계
 
 - 조인트에 매달린 동적 바디는 잠들지 않는다(접촉으로 묶인 섬과 조인트를 합치지 않음). `add_joint`가 두 바디를 깨운다.
-- 3D 볼 조인트의 스윙 제한은 원형 원뿔 하나다. 방향마다 각이 다른 타원 원뿔은 없다. 스프링(부드러운 조인트)은 2D, 3D 모두 없다.
+- 3D 볼 조인트의 스윙 제한은 원형 원뿔 하나다. 방향마다 각이 다른 타원 원뿔은 없다.
 - 위치 보정이 속도 항(Baumgarte)이라 무거운 사슬은 늘어날 수 있다. 반복 횟수(`PhysicsConfig::velocity_iterations`)를 올리면 줄어든다.
 - 에디터와 씬 파일은 3D 조인트만 다룬다. 2D 조인트(`orr_physics::Joint`)는 리플렉션에 등록되지 않았다. Yard3D 외의 3D 게임은 `register_joints`, `register_joints_reflect`를 직접 불러야 한다.
 - 고정점을 뷰포트에서 끌어 옮기는 기즈모는 없다. 숫자로 고친다.
