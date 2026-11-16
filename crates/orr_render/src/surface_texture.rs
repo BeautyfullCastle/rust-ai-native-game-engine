@@ -42,6 +42,18 @@ fn unorm(value: f32) -> u8 {
     (value.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
+/// The pixels of a `src` long side that destination pixel `dst` of a `dst_len` long side covers,
+/// each with the share of that source pixel the destination covers (1 when the sides halve evenly).
+fn overlaps(src: u32, dst_len: u32, dst: u32) -> impl Iterator<Item = (u32, f32)> {
+    let (src, dst_len, dst) = (u64::from(src), u64::from(dst_len), u64::from(dst));
+    // Both sides in units of 1 / dst_len of a source pixel: the destination pixel spans dst * src .. (dst + 1) * src.
+    let (from, to) = (dst * src, (dst + 1) * src);
+    (from / dst_len..to.div_ceil(dst_len)).map(move |i| {
+        let covered = to.min((i + 1) * dst_len) - from.max(i * dst_len);
+        (i as u32, covered as f32 / dst_len as f32)
+    })
+}
+
 impl SurfaceTexture {
     /// Prepares `rgba`, `width` × `height` RGBA8 pixels in rows from top to
     /// bottom, and its smaller levels. A color texture holds sRGB colors and
@@ -65,21 +77,23 @@ impl SurfaceTexture {
         for level in 1..orr_rhi::mip_level_count(width, height) {
             let (nw, nh) = mip_level_size(width, height, level);
             let mut next = vec![[0.0f32; 4]; nw as usize * nh as usize];
-            // Each pixel averages the 2 x 2 block below it; a side of one pixel averages 1 x 2.
-            let (sx, sy) = (if w > 1 { 2 } else { 1 }, if h > 1 { 2 } else { 1 });
+            // Each pixel averages the area it covers below it: a 2 x 2 block, or, on an odd side, a
+            // block that takes in part of the next pixel too. A side of one pixel averages 1 x 2.
             for y in 0..nh {
                 for x in 0..nw {
                     let mut sum = [0.0f32; 4];
-                    for dy in 0..sy {
-                        for dx in 0..sx {
-                            let tap = values[((y * sy + dy) * w + x * sx + dx) as usize];
+                    let mut total = 0.0f32;
+                    for (sy, wy) in overlaps(h, nh, y) {
+                        for (sx, wx) in overlaps(w, nw, x) {
+                            let tap = values[(sy * w + sx) as usize];
+                            let weight = wx * wy;
                             for c in 0..4 {
-                                sum[c] += tap[c];
+                                sum[c] += tap[c] * weight;
                             }
+                            total += weight;
                         }
                     }
-                    let n = (sx * sy) as f32;
-                    next[(y * nw + x) as usize] = sum.map(|s| s / n);
+                    next[(y * nw + x) as usize] = sum.map(|s| s / total);
                 }
             }
             levels.push(next.iter().flat_map(|p| [encode(p[0]), encode(p[1]), encode(p[2]), unorm(p[3])]).collect());
@@ -233,5 +247,39 @@ mod tests {
     fn a_solid_texture_is_one_pixel_of_its_color() {
         let texture = SurfaceTexture::solid(TextureKind::Data, [0.5, 0.5, 1.0, 1.0]);
         assert_eq!((texture.size(), texture.levels.as_slice()), ((1, 1), [vec![128, 128, 255, 255]].as_slice()));
+    }
+
+    fn data_row(values: &[u8]) -> Vec<u8> {
+        values.iter().flat_map(|&v| [v, v, v, v]).collect()
+    }
+
+    #[test]
+    fn an_odd_side_keeps_its_last_pixel_in_the_next_level() {
+        // 3 x 1 black, black, white: the one pixel level averages all three, one third white.
+        let texture = SurfaceTexture::from_rgba8(TextureKind::Data, 3, 1, &data_row(&[0, 0, 255])).unwrap();
+        assert_eq!(texture.levels[1], [85, 85, 85, 85]);
+        // The same along the other side.
+        let column = SurfaceTexture::from_rgba8(TextureKind::Data, 1, 3, &data_row(&[255, 0, 0])).unwrap();
+        assert_eq!(column.levels[1], [85, 85, 85, 85]);
+        // The white pixel in the first place counts the same.
+        let first = SurfaceTexture::from_rgba8(TextureKind::Data, 3, 1, &data_row(&[255, 0, 0])).unwrap();
+        assert_eq!(first.levels[1], [85, 85, 85, 85]);
+    }
+
+    #[test]
+    fn odd_sizes_in_both_sides_weigh_every_pixel_by_the_area_it_covers() {
+        // 3 x 3 with one white corner pixel: its area share in the 1 x 1 level is one ninth.
+        let mut rgba = data_row(&[0; 9]);
+        rgba[32..36].copy_from_slice(&[255; 4]);
+        let texture = SurfaceTexture::from_rgba8(TextureKind::Data, 3, 3, &rgba).unwrap();
+        assert_eq!(texture.levels[1], [28, 28, 28, 28]);
+        // 5 x 3 goes to 2 x 1: the middle column, and the last one, reach into both pixels.
+        let mut wide = data_row(&[0; 15]);
+        for y in 0..3 {
+            wide[(y * 5 + 4) * 4..(y * 5 + 5) * 4].copy_from_slice(&[255; 4]);
+        }
+        let texture = SurfaceTexture::from_rgba8(TextureKind::Data, 5, 3, &wide).unwrap();
+        assert_eq!(texture.levels[1], [0, 0, 0, 0, 102, 102, 102, 102]);
+        assert_eq!(texture.levels[2], [51, 51, 51, 51]);
     }
 }

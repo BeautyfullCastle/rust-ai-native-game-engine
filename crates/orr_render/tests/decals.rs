@@ -169,3 +169,17 @@ fn a_wrong_atlas_is_refused() {
     assert_eq!(scene.set_decal_atlas(2, 2, &[0; 12]), Err(DecalAtlasError::DataLength));
     assert_eq!(scene.set_decal_atlas(1, 1, &[0; 4]), Ok(()));
 }
+
+#[test]
+fn a_decal_tints_the_border_pixels_like_the_inside() {
+    let Some(g) = gpu() else { return };
+    let plain = render(&g, &[], true, None);
+    let big = Decal { size: [4.0, 4.0, 4.0], ..on_square([1.0, 0.1, 0.1, 1.0], DecalShape::Square) };
+    let image = render(&g, &[big], true, None);
+    let inside = px(&image, 32, 32);
+    assert!(inside[1] < px(&plain, 32, 32)[1] / 2, "the inside is tinted: {inside:?}");
+    let last = SIZE - 1;
+    for (x, y) in [(0, 32), (last, 32), (32, 0), (32, last), (0, 0), (last, 0), (0, last), (last, last)] {
+        assert_eq!(px(&image, x, y), inside, "border pixel ({x}, {y})");
+    }
+}

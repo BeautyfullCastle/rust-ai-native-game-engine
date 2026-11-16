@@ -247,7 +247,8 @@ fn light_matrix(light: &SceneLight, direction: [f32; 3], fov: f32) -> [[f32; 4];
     let up = normalize(cross(cross(forward, helper), forward));
     let target = [light.position[0] + forward[0], light.position[1] + forward[1], light.position[2] + forward[2]];
     let view = Mat4::look_at(light.position, target, if dot(up, up) > 0.5 { up } else { helper });
-    let near = (light.range * 0.002).max(0.02);
+    // Near stays inside the range, so a small range still has its own depth span.
+    let near = (light.range * 0.002).max(0.02_f32.min(light.range * 0.1));
     Mat4::perspective(fov, 1.0, near, light.range.max(near * 2.0)).mul(&view).0
 }
 
@@ -339,5 +340,20 @@ mod tests {
         assert!((inner - 0.3_f32.cos()).abs() < 1.0e-6 && outer < inner);
         assert_eq!(layers, 6.0);
         assert_eq!(std::mem::size_of::<SceneLightsUniform>(), 16 + MAX_SCENE_LIGHTS * 64);
+    }
+
+    #[test]
+    fn a_small_range_shadow_view_keeps_the_whole_range_in_front_of_near() {
+        use crate::math3::Mat4;
+        let mut lights = SceneLights::default();
+        lights.push(SceneLight { kind: SceneLightKind::Point, range: 0.01, shadows: true, ..SceneLight::default() }).unwrap();
+        let tiles = lights.shadow_tiles();
+        assert_eq!(tiles.len(), 6);
+        // +x face: a point inside the range along the face axis lies between near and far.
+        for distance in [0.002_f32, 0.005, 0.009] {
+            let clip = Mat4(tiles[0].matrix).transform_point4([distance, 0.0, 0.0]);
+            let depth = clip[2] / clip[3];
+            assert!(clip[3] > 0.0 && (0.0..=1.0).contains(&depth), "distance {distance}: {clip:?}");
+        }
     }
 }
