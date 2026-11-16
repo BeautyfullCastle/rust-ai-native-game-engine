@@ -539,3 +539,110 @@ fn a_cone_pulls_axes_that_point_opposite_back_inside_its_swing() {
         assert!(swing < 0.6, "the swing is back inside the cone from {}: {swing}", f(angle));
     }
 }
+
+/// A ball `start` from a hub at (0, 10, 0) that collides with nothing, joined by `joint`, with `gravity`.
+fn tied(gravity: FPVec3, start: FPVec3, joint: impl Fn(Entity, Entity) -> Joint) -> (Frame, Entity) {
+    let (f, _, ball) = rail(gravity, start, joint);
+    (f, ball)
+}
+
+fn spring_joint(a: Entity, b: Entity, hertz: FP, damping: FP) -> Joint {
+    Joint::spring(a, b, FPVec3::ZERO, FPVec3::ZERO, fp!(2), hertz, damping)
+}
+
+/// The stretch (distance from the hub minus the rest length of 2) after each tick, with no gravity.
+fn stretch_over(hertz: FP, damping: FP, ticks: u32) -> Vec<f64> {
+    let (mut fr, ball) = tied(FPVec3::ZERO, v3(fp!(3), fp!(10), FP::ZERO), |a, b| spring_joint(a, b, hertz, damping));
+    let mut sc = Scratch::new();
+    (0..ticks)
+        .map(|_| {
+            run(&mut fr, &mut sc, 1);
+            px(&fr, ball) - 2.0
+        })
+        .collect()
+}
+
+#[test]
+fn a_spring_swings_about_its_rest_length_at_its_frequency() {
+    for hertz in [1, 2] {
+        let s = stretch_over(FP::from_int(hertz), FP::ZERO, 300);
+        let crossings: Vec<usize> = (1..s.len()).filter(|&i| s[i - 1] > 0.0 && s[i] <= 0.0).collect();
+        assert!(crossings.len() >= 3, "it keeps swinging: {crossings:?}");
+        let period = (crossings[2] - crossings[0]) as f64 / 2.0 / 60.0;
+        assert!((period * hertz as f64 - 1.0).abs() < 0.1, "the period is near 1/{hertz} s: {period}");
+        let (high, low) = s.iter().fold((f64::MIN, f64::MAX), |(h, l), &v| (h.max(v), l.min(v)));
+        assert!(high > 0.7 && low < -0.7, "it swings both sides of the rest length: {low}..{high}");
+    }
+}
+
+#[test]
+fn a_hanging_spring_settles_below_its_rest_length_by_its_sag() {
+    // Mass 1 at 1 Hz: the sag is g / (2 pi)^2, about 0.253.
+    let (mut fr, ball) = tied(gravity(), v3(FP::ZERO, fp!(8), FP::ZERO), |a, b| spring_joint(a, b, FP::ONE, FP::ONE));
+    run(&mut fr, &mut Scratch::new(), 600);
+    let sag = 10.0 - y(&fr, ball) - 2.0;
+    assert!((sag - 0.253).abs() < 0.03, "it hangs a sag below the rest length: {sag}");
+}
+
+#[test]
+fn a_critically_damped_spring_settles_without_overshoot() {
+    let s = stretch_over(FP::ONE, FP::ONE, 240);
+    let lowest = s.iter().copied().fold(f64::MAX, f64::min);
+    assert!(lowest > -0.05, "it does not swing past the rest length: {lowest}");
+    assert!(s[239].abs() < 0.03, "it comes to rest: {}", s[239]);
+}
+
+#[test]
+fn an_undamped_spring_keeps_oscillating() {
+    // The implicit step loses a little energy per swing, so the amplitude shrinks slowly.
+    let s = stretch_over(FP::ONE, FP::ZERO, 600);
+    let swings = (1..s.len()).filter(|&i| s[i - 1] > 0.0 && s[i] <= 0.0).count();
+    assert!(swings >= 9, "it crosses the rest length on every swing for ten seconds: {swings}");
+    let later = s[180..240].iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    assert!(later > 0.2, "after three swings it still swings wide: {later}");
+    let damped = stretch_over(FP::ONE, FP::ONE, 240);
+    assert!(damped[180..].iter().all(|v| v.abs() < 0.01), "while a damped one is at rest by then");
+}
+
+#[test]
+fn a_spring_of_zero_frequency_is_a_rod() {
+    let start = v3(fp!(3), fp!(10), FP::ZERO);
+    let ((mut r, rb), (mut s, sb)) = (
+        tied(gravity(), start, |a, b| Joint::new(JOINT_ROD, a, b, FPVec3::ZERO, FPVec3::ZERO, fp!(2))),
+        tied(gravity(), start, |a, b| spring_joint(a, b, FP::ZERO, fp!(0.7))),
+    );
+    let (mut rs, mut ss) = (Scratch::new(), Scratch::new());
+    for _ in 0..120 {
+        run(&mut r, &mut rs, 1);
+        run(&mut s, &mut ss, 1);
+        assert_eq!(r.get::<Body>(rb), s.get::<Body>(sb), "same body state every tick");
+    }
+}
+
+#[test]
+fn a_spring_with_negative_inputs_counts_them_as_zero() {
+    let state = |hertz: FP, damping: FP| {
+        let (mut fr, ball) = tied(gravity(), v3(fp!(3), fp!(10), FP::ZERO), |a, b| spring_joint(a, b, hertz, damping));
+        run(&mut fr, &mut Scratch::new(), 90);
+        *fr.get::<Body>(ball).unwrap()
+    };
+    assert_eq!(state(fp!(-3), fp!(0.5)), state(FP::ZERO, fp!(0.5)), "a negative frequency is rigid");
+    assert_eq!(state(fp!(2), fp!(-1)), state(fp!(2), FP::ZERO), "a negative damping ratio is none");
+}
+
+#[test]
+fn a_spring_is_deterministic_across_rollback() {
+    let scene = || tied(gravity(), v3(fp!(3), fp!(10), fp!(1)), |a, b| Joint::spring(a, b, v3(fp!(0.1), FP::ZERO, FP::ZERO), FPVec3::ZERO, fp!(2), fp!(1.5), fp!(0.3))).0;
+    let mut a = scene();
+    let mut sa = Scratch::new();
+    run(&mut a, &mut sa, 20);
+    let snapshot = a.clone();
+    run(&mut a, &mut sa, 40);
+    let ahead = a.checksum();
+    let mut b = scene();
+    run(&mut b, &mut Scratch::new(), 60);
+    assert_eq!(b.checksum(), ahead, "two runs agree");
+    a.copy_from(&snapshot);
+    run(&mut a, &mut Scratch::new(), 40);
+    assert_eq!(a.checksum(), ahead, "a rollback replays to the same state");
+}
