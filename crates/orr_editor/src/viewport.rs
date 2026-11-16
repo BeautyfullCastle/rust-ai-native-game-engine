@@ -180,6 +180,75 @@ pub fn add_joints(list: &mut RenderList, joints: &[JointView], selected: Option<
     }
 }
 
+/// Fill color of the anchor handles of the selected joint.
+pub const HANDLE_COLOR: [f32; 4] = [1.0, 0.9, 0.3, 1.0];
+/// Ring color of the anchor handles.
+pub const HANDLE_RING: [f32; 4] = [0.1, 0.1, 0.12, 1.0];
+/// Radius of an anchor handle, in pixels. The same radius is the grab distance.
+const HANDLE_PX: f32 = 7.0;
+
+/// Which anchors of a joint a handle drag moves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnchorGrab {
+    /// The anchor on the first body.
+    A,
+    /// The anchor on the second body.
+    B,
+    /// Both anchors, because they lie on the same spot (a pin's joint point).
+    Both,
+}
+
+/// What a press on an anchor handle grabbed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AnchorHit {
+    /// The joint's entity.
+    pub joint: Entity,
+    pub grab: AnchorGrab,
+    /// World position of the handle that was hit.
+    pub center: [f32; 2],
+}
+
+/// The anchor handle of the selected joint under a world point, if any. Only the selected joint
+/// has handles. When both anchors are under the point and lie on the same spot, the hit moves
+/// both. Otherwise the nearest anchor wins, the first one on a tie.
+pub fn pick_anchor(joints: &[JointView], selected: Option<Entity>, world: [f32; 2], camera: &Camera, vp: (u32, u32)) -> Option<AnchorHit> {
+    let joint = joints.iter().find(|j| Some(j.entity) == selected)?;
+    let reach = HANDLE_PX / camera.pixels_per_unit(vp.0, vp.1);
+    let dist = |p: [f32; 2], q: [f32; 2]| ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2)).sqrt();
+    let (da, db) = (dist(joint.a, world), dist(joint.b, world));
+    let (grab, center) = match (da <= reach, db <= reach) {
+        (false, false) => return None,
+        (true, true) if dist(joint.a, joint.b) <= reach * 0.25 => (AnchorGrab::Both, joint.a),
+        (true, false) => (AnchorGrab::A, joint.a),
+        (false, true) => (AnchorGrab::B, joint.b),
+        (true, true) if da <= db => (AnchorGrab::A, joint.a),
+        (true, true) => (AnchorGrab::B, joint.b),
+    };
+    Some(AnchorHit { joint: joint.entity, grab, center })
+}
+
+/// The body-local anchors a drag to `world` gives: `(anchor_a, anchor_b)`, each only for the
+/// anchors the grab moves. A local anchor is the world point taken back through the body's pose,
+/// so it is measured from the body position, before the body angle.
+pub fn dragged_anchors(joint: &JointView, grab: AnchorGrab, world: [f32; 2]) -> (Option<[f32; 2]>, Option<[f32; 2]>) {
+    let a = matches!(grab, AnchorGrab::A | AnchorGrab::Both).then(|| joint.pose_a.to_local(world));
+    let b = matches!(grab, AnchorGrab::B | AnchorGrab::Both).then(|| joint.pose_b.to_local(world));
+    (a, b)
+}
+
+/// Adds the two anchor handles of the selected joint: a disc with a ring on the first anchor and
+/// a square on the second. Drawn on top of the joint markers.
+pub fn add_anchor_handles(list: &mut RenderList, joints: &[JointView], selected: Option<Entity>, camera: &Camera, vp: (u32, u32)) {
+    let Some(joint) = joints.iter().find(|j| Some(j.entity) == selected) else { return };
+    let r = HANDLE_PX / camera.pixels_per_unit(vp.0, vp.1);
+    list.circle(joint.a, r, HANDLE_COLOR);
+    list.circle_outline(joint.a, r, 20, 1.5, HANDLE_RING);
+    let q = r * 0.85;
+    list.quad(joint.b, [q, q], 0.0, HANDLE_COLOR);
+    let corners = [[-q, -q], [q, -q], [q, q], [-q, q]].map(|c| [joint.b[0] + c[0], joint.b[1] + c[1]]);
+    list.polyline(&corners, true, 1.5, HANDLE_RING);
+}
+
 /// Which entities a proposal touches, by GUID: `(changed, added, removed)`.
 pub fn preview_marks(summary: &Summary) -> (Vec<Guid>, Vec<Guid>, Vec<Guid>) {
     let mut changed: Vec<Guid> = summary.fields_changed.iter().filter_map(|f| f.entity.clone()).collect();

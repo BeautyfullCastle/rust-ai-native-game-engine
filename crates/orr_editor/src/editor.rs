@@ -2972,6 +2972,9 @@ impl Editor {
             None => {
                 let mut list = viewport::build_list(&self.bodies, selected, &self.camera, vp);
                 viewport::add_joints(&mut list, &self.joints, selected, &self.camera, vp);
+                if self.anchor_handles_active() {
+                    viewport::add_anchor_handles(&mut list, &self.joints, selected, &self.camera, vp);
+                }
                 (list, &self.bodies, &self.rows)
             }
         };
@@ -3006,6 +3009,43 @@ impl Editor {
     pub fn pick(&self, world: [f32; 2]) -> Option<Target> {
         let e = viewport::pick(&self.bodies, world)?;
         Some(self.row_of(&Target::Entity(e)).map_or(Target::Entity(e), EntityRow::target))
+    }
+
+    /// True while the anchor handles of the selected joint show and take drags: in Edit mode, with
+    /// the host reachable, and with no proposal previewed.
+    fn anchor_handles_active(&self) -> bool {
+        self.mode() == Mode::Edit && self.can_mutate() && self.previewing().is_none()
+    }
+
+    /// The anchor handle of the selected joint under a world point. `None` when the handles are
+    /// not active, so a press there picks bodies as before.
+    pub fn pick_anchor(&self, world: [f32; 2], vp: (u32, u32)) -> Option<viewport::AnchorHit> {
+        if !self.anchor_handles_active() {
+            return None;
+        }
+        let selected = self.selection.as_ref().and_then(|t| self.entity_of(t));
+        viewport::pick_anchor(&self.joints, selected, world, &self.camera, vp)
+    }
+
+    /// Moves the grabbed anchors of the selected joint to a world point by writing the body-local
+    /// anchor fields, the same field edits the inspector makes. Inside a drag gesture, the writes
+    /// join its single undo step. Returns false when nothing was written.
+    pub fn drag_anchor(&mut self, joint: Entity, grab: viewport::AnchorGrab, world: [f32; 2]) -> bool {
+        let selected = self.selection.as_ref().and_then(|t| self.entity_of(t));
+        if selected != Some(joint) || !self.anchor_handles_active() {
+            return false;
+        }
+        let Some(view) = self.joints.iter().find(|j| j.entity == joint).copied() else { return false };
+        let (a, b) = viewport::dragged_anchors(&view, grab, world);
+        let owner = Owner::Component(JOINT_2D.to_string());
+        let mut written = false;
+        for (path, local) in [("anchor_a", a), ("anchor_b", b)] {
+            let Some(local) = local else { continue };
+            if let (Some(x), Some(y)) = (fp_of_f64(f64::from(local[0])), fp_of_f64(f64::from(local[1]))) {
+                written |= self.set_field(&owner, path, Value::Vec2(FPVec2::new(x, y)));
+            }
+        }
+        written
     }
 
     /// World position of the body of a target, as the frame on screen has it.
@@ -3350,6 +3390,9 @@ fn singletons_of(types: &TypeRegistry, v: &J) -> Vec<(String, Value)> {
 pub fn fp_to_f64(v: FP) -> f64 {
     v.raw() as f64 / 65536.0
 }
+
+/// Reflected name of the 2D physics joint component, whose anchors the viewport handles edit.
+const JOINT_2D: &str = "orr_physics::Joint";
 
 /// `FP` from a view-layer number, through exact decimal parsing: the number
 /// is printed with 5 decimals and parsed by `orr_reflect::decimal`, never

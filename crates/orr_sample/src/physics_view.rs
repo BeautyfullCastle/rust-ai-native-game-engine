@@ -166,6 +166,28 @@ pub fn body_views(frame: FrameView<'_>) -> Vec<BodyView> {
     out
 }
 
+/// Where a body is: its position and angle in radians.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pose {
+    pub pos: [f32; 2],
+    pub angle: f32,
+}
+
+impl Pose {
+    /// The world point of a body-local point (turned by the body angle, then moved to the body).
+    pub fn to_world(self, local: [f32; 2]) -> [f32; 2] {
+        let (s, c) = self.angle.sin_cos();
+        [self.pos[0] + c * local[0] - s * local[1], self.pos[1] + s * local[0] + c * local[1]]
+    }
+
+    /// The body-local point of a world point. This is the inverse of [`Pose::to_world`].
+    pub fn to_local(self, world: [f32; 2]) -> [f32; 2] {
+        let (s, c) = self.angle.sin_cos();
+        let d = [world[0] - self.pos[0], world[1] - self.pos[1]];
+        [c * d[0] + s * d[1], -s * d[0] + c * d[1]]
+    }
+}
+
 /// One joint with both of its bodies in the frame, placed in the world for editor markers.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct JointView {
@@ -177,6 +199,10 @@ pub struct JointView {
     pub b: [f32; 2],
     /// World direction of a prismatic joint's slide axis (unit length).
     pub axis: Option<[f32; 2]>,
+    /// Pose of the first body.
+    pub pose_a: Pose,
+    /// Pose of the second body.
+    pub pose_b: Pose,
 }
 
 /// The joints whose two bodies exist, in entity order. An anchor is the body position plus the
@@ -186,11 +212,13 @@ pub fn joint_views(frame: FrameView<'_>) -> Vec<JointView> {
     if !frame.registers::<Joint>() {
         return Vec::new();
     }
-    let anchor = |body: &Body, local: orr_fp::FPVec2| {
-        let (s, c) = fp_to_f32(body.angle).sin_cos();
-        let l = fp_to_vec2(local);
+    let pose = |body: &Body| {
         let p = fp_to_vec2(body.pos);
-        [p.x + c * l.x - s * l.y, p.y + s * l.x + c * l.y]
+        Pose { pos: [p.x, p.y], angle: fp_to_f32(body.angle) }
+    };
+    let anchor = |pose: Pose, local: orr_fp::FPVec2| {
+        let l = fp_to_vec2(local);
+        pose.to_world([l.x, l.y])
     };
     frame
         .iter::<Joint>()
@@ -200,7 +228,8 @@ pub fn joint_views(frame: FrameView<'_>) -> Vec<JointView> {
                 let (s, c) = (fp_to_f32(a.angle) + fp_to_f32(joint.length)).sin_cos();
                 [c, s]
             });
-            Some(JointView { entity, a: anchor(a, joint.anchor_a), b: anchor(b, joint.anchor_b), axis })
+            let (pose_a, pose_b) = (pose(a), pose(b));
+            Some(JointView { entity, a: anchor(pose_a, joint.anchor_a), b: anchor(pose_b, joint.anchor_b), axis, pose_a, pose_b })
         })
         .collect()
 }
