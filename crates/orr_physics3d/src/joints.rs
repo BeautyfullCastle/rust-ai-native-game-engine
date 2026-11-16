@@ -129,7 +129,7 @@ pub fn register_joints(builder: &mut ComponentRegistryBuilder) {
 /// missing, or whose axis is zero, is left unrecorded.
 fn record(frame: &Frame, joint: &mut Joint) {
     let (Some(a), Some(b)) = (frame.get::<Body>(joint.a), frame.get::<Body>(joint.b)) else { return };
-    let n = a.rot.rotate_vec3(joint.axis_a).normalize();
+    let n = a.rot.rotate_vec3(joint.axis_a).normalize_or_zero();
     if n == FPVec3::ZERO {
         return;
     }
@@ -318,7 +318,7 @@ pub(crate) fn prepare(frame: &Frame, ents: &[Entity], bslot: &[u32], bd: &[Body]
             mass: FP::ZERO,
             bias_axis: FP::ZERO,
             total: FP::ZERO,
-            hinge: (joint.kind == JOINT_HINGE).then_some(Hinge {
+            hinge: (joint.kind == JOINT_HINGE && joint.axis_a != FPVec3::ZERO).then_some(Hinge {
                 flags: joint.flags,
                 axis_a: joint.axis_a,
                 axis_b: joint.axis_b,
@@ -338,7 +338,7 @@ pub(crate) fn prepare(frame: &Frame, ents: &[Entity], bslot: &[u32], bd: &[Body]
                 lower_total: FP::ZERO,
                 upper_total: FP::ZERO,
             }),
-            cone: joint.has_cone().then_some(Cone {
+            cone: (joint.has_cone() && joint.axis_a != FPVec3::ZERO).then_some(Cone {
                 axis_a: joint.axis_a,
                 axis_b: joint.axis_b,
                 ref_a: joint.ref_a,

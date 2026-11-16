@@ -322,3 +322,23 @@ fn a_negative_motor_torque_limits_like_its_magnitude_and_zero_torque_does_nothin
     assert!((f(spun(fp!(-100))) - 2.0).abs() < 0.02, "a strong negative torque still reaches the speed");
     assert!(f(spun(FP::ZERO)).abs() < 0.01, "no torque turns nothing");
 }
+
+#[test]
+fn a_joint_with_a_zero_axis_is_held_like_a_ball_joint_without_panicking() {
+    let zero = FPVec3::ZERO;
+    let (mut added, pivot, ball) = door(|j| Joint { axis_a: zero, ..j });
+    let (mut coned, ..) = arm(|j| j.with_cone(zero, fp!(0.5), fp!(-1), fp!(1)));
+    // The same joint put on an entity directly, as a scene file or the inspector does.
+    let mut plain = new_frame(true);
+    let p = spawn_body(&mut plain, Body::new_static(v3(FP::ZERO, fp!(10), FP::ZERO)), Collider::new(Shape::sphere(fp!(0.1))));
+    let shape = Shape::sphere(fp!(0.2));
+    let b = spawn_body(&mut plain, Body::new_dynamic(v3(fp!(3), fp!(10), FP::ZERO), &shape, FP::ONE), Collider::new(shape));
+    let e = plain.spawn();
+    plain.add(e, Joint::hinge(p, b, FPVec3::ZERO, v3(fp!(-3), FP::ZERO, FP::ZERO), zero).with_limits(fp!(-0.5), fp!(0.5)));
+    let mut sc = Scratch::new();
+    run(&mut added, &mut sc, 60);
+    run(&mut coned, &mut sc, 60);
+    run(&mut plain, &mut sc, 60);
+    assert!((distance(&added, pivot, ball) - 3.0).abs() < 0.1, "the anchors stay together");
+    assert!(y(&added, ball) < 7.5, "it swings down under the pivot");
+}
