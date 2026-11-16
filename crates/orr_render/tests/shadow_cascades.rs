@@ -78,7 +78,7 @@ fn render(g: &Wgpu, cascades: u32) -> Vec<u8> {
     let mut scene = ImportedSceneRenderer::new(g.clone(), FORMAT).unwrap();
     scene.shadow_cascades = cascades;
     let mut renderer = ModelRenderer::new(g.clone(), FORMAT, square()).unwrap();
-    let instances = [ground([0.0, 0.0, -80.0], 240.0), panel([0.0, 1.5, -6.0], 2.0), panel([0.0, 6.0, -110.0], 8.0)];
+    let instances = [ground([0.0, 0.0, -80.0], 240.0), panel([0.0, 1.5, -6.0], 2.0), panel([0.0, 6.0, -110.0], 16.0)];
     let texture = g.create_texture(&TextureDesc { label: "cascades", width: SIZE.0, height: SIZE.1, format: FORMAT, usage: TextureUsage::RENDER_ATTACHMENT | TextureUsage::COPY_SRC, sample_count: 1, view_formats: &[] });
     let view = g.create_texture_view(&texture, None);
     scene
@@ -112,8 +112,8 @@ fn four_cascades_show_a_sharp_near_shadow_and_still_a_far_one() {
     // The near panel's shadow falls toward the camera, the far panel's too.
     let (near_shadow, near_lit) = (ground_at(&cascaded, [0.0, 0.0, -5.0]), ground_at(&cascaded, [4.0, 0.0, -5.0]));
     let (far_shadow, far_lit) = (ground_at(&cascaded, [0.0, 0.0, -105.0]), ground_at(&cascaded, [14.0, 0.0, -105.0]));
-    assert!(near_shadow + 60 < near_lit, "near shadow: {near_shadow} vs lit {near_lit}");
-    assert!(far_shadow + 60 < far_lit, "far shadow: {far_shadow} vs lit {far_lit}");
+    assert!(u32::from(near_shadow) + 60 < u32::from(near_lit), "near shadow: {near_shadow} vs lit {near_lit}");
+    assert!(u32::from(far_shadow) + 60 < u32::from(far_lit), "far shadow: {far_shadow} vs lit {far_lit}");
 
     // One map over the same range blurs the near edge over more pixels.
     let single = render(&g, 1);
