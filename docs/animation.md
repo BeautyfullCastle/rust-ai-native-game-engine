@@ -98,15 +98,17 @@ renderer.set_morph_weights(&[weights]); // 인스턴스 순서대로, 없으면 
 renderer.draw(view, size, &camera, &lighting, &[SkinnedInstance::new(&pose)])?;
 ```
 
-- 가져오기: 애니메이션 모델 임포터가 glTF 프리미티브의 `targets`(POSITION 필수, NORMAL 선택, f32 VEC3, 정점마다 하나)와 기본 가중치(노드의 `weights`, 없으면 메시의 `weights`, 없으면 0)를 읽는다. 애니메이션의 `weights` 채널(STEP, LINEAR)도 읽는다. 프리미티브 하나에 타깃은 최대 8개(`MAX_MORPH_TARGETS`), 가중치 크기는 16 이하다. 정적 모델 임포터는 모프 타깃을 계속 거부한다.
+- 가져오기: 애니메이션 모델 임포터가 glTF 프리미티브의 `targets`(POSITION 필수, NORMAL 선택, f32 VEC3, 정점마다 하나)와 기본 가중치(노드의 `weights`, 없으면 메시의 `weights`, 없으면 0)를 읽는다. 애니메이션의 `weights` 채널(STEP, LINEAR, CUBICSPLINE)도 읽는다. 타깃의 접근자는 희소(sparse)여도 된다. 프리미티브 하나에 타깃은 최대 8개(`MAX_MORPH_TARGETS`), 가중치 크기는 16 이하다. 정적 모델 임포터는 모프 타깃을 계속 거부한다.
 - 데이터: `AnimatedSource::morph`(`Morphs`)에 프리미티브별 타깃(`PrimitiveMorph`)과 클립별 가중치 트랙(`MorphChannel`)이 있다. 비어 있으면 쿠킹 파일에 쓰지 않으므로 모프 없는 모델의 바이트는 그대로다. 같은 클립과 노드에 가중치 트랙을 둘 이상 두면 거절한다. 가중치 트랙도 관절 채널과 같은 예산(클립당 채널 수, 전체 키 수, 애니메이션 바이트)에 합산한다.
+- CUBICSPLINE 가중치: 키마다 인탄젠트, 값, 아웃탄젠트 세 블록을 두고 블록마다 타깃 수만큼 가중치를 둔다. 관절 TRS의 CUBICSPLINE과 같은 배치이고 같은 에르미트 식(glTF 부록 C)으로 샘플링한다. 키가 둘 이상이어야 한다. 쿠킹 파일은 `MorphChannel::interpolation`에 `CubicSpline`을 쓰고 `weights`에 세 블록을 그대로 담는다. 포맷 버전은 1 그대로이고, CUBICSPLINE 트랙이 없는 모델의 바이트는 바뀌지 않는다. 값은 16 이하여야 하고 탄젠트는 유한하기만 하면 된다. 예산에는 탄젠트까지 센다(키당 값 세 묶음). 샘플 결과는 0~1로 자르지 않는다. 오버슈트가 16을 넘으면 `sample_weights`가 오류를 낸다.
+- 희소 접근자: glTF `accessor.sparse`를 읽는다. `bufferView`가 없으면 기본값은 0이다. 불러올 때 희소 접근자를 새 버퍼에 담긴 일반 접근자로 풀기 때문에 모프 타깃 외 다른 f32 접근자(애니메이션 입출력 등)도 같은 경로를 쓴다. 값은 f32여야 하고, 인덱스는 unsigned byte, short, int 중 하나이며 접근자 수 미만으로 엄격히 증가해야 한다. `count`는 1 이상 접근자 수 이하이고, 인덱스와 값 뷰는 `byteStride`와 `target`을 가질 수 없다. 어긋나면 `invalid sparse accessor`로 거절한다. 정적 모델 임포터는 희소 접근자를 계속 거부한다.
 - 가중치는 `Pose` 밖에 둔다. 포즈 그래프(상태 머신, 레이어, 블렌드 스페이스)는 관절만 섞는다. `rest_weights()`가 기본값, `sample_weights(clip, time)`이 클립의 값을 준다. 시간은 트랙마다 끝에서 멈춘다. 가중치 트랙만 있는 클립도 되고, `clip_duration`과 재생기는 그 트랙의 길이를 센다.
 - 변형 순서: 타깃 오프셋을 먼저 더하고 그 정점을 스키닝한다. CPU 기준 구현은 `deform_morphed`, `bounds_morphed`다.
 - 그리기: `SkinnedModelRenderer::set_morph_weights`로 인스턴스마다 가중치를 준다. 가중치가 0이 아닌 그리기는 CPU에서 오프셋을 더한 정점을 그 그리기 전용 정점 버퍼에 매 프레임 올리고, 0이면 공유 정점 버퍼를 그대로 쓴다. 저장 버퍼가 없는 WebGL2에서도 같은 경로로 돈다. 경계 상자와 그림자도 같은 정점을 쓴다.
 
 ## 5. 한계
 
-- 모프 타깃의 CUBICSPLINE 가중치 트랙, 희소(sparse) 접근자, 탄젠트 오프셋은 없다. 타깃 이름은 glTF에 표준 자리가 없어 `target0`, `target1`로 붙는다.
+- 모프 타깃의 탄젠트 오프셋(`TANGENT`)은 없다. 희소 접근자는 f32 값만 받고, 풀린 데이터는 입력 예산(접근자 검증 바이트)에 합산한다. 타깃 이름은 glTF에 표준 자리가 없어 `target0`, `target1`로 붙는다.
 - 모프는 정점 수 × 0이 아닌 타깃 수만큼 CPU에서 계산하고 그리기마다 정점 버퍼를 올린다. 정점이 많은 얼굴을 여러 인스턴스 그리면 비용이 커진다.
 - 클립 잘라내기, 이어 붙이기, 포즈 굽기 도구는 가중치 트랙을 옮기지 않는다. 에디터의 클립 길이 표시는 관절 채널만 본다.
 - 상태 머신과 레이어는 코드 API다. 에디터에서 그래프를 편집하는 화면과 씬 파일 형식은 아직 없다.
