@@ -115,7 +115,7 @@ pub struct OcclusionBuffer {
 }
 
 impl OcclusionBuffer {
-    /// Draws the boxes and planes of `instances` (by kind) that are large enough on screen.
+    /// Draws the faces turned toward the eye of the boxes and planes of `instances` (by kind) that are large enough on screen.
     pub fn build(view: &View, instances: [&[Instance3D]; 4]) -> Self {
         let mut buffer = Self { depth: vec![f32::INFINITY; OCCLUSION_WIDTH * OCCLUSION_HEIGHT] };
         let mut candidates: Vec<(f32, MeshKind, &Instance3D)> = [MeshKind::Box, MeshKind::Plane]
@@ -130,8 +130,11 @@ impl OcclusionBuffer {
         // Largest first; equal sizes keep list order, so the choice is the same every frame.
         candidates.sort_by(|a, b| b.0.total_cmp(&a.0));
         for (_, kind, instance) in candidates.into_iter().take(MAX_OCCLUDERS) {
-            for face in faces(kind, instance) {
-                buffer.draw(view, face);
+            for (face, normal) in faces(kind, instance) {
+                // A face turned away from the eye is culled in the main pass, so it hides nothing.
+                if dot3(normal, [view.eye[0] - face[0][0], view.eye[1] - face[0][1], view.eye[2] - face[0][2]]) > 0.0 {
+                    buffer.draw(view, face);
+                }
             }
         }
         buffer
@@ -236,17 +239,19 @@ impl Culler {
     }
 }
 
-/// The world faces of a box or plane instance, each with its corners in order around it.
-fn faces(kind: MeshKind, i: &Instance3D) -> Vec<[[f32; 3]; 4]> {
+/// The world faces of a box or plane instance, each with its corners in order around it
+/// and its outward normal. The main pass draws only the side a face's normal points to.
+fn faces(kind: MeshKind, i: &Instance3D) -> Vec<([[f32; 3]; 4], [f32; 3])> {
     let world = |local: [f32; 3]| {
         let r = rotate(i.rot, [local[0] * i.scale[0], local[1] * i.scale[1], local[2] * i.scale[2]]);
         [i.pos[0] + r[0], i.pos[1] + r[1], i.pos[2] + r[2]]
     };
     if kind == MeshKind::Plane {
-        return vec![[[-1.0, 0.0, -1.0], [1.0, 0.0, -1.0], [1.0, 0.0, 1.0], [-1.0, 0.0, 1.0]].map(world)];
+        return vec![([[-1.0, 0.0, -1.0], [1.0, 0.0, -1.0], [1.0, 0.0, 1.0], [-1.0, 0.0, 1.0]].map(world), rotate(i.rot, [0.0, 1.0, 0.0]))];
     }
     let corner = |x: f32, y: f32, z: f32| world([x, y, z]);
-    let faces = [
+    let axes = [[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, -1.0]];
+    let corners = [
         [corner(1.0, -1.0, -1.0), corner(1.0, 1.0, -1.0), corner(1.0, 1.0, 1.0), corner(1.0, -1.0, 1.0)],
         [corner(-1.0, -1.0, -1.0), corner(-1.0, -1.0, 1.0), corner(-1.0, 1.0, 1.0), corner(-1.0, 1.0, -1.0)],
         [corner(-1.0, 1.0, -1.0), corner(-1.0, 1.0, 1.0), corner(1.0, 1.0, 1.0), corner(1.0, 1.0, -1.0)],
@@ -254,7 +259,7 @@ fn faces(kind: MeshKind, i: &Instance3D) -> Vec<[[f32; 3]; 4]> {
         [corner(-1.0, -1.0, 1.0), corner(1.0, -1.0, 1.0), corner(1.0, 1.0, 1.0), corner(-1.0, 1.0, 1.0)],
         [corner(-1.0, -1.0, -1.0), corner(-1.0, 1.0, -1.0), corner(1.0, 1.0, -1.0), corner(1.0, -1.0, -1.0)],
     ];
-    faces.to_vec()
+    corners.into_iter().zip(axes).map(|(face, axis)| (face, rotate(i.rot, axis))).collect()
 }
 
 /// The instances of each kind reordered with the visible ones first (in list
@@ -345,5 +350,32 @@ mod tests {
         assert_eq!(frustum_only, [3, 1, 0, 0]);
         let (_, none) = partition(&v, Culling { frustum: false, occlusion: false }, all);
         assert_eq!(none, [4, 1, 0, 0]);
+    }
+
+    #[test]
+    fn a_plane_seen_from_its_back_hides_nothing() {
+        let mut l = list();
+        let m = Material::new([0.5; 3]);
+        l.plane([0.0; 3], 4.0, 4.0, &m);
+        let lists = [&l.spheres[..], &l.boxes[..], &l.capsules[..], &l.planes[..]];
+        // From below the plane's back is turned to the eye and is not drawn, so the ball above shows.
+        let below = view([0.0, -6.0, 4.0], [0.0, 4.0, 0.0]);
+        assert!(!OcclusionBuffer::build(&below, lists).hides(&below, [0.0, 4.0, 0.0], 0.5));
+        // From above its front is drawn and hides the ball under it.
+        let above = view([0.0, 6.0, 4.0], [0.0, -4.0, 0.0]);
+        assert!(OcclusionBuffer::build(&above, lists).hides(&above, [0.0, -4.0, 0.0], 0.5));
+    }
+
+    #[test]
+    fn a_box_seen_from_inside_hides_nothing_beyond_its_walls() {
+        let mut l = list();
+        l.cuboid([0.0; 3], crate::IDENTITY_ROT, [20.0; 3], &Material::new([0.5; 3]));
+        let lists = [&l.spheres[..], &l.boxes[..], &l.capsules[..], &l.planes[..]];
+        // The walls' backs face the eye, so none is drawn and the ball past the far wall shows.
+        let inside = view([0.0, 0.0, 5.0], [0.0; 3]);
+        assert!(!OcclusionBuffer::build(&inside, lists).hides(&inside, [0.0, 0.0, -30.0], 0.5));
+        // From outside the near wall hides it.
+        let outside = view([0.0, 0.0, 60.0], [0.0; 3]);
+        assert!(OcclusionBuffer::build(&outside, lists).hides(&outside, [0.0, 0.0, -10.0], 0.5));
     }
 }
