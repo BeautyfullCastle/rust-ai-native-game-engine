@@ -240,6 +240,34 @@ fn reset_pause_and_a_source_swap_silence_the_reverb_tail() {
     }
 }
 
+/// Resets twice, 40 ms apart, with a long reverb voice started between them. The second reset
+/// fades that voice over 100 ms, so the bus is cleared only after that fade. Returns the energy
+/// of one second that starts 200 ms after the second reset. `second_reset: false` leaves the voice playing.
+fn energy_after_two_resets(second_reset: bool) -> f32 {
+    let config = AudioConfig { cancel_fade: std::time::Duration::from_millis(100), ..AudioConfig::default() };
+    let mut audio = OfflineAudio::new_offline(config, RATE).unwrap();
+    audio.set_ambient_reverb(ReverbParams { wet: 1.0, ..ReverbParams::CAVE }).unwrap();
+    // The first reverb voice builds the bus; the first reset then has a bus to fade and clear.
+    play(&mut audio, 1, &click().reverb(1.0));
+    render(&mut audio, 256);
+    audio.reset();
+    render(&mut audio, 960);
+    play(&mut audio, 2, &tone(0.6).reverb(1.0));
+    render(&mut audio, 960);
+    if second_reset {
+        audio.reset();
+    }
+    let after = render(&mut audio, RATE as usize * 2);
+    energies(&after[9600 * 2..], RATE as usize)[0]
+}
+
+#[test]
+fn a_second_reset_during_a_fade_clears_the_bus_after_its_own_fade() {
+    let ringing = energy_after_two_resets(false);
+    assert!(ringing > 1e-6, "without the second reset the voice and its tail are heard");
+    let cleared = energy_after_two_resets(true);    assert!(cleared < ringing * 1e-6, "energy {cleared} after the second fade against {ringing} without it");
+}
+
 #[test]
 fn sounds_after_a_reset_still_get_their_reverb_and_leaving_a_zone_keeps_the_natural_tail() {
     let mut audio = mixer();
