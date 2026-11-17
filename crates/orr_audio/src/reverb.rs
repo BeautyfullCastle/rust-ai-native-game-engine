@@ -286,6 +286,8 @@ struct Freeverb {
     /// Length of the fade-out in progress and the samples left of it. Zero left: no fade.
     fade_total: usize,
     fade_left: usize,
+    /// Level the fade in progress starts from: 1 for a fade that began on a free bus.
+    fade_start: f32,
 }
 impl Freeverb {
     fn new(shared: Arc<Shared>) -> Self {
@@ -302,6 +304,7 @@ impl Freeverb {
             seen_clears: 0,
             fade_total: 0,
             fade_left: 0,
+            fade_start: 1.0,
         }
     }
     /// Feedback, damping and pre-delay in samples that the shared parameters ask for.
@@ -331,12 +334,12 @@ impl Effect for Freeverb {
         let clears = self.shared.clears.load(Ordering::Acquire);
         if clears != self.seen_clears {
             self.seen_clears = clears;
-            // A request during a fade is covered by the fade.
-            if self.fade_left == 0 {
-                let fade = f32::from_bits(self.shared.clear_fade.load(Ordering::Relaxed));
-                self.fade_total = ((fade * self.sample_rate) as usize).max(1);
-                self.fade_left = self.fade_total;
-            }
+            // A newer request restarts the fade from the level it has now, because the sounds
+            // that it stops keep feeding the bus until their own fade ends.
+            let fade = f32::from_bits(self.shared.clear_fade.load(Ordering::Relaxed));
+            self.fade_start = if self.fade_left > 0 { self.fade_start * self.fade_left as f32 / self.fade_total as f32 } else { 1.0 };
+            self.fade_total = ((fade * self.sample_rate) as usize).max(1);
+            self.fade_left = self.fade_total;
         }
         let Some([left, right]) = &mut self.channels else { return };
         let len = self.pre_buffer.len();
@@ -358,7 +361,7 @@ impl Effect for Freeverb {
                 right.process(delayed, self.feedback, self.damping) * WET_GAIN,
             );
             if self.fade_left > 0 {
-                let gain = self.fade_left as f32 / self.fade_total as f32;
+                let gain = self.fade_start * self.fade_left as f32 / self.fade_total as f32;
                 wet = Frame::new(wet.left * gain, wet.right * gain);
                 self.fade_left -= 1;
                 if self.fade_left == 0 {
