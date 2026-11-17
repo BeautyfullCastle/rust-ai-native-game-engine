@@ -24,5 +24,6 @@ winit = "0.30"
 png = "0.18"
 
 [dev-dependencies]
+bytemuck = { version = "1", features = ["derive"] }
 orr_games = { path = "../orr_games" }
 orr_sample = { path = "../orr_sample" }
