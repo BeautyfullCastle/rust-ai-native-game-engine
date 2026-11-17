@@ -10,7 +10,8 @@ use crate::{ViewUpdate, DEFAULT_VIEW_EVENT_CAPACITY};
 /// Why a view-to-sim call was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BridgeError {
-    /// This bridge carries input for the local player only.
+    /// This bridge carries input only for the slots its client owns
+    /// ([`Bridge::local_slots`]); `local` is the first of them.
     NotLocalPlayer { player: PlayerSlot, local: PlayerSlot },
     /// The sim thread is gone (it panicked or was shut down).
     Disconnected,
@@ -24,7 +25,7 @@ impl core::fmt::Display for BridgeError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             BridgeError::NotLocalPlayer { player, local } => {
-                write!(f, "input for player {} refused: this bridge only carries slot {}", player.0, local.0)
+                write!(f, "input for player {} refused: it is not a local slot of this bridge (the first is {})", player.0, local.0)
             }
             BridgeError::Disconnected => write!(f, "the sim side of the bridge is gone"),
             BridgeError::Backpressure => write!(f, "the bridge command/control queue is full; retry after it drains"),
@@ -128,13 +129,27 @@ impl<G: Game> BridgeConfig<G> {
 /// [`Snapshot`] and the [`BridgeEvent`] stream.
 pub trait Bridge<G: Game> {
     fn tick_rate(&self) -> u32;
+    /// The first local slot, the one the client is known by.
     fn local_slot(&self) -> PlayerSlot;
     fn player_count(&self) -> u8;
 
+    /// Every slot this client owns, [`local_slot`](Self::local_slot) first.
+    /// One slot for network clients. An offline host may own several, for
+    /// players that share one screen. The default is `[local_slot()]`.
+    fn local_slots(&self) -> Vec<PlayerSlot> {
+        vec![self.local_slot()]
+    }
+
     /// Sets the input of `player` that the sim samples at its next ticks
-    /// (held until changed). Only the local slot is accepted. InProc/Threaded
-    /// updates coalesce and replay viewers return `ReplayReadOnly` without
-    /// retaining the input. Remote adapters may report server errors asynchronously.
+    /// (held until changed). Only the slots of [`local_slots`](Self::local_slots)
+    /// are accepted; any other slot returns `NotLocalPlayer` and changes
+    /// nothing. InProc/Threaded updates coalesce and replay viewers return
+    /// `ReplayReadOnly` without retaining the input. Remote adapters may
+    /// report server errors asynchronously.
+    ///
+    /// The input of a slot other than the first is held and read when each
+    /// tick runs. An explicit batch step (`Threaded::try_step`) captures only
+    /// the first slot at admission.
     fn set_input(&mut self, player: PlayerSlot, input: G::Input) -> Result<(), BridgeError>;
 
     /// Queues a one-off command for the next tick. With InProc/Threaded, `Backpressure` and

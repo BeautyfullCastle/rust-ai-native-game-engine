@@ -30,6 +30,17 @@ pub trait SimHost<G: Game> {
     fn local_slot(&self) -> PlayerSlot;
     fn player_count(&self) -> u8;
 
+    /// Further slots, besides [`local_slot`](Self::local_slot), whose input
+    /// the view supplies (players that share one screen). Asked once, when the
+    /// bridge starts. Default: none.
+    fn extra_local_slots(&self) -> Vec<PlayerSlot> {
+        Vec::new()
+    }
+
+    /// The held input of one of the [`extra_local_slots`](Self::extra_local_slots),
+    /// given before every `advance`. Default: ignored.
+    fn set_extra_input(&mut self, _slot: PlayerSlot, _input: G::Input) {}
+
     /// One fixed step with the local player's input and commands.
     fn advance(&mut self, input: G::Input, commands: Vec<G::Command>) -> AdvanceResult<G>;
 
@@ -240,18 +251,33 @@ type SlotBot<G> = Box<dyn FnMut(PlayerSlot, u64) -> <G as Game>::Input>;
 /// A local play session as a bridge host: the sim side of the editor's
 /// play mode. See [`orr_session::PlaySession`] for the timeline semantics.
 ///
-/// The view's input goes to the local slot; other slots are default input
+/// The view's input goes to the local slot, and to the extra local slots of
+/// [`PlayHost::with_extra_local_slots`]; other slots are default input
 /// unless [`PlayHost::with_bot`] is set.
 pub struct PlayHost<G: Game> {
     session: PlaySession<G>,
     local_slot: PlayerSlot,
+    extra_local: Vec<PlayerSlot>,
     bot: Option<SlotBot<G>>,
     lifecycle: Vec<Lifecycle>,
 }
 
 impl<G: Game> PlayHost<G> {
     pub fn new(session: PlaySession<G>, local_slot: PlayerSlot) -> Self {
-        Self { session, local_slot, bot: None, lifecycle: Vec::new() }
+        Self { session, local_slot, extra_local: Vec::new(), bot: None, lifecycle: Vec::new() }
+    }
+
+    /// Makes more slots local: the view sets their input with
+    /// `Bridge::set_input`, like the first local slot (offline play with
+    /// several players on one screen). Slots that are out of range, equal to
+    /// the first local slot, or repeated are dropped.
+    pub fn with_extra_local_slots(mut self, slots: impl IntoIterator<Item = PlayerSlot>) -> Self {
+        for slot in slots {
+            if slot.0 < self.session.player_count() && slot != self.local_slot && !self.extra_local.contains(&slot) {
+                self.extra_local.push(slot);
+            }
+        }
+        self
     }
 
     /// Sets `bot(slot, tick)`, called for every non-local slot before each
@@ -293,6 +319,14 @@ impl<G: Game> SimHost<G> for PlayHost<G> {
     fn player_count(&self) -> u8 {
         self.session.player_count()
     }
+    fn extra_local_slots(&self) -> Vec<PlayerSlot> {
+        self.extra_local.clone()
+    }
+    fn set_extra_input(&mut self, slot: PlayerSlot, input: G::Input) {
+        if self.extra_local.contains(&slot) {
+            self.session.set_input(slot, input);
+        }
+    }
     fn advance(&mut self, input: G::Input, commands: Vec<G::Command>) -> AdvanceResult<G> {
         if self.session.mode() == orr_session::PlayMode::Record {
             self.session.set_input(self.local_slot, input);
@@ -303,7 +337,7 @@ impl<G: Game> SimHost<G> for PlayHost<G> {
             if let Some(bot) = self.bot.as_mut() {
                 let tick = self.session.head_tick() + 1;
                 for slot in 0..self.session.player_count() {
-                    if PlayerSlot(slot) != self.local_slot {
+                    if PlayerSlot(slot) != self.local_slot && !self.extra_local.contains(&PlayerSlot(slot)) {
                         let input = bot(PlayerSlot(slot), tick);
                         self.session.set_input(PlayerSlot(slot), input);
                     }

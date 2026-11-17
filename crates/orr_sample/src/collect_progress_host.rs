@@ -83,6 +83,12 @@ impl SimHost<CollectDodgeV1> for ProgressHost {
     fn player_count(&self) -> u8 {
         self.inner.player_count()
     }
+    fn extra_local_slots(&self) -> Vec<PlayerSlot> {
+        self.inner.extra_local_slots()
+    }
+    fn set_extra_input(&mut self, slot: PlayerSlot, input: <CollectDodgeV1 as Game>::Input) {
+        self.inner.set_extra_input(slot, input);
+    }
     fn head_tick(&self) -> u64 {
         self.inner.head_tick()
     }

@@ -67,6 +67,8 @@ pub struct Threaded<G: Game> {
     steps_sent: u64,
     handle: Option<JoinHandle<()>>,
     local_slot: PlayerSlot,
+    /// Every local slot, `local_slot` first.
+    local_slots: Vec<PlayerSlot>,
     tick_rate: u32,
     player_count: u8,
     pacing: Pacing,
@@ -132,6 +134,9 @@ impl<G: Game> Threaded<G> {
             }
             Err(_) => return Err(BridgeError::Disconnected.to_string()),
         };
+        // The sim side declared the extra slots before it sent `ready`.
+        let mut local_slots = vec![local_slot];
+        local_slots.extend(ingress.extra_slots());
         Ok(Self {
             ingress,
             events,
@@ -140,6 +145,7 @@ impl<G: Game> Threaded<G> {
             steps_sent: 0,
             handle: Some(handle),
             local_slot,
+            local_slots,
             tick_rate,
             player_count,
             pacing: threaded.pacing,
@@ -209,11 +215,18 @@ impl<G: Game> Bridge<G> for Threaded<G> {
         self.player_count
     }
 
+    fn local_slots(&self) -> Vec<PlayerSlot> {
+        self.local_slots.clone()
+    }
+
     fn set_input(&mut self, player: PlayerSlot, input: G::Input) -> Result<(), BridgeError> {
-        if player != self.local_slot {
-            return Err(BridgeError::NotLocalPlayer { player, local: self.local_slot });
+        if player == self.local_slot {
+            self.ingress.set_input(input)
+        } else if self.local_slots.contains(&player) {
+            self.ingress.set_extra_input(player, input)
+        } else {
+            Err(BridgeError::NotLocalPlayer { player, local: self.local_slot })
         }
-        self.ingress.set_input(input)
     }
 
     fn send_command(&mut self, command: G::Command) -> Result<(), BridgeError> {

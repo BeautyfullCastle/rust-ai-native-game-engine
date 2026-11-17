@@ -8,7 +8,7 @@ use std::time::Instant;
 use arc_swap::ArcSwapOption;
 use orr_ecs::Frame;
 use orr_session::{AdvanceResult, ControlOp, EventBatch, Timeline};
-use orr_sim::{DebugCommand, Game};
+use orr_sim::{DebugCommand, Game, PlayerSlot};
 
 use crate::bridge::{BridgeConfig, StepTiming};
 use crate::event::{BridgeEvent, BridgeStats, Lifecycle};
@@ -80,6 +80,9 @@ pub(crate) struct SimCore<G: Game, H: SimHost<G>> {
     last: Option<Published>,
     seen_rollbacks: u64,
     was_stalled: bool,
+    /// Scratch for the held input of the extra local slots.
+    extra_inputs: Vec<(PlayerSlot, G::Input)>,
+    has_extra: bool,
 }
 
 impl<G: Game, H: SimHost<G>> SimCore<G, H> {
@@ -93,6 +96,8 @@ impl<G: Game, H: SimHost<G>> SimCore<G, H> {
     ) -> Self {
         let host_commands = host.pending_command_count();
         ingress.initialize(host.accepts_commands(), host.branch_enables_commands(), host_commands);
+        let extra = host.extra_local_slots();
+        ingress.declare_extra(&extra);
         let mut core = Self {
             host,
             cfg,
@@ -109,6 +114,8 @@ impl<G: Game, H: SimHost<G>> SimCore<G, H> {
             last: None,
             seen_rollbacks: 0,
             was_stalled: false,
+            extra_inputs: Vec::new(),
+            has_extra: !extra.is_empty(),
         };
         let started = Lifecycle::SessionStarted {
             tick_rate: core.host.tick_rate(),
@@ -212,6 +219,12 @@ impl<G: Game, H: SimHost<G>> SimCore<G, H> {
             self.host_commands += commands.len();
             if let Some(derive) = &self.cfg.commands_from_input {
                 commands.extend(derive(&input));
+            }
+        }
+        if self.has_extra {
+            self.ingress.extra_inputs_into(&mut self.extra_inputs);
+            for &(slot, held) in &self.extra_inputs {
+                self.host.set_extra_input(slot, held);
             }
         }
         let observing = self.cfg.step_observer.is_some();
