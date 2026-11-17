@@ -67,18 +67,47 @@ impl SceneView<PhysGame> for EventCounter {
     fn on_start(&mut self, ctx: &mut ViewContext<'_, PhysGame>) { .. }
     fn on_update(&mut self, ctx: &mut ViewContext<'_, PhysGame>) { .. }
     fn on_event(&mut self, ctx: &mut ViewContext<'_, PhysGame>, event: &PhysEvent, state: EventState) { .. }
+    fn on_player(&mut self, ctx: &mut ViewContext<'_, PhysGame>, signal: &RawPlayerSignal, state: EventState) { .. }
     fn on_session(&mut self, ctx: &mut ViewContext<'_, PhysGame>, note: Lifecycle) { .. }
     fn on_resync(&mut self, ctx: &mut ViewContext<'_, PhysGame>) { .. }
 }
 ```
 
-모든 메서드의 기본 몸체는 비어 있다. 한 프레임의 호출 순서는 `poll_view` → `on_start`(처음 한 번) → 세션 알림(`on_session`)과 이벤트(`on_event`) → `on_destroy` → `on_create` → 엔티티 `on_update` → 씬 `on_update` → 그리기다.
+모든 메서드의 기본 몸체는 비어 있다. 한 프레임의 호출 순서는 `poll_view` → `on_start`(처음 한 번) → 세션 알림(`on_session`), 플레이어 신호(`on_player`), 이벤트(`on_event`) → `on_destroy` → `on_create` → 엔티티 `on_update` → 씬 `on_update` → 그리기다.
 
 - **엔티티 키는 `(번호, 버전)`이다.** 번호가 재사용되어 버전이 달라지면 옛 엔티티는 `on_destroy`, 새 엔티티는 `on_create`다. 롤백으로 예측에만 있던 엔티티가 사라져도 `on_destroy`가 불린다. 같은 프레임 안에서 사라졌다 같은 키로 다시 생기는 경우(롤백 재계산 안)는 화면이 프레임 단위로만 보므로 구별되지 않는다.
 - **`pose`는 `ViewWorld`가 계산한 `Transform2`이다.** `Extractor`가 그 엔티티를 내놓지 않으면 뷰 월드에 위치가 없어서 `None`이다. `on_update`는 그래도 불린다.
 - **`EventState`는 `orr_session::EventStatus`에서 페이로드를 뺀 얇은 열거형이다.** `Predicted`, `Verified`, `Canceled`. `Canceled` 호출에는 `Predicted` 때 받은 페이로드가 그대로 온다(세션이 취소에는 페이로드를 주지 않아서 `Views`가 기억한다). 소리·파티클은 `Predicted`에서 시작하고 `Canceled`에서 멈춘다. 업적·통계는 `Verified`에서만 한다.
 - **`ViewContext`:** `predicted()`, `verified()`(`Option`), `tick()`, `verified_tick()`, `local_players()`, `is_local(slot)`, `send_command(cmd)`. 오프라인에서 로컬 플레이어는 `.local_players(n)`의 슬롯 `0..n`이고, `local_players()`와 `is_local(slot)`이 모두 보고한다.
 - **창 없이도 쓴다.** 호출 순서를 지키는 코드는 창과 렌더러가 없는 `Views::dispatch(bridge, update, poses)`에 있다. 창 루프는 이것을 부르기만 한다. 테스트는 `tests/views.rs`이고, 롤백이 나는 두 세션(`LoopbackPair`)에서 `on_create`/`on_destroy`와 `Canceled`/`Verified`를 확인한다.
+
+## 플레이어 신호 (4a단계)
+
+플레이어가 들어오고, 끊기고, 돌아오고, 나가는 일을 게임에 알리는 신호다. 신호는 입력의 일부라서 모든 피어가 같은 틱에 같은 신호를 받고, 리플레이와 롤백 재계산에서도 같은 틱에 다시 적용된다.
+
+```rust
+impl Players for MyGame {
+    type Player = Profile;                       // 고정 크기 Pod. 이름, 색, 고른 캐릭터 같은 시작 데이터
+    fn on_player(frame: &mut Frame, signal: PlayerSignal<Profile>) {
+        match signal {
+            PlayerSignal::Added { slot, data } => { /* 아바타 만들기 */ }
+            PlayerSignal::Disconnected { slot } => { /* 멈추기, AI가 대신 조종 */ }
+            PlayerSignal::Reconnected { slot } => { /* 조종권 돌려주기 */ }
+            PlayerSignal::Removed { slot } => { /* 아바타 지우기 */ }
+        }
+    }
+}
+// Game::systems()의 맨 앞에 넣는다:  let mut s = vec![player_signals::<Self>()]; s.extend(fn_systems([..]));
+```
+
+- **`Players`는 선택이다.** 기존 `Game` 구현은 바꾸지 않는다. `player_signals::<G>()`를 `systems()` 맨 앞에 넣은 게임만 신호를 `on_player`로 받는다. 넣지 않은 게임에서 신호는 시뮬레이션이 무시한다(`TickInputs::signals()`로는 읽을 수 있다). 신호가 없는 틱은 비용이 없다(빈 목록). 신호를 쓰지 않는 게임의 체크섬과 리플레이 파일은 그대로다.
+- **신호의 모양.** `RawPlayerSignal { kind, slot, data: Vec<u8> }`이다. `data`는 `Added`의 `Players::Player` 바이트이고, 비어 있거나 크기가 다르면 `Player::default()`다. `raw.typed::<Profile>()`이 `PlayerSignal<Profile>`을 준다. 한 틱의 신호는 슬롯 순서로 적용되고, 같은 슬롯에서는 넣은 순서다(`insert_signal`).
+- **서버 없이 실행하면** `App`이 첫 틱(틱 1)에 모든 슬롯(`players`와 `local_players` 중 큰 수)에 `Added`를 넣는다(`PlayHost::with_announced_players`). 데이터는 기본값이다. 그 신호는 기록에 들어가므로 리플레이를 다시 돌려도 같은 월드가 된다. 틱 1 한 번뿐이다. 되감기(`seek`)는 기록된 신호를 다시 적용하지만 뷰에 알림은 다시 보내지 않는다.
+- **씬 뷰의 `on_player`.** 신호는 이벤트와 같은 세 상태(`Predicted`, `Verified`, `Canceled`)로 온다. 브리지가 새 `BridgeEvent::Player { key, status }`로 전달하고, 키는 `(틱, 슬롯, 그 슬롯의 순번)`이다(`orr_sim::signal_key`). 롤백 재계산에서도 같다. 한 틱의 신호는 그 틱의 게임 이벤트보다 먼저 온다. 오프라인에서는 예측이 없어서 모두 바로 `Verified`다. `Canceled`에는 `Predicted` 때의 신호가 그대로 온다. `ViewResync`가 오면 기억을 비운다. 신호는 이미 프레임에 적용돼 있으므로 `Predicted` 때 `ctx.predicted()`에 아바타가 있다.
+- **왜 게임 이벤트가 아니라 브리지 이벤트인가.** 게임이 `on_player`에서 이벤트를 다시 내보내게 하면 게임마다 이벤트 타입을 정해야 하고 `Players`가 `SimContext`에 묶인다. 신호는 입력이라서 세션이 이미 틱 기록을 가지고 있다. 세션이 그 기록에서 `Predicted`/`Verified`/`Canceled`를 직접 만드는 쪽이 이벤트 조정(`diff_events`)과 똑같이 동작하고 게임 코드가 필요 없다.
+- **세션 쪽.** `Session::schedule_signal(tick, signal)`이 신호를 틱 입력에 넣는다. 이미 예측으로 지난 틱이면 다음 `step`/`poll_confirmed`가 그 틱으로 롤백해서 다시 계산한다. 검증이 끝난 틱은 `SignalError`다. 모든 피어가 같은 신호를 같은 틱에 넣어야 한다(릴레이 `Presence`의 `from_tick`이 그 틱이다. 서버 연결은 4b단계). `PlaySession::push_signal`은 다음 틱에 넣고 기록한다. 리플레이 파일은 신호가 있을 때만 형식 4(신호 표가 끝에 붙는다)로 쓰고, 없으면 지금까지처럼 3이다.
+- **예제:** `examples/physics2d_coop.rs`의 `Roll`이 신호를 출력한다. `PhysGame`은 패들을 `setup`에서 만들고, 이것을 신호로 바꾸면 골든 체크섬이 바뀌어서 `Players`를 쓰지 않았다. 신호로 아바타를 만드는 게임은 `orr_testgame::roster::Roster`다(테스트 전용 게임).
+- **테스트:** `orr_testgame/tests/roster.rs`(시뮬레이션), `orr_session/tests/player_signals.rs`(리플레이, 되감기, 가지치기, 오프라인 알림, 롤백 후 같은 체크섬, 알림 상태), `orr_bridge/tests/player_signals.rs`, `orr_app/tests/player_signals.rs`(씬 뷰).
 
 ## 명령줄
 
@@ -106,6 +135,7 @@ impl SceneView<PhysGame> for EventCounter {
 
 ## 남은 것
 
-- **2단계에서 뺀 것:** `ViewContext::query`(`FrameView::iter::<T>()`, `dense::<T>()`가 이미 있어서 조합 질의는 `orr_ecs` 쪽 일이다), `ViewContext::draw()`(기본 2D 그리기가 `Extractor` 항목과 `backdrop`만 받아서 선·글자를 더하려면 그리기 경로를 넓혀야 한다), `SceneView::on_player`(4단계), `App::threaded()`(위).
+- **2단계에서 뺀 것:** `ViewContext::query`(`FrameView::iter::<T>()`, `dense::<T>()`가 이미 있어서 조합 질의는 `orr_ecs` 쪽 일이다), `ViewContext::draw()`(기본 2D 그리기가 `Extractor` 항목과 `backdrop`만 받아서 선·글자를 더하려면 그리기 경로를 넓혀야 한다), `App::threaded()`(위). `SceneView::on_player`는 4a단계에서 더했다.
 - **3단계에서 뺀 것:** 패드 입력(키보드만), 서버 쪽 여러 슬롯 클라이언트(릴레이·네트워크는 슬롯 하나), `Threaded`를 쓰는 `App` 경로(위), 여러 슬롯의 `Step` 입력 캡처(`Threaded::try_step`은 첫 슬롯만 고정한다).
+- **4a단계에서 뺀 것(4b):** 릴레이 서버의 `Presence`를 `Session::schedule_signal(from_tick, ..)`로 잇기(`orr_server`, 릴레이 클라이언트), `--host`/`--connect`, 재접속 테스트(창을 닫았다 다시 열면 `Disconnected` → `Reconnected`), 원격 뷰 스트림(`orr_viewstream`)은 신호를 아직 내보내지 않는다. 신호를 취소하는 API가 없어서 `Canceled`는 합성 업데이트 테스트로만 확인했다.
 - **이후 단계:** 3D 렌더러(`SceneLook`), 서버 연결, 웹·모바일 루프.

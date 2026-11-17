@@ -27,3 +27,4 @@ png = "0.18"
 bytemuck = { version = "1", features = ["derive"] }
 orr_games = { path = "../orr_games" }
 orr_sample = { path = "../orr_sample" }
+orr_testgame = { path = "../orr_testgame" }
