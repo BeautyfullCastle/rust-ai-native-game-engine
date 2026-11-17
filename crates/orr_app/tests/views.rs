@@ -135,6 +135,8 @@ struct Log {
     entity_calls: RefCell<Vec<Call>>,
     flashes: RefCell<Vec<(Flash, EventState, u32)>>,
     notes: RefCell<Vec<(Lifecycle, u32)>>,
+    /// The frames in which a scene view was told about a resync.
+    resyncs: RefCell<Vec<u32>>,
     scene_calls: RefCell<Vec<String>>,
 }
 
@@ -185,6 +187,11 @@ impl SceneView<Burst> for Recorder {
     fn on_session(&mut self, _ctx: &mut ViewContext<'_, Burst>, note: Lifecycle) {
         self.log.notes.borrow_mut().push((note, self.log.frame.get()));
         self.log.scene_calls.borrow_mut().push(format!("{}:session", self.name));
+    }
+
+    fn on_resync(&mut self, _ctx: &mut ViewContext<'_, Burst>) {
+        self.log.resyncs.borrow_mut().push(self.log.frame.get());
+        self.log.scene_calls.borrow_mut().push(format!("{}:resync", self.name));
     }
 }
 
@@ -451,6 +458,137 @@ fn a_cancel_carries_the_payload_of_its_predicted_event_and_a_resync_forgets_it()
     });
     views.dispatch(&mut bridge, &update, &[]);
     assert_eq!(log.flashes.borrow().len(), 3);
+}
+
+/// Sound or particles started on `Predicted` and stopped on `Canceled`, as the docs advise.
+#[derive(Default)]
+struct Effects {
+    active: Rc<RefCell<BTreeSet<u32>>>,
+    updates: Rc<Cell<u32>>,
+}
+
+impl SceneView<Burst> for Effects {
+    fn on_update(&mut self, _ctx: &mut ViewContext<'_, Burst>) {
+        self.updates.set(self.updates.get() + 1);
+    }
+
+    fn on_event(&mut self, _ctx: &mut ViewContext<'_, Burst>, event: &Flash, state: EventState) {
+        match state {
+            EventState::Predicted => self.active.borrow_mut().insert(event.tick),
+            EventState::Verified | EventState::Canceled => self.active.borrow_mut().remove(&event.tick),
+        };
+    }
+
+    fn on_resync(&mut self, _ctx: &mut ViewContext<'_, Burst>) {
+        // No `Canceled` will come for what was started: stop it and start again from the frame.
+        self.active.borrow_mut().clear();
+    }
+}
+
+fn resync_note() -> orr_bridge::ViewResync {
+    orr_bridge::ViewResync {
+        generation: 1,
+        discarded_events: 3,
+        head_tick: 1,
+        verified_tick: 1,
+        disconnected: false,
+        last_desync: None,
+        lifecycle: Vec::new(),
+    }
+}
+
+#[test]
+fn a_resync_tells_the_scene_views_once_before_the_events_of_its_frame() {
+    let log = Rc::new(Log::default());
+    let effects = Effects::default();
+    let (active, updates) = (effects.active.clone(), effects.updates.clone());
+    let mut views = Views::<Burst>::new();
+    views.scene_view(Recorder { name: "scene", log: log.clone() });
+    views.scene_view(effects);
+    let session = PlaySession::<Burst>::new(PlayConfig::new(1, 42, 60), BurstConfig { players: 1, ttl: 100 });
+    let mut bridge = InProc::new(PlayHost::new(session, PlayerSlot(0)), BridgeConfig::default());
+    bridge.step(1);
+    let sim = |tick: u64, status| BridgeEvent::Sim { key: EventKey::new(tick, 0, 0), status };
+    let flash = |tick: u32| Flash { owner: 0, tick };
+
+    let update = update_with(&mut bridge, vec![sim(5, EventStatus::Predicted(flash(5)))]);
+    views.dispatch(&mut bridge, &update, &[]);
+    assert_eq!(*active.borrow(), BTreeSet::from([5]));
+    assert!(log.resyncs.borrow().is_empty());
+
+    // A resync without any session note, and an event after it that belongs to the new epoch.
+    log.frame.set(1);
+    let mut update = update_with(&mut bridge, vec![sim(6, EventStatus::Predicted(flash(6)))]);
+    update.resync = Some(resync_note());
+    views.dispatch(&mut bridge, &update, &[]);
+    assert_eq!(*log.resyncs.borrow(), [1], "once");
+    assert_eq!(*active.borrow(), BTreeSet::from([6]), "the old effect is gone, the new one runs");
+    let calls = log.scene_calls.borrow().clone();
+    let at = calls.iter().position(|c| c == "scene:resync").unwrap();
+    assert_eq!(&calls[at..], ["scene:resync", "scene:event", "scene:update"]);
+
+    // The Canceled of the forgotten event has nothing to cancel, and the frames go on.
+    let update = update_with(&mut bridge, vec![sim(5, EventStatus::Canceled)]);
+    views.dispatch(&mut bridge, &update, &[]);
+    assert_eq!(*active.borrow(), BTreeSet::from([6]));
+    assert_eq!(updates.get(), 3);
+    assert_eq!(log.resyncs.borrow().len(), 1);
+}
+
+#[test]
+fn the_legacy_resync_event_tells_the_scene_views_too() {
+    let log = Rc::new(Log::default());
+    let mut views = Views::<Burst>::new();
+    views.scene_view(Recorder { name: "scene", log: log.clone() });
+    let session = PlaySession::<Burst>::new(PlayConfig::new(1, 42, 60), BurstConfig { players: 1, ttl: 100 });
+    let mut bridge = InProc::new(PlayHost::new(session, PlayerSlot(0)), BridgeConfig::default());
+    bridge.step(1);
+    let flash = BridgeEvent::Sim { key: EventKey::new(5, 0, 0), status: EventStatus::Predicted(Flash { owner: 0, tick: 5 }) };
+    let update = update_with(&mut bridge, vec![BridgeEvent::ViewResynced(resync_note()), flash]);
+    views.dispatch(&mut bridge, &update, &[]);
+    assert_eq!(*log.resyncs.borrow(), [0]);
+    let calls = log.scene_calls.borrow().clone();
+    assert_eq!(calls, ["scene:start", "scene:resync", "scene:event", "scene:update"]);
+}
+
+/// A bridge whose queue holds one notification: a tick with two events overflows it, and the
+/// recovery carries no session note, so `on_resync` is the only sign that something was lost.
+#[test]
+fn a_mailbox_overflow_of_sim_events_reaches_the_scene_views_as_a_resync() {
+    let log = Rc::new(Log::default());
+    let effects = Effects::default();
+    let updates = effects.updates.clone();
+    let mut views = Views::<Burst>::new();
+    views.scene_view(Recorder { name: "scene", log: log.clone() });
+    views.scene_view(effects);
+    let session = PlaySession::<Burst>::new(PlayConfig::new(2, 42, 60), BurstConfig { players: 2, ttl: 100 });
+    let host = PlayHost::new(session, PlayerSlot(0)).with_bot(|_, tick| Trigger { held: u32::from(tick >= 4), _pad: 0 });
+    let mut bridge = InProc::new(host, BridgeConfig::default().with_view_event_capacity(1));
+    let mut world = world();
+
+    // Quiet frames first: the opening note is taken in and nothing overflows.
+    for _ in 0..3 {
+        frame(&mut bridge, &mut world, &mut views, &log);
+    }
+    assert!(log.resyncs.borrow().is_empty());
+
+    // Both players hold the trigger: every tick has two flashes for a queue of one.
+    let mut overflows = 0;
+    for _ in 0..4 {
+        bridge.set_input(PlayerSlot(0), Trigger { held: 1, _pad: 0 }).unwrap();
+        bridge.update(ONE_TICK);
+        let update = bridge.poll_view();
+        if let Some(resync) = &update.resync {
+            assert!(resync.lifecycle.is_empty(), "the overflow was made of sim events only");
+            overflows += 1;
+        }
+        world.update_from_bridge(1.0 / 60.0, &update);
+        log.frame.set(log.frame.get() + 1);
+        views.dispatch(&mut bridge, &update, &[]);
+    }
+    assert!(overflows > 0, "the small mailbox must overflow");
+    assert_eq!(log.resyncs.borrow().len(), overflows, "one call per resync");
+    assert_eq!(updates.get(), 7, "every frame still updates the scene views");
 }
 
 #[test]

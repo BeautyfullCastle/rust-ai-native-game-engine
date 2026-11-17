@@ -46,6 +46,7 @@ impl SceneView<PhysGame> for EventCounter {
     fn on_update(&mut self, ctx: &mut ViewContext<'_, PhysGame>) { .. }
     fn on_event(&mut self, ctx: &mut ViewContext<'_, PhysGame>, event: &PhysEvent, state: EventState) { .. }
     fn on_session(&mut self, ctx: &mut ViewContext<'_, PhysGame>, note: Lifecycle) { .. }
+    fn on_resync(&mut self, ctx: &mut ViewContext<'_, PhysGame>) { .. }
 }
 ```
 
@@ -78,7 +79,7 @@ impl SceneView<PhysGame> for EventCounter {
 - **오프라인 세션은 `PlayHost` 위에 있다.** 롤백이 없고, 입력은 로컬 슬롯 하나다. 롤백이 나는 경우는 `LoopbackPair` 테스트로만 확인했다.
 - **시뮬레이션 크레이트는 건드리지 않았다.** 화면은 `Snapshot`을 읽고 `set_input`, `send_command`만 보낸다.
 - **이름은 가칭 그대로 쓴다.** `.scene`은 설계의 `.scene(path)`와 달리 `register` 인자를 받는다. 게임의 리플렉션 등록 함수를 타입으로 찾을 방법이 없기 때문이다.
-- **`ViewResync`가 오면** 예측 이벤트 기억을 비우고(이전 `Predicted`의 `Canceled`는 오지 않는다), 코얼레스된 세션 알림을 `on_session`으로 한 번씩 준다. 엔티티 뷰는 새 프레임과 비교해서 맞춘다.
+- **`ViewResync`가 오면** 예측 이벤트 기억을 비우고(이전 `Predicted`의 `Canceled`는 오지 않는다), 씬 뷰의 `on_resync`를 그 프레임의 이벤트보다 먼저 한 번 부른다. `Predicted`에서 시작한 효과는 거기서 멈추고 `ctx.predicted()`로 다시 만든다. 코얼레스된 세션 알림은 `on_session`으로 한 번씩 준다. 엔티티 뷰는 새 프레임과 비교해서 맞춘다.
 - **첫 스냅숏보다 먼저 온 이벤트는** 첫 스냅숏이 올 때까지 쌓아 두었다가 `on_start` 다음에 전달한다.
 
 ## 남은 것
