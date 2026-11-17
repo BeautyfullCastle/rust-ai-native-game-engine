@@ -290,7 +290,7 @@ sequenceDiagram
 
 | 단계 | 내용 | 끝났다는 기준 |
 |---|---|---|
-| 1 | `orr_app` 실행 함수, 기본 렌더러, 서버 없이 실행 | 2D 물리 데모 하나를 `orr_app` 위로 옮겨 같은 화면이 나온다 |
+| 1 (완료) | `orr_app` 실행 함수, 기본 렌더러, 서버 없이 실행 | 2D 물리 데모 하나를 `orr_app` 위로 옮겨 같은 화면이 나온다. 쓰는 법과 정한 것은 [crates/orr_app/README.md](../crates/orr_app/README.md), 예제는 `orr_app/examples/physics2d.rs`. 같은 틱의 그림이 기존 물리 샘플의 그리기 경로와 바이트까지 같다 |
 | 2 | 엔티티 뷰, 씬 뷰, 이벤트 상태, 예측·확정 프레임 접근 | 롤백이 나는 장면에서 `on_create`/`on_destroy`와 이벤트 취소가 맞게 불린다(테스트) |
 | 3 | `PlayerSlot` Pod·리플렉션, `PlayerLink`, 로컬 플레이어 여러 명 | 한 화면 2인 예제가 돈다 |
 | 4 | 플레이어 신호, `Players` 트레이트, 서버 `Presence` 연결 | 로컬 서버에 창 두 개가 접속하고, 한 창을 닫았다 다시 열면 `Disconnected` → `Reconnected` 순서로 신호가 온다 |

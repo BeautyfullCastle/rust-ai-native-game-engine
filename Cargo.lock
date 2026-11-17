@@ -3064,6 +3064,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "orr_app"
+version = "0.0.1"
+dependencies = [
+ "orr_bridge",
+ "orr_ecs",
+ "orr_games",
+ "orr_reflect",
+ "orr_render",
+ "orr_sample",
+ "orr_session",
+ "orr_sim",
+ "orr_view",
+ "png 0.18.1",
+ "winit",
+]
+
+[[package]]
 name = "orr_asset"
 version = "0.0.1"
 dependencies = [

@@ -1,0 +1,28 @@
+[package]
+name = "orr_app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Runs a Game in a window: fixed tick, input, bridge, interpolation, default 2D renderer, screenshots"
+
+[lints]
+workspace = true
+
+[dependencies]
+orr_bridge = { path = "../orr_bridge" }
+orr_view = { path = "../orr_view" }
+orr_render = { path = "../orr_render" }
+orr_session = { path = "../orr_session" }
+orr_sim = { path = "../orr_sim" }
+orr_ecs = { path = "../orr_ecs" }
+orr_reflect = { path = "../orr_reflect" }
+# Window (view layer only): winit 0.30 (raw-window-handle 0.6, same as wgpu 30).
+winit = "0.30"
+# Screenshot files.
+png = "0.18"
+
+[dev-dependencies]
+orr_games = { path = "../orr_games" }
+orr_sample = { path = "../orr_sample" }
