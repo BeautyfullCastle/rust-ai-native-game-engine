@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use orr_ecs::Frame;
 use orr_proto::{Link, RejectReason};
 use orr_session::{AdvanceResult, ClientEvent, ClientState, EventBatch, RelayClient, RollbackInfo};
-use orr_sim::{Game, PlayerSlot};
+use orr_sim::{Game, PlayerSlot, RawPlayerSignal};
 
 use crate::event::Lifecycle;
 use crate::host::SimHost;
@@ -356,6 +356,9 @@ impl<G: Game, L: Link> SimHost<G> for RelayHost<G, L> {
     }
     fn take_lifecycle(&mut self) -> Vec<Lifecycle> {
         std::mem::take(&mut self.lifecycle)
+    }
+    fn take_signal_notes(&mut self) -> EventBatch<RawPlayerSignal> {
+        self.client.take_signal_notes()
     }
 }
 
