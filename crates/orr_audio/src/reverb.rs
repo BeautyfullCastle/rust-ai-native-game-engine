@@ -2,7 +2,7 @@
 //! series allpass filters, with a stereo spread and an optional pre-delay) and
 //! zones that set, from the listener's position, how much of each spatial sound
 //! is sent into it. All buffers are allocated when the bus is created. The
-//! audio thread only reads smoothed parameters from atomics.
+//! audio thread only reads smoothed parameters and clear requests from atomics.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -141,10 +141,20 @@ pub(crate) struct Shared {
     room_size: AtomicU32,
     damping: AtomicU32,
     pre_delay: AtomicU32,
+    /// Counts the requests to silence the bus. The audio thread acts when it differs from its last seen value.
+    clears: AtomicU32,
+    /// Seconds over which the bus fades out before it is cleared.
+    clear_fade: AtomicU32,
 }
 impl Shared {
     pub(crate) fn new(params: ReverbParams) -> Arc<Self> {
-        let shared = Arc::new(Self { room_size: AtomicU32::new(0), damping: AtomicU32::new(0), pre_delay: AtomicU32::new(0) });
+        let shared = Arc::new(Self {
+            room_size: AtomicU32::new(0),
+            damping: AtomicU32::new(0),
+            pre_delay: AtomicU32::new(0),
+            clears: AtomicU32::new(0),
+            clear_fade: AtomicU32::new(0),
+        });
         shared.store(params);
         shared
     }
@@ -152,6 +162,12 @@ impl Shared {
         self.room_size.store(params.room_size.to_bits(), Ordering::Relaxed);
         self.damping.store(params.damping.to_bits(), Ordering::Relaxed);
         self.pre_delay.store(params.pre_delay.to_bits(), Ordering::Relaxed);
+    }
+    /// Asks the audio thread to fade the bus out over `fade` seconds, then empty every filter
+    /// buffer. The tail of the sounds that played before is gone. Sounds that start later are heard.
+    pub(crate) fn request_clear(&self, fade: f32) {
+        self.clear_fade.store(fade.max(0.0).to_bits(), Ordering::Relaxed);
+        self.clears.fetch_add(1, Ordering::Release);
     }
     fn load(&self) -> (f32, f32, f32) {
         let get = |a: &AtomicU32| f32::from_bits(a.load(Ordering::Relaxed));
@@ -198,6 +214,10 @@ impl Comb {
         }
         out
     }
+    fn clear(&mut self) {
+        self.buffer.fill(0.0);
+        self.store = 0.0;
+    }
 }
 
 struct Allpass {
@@ -216,6 +236,9 @@ impl Allpass {
             self.index = 0;
         }
         held - input
+    }
+    fn clear(&mut self) {
+        self.buffer.fill(0.0);
     }
 }
 
@@ -241,6 +264,10 @@ impl Channel {
         }
         out
     }
+    fn clear(&mut self) {
+        self.combs.iter_mut().for_each(Comb::clear);
+        self.allpasses.iter_mut().for_each(Allpass::clear);
+    }
 }
 
 /// The wet-only reverb effect of the send track.
@@ -254,6 +281,11 @@ struct Freeverb {
     feedback: f32,
     damping: f32,
     delay: f32,
+    /// The value of `Shared::clears` that was already handled.
+    seen_clears: u32,
+    /// Length of the fade-out in progress and the samples left of it. Zero left: no fade.
+    fade_total: usize,
+    fade_left: usize,
 }
 impl Freeverb {
     fn new(shared: Arc<Shared>) -> Self {
@@ -267,6 +299,9 @@ impl Freeverb {
             feedback: 0.0,
             damping: 0.0,
             delay: 0.0,
+            seen_clears: 0,
+            fade_total: 0,
+            fade_left: 0,
         }
     }
     /// Feedback, damping and pre-delay in samples that the shared parameters ask for.
@@ -293,6 +328,16 @@ impl Effect for Freeverb {
     }
     fn process(&mut self, input: &mut [Frame], _dt: f64, _info: &Info) {
         let (target_feedback, target_damping, target_delay) = self.targets();
+        let clears = self.shared.clears.load(Ordering::Acquire);
+        if clears != self.seen_clears {
+            self.seen_clears = clears;
+            // A request during a fade is covered by the fade.
+            if self.fade_left == 0 {
+                let fade = f32::from_bits(self.shared.clear_fade.load(Ordering::Relaxed));
+                self.fade_total = ((fade * self.sample_rate) as usize).max(1);
+                self.fade_left = self.fade_total;
+            }
+        }
         let Some([left, right]) = &mut self.channels else { return };
         let len = self.pre_buffer.len();
         for frame in input.iter_mut() {
@@ -308,10 +353,21 @@ impl Effect for Freeverb {
             let b = self.pre_buffer[(whole + 1) % len];
             let delayed = a + (b - a) * frac;
             self.pre_index = (self.pre_index + 1) % len;
-            *frame = Frame::new(
+            let mut wet = Frame::new(
                 left.process(delayed, self.feedback, self.damping) * WET_GAIN,
                 right.process(delayed, self.feedback, self.damping) * WET_GAIN,
             );
+            if self.fade_left > 0 {
+                let gain = self.fade_left as f32 / self.fade_total as f32;
+                wet = Frame::new(wet.left * gain, wet.right * gain);
+                self.fade_left -= 1;
+                if self.fade_left == 0 {
+                    left.clear();
+                    right.clear();
+                    self.pre_buffer.fill(0.0);
+                }
+            }
+            *frame = wet;
         }
     }
 }
