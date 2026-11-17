@@ -18,6 +18,9 @@ orr_session = { path = "../orr_session" }
 orr_sim = { path = "../orr_sim" }
 orr_ecs = { path = "../orr_ecs" }
 orr_reflect = { path = "../orr_reflect" }
+# `--host` and `--connect`: the relay server (without its binary's dependencies) and a socket link to it.
+orr_server = { path = "../orr_server", default-features = false }
+orr_relay_net = { path = "../orr_relay_net" }
 # Window (view layer only): winit 0.30 (raw-window-handle 0.6, same as wgpu 30).
 winit = "0.30"
 # Screenshot files.

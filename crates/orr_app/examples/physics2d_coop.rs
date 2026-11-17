@@ -1,6 +1,8 @@
 //! Two players on one screen: `cargo run -p orr_app --release --example physics2d_coop`.
 //! Player 1 (slot 0): W A S D move the paddle, Space shoots.
 //! Player 2 (slot 1): arrow keys move the paddle, Enter shoots. Escape quits.
+//! The same program also runs as two windows, one player each (W A S D and Space in both):
+//!   `... --example physics2d_coop -- --host`   and   `... --example physics2d_coop -- --connect 127.0.0.1:7777`
 #![allow(clippy::float_arithmetic)]
 use orr_app::{App, Entity, EntityView, EventState, FrameView, InterpMode, PlayerSlot, RawPlayerSignal, SceneView, ViewContext};
 use orr_app::{fp_to_f32, solid_quad, Camera, Extracted, Extractor, RenderItem, View2D};

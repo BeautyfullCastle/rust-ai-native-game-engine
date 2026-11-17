@@ -41,6 +41,7 @@
 //! | 10 | `Presence` (a slot got a player or lost it) | reliable |
 //! | 11 | `Bye` (code: see `BYE_*`) | reliable |
 //! | 12 | `Correction` (authoritative mode: server snapshot for a diverged client; v3) | reliable |
+//! | 13 | `SeatChange` (a returning player or an expired seat; v3) | reliable |
 //!
 //! # Versions
 //!
@@ -48,7 +49,12 @@
 //! relay-mode traffic is byte-identical to version 2 and old and new peers
 //! interoperate there. Version 3 adds the authoritative mode: `Welcome`
 //! with a trailing `flags` byte (only written when a flag is set) and
-//! `Correction`. A decoder accepts `MIN_PROTOCOL_VERSION..=PROTOCOL_VERSION`;
+//! `Correction`. It also adds `SeatChange` for the player signals: a slot's
+//! player came back (`SEAT_RECONNECTED`) or its reserved seat ran out
+//! (`SEAT_REMOVED`). `Presence` is unchanged: `present = true` for a slot
+//! that had no player is a new player (`Added`), `present = false` is a
+//! player that left while its seat is still reserved (`Disconnected`). A
+//! decoder accepts `MIN_PROTOCOL_VERSION..=PROTOCOL_VERSION`;
 //! a version-2 client cannot join an authoritative room (it fails to decode
 //! the version-3 `Welcome`).
 //!
@@ -73,6 +79,11 @@ pub const NO_SLOT: u8 = 0xFF;
 /// Slot number the server uses for itself in `Desync` reports and `.orrd`
 /// dumps (its own checksum, in authoritative mode).
 pub const SERVER_SLOT: u8 = 0xFF;
+
+/// `SeatChange::change`: the player of the slot came back with its token.
+pub const SEAT_RECONNECTED: u8 = 1;
+/// `SeatChange::change`: the reserved seat of the slot ran out; the slot is free.
+pub const SEAT_REMOVED: u8 = 2;
 
 /// `Welcome::flags`: the room is authoritative (the server simulates, judges
 /// checksums and sends `Correction`s).
@@ -342,6 +353,10 @@ pub enum ServerMsg {
     /// format as `JoinSnapshot`), `checksum` its checksum. The client
     /// restores it and goes on with the confirmed bundles after `tick`.
     Correction { from_tick: u64, tick: u64, checksum: u64, data: Vec<u8> },
+    /// A change of a slot that `Presence` cannot say: `change` is
+    /// `SEAT_RECONNECTED` or `SEAT_REMOVED`. It takes effect from `from_tick`,
+    /// like `Presence`.
+    SeatChange { slot: u8, change: u8, from_tick: u64 },
 }
 
 fn seal(mut w: Writer) -> Vec<u8> {
@@ -646,6 +661,13 @@ impl ServerMsg {
                 w.bytes(data);
                 seal(w)
             }
+            ServerMsg::SeatChange { slot, change, from_tick } => {
+                let mut w = start_v(13, V_AUTHORITATIVE);
+                w.u8(*slot);
+                w.u8(*change);
+                w.u64(*from_tick);
+                seal(w)
+            }
         }
     }
 
@@ -747,6 +769,13 @@ impl ServerMsg {
                 checksum: r.u64()?,
                 data: r.bytes(MAX_SNAPSHOT_LEN)?,
             },
+            13 if version >= V_AUTHORITATIVE => {
+                let (slot, change, from_tick) = (r.u8()?, r.u8()?, r.u64()?);
+                if change != SEAT_RECONNECTED && change != SEAT_REMOVED {
+                    return Err(ProtoError::Corrupt("unknown seat change"));
+                }
+                ServerMsg::SeatChange { slot, change, from_tick }
+            }
             k => return Err(ProtoError::UnknownKind(k)),
         };
         r.finish()?;
@@ -840,6 +869,8 @@ mod tests {
             ServerMsg::Presence { slot: 1, present: false, from_tick: 44 },
             ServerMsg::Bye { code: 2 },
             ServerMsg::Correction { from_tick: 60, tick: 91, checksum: 0xABCD, data: vec![7; 40] },
+            ServerMsg::SeatChange { slot: 2, change: SEAT_RECONNECTED, from_tick: 77 },
+            ServerMsg::SeatChange { slot: 0, change: SEAT_REMOVED, from_tick: 900 },
         ]
     }
 
@@ -854,7 +885,7 @@ mod tests {
         }
         for m in all_server() {
             let v = version_of(&m.encode());
-            let v3 = matches!(&m, ServerMsg::Correction { .. }) || matches!(&m, ServerMsg::Welcome(w) if w.flags != 0);
+            let v3 = matches!(&m, ServerMsg::Correction { .. } | ServerMsg::SeatChange { .. }) || matches!(&m, ServerMsg::Welcome(w) if w.flags != 0);
             assert_eq!(v, if v3 { 3 } else { 2 }, "{m:?}");
         }
     }
@@ -875,6 +906,25 @@ mod tests {
         let sum = xxhash_rust::xxh3::xxh3_64(&bytes[..n]);
         bytes[n..].copy_from_slice(&sum.to_le_bytes());
         assert_eq!(ServerMsg::decode(&bytes), Err(ProtoError::UnknownKind(12)));
+    }
+
+    #[test]
+    fn a_seat_change_needs_version_3_and_a_known_change() {
+        let m = ServerMsg::SeatChange { slot: 1, change: SEAT_REMOVED, from_tick: 5 };
+        let reseal = |bytes: &mut Vec<u8>| {
+            let n = bytes.len() - 8;
+            let sum = xxhash_rust::xxh3::xxh3_64(&bytes[..n]);
+            bytes[n..].copy_from_slice(&sum.to_le_bytes());
+        };
+        let mut bytes = m.encode();
+        bytes[4..8].copy_from_slice(&2u32.to_le_bytes());
+        reseal(&mut bytes);
+        assert_eq!(ServerMsg::decode(&bytes), Err(ProtoError::UnknownKind(13)));
+
+        let mut bytes = m.encode();
+        bytes[9 + 1] = 9; // kind at 8, slot at 9, change at 10
+        reseal(&mut bytes);
+        assert_eq!(ServerMsg::decode(&bytes), Err(ProtoError::Corrupt("unknown seat change")));
     }
 
     #[test]

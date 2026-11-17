@@ -110,6 +110,13 @@ pub struct RoomConfig {
     pub join_timeout_ticks: u32,
     /// A departed player's slot is kept for its token this many ticks.
     pub reserve_ticks: u32,
+    /// A player signal (`Disconnected`, `Reconnected`, `Removed`, or `Added`
+    /// after the start) takes effect this many ticks after the tick in which
+    /// the server announces it. The announcement travels on the reliable
+    /// channel and the confirmed bundles on the unreliable one, so a lost
+    /// packet could let a client verify the tick before the announcement
+    /// arrives. The lead gives the reliable channel time to resend.
+    pub signal_lead_ticks: u32,
     /// A running room with nobody in it for this many ticks is closed.
     pub idle_close_ticks: u32,
     /// Inputs for ticks further than this ahead of the clock are ignored.
@@ -140,6 +147,7 @@ impl RoomConfig {
             max_unreliable_payload: 1100,
             join_timeout_ticks: 300,
             reserve_ticks: 600,
+            signal_lead_ticks: 10,
             idle_close_ticks: 1800,
             max_ticks_ahead: 120,
             vacant_policy: VacantPolicy::RepeatLast,
@@ -232,6 +240,44 @@ enum Phase {
     Playing,
 }
 
+/// What the players of the room know about the seat of a slot (see
+/// `Room::announce_seat`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Seat {
+    /// No player was announced, or the seat was removed.
+    Empty,
+    /// A player is in the room and was announced.
+    Present,
+    /// The player left and the seat is reserved for its token.
+    Away,
+}
+
+/// A change of a seat, in the order the room announced it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SeatEvent {
+    Added,
+    Disconnected,
+    Reconnected,
+    Removed,
+}
+
+impl SeatEvent {
+    fn message(self, slot: u8, from_tick: u64) -> ServerMsg {
+        match self {
+            SeatEvent::Added => ServerMsg::Presence { slot, present: true, from_tick },
+            SeatEvent::Disconnected => ServerMsg::Presence { slot, present: false, from_tick },
+            SeatEvent::Reconnected => ServerMsg::SeatChange { slot, change: orr_proto::SEAT_RECONNECTED, from_tick },
+            SeatEvent::Removed => ServerMsg::SeatChange { slot, change: orr_proto::SEAT_REMOVED, from_tick },
+        }
+    }
+}
+
+struct SeatRec {
+    from_tick: u64,
+    slot: u8,
+    event: SeatEvent,
+}
+
 struct Player {
     conn: ConnId,
     token: u64,
@@ -272,6 +318,7 @@ struct Slot {
     /// `(token, until finalized tick)`: the slot is kept for a returning
     /// player.
     reserved: Option<(u64, u64)>,
+    seat: Seat,
     last_input: Vec<u8>,
     pending: BTreeMap<u64, (Vec<u8>, Vec<Vec<u8>>)>,
     /// Ticks whose input this slot already delivered (or that were judged).
@@ -310,6 +357,9 @@ pub(crate) struct Room {
     snapshots_relayed: u64,
     auth: Option<Auth>,
     pending_violations: Vec<(u64, Violation)>,
+    /// Every seat change announced, oldest first (pruned like `log`). A late
+    /// joiner gets the ones after its snapshot tick.
+    seat_log: Vec<SeatRec>,
 }
 
 struct AnchorRec {
@@ -364,6 +414,7 @@ impl Room {
                 player: None,
                 server_owned: false,
                 reserved: None,
+                seat: Seat::Empty,
                 last_input: cfg.default_input.clone(),
                 pending: BTreeMap::new(),
                 seen: BTreeSet::new(),
@@ -393,6 +444,7 @@ impl Room {
             snapshots_relayed: 0,
             auth: None,
             pending_violations: Vec::new(),
+            seat_log: Vec::new(),
         }
     }
 
@@ -537,7 +589,9 @@ impl Room {
         }
         let (slot, token, stale) = self.pick_slot(h, new_token)?;
         if stale.is_some() {
-            self.vacate(out, slot, false);
+            // The old connection is gone for the others too: they see
+            // `Disconnected` now and `Reconnected` when this join is done.
+            self.vacate(out, slot, true);
         }
         let phase = if self.running { Phase::AwaitSnapshot } else { Phase::Lobby };
         let s = &mut self.slots[slot as usize];
@@ -579,6 +633,7 @@ impl Room {
         let running = self.running;
         let finalized = self.finalized;
         let reserve = u64::from(self.cfg.reserve_ticks);
+        let lead = u64::from(self.cfg.signal_lead_ticks);
         let s = &mut self.slots[slot as usize];
         let Some(p) = s.player.take() else { return };
         s.reserved = if running { Some((p.token, finalized + reserve)) } else { None };
@@ -591,7 +646,7 @@ impl Room {
         if announce && was_playing {
             let from_tick = finalized + 1;
             out.notes.push(ServerNote::PlayerLeft { room: self.id, slot, from_tick });
-            self.broadcast(out, &ServerMsg::Presence { slot, present: false, from_tick });
+            self.announce_seat(out, slot, SeatEvent::Disconnected, from_tick + lead);
         }
         // A join that depended on this slot.
         if let Some(j) = &self.join {
@@ -621,6 +676,33 @@ impl Room {
         }
     }
 
+    /// Tells every player in the game that the seat of `slot` changes from
+    /// `from_tick` on, and keeps the change for late joiners. Every client
+    /// turns it into a player signal of that tick, so the order of the calls
+    /// is the order of the signals.
+    fn announce_seat<E: Endpoint>(&mut self, out: &mut Out<'_, E>, slot: u8, event: SeatEvent, from_tick: u64) {
+        self.slots[usize::from(slot)].seat = match event {
+            SeatEvent::Added | SeatEvent::Reconnected => Seat::Present,
+            SeatEvent::Disconnected => Seat::Away,
+            SeatEvent::Removed => Seat::Empty,
+        };
+        if self.auth.is_some() {
+            // The server sim of an authoritative room gets no player
+            // signals, so the clients must not apply any either. Only the
+            // old `Presence` messages go out (the clients need them to know
+            // when a late join is done).
+            let present = match event {
+                SeatEvent::Added | SeatEvent::Reconnected => true,
+                SeatEvent::Disconnected => false,
+                SeatEvent::Removed => return,
+            };
+            self.broadcast(out, &ServerMsg::Presence { slot, present, from_tick });
+            return;
+        }
+        self.seat_log.push(SeatRec { from_tick, slot, event });
+        self.broadcast(out, &event.message(slot, from_tick));
+    }
+
     // ---- start ----------------------------------------------------------
 
     pub fn ready<E: Endpoint>(&mut self, out: &mut Out<'_, E>, slot: u8) {
@@ -636,7 +718,8 @@ impl Room {
                 let from_tick = finalized + 1;
                 self.slots[slot as usize].win.reset(from_tick);
                 out.notes.push(ServerNote::PlayerJoined { room: self.id, slot, from_tick });
-                self.broadcast(out, &ServerMsg::Presence { slot, present: true, from_tick });
+                let event = if self.slots[slot as usize].seat == Seat::Empty { SeatEvent::Added } else { SeatEvent::Reconnected };
+                self.announce_seat(out, slot, event, from_tick + u64::from(self.cfg.signal_lead_ticks));
             }
             _ => {}
         }
@@ -666,6 +749,13 @@ impl Room {
                 let conn = p.conn;
                 out.send(conn, Channel::Reliable, &ServerMsg::Start { t0_us: t0, server_time_us: now });
                 out.notes.push(ServerNote::PlayerJoined { room: self.id, slot: i as u8, from_tick: 1 });
+            }
+        }
+        // Everybody who plays from the first tick is a new player of tick 1.
+        // (Authoritative rooms have no player signals, see `announce_seat`.)
+        for i in 0..self.slots.len() {
+            if self.auth.is_none() && self.slots[i].player.is_some() {
+                self.announce_seat(out, i as u8, SeatEvent::Added, 1);
             }
         }
     }
@@ -775,6 +865,7 @@ impl Room {
             any = true;
         }
         if any {
+            self.expire_seats(out);
             self.process_violations(out);
             self.send_confirmed(out);
             self.send_time_sync(out);
@@ -784,6 +875,20 @@ impl Room {
             if self.finalized.saturating_sub(j.started_tick) > u64::from(self.cfg.join_timeout_ticks) {
                 self.donor_failed(out);
                 self.pump_join(out);
+            }
+        }
+    }
+
+    /// Removes the seats whose reservation ran out (the slot is free for
+    /// other players from now on) and tells the players.
+    fn expire_seats<E: Endpoint>(&mut self, out: &mut Out<'_, E>) {
+        let finalized = self.finalized;
+        let lead = u64::from(self.cfg.signal_lead_ticks);
+        for i in 0..self.slots.len() {
+            let s = &mut self.slots[i];
+            if s.player.is_none() && s.seat == Seat::Away && s.reserved.is_some_and(|(_, until)| until <= finalized) {
+                s.reserved = None;
+                self.announce_seat(out, i as u8, SeatEvent::Removed, finalized + 1 + lead);
             }
         }
     }
@@ -887,6 +992,7 @@ impl Room {
         if self.join.is_none() {
             let floor = finalized.saturating_sub(u64::from(self.cfg.retain_ticks));
             self.log = self.log.split_off(&(floor + 1));
+            self.seat_log.retain(|r| r.from_tick > floor);
         }
     }
 
@@ -1116,6 +1222,11 @@ impl Room {
             return;
         };
         out.send(conn, Channel::Reliable, &ServerMsg::JoinSnapshot { tick, checksum, data });
+        // The snapshot holds the signals up to its tick. The later seat
+        // changes it does not know are sent again, in their order.
+        for rec in self.seat_log.iter().filter(|r| r.from_tick > tick) {
+            out.send(conn, Channel::Reliable, &rec.event.message(rec.slot, rec.from_tick));
+        }
         let input_size = self.cfg.input_size;
         let mut backlog = 0u32;
         let mut chunk: Vec<Bundle> = Vec::new();
@@ -1296,5 +1407,8 @@ impl Room {
         }
         self.vacate(out, slot, true);
         self.slots[usize::from(slot)].reserved = None;
+        if self.slots[usize::from(slot)].seat == Seat::Away {
+            self.announce_seat(out, slot, SeatEvent::Removed, self.finalized + 1 + u64::from(self.cfg.signal_lead_ticks));
+        }
     }
 }

@@ -1,6 +1,6 @@
 # orr_app
 
-`Game`을 창에 띄우는 실행 층이다. 설계는 [docs/view-framework.md](../../docs/view-framework.md) 4장이고, 이 크레이트는 12장의 1단계(서버 없이 실행, 기본 2D 렌더러), 2단계(엔티티 뷰, 씬 뷰, 이벤트 상태), 3단계(한 화면 여러 명)까지 만들었다.
+`Game`을 창에 띄우는 실행 층이다. 설계는 [docs/view-framework.md](../../docs/view-framework.md) 4장이고, 이 크레이트는 12장의 1단계(서버 없이 실행, 기본 2D 렌더러), 2단계(엔티티 뷰, 씬 뷰, 이벤트 상태), 3단계(한 화면 여러 명), 4단계(플레이어 신호, 릴레이 서버로 실행)까지 만들었다.
 
 ## 쓰는 법
 
@@ -105,9 +105,48 @@ impl Players for MyGame {
 - **서버 없이 실행하면** `App`이 첫 틱(틱 1)에 모든 슬롯(`players`와 `local_players` 중 큰 수)에 `Added`를 넣는다(`PlayHost::with_announced_players`). 데이터는 기본값이다. 그 신호는 기록에 들어가므로 리플레이를 다시 돌려도 같은 월드가 된다. 틱 1 한 번뿐이다. 되감기(`seek`)는 기록된 신호를 다시 적용하지만 뷰에 알림은 다시 보내지 않는다.
 - **씬 뷰의 `on_player`.** 신호는 이벤트와 같은 세 상태(`Predicted`, `Verified`, `Canceled`)로 온다. 브리지가 새 `BridgeEvent::Player { key, status }`로 전달하고, 키는 `(틱, 슬롯, 그 슬롯의 순번)`이다(`orr_sim::signal_key`). 롤백 재계산에서도 같다. 한 틱의 신호는 그 틱의 게임 이벤트보다 먼저 온다. 오프라인에서는 예측이 없어서 모두 바로 `Verified`다. `Canceled`에는 `Predicted` 때의 신호가 그대로 온다. `ViewResync`가 오면 기억을 비운다. 신호는 이미 프레임에 적용돼 있으므로 `Predicted` 때 `ctx.predicted()`에 아바타가 있다.
 - **왜 게임 이벤트가 아니라 브리지 이벤트인가.** 게임이 `on_player`에서 이벤트를 다시 내보내게 하면 게임마다 이벤트 타입을 정해야 하고 `Players`가 `SimContext`에 묶인다. 신호는 입력이라서 세션이 이미 틱 기록을 가지고 있다. 세션이 그 기록에서 `Predicted`/`Verified`/`Canceled`를 직접 만드는 쪽이 이벤트 조정(`diff_events`)과 똑같이 동작하고 게임 코드가 필요 없다.
-- **세션 쪽.** `Session::schedule_signal(tick, signal)`이 신호를 틱 입력에 넣는다. 이미 예측으로 지난 틱이면 다음 `step`/`poll_confirmed`가 그 틱으로 롤백해서 다시 계산한다. 검증이 끝난 틱은 `SignalError`다. 모든 피어가 같은 신호를 같은 틱에 넣어야 한다(릴레이 `Presence`의 `from_tick`이 그 틱이다. 서버 연결은 4b단계). `PlaySession::push_signal`은 다음 틱에 넣고 기록한다. 리플레이 파일은 신호가 있을 때만 형식 4(신호 표가 끝에 붙는다)로 쓰고, 없으면 지금까지처럼 3이다.
+- **세션 쪽.** `Session::schedule_signal(tick, signal)`이 신호를 틱 입력에 넣는다. 이미 예측으로 지난 틱이면 다음 `step`/`poll_confirmed`가 그 틱으로 롤백해서 다시 계산한다. 검증이 끝난 틱은 `SignalError`다. 모든 피어가 같은 신호를 같은 틱에 넣어야 한다(릴레이 서버가 보내는 `from_tick`이 그 틱이다. 아래 "서버로 실행"). `PlaySession::push_signal`은 다음 틱에 넣고 기록한다. 리플레이 파일은 신호가 있을 때만 형식 4(신호 표가 끝에 붙는다)로 쓰고, 없으면 지금까지처럼 3이다.
 - **예제:** `examples/physics2d_coop.rs`의 `Roll`이 신호를 출력한다. `PhysGame`은 패들을 `setup`에서 만들고, 이것을 신호로 바꾸면 골든 체크섬이 바뀌어서 `Players`를 쓰지 않았다. 신호로 아바타를 만드는 게임은 `orr_testgame::roster::Roster`다(테스트 전용 게임).
-- **테스트:** `orr_testgame/tests/roster.rs`(시뮬레이션), `orr_session/tests/player_signals.rs`(리플레이, 되감기, 가지치기, 오프라인 알림, 롤백 후 같은 체크섬, 알림 상태), `orr_bridge/tests/player_signals.rs`, `orr_app/tests/player_signals.rs`(씬 뷰).
+- **테스트:** `orr_testgame/tests/roster.rs`(시뮬레이션), `orr_session/tests/player_signals.rs`(리플레이, 되감기, 가지치기, 오프라인 알림, 롤백 후 같은 체크섬, 알림 상태), `orr_bridge/tests/player_signals.rs`, `orr_app/tests/player_signals.rs`(씬 뷰), `orr_server/tests/player_signals.rs`(서버와 클라이언트 두 명: 재접속, 보관 만료, 중간 입장, 손실이 있는 네트워크), `orr_app/src/net.rs`의 테스트(진짜 소켓의 창 두 개).
+
+## 서버로 실행 (4b단계)
+
+같은 `App` 코드가 세 가지 방식으로 돈다. 명령줄 인자만 다르다. 기본은 서버 없이 실행이다.
+
+```text
+roster                                   서버 없이 (한 화면 여러 명은 .local_players(n))
+roster --host [포트 | 주소:포트]          릴레이 서버를 이 프로세스에서 띄우고, 이 창도 거기에 접속한다 (기본 127.0.0.1:7777)
+roster --connect 127.0.0.1:7777          그 서버에 접속하는 다른 창 (--slot n --token t: 닫았던 창이 자리를 되찾는다)
+```
+
+- **창 하나가 플레이어 한 명이다.** 서버는 `.players(n)`과 `.local_players(n)` 중 큰 수만큼 자리를 만들고, 자리가 다 차면 게임을 시작한다(그 전에는 창이 열리지 않는다). `--host` 창이 0번 슬롯이고, `--connect` 창은 빈 슬롯을 받는다. 접속하면 `playing as slot 1 of 2 ... --slot 1 --token ...` 줄을 출력한다. 창을 닫았다가 그 인자로 다시 열면 같은 슬롯을 되찾고, 다른 창은 `Disconnected` → `Reconnected`를 본다.
+- **입력 함수의 `slot`.** 접속한 창에서 `.input(|keys, slot| ..)`의 `slot`은 서버가 준 슬롯이 아니라 이 창의 로컬 번호(0)다. 그래서 창마다 WASD가 먹는다. 뷰의 `ctx.is_local(slot)`과 `local_players()`는 서버가 준 실제 슬롯을 쓴다.
+- **전송.** `ws://` WebSocket이다(인증서가 필요 없다). 같은 PC와 LAN용이다. 다른 PC가 접속하려면 `--host 0.0.0.0:7777`로 띄운다. 인터넷 서버는 `orr_server` 바이너리와 인증서를 쓴다. 두 쪽은 게임 타입 이름에서 만든 빌드 번호가 같아야 접속된다(`net::build_id`).
+- **봇과 씬 파일.** 서버로 실행하면 `.bot(..)`은 쓰지 않는다(다른 슬롯은 사람 창이다). `.scene(..)`은 아직 안 된다(오류로 알려 준다). `G::Config`는 `Send`다(`Game`이 이미 요구한다).
+- **`--ticks`, `--screenshot`.** 서버 시계를 따라가므로 시뮬레이션을 그 틱까지 돌리지 못하고, 그 틱에 닿을 때까지 기다린 뒤 프레임을 센다. 그림은 두 창이 같은 틱에서 찍히지 않을 수 있다.
+- **예제.** `examples/roster.rs`(신호로 아바타가 생기고, 자리를 비우면 흐려진다), `examples/physics2d_coop.rs`(같은 코드가 한 화면 2인과 창 두 개 모두 된다).
+
+```text
+cargo run -p orr_app --release --example roster -- --host
+cargo run -p orr_app --release --example roster -- --connect 127.0.0.1:7777
+```
+
+### 서버가 보내는 신호
+
+서버(`orr_server`)는 자리가 바뀔 때마다 모든 플레이어에게 알리고, 클라이언트는 그것을 `from_tick`의 신호로 `Session::schedule_signal`에 넣는다. 그래서 모든 창이 같은 틱에 같은 신호를 받는다.
+
+| 일 | 메시지 | 신호 |
+|---|---|---|
+| 게임 시작 | 자리마다 `Presence { present: true, from_tick: 1 }` | `Added` (틱 1) |
+| 중간 입장(새 슬롯) | `Presence { present: true }` | `Added` |
+| 연결 끊김, 자리는 보관 중 | `Presence { present: false }` | `Disconnected` |
+| 같은 토큰으로 돌아옴 | `SeatChange { RECONNECTED }` (프로토콜 v3 새 메시지, 종류 13) | `Reconnected` |
+| 보관 시간(`reserve_ticks`) 끝 또는 강퇴 | `SeatChange { REMOVED }` | `Removed` |
+
+- **`from_tick`은 알린 틱보다 `signal_lead_ticks`(기본 10) 뒤다.** 알림은 신뢰 채널로, 확정 묶음은 비신뢰 채널로 간다. 패킷을 잃으면 클라이언트가 묶음을 먼저 받아 그 틱을 검증해 버릴 수 있다. 여유를 두면 신뢰 채널이 다시 보낼 시간이 있다. 시작 때의 `Added`(틱 1)에는 여유가 없다.
+- **중간 입장.** 서버는 지난 자리 변경을 `retain_ticks`만큼 기억한다. 스냅숏을 받는 창에게는 스냅숏 틱보다 뒤의 변경만 다시 보낸다. 스냅숏에 이미 들어 있는 신호는 오지 않는다. 클라이언트는 세션이 만들어질 때까지 받은 신호를 쌓아 둔다.
+- **하위 호환.** `Presence`는 그대로다. 새 메시지 `SeatChange`는 프로토콜 버전 3이고 `Reconnected`와 `Removed`일 때만 나간다. 버전 2 클라이언트는 그 메시지를 알 수 없는 종류로 버린다(접속은 계속된다).
+- **권한 있는 서버 방(authoritative).** 서버 시뮬레이션이 신호를 받지 못하므로 신호를 보내지 않는다. 클라이언트도 적용하지 않는다. 옛 `Presence`만 간다.
 
 ## 명령줄
 
@@ -117,16 +156,20 @@ impl Players for MyGame {
 --ticks <n>         시뮬레이션을 n틱까지 돌리고 거기서 멈춘다
 --size <WxH>        창 크기이자 그림 크기 (기본 900x900)
 --no-vsync          화면 주사율을 기다리지 않는다
+--host [포트|주소]  릴레이 서버를 이 프로세스에서 띄우고 접속한다 (기본 127.0.0.1:7777)
+--connect <주소>    릴레이 서버에 접속한다 (host:port)
+--slot <n>          --connect와 함께: 이 슬롯을 요청한다
+--token <n>         --connect와 함께: 창이 출력한 토큰으로 자리를 되찾는다
 --help
 ```
 
-- `--ticks`가 있으면 시계를 쓰지 않는다. 프레임마다 시뮬레이션은 최대 240틱씩 돌고, 화면은 프레임당 정확히 1틱 시간만큼 보간한다. 그래서 기계 속도와 관계없이 같은 그림이 나온다.
+- `--ticks`가 있으면 시계를 쓰지 않는다. 프레임마다 시뮬레이션은 최대 240틱씩 돌고, 화면은 프레임당 정확히 1틱 시간만큼 보간한다. 그래서 기계 속도와 관계없이 같은 그림이 나온다(서버로 실행할 때는 위).
 - 그림은 창과 따로 `--size` 크기의 화면 밖 텍스처에 다시 그려서 읽는다. 창 크기나 화면 배율에 영향을 받지 않는다.
 - Esc 또는 창 닫기로 끝낸다.
 
 ## 지금 정한 것
 
-- **브리지는 `InProc`이다.** 시뮬레이션이 그리기와 같은 스레드에서 돌아서 `--ticks`가 정확하고, `G::Config`에 `Send`를 요구하지 않는다. 물리 샘플의 `physics` 바이너리는 기본이 `Threaded`다. `App::threaded()`는 만들지 않았다. 오프라인 세션의 `PlayHost`가 `Send`가 아닌 봇 클로저를 들고 있고, `Threaded::spawn`은 호스트를 다른 스레드에서 만들어야 하기 때문이다. `Views::dispatch`는 `&mut dyn Bridge<G>`를 받으므로 `Threaded`에도 그대로 쓸 수 있다.
+- **서버 없이 실행하는 브리지는 `InProc`이다.** 서버로 실행하면 `Threaded` 위의 릴레이 클라이언트다(`net.rs`, 내부 `Driver`가 둘을 한 `Bridge`로 묶는다). `InProc`은 시뮬레이션이 그리기와 같은 스레드에서 돌아서 `--ticks`가 정확하고, `G::Config`에 `Send`를 요구하지 않는다. 물리 샘플의 `physics` 바이너리는 기본이 `Threaded`다. `App::threaded()`는 만들지 않았다. 오프라인 세션의 `PlayHost`가 `Send`가 아닌 봇 클로저를 들고 있고, `Threaded::spawn`은 호스트를 다른 스레드에서 만들어야 하기 때문이다. `Views::dispatch`는 `&mut dyn Bridge<G>`를 받으므로 `Threaded`에도 그대로 쓸 수 있다.
 - **오프라인 세션은 `PlayHost` 위에 있다.** 롤백이 없고, 입력은 로컬 슬롯 `0..n`이다(`PlayHost::with_extra_local_slots`). 롤백이 나는 경우는 `LoopbackPair` 테스트로만 확인했다.
 - **시뮬레이션 규칙은 건드리지 않았다.** 화면은 `Snapshot`을 읽고 `set_input`, `send_command`만 보낸다. 3단계에서 `orr_sim`에 `PlayerSlot`의 `Pod`·리플렉션과 `PlayerLink`를 더했고 골든 체크섬은 그대로다.
 - **이름은 가칭 그대로 쓴다.** `.scene`은 설계의 `.scene(path)`와 달리 `register` 인자를 받는다. 게임의 리플렉션 등록 함수를 타입으로 찾을 방법이 없기 때문이다.
@@ -137,5 +180,5 @@ impl Players for MyGame {
 
 - **2단계에서 뺀 것:** `ViewContext::query`(`FrameView::iter::<T>()`, `dense::<T>()`가 이미 있어서 조합 질의는 `orr_ecs` 쪽 일이다), `ViewContext::draw()`(기본 2D 그리기가 `Extractor` 항목과 `backdrop`만 받아서 선·글자를 더하려면 그리기 경로를 넓혀야 한다), `App::threaded()`(위). `SceneView::on_player`는 4a단계에서 더했다.
 - **3단계에서 뺀 것:** 패드 입력(키보드만), 서버 쪽 여러 슬롯 클라이언트(릴레이·네트워크는 슬롯 하나), `Threaded`를 쓰는 `App` 경로(위), 여러 슬롯의 `Step` 입력 캡처(`Threaded::try_step`은 첫 슬롯만 고정한다).
-- **4a단계에서 뺀 것(4b):** 릴레이 서버의 `Presence`를 `Session::schedule_signal(from_tick, ..)`로 잇기(`orr_server`, 릴레이 클라이언트), `--host`/`--connect`, 재접속 테스트(창을 닫았다 다시 열면 `Disconnected` → `Reconnected`), 원격 뷰 스트림(`orr_viewstream`)은 신호를 아직 내보내지 않는다. 신호를 취소하는 API가 없어서 `Canceled`는 합성 업데이트 테스트로만 확인했다.
-- **이후 단계:** 3D 렌더러(`SceneLook`), 서버 연결, 웹·모바일 루프.
+- **4b단계에서 뺀 것:** 플레이어별 시작 데이터(`Added`의 `data`는 서버로 실행해도 비어 있다. `Hello`에 시작 데이터가 없다. 8.3), 서버 쪽 신호 기록은 방이 사는 동안만 있다(서버를 다시 띄우면 사라진다), 시작 때의 `Added`(틱 1)는 `signal_lead_ticks` 여유가 없다, 권한 있는 서버 방은 신호가 없다, `.scene(..)`과 `.bot(..)`은 서버로 실행할 때 쓰지 않는다, `ws://`만 지원한다(QUIC·인증서 옵션 없음), 원격 뷰 스트림(`orr_viewstream`)은 신호를 아직 내보내지 않는다. 신호를 취소하는 API가 없어서 `Canceled`는 합성 업데이트 테스트로만 확인했다.
+- **이후 단계:** 3D 렌더러(`SceneLook`), 웹·모바일 루프.

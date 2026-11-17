@@ -31,16 +31,26 @@ pub(crate) struct Pacer {
     target: Option<u64>,
     shot_frames: Option<u32>,
     settled_frames: u32,
+    /// A relay client: the server's clock sets the ticks, so a target tick can only be waited for.
+    follow_clock: bool,
 }
 
 impl Pacer {
     pub fn new(args: &Args) -> Self {
-        Self { target: args.ticks, shot_frames: args.screenshot.as_ref().map(|_| args.frames), settled_frames: 0 }
+        Self { target: args.ticks, shot_frames: args.screenshot.as_ref().map(|_| args.frames), settled_frames: 0, follow_clock: false }
+    }
+
+    /// For a run on a relay server: ticks always follow the clock. `--ticks` and
+    /// `--screenshot` then wait until the sim reaches the tick, instead of running it there.
+    pub fn following_clock(mut self) -> Self {
+        self.follow_clock = true;
+        self
     }
 
     pub fn advance(&self, head_tick: u64) -> Advance {
         match self.target {
             None => Advance::Realtime,
+            Some(_) if self.follow_clock => Advance::Realtime,
             Some(target) if head_tick < target => Advance::Steps((target - head_tick).min(MAX_STEPS_PER_FRAME) as u32),
             Some(_) => Advance::Frozen,
         }
@@ -50,8 +60,8 @@ impl Pacer {
     /// tick per frame, so a picture does not depend on the speed of the machine.
     pub fn view_dt(&self, real_secs: f32, tick_rate: u32) -> f32 {
         match self.target {
-            Some(_) => 1.0 / tick_rate.max(1) as f32,
-            None => real_secs.clamp(0.0, MAX_VIEW_DT),
+            Some(_) if !self.follow_clock => 1.0 / tick_rate.max(1) as f32,
+            _ => real_secs.clamp(0.0, MAX_VIEW_DT),
         }
     }
 
@@ -93,6 +103,16 @@ mod tests {
         assert_eq!(p.advance(240), Advance::Steps(240));
         assert_eq!(p.advance(480), Advance::Steps(20));
         assert_eq!(p.advance(500), Advance::Frozen);
+    }
+
+    #[test]
+    fn on_a_server_a_target_tick_is_waited_for_not_run() {
+        let mut p = pacer("--ticks 100 --screenshot a.png --frames 1").following_clock();
+        assert_eq!(p.advance(0), Advance::Realtime);
+        assert_eq!(p.advance(100), Advance::Realtime);
+        assert_eq!(p.view_dt(0.02, 60), 0.02);
+        assert_eq!(p.frame_done(99), Outcome::Continue);
+        assert_eq!(p.frame_done(100), Outcome::Capture);
     }
 
     #[test]

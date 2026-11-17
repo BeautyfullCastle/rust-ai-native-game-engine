@@ -193,7 +193,11 @@ fn a_corrupted_client_is_detected_and_dumps_are_written() {
     // the notice follows within about one round trip of it.
     assert_eq!(desync.0, 120);
     assert!(desync.1 <= 120 + 30, "found only at server tick {}", desync.1);
-    assert_eq!(desync.2.len(), 2, "two checksums differ from the third: {:?}", desync.2);
+    // The notice comes with the reports that had arrived (two or all three,
+    // by network timing): they hold the healthy checksum and the wrong one.
+    assert!((2..=3).contains(&desync.2.len()), "{:?}", desync.2);
+    let distinct: std::collections::BTreeSet<u64> = desync.2.iter().map(|r| r.1).collect();
+    assert_eq!(distinct.len(), 2, "one checksum differs from the others: {:?}", desync.2);
 
     let mut healthy_local = None;
     for i in 0..3 {

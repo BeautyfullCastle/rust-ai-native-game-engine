@@ -32,7 +32,7 @@ use orr_proto::{
     Bundle, Channel, ClientMsg, Hello, InputEntry, Link, LinkEvent, RejectReason, ServerMsg, TimeSync, Welcome,
     FLAG_ABSENT, FLAG_REPEATED, NO_SLOT,
 };
-use orr_sim::{Game, PlayerSlot, SimCommand};
+use orr_sim::{Game, PlayerSlot, RawPlayerSignal, SimCommand};
 
 use crate::dump::DesyncDump;
 use crate::events::EventBatch;
@@ -416,6 +416,9 @@ pub enum ClientEvent {
     /// A late join finished loading the snapshot.
     SnapshotLoaded { tick: u64 },
     Presence { slot: u8, present: bool, from_tick: u64 },
+    /// A seat change of the server (`orr_proto::SEAT_RECONNECTED` or
+    /// `SEAT_REMOVED`).
+    SeatChange { slot: u8, change: u8, from_tick: u64 },
     /// The server found different checksums at `tick`; a dump was written.
     Desync { tick: u64, dump_name: String },
     DelayChanged { delay: u32 },
@@ -455,6 +458,9 @@ pub struct ClientStats {
     pub corrections: u64,
     /// Corrections ignored because the bundle log could not cover them.
     pub corrections_ignored: u64,
+    /// Player signals that came for a tick the session had already verified
+    /// (it could not apply them; the checksums will show the difference).
+    pub signals_late: u64,
 }
 
 /// What one [`RelayClient::update`] produced.
@@ -496,6 +502,9 @@ pub struct RelayClient<G: Game, L: Link> {
     /// Event batches a correction produced, for the next `update`.
     correction_events: Vec<EventBatch<G::Event>>,
     kicked: Option<u8>,
+    /// Signals the server announced before the session existed (a late joiner
+    /// gets them with its snapshot), in the order received.
+    pending_signals: Vec<(u64, RawPlayerSignal)>,
 
     now_us: u64,
     offset_us: i64,
@@ -548,6 +557,7 @@ impl<G: Game, L: Link> RelayClient<G, L> {
             pending_snapshot: None,
             correction_events: Vec::new(),
             kicked: None,
+            pending_signals: Vec::new(),
             now_us: 0,
             offset_us: 0,
             samples: VecDeque::new(),
@@ -757,12 +767,26 @@ impl<G: Game, L: Link> RelayClient<G, L> {
             }
             ServerMsg::Presence { slot, present, from_tick } => {
                 self.events.push(ClientEvent::Presence { slot, present, from_tick });
-                let mine = self.welcome.as_ref().map(|w| w.slot);
-                if present && Some(slot) == mine && self.state == ClientState::CatchingUp {
-                    self.state = ClientState::Playing;
-                    self.submitting = true;
-                    self.next_submit = self.send_clock / MICRO + 1;
-                    self.events.push(ClientEvent::Started);
+                let signal = if present {
+                    RawPlayerSignal::added(PlayerSlot(slot))
+                } else {
+                    RawPlayerSignal::disconnected(PlayerSlot(slot))
+                };
+                self.queue_signal(from_tick, signal);
+                if present {
+                    self.on_own_seat(slot);
+                }
+            }
+            ServerMsg::SeatChange { slot, change, from_tick } => {
+                self.events.push(ClientEvent::SeatChange { slot, change, from_tick });
+                let signal = if change == orr_proto::SEAT_REMOVED {
+                    RawPlayerSignal::removed(PlayerSlot(slot))
+                } else {
+                    RawPlayerSignal::reconnected(PlayerSlot(slot))
+                };
+                self.queue_signal(from_tick, signal);
+                if change == orr_proto::SEAT_RECONNECTED {
+                    self.on_own_seat(slot);
                 }
             }
             ServerMsg::Correction { from_tick, tick, checksum, data } => {
@@ -779,6 +803,47 @@ impl<G: Game, L: Link> RelayClient<G, L> {
             }
             ServerMsg::Confirmed { .. } => {}
         }
+    }
+
+    /// A signal of the server for `tick`: the session applies it at that tick
+    /// like part of the tick's input. Every client gets the same messages, so
+    /// every session has the same signals. Before the session exists the
+    /// signal waits. Authoritative rooms have none.
+    fn queue_signal(&mut self, tick: u64, signal: RawPlayerSignal) {
+        // The server sim of an authoritative room does not get signals, so
+        // neither may the clients.
+        if self.welcome.as_ref().is_some_and(Welcome::authoritative) {
+            return;
+        }
+        match self.session.as_mut() {
+            Some(session) => {
+                if session.schedule_signal(tick, signal).is_err() {
+                    self.stats.signals_late += 1;
+                }
+            }
+            None => self.pending_signals.push((tick, signal)),
+        }
+    }
+
+    /// The server put this client's own slot into the game: a late join is
+    /// over. Messages about the slot from before that (the signals the
+    /// server sends again after a snapshot) do not count, so the client has
+    /// to have sent `Ready` first.
+    fn on_own_seat(&mut self, slot: u8) {
+        let mine = self.welcome.as_ref().map(|w| w.slot);
+        if Some(slot) == mine && self.state == ClientState::CatchingUp && self.sent_ready {
+            self.state = ClientState::Playing;
+            self.submitting = true;
+            self.next_submit = self.send_clock / MICRO + 1;
+            self.events.push(ClientEvent::Started);
+        }
+    }
+
+    /// Takes the notes of the player signals the session simulated or
+    /// verified since the last call (see `Session::take_signal_notes`).
+    /// Empty while there is no session.
+    pub fn take_signal_notes(&mut self) -> EventBatch<RawPlayerSignal> {
+        self.session.as_mut().map_or_else(EventBatch::empty, Session::take_signal_notes)
     }
 
     fn fail(&mut self, why: String) {
@@ -964,6 +1029,9 @@ impl<G: Game, L: Link> RelayClient<G, L> {
                     }
                 }
             }
+        }
+        for (tick, signal) in std::mem::take(&mut self.pending_signals) {
+            self.queue_signal(tick, signal);
         }
     }
 
