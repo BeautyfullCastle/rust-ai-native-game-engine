@@ -361,6 +361,28 @@ fn an_index_that_comes_back_with_a_new_version_is_a_new_entity() {
     assert_ne!(first.version, second.version, "with a new version");
 }
 
+/// The runner drains the view world's lifecycle queue after each update. A game that spawns
+/// and despawns an entity every tick keeps that queue at a constant size only if it is drained.
+#[test]
+fn the_view_world_lifecycle_queue_stays_bounded_when_drained_every_frame() {
+    const FRAMES: usize = 300;
+    let session = PlaySession::<Burst>::new(PlayConfig::new(1, 42, 60), BurstConfig { players: 1, ttl: 1 });
+    let mut bridge = InProc::new(PlayHost::new(session, PlayerSlot(0)), BridgeConfig::default());
+    let (mut drained, mut kept) = (world(), world());
+    let mut largest = 0;
+    for _ in 0..FRAMES {
+        bridge.set_input(PlayerSlot(0), Trigger { held: 1, _pad: 0 }).unwrap();
+        bridge.update(ONE_TICK);
+        let update = bridge.poll_view();
+        drained.update_from_bridge(1.0 / 60.0, &update);
+        largest = largest.max(drained.take_lifecycle().len());
+        kept.update_from_bridge(1.0 / 60.0, &update);
+    }
+    assert!(largest <= 2, "one spawn and one despawn per frame at most, got {largest}");
+    assert!(drained.take_lifecycle().is_empty());
+    assert!(kept.take_lifecycle().len() > FRAMES, "without a drain the queue grows with the run time");
+}
+
 #[test]
 fn scene_views_start_once_and_are_called_in_the_order_they_were_added() {
     let log = Rc::new(Log::default());

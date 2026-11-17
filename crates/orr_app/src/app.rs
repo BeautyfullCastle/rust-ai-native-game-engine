@@ -312,6 +312,8 @@ impl<G: Game> Runner<G> {
             }
         }
         self.world.update_from_bridge(self.pacer.view_dt(real.as_secs_f32(), self.bridge.tick_rate()), &update);
+        // The entity views diff the poses themselves, so nobody reads this queue: drop it every frame.
+        drop(self.world.take_lifecycle());
 
         if !self.views.is_empty() {
             self.poses.clear();
