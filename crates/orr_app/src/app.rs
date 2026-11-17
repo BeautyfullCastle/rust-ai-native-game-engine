@@ -46,7 +46,7 @@ impl From<String> for Error {
     }
 }
 
-/// The only local player of an offline run.
+/// The first local player of an offline run (the others follow: slots `0..local_players`).
 const LOCAL_SLOT: PlayerSlot = PlayerSlot(0);
 const DEFAULT_TICK_RATE: u32 = 60;
 const DEFAULT_SEED: u64 = 42;
@@ -60,11 +60,18 @@ struct SceneSource {
     register: fn(&mut TypeRegistry),
 }
 
-/// Runs game `G` in a window, offline: one local player, no server.
+/// Runs game `G` in a window, offline: one or more local players on one screen, no server.
 ///
 /// ```text
 /// App::<MyGame>::new()
 ///     .input(|keys, _slot| MyInput::from(keys))
+///     .view(MyLook)
+///     .run()
+///
+/// // Two players on one keyboard (slot 0: WASD, slot 1: arrows):
+/// App::<MyGame>::new()
+///     .local_players(2)
+///     .input(|keys, slot| MyInput::from(keys.stick_for_slot(slot)))
 ///     .view(MyLook)
 ///     .run()
 /// ```
@@ -73,6 +80,7 @@ pub struct App<G: Game> {
     scene: Option<SceneSource>,
     tick_rate: u32,
     players: u8,
+    local_players: u8,
     seed: u64,
     title: String,
     input: Option<InputFn<G>>,
@@ -108,6 +116,7 @@ impl<G: Game> App<G> {
             scene: None,
             tick_rate: DEFAULT_TICK_RATE,
             players: 1,
+            local_players: 1,
             seed: DEFAULT_SEED,
             title: "Orrery".to_string(),
             input: None,
@@ -130,10 +139,22 @@ impl<G: Game> App<G> {
         self
     }
 
-    /// Players in the simulation (default 1). The local player is slot 0;
-    /// the others get default input unless [`App::bot`] drives them.
+    /// Players in the simulation (default 1). Slots `0..local_players` are local
+    /// (see [`App::local_players`]); the others get default input unless [`App::bot`] drives them.
     pub fn players(mut self, count: u8) -> Self {
         self.players = count.max(1);
+        self
+    }
+
+    /// How many players share this screen (default 1): slots `0..n` are local and
+    /// every frame the [`App::input`] function is called for each of them. Slots
+    /// from `n` up to [`App::players`] are not local; the bot drives them. The
+    /// simulation has at least `n` players, so `local_players(2)` alone makes a
+    /// two-player game. A count of 0 is read as 1.
+    ///
+    /// [`crate::ViewContext::local_players`] and `is_local` report all of them.
+    pub fn local_players(mut self, count: u8) -> Self {
+        self.local_players = count.max(1);
         self
     }
 
@@ -149,13 +170,15 @@ impl<G: Game> App<G> {
         self
     }
 
-    /// Turns the held keys into the input of the local player. Called every frame.
+    /// Turns the held keys into the input of a local player. Called every frame, once for
+    /// each local slot, with that slot. `InputContext::stick_for_slot` maps slot 0 to
+    /// WASD and slot 1 to the arrow keys.
     pub fn input(mut self, poll: impl FnMut(&InputContext, PlayerSlot) -> G::Input + 'static) -> Self {
         self.input = Some(Box::new(poll));
         self
     }
 
-    /// Input of every slot except the local one: `bot(slot, tick)` runs before each tick.
+    /// Input of every slot that is not local: `bot(slot, tick)` runs before each tick.
     pub fn bot(mut self, bot: impl FnMut(PlayerSlot, u64) -> G::Input + 'static) -> Self {
         self.bot = Some(Box::new(bot));
         self
@@ -192,12 +215,13 @@ impl<G: Game> App<G> {
     }
 
     fn build_bridge(&mut self) -> Result<Offline<G>, Error> {
-        let cfg = PlayConfig::new(self.players, self.seed, self.tick_rate);
+        let players = self.players.max(self.local_players);
+        let cfg = PlayConfig::new(players, self.seed, self.tick_rate);
         let session = match self.scene.take() {
             Some(source) => session_from_scene::<G>(cfg, &source)?,
             None => PlaySession::<G>::new(cfg, self.config.take().ok_or_else(|| Error("the app was already run".to_string()))?),
         };
-        let mut host = PlayHost::new(session, LOCAL_SLOT);
+        let mut host = PlayHost::new(session, LOCAL_SLOT).with_extra_local_slots((1..self.local_players).map(PlayerSlot));
         if let Some(bot) = self.bot.take() {
             host = host.with_bot(bot);
         }
@@ -210,14 +234,14 @@ impl<G: Game> App<G> {
         let bridge = self.build_bridge()?;
         let event_loop = EventLoop::new().map_err(|e| Error(format!("event loop: {e}")))?;
         event_loop.set_control_flow(ControlFlow::Poll);
+        let local = LocalInput::new(input, bridge.local_slots());
         let shared = SharedView(view);
         let mut runner = Runner {
             bridge,
             world: ViewWorld::new(shared.clone(), ViewConfig::default()),
             view: shared,
-            input,
+            local,
             keys: InputContext::default(),
-            sent: None,
             pacer: Pacer::new(&args),
             args,
             title: self.title,
@@ -256,6 +280,31 @@ fn session_from_scene<G: Game>(cfg: PlayConfig, source: &SceneSource) -> Result<
     }
 }
 
+/// The input function and what it last sent for each local slot.
+struct LocalInput<G: Game> {
+    poll: InputFn<G>,
+    slots: Vec<PlayerSlot>,
+    sent: Vec<Option<G::Input>>,
+}
+
+impl<G: Game> LocalInput<G> {
+    fn new(poll: InputFn<G>, slots: Vec<PlayerSlot>) -> Self {
+        let sent = vec![None; slots.len()];
+        Self { poll, slots, sent }
+    }
+
+    /// Polls every local slot and sends the inputs that changed.
+    fn send(&mut self, keys: &InputContext, bridge: &mut dyn Bridge<G>) {
+        for (slot, sent) in self.slots.iter().zip(&mut self.sent) {
+            let input = (self.poll)(keys, *slot);
+            if *sent != Some(input) {
+                *sent = Some(input);
+                let _ = bridge.set_input(*slot, input);
+            }
+        }
+    }
+}
+
 struct Gfx {
     window: Arc<Window>,
     renderer: WindowRenderer<Wgpu>,
@@ -265,9 +314,8 @@ struct Runner<G: Game> {
     bridge: Offline<G>,
     world: ViewWorld<SharedView>,
     view: SharedView,
-    input: InputFn<G>,
+    local: LocalInput<G>,
     keys: InputContext,
-    sent: Option<G::Input>,
     pacer: Pacer,
     args: Args,
     title: String,
@@ -289,12 +337,7 @@ impl<G: Game> Runner<G> {
         let real = now - self.last_frame;
         self.last_frame = now;
 
-        let slot = self.bridge.local_slot();
-        let input = (self.input)(&self.keys, slot);
-        if self.sent != Some(input) {
-            self.sent = Some(input);
-            let _ = self.bridge.set_input(slot, input);
-        }
+        self.local.send(&self.keys, &mut self.bridge);
 
         let head = self.bridge.snapshot().map_or(0, |s| s.tick());
         match self.pacer.advance(head) {
@@ -434,6 +477,52 @@ mod tests {
         assert_eq!(bridge.player_count(), 2);
         assert_eq!(bridge.local_slot(), PlayerSlot(0));
         assert_eq!(asked.get(), 30);
+    }
+
+    #[test]
+    fn local_players_are_polled_each_frame_and_the_bot_gets_only_the_other_slots() {
+        let asked = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let log = asked.clone();
+        let mut bridge = physics()
+            .players(3)
+            .local_players(2)
+            .bot(move |slot, _tick| {
+                log.borrow_mut().push(slot);
+                PhysInput::default()
+            })
+            .build_bridge()
+            .unwrap();
+        assert_eq!(bridge.player_count(), 3);
+        assert_eq!(bridge.local_slots(), vec![PlayerSlot(0), PlayerSlot(1)]);
+
+        let polled = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = polled.clone();
+        let mut local = LocalInput::<PhysGame>::new(
+            Box::new(move |keys, slot| {
+                seen.borrow_mut().push(slot);
+                let stick = keys.stick_for_slot(slot);
+                PhysInput::new(stick.x, stick.y, 0, stick.action)
+            }),
+            bridge.local_slots(),
+        );
+        let mut keys = InputContext::default();
+        keys.set(KeyCode::KeyD, true);
+        keys.set(KeyCode::ArrowUp, true);
+        local.send(&keys, &mut bridge);
+        local.send(&keys, &mut bridge);
+        assert_eq!(*polled.borrow(), vec![PlayerSlot(0), PlayerSlot(1), PlayerSlot(0), PlayerSlot(1)]);
+        assert_eq!(local.sent, vec![Some(PhysInput::new(1, 0, 0, false)), Some(PhysInput::new(0, 1, 0, false))]);
+
+        bridge.step(5);
+        assert_eq!(*asked.borrow(), vec![PlayerSlot(2); 5]);
+    }
+
+    #[test]
+    fn local_players_raise_the_player_count_and_the_default_is_one() {
+        let bridge = physics().players(1).local_players(2).build_bridge().unwrap();
+        assert_eq!((bridge.player_count(), bridge.local_slots()), (2, vec![PlayerSlot(0), PlayerSlot(1)]));
+        let bridge = physics().build_bridge().unwrap();
+        assert_eq!(bridge.local_slots(), vec![PlayerSlot(0)]);
     }
 
     #[test]

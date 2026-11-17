@@ -641,3 +641,25 @@ fn a_view_context_reads_both_frames_and_sends_commands() {
     assert_eq!(lines.len(), 1);
     assert!(lines[0].starts_with("tick 3 verified Some(3) (tick 3) local [PlayerSlot(0)] sent true"), "{}", lines[0]);
 }
+
+#[test]
+fn a_view_context_reports_every_local_slot_of_the_bridge() {
+    type Seen = Vec<(Vec<PlayerSlot>, [bool; 3])>;
+    struct Probe(Rc<RefCell<Seen>>);
+    impl SceneView<Burst> for Probe {
+        fn on_update(&mut self, ctx: &mut ViewContext<'_, Burst>) {
+            let slots = [PlayerSlot(0), PlayerSlot(1), PlayerSlot(2)];
+            self.0.borrow_mut().push((ctx.local_players().to_vec(), slots.map(|slot| ctx.is_local(slot))));
+        }
+    }
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let mut views = Views::<Burst>::new();
+    views.scene_view(Probe(seen.clone()));
+    let session = PlaySession::<Burst>::new(PlayConfig::new(3, 42, 60), BurstConfig { players: 3, ttl: 100 });
+    let host = PlayHost::new(session, PlayerSlot(0)).with_extra_local_slots([PlayerSlot(1)]);
+    let mut bridge = InProc::new(host, BridgeConfig::default());
+    bridge.step(1);
+    let update = bridge.poll_view();
+    views.dispatch(&mut bridge, &update, &[]);
+    assert_eq!(*seen.borrow(), vec![(vec![PlayerSlot(0), PlayerSlot(1)], [true, true, false])]);
+}

@@ -31,7 +31,7 @@ pub enum EventState {
 /// What a view can read and do during one call. Valid for this call only.
 pub struct ViewContext<'a, G: Game> {
     snapshot: &'a Snapshot,
-    local: [PlayerSlot; 1],
+    local: Vec<PlayerSlot>,
     bridge: &'a mut dyn Bridge<G>,
 }
 
@@ -56,7 +56,8 @@ impl<'a, G: Game> ViewContext<'a, G> {
         self.snapshot.verified_tick()
     }
 
-    /// The players this client controls. Offline: the one local slot.
+    /// The players this client controls: every local slot of the bridge
+    /// (offline: slots `0..n` of [`crate::App::local_players`], default one).
     pub fn local_players(&self) -> &[PlayerSlot] {
         &self.local
     }
@@ -246,7 +247,7 @@ impl<G: Game> Views<G> {
             self.waiting = events;
             return;
         };
-        let mut ctx = ViewContext { snapshot: &snapshot, local: [bridge.local_slot()], bridge };
+        let mut ctx = ViewContext { snapshot: &snapshot, local: bridge.local_slots(), bridge };
 
         if !self.started {
             self.started = true;

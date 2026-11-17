@@ -1,6 +1,6 @@
 //! Runs a [`orr_sim::Game`] in a window with almost no code of its own.
 //!
-//! Stages 1 and 2 of `docs/view-framework.md`: offline only (one local player, no server),
+//! Stages 1 to 3 of `docs/view-framework.md`: offline only (one or more local players on one screen, no server),
 //! a fixed tick from the clock, interpolation through `orr_view`, a default 2D
 //! renderer, and `--screenshot` / `--ticks` for pictures that can be compared.
 //! `EntityView` and `SceneView` get creates, destroys and events (also the canceled ones).
@@ -20,7 +20,7 @@ mod view2d;
 mod views;
 
 pub use app::{App, Error};
-pub use input::InputContext;
+pub use input::{InputContext, KeyLayout, Stick};
 pub use orr_bridge::{FrameView, Lifecycle, PlayerSlot};
 pub use orr_render::Camera;
 pub use orr_ecs::Entity;
