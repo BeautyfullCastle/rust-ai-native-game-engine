@@ -450,11 +450,11 @@ fn v1_and_v2_replays_still_parse_and_seek() {
     }
 
     // Unknown future versions are still rejected.
-    let mut v4 = v3.clone();
-    v4[4..8].copy_from_slice(&4u32.to_le_bytes());
+    let mut v5 = v3.clone();
+    v5[4..8].copy_from_slice(&5u32.to_le_bytes());
     assert!(matches!(
-        orr_session::ReplayReader::<Arena>::parse(&v4),
-        Err(orr_session::ReplayError::UnsupportedVersion(4))
+        orr_session::ReplayReader::<Arena>::parse(&v5),
+        Err(orr_session::ReplayError::UnsupportedVersion(5))
     ));
 }
 
