@@ -1,6 +1,6 @@
 # orr_app
 
-`Game`을 창에 띄우는 실행 층이다. 설계는 [docs/view-framework.md](../../docs/view-framework.md) 4장이고, 이 크레이트는 12장의 1단계(서버 없이 실행, 기본 2D 렌더러)까지 만들었다.
+`Game`을 창에 띄우는 실행 층이다. 설계는 [docs/view-framework.md](../../docs/view-framework.md) 4장이고, 이 크레이트는 12장의 1단계(서버 없이 실행, 기본 2D 렌더러)와 2단계(엔티티 뷰, 씬 뷰, 이벤트 상태)까지 만들었다.
 
 ## 쓰는 법
 
@@ -12,6 +12,8 @@ fn main() -> Result<(), orr_app::Error> {
         .bot(move |_slot, tick| bot(tick).0)  // 로컬이 아닌 슬롯의 입력 (선택)
         .input(|keys, _slot| PhysInput::new(/* keys.axis(..), keys.held(..) */))
         .view(Look(PhysExtractor { .. }))     // 무엇을 어떻게 그릴지 (View2D)
+        .entity_view::<PaddleTag>(PaddleView::default) // PaddleTag가 있는 엔티티마다 뷰 하나 (EntityView)
+        .scene_view(EventCounter::default())  // 화면 전체에 하나 (SceneView). 여러 개 가능
         .run()
 }
 ```
@@ -27,6 +29,33 @@ fn main() -> Result<(), orr_app::Error> {
 | `.input(f)` | `f(&InputContext, PlayerSlot) -> G::Input`. 매 프레임 부른다. `InputContext`는 `held(key)`, `any_held(keys)`, `axis(neg, pos)`를 준다 |
 | `.bot(f)` | 로컬이 아닌 슬롯마다 매 틱 `f(slot, tick)`을 부른다 |
 | `.view(v)` | `v`는 `View2D`: `Extractor`(엔티티 읽기) + `camera(frame)` + `backdrop(frame, out)` |
+| `.entity_view::<C>(factory)` | 예측 프레임에서 컴포넌트 `C`를 가진 엔티티마다 `factory()`로 만든 `EntityView` 하나 |
+| `.scene_view(v)` | `SceneView` 하나. 여러 개를 더하면 더한 순서로 불린다 |
+
+## 엔티티 뷰와 씬 뷰
+
+```rust
+impl EntityView<PhysGame> for PaddleView {
+    fn on_create(&mut self, ctx: &mut ViewContext<'_, PhysGame>, entity: Entity) { .. }
+    fn on_update(&mut self, ctx: &mut ViewContext<'_, PhysGame>, entity: Entity, pose: Option<Transform2>) { .. }
+    fn on_destroy(&mut self, ctx: &mut ViewContext<'_, PhysGame>, entity: Entity) { .. }
+}
+
+impl SceneView<PhysGame> for EventCounter {
+    fn on_start(&mut self, ctx: &mut ViewContext<'_, PhysGame>) { .. }
+    fn on_update(&mut self, ctx: &mut ViewContext<'_, PhysGame>) { .. }
+    fn on_event(&mut self, ctx: &mut ViewContext<'_, PhysGame>, event: &PhysEvent, state: EventState) { .. }
+    fn on_session(&mut self, ctx: &mut ViewContext<'_, PhysGame>, note: Lifecycle) { .. }
+}
+```
+
+모든 메서드의 기본 몸체는 비어 있다. 한 프레임의 호출 순서는 `poll_view` → `on_start`(처음 한 번) → 세션 알림(`on_session`)과 이벤트(`on_event`) → `on_destroy` → `on_create` → 엔티티 `on_update` → 씬 `on_update` → 그리기다.
+
+- **엔티티 키는 `(번호, 버전)`이다.** 번호가 재사용되어 버전이 달라지면 옛 엔티티는 `on_destroy`, 새 엔티티는 `on_create`다. 롤백으로 예측에만 있던 엔티티가 사라져도 `on_destroy`가 불린다. 같은 프레임 안에서 사라졌다 같은 키로 다시 생기는 경우(롤백 재계산 안)는 화면이 프레임 단위로만 보므로 구별되지 않는다.
+- **`pose`는 `ViewWorld`가 계산한 `Transform2`이다.** `Extractor`가 그 엔티티를 내놓지 않으면 뷰 월드에 위치가 없어서 `None`이다. `on_update`는 그래도 불린다.
+- **`EventState`는 `orr_session::EventStatus`에서 페이로드를 뺀 얇은 열거형이다.** `Predicted`, `Verified`, `Canceled`. `Canceled` 호출에는 `Predicted` 때 받은 페이로드가 그대로 온다(세션이 취소에는 페이로드를 주지 않아서 `Views`가 기억한다). 소리·파티클은 `Predicted`에서 시작하고 `Canceled`에서 멈춘다. 업적·통계는 `Verified`에서만 한다.
+- **`ViewContext`:** `predicted()`, `verified()`(`Option`), `tick()`, `verified_tick()`, `local_players()`, `is_local(slot)`, `send_command(cmd)`. 오프라인에서 로컬 플레이어는 슬롯 0 하나다.
+- **창 없이도 쓴다.** 호출 순서를 지키는 코드는 창과 렌더러가 없는 `Views::dispatch(bridge, update, poses)`에 있다. 창 루프는 이것을 부르기만 한다. 테스트는 `tests/views.rs`이고, 롤백이 나는 두 세션(`LoopbackPair`)에서 `on_create`/`on_destroy`와 `Canceled`/`Verified`를 확인한다.
 
 ## 명령줄
 
@@ -45,11 +74,14 @@ fn main() -> Result<(), orr_app::Error> {
 
 ## 지금 정한 것
 
-- **브리지는 `InProc`이다.** 시뮬레이션이 그리기와 같은 스레드에서 돌아서 `--ticks`가 정확하고, `G::Config`에 `Send`를 요구하지 않는다. 물리 샘플의 `physics` 바이너리는 기본이 `Threaded`다. 무거운 장면에서 틱이 그리기를 막지 않게 하려면 이후 `Threaded` 선택을 더한다.
-- **오프라인 세션은 `PlayHost` 위에 있다.** 롤백이 없고, 입력은 로컬 슬롯 하나다.
-- **시뮬레이션 크레이트는 건드리지 않았다.** 화면은 `Snapshot`을 읽고 `set_input`만 보낸다.
+- **브리지는 `InProc`이다.** 시뮬레이션이 그리기와 같은 스레드에서 돌아서 `--ticks`가 정확하고, `G::Config`에 `Send`를 요구하지 않는다. 물리 샘플의 `physics` 바이너리는 기본이 `Threaded`다. `App::threaded()`는 만들지 않았다. 오프라인 세션의 `PlayHost`가 `Send`가 아닌 봇 클로저를 들고 있고, `Threaded::spawn`은 호스트를 다른 스레드에서 만들어야 하기 때문이다. `Views::dispatch`는 `&mut dyn Bridge<G>`를 받으므로 `Threaded`에도 그대로 쓸 수 있다.
+- **오프라인 세션은 `PlayHost` 위에 있다.** 롤백이 없고, 입력은 로컬 슬롯 하나다. 롤백이 나는 경우는 `LoopbackPair` 테스트로만 확인했다.
+- **시뮬레이션 크레이트는 건드리지 않았다.** 화면은 `Snapshot`을 읽고 `set_input`, `send_command`만 보낸다.
 - **이름은 가칭 그대로 쓴다.** `.scene`은 설계의 `.scene(path)`와 달리 `register` 인자를 받는다. 게임의 리플렉션 등록 함수를 타입으로 찾을 방법이 없기 때문이다.
+- **`ViewResync`가 오면** 예측 이벤트 기억을 비우고(이전 `Predicted`의 `Canceled`는 오지 않는다), 코얼레스된 세션 알림을 `on_session`으로 한 번씩 준다. 엔티티 뷰는 새 프레임과 비교해서 맞춘다.
+- **첫 스냅숏보다 먼저 온 이벤트는** 첫 스냅숏이 올 때까지 쌓아 두었다가 `on_start` 다음에 전달한다.
 
-## 2단계에 남은 것
+## 남은 것
 
-`EntityView`, `SceneView`와 이벤트 전달(지금은 이벤트를 읽고 버린다), 3D 렌더러(`SceneLook`), `Threaded` 선택, 여러 로컬 플레이어(`Bridge::set_input` 확장), 서버 연결, 웹·모바일 루프.
+- **2단계에서 뺀 것:** `ViewContext::query`(`FrameView::iter::<T>()`, `dense::<T>()`가 이미 있어서 조합 질의는 `orr_ecs` 쪽 일이다), `ViewContext::draw()`(기본 2D 그리기가 `Extractor` 항목과 `backdrop`만 받아서 선·글자를 더하려면 그리기 경로를 넓혀야 한다), `SceneView::on_player`(4단계), `App::threaded()`(위).
+- **이후 단계:** 3D 렌더러(`SceneLook`), 여러 로컬 플레이어(`Bridge::set_input` 확장), 서버 연결, 웹·모바일 루프.

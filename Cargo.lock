@@ -3067,6 +3067,7 @@ dependencies = [
 name = "orr_app"
 version = "0.0.1"
 dependencies = [
+ "bytemuck",
  "orr_bridge",
  "orr_ecs",
  "orr_games",

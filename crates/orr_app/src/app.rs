@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use orr_bridge::{Bridge, BridgeConfig, InProc, PlayHost, PlayerSlot};
+use orr_ecs::Component;
 use orr_reflect::{Scene, TypeRegistry};
 use orr_render::orr_rhi::Wgpu;
 use orr_render::{RenderList, WindowRenderer};
@@ -25,6 +26,7 @@ use crate::input::InputContext;
 use crate::pace::{Advance, Outcome, Pacer};
 use crate::shot::{render_rgba, write_png};
 use crate::view2d::{fill_draw_list, SharedView, View2D};
+use crate::views::{EntityFactory, SceneView, Views};
 
 /// Why a run could not start or ended badly.
 #[derive(Debug)]
@@ -76,6 +78,7 @@ pub struct App<G: Game> {
     input: Option<InputFn<G>>,
     bot: Option<BotFn<G>>,
     view: Option<Rc<dyn View2D>>,
+    views: Views<G>,
 }
 
 impl<G: Game> App<G>
@@ -110,6 +113,7 @@ impl<G: Game> App<G> {
             input: None,
             bot: None,
             view: None,
+            views: Views::new(),
         }
     }
 
@@ -163,6 +167,19 @@ impl<G: Game> App<G> {
         self
     }
 
+    /// One [`crate::EntityView`] for every entity that has component `C` in the newest
+    /// predicted frame. `factory` makes a view for each new entity (`MyView::default` works).
+    pub fn entity_view<C: Component>(mut self, factory: impl EntityFactory<G> + 'static) -> Self {
+        self.views.entity_view::<C>(factory);
+        self
+    }
+
+    /// A [`crate::SceneView`]: one object for the whole scene. Several are allowed and are called in the order added.
+    pub fn scene_view(mut self, view: impl SceneView<G> + 'static) -> Self {
+        self.views.scene_view(view);
+        self
+    }
+
     /// Reads the command line (see `--help`) and runs until the window closes,
     /// Escape is pressed, or the requested screenshot is saved.
     pub fn run(self) -> Result<(), Error> {
@@ -206,6 +223,8 @@ impl<G: Game> App<G> {
             title: self.title,
             gfx: None,
             epoch: None,
+            views: self.views,
+            poses: Vec::new(),
             items: Vec::new(),
             list: RenderList::new(),
             last_frame: Instant::now(),
@@ -255,6 +274,9 @@ struct Runner<G: Game> {
     gfx: Option<Gfx>,
     /// The last timeline epoch shown (a change means a jump, not a movement).
     epoch: Option<u64>,
+    views: Views<G>,
+    /// The poses of the view world, read again each frame for the entity views.
+    poses: Vec<RenderItem>,
     items: Vec<RenderItem>,
     list: RenderList,
     last_frame: Instant,
@@ -282,13 +304,21 @@ impl<G: Game> Runner<G> {
         }
 
         let update = self.bridge.poll_view();
-        let Some(snapshot) = update.snapshot.clone() else { return };
-        let epoch = snapshot.timeline().map(|t| t.epoch);
-        if epoch != self.epoch {
-            self.epoch = epoch;
-            self.world.reset();
+        let snapshot = update.snapshot.clone();
+        if let Some(epoch) = snapshot.as_ref().map(|s| s.timeline().map(|t| t.epoch)) {
+            if epoch != self.epoch {
+                self.epoch = epoch;
+                self.world.reset();
+            }
         }
         self.world.update_from_bridge(self.pacer.view_dt(real.as_secs_f32(), self.bridge.tick_rate()), &update);
+
+        if !self.views.is_empty() {
+            self.poses.clear();
+            self.world.render_items(&mut self.poses);
+            self.views.dispatch(&mut self.bridge, &update, &self.poses);
+        }
+        let Some(snapshot) = snapshot else { return };
 
         let camera = fill_draw_list(&self.view, &self.world, snapshot.predicted(), &mut self.items, &mut self.list);
         let Some(gfx) = &mut self.gfx else { return };
