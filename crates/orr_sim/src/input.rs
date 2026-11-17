@@ -1,4 +1,5 @@
-use bytemuck::Pod;
+use bytemuck::{Pod, Zeroable};
+use orr_reflect::{IntKind, Reflect, TypeDesc};
 
 /// A fixed-size, per-player input sample for one tick.
 ///
@@ -11,9 +12,53 @@ impl<T: Pod + Default + Eq + Send + Sync + 'static> SimInput for T {}
 
 /// Index of a player's input slot within a [`TickInputs`]. Stable for the
 /// lifetime of a session (players don't get renumbered on disconnect).
+///
+/// It is a plain byte, so it can be a field of a component (see
+/// [`crate::PlayerLink`]) and shows as a number in scene files and the inspector.
 #[repr(transparent)]
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Pod, Zeroable)]
 pub struct PlayerSlot(pub u8);
+
+impl PlayerSlot {
+    /// "No player": the value the relay protocol calls `NO_SLOT` (`0xFF`).
+    /// It is never a valid slot of a session.
+    pub const NONE: PlayerSlot = PlayerSlot(0xFF);
+
+    /// `false` for [`PlayerSlot::NONE`].
+    pub const fn is_some(self) -> bool {
+        self.0 != Self::NONE.0
+    }
+}
+
+impl Reflect for PlayerSlot {
+    fn describe() -> TypeDesc {
+        TypeDesc::int(IntKind::U8)
+    }
+}
+
+/// Standard component: "this entity belongs to player N". Views compare it
+/// with the local players (`ctx.is_local(link.player)` in `orr_app`).
+///
+/// A game opts in with [`register_player_link`] in `Game::register` and
+/// [`register_player_link_reflect`] in its reflection registration.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Pod, Zeroable, Reflect)]
+pub struct PlayerLink {
+    pub player: PlayerSlot,
+}
+
+/// The component name of [`PlayerLink`] in the component registry and in scene files.
+pub const PLAYER_LINK_NAME: &str = "PlayerLink";
+
+/// Registers [`PlayerLink`] as a component named [`PLAYER_LINK_NAME`].
+pub fn register_player_link(builder: &mut orr_ecs::ComponentRegistryBuilder) {
+    builder.register_component::<PlayerLink>(PLAYER_LINK_NAME);
+}
+
+/// Registers [`PlayerLink`] for reflection under the same name.
+pub fn register_player_link_reflect(types: &mut orr_reflect::TypeRegistry) {
+    types.register_component::<PlayerLink>(PLAYER_LINK_NAME);
+}
 
 /// Per-player metadata that rides alongside an input sample.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]

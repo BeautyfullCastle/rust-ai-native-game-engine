@@ -33,7 +33,9 @@ pub use event::{EventKey, SimEvent};
 pub use game::Game;
 pub use hotpatch::{DirectCall, HotPatchHook};
 pub use metrics::{MetricValue, Metrics, NoMetrics};
-pub use input::{PlayerFlags, PlayerSlot, SimInput, TickInputs};
+pub use input::{
+    register_player_link, register_player_link_reflect, PlayerFlags, PlayerLink, PlayerSlot, SimInput, TickInputs, PLAYER_LINK_NAME,
+};
 pub use simulation::{build_hash_of, frame_build_id, Simulation};
 pub use system::{fn_systems, System};
 
