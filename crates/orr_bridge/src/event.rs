@@ -1,5 +1,5 @@
 use orr_session::{EventStatus, RollbackInfo};
-use orr_sim::{DebugError, EventKey, PlayerSlot};
+use orr_sim::{DebugError, EventKey, PlayerSlot, RawPlayerSignal};
 
 /// Session-level notifications (design doc 5.2, "Lifecycle").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,6 +48,12 @@ pub enum BridgeEvent<E> {
     /// rollback resimulation, so the view can match a `Canceled` or
     /// `Verified` to the `Predicted` it saw before.
     Sim { key: EventKey, status: EventStatus<E> },
+    /// A player signal (a player entered, dropped, came back or left) with
+    /// the same three states as a game event. `key` is
+    /// [`orr_sim::signal_key`]: the tick, the slot and the place among that
+    /// slot's signals of the tick, the same across a rollback resimulation. A tick's signals come
+    /// before the game events of that tick.
+    Player { key: EventKey, status: EventStatus<RawPlayerSignal> },
     Lifecycle(Lifecycle),
 }
 

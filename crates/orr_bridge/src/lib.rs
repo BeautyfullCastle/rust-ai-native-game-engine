@@ -4,10 +4,12 @@
 //! - **View to sim** has two game paths only: [`Bridge::set_input`] (one `Input`
 //!   sample per player, sampled once per tick) and [`Bridge::send_command`]
 //!   (one-off `Command`s). Nothing else reaches the simulation.
-//! - **Sim to view** has three read-only channels:
+//! - **Sim to view** has four read-only channels:
 //!   [`Snapshot`] (immutable published frames, read through [`FrameView`]),
 //!   [`BridgeEvent::Sim`] (sim events with the 3-state reconciliation of
-//!   `orr_session`: predicted / verified / canceled) and
+//!   `orr_session`: predicted / verified / canceled),
+//!   [`BridgeEvent::Player`] (player signals: entered, dropped, back, left,
+//!   with the same three states) and
 //!   [`BridgeEvent::Lifecycle`] (session started, rollback, stall).
 //!
 //! Two transport adapters implement the same [`Bridge`] trait:
@@ -47,4 +49,4 @@ pub use view_events::{view_event_channel, LifecycleRecovery, ViewEventReceiver, 
 pub use orr_session::{
     ControlOp, EventStatus, PlayConfig, PlayMode, PlaySession, RollbackInfo, Speed, Timeline, TIMELINE_CHECKSUM_WINDOW,
 };
-pub use orr_sim::{DebugCommand, DebugError, EventKey, PlayerSlot};
+pub use orr_sim::{DebugCommand, DebugError, EventKey, PlayerSignal, PlayerSlot, Players, RawPlayerSignal, SignalKind};

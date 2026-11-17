@@ -263,6 +263,8 @@ impl<X: Extractor, K: StreamKinds> ViewStreamSource<X, K> {
                         events.push(EventRecord { tick: key.tick, system: u32::from(key.system_index), seq: key.seq, state, event_type, payload });
                     }
                     BridgeEvent::Lifecycle(Lifecycle::Seeked { .. } | Lifecycle::Branched { .. }) => self.discontinuity = true,
+                    // The stream format has no record for player signals yet.
+                    BridgeEvent::Player { .. } => {}
                     BridgeEvent::Lifecycle(_) => {}
                 }
             }
@@ -480,6 +482,8 @@ impl<X: Extractor3, K: StreamKinds3> ViewStreamSource3<X, K> {
                         events.push(EventRecord { tick: key.tick, system: u32::from(key.system_index), seq: key.seq, state, event_type, payload });
                     }
                     BridgeEvent::Lifecycle(Lifecycle::Seeked { .. } | Lifecycle::Branched { .. }) => self.discontinuity = true,
+                    // The stream format has no record for player signals yet.
+                    BridgeEvent::Player { .. } => {}
                     BridgeEvent::Lifecycle(_) => {}
                 }
             }

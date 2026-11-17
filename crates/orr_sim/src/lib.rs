@@ -23,6 +23,7 @@ mod game;
 mod hotpatch;
 mod input;
 mod metrics;
+mod signal;
 mod simulation;
 mod system;
 
@@ -36,6 +37,7 @@ pub use metrics::{MetricValue, Metrics, NoMetrics};
 pub use input::{
     register_player_link, register_player_link_reflect, PlayerFlags, PlayerLink, PlayerSlot, SimInput, TickInputs, PLAYER_LINK_NAME,
 };
+pub use signal::{insert_signal, keyed_signals, player_signals, signal_key, SIGNAL_SYSTEM_INDEX, PlayerSignal, Players, RawPlayerSignal, SignalKind};
 pub use simulation::{build_hash_of, frame_build_id, Simulation};
 pub use system::{fn_systems, System};
 

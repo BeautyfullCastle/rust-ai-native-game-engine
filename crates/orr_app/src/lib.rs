@@ -21,7 +21,7 @@ mod views;
 
 pub use app::{App, Error};
 pub use input::{InputContext, KeyLayout, Stick};
-pub use orr_bridge::{FrameView, Lifecycle, PlayerSlot};
+pub use orr_bridge::{FrameView, Lifecycle, PlayerSignal, PlayerSlot, Players, RawPlayerSignal, SignalKind};
 pub use orr_render::Camera;
 pub use orr_ecs::Entity;
 pub use orr_view::{fp_to_f32, fp_to_vec2, Extracted, Extractor, InterpMode, RenderItem, Transform2};

@@ -9,6 +9,8 @@
 #![deny(clippy::disallowed_types)]
 #![deny(clippy::float_arithmetic)]
 
+pub mod roster;
+
 use bytemuck::{Pod, Zeroable};
 use orr_ecs::{ComponentRegistryBuilder, Entity, Frame};
 use orr_fp::{fp, FPVec2, FP};

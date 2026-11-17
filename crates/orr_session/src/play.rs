@@ -31,8 +31,9 @@
 use std::sync::Arc;
 
 use orr_ecs::{Frame, FrameDecodeError, FrameRing};
-use orr_sim::{DebugCommand, DebugError, Game, PlayerSlot, SimEvent, Simulation, TickInputs};
+use orr_sim::{DebugCommand, DebugError, Game, PlayerSlot, RawPlayerSignal, SimEvent, Simulation, TickInputs};
 
+use crate::events::{EventBatch, EventStatus};
 use crate::replay::{ReplayError, ReplayHeader, ReplayReader, ReplayWriter};
 
 /// How many recent `(tick, checksum)` pairs a [`Timeline`] carries.
@@ -224,6 +225,10 @@ pub struct PlaySession<G: Game> {
     stride: u64,
     keyframe_ticks: Arc<[u64]>,
     notes: Vec<PlayNote>,
+    /// Signals queued for the next tick that is run.
+    pending_signals: Vec<RawPlayerSignal>,
+    /// Notes of the signals of ticks that ran, until taken.
+    signal_notes: EventBatch<RawPlayerSignal>,
 }
 
 impl<G: Game> PlaySession<G> {
@@ -292,6 +297,8 @@ impl<G: Game> PlaySession<G> {
             stride: 1,
             keyframe_ticks: Arc::from(Vec::new()),
             notes: Vec::new(),
+            pending_signals: Vec::new(),
+            signal_notes: EventBatch::empty(),
         };
         s.sync_keyframes();
         s
@@ -355,6 +362,8 @@ impl<G: Game> PlaySession<G> {
             stride: 1,
             keyframe_ticks: Arc::from(Vec::new()),
             notes: Vec::new(),
+            pending_signals: Vec::new(),
+            signal_notes: EventBatch::empty(),
         };
         s.sync_keyframes();
         Ok(s)
@@ -494,6 +503,41 @@ impl<G: Game> PlaySession<G> {
         Ok(())
     }
 
+    /// Queues a player signal for the next tick that is run. The tick
+    /// records it with its input, so playback and seeking apply it again.
+    /// Returns [`PlayError::ReadOnly`] if this session is viewing a replay.
+    pub fn push_signal(&mut self, signal: RawPlayerSignal) -> Result<(), PlayError> {
+        if self.mode == PlayMode::Viewer {
+            return Err(PlayError::ReadOnly);
+        }
+        self.pending_signals.push(signal);
+        Ok(())
+    }
+
+    /// Queues `Added` (with default start data) for every player slot. Call it
+    /// before the first tick: they are then signals of that tick, so a game
+    /// can create its avatars from them without a server. Returns
+    /// [`PlayError::ReadOnly`] if this session is viewing a replay.
+    pub fn announce_players(&mut self) -> Result<(), PlayError> {
+        for slot in 0..self.cfg.player_count {
+            self.push_signal(RawPlayerSignal::added(PlayerSlot(slot)))?;
+        }
+        Ok(())
+    }
+
+    /// Takes the notes of the signals of the ticks that ran since the last
+    /// call. A local session has no prediction, so every note is `Verified`.
+    /// Seeking makes no notes, as it makes no events.
+    pub fn take_signal_notes(&mut self) -> EventBatch<RawPlayerSignal> {
+        std::mem::replace(&mut self.signal_notes, EventBatch::empty())
+    }
+
+    fn note_signals(&mut self, tick: u64) {
+        for (key, signal) in orr_sim::keyed_signals(tick, self.writer.signals_at(tick)) {
+            self.signal_notes.push(key, EventStatus::Verified(signal.clone()));
+        }
+    }
+
     /// One clock tick: runs a tick when [`wants_tick`](Self::wants_tick),
     /// else nothing.
     pub fn tick(&mut self) -> Vec<SimEvent<G::Event>> {
@@ -622,6 +666,7 @@ impl<G: Game> PlaySession<G> {
         if head < self.last_tick() {
             if self.mode == PlayMode::Viewer {
                 let events = self.replay_tick(next, self.preview_applied)?;
+                self.note_signals(next);
                 self.preview_applied = 0;
                 self.ring.store(self.sim.frame());
                 return Some(events);
@@ -647,6 +692,11 @@ impl<G: Game> PlaySession<G> {
         }
         self.writer.record_tick(next, &self.held, &commands);
         inputs.set_commands(commands);
+        for signal in std::mem::take(&mut self.pending_signals) {
+            self.writer.record_signal(next, signal);
+        }
+        inputs.set_signals(self.writer.signals_at(next).to_vec());
+        self.note_signals(next);
         let debug = self.writer.debug_at(next);
         let skip = self.preview_applied.min(debug.len());
         let events = self.sim.step_with_debug(&inputs, &debug[skip..]);
@@ -686,6 +736,7 @@ impl<G: Game> PlaySession<G> {
             inputs.set_input(PlayerSlot(i as u8), *input);
         }
         inputs.set_commands(rec.commands.clone());
+        inputs.set_signals(self.writer.signals_at(tick).to_vec());
         let debug = self.writer.debug_at(tick);
         let skip = skip_debug.min(debug.len());
         Some(self.sim.step_with_debug(&inputs, &debug[skip..]))

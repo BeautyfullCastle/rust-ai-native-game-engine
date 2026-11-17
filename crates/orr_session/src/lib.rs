@@ -48,10 +48,10 @@ pub use replay::{
 };
 pub use session::{
     compare_checksums, require_same_build_hash, AdvanceResult, Anchor, BuildHashMismatch, ChecksumRetireError, Desync,
-    JoinHoldLease, JoinHoldRelease, JoinStatus, RollbackInfo, Session, SessionConfig,
+    JoinHoldLease, JoinHoldRelease, JoinStatus, RollbackInfo, Session, SessionConfig, SignalError,
 };
 
-pub use orr_sim::{DebugCommand, DebugError, EventKey, Game, PlayerSlot, SimEvent};
+pub use orr_sim::{DebugCommand, DebugError, EventKey, Game, PlayerSlot, RawPlayerSignal, SignalKind, SimEvent};
 
 pub use p2p_membership::{
     P2pAttempt, P2pCleanup, P2pConnectionIssuer, P2pConnectionLease,

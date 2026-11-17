@@ -13,16 +13,22 @@
 //! compressed body. v3 appends, after the keyframes, `count u32` and, per
 //! debug command, `tick u64, len u32, bytes` (`DebugCommand::encode`). A
 //! debug command of tick `t` is applied at the boundary before tick `t`
-//! runs, in file order. The reader accepts all three; the writer always
-//! writes v3.
+//! runs, in file order. v4 appends, after the debug commands, `count u32`
+//! and, per player signal, `tick u64, kind u8, slot u8, len u32, bytes`
+//! (`RawPlayerSignal`); a signal of tick `t` is part of tick `t`'s input, in
+//! file order. The reader accepts all four. The writer writes v3 when the
+//! recording has no signal, so a recording of a game that never uses signals
+//! stays byte for byte what it was, and writes v4 otherwise.
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use orr_ecs::{Frame, FrameDecodeError};
-use orr_sim::{DebugCommand, Game, PlayerSlot, SimCommand, Simulation};
+use orr_sim::{insert_signal, DebugCommand, Game, PlayerSlot, RawPlayerSignal, SignalKind, SimCommand, Simulation};
 
 const MAGIC: &[u8; 4] = b"ORRP";
-const FORMAT_VERSION: u32 = 3;
+const FORMAT_VERSION: u32 = 4;
+/// The version written when a recording has no signal.
+const BASE_FORMAT_VERSION: u32 = 3;
 const MIN_FORMAT_VERSION: u32 = 1;
 
 /// `.orrp` file header.
@@ -60,6 +66,8 @@ pub enum ReplayError {
     BadKeyframe { tick: u64, source: FrameDecodeError },
     /// [`ReplayReader::seek`] target is past the last recorded tick.
     TickOutOfRange { tick: u64, last: u64 },
+    /// A player signal in the file has an unknown kind.
+    BadSignal,
 }
 
 impl core::fmt::Display for ReplayError {
@@ -79,6 +87,7 @@ impl core::fmt::Display for ReplayError {
             ReplayError::TickOutOfRange { tick, last } => {
                 write!(f, "tick {tick} is past the last recorded tick {last}")
             }
+            ReplayError::BadSignal => write!(f, "malformed player signal in replay body"),
         }
     }
 }
@@ -133,6 +142,8 @@ enum ParseCheckpoint {
     AfterKeyframe,
     BeforeDebugCommand,
     AfterDebugCommand,
+    BeforeSignal,
+    AfterSignal,
     Complete,
 }
 
@@ -204,6 +215,8 @@ pub struct ReplayWriter<G: Game> {
     keyframes: BTreeMap<u64, Vec<u8>>,
     /// Debug commands by the tick whose boundary they belong to.
     debug: BTreeMap<u64, Vec<DebugCommand>>,
+    /// Player signals by tick, in canonical order.
+    signals: BTreeMap<u64, Vec<RawPlayerSignal>>,
 }
 
 impl<G: Game> ReplayWriter<G> {
@@ -217,6 +230,7 @@ impl<G: Game> ReplayWriter<G> {
             keyframe_interval: 0,
             keyframes: BTreeMap::new(),
             debug: BTreeMap::new(),
+            signals: BTreeMap::new(),
         }
     }
 
@@ -232,6 +246,17 @@ impl<G: Game> ReplayWriter<G> {
 
     pub fn debug_at(&self, tick: u64) -> &[DebugCommand] {
         self.debug.get(&tick).map_or(&[], |v| v.as_slice())
+    }
+
+    /// Records a player signal as part of the input of `tick`. Signals of one
+    /// tick are kept in the canonical order of [`orr_sim::insert_signal`].
+    pub fn record_signal(&mut self, tick: u64, signal: RawPlayerSignal) {
+        insert_signal(self.signals.entry(tick).or_default(), signal);
+    }
+
+    /// The signals recorded for `tick`, in the order the tick applies them.
+    pub fn signals_at(&self, tick: u64) -> &[RawPlayerSignal] {
+        self.signals.get(&tick).map_or(&[], |v| v.as_slice())
     }
 
     pub(crate) fn tick_data(&self, tick: u64) -> Option<&RecordedTick<G>> {
@@ -287,6 +312,7 @@ impl<G: Game> ReplayWriter<G> {
         let _ = self.ticks.split_off(&(tick + 1));
         let _ = self.keyframes.split_off(&(tick + 1));
         let _ = self.debug.split_off(&(tick + 1));
+        let _ = self.signals.split_off(&(tick + 1));
         self.checksums.retain(|&(t, _)| t <= tick);
     }
 
@@ -331,7 +357,8 @@ impl<G: Game> ReplayWriter<G> {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(MAGIC);
-        write_u32(&mut out, FORMAT_VERSION);
+        let has_signals = self.signals.values().any(|v| !v.is_empty());
+        write_u32(&mut out, if has_signals { FORMAT_VERSION } else { BASE_FORMAT_VERSION });
         write_str(&mut out, &self.header.game_id);
         write_u64(&mut out, self.header.build_hash);
         write_u64(&mut out, self.header.seed);
@@ -400,6 +427,20 @@ impl<G: Game> ReplayWriter<G> {
             }
         }
 
+        if has_signals {
+            let count: usize = self.signals.values().map(Vec::len).sum();
+            write_u32(&mut body, count as u32);
+            for (&tick, list) in &self.signals {
+                for signal in list {
+                    write_u64(&mut body, tick);
+                    body.push(signal.kind.to_byte());
+                    body.push(signal.slot.0);
+                    write_u32(&mut body, signal.data.len() as u32);
+                    body.extend_from_slice(&signal.data);
+                }
+            }
+        }
+
         let compressed = lz4_flex::block::compress_prepend_size(&body);
         write_u32(&mut out, compressed.len() as u32);
         out.extend_from_slice(&compressed);
@@ -417,6 +458,7 @@ pub struct ReplayReader<G: Game> {
     pub checksums: Vec<(u64, u64)>,
     keyframes: BTreeMap<u64, Vec<u8>>,
     debug: BTreeMap<u64, Vec<DebugCommand>>,
+    signals: BTreeMap<u64, Vec<RawPlayerSignal>>,
     cursor: u64,
     first_tick: u64,
     last_tick: u64,
@@ -538,10 +580,26 @@ impl<G: Game> ReplayReader<G> {
             }
         }
 
+        let mut signals: BTreeMap<u64, Vec<RawPlayerSignal>> = BTreeMap::new();
+        if format_version >= 4 {
+            let signal_count = br.u32()?;
+            for _ in 0..signal_count {
+                checkpoint(ParseCheckpoint::BeforeSignal)?;
+                let tick = br.u64()?;
+                let kind = SignalKind::from_byte(br.u8()?).ok_or(ReplayError::BadSignal)?;
+                let slot = PlayerSlot(br.u8()?);
+                let len = br.u32()? as usize;
+                let data = br.take(len)?.to_vec();
+                checkpoint(ParseCheckpoint::AfterSignal)?;
+                // The file holds the canonical order already; inserting keeps it.
+                insert_signal(signals.entry(tick).or_default(), RawPlayerSignal { kind, slot, data });
+            }
+        }
+
         let first_tick = ticks.keys().next().copied().unwrap_or(1);
         let last_tick = ticks.keys().next_back().copied().unwrap_or(0);
         checkpoint(ParseCheckpoint::Complete)?;
-        Ok(Self { header, ticks, checksums, keyframes, debug, cursor: first_tick, first_tick, last_tick })
+        Ok(Self { header, ticks, checksums, keyframes, debug, signals, cursor: first_tick, first_tick, last_tick })
     }
 
     pub fn tick_count(&self) -> usize {
@@ -559,6 +617,11 @@ impl<G: Game> ReplayReader<G> {
     /// The debug commands applied at the boundary before `tick`, in order.
     pub fn debug_commands(&self, tick: u64) -> &[DebugCommand] {
         self.debug.get(&tick).map_or(&[], |v| v.as_slice())
+    }
+
+    /// The player signals applied at `tick`, in order.
+    pub fn signals(&self, tick: u64) -> &[RawPlayerSignal] {
+        self.signals.get(&tick).map_or(&[], |v| v.as_slice())
     }
 
     /// Whether any debug command exists, including outside the input tick range.
@@ -622,6 +685,7 @@ impl<G: Game> ReplayReader<G> {
         w.checksums.sort_by_key(|&(t, _)| t);
         w.keyframes = self.keyframes.clone();
         w.debug = self.debug.clone();
+        w.signals = self.signals.clone();
         w
     }
 
@@ -830,6 +894,7 @@ fn step_recorded<G: Game>(sim: &mut Simulation<G>, reader: &ReplayReader<G>, tic
         tick_inputs.set_input(PlayerSlot(i as u8), *inp);
     }
     tick_inputs.set_commands(commands.clone());
+    tick_inputs.set_signals(reader.signals(tick).to_vec());
     let _events = sim.step_with_debug(&tick_inputs, debug);
     true
 }

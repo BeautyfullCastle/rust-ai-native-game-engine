@@ -221,7 +221,9 @@ impl<G: Game> App<G> {
             Some(source) => session_from_scene::<G>(cfg, &source)?,
             None => PlaySession::<G>::new(cfg, self.config.take().ok_or_else(|| Error("the app was already run".to_string()))?),
         };
-        let mut host = PlayHost::new(session, LOCAL_SLOT).with_extra_local_slots((1..self.local_players).map(PlayerSlot));
+        // Offline, the app is the "server": it announces every player in tick 1.
+        let mut host =
+            PlayHost::new(session, LOCAL_SLOT).with_extra_local_slots((1..self.local_players).map(PlayerSlot)).with_announced_players();
         if let Some(bot) = self.bot.take() {
             host = host.with_bot(bot);
         }

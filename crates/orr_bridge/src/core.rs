@@ -176,12 +176,19 @@ impl<G: Game, H: SimHost<G>> SimCore<G, H> {
             self.lifecycle(note);
         }
         self.refresh_admission(branch_finished);
+        self.send_signal_notes();
         self.send_events(events);
         if self.needs_publish() {
             self.publish();
         }
         self.publish_output();
         self.steps_done.fetch_add(1, Ordering::Release);
+    }
+
+    fn send_signal_notes(&mut self) {
+        for (key, status) in self.host.take_signal_notes().into_vec() {
+            self.pending_events.push(BridgeEvent::Player { key, status });
+        }
     }
 
     fn send_events(&mut self, batch: EventBatch<G::Event>) {
@@ -261,6 +268,8 @@ impl<G: Game, H: SimHost<G>> SimCore<G, H> {
             self.lifecycle(note);
         }
         self.refresh_admission(false);
+        // A tick applies its signals before its systems run, so they come first.
+        self.send_signal_notes();
         self.send_events(batch);
 
         if self.needs_publish() {
