@@ -3,13 +3,15 @@ use std::collections::VecDeque;
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 
 use orr_session::ControlOp;
-use orr_sim::{DebugCommand, Game};
+use orr_sim::{DebugCommand, Game, PlayerSlot};
 
 use crate::bridge::BridgeError;
 use crate::core::ToSim;
 
 struct State<G: Game> {
     input: G::Input,
+    /// Held input of the local slots after the first (see `Bridge::local_slots`).
+    extra: Vec<(PlayerSlot, G::Input)>,
     queue: VecDeque<ToSim<G>>,
     data_queued: usize,
     controls_queued: usize,
@@ -32,6 +34,7 @@ impl<G: Game> Ingress<G> {
         Self {
             state: Mutex::new(State {
                 input: G::Input::default(),
+                extra: Vec::new(),
                 queue: VecDeque::new(),
                 data_queued: 0,
                 controls_queued: 0,
@@ -73,6 +76,31 @@ impl<G: Game> Ingress<G> {
     pub(crate) fn close(&self) {
         self.lock().open = false;
         self.ready.notify_all();
+    }
+
+    /// Sets the extra local slots (default input each). Called once by the sim side at start.
+    pub(crate) fn declare_extra(&self, slots: &[PlayerSlot]) {
+        self.lock().extra = slots.iter().map(|slot| (*slot, G::Input::default())).collect();
+    }
+
+    pub(crate) fn extra_slots(&self) -> Vec<PlayerSlot> {
+        self.lock().extra.iter().map(|(slot, _)| *slot).collect()
+    }
+
+    /// Replaces `out` with the held input of every extra slot.
+    pub(crate) fn extra_inputs_into(&self, out: &mut Vec<(PlayerSlot, G::Input)>) {
+        out.clear();
+        out.extend(self.lock().extra.iter().copied());
+    }
+
+    /// Holds `input` for one declared extra slot. Other slots are ignored.
+    pub(crate) fn set_extra_input(&self, slot: PlayerSlot, input: G::Input) -> Result<(), BridgeError> {
+        let mut state = self.lock();
+        Self::check_writable(&state)?;
+        if let Some(held) = state.extra.iter_mut().find(|(s, _)| *s == slot) {
+            held.1 = input;
+        }
+        Ok(())
     }
 
     pub(crate) fn input(&self) -> G::Input {

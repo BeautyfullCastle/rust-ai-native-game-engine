@@ -11,10 +11,12 @@ workspace = true
 [dependencies]
 orr_fp = { path = "../orr_fp" }
 orr_ecs = { path = "../orr_ecs" }
+orr_reflect = { path = "../orr_reflect", default-features = false }
 bytemuck = { version = "1", features = ["derive"] }
 subsecond = { version = "0.7.10", optional = true }
 
 [dev-dependencies]
+orr_reflect = { path = "../orr_reflect" }
 criterion = { version = "0.5", default-features = false }
 
 [features]
