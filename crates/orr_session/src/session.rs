@@ -553,7 +553,10 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
     /// simulated before is dropped (the predicted ticks, the frame ring, the
     /// anchors). Checksums recorded for ticks `>= bad_from` came from the
     /// diverged state and are dropped too. Events announced as `Predicted`
-    /// and not yet verified are canceled in the returned batch.
+    /// and not yet verified are canceled in the returned batch. Signals
+    /// announced as `Predicted` and not yet verified are canceled in
+    /// [`take_signal_notes`](Self::take_signal_notes). Scheduled signals of
+    /// ticks up to `tick` are dropped, as their effect is in the frame.
     ///
     /// `tick` may be older than the current verified tick (the reliable
     /// correction can lag the unreliable bundles); the caller must then feed
@@ -588,6 +591,10 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
         for (key, _) in std::mem::take(&mut self.announced) {
             batch.push(key, EventStatus::Canceled);
         }
+        for (key, _) in std::mem::take(&mut self.announced_signals) {
+            self.signal_notes.push(key, EventStatus::Canceled);
+        }
+        self.signals = self.signals.split_off(&(tick + 1));
         self.checksums.retain(|&(t, _)| t < bad_from);
         self.anchors.clear();
         if self.cfg.keep_anchors > 0 {

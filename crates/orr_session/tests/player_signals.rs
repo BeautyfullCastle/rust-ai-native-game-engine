@@ -7,7 +7,7 @@ use orr_session::{
     replay_verify, AdvanceResult, EventKey, EventStatus, LoopbackNetwork, PlayConfig, PlaySession, ReplayReader, Session,
     SessionConfig, SignalError,
 };
-use orr_sim::{signal_key, PlayerSlot, RawPlayerSignal};
+use orr_sim::{signal_key, PlayerSlot, RawPlayerSignal, Simulation, TickInputs};
 use orr_testgame::roster::{Avatar, Census, Profile, Roster, RosterInput};
 
 // ---- offline: PlaySession and recordings ----
@@ -360,4 +360,75 @@ fn a_signal_for_a_verified_tick_is_refused() {
     let err = pair.a.schedule_signal(3, RawPlayerSignal::added(PlayerSlot(0))).unwrap_err();
     assert_eq!(err, SignalError::AlreadyVerified { tick: 3, verified_tick: verified });
     assert!(pair.a.schedule_signal(verified + 1, RawPlayerSignal::added(PlayerSlot(0))).is_ok());
+}
+
+// ---- authoritative restore ----
+
+/// A frame of the roster game at `tick`, as the authority would send it.
+fn authority_frame(tick: u64) -> (u64, Vec<u8>) {
+    let mut reference = Simulation::<Roster>::new((), 60, 42);
+    for t in 1..=tick {
+        reference.step(&TickInputs::new(t, 2));
+    }
+    (reference.checksum(), reference.frame().to_bytes())
+}
+
+fn notes_of(pair: &Pair, key: EventKey) -> Vec<&'static str> {
+    pair.notes
+        .iter()
+        .filter(|(k, _)| *k == key)
+        .map(|(_, s)| match s {
+            EventStatus::Predicted(_) => "predicted",
+            EventStatus::Verified(_) => "verified",
+            EventStatus::Canceled => "canceled",
+        })
+        .collect()
+}
+
+#[test]
+fn restoring_before_the_signal_tick_cancels_the_prediction_before_it_is_predicted_again() {
+    let mut pair = Pair::new();
+    let key = signal_key(6, PlayerSlot(1), 0);
+    pair.signal(6, RawPlayerSignal::added(PlayerSlot(1))).unwrap();
+    for _ in 0..6 {
+        pair.advance();
+    }
+    assert_eq!(pair.a.head_tick(), 6);
+    assert!(pair.a.verified_tick() < 5, "the remote input is still unconfirmed");
+    assert_eq!(notes_of(&pair, key), ["predicted"]);
+
+    let (checksum, bytes) = authority_frame(5);
+    pair.a.restore_confirmed(5, checksum, &bytes, 1).unwrap();
+    pair.notes.extend(pair.a.take_signal_notes().into_vec());
+    assert_eq!(notes_of(&pair, key), ["predicted", "canceled"], "the restore withdraws the prediction");
+
+    pair.advance();
+    assert_eq!(pair.a.head_tick(), 6, "tick 6 runs again");
+    assert_eq!(notes_of(&pair, key), ["predicted", "canceled", "predicted"], "never two predictions in a row");
+}
+
+#[test]
+fn restoring_at_or_after_the_signal_tick_leaves_no_unconfirmed_signal() {
+    let mut pair = Pair::new();
+    let key = signal_key(6, PlayerSlot(1), 0);
+    pair.signal(6, RawPlayerSignal::added(PlayerSlot(1))).unwrap();
+    for _ in 0..8 {
+        pair.advance();
+    }
+    assert_eq!(notes_of(&pair, key), ["predicted"]);
+
+    let (checksum, bytes) = authority_frame(7);
+    pair.a.restore_confirmed(7, checksum, &bytes, 1).unwrap();
+    pair.notes.extend(pair.a.take_signal_notes().into_vec());
+    assert_eq!(notes_of(&pair, key), ["predicted", "canceled"]);
+
+    // The signal's tick is part of the restored frame: it can no longer be scheduled and never runs again.
+    assert_eq!(
+        pair.a.schedule_signal(6, RawPlayerSignal::added(PlayerSlot(1))).unwrap_err(),
+        SignalError::AlreadyVerified { tick: 6, verified_tick: 7 }
+    );
+    for _ in 0..4 {
+        pair.advance();
+    }
+    assert_eq!(notes_of(&pair, key), ["predicted", "canceled"], "nothing stale is left to note");
 }
