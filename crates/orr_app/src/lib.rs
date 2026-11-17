@@ -1,6 +1,7 @@
 //! Runs a [`orr_sim::Game`] in a window with almost no code of its own.
 //!
-//! Stages 1 to 3 of `docs/view-framework.md`: offline only (one or more local players on one screen, no server),
+//! Stages 1 to 4 of `docs/view-framework.md`: offline (one or more local players on one screen, no
+//! server) or on a relay server (`--host`, `--connect`: one player per window),
 //! a fixed tick from the clock, interpolation through `orr_view`, a default 2D
 //! renderer, and `--screenshot` / `--ticks` for pictures that can be compared.
 //! `EntityView` and `SceneView` get creates, destroys and events (also the canceled ones).
@@ -14,6 +15,7 @@
 mod app;
 mod cli;
 mod input;
+mod net;
 mod pace;
 mod shot;
 mod view2d;

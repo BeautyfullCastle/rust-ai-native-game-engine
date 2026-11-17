@@ -4,9 +4,9 @@ use std::fmt;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use orr_bridge::{Bridge, BridgeConfig, InProc, PlayHost, PlayerSlot};
+use orr_bridge::{Bridge, BridgeConfig, BridgeError, BridgeEvent, InProc, PlayHost, PlayerSlot, Snapshot, Threaded, ViewUpdate};
 use orr_ecs::Component;
 use orr_reflect::{Scene, TypeRegistry};
 use orr_render::orr_rhi::Wgpu;
@@ -21,8 +21,9 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
-use crate::cli::{Args, USAGE};
+use crate::cli::{Args, RunMode, USAGE};
 use crate::input::InputContext;
+use crate::net::{self, Hosted, Join};
 use crate::pace::{Advance, Outcome, Pacer};
 use crate::shot::{render_rgba, write_png};
 use crate::view2d::{fill_draw_list, SharedView, View2D};
@@ -55,12 +56,75 @@ type InputFn<G> = Box<dyn FnMut(&InputContext, PlayerSlot) -> <G as Game>::Input
 type BotFn<G> = Box<dyn FnMut(PlayerSlot, u64) -> <G as Game>::Input>;
 type Offline<G> = InProc<G, PlayHost<G>>;
 
+/// The bridge of a run: the game inside this process (offline), or a relay client on its own thread.
+enum Driver<G: Game> {
+    Offline(Box<Offline<G>>),
+    Net(Threaded<G>),
+}
+
+impl<G: Game> Driver<G> {
+    /// Runs `n` ticks now. Only an offline run can: a relay client follows the clock of the server.
+    fn step(&mut self, n: u32) {
+        match self {
+            Driver::Offline(bridge) => bridge.step(n),
+            Driver::Net(bridge) => bridge.step(n),
+        }
+    }
+}
+
+macro_rules! delegate {
+    ($self:ident.$method:ident($($arg:expr),*)) => {
+        match $self {
+            Driver::Offline(bridge) => bridge.$method($($arg),*),
+            Driver::Net(bridge) => bridge.$method($($arg),*),
+        }
+    };
+}
+
+impl<G: Game> Bridge<G> for Driver<G> {
+    fn tick_rate(&self) -> u32 {
+        delegate!(self.tick_rate())
+    }
+    fn local_slot(&self) -> PlayerSlot {
+        delegate!(self.local_slot())
+    }
+    fn player_count(&self) -> u8 {
+        delegate!(self.player_count())
+    }
+    fn local_slots(&self) -> Vec<PlayerSlot> {
+        delegate!(self.local_slots())
+    }
+    fn set_input(&mut self, player: PlayerSlot, input: G::Input) -> Result<(), BridgeError> {
+        delegate!(self.set_input(player, input))
+    }
+    fn send_command(&mut self, command: G::Command) -> Result<(), BridgeError> {
+        delegate!(self.send_command(command))
+    }
+    fn update(&mut self, elapsed: Duration) {
+        delegate!(self.update(elapsed))
+    }
+    fn snapshot(&self) -> Option<Snapshot> {
+        delegate!(self.snapshot())
+    }
+    fn drain_events(&mut self) -> Vec<BridgeEvent<G::Event>> {
+        delegate!(self.drain_events())
+    }
+    fn poll_view(&mut self) -> ViewUpdate<G::Event> {
+        delegate!(self.poll_view())
+    }
+    fn is_alive(&self) -> bool {
+        delegate!(self.is_alive())
+    }
+}
+
 struct SceneSource {
     path: PathBuf,
     register: fn(&mut TypeRegistry),
 }
 
-/// Runs game `G` in a window, offline: one or more local players on one screen, no server.
+/// Runs game `G` in a window. By default it runs offline: one or more local players on one
+/// screen, no server. `--host` and `--connect` (see `--help`) play the same game on a relay
+/// server instead, with one player per window; the builder code does not change.
 ///
 /// ```text
 /// App::<MyGame>::new()
@@ -230,13 +294,60 @@ impl<G: Game> App<G> {
         Ok(InProc::new(host, BridgeConfig::default()))
     }
 
+    /// What a networked run needs from the builder: the number of players the room waits for
+    /// (every window plays one slot, so the larger of `players` and `local_players`) and the
+    /// config of the game.
+    fn net_parts(&mut self) -> Result<(u8, G::Config), Error> {
+        if self.scene.is_some() {
+            return Err(Error("a scene file is not supported with --host or --connect yet".to_string()));
+        }
+        let config = self.config.take().ok_or_else(|| Error("the app was already run".to_string()))?;
+        Ok((self.players.max(self.local_players), config))
+    }
+
+    /// `--host`: a relay server in this process, and a client of it for this window (slot 0).
+    fn build_hosted(&mut self, bind: std::net::SocketAddr) -> Result<(Driver<G>, Hosted), Error> {
+        let (players, config) = self.net_parts()?;
+        let room = net::room_config::<G>(players, self.tick_rate, self.seed);
+        let server = Hosted::start(bind, room, self.seed)?;
+        eprintln!("hosting {players} players on {} (other windows: --connect {})", server.addr(), server.client_address());
+        let join = Join { addr: server.client_address(), slot: Some(0), token: 0 };
+        let joined = net::join::<G>(join, config)?;
+        Ok((Driver::Net(joined.bridge), server))
+    }
+
+    /// `--connect`: this window is a client of the server at `addr`.
+    fn build_joined(&mut self, addr: String, args: &Args) -> Result<Driver<G>, Error> {
+        let (_, config) = self.net_parts()?;
+        let join = Join { addr: addr.clone(), slot: args.slot, token: args.token };
+        let joined = net::join::<G>(join, config)?;
+        eprintln!(
+            "playing as slot {} of {}. To take the seat again after closing this window: --connect {} --slot {} --token {}",
+            joined.slot, joined.players, addr, joined.slot, joined.token
+        );
+        Ok(Driver::Net(joined.bridge))
+    }
+
     fn run_window(mut self, args: Args) -> Result<(), Error> {
         let view = self.view.take().ok_or_else(|| Error("no view: call .view(..) before .run()".to_string()))?;
         let input = self.input.take().ok_or_else(|| Error("no input: call .input(..) before .run()".to_string()))?;
-        let bridge = self.build_bridge()?;
+        let mode = args.mode()?;
+        let (bridge, server) = match &mode {
+            RunMode::Offline => (Driver::Offline(Box::new(self.build_bridge()?)), None),
+            RunMode::Host { bind } => {
+                let (bridge, server) = self.build_hosted(*bind)?;
+                (bridge, Some(server))
+            }
+            RunMode::Connect { addr } => (self.build_joined(addr.clone(), &args)?, None),
+        };
         let event_loop = EventLoop::new().map_err(|e| Error(format!("event loop: {e}")))?;
         event_loop.set_control_flow(ControlFlow::Poll);
-        let local = LocalInput::new(input, bridge.local_slots());
+        let networked = mode != RunMode::Offline;
+        let local = if networked {
+            LocalInput::networked(input, bridge.local_slots())
+        } else {
+            LocalInput::new(input, bridge.local_slots())
+        };
         let shared = SharedView(view);
         let mut runner = Runner {
             bridge,
@@ -244,7 +355,7 @@ impl<G: Game> App<G> {
             view: shared,
             local,
             keys: InputContext::default(),
-            pacer: Pacer::new(&args),
+            pacer: if networked { Pacer::new(&args).following_clock() } else { Pacer::new(&args) },
             args,
             title: self.title,
             gfx: None,
@@ -255,6 +366,7 @@ impl<G: Game> App<G> {
             list: RenderList::new(),
             last_frame: Instant::now(),
             error: None,
+            _server: server,
         };
         event_loop.run_app(&mut runner).map_err(|e| Error(format!("run: {e}")))?;
         runner.error.map_or(Ok(()), |e| Err(Error(e)))
@@ -285,20 +397,33 @@ fn session_from_scene<G: Game>(cfg: PlayConfig, source: &SceneSource) -> Result<
 /// The input function and what it last sent for each local slot.
 struct LocalInput<G: Game> {
     poll: InputFn<G>,
+    /// The slots the bridge takes input for.
     slots: Vec<PlayerSlot>,
+    /// The slot number the input function is given for each of them.
+    polled: Vec<PlayerSlot>,
     sent: Vec<Option<G::Input>>,
 }
 
 impl<G: Game> LocalInput<G> {
+    /// The input function gets the slots themselves.
     fn new(poll: InputFn<G>, slots: Vec<PlayerSlot>) -> Self {
+        let polled = slots.clone();
         let sent = vec![None; slots.len()];
-        Self { poll, slots, sent }
+        Self { poll, slots, polled, sent }
+    }
+
+    /// A relay client: the server picked the slot, so the input function gets the number of the
+    /// local player instead (0 for the one player of this window, which is the WASD layout).
+    fn networked(poll: InputFn<G>, slots: Vec<PlayerSlot>) -> Self {
+        let polled = (0..slots.len()).map(|i| PlayerSlot(i as u8)).collect();
+        let sent = vec![None; slots.len()];
+        Self { poll, slots, polled, sent }
     }
 
     /// Polls every local slot and sends the inputs that changed.
     fn send(&mut self, keys: &InputContext, bridge: &mut dyn Bridge<G>) {
-        for (slot, sent) in self.slots.iter().zip(&mut self.sent) {
-            let input = (self.poll)(keys, *slot);
+        for ((slot, polled), sent) in self.slots.iter().zip(&self.polled).zip(&mut self.sent) {
+            let input = (self.poll)(keys, *polled);
             if *sent != Some(input) {
                 *sent = Some(input);
                 let _ = bridge.set_input(*slot, input);
@@ -313,7 +438,7 @@ struct Gfx {
 }
 
 struct Runner<G: Game> {
-    bridge: Offline<G>,
+    bridge: Driver<G>,
     world: ViewWorld<SharedView>,
     view: SharedView,
     local: LocalInput<G>,
@@ -331,6 +456,8 @@ struct Runner<G: Game> {
     list: RenderList,
     last_frame: Instant,
     error: Option<String>,
+    /// The relay server of `--host`. Declared last so it stops after the bridge left the room.
+    _server: Option<Hosted>,
 }
 
 impl<G: Game> Runner<G> {
