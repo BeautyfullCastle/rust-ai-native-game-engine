@@ -196,7 +196,8 @@ pub trait SceneView<G: Game> {
 - 신호는 `TickInputs`에 틱 단위로 실린다. 모든 클라이언트가 같은 틱에 같은 신호를 받으므로 결정론이 유지된다.
 - 릴레이 서버의 입장·퇴장 알림 `Presence { slot, present, from_tick }`는 지금 확정 묶음과 따로 신뢰 채널로 간다. 클라이언트는 이 알림을 `from_tick`의 `TickInputs`에 신호로 넣는다. 그 틱을 이미 예측으로 지나갔다면 일반 입력 오예측과 같이 롤백한다.
 - `Disconnected`와 `Removed`의 구분은 서버의 자리 보관 기능을 쓴다. 지금 서버는 나간 플레이어의 자리를 토큰과 함께 `reserve_ticks` 동안 보관한다. 보관 중이면 `Disconnected`, 보관이 끝나면 `Removed`다.
-- 서버 없이 실행하면 `App`이 시작할 때 로컬 플레이어마다 `PlayerAdded`를 넣는다.
+- 서버 없이 실행하면 `App`이 첫 틱(틱 1)에 모든 플레이어 슬롯마다 `PlayerAdded`를 넣는다(구현: `PlayHost::with_announced_players`).
+- 구현 메모(4a): 신호는 `RawPlayerSignal`(종류, 슬롯, 시작 데이터 바이트)로 `TickInputs`에 실리고, 게임의 `systems()` 맨 앞에 `player_signals::<G>()`를 넣으면 `Players::on_player`가 불린다. 뷰는 `BridgeEvent::Player`로 `Predicted`/`Verified`/`Canceled`를 받는다.
 
 ### 8.3 플레이어별 시작 데이터
 
@@ -295,7 +296,8 @@ sequenceDiagram
 | 1 (완료) | `orr_app` 실행 함수, 기본 렌더러, 서버 없이 실행 | 2D 물리 데모 하나를 `orr_app` 위로 옮겨 같은 화면이 나온다. 쓰는 법과 정한 것은 [crates/orr_app/README.md](../crates/orr_app/README.md), 예제는 `orr_app/examples/physics2d.rs`. 같은 틱의 그림이 기존 물리 샘플의 그리기 경로와 바이트까지 같다 |
 | 2 (완료) | 엔티티 뷰, 씬 뷰, 이벤트 상태, 예측·확정 프레임 접근 | 롤백이 나는 장면에서 `on_create`/`on_destroy`와 이벤트 취소가 맞게 불린다(테스트). 쓰는 법은 [crates/orr_app/README.md](../crates/orr_app/README.md), 코드는 `orr_app/src/views.rs`, 테스트는 `orr_app/tests/views.rs`(롤백이 나는 두 세션). 뺀 것: `ViewContext::query`, `draw()`, `on_player`(4단계), `App::threaded()` |
 | 3 (완료) | `PlayerSlot` Pod·리플렉션, `PlayerLink`, 로컬 플레이어 여러 명 | 한 화면 2인 예제가 돈다. 쓰는 법은 [crates/orr_app/README.md](../crates/orr_app/README.md), 예제는 `orr_app/examples/physics2d_coop.rs`(WASD와 방향키). 코드는 `orr_sim/src/input.rs`(`PlayerSlot::NONE`, `PlayerLink`), `orr_bridge`(`Bridge::local_slots`, `PlayHost::with_extra_local_slots`). 테스트는 `orr_sim/tests/player_link.rs`, `orr_bridge/tests/local_slots.rs`. 뺀 것: 패드 입력(키보드만), 서버 쪽 여러 슬롯 클라이언트(릴레이·네트워크 클라이언트는 슬롯 하나), `Threaded`로 여러 로컬 슬롯을 쓰는 `App` 경로, 여러 슬롯의 `Step` 입력 캡처(첫 슬롯만) |
-| 4 | 플레이어 신호, `Players` 트레이트, 서버 `Presence` 연결 | 로컬 서버에 창 두 개가 접속하고, 한 창을 닫았다 다시 열면 `Disconnected` → `Reconnected` 순서로 신호가 온다 |
+| 4a (완료) | 신호·`Players`·오프라인: `PlayerSignal`을 입력(`TickInputs`)과 리플레이에 싣고, `Players` 트레이트, 서버 없이 첫 틱의 `Added`, `SceneView::on_player` | 신호가 `on_player`에 같은 틱으로 들어가고 리플레이에서도 같다. 이미 예측한 틱에 신호가 늦게 와도 롤백 후 체크섬이 같다(테스트). 쓰는 법은 [crates/orr_app/README.md](../crates/orr_app/README.md), 코드는 `orr_sim/src/signal.rs`, `orr_session`(`Session::schedule_signal`, `PlaySession::push_signal`, 리플레이 형식 4), `orr_bridge`(`BridgeEvent::Player`). 남은 것은 4b |
+| 4b | 서버 `Presence`를 `Session::schedule_signal(from_tick, ..)`로 잇기, `--host`/`--connect`, 재접속 | 로컬 서버에 창 두 개가 접속하고, 한 창을 닫았다 다시 열면 `Disconnected` → `Reconnected` 순서로 신호가 온다(테스트). 원격 뷰 스트림의 신호 전달도 여기서 정한다 |
 | 5 | 스냅숏 체크섬 다수 검증, 클라이언트 입력 "직전과 같음" 표시 | `netsim` 테스트로 조작된 스냅숏이 거부되고, 입력 바이트 감소량을 기록한다 |
 | 6 | `ViewRef`, 뷰 에셋, 프리팹 생성 | 인스펙터에서 뷰 에셋을 고르면 그 모델이 그려진다. `PlayerAdded`로 아바타 프리팹이 생긴다 |
 | 7 | 튜토리얼 | 빈 프로젝트 → 혼자 하기 → 한 화면 2인 → 로컬 서버 2창 → 재접속까지, 단계별 예제가 모두 빌드되고 테스트로 확인된다 |

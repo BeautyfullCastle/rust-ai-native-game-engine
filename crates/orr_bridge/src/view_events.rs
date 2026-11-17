@@ -332,7 +332,7 @@ impl<E> ViewEventReceiver<E> {
                     }
                     // A late confirmation/cancellation of a pre-reset effect
                     // must not resurrect a VFX whose predicted start was lost.
-                    BridgeEvent::Sim { key, .. }
+                    BridgeEvent::Sim { key, .. } | BridgeEvent::Player { key, .. }
                         if self.recovery_tick.is_some_and(|tick| key.tick <= tick) =>
                     {
                         continue

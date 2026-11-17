@@ -2,7 +2,7 @@
 //! Player 1 (slot 0): W A S D move the paddle, Space shoots.
 //! Player 2 (slot 1): arrow keys move the paddle, Enter shoots. Escape quits.
 #![allow(clippy::float_arithmetic)]
-use orr_app::{App, Entity, EntityView, FrameView, InterpMode, PlayerSlot, ViewContext};
+use orr_app::{App, Entity, EntityView, EventState, FrameView, InterpMode, PlayerSlot, RawPlayerSignal, SceneView, ViewContext};
 use orr_app::{fp_to_f32, solid_quad, Camera, Extracted, Extractor, RenderItem, View2D};
 use orr_games::physics_game::{PaddleTag, PhysConfig, PhysGame, PhysInput, Scene, SceneMode, TICK_RATE};
 use orr_sample::physics_view::PhysExtractor;
@@ -45,6 +45,16 @@ impl EntityView<PhysGame> for PaddleView {
     }
 }
 
+/// Prints the player signals the app sends without a server. `PhysGame` makes its paddles in
+/// `setup`, so it does not use `Players`; a game that does would create them from `Added`.
+struct Roll;
+
+impl SceneView<PhysGame> for Roll {
+    fn on_player(&mut self, ctx: &mut ViewContext<'_, PhysGame>, signal: &RawPlayerSignal, state: EventState) {
+        println!("player signal {:?} of slot {} at tick {} ({state:?})", signal.kind, signal.slot.0, ctx.tick());
+    }
+}
+
 fn main() -> Result<(), orr_app::Error> {
     App::<PhysGame>::with_config(PhysConfig::new(600, SceneMode::Rain))
         .tick_rate(TICK_RATE)
@@ -54,6 +64,7 @@ fn main() -> Result<(), orr_app::Error> {
             PhysInput::new(stick.x, stick.y, 0, stick.action)
         })
         .entity_view::<PaddleTag>(PaddleView::default)
+        .scene_view(Roll)
         .view(Look(PhysExtractor { remote_mode: InterpMode::Prediction, local_slot: 0 }))
         .title("Orrery two players (orr_app)")
         .run()

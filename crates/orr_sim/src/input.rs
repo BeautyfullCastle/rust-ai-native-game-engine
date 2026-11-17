@@ -1,6 +1,8 @@
 use bytemuck::{Pod, Zeroable};
 use orr_reflect::{IntKind, Reflect, TypeDesc};
 
+use crate::signal::{insert_signal, RawPlayerSignal};
+
 /// A fixed-size, per-player input sample for one tick.
 ///
 /// `Pod` gives a stable byte layout (needed for replay delta-compression and
@@ -83,6 +85,7 @@ pub struct TickInputs<I: SimInput, C: Clone> {
     inputs: Vec<I>,
     flags: Vec<PlayerFlags>,
     commands: Vec<(PlayerSlot, C)>,
+    signals: Vec<RawPlayerSignal>,
 }
 
 impl<I: SimInput, C: Clone> TickInputs<I, C> {
@@ -94,6 +97,7 @@ impl<I: SimInput, C: Clone> TickInputs<I, C> {
             inputs: (0..player_count).map(|_| I::default()).collect(),
             flags: vec![PlayerFlags::default(); player_count as usize],
             commands: Vec::new(),
+            signals: Vec::new(),
         }
     }
 
@@ -136,5 +140,23 @@ impl<I: SimInput, C: Clone> TickInputs<I, C> {
 
     pub fn set_commands(&mut self, commands: Vec<(PlayerSlot, C)>) {
         self.commands = commands;
+    }
+
+    /// The player signals of this tick, in the canonical order (by slot,
+    /// then in the order they were added). Empty for almost every tick, and
+    /// an empty list holds no memory.
+    pub fn signals(&self) -> &[RawPlayerSignal] {
+        &self.signals
+    }
+
+    /// Adds a signal in the canonical order, see [`crate::insert_signal`].
+    pub fn push_signal(&mut self, signal: RawPlayerSignal) {
+        insert_signal(&mut self.signals, signal);
+    }
+
+    /// Replaces the signals. `signals` must already be in the canonical
+    /// order (what [`TickInputs::signals`] returned).
+    pub fn set_signals(&mut self, signals: Vec<RawPlayerSignal>) {
+        self.signals = signals;
     }
 }

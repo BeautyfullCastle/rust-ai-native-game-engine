@@ -8,7 +8,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
 
-use orr_bridge::{Bridge, BridgeError, BridgeEvent, EventKey, EventStatus, FrameView, Lifecycle, PlayerSlot, Snapshot, ViewUpdate};
+use orr_bridge::{
+    Bridge, BridgeError, BridgeEvent, EventKey, EventStatus, FrameView, Lifecycle, PlayerSlot, RawPlayerSignal, Snapshot, ViewUpdate,
+};
 use orr_ecs::{Component, Entity};
 use orr_sim::Game;
 use orr_view::{RenderItem, Transform2};
@@ -116,6 +118,18 @@ pub trait SceneView<G: Game> {
         let _ = (ctx, event, state);
     }
 
+    /// A player signal: a player entered, dropped, came back or left. It arrives like an event:
+    /// `Predicted`, then `Verified` or `Canceled`, and a signal of a tick comes before the events
+    /// of that tick. Create the avatar view or a name tag on `Predicted` (and remove it on
+    /// `Canceled`). Do what cannot be undone, such as a "player joined" message log entry, on `Verified`.
+    ///
+    /// `signal.typed::<P>()` gives the start data as the game's `Players::Player`. Without a
+    /// server, the app announces every local player with `Added` at the first tick, and that
+    /// signal is `Verified` at once.
+    fn on_player(&mut self, ctx: &mut ViewContext<'_, G>, signal: &RawPlayerSignal, state: EventState) {
+        let _ = (ctx, signal, state);
+    }
+
     /// A session note: rollback, stall, disconnect, seek and so on.
     fn on_session(&mut self, ctx: &mut ViewContext<'_, G>, note: Lifecycle) {
         let _ = (ctx, note);
@@ -202,6 +216,8 @@ pub struct Views<G: Game> {
     /// The payload of every `Predicted` event that is neither verified nor canceled yet,
     /// because `Canceled` itself carries no payload.
     announced: BTreeMap<EventKey, G::Event>,
+    /// The same for player signals.
+    announced_signals: BTreeMap<EventKey, RawPlayerSignal>,
 }
 
 impl<G: Game> Default for Views<G> {
@@ -212,7 +228,7 @@ impl<G: Game> Default for Views<G> {
 
 impl<G: Game> Views<G> {
     pub fn new() -> Self {
-        Self { layers: Vec::new(), scenes: Vec::new(), started: false, snapshot: None, waiting: Vec::new(), announced: BTreeMap::new() }
+        Self { layers: Vec::new(), scenes: Vec::new(), started: false, snapshot: None, waiting: Vec::new(), announced: BTreeMap::new(), announced_signals: BTreeMap::new() }
     }
 
     /// One view (made by `factory`) for every entity that has component `C`.
@@ -266,6 +282,21 @@ impl<G: Game> Views<G> {
             match event {
                 BridgeEvent::ViewResynced(_) => self.resynced(&mut ctx),
                 BridgeEvent::Lifecycle(note) => self.session_note(&mut ctx, note),
+                BridgeEvent::Player { key, status } => match status {
+                    EventStatus::Predicted(signal) => {
+                        self.announced_signals.insert(key, signal.clone());
+                        self.player(&mut ctx, &signal, EventState::Predicted);
+                    }
+                    EventStatus::Verified(signal) => {
+                        self.announced_signals.remove(&key);
+                        self.player(&mut ctx, &signal, EventState::Verified);
+                    }
+                    EventStatus::Canceled => {
+                        if let Some(signal) = self.announced_signals.remove(&key) {
+                            self.player(&mut ctx, &signal, EventState::Canceled);
+                        }
+                    }
+                },
                 BridgeEvent::Sim { key, status } => match status {
                     EventStatus::Predicted(payload) => {
                         self.announced.insert(key, payload);
@@ -305,9 +336,16 @@ impl<G: Game> Views<G> {
         }
     }
 
+    fn player(&mut self, ctx: &mut ViewContext<'_, G>, signal: &RawPlayerSignal, state: EventState) {
+        for scene in &mut self.scenes {
+            scene.on_player(ctx, signal, state);
+        }
+    }
+
     /// Forgets the payloads of the `Predicted` events and tells the scene views.
     fn resynced(&mut self, ctx: &mut ViewContext<'_, G>) {
         self.announced.clear();
+        self.announced_signals.clear();
         for scene in &mut self.scenes {
             scene.on_resync(ctx);
         }

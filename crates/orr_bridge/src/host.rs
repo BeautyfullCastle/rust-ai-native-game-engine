@@ -5,7 +5,7 @@ use orr_session::{
     AdvanceResult, ControlOp, EventBatch, InputSource, LoopbackClock, LoopbackEnd, LoopbackNetwork, PlayNote, PlaySession,
     RollbackInfo, Session, SessionConfig, Speed, Timeline,
 };
-use orr_sim::{DebugCommand, DebugError, Game, PlayerSlot};
+use orr_sim::{DebugCommand, DebugError, Game, PlayerSlot, RawPlayerSignal};
 
 /// What a control or debug call on a [`SimHost`] produced: sim events and
 /// lifecycle notes, sent to the view in that order.
@@ -57,6 +57,14 @@ pub trait SimHost<G: Game> {
     /// taken after every `advance`. Default: none.
     fn take_lifecycle(&mut self) -> Vec<Lifecycle> {
         Vec::new()
+    }
+
+    /// Notes of the player signals of the ticks the host simulated since the
+    /// last call, taken after every `advance` (and after a control call), with
+    /// the same `Predicted`/`Verified`/`Canceled` meaning as sim events.
+    /// Default: none.
+    fn take_signal_notes(&mut self) -> EventBatch<RawPlayerSignal> {
+        EventBatch::empty()
     }
 
     /// Number of gameplay commands staged locally for a future simulation
@@ -132,6 +140,9 @@ impl<G: Game, S: InputSource<G>> SimHost<G> for Session<G, S> {
     }
     fn advance(&mut self, input: G::Input, commands: Vec<G::Command>) -> AdvanceResult<G> {
         Session::advance(self, input, commands)
+    }
+    fn take_signal_notes(&mut self) -> EventBatch<RawPlayerSignal> {
+        Session::take_signal_notes(self)
     }
     fn head_tick(&self) -> u64 {
         Session::head_tick(self)
@@ -221,6 +232,9 @@ impl<G: Game> SimHost<G> for LoopbackPair<G> {
         let _ = self.b.advance(bot_input, bot_commands);
         result
     }
+    fn take_signal_notes(&mut self) -> EventBatch<RawPlayerSignal> {
+        self.a.take_signal_notes()
+    }
     fn head_tick(&self) -> u64 {
         self.a.head_tick()
     }
@@ -284,6 +298,18 @@ impl<G: Game> PlayHost<G> {
     /// tick. Its input is ignored while a recording plays back.
     pub fn with_bot(mut self, bot: impl FnMut(PlayerSlot, u64) -> G::Input + 'static) -> Self {
         self.bot = Some(Box::new(bot));
+        self
+    }
+
+    /// Announces every player to the game at the start: each slot gets an
+    /// `Added` signal (default start data) in tick 1, the first tick run, so
+    /// a [`orr_sim::Players`] game can create its avatars from it without a
+    /// server. The signals are recorded with the tick, so a replay of the
+    /// session applies them again. Call it before the first tick. A game
+    /// without `Players` ignores them; the view still gets the notes.
+    pub fn with_announced_players(mut self) -> Self {
+        // A viewer session is read-only and has no live tick to announce in.
+        let _ = self.session.announce_players();
         self
     }
 
@@ -378,6 +404,9 @@ impl<G: Game> SimHost<G> for PlayHost<G> {
     }
     fn take_lifecycle(&mut self) -> Vec<Lifecycle> {
         std::mem::take(&mut self.lifecycle)
+    }
+    fn take_signal_notes(&mut self) -> EventBatch<RawPlayerSignal> {
+        self.session.take_signal_notes()
     }
     fn epoch(&self) -> u64 {
         self.session.epoch()

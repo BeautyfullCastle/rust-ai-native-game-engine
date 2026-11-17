@@ -327,6 +327,7 @@ impl<B: Bridge<Arena>> App<B> {
                     status: EventStatus::Canceled,
                     ..
                 } => self.summary.canceled_events += 1,
+                BridgeEvent::Player { .. } => {}
                 BridgeEvent::Lifecycle(note) => log_lifecycle(&note),
                 BridgeEvent::ViewResynced(reset) => crate::net_client::log_view_resync(&reset),
             }

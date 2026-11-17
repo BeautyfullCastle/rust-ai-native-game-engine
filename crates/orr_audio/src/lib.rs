@@ -505,6 +505,8 @@ impl<B: Backend> EventAudio<B> {
             match event {
                 BridgeEvent::Sim { key, status } => self.event(*key, status, &clip),
                 BridgeEvent::ViewResynced(resync) => self.resync(source, resync, adopt_baseline),
+                // Sound effects follow game events, not player signals.
+                BridgeEvent::Player { .. } => {}
                 BridgeEvent::Lifecycle(note) => match note {
                     Lifecycle::Seeked { to, .. } => self.reset_at(source, *to),
                     Lifecycle::Branched { tick, .. } => self.reset_at(source, *tick),

@@ -3,7 +3,10 @@ use std::ops::Bound;
 use std::sync::{Arc, Weak};
 
 use orr_ecs::{Frame, FrameRing};
-use orr_sim::{EventKey, Game, PlayerFlags, PlayerSlot, SimCommand, SimEvent, Simulation, TickInputs};
+use orr_sim::{
+    insert_signal, keyed_signals, EventKey, Game, PlayerFlags, PlayerSlot, RawPlayerSignal, SimCommand, SimEvent, Simulation,
+    TickInputs,
+};
 
 use crate::events::{EventBatch, EventStatus};
 use crate::input_source::{InputSource, LocallyVerifiedTick, RemoteInput};
@@ -352,7 +355,34 @@ pub struct Session<G: Game, S: InputSource<G>> {
     /// its prediction until the server's bundle confirms the tick.
     local_pending: BTreeMap<u64, (G::Input, Vec<G::Command>)>,
     anchors: VecDeque<Anchor>,
+    /// Player signals scheduled for ticks after `verified_tick`, in the
+    /// canonical order of each tick. Part of the input of those ticks.
+    signals: BTreeMap<u64, Vec<RawPlayerSignal>>,
+    /// Signals currently "live" as `Predicted` (announced, not yet verified
+    /// or canceled), by their key, for change detection across a rollback.
+    announced_signals: BTreeMap<EventKey, RawPlayerSignal>,
+    /// Notes of signals, until [`Session::take_signal_notes`] takes them.
+    signal_notes: EventBatch<RawPlayerSignal>,
 }
+
+/// Why [`Session::schedule_signal`] refused a signal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignalError {
+    /// The tick is already verified: it can never be simulated again.
+    AlreadyVerified { tick: u64, verified_tick: u64 },
+}
+
+impl core::fmt::Display for SignalError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            SignalError::AlreadyVerified { tick, verified_tick } => {
+                write!(f, "tick {tick} is already verified (verified tick {verified_tick})")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SignalError {}
 
 fn event_bytes<E: bytemuck::Pod>(e: &E) -> Vec<u8> {
     bytemuck::bytes_of(e).to_vec()
@@ -417,6 +447,9 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
             last_rollback: None,
             local_pending: BTreeMap::new(),
             anchors: VecDeque::new(),
+            signals: BTreeMap::new(),
+            announced_signals: BTreeMap::new(),
+            signal_notes: EventBatch::empty(),
         }
     }
 
@@ -1038,6 +1071,9 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
             }
         }
         ti.set_commands(cmds);
+        if let Some(signals) = self.signals.get(&tick) {
+            ti.set_signals(signals.clone());
+        }
         (ti, predicted)
     }
 
@@ -1069,6 +1105,11 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
     /// its input, or its commands (a confirmed slot that had commands the
     /// prediction lacked, or the reverse).
     fn tick_mismatch(&self, tick: u64, rec: &TickRecord<G>) -> bool {
+        // A signal scheduled after the tick was simulated changes its input.
+        let signals = self.signals.get(&tick).map_or(&[][..], Vec::as_slice);
+        if signals != rec.inputs.signals() {
+            return true;
+        }
         let Some(confirmed) = self.confirmed_input.get(&tick) else { return false };
         let commands = self.confirmed_commands.get(&tick);
         for (&slot, &val) in confirmed {
@@ -1116,11 +1157,16 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
 
         let mut resim_count = 0u32;
         for tick in from..=head {
-            let old_events = self.history.remove(&tick).map(|r| r.events).unwrap_or_default();
+            let (old_events, old_signals) = match self.history.remove(&tick) {
+                Some(r) => (r.events, r.inputs.signals().to_vec()),
+                None => (Vec::new(), Vec::new()),
+            };
             self.simulate_tick(tick);
             resim_count += 1;
             let new_events = &self.history[&tick].events;
             diff_events(&old_events, new_events, &mut self.announced, batch);
+            let new_signals = self.history[&tick].inputs.signals();
+            diff_signals(tick, &old_signals, new_signals, &mut self.announced_signals, &mut self.signal_notes);
         }
 
         let info = RollbackInfo { from_tick: from, to_tick: head, resim_count };
@@ -1177,6 +1223,10 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
                 let _ = bytes;
                 batch.push(e.key, EventStatus::Verified(e.payload));
             }
+            for (key, signal) in keyed_signals(t, rec.inputs.signals()) {
+                self.announced_signals.remove(&key);
+                self.signal_notes.push(key, EventStatus::Verified(signal.clone()));
+            }
             self.verified_tick = t;
             self.source.on_locally_verified(LocallyVerifiedTick {
                 simulated: &rec.inputs,
@@ -1208,6 +1258,33 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
                 }
             }
         }
+    }
+
+    /// Schedules a player signal as part of the input of `tick`. Every peer
+    /// must schedule the same signals, in the same order per slot, for the
+    /// same ticks (the relay delivers `Presence` with its `from_tick` for
+    /// this). A tick the session has not simulated yet applies the signal
+    /// when it runs. A tick it already simulated is simulated again: the next
+    /// [`step`](Self::step) or [`poll_confirmed`](Self::poll_confirmed) rolls
+    /// back to it, like for a mispredicted input, and the notes of the signal
+    /// and of the events of the resimulated ticks follow.
+    ///
+    /// Refused for a tick that is already verified.
+    pub fn schedule_signal(&mut self, tick: u64, signal: RawPlayerSignal) -> Result<(), SignalError> {
+        if tick <= self.verified_tick {
+            return Err(SignalError::AlreadyVerified { tick, verified_tick: self.verified_tick });
+        }
+        insert_signal(self.signals.entry(tick).or_default(), signal);
+        Ok(())
+    }
+
+    /// Takes the notes of signals since the last call: `Predicted` when a
+    /// tick that has the signal is simulated, `Verified` when that tick is
+    /// verified, `Canceled` when a rollback resimulation no longer has it.
+    /// The key of a note is [`orr_sim::signal_key`]. Use it with the batch of
+    /// [`step`](Self::step) so both reach the view in the same call.
+    pub fn take_signal_notes(&mut self) -> EventBatch<RawPlayerSignal> {
+        std::mem::replace(&mut self.signal_notes, EventBatch::empty())
     }
 
     /// Advances the session by one tick: records the local player's input,
@@ -1282,6 +1359,10 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
             self.announced.insert(e.key, bytes);
             batch.push(e.key, EventStatus::Predicted(e.payload));
         }
+        for (key, signal) in keyed_signals(next, self.history[&next].inputs.signals()) {
+            self.announced_signals.insert(key, signal.clone());
+            self.signal_notes.push(key, EventStatus::Predicted(signal.clone()));
+        }
 
         AdvanceResult::Advanced { tick: next, events: batch, rollback }
     }
@@ -1326,6 +1407,9 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
         }
 
         self.advance_verified(&mut batch);
+        if !self.signals.is_empty() {
+            self.signals = self.signals.split_off(&(self.verified_tick + 1));
+        }
         if self.cfg.relay {
             self.local_pending = self.local_pending.split_off(&(self.verified_tick + 1));
         }
@@ -1335,6 +1419,29 @@ impl<G: Game, S: InputSource<G>> Session<G, S> {
         }
         self.authored = self.authored.split_off(&keep_from);
         (batch, rollback)
+    }
+}
+
+/// Like [`diff_events`], for the signals of one tick (identity: [`orr_sim::signal_key`]).
+fn diff_signals(
+    tick: u64,
+    old: &[RawPlayerSignal],
+    new: &[RawPlayerSignal],
+    announced: &mut BTreeMap<EventKey, RawPlayerSignal>,
+    batch: &mut EventBatch<RawPlayerSignal>,
+) {
+    let new = keyed_signals(tick, new);
+    for (key, signal) in keyed_signals(tick, old) {
+        if announced.get(&key) == Some(signal) && !new.iter().any(|(k, s)| *k == key && *s == signal) {
+            announced.remove(&key);
+            batch.push(key, EventStatus::Canceled);
+        }
+    }
+    for (key, signal) in new {
+        if announced.get(&key) != Some(signal) {
+            announced.insert(key, signal.clone());
+            batch.push(key, EventStatus::Predicted(signal.clone()));
+        }
     }
 }
 
