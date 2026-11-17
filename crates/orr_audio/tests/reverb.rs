@@ -1,7 +1,7 @@
 #![allow(clippy::float_arithmetic)]
 
 use orr_audio::{AudioConfig, Clip, Listener, OfflineAudio, ReverbParams, ReverbZone};
-use orr_bridge::{EventKey, EventStatus};
+use orr_bridge::{EventKey, EventStatus, ViewUpdate};
 
 const RATE: u32 = 48_000;
 
@@ -196,4 +196,68 @@ fn zones_blend_by_weight_and_reject_invalid_input() {
     assert!(audio.add_reverb_zone(ReverbZone::sphere([0.0; 3], 1.0, ReverbParams::HALL)).is_err());
     audio.clear_reverb_zones();
     assert!(audio.set_ambient_reverb(ReverbParams { damping: f32::INFINITY, ..ReverbParams::HALL }).is_err());
+}
+
+/// How a session ends: each way stops the old voices, so each must also silence the bus.
+#[derive(Clone, Copy, Debug)]
+enum Boundary {
+    Reset,
+    Pause,
+    SourceSwap,
+}
+
+/// A click sent fully into a long-tail room, 100 ms of it rendered, then the boundary (or
+/// nothing), then one second more. Returns the energy of that second after a 100 ms fade window.
+fn energy_after(boundary: Option<Boundary>) -> f32 {
+    let mut audio = mixer();
+    audio.set_ambient_reverb(ReverbParams { wet: 1.0, ..ReverbParams::CAVE }).unwrap();
+    let empty = ViewUpdate::<()> { snapshot: None, events: Vec::new(), resync: None };
+    audio.update(1, &empty, |_| None);
+    play(&mut audio, 1, &click().reverb(1.0));
+    let before = render(&mut audio, 4800);
+    assert!(energies(&before, 4800)[0] > 0.0, "the reverb is already ringing at the boundary");
+    match boundary {
+        Some(Boundary::Reset) => audio.reset(),
+        Some(Boundary::Pause) => audio.set_paused(true),
+        Some(Boundary::SourceSwap) => audio.update(2, &empty, |_| None),
+        None => {}
+    }
+    let after = render(&mut audio, RATE as usize);
+    energies(&after[4800 * 2..], 43_200)[0]
+}
+
+#[test]
+fn a_reverb_tail_rings_on_without_a_boundary_so_the_clear_below_proves_something() {
+    assert!(energy_after(None) > 1e-6, "the cave tail is audible one second later");
+}
+
+#[test]
+fn reset_pause_and_a_source_swap_silence_the_reverb_tail() {
+    let ringing = energy_after(None);
+    for boundary in [Boundary::Reset, Boundary::Pause, Boundary::SourceSwap] {
+        let cleared = energy_after(Some(boundary));
+        assert!(cleared < ringing * 1e-6, "{boundary:?}: energy {cleared} after the fade against {ringing} without a boundary");
+    }
+}
+
+#[test]
+fn sounds_after_a_reset_still_get_their_reverb_and_leaving_a_zone_keeps_the_natural_tail() {
+    let mut audio = mixer();
+    audio.set_ambient_reverb(ReverbParams { wet: 1.0, ..ReverbParams::CAVE }).unwrap();
+    play(&mut audio, 1, &click().reverb(1.0));
+    render(&mut audio, 4800);
+    audio.reset();
+    render(&mut audio, 9600);
+    play(&mut audio, 2, &click().reverb(1.0));
+    let again = render(&mut audio, 24_000);
+    assert!(energies(&again, 4800)[1] > 0.0, "a click after the reset has a tail again");
+
+    // Leaving the zone: the ambient reverb turns off, the sound that already went in keeps ringing.
+    let mut audio = mixer();
+    audio.set_ambient_reverb(ReverbParams { wet: 1.0, ..ReverbParams::CAVE }).unwrap();
+    play(&mut audio, 1, &click().reverb(1.0));
+    render(&mut audio, 4800);
+    audio.set_ambient_reverb(ReverbParams::OUTDOOR).unwrap();
+    let after = render(&mut audio, RATE as usize);
+    assert!(energies(&after[4800 * 2..], 43_200)[0] > 1e-6, "the natural tail survives leaving the zone");
 }

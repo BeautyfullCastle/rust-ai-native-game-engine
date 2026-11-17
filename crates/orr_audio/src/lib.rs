@@ -443,6 +443,7 @@ impl<B: Backend> EventAudio<B> {
     pub fn set_paused(&mut self, paused: bool) {
         if paused && !self.paused {
             self.stop_voices();
+            self.silence_reverb();
         }
         self.paused = paused;
     }
@@ -464,8 +465,10 @@ impl<B: Backend> EventAudio<B> {
 
     /// Stop all owned voices with the short cancel fade, forget identity history.
     /// The manager keeps fading voices alive and bounded until they finish.
+    /// The reverb tail of the old sounds is faded out and cleared over the same time.
     pub fn reset(&mut self) {
         self.stop_voices();
+        self.silence_reverb();
         self.history.clear();
         self.retired_through = None;
         self.source = None;
@@ -563,6 +566,14 @@ impl<B: Backend> EventAudio<B> {
             if voice.key.take().is_some() {
                 voice.handle.stop(tween);
             }
+        }
+    }
+
+    /// Fades the reverb bus out over the cancel fade, then empties its filters, so the
+    /// sounds that were stopped leave no tail. Leaving a zone does not call this.
+    fn silence_reverb(&self) {
+        if let Some(bus) = &self.bus {
+            bus.shared.request_clear(self.config.cancel_fade.as_secs_f32());
         }
     }
 
