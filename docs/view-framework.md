@@ -150,6 +150,7 @@ pub trait SceneView<G: Game> {
     fn on_event(&mut self, ctx: &mut ViewContext<G>, event: &G::Event, state: EventState) {}
     fn on_player(&mut self, ctx: &mut ViewContext<G>, signal: PlayerSignal) {}
     fn on_session(&mut self, ctx: &mut ViewContext<G>, note: Lifecycle) {}
+    fn on_resync(&mut self, ctx: &mut ViewContext<G>) {}
 }
 ```
 
@@ -169,6 +170,7 @@ pub trait SceneView<G: Game> {
 
 - 효과음, 파티클: `Predicted`에서 시작하고 `Canceled`면 멈춘다.
 - 업적, 통계, 서버 보고: `Verified`에서만 처리한다.
+- 브리지가 이벤트를 버리고 복구하면(`ViewResync`, 옛 `BridgeEvent::ViewResynced`) 이전 `Predicted`는 모두 잊혀서 `Verified`도 `Canceled`도 오지 않는다. 그때 `on_resync`가 그 프레임의 이벤트보다 먼저 한 번 불린다. 추측으로 시작한 효과를 멈추고 `ctx.predicted()`/`ctx.verified()`로 다시 만든다. 엔티티 뷰에는 따로 알리지 않는다. 매 프레임 예측 프레임과 비교하기 때문이다.
 
 ## 8. 플레이어
 

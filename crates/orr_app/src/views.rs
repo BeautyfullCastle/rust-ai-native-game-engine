@@ -119,6 +119,15 @@ pub trait SceneView<G: Game> {
     fn on_session(&mut self, ctx: &mut ViewContext<'_, G>, note: Lifecycle) {
         let _ = (ctx, note);
     }
+
+    /// The bridge dropped events it could not deliver (its queue overflowed), so the view lost
+    /// track. All earlier `Predicted` events are forgotten: no `Verified` or `Canceled` will come
+    /// for them. Stop the speculative effects you started on `Predicted` and rebuild what you
+    /// show from `ctx.predicted()` and `ctx.verified()`. Called once per resync, before the
+    /// events and session notes of that frame (those notes still follow in `on_session`).
+    fn on_resync(&mut self, ctx: &mut ViewContext<'_, G>) {
+        let _ = ctx;
+    }
 }
 
 /// Makes one [`EntityView`] for each new entity. Any `FnMut() -> V` is a factory,
@@ -247,14 +256,14 @@ impl<G: Game> Views<G> {
         }
         if let Some(resync) = &update.resync {
             // Events before the resync are gone. Speculative effects must not wait for a `Canceled` that cannot come.
-            self.announced.clear();
+            self.resynced(&mut ctx);
             for recovery in &resync.lifecycle {
                 self.session_note(&mut ctx, recovery.last);
             }
         }
         for event in events {
             match event {
-                BridgeEvent::ViewResynced(_) => self.announced.clear(),
+                BridgeEvent::ViewResynced(_) => self.resynced(&mut ctx),
                 BridgeEvent::Lifecycle(note) => self.session_note(&mut ctx, note),
                 BridgeEvent::Sim { key, status } => match status {
                     EventStatus::Predicted(payload) => {
@@ -292,6 +301,14 @@ impl<G: Game> Views<G> {
     fn event(&mut self, ctx: &mut ViewContext<'_, G>, payload: &G::Event, state: EventState) {
         for scene in &mut self.scenes {
             scene.on_event(ctx, payload, state);
+        }
+    }
+
+    /// Forgets the payloads of the `Predicted` events and tells the scene views.
+    fn resynced(&mut self, ctx: &mut ViewContext<'_, G>) {
+        self.announced.clear();
+        for scene in &mut self.scenes {
+            scene.on_resync(ctx);
         }
     }
 
