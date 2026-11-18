@@ -418,7 +418,7 @@ fn recorded_controller<G: StandaloneGame>() -> (Admitted<G>, Vec<u8>, Vec<Value>
 fn replay_round_trip<G: StandaloneGame>() {
     let (admitted, bytes, consumed) = recorded_controller::<G>();
     assert_eq!(&bytes[..4], b"ORRP");
-    assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 3);
+    assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 5);
     let reader = ReplayReader::<G>::parse(&bytes).unwrap();
     assert_eq!(reader.first_tick(), 1);
     assert_eq!(reader.last_tick(), 125);
@@ -486,7 +486,6 @@ fn both_games_record_actual_consumed_inputs_and_replay_every_tick_past_two_keyfr
 
 fn header<G: Starter>() -> ReplayHeader {
     ReplayHeader {
-        format_version: 3,
         game_id: G::ID.into(),
         build_hash: orr_sim::build_hash_of(G::BUILD, 0),
         seed: SEED,
@@ -542,10 +541,10 @@ fn replay_header_contract<G: StandaloneGame>() {
         let bytes = one_tick_replay(&admitted, altered, G::Input::default());
         rejection(&admitted, &bytes, expected);
     }
-    for version in [0_u32, 1, 2, 4] {
+    for version in [0_u32, 1, 2, 3, 4, 6] {
         let mut bytes = valid.clone();
         bytes[4..8].copy_from_slice(&version.to_le_bytes());
-        rejection(&admitted, &bytes, "canonical engine-writer v3");
+        rejection(&admitted, &bytes, "canonical engine-writer v5");
     }
     let mut trailing = valid.clone();
     trailing.extend_from_slice(b"trailing bytes");

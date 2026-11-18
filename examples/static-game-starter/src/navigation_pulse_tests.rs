@@ -482,7 +482,6 @@ fn invalid_raw_modes_are_deterministic_noops_without_releasing_existing_latches(
 
 fn header<G: Starter>(build: u64) -> ReplayHeader {
     ReplayHeader {
-        format_version: 3,
         game_id: G::ID.into(),
         build_hash: orr_sim::build_hash_of(build, 0),
         seed: SEED,

@@ -60,7 +60,7 @@ New fixture-only golden values:
 - Tick 180: `c174dce162c02552`
 - Tick 300: `d4048d6f1fc625ff`
 - Whole replay SHA-256:
-  `3eaa82744580e8e080b1bbd48bfbc02a29096efc4e94a99fd53d68706a44820b`
+  `e67ca511cdc657b6b99058bbe132b2d0402549e56acdf745bd0a4747b9424029`
 
 A separate read-only review checked the complete new source/tests and fixture
 identity. Its package-boundary finding (view root, cross-domain duplicate GUID,

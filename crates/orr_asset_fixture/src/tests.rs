@@ -311,7 +311,7 @@ fn new_fixture_exact_baseline_schedule_cues_and_closed_replay_roundtrip() {
     );
     assert_eq!(recording.replay, prepared.record().unwrap().replay);
     assert_eq!(sha256(&recording.replay), EXPECTED_REPLAY_SHA256);
-    assert_eq!(&recording.replay[..8], b"ORRP\x03\x00\x00\x00");
+    assert_eq!(&recording.replay[..8], b"ORRP\x05\x00\x00\x00");
     let report = prepared.verify(&recording.replay).unwrap();
     assert!(report.ok());
     assert_eq!(

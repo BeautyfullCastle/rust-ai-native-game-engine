@@ -92,7 +92,7 @@ def replay_header(path):
         return struct.unpack(fmt, take(struct.calcsize(fmt)))[0]
 
     version = number("<I")
-    require(version in (1, 2, 3), f"unsupported replay version {version}")
+    require(version == 5, f"unsupported replay version {version}")
     game_id = take(number("<I")).decode("utf-8")
     header = {
         "format_version": version,
@@ -593,7 +593,7 @@ class HarnessTests(unittest.TestCase):
 
     def test_header_parser_and_identity(self):
         game = b"Arena"
-        blob = b"ORRP" + struct.pack("<II", 3, len(game)) + game
+        blob = b"ORRP" + struct.pack("<II", 5, len(game)) + game
         blob += struct.pack("<QQBIII", build_hash_of(123), 42, 2, 60, 24, 1) + b"x"
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "test.orrp"

@@ -6,7 +6,7 @@
 
 첫 경로는 `MotionProfileV1`(FP 이동량 한 필드)와 `ImpactPcm16V1`(절차 생성 효과음 한 종류)만 지원한다. 소스 파일을 명시적 GUID로 등록하고, 재현 가능한 cooker가 정렬된 manifest와 content-addressed artifact를 만든다. sim은 빌드에 포함된 읽기 전용 typed table만 참조한다. view는 시작 시 검증·디코딩한 clip을 소유한다. 틱/오디오 콜백에서 파일을 열거나 cook하지 않는다.
 
-기존 Arena/PhysGame 기본 경로, 골든, ORRF v2와 ORRP v3를 변경하지 않는다. 별도 opt-in fixture game으로 참조→cook→resolve→tick→replay 및 event→clip 경로를 증명한다. 범용 런타임 sim-resource 주입이나 외부 sim bundle 교체는 후속 ADR로 남긴다. 정적 sim table을 선택한 이유는 현재 `Game::systems()`와 replay 복원이 config를 시스템에 전달하는 에셋 저장소 API를 제공하지 않기 때문이다. 제안 API를 이미 존재하는 기능처럼 설명하지 않는다.
+기존 Arena/PhysGame 기본 경로, 골든, ORRF v2와 ORRP v5를 변경하지 않는다. 별도 opt-in fixture game으로 참조→cook→resolve→tick→replay 및 event→clip 경로를 증명한다. 범용 런타임 sim-resource 주입이나 외부 sim bundle 교체는 후속 ADR로 남긴다. 정적 sim table을 선택한 이유는 현재 `Game::systems()`와 replay 복원이 config를 시스템에 전달하는 에셋 저장소 API를 제공하지 않기 때문이다. 제안 API를 이미 존재하는 기능처럼 설명하지 않는다.
 
 ## 2. 현재 근거와 제안의 구분
 
@@ -15,7 +15,7 @@
 현재 구현 (아래는 설계 작성 시점의 조사 기록):
 - `docs/design-v1.md` §2·§3.3의 `orr_asset` 및 GUID-u64 `AssetRef`는 설계 방향이다. workspace에는 `orr_asset` crate와 asset DB/cooker가 없다
 - `crates/orr_sim/src/game.rs`, `system.rs`, `context.rs`, `simulation.rs`: `Game::setup(&mut Frame, &Config)`, 인자 없는 `Game::systems()`, `System::run(&mut SimContext)`가 존재한다. 현재 `SimContext`에는 asset store가 없고 `Simulation`은 생성 시 시스템 목록을 구성한다
-- `crates/orr_session/src/replay.rs`: ORRP writer v3, reader v1–v3. header에 `build_hash`는 있으나 asset digest는 없다. unchecked `seek`는 build hash를 검사하지 않는다. checked verify/seek도 header 또는 expected ID가 0이면 wildcard로 허용한다
+- `crates/orr_session/src/replay.rs`: ORRP writer·reader v5 단일 버전. header에 `build_hash`는 있으나 asset digest는 없다. unchecked `seek`는 build hash를 검사하지 않는다. checked verify/seek도 header 또는 expected ID가 0이면 wildcard로 허용한다
 - `docs/frame-compatibility.md`, `crates/orr_ecs/src/codec.rs`: Frame ORRF v2. `frame_build_id`는 game ID와 Frame version을 묶지만 game code 변경을 탐지하지 않는다
 - 원격 `tools/deployment_manifest.py`(PR #30): `orr.deployment/1`, release owner가 부여한 nonzero `game_code_id`, `frame_build_id`로 계산한 `build_id`; provenance는 기록이지 서명이나 바이너리-소스 관계의 증명이 아니다. 이 tool의 strict schema에 임의 asset 필드를 추가하지 않는다
 - `docs/audio.md`, `crates/orr_sample/src/arena_audio.rs`: 현재 Arena 효과음은 런타임 float 수식으로 생성한 clip. asset DB가 아니며 이 수식의 서로 다른 플랫폼 PCM byte 동일성을 전제하지 않는다. event 중복 억제·취소·음성 수 상한과 offline PCM 검사는 이미 존재한다

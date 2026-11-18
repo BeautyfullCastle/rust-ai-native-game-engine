@@ -15,7 +15,6 @@ fn cfg() -> ArenaConfig {
 fn valid_replay() -> Vec<u8> {
     let mut sim = Simulation::<Arena>::new(cfg(), 60, 9);
     let mut writer = ReplayWriter::<Arena>::new(ReplayHeader {
-        format_version: 2,
         game_id: "arena".to_string(),
         build_hash: 0,
         seed: 9,
@@ -134,6 +133,7 @@ fn forged_tick_numbers_do_not_hang() {
     body.extend_from_slice(&0u32.to_le_bytes()); // checksums
     body.extend_from_slice(&0u32.to_le_bytes()); // keyframes
     body.extend_from_slice(&0u32.to_le_bytes()); // debug commands
+    body.extend_from_slice(&0u32.to_le_bytes()); // signals
     let file = file_with_body(&body);
     let reader = parse(&file).expect("well-formed");
     assert_eq!(reader.seek(cfg(), u64::MAX).expect("seek").tick(), 1);
@@ -158,7 +158,7 @@ fn random_bytes_never_panic() {
         let _ = parse(&junk);
         // Past the magic, so the fields behind it get exercised too.
         let mut with_magic = b"ORRP".to_vec();
-        with_magic.extend_from_slice(&(1 + rng.next_u32() % 2).to_le_bytes());
+        with_magic.extend_from_slice(&5u32.to_le_bytes());
         with_magic.extend_from_slice(&junk);
         let _ = parse(&with_magic);
     }
@@ -232,4 +232,24 @@ fn forged_debug_command_tables_are_errors() {
     bad_command.extend_from_slice(&2u32.to_le_bytes());
     bad_command.extend_from_slice(&[99, 99]);
     assert!(matches!(parse(&file_with_body(&bad_command)), Err(ReplayError::BadCommand)));
+}
+
+#[test]
+fn forged_signal_tables_are_errors() {
+    let u32max = u32::MAX.to_le_bytes();
+    // An empty recording: no ticks, checksums, keyframes or debug commands.
+    let empty = || 0u32.to_le_bytes().repeat(4);
+    let mut forged_count = empty();
+    forged_count.extend_from_slice(&u32max);
+    assert!(matches!(parse(&file_with_body(&forged_count)), Err(ReplayError::Truncated)));
+
+    let mut forged_len = empty();
+    forged_len.extend_from_slice(&1u32.to_le_bytes());
+    forged_len.extend_from_slice(&3u64.to_le_bytes());
+    forged_len.extend_from_slice(&[0, 0]); // kind, slot
+    forged_len.extend_from_slice(&u32max);
+    assert!(matches!(parse(&file_with_body(&forged_len)), Err(ReplayError::Truncated)));
+
+    // A recording without the signal table is truncated, not an older format.
+    assert!(matches!(parse(&file_with_body(&empty())), Err(ReplayError::Truncated)));
 }

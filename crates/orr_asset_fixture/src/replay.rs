@@ -8,8 +8,8 @@ use orr_session::{ReplayHeader, ReplayReader, ReplayWriter, VerifyReport};
 /// Source-controlled whole compressed ORRP SHA. Updating it requires explicit
 /// regeneration/review; no runtime caller can add a digest to this closed set.
 pub const EXPECTED_REPLAY_SHA256: [u8; 32] = [
-    62, 170, 130, 116, 69, 128, 232, 224, 128, 177, 187, 212, 139, 251, 192, 42, 41, 9, 110, 252,
-    78, 148, 169, 159, 213, 61, 104, 112, 106, 68, 130, 11,
+    230, 124, 165, 17, 205, 198, 87, 182, 185, 144, 88, 187, 225, 50, 178, 208, 64, 37, 73, 229,
+    106, 205, 247, 69, 189, 10, 71, 71, 185, 66, 64, 41,
 ];
 const ALLOWED_REPLAYS: &[[u8; 32]] = &[EXPECTED_REPLAY_SHA256];
 const KEYS_DESCENDING: [u64; 5] = [300, 240, 180, 120, 60];
@@ -24,7 +24,6 @@ pub struct Recording {
 
 pub(crate) fn header() -> ReplayHeader {
     ReplayHeader {
-        format_version: 3,
         game_id: GAME_ID.into(),
         build_hash: orr_sim::build_hash_of(BUILD_ID, 0),
         seed: SEED,
@@ -142,8 +141,8 @@ fn validate_header(header: &ReplayHeader, expected_id: u64) -> Result<()> {
     if expected_id == 0 || hash == 0 || header.build_hash == 0 || header.build_hash != hash {
         return Err(Error::Header("untracked or mismatched build"));
     }
-    if header.format_version != 3 || header.game_id != GAME_ID {
-        return Err(Error::Header("format or game"));
+    if header.game_id != GAME_ID {
+        return Err(Error::Header("game"));
     }
     if header.seed != SEED
         || header.player_count != PLAYER_COUNT

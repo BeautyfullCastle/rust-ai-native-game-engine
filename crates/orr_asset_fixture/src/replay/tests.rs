@@ -139,7 +139,6 @@ fn header_validator_directly_rejects_each_mismatch_including_zero_expected_id() 
         |h: &mut ReplayHeader| h.build_hash ^= 1,
         |h: &mut ReplayHeader| h.build_hash = orr_sim::build_hash_of(BUILD_ID, 1),
         |h: &mut ReplayHeader| h.game_id = "arena".into(),
-        |h: &mut ReplayHeader| h.format_version = 2,
         |h: &mut ReplayHeader| h.seed = 2,
         |h: &mut ReplayHeader| h.player_count = 0,
         |h: &mut ReplayHeader| h.player_count = 2,

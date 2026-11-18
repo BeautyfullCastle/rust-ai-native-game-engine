@@ -169,7 +169,6 @@ fn replay_round_trip_and_verify() {
     const TICKS: u64 = 300;
     let mut sim = Simulation::<Arena>::new(ArenaConfig { player_count: 2 }, 60, 123);
     let mut writer = ReplayWriter::<Arena>::new(ReplayHeader {
-        format_version: 1,
         game_id: "arena".to_string(),
         build_hash: 0xdead_beef,
         seed: 123,
@@ -242,7 +241,6 @@ fn build_hash_mismatch_rejected() {
 
     let mut sim = Simulation::<Arena>::with_build_id(ArenaConfig { player_count: 2 }, 60, 321, BUILD_ID);
     let mut writer = ReplayWriter::<Arena>::new(ReplayHeader {
-        format_version: 1,
         game_id: "arena".to_string(),
         build_hash: sim.build_hash(),
         seed: 321,
@@ -333,7 +331,6 @@ fn stall_when_latency_exceeds_max_prediction() {
 fn record_replay(ticks: u64, keyframe_interval: u64) -> (Vec<u8>, BTreeMap<u64, u64>) {
     let mut sim = Simulation::<Arena>::new(ArenaConfig { player_count: 2 }, 60, 808);
     let mut writer = ReplayWriter::<Arena>::new(ReplayHeader {
-        format_version: 1,
         game_id: "arena".to_string(),
         build_hash: 0,
         seed: 808,
@@ -425,37 +422,18 @@ fn keyframes_add_to_file_size() {
 }
 
 #[test]
-fn v1_and_v2_replays_still_parse_and_seek() {
-    // Turn a v3 file without keyframes or debug commands into the older
-    // layouts: v2 has no trailing debug count, v1 has no keyframe count either.
-    let (v3, checksums) = record_replay(60, 0);
-    let header_len = 4 + 4 + (4 + "arena".len()) + 8 + 8 + 1 + 4 + 4;
-    let body_len = u32::from_le_bytes(v3[header_len..header_len + 4].try_into().unwrap()) as usize;
-    let compressed = &v3[header_len + 4..header_len + 4 + body_len];
-    let body = lz4_flex::block::decompress_size_prepended(compressed).unwrap();
-    assert_eq!(&body[body.len() - 8..], &[0; 8], "expected empty keyframe and debug tables");
-
-    for (version, cut) in [(2u32, 4usize), (1u32, 8usize)] {
-        let recompressed = lz4_flex::block::compress_prepend_size(&body[..body.len() - cut]);
-        let mut old = v3[..header_len].to_vec();
-        old[4..8].copy_from_slice(&version.to_le_bytes());
-        old.extend_from_slice(&(recompressed.len() as u32).to_le_bytes());
-        old.extend_from_slice(&recompressed);
-
-        let reader = orr_session::ReplayReader::<Arena>::parse(&old).expect("old version parses");
-        assert_eq!(reader.header.format_version, version);
-        assert_eq!(reader.keyframe_count(), 0);
-        let sim = reader.seek(ArenaConfig { player_count: 2 }, 60).unwrap();
-        assert_eq!(sim.checksum(), checksums[&60]);
+fn replay_with_another_format_version_is_refused() {
+    let (bytes, _) = record_replay(60, 0);
+    let current = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+    assert_eq!(current, 5);
+    for version in [0u32, 1, 2, 3, 4, 6] {
+        let mut other = bytes.clone();
+        other[4..8].copy_from_slice(&version.to_le_bytes());
+        assert!(matches!(
+            orr_session::ReplayReader::<Arena>::parse(&other),
+            Err(orr_session::ReplayError::UnsupportedVersion(v)) if v == version
+        ));
     }
-
-    // Unknown future versions are still rejected.
-    let mut v5 = v3.clone();
-    v5[4..8].copy_from_slice(&5u32.to_le_bytes());
-    assert!(matches!(
-        orr_session::ReplayReader::<Arena>::parse(&v5),
-        Err(orr_session::ReplayError::UnsupportedVersion(5))
-    ));
 }
 
 #[test]
@@ -463,7 +441,6 @@ fn replay_seek_checked_enforces_build_hash() {
     const BUILD_ID: u64 = 0xC0FFEE_u64;
     let mut sim = Simulation::<Arena>::with_build_id(ArenaConfig { player_count: 2 }, 60, 5, BUILD_ID);
     let mut writer = ReplayWriter::<Arena>::new(ReplayHeader {
-        format_version: 2,
         game_id: "arena".to_string(),
         build_hash: sim.build_hash(),
         seed: 5,

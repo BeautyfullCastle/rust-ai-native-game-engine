@@ -904,7 +904,7 @@ mod recorded_admission_tests {
     fn decoding_recording() -> StoppedPlay {
         let mut sim = orr_sim::Simulation::<DecodeGame>::new((), 60, 7);
         let mut writer = orr_session::ReplayWriter::<DecodeGame>::new(orr_session::ReplayHeader {
-            format_version: 3, game_id: "decode-test".into(), build_hash: sim.build_hash(), seed: 7,
+            game_id: "decode-test".into(), build_hash: sim.build_hash(), seed: 7,
             player_count: 1, tick_rate: 60, input_size: std::mem::size_of::<u32>() as u32,
         });
         writer.record_checksum(0, sim.checksum());

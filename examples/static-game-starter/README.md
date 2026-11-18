@@ -121,10 +121,10 @@ close. `--replay /absolute/existing.orrp` opens a read-only viewer. These option
 are mutually exclusive. `--observe /absolute/new.ndjson` is a bounded, read-only
 post-presentation diagnostic stream, not an input/control interface. Output files
 must be new and outside the executable/bundle directory. Recordings are limited
-to 4 MiB and 36,000 ticks. Admission requires canonical current engine-writer v3
+to 4 MiB and 36,000 ticks. Admission requires canonical current engine-writer v5
 ORRP, exact game/build/seed/rate/player/input layout, the admitted initial frame,
 finite typed inputs, and independently verified keyframes/checksums. No command
-or debug edits are accepted. Legacy/alternative ORRP encodings remain outside
+or debug edits are accepted. Alternative ORRP encodings remain outside
 this starter's policy, without changing the engine's raw replay format. Full
 scene/input descriptors are bound by the admitted compiled game and bundle, not
 embedded or authenticated by raw ORRP alone.

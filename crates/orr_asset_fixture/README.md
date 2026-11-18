@@ -78,7 +78,7 @@ late-join guarantee and no runtime external sim-table replacement.
 Before parsing, input is limited to 1 MiB and its **whole compressed ORRP file**
 SHA must match the source-controlled closed allowlist. The v1 golden is:
 
-`3eaa82744580e8e080b1bbd48bfbc02a29096efc4e94a99fd53d68706a44820b`
+`e67ca511cdc657b6b99058bbe132b2d0402549e56acdf745bd0a4747b9424029`
 
 Private validators then require the exact nonzero build hash and every header
 field, 300 contiguous scheduled inputs, no game commands, no debug commands in

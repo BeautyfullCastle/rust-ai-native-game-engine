@@ -50,7 +50,7 @@ fn character_is_strict_room_only_and_cannot_alias_other_owned_documents() {
 }
 
 #[test]
-fn character_metadata_requires_objects_and_preserves_legacy_slots() {
+fn character_metadata_requires_objects() {
     let ui = serde_json::json!({"profile":"arena-korean-v1","font":{"package":"font","asset":"font.otf"}});
     let entry = serde_json::json!([
         "tile.json",
@@ -71,24 +71,4 @@ fn character_metadata_requires_objects_and_preserves_legacy_slots() {
         serde_json::from_value::<ProjectManifest>(serde_json::json!([2, "*", object_entry]))
             .is_err()
     );
-    // Deserialization alone preserves the old positional slots. Semantic validation
-    // separately rejects this mixed-profile fixture, as it did before character support.
-    let legacy: ProjectManifest = serde_json::from_value(serde_json::json!([
-        2,
-        "*",
-        [
-            "tile.json",
-            "camera.json",
-            "room-escape-v1",
-            "room.yaml",
-            "sprites.json",
-            "room.models.json",
-            ui
-        ]
-    ]))
-    .unwrap();
-    let entry = legacy.entry.unwrap();
-    assert_eq!(entry.scene, "room.yaml");
-    assert_eq!(entry.models.as_deref(), Some("room.models.json"));
-    assert!(entry.lighting.is_none() && entry.character.is_none());
 }
