@@ -57,6 +57,14 @@ pub fn open_file(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
+/// Identity of what `path` names, after the call follows links.
+///
+/// Use it to ask whether two paths reach the same file or folder. A link and its target
+/// give the same identity. On Unix the open does not wait for a writer.
+pub fn file_id_at(path: &Path) -> io::Result<FileId> {
+    file_id(&imp::open_following(path)?)
+}
+
 /// True when `metadata` describes a symbolic link or a Windows reparse point.
 pub fn is_link(metadata: &std::fs::Metadata) -> bool {
     imp::is_link(metadata)
@@ -240,6 +248,13 @@ mod imp {
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
             .open(path)
     }
+
+    pub fn open_following(path: &Path) -> io::Result<File> {
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+    }
 }
 
 #[cfg(unix)]
@@ -290,6 +305,13 @@ mod imp {
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
             .open(path)
     }
+
+    pub fn open_following(path: &Path) -> io::Result<File> {
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(path)
+    }
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -314,6 +336,9 @@ mod imp {
         unsupported()
     }
     pub fn open_file(_: &Path) -> io::Result<File> {
+        unsupported()
+    }
+    pub fn open_following(_: &Path) -> io::Result<File> {
         unsupported()
     }
     pub fn is_link(metadata: &Metadata) -> bool {
@@ -376,6 +401,24 @@ mod tests {
         fs::write(&path, b"x").unwrap();
         assert!(!same_file(&path, &held).unwrap());
         assert!(same_file(&moved, &held).unwrap());
+    }
+
+    #[test]
+    fn identity_at_a_path_follows_a_link_to_the_same_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("file.txt");
+        let alias = temp.path().join("alias.txt");
+        let other = temp.path().join("other.txt");
+        fs::write(&file, b"x").unwrap();
+        fs::write(&other, b"x").unwrap();
+        fs::hard_link(&file, &alias).unwrap();
+        assert_eq!(file_id_at(&file).unwrap(), file_id_at(&alias).unwrap());
+        assert_ne!(file_id_at(&file).unwrap(), file_id_at(&other).unwrap());
+        assert_eq!(
+            file_id_at(temp.path()).unwrap(),
+            file_id(&open_directory(temp.path()).unwrap()).unwrap()
+        );
+        assert!(file_id_at(&temp.path().join("missing")).is_err());
     }
 
     #[test]

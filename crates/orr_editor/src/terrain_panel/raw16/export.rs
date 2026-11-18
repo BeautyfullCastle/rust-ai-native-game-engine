@@ -1,7 +1,7 @@
 //! Synchronous publication pins memory independently of the saved backing files.
 use super::{Editor, Fields, Recipe, TerrainPanel, TerrainSource};
 use std::{
-    fs::{self, File, Metadata},
+    fs::{self, Metadata},
     io::Read,
     path::{Component, Path, PathBuf},
 };
@@ -133,24 +133,16 @@ fn checked_metadata(path: &Path) -> Result<Metadata, String> {
     }
     Ok(metadata)
 }
-fn same(a: &Metadata, b: &Metadata) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if a.dev() != b.dev() || a.ino() != b.ino() {
-            return false;
-        }
-    }
-    a.len() == b.len() && a.modified().ok() == b.modified().ok()
-}
 fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
-    let before = checked_metadata(path)?;
-    if before.len() > limit as u64 {
+    // The ancestry check refuses links on the way. `open_file` refuses a link, a folder
+    // or a FIFO at the end and gives a handle whose identity can be compared later.
+    checked_metadata(path)?;
+    let file = orr_fsid::open_file(path).map_err(|e| e.to_string())?;
+    let opened = file.metadata().map_err(|e| e.to_string())?;
+    if opened.len() > limit as u64 {
         return Err("Export backing source exceeds byte limit".into());
     }
-    let file = File::open(path).map_err(|e| e.to_string())?;
-    let opened = file.metadata().map_err(|e| e.to_string())?;
-    if !opened.is_file() || !same(&before, &opened) || !same(&opened, &checked_metadata(path)?) {
+    if !matches!(orr_fsid::same_file(path, &file), Ok(true)) {
         return Err("Export backing source changed during open".into());
     }
     let mut bytes = Vec::new();
@@ -158,10 +150,12 @@ fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
         .take(limit as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
+    let after = file.metadata().map_err(|e| e.to_string())?;
     if bytes.len() > limit
         || bytes.len() as u64 != opened.len()
-        || !same(&opened, &file.metadata().map_err(|e| e.to_string())?)
-        || !same(&opened, &checked_metadata(path)?)
+        || after.len() != opened.len()
+        || after.modified().ok() != opened.modified().ok()
+        || !matches!(orr_fsid::same_file(path, &file), Ok(true))
     {
         return Err("Export backing source changed during read".into());
     }

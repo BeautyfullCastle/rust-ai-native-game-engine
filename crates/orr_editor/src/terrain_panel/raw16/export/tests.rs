@@ -360,3 +360,25 @@ fn backing_reader_is_bounded_regular_and_symlink_free() {
         assert!(super::read_bounded(&alias, 100).is_err());
     }
 }
+
+#[cfg(windows)]
+#[test]
+fn backing_reader_refuses_a_junction_ancestry() {
+    let temp = tempfile::tempdir().unwrap();
+    let target = temp.path().join("target");
+    fs::create_dir(&target).unwrap();
+    fs::write(target.join("source"), [1; 9]).unwrap();
+    let junction = temp.path().join("junction");
+    let made = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&junction)
+        .arg(&target)
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "{made:?}");
+    assert_eq!(
+        super::read_bounded(&target.join("source"), 9).unwrap(),
+        [1; 9]
+    );
+    assert!(super::read_bounded(&junction.join("source"), 9).is_err());
+}
