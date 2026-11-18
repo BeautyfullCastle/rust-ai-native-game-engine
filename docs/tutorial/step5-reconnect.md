@@ -37,10 +37,12 @@ stateDiagram-v2
 
 | 신호 | 서버가 알리는 때 | 이 튜토리얼에서 게임이 하는 일 |
 |---|---|---|
-| `Added` | 게임 시작, 또는 새 플레이어가 들어올 때 | 프리팹으로 아바타를 만듭니다 (4단계) |
+| `Added` | 게임 시작, 또는 새 플레이어가 들어올 때 | 프리팹으로 아바타를 만들고 고른 색을 붙입니다 (4단계) |
 | `Disconnected` | 연결이 끊겼습니다. 자리는 보관 중입니다. | 아바타에 `Away`를 붙여 멈춥니다 |
 | `Reconnected` | 같은 토큰으로 돌아왔습니다. | `Away`를 뗍니다 |
 | `Removed` | 보관 시간(`reserve_ticks`)이 끝났거나 쫓겨났습니다. | 아바타를 지웁니다 (4단계) |
+
+`Reconnected`는 `Added`가 아니므로, 돌아온 창이 새 `STAR_COLOR`를 보내도 아바타 색은 처음 알린 색 그대로입니다.
 
 서버가 자리를 보관하는 시간은 기본 600틱(10초)입니다. 이 신호들은 모두 `from_tick`이 붙어서 두 창이 같은 틱에 같은 일을 합니다.
 
@@ -95,7 +97,7 @@ for (_, (pos, link)) in ctx.frame.query::<(&mut Pos, &PlayerLink)>().without::<A
 ### 회색으로 그리기
 
 ```rust
-let mut color = color_of(link.map_or(0, |link| u32::from(link.player.0)));
+let mut color = color_of(frame.get::<Tint>(entity).map_or_else(|| link.map_or(0, |link| u32::from(link.player.0)), |tint| tint.color));
 if frame.has::<Away>(entity) {
     color = AWAY; // 회색, 반투명
 }

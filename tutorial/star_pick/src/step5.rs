@@ -77,6 +77,44 @@ pub struct Picked {
     pub points: u32,
 }
 
+/// How many avatar colors there are.
+pub const COLOR_COUNT: u32 = 4;
+/// `Choice::color` for "the color of my seat".
+pub const SEAT_COLOR: u32 = u32::MAX;
+
+/// The start data of a player: the color it picked, as an index into the color list. A window
+/// sends it when it joins (`App::player_data`), and the server gives it to every window in the
+/// `Added` signal of the player, so all windows make the same avatar.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Pod, Zeroable)]
+pub struct Choice {
+    pub color: u32,
+}
+
+impl Default for Choice {
+    fn default() -> Self {
+        Self { color: SEAT_COLOR }
+    }
+}
+
+impl Choice {
+    /// The color of the avatar: the pick, or the color of the seat when the pick is no color.
+    fn color_of_avatar(self, slot: PlayerSlot) -> u32 {
+        if self.color < COLOR_COUNT {
+            self.color
+        } else {
+            u32::from(slot.0) % COLOR_COUNT
+        }
+    }
+}
+
+/// On the avatar: the index of its color, from the start data of the player.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct Tint {
+    pub color: u32,
+}
+
 /// What `setup` needs. The prefab is the recipe of a player entity: its components and their
 /// first values. It is baked before the run, because a system cannot read the config.
 pub struct Setup {
@@ -107,6 +145,7 @@ impl Game for StarPick {
         builder.register_component::<Pos>("Pos");
         builder.register_component::<Score>("Score");
         builder.register_component::<Star>("Star");
+        builder.register_component::<Tint>("Tint");
         builder.register_component::<Away>("Away");
         register_player_link(builder);
         prefab::register(builder); // the place where the frame keeps its prefabs
@@ -126,12 +165,12 @@ impl Game for StarPick {
 }
 
 impl Players for StarPick {
-    /// The start data of a player (a name, a color). StarPick has none.
-    type Player = ();
+    /// The start data of a player: the color it picked.
+    type Player = Choice;
 
-    fn on_player(frame: &mut Frame, signal: PlayerSignal<()>) {
+    fn on_player(frame: &mut Frame, signal: PlayerSignal<Choice>) {
         match signal {
-            PlayerSignal::Added { slot, .. } => {
+            PlayerSignal::Added { slot, data } => {
                 if avatar_of(frame, slot).is_some() {
                     return; // the same player never gets two avatars
                 }
@@ -139,6 +178,7 @@ impl Players for StarPick {
                 if let Some(link) = frame.get_mut::<PlayerLink>(avatar) {
                     link.player = slot;
                 }
+                frame.add(avatar, Tint { color: data.color_of_avatar(slot) });
                 if let Some(pos) = frame.get_mut::<Pos>(avatar) {
                     pos.x = FP::from_int(4 * i32::from(slot.0) - 2); // slot 0 at -2, slot 1 at 2
                 }
@@ -221,20 +261,27 @@ fn pick_stars(ctx: &mut SimContext<StarPick>) {
 // ---- view ----
 
 const FIELD: [f32; 4] = [0.09, 0.10, 0.15, 1.0];
-const COLORS: [[f32; 4]; 2] = [[0.35, 0.70, 0.95, 1.0], [0.95, 0.55, 0.30, 1.0]];
+const COLORS: [[f32; 4]; COLOR_COUNT as usize] = [[0.35, 0.70, 0.95, 1.0], [0.95, 0.55, 0.30, 1.0], [0.45, 0.85, 0.50, 1.0], [0.75, 0.50, 0.90, 1.0]];
 const STAR: [f32; 4] = [1.0, 0.85, 0.25, 1.0];
 const AWAY: [f32; 4] = [0.5, 0.5, 0.5, 0.45];
 const RING_TICKS: u64 = 40;
 const KEEP_TICKS: u64 = 240;
 const TRAIL_DOTS: usize = 12;
 
-fn color_of(slot: u32) -> [f32; 4] {
-    COLORS[slot as usize % COLORS.len()]
+fn color_of(index: u32) -> [f32; 4] {
+    COLORS[index as usize % COLORS.len()]
+}
+
+/// The color of the avatar of `slot`; the color of the seat while it has no avatar.
+fn avatar_color(frame: FrameView<'_>, slot: u32) -> [f32; 4] {
+    let tint = frame.iter::<PlayerLink>().find(|(_, link)| u32::from(link.player.0) == slot).and_then(|(entity, _)| frame.get::<Tint>(entity));
+    color_of(tint.map_or(slot, |tint| tint.color))
 }
 
 pub struct Ring {
     pub picked: Picked,
     pub start: u64,
+    pub color: [f32; 4],
     /// The pick-up sound. A rollback that takes the pick-up back stops it.
     pub sound: Option<SoundHandle>,
 }
@@ -278,7 +325,7 @@ impl Extractor for Look {
                     (Style { shape: Shape::Quad, size: 0.08 + 0.017 * age, half_y: 0.0, color: STAR }, InterpMode::None, FRAC_PI_4)
                 }
                 (None, link) => {
-                    let mut color = color_of(link.map_or(0, |link| u32::from(link.player.0)));
+                    let mut color = color_of(frame.get::<Tint>(entity).map_or_else(|| link.map_or(0, |link| u32::from(link.player.0)), |tint| tint.color));
                     if frame.has::<Away>(entity) {
                         color = AWAY; // gray and see-through
                     }
@@ -310,7 +357,7 @@ impl View2D for Look {
             if age < RING_TICKS {
                 let t = age as f32 / RING_TICKS as f32;
                 let center = Vec2::new(fp_to_f32(ring.picked.x), fp_to_f32(ring.picked.y));
-                let color = color_of(ring.picked.slot);
+                let color = ring.color;
                 out.push(disc(center, 0.3 + 0.9 * t, [color[0], color[1], color[2], 0.6 * (1.0 - t)]));
             }
         }
@@ -326,7 +373,7 @@ impl EntityView<StarPick> for TrailView {
     fn on_create(&mut self, ctx: &mut ViewContext<'_, StarPick>, entity: Entity) {
         let Some(link) = ctx.predicted().get::<PlayerLink>(entity) else { return };
         if ctx.is_local(link.player) {
-            let color = color_of(u32::from(link.player.0));
+            let color = avatar_color(ctx.predicted(), u32::from(link.player.0));
             self.fx.borrow_mut().trails.push(Trail { entity, color, dots: Vec::new() });
         }
     }
@@ -360,7 +407,8 @@ impl SceneView<StarPick> for Juice {
             EventState::Predicted | EventState::Verified => {
                 if !fx.rings.iter().any(|ring| ring.picked == *event) {
                     let sound = ctx.audio().play_named(sound::PICKUP); // a short ding, at once
-                    fx.rings.push(Ring { picked: *event, start: ctx.tick(), sound });
+                    let color = avatar_color(ctx.predicted(), event.slot);
+                    fx.rings.push(Ring { picked: *event, start: ctx.tick(), color, sound });
                 }
             }
             EventState::Canceled => {
@@ -403,7 +451,8 @@ impl SceneView<StarPick> for Juice {
         // The score of each player as text in the top left corner: player 1 on the first line, player 2 on the second.
         for (slot, score) in fx.scores.iter().enumerate() {
             let line = 14.0 + 30.0 * slot as f32;
-            ctx.draw().text([16.0, line], 21.0, color_of(slot as u32), &format!("PLAYER {} SCORE {}", slot + 1, score));
+            let color = avatar_color(ctx.predicted(), slot as u32);
+            ctx.draw().text([16.0, line], 21.0, color, &format!("PLAYER {} SCORE {}", slot + 1, score));
         }
         let now = fx.now;
         fx.rings.retain(|ring| now < ring.start + KEEP_TICKS);
@@ -418,11 +467,18 @@ pub fn read_keys(keys: &orr_app::InputContext) -> Move {
     }
 }
 
+/// The color this window asks for: `STAR_COLOR=0` to `STAR_COLOR=3` in the environment. Without it,
+/// the avatar gets the color of its seat.
+pub fn chosen_color() -> Choice {
+    std::env::var("STAR_COLOR").ok().and_then(|text| text.parse().ok()).map_or_else(Choice::default, |color| Choice { color })
+}
+
 pub fn app() -> App<StarPick> {
     let fx = Shared::default();
     let for_trails = fx.clone();
     App::<StarPick>::new() // `Setup::default()` bakes the avatar prefab
         .players(PLAYERS) // two seats: the server waits until both are taken
+        .player_data(chosen_color()) // goes to the server, which gives it to every window
         .input(|keys, _slot| read_keys(keys))
         .view(Look { fx: fx.clone() })
         .entity_view::<Score>(move || TrailView { fx: for_trails.clone() })

@@ -16,7 +16,7 @@
 //!
 //! | kind | message | channel |
 //! |---|---|---|
-//! | 1 | `Hello` | reliable |
+//! | 1 | `Hello` (build hash, room, slot wish, token, player start data) | reliable |
 //! | 2 | `Input`: last K unacked inputs (tick, input, commands) + `ack_tick` | unreliable |
 //! | 3 | `Ping` | unreliable |
 //! | 4 | `Checksum` (tick, xxh3 of the verified frame) | reliable |
@@ -38,7 +38,7 @@
 //! | 7 | `Desync` (checksum mismatch notice) | reliable |
 //! | 8 | `SnapshotRequest` (to a donor client, names the tick) | reliable |
 //! | 9 | `JoinSnapshot` (relayed snapshot, to the joiner) | reliable |
-//! | 10 | `Presence` (a slot got a player or lost it) | reliable |
+//! | 10 | `Presence` (a slot got a player, with its start data, or lost it) | reliable |
 //! | 11 | `Bye` (code: see `BYE_*`) | reliable |
 //! | 12 | `Correction` (authoritative mode: server snapshot for a diverged client) | reliable |
 //! | 13 | `SeatChange` (a returning player or an expired seat) | reliable |
@@ -90,8 +90,16 @@ use crate::codec::{Reader, Writer};
 
 /// The one protocol version. Every message is encoded with it and a decoder
 /// accepts no other (see the module docs).
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 const MAGIC: &[u8; 4] = b"ORRN";
+
+/// The most bytes of player start data a `Hello` may carry. The server refuses a `Hello` with more
+/// (`RejectReason::PlayerDataTooLarge`). The data rides in the `Presence` of every client.
+pub const MAX_PLAYER_DATA: usize = 256;
+/// What a decoder reads of `Hello::player_data` at most. A `Hello` between this and
+/// [`MAX_PLAYER_DATA`] decodes, so that the server can refuse it with a reason; a larger one is a
+/// decode error.
+const MAX_PLAYER_DATA_WIRE: u32 = 4096;
 
 /// `Hello::want_slot` value meaning "any free slot".
 pub const NO_SLOT: u8 = 0xFF;
@@ -301,6 +309,10 @@ pub struct Hello {
     pub want_slot: u8,
     /// Token from an earlier `Welcome` to reclaim the same slot, or `0`.
     pub token: u64,
+    /// The start data of this player (the bytes of `orr_sim::Players::Player`), at most
+    /// [`MAX_PLAYER_DATA`] bytes. The server puts them in the `Presence` that announces the player
+    /// to every client. Empty means "the default start data".
+    pub player_data: Vec<u8>,
 }
 
 /// Server answer to an accepted `Hello`.
@@ -350,6 +362,8 @@ pub enum RejectReason {
     NoDonor,
     JoinTimedOut,
     BadRequest,
+    /// `Hello::player_data` has `len` bytes, more than the `max` the server takes.
+    PlayerDataTooLarge { max: u32, len: u32 },
 }
 
 impl RejectReason {
@@ -364,6 +378,7 @@ impl RejectReason {
             RejectReason::NoDonor => (7, 0, 0),
             RejectReason::JoinTimedOut => (8, 0, 0),
             RejectReason::BadRequest => (9, 0, 0),
+            RejectReason::PlayerDataTooLarge { max, len } => (10, u64::from(max), u64::from(len)),
         };
         w.u8(code);
         w.u64(a);
@@ -383,6 +398,7 @@ impl RejectReason {
             7 => RejectReason::NoDonor,
             8 => RejectReason::JoinTimedOut,
             9 => RejectReason::BadRequest,
+            10 => RejectReason::PlayerDataTooLarge { max: a as u32, len: b as u32 },
             _ => return Err(ProtoError::Corrupt("unknown reject reason")),
         })
     }
@@ -439,8 +455,10 @@ pub enum ServerMsg {
     /// `signals`: the signal count at `tick` (see [`Bundle::signals`]).
     JoinSnapshot { tick: u64, checksum: u64, data: Vec<u8>, signals: u32 },
     /// `seq`: the number of this signal (see the module docs), `0` for a
-    /// message that is no signal (authoritative rooms).
-    Presence { slot: u8, present: bool, from_tick: u64, seq: u32 },
+    /// message that is no signal (authoritative rooms). `data` is the start data of a new
+    /// player (`present`), as its `Hello` gave it; empty for a player that left and in
+    /// authoritative rooms.
+    Presence { slot: u8, present: bool, from_tick: u64, seq: u32, data: Vec<u8> },
     Bye { code: u8 },
     /// Authoritative mode: the client's checksum at `from_tick` differed from
     /// the server's. `data` is the server's frame at `tick` (lz4, the same
@@ -523,6 +541,7 @@ impl ClientMsg {
                 w.u32(h.input_size);
                 w.u8(h.want_slot);
                 w.u64(h.token);
+                w.bytes(&h.player_data);
                 seal(w)
             }
             ClientMsg::Input { slot, input_size, ack_tick, entries } => {
@@ -600,6 +619,7 @@ impl ClientMsg {
                 input_size: r.u32()?,
                 want_slot: r.u8()?,
                 token: r.u64()?,
+                player_data: r.bytes(MAX_PLAYER_DATA_WIRE)?,
             }),
             2 => {
                 let slot = r.u8()?;
@@ -781,12 +801,13 @@ impl ServerMsg {
                 w.varint(*signals);
                 seal(w)
             }
-            ServerMsg::Presence { slot, present, from_tick, seq } => {
+            ServerMsg::Presence { slot, present, from_tick, seq, data } => {
                 let mut w = start(10);
                 w.u8(*slot);
                 w.u8(u8::from(*present));
                 w.u64(*from_tick);
                 w.varint(*seq);
+                w.bytes(data);
                 seal(w)
             }
             ServerMsg::Bye { code } => {
@@ -942,6 +963,7 @@ impl ServerMsg {
                 present: r.u8()? != 0,
                 from_tick: r.u64()?,
                 seq: r.varint()?,
+                data: r.bytes(MAX_PLAYER_DATA as u32)?,
             },
             11 => ServerMsg::Bye { code: r.u8()? },
             12 => ServerMsg::Correction {
@@ -1002,7 +1024,8 @@ mod tests {
 
     fn all_client() -> Vec<ClientMsg> {
         vec![
-            ClientMsg::Hello(Hello { build_hash: 7, room: 3, input_size: 4, want_slot: NO_SLOT, token: 0 }),
+            ClientMsg::Hello(Hello { build_hash: 7, room: 3, input_size: 4, want_slot: NO_SLOT, token: 0, player_data: vec![] }),
+            ClientMsg::Hello(Hello { build_hash: 7, room: 3, input_size: 4, want_slot: 1, token: 9, player_data: vec![5; MAX_PLAYER_DATA] }),
             ClientMsg::Input {
                 slot: 1,
                 input_size: 4,
@@ -1057,7 +1080,8 @@ mod tests {
                 flags: WELCOME_AUTHORITATIVE,
             }),
             ServerMsg::Reject(RejectReason::BuildHashMismatch { server: 1, client: 2 }),
-            ServerMsg::Reject(RejectReason::BadVersion { server: 6, client: 5 }),
+            ServerMsg::Reject(RejectReason::BadVersion { server: 7, client: 6 }),
+            ServerMsg::Reject(RejectReason::PlayerDataTooLarge { max: 256, len: 300 }),
             ServerMsg::Start { t0_us: 5, server_time_us: 6 },
             ServerMsg::Pong { seq: 1, client_time_us: 2, server_time_us: 3, t0_us: u64::MAX, finalized_tick: 0 },
             ServerMsg::Confirmed { input_size: 4, bundles: vec![sample_bundle(5), sample_bundle(6)] },
@@ -1073,8 +1097,8 @@ mod tests {
             ServerMsg::SnapshotRequest { request_id: 3, tick: 60 },
             ServerMsg::JoinSnapshot { tick: 90, checksum: 8, data: vec![1; 50], signals: 0 },
             ServerMsg::JoinSnapshot { tick: 90, checksum: 8, data: vec![1; 50], signals: 300 },
-            ServerMsg::Presence { slot: 1, present: false, from_tick: 44, seq: 0 },
-            ServerMsg::Presence { slot: 1, present: true, from_tick: 44, seq: 3 },
+            ServerMsg::Presence { slot: 1, present: false, from_tick: 44, seq: 0, data: vec![] },
+            ServerMsg::Presence { slot: 1, present: true, from_tick: 44, seq: 3, data: vec![2, 0, 0, 0] },
             ServerMsg::Bye { code: 2 },
             ServerMsg::Correction { from_tick: 60, tick: 91, checksum: 0xABCD, data: vec![7; 40] },
             ServerMsg::SeatChange { slot: 2, change: SEAT_RECONNECTED, from_tick: 77, seq: 0 },
@@ -1363,6 +1387,21 @@ mod tests {
                 assert!(ServerMsg::decode(&b).is_err(), "flip at {i} accepted");
             }
         }
+    }
+
+    #[test]
+    fn player_data_up_to_the_wire_limit_decodes_so_that_the_server_can_refuse_it_with_a_reason() {
+        let hello = |len: usize| ClientMsg::Hello(Hello { build_hash: 1, room: 1, input_size: 4, want_slot: NO_SLOT, token: 0, player_data: vec![3; len] });
+        for len in [0, 1, MAX_PLAYER_DATA, MAX_PLAYER_DATA + 1, MAX_PLAYER_DATA_WIRE as usize] {
+            assert_eq!(ClientMsg::decode(&hello(len).encode()), Ok(hello(len)), "{len} bytes");
+        }
+        assert_eq!(ClientMsg::decode(&hello(MAX_PLAYER_DATA_WIRE as usize + 1).encode()), Err(ProtoError::TooLarge));
+        // A server never sends more than the limit of `Hello`s it takes.
+        let presence = |len: usize| ServerMsg::Presence { slot: 1, present: true, from_tick: 5, seq: 1, data: vec![9; len] };
+        assert_eq!(ServerMsg::decode(&presence(MAX_PLAYER_DATA).encode()), Ok(presence(MAX_PLAYER_DATA)));
+        assert_eq!(ServerMsg::decode(&presence(MAX_PLAYER_DATA + 1).encode()), Err(ProtoError::TooLarge));
+        let reject = ServerMsg::Reject(RejectReason::PlayerDataTooLarge { max: 256, len: 300 });
+        assert_eq!(ServerMsg::decode(&reject.encode()), Ok(reject));
     }
 
     fn input_msg(entries: Vec<InputEntry>) -> ClientMsg {

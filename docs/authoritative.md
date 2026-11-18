@@ -60,7 +60,7 @@ Demo: `presets::arena_ai` (moves toward the nearest player, fires every 12 ticks
 
 ## Messages and versioning
 
-There is one protocol version (`PROTOCOL_VERSION`, now 6). Every message is encoded with it, and a decoder refuses any other version. A server answers a `Hello` of another version with `Reject(BadVersion { server, client })`. Every field is always written. See the `orr_proto::msg` module docs. The authoritative mode uses these messages and fields:
+There is one protocol version (`PROTOCOL_VERSION`, now 7). Every message is encoded with it, and a decoder refuses any other version. A server answers a `Hello` of another version with `Reject(BadVersion { server, client })`. Every field is always written. See the `orr_proto::msg` module docs. The authoritative mode uses these messages and fields:
 
 | message | change |
 |---|---|

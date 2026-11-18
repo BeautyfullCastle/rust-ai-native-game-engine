@@ -31,7 +31,7 @@
 use std::sync::Arc;
 
 use orr_ecs::{Frame, FrameDecodeError, FrameRing};
-use orr_sim::{DebugCommand, DebugError, Game, PlayerSlot, RawPlayerSignal, SimEvent, Simulation, TickInputs};
+use orr_sim::{DebugCommand, DebugError, Game, PlayerSlot, RawPlayerSignal, SignalKind, SimEvent, Simulation, TickInputs};
 
 use crate::events::{EventBatch, EventStatus};
 use crate::replay::{ReplayError, ReplayHeader, ReplayReader, ReplayWriter};
@@ -518,8 +518,15 @@ impl<G: Game> PlaySession<G> {
     /// can create its avatars from them without a server. Returns
     /// [`PlayError::ReadOnly`] if this session is viewing a replay.
     pub fn announce_players(&mut self) -> Result<(), PlayError> {
+        self.announce_players_with(|_| Vec::new())
+    }
+
+    /// Like [`PlaySession::announce_players`], with the start data `data(slot)` for each slot
+    /// (the bytes of `orr_sim::Players::Player`; empty means the default value).
+    pub fn announce_players_with(&mut self, mut data: impl FnMut(PlayerSlot) -> Vec<u8>) -> Result<(), PlayError> {
         for slot in 0..self.cfg.player_count {
-            self.push_signal(RawPlayerSignal::added(PlayerSlot(slot)))?;
+            let slot = PlayerSlot(slot);
+            self.push_signal(RawPlayerSignal { kind: SignalKind::Added, slot, data: data(slot) })?;
         }
         Ok(())
     }

@@ -16,6 +16,7 @@ default = ["audio-native"]
 audio-native = ["orr_audio/native"]
 
 [dependencies]
+bytemuck = "1"
 orr_audio = { path = "../orr_audio" }
 orr_bridge = { path = "../orr_bridge" }
 orr_view = { path = "../orr_view" }
@@ -23,6 +24,7 @@ orr_view = { path = "../orr_view" }
 orr_render = { path = "../orr_render", features = ["imported-scene"] }
 orr_model = { path = "../orr_model", features = ["import"] }
 orr_session = { path = "../orr_session" }
+orr_proto = { path = "../orr_proto" }
 orr_sim = { path = "../orr_sim" }
 orr_ecs = { path = "../orr_ecs" }
 orr_gfx = { path = "../orr_gfx" }

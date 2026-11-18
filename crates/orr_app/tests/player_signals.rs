@@ -66,6 +66,30 @@ fn an_offline_run_tells_the_scene_view_about_each_player_as_verified() {
     assert_eq!(*avatars.borrow(), [2, 2], "the avatars are already in the frame the view reads");
 }
 
+#[test]
+fn an_offline_run_gives_the_local_slots_their_start_data_and_the_others_the_default() {
+    let (scene, heard, _) = listener();
+    let mut views = Views::<Roster>::new();
+    views.scene_view(scene);
+    let session = PlaySession::<Roster>::new(PlayConfig::new(3, 1, 60), ());
+    let host = PlayHost::new(session, PlayerSlot(0)).with_extra_local_slots([PlayerSlot(1)]).with_announced_players_data(|slot| {
+        if slot.0 < 2 { bytemuck::bytes_of(&Profile { color: 5 + u32::from(slot.0), _pad: 0 }).to_vec() } else { Vec::new() }
+    });
+    let mut bridge = InProc::new(host, BridgeConfig::default());
+    for _ in 0..3 {
+        frame(&mut bridge, &mut views);
+    }
+    let data: Vec<PlayerSignal<Profile>> = heard.borrow().iter().map(|(_, signal, _)| *signal).collect();
+    assert_eq!(
+        data,
+        [
+            PlayerSignal::Added { slot: PlayerSlot(0), data: Profile { color: 5, _pad: 0 } },
+            PlayerSignal::Added { slot: PlayerSlot(1), data: Profile { color: 6, _pad: 0 } },
+            PlayerSignal::Added { slot: PlayerSlot(2), data: Profile::default() },
+        ]
+    );
+}
+
 // ---- prediction ----
 
 /// The local peer of a two-peer loopback, plus a script: at call `n` the

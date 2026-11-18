@@ -92,7 +92,7 @@ impl Rig {
     }
 
     fn signal(&self, seq: u32, slot: u8, from_tick: u64) {
-        self.link.receive(ServerMsg::Presence { slot, present: true, from_tick, seq });
+        self.link.receive(ServerMsg::Presence { slot, present: true, from_tick, seq, data: Vec::new() });
     }
 
     fn verified(&self) -> u64 {

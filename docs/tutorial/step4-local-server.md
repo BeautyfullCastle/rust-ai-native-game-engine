@@ -75,12 +75,12 @@ impl Default for Setup {
 
 ```rust
 impl Players for StarPick {
-    /// 플레이어의 시작 데이터(이름, 색). StarPick에는 없습니다.
-    type Player = ();
+    /// 플레이어의 시작 데이터: 고른 색(`Choice`)입니다.
+    type Player = Choice;
 
-    fn on_player(frame: &mut Frame, signal: PlayerSignal<()>) {
+    fn on_player(frame: &mut Frame, signal: PlayerSignal<Choice>) {
         match signal {
-            PlayerSignal::Added { slot, .. } => {
+            PlayerSignal::Added { slot, data } => {
                 if avatar_of(frame, slot).is_some() {
                     return; // 같은 플레이어에게 아바타가 둘 생기지 않게 합니다
                 }
@@ -91,6 +91,7 @@ impl Players for StarPick {
                 if let Some(pos) = frame.get_mut::<Pos>(avatar) {
                     pos.x = FP::from_int(4 * i32::from(slot.0) - 2); // 슬롯 0은 -2, 슬롯 1은 2
                 }
+                frame.add(avatar, Tint { color: data.color_of_avatar(slot) }); // 고른 색, 없으면 자리 색
             }
             PlayerSignal::Disconnected { .. } | PlayerSignal::Reconnected { .. } => {} // 5단계
             PlayerSignal::Removed { slot } => {
@@ -110,7 +111,15 @@ pub fn avatar_of(frame: &mut Frame, slot: PlayerSlot) -> Option<Entity> {
 
 `on_player`는 시스템처럼 프레임을 바꿉니다. 단, **프레임과 신호만** 보고 정해야 합니다. 파일, 시계, 난수를 쓰지 않습니다. 모든 창이 같은 결과를 내야 하기 때문입니다.
 
-`Player` 타입은 신호에 실려 오는 플레이어별 시작 데이터입니다. 이름이나 고른 캐릭터를 넣을 수 있습니다. 이 게임에는 없어서 `()`입니다. 지금은 서버로 돌릴 때 이 데이터가 비어 있습니다. 서버 없이 돌릴 때는 기본값입니다.
+`Player` 타입은 신호에 실려 오는 플레이어별 시작 데이터입니다. 이름이나 고른 캐릭터를 넣을 수 있습니다. 이 게임에서는 고른 색의 번호입니다.
+
+```rust
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Pod, Zeroable)]
+pub struct Choice { pub color: u32 } // 0~3: 색 번호. `SEAT_COLOR`(기본값): 자리 색
+```
+
+창은 접속할 때 이 값을 서버로 보냅니다. 서버는 값을 검사하지 않고 `Added` 신호에 그대로 실어 모든 창에 보냅니다. 그래서 모든 창이 같은 색의 아바타를 만듭니다. 값은 256바이트 이하여야 합니다. 더 크면 서버가 접속을 거절합니다. 서버 없이 돌릴 때는 앱이 로컬 슬롯의 `Added`에 같은 값을 실어 줍니다. 값을 주지 않으면 기본값입니다. 색 번호는 `Tint` 컴포넌트로 아바타에 남습니다. 게임 상태이므로 스냅숏과 체크섬에 들어갑니다.
 
 ### 4. 시스템 목록
 
@@ -132,6 +141,7 @@ pub fn app() -> App<StarPick> {
     // ...
     App::<StarPick>::new() // `Setup::default()`가 프리팹을 굽습니다
         .players(PLAYERS)  // 자리 두 개. 둘이 다 차야 서버가 게임을 시작합니다
+        .player_data(chosen_color()) // 환경 변수 STAR_COLOR(0~3)로 고른 색. 서버가 모든 창에 알립니다
         .input(|keys, _slot| read_keys(keys))
         // 뷰는 3단계와 같습니다
 }
@@ -163,6 +173,12 @@ cargo run -p star_pick --release --bin step4 -- --connect 127.0.0.1:7777
 playing as slot 1 of 2. To take the seat again after closing this window: --connect 127.0.0.1:7777 --slot 1 --token 8042519091568454697
 ```
 
+색을 고르려면 창마다 환경 변수 `STAR_COLOR`를 정합니다. 정하지 않으면 자리 색(슬롯 0은 파랑, 슬롯 1은 주황)입니다.
+
+```powershell
+$env:STAR_COLOR = "2"; cargo run -p star_pick --release --bin step4 -- --connect 127.0.0.1:7777
+```
+
 **서버 없이** 실행하면 어떻게 됩니까? `cargo run -p star_pick --release --bin step4`는 0번 플레이어만 조종할 수 있습니다. 앱이 틱 1에 두 슬롯 모두에 `Added`를 넣어서, 2번 플레이어의 아바타는 생기지만 가만히 서 있습니다. 둘이 같이 놀려면 서버로 실행합니다.
 
 ## 보이는 것
@@ -181,6 +197,8 @@ playing as slot 1 of 2. To take the seat again after closing this window: --conn
 |---|---|
 | `added_gives_every_player_an_avatar_on_every_client` | 두 클라이언트 모두 확정 프레임에 아바타가 둘 있다. 각 클라이언트의 입력은 자기 아바타만 움직인다. 두 클라이언트의 체크섬이 같은 틱마다 같다 |
 | `without_a_server_the_app_announces_every_player_in_tick_one` | 서버 없이 실행할 때처럼 `announce_players`를 하면 틱 1에 아바타가 둘 생긴다 |
+| `the_color_a_window_picks_reaches_the_avatar_on_every_client` | 한 창이 고른 색이 두 클라이언트의 아바타에 모두 같게 들어간다. 고르지 않은 창은 자리 색을 받는다. 체크섬이 같다 |
+| `without_a_server_the_start_data_of_a_slot_gives_its_avatar_color` | 서버 없이 슬롯마다 준 시작 데이터가 아바타 색이 된다 |
 
 ```powershell
 cargo test --release -p star_pick --test step4
@@ -189,7 +207,7 @@ cargo test --release -p star_pick --test step4
 ## 더 해보기
 
 1. `--host 0.0.0.0:7777`로 띄우고 같은 네트워크의 다른 컴퓨터에서 `--connect <주소>:7777`로 접속해 보세요. 두 컴퓨터는 같은 빌드여야 합니다.
-2. `PLAYERS`를 3으로 올려 보세요. 창을 세 개 띄워야 게임이 시작합니다. 세 번째 아바타가 판 밖에 생깁니다. 시작 위치 공식(`4 * 슬롯 - 2`)을 고치세요. 세 번째 플레이어의 색은 `color_of`가 정합니다.
+2. `PLAYERS`를 3으로 올려 보세요. 창을 세 개 띄워야 게임이 시작합니다. 세 번째 아바타가 판 밖에 생깁니다. 시작 위치 공식(`4 * 슬롯 - 2`)을 고치세요. 세 번째 플레이어의 색은 고르지 않으면 `color_of`가 자리 번호로 정합니다.
 3. 아바타의 시작 위치를 난수로 정해 보세요. `on_player`는 `ctx`가 없어서 `ctx.rng()`를 부를 수 없습니다. 난수 상태는 프레임 안의 싱글턴 `FrameRng`입니다. `frame.singleton_mut::<FrameRng>()`로 꺼내 쓸 수 있습니다. 모든 창이 같은 값을 얻는 이유를 설명해 보세요.
 4. `on_player`에서 `Disconnected`를 받으면 `println!`을 하게 해 보세요. 시뮬레이션 코드는 롤백 때문에 같은 틱을 여러 번 계산할 수 있어서, 같은 줄이 여러 번 찍힐 수 있습니다. 찍는 일은 뷰의 `SceneView::on_player`에서 합니다. 5단계가 이 길을 갑니다.
 

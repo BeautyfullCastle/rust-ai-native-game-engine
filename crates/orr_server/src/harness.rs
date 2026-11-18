@@ -43,11 +43,13 @@ pub struct ClientSpec {
     /// Checksum-tick frames the client keeps to serve as a donor
     /// (`None` = the client default).
     pub keep_anchors: Option<u32>,
+    /// The start data of the client's player (`RelayClientConfig::player_data`).
+    pub player_data: Vec<u8>,
 }
 
 impl ClientSpec {
     pub fn new(path: PathParams) -> Self {
-        Self { path, clock_ppm: 1_000_000, want_slot: None, token: 0, build_id: 1, input_redundancy: None, keep_anchors: None }
+        Self { path, clock_ppm: 1_000_000, want_slot: None, token: 0, build_id: 1, input_redundancy: None, keep_anchors: None, player_data: Vec::new() }
     }
 }
 
@@ -166,6 +168,7 @@ impl<G: Game> Harness<G> {
         let mut cfg = RelayClientConfig::new(self.room, spec.build_id);
         cfg.want_slot = spec.want_slot;
         cfg.token = spec.token;
+        cfg.player_data.clone_from(&spec.player_data);
         if let Some(r) = spec.input_redundancy {
             cfg.input_redundancy = r;
         }
