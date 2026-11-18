@@ -123,9 +123,9 @@ fn outer_early_return_poll_and_normal_teardown_join() {
     let until = Instant::now() + Duration::from_secs(10);
     while app.arena_export.busy() {
         assert!(Instant::now() < until);
-        let _ = ctx.run_ui(Default::default(), |ui| {
+        ctx.run_ui(Default::default(), |ui| {
             app.with_close_review(ui, |_, _| {});
-        });
+        }).textures_delta.clear();
         thread::sleep(Duration::from_millis(1));
     }
     let release = synthetic_job(&mut app, dir.path());

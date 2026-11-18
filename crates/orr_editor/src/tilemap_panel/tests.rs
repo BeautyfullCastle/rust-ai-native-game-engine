@@ -356,7 +356,7 @@ fn pick_rejects_outside_grid_and_degenerate_viewports() {
         assert_eq!(TilemapPanel::document_cell_at(&doc, world), None);
     }
     let pos = h.point(0, 0);
-    let _ = h.ctx.run_ui(
+    h.ctx.run_ui(
         egui::RawInput {
             events: vec![PickHarness::button(pos, true)],
             focused: true,
@@ -380,7 +380,7 @@ fn pick_rejects_outside_grid_and_degenerate_viewports() {
                 None
             );
         },
-    );
+    ).textures_delta.clear();
 }
 
 #[test]

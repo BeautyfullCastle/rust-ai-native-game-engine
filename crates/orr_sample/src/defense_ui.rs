@@ -1562,7 +1562,7 @@ mod click_attribution_tests {
         time: f64,
         events: Vec<Event>,
     ) -> Option<game::DefenseInput> {
-        ui.show(
+        let (mut output, action) = ui.show(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 940.0))),
                 time: Some(time),
@@ -1570,8 +1570,9 @@ mod click_attribution_tests {
                 ..Default::default()
             },
             sim.frame(),
-        )
-        .1
+        );
+        output.textures_delta.clear();
+        action
     }
     fn apply(sim: &mut Sim, command: game::DefenseInput) {
         let mut inputs = orr_sim::TickInputs::new(sim.frame().tick(), 1);
@@ -1802,17 +1803,16 @@ mod click_attribution_tests {
         }
         let (mut ui, mut sim) = fixture();
         draw(&mut ui, &sim, 0.1, vec![press(restart())]);
-        assert!(ui
-            .show(
-                egui::RawInput {
-                    focused: false,
-                    time: Some(0.2),
-                    ..Default::default()
-                },
-                sim.frame()
-            )
-            .1
-            .is_none());
+        let (mut output, action) = ui.show(
+            egui::RawInput {
+                focused: false,
+                time: Some(0.2),
+                ..Default::default()
+            },
+            sim.frame(),
+        );
+        output.textures_delta.clear();
+        assert!(action.is_none());
         assert!(draw(&mut ui, &sim, 0.3, vec![release(restart())]).is_none());
         let mut focus_events = click(restart());
         focus_events.push(Event::WindowFocused(false));
@@ -1889,18 +1889,17 @@ mod click_attribution_tests {
     fn resized_layout_and_duplicate_press_cancel_old_gesture() {
         let (mut ui, sim) = fixture();
         draw(&mut ui, &sim, 0.1, vec![press(restart())]);
-        assert!(ui
-            .show(
-                egui::RawInput {
-                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1190.0, 940.0))),
-                    time: Some(0.2),
-                    events: vec![release(restart())],
-                    ..Default::default()
-                },
-                sim.frame()
-            )
-            .1
-            .is_none());
+        let (mut output, action) = ui.show(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1190.0, 940.0))),
+                time: Some(0.2),
+                events: vec![release(restart())],
+                ..Default::default()
+            },
+            sim.frame(),
+        );
+        output.textures_delta.clear();
+        assert!(action.is_none());
         assert!(draw(
             &mut ui,
             &sim,
@@ -1952,15 +1951,16 @@ mod run_save_tests {
         frame: &orr_ecs::Frame,
         events: Vec<egui::Event>,
     ) -> Option<game::DefenseInput> {
-        ui.show(
+        let (mut output, action) = ui.show(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(1200.0, 940.0))),
                 events,
                 ..Default::default()
             },
             frame,
-        )
-        .1
+        );
+        output.textures_delta.clear();
+        action
     }
     fn button(x: f32, y: f32, pressed: bool) -> egui::Event {
         egui::Event::PointerButton {

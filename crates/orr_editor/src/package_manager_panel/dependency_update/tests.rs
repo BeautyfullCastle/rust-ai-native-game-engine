@@ -224,7 +224,7 @@ fn preview_completion_rejects_project_source_close_and_block_changes() {
         if change >= 3 {
             p.open = change != 3;
             let ctx = egui::Context::default();
-            let _ = ctx.run_ui(Default::default(), |ui| {
+            ctx.run_ui(Default::default(), |ui| {
                 p.show(
                     ui.ctx(),
                     Some(&f.root),
@@ -234,7 +234,7 @@ fn preview_completion_rejects_project_source_close_and_block_changes() {
                         None
                     },
                 )
-            });
+            }).textures_delta.clear();
         } else {
             p.poll();
         }
@@ -285,9 +285,9 @@ fn update_dispatch_fence_survives_close_block_and_prior_project() {
         p.open = false;
         let target = if prior { Path::new("other") } else { &f.root };
         let ctx = egui::Context::default();
-        let _ = ctx.run_ui(Default::default(), |ui| {
+        ctx.run_ui(Default::default(), |ui| {
             p.show(ui.ctx(), Some(target), Some("Mutation pending"))
-        });
+        }).textures_delta.clear();
         wait(p);
         assert!(
             p.status.contains(if prior {

@@ -55,9 +55,9 @@ fn assert_slot_panel_matches_selected_model(panel: &mut Panel) {
         .source_model_arc()
         .clone();
     let context = egui::Context::default();
-    let _ = context.run_ui(egui::RawInput::default(), |ui| {
+    context.run_ui(egui::RawInput::default(), |ui| {
         assert!(panel.material_slots.show(ui, &selected_model).is_none());
-    });
+    }).textures_delta.clear();
     assert!(!panel.material_slots.dirty());
 }
 

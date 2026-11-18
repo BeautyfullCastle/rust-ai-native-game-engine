@@ -201,13 +201,13 @@ fn blocked_and_closed_panel_invalidate_before_ready_completion_poll() {
         p.pending = Some(rx);
         p.open = !closed;
         let ctx = egui::Context::default();
-        let _ = ctx.run_ui(Default::default(), |ui| {
+        ctx.run_ui(Default::default(), |ui| {
             p.show(
                 ui.ctx(),
                 Some(&f.root),
                 if closed { None } else { Some("Save first") },
             )
-        });
+        }).textures_delta.clear();
         assert!(p.dependency_add.ready.is_none());
         assert!(!p.busy());
         assert!(p.status.contains("discarded"));
@@ -261,9 +261,9 @@ fn dispatched_install_is_fenced_and_not_cancelled_by_close_or_project_change() {
             &f.root
         };
         let ctx = egui::Context::default();
-        let _ = ctx.run_ui(Default::default(), |ui| {
+        ctx.run_ui(Default::default(), |ui| {
             p.show(ui.ctx(), Some(target), Some("Package mutation pending"))
-        });
+        }).textures_delta.clear();
         wait(&mut p);
         assert!(!p.removal_busy());
         assert!(
