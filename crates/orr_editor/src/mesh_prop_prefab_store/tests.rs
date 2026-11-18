@@ -1,4 +1,5 @@
 use super::*;
+use std::fs;
 
 fn prefab_path(directory: &Path, filename: &str) -> PathBuf {
     directory.join(filename)
@@ -103,4 +104,31 @@ fn file_symlinks_are_rejected_for_load_and_save() {
     assert!(load(&linked).is_err());
     assert!(save_new(&linked, b"replacement").is_err());
     assert_eq!(fs::read(original).unwrap(), b"content");
+}
+
+#[cfg(windows)]
+#[test]
+fn a_junction_parent_and_a_symlinked_file_are_rejected() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory.path().join("target");
+    fs::create_dir(&target).unwrap();
+    let junction = directory.path().join("junction");
+    let made = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&junction)
+        .arg(&target)
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "{made:?}");
+    let through = prefab_path(&junction, "x.mesh-prop-prefab.json");
+    assert!(save_new(&through, b"{}").is_err());
+    assert!(load(&through).is_err());
+    assert_eq!(fs::read_dir(&target).unwrap().count(), 0);
+
+    let linked = directory.path().join("link.mesh-prop-prefab.json");
+    let outside = directory.path().join("outside.json");
+    fs::write(&outside, b"{}").unwrap();
+    if std::os::windows::fs::symlink_file(&outside, &linked).is_ok() {
+        assert!(load(&linked).is_err());
+    }
 }

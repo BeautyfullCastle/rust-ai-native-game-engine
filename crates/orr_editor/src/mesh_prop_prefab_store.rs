@@ -1,6 +1,6 @@
 use sha2::{Digest, Sha256};
 use std::{
-    fs::{self, Metadata, OpenOptions},
+    fs::Metadata,
     io::{Read, Write},
     path::{Component, Path, PathBuf},
 };
@@ -9,12 +9,6 @@ const MAX_PATH_BYTES: usize = 4096;
 const MAX_PATH_COMPONENTS: usize = 128;
 const MAX_FILENAME_UTF16_UNITS: usize = 255;
 const SUFFIX: &str = ".mesh-prop-prefab.json";
-#[cfg(windows)]
-const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-#[cfg(windows)]
-const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-#[cfg(windows)]
-const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
 
 use crate::mesh_prop_prefab::MAX_BYTES;
 
@@ -118,14 +112,12 @@ fn validate_parent(parent: &Path) -> Result<(), String> {
                     return Err("mesh prop prefab path has too many components".into());
                 }
                 current.push(name);
-                let metadata = fs::symlink_metadata(&current)
-                    .map_err(|error| format!("inspect mesh prop prefab directory: {error}"))?;
-                if !metadata.is_dir() || is_reparse(&metadata) {
-                    return Err(
-                        "mesh prop prefab path must use real directories, not symlinks or reparse points".into(),
-                    );
-                }
-                verify_open_directory(&current, &metadata)?;
+                // One open checks the type and refuses a link or reparse point.
+                orr_fsid::open_directory(&current).map_err(|error| {
+                    format!(
+                        "mesh prop prefab path must use real directories, not symlinks or reparse points: {error}"
+                    )
+                })?;
             }
             Component::CurDir | Component::ParentDir | Component::Prefix(_) => {
                 return Err(
@@ -182,57 +174,28 @@ fn validate_windows_component(component: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn verify_open_directory(path: &Path, observed: &Metadata) -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        let directory = OpenOptions::new()
-            .read(true)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(path)
-            .map_err(|error| format!("open mesh prop prefab directory: {error}"))?;
-        let opened = directory
-            .metadata()
-            .map_err(|error| format!("inspect opened mesh prop prefab directory: {error}"))?;
-        // A new sibling file changes a directory's size and write time, not its identity.
-        let same_directory = {
-            use std::os::windows::fs::MetadataExt;
-            observed.creation_time() == opened.creation_time()
-                && observed.file_attributes() == opened.file_attributes()
-        };
-        if !opened.is_dir() || is_reparse(&opened) || !same_directory {
-            return Err("mesh prop prefab directory changed while opening".into());
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = (path, observed);
-    }
-    Ok(())
-}
-
 fn read_file(checked: &CheckedPath) -> Result<Vec<u8>, String> {
-    let before = fs::symlink_metadata(&checked.path)
+    // The first handle pins the identity of the file that was inspected. A link, a
+    // folder or a special file at the path is refused by `open_file`.
+    let inspected = orr_fsid::open_file(&checked.path)
         .map_err(|error| format!("inspect mesh prop prefab: {error}"))?;
-    if !before.is_file() || is_reparse(&before) || before.len() > MAX_BYTES as u64 {
+    let before = inspected
+        .metadata()
+        .map_err(|error| format!("inspect mesh prop prefab: {error}"))?;
+    if before.len() > MAX_BYTES as u64 {
         return Err(format!(
             "mesh prop prefab must be a regular file of at most {MAX_BYTES} bytes"
         ));
     }
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    }
-    let mut file = options
-        .open(&checked.path)
+    let mut file = orr_fsid::open_file(&checked.path)
         .map_err(|error| format!("open mesh prop prefab: {error}"))?;
     let opened = file
         .metadata()
         .map_err(|error| format!("inspect opened mesh prop prefab: {error}"))?;
-    if !opened.is_file() || is_reparse(&opened) || !same_metadata_stamp(&before, &opened) {
+    let same_file = orr_fsid::file_id(&file)
+        .and_then(|opened_id| orr_fsid::file_id(&inspected).map(|first| opened_id == first))
+        .map_err(|error| format!("inspect opened mesh prop prefab: {error}"))?;
+    if !same_file || !same_stamp(&before, &opened) {
         return Err("mesh prop prefab changed while opening".into());
     }
     let mut bytes = Vec::new();
@@ -240,12 +203,14 @@ fn read_file(checked: &CheckedPath) -> Result<Vec<u8>, String> {
         .take(MAX_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| format!("read mesh prop prefab: {error}"))?;
-    let after = fs::symlink_metadata(&checked.path)
+    let handle_after = file
+        .metadata()
+        .map_err(|error| format!("recheck opened mesh prop prefab: {error}"))?;
+    let still_named = orr_fsid::same_file(&checked.path, &file)
         .map_err(|error| format!("recheck mesh prop prefab: {error}"))?;
-    if !after.is_file()
-        || is_reparse(&after)
-        || !same_metadata_stamp(&opened, &after)
-        || after.len() != bytes.len() as u64
+    if !still_named
+        || !same_stamp(&opened, &handle_after)
+        || handle_after.len() != bytes.len() as u64
         || bytes.len() > MAX_BYTES
     {
         return Err("mesh prop prefab changed or exceeded its byte limit while reading".into());
@@ -258,36 +223,19 @@ fn recheck_parent(parent: &Path) -> Result<(), String> {
     validate_parent(parent)
 }
 
-fn is_reparse(metadata: &Metadata) -> bool {
-    if metadata.file_type().is_symlink() {
-        return true;
-    }
+/// Size, times and attributes of one file. Identity is compared by handle, not here.
+fn same_stamp(left: &Metadata, right: &Metadata) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
-        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-    }
-    #[cfg(not(windows))]
-    {
-        false
-    }
-}
-
-fn same_metadata_stamp(left: &Metadata, right: &Metadata) -> bool {
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        left.creation_time() == right.creation_time()
-            && left.file_attributes() == right.file_attributes()
+        left.file_attributes() == right.file_attributes()
             && left.len() == right.len()
             && left.last_write_time() == right.last_write_time()
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        left.dev() == right.dev()
-            && left.ino() == right.ino()
-            && left.mode() == right.mode()
+        left.mode() == right.mode()
             && left.nlink() == right.nlink()
             && left.len() == right.len()
             && left.mtime() == right.mtime()
@@ -297,11 +245,7 @@ fn same_metadata_stamp(left: &Metadata, right: &Metadata) -> bool {
     }
     #[cfg(not(any(windows, unix)))]
     {
-        left.len() == right.len()
-            && left.modified().ok() == right.modified().ok()
-            && left.created().ok() == right.created().ok()
-            && left.is_file() == right.is_file()
-            && left.is_dir() == right.is_dir()
+        left.len() == right.len() && left.modified().ok() == right.modified().ok()
     }
 }
 
