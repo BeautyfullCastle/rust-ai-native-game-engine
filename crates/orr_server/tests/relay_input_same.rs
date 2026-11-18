@@ -1,5 +1,5 @@
 //! The "same as the previous input" flag of client `Input` messages under
-//! packet loss, duplication and reordering, and the version check of `Hello`.
+//! packet loss, duplication and reordering, and the version of `Hello`.
 mod common;
 
 use common::*;
@@ -8,7 +8,7 @@ use orr_proto::{
     Channel, ClientMsg, Hello, Link, LinkEvent, RejectReason, ServerMsg, FLAG_ABSENT, FLAG_REPEATED, NO_SLOT, PROTOCOL_VERSION,
 };
 use orr_server::harness::{headless_checksums, ClientSpec, Harness};
-use orr_server::{RelayServer, RoomConfig};
+use orr_server::RelayServer;
 use orr_testgame::{Arena, ArenaConfig};
 use std::collections::BTreeMap;
 
@@ -105,12 +105,11 @@ fn packet_loss_never_changes_an_input_the_server_confirms() {
 
 // ---- the version in Hello ---------------------------------------------------
 
-fn answer(min_client: u32, client_version: u32) -> ServerMsg {
+/// The server's answer to a `Hello` whose header states `version`.
+fn answer(version: u32) -> ServerMsg {
     let net = SimNet::new(3);
     let mut server = RelayServer::new(net.endpoint(), 5);
-    let mut cfg: RoomConfig = arena_room(2);
-    cfg.min_client_version = min_client;
-    server.create_room(1, cfg);
+    server.create_room(1, arena_room(2));
     let mut link = net.connect(PathParams::default());
     assert_eq!(link.poll(), Some(LinkEvent::Connected));
     let hello = Hello {
@@ -119,34 +118,24 @@ fn answer(min_client: u32, client_version: u32) -> ServerMsg {
         input_size: std::mem::size_of::<orr_testgame::ArenaInput>() as u32,
         want_slot: NO_SLOT,
         token: 0,
-        client_version,
     };
-    link.send(Channel::Reliable, &ClientMsg::Hello(hello).encode());
+    let mut bytes = ClientMsg::Hello(hello).encode();
+    // The version is checked before the message checksum, so no re-sealing.
+    bytes[4..8].copy_from_slice(&version.to_le_bytes());
+    link.send(Channel::Reliable, &bytes);
     server.update(0);
     let Some(LinkEvent::Message { channel: Channel::Reliable, data }) = link.poll() else { panic!("no answer to Hello") };
     ServerMsg::decode(&data).expect("valid answer")
 }
 
 #[test]
-fn a_client_older_than_the_room_allows_is_refused_with_the_versions() {
-    // A client that states version 3 cannot decode version 4 messages.
-    assert_eq!(
-        answer(4, 3),
-        ServerMsg::Reject(RejectReason::BadVersion { server: PROTOCOL_VERSION, min_client: 4 })
-    );
-    // A client that states nothing is older than version 5.
-    assert_eq!(
-        answer(PROTOCOL_VERSION, 0),
-        ServerMsg::Reject(RejectReason::BadVersion { server: PROTOCOL_VERSION, min_client: PROTOCOL_VERSION })
-    );
-    // A client that claims a version the server does not know.
-    assert!(matches!(answer(2, PROTOCOL_VERSION + 1), ServerMsg::Reject(RejectReason::BadVersion { .. })));
+fn a_hello_of_another_version_is_refused_with_both_versions() {
+    for client in [0, 2, 5, PROTOCOL_VERSION + 1, u32::MAX] {
+        assert_eq!(answer(client), ServerMsg::Reject(RejectReason::BadVersion { server: PROTOCOL_VERSION, client }), "client {client}");
+    }
 }
 
 #[test]
-fn the_default_room_still_takes_old_and_new_clients() {
-    for v in [0, 2, 4, PROTOCOL_VERSION] {
-        assert!(matches!(answer(orr_proto::MIN_PROTOCOL_VERSION, v), ServerMsg::Welcome(_)), "client version {v}");
-    }
-    assert!(matches!(answer(PROTOCOL_VERSION, PROTOCOL_VERSION), ServerMsg::Welcome(_)));
+fn a_hello_of_the_current_version_is_welcomed() {
+    assert!(matches!(answer(PROTOCOL_VERSION), ServerMsg::Welcome(_)));
 }

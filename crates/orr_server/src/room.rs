@@ -122,11 +122,6 @@ pub struct RoomConfig {
     /// Inputs for ticks further than this ahead of the clock are ignored.
     pub max_ticks_ahead: u32,
     pub vacant_policy: VacantPolicy,
-    /// A client whose `Hello` states a protocol version below this one is
-    /// refused (`RejectReason::BadVersion`). A `Hello` that states none (a
-    /// client older than version 5, which can be version 2, 3 or 4) counts as
-    /// version 2. Set this to 5 to refuse such clients.
-    pub min_client_version: u32,
     /// Keep every confirmed bundle (for replays and tests) in
     /// [`Room::recorded`](crate::RelayServer::recorded).
     pub record_all: bool,
@@ -156,7 +151,6 @@ impl RoomConfig {
             idle_close_ticks: 1800,
             max_ticks_ahead: 120,
             vacant_policy: VacantPolicy::RepeatLast,
-            min_client_version: orr_proto::MIN_PROTOCOL_VERSION,
             record_all: false,
         }
     }
@@ -172,7 +166,7 @@ pub enum ServerNote {
     Rejected { conn: ConnId, reason: RejectReason },
     /// `finalized` is the server tick when the mismatch was found.
     Desync { room: u64, tick: u64, finalized: u64, reports: Vec<(u8, u64)> },
-    SnapshotRequested { room: u64, donor: u8, joiner: u8 },
+    SnapshotRequested { room: u64, donor: u8, joiner: u8, tick: u64 },
     /// A donor's snapshot went to the joiner. `verified`: its checksum matched
     /// the majority of the checksums the other clients reported for `tick`.
     /// `false` when no other client had a report to compare with (a two
@@ -353,22 +347,20 @@ struct Slot {
 
 struct PendingJoin {
     joiner: u8,
-    donor: u8,
-    request_id: u32,
     started_tick: u64,
+    /// Donors that failed this join.
     tried: BTreeSet<u8>,
-    /// An upload that waits for the other clients' checksums of its tick.
-    held: Option<HeldSnapshot>,
+    /// The snapshot request that is out. `None` while no donor has a checksum
+    /// tick the server can ask for yet (see `Room::snapshot_tick`).
+    ask: Option<SnapshotAsk>,
 }
 
-/// A donor's snapshot that is not yet judged (see `Room::judge_snapshot`).
-struct HeldSnapshot {
+/// A `SnapshotRequest` that waits for its answer.
+struct SnapshotAsk {
+    donor: u8,
+    request_id: u32,
+    /// The tick the server chose.
     tick: u64,
-    checksum: u64,
-    data: Vec<u8>,
-    /// Finalized tick after which it is forwarded as unverified if no
-    /// comparable report arrived.
-    until: u64,
 }
 
 /// What the other clients' checksums say about a donor snapshot.
@@ -376,8 +368,6 @@ enum SnapCheck {
     /// Matches the majority of the reports.
     Match,
     Mismatch { majority: Option<u64> },
-    /// Other clients can still report; wait.
-    Wait,
     /// Nobody can confirm it.
     Unverified,
 }
@@ -636,13 +626,6 @@ impl Room {
         h: &Hello,
         new_token: u64,
     ) -> Result<(u8, Option<ConnId>), RejectReason> {
-        let stated = if h.client_version == 0 { orr_proto::MIN_PROTOCOL_VERSION } else { h.client_version };
-        if stated < self.cfg.min_client_version || stated > orr_proto::PROTOCOL_VERSION {
-            return Err(RejectReason::BadVersion {
-                server: orr_proto::PROTOCOL_VERSION,
-                min_client: self.cfg.min_client_version,
-            });
-        }
         if !require_same_build_hash(self.cfg.build_hash, h.build_hash) {
             return Err(RejectReason::BuildHashMismatch { server: self.cfg.build_hash, client: h.build_hash });
         }
@@ -714,7 +697,7 @@ impl Room {
         if let Some(j) = &self.join {
             if j.joiner == slot {
                 self.join = None;
-            } else if j.donor == slot {
+            } else if j.ask.as_ref().is_some_and(|a| a.donor == slot) {
                 self.donor_failed(out);
             }
         }
@@ -910,8 +893,8 @@ impl Room {
 
     pub fn checksum<E: Endpoint>(&mut self, out: &mut Out<'_, E>, slot: u8, tick: u64, checksum: u64) {
         self.record_checksum(out, slot, tick, checksum);
-        // A new report may settle a donor snapshot that waits for it.
-        self.release_held(out);
+        // A new report may give a waiting join a tick to ask for.
+        self.ask_donor(out);
     }
 
     fn record_checksum<E: Endpoint>(&mut self, out: &mut Out<'_, E>, slot: u8, tick: u64, checksum: u64) {
@@ -953,11 +936,15 @@ impl Room {
             self.send_time_sync(out);
             self.prune();
         }
-        self.release_held(out);
         if let Some(j) = &self.join {
             if self.finalized.saturating_sub(j.started_tick) > u64::from(self.cfg.join_timeout_ticks) {
-                self.donor_failed(out);
-                self.pump_join(out);
+                if j.ask.is_some() {
+                    self.donor_failed(out);
+                    self.pump_join(out);
+                } else {
+                    let joiner = j.joiner;
+                    self.fail_join(out, joiner, RejectReason::JoinTimedOut);
+                }
             }
         }
     }
@@ -1223,6 +1210,7 @@ impl Room {
             return;
         }
         if self.join.is_some() {
+            self.ask_donor(out);
             return;
         }
         let Some(joiner) = self
@@ -1236,31 +1224,84 @@ impl Room {
     }
 
     fn start_join<E: Endpoint>(&mut self, out: &mut Out<'_, E>, joiner: u8, tried: BTreeSet<u8>) {
-        let donor = self
-            .slots
-            .iter()
-            .enumerate()
-            .find(|(i, s)| {
-                !tried.contains(&(*i as u8)) && s.player.as_ref().is_some_and(|p| p.phase == Phase::Playing)
+        self.join = Some(PendingJoin { joiner, started_tick: self.finalized, tried, ask: None });
+        self.ask_donor(out);
+    }
+
+    /// Sends the `SnapshotRequest` of the join in progress to the first donor
+    /// that has a tick to offer. Does nothing while a request is out. When
+    /// every untried donor lacks a tick the join waits: the next `Checksum`
+    /// message asks again, and `join_timeout_ticks` ends the wait. When no
+    /// untried donor is left the join fails.
+    fn ask_donor<E: Endpoint>(&mut self, out: &mut Out<'_, E>) {
+        let Some(j) = &self.join else { return };
+        if j.ask.is_some() {
+            return;
+        }
+        let joiner = j.joiner;
+        let donors: Vec<u8> = (0..self.slots.len() as u8)
+            .filter(|i| {
+                !j.tried.contains(i) && self.slots[usize::from(*i)].player.as_ref().is_some_and(|p| p.phase == Phase::Playing)
             })
-            .map(|(i, _)| i as u8);
-        let Some(donor) = donor else {
+            .collect();
+        if donors.is_empty() {
             self.fail_join(out, joiner, RejectReason::NoDonor);
+            return;
+        }
+        let Some((donor, tick)) = donors.iter().find_map(|&d| self.snapshot_tick(d, joiner).map(|t| (d, t))) else {
             return;
         };
         let request_id = self.next_request;
         self.next_request += 1;
-        let conn = self.slots[donor as usize].player.as_ref().unwrap().conn;
-        out.send(conn, Channel::Reliable, &ServerMsg::SnapshotRequest { request_id });
-        out.notes.push(ServerNote::SnapshotRequested { room: self.id, donor, joiner });
-        self.join = Some(PendingJoin { joiner, donor, request_id, started_tick: self.finalized, tried, held: None });
+        let conn = self.slots[usize::from(donor)].player.as_ref().unwrap().conn;
+        out.send(conn, Channel::Reliable, &ServerMsg::SnapshotRequest { request_id, tick });
+        out.notes.push(ServerNote::SnapshotRequested { room: self.id, donor, joiner, tick });
+        if let Some(j) = self.join.as_mut() {
+            j.ask = Some(SnapshotAsk { donor, request_id, tick });
+        }
+    }
+
+    /// The tick the server asks `donor` for: the newest checksum tick that
+    /// the donor reported (so it still keeps that frame), that the server
+    /// holds the bundles after, and that a majority of the other players
+    /// reported too (so their checksums can judge the snapshot). With no other
+    /// player the newest checksum tick of the donor counts. The donor's
+    /// session keeps the frames of its latest checksum ticks
+    /// (`RelayConfig::keep_anchors`), and declines a tick it no longer has.
+    fn snapshot_tick(&self, donor: u8, joiner: u8) -> Option<u64> {
+        let interval = u64::from(self.cfg.checksum_interval.max(1));
+        let others = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(i, s)| {
+                *i != usize::from(donor)
+                    && *i != usize::from(joiner)
+                    && !s.server_owned
+                    && s.player.as_ref().is_some_and(|p| p.phase == Phase::Playing)
+            })
+            .count();
+        self.checksums
+            .iter()
+            .rev()
+            .find(|(tick, reports)| {
+                let reported = reports.keys().filter(|s| **s != donor && **s != joiner).count();
+                **tick != 0
+                    && **tick % interval == 0
+                    && reports.contains_key(&donor)
+                    && (others == 0 || reported * 2 > others)
+                    && self.covers(**tick)
+            })
+            .map(|(tick, _)| *tick)
     }
 
     /// The donor failed (declined, left, too slow, bad snapshot): try the
     /// next one.
     fn donor_failed<E: Endpoint>(&mut self, out: &mut Out<'_, E>) {
         let Some(mut j) = self.join.take() else { return };
-        j.tried.insert(j.donor);
+        if let Some(a) = &j.ask {
+            j.tried.insert(a.donor);
+        }
         self.start_join(out, j.joiner, j.tried);
     }
 
@@ -1277,41 +1318,35 @@ impl Room {
     }
 
     pub fn snapshot_declined<E: Endpoint>(&mut self, out: &mut Out<'_, E>, slot: u8, request_id: u32) {
-        if self.join.as_ref().is_some_and(|j| j.donor == slot && j.request_id == request_id) {
+        if self.join.as_ref().and_then(|j| j.ask.as_ref()).is_some_and(|a| a.donor == slot && a.request_id == request_id) {
             self.donor_failed(out);
         }
     }
 
-    pub fn snapshot_uploaded<E: Endpoint>(
-        &mut self,
-        out: &mut Out<'_, E>,
-        slot: u8,
-        request_id: u32,
-        tick: u64,
-        checksum: u64,
-        data: Vec<u8>,
-    ) {
+    /// The donor sent the frame of the tick the server asked for. The server
+    /// judges its checksum and forwards the snapshot to the joiner, or
+    /// refuses it and asks the next donor.
+    pub fn snapshot_uploaded<E: Endpoint>(&mut self, out: &mut Out<'_, E>, slot: u8, request_id: u32, checksum: u64, data: Vec<u8>) {
         let Some(j) = &self.join else { return };
-        if j.donor != slot || j.request_id != request_id || j.held.is_some() {
+        let Some(ask) = &j.ask else { return };
+        if ask.donor != slot || ask.request_id != request_id {
             return;
         }
+        let (joiner, tick) = (j.joiner, ask.tick);
         // The server must hold every confirmed tick after the snapshot.
         if !self.covers(tick) {
             self.donor_failed(out);
             return;
         }
-        // The donor's snapshot checksum counts like its `Checksum` message
-        // when it sent none for this tick: a snapshot that differs from the
-        // other clients is a desync, and goes the same way to the notes and
-        // to the players.
-        if !self.checksums.get(&tick).is_some_and(|r| r.contains_key(&slot)) {
-            self.record_checksum(out, slot, tick, checksum);
+        match self.judge_snapshot(joiner, slot, tick, checksum) {
+            SnapCheck::Match => self.forward_snapshot(out, tick, checksum, data, true),
+            SnapCheck::Unverified => self.forward_snapshot(out, tick, checksum, data, false),
+            SnapCheck::Mismatch { majority } => {
+                self.snapshots_rejected += 1;
+                out.notes.push(ServerNote::SnapshotRejected { room: self.id, donor: slot, joiner, tick, checksum, majority });
+                self.donor_failed(out);
+            }
         }
-        let until = self.finalized + u64::from(self.cfg.checksum_interval.max(1));
-        if let Some(j) = self.join.as_mut() {
-            j.held = Some(HeldSnapshot { tick, checksum, data, until });
-        }
-        self.release_held(out);
     }
 
     /// The server holds the confirmed bundles of every tick after `tick`.
@@ -1324,51 +1359,22 @@ impl Room {
     /// Compares a donor snapshot's checksum with what the other clients
     /// reported for its tick. The server cannot recompute the checksum from
     /// the data (it does not know the components of the game). The joiner
-    /// checks that the data has that checksum and tick.
-    fn judge_snapshot(&self, joiner: u8, donor: u8, tick: u64, checksum: u64, deadline_passed: bool) -> SnapCheck {
-        let interval = u64::from(self.cfg.checksum_interval.max(1));
-        // Clients report checksum ticks only.
-        if tick % interval != 0 {
-            return SnapCheck::Unverified;
-        }
+    /// checks that the data has that checksum and tick. The donor's checksum
+    /// is one vote too. It is accepted when more than half of all votes (the
+    /// donor's and the reports) equal it. So one wrong client among three
+    /// does not cost an honest donor its place, and a donor that stands alone
+    /// against the others is refused. Without any report nobody can compare.
+    fn judge_snapshot(&self, joiner: u8, donor: u8, tick: u64, checksum: u64) -> SnapCheck {
         let reports: Vec<u64> = self
             .checksums
             .get(&tick)
             .map(|r| r.iter().filter(|(s, _)| **s != donor && **s != joiner).map(|(_, c)| *c).collect())
             .unwrap_or_default();
-        let expected = self
-            .slots
-            .iter()
-            .enumerate()
-            .filter(|(i, s)| {
-                *i != usize::from(donor)
-                    && *i != usize::from(joiner)
-                    && !s.server_owned
-                    && s.player.as_ref().is_some_and(|p| p.phase == Phase::Playing)
-            })
-            .count();
         if reports.is_empty() {
-            return if expected == 0 || deadline_passed { SnapCheck::Unverified } else { SnapCheck::Wait };
+            return SnapCheck::Unverified;
         }
-        // The donor's checksum is one vote too. It is accepted when more
-        // than half of all votes (the donor's and the reports) equal it. So
-        // one wrong client among three does not cost an honest donor its
-        // place, and a donor that stands alone against the others is refused.
         let agree = reports.iter().filter(|c| **c == checksum).count() + 1;
-        let voters = expected + 1;
-        let pass_now = agree * 2 > voters;
-        let fail_now = (agree + expected.saturating_sub(reports.len())) * 2 <= voters;
-        let all_in = reports.len() >= expected;
-        let pass = if pass_now {
-            true
-        } else if fail_now {
-            false
-        } else if all_in || deadline_passed {
-            agree * 2 > reports.len() + 1
-        } else {
-            return SnapCheck::Wait;
-        };
-        if pass {
+        if agree * 2 > reports.len() + 1 {
             return SnapCheck::Match;
         }
         let mut counts: BTreeMap<u64, usize> = BTreeMap::new();
@@ -1379,38 +1385,11 @@ impl Room {
         SnapCheck::Mismatch { majority }
     }
 
-    /// Judges the held donor snapshot and forwards it, refuses it, or keeps
-    /// waiting for reports.
-    fn release_held<E: Endpoint>(&mut self, out: &mut Out<'_, E>) {
-        let Some(j) = &self.join else { return };
-        let Some(h) = &j.held else { return };
-        let (joiner, donor, tick, checksum) = (j.joiner, j.donor, h.tick, h.checksum);
-        let deadline_passed = self.finalized > h.until;
-        match self.judge_snapshot(joiner, donor, tick, checksum, deadline_passed) {
-            SnapCheck::Wait => {}
-            SnapCheck::Match => self.forward_snapshot(out, true),
-            SnapCheck::Unverified => self.forward_snapshot(out, false),
-            SnapCheck::Mismatch { majority } => {
-                self.snapshots_rejected += 1;
-                out.notes.push(ServerNote::SnapshotRejected { room: self.id, donor, joiner, tick, checksum, majority });
-                self.donor_failed(out);
-            }
-        }
-    }
-
-    /// Sends the held snapshot and the confirmed bundles after it.
-    fn forward_snapshot<E: Endpoint>(&mut self, out: &mut Out<'_, E>, verified: bool) {
-        let Some(mut j) = self.join.take() else { return };
-        let Some(HeldSnapshot { tick, checksum, data, .. }) = j.held.take() else {
-            self.join = Some(j);
-            return;
-        };
-        let (joiner, slot) = (j.joiner, j.donor);
-        if !self.covers(tick) {
-            self.join = Some(j);
-            self.donor_failed(out);
-            return;
-        }
+    /// Sends the snapshot and the confirmed bundles after it.
+    fn forward_snapshot<E: Endpoint>(&mut self, out: &mut Out<'_, E>, tick: u64, checksum: u64, data: Vec<u8>, verified: bool) {
+        let Some(j) = self.join.take() else { return };
+        let Some(slot) = j.ask.as_ref().map(|a| a.donor) else { return };
+        let joiner = j.joiner;
         let Some(conn) = self.slots[joiner as usize].player.as_ref().map(|p| p.conn) else {
             return;
         };
