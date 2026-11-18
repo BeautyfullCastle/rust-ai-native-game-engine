@@ -32,6 +32,15 @@ impl Writer {
     pub fn raw(&mut self, v: &[u8]) {
         self.out.extend_from_slice(v);
     }
+    /// A `u32` in 1 to 5 bytes: seven bits per byte, low bits first, the top
+    /// bit says that another byte follows.
+    pub fn varint(&mut self, mut v: u32) {
+        while v >= 0x80 {
+            self.out.push((v as u8 & 0x7F) | 0x80);
+            v >>= 7;
+        }
+        self.out.push(v as u8);
+    }
 }
 
 pub(crate) struct Reader<'a> {
@@ -64,6 +73,22 @@ impl<'a> Reader<'a> {
     }
     pub fn u64(&mut self) -> Result<u64, ProtoError> {
         Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+    }
+    /// A `u32` written by [`Writer::varint`]. Longer or overflowing forms are corrupt.
+    pub fn varint(&mut self) -> Result<u32, ProtoError> {
+        let mut v = 0u32;
+        for i in 0..5 {
+            let b = self.u8()?;
+            let bits = u32::from(b & 0x7F);
+            if i == 4 && bits > 0x0F {
+                return Err(ProtoError::Corrupt("varint overflow"));
+            }
+            v |= bits << (7 * i);
+            if b & 0x80 == 0 {
+                return Ok(v);
+            }
+        }
+        Err(ProtoError::Corrupt("varint too long"))
     }
     /// `u32` length (at most `max`), then that many bytes.
     pub fn bytes(&mut self, max: u32) -> Result<Vec<u8>, ProtoError> {

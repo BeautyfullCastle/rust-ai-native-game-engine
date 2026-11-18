@@ -58,19 +58,36 @@
 //! a version-2 client cannot join an authoritative room (it fails to decode
 //! the version-3 `Welcome`).
 //!
+//! Version 4 adds the signal fence. The server numbers its player signals
+//! (`Presence` of a relay room and `SeatChange`) 1, 2, 3, ... in the order it
+//! announces them, and every signal message carries its `seq`. A `Bundle`
+//! carries `signals`: how many signals have a tick at or before the bundle's
+//! tick. A client must have all of them before it may verify that tick, so a
+//! signal that is late on the reliable channel holds the bundles back instead
+//! of arriving for a tick that is already verified. `Confirmed` writes the
+//! counts after the bundles (see below), `JoinSnapshot` carries the count at
+//! the snapshot tick. A message whose counts are all zero (an authoritative
+//! room, or a room that never had a signal) is still written as version 2 or 3.
+//!
 //! `Confirmed` is compact, because the server repeats unacked bundles in
 //! every packet: the first bundle has a `u64` tick, later ones a one-byte
 //! delta (255 escapes to a full `u64`); a slot's flags byte tells whether
 //! its input equals the same slot's input in the previous bundle of the
 //! message (then the input bytes are left out) and whether commands follow.
+//! In version 4 a `Confirmed` with a nonzero signal count ends with: the
+//! count of the first bundle, the number of later bundles whose count differs
+//! from the bundle before, and for each such bundle its index and count (all
+//! varints). Counts that stay the same cost two bytes per message.
 use crate::codec::{Reader, Writer};
 
-/// Newest protocol version (adds the authoritative mode, see the module docs).
-pub const PROTOCOL_VERSION: u32 = 3;
+/// Newest protocol version (adds the signal fence, see the module docs).
+pub const PROTOCOL_VERSION: u32 = 4;
 /// Oldest version a decoder still accepts (the relay-only protocol).
 pub const MIN_PROTOCOL_VERSION: u32 = 2;
 /// First version that has `Welcome::flags` and `ServerMsg::Correction`.
 const V_AUTHORITATIVE: u32 = 3;
+/// First version with signal sequence numbers and counts (the signal fence).
+const V_SIGNAL_FENCE: u32 = 4;
 const MAGIC: &[u8; 4] = b"ORRN";
 
 /// `Hello::want_slot` value meaning "any free slot".
@@ -172,6 +189,9 @@ pub struct SlotConfirmed {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Bundle {
     pub tick: u64,
+    /// How many player signals of the room have a tick at or before `tick`
+    /// (the signal fence, see the module docs). `0` when there are none.
+    pub signals: u32,
     pub slots: Vec<SlotConfirmed>,
 }
 
@@ -345,8 +365,11 @@ pub enum ServerMsg {
     TimeSync(TimeSync),
     Desync { tick: u64, reports: Vec<(u8, u64)> },
     SnapshotRequest { request_id: u32 },
-    JoinSnapshot { tick: u64, checksum: u64, data: Vec<u8> },
-    Presence { slot: u8, present: bool, from_tick: u64 },
+    /// `signals`: the signal count at `tick` (see [`Bundle::signals`]).
+    JoinSnapshot { tick: u64, checksum: u64, data: Vec<u8>, signals: u32 },
+    /// `seq`: the number of this signal (see the module docs), `0` for a
+    /// message that is no signal (authoritative rooms).
+    Presence { slot: u8, present: bool, from_tick: u64, seq: u32 },
     Bye { code: u8 },
     /// Authoritative mode: the client's checksum at `from_tick` differed from
     /// the server's. `data` is the server's frame at `tick` (lz4, the same
@@ -356,7 +379,7 @@ pub enum ServerMsg {
     /// A change of a slot that `Presence` cannot say: `change` is
     /// `SEAT_RECONNECTED` or `SEAT_REMOVED`. It takes effect from `from_tick`,
     /// like `Presence`.
-    SeatChange { slot: u8, change: u8, from_tick: u64 },
+    SeatChange { slot: u8, change: u8, from_tick: u64, seq: u32 },
 }
 
 fn seal(mut w: Writer) -> Vec<u8> {
@@ -569,7 +592,8 @@ impl ServerMsg {
                 seal(w)
             }
             ServerMsg::Confirmed { input_size, bundles } => {
-                let mut w = start(5);
+                let fenced = bundles.iter().any(|b| b.signals != 0);
+                let mut w = start_v(5, if fenced { V_SIGNAL_FENCE } else { MIN_PROTOCOL_VERSION });
                 w.u32(*input_size);
                 let slots = bundles.first().map_or(0, |b| b.slots.len());
                 w.u8(slots as u8);
@@ -607,6 +631,20 @@ impl ServerMsg {
                     }
                     prev = Some(b);
                 }
+                if fenced {
+                    w.varint(bundles[0].signals);
+                    let changes: Vec<(usize, u32)> = bundles
+                        .windows(2)
+                        .enumerate()
+                        .filter(|(_, pair)| pair[0].signals != pair[1].signals)
+                        .map(|(i, pair)| (i + 1, pair[1].signals))
+                        .collect();
+                    w.varint(changes.len() as u32);
+                    for (index, signals) in changes {
+                        w.varint(index as u32);
+                        w.varint(signals);
+                    }
+                }
                 seal(w)
             }
             ServerMsg::TimeSync(t) => {
@@ -634,18 +672,24 @@ impl ServerMsg {
                 w.u32(*request_id);
                 seal(w)
             }
-            ServerMsg::JoinSnapshot { tick, checksum, data } => {
-                let mut w = start(9);
+            ServerMsg::JoinSnapshot { tick, checksum, data, signals } => {
+                let mut w = start_v(9, if *signals != 0 { V_SIGNAL_FENCE } else { MIN_PROTOCOL_VERSION });
                 w.u64(*tick);
                 w.u64(*checksum);
                 w.bytes(data);
+                if *signals != 0 {
+                    w.varint(*signals);
+                }
                 seal(w)
             }
-            ServerMsg::Presence { slot, present, from_tick } => {
-                let mut w = start(10);
+            ServerMsg::Presence { slot, present, from_tick, seq } => {
+                let mut w = start_v(10, if *seq != 0 { V_SIGNAL_FENCE } else { MIN_PROTOCOL_VERSION });
                 w.u8(*slot);
                 w.u8(u8::from(*present));
                 w.u64(*from_tick);
+                if *seq != 0 {
+                    w.varint(*seq);
+                }
                 seal(w)
             }
             ServerMsg::Bye { code } => {
@@ -661,11 +705,14 @@ impl ServerMsg {
                 w.bytes(data);
                 seal(w)
             }
-            ServerMsg::SeatChange { slot, change, from_tick } => {
-                let mut w = start_v(13, V_AUTHORITATIVE);
+            ServerMsg::SeatChange { slot, change, from_tick, seq } => {
+                let mut w = start_v(13, if *seq != 0 { V_SIGNAL_FENCE } else { V_AUTHORITATIVE });
                 w.u8(*slot);
                 w.u8(*change);
                 w.u64(*from_tick);
+                if *seq != 0 {
+                    w.varint(*seq);
+                }
                 seal(w)
             }
         }
@@ -738,7 +785,36 @@ impl ServerMsg {
                         let commands = if wire & WIRE_HAS_COMMANDS != 0 { read_commands(&mut r)? } else { Vec::new() };
                         list.push(SlotConfirmed { input, commands, flags: wire & (FLAG_REPEATED | FLAG_ABSENT) });
                     }
-                    bundles.push(Bundle { tick, slots: list });
+                    bundles.push(Bundle { tick, signals: 0, slots: list });
+                }
+                if version >= V_SIGNAL_FENCE && !bundles.is_empty() {
+                    let mut signals = r.varint()?;
+                    let changes = r.varint()?;
+                    if u64::from(changes) >= bundles.len() as u64 {
+                        return Err(ProtoError::Corrupt("signal count changes"));
+                    }
+                    let mut at = 0usize;
+                    let mut last_index = 0u64;
+                    for c in 0..=changes {
+                        // The run `at..end` has `signals`; the next change starts the next run.
+                        let (end, next) = if c < changes {
+                            let index = u64::from(r.varint()?);
+                            if index <= last_index || index >= bundles.len() as u64 {
+                                return Err(ProtoError::Corrupt("signal count index"));
+                            }
+                            last_index = index;
+                            (index as usize, Some(r.varint()?))
+                        } else {
+                            (bundles.len(), None)
+                        };
+                        for b in &mut bundles[at..end] {
+                            b.signals = signals;
+                        }
+                        at = end;
+                        if let Some(n) = next {
+                            signals = n;
+                        }
+                    }
                 }
                 ServerMsg::Confirmed { input_size, bundles }
             }
@@ -760,8 +836,18 @@ impl ServerMsg {
                 ServerMsg::Desync { tick, reports }
             }
             8 => ServerMsg::SnapshotRequest { request_id: r.u32()? },
-            9 => ServerMsg::JoinSnapshot { tick: r.u64()?, checksum: r.u64()?, data: r.bytes(MAX_SNAPSHOT_LEN)? },
-            10 => ServerMsg::Presence { slot: r.u8()?, present: r.u8()? != 0, from_tick: r.u64()? },
+            9 => ServerMsg::JoinSnapshot {
+                tick: r.u64()?,
+                checksum: r.u64()?,
+                data: r.bytes(MAX_SNAPSHOT_LEN)?,
+                signals: if version >= V_SIGNAL_FENCE { r.varint()? } else { 0 },
+            },
+            10 => ServerMsg::Presence {
+                slot: r.u8()?,
+                present: r.u8()? != 0,
+                from_tick: r.u64()?,
+                seq: if version >= V_SIGNAL_FENCE { r.varint()? } else { 0 },
+            },
             11 => ServerMsg::Bye { code: r.u8()? },
             12 if version >= V_AUTHORITATIVE => ServerMsg::Correction {
                 from_tick: r.u64()?,
@@ -774,7 +860,8 @@ impl ServerMsg {
                 if change != SEAT_RECONNECTED && change != SEAT_REMOVED {
                     return Err(ProtoError::Corrupt("unknown seat change"));
                 }
-                ServerMsg::SeatChange { slot, change, from_tick }
+                let seq = if version >= V_SIGNAL_FENCE { r.varint()? } else { 0 };
+                ServerMsg::SeatChange { slot, change, from_tick, seq }
             }
             k => return Err(ProtoError::UnknownKind(k)),
         };
@@ -790,11 +877,16 @@ mod tests {
     fn sample_bundle(tick: u64) -> Bundle {
         Bundle {
             tick,
+            signals: 0,
             slots: vec![
                 SlotConfirmed { input: vec![1, 2, 3, 4], commands: vec![vec![9, 9]], flags: 0 },
                 SlotConfirmed { input: vec![5, 6, 7, 8], commands: vec![], flags: FLAG_REPEATED },
             ],
         }
+    }
+
+    fn fenced_bundle(tick: u64, signals: u32) -> Bundle {
+        Bundle { signals, ..sample_bundle(tick) }
     }
 
     fn all_client() -> Vec<ClientMsg> {
@@ -865,12 +957,15 @@ mod tests {
             }),
             ServerMsg::Desync { tick: 30, reports: vec![(0, 1), (1, 2)] },
             ServerMsg::SnapshotRequest { request_id: 3 },
-            ServerMsg::JoinSnapshot { tick: 90, checksum: 8, data: vec![1; 50] },
-            ServerMsg::Presence { slot: 1, present: false, from_tick: 44 },
+            ServerMsg::JoinSnapshot { tick: 90, checksum: 8, data: vec![1; 50], signals: 0 },
+            ServerMsg::JoinSnapshot { tick: 90, checksum: 8, data: vec![1; 50], signals: 300 },
+            ServerMsg::Presence { slot: 1, present: false, from_tick: 44, seq: 0 },
+            ServerMsg::Presence { slot: 1, present: true, from_tick: 44, seq: 3 },
             ServerMsg::Bye { code: 2 },
             ServerMsg::Correction { from_tick: 60, tick: 91, checksum: 0xABCD, data: vec![7; 40] },
-            ServerMsg::SeatChange { slot: 2, change: SEAT_RECONNECTED, from_tick: 77 },
-            ServerMsg::SeatChange { slot: 0, change: SEAT_REMOVED, from_tick: 900 },
+            ServerMsg::SeatChange { slot: 2, change: SEAT_RECONNECTED, from_tick: 77, seq: 0 },
+            ServerMsg::SeatChange { slot: 0, change: SEAT_REMOVED, from_tick: 900, seq: 129 },
+            ServerMsg::Confirmed { input_size: 4, bundles: vec![fenced_bundle(5, 2), fenced_bundle(6, 2), fenced_bundle(9, 7)] },
         ]
     }
 
@@ -879,14 +974,20 @@ mod tests {
     }
 
     #[test]
-    fn relay_messages_stay_version_2_and_authoritative_ones_are_version_3() {
+    fn messages_without_signals_stay_version_2_and_authoritative_ones_are_version_3() {
         for m in all_client() {
             assert_eq!(version_of(&m.encode()), 2, "{m:?}");
         }
         for m in all_server() {
             let v = version_of(&m.encode());
+            let v4 = match &m {
+                ServerMsg::JoinSnapshot { signals, .. } => *signals != 0,
+                ServerMsg::Presence { seq, .. } | ServerMsg::SeatChange { seq, .. } => *seq != 0,
+                ServerMsg::Confirmed { bundles, .. } => bundles.iter().any(|b| b.signals != 0),
+                _ => false,
+            };
             let v3 = matches!(&m, ServerMsg::Correction { .. } | ServerMsg::SeatChange { .. }) || matches!(&m, ServerMsg::Welcome(w) if w.flags != 0);
-            assert_eq!(v, if v3 { 3 } else { 2 }, "{m:?}");
+            assert_eq!(v, if v4 { 4 } else if v3 { 3 } else { 2 }, "{m:?}");
         }
     }
 
@@ -910,7 +1011,7 @@ mod tests {
 
     #[test]
     fn a_seat_change_needs_version_3_and_a_known_change() {
-        let m = ServerMsg::SeatChange { slot: 1, change: SEAT_REMOVED, from_tick: 5 };
+        let m = ServerMsg::SeatChange { slot: 1, change: SEAT_REMOVED, from_tick: 5, seq: 0 };
         let reseal = |bytes: &mut Vec<u8>| {
             let n = bytes.len() - 8;
             let sum = xxhash_rust::xxh3::xxh3_64(&bytes[..n]);
@@ -931,6 +1032,7 @@ mod tests {
     fn confirmed_compact_encoding_round_trips_and_shrinks() {
         let b = |tick: u64, a: u8, c: u8, cmds: bool| Bundle {
             tick,
+            signals: 0,
             slots: vec![
                 SlotConfirmed { input: vec![a; 4], commands: if cmds { vec![vec![1, 2]] } else { vec![] }, flags: 0 },
                 SlotConfirmed { input: vec![c; 4], commands: vec![], flags: FLAG_ABSENT | FLAG_REPEATED },
@@ -946,6 +1048,65 @@ mod tests {
         assert!(est < full);
         // header: magic 4 + version 4 + kind 1 + input_size 4 + slots 1 + count 4 + checksum 8
         assert_eq!(bytes.len(), est + 26);
+    }
+
+    #[test]
+    fn signal_counts_cost_two_bytes_while_they_stay_the_same_and_round_trip() {
+        let plain = ServerMsg::Confirmed { input_size: 4, bundles: vec![sample_bundle(5), sample_bundle(6), sample_bundle(7)] };
+        let same = ServerMsg::Confirmed { input_size: 4, bundles: (5..8).map(|t| fenced_bundle(t, 3)).collect() };
+        assert_eq!(same.encode().len(), plain.encode().len() + 2);
+        // Counts that rise inside the message: one more index and count for every change.
+        let rising = ServerMsg::Confirmed {
+            input_size: 4,
+            bundles: vec![fenced_bundle(5, 3), fenced_bundle(6, 3), fenced_bundle(7, 4), fenced_bundle(8, 4), fenced_bundle(9, 200)],
+        };
+        assert_eq!(ServerMsg::decode(&rising.encode()).unwrap(), rising);
+        assert_eq!(ServerMsg::decode(&same.encode()).unwrap(), same);
+        // A count of zero in the first bundle and a rise later.
+        let late = ServerMsg::Confirmed { input_size: 4, bundles: vec![sample_bundle(5), fenced_bundle(6, 1)] };
+        assert_eq!(ServerMsg::decode(&late.encode()).unwrap(), late);
+        // A single bundle and a message of version 4 without bundles.
+        let one = ServerMsg::Confirmed { input_size: 4, bundles: vec![fenced_bundle(5, 1)] };
+        assert_eq!(ServerMsg::decode(&one.encode()).unwrap(), one);
+    }
+
+    #[test]
+    fn bad_signal_count_trailers_are_errors() {
+        let encode = |trailer: &[u32]| {
+            let mut w = start_v(5, V_SIGNAL_FENCE);
+            w.u32(4);
+            w.u8(1);
+            w.u32(2);
+            w.u64(5);
+            w.u8(0);
+            w.raw(&[1, 2, 3, 4]);
+            w.u8(1);
+            w.u8(WIRE_SAME_INPUT);
+            for v in trailer {
+                w.varint(*v);
+            }
+            seal(w)
+        };
+        assert!(ServerMsg::decode(&encode(&[2, 1, 1, 5])).is_ok());
+        // More changes than later bundles; an index of 0 or past the end; indexes that do not rise.
+        assert!(ServerMsg::decode(&encode(&[2, 2, 1, 5, 1, 6])).is_err());
+        assert!(ServerMsg::decode(&encode(&[2, 1, 0, 5])).is_err());
+        assert!(ServerMsg::decode(&encode(&[2, 1, 2, 5])).is_err());
+        // The trailer is missing.
+        assert!(ServerMsg::decode(&encode(&[])).is_err());
+    }
+
+    #[test]
+    fn varint_round_trips_and_refuses_overflow() {
+        for v in [0u32, 1, 127, 128, 300, 16_383, 16_384, u32::MAX] {
+            let mut w = Writer::new();
+            w.varint(v);
+            let len = w.out.len();
+            assert_eq!(len, if v < 128 { 1 } else if v < 16_384 { 2 } else if v == u32::MAX { 5 } else { 3 }, "{v}");
+            assert_eq!(Reader::new(&w.out).varint().unwrap(), v);
+        }
+        assert!(Reader::new(&[0xFF, 0xFF, 0xFF, 0xFF, 0x1F]).varint().is_err());
+        assert!(Reader::new(&[0x80, 0x80, 0x80, 0x80, 0x80, 0x01]).varint().is_err());
     }
 
     #[test]

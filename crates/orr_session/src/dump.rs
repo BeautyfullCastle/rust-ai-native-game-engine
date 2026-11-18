@@ -218,7 +218,7 @@ impl DesyncDump {
                 }
                 slots.push(SlotConfirmed { input, commands, flags });
             }
-            ticks.push(Bundle { tick, slots });
+            ticks.push(Bundle { tick, signals: 0, slots });
         }
         if !r.bytes.is_empty() {
             return Err(DumpError::Corrupt("trailing bytes"));

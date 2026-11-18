@@ -89,6 +89,9 @@ pub struct SourceStats {
     /// what it had sent for the tick (so the session rolled back).
     pub own_overridden: u64,
     pub packets_sent: u64,
+    /// Bundles that waited for a player signal before the session got them
+    /// (the signal fence).
+    pub bundles_fenced: u64,
 }
 
 /// The [`InputSource`] of a relay session: sends the local inputs to the
@@ -112,6 +115,14 @@ pub struct RelaySource<G: Game, L: Link> {
     seen: BTreeSet<u64>,
     /// Confirmed bundles, kept for desync dumps.
     log: BTreeMap<u64, Bundle>,
+    /// The signal fence: signals `1..=signals_seen` are all in (applied, or
+    /// inside the snapshot the session started from), and the numbers above
+    /// that are in `signals_ahead`.
+    signals_seen: u32,
+    signals_ahead: BTreeSet<u32>,
+    /// Bundles that wait for signals, by tick: the signal count the bundle
+    /// needs and its inputs. The session gets them when the signals are in.
+    fenced: BTreeMap<u64, (u32, Vec<RemoteInput<G>>)>,
     connected: bool,
     disconnected: bool,
     stats: SourceStats,
@@ -132,6 +143,9 @@ impl<G: Game, L: Link> RelaySource<G, L> {
             ack: 0,
             seen: BTreeSet::new(),
             log: BTreeMap::new(),
+            signals_seen: 0,
+            signals_ahead: BTreeSet::new(),
+            fenced: BTreeMap::new(),
             connected: false,
             disconnected: false,
             stats: SourceStats::default(),
@@ -225,9 +239,51 @@ impl<G: Game, L: Link> RelaySource<G, L> {
         }
         self.stats.bundles_received += 1;
         self.seen.insert(b.tick);
-        self.inbox.extend(decoded);
+        // The session must not verify a tick before it has every signal that
+        // applies at or before that tick. The bundle is still in (acked), but
+        // the session gets it when the signals are in.
+        if b.signals <= self.signals_seen {
+            self.inbox.extend(decoded);
+        } else {
+            self.stats.bundles_fenced += 1;
+            self.fenced.insert(b.tick, (b.signals, decoded));
+        }
         self.log.insert(b.tick, b);
         self.advance_ack();
+    }
+
+    /// A signal with number `seq` arrived (`0`: from a server without the
+    /// signal fence). Returns false when it was in already.
+    fn note_signal(&mut self, seq: u32) -> bool {
+        if seq == 0 {
+            return true;
+        }
+        if seq <= self.signals_seen || !self.signals_ahead.insert(seq) {
+            return false;
+        }
+        self.advance_signals();
+        true
+    }
+
+    /// The snapshot the session starts from holds signals `1..=signals`.
+    fn set_signal_base(&mut self, signals: u32) {
+        if signals > self.signals_seen {
+            self.signals_seen = signals;
+            self.signals_ahead = self.signals_ahead.split_off(&(signals + 1));
+            self.advance_signals();
+        }
+    }
+
+    fn advance_signals(&mut self) {
+        while self.signals_ahead.remove(&(self.signals_seen + 1)) {
+            self.signals_seen += 1;
+        }
+        let ready: Vec<u64> = self.fenced.iter().filter(|(_, (n, _))| *n <= self.signals_seen).map(|(t, _)| *t).collect();
+        for tick in ready {
+            if let Some((_, decoded)) = self.fenced.remove(&tick) {
+                self.inbox.extend(decoded);
+            }
+        }
     }
 
     /// Turns a bundle into per-slot remote inputs; `None` (counted) when an
@@ -263,7 +319,9 @@ impl<G: Game, L: Link> RelaySource<G, L> {
         if !covered {
             return false;
         }
-        let bundles: Vec<Bundle> = self.log.range(from + 1..=self.ack).map(|(_, b)| b.clone()).collect();
+        // A fenced bundle is not in the session yet, so it is not fed again.
+        let bundles: Vec<Bundle> =
+            self.log.range(from + 1..=self.ack).filter(|(t, _)| !self.fenced.contains_key(t)).map(|(_, b)| b.clone()).collect();
         for b in bundles {
             if let Some(decoded) = self.decode_slots(&b) {
                 self.inbox.extend(decoded);
@@ -421,6 +479,10 @@ pub enum ClientEvent {
     SeatChange { slot: u8, change: u8, from_tick: u64 },
     /// The server found different checksums at `tick`; a dump was written.
     Desync { tick: u64, dump_name: String },
+    /// A player signal came for a tick the session had already verified. The
+    /// signal fence of the server makes this impossible, so the game state
+    /// cannot be trusted any more and the client fails.
+    SignalLate { tick: u64 },
     DelayChanged { delay: u32 },
     HardResync { error_us: i64 },
     /// Authoritative mode: the server found this client's checksum at
@@ -458,8 +520,9 @@ pub struct ClientStats {
     pub corrections: u64,
     /// Corrections ignored because the bundle log could not cover them.
     pub corrections_ignored: u64,
-    /// Player signals that came for a tick the session had already verified
-    /// (it could not apply them; the checksums will show the difference).
+    /// Player signals that came for a tick the session had already verified.
+    /// The signal fence of the server (protocol version 4) keeps this at 0;
+    /// a signal that is late anyway fails the client (`ClientEvent::SignalLate`).
     pub signals_late: u64,
 }
 
@@ -757,15 +820,22 @@ impl<G: Game, L: Link> RelayClient<G, L> {
             }
             ServerMsg::Desync { tick, reports } => self.on_desync(tick, reports),
             ServerMsg::SnapshotRequest { request_id } => self.serve_snapshot(request_id),
-            ServerMsg::JoinSnapshot { tick, checksum, data } => {
+            ServerMsg::JoinSnapshot { tick, checksum, data, signals } => {
                 if self.state == ClientState::AwaitSnapshot && self.pending_snapshot.is_none() {
                     match crate::wire::decompress_bounded(&data) {
-                        Ok(frame_bytes) => self.pending_snapshot = Some(PendingSnapshot { tick, checksum, frame_bytes }),
+                        Ok(frame_bytes) => {
+                            // The snapshot has the signals up to its tick; the server sends the later ones again.
+                            self.src_mut().set_signal_base(signals);
+                            self.pending_snapshot = Some(PendingSnapshot { tick, checksum, frame_bytes });
+                        }
                         Err(e) => self.fail(format!("snapshot: {e}")),
                     }
                 }
             }
-            ServerMsg::Presence { slot, present, from_tick } => {
+            ServerMsg::Presence { slot, present, from_tick, seq } => {
+                if !self.src_mut().note_signal(seq) {
+                    return;
+                }
                 self.events.push(ClientEvent::Presence { slot, present, from_tick });
                 let signal = if present {
                     RawPlayerSignal::added(PlayerSlot(slot))
@@ -777,7 +847,10 @@ impl<G: Game, L: Link> RelayClient<G, L> {
                     self.on_own_seat(slot);
                 }
             }
-            ServerMsg::SeatChange { slot, change, from_tick } => {
+            ServerMsg::SeatChange { slot, change, from_tick, seq } => {
+                if !self.src_mut().note_signal(seq) {
+                    return;
+                }
                 self.events.push(ClientEvent::SeatChange { slot, change, from_tick });
                 let signal = if change == orr_proto::SEAT_REMOVED {
                     RawPlayerSignal::removed(PlayerSlot(slot))
@@ -818,7 +891,10 @@ impl<G: Game, L: Link> RelayClient<G, L> {
         match self.session.as_mut() {
             Some(session) => {
                 if session.schedule_signal(tick, signal).is_err() {
+                    // Not possible with the signal fence. This client has a state the others do not have.
                     self.stats.signals_late += 1;
+                    self.events.push(ClientEvent::SignalLate { tick });
+                    self.fail(format!("player signal for tick {tick} came after the tick was verified"));
                 }
             }
             None => self.pending_signals.push((tick, signal)),

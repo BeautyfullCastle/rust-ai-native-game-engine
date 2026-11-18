@@ -569,7 +569,7 @@ fn arena_server_sim_cost_per_tick() {
             })
             .collect();
         let t = Instant::now();
-        let v = sim.step(&Bundle { tick, slots });
+        let v = sim.step(&Bundle { tick, signals: 0, slots });
         step.push(t.elapsed());
         assert!(v.is_empty(), "honest input broke a rule at tick {tick}: {v:?}");
     }
