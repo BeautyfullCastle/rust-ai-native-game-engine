@@ -35,7 +35,7 @@ fn composition_literal_defaults_layout_and_nested_schema() {
     let Kind::Array { elem: kind, len: 4 } = &row.kind else {
         panic!()
     };
-    let Kind::Int { int, range } = &kind.kind else {
+    let Kind::Int { int, range, .. } = &kind.kind else {
         panic!()
     };
     assert_eq!(*int, orr_reflect::IntKind::U32);
@@ -48,7 +48,7 @@ fn composition_literal_defaults_layout_and_nested_schema() {
     else {
         panic!()
     };
-    let Kind::Int { int, range } = &flag.kind else {
+    let Kind::Int { int, range, .. } = &flag.kind else {
         panic!()
     };
     assert_eq!(*int, orr_reflect::IntKind::U32);
