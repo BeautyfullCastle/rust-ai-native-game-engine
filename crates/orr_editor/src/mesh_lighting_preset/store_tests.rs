@@ -184,6 +184,29 @@ fn symlink_replacement_after_inspection_is_rejected() {
 
 #[cfg(unix)]
 #[test]
+fn a_preset_loads_below_a_folder_with_search_permission_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_temporary, root) = root();
+    let search_only = root.join("search-only");
+    let project = search_only.join("project");
+    fs::create_dir_all(&project).unwrap();
+    let path = project.join("preset.mesh-lighting-preset.json");
+    fs::write(&path, bytes()).unwrap();
+    fs::set_permissions(&search_only, fs::Permissions::from_mode(0o111)).unwrap();
+    let outcome = std::panic::catch_unwind(|| {
+        if fs::read_dir(&search_only).is_ok() {
+            eprintln!("SKIP: permission bits do not restrict this user (root?), so no folder can be search-only");
+            return;
+        }
+        assert_eq!(load(&path).unwrap(), Preset::decode(&bytes()).unwrap());
+    });
+    // The temporary folder cannot be removed while its permissions deny listing.
+    fs::set_permissions(&search_only, fs::Permissions::from_mode(0o755)).unwrap();
+    outcome.unwrap();
+}
+
+#[cfg(unix)]
+#[test]
 fn changed_metadata_even_with_unchanged_length_is_rejected() {
     use std::os::unix::fs::PermissionsExt;
     let (_temporary, root) = root();

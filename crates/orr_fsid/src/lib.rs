@@ -30,7 +30,23 @@ pub fn file_id(file: &File) -> io::Result<FileId> {
 /// The call fails when the path is a file, a symbolic link, a junction or another reparse
 /// point. On Windows the handle uses backup semantics, which a folder handle needs.
 pub fn open_directory(path: &Path) -> io::Result<File> {
-    let file = imp::open_directory(path)?;
+    check_directory(imp::open_directory(path)?)
+}
+
+/// Open a folder only to learn its identity, without following a link at the end of the path.
+///
+/// The call needs no permission to list the folder, so a folder that has search permission
+/// only (mode `0o111`) opens. On Linux the handle is a path handle: `file_id` and
+/// `metadata` work on it, but it cannot read, list or sync the folder. Use
+/// [`open_directory`] when the folder must be listed or synced.
+///
+/// The call fails when the path is a file, a symbolic link, a junction or another reparse
+/// point.
+pub fn open_directory_identity(path: &Path) -> io::Result<File> {
+    check_directory(imp::open_directory_identity(path)?)
+}
+
+fn check_directory(file: File) -> io::Result<File> {
     let metadata = file.metadata()?;
     if !metadata.is_dir() || imp::is_link(&metadata) {
         return Err(io::Error::new(
@@ -71,8 +87,10 @@ pub fn is_link(metadata: &std::fs::Metadata) -> bool {
 }
 
 /// True when `path` names the same folder as the open handle `pinned`.
+///
+/// The check needs search permission on `path` only, not permission to list it.
 pub fn same_directory(path: &Path, pinned: &File) -> io::Result<bool> {
-    Ok(file_id(&open_directory(path)?)? == file_id(pinned)?)
+    Ok(file_id(&open_directory_identity(path)?)? == file_id(pinned)?)
 }
 
 /// True when `path` names the same regular file as the open handle `held`.
@@ -94,17 +112,35 @@ pub struct PinnedDirectory {
     path: PathBuf,
     file: File,
     id: FileId,
+    readable: bool,
 }
 
 impl PinnedDirectory {
     /// Open `path` as a real folder and remember its identity.
+    ///
+    /// Search permission on the folder is enough. The pin cannot list or sync the folder.
+    /// Use [`PinnedDirectory::open_readable`] for that.
     pub fn open(path: &Path) -> io::Result<Self> {
+        let file = open_directory_identity(path)?;
+        let id = file_id(&file)?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            file,
+            id,
+            readable: false,
+        })
+    }
+
+    /// Open `path` as a real folder, remember its identity and keep a handle that can sync
+    /// the folder. This needs permission to read the folder.
+    pub fn open_readable(path: &Path) -> io::Result<Self> {
         let file = open_directory(path)?;
         let id = file_id(&file)?;
         Ok(Self {
             path: path.to_path_buf(),
             file,
             id,
+            readable: true,
         })
     }
 
@@ -112,8 +148,9 @@ impl PinnedDirectory {
         &self.path
     }
 
-    pub fn file(&self) -> &File {
-        &self.file
+    /// The open handle when the pin came from [`PinnedDirectory::open_readable`], else `None`.
+    pub fn file(&self) -> Option<&File> {
+        self.readable.then_some(&self.file)
     }
 
     pub fn id(&self) -> FileId {
@@ -128,7 +165,7 @@ impl PinnedDirectory {
     /// Fail when `path` is not the pinned path or no longer names the pinned folder.
     pub fn verify_unchanged_at(&self, path: &Path) -> io::Result<()> {
         if path != self.path
-            || file_id(&open_directory(path)?)? != self.id
+            || file_id(&open_directory_identity(path)?)? != self.id
             || file_id(&self.file)? != self.id
         {
             return Err(io::Error::other("folder changed since it was opened"));
@@ -242,6 +279,15 @@ mod imp {
             .open(path)
     }
 
+    pub fn open_directory_identity(path: &Path) -> io::Result<File> {
+        // Access rights 0 ask for no data access, so a folder whose list permission is
+        // denied still opens. `GetFileInformationByHandle` needs no access right.
+        OpenOptions::new()
+            .access_mode(0)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+    }
+
     pub fn is_link(metadata: &Metadata) -> bool {
         metadata.file_type().is_symlink()
             || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
@@ -291,6 +337,31 @@ mod imp {
             .open(path)
     }
 
+    /// Flags of an identity-only open: the call needs search permission on the folder and
+    /// its parents, not read permission on the folder itself.
+    ///
+    /// Linux and Android: `O_PATH` gives a path handle. `fstat` works on it, and the
+    /// kernel checks the type while it opens the path. Apple systems: `O_SEARCH` (which
+    /// includes `O_DIRECTORY`) opens for search only. Other Unix systems have no
+    /// search-only open here, so they keep the read open and need read permission.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    const IDENTITY_FLAGS: libc::c_int =
+        libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    #[cfg(target_vendor = "apple")]
+    const IDENTITY_FLAGS: libc::c_int = libc::O_SEARCH | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+    const IDENTITY_FLAGS: libc::c_int =
+        libc::O_DIRECTORY | libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+
+    pub fn open_directory_identity(path: &Path) -> io::Result<File> {
+        // `read(true)` only satisfies the access mode that `OpenOptions` demands. It is
+        // `O_RDONLY` (zero), which `O_PATH` and `O_SEARCH` replace.
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(IDENTITY_FLAGS)
+            .open(path)
+    }
+
     pub fn is_link(metadata: &Metadata) -> bool {
         metadata.file_type().is_symlink()
     }
@@ -331,6 +402,9 @@ mod imp {
         unsupported()
     }
     pub fn open_directory(_: &Path) -> io::Result<File> {
+        unsupported()
+    }
+    pub fn open_directory_identity(_: &Path) -> io::Result<File> {
         unsupported()
     }
     pub fn open_file(_: &Path) -> io::Result<File> {
@@ -377,14 +451,20 @@ mod tests {
         let path = temp.path().join("project");
         let moved = temp.path().join("moved");
         fs::create_dir(&path).unwrap();
-        let pinned = PinnedDirectory::open(&path).unwrap();
+        let pinned = PinnedDirectory::open_readable(&path).unwrap();
+        let identity_only = PinnedDirectory::open(&path).unwrap();
+        assert_eq!(pinned.id(), identity_only.id());
+        assert!(identity_only.file().is_none());
         pinned.verify_unchanged().unwrap();
-        assert!(same_directory(&path, pinned.file()).unwrap());
+        identity_only.verify_unchanged().unwrap();
+        let held = pinned.file().unwrap();
+        assert!(same_directory(&path, held).unwrap());
         fs::rename(&path, &moved).unwrap();
         fs::create_dir(&path).unwrap();
         assert!(pinned.verify_unchanged().is_err());
-        assert!(!same_directory(&path, pinned.file()).unwrap());
-        assert!(same_directory(&moved, pinned.file()).unwrap());
+        assert!(identity_only.verify_unchanged().is_err());
+        assert!(!same_directory(&path, held).unwrap());
+        assert!(same_directory(&moved, held).unwrap());
     }
 
     #[test]
@@ -521,8 +601,49 @@ mod tests {
             let fifo = path.clone();
             finishes_in_time(&fifo, move || {
                 assert!(pinned.verify_unchanged().is_err());
-                assert!(same_directory(&path, pinned.file()).is_err());
+                assert!(same_directory(&path, pinned.file().unwrap()).is_err());
             });
+        }
+
+        /// Skip when the test user ignores permission bits (root, or a filesystem without
+        /// them): the folder then still lists.
+        fn search_only_folder(parent: &Path) -> Option<PathBuf> {
+            use std::os::unix::fs::PermissionsExt;
+            let folder = parent.join("search-only");
+            fs::create_dir(&folder).unwrap();
+            fs::create_dir(folder.join("project")).unwrap();
+            fs::set_permissions(&folder, fs::Permissions::from_mode(0o111)).unwrap();
+            if fs::read_dir(&folder).is_ok() {
+                eprintln!("SKIP: permission bits do not restrict this user (root?), so a search-only folder cannot be built");
+                fs::set_permissions(&folder, fs::Permissions::from_mode(0o755)).unwrap();
+                return None;
+            }
+            Some(folder)
+        }
+
+        fn restore(folder: &Path) {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(folder, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        #[test]
+        fn a_folder_with_search_permission_only_pins_by_identity() {
+            let temp = tempfile::tempdir().unwrap();
+            let Some(folder) = search_only_folder(temp.path()) else { return };
+            let project = folder.join("project");
+            let outcome = std::panic::catch_unwind(|| {
+                let pinned = PinnedDirectory::open(&folder).unwrap();
+                pinned.verify_unchanged().unwrap();
+                let held = open_directory_identity(&folder).unwrap();
+                assert!(same_handle(&held, &open_directory_identity(&folder).unwrap()).unwrap());
+                assert!(same_directory(&folder, &held).unwrap());
+                PinnedDirectory::open(&project).unwrap().verify_unchanged().unwrap();
+                // A handle that can sync needs the permission to read the folder.
+                assert!(open_directory(&folder).is_err());
+                assert!(PinnedDirectory::open_readable(&folder).is_err());
+            });
+            restore(&folder);
+            outcome.unwrap();
         }
 
         #[test]
