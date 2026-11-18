@@ -16,12 +16,12 @@
 //!
 //! | kind | message | channel |
 //! |---|---|---|
-//! | 1 | `Hello` (with the client's protocol version; v5) | reliable |
+//! | 1 | `Hello` | reliable |
 //! | 2 | `Input`: last K unacked inputs (tick, input, commands) + `ack_tick` | unreliable |
 //! | 3 | `Ping` | unreliable |
 //! | 4 | `Checksum` (tick, xxh3 of the verified frame) | reliable |
-//! | 5 | `SnapshotUpload` (answer to `SnapshotRequest`) | reliable |
-//! | 6 | `SnapshotDecline` | reliable |
+//! | 5 | `SnapshotUpload` (the frame the request named) | reliable |
+//! | 6 | `SnapshotDecline` (the donor does not have that frame) | reliable |
 //! | 7 | `Ready` (clock synced, or late join caught up) | reliable |
 //! | 8 | `Leave` | reliable |
 //!
@@ -36,80 +36,61 @@
 //! | 5 | `Confirmed` (bundles: every slot's input for a tick) | unreliable (live), reliable (backlog) |
 //! | 6 | `TimeSync` (input arrival slack of this client) | unreliable |
 //! | 7 | `Desync` (checksum mismatch notice) | reliable |
-//! | 8 | `SnapshotRequest` (to a donor client) | reliable |
+//! | 8 | `SnapshotRequest` (to a donor client, names the tick) | reliable |
 //! | 9 | `JoinSnapshot` (relayed snapshot, to the joiner) | reliable |
 //! | 10 | `Presence` (a slot got a player or lost it) | reliable |
 //! | 11 | `Bye` (code: see `BYE_*`) | reliable |
-//! | 12 | `Correction` (authoritative mode: server snapshot for a diverged client; v3) | reliable |
-//! | 13 | `SeatChange` (a returning player or an expired seat; v3) | reliable |
+//! | 12 | `Correction` (authoritative mode: server snapshot for a diverged client) | reliable |
+//! | 13 | `SeatChange` (a returning player or an expired seat) | reliable |
 //!
-//! # Versions
+//! # Version
 //!
-//! A message carries the lowest protocol version that can express it, so the
-//! server messages of a relay room without signals are byte-identical to
-//! version 2 and old clients can read them. The client `Input` and the
-//! `Hello` of a version 5 client are the exception (see version 5 below).
-//! Version 3 adds the authoritative mode: `Welcome`
-//! with a trailing `flags` byte (only written when a flag is set) and
-//! `Correction`. It also adds `SeatChange` for the player signals: a slot's
-//! player came back (`SEAT_RECONNECTED`) or its reserved seat ran out
-//! (`SEAT_REMOVED`). `Presence` is unchanged: `present = true` for a slot
-//! that had no player is a new player (`Added`), `present = false` is a
-//! player that left while its seat is still reserved (`Disconnected`). A
-//! decoder accepts `MIN_PROTOCOL_VERSION..=PROTOCOL_VERSION`;
-//! a version-2 client cannot join an authoritative room (it fails to decode
-//! the version-3 `Welcome`).
+//! There is one protocol version, [`PROTOCOL_VERSION`], and every message is
+//! encoded with it. A decoder accepts no other version and answers
+//! [`ProtoError::UnsupportedVersion`]. The version in the header of the first
+//! message, the `Hello`, is the version the client states. A server that
+//! cannot read it refuses the client with `RejectReason::BadVersion`, which
+//! names both versions. Any change of the wire format bumps the version.
 //!
-//! Version 4 adds the signal fence. The server numbers its player signals
-//! (`Presence` of a relay room and `SeatChange`) 1, 2, 3, ... in the order it
-//! announces them, and every signal message carries its `seq`. A `Bundle`
-//! carries `signals`: how many signals have a tick at or before the bundle's
-//! tick. A client must have all of them before it may verify that tick, so a
-//! signal that is late on the reliable channel holds the bundles back instead
-//! of arriving for a tick that is already verified. `Confirmed` writes the
-//! counts after the bundles (see below), `JoinSnapshot` carries the count at
-//! the snapshot tick. A message whose counts are all zero (an authoritative
-//! room, or a room that never had a signal) is still written as version 2 or 3.
+//! Every field is always present. Player signals (`Presence` of a relay room
+//! and `SeatChange`) are numbered 1, 2, 3, ... by the server in the order it
+//! announces them, and carry their `seq` (`0` in an authoritative room, which
+//! has no signal fence). `Welcome` ends with `flags`. `Correction` and
+//! `SeatChange` serve the authoritative mode. A `Bundle` carries `signals`:
+//! how many signals have a tick at or before the bundle's tick. A client must
+//! have all of them before it may verify that tick, so a signal that is late
+//! on the reliable channel holds the bundles back instead of arriving for a
+//! tick that is already verified. `Confirmed` writes the counts after the
+//! bundles (see below), `JoinSnapshot` carries the count at the snapshot tick.
 //!
-//! Version 5 adds the client's side of the compact encoding. `Hello` ends with
-//! `client_version`, the newest protocol version the client speaks (a `Hello`
-//! without it, `client_version == 0`, is written as version 2: a client older
-//! than version 5, which can be version 2, 3 or 4). The server refuses a
-//! client below `RoomConfig::min_client_version` with `RejectReason::BadVersion`,
-//! which names the oldest version it accepts. A version 5 `Input` writes, per
-//! entry, a flags byte, then the tick (a full `u64` for the first entry, later
-//! a one-byte delta to the previous entry, 255 escapes to a full `u64`), then
-//! the input bytes, then the commands only if the flags say so. An entry whose
-//! input equals the input of the entry before it in the same message has the
-//! `INPUT_SAME` flag and leaves the input bytes out. The first entry is never
-//! "same". The rule looks at the same message only, never at an earlier
-//! packet or at what the server acked. Every `Input` packet is then decodable
-//! alone, so a lost or reordered packet cannot make the server read a wrong
-//! input. A client sends a version 5 `Input` always. A server decodes the
-//! version 2 form of old clients as before.
+//! The server chooses the snapshot of a late joiner: `SnapshotRequest` names
+//! the tick, a multiple of the checksum interval, and the donor answers with
+//! the frame of exactly that tick (or declines).
+//!
+//! A client `Input` writes, per entry, a flags byte, then the tick (a full
+//! `u64` for the first entry, later a one-byte delta to the previous entry,
+//! 255 escapes to a full `u64`), then the input bytes, then the commands only
+//! if the flags say so. An entry whose input equals the input of the entry
+//! before it in the same message has the `INPUT_SAME` flag and leaves the
+//! input bytes out. The first entry is never "same". The rule looks at the
+//! same message only, never at an earlier packet or at what the server acked.
+//! Every `Input` packet is then decodable alone, so a lost or reordered packet
+//! cannot make the server read a wrong input.
 //!
 //! `Confirmed` is compact, because the server repeats unacked bundles in
 //! every packet: the first bundle has a `u64` tick, later ones a one-byte
 //! delta (255 escapes to a full `u64`); a slot's flags byte tells whether
 //! its input equals the same slot's input in the previous bundle of the
 //! message (then the input bytes are left out) and whether commands follow.
-//! In version 4 a `Confirmed` with a nonzero signal count ends with: the
-//! count of the first bundle, the number of later bundles whose count differs
-//! from the bundle before, and for each such bundle its index and count (all
-//! varints). Counts that stay the same cost two bytes per message.
+//! A `Confirmed` ends with: the signal count of the first bundle, the number of
+//! later bundles whose count differs from the bundle before, and for each such
+//! bundle its index and count (all varints). Counts that stay the same cost
+//! two bytes per message.
 use crate::codec::{Reader, Writer};
 
-/// Newest protocol version (adds the compact client `Input` and the version
-/// in `Hello`, see the module docs).
-pub const PROTOCOL_VERSION: u32 = 5;
-/// Oldest version a decoder still accepts (the relay-only protocol).
-pub const MIN_PROTOCOL_VERSION: u32 = 2;
-/// First version that has `Welcome::flags` and `ServerMsg::Correction`.
-const V_AUTHORITATIVE: u32 = 3;
-/// First version with signal sequence numbers and counts (the signal fence).
-const V_SIGNAL_FENCE: u32 = 4;
-/// First version with the compact client `Input` and `Hello::client_version`.
-const V_CLIENT_COMPACT: u32 = 5;
+/// The one protocol version. Every message is encoded with it and a decoder
+/// accepts no other (see the module docs).
+pub const PROTOCOL_VERSION: u32 = 6;
 const MAGIC: &[u8; 4] = b"ORRN";
 
 /// `Hello::want_slot` value meaning "any free slot".
@@ -183,7 +164,7 @@ impl core::fmt::Display for ProtoError {
         match self {
             ProtoError::Truncated => write!(f, "message truncated"),
             ProtoError::BadMagic => write!(f, "not an ORRN message"),
-            ProtoError::UnsupportedVersion(v) => write!(f, "unsupported protocol version {v}"),
+            ProtoError::UnsupportedVersion(v) => write!(f, "unsupported protocol version {v} (this build speaks {PROTOCOL_VERSION})"),
             ProtoError::BadChecksum => write!(f, "message checksum mismatch"),
             ProtoError::UnknownKind(k) => write!(f, "unknown message kind {k}"),
             ProtoError::TooLarge => write!(f, "message field too large"),
@@ -255,18 +236,18 @@ fn varint_len(v: u32) -> usize {
     (32 - (v | 1).leading_zeros() as usize).div_ceil(7)
 }
 
-/// Magic, version, kind, input size, slot count, bundle count, checksum.
+/// Magic, version, kind, input size, slot count, bundle count, checksum (the
+/// signal count trailer comes on top, see `confirmed_encoded_len`).
 const CONFIRMED_FIXED_LEN: usize = 4 + 4 + 1 + 4 + 1 + 4 + 8;
 /// Magic, version, kind, slot, input size, ack tick, checksum (and the entry count varint).
 const INPUT_FIXED_LEN: usize = 4 + 4 + 1 + 1 + 4 + 8 + 8;
 
 /// Exact byte length of `ServerMsg::Confirmed { input_size, bundles }` once
 /// encoded: header, bundles (each against its predecessor), the signal count
-/// trailer of a fenced message, and the checksum.
+/// trailer, and the checksum.
 pub fn confirmed_encoded_len<'a>(bundles: impl IntoIterator<Item = &'a Bundle>, input_size: u32) -> usize {
     let mut n = CONFIRMED_FIXED_LEN;
     let mut prev: Option<&Bundle> = None;
-    let mut fenced = false;
     let mut first_signals = 0;
     let (mut changes, mut change_bytes) = (0u32, 0usize);
     for (i, b) in bundles.into_iter().enumerate() {
@@ -283,13 +264,9 @@ pub fn confirmed_encoded_len<'a>(bundles: impl IntoIterator<Item = &'a Bundle>, 
                 b.encoded_len_after(p, input_size)
             }
         };
-        fenced |= b.signals != 0;
         prev = Some(b);
     }
-    if fenced {
-        n += varint_len(first_signals) + varint_len(changes) + change_bytes;
-    }
-    n
+    n + varint_len(first_signals) + varint_len(changes) + change_bytes
 }
 
 /// Exact byte length of `ClientMsg::Input` with these entries once encoded.
@@ -322,9 +299,6 @@ pub struct Hello {
     pub want_slot: u8,
     /// Token from an earlier `Welcome` to reclaim the same slot, or `0`.
     pub token: u64,
-    /// The newest protocol version the client speaks (`PROTOCOL_VERSION` of
-    /// its build), or `0` when it does not say (a client older than version 5).
-    pub client_version: u32,
 }
 
 /// Server answer to an accepted `Hello`.
@@ -348,7 +322,7 @@ pub struct Welcome {
     pub finalized_tick: u64,
     /// Opaque game/room configuration for the client's `Game::Config`.
     pub config: Vec<u8>,
-    /// `WELCOME_*` bits. Nonzero needs protocol version 3 on the wire.
+    /// `WELCOME_*` bits.
     pub flags: u8,
 }
 
@@ -364,9 +338,9 @@ impl Welcome {
 pub enum RejectReason {
     BuildHashMismatch { server: u64, client: u64 },
     InputSizeMismatch { server: u32, client: u32 },
-    /// `server`: the newest protocol version the server speaks. `min_client`:
-    /// the oldest client version it accepts (`0`: not said).
-    BadVersion { server: u32, min_client: u32 },
+    /// The protocol version of the `Hello` is not the server's. `server` is
+    /// the version the server speaks, `client` the one the `Hello` stated.
+    BadVersion { server: u32, client: u32 },
     NoSuchRoom,
     RoomFull,
     SlotTaken,
@@ -381,7 +355,7 @@ impl RejectReason {
         let (code, a, b) = match *self {
             RejectReason::BuildHashMismatch { server, client } => (1, server, client),
             RejectReason::InputSizeMismatch { server, client } => (2, u64::from(server), u64::from(client)),
-            RejectReason::BadVersion { server, min_client } => (3, u64::from(server), u64::from(min_client)),
+            RejectReason::BadVersion { server, client } => (3, u64::from(server), u64::from(client)),
             RejectReason::NoSuchRoom => (4, 0, 0),
             RejectReason::RoomFull => (5, 0, 0),
             RejectReason::SlotTaken => (6, 0, 0),
@@ -400,7 +374,7 @@ impl RejectReason {
         Ok(match code {
             1 => RejectReason::BuildHashMismatch { server: a, client: b },
             2 => RejectReason::InputSizeMismatch { server: a as u32, client: b as u32 },
-            3 => RejectReason::BadVersion { server: a as u32, min_client: b as u32 },
+            3 => RejectReason::BadVersion { server: a as u32, client: b as u32 },
             4 => RejectReason::NoSuchRoom,
             5 => RejectReason::RoomFull,
             6 => RejectReason::SlotTaken,
@@ -438,8 +412,9 @@ pub enum ClientMsg {
     Input { slot: u8, input_size: u32, ack_tick: u64, entries: Vec<InputEntry> },
     Ping { seq: u32, client_time_us: u64, rtt_hint_us: u32 },
     Checksum { tick: u64, checksum: u64 },
-    /// `data` is opaque to the server (the client's compressed frame).
-    SnapshotUpload { request_id: u32, tick: u64, checksum: u64, data: Vec<u8> },
+    /// The frame of the tick the `SnapshotRequest` named. `data` is opaque to
+    /// the server (the client's compressed frame), `checksum` its checksum.
+    SnapshotUpload { request_id: u32, checksum: u64, data: Vec<u8> },
     SnapshotDecline { request_id: u32 },
     Ready,
     Leave,
@@ -456,7 +431,9 @@ pub enum ServerMsg {
     Confirmed { input_size: u32, bundles: Vec<Bundle> },
     TimeSync(TimeSync),
     Desync { tick: u64, reports: Vec<(u8, u64)> },
-    SnapshotRequest { request_id: u32 },
+    /// Asks a donor for its verified frame at `tick`, a multiple of the
+    /// checksum interval.
+    SnapshotRequest { request_id: u32, tick: u64 },
     /// `signals`: the signal count at `tick` (see [`Bundle::signals`]).
     JoinSnapshot { tick: u64, checksum: u64, data: Vec<u8>, signals: u32 },
     /// `seq`: the number of this signal (see the module docs), `0` for a
@@ -480,7 +457,7 @@ fn seal(mut w: Writer) -> Vec<u8> {
     w.out
 }
 
-fn open(bytes: &[u8]) -> Result<(u8, u32, Reader<'_>), ProtoError> {
+fn open(bytes: &[u8]) -> Result<(u8, Reader<'_>), ProtoError> {
     let Some(split) = bytes.len().checked_sub(8) else { return Err(ProtoError::Truncated) };
     let (body, tail) = bytes.split_at(split);
     let mut r = Reader::new(body);
@@ -488,25 +465,20 @@ fn open(bytes: &[u8]) -> Result<(u8, u32, Reader<'_>), ProtoError> {
         return Err(ProtoError::BadMagic);
     }
     let version = r.u32()?;
-    if !(MIN_PROTOCOL_VERSION..=PROTOCOL_VERSION).contains(&version) {
+    if version != PROTOCOL_VERSION {
         return Err(ProtoError::UnsupportedVersion(version));
     }
     if u64::from_le_bytes(tail.try_into().unwrap()) != xxhash_rust::xxh3::xxh3_64(body) {
         return Err(ProtoError::BadChecksum);
     }
     let kind = r.u8()?;
-    Ok((kind, version, r))
+    Ok((kind, r))
 }
 
-/// Starts a version-2 message (everything the relay protocol had).
 fn start(kind: u8) -> Writer {
-    start_v(kind, MIN_PROTOCOL_VERSION)
-}
-
-fn start_v(kind: u8, version: u32) -> Writer {
     let mut w = Writer::new();
     w.raw(MAGIC);
-    w.u32(version);
+    w.u32(PROTOCOL_VERSION);
     w.u8(kind);
     w
 }
@@ -543,19 +515,16 @@ impl ClientMsg {
     pub fn encode(&self) -> Vec<u8> {
         match self {
             ClientMsg::Hello(h) => {
-                let mut w = start_v(1, if h.client_version != 0 { V_CLIENT_COMPACT } else { MIN_PROTOCOL_VERSION });
+                let mut w = start(1);
                 w.u64(h.build_hash);
                 w.u64(h.room);
                 w.u32(h.input_size);
                 w.u8(h.want_slot);
                 w.u64(h.token);
-                if h.client_version != 0 {
-                    w.u32(h.client_version);
-                }
                 seal(w)
             }
             ClientMsg::Input { slot, input_size, ack_tick, entries } => {
-                let mut w = start_v(2, V_CLIENT_COMPACT);
+                let mut w = start(2);
                 w.u8(*slot);
                 w.u32(*input_size);
                 w.u64(*ack_tick);
@@ -603,10 +572,9 @@ impl ClientMsg {
                 w.u64(*checksum);
                 seal(w)
             }
-            ClientMsg::SnapshotUpload { request_id, tick, checksum, data } => {
+            ClientMsg::SnapshotUpload { request_id, checksum, data } => {
                 let mut w = start(5);
                 w.u32(*request_id);
-                w.u64(*tick);
                 w.u64(*checksum);
                 w.bytes(data);
                 seal(w)
@@ -622,7 +590,7 @@ impl ClientMsg {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, ProtoError> {
-        let (kind, version, mut r) = open(bytes)?;
+        let (kind, mut r) = open(bytes)?;
         let msg = match kind {
             1 => ClientMsg::Hello(Hello {
                 build_hash: r.u64()?,
@@ -630,9 +598,8 @@ impl ClientMsg {
                 input_size: r.u32()?,
                 want_slot: r.u8()?,
                 token: r.u64()?,
-                client_version: if version >= V_CLIENT_COMPACT { r.u32()? } else { 0 },
             }),
-            2 if version >= V_CLIENT_COMPACT => {
+            2 => {
                 let slot = r.u8()?;
                 let input_size = r.u32()?;
                 check_input_size(input_size)?;
@@ -666,27 +633,10 @@ impl ClientMsg {
                 }
                 ClientMsg::Input { slot, input_size, ack_tick, entries }
             }
-            2 => {
-                // Version 2 to 4 clients: a full entry each.
-                let slot = r.u8()?;
-                let input_size = r.u32()?;
-                check_input_size(input_size)?;
-                let ack_tick = r.u64()?;
-                let n = r.count(12 + u64::from(input_size), MAX_ENTRIES)?;
-                let mut entries = Vec::with_capacity(n as usize);
-                for _ in 0..n {
-                    let tick = r.u64()?;
-                    let input = read_input(&mut r, input_size)?;
-                    let commands = read_commands(&mut r)?;
-                    entries.push(InputEntry { tick, input, commands });
-                }
-                ClientMsg::Input { slot, input_size, ack_tick, entries }
-            }
             3 => ClientMsg::Ping { seq: r.u32()?, client_time_us: r.u64()?, rtt_hint_us: r.u32()? },
             4 => ClientMsg::Checksum { tick: r.u64()?, checksum: r.u64()? },
             5 => ClientMsg::SnapshotUpload {
                 request_id: r.u32()?,
-                tick: r.u64()?,
                 checksum: r.u64()?,
                 data: r.bytes(MAX_SNAPSHOT_LEN)?,
             },
@@ -704,7 +654,7 @@ impl ServerMsg {
     pub fn encode(&self) -> Vec<u8> {
         match self {
             ServerMsg::Welcome(m) => {
-                let mut w = start_v(1, if m.flags != 0 { V_AUTHORITATIVE } else { MIN_PROTOCOL_VERSION });
+                let mut w = start(1);
                 w.u64(m.room);
                 w.u8(m.slot);
                 w.u8(m.player_count);
@@ -719,9 +669,7 @@ impl ServerMsg {
                 w.u64(m.server_time_us);
                 w.u64(m.finalized_tick);
                 w.bytes(&m.config);
-                if m.flags != 0 {
-                    w.u8(m.flags);
-                }
+                w.u8(m.flags);
                 seal(w)
             }
             ServerMsg::Reject(reason) => {
@@ -745,8 +693,7 @@ impl ServerMsg {
                 seal(w)
             }
             ServerMsg::Confirmed { input_size, bundles } => {
-                let fenced = bundles.iter().any(|b| b.signals != 0);
-                let mut w = start_v(5, if fenced { V_SIGNAL_FENCE } else { MIN_PROTOCOL_VERSION });
+                let mut w = start(5);
                 w.u32(*input_size);
                 let slots = bundles.first().map_or(0, |b| b.slots.len());
                 w.u8(slots as u8);
@@ -784,19 +731,17 @@ impl ServerMsg {
                     }
                     prev = Some(b);
                 }
-                if fenced {
-                    w.varint(bundles[0].signals);
-                    let changes: Vec<(usize, u32)> = bundles
-                        .windows(2)
-                        .enumerate()
-                        .filter(|(_, pair)| pair[0].signals != pair[1].signals)
-                        .map(|(i, pair)| (i + 1, pair[1].signals))
-                        .collect();
-                    w.varint(changes.len() as u32);
-                    for (index, signals) in changes {
-                        w.varint(index as u32);
-                        w.varint(signals);
-                    }
+                w.varint(bundles.first().map_or(0, |b| b.signals));
+                let changes: Vec<(usize, u32)> = bundles
+                    .windows(2)
+                    .enumerate()
+                    .filter(|(_, pair)| pair[0].signals != pair[1].signals)
+                    .map(|(i, pair)| (i + 1, pair[1].signals))
+                    .collect();
+                w.varint(changes.len() as u32);
+                for (index, signals) in changes {
+                    w.varint(index as u32);
+                    w.varint(signals);
                 }
                 seal(w)
             }
@@ -820,29 +765,26 @@ impl ServerMsg {
                 }
                 seal(w)
             }
-            ServerMsg::SnapshotRequest { request_id } => {
+            ServerMsg::SnapshotRequest { request_id, tick } => {
                 let mut w = start(8);
                 w.u32(*request_id);
+                w.u64(*tick);
                 seal(w)
             }
             ServerMsg::JoinSnapshot { tick, checksum, data, signals } => {
-                let mut w = start_v(9, if *signals != 0 { V_SIGNAL_FENCE } else { MIN_PROTOCOL_VERSION });
+                let mut w = start(9);
                 w.u64(*tick);
                 w.u64(*checksum);
                 w.bytes(data);
-                if *signals != 0 {
-                    w.varint(*signals);
-                }
+                w.varint(*signals);
                 seal(w)
             }
             ServerMsg::Presence { slot, present, from_tick, seq } => {
-                let mut w = start_v(10, if *seq != 0 { V_SIGNAL_FENCE } else { MIN_PROTOCOL_VERSION });
+                let mut w = start(10);
                 w.u8(*slot);
                 w.u8(u8::from(*present));
                 w.u64(*from_tick);
-                if *seq != 0 {
-                    w.varint(*seq);
-                }
+                w.varint(*seq);
                 seal(w)
             }
             ServerMsg::Bye { code } => {
@@ -851,7 +793,7 @@ impl ServerMsg {
                 seal(w)
             }
             ServerMsg::Correction { from_tick, tick, checksum, data } => {
-                let mut w = start_v(12, V_AUTHORITATIVE);
+                let mut w = start(12);
                 w.u64(*from_tick);
                 w.u64(*tick);
                 w.u64(*checksum);
@@ -859,20 +801,18 @@ impl ServerMsg {
                 seal(w)
             }
             ServerMsg::SeatChange { slot, change, from_tick, seq } => {
-                let mut w = start_v(13, if *seq != 0 { V_SIGNAL_FENCE } else { V_AUTHORITATIVE });
+                let mut w = start(13);
                 w.u8(*slot);
                 w.u8(*change);
                 w.u64(*from_tick);
-                if *seq != 0 {
-                    w.varint(*seq);
-                }
+                w.varint(*seq);
                 seal(w)
             }
         }
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, ProtoError> {
-        let (kind, version, mut r) = open(bytes)?;
+        let (kind, mut r) = open(bytes)?;
         let msg = match kind {
             1 => ServerMsg::Welcome(Welcome {
                 room: r.u64()?,
@@ -889,7 +829,7 @@ impl ServerMsg {
                 server_time_us: r.u64()?,
                 finalized_tick: r.u64()?,
                 config: r.bytes(MAX_CONFIG_LEN)?,
-                flags: if version >= V_AUTHORITATIVE { r.u8()? } else { 0 },
+                flags: r.u8()?,
             }),
             2 => ServerMsg::Reject(RejectReason::read(&mut r)?),
             3 => ServerMsg::Start { t0_us: r.u64()?, server_time_us: r.u64()? },
@@ -940,10 +880,10 @@ impl ServerMsg {
                     }
                     bundles.push(Bundle { tick, signals: 0, slots: list });
                 }
-                if version >= V_SIGNAL_FENCE && !bundles.is_empty() {
+                {
                     let mut signals = r.varint()?;
                     let changes = r.varint()?;
-                    if u64::from(changes) >= bundles.len() as u64 {
+                    if (changes != 0 && u64::from(changes) >= bundles.len() as u64) || (bundles.is_empty() && signals != 0) {
                         return Err(ProtoError::Corrupt("signal count changes"));
                     }
                     let mut at = 0usize;
@@ -988,32 +928,32 @@ impl ServerMsg {
                 }
                 ServerMsg::Desync { tick, reports }
             }
-            8 => ServerMsg::SnapshotRequest { request_id: r.u32()? },
+            8 => ServerMsg::SnapshotRequest { request_id: r.u32()?, tick: r.u64()? },
             9 => ServerMsg::JoinSnapshot {
                 tick: r.u64()?,
                 checksum: r.u64()?,
                 data: r.bytes(MAX_SNAPSHOT_LEN)?,
-                signals: if version >= V_SIGNAL_FENCE { r.varint()? } else { 0 },
+                signals: r.varint()?,
             },
             10 => ServerMsg::Presence {
                 slot: r.u8()?,
                 present: r.u8()? != 0,
                 from_tick: r.u64()?,
-                seq: if version >= V_SIGNAL_FENCE { r.varint()? } else { 0 },
+                seq: r.varint()?,
             },
             11 => ServerMsg::Bye { code: r.u8()? },
-            12 if version >= V_AUTHORITATIVE => ServerMsg::Correction {
+            12 => ServerMsg::Correction {
                 from_tick: r.u64()?,
                 tick: r.u64()?,
                 checksum: r.u64()?,
                 data: r.bytes(MAX_SNAPSHOT_LEN)?,
             },
-            13 if version >= V_AUTHORITATIVE => {
+            13 => {
                 let (slot, change, from_tick) = (r.u8()?, r.u8()?, r.u64()?);
                 if change != SEAT_RECONNECTED && change != SEAT_REMOVED {
                     return Err(ProtoError::Corrupt("unknown seat change"));
                 }
-                let seq = if version >= V_SIGNAL_FENCE { r.varint()? } else { 0 };
+                let seq = r.varint()?;
                 ServerMsg::SeatChange { slot, change, from_tick, seq }
             }
             k => return Err(ProtoError::UnknownKind(k)),
@@ -1060,15 +1000,7 @@ mod tests {
 
     fn all_client() -> Vec<ClientMsg> {
         vec![
-            ClientMsg::Hello(Hello { build_hash: 7, room: 3, input_size: 4, want_slot: NO_SLOT, token: 0, client_version: 0 }),
-            ClientMsg::Hello(Hello {
-                build_hash: 7,
-                room: 3,
-                input_size: 4,
-                want_slot: NO_SLOT,
-                token: 0,
-                client_version: PROTOCOL_VERSION,
-            }),
+            ClientMsg::Hello(Hello { build_hash: 7, room: 3, input_size: 4, want_slot: NO_SLOT, token: 0 }),
             ClientMsg::Input {
                 slot: 1,
                 input_size: 4,
@@ -1079,7 +1011,7 @@ mod tests {
             ClientMsg::Input { slot: 1, input_size: 4, ack_tick: 9, entries: mixed_entries() },
             ClientMsg::Ping { seq: 1, client_time_us: 99, rtt_hint_us: 5 },
             ClientMsg::Checksum { tick: 30, checksum: 0xDEAD },
-            ClientMsg::SnapshotUpload { request_id: 4, tick: 60, checksum: 1, data: vec![7; 100] },
+            ClientMsg::SnapshotUpload { request_id: 4, checksum: 1, data: vec![7; 100] },
             ClientMsg::SnapshotDecline { request_id: 4 },
             ClientMsg::Ready,
             ClientMsg::Leave,
@@ -1123,7 +1055,7 @@ mod tests {
                 flags: WELCOME_AUTHORITATIVE,
             }),
             ServerMsg::Reject(RejectReason::BuildHashMismatch { server: 1, client: 2 }),
-            ServerMsg::Reject(RejectReason::BadVersion { server: 5, min_client: 4 }),
+            ServerMsg::Reject(RejectReason::BadVersion { server: 6, client: 5 }),
             ServerMsg::Start { t0_us: 5, server_time_us: 6 },
             ServerMsg::Pong { seq: 1, client_time_us: 2, server_time_us: 3, t0_us: u64::MAX, finalized_tick: 0 },
             ServerMsg::Confirmed { input_size: 4, bundles: vec![sample_bundle(5), sample_bundle(6)] },
@@ -1136,7 +1068,7 @@ mod tests {
                 late: 1,
             }),
             ServerMsg::Desync { tick: 30, reports: vec![(0, 1), (1, 2)] },
-            ServerMsg::SnapshotRequest { request_id: 3 },
+            ServerMsg::SnapshotRequest { request_id: 3, tick: 60 },
             ServerMsg::JoinSnapshot { tick: 90, checksum: 8, data: vec![1; 50], signals: 0 },
             ServerMsg::JoinSnapshot { tick: 90, checksum: 8, data: vec![1; 50], signals: 300 },
             ServerMsg::Presence { slot: 1, present: false, from_tick: 44, seq: 0 },
@@ -1146,6 +1078,7 @@ mod tests {
             ServerMsg::SeatChange { slot: 2, change: SEAT_RECONNECTED, from_tick: 77, seq: 0 },
             ServerMsg::SeatChange { slot: 0, change: SEAT_REMOVED, from_tick: 900, seq: 129 },
             ServerMsg::Confirmed { input_size: 4, bundles: vec![fenced_bundle(5, 2), fenced_bundle(6, 2), fenced_bundle(9, 7)] },
+            ServerMsg::Confirmed { input_size: 4, bundles: vec![] },
         ]
     }
 
@@ -1153,60 +1086,47 @@ mod tests {
         u32::from_le_bytes(bytes[4..8].try_into().unwrap())
     }
 
+    /// Writes `version` into the header and seals the message again.
+    fn with_version(mut bytes: Vec<u8>, version: u32) -> Vec<u8> {
+        bytes[4..8].copy_from_slice(&version.to_le_bytes());
+        let n = bytes.len() - 8;
+        let sum = xxhash_rust::xxh3::xxh3_64(&bytes[..n]);
+        bytes[n..].copy_from_slice(&sum.to_le_bytes());
+        bytes
+    }
+
     #[test]
-    fn messages_without_signals_stay_version_2_and_authoritative_ones_are_version_3() {
+    fn every_message_carries_the_current_version() {
         for m in all_client() {
-            // An input and a Hello that states its version are version 5.
-            let v5 = matches!(&m, ClientMsg::Input { .. }) || matches!(&m, ClientMsg::Hello(h) if h.client_version != 0);
-            assert_eq!(version_of(&m.encode()), if v5 { 5 } else { 2 }, "{m:?}");
+            assert_eq!(version_of(&m.encode()), PROTOCOL_VERSION, "{m:?}");
         }
         for m in all_server() {
-            let v = version_of(&m.encode());
-            let v4 = match &m {
-                ServerMsg::JoinSnapshot { signals, .. } => *signals != 0,
-                ServerMsg::Presence { seq, .. } | ServerMsg::SeatChange { seq, .. } => *seq != 0,
-                ServerMsg::Confirmed { bundles, .. } => bundles.iter().any(|b| b.signals != 0),
-                _ => false,
-            };
-            let v3 = matches!(&m, ServerMsg::Correction { .. } | ServerMsg::SeatChange { .. }) || matches!(&m, ServerMsg::Welcome(w) if w.flags != 0);
-            assert_eq!(v, if v4 { 4 } else if v3 { 3 } else { 2 }, "{m:?}");
+            assert_eq!(version_of(&m.encode()), PROTOCOL_VERSION, "{m:?}");
         }
     }
 
     #[test]
-    fn a_future_version_and_a_correction_in_a_version_2_message_are_refused() {
-        let mut bytes = ServerMsg::Bye { code: 1 }.encode();
-        bytes[4..8].copy_from_slice(&(PROTOCOL_VERSION + 1).to_le_bytes());
-        // The header checksum no longer matches, so re-seal.
-        let n = bytes.len() - 8;
-        let sum = xxhash_rust::xxh3::xxh3_64(&bytes[..n]);
-        bytes[n..].copy_from_slice(&sum.to_le_bytes());
-        assert_eq!(ServerMsg::decode(&bytes), Err(ProtoError::UnsupportedVersion(PROTOCOL_VERSION + 1)));
-
-        let mut bytes = ServerMsg::Correction { from_tick: 1, tick: 2, checksum: 3, data: vec![] }.encode();
-        bytes[4..8].copy_from_slice(&2u32.to_le_bytes());
-        let n = bytes.len() - 8;
-        let sum = xxhash_rust::xxh3::xxh3_64(&bytes[..n]);
-        bytes[n..].copy_from_slice(&sum.to_le_bytes());
-        assert_eq!(ServerMsg::decode(&bytes), Err(ProtoError::UnknownKind(12)));
+    fn a_message_of_another_version_is_refused() {
+        for other in [0, 2, 5, PROTOCOL_VERSION + 1, u32::MAX] {
+            for m in all_client() {
+                let bytes = with_version(m.encode(), other);
+                assert_eq!(ClientMsg::decode(&bytes), Err(ProtoError::UnsupportedVersion(other)), "{m:?}");
+            }
+            for m in all_server() {
+                let bytes = with_version(m.encode(), other);
+                assert_eq!(ServerMsg::decode(&bytes), Err(ProtoError::UnsupportedVersion(other)), "{m:?}");
+            }
+        }
     }
 
     #[test]
-    fn a_seat_change_needs_version_3_and_a_known_change() {
+    fn a_seat_change_needs_a_known_change() {
         let m = ServerMsg::SeatChange { slot: 1, change: SEAT_REMOVED, from_tick: 5, seq: 0 };
-        let reseal = |bytes: &mut Vec<u8>| {
-            let n = bytes.len() - 8;
-            let sum = xxhash_rust::xxh3::xxh3_64(&bytes[..n]);
-            bytes[n..].copy_from_slice(&sum.to_le_bytes());
-        };
-        let mut bytes = m.encode();
-        bytes[4..8].copy_from_slice(&2u32.to_le_bytes());
-        reseal(&mut bytes);
-        assert_eq!(ServerMsg::decode(&bytes), Err(ProtoError::UnknownKind(13)));
-
         let mut bytes = m.encode();
         bytes[9 + 1] = 9; // kind at 8, slot at 9, change at 10
-        reseal(&mut bytes);
+        let n = bytes.len() - 8;
+        let sum = xxhash_rust::xxh3::xxh3_64(&bytes[..n]);
+        bytes[n..].copy_from_slice(&sum.to_le_bytes());
         assert_eq!(ServerMsg::decode(&bytes), Err(ProtoError::Corrupt("unknown seat change")));
     }
 
@@ -1228,15 +1148,16 @@ mod tests {
         let full: usize = bundles.iter().map(|x| x.encoded_len(4)).sum();
         let est = bundles[0].encoded_len(4) + bundles.windows(2).map(|w| w[1].encoded_len_after(&w[0], 4)).sum::<usize>();
         assert!(est < full);
-        // header: magic 4 + version 4 + kind 1 + input_size 4 + slots 1 + count 4 + checksum 8
-        assert_eq!(bytes.len(), est + 26);
+        // header: magic 4 + version 4 + kind 1 + input_size 4 + slots 1 + count 4 + checksum 8,
+        // signal trailer: two varints
+        assert_eq!(bytes.len(), est + 26 + 2);
     }
 
     #[test]
-    fn signal_counts_cost_two_bytes_while_they_stay_the_same_and_round_trip() {
+    fn signal_counts_cost_nothing_extra_while_they_stay_the_same_and_round_trip() {
         let plain = ServerMsg::Confirmed { input_size: 4, bundles: vec![sample_bundle(5), sample_bundle(6), sample_bundle(7)] };
         let same = ServerMsg::Confirmed { input_size: 4, bundles: (5..8).map(|t| fenced_bundle(t, 3)).collect() };
-        assert_eq!(same.encode().len(), plain.encode().len() + 2);
+        assert_eq!(same.encode().len(), plain.encode().len());
         // Counts that rise inside the message: one more index and count for every change.
         let rising = ServerMsg::Confirmed {
             input_size: 4,
@@ -1247,7 +1168,7 @@ mod tests {
         // A count of zero in the first bundle and a rise later.
         let late = ServerMsg::Confirmed { input_size: 4, bundles: vec![sample_bundle(5), fenced_bundle(6, 1)] };
         assert_eq!(ServerMsg::decode(&late.encode()).unwrap(), late);
-        // A single bundle and a message of version 4 without bundles.
+        // A single bundle and a message without bundles.
         let one = ServerMsg::Confirmed { input_size: 4, bundles: vec![fenced_bundle(5, 1)] };
         assert_eq!(ServerMsg::decode(&one.encode()).unwrap(), one);
     }
@@ -1357,7 +1278,7 @@ mod tests {
     #[test]
     fn bad_signal_count_trailers_are_errors() {
         let encode = |trailer: &[u32]| {
-            let mut w = start_v(5, V_SIGNAL_FENCE);
+            let mut w = start(5);
             w.u32(4);
             w.u8(1);
             w.u32(2);
@@ -1378,6 +1299,8 @@ mod tests {
         assert!(ServerMsg::decode(&encode(&[2, 1, 2, 5])).is_err());
         // The trailer is missing.
         assert!(ServerMsg::decode(&encode(&[])).is_err());
+        // No signals at all is the plain trailer.
+        assert!(ServerMsg::decode(&encode(&[0, 0])).is_ok());
     }
 
     #[test]
@@ -1458,9 +1381,6 @@ mod tests {
         let differing: Vec<_> = (100..104).map(|t| entry(t, t as u8)).collect();
         let four_different = input_msg(differing.clone()).encode();
         assert_eq!(four_different.len(), one + 3 * (2 + 24));
-        // The old form: 12 bytes and the input for every entry, a 4-byte count.
-        let old_form = 4 * (12 + 24) + 34;
-        assert!(four_same.len() * 2 < old_form, "{} bytes against {old_form}", four_same.len());
         for entries in [(100..104).map(|t| entry(t, 7)).collect::<Vec<_>>(), differing, mixed_entries_24()] {
             let msg = input_msg(entries);
             assert_eq!(ClientMsg::decode(&msg.encode()), Ok(msg));
@@ -1485,33 +1405,9 @@ mod tests {
     }
 
     #[test]
-    fn a_version_2_input_still_decodes() {
-        let mut w = start(2);
-        w.u8(1);
-        w.u32(4);
-        w.u64(9);
-        w.u32(2);
-        for (tick, byte) in [(10u64, 1u8), (11, 1)] {
-            w.u64(tick);
-            w.raw(&[byte; 4]);
-            write_commands(&mut w, &[]);
-        }
-        let want = ClientMsg::Input {
-            slot: 1,
-            input_size: 4,
-            ack_tick: 9,
-            entries: vec![
-                InputEntry { tick: 10, input: vec![1; 4], commands: vec![] },
-                InputEntry { tick: 11, input: vec![1; 4], commands: vec![] },
-            ],
-        };
-        assert_eq!(ClientMsg::decode(&seal(w)), Ok(want));
-    }
-
-    #[test]
     fn bad_compact_inputs_are_errors() {
         let build = |entries: &dyn Fn(&mut Writer)| {
-            let mut w = start_v(2, V_CLIENT_COMPACT);
+            let mut w = start(2);
             w.u8(1);
             w.u32(4);
             w.u64(9);
@@ -1543,28 +1439,12 @@ mod tests {
         });
         assert!(matches!(ClientMsg::decode(&bytes), Err(ProtoError::Corrupt(_))));
         // More entries than the bytes can hold.
-        let mut w = start_v(2, V_CLIENT_COMPACT);
+        let mut w = start(2);
         w.u8(1);
         w.u32(4);
         w.u64(9);
         w.varint(200);
         assert!(ClientMsg::decode(&seal(w)).is_err());
-    }
-
-    #[test]
-    fn a_hello_states_its_version_and_an_old_hello_states_none() {
-        let hello = Hello { build_hash: 1, room: 2, input_size: 4, want_slot: NO_SLOT, token: 3, client_version: PROTOCOL_VERSION };
-        let ClientMsg::Hello(back) = ClientMsg::decode(&ClientMsg::Hello(hello.clone()).encode()).unwrap() else { panic!() };
-        assert_eq!(back, hello);
-        // What a version 2 to 4 client sends: no version at the end.
-        let mut w = start(1);
-        w.u64(1);
-        w.u64(2);
-        w.u32(4);
-        w.u8(NO_SLOT);
-        w.u64(3);
-        let ClientMsg::Hello(old) = ClientMsg::decode(&seal(w)).unwrap() else { panic!() };
-        assert_eq!(old, Hello { client_version: 0, ..hello });
     }
 
     #[test]

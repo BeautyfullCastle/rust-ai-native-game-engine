@@ -532,7 +532,7 @@ pub struct ClientStats {
     /// Corrections ignored because the bundle log could not cover them.
     pub corrections_ignored: u64,
     /// Player signals that came for a tick the session had already verified.
-    /// The signal fence of the server (protocol version 4) keeps this at 0;
+    /// The signal fence of the server keeps this at 0;
     /// a signal that is late anyway fails the client (`ClientEvent::SignalLate`).
     pub signals_late: u64,
 }
@@ -774,7 +774,6 @@ impl<G: Game, L: Link> RelayClient<G, L> {
                 input_size: std::mem::size_of::<G::Input>() as u32,
                 want_slot: self.cfg.want_slot.map_or(NO_SLOT, |s| s.0),
                 token: self.cfg.token,
-                client_version: orr_proto::PROTOCOL_VERSION,
             };
             self.src_mut().send(Channel::Reliable, &ClientMsg::Hello(hello));
             self.state = ClientState::Handshake;
@@ -831,7 +830,7 @@ impl<G: Game, L: Link> RelayClient<G, L> {
                 }
             }
             ServerMsg::Desync { tick, reports } => self.on_desync(tick, reports),
-            ServerMsg::SnapshotRequest { request_id } => self.serve_snapshot(request_id),
+            ServerMsg::SnapshotRequest { request_id, tick } => self.serve_snapshot(request_id, tick),
             ServerMsg::JoinSnapshot { tick, checksum, data, signals } => {
                 if self.state == ClientState::AwaitSnapshot && self.pending_snapshot.is_none() {
                     match crate::wire::decompress_bounded(&data) {
@@ -1308,39 +1307,25 @@ impl<G: Game, L: Link> RelayClient<G, L> {
         }
     }
 
-    /// Answers a snapshot request. The snapshot is the newest verified frame
-    /// at a checksum tick (a multiple of `checksum_interval`), because the
-    /// other clients report checksums at those ticks only and the server
-    /// compares this snapshot with their reports. The checksum tick frames
-    /// are the session's anchors (and the base anchor of a client that
-    /// joined itself). A session without any anchor yet offers its newest
-    /// verified frame, which the server forwards as unverified.
-    fn serve_snapshot(&mut self, request_id: u32) {
+    /// Answers a snapshot request with the verified frame of exactly the tick
+    /// the server chose. That tick is a checksum tick (a multiple of
+    /// `checksum_interval`) at which this client reported its checksum, so the
+    /// frame is one of the session's anchors (the newest `keep_anchors`
+    /// checksum ticks, or the base anchor of a client that joined itself). A
+    /// client that no longer has the frame declines, and the server asks
+    /// another donor.
+    fn serve_snapshot(&mut self, request_id: u32, tick: u64) {
         let reply = match (&self.state, self.session.as_ref()) {
-            (ClientState::Playing, Some(session)) => {
-                let interval = u64::from(session.config().checksum_interval.max(1));
-                let anchor = session
-                    .anchors()
-                    .iter()
-                    .chain(self.base_anchor.iter())
-                    .filter(|a| a.tick % interval == 0 && a.tick <= session.verified_tick())
-                    .max_by_key(|a| a.tick);
-                match (anchor, session.verified_frame()) {
-                    (Some(a), _) => Some(ClientMsg::SnapshotUpload {
-                        request_id,
-                        tick: a.tick,
-                        checksum: a.checksum,
-                        data: lz4_flex::block::compress_prepend_size(&a.frame_bytes),
-                    }),
-                    (None, Some(frame)) => Some(ClientMsg::SnapshotUpload {
-                        request_id,
-                        tick: session.verified_tick(),
-                        checksum: frame.checksum(),
-                        data: lz4_flex::block::compress_prepend_size(&frame.to_bytes()),
-                    }),
-                    (None, None) => None,
-                }
-            }
+            (ClientState::Playing, Some(session)) => session
+                .anchors()
+                .iter()
+                .chain(self.base_anchor.iter())
+                .find(|a| a.tick == tick && a.tick <= session.verified_tick())
+                .map(|a| ClientMsg::SnapshotUpload {
+                    request_id,
+                    checksum: a.checksum,
+                    data: lz4_flex::block::compress_prepend_size(&a.frame_bytes),
+                }),
             _ => None,
         };
         let msg = match reply {

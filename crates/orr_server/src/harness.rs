@@ -40,11 +40,14 @@ pub struct ClientSpec {
     pub build_id: u64,
     /// Inputs per packet the client repeats (`None` = the client default).
     pub input_redundancy: Option<u32>,
+    /// Checksum-tick frames the client keeps to serve as a donor
+    /// (`None` = the client default).
+    pub keep_anchors: Option<u32>,
 }
 
 impl ClientSpec {
     pub fn new(path: PathParams) -> Self {
-        Self { path, clock_ppm: 1_000_000, want_slot: None, token: 0, build_id: 1, input_redundancy: None }
+        Self { path, clock_ppm: 1_000_000, want_slot: None, token: 0, build_id: 1, input_redundancy: None, keep_anchors: None }
     }
 }
 
@@ -165,6 +168,9 @@ impl<G: Game> Harness<G> {
         cfg.token = spec.token;
         if let Some(r) = spec.input_redundancy {
             cfg.input_redundancy = r;
+        }
+        if let Some(k) = spec.keep_anchors {
+            cfg.keep_anchors = k;
         }
         let dumps = DumpCollector::new();
         let make = self.make_config.clone();

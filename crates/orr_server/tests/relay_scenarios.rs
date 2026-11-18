@@ -311,6 +311,17 @@ fn relayed_notes(notes: &[ServerNote]) -> Vec<(u8, u64, bool)> {
         .collect()
 }
 
+/// `(donor, tick)` of every snapshot request the server sent.
+fn requested_notes(notes: &[ServerNote]) -> Vec<(u8, u64)> {
+    notes
+        .iter()
+        .filter_map(|n| match n {
+            ServerNote::SnapshotRequested { donor, tick, .. } => Some((*donor, *tick)),
+            _ => None,
+        })
+        .collect()
+}
+
 #[test]
 fn a_late_join_snapshot_is_checked_against_the_other_clients() {
     let p = path(40, 5, 10_000);
@@ -333,6 +344,12 @@ fn a_late_join_snapshot_is_checked_against_the_other_clients() {
     assert_eq!(relayed.len(), 1, "{relayed:?}");
     assert!(relayed[0].2, "two healthy clients confirm the snapshot");
     assert_eq!(relayed[0].1 % 30, 0, "the snapshot is at a checksum tick");
+    // The server chose the tick: the donor served exactly that one, and it was
+    // a recent tick of the running room (not the start).
+    let asked = requested_notes(&notes);
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert_eq!(asked[0].1, relayed[0].1);
+    assert!(asked[0].1 > 300, "tick {}", asked[0].1);
     let stats = h.server.room_stats(h.room).unwrap();
     assert_eq!((stats.snapshots_relayed, stats.snapshots_unverified, stats.snapshots_rejected), (1, 0, 0));
     assert!(!notes.iter().any(|n| matches!(n, ServerNote::SnapshotRejected { .. } | ServerNote::Desync { .. })));
@@ -402,6 +419,60 @@ fn a_tampered_donor_snapshot_is_refused_and_the_next_donor_serves_the_join() {
     }
     // The join did not stop the room from judging the donor's own reports.
     assert!(notes.iter().any(|n| matches!(n, ServerNote::Desync { .. })));
+}
+
+#[test]
+fn a_donor_without_the_chosen_frame_declines_and_the_next_donor_serves_the_join() {
+    let p = path(40, 5, 10_000);
+    let mut cfg = RoomConfig::new(4, TICK_RATE, SEED, 8);
+    cfg.min_players_to_start = 3;
+    let mut h = Harness::<Counter>::new(3, cfg, counter_script(), |_| ());
+    // Two clients keep no frames, so they cannot serve any tick. The third can.
+    for _ in 0..2 {
+        h.add_client(&ClientSpec { keep_anchors: Some(0), ..ClientSpec::new(p) });
+    }
+    let keeper = h.add_client(&ClientSpec::new(p));
+    assert!(h.run_until_all_playing(10_000_000));
+    assert!(h.run_until_tick(400, 60_000_000));
+    let keeper_slot = h.clients[keeper].client.welcome().unwrap().slot;
+    let joiner = h.add_client(&ClientSpec::new(p));
+    assert!(h.run_until_all_playing(30_000_000), "the join never finished");
+    let start = h.server.finalized_tick(h.room).unwrap();
+    assert!(h.run_until_tick(start + 300, 60_000_000));
+    h.run_for_us(500_000);
+
+    let notes = h.server.drain_notes();
+    // The donors go by slot. Every slot below the keeper declines the tick.
+    let asked = requested_notes(&notes);
+    assert!(keeper_slot > 0, "the keeper must come after a decline");
+    assert_eq!(asked.iter().map(|a| a.0).collect::<Vec<_>>(), (0..=keeper_slot).collect::<Vec<_>>(), "{asked:?}");
+    assert!(asked.iter().all(|a| a.1 == asked[0].1), "the same tick goes to the next donor: {asked:?}");
+    let relayed = relayed_notes(&notes);
+    assert_eq!(relayed.len(), 1, "{relayed:?}");
+    assert_eq!((relayed[0].0, relayed[0].1, relayed[0].2), (keeper_slot, asked[0].1, true));
+    let stats = h.server.room_stats(h.room).unwrap();
+    assert_eq!((stats.snapshots_relayed, stats.snapshots_rejected), (1, 0));
+    assert_eq!(*h.clients[joiner].client.state(), ClientState::Playing);
+    assert!(compare_checkpoints(&h, joiner, keeper) > 5);
+}
+
+#[test]
+fn a_join_with_no_donor_that_has_the_frame_is_refused() {
+    let p = path(40, 5, 10_000);
+    let mut h = counter_harness(2);
+    for _ in 0..2 {
+        h.add_client(&ClientSpec { keep_anchors: Some(0), ..ClientSpec::new(p) });
+    }
+    assert!(h.run_until_all_playing(10_000_000));
+    assert!(h.run_until_tick(300, 60_000_000));
+    let token = h.clients[1].client.token().unwrap();
+    h.cut(1);
+    let cut_tick = h.server.finalized_tick(h.room).unwrap();
+    assert!(h.run_until_tick(cut_tick + 200, 60_000_000));
+    let back = h.add_client(&ClientSpec { want_slot: Some(PlayerSlot(1)), token, ..ClientSpec::new(p) });
+    assert!(h.run_until_tick(cut_tick + 400, 60_000_000));
+    assert_eq!(*h.clients[back].client.state(), ClientState::Rejected(RejectReason::NoDonor));
+    assert_eq!(h.server.room_stats(h.room).unwrap().snapshots_relayed, 0);
 }
 
 #[test]
@@ -526,7 +597,7 @@ impl Rng {
 fn random_and_mutated_messages_never_panic_the_codecs() {
     let mut rng = Rng(1);
     let seeds: Vec<Vec<u8>> = vec![
-        ClientMsg::Hello(Hello { build_hash: 1, room: 1, input_size: 4, want_slot: NO_SLOT, token: 0, client_version: orr_proto::PROTOCOL_VERSION }).encode(),
+        ClientMsg::Hello(Hello { build_hash: 1, room: 1, input_size: 4, want_slot: NO_SLOT, token: 0 }).encode(),
         ClientMsg::Input {
             slot: 0,
             input_size: 4,
@@ -561,8 +632,8 @@ fn random_and_mutated_messages_never_panic_the_codecs() {
 fn nonsense_client_msgs(rng: &mut Rng) -> Vec<Vec<u8>> {
     let big = rng.next();
     vec![
-        ClientMsg::Hello(Hello { build_hash: 0, room: 1, input_size: 24, want_slot: 200, token: big, client_version: 0 }).encode(),
-        ClientMsg::Hello(Hello { build_hash: 0, room: 99, input_size: 24, want_slot: NO_SLOT, token: 0, client_version: orr_proto::PROTOCOL_VERSION }).encode(),
+        ClientMsg::Hello(Hello { build_hash: 0, room: 1, input_size: 24, want_slot: 200, token: big }).encode(),
+        ClientMsg::Hello(Hello { build_hash: 0, room: 99, input_size: 24, want_slot: NO_SLOT, token: 0 }).encode(),
         ClientMsg::Input { slot: 250, input_size: 24, ack_tick: u64::MAX, entries: vec![] }.encode(),
         ClientMsg::Input {
             slot: 0,
@@ -577,7 +648,7 @@ fn nonsense_client_msgs(rng: &mut Rng) -> Vec<Vec<u8>> {
         .encode(),
         ClientMsg::Checksum { tick: u64::MAX, checksum: 1 }.encode(),
         ClientMsg::Checksum { tick: 0, checksum: 1 }.encode(),
-        ClientMsg::SnapshotUpload { request_id: 77, tick: 5, checksum: 5, data: vec![0; 10] }.encode(),
+        ClientMsg::SnapshotUpload { request_id: 77, checksum: 5, data: vec![0; 10] }.encode(),
         ClientMsg::SnapshotDecline { request_id: 1 }.encode(),
         ClientMsg::Ping { seq: 0, client_time_us: u64::MAX, rtt_hint_us: u32::MAX }.encode(),
         ClientMsg::Ready.encode(),
@@ -594,7 +665,7 @@ fn nonsense_server_msgs(rng: &mut Rng) -> Vec<Vec<u8>> {
         ServerMsg::Presence { slot: 250, present: true, from_tick: u64::MAX, seq: 0 }.encode(),
         ServerMsg::Presence { slot: 250, present: true, from_tick: u64::MAX, seq: u32::MAX }.encode(),
         ServerMsg::SeatChange { slot: 250, change: orr_proto::SEAT_REMOVED, from_tick: 0, seq: 1 }.encode(),
-        ServerMsg::SnapshotRequest { request_id: 5 }.encode(),
+        ServerMsg::SnapshotRequest { request_id: 5, tick: 30 }.encode(),
         ServerMsg::JoinSnapshot { tick: 1, checksum: 1, data: vec![1, 2, 3], signals: 0 }.encode(),
         ServerMsg::JoinSnapshot { tick: 1, checksum: 1, data: vec![1, 2, 3], signals: u32::MAX }.encode(),
         ServerMsg::Start { t0_us: 0, server_time_us: u64::MAX }.encode(),

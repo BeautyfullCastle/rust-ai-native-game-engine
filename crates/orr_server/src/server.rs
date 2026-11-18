@@ -192,8 +192,10 @@ impl<E: Endpoint, V: InputValidator> RelayServer<E, V> {
             Err(e) => {
                 self.bad_messages += 1;
                 self.notes.push(ServerNote::BadMessage { conn });
-                if matches!(e, ProtoError::UnsupportedVersion(_)) && self.conns.get(&conn).is_some_and(|c| c.room.is_none()) {
-                    self.reject(conn, RejectReason::BadVersion { server: PROTOCOL_VERSION, min_client: orr_proto::MIN_PROTOCOL_VERSION }, now_us);
+                if let ProtoError::UnsupportedVersion(client) = e {
+                    if self.conns.get(&conn).is_some_and(|c| c.room.is_none()) {
+                        self.reject(conn, RejectReason::BadVersion { server: PROTOCOL_VERSION, client }, now_us);
+                    }
                 }
                 return;
             }
@@ -244,8 +246,8 @@ impl<E: Endpoint, V: InputValidator> RelayServer<E, V> {
                         room.ping(&mut out, slot, seq, client_time_us, rtt_hint_us)
                     }
                     ClientMsg::Checksum { tick, checksum } => room.checksum(&mut out, slot, tick, checksum),
-                    ClientMsg::SnapshotUpload { request_id, tick, checksum, data } => {
-                        room.snapshot_uploaded(&mut out, slot, request_id, tick, checksum, data)
+                    ClientMsg::SnapshotUpload { request_id, checksum, data } => {
+                        room.snapshot_uploaded(&mut out, slot, request_id, checksum, data)
                     }
                     ClientMsg::SnapshotDecline { request_id } => room.snapshot_declined(&mut out, slot, request_id),
                     ClientMsg::Ready => room.ready(&mut out, slot),

@@ -12,8 +12,10 @@
 //! injected time, on top of an abstract `orr_proto::Endpoint`, so it is
 //! deterministic and testable without sockets (`orr_proto::netsim`).
 //!
-//! Late join: the server asks a playing client (the donor) for a snapshot
-//! of its verified frame, relays it to the joiner and follows it with every
+//! Late join: the server picks a checksum tick that the other clients have
+//! reported and asks a playing client (the donor) for its verified frame of
+//! exactly that tick. It judges the snapshot against those reports, relays it
+//! to the joiner and follows it with every
 //! confirmed bundle after the snapshot tick (the server keeps them, so
 //! there is never a gap). The joiner takes over its slot at the tick the
 //! server sees its `Ready`.
@@ -23,9 +25,9 @@
 //! A room created with [`RelayServer::create_authoritative_room`] also runs
 //! the game's `orr_sim` headless ([`ServerSim`], [`GameSim`]) on the
 //! confirmed bundles, one tick at a time, as each tick is finalized. The
-//! wire protocol is the relay's (protocol version 5, see `orr_proto::msg`)
-//! plus the additions of version 3 (`Welcome::flags`,
-//! `ServerMsg::Correction`), so clients are the same `RelayClient`s. What the
+//! wire protocol is the relay's (the one protocol version, see
+//! `orr_proto::msg`; `Welcome::flags` and `ServerMsg::Correction` serve this
+//! mode), so clients are the same `RelayClient`s. What the
 //! server adds:
 //!
 //! - **Checksum referee**: a client's checkpoint checksum is compared with

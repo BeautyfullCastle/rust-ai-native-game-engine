@@ -238,9 +238,10 @@ sequenceDiagram
     participant D as 제공자 클라이언트
     participant O as 다른 클라이언트들
     J->>S: Hello (토큰이 있으면 같은 번호 요청)
-    S->>D: SnapshotRequest
-    D->>S: SnapshotUpload (tick T, checksum C, 데이터)
-    O->>S: Checksum (tick T 무렵에 주기적으로 보고)
+    O->>S: Checksum (checksum_interval 틱마다 보고)
+    S->>S: 보고가 있는 체크섬 틱 T를 고름
+    S->>D: SnapshotRequest (tick T)
+    D->>S: SnapshotUpload (checksum C, 데이터)
     S->>S: C가 T의 다수 체크섬과 같은지 확인
     alt 같음
         S->>J: JoinSnapshot (T, C, 데이터) + T 이후 확정 묶음
@@ -248,22 +249,23 @@ sequenceDiagram
         J->>S: Ready
         S->>O: Presence (present, from_tick)
     else 다름
-        S->>S: 다른 제공자 선택
+        S->>S: 다른 제공자에게 같은 T를 요청
     end
 ```
 
 바꿀 곳:
 
-- **체크섬 틱 맞추기:** 클라이언트는 `checksum_interval` 틱마다 체크섬을 보고한다. 서버는 스냅숏 틱 `T`를 그 간격에 맞춘 틱으로 고른다. 그래야 비교할 체크섬이 있다.
+- **체크섬 틱 맞추기:** 클라이언트는 `checksum_interval` 틱마다 체크섬을 보고한다. 서버는 스냅숏 틱 `T`를 그 간격에 맞춘 틱으로 고르고 `SnapshotRequest`에 싣는다. 그래야 비교할 체크섬이 있다.
 - **비교 대상 부족:** 비교할 다른 클라이언트가 없으면(2인 게임에서 한 명이 재접속) 검증 없이 넘긴다. 이 경우는 결과에 "검증 안 됨"으로 남긴다.
 
 구현(5단계, `orr_server/src/room.rs`의 `judge_snapshot`):
 
-- **T는 제공자가 정한다.** `SnapshotRequest`에 틱을 싣지 않았다. 싣으면 메시지 버전이 올라가고, 예전 클라이언트는 그 요청을 읽지 못한다. 제공자(`RelayClient::serve_snapshot`)는 검증이 끝난 체크섬 틱의 앵커 중 가장 새것을 올린다. 서버는 `T`가 체크섬 틱인지 확인한다. 앵커가 아직 없는 클라이언트(첫 체크섬 틱 전)는 검증된 프레임을 그대로 올리고, 서버는 그것을 "검증 안 됨"으로 넘긴다.
+- **T는 서버가 정한다.** `SnapshotRequest`는 틱 `T`를 싣는다(`Room::snapshot_tick`). `T`는 (1) 체크섬 간격의 배수이고 0이 아니며, (2) 제공자가 보고한 틱이고(그래서 제공자에게 그 프레임이 있다), (3) 서버가 `T` 이후 확정 묶음을 모두 가지고 있고, (4) 제공자와 입장하는 클라이언트를 뺀 플레이어 중 절반을 넘는 수가 보고한 틱이다. 이 조건을 모두 만족하는 가장 새 틱을 고른다. 뺄 플레이어가 없으면(2인 게임) 조건 (4)는 없다. 올리는 쪽이 `T`를 고르지 못하므로 비교를 피할 수 없다.
+- **제공자의 프레임.** 제공자(`RelayClient::serve_snapshot`)는 `T`의 검증된 프레임을 앵커(`keep_anchors`, 기본 3개의 최근 체크섬 틱 프레임, 또는 스스로 입장한 클라이언트의 기준 앵커)에서 찾아 올린다. `SnapshotUpload`는 틱을 싣지 않는다. 서버가 `T`를 알기 때문이다. 앵커에 `T`가 없으면(`keep_anchors = 0`이거나 너무 오래됐으면) `SnapshotDecline`으로 거절한다. 서버는 그 제공자를 이번 입장에서 제외하고 다음 제공자에게 요청한다. 제공자가 남지 않으면 `Reject(NoDonor)`다.
 - **표결.** 서버는 올라온 체크섬 `C`를 한 표로 치고, 다른 클라이언트들이 `T`에 보고한 체크섬을 나머지 표로 센다. `C`와 같은 표가 전체의 절반을 넘으면 넘긴다. 3인 게임에서 한 명이 틀려도 정상 제공자가 거부되지 않는다. 혼자 다른 제공자는 거부된다.
-- **기다림.** 다른 클라이언트의 보고가 아직 없고 보고할 클라이언트가 있으면 업로드를 잡아 두고, 보고가 올 때마다 다시 판정한다. `checksum_interval` 틱 안에 보고가 없으면 "검증 안 됨"으로 넘긴다. 올린 쪽이 `T`를 아주 새것으로 골라 비교를 피할 수 없다.
-- **거부.** 거부하면 `ServerNote::SnapshotRejected`를 남기고, 제공자의 `C`를 그 클라이언트의 `Checksum` 보고처럼 기록한다. 다른 클라이언트와 다르면 기존 `Desync` 알림(노트와 방송)이 나간다. 그 제공자를 이번 입장에서 제외하고 다음 제공자에게 요청한다. 제공자가 남지 않으면 기존 입장 실패 경로대로 입장하는 클라이언트가 `Reject(NoDonor)`를 받는다.
-- **검증 안 됨 표시.** 와이어는 바꾸지 않았다. `ServerNote::SnapshotRelayed::verified`와 `RoomStats::snapshots_unverified`에 남는다.
+- **기다림 없음.** `T`를 고를 때 이미 다른 클라이언트의 보고가 있으므로, 올라온 스냅숏은 바로 판정한다. 고를 수 있는 `T`가 아직 없으면(경기가 막 시작해서 첫 체크섬 보고 전, 또는 아직 보고가 모자랄 때) 입장은 `Checksum` 메시지가 올 때마다 다시 시도한다. `join_timeout_ticks` 안에 `T`를 못 고르면 `Reject(JoinTimedOut)`이다.
+- **거부.** 거부하면 `ServerNote::SnapshotRejected`를 남긴다. 제공자는 `T`의 체크섬을 이미 보고했으므로 `Desync` 알림은 그 보고에서 나간다. 그 제공자를 이번 입장에서 제외하고 다음 제공자에게 요청한다. 제공자가 남지 않으면 기존 입장 실패 경로대로 입장하는 클라이언트가 `Reject(NoDonor)`를 받는다.
+- **검증 안 됨 표시.** `ServerNote::SnapshotRelayed::verified`와 `RoomStats::snapshots_unverified`에 남는다.
 - **데이터 확인.** 서버는 데이터에서 체크섬을 다시 계산하지 못한다. 컴포넌트 목록은 게임이 정하기 때문이다. 서버는 `C`만 다수와 비교한다. 입장하는 클라이언트가 프레임을 읽어 틱과 체크섬이 `C`와 같은지 확인하고(`Session::from_relay_snapshot`), 다르면 입장이 실패한다.
 
 ## 10. 입력 전송
@@ -284,14 +286,14 @@ sequenceDiagram
 
 더할 것:
 
-1. **클라이언트 입력의 "직전과 같음" 표시.** 확정 묶음과 같은 방식으로 클라이언트 입력 항목에도 넣는다. 입력이 자주 바뀌지 않는 게임에서 입력 바이트가 거의 사라진다. 프로토콜 버전을 올린다. **(5단계에서 구현, 버전 5)**
+1. **클라이언트 입력의 "직전과 같음" 표시.** 확정 묶음과 같은 방식으로 클라이언트 입력 항목에도 넣는다. 입력이 자주 바뀌지 않는 게임에서 입력 바이트가 거의 사라진다. 프로토콜 버전을 올린다. **(5단계에서 구현)**
 2. **두 틱 묶어 보내기(선택).** 패킷 수가 절반이 되고 입력 지연이 1틱 늘어난다. 게임이 고른다. **(5단계에서 하지 않았다. 아래 "남은 것")**
 
 하지 않을 것: "변화 없음"을 가끔만 보내는 방식. 입력이 바뀐 패킷을 잃으면 서버가 옛 입력으로 확정해 실제 조작이 무시된다.
 
 #### 구현한 규칙
 
-입력 패킷(`ClientMsg::Input`, 버전 5)은 항목마다 이렇게 쓴다.
+입력 패킷(`ClientMsg::Input`)은 항목마다 이렇게 쓴다.
 
 | 부분 | 내용 |
 |---|---|
@@ -302,7 +304,7 @@ sequenceDiagram
 
 **손실에 안전한 이유.** "직전"은 같은 패킷 안의 바로 앞 항목이다. 이전 패킷이나 서버가 확인한 상태를 보지 않는다. 그래서 패킷 하나는 혼자서 해석된다. 패킷을 잃거나 순서가 바뀌거나 두 번 와도 서버가 잘못된 입력을 만들 수 없다. 잃은 틱은 다음 패킷이 다시 싣는다(미확인 입력 K개). 패킷의 첫 항목은 항상 입력 바이트를 모두 싣는다. 그래서 입력이 변하지 않는 동안에도 패킷마다 입력 한 벌은 간다. 이 한 벌이 있어서 패킷 하나만 도착해도 그 패킷의 모든 틱을 알 수 있다.
 
-**`Hello`의 버전.** `Hello`는 끝에 `client_version`(클라이언트가 아는 가장 새 프로토콜 버전)을 싣는다. 버전을 적은 `Hello`는 헤더 버전 5다. 버전을 모르는 옛 클라이언트(2~4)의 `Hello`는 그대로 버전 2이고 `client_version`은 0으로 읽힌다. 서버는 `RoomConfig::min_client_version`(기본 2)보다 낮게 적은 클라이언트와 서버가 모르는 버전을 적은 클라이언트를 `Reject(BadVersion { server, min_client })`로 돌려보낸다. `min_client`가 서버가 받는 가장 오래된 버전이다. 버전 4 서버가 버전 5 `Hello`를 받으면 헤더 버전을 몰라서 같은 `BadVersion`으로 거절한다. 옛 클라이언트는 버전을 적지 않으므로 서버가 버전 3과 4를 구별하지 못한다. 서버를 5로 두면(`min_client_version = 5`) 버전을 적지 않은 클라이언트가 모두 거절된다.
+**프로토콜 버전은 하나다.** 개발 중이라 하위 호환을 두지 않는다. `PROTOCOL_VERSION`(지금 6)은 하나이고, 모든 메시지를 그 버전으로 쓴다. 디코더는 다른 버전을 `ProtoError::UnsupportedVersion`으로 거절한다. 와이어 형식을 바꾸면 버전을 올린다. `Hello`는 별도 필드 없이 헤더의 버전이 클라이언트가 말하는 버전이다. 서버는 `Hello`를 읽지 못하면(헤더 버전이 다르면) `Reject(BadVersion { server, client })`로 돌려보낸다. `server`는 서버의 버전, `client`는 `Hello` 헤더의 버전이다. 헤더 버전은 체크섬보다 먼저 검사한다. 선택 필드는 없다. 예전에 "있을 때만 쓰던" 끝 필드(`Welcome::flags`, `JoinSnapshot`의 신호 수, `Presence`와 `SeatChange`의 `seq`, `Confirmed`의 신호 수 꼬리)는 항상 쓴다. 신호가 없는 `Confirmed`는 꼬리가 2바이트(신호 수 0, 바뀜 0) 늘었다.
 
 #### 잰 바이트
 
@@ -336,7 +338,7 @@ sequenceDiagram
 | 3 (완료) | `PlayerSlot` Pod·리플렉션, `PlayerLink`, 로컬 플레이어 여러 명 | 한 화면 2인 예제가 돈다. 쓰는 법은 [crates/orr_app/README.md](../crates/orr_app/README.md), 예제는 `orr_app/examples/physics2d_coop.rs`(WASD와 방향키). 코드는 `orr_sim/src/input.rs`(`PlayerSlot::NONE`, `PlayerLink`), `orr_bridge`(`Bridge::local_slots`, `PlayHost::with_extra_local_slots`). 테스트는 `orr_sim/tests/player_link.rs`, `orr_bridge/tests/local_slots.rs`. 뺀 것: 패드 입력(키보드만), 서버 쪽 여러 슬롯 클라이언트(릴레이·네트워크 클라이언트는 슬롯 하나), `Threaded`로 여러 로컬 슬롯을 쓰는 `App` 경로, 여러 슬롯의 `Step` 입력 캡처(첫 슬롯만) |
 | 4a (완료) | 신호·`Players`·오프라인: `PlayerSignal`을 입력(`TickInputs`)과 리플레이에 싣고, `Players` 트레이트, 서버 없이 첫 틱의 `Added`, `SceneView::on_player` | 신호가 `on_player`에 같은 틱으로 들어가고 리플레이에서도 같다. 이미 예측한 틱에 신호가 늦게 와도 롤백 후 체크섬이 같다(테스트). 쓰는 법은 [crates/orr_app/README.md](../crates/orr_app/README.md), 코드는 `orr_sim/src/signal.rs`, `orr_session`(`Session::schedule_signal`, `PlaySession::push_signal`, 리플레이 형식 4), `orr_bridge`(`BridgeEvent::Player`). 남은 것은 4b |
 | 4b (완료) | 서버의 자리 변경을 `Session::schedule_signal(from_tick, ..)`로 잇기, `--host`/`--connect`, 재접속 | 서버와 클라이언트 둘로 한 쪽이 끊겼다 토큰으로 돌아오면 두 쪽이 같은 틱에 `Disconnected` → `Reconnected`를 받고 체크섬이 같다. 보관 시간이 끝나면 `Removed`, 새로 들어온 플레이어는 모두에게 같은 틱의 `Added`(`orr_server/tests/player_signals.rs`, 손실·재정렬이 있는 시뮬레이션 네트워크). 진짜 소켓의 창 두 개는 `orr_app/src/net.rs` 테스트. 쓰는 법은 [crates/orr_app/README.md](../crates/orr_app/README.md)의 "서버로 실행", 예제는 `orr_app/examples/roster.rs`와 `physics2d_coop.rs`. 코드는 `orr_proto`(`SeatChange`), `orr_server/src/room.rs`(`announce_seat`, 자리 기록, `signal_lead_ticks`), `orr_session/src/relay.rs`(`RelayClient::take_signal_notes`), `orr_bridge`(`RelayHost`), `orr_app/src/net.rs`. 뺀 것: 플레이어별 시작 데이터(`Added.data`는 비어 있음), 권한 있는 서버 방의 신호, 원격 뷰 스트림의 신호 전달, `.scene(..)`과 `--connect`, QUIC |
-| 5 (완료) | 스냅숏 체크섬 다수 검증, 클라이언트 입력 "직전과 같음" 표시 | `netsim` 테스트로 조작된 스냅숏이 거부되고, 입력 바이트 감소량을 기록한다. 스냅숏 검증은 9.2, 입력 표시와 잰 바이트는 10.2에 쓴다. 코드는 `orr_server/src/room.rs`(`judge_snapshot`, `min_client_version`), `orr_proto/src/msg.rs`(버전 5), `orr_session/src/relay.rs`(`serve_snapshot`, `SourceStats::input_bytes_sent`). 테스트는 `orr_server/tests/relay_scenarios.rs`(조작된 제공자, 2인 재접속), `relay_input_same.rs`(손실·중복·재정렬, `Hello` 버전), `relay_input_bytes.rs`(바이트), `orr_proto`의 `msg` 단위 테스트. 남은 것: `SnapshotRequest`에 틱을 싣지 않았다(제공자가 가장 새 체크섬 틱을 고른다, 9.2). 서버가 데이터에서 체크섬을 다시 계산하지 않는다(입장하는 클라이언트가 확인한다). 두 틱 묶어 보내기는 하지 않았다. 입력 패킷 머리(약 31바이트)와 틱·확인 틱의 고정 8바이트는 줄이지 않았다. 버전을 적지 않은 옛 클라이언트(2~4)는 서버가 구별하지 못한다. 위조된 데이터에 정직한 체크섬을 붙인 업로드는 서버가 아니라 입장하는 클라이언트가 거부한다(입장 실패) |
+| 5 (완료) | 스냅숏 체크섬 다수 검증, 클라이언트 입력 "직전과 같음" 표시 | `netsim` 테스트로 조작된 스냅숏이 거부되고, 입력 바이트 감소량을 기록한다. 스냅숏 검증은 9.2, 입력 표시와 잰 바이트는 10.2에 쓴다. 코드는 `orr_server/src/room.rs`(`snapshot_tick`, `judge_snapshot`), `orr_proto/src/msg.rs`, `orr_session/src/relay.rs`(`serve_snapshot`, `SourceStats::input_bytes_sent`). 테스트는 `orr_server/tests/relay_scenarios.rs`(조작된 제공자, 2인 재접속, 프레임이 없는 제공자), `relay_input_same.rs`(손실·중복·재정렬, `Hello` 버전), `relay_input_bytes.rs`(바이트), `orr_proto`의 `msg` 단위 테스트. 이후 프로토콜 버전을 하나(6)로 합치고 `SnapshotRequest`에 서버가 고른 틱을 실었다(9.2). 남은 것: 서버가 데이터에서 체크섬을 다시 계산하지 않는다(입장하는 클라이언트가 확인한다). 두 틱 묶어 보내기는 하지 않았다. 입력 패킷 머리(약 31바이트)와 틱·확인 틱의 고정 8바이트는 줄이지 않았다. 위조된 데이터에 정직한 체크섬을 붙인 업로드는 서버가 아니라 입장하는 클라이언트가 거부한다(입장 실패) |
 | 6 | `ViewRef`, 뷰 에셋, 프리팹 생성 | 인스펙터에서 뷰 에셋을 고르면 그 모델이 그려진다. `PlayerAdded`로 아바타 프리팹이 생긴다 |
 | 7 | 튜토리얼 | 빈 프로젝트 → 혼자 하기 → 한 화면 2인 → 로컬 서버 2창 → 재접속까지, 단계별 예제가 모두 빌드되고 테스트로 확인된다 |
 
