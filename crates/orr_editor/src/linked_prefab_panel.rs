@@ -4,7 +4,7 @@
 use crate::{game::EditorGame, Editor};
 use serde_json::{json, Value};
 use std::{
-    fs::{File, Metadata},
+    fs::Metadata,
     io::{Read, Write},
     path::{Component, Path, PathBuf},
 };
@@ -15,22 +15,8 @@ const MAX_BYTES: usize = 32 * 1024;
 /// portable source filenames beside the scene, never arbitrary filesystem paths.
 pub struct SourceFiles {
     root: PathBuf,
-    ancestors: Vec<(PathBuf, File)>,
+    ancestors: Vec<orr_fsid::PinnedDirectory>,
     protected_scene: Option<(String, PathBuf)>,
-}
-#[cfg(windows)]
-fn open_directory(path: &Path) -> std::io::Result<File> {
-    use std::os::windows::fs::OpenOptionsExt;
-    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-    std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)
-}
-#[cfg(not(windows))]
-fn open_directory(path: &Path) -> std::io::Result<File> {
-    File::open(path)
 }
 #[cfg(unix)]
 fn same(a: &Metadata, b: &Metadata) -> bool {
@@ -63,15 +49,14 @@ impl SourceFiles {
             if matches!(component, Component::Prefix(_)) {
                 continue;
             }
-            let metadata = std::fs::symlink_metadata(&current).map_err(|e| e.to_string())?;
-            if !metadata.is_dir() || metadata.file_type().is_symlink() {
-                return Err("Source directory must contain only real directories".into());
-            }
-            let file = open_directory(&current).map_err(|e| e.to_string())?;
-            if !same(&metadata, &file.metadata().map_err(|e| e.to_string())?) {
-                return Err("Source directory changed".into());
-            }
-            ancestors.push((current.clone(), file));
+            let pinned = orr_fsid::PinnedDirectory::open(&current).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::InvalidInput {
+                    "Source directory must contain only real directories".to_string()
+                } else {
+                    error.to_string()
+                }
+            })?;
+            ancestors.push(pinned);
         }
         Ok(Self {
             root: current,
@@ -97,12 +82,8 @@ impl SourceFiles {
         Ok(files)
     }
     fn recheck(&self) -> Result<(), String> {
-        for (path, file) in &self.ancestors {
-            let metadata = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
-            if metadata.file_type().is_symlink()
-                || !metadata.is_dir()
-                || !same(&metadata, &file.metadata().map_err(|e| e.to_string())?)
-            {
+        for directory in &self.ancestors {
+            if directory.verify_unchanged().is_err() {
                 return Err("Source directory changed; reopen the scene".into());
             }
         }
@@ -409,5 +390,30 @@ impl Panel {
             if let Some(error) = &self.error { ui.colored_label(egui::Color32::RED, format!("Prefab conflict/error: {error}")); }
             if let Some(notice) = &self.notice { ui.label(notice); }
         });
+    }
+}
+
+#[cfg(test)]
+mod source_folder_tests {
+    use super::*;
+
+    #[test]
+    fn source_files_detect_a_replaced_scene_folder() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap().join("scene folder");
+        std::fs::create_dir(&root).unwrap();
+        let files = SourceFiles::new(&root).unwrap();
+        files.path("prefab.json").unwrap();
+        std::fs::rename(&root, root.with_file_name("moved")).unwrap();
+        std::fs::create_dir(&root).unwrap();
+        assert!(files.path("prefab.json").is_err());
+    }
+
+    #[test]
+    fn source_files_refuse_a_file_as_the_scene_folder() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = std::fs::canonicalize(temp.path()).unwrap().join("not a folder");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(SourceFiles::new(&file).is_err());
     }
 }

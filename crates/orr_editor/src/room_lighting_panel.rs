@@ -1,7 +1,7 @@
 //! Editor-owned lighting authoring with independent history and exact source binding.
 use orr_sample::{room_lighting::Document, room_project::PreparedRoomLighting};
 use std::{
-    fs::{File, Metadata},
+    fs::File,
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::Arc,
@@ -103,46 +103,20 @@ impl LightingEditor for crate::editor::Editor {
 
 struct RootPin {
     path: PathBuf,
-    directory: File,
+    directory: orr_fsid::PinnedDirectory,
 }
 impl RootPin {
     fn new(parent: &Path) -> Result<Self, String> {
         let path = checked_directory(parent)?;
-        let directory = open_directory(&path).map_err(|e| e.to_string())?;
+        let directory = orr_fsid::PinnedDirectory::open(&path).map_err(|e| e.to_string())?;
         Ok(Self { path, directory })
     }
     fn recheck(&self, path: &Path) -> Result<(), String> {
         let current = checked_directory(path.parent().unwrap_or(Path::new(".")))?;
-        let metadata = std::fs::symlink_metadata(&current).map_err(|e| e.to_string())?;
-        let pinned = self.directory.metadata().map_err(|e| e.to_string())?;
-        if current != self.path || !same_directory(&metadata, &pinned) {
-            return Err("Lighting project directory changed; reopen before saving".into());
-        }
-        Ok(())
+        self.directory
+            .verify_unchanged_at(&current)
+            .map_err(|_| "Lighting project directory changed; reopen before saving".to_string())
     }
-}
-#[cfg(windows)]
-fn open_directory(path: &Path) -> std::io::Result<File> {
-    use std::os::windows::fs::OpenOptionsExt;
-    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-    std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)
-}
-#[cfg(not(windows))]
-fn open_directory(path: &Path) -> std::io::Result<File> {
-    File::open(path)
-}
-#[cfg(unix)]
-fn same_directory(a: &Metadata, b: &Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    a.dev() == b.dev() && a.ino() == b.ino()
-}
-#[cfg(not(unix))]
-fn same_directory(a: &Metadata, b: &Metadata) -> bool {
-    matches!((a.created(), b.created()), (Ok(a), Ok(b)) if a == b)
 }
 fn checked_directory(path: &Path) -> Result<PathBuf, String> {
     orr_model_bindings::model_bindings::resolve_project(path, ".")
@@ -401,7 +375,7 @@ impl Panel {
         self.saved_bytes = bytes;
         #[cfg(unix)]
         check(SaveStage::BeforeDirectorySync)
-            .and_then(|_| pin.directory.sync_all())
+            .and_then(|_| pin.directory.file().sync_all())
             .map_err(|e| {
                 format!(
                     "Lighting replaced, but directory sync failed; durability is uncertain: {e}"
@@ -1116,3 +1090,21 @@ mod tests {
 #[cfg(all(test,target_os="linux",feature="project-create"))]
 #[path="room_lighting_panel/environment_integration_tests.rs"]
 mod environment_integration_tests;
+
+#[cfg(test)]
+mod root_pin_tests {
+    use super::*;
+
+    #[test]
+    fn pin_admits_a_project_folder_and_detects_a_replaced_one() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("project");
+        std::fs::create_dir(&root).unwrap();
+        let file = root.join("lighting.json");
+        let pin = RootPin::new(&root).unwrap();
+        pin.recheck(&file).unwrap();
+        std::fs::rename(&root, temp.path().join("moved")).unwrap();
+        std::fs::create_dir(&root).unwrap();
+        assert!(pin.recheck(&file).is_err());
+    }
+}

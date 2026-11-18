@@ -1,0 +1,15 @@
+[package]
+name = "orr_fsid"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Folder identity checks shared by the authoring tools: open a folder and verify that it did not change"
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+tempfile = "3"

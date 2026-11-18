@@ -7,7 +7,7 @@ use orr_sample::{
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{File, Metadata},
+    fs::File,
     io::{Read, Write},
     path::{Path, PathBuf},
 };
@@ -28,60 +28,22 @@ pub struct Panel {
 struct RootPin {
     path: PathBuf,
     /// Keep the admitted directory alive and compare its filesystem identity.
-    directory: File,
+    directory: orr_fsid::PinnedDirectory,
 }
 
 impl RootPin {
     fn new(parent: &Path) -> Result<Self, String> {
         let path = checked_directory(parent)?;
-        let directory = open_directory(&path)?;
+        let directory = orr_fsid::PinnedDirectory::open(&path)
+            .map_err(|_| "UI document root must be a regular non-reparse directory".to_string())?;
         Ok(Self { path, directory })
     }
     fn recheck(&self, parent: &Path) -> Result<(), String> {
         let current = checked_directory(parent)?;
-        let metadata = std::fs::symlink_metadata(&current).map_err(|e| e.to_string())?;
-        let pinned = self.directory.metadata().map_err(|e| e.to_string())?;
-        if current != self.path || !same_directory(&metadata, &pinned) {
-            return Err("UI document directory changed; reopen the project before saving".into());
-        }
-        Ok(())
+        self.directory.verify_unchanged_at(&current).map_err(|_| {
+            "UI document directory changed; reopen the project before saving".to_string()
+        })
     }
-}
-
-#[cfg(windows)]
-fn open_directory(path: &Path) -> Result<File, String> {
-    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
-
-    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-
-    // Windows requires backup semantics to open a directory handle. Do not
-    // follow a reparse point introduced after checked_directory admitted it.
-    let directory = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)
-        .map_err(|error| error.to_string())?;
-    let metadata = directory.metadata().map_err(|error| error.to_string())?;
-    if !metadata.is_dir() || metadata.file_attributes() & 0x0400 != 0 {
-        return Err("UI document root must be a regular non-reparse directory".into());
-    }
-    Ok(directory)
-}
-#[cfg(not(windows))]
-fn open_directory(path: &Path) -> Result<File, String> {
-    File::open(path).map_err(|error| error.to_string())
-}
-
-#[cfg(unix)]
-fn same_directory(a: &Metadata, b: &Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    a.dev() == b.dev() && a.ino() == b.ino()
-}
-#[cfg(not(unix))]
-fn same_directory(a: &Metadata, b: &Metadata) -> bool {
-    // If the platform cannot report creation identity, fail closed on Save.
-    matches!((a.created(), b.created()), (Ok(a), Ok(b)) if a == b)
 }
 
 fn checked_directory(path: &Path) -> Result<PathBuf, String> {
@@ -671,5 +633,22 @@ mod tests {
         std::fs::write(&path, prepared.document.to_bytes().unwrap()).unwrap();
         assert!(panel.save().is_err());
         std::fs::remove_dir_all(moved).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod root_pin_tests {
+    use super::*;
+
+    #[test]
+    fn pin_admits_a_project_folder_and_detects_a_replaced_one() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("project");
+        std::fs::create_dir(&root).unwrap();
+        let pin = RootPin::new(&root).unwrap();
+        pin.recheck(&root).unwrap();
+        std::fs::rename(&root, temp.path().join("moved")).unwrap();
+        std::fs::create_dir(&root).unwrap();
+        assert!(pin.recheck(&root).is_err());
     }
 }

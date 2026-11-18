@@ -113,6 +113,7 @@ tempfile = { version = "3", optional = true }
 # The editor is a view: it sees the simulation only through the bridge and ERP.
 # No orr_sim / orr_session / orr_edit / orr_physics here (see tests/deps.rs).
 orr_fp = { path = "../orr_fp" }
+orr_fsid = { path = "../orr_fsid" }
 orr_ecs = { path = "../orr_ecs" }
 orr_reflect = { path = "../orr_reflect", features = ["scene"] }
 orr_bridge = { path = "../orr_bridge" }

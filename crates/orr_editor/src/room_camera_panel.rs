@@ -4,10 +4,8 @@ use orr_sample::{
     room_camera::{Document, Projection},
     room_project::PreparedRoomCamera,
 };
-#[cfg(windows)]
-use std::fs::OpenOptions;
 use std::{
-    fs::{File, Metadata},
+    fs::File,
     io::{Read, Write},
     path::{Path, PathBuf},
 };
@@ -41,76 +39,21 @@ pub struct Panel {
 
 struct RootPin {
     path: PathBuf,
-    directory: File,
+    directory: orr_fsid::PinnedDirectory,
 }
 impl RootPin {
     fn new(parent: &Path) -> Result<Self, String> {
         let path = checked_directory(parent)?;
-        let directory = open_directory(&path)?;
+        let directory = orr_fsid::PinnedDirectory::open(&path)
+            .map_err(|_| "Camera project root must be a regular non-reparse directory".to_string())?;
         Ok(Self { path, directory })
     }
     fn recheck(&self, path: &Path) -> Result<(), String> {
         let current = checked_directory(path.parent().unwrap_or(Path::new(".")))?;
-        let metadata = std::fs::symlink_metadata(&current).map_err(|e| e.to_string())?;
-        let pinned = self.directory.metadata().map_err(|e| e.to_string())?;
-        if current != self.path
-            || !is_safe_directory(&metadata)
-            || !is_safe_directory(&pinned)
-            || !same_directory(&metadata, &pinned)
-        {
-            return Err("Camera project directory changed; reopen before saving".into());
-        }
-        Ok(())
+        self.directory
+            .verify_unchanged_at(&current)
+            .map_err(|_| "Camera project directory changed; reopen before saving".to_string())
     }
-}
-#[cfg(windows)]
-fn open_directory(path: &Path) -> Result<File, String> {
-    use std::os::windows::fs::OpenOptionsExt;
-
-    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-
-    let directory = OpenOptions::new()
-        .read(true)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)
-        .map_err(|error| error.to_string())?;
-    let metadata = directory.metadata().map_err(|error| error.to_string())?;
-    if !is_safe_directory(&metadata) {
-        return Err("Camera project root must be a regular non-reparse directory".into());
-    }
-    Ok(directory)
-}
-#[cfg(not(windows))]
-fn open_directory(path: &Path) -> Result<File, String> {
-    let directory = File::open(path).map_err(|error| error.to_string())?;
-    if !directory
-        .metadata()
-        .map_err(|error| error.to_string())?
-        .is_dir()
-    {
-        return Err("Camera project root must be a directory".into());
-    }
-    Ok(directory)
-}
-#[cfg(windows)]
-fn is_safe_directory(metadata: &Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-
-    metadata.is_dir() && metadata.file_attributes() & 0x0400 == 0
-}
-#[cfg(not(windows))]
-fn is_safe_directory(metadata: &Metadata) -> bool {
-    metadata.is_dir()
-}
-#[cfg(unix)]
-fn same_directory(a: &Metadata, b: &Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    a.dev() == b.dev() && a.ino() == b.ino()
-}
-#[cfg(not(unix))]
-fn same_directory(a: &Metadata, b: &Metadata) -> bool {
-    matches!((a.created(), b.created()), (Ok(a), Ok(b)) if a == b)
 }
 fn checked_directory(path: &Path) -> Result<PathBuf, String> {
     orr_model_bindings::model_bindings::resolve_project(path, ".")
@@ -239,7 +182,7 @@ impl Panel {
         self.saved_bytes = bytes;
         #[cfg(unix)]
         check(SaveStage::BeforeDirectorySync)
-            .and_then(|_| pin.directory.sync_all())
+            .and_then(|_| pin.directory.file().sync_all())
             .map_err(|e| {
                 format!("Camera replaced, but directory sync failed; durability is uncertain: {e}")
             })?;
@@ -764,3 +707,21 @@ mod projection_match;
 #[cfg(all(test,target_os="linux",feature="package-manager",feature="project-create",feature="room-character",feature="room-lighting",feature="windows-export"))]
 #[path="room_camera_panel/projection_match_integration_tests.rs"]
 mod projection_match_integration_tests;
+
+#[cfg(test)]
+mod root_pin_tests {
+    use super::*;
+
+    #[test]
+    fn pin_admits_a_project_folder_and_detects_a_replaced_one() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("project");
+        std::fs::create_dir(&root).unwrap();
+        let file = root.join("camera.json");
+        let pin = RootPin::new(&root).unwrap();
+        pin.recheck(&file).unwrap();
+        std::fs::rename(&root, temp.path().join("moved")).unwrap();
+        std::fs::create_dir(&root).unwrap();
+        assert!(pin.recheck(&file).is_err());
+    }
+}
