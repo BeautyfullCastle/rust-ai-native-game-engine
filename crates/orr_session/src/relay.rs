@@ -767,6 +767,7 @@ impl<G: Game, L: Link> RelayClient<G, L> {
                 input_size: std::mem::size_of::<G::Input>() as u32,
                 want_slot: self.cfg.want_slot.map_or(NO_SLOT, |s| s.0),
                 token: self.cfg.token,
+                client_version: orr_proto::PROTOCOL_VERSION,
             };
             self.src_mut().send(Channel::Reliable, &ClientMsg::Hello(hello));
             self.state = ClientState::Handshake;

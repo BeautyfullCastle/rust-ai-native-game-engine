@@ -23,7 +23,8 @@
 //! A room created with [`RelayServer::create_authoritative_room`] also runs
 //! the game's `orr_sim` headless ([`ServerSim`], [`GameSim`]) on the
 //! confirmed bundles, one tick at a time, as each tick is finalized. The
-//! wire protocol is the relay's plus version 3 additions (`Welcome::flags`,
+//! wire protocol is the relay's (protocol version 5, see `orr_proto::msg`)
+//! plus the additions of version 3 (`Welcome::flags`,
 //! `ServerMsg::Correction`), so clients are the same `RelayClient`s. What the
 //! server adds:
 //!

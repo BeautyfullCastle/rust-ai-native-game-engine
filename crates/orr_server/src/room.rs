@@ -122,6 +122,11 @@ pub struct RoomConfig {
     /// Inputs for ticks further than this ahead of the clock are ignored.
     pub max_ticks_ahead: u32,
     pub vacant_policy: VacantPolicy,
+    /// A client whose `Hello` states a protocol version below this one is
+    /// refused (`RejectReason::BadVersion`). A `Hello` that states none (a
+    /// client older than version 5, which can be version 2, 3 or 4) counts as
+    /// version 2. Set this to 5 to refuse such clients.
+    pub min_client_version: u32,
     /// Keep every confirmed bundle (for replays and tests) in
     /// [`Room::recorded`](crate::RelayServer::recorded).
     pub record_all: bool,
@@ -151,6 +156,7 @@ impl RoomConfig {
             idle_close_ticks: 1800,
             max_ticks_ahead: 120,
             vacant_policy: VacantPolicy::RepeatLast,
+            min_client_version: orr_proto::MIN_PROTOCOL_VERSION,
             record_all: false,
         }
     }
@@ -588,6 +594,13 @@ impl Room {
         h: &Hello,
         new_token: u64,
     ) -> Result<(u8, Option<ConnId>), RejectReason> {
+        let stated = if h.client_version == 0 { orr_proto::MIN_PROTOCOL_VERSION } else { h.client_version };
+        if stated < self.cfg.min_client_version || stated > orr_proto::PROTOCOL_VERSION {
+            return Err(RejectReason::BadVersion {
+                server: orr_proto::PROTOCOL_VERSION,
+                min_client: self.cfg.min_client_version,
+            });
+        }
         if !require_same_build_hash(self.cfg.build_hash, h.build_hash) {
             return Err(RejectReason::BuildHashMismatch { server: self.cfg.build_hash, client: h.build_hash });
         }

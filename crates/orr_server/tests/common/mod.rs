@@ -36,6 +36,19 @@ pub fn arena_script(client: usize, tick: u64) -> (ArenaInput, Vec<SpawnBulletCmd
     (input, cmds)
 }
 
+/// The arena input as a pure function of `(client, tick)` that changes every
+/// `period` ticks (`0` = never), without commands.
+pub fn periodic_input(client: usize, tick: u64, period: u64) -> ArenaInput {
+    let k = tick.checked_div(period).map_or(0, |n| n + client as u64);
+    let ax = (k % 3) as i32 - 1;
+    let ay = ((k / 3) % 3) as i32 - 1;
+    ArenaInput::new(FP::from_int(ax), FP::from_int(ay), false)
+}
+
+pub fn periodic_script(period: u64) -> Script<Arena> {
+    Rc::new(move |client, tick| (periodic_input(client, tick, period), Vec::<SpawnBulletCmd>::new()))
+}
+
 pub fn arena_script_rc() -> Script<Arena> {
     Rc::new(arena_script)
 }

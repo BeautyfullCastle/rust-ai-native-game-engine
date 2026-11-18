@@ -62,6 +62,7 @@ fn handshake(game: Game, server_hash: u64, client_hash: u64) -> ServerMsg {
         input_size: presets::SAMPLE_INPUT_SIZE,
         want_slot: NO_SLOT,
         token: 0,
+        client_version: orr_proto::PROTOCOL_VERSION,
     };
     link.send(Channel::Reliable, &ClientMsg::Hello(hello).encode());
     server.update(0);
