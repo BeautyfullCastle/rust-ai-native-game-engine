@@ -1,6 +1,6 @@
 # 뷰 프레임워크 설계 (`orr_app`)
 
-갱신: 2026-11-17 · 상태: 제안 (아직 구현 전) · 관련: [설계 v1](design-v1.md) 4~6장, [getting-started.md](getting-started.md)
+갱신: 2026-11-18 · 상태: 1~7단계 구현 완료 (남은 것은 12장 각 단계의 남은 항목) · 관련: [설계 v1](design-v1.md) 4~6장, [getting-started.md](getting-started.md)
 
 ## 1. 목표
 
