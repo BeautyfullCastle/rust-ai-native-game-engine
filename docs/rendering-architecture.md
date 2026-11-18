@@ -387,6 +387,49 @@ Forest Valley 위를 동양식 용이 난다. 비행은 시뮬에서 고정소�
 | 10,000 | 0.10 ms | 0.89 ms | 9,095 → 1,812 |
 | 50,000 | 1.1 ms | 4.6 ms | 45,579 → 9,081 |
 
+### 1.21 에디터 씬과 장면 창 (`orr_editor::scenery_scene`)
+
+**문제.** `Edit > Forest Valley scene…` 창은 `orr_scenery::Renderer`로 생성된 계곡을 따로 그린다. 창의 설정 36개는 그 계곡에만 적용되었고, 에디터 뷰포트의 씬에는 닿지 않았다.
+
+**두 렌더러의 차이.**
+
+| | 뷰포트 (`orr_render` 합성 렌더러) | 장면 창 (`orr_scenery::Renderer`) |
+|---|---|---|
+| 입력 | 씬 컴포넌트: `Light`, `Sky`, `Environment`, `PostProcess`, `Terrain`, `Water`, `Scatter`, `Camera`, `Material`, `ViewRef` | 생성된 `World` 하나와 `Settings` |
+| 하늘·물·식생 | `orr_scenery::passes::OutdoorPass`(같은 셰이더)를 렌더 패스로 붙여 그린다 | 같은 셰이더를 직접 그린다 |
+| 모델·표면 셰이더·선택·기즈모·Play | 있다 | 없다 |
+| 설정 | 컴포넌트 필드 | `Settings` 구조체 |
+
+뷰포트는 이미 `orr_scenery`의 하늘·물·식생 코드를 쓴다. 그래서 뷰포트 전체를 `orr_scenery::Renderer`로 바꾸는 (a)안은 모델, 표면 셰이더, 선택, 기즈모, Play를 버리거나 다시 만들어야 한다. 작은 변경이 아니다.
+
+**결정: (b) 창의 설정을 열린 씬의 컴포넌트에 적용한다.** 창에 `Open scene` 모드를 둔다. 컨트롤을 바꾸면 그 컨트롤에 해당하는 컴포넌트 필드가 일반 씬 편집(실행 취소, 저장, 인스펙터)으로 바뀐다. 창은 모드를 바꿀 때 씬의 값을 읽어 컨트롤에 보여 준다. 구현은 `crates/orr_editor/src/scenery_scene.rs`다.
+
+이유는 세 가지다. 첫째, 뷰포트의 선택·기즈모·ViewRef 모델·Play가 그대로 남는다. 둘째, 값이 씬 파일에 저장되어 내보낸 게임에도 따라간다. 셋째, `orr` 명령과 에이전트도 같은 필드를 고친다.
+
+**컨트롤과 필드.**
+
+| 컨트롤 | 씬 필드 |
+|---|---|
+| Sun: Hour | 해(첫 번째 켜진 방향광)의 `Transform3.rotation` |
+| Sun: Intensity, Shadows: Wide range, Sun shadows | 해의 `Light.intensity`, `shadow_range`, `cast_shadows` |
+| Sun: Ambient | `Environment.ambient` |
+| Sky 4개, Fog 3개, Wind 2개 | `Sky`의 같은 이름 필드. Fog density는 0.7배(생성된 씬의 값) |
+| Water: Clarity, Ripples, Sun glint, Deep water color | 모든 `Water`의 같은 이름 필드 |
+| Water: Flow speed | 모든 `Water.flow`의 크기. 방향은 그대로 |
+| Look: Exposure | `PostProcess.exposure` |
+| Look: Auto exposure, Adaptation speed, Bloom, Bloom threshold, Light shafts, Saturation, Contrast, Vignette, Grain | `PostProcess.effects`의 `auto_exposure`, `bloom`, `light_shafts`, `color_grade`, `vignette`, `film_grain`. 없는 효과는 빈 칸에 넣는다. Grain은 0.04배 |
+
+씬에 필드가 없는 컨트롤은 Open scene 모드에서 꺼진다: Shadows(Softness, Sharp range), Water(Foam), Vegetation 전부, Ground 전부. 이것들은 `Scatter`, `Material`에 대응하는 필드가 없다. 생성된 계곡 모드에서는 그대로 쓴다.
+
+**적용 범위.** 컴포넌트를 등록한 게임(Yard3D, ViewYard3D)의 씬에 적용된다. 터레인 문서, 내비게이션, Room, 메시 게임은 아직 `orr_gfx`를 등록하지 않아 이 모드가 꺼져 있다. 같은 이유로 1.14의 첫 항목이 남아 있다. 터레인 문서는 지형을 `orr_gfx::Terrain`이 아니라 터레인 세션의 모델로 그리고, 게임의 입장 검사와 뷰 스트림 스키마가 `orr_gfx`를 모른다. 그래서 이 게임들에 컴포넌트를 넣는 일은 별도 작업이다.
+
+**편집 방식과 한계.**
+- 슬라이더를 끄는 동안은 하나의 실행 취소 항목이다. 한 번에 바뀌는 필드가 64개를 넘으면 에디터가 끌기를 취소한다. `Water` 컨트롤은 물 엔티티마다 필드 하나를 쓰므로, 물이 64개를 넘는 씬에서는 쓸 수 없다. Forest Valley는 18개다.
+- 씬의 해는 첫 번째 켜진 방향광이다. 해가 물리 몸체(`Body`)로 놓인 씬에서는 Hour가 회전을 바꾸지 못한다.
+- Hour는 해의 방향 가운데 방위각만 시각으로 되돌린다. 씬의 해가 창의 해 경로와 다른 고도에 있어도 시각을 한 번 바꾸면 창의 경로를 따른다.
+- 창은 씬 값을 모드를 바꿀 때와 `Read scene values`를 누를 때 읽는다. 인스펙터나 실행 취소로 바뀐 값은 그때까지 컨트롤에 반영되지 않는다.
+- 뷰포트 그림은 바뀌지 않았다. 같은 `orr_render` 경로이므로 프레임 시간도 같다. 에디터 테스트(`crates/orr_editor/tests/scenery_scene.rs`)에서 RTX 4060으로 Forest Valley를 재면 창이 닫혔을 때 4.8 ms, 창이 씬을 고치는 모드로 열려 있을 때 5.4 ms였다(동기화와 두 단계 실행 포함, 평균).
+
 ### 1.14 지금의 한계
 
 - Yard3D만 `orr_gfx`를 등록했다. Room, 지형, 내비게이션, 메시 게임은 아직 각자의 조명 별도 파일을 쓴다.
