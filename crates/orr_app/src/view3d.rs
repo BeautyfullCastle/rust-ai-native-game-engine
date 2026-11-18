@@ -531,6 +531,27 @@ mod tests {
     }
 
     #[test]
+    fn the_avatars_of_an_offline_lobby_are_drawn_with_the_models_of_their_view_assets() {
+        use orr_session::{PlayConfig, PlaySession};
+        use orr_testgame::lobby::{Lobby, LobbyConfig};
+
+        let config = LobbyConfig::from_view_assets(&["blue.orrview", "red.orrview"]);
+        let mut session = PlaySession::<Lobby>::new(PlayConfig::new(2, 1, 60), config);
+        session.announce_players().unwrap();
+        session.step_now().unwrap();
+        let assets = ViewAssets::from_assets(".", [asset("blue.orrview", "blue.glb", 1.0), asset("red.orrview", "red.glb", 1.0)]).unwrap();
+
+        let (models, list) = drawn(Look3D::default().assets(assets), session.frame());
+
+        let mut files: Vec<&str> = models.iter().map(|m| m.model.as_str()).collect();
+        files.sort_unstable();
+        assert_eq!(files, ["blue.glb", "red.glb"], "one model per player");
+        let xs: Vec<f32> = models.iter().map(|m| m.instance.translation[0]).collect();
+        assert!(xs.contains(&-1.5) && xs.contains(&1.5), "each avatar stands where on_player put it: {xs:?}");
+        assert_eq!(list.instances(MeshKind::Box).len(), 1, "the floor stays a shape");
+    }
+
+    #[test]
     fn a_game_without_view_refs_draws_as_before() {
         let mut f = Frame::new({
             let mut registry = ComponentRegistryBuilder::new();

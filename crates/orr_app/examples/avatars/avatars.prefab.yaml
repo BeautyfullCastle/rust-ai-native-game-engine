@@ -1,0 +1,14 @@
+schema: orr.scene/1
+# Avatar prefabs of the lobby: one entity is one prefab, in GUID order. `orr_gfx::ViewRef` holds the id
+# of a view asset (the hash of its path): pick it in the editor inspector, or run the `avatars` test.
+entities:
+  e_00000001:
+    name: blue_pawn
+    PlayerLink: { player: 255 }
+    orr_gfx::Transform3: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] }
+    orr_gfx::ViewRef: { asset: 15401713782714038999 }
+  e_00000002:
+    name: red_pawn
+    PlayerLink: { player: 255 }
+    orr_gfx::Transform3: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] }
+    orr_gfx::ViewRef: { asset: 7677620014921565166 }

@@ -9,13 +9,15 @@ use std::collections::BTreeMap;
 use orr_gfx_view::ViewAssets;
 use orr_render::model_renderer::MAX_STATIC_INSTANCES;
 use orr_render::orr_rhi::{Rhi, TextureFormat, Wgpu};
-use orr_render::{Camera3D, OffscreenTarget, ImportedBatch, ImportedSceneRenderer, ImportedSceneTarget, ModelRenderer, PointLightSettings, RenderList3D, Renderer3D, StaticInstance};
+use orr_render::{Camera3D, OffscreenTarget, ImportedBatch, ImportedSceneRenderer, ImportedSceneTarget, ModelRenderer, PointLightSettings, RenderList3D, Renderer3D, Settings3D, StaticInstance};
 
 use crate::view3d::ModelDraw;
 
 /// Shapes and models of a frame, drawn by one [`ImportedSceneRenderer`].
 pub(crate) struct ModelScene {
     composer: ImportedSceneRenderer<Wgpu>,
+    /// The shapes of the look. The composed pass has one sample per pixel, so this renderer has no MSAA.
+    shapes: Renderer3D<Wgpu>,
     rhi: Wgpu,
     format: TextureFormat,
     /// One renderer per model file; `None` for a file that could not be loaded (reported once).
@@ -26,15 +28,15 @@ pub(crate) struct ModelScene {
 impl ModelScene {
     pub(crate) fn new(rhi: Wgpu, format: TextureFormat) -> Result<Self, String> {
         let composer = ImportedSceneRenderer::new(rhi.clone(), format).map_err(|e| e.to_string())?;
-        Ok(Self { composer, rhi, format, renderers: BTreeMap::new(), last_error: None })
+        let shapes = Renderer3D::with_settings(rhi.clone(), format, Settings3D { msaa: 1, ..Settings3D::default() });
+        Ok(Self { composer, shapes, rhi, format, renderers: BTreeMap::new(), last_error: None })
     }
 
-    /// Draws the shapes of `list` (with the renderer `shapes`) and the `draws` into `view`.
+    /// Draws the shapes of `list` and the `draws` into `view`.
     /// The sun and the other lights of `list` light both. A model that cannot be loaded is
     /// reported on stderr once and left out.
     pub(crate) fn draw(
         &mut self,
-        shapes: &mut Renderer3D<Wgpu>,
         view: &<Wgpu as Rhi>::TextureView,
         size: (u32, u32),
         list: &RenderList3D,
@@ -63,7 +65,7 @@ impl ModelScene {
         }
         self.composer.scene_lights = list.scene_lights;
         self.composer.decals.clone_from(&list.decals);
-        let mut batches = vec![ImportedBatch::Procedural { renderer: shapes, list }];
+        let mut batches = vec![ImportedBatch::Procedural { renderer: &mut self.shapes, list }];
         for (path, renderer) in &mut self.renderers {
             if let (Some(renderer), Some(instances)) = (renderer.as_mut(), groups.get(path.as_str())) {
                 batches.push(ImportedBatch::StaticInstances { renderer, instances });
@@ -87,7 +89,6 @@ impl ModelScene {
     /// RGBA8, top row first. It does not depend on the window.
     pub(crate) fn capture(
         &mut self,
-        shapes: &mut Renderer3D<Wgpu>,
         size: (u32, u32),
         list: &RenderList3D,
         camera: &Camera3D,
@@ -95,7 +96,7 @@ impl ModelScene {
         assets: &ViewAssets,
     ) -> Vec<u8> {
         let target = OffscreenTarget::new(&self.rhi.clone(), size.0, size.1, self.format);
-        target.render_into(|_, view, size| self.draw(shapes, view, size, list, camera, draws, assets));
+        target.render_into(|_, view, size| self.draw(view, size, list, camera, draws, assets));
         target.read_rgba8()
     }
 

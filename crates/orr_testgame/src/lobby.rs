@@ -12,7 +12,8 @@
 use bytemuck::{Pod, Zeroable};
 use orr_ecs::{prefab, ComponentRegistryBuilder, Entity, Frame, Prefab, PrefabId};
 use orr_fp::{fp, FP};
-use orr_gfx::{Transform3, ViewRef};
+use orr_fp::FPVec3;
+use orr_gfx::{Material, Transform3, ViewRef};
 use orr_sim::{fn_systems, player_signals, register_player_link, Game, PlayerLink, PlayerSignal, PlayerSlot, Players, SimContext, Simulation, System};
 
 /// How far an avatar walks in one tick at full input: a quarter unit.
@@ -86,6 +87,7 @@ impl Game for Lobby {
 
     fn register(builder: &mut ComponentRegistryBuilder) {
         builder.register_component::<Transform3>(orr_gfx::names::TRANSFORM);
+        builder.register_component::<Material>(orr_gfx::names::MATERIAL);
         orr_gfx::register_view_ref(builder);
         register_player_link(builder);
         prefab::register(builder);
@@ -93,6 +95,10 @@ impl Game for Lobby {
 
     fn setup(frame: &mut Frame, config: &LobbyConfig) {
         prefab::install(frame, &config.avatars).expect("the lobby registers prefabs in Game::register");
+        // A floor to stand on: a slab 30 units wide, its top at height 0.
+        let floor = frame.spawn();
+        frame.add(floor, Transform3 { position: FPVec3::new(FP::ZERO, fp!(-0.25), FP::ZERO), scale: FPVec3::new(fp!(30), fp!(0.5), fp!(30)), ..Default::default() });
+        frame.add(floor, Material::new("floor"));
     }
 
     fn systems() -> Vec<Box<dyn System<Self>>> {

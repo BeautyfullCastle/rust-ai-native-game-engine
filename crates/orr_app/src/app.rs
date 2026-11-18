@@ -611,7 +611,7 @@ impl Display {
                         let d = &mut **d;
                         let (scene, renderer) = (d.scene.as_mut().expect("made above"), d.renderer.as_mut().expect("checked above"));
                         let (list, models) = (&d.list, &d.models);
-                        renderer.render_with(false, |shapes, target, size| scene.draw(shapes, target, size, list, &camera, models, assets));
+                        renderer.render_with(false, |_, target, size| scene.draw(target, size, list, &camera, models, assets));
                     }
                     None => {
                         d.renderer.as_mut().expect("checked above").render(&d.list, &camera);
@@ -633,8 +633,8 @@ impl Display {
                 let composed = d.model_scene().is_some();
                 if let Some(assets) = view.view_assets().filter(|_| composed) {
                     let d = &mut **d;
-                    let (scene, renderer) = (d.scene.as_mut().expect("made above"), d.renderer.as_mut().expect("checked above"));
-                    return Some(scene.capture(&mut renderer.renderer, size, &d.list, &camera, &d.models, assets));
+                    let scene = d.scene.as_mut().expect("made above");
+                    return Some(scene.capture(size, &d.list, &camera, &d.models, assets));
                 }
                 d.renderer.as_mut().map(|r| render_rgba3(&mut r.renderer, &d.list, &camera, size))
             }

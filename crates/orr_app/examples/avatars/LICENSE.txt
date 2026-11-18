@@ -1,0 +1,8 @@
+Original Orrery example fixtures: CC0-1.0
+
+blue.glb, red.glb and generate.py were written for the `avatars` example of orr_app. No third-party
+meshes or textures were used. To the extent copyright applies they are dedicated to the public domain
+under CC0 1.0 Universal: https://creativecommons.org/publicdomain/zero/1.0/
+
+Reproduce with Python 3 (standard library only), from this folder: python3 generate.py
+The example never runs the script; it loads the checked-in .glb files.
