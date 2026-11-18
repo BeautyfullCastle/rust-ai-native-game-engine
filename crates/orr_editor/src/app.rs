@@ -1505,7 +1505,7 @@ impl EditorApp {
         #[cfg(all(feature="package-manager",feature="room-animated-models"))]
         self.show_variant_model_preview(&ctx);
         #[cfg(feature="scenery")]
-        self.scenery.show(&ctx, self.render_state.as_ref());
+        self.scenery.show(&ctx, self.render_state.as_ref(), &mut self.editor);
         #[cfg(feature="collect-ui")]
         self.show_collect_ui_preview(&ctx);
         #[cfg(feature="room-authoring")]

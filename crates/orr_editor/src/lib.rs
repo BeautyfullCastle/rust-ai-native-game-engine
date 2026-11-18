@@ -89,6 +89,8 @@ pub mod sprite_playback;
 pub mod project;
 
 #[cfg(feature = "scenery")]
+pub mod scenery_scene;
+#[cfg(feature = "scenery")]
 pub mod scenery_window;
 #[cfg(feature = "animated-models")]
 pub mod animated_bindings;

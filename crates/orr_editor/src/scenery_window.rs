@@ -2,8 +2,14 @@
 //! `orr_scenery` and a panel that edits every setting of its look. Presets
 //! are saved to and loaded from a JSON file that `forest_valley --settings`
 //! also reads.
+//!
+//! The same settings can also edit the scene that is open in the editor, when
+//! its game keeps `orr_gfx` components (see [`crate::scenery_scene`]). Then the
+//! window shows no view of its own: the editor's viewport is the view.
 #![allow(clippy::float_arithmetic)]
 
+use crate::editor::Editor;
+use crate::scenery_scene;
 use crate::viewport::TARGET_FORMAT;
 use orr_render::orr_rhi::{Rhi, Wgpu};
 use orr_render::OffscreenTarget;
@@ -82,9 +88,22 @@ impl Scene {
     }
 }
 
+/// What the settings of the window change.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Target {
+    /// The generated valley that the window draws itself.
+    #[default]
+    Valley,
+    /// The scene that is open in the editor, through its components.
+    OpenScene,
+}
+
 /// State of the Forest Valley window. The window keeps its preset while closed.
 pub struct Panel {
     pub open: bool,
+    /// What the controls change. `OpenScene` works only while the open scene
+    /// has the components; otherwise the window acts as `Valley`.
+    pub target: Target,
     /// What the controls show. `preset.seed` and `preset.quality` take effect
     /// on the next frame by rebuilding the scene or the renderer.
     preset: Preset,
@@ -103,6 +122,7 @@ impl Default for Panel {
     fn default() -> Self {
         Self {
             open: false,
+            target: Target::Valley,
             preset: Preset::default(),
             file: DEFAULT_FILE.into(),
             status: String::new(),
@@ -168,29 +188,44 @@ impl Panel {
         self.status = "All settings are back to their defaults.".into();
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, render_state: Option<&egui_wgpu::RenderState>) {
+    /// Whether the controls now edit the open scene: chosen, and the scene can hold them.
+    pub fn edits_open_scene(&self, editor: &Editor) -> bool {
+        self.target == Target::OpenScene && scenery_scene::available(editor)
+    }
+
+    pub fn show(&mut self, ctx: &egui::Context, render_state: Option<&egui_wgpu::RenderState>, editor: &mut Editor) {
         if !self.open {
             // A closed window holds no GPU memory. The preset stays.
             self.gpu = None;
             self.scene = None;
             return;
         }
+        let on_scene = self.edits_open_scene(editor);
+        if on_scene {
+            // The editor's viewport is the view. The valley needs no memory.
+            self.gpu = None;
+            self.scene = None;
+        }
         let mut open = true;
         egui::Window::new("Forest Valley scene")
             .id(egui::Id::new("forest-valley-scene"))
             .open(&mut open)
             .default_pos(egui::pos2(60.0, 50.0))
-            .default_size(egui::vec2(1280.0, 760.0))
-            .min_size(egui::vec2(640.0, 360.0))
+            .default_size(if on_scene { egui::vec2(PANEL_WIDTH + 40.0, 760.0) } else { egui::vec2(1280.0, 760.0) })
+            .min_size(egui::vec2(if on_scene { PANEL_WIDTH } else { 640.0 }, 360.0))
             .resizable(true)
             .show(ctx, |ui| {
+                if on_scene {
+                    egui::ScrollArea::vertical().id_salt("forest-valley-settings").auto_shrink([false, false]).show(ui, |ui| self.controls(ui, editor));
+                    return;
+                }
                 let available = ui.available_size();
                 let panel_width = PANEL_WIDTH.min(available.x * 0.5);
                 let view = egui::vec2((available.x - panel_width - ui.spacing().item_spacing.x).max(160.0), available.y.max(160.0));
                 ui.horizontal_top(|ui| {
                     self.view(ui, view, render_state);
                     ui.allocate_ui_with_layout(egui::vec2(panel_width, view.y), egui::Layout::top_down(egui::Align::Min), |ui| {
-                        egui::ScrollArea::vertical().id_salt("forest-valley-settings").auto_shrink([false, false]).show(ui, |ui| self.controls(ui));
+                        egui::ScrollArea::vertical().id_salt("forest-valley-settings").auto_shrink([false, false]).show(ui, |ui| self.controls(ui, editor));
                     });
                 });
             });
@@ -250,8 +285,29 @@ impl Panel {
         ui.painter().image(texture, rect, egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
     }
 
-    fn controls(&mut self, ui: &mut egui::Ui) {
+    fn controls(&mut self, ui: &mut egui::Ui, editor: &mut Editor) {
+        let can_edit_scene = scenery_scene::available(editor);
+        if !can_edit_scene {
+            // The target can only be the valley now. It is kept for a scene that has the components.
+            ui.weak("The open scene has no sun, sky and post process components, so these settings change only the generated valley.");
+        } else {
+            ui.horizontal_wrapped(|ui| {
+                let before = self.target;
+                ui.selectable_value(&mut self.target, Target::Valley, "Edit the generated valley").on_hover_text("The window draws its own valley with these settings.");
+                ui.selectable_value(&mut self.target, Target::OpenScene, "Edit the open scene")
+                    .on_hover_text("Each change sets the matching fields of the scene's sun, sky, water and post process. Undo reverses it. The viewport shows the result.");
+                if before != self.target && self.target == Target::OpenScene {
+                    // The controls show the values of the scene.
+                    self.preset.settings = scenery_scene::read(editor, self.preset.settings);
+                    self.status = "The controls show the values of the open scene.".into();
+                }
+            });
+        }
+        let on_scene = self.edits_open_scene(editor);
         match (&self.gpu, &self.scene) {
+            _ if on_scene => {
+                ui.weak("Each change edits the open scene. Undo reverses it. Dimmed controls have no field in the scene.");
+            }
             (Some(gpu), Some(scene)) => {
                 let stats = gpu.renderer.last_frame_stats();
                 ui.weak(format!(
@@ -265,6 +321,19 @@ impl Panel {
             _ => {
                 ui.weak("The scene is not drawn.");
             }
+        }
+        if on_scene {
+            ui.separator();
+            if ui.button("Read scene values").on_hover_text("Shows the values that the open scene has now, for example after an undo.").clicked() {
+                self.preset.settings = scenery_scene::read(editor, self.preset.settings);
+                self.status = "The controls show the values of the open scene.".into();
+            }
+            if !self.status.is_empty() {
+                ui.label(&self.status);
+            }
+            ui.separator();
+            self.setting_controls(ui, Some(editor));
+            return;
         }
         ui.weak("Drag in the view to look. With the pointer over it: W A S D to move, Shift to move fast, Q and E to fly down and up.");
         ui.separator();
@@ -325,33 +394,80 @@ impl Panel {
                 }
             });
         });
+        self.setting_controls(ui, None);
+    }
+
+    /// The groups of toggles, sliders and colors. With an `editor`, every change
+    /// is also written to the open scene as one undoable edit: a drag is one edit.
+    fn setting_controls(&mut self, ui: &mut egui::Ui, mut editor: Option<&mut Editor>) {
+        let on_scene = editor.is_some();
         let settings = &mut self.preset.settings;
+        /// Writes the control to the open scene. The edit stays open while the pointer drags.
+        fn write(editor: &mut Editor, group: &str, name: &str, settings: &Settings, response: &egui::Response) {
+            if response.changed() {
+                editor.begin_edit(&format!("scene window: {group} {name}"));
+                let changes = scenery_scene::changes(editor, group, name, settings);
+                scenery_scene::apply(editor, &changes);
+                if !response.dragged() {
+                    editor.end_edit();
+                }
+            } else if response.drag_stopped() {
+                editor.end_edit();
+            }
+        }
         for group in GROUPS {
             crate::theme::header(group).default_open(true).show(ui, |ui| {
+                // A control with no field in the scene is dimmed while the scene is edited.
+                let enabled = |name: &str| !on_scene || scenery_scene::applies(group, name);
                 for toggle in TOGGLES.iter().filter(|toggle| toggle.group == group) {
                     let mut value = (toggle.get)(settings);
-                    if ui.checkbox(&mut value, toggle.name).on_hover_text(toggle.help).changed() {
+                    let response = ui.add_enabled(enabled(toggle.name), egui::Checkbox::new(&mut value, toggle.name)).on_hover_text(toggle.help);
+                    if response.changed() {
                         (toggle.set)(settings, value);
+                    }
+                    if let Some(editor) = editor.as_deref_mut() {
+                        write(editor, group, toggle.name, settings, &response);
                     }
                 }
                 for slider in SLIDERS.iter().filter(|slider| slider.group == group) {
                     let mut value = (slider.get)(settings);
-                    if ui.add(egui::Slider::new(&mut value, slider.min..=slider.max).text(slider.name)).on_hover_text(slider.help).changed() {
+                    let response = ui.add_enabled(enabled(slider.name), egui::Slider::new(&mut value, slider.min..=slider.max).text(slider.name)).on_hover_text(slider.help);
+                    if response.changed() {
                         (slider.set)(settings, value);
+                    }
+                    if let Some(editor) = editor.as_deref_mut() {
+                        write(editor, group, slider.name, settings, &response);
                     }
                 }
                 for color in COLORS.iter().filter(|color| color.group == group) {
                     let mut value = (color.get)(settings);
-                    let mut changed = false;
-                    ui.horizontal(|ui| {
-                        // Linear values that may pass 1, so three numbers and not a display color picker.
-                        for (channel, label) in value.iter_mut().zip(["R", "G", "B"]) {
-                            changed |= ui.add(egui::DragValue::new(channel).speed(0.005).range(0.0..=color.max).prefix(format!("{label} "))).changed();
-                        }
-                        ui.label(color.name).on_hover_text(color.help);
+                    let (mut changed, mut dragging, mut stopped) = (false, false, false);
+                    ui.add_enabled_ui(enabled(color.name), |ui| {
+                        ui.horizontal(|ui| {
+                            // Linear values that may pass 1, so three numbers and not a display color picker.
+                            for (channel, label) in value.iter_mut().zip(["R", "G", "B"]) {
+                                let response = ui.add(egui::DragValue::new(channel).speed(0.005).range(0.0..=color.max).prefix(format!("{label} ")));
+                                changed |= response.changed();
+                                dragging |= response.dragged();
+                                stopped |= response.drag_stopped();
+                            }
+                            ui.label(color.name).on_hover_text(color.help);
+                        });
                     });
                     if changed {
                         (color.set)(settings, value);
+                    }
+                    if let Some(editor) = editor.as_deref_mut() {
+                        if changed {
+                            editor.begin_edit(&format!("scene window: {group} {}", color.name));
+                            let changes = scenery_scene::changes(editor, group, color.name, settings);
+                            scenery_scene::apply(editor, &changes);
+                            if !dragging {
+                                editor.end_edit();
+                            }
+                        } else if stopped {
+                            editor.end_edit();
+                        }
                     }
                 }
             });
