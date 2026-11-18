@@ -108,6 +108,8 @@ pub(crate) struct Join {
     pub slot: Option<u8>,
     /// The token of an earlier join, to take its slot back (0: none).
     pub token: u64,
+    /// The start data of this window's player (the bytes of `Players::Player`); empty: the default.
+    pub player_data: Vec<u8>,
 }
 
 /// A window that joined: its bridge, and the seat the server gave it.
@@ -129,6 +131,7 @@ pub(crate) fn join<G: Game>(join: Join, config: G::Config) -> Result<Joined<G>, 
             let mut cfg = RelayClientConfig::new(ROOM, build_id::<G>());
             cfg.want_slot = join.slot.map(PlayerSlot);
             cfg.token = join.token;
+            cfg.player_data = join.player_data;
             let mut config = Some(config);
             let client = RelayClient::<G, _>::new(
                 cfg,
@@ -171,7 +174,7 @@ mod tests {
     }
 
     fn join_slot(server: &Hosted, slot: u8, token: u64) -> Result<Joined<Roster>, String> {
-        join::<Roster>(Join { addr: server.client_address(), slot: Some(slot), token }, ())
+        join::<Roster>(Join { addr: server.client_address(), slot: Some(slot), token, player_data: Vec::new() }, ())
     }
 
     /// Plays `window` for `ms` milliseconds of real time and keeps the verified signals it saw.
@@ -205,7 +208,7 @@ mod tests {
 
     #[test]
     fn a_window_that_cannot_reach_a_server_fails_with_a_message() {
-        let nobody = Join { addr: "127.0.0.1:1".to_string(), slot: None, token: 0 };
+        let nobody = Join { addr: "127.0.0.1:1".to_string(), slot: None, token: 0, player_data: Vec::new() };
         let error = join::<Roster>(nobody, ()).err().unwrap();
         assert!(!error.is_empty());
     }

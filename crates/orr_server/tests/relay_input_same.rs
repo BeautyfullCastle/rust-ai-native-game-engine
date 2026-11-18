@@ -118,6 +118,7 @@ fn answer(version: u32) -> ServerMsg {
         input_size: std::mem::size_of::<orr_testgame::ArenaInput>() as u32,
         want_slot: NO_SLOT,
         token: 0,
+        player_data: Vec::new(),
     };
     let mut bytes = ClientMsg::Hello(hello).encode();
     // The version is checked before the message checksum, so no re-sealing.

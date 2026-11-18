@@ -32,7 +32,7 @@ use orr_proto::{
     input_encoded_len, Bundle, Channel, ClientMsg, Hello, InputEntry, Link, LinkEvent, RejectReason, ServerMsg, TimeSync, Welcome,
     FLAG_ABSENT, FLAG_REPEATED, MAX_INPUT_ENTRIES, NO_SLOT,
 };
-use orr_sim::{Game, PlayerSlot, RawPlayerSignal, SimCommand};
+use orr_sim::{Game, PlayerSlot, RawPlayerSignal, SignalKind, SimCommand};
 
 use crate::dump::DesyncDump;
 use crate::events::EventBatch;
@@ -401,6 +401,12 @@ pub struct RelayClientConfig {
     pub want_slot: Option<PlayerSlot>,
     /// Token of an earlier `Welcome` to take the same slot back (`0` = new).
     pub token: u64,
+    /// The start data of this player: the bytes of `orr_sim::Players::Player`, at most
+    /// `orr_proto::MAX_PLAYER_DATA`. The server copies them into the `Added` signal that every
+    /// client gets for this player. Empty (the default) means the default start data. A seat that
+    /// was announced already keeps its data when this client takes it back with `token`. A larger
+    /// value makes the server reject the client (`RejectReason::PlayerDataTooLarge`).
+    pub player_data: Vec<u8>,
     /// Bounds of the input delay in ticks. Default `2..=10`.
     pub min_delay: u32,
     pub max_delay: u32,
@@ -444,6 +450,7 @@ impl RelayClientConfig {
             room,
             want_slot: None,
             token: 0,
+            player_data: Vec::new(),
             min_delay: 2,
             max_delay: 10,
             max_prediction: 8,
@@ -779,6 +786,7 @@ impl<G: Game, L: Link> RelayClient<G, L> {
                 input_size: std::mem::size_of::<G::Input>() as u32,
                 want_slot: self.cfg.want_slot.map_or(NO_SLOT, |s| s.0),
                 token: self.cfg.token,
+                player_data: self.cfg.player_data.clone(),
             };
             self.src_mut().send(Channel::Reliable, &ClientMsg::Hello(hello));
             self.state = ClientState::Handshake;
@@ -848,13 +856,13 @@ impl<G: Game, L: Link> RelayClient<G, L> {
                     }
                 }
             }
-            ServerMsg::Presence { slot, present, from_tick, seq } => {
+            ServerMsg::Presence { slot, present, from_tick, seq, data } => {
                 if !self.src_mut().note_signal(seq) {
                     return;
                 }
                 self.events.push(ClientEvent::Presence { slot, present, from_tick });
                 let signal = if present {
-                    RawPlayerSignal::added(PlayerSlot(slot))
+                    RawPlayerSignal { kind: SignalKind::Added, slot: PlayerSlot(slot), data }
                 } else {
                     RawPlayerSignal::disconnected(PlayerSlot(slot))
                 };

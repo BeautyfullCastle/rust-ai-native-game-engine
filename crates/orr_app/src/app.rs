@@ -13,7 +13,7 @@ use orr_reflect::{Scene, TypeRegistry};
 use orr_render::orr_rhi::Wgpu;
 use orr_render::{Camera, Camera3D, RenderList, RenderList3D, Settings3D, WindowRenderer, WindowRenderer3D};
 use orr_session::{PlayConfig, PlaySession};
-use orr_sim::{Game, Simulation};
+use orr_sim::{Game, Players, Simulation};
 use orr_view::{RenderItem, RenderItem3, ViewConfig, ViewWorld, ViewWorld3};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -162,6 +162,8 @@ pub struct App<G: Game> {
     view: Option<Rc<dyn View2D>>,
     view3: Option<Rc<dyn View3D>>,
     views: Views<G>,
+    /// The start data of the local players, as bytes (see [`App::player_data`]); empty: the default.
+    player_data: Vec<u8>,
 }
 
 impl<G: Game> App<G>
@@ -199,6 +201,7 @@ impl<G: Game> App<G> {
             view: None,
             view3: None,
             views: Views::new(),
+            player_data: Vec::new(),
         }
     }
 
@@ -231,6 +234,22 @@ impl<G: Game> App<G> {
     /// [`crate::ViewContext::local_players`] and `is_local` report all of them.
     pub fn local_players(mut self, count: u8) -> Self {
         self.local_players = count.max(1);
+        self
+    }
+
+    /// The start data of the local players, for a game with [`Players`]: the `data` of the `Added`
+    /// signal that creates their avatars (a color, a name, a character). Offline, every local
+    /// player gets it and the other players get the default value. With `--host` and `--connect`,
+    /// the window sends it when it joins and the server gives it to every window, in the same
+    /// `Added` signal. Without this call the start data is `G::Player::default()`.
+    ///
+    /// `Players::Player` must be at most `orr_proto::MAX_PLAYER_DATA` (256) bytes; the run
+    /// stops with an error before it starts otherwise.
+    pub fn player_data(mut self, value: G::Player) -> Self
+    where
+        G: Players,
+    {
+        self.player_data = bytemuck::bytes_of(&value).to_vec();
         self
     }
 
@@ -308,6 +327,7 @@ impl<G: Game> App<G> {
     }
 
     fn build_bridge(&mut self) -> Result<Offline<G>, Error> {
+        self.check_player_data()?;
         let players = self.players.max(self.local_players);
         let cfg = PlayConfig::new(players, self.seed, self.tick_rate);
         let session = match self.scene.take() {
@@ -315,18 +335,30 @@ impl<G: Game> App<G> {
             None => PlaySession::<G>::new(cfg, self.config.take().ok_or_else(|| Error("the app was already run".to_string()))?),
         };
         // Offline, the app is the "server": it announces every player in tick 1.
-        let mut host =
-            PlayHost::new(session, LOCAL_SLOT).with_extra_local_slots((1..self.local_players).map(PlayerSlot)).with_announced_players();
+        let (local_players, data) = (self.local_players, std::mem::take(&mut self.player_data));
+        let mut host = PlayHost::new(session, LOCAL_SLOT)
+            .with_extra_local_slots((1..self.local_players).map(PlayerSlot))
+            .with_announced_players_data(|slot| if slot.0 < local_players { data.clone() } else { Vec::new() });
         if let Some(bot) = self.bot.take() {
             host = host.with_bot(bot);
         }
         Ok(InProc::new(host, BridgeConfig::default()))
     }
 
+    /// The start data must fit a `Hello`, also offline, so that a game runs the same way in both modes.
+    fn check_player_data(&self) -> Result<(), Error> {
+        let (len, max) = (self.player_data.len(), orr_proto::MAX_PLAYER_DATA);
+        if len > max {
+            return Err(Error(format!("the player data is {len} bytes, more than the {max} bytes a server takes")));
+        }
+        Ok(())
+    }
+
     /// What a networked run needs from the builder: the number of players the room waits for
     /// (every window plays one slot, so the larger of `players` and `local_players`) and the
     /// config of the game.
     fn net_parts(&mut self) -> Result<(u8, G::Config), Error> {
+        self.check_player_data()?;
         if self.scene.is_some() {
             return Err(Error("a scene file is not supported with --host or --connect yet".to_string()));
         }
@@ -340,7 +372,7 @@ impl<G: Game> App<G> {
         let room = net::room_config::<G>(players, self.tick_rate, self.seed);
         let server = Hosted::start(bind, room, self.seed)?;
         eprintln!("hosting {players} players on {} (other windows: --connect {})", server.addr(), server.client_address());
-        let join = Join { addr: server.client_address(), slot: Some(0), token: 0 };
+        let join = Join { addr: server.client_address(), slot: Some(0), token: 0, player_data: std::mem::take(&mut self.player_data) };
         let joined = net::join::<G>(join, config)?;
         Ok((Driver::Net(joined.bridge), server))
     }
@@ -348,7 +380,7 @@ impl<G: Game> App<G> {
     /// `--connect`: this window is a client of the server at `addr`.
     fn build_joined(&mut self, addr: String, args: &Args) -> Result<Driver<G>, Error> {
         let (_, config) = self.net_parts()?;
-        let join = Join { addr: addr.clone(), slot: args.slot, token: args.token };
+        let join = Join { addr: addr.clone(), slot: args.slot, token: args.token, player_data: std::mem::take(&mut self.player_data) };
         let joined = net::join::<G>(join, config)?;
         eprintln!(
             "playing as slot {} of {}. To take the seat again after closing this window: --connect {} --slot {} --token {}",
@@ -823,6 +855,7 @@ mod tests {
     use std::cell::Cell;
 
     use orr_games::physics_game::{register_reflect, PhysConfig, PhysGame, PhysInput, SceneMode, TICK_RATE};
+    use orr_testgame::roster::{Avatar, Profile, Roster};
 
     use super::*;
 
@@ -852,6 +885,16 @@ mod tests {
         assert_eq!(bridge.player_count(), 2);
         assert_eq!(bridge.local_slot(), PlayerSlot(0));
         assert_eq!(asked.get(), 30);
+    }
+
+    #[test]
+    fn the_player_data_of_the_app_is_the_start_data_of_every_local_player_and_not_of_the_others() {
+        let mut bridge = App::<Roster>::new().players(3).local_players(2).player_data(Profile { color: 5, _pad: 0 }).build_bridge().unwrap();
+        bridge.step(3);
+        let snapshot = bridge.snapshot().unwrap();
+        let mut avatars: Vec<(u32, u32)> = snapshot.predicted().dense::<Avatar>().1.iter().map(|a| (a.slot, a.color)).collect();
+        avatars.sort_unstable();
+        assert_eq!(avatars, [(0, 5), (1, 5), (2, 0)]);
     }
 
     #[test]

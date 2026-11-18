@@ -680,7 +680,7 @@ impl Rng {
 fn random_and_mutated_messages_never_panic_the_codecs() {
     let mut rng = Rng(1);
     let seeds: Vec<Vec<u8>> = vec![
-        ClientMsg::Hello(Hello { build_hash: 1, room: 1, input_size: 4, want_slot: NO_SLOT, token: 0 }).encode(),
+        ClientMsg::Hello(Hello { build_hash: 1, room: 1, input_size: 4, want_slot: NO_SLOT, token: 0, player_data: vec![] }).encode(),
         ClientMsg::Input {
             slot: 0,
             input_size: 4,
@@ -715,8 +715,8 @@ fn random_and_mutated_messages_never_panic_the_codecs() {
 fn nonsense_client_msgs(rng: &mut Rng) -> Vec<Vec<u8>> {
     let big = rng.next();
     vec![
-        ClientMsg::Hello(Hello { build_hash: 0, room: 1, input_size: 24, want_slot: 200, token: big }).encode(),
-        ClientMsg::Hello(Hello { build_hash: 0, room: 99, input_size: 24, want_slot: NO_SLOT, token: 0 }).encode(),
+        ClientMsg::Hello(Hello { build_hash: 0, room: 1, input_size: 24, want_slot: 200, token: big, player_data: vec![] }).encode(),
+        ClientMsg::Hello(Hello { build_hash: 0, room: 99, input_size: 24, want_slot: NO_SLOT, token: 0, player_data: vec![] }).encode(),
         ClientMsg::Input { slot: 250, input_size: 24, ack_tick: u64::MAX, entries: vec![] }.encode(),
         ClientMsg::Input {
             slot: 0,
@@ -745,8 +745,8 @@ fn nonsense_server_msgs(rng: &mut Rng) -> Vec<Vec<u8>> {
         ServerMsg::TimeSync(TimeSync { window_from: 0, finalized: 0, min_slack_us: i32::MAX, avg_slack_us: 0, samples: 1, late: 0 }).encode(),
         ServerMsg::Desync { tick: u64::MAX, reports: vec![(200, 1)] }.encode(),
         ServerMsg::Desync { tick: 0, reports: vec![] }.encode(),
-        ServerMsg::Presence { slot: 250, present: true, from_tick: u64::MAX, seq: 0 }.encode(),
-        ServerMsg::Presence { slot: 250, present: true, from_tick: u64::MAX, seq: u32::MAX }.encode(),
+        ServerMsg::Presence { slot: 250, present: true, from_tick: u64::MAX, seq: 0, data: vec![] }.encode(),
+        ServerMsg::Presence { slot: 250, present: true, from_tick: u64::MAX, seq: u32::MAX, data: vec![] }.encode(),
         ServerMsg::SeatChange { slot: 250, change: orr_proto::SEAT_REMOVED, from_tick: 0, seq: 1 }.encode(),
         ServerMsg::SnapshotRequest { request_id: 5, tick: 30 }.encode(),
         ServerMsg::JoinSnapshot { tick: 1, checksum: 1, data: vec![1, 2, 3], signals: 0 }.encode(),

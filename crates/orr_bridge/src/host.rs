@@ -307,9 +307,16 @@ impl<G: Game> PlayHost<G> {
     /// server. The signals are recorded with the tick, so a replay of the
     /// session applies them again. Call it before the first tick. A game
     /// without `Players` ignores them; the view still gets the notes.
-    pub fn with_announced_players(mut self) -> Self {
+    pub fn with_announced_players(self) -> Self {
+        self.with_announced_players_data(|_| Vec::new())
+    }
+
+    /// Like [`PlayHost::with_announced_players`], with the start data `data(slot)` in the `Added`
+    /// signal of each slot: the bytes of `orr_sim::Players::Player`, or empty for the default
+    /// value. A networked client gives its start data in the `Hello` instead.
+    pub fn with_announced_players_data(mut self, data: impl FnMut(PlayerSlot) -> Vec<u8>) -> Self {
         // A viewer session is read-only and has no live tick to announce in.
-        let _ = self.session.announce_players();
+        let _ = self.session.announce_players_with(data);
         self
     }
 

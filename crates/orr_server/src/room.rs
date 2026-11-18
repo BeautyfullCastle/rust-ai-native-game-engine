@@ -27,7 +27,7 @@ use std::collections::VecDeque;
 
 use orr_proto::{
     confirmed_encoded_len, Bundle, Channel, ConnId, Endpoint, Hello, InputEntry, RejectReason, ServerMsg, SlotConfirmed, TimeSync, Welcome,
-    BYE_KICKED_CHEAT, BYE_KICKED_DESYNC, FLAG_ABSENT, FLAG_REPEATED, NO_SLOT, SERVER_SLOT, WELCOME_AUTHORITATIVE,
+    BYE_KICKED_CHEAT, BYE_KICKED_DESYNC, FLAG_ABSENT, FLAG_REPEATED, MAX_PLAYER_DATA, NO_SLOT, SERVER_SLOT, WELCOME_AUTHORITATIVE,
 };
 use orr_session::DesyncDump;
 
@@ -275,10 +275,11 @@ enum SeatEvent {
 }
 
 impl SeatEvent {
-    fn message(self, slot: u8, from_tick: u64, seq: u32) -> ServerMsg {
+    /// `data`: the start data of the player, for `Added`.
+    fn message(self, slot: u8, from_tick: u64, seq: u32, data: &[u8]) -> ServerMsg {
         match self {
-            SeatEvent::Added => ServerMsg::Presence { slot, present: true, from_tick, seq },
-            SeatEvent::Disconnected => ServerMsg::Presence { slot, present: false, from_tick, seq },
+            SeatEvent::Added => ServerMsg::Presence { slot, present: true, from_tick, seq, data: data.to_vec() },
+            SeatEvent::Disconnected => ServerMsg::Presence { slot, present: false, from_tick, seq, data: Vec::new() },
             SeatEvent::Reconnected => ServerMsg::SeatChange { slot, change: orr_proto::SEAT_RECONNECTED, from_tick, seq },
             SeatEvent::Removed => ServerMsg::SeatChange { slot, change: orr_proto::SEAT_REMOVED, from_tick, seq },
         }
@@ -291,12 +292,18 @@ struct SeatRec {
     from_tick: u64,
     slot: u8,
     event: SeatEvent,
+    /// The start data of the player, for `Added`; empty for the other events.
+    data: Vec<u8>,
 }
 
 struct Player {
     conn: ConnId,
     token: u64,
     phase: Phase,
+    /// The start data of the `Hello` of this connection. The room announces it with `Added`
+    /// only. A player who comes back to a seat that was announced (`Reconnected`) keeps the
+    /// data that the seat was announced with, because every sim has applied it already.
+    data: Vec<u8>,
 }
 
 #[derive(Clone, Copy)]
@@ -632,6 +639,9 @@ impl Room {
         if h.input_size != self.cfg.input_size {
             return Err(RejectReason::InputSizeMismatch { server: self.cfg.input_size, client: h.input_size });
         }
+        if h.player_data.len() > MAX_PLAYER_DATA {
+            return Err(RejectReason::PlayerDataTooLarge { max: MAX_PLAYER_DATA as u32, len: h.player_data.len() as u32 });
+        }
         let (slot, token, stale) = self.pick_slot(h, new_token)?;
         if stale.is_some() {
             // The old connection is gone for the others too: they see
@@ -640,7 +650,7 @@ impl Room {
         }
         let phase = if self.running { Phase::AwaitSnapshot } else { Phase::Lobby };
         let s = &mut self.slots[slot as usize];
-        s.player = Some(Player { conn, token, phase });
+        s.player = Some(Player { conn, token, phase, data: h.player_data.clone() });
         s.reserved = None;
         s.pending.clear();
         s.seen.clear();
@@ -741,15 +751,20 @@ impl Room {
                 SeatEvent::Disconnected => false,
                 SeatEvent::Removed => return,
             };
-            self.broadcast(out, &ServerMsg::Presence { slot, present, from_tick, seq: 0 });
+            self.broadcast(out, &ServerMsg::Presence { slot, present, from_tick, seq: 0, data: Vec::new() });
             return;
         }
         // The count of `signals_up_to` needs the ticks to be in the order of the numbers.
         debug_assert!(self.seat_log.last().is_none_or(|r| r.from_tick <= from_tick));
         self.signal_seq += 1;
         let seq = self.signal_seq;
-        self.seat_log.push(SeatRec { seq, from_tick, slot, event });
-        self.broadcast(out, &event.message(slot, from_tick, seq));
+        let data = match event {
+            SeatEvent::Added => self.slots[usize::from(slot)].player.as_ref().map(|p| p.data.clone()).unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        let msg = event.message(slot, from_tick, seq, &data);
+        self.seat_log.push(SeatRec { seq, from_tick, slot, event, data });
+        self.broadcast(out, &msg);
     }
 
     /// How many signals have a tick at or before `tick`: the clients must
@@ -1404,7 +1419,7 @@ impl Room {
         // The snapshot holds the signals up to its tick (`signals` of them).
         // The later seat changes it does not know are sent again, in their order.
         for rec in self.seat_log.iter().filter(|r| r.from_tick > tick) {
-            out.send(conn, Channel::Reliable, &rec.event.message(rec.slot, rec.from_tick, rec.seq));
+            out.send(conn, Channel::Reliable, &rec.event.message(rec.slot, rec.from_tick, rec.seq, &rec.data));
         }
         let input_size = self.cfg.input_size;
         let mut backlog = 0u32;
