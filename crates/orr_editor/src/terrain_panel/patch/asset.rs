@@ -8,7 +8,7 @@ use std::{
     path::{Component, Path},
 };
 #[cfg(any(unix, windows))]
-use std::{fs, io::Read, path::PathBuf};
+use std::{fs, io::Read};
 
 const MAX_ASSET_BYTES: usize = 256 * 1024;
 #[derive(Serialize, Deserialize)]
@@ -135,102 +135,43 @@ fn checked_path(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(unix)]
-fn identity(metadata: &fs::Metadata) -> (u64, u64) {
-    use std::os::unix::fs::MetadataExt;
-    (metadata.dev(), metadata.ino())
-}
-/// Windows has no stable file index in std. The creation time stands in for it:
-/// a replaced directory or file gets a new one. The second field is never zero.
+/// Size, attributes and times of one file. Identity is compared by handle, not here.
 #[cfg(windows)]
-fn identity(metadata: &fs::Metadata) -> (u64, u64) {
+fn stamp(metadata: &fs::Metadata) -> [i64; 5] {
     use std::os::windows::fs::MetadataExt;
-    (metadata.creation_time(), 1)
-}
-#[cfg(windows)]
-fn observation(metadata: &fs::Metadata) -> (u64, u64, u64, i64, i64, i64, i64) {
-    use std::os::windows::fs::MetadataExt;
-    (
-        metadata.creation_time(),
-        u64::from(metadata.file_attributes()),
-        metadata.len(),
+    [
+        metadata.len() as i64,
+        i64::from(metadata.file_attributes()),
         metadata.last_write_time() as i64,
         0,
         0,
-        0,
-    )
-}
-/// A junction or any other reparse point, which `is_symlink` may not report.
-#[cfg(windows)]
-fn is_reparse_point(metadata: &fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    metadata.file_attributes() & 0x0400 != 0
+    ]
 }
 #[cfg(unix)]
-fn is_reparse_point(_metadata: &fs::Metadata) -> bool {
-    false
-}
-#[cfg(unix)]
-fn observation(metadata: &fs::Metadata) -> (u64, u64, u64, i64, i64, i64, i64) {
+fn stamp(metadata: &fs::Metadata) -> [i64; 5] {
     use std::os::unix::fs::MetadataExt;
-    (
-        metadata.dev(),
-        metadata.ino(),
-        metadata.len(),
+    [
+        metadata.len() as i64,
         metadata.mtime(),
         metadata.mtime_nsec(),
         metadata.ctime(),
         metadata.ctime_nsec(),
-    )
+    ]
 }
+/// Every folder from the parent of `path` up to the root, each pinned by an open
+/// handle. One open checks the type, refuses a link or reparse point and pins the
+/// identity.
 #[cfg(any(unix, windows))]
-type Ancestors = Vec<(PathBuf, (u64, u64))>;
-#[cfg(any(unix, windows))]
-fn ancestry(path: &Path) -> Result<Ancestors, String> {
-    let mut result = Vec::new();
-    for parent in path
-        .parent()
+fn ancestry(path: &Path) -> Result<Vec<orr_fsid::PinnedDirectory>, String> {
+    path.parent()
         .ok_or("terrain patch path has no parent")?
         .ancestors()
-    {
-        let metadata = fs::symlink_metadata(parent)
-            .map_err(|e| format!("inspect terrain patch parent: {e}"))?;
-        if !metadata.is_dir()
-            || metadata.file_type().is_symlink()
-            || is_reparse_point(&metadata)
-            || identity(&metadata).1 == 0
-        {
-            return Err(
-                "terrain patch ancestors must be real directories with stable identities".into(),
-            );
-        }
-        result.push((parent.to_path_buf(), identity(&metadata)));
-    }
-    Ok(result)
-}
-
-#[cfg(unix)]
-fn open_no_follow(path: &Path) -> Result<fs::File, String> {
-    let descriptor = rustix::fs::open(
-        path,
-        rustix::fs::OFlags::RDONLY
-            | rustix::fs::OFlags::NOFOLLOW
-            | rustix::fs::OFlags::NONBLOCK
-            | rustix::fs::OFlags::CLOEXEC,
-        rustix::fs::Mode::empty(),
-    )
-    .map_err(|e| format!("open terrain patch: {e}"))?;
-    Ok(fs::File::from(descriptor))
-}
-/// `FILE_FLAG_OPEN_REPARSE_POINT` opens a final link itself instead of its target.
-#[cfg(windows)]
-fn open_no_follow(path: &Path) -> Result<fs::File, String> {
-    use std::os::windows::fs::OpenOptionsExt;
-    fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(0x0020_0000)
-        .open(path)
-        .map_err(|e| format!("open terrain patch: {e}"))
+        .map(|parent| {
+            orr_fsid::PinnedDirectory::open(parent).map_err(|e| {
+                format!("terrain patch ancestors must be real directories with stable identities: {e}")
+            })
+        })
+        .collect()
 }
 
 /// Requires trusted, quiescent directories. Observations detect ordinary
@@ -240,24 +181,18 @@ pub(super) fn read_patch(path: &Path) -> Result<Vec<u8>, String> {
     #[cfg(any(unix, windows))]
     {
         let parents = ancestry(path)?;
-        let before =
-            fs::symlink_metadata(path).map_err(|e| format!("inspect terrain patch: {e}"))?;
-        if !before.is_file()
-            || before.file_type().is_symlink()
-            || is_reparse_point(&before)
-            || identity(&before).1 == 0
-            || before.len() > MAX_ASSET_BYTES as u64
-        {
+        let unchanged = || parents.iter().all(|parent| parent.verify_unchanged().is_ok());
+        // `open_file` refuses a link, a folder or a FIFO without waiting for a writer.
+        let file = orr_fsid::open_file(path).map_err(|e| {
+            format!("terrain patch must be a regular, bounded file with a stable identity: {e}")
+        })?;
+        let held = file.metadata().map_err(|e| e.to_string())?;
+        if held.len() > MAX_ASSET_BYTES as u64 {
             return Err(
                 "terrain patch must be a regular, bounded file with a stable identity".into(),
             );
         }
-        let file = open_no_follow(path)?;
-        let held = file.metadata().map_err(|e| e.to_string())?;
-        if !held.is_file()
-            || observation(&held) != observation(&before)
-            || ancestry(path)? != parents
-        {
+        if !matches!(orr_fsid::same_file(path, &file), Ok(true)) || !unchanged() {
             return Err("terrain patch changed while opening".into());
         }
         let mut bytes = Vec::new();
@@ -266,15 +201,11 @@ pub(super) fn read_patch(path: &Path) -> Result<Vec<u8>, String> {
             .read_to_end(&mut bytes)
             .map_err(|e| format!("read terrain patch: {e}"))?;
         let after = file.metadata().map_err(|e| e.to_string())?;
-        let named = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
         if bytes.len() > MAX_ASSET_BYTES
-            || bytes.len() as u64 != before.len()
-            || !named.is_file()
-            || named.file_type().is_symlink()
-            || is_reparse_point(&named)
-            || observation(&after) != observation(&before)
-            || observation(&named) != observation(&before)
-            || ancestry(path)? != parents
+            || bytes.len() as u64 != held.len()
+            || stamp(&after) != stamp(&held)
+            || !matches!(orr_fsid::same_file(path, &file), Ok(true))
+            || !unchanged()
         {
             return Err("terrain patch changed while reading or exceeded the size bound".into());
         }

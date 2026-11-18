@@ -3,7 +3,7 @@ use orr_package::Manifest;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, File, Metadata, OpenOptions},
+    fs::{self, Metadata, OpenOptions},
     io::{Read, Write},
     path::{Component, Path, PathBuf},
 };
@@ -17,8 +17,6 @@ const MAX_LICENSE_BYTES: u64 = 1024 * 1024;
 const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_PATH_COMPONENTS: usize = 64;
-#[cfg(windows)]
-const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 #[cfg(windows)]
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
 
@@ -161,19 +159,27 @@ pub(crate) fn validate_package_identity(name: &str, version: &str) -> Result<(),
 
 pub(crate) fn read_input_file(path: &Path, limit: u64, label: &str) -> Result<InputFile, String> {
     let canonical = checked_file_path(path, label)?;
-    let before =
-        fs::symlink_metadata(&canonical).map_err(|error| format!("inspect {label}: {error}"))?;
+    // The first handle pins the identity of the inspected file. `open_file` refuses a
+    // link, a folder or a FIFO without waiting for a writer.
+    let inspected =
+        orr_fsid::open_file(&canonical).map_err(|error| format!("inspect {label}: {error}"))?;
+    let before = inspected
+        .metadata()
+        .map_err(|error| format!("inspect {label}: {error}"))?;
     if !regular_non_reparse(&before) || before.len() > limit {
         return Err(format!(
             "{label} must be a bounded regular non-reparse file"
         ));
     }
-    let mut file = open_without_following(&canonical)
+    let mut file = orr_fsid::open_file(&canonical)
         .map_err(|error| format!("open {label} without following links: {error}"))?;
     let opened = file
         .metadata()
         .map_err(|error| format!("inspect opened {label}: {error}"))?;
-    if !regular_non_reparse(&opened) || opened.len() > limit || !same_observation(&before, &opened)
+    if !regular_non_reparse(&opened)
+        || opened.len() > limit
+        || !matches!(orr_fsid::same_handle(&inspected, &file), Ok(true))
+        || !same_observation(&before, &opened)
     {
         return Err(format!("{label} changed before reading"));
     }
@@ -185,17 +191,15 @@ pub(crate) fn read_input_file(path: &Path, limit: u64, label: &str) -> Result<In
     let opened_after = file
         .metadata()
         .map_err(|error| format!("recheck opened {label}: {error}"))?;
-    let current =
-        fs::symlink_metadata(&canonical).map_err(|error| format!("recheck {label}: {error}"))?;
+    let still_named = matches!(orr_fsid::same_file(&canonical, &file), Ok(true));
     let parent = canonical
         .parent()
         .ok_or_else(|| format!("{label} has no parent"))?;
     if bytes.len() as u64 > limit
         || bytes.len() as u64 != opened.len()
         || !regular_non_reparse(&opened_after)
-        || !regular_non_reparse(&current)
+        || !still_named
         || !same_observation(&opened, &opened_after)
-        || !same_observation(&before, &current)
         || checked_directory(parent, label)?.as_path() != parent
     {
         return Err(format!("{label} changed while it was read"));
@@ -428,17 +432,6 @@ fn same_observation(first: &Metadata, second: &Metadata) -> bool {
             (Ok(first_modified), Ok(second_modified)) => first_modified == second_modified,
             _ => true,
         }
-}
-
-fn open_without_following(path: &Path) -> std::io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    }
-    options.open(path)
 }
 
 pub(crate) fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), String> {

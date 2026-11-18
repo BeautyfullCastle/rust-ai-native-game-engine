@@ -15,7 +15,7 @@ use orr_terrain::{
 use orr_terrain_view::{to_static_model, QueryMarker};
 use sha2::{Digest, Sha256};
 use std::{
-    fs::{self, File},
+    fs,
     io::{Read, Write},
     path::{Component, Path, PathBuf},
     sync::Arc,
@@ -728,7 +728,8 @@ fn read_terrain_file(path: &Path) -> Result<Vec<u8>, String> {
     if !check_optional_regular(path)? {
         return Err("terrain file does not exist".into());
     }
-    let file = File::open(path).map_err(|e| e.to_string())?;
+    // `open_file` refuses a link, a folder or a FIFO without waiting for a writer.
+    let file = orr_fsid::open_file(path).map_err(|e| e.to_string())?;
     let metadata = file.metadata().map_err(|e| e.to_string())?;
     if !metadata.is_file() || metadata.len() > MAX_FILE_BYTES as u64 {
         return Err("terrain file is not regular or exceeds its byte limit".into());
@@ -749,15 +750,10 @@ fn read_terrain_file(path: &Path) -> Result<Vec<u8>, String> {
     if !check_optional_regular(path)? {
         return Err("terrain file disappeared while reading".into());
     }
-    // A replaced path is not the same asset that this handle read. Compare inode
-    // identity on Unix as well as metadata bounds; writes themselves are atomic.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let named = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
-        if metadata.dev() != named.dev() || metadata.ino() != named.ino() {
-            return Err("terrain file was replaced while reading; retry".into());
-        }
+    // A replaced path is not the same asset that this handle read. Compare the file
+    // identity of the handle with the named path; writes themselves are atomic.
+    if !matches!(orr_fsid::same_file(path, &file), Ok(true)) {
+        return Err("terrain file was replaced while reading; retry".into());
     }
     Ok(bytes)
 }

@@ -1068,29 +1068,27 @@ struct FileStamp {
     path: PathBuf,
     len: u64,
     modified: SystemTime,
+    identity: orr_fsid::FileId,
     #[cfg(unix)]
-    unix_identity: (u64, u64, i64, i64),
+    changed: (i64, i64),
 }
 impl FileStamp {
     fn read(path: &Path) -> Result<Self, String> {
         reject_source_links(path)?;
-        let metadata = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
-        if !metadata.is_file() {
-            return Err("Bake source/package must remain a regular file".into());
-        }
+        // `open_file` refuses a link, a folder or a FIFO and gives the file identity
+        // from the open handle.
+        let file = orr_fsid::open_file(path)
+            .map_err(|_| "Bake source/package must remain a regular file".to_string())?;
+        let metadata = file.metadata().map_err(|e| e.to_string())?;
         #[cfg(unix)]
         use std::os::unix::fs::MetadataExt;
         Ok(Self {
             path: path.to_owned(),
             len: metadata.len(),
             modified: metadata.modified().map_err(|e| e.to_string())?,
+            identity: orr_fsid::file_id(&file).map_err(|e| e.to_string())?,
             #[cfg(unix)]
-            unix_identity: (
-                metadata.dev(),
-                metadata.ino(),
-                metadata.ctime(),
-                metadata.ctime_nsec(),
-            ),
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
         })
     }
 }

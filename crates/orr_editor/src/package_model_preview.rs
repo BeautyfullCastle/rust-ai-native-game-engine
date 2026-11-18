@@ -16,7 +16,6 @@ pub(crate) use camera::{bounded_size, PreviewBounds, PreviewCamera};
 use crate::model_bindings::{self, LoadedAsset, ModelKind};
 use orr_package::{Lock, Project};
 use std::{
-    fs,
     path::{Path, PathBuf},
     sync::{
         mpsc::{self, Receiver, TryRecvError},
@@ -359,40 +358,30 @@ fn verify_loaded(request: &PreviewRequest, loaded: &LoadedAsset) -> Result<Fresh
 struct FileStamp {
     length: u64,
     modified: SystemTime,
-    created: Option<SystemTime>,
     directory: bool,
-    #[cfg(unix)]
-    identity: (u64, u64),
+    identity: orr_fsid::FileId,
 }
 
 impl FileStamp {
     fn read(path: &Path, directory: bool) -> Result<Self, String> {
-        let metadata =
-            fs::symlink_metadata(path).map_err(|error| format!("preview file changed: {error}"))?;
-        #[cfg(windows)]
-        let reparse = {
-            use std::os::windows::fs::MetadataExt;
-            metadata.file_attributes() & 0x0400 != 0
-        };
-        #[cfg(not(windows))]
-        let reparse = false;
-        if metadata.file_type().is_symlink()
-            || reparse
-            || (directory && !metadata.is_dir())
-            || (!directory && !metadata.is_file())
-        {
-            return Err("preview path changed to a link or unexpected file type".into());
+        // One open checks the type, refuses a link or reparse point and gives the
+        // file identity from the handle.
+        let handle = if directory {
+            orr_fsid::open_directory(path)
+        } else {
+            orr_fsid::open_file(path)
         }
+        .map_err(|error| {
+            format!("preview path changed to a link or unexpected file type: {error}")
+        })?;
+        let metadata = handle
+            .metadata()
+            .map_err(|error| format!("preview file changed: {error}"))?;
         Ok(Self {
             length: metadata.len(),
             modified: metadata.modified().map_err(|error| error.to_string())?,
-            created: metadata.created().ok(),
             directory,
-            #[cfg(unix)]
-            identity: {
-                use std::os::unix::fs::MetadataExt;
-                (metadata.dev(), metadata.ino())
-            },
+            identity: orr_fsid::file_id(&handle).map_err(|error| error.to_string())?,
         })
     }
 }

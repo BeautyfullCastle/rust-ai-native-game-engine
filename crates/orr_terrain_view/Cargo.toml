@@ -20,6 +20,7 @@ gpu = ["dep:orr_render", "dep:png"]
 orr_terrain = { path = "../orr_terrain" }
 orr_fp = { path = "../orr_fp", features = ["float-interop"] }
 orr_model = { path = "../orr_model" }
+orr_fsid = { path = "../orr_fsid" }
 orr_package = { path = "../orr_package" }
 orr_render = { path = "../orr_render", features = ["models"], optional = true }
 png = { version = "0.18", optional = true }

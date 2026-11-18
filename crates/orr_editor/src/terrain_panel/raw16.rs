@@ -83,20 +83,11 @@ impl TerrainPanel {
         if input == target {
             return Err("RAW16 source must not alias the current terrain file".into());
         }
-        if let (Ok(a), Ok(b)) = (std::fs::metadata(input), std::fs::metadata(&target)) {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                if a.dev() == b.dev() && a.ino() == b.ino() {
-                    return Err("RAW16 source must not alias the current terrain file".into());
-                }
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = (a, b);
-                if std::fs::canonicalize(input).ok() == std::fs::canonicalize(&target).ok() {
-                    return Err("RAW16 source must not alias the current terrain file".into());
-                }
+        // File identity from open handles: a link, a hard link or a junction path
+        // that reaches the terrain file is an alias.
+        if let (Ok(a), Ok(b)) = (orr_fsid::file_id_at(input), orr_fsid::file_id_at(&target)) {
+            if a == b {
+                return Err("RAW16 source must not alias the current terrain file".into());
             }
         }
         Ok(())

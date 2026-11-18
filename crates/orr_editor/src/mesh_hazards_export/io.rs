@@ -8,15 +8,13 @@
 use super::MAX_SCENE_BYTES;
 use std::{
     collections::BTreeSet,
-    fs::{self, File, Metadata, OpenOptions},
+    fs::{self, Metadata, OpenOptions},
     io::{Read, Write},
     path::{Component, Path, PathBuf},
 };
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_PATH_COMPONENTS: usize = 64;
 const MAX_SCENE_LEAF_BYTES: usize = 180;
-#[cfg(windows)]
-const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 #[cfg(windows)]
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
 pub(super) fn inventory_names(
@@ -227,21 +225,32 @@ pub(super) fn reserved_device_name(value: &str) -> bool {
 
 pub(super) fn read_bounded(path: &Path, limit: u64, context: &str) -> Result<Vec<u8>, String> {
     let canonical = checked_existing_file(path, limit, context)?;
-    let before = fs::symlink_metadata(&canonical).map_err(|error| error.to_string())?;
-    read_observed(&canonical, before, limit, context)
+    read_observed(&canonical, limit, context)
 }
 
 // Shared checked-open path also permits deterministic replacement-race tests.
 pub(super) fn read_observed(
     canonical: &Path,
-    before: Metadata,
     limit: u64,
     context: &str,
 ) -> Result<Vec<u8>, String> {
-    let mut file =
-        open_without_following(canonical).map_err(|error| format!("open {context}: {error}"))?;
+    // The first handle pins the identity of the inspected file. `open_file` refuses a
+    // link, a folder or a FIFO without waiting for a writer.
+    let inspected = orr_fsid::open_file(canonical).map_err(|error| match error.kind() {
+        std::io::ErrorKind::InvalidInput => format!("{context} changed before reading"),
+        _ => format!("open {context}: {error}"),
+    })?;
+    let before = inspected.metadata().map_err(|error| error.to_string())?;
+    let mut file = orr_fsid::open_file(canonical).map_err(|error| match error.kind() {
+        std::io::ErrorKind::InvalidInput => format!("{context} changed before reading"),
+        _ => format!("open {context}: {error}"),
+    })?;
     let opened = file.metadata().map_err(|error| error.to_string())?;
-    if !regular_file(&opened) || opened.len() > limit || !same_observation(&before, &opened) {
+    if !regular_file(&opened)
+        || opened.len() > limit
+        || !matches!(orr_fsid::same_handle(&inspected, &file), Ok(true))
+        || !same_observation(&before, &opened)
+    {
         return Err(format!("{context} changed before reading"));
     }
     let mut bytes = Vec::with_capacity(opened.len() as usize);
@@ -250,13 +259,12 @@ pub(super) fn read_observed(
         .read_to_end(&mut bytes)
         .map_err(|error| format!("read {context}: {error}"))?;
     let after = file.metadata().map_err(|error| error.to_string())?;
-    let current = fs::symlink_metadata(canonical).map_err(|error| error.to_string())?;
+    let still_named = matches!(orr_fsid::same_file(canonical, &file), Ok(true));
     if bytes.len() as u64 > limit
         || bytes.len() as u64 != opened.len()
         || !regular_file(&after)
-        || !regular_file(&current)
+        || !still_named
         || !same_observation(&opened, &after)
-        || !same_observation(&before, &current)
     {
         return Err(format!("{context} changed while being read"));
     }
@@ -266,22 +274,6 @@ pub(super) fn read_observed(
         return Err(format!("{context} parent changed while being read"));
     }
     Ok(bytes)
-}
-
-pub(super) fn open_without_following(path: &Path) -> std::io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    }
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(0x20000 | 0x800); // Linux O_NOFOLLOW | O_NONBLOCK; reject opened non-regular leaves before reading
-    }
-    options.open(path)
 }
 
 pub(super) fn regular_file(metadata: &Metadata) -> bool {
@@ -318,9 +310,7 @@ pub(super) fn same_observation(first: &Metadata, second: &Metadata) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        if first.dev() != second.dev()
-            || first.ino() != second.ino()
-            || first.ctime() != second.ctime()
+        if first.ctime() != second.ctime()
             || first.ctime_nsec() != second.ctime_nsec()
         {
             return false;

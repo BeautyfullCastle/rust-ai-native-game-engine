@@ -60,7 +60,7 @@ pub(crate) struct Report {
 // Holding handles prevents identity reuse after an unlinked inode is replaced.
 struct Retained {
     handle: Option<File>,
-    identity: (u64, u64),
+    identity: orr_fsid::FileId,
 }
 
 impl Retained {
@@ -75,7 +75,8 @@ impl Retained {
         let handle = options
             .open(path)
             .map_err(|error| format!("retain file identity: {error}"))?;
-        let identity = file_identity(&handle)?;
+        let identity = orr_fsid::file_id(&handle)
+            .map_err(|error| format!("read file identity: {error}"))?;
         Ok(Self {
             handle: Some(handle),
             identity,
@@ -85,56 +86,9 @@ impl Retained {
     fn matches(&self, path: &Path) -> bool {
         self.handle
             .as_ref()
-            .is_none_or(|handle| file_identity(handle).ok() == Some(self.identity))
+            .is_none_or(|handle| orr_fsid::file_id(handle).ok() == Some(self.identity))
             && Self::open(path).is_ok_and(|current| current.identity == self.identity)
     }
-}
-
-#[cfg(unix)]
-fn file_identity(file: &File) -> Result<(u64, u64), String> {
-    use std::os::unix::fs::MetadataExt;
-    let metadata = file.metadata().map_err(|error| error.to_string())?;
-    Ok((metadata.dev(), metadata.ino()))
-}
-
-#[cfg(windows)]
-fn file_identity(file: &File) -> Result<(u64, u64), String> {
-    use std::os::windows::io::AsRawHandle;
-    #[repr(C)]
-    #[derive(Default)]
-    struct Information {
-        attributes: u32,
-        created: [u32; 2],
-        accessed: [u32; 2],
-        written: [u32; 2],
-        volume: u32,
-        size_high: u32,
-        size_low: u32,
-        links: u32,
-        index_high: u32,
-        index_low: u32,
-    }
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn GetFileInformationByHandle(handle: *mut std::ffi::c_void, info: *mut Information)
-            -> i32;
-    }
-    let mut info = Information::default();
-    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
-        return Err(format!(
-            "read file identity: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    Ok((
-        u64::from(info.volume),
-        (u64::from(info.index_high) << 32) | u64::from(info.index_low),
-    ))
-}
-
-#[cfg(not(any(unix, windows)))]
-fn file_identity(_file: &File) -> Result<(u64, u64), String> {
-    Err("retained file identity is unavailable on this platform".into())
 }
 
 struct Stage {

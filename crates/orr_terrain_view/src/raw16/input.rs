@@ -1,10 +1,10 @@
 //! Bounded RAW16 input snapshots, requiring trusted stable ancestry.
 //! These std path checks are not a hostile-user filesystem sandbox: replacement
-//! between metadata and open can still block on a substituted FIFO. Retained
+//! between the checks and the open is detected by file identity from open handles. Retained
 //! bytes do not certify absence of concurrent in-place modification.
 use super::{Error, Recipe, Result};
 use std::{
-    fs::{self, File, Metadata},
+    fs,
     io::Read,
     path::{Component, Path, PathBuf},
 };
@@ -44,42 +44,22 @@ fn checked_path(path: &Path) -> Result<PathBuf> {
     Ok(resolved)
 }
 
-fn same_file(a: &Metadata, b: &Metadata) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        a.dev() == b.dev() && a.ino() == b.ino()
-    }
-    #[cfg(not(unix))]
-    {
-        // std exposes no portable stable file ID. These are consistency checks,
-        // not proof of identity; trusted non-mutating input ancestry is required.
-        a.len() == b.len() && a.modified().ok() == b.modified().ok()
-    }
-}
-
-/// Verify a regular file before open, verify the opened handle again, and retain
+/// Open a regular file by handle, verify the path still names it, and retain
 /// at most expected+1 bytes. Exact length is required; no pipes or stdin route.
 pub fn read_raw16(input: &Path, recipe: &Recipe) -> Result<Vec<u8>> {
     let expected = recipe.validate()?;
     let path = checked_path(input)?;
-    let before = fs::symlink_metadata(&path).map_err(|e| Error(format!("input metadata: {e}")))?;
-    if !before.file_type().is_file() || before.len() != expected as u64 {
+    // `open_file` refuses a link, a folder or a FIFO without waiting for a writer.
+    let file = orr_fsid::open_file(&path).map_err(|e| Error(format!("input open: {e}")))?;
+    let opened = file
+        .metadata()
+        .map_err(|e| Error(format!("opened input metadata: {e}")))?;
+    if opened.len() != expected as u64 {
         return Err(Error(format!(
             "input must be a regular file of exactly {expected} bytes"
         )));
     }
-    let file = File::open(&path).map_err(|e| Error(format!("input open: {e}")))?;
-    let opened = file
-        .metadata()
-        .map_err(|e| Error(format!("opened input metadata: {e}")))?;
-    let current = fs::symlink_metadata(&path).map_err(|e| Error(format!("input recheck: {e}")))?;
-    if !opened.is_file()
-        || !current.file_type().is_file()
-        || opened.len() != expected as u64
-        || !same_file(&before, &opened)
-        || !same_file(&opened, &current)
-    {
+    if !matches!(orr_fsid::same_file(&path, &file), Ok(true)) {
         return Err(Error(
             "input changed during open; use a trusted stable source directory".into(),
         ));
@@ -96,9 +76,10 @@ pub fn read_raw16(input: &Path, recipe: &Recipe) -> Result<Vec<u8>> {
     if bytes.len() != expected
         || after.len() != expected as u64
         || opened.modified().ok() != after.modified().ok()
+        || !matches!(orr_fsid::same_file(&path, limited.get_ref()), Ok(true))
     {
         return Err(Error(
-            "input length or modification time changed during read".into(),
+            "input length, modification time or identity changed during read".into(),
         ));
     }
     Ok(bytes)

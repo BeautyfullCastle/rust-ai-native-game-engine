@@ -4,8 +4,9 @@
 //! concurrent write. Ancestor checks are path based, not an atomic filesystem
 //! snapshot or a defense against an attacker controlling the directory tree.
 use super::{Preset, MAX_BYTES};
+use orr_fsid::PinnedDirectory;
 use std::{
-    fs::{self, Metadata, OpenOptions},
+    fs::{self, Metadata},
     io::{Read, Write},
     path::{Component, Path, PathBuf},
 };
@@ -13,15 +14,11 @@ use std::{
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_PATH_COMPONENTS: usize = 128;
 const SUFFIX: &str = ".mesh-lighting-preset.json";
-#[cfg(windows)]
-const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-#[cfg(windows)]
-const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
 
 struct CheckedPath {
     path: PathBuf,
     parent: PathBuf,
-    ancestors: Vec<(PathBuf, Metadata)>,
+    ancestors: Vec<PinnedDirectory>,
 }
 
 pub(crate) fn load(path: &Path) -> Result<Preset, String> {
@@ -102,7 +99,7 @@ fn checked_path(path: &Path) -> Result<CheckedPath, String> {
     })
 }
 
-fn inspect_ancestors(parent: &Path) -> Result<Vec<(PathBuf, Metadata)>, String> {
+fn inspect_ancestors(parent: &Path) -> Result<Vec<PinnedDirectory>, String> {
     let mut current = PathBuf::new();
     let mut ancestors = Vec::new();
     for component in parent.components() {
@@ -128,15 +125,10 @@ fn inspect_ancestors(parent: &Path) -> Result<Vec<(PathBuf, Metadata)>, String> 
         if ancestors.len() >= MAX_PATH_COMPONENTS {
             return Err("mesh lighting preset path has too many components".into());
         }
-        let metadata = fs::symlink_metadata(&current)
-            .map_err(|error| format!("inspect mesh lighting preset directory: {error}"))?;
-        if !metadata.is_dir() || is_reparse(&metadata) {
-            return Err(
-                "mesh lighting preset ancestry must use real non-reparse directories".into(),
-            );
-        }
-        verify_directory(&current, &metadata)?;
-        ancestors.push((current.clone(), metadata));
+        // One open checks the type, refuses a link and pins the identity.
+        let directory = PinnedDirectory::open(&current)
+            .map_err(|error| format!("open mesh lighting preset directory: {error}"))?;
+        ancestors.push(directory);
     }
     if ancestors.is_empty() {
         return Err("mesh lighting preset parent must be an existing directory".into());
@@ -145,14 +137,10 @@ fn inspect_ancestors(parent: &Path) -> Result<Vec<(PathBuf, Metadata)>, String> 
 }
 
 fn recheck_ancestors(checked: &CheckedPath) -> Result<(), String> {
-    let current = inspect_ancestors(&checked.parent)?;
-    if current.len() != checked.ancestors.len()
-        || current
-            .iter()
-            .zip(&checked.ancestors)
-            .any(|((path, now), (old_path, old))| path != old_path || !same_directory(old, now))
-    {
-        return Err("mesh lighting preset directory changed during access".into());
+    for directory in &checked.ancestors {
+        directory.verify_unchanged().map_err(|error| {
+            format!("mesh lighting preset directory changed during access: {error}")
+        })?;
     }
     Ok(())
 }
@@ -196,25 +184,6 @@ fn validate_component(component: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn verify_directory(path: &Path, observed: &Metadata) -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        let opened = OpenOptions::new()
-            .read(true)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(path)
-            .and_then(|directory| directory.metadata())
-            .map_err(|error| format!("open mesh lighting preset directory: {error}"))?;
-        if !opened.is_dir() || is_reparse(&opened) || !same_directory(observed, &opened) {
-            return Err("mesh lighting preset directory changed while opening".into());
-        }
-    }
-    #[cfg(not(windows))]
-    let _ = (path, observed);
-    Ok(())
-}
-
 // The two no-op production observers permit deterministic replacement/race
 // tests without relying on scheduler timing or an unbounded filesystem reader.
 fn read_file(
@@ -222,44 +191,28 @@ fn read_file(
     before_open: impl FnOnce(),
     after_read: impl FnOnce(),
 ) -> Result<Vec<u8>, String> {
-    let before = fs::symlink_metadata(&checked.path)
+    // The first handle pins the identity of the file that was inspected. A link, a
+    // folder or a FIFO at the path is refused by `open_file`.
+    let inspected = orr_fsid::open_file(&checked.path)
         .map_err(|error| format!("inspect mesh lighting preset: {error}"))?;
-    if !regular_file(&before) || before.len() > MAX_BYTES as u64 {
+    let before = inspected
+        .metadata()
+        .map_err(|error| format!("inspect mesh lighting preset: {error}"))?;
+    if before.len() > MAX_BYTES as u64 {
         return Err(format!(
             "mesh lighting preset must be a regular file of at most {MAX_BYTES} bytes"
         ));
     }
     before_open();
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    }
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        // Linux O_NOFOLLOW | O_NONBLOCK: a swapped FIFO must not hang open.
-        options.custom_flags(0x20000 | 0x800);
-    }
-    #[cfg(any(
-        target_os = "macos",
-        target_os = "freebsd",
-        target_os = "openbsd",
-        target_os = "netbsd"
-    ))]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(0x100 | 0x4); // O_NOFOLLOW | O_NONBLOCK
-    }
-    let mut file = options
-        .open(&checked.path)
-        .map_err(|error| format!("open mesh lighting preset: {error}"))?;
+    let mut file = orr_fsid::open_file(&checked.path)
+        .map_err(|error| format!("mesh lighting preset changed while opening: {error}"))?;
     let opened = file
         .metadata()
         .map_err(|error| format!("inspect opened mesh lighting preset: {error}"))?;
-    if !regular_file(&opened) || !same_metadata(&before, &opened) {
+    let same_file = orr_fsid::file_id(&file)
+        .and_then(|opened_id| orr_fsid::file_id(&inspected).map(|first| opened_id == first))
+        .map_err(|error| format!("inspect opened mesh lighting preset: {error}"))?;
+    if !same_file || !same_stamp(&before, &opened) {
         return Err("mesh lighting preset changed while opening".into());
     }
     let mut bytes = Vec::new();
@@ -271,14 +224,13 @@ fn read_file(
     let handle_after = file
         .metadata()
         .map_err(|error| format!("recheck opened mesh lighting preset: {error}"))?;
-    let path_after = fs::symlink_metadata(&checked.path)
+    let still_named = orr_fsid::same_file(&checked.path, &file)
         .map_err(|error| format!("recheck mesh lighting preset: {error}"))?;
     if bytes.len() > MAX_BYTES
         || bytes.len() as u64 != opened.len()
-        || !regular_file(&handle_after)
-        || !regular_file(&path_after)
-        || !same_metadata(&opened, &handle_after)
-        || !same_metadata(&opened, &path_after)
+        || !handle_after.is_file()
+        || !still_named
+        || !same_stamp(&opened, &handle_after)
     {
         return Err("mesh lighting preset changed or exceeded its byte limit while reading".into());
     }
@@ -286,48 +238,12 @@ fn read_file(
     Ok(bytes)
 }
 
-fn regular_file(metadata: &Metadata) -> bool {
-    metadata.is_file() && !is_reparse(metadata)
-}
-
-fn is_reparse(metadata: &Metadata) -> bool {
-    if metadata.file_type().is_symlink() {
-        return true;
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        metadata.file_attributes() & 0x0400 != 0
-    }
-    #[cfg(not(windows))]
-    {
-        false
-    }
-}
-
-fn same_directory(left: &Metadata, right: &Metadata) -> bool {
+/// Size, times and attributes of one file. Identity is compared by handle, not here.
+fn same_stamp(left: &Metadata, right: &Metadata) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        left.dev() == right.dev() && left.ino() == right.ino() && left.mode() == right.mode()
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        left.creation_time() == right.creation_time()
-            && left.file_attributes() == right.file_attributes()
-    }
-    #[cfg(not(any(windows, unix)))]
-    {
-        left.is_dir() == right.is_dir() && left.created().ok() == right.created().ok()
-    }
-}
-
-fn same_metadata(left: &Metadata, right: &Metadata) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        same_directory(left, right)
+        left.mode() == right.mode()
             && left.nlink() == right.nlink()
             && left.len() == right.len()
             && left.mtime() == right.mtime()
@@ -338,15 +254,13 @@ fn same_metadata(left: &Metadata, right: &Metadata) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
-        same_directory(left, right)
+        left.file_attributes() == right.file_attributes()
             && left.len() == right.len()
             && left.last_write_time() == right.last_write_time()
     }
     #[cfg(not(any(windows, unix)))]
     {
-        left.len() == right.len()
-            && left.modified().ok() == right.modified().ok()
-            && left.created().ok() == right.created().ok()
+        left.len() == right.len() && left.modified().ok() == right.modified().ok()
     }
 }
 

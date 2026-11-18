@@ -384,7 +384,6 @@ fn source_files_reject_paths_existing_files_and_oversize() {
         .is_err());
     assert!(protected.save_new("LEVEL.prefab.yaml", "fragment").is_err());
     assert_eq!(std::fs::read_to_string(&scene_path).unwrap(), scene_bytes);
-    #[cfg(unix)]
     {
         std::fs::hard_link(&scene_path, root.path().join("alias.prefab.yaml")).unwrap();
         assert!(protected
@@ -489,6 +488,37 @@ fn source_files_reject_symlinks_and_replaced_ancestors() {
     );
     symlink(outer.path().join("old"), outer.path().join("alias")).unwrap();
     assert!(SourceFiles::new(&outer.path().join("alias")).is_err());
+}
+
+#[cfg(windows)]
+#[test]
+fn source_files_reject_junctions_and_replaced_ancestors() {
+    let outer = tempfile::tempdir().unwrap();
+    let root = outer.path().join("project");
+    std::fs::create_dir(&root).unwrap();
+    let files = SourceFiles::new(&root).unwrap();
+    files.save_new("actors.prefab.yaml", "source").unwrap();
+    assert_eq!(files.read("actors.prefab.yaml").unwrap(), "source");
+    std::fs::rename(&root, outer.path().join("old")).unwrap();
+    std::fs::create_dir(&root).unwrap();
+    assert!(files.save_new("other.yaml", "source").is_err());
+    assert!(files.read("actors.prefab.yaml").is_err());
+    assert!(files
+        .replace_source("actors.prefab.yaml", "source", "bad")
+        .is_err());
+    assert_eq!(
+        std::fs::read_to_string(outer.path().join("old").join("actors.prefab.yaml")).unwrap(),
+        "source"
+    );
+    let junction = outer.path().join("junction");
+    let made = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&junction)
+        .arg(outer.path().join("old"))
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "{made:?}");
+    assert!(SourceFiles::new(&junction).is_err());
 }
 
 #[test]

@@ -1,5 +1,6 @@
 use super::*;
 use crate::mesh_lighting::Document;
+use std::fs::OpenOptions;
 
 fn bytes() -> Vec<u8> {
     Preset::from_document(&Document::from_lighting(orr_render::Lighting::default()).unwrap())
@@ -200,7 +201,6 @@ fn changed_metadata_even_with_unchanged_length_is_rejected() {
     .is_err());
 }
 
-#[cfg(unix)]
 #[test]
 fn replaced_parent_is_detected_before_publication() {
     let (_temporary, root) = root();
@@ -306,4 +306,25 @@ fn replacement_after_read_is_rejected() {
         }
     )
     .is_err());
+}
+
+#[cfg(windows)]
+#[test]
+fn a_junction_in_the_ancestry_is_refused_for_load_and_save() {
+    let (_temporary, root) = root();
+    let target = root.join("target");
+    fs::create_dir(&target).unwrap();
+    fs::write(target.join("x.mesh-lighting-preset.json"), bytes()).unwrap();
+    let junction = root.join("junction");
+    let made = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&junction)
+        .arg(&target)
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "{made:?}");
+    let through = junction.join("x.mesh-lighting-preset.json");
+    assert!(load(&through).is_err());
+    assert!(save_new(&junction.join("y.mesh-lighting-preset.json"), &bytes()).is_err());
+    assert_eq!(fs::read_dir(&target).unwrap().count(), 1);
 }

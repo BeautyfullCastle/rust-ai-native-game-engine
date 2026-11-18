@@ -302,8 +302,7 @@ fn prechecked_regular_file_replaced_by_fifo_is_rejected_without_blocking() {
         .join("replace.scene.yaml");
     fs::write(&path, b"regular before check").unwrap();
     let checked = io::checked_existing_file(&path, MAX_SCENE_BYTES, "precheck").unwrap();
-    let observed = fs::symlink_metadata(&checked).unwrap();
-    assert!(observed.is_file());
+    assert!(fs::symlink_metadata(&checked).unwrap().is_file());
     fs::remove_file(&checked).unwrap();
     // Test fixture only: no writer is opened, so a blocking read-open would hang.
     assert!(
@@ -316,12 +315,7 @@ fn prechecked_regular_file_replaced_by_fifo_is_rejected_without_blocking() {
     let (sender, receiver) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
         sender
-            .send(io::read_observed(
-                &checked,
-                observed,
-                MAX_SCENE_BYTES,
-                "replacement",
-            ))
+            .send(io::read_observed(&checked, MAX_SCENE_BYTES, "replacement"))
             .unwrap();
     });
     let error = receiver

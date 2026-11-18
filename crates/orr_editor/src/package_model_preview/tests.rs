@@ -1,6 +1,9 @@
 use super::*;
 use orr_model::{Dependency, Image, Material, ModelSource, Primitive, StaticModel, Vertex, Wrap};
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+};
 
 const PACKAGE: &str = "preview-model";
 const ASSET: &str = "mesh.orrmodel";

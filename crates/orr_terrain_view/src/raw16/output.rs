@@ -6,9 +6,10 @@
 //! Existing destinations are never overwritten. Once linked, errors become
 //! warnings: the output exists or may exist, and retry is not safe.
 use super::{export_raw16, Error, Recipe, Result};
+use orr_fsid::{FileId, PinnedDirectory};
 use orr_terrain::Terrain;
 use std::{
-    fs::{self, File, Metadata, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -26,47 +27,9 @@ fn failure(context: &str, error: impl std::fmt::Display) -> Error {
     Error(format!("{context}: {error}"))
 }
 
-fn same_file(a: &Metadata, b: &Metadata) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        a.dev() == b.dev() && a.ino() == b.ino()
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        a.is_dir() == b.is_dir()
-            && a.creation_time() == b.creation_time()
-            && a.file_attributes() == b.file_attributes()
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = (a, b);
-        false // Fail closed: std does not expose a portable stable file identity.
-    }
-}
-
-fn open_directory(path: &Path) -> std::io::Result<File> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        OpenOptions::new()
-            .read(true)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(path)
-    }
-    #[cfg(not(windows))]
-    {
-        File::open(path)
-    }
-}
-
 struct Parent {
     path: PathBuf,
-    handle: File,
-    ancestry: Vec<(PathBuf, Metadata)>,
+    ancestry: Vec<PinnedDirectory>,
 }
 impl Parent {
     fn open(output: &Path) -> Result<Self> {
@@ -100,48 +63,43 @@ impl Parent {
             {
                 return Err(Error("output inside .orr ancestry is forbidden".into()));
             }
-            let metadata =
-                fs::symlink_metadata(&current).map_err(|e| failure("output ancestry", e))?;
-            if !metadata.file_type().is_dir() {
-                return Err(Error(
-                    "output ancestry must contain only real directories, not symlinks".into(),
-                ));
-            }
-            ancestry.push((current.clone(), metadata));
+            // One open both checks the type and pins the identity, so a link or a
+            // replaced folder cannot slip in between a check and the open.
+            let directory = PinnedDirectory::open(&current).map_err(|e| {
+                failure(
+                    "output ancestry must contain only real directories, not symlinks",
+                    e,
+                )
+            })?;
+            ancestry.push(directory);
         }
-        let handle = open_directory(&path).map_err(|e| failure("open output parent", e))?;
-        let parent = Self {
-            path,
-            handle,
-            ancestry,
-        };
+        if ancestry.is_empty() {
+            return Err(Error("output needs a parent directory".into()));
+        }
+        let parent = Self { path, ancestry };
         parent.check()?;
         absent(output)?;
         Ok(parent)
     }
 
     fn check(&self) -> Result<()> {
-        for (path, before) in &self.ancestry {
-            let now =
-                fs::symlink_metadata(path).map_err(|e| failure("output ancestry recheck", e))?;
-            if !now.file_type().is_dir() || !same_file(before, &now) {
-                return Err(Error(
-                    "output ancestry changed or stable identity is unsupported".into(),
-                ));
-            }
-        }
-        let now = self
-            .handle
-            .metadata()
-            .map_err(|e| failure("held parent metadata", e))?;
-        if !self
-            .ancestry
-            .last()
-            .is_some_and(|(_, before)| same_file(before, &now))
-        {
-            return Err(Error("held output parent changed".into()));
+        for directory in &self.ancestry {
+            directory.verify_unchanged().map_err(|e| {
+                failure(
+                    "output ancestry changed or stable identity is unsupported",
+                    e,
+                )
+            })?;
         }
         Ok(())
+    }
+
+    /// The open handle of the output parent folder, the last pinned ancestor.
+    fn handle(&self) -> &File {
+        self.ancestry
+            .last()
+            .map(PinnedDirectory::file)
+            .expect("Parent::open keeps at least one ancestor")
     }
 }
 
@@ -158,7 +116,7 @@ fn absent(path: &Path) -> Result<()> {
 struct Stage {
     path: PathBuf,
     handle: File,
-    identity: Metadata,
+    identity: FileId,
 }
 impl Stage {
     fn create(parent: &Parent) -> Result<Self> {
@@ -176,7 +134,7 @@ impl Stage {
                 .open(&path)
             {
                 Ok(handle) => {
-                    let identity = handle.metadata().map_err(|e| failure(
+                    let identity = orr_fsid::file_id(&handle).map_err(|e| failure(
                         &format!("stage identity unavailable; owned staging path may remain at {} (not removed without verified identity)", path.display()), e))?;
                     return Ok(Self {
                         path,
@@ -193,16 +151,14 @@ impl Stage {
 
     fn check(&self, parent: &Parent) -> Result<()> {
         parent.check()?;
-        let path = fs::symlink_metadata(&self.path).map_err(|e| failure("stage recheck", e))?;
+        let named = orr_fsid::open_file(&self.path).map_err(|e| failure("stage recheck", e))?;
         let held = self
             .handle
             .metadata()
             .map_err(|e| failure("held stage metadata", e))?;
-        if !path.file_type().is_file()
-            || !held.is_file()
-            || !same_file(&self.identity, &path)
-            || !same_file(&self.identity, &held)
-        {
+        let named_id = orr_fsid::file_id(&named).map_err(|e| failure("stage recheck", e))?;
+        let held_id = orr_fsid::file_id(&self.handle).map_err(|e| failure("held stage", e))?;
+        if !held.is_file() || named_id != self.identity || held_id != self.identity {
             return Err(Error(
                 "staging file replaced; foreign path will not be removed".into(),
             ));
@@ -242,8 +198,8 @@ enum Point {
 
 /// All conversion completes before staging. The refusal callback runs before
 /// staging and immediately before final identity/readback checks and no-replace
-/// publication. It is not a concurrency guarantee. Only Unix stable file IDs are
-/// supported; other targets fail closed before staging.
+/// publication. It is not a concurrency guarantee. File identity comes from open handles
+/// (`orr_fsid`); other targets fail closed before staging.
 pub fn export_new_checked(
     output: &Path,
     terrain: &Terrain,
@@ -299,14 +255,16 @@ fn publish(
         hook(Point::Linked, &stage.path)?;
         stage.check(&parent)?;
         let published =
-            fs::symlink_metadata(output).map_err(|e| failure("published output readback", e))?;
-        if !published.file_type().is_file() || !same_file(&stage.identity, &published) {
+            orr_fsid::open_file(output).map_err(|e| failure("published output readback", e))?;
+        let published_id =
+            orr_fsid::file_id(&published).map_err(|e| failure("published output readback", e))?;
+        if published_id != stage.identity {
             return Err(Error("published output identity changed".into()));
         }
         stage.verify(&bytes)?;
         hook(Point::BeforeDirectorySync, &stage.path)?;
         parent
-            .handle
+            .handle()
             .sync_all()
             .map_err(|e| failure("output parent sync", e))
     })();
@@ -320,7 +278,7 @@ fn publish(
         .err()
         .map(|e| format!("output was published; staging cleanup refused/failed: {e}"));
     if cleanup_warning.is_none() {
-        if let Err(error) = parent.handle.sync_all() {
+        if let Err(error) = parent.handle().sync_all() {
             warnings.push(format!(
                 "output was published; staging cleanup durability is uncertain: {error}"
             ));
@@ -341,6 +299,54 @@ mod tests;
 mod windows_tests {
     use super::*;
     use crate::raw16::export_tests::{recipe, terrain};
+
+    #[test]
+    fn a_junction_in_the_output_ancestry_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        let target = root.join("target");
+        let junction = root.join("junction");
+        fs::create_dir(&target).unwrap();
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&target)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "{made:?}");
+        let r = recipe();
+        let t = terrain(&r, [-100, -99, 0, 65435]);
+        assert!(export_new_checked(&junction.join("height.raw"), &t, &r, || Ok(())).is_err());
+        assert_eq!(fs::read_dir(&target).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_staging_file_replaced_by_another_file_is_refused_and_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = fs::canonicalize(dir.path()).unwrap().join("height.raw");
+        let r = recipe();
+        let t = terrain(&r, [-100, -99, 0, 65435]);
+        let result = publish(
+            &output,
+            &t,
+            &r,
+            || Ok(()),
+            |point, stage| {
+                if point == Point::StageCreated {
+                    fs::remove_file(stage).unwrap();
+                    fs::write(stage, b"foreign").unwrap();
+                }
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert!(!output.exists());
+        let kept: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| fs::read(entry.unwrap().path()).unwrap())
+            .collect();
+        assert_eq!(kept, vec![b"foreign".to_vec()]);
+    }
 
     #[test]
     fn publishes_into_verbatim_canonical_parent() {

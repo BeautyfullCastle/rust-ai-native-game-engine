@@ -3349,6 +3349,7 @@ name = "orr_model"
 version = "0.0.1"
 dependencies = [
  "base64 0.22.1",
+ "orr_fsid",
  "png 0.18.1",
  "serde",
  "serde_json",
@@ -3359,6 +3360,7 @@ dependencies = [
 name = "orr_model_bindings"
 version = "0.0.1"
 dependencies = [
+ "orr_fsid",
  "orr_model",
  "orr_package",
  "orr_reflect",
@@ -3579,6 +3581,7 @@ dependencies = [
  "bytemuck",
  "naga",
  "orr_ecs",
+ "orr_fsid",
  "orr_model",
  "orr_package",
  "orr_rhi",
@@ -3812,6 +3815,7 @@ version = "0.0.1"
 dependencies = [
  "fdeflate",
  "orr_fp",
+ "orr_fsid",
  "orr_model",
  "orr_package",
  "orr_render",
