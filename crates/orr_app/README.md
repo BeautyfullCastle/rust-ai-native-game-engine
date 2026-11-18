@@ -1,6 +1,6 @@
 # orr_app
 
-`Game`을 창에 띄우는 실행 층이다. 설계는 [docs/view-framework.md](../../docs/view-framework.md) 4장이고, 이 크레이트는 12장의 1단계(서버 없이 실행, 기본 2D 렌더러), 2단계(엔티티 뷰, 씬 뷰, 이벤트 상태), 3단계(한 화면 여러 명), 4단계(플레이어 신호, 릴레이 서버로 실행)까지 만들었다.
+`Game`을 창에 띄우는 실행 층이다. 설계는 [docs/view-framework.md](../../docs/view-framework.md) 4장이고, 이 크레이트는 12장의 1단계(서버 없이 실행, 기본 2D 렌더러), 2단계(엔티티 뷰, 씬 뷰, 이벤트 상태), 3단계(한 화면 여러 명), 4단계(플레이어 신호, 릴레이 서버로 실행), 6a단계(기본 3D 렌더러)까지 만들었다.
 
 ## 쓰는 법
 
@@ -51,8 +51,33 @@ App::<PhysGame>::with_config(PhysConfig::new(600, SceneMode::Rain))
 | `.input(f)` | `f(&InputContext, PlayerSlot) -> G::Input`. 매 프레임 **로컬 슬롯마다 한 번씩** 그 슬롯 번호와 함께 부른다. `InputContext`는 `held(key)`, `any_held(keys)`, `axis(neg, pos)`, `stick_for_slot(slot)`, `stick(&KeyLayout)`을 준다 |
 | `.bot(f)` | 로컬이 아닌 슬롯마다 매 틱 `f(slot, tick)`을 부른다 |
 | `.view(v)` | `v`는 `View2D`: `Extractor`(엔티티 읽기) + `camera(frame)` + `backdrop(frame, out)` |
+| `.view3d(v)` | `v`는 `View3D`: `Extractor3` + `camera(frame)` + `lighting(frame)`. 기본은 `Look3D::default()`. `.view(v)`와 같이 쓸 수 없다 |
 | `.entity_view::<C>(factory)` | 예측 프레임에서 컴포넌트 `C`를 가진 엔티티마다 `factory()`로 만든 `EntityView` 하나 |
 | `.scene_view(v)` | `SceneView` 하나. 여러 개를 더하면 더한 순서로 불린다 |
+
+## 3D (6a단계)
+
+```rust
+fn main() -> Result<(), orr_app::Error> {
+    App::<Yard3D>::with_config(YardConfig::new(400))
+        .tick_rate(TICK_RATE)
+        .input(|keys, _slot| /* keys.held(..)로 YardInput을 만든다 */)
+        .view3d(Look3D::default())   // 뷰 코드 없이 그림이 나온다
+        .run()
+}
+```
+
+예제: [examples/yard3d.rs](examples/yard3d.rs) (17줄). `cargo run -p orr_app --release --example yard3d`
+
+`.view(..)`(2D) 대신 `.view3d(..)`를 부르면 같은 실행 함수가 3D로 그린다. 한 실행은 2D 아니면 3D 하나이고, 둘 다 주면 `run()`이 창을 열기 전에 오류를 낸다. 엔티티 뷰, 씬 뷰, 플레이어, `--host`/`--connect`, `--screenshot`/`--ticks`는 2D와 같게 동작한다. 엔티티 뷰는 `on_update` 대신 `on_update3(ctx, entity, pose: Option<Transform3>)`를 받는다.
+
+- **`Look3D`가 그리는 것 (뷰 코드 없이).** 물리 `Body`와 `Collider`가 있는 엔티티는 콜라이더 모양(구, 상자, 캡슐)으로 그린다. 움직이는 몸은 밝게, 쉬는 몸은 어둡게 보인다. 가로세로가 20 단위를 넘는 정적 상자는 체크무늬 바닥으로 그린다. `orr_gfx::Transform3`과 `orr_gfx::Material`이 있고 `Body`가 없는 엔티티는 `Transform3`의 크기만 한 상자로 그린다(모델의 자리 표시). **`Material`의 표면 셰이더는 아직 적용하지 않는다.**
+- **보간.** 2D와 같다. `ViewWorld3`가 움직이는 몸을 예측 틱 사이에서 보간하고 롤백 튐을 보정한다.
+- **기본 카메라.** 씬에 활성 `orr_gfx::Camera`가 있으면 그 카메라(우선순위가 가장 높은 것)다. 없으면 원점 바로 위를 보는 궤도 카메라 `default_orbit()`이다. 50 x 50 단위 바닥이 한눈에 들어온다. `Look3D::default().orbit(OrbitCamera::new(target, yaw, pitch, distance))`로 바꾼다.
+- **기본 조명.** 씬에 `orr_gfx::Light`, `Environment`, 후처리가 있으면 `orr_gfx_view::scene_look`이 읽은 그 값이 이긴다. 없으면 낮게 뜬 오후 해와 그림자(`default_lighting()`, 원점 둘레 36 단위)다. `Look3D::default().lighting(..)`으로 바꾼다.
+- **직접 만들기.** `View3D`는 `Extractor3`에 `camera(frame) -> Camera3D`와 `lighting(frame) -> Lighting`을 더한 트레이트다. 둘 다 기본 구현이 있어서 `Extractor3`만 쓰면 된다. 기본 추출은 `extract_default(frame, out)`로 부를 수 있다.
+- **그림이 같다.** `--screenshot --ticks 300`의 Yard3D 그림은 Yard3D 샘플의 그리기 경로(`YardExtractor`, `fill_list`, `scene_look`, `yard_camera`)로 같은 틱을 그린 그림과 픽셀까지 같다(900x900, MSAA 4, 같은 GPU). `Look3D`의 색과 바닥 규칙은 `YardExtractor`와 같게 맞췄다.
+- **렌더러 설정은 `Settings3D::default()`다**(MSAA 4, 그림자 지도 2048). 바꾸는 옵션은 아직 없다.
 
 ## 엔티티 뷰와 씬 뷰
 
@@ -181,4 +206,5 @@ cargo run -p orr_app --release --example roster -- --connect 127.0.0.1:7777
 - **2단계에서 뺀 것:** `ViewContext::query`(`FrameView::iter::<T>()`, `dense::<T>()`가 이미 있어서 조합 질의는 `orr_ecs` 쪽 일이다), `ViewContext::draw()`(기본 2D 그리기가 `Extractor` 항목과 `backdrop`만 받아서 선·글자를 더하려면 그리기 경로를 넓혀야 한다), `App::threaded()`(위). `SceneView::on_player`는 4a단계에서 더했다.
 - **3단계에서 뺀 것:** 패드 입력(키보드만), 서버 쪽 여러 슬롯 클라이언트(릴레이·네트워크는 슬롯 하나), `Threaded`를 쓰는 `App` 경로(위), 여러 슬롯의 `Step` 입력 캡처(`Threaded::try_step`은 첫 슬롯만 고정한다).
 - **4b단계에서 뺀 것:** 플레이어별 시작 데이터(`Added`의 `data`는 서버로 실행해도 비어 있다. `Hello`에 시작 데이터가 없다. 8.3), 서버 쪽 신호 기록은 방이 사는 동안만 있다(서버를 다시 띄우면 사라진다), 시작 때의 `Added`(틱 1)는 `signal_lead_ticks` 여유가 없다, 권한 있는 서버 방은 신호가 없다, `.scene(..)`과 `.bot(..)`은 서버로 실행할 때 쓰지 않는다, `ws://`만 지원한다(QUIC·인증서 옵션 없음), 원격 뷰 스트림(`orr_viewstream`)은 신호를 아직 내보내지 않는다. 신호를 취소하는 API가 없어서 `Canceled`는 합성 업데이트 테스트로만 확인했다.
-- **이후 단계:** 3D 렌더러(`SceneLook`), 웹·모바일 루프.
+- **6a단계에서 뺀 것:** `Material`의 표면 셰이더(`Transform3`과 `Material`이 있는 엔티티는 단색 상자로 그린다), 모델 참조(`ViewRef`, 6b), `SceneLook`의 후처리(블룸 등)와 하늘, 물, 지형, 흩뿌리기 그리기(조명과 데칼만 쓴다), 3D 마우스 입력(`InputContext`는 키만 읽는다. 예제 `yard3d`는 화면 가운데로 쏜다), 3D 뷰의 `ViewConfig` 바꾸기(기본값), 화면 글자 겹치기(overlay).
+- **이후 단계:** 웹·모바일 루프.
