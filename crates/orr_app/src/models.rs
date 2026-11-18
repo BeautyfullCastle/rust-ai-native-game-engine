@@ -61,6 +61,30 @@ fn fit_models(requests: &[ModelRequest], draw_budget: usize, max_models: usize) 
         .collect()
 }
 
+/// Cuts `groups` with [`fit_models`] for the models in `primitives` (path and primitive draws per
+/// instance) and returns how many instances were cut. A cut group stays in `groups`, possibly empty.
+fn cut_groups<'a>(groups: &mut BTreeMap<&'a str, Vec<StaticInstance>>, primitives: &[(&'a str, usize)], draw_budget: usize) -> usize {
+    let requests: Vec<ModelRequest> = primitives
+        .iter()
+        .map(|(path, primitives)| ModelRequest { instances: groups[path].len(), primitives: *primitives })
+        .collect();
+    let keep = fit_models(&requests, draw_budget, MAX_IMPORTED_BATCHES - 1);
+    let mut dropped = 0usize;
+    for ((path, _), keep) in primitives.iter().zip(keep) {
+        let instances = groups.get_mut(path).expect("grouped above");
+        dropped += instances.len() - keep;
+        instances.truncate(keep);
+    }
+    dropped
+}
+
+/// The models that get a batch in the frame: the groups that are loaded and still hold an instance,
+/// in path order. A group cut to nothing is left out, because every batch counts against
+/// [`MAX_IMPORTED_BATCHES`] with the shapes of the look.
+fn model_batch_paths<'a>(groups: &BTreeMap<&'a str, Vec<StaticInstance>>, is_loaded: impl Fn(&str) -> bool) -> Vec<&'a str> {
+    groups.iter().filter(|(path, instances)| !instances.is_empty() && is_loaded(path)).map(|(path, _)| *path).collect()
+}
+
 impl ModelScene {
     pub(crate) fn new(rhi: Wgpu, format: TextureFormat) -> Result<Self, String> {
         let composer = ImportedSceneRenderer::new(rhi.clone(), format).map_err(|e| e.to_string())?;
@@ -99,10 +123,13 @@ impl ModelScene {
         self.limit_to_budget(&mut groups, list);
         self.composer.scene_lights = list.scene_lights;
         self.composer.decals.clone_from(&list.decals);
+        let planned = model_batch_paths(&groups, |path| matches!(self.renderers.get(path), Some(Some(_))));
         let mut batches = vec![ImportedBatch::Procedural { renderer: &mut self.shapes, list }];
         for (path, renderer) in &mut self.renderers {
             if let (Some(renderer), Some(instances)) = (renderer.as_mut(), groups.get(path.as_str())) {
-                batches.push(ImportedBatch::StaticInstances { renderer, instances });
+                if planned.binary_search(&path.as_str()).is_ok() {
+                    batches.push(ImportedBatch::StaticInstances { renderer, instances });
+                }
             }
         }
         let target = ImportedSceneTarget { view, size, format: self.format, sample_count: 1 };
@@ -123,21 +150,14 @@ impl ModelScene {
     /// shapes and the models that fit are still drawn. The cut instances are counted, and the first
     /// frame of a series of frames with cut instances is reported on stderr.
     fn limit_to_budget(&mut self, groups: &mut BTreeMap<&str, Vec<StaticInstance>>, list: &RenderList3D) {
-        let mut paths = Vec::new();
-        let mut requests = Vec::new();
-        for (path, instances) in groups.iter() {
-            if let Some(Some(renderer)) = self.renderers.get(*path) {
-                paths.push(*path);
-                requests.push(ModelRequest { instances: instances.len(), primitives: renderer.model().source().primitives.len() });
-            }
-        }
-        let keep = fit_models(&requests, model_draw_budget(list), MAX_IMPORTED_BATCHES - 1);
-        let mut dropped = 0usize;
-        for (path, keep) in paths.into_iter().zip(keep) {
-            let instances = groups.get_mut(path).expect("grouped above");
-            dropped += instances.len() - keep;
-            instances.truncate(keep);
-        }
+        let primitives: Vec<(&str, usize)> = groups
+            .keys()
+            .filter_map(|path| match self.renderers.get(*path) {
+                Some(Some(renderer)) => Some((*path, renderer.model().source().primitives.len())),
+                _ => None,
+            })
+            .collect();
+        let dropped = cut_groups(groups, &primitives, model_draw_budget(list));
         self.dropped_instances += dropped as u64;
         if dropped > 0 && !self.was_dropping {
             eprintln!("drawing models: {dropped} model instances do not fit the draw budget and are left out (the first ones of each model are kept; {} left out so far)", self.dropped_instances);
@@ -224,6 +244,26 @@ mod tests {
         let kept = fit_models(&requests, MAX_IMPORTED_DRAWS, 3);
 
         assert_eq!(kept, [1, 1, 1, 0, 0, 0, 0, 0, 0, 0]);
+    }
+
+    /// The batches a frame submits (the shapes of the look plus one per model) for `models` distinct
+    /// models of one primitive each, drawn once each, after the cut of the real frame path.
+    fn submitted_batches(models: usize) -> usize {
+        let paths: Vec<String> = (0..models).map(|i| format!("m{i:04}.glb")).collect();
+        let mut groups: BTreeMap<&str, Vec<StaticInstance>> = BTreeMap::new();
+        for path in &paths {
+            groups.insert(path.as_str(), vec![StaticInstance::default()]);
+        }
+        let primitives: Vec<(&str, usize)> = paths.iter().map(|p| (p.as_str(), 1)).collect();
+        cut_groups(&mut groups, &primitives, MAX_IMPORTED_DRAWS);
+        1 + model_batch_paths(&groups, |_| true).len()
+    }
+
+    #[test]
+    fn an_empty_model_group_gets_no_batch_so_256_distinct_models_stay_inside_the_batch_limit() {
+        assert!(submitted_batches(255) <= MAX_IMPORTED_BATCHES);
+        assert!(submitted_batches(256) <= MAX_IMPORTED_BATCHES, "the 256th model is cut to nothing and must not be submitted");
+        assert_eq!(submitted_batches(256), MAX_IMPORTED_BATCHES);
     }
 
     #[test]
