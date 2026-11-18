@@ -347,8 +347,8 @@ impl<G: Game> App<G> {
 
     fn run_window(mut self, args: Args) -> Result<(), Error> {
         let display = match (self.view.take(), self.view3.take()) {
-            (Some(view), None) => Display::D2(Display2::new(view)),
-            (None, Some(view)) => Display::D3(Display3::new(view)),
+            (Some(view), None) => Display::D2(Box::new(Display2::new(view))),
+            (None, Some(view)) => Display::D3(Box::new(Display3::new(view))),
             (None, None) => return Err(Error("no view: call .view(..) for 2D or .view3d(..) for 3D before .run()".to_string())),
             (Some(_), Some(_)) => return Err(Error("both .view(..) and .view3d(..) are set: a run draws in 2D or in 3D, not both".to_string())),
         };
@@ -451,8 +451,8 @@ impl<G: Game> LocalInput<G> {
 
 /// What a run draws: the 2D look or the 3D look, each with its view world, draw list and renderer.
 enum Display {
-    D2(Display2),
-    D3(Display3),
+    D2(Box<Display2>),
+    D3(Box<Display3>),
 }
 
 struct Display2 {

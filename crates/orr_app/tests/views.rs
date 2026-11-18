@@ -684,10 +684,10 @@ impl Extractor3 for SparkLook3 {
 
 #[test]
 fn in_a_3d_run_the_entity_views_get_the_3d_pose_and_not_the_flat_one() {
-    #[derive(Default)]
+    type Poses = Rc<RefCell<Vec<(Entity, Option<Transform3>)>>>;
     struct Probe {
         flat: Rc<Cell<u32>>,
-        poses: Rc<RefCell<Vec<(Entity, Option<Transform3>)>>>,
+        poses: Poses,
     }
     impl EntityView<Burst> for Probe {
         fn on_update(&mut self, _ctx: &mut ViewContext<'_, Burst>, _entity: Entity, _pose: Option<Transform2>) {

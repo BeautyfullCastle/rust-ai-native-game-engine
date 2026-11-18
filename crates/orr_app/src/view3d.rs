@@ -305,9 +305,7 @@ mod tests {
     fn an_entity_with_a_material_and_a_placement_is_a_box_of_its_scale_and_a_body_is_not_drawn_twice() {
         let mut f = frame();
         let marked = f.spawn();
-        let mut placed = PlacedTransform::default();
-        placed.position = FPVec3::new(fp!(4), fp!(0), fp!(0));
-        placed.scale = FPVec3::new(fp!(2), fp!(4), fp!(6));
+        let placed = PlacedTransform { position: FPVec3::new(fp!(4), fp!(0), fp!(0)), scale: FPVec3::new(fp!(2), fp!(4), fp!(6)), ..Default::default() };
         f.add(marked, placed);
         f.add(marked, Material::new("lava"));
         let plain = f.spawn();
@@ -368,8 +366,7 @@ mod tests {
     fn the_camera_of_the_scene_wins_over_the_orbit() {
         let mut f = frame();
         let eye = f.spawn();
-        let mut placed = PlacedTransform::default();
-        placed.position = FPVec3::new(fp!(0), fp!(5), fp!(-10));
+        let placed = PlacedTransform { position: FPVec3::new(fp!(0), fp!(5), fp!(-10)), ..Default::default() };
         f.add(eye, placed);
         f.add(eye, orr_gfx::Camera::default());
 
