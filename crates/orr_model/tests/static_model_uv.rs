@@ -1467,6 +1467,29 @@ fn cli_windows_nonlocal_prefixes_reject() {
     fixture.assert_unchanged();
 }
 
+#[cfg(windows)]
+#[test]
+fn cli_windows_junction_ancestry_and_folder_recipe_reject() {
+    let fixture = CliFixture::new();
+    let aliases = Temp::new();
+    let junction = aliases.0.join("junction");
+    let made = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&junction)
+        .arg(&fixture.temp.0)
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "{made:?}");
+    let before = tree(&fixture.temp.0);
+    let through = junction.join(fixture.input.strip_prefix(&fixture.temp.0).unwrap());
+    assert!(authoring::run(cli_args(&through, &fixture.output)).is_err());
+    assert!(authoring::transform_recipe(&through, RECIPE_ID).is_err());
+    assert!(authoring::transform_recipe(&fixture.temp.0, RECIPE_ID).is_err());
+    assert_eq!(tree(&fixture.temp.0), before);
+    assert!(!fixture.output.exists());
+    fixture.assert_unchanged();
+}
+
 #[test]
 fn shared_file_recipe_matches_memory_transform_without_publishing() {
     let fixture = CliFixture::new();

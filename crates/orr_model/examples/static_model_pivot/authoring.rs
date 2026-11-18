@@ -7,7 +7,7 @@ use orr_model::MAX_FILE_BYTES;
 use std::{
     collections::BTreeMap,
     ffi::OsString,
-    fs::{self, File, Metadata, OpenOptions},
+    fs::{self, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -80,32 +80,15 @@ fn checked_path(path: &Path, output: bool) -> Result<PathBuf, String> {
     }
     Ok(result)
 }
-fn same_file(a: &Metadata, b: &Metadata) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        a.dev() == b.dev() && a.ino() == b.ino()
-    }
-    #[cfg(not(unix))]
-    {
-        a.len() == b.len() && a.modified().ok() == b.modified().ok()
-    }
-}
 fn read_input(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
     let path = checked_path(path, false)?;
-    let before = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
-    if !before.file_type().is_file() || before.len() > limit as u64 {
+    // `open_file` refuses a link, a folder or a FIFO without waiting for a writer.
+    let file = orr_fsid::open_file(&path).map_err(|e| e.to_string())?;
+    let opened = file.metadata().map_err(|e| e.to_string())?;
+    if opened.len() > limit as u64 {
         return Err("input must be a bounded regular file".into());
     }
-    let file = File::open(&path).map_err(|e| e.to_string())?;
-    let opened = file.metadata().map_err(|e| e.to_string())?;
-    let current = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
-    if !opened.is_file()
-        || !current.file_type().is_file()
-        || !same_file(&before, &opened)
-        || !same_file(&opened, &current)
-        || before.len() != opened.len()
-    {
+    if !matches!(orr_fsid::same_file(&path, &file), Ok(true)) {
         return Err("input changed during open".into());
     }
     let mut limited = file.take(limit as u64 + 1);
@@ -116,6 +99,7 @@ fn read_input(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
         || bytes.len() as u64 != opened.len()
         || after.len() != opened.len()
         || after.modified().ok() != opened.modified().ok()
+        || !matches!(orr_fsid::same_file(&path, limited.get_ref()), Ok(true))
     {
         return Err("input changed during read or exceeds byte limit".into());
     }
@@ -208,7 +192,7 @@ fn publish(output: &Path, bytes: &[u8]) -> Result<(), String> {
         );
     }
     #[cfg(unix)]
-    if let Err(error) = File::open(parent).and_then(|f| f.sync_all()) {
+    if let Err(error) = fs::File::open(parent).and_then(|f| f.sync_all()) {
         let _ = writeln!(
             std::io::stderr(),
             "warning: published; directory durability uncertain: {error}"
