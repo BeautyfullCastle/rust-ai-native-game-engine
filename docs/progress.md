@@ -1,6 +1,6 @@
 # Orrery 현재 상태
 
-갱신: 2026-11-14 · [설계 v2](design-v2.md) · [상위 추적 #2](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/2) · [게임 제작 #94](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94)
+갱신: 2026-11-19 · [설계 v2](design-v2.md) · [상위 추적 #2](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/2) · [게임 제작 #94](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/94)
 
 ## 지금 되는 것
 
@@ -9,6 +9,7 @@
 - **빌드**: `cargo build-all` 한 줄로 에디터와 게임 실행 파일이 모두 만들어진다.
 - **에디터**: 기본 물리 씬, `--game arena`, Room 프로젝트 열기를 화면 캡처로 확인했다.
 - **Room 제작 흐름**: `orr_new_room`으로 프로젝트 생성 → `orr_editor --room-project`로 열기 → `room_escape --project`로 실행 → `orr_export_windows`로 내보내기 → 내보낸 폴더의 실행 파일만으로 실행.
+- **Arena·Collect 제작 흐름 (2026-11-19, 윈도우)**: `orr_new_arena`로 프로젝트 생성(Arena, Collect, Collect UI, 타일맵, 사용자 스프라이트 템플릿을 실행해 확인했다. 사용자 타일셋 템플릿은 같은 코드 경로지만 실행하지 않았다) → `arena`·`collect_dodge --project --headless --ticks 120 --capture`로 실행 → `orr_export_arena`·`orr_export_collect`(내부는 `orr_export_windows`와 같은 윈도우 내보내기)로 내보내기 → 내보낸 폴더의 `bin\arena.exe`·`bin\collect_dodge.exe`로 실행. 원본과 내보낸 폴더의 120틱 체크섬과 캡처 PNG가 같다. 게임 진행(Collect 최고 기록, Room 클리어)은 `%LOCALAPPDATA%\orrery\games\...`에 저장된다. 터레인 패치 불러오기와 `orr_pkg export-source`, `orr_pkg create-sprite`도 윈도우에서 돈다.
 - **게임**: Stormglass(`coop_defense`)의 창 실행과 창 없는 600틱 실행, `arena`의 60fps 실행과 오디오 출력.
 - **야외 장면 렌더러**: `forest_valley`가 숲과 계곡 장면을 1600x900 창에서 수직 동기화 60fps로 그린다. 동기화를 끄면 약 100fps다. 구성은 그림자 두 단계, HDR 다중 샘플 장면, 하늘과 안개, 물, 블룸, 빛줄기, 자동 노출, 톤 매핑이다. 코드는 `crates/orr_scenery`에 있고 `orr_rhi`만 쓴다. 관련 이슈는 [#101](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/101)이다.
 - **에디터의 장면 창**: `Edit > Forest Valley scene…`에서 같은 장면을 에디터 안에 띄우고 설정 36개, 켜고 끄기 2개, 색 2개, 품질 2개를 고친다. 값은 다음 프레임에 반영된다. 프리셋을 JSON으로 저장하고 불러온다. 에디터 기능 이름은 `scenery`이고 `full`에 들어 있다.
@@ -45,7 +46,10 @@
 
 추적 이슈: [#563](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/563)
 
-- Arena·Collect 프로젝트의 새로 만들기와 내보내기, 게임 진행 저장, 지형 패치 불러오기, `orr_pkg`의 번들·웹 명령은 리눅스 전용이다.
+- 윈도우에서 아직 안 되는 것은 다음과 같다. Stormglass의 이어하기 저장(`defense_run_save`)도 리눅스 전용이다. 에디터 메뉴 `File > New Collect project…`와 Arena·Collect 내보내기 창은 리눅스에서만 나온다(같은 일은 `orr_new_arena`, `orr_export_arena`, `orr_export_collect` 명령으로 한다). 타일맵 프로젝트의 내보내기는 윈도우 내보내기가 거부한다. `orr_pkg`는 `export-source`와 `create-sprite`만 윈도우에서 돈다. 나머지 명령(`pack-coop-native`, `create-coop-native-scene`, `build-coop-recipe`, `copy-coop-web-assets`, `pack-coop-offline`, `create-coop-scene`, `create-coop-animation`, `compose-coop-animations`, `create-coop-audio-bank[-from-wav]`, `deployment`, `bootstrap-user-game`, `create-assembled`, `create-uv-model`, `create-retextured-model`, `create-animated-sequence`)는 리눅스 전용이다. 이유는 두 가지다. 첫째, 이 명령들의 폴더 읽기·쓰기가 `rustix`의 `openat`, `renameat2(NOREPLACE)`, `flock`으로 짜여 있어서 윈도우용 저장 계층을 따로 써야 한다. 둘째, `pack-coop-native`는 리눅스 x86-64 ELF 실행 파일, 실행 비트, 프로세스 그룹 종료를 전제로 한다. 윈도우용 실행 파일 묶음은 `orr_export_windows`가 맡는다.
+- 윈도우 진행 저장은 `%LOCALAPPDATA%` 아래 폴더의 상속 권한에 기댄다. 리눅스 저장소가 하는 소유자·쓰기 권한 검사는 하지 않는다. 폴더 이음(junction)과 심볼릭 링크는 거부하고, 잠금은 잠금 파일의 공유 모드로 한다.
+- 윈도우 터레인 패치 읽기는 파일 번호(inode)가 없어서 생성 시각을 파일 식별자 대신 쓴다. 일반적인 교체는 잡지만, 악의적으로 폴더를 바꿔치기하는 경쟁은 리눅스와 마찬가지로 막지 않는다.
+- 윈도우에서 Collect 최고 기록 저장은 창 경로의 단위 테스트(`isolated_process_relaunch_uses_only_external_progress`)로 확인했다. 창을 띄워 사람이 직접 점수를 내 보는 확인은 하지 않았다.
 - 에디터 메뉴(`File > New Room project…`, `File > Export Windows game…`)는 사람이 직접 눌러 보는 확인을 아직 하지 않았다. 같은 기능을 명령 도구로 실행해 확인했다.
 - 리눅스, macOS, 안드로이드, 브라우저 빌드는 이번에 실행하지 않았다.
 - 2026-11-14 기준 main에서 원래부터 실패하는 테스트 2건: `crates/orr_editor/tests/measure.rs`의 `drag_to_viewport_latency`(두 번째 드래그 이동이 화면에 반영되지 않음), `crates/orr_wasm_bench/tests/checksums.rs`의 `physics3d_1000_tick` 골든 체크섬 불일치.
@@ -55,7 +59,7 @@
 
 0. 뷰 프레임워크(`orr_app`)와 그 위의 튜토리얼([tutorial/README.md](tutorial/README.md), 5단계)을 [view-framework.md](view-framework.md)의 12장 순서로 만들었다. 남은 것은 12장의 "아직 정하지 않은 것"(웹과 모바일, 서버 직접 시뮬레이션 모드 등)이다.
 1. [#104](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/104) 흐름을 에디터 화면에서 사람 손으로 끝까지 진행한다: 새 프로젝트 → 개체 이동과 값 수정 → 실행 취소 → 저장 → Play → 내보내기 → 내보낸 게임 실행.
-2. Arena 프로젝트 생성과 내보내기를 윈도우로 옮긴다.
+2. 윈도우로 옮기고 남은 것을 옮긴다. 에디터의 Collect 프로젝트 메뉴와 Arena·Collect 내보내기 창(경로 검사가 `/` 기준이다), 그리고 `orr_pkg`의 나머지 명령이다. Arena·Collect 생성·내보내기·진행 저장·터레인 패치 불러오기는 2026-11-19에 옮겼다.
 3. 설계 v2의 고정 과제군(배달, 스위치 퍼즐, 액션)으로 무개입 완주율을 처음 측정한다.
 4. `orr_scenery` 렌더러로 에디터의 지형·모델 씬을 그린다. 지금은 생성된 Forest Valley 장면만 그린다. 에디터에서 만든 씬(Room, Yard3D, 지형 문서)은 여전히 `orr_render`로 그리고, 장면 창의 설정은 그 씬에 적용되지 않는다.
 

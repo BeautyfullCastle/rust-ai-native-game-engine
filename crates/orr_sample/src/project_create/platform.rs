@@ -7,8 +7,10 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+// The Room creator on Windows compiles the same file into the binary and into
+// `windows_project`. One more copy here keeps the checks in one place.
 #[cfg(windows)]
-#[allow(dead_code)]
+#[allow(dead_code, clippy::duplicate_mod)]
 #[path = "../windows_room/platform.rs"]
 mod win;
 

@@ -140,9 +140,9 @@ cargo clippy --workspace --all-targets
 
 아래 기능은 코드가 리눅스 전용으로 막혀 있습니다. 윈도우에서 실행하면 지원하지 않는다는 안내가 나옵니다.
 
-- Arena 프로젝트와 Collect 프로젝트의 새로 만들기와 내보내기 (`orr_new_arena`, `orr_export_arena`, `orr_export_collect`)
-- 게임 진행 저장 (Room, Collect, Stormglass의 이어하기)
-- `orr_pkg`의 번들·웹 관련 하위 명령
+- 에디터 메뉴 `File > New Collect project…`와 Arena·Collect 내보내기 창. 같은 일은 `orr_new_arena`, `orr_export_arena`, `orr_export_collect` 명령으로 합니다.
+- Stormglass의 이어하기 저장 (Room과 Collect의 진행 저장은 윈도우에서 됩니다)
+- `orr_pkg`의 번들·웹 관련 하위 명령 (`export-source`와 `create-sprite`는 윈도우에서 됩니다)
 
 ## 저장소 구조
 
