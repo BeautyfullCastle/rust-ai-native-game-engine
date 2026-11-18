@@ -330,15 +330,16 @@ fn actual_attack_clip_release_pause_idle_fallback_and_restart_keep_frame_bytes()
     panic!("real native App must produce a Rivet shot clip");
 }
 
-#[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+#[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
 #[test]
 fn actual_app_loaded_save_restores_pixel_frame_without_backlog_or_catchup() {
     use crate::defense_run_save::{Candidate, Journal, Origin};
-    use std::os::unix::fs::PermissionsExt;
-    let dir = tempfile::Builder::new()
-        .permissions(std::fs::Permissions::from_mode(0o700))
-        .tempdir()
-        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let mut app = ready();
     app.saves = Some(RunSaves {
         store: crate::defense_run_save_store::RunStore::open(dir.path(), &[]).unwrap(),

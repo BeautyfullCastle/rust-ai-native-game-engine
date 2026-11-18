@@ -183,7 +183,7 @@ fn gain_is_bounded_and_audio_consumes_simultaneous_game_inputs() {
     assert!(ui.paused);
 }
 
-#[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+#[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
 #[test]
 fn save_modals_block_audio_and_discard_existing_gestures() {
     let sim = simulation();

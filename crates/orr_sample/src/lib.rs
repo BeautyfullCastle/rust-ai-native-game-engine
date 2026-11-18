@@ -197,9 +197,9 @@ pub mod defense_view;
 #[cfg(feature = "coop-defense")]
 pub mod defense_ui;
 
-#[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+#[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
 pub mod defense_run_save;
-#[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+#[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
 pub mod defense_run_save_store;
 
 #[cfg(feature = "coop-defense-audio")]

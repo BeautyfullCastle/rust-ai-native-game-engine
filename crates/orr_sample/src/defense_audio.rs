@@ -93,7 +93,7 @@ pub(crate) struct Consumer<S: AudioOutput> {
     paused: bool,
     focused: bool,
     gain: f32,
-    #[cfg(any(test, all(feature = "coop-defense-run-save", target_os = "linux")))]
+    #[cfg(any(test, all(feature = "coop-defense-run-save", any(target_os = "linux", windows))))]
     pub(crate) bindings: u64,
 }
 #[cfg(any(test, all(feature = "audio-native", not(target_arch = "wasm32"))))]
@@ -126,7 +126,7 @@ impl<S: AudioOutput> Consumer<S> {
             paused: true,
             focused: true,
             gain: 1.0,
-            #[cfg(any(test, all(feature = "coop-defense-run-save", target_os = "linux")))]
+            #[cfg(any(test, all(feature = "coop-defense-run-save", any(target_os = "linux", windows))))]
             bindings: 0,
         })
     }
@@ -155,7 +155,7 @@ impl<S: AudioOutput> Consumer<S> {
             self.gain / MAX_VOICES as f32
         })
     }
-    #[cfg(any(test, all(feature = "coop-defense-run-save", target_os = "linux")))]
+    #[cfg(any(test, all(feature = "coop-defense-run-save", any(target_os = "linux", windows))))]
     pub(crate) fn replace(&mut self, tick: u64, generation: u32) -> Result<(), String> {
         self.output.reset();
         self.paused = true;
@@ -258,7 +258,7 @@ pub(crate) struct DefenseAudio {
     status: String,
     #[cfg(test)]
     pub(crate) injected_error: Option<String>,
-    #[cfg(all(test, feature = "coop-defense-run-save", target_os = "linux"))]
+    #[cfg(all(test, feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
     pub(crate) injected_replace_error: Option<String>,
 }
 impl Default for DefenseAudio {
@@ -269,7 +269,7 @@ impl Default for DefenseAudio {
             status: "off".into(),
             #[cfg(test)]
             injected_error: None,
-            #[cfg(all(test, feature = "coop-defense-run-save", target_os = "linux"))]
+            #[cfg(all(test, feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
             injected_replace_error: None,
         }
     }
@@ -361,7 +361,7 @@ impl DefenseAudio {
         let _ = batch;
         dispatch!(self, owner, owner.consume(batch))
     }
-    #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+    #[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
     pub(crate) fn replace(&mut self, tick: u64, generation: u32) -> Result<(), String> {
         #[cfg(test)]
         if let Some(error) = self.injected_replace_error.take() {
@@ -378,7 +378,7 @@ impl DefenseAudio {
             mode,
             status: "offline test output".into(),
             injected_error: None,
-            #[cfg(all(test, feature = "coop-defense-run-save", target_os = "linux"))]
+            #[cfg(all(test, feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
             injected_replace_error: None,
         }
     }

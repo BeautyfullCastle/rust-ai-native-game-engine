@@ -26,7 +26,7 @@ coop-defense-pixelfx = ["coop-defense"]
 # Opt-in authored native presentation; hardware output additionally needs audio-native.
 coop-defense-audio = ["coop-defense", "audio", "orr_package/coop-audio-load"]
 # Optional Linux native admission-journal run saves, never enabled by web/default.
-coop-defense-run-save = ["coop-defense", "dep:sha2"]
+coop-defense-run-save = ["coop-defense", "dep:sha2", "dep:orr_fsid", "dep:windows-sys"]
 coop-defense-presentation = ["dep:egui", "orr_games/coop-defense"]
 coop-defense = ["coop-defense-presentation", "project", "game-ui", "orr_games/coop-defense-scene", "dep:rustix"]
 room-character = ["room-animated-models", "dep:sha2"]
@@ -78,6 +78,7 @@ orr_model_bindings = { path = "../orr_model_bindings", optional = true }
 semver = { version = "1", optional = true }
 sha2 = { version = "0.11", optional = true }
 tempfile = { version = "3", optional = true }
+orr_fsid = { path = "../orr_fsid", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 png17 = { package = "png", version = "0.17", optional = true }

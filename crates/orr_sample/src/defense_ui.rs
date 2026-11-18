@@ -49,7 +49,7 @@ enum ClickTarget {
     AudioGainUp,
     #[cfg(all(feature = "coop-defense-audio-settings", any(target_os = "linux", windows)))]
     AudioSave,
-    #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+    #[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
     RunSave(u32),
 }
 #[cfg(feature = "coop-defense-audio")]
@@ -201,7 +201,7 @@ impl PointerClicks {
                         {
                             // Keep the first eligible gameplay click. Pause is a
                             // safety exception: it dominates other clicks this frame.
-                            #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+                            #[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
                             if matches!(press.target, ClickTarget::RunSave(_))
                                 && !matches!(clicked, Some(ClickTarget::RunSave(_)))
                             {
@@ -214,12 +214,9 @@ impl PointerClicks {
                                 && !clicked.is_some_and(ClickTarget::is_audio)
                                 && !matches!(clicked, Some(ClickTarget::Pause))
                             {
-                                #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+                                #[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
                                 let save_clicked = matches!(clicked, Some(ClickTarget::RunSave(_)));
-                                #[cfg(not(all(
-                                    feature = "coop-defense-run-save",
-                                    target_os = "linux"
-                                )))]
+                                #[cfg(not(all(feature = "coop-defense-run-save", any(target_os = "linux", windows))))]
                                 let save_clicked = false;
                                 if !save_clicked {
                                     clicked = Some(press.target);
@@ -242,7 +239,7 @@ impl PointerClicks {
     }
 }
 
-#[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+#[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) enum RunSaveMode {
     #[default]
@@ -251,7 +248,7 @@ pub(crate) enum RunSaveMode {
     Confirm(String),
     Loading,
 }
-#[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+#[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RunSaveAction {
     Open,
@@ -260,7 +257,7 @@ pub(crate) enum RunSaveAction {
     Confirm(String),
     Cancel,
 }
-#[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+#[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
 #[derive(Default)]
 pub(crate) struct RunSavePanel {
     pub enabled: bool,
@@ -315,11 +312,11 @@ pub struct DefenseUi {
     impacts: Vec<(i32, i32, u32, u32)>,
     observed_tick: u32,
     notice: String,
-    #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+    #[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
     pub(crate) run_save: RunSavePanel,
-    #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+    #[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
     save_page: usize,
-    #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+    #[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
     save_identity: Option<(RunSaveMode, bool, bool, bool, bool)>,
 }
 impl Default for DefenseUi {
@@ -354,11 +351,11 @@ impl DefenseUi {
             previous: BTreeMap::new(),
             impacts: Vec::new(),
             observed_tick: 0,
-            #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+            #[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
             run_save: RunSavePanel::default(),
-            #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+            #[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
             save_page: 0,
-            #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+            #[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
             save_identity: None,
             notice: "Summon a crew. Match identical role + tier to merge.".into(),
         }
@@ -394,11 +391,11 @@ impl DefenseUi {
             sequence: self.sequence,
         }
     }
-    #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+    #[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
     pub(crate) fn high_water(&self) -> u32 {
         self.sequence
     }
-    #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+    #[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
     pub(crate) fn restore_paused(&mut self, high_water: u32) {
         self.started = true;
         self.pause();
@@ -410,11 +407,11 @@ impl DefenseUi {
         self.run_save.mode = RunSaveMode::Closed;
         self.run_save.action = None;
     }
-    #[cfg(not(all(feature = "coop-defense-run-save", target_os = "linux")))]
+    #[cfg(not(all(feature = "coop-defense-run-save", any(target_os = "linux", windows))))]
     fn save_targets(&mut self, _: Layout) -> (Vec<(Rect, ClickTarget)>, bool) {
         (Vec::new(), false)
     }
-    #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+    #[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
     fn save_targets(&mut self, l: Layout) -> (Vec<(Rect, ClickTarget)>, bool) {
         let identity = (
             self.run_save.mode.clone(),
@@ -474,7 +471,7 @@ impl DefenseUi {
             }
         }
     }
-    #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+    #[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
     fn paint_run_save(
         &mut self,
         _: &egui::Painter,
@@ -728,7 +725,7 @@ impl DefenseUi {
         #[cfg(feature = "coop-defense-attack-clip")]
         self.vfx.resolve_attack_facing(frame);
         let pausable = run.phase == game::PLAYING;
-        #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+        #[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
         let pausable = pausable || self.run_save.enabled;
         let max_hp = frame.singleton::<game::Scenario>().reactor_hp;
         let last_wave = frame.singleton::<game::Campaign>().last_wave;
@@ -941,7 +938,7 @@ impl DefenseUi {
             let blocked_keys = self.controls.blocked_keys();
             #[cfg(all(feature = "coop-defense-controls", any(target_os = "linux", windows)))]
             let just_pressed = |ctx: &egui::Context, key| !blocked_keys.contains(&key) && just_pressed(ctx,key);
-            #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+            #[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
             if self.paint_run_save(&p, l, clicked, ctx) {
                 return;
             }
@@ -1944,7 +1941,7 @@ mod click_attribution_tests {
     }
 }
 
-#[cfg(all(test, feature = "coop-defense-run-save", target_os = "linux"))]
+#[cfg(all(test, feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
 mod run_save_tests {
     use super::*;
     fn frame() -> orr_sim::Simulation<game::DefenseGame> {

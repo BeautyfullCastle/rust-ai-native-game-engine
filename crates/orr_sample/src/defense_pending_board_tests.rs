@@ -238,7 +238,7 @@ fn failed_predecessor_and_noop_do_not_select_unrelated_destination() {
     assert_ne!(unit(&a, 2).active, 0);
     assert_eq!(unit(&a, 1).active, 0);
 }
-#[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+#[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
 #[test]
 fn sequence_exhaustion_never_creates_pending_or_changes_selection() {
     let mut a = summoned();

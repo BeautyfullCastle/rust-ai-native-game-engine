@@ -3611,6 +3611,7 @@ dependencies = [
  "orr_ecs",
  "orr_edit",
  "orr_fp",
+ "orr_fsid",
  "orr_games",
  "orr_gfx_view",
  "orr_input",
