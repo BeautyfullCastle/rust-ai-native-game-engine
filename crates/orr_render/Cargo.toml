@@ -33,6 +33,7 @@ naga = { version = "30", features = ["wgsl-in"] }
 
 [dev-dependencies]
 winit = "0.30"
+orr_fsid = { path = "../orr_fsid" }
 orr_package = { path = "../orr_package" }
 orr_model = { path = "../orr_model", features = ["import"] }
 orr_ecs = { path = "../orr_ecs" }

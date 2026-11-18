@@ -3360,6 +3360,7 @@ dependencies = [
 name = "orr_model_bindings"
 version = "0.0.1"
 dependencies = [
+ "orr_fsid",
  "orr_model",
  "orr_package",
  "orr_reflect",
@@ -3580,6 +3581,7 @@ dependencies = [
  "bytemuck",
  "naga",
  "orr_ecs",
+ "orr_fsid",
  "orr_model",
  "orr_package",
  "orr_rhi",
