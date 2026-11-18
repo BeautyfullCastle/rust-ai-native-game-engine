@@ -30,7 +30,7 @@ use std::rc::Rc;
 
 use orr_proto::{
     input_encoded_len, Bundle, Channel, ClientMsg, Hello, InputEntry, Link, LinkEvent, RejectReason, ServerMsg, TimeSync, Welcome,
-    FLAG_ABSENT, FLAG_REPEATED, NO_SLOT,
+    FLAG_ABSENT, FLAG_REPEATED, MAX_INPUT_ENTRIES, NO_SLOT,
 };
 use orr_sim::{Game, PlayerSlot, RawPlayerSignal, SimCommand};
 
@@ -141,7 +141,10 @@ impl<G: Game, L: Link> RelaySource<G, L> {
             input_size: std::mem::size_of::<G::Input>() as u32,
             slot: 0,
             player_count: 0,
-            redundancy: redundancy.max(1),
+            // The server refuses an `Input` message with more entries than
+            // the codec allows, and a run of equal inputs is small enough to
+            // fit that many into the byte budget.
+            redundancy: redundancy.clamp(1, MAX_INPUT_ENTRIES),
             inbox: Vec::new(),
             others: VecDeque::new(),
             out: BTreeMap::new(),
@@ -422,7 +425,9 @@ pub struct RelayClientConfig {
     pub sync_ping_interval_us: u64,
     /// Pongs needed before the client reports itself ready.
     pub sync_pings: u32,
-    /// Unconfirmed inputs in every input packet. Default 4.
+    /// Unconfirmed inputs in every input packet. Default 4. The client keeps
+    /// it between 1 and `orr_proto::MAX_INPUT_ENTRIES` (256), the most entries
+    /// the server accepts in one packet. The newest inputs are the ones sent.
     pub input_redundancy: u32,
     /// Most ticks simulated in one `update`. Default 32.
     pub max_steps_per_update: u32,

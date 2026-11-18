@@ -140,7 +140,9 @@ pub const MAX_COMMANDS_PER_SLOT: usize = 64;
 pub const MAX_COMMAND_BYTES: usize = 4096;
 const MAX_COMMANDS: u32 = MAX_COMMANDS_PER_SLOT as u32;
 const MAX_COMMAND_LEN: u32 = MAX_COMMAND_BYTES as u32;
-const MAX_ENTRIES: u32 = 256;
+/// Most entries of one `Input` message. The decoder refuses a message with more.
+pub const MAX_INPUT_ENTRIES: usize = 256;
+const MAX_ENTRIES: u32 = MAX_INPUT_ENTRIES as u32;
 const MAX_BUNDLES: u32 = 65_536;
 const MAX_CONFIG_LEN: u32 = 1 << 20;
 const MAX_SNAPSHOT_LEN: u32 = 256 << 20;
