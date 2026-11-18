@@ -126,8 +126,103 @@ fn every_control_of_the_window_that_has_a_field_round_trips_through_the_scene() 
     for toggle in TOGGLES {
         assert_eq!((toggle.get)(&back), (toggle.get)(&settings), "{}", toggle.name);
     }
-    let (want, got) = ((COLORS[0].get)(&settings), (COLORS[0].get)(&back));
-    assert!((0..3).all(|i| (want[i] - got[i]).abs() < 2.0e-3), "water color: set {want:?}, scene has {got:?}");
+    for color in COLORS {
+        let (want, got) = ((color.get)(&settings), (color.get)(&back));
+        assert!((0..3).all(|i| (want[i] - got[i]).abs() < 2.0e-3), "{}: set {want:?}, scene has {got:?}", color.name);
+    }
+}
+
+/// The controls that only the generated valley had before the scene stored them.
+const SCENE_FIELDS: [(&str, &str); 11] = [
+    ("Shadows", "Softness"),
+    ("Shadows", "Sharp range"),
+    ("Water", "Foam"),
+    ("Vegetation", "Translucency"),
+    ("Vegetation", "Leaf detail"),
+    ("Vegetation", "Autumn trees"),
+    ("Vegetation", "Grass distance"),
+    ("Vegetation", "Tree detail distance"),
+    ("Vegetation", "Leaf tint"),
+    ("Ground", "Bumps"),
+    ("Ground", "Caustics"),
+];
+
+/// Writes the control the way the window does: as one gesture, so that it is one undo step.
+fn apply_in_gesture(editor: &mut Editor, group: &str, name: &str, settings: &Settings) {
+    editor.begin_edit(&format!("scene window: {group} {name}"));
+    let changes = scenery_scene::changes(editor, group, name, settings);
+    assert!(!changes.is_empty(), "{group} {name} sets nothing in the scene");
+    scenery_scene::apply(editor, &changes);
+    editor.end_edit();
+    for _ in 0..40 {
+        editor.sync();
+        if !editor.in_gesture() {
+            break;
+        }
+    }
+    assert!(!editor.in_gesture());
+    assert!(editor.status().is_none_or(|m| m.text.is_empty() || !m.error), "{group} {name}: the scene refused an edit");
+}
+
+#[test]
+fn each_control_that_was_valley_only_is_stored_in_the_scene_and_is_one_undo_step() {
+    let mut editor = forest_editor();
+    for (group, name) in SCENE_FIELDS {
+        assert!(scenery_scene::applies(group, name), "{group} {name}");
+        let before = scenery_scene::read(&editor, Settings::default());
+        let checksum = editor.checksum();
+        let mut settings = before;
+        if let Some(slider) = SLIDERS.iter().find(|s| s.group == group && s.name == name) {
+            // A value inside the range that is not the scene's own.
+            let value = slider.min + (slider.max - slider.min) * 0.61;
+            assert!(((slider.get)(&before) - value).abs() > 1.0e-2, "{group} {name} already has {value}");
+            (slider.set)(&mut settings, value);
+        } else {
+            let color = COLORS.iter().find(|c| c.group == group && c.name == name).expect("a slider or a color");
+            (color.set)(&mut settings, [0.4, 0.6, 0.8]);
+        }
+        let settings = settings.sanitized();
+        apply_in_gesture(&mut editor, group, name, &settings);
+        // The scene gives the value back to the control.
+        let after = scenery_scene::read(&editor, Settings::default());
+        if let Some(slider) = SLIDERS.iter().find(|s| s.group == group && s.name == name) {
+            let (want, got) = ((slider.get)(&settings), (slider.get)(&after));
+            assert!((want - got).abs() < 2.0e-3 * want.abs().max(1.0), "{group} {name}: set {want}, scene has {got}");
+        } else {
+            let color = COLORS.iter().find(|c| c.group == group && c.name == name).unwrap();
+            let (want, got) = ((color.get)(&settings), (color.get)(&after));
+            assert!((0..3).all(|i| (want[i] - got[i]).abs() < 2.0e-3), "{group} {name}: set {want:?}, scene has {got:?}");
+        }
+        assert_ne!(editor.checksum(), checksum, "{group} {name} changed nothing in the scene");
+        // One undo takes the whole control back.
+        assert!(editor.undo(), "{group} {name}");
+        editor.sync();
+        assert_eq!(editor.checksum(), checksum, "{group} {name}: one undo restores the scene");
+        assert_eq!(scenery_scene::read(&editor, Settings::default()), before, "{group} {name}");
+    }
+}
+
+#[test]
+fn a_vegetation_control_sets_every_scatter_and_a_ground_control_every_terrain() {
+    let mut editor = forest_editor();
+    let scatters = editor.yard_frame().scatters.len();
+    let terrains = editor.yard_frame().terrains.len();
+    assert!(scatters >= 4 && terrains >= 2, "{scatters} scatters, {terrains} terrains");
+    let mut settings = scenery_scene::read(&editor, Settings::default());
+    settings.vegetation.translucency = 2.5;
+    settings.vegetation.tint = [1.5, 0.5, 0.25];
+    settings.ground.bumps = 2.0;
+    apply_in_gesture(&mut editor, "Vegetation", "Translucency", &settings);
+    apply_in_gesture(&mut editor, "Vegetation", "Leaf tint", &settings);
+    apply_in_gesture(&mut editor, "Ground", "Bumps", &settings);
+    let frame = editor.yard_frame();
+    assert!(frame.scatters.iter().all(|s| (s.translucency - 2.5).abs() < 1.0e-3 && (s.tint[0] - 1.5).abs() < 1.0e-3 && (s.tint[2] - 0.25).abs() < 1.0e-3));
+    // The number of the terrain shader that is called bumps is the 12th of its parameters (colors take three).
+    let grounds: Vec<_> = frame.materials.iter().filter(|m| frame.terrains.iter().any(|t| t.entity == m.entity)).collect();
+    assert_eq!(grounds.len(), terrains);
+    assert!(grounds.iter().all(|m| m.overrides() & (1 << 11) != 0 && (m.stored(11) - 2.0).abs() < 1.0e-3), "the terrain materials hold bumps 2");
+    // The first scatter that is not grass keeps the default grass distance until the control is used.
+    assert!(frame.scatters.iter().all(|s| (s.grass_distance - 85.0).abs() < 1.0e-3));
 }
 
 #[test]
@@ -220,11 +315,11 @@ fn the_window_edits_the_open_scene_when_asked_and_dims_what_the_scene_lacks() {
     assert!(!flag(&field(&mut h.state_mut().editor, &sun, "orr_gfx::Light", "cast_shadows")), "the sun no longer casts shadows");
     assert!(!on(&h, "Sun shadows"));
 
-    // A control with no field in the scene is dimmed: the click does not reach the scene.
-    let foam = h.get_by(|n| n.role() == Role::Slider && n.label().as_deref() == Some("Foam"));
-    assert!(foam.accesskit_node().is_disabled(), "foam has no field in an editor scene");
-    let sky = h.get_by(|n| n.role() == Role::Slider && n.label().as_deref() == Some("Brightness"));
-    assert!(!sky.accesskit_node().is_disabled());
+    // Every control has a field in the scene now: none is dimmed.
+    for label in ["Foam", "Brightness", "Softness", "Sharp range", "Translucency", "Leaf detail", "Autumn trees", "Grass distance", "Tree detail distance", "Bumps", "Caustics"] {
+        let slider = h.get_by(|n| n.role() == Role::Slider && n.label().as_deref() == Some(label));
+        assert!(!slider.accesskit_node().is_disabled(), "{label} is dimmed");
+    }
 
     // The edit is in the editor's history and undo takes it back.
     assert!(h.state_mut().editor.undo());
@@ -343,6 +438,106 @@ fn a_setting_changed_in_the_window_changes_the_picture_of_the_open_scene() {
     assert!(h.query_by_label_contains("Terrain:").is_none());
 }
 
+/// Mean absolute difference of the red, green and blue values (0..255) of two pictures inside `rect`.
+fn mean_difference(width: u32, a: &[u8], b: &[u8], rect: egui::Rect) -> f32 {
+    let (x0, x1) = (rect.min.x as u32, rect.max.x as u32);
+    let (y0, y1) = (rect.min.y as u32, rect.max.y as u32);
+    let mut sum = 0.0f64;
+    let mut n = 0.0f64;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let i = ((y * width + x) * 4) as usize;
+            for c in 0..3 {
+                sum += f64::from(a[i + c].abs_diff(b[i + c]));
+                n += 1.0;
+            }
+        }
+    }
+    (sum / n) as f32
+}
+
+#[test]
+fn vegetation_and_ground_settings_change_the_picture_of_the_open_scene() {
+    let Some((_guard, probe)) = gpu() else { return };
+    if probe.is_software() {
+        eprintln!("SKIP: this picture check needs a hardware adapter");
+        return;
+    }
+    let setup = egui_wgpu::WgpuSetup::CreateNew(egui_wgpu::WgpuSetupCreateNew::without_display_handle());
+    let mut h = Harness::builder().with_size([1600.0, 1000.0]).wgpu_setup(setup).build_eframe(|cc| EditorApp::new(forest_editor(), cc.wgpu_render_state.clone()));
+    let frames = |h: &mut Harness<'_, EditorApp>, n: usize| {
+        for _ in 0..n {
+            h.state_mut().editor.sync();
+            h.run_steps(2);
+        }
+    };
+    frames(&mut h, 4);
+    h.get_by_label("Camera view").click();
+    frames(&mut h, 30);
+    assert!(h.query_by_label_contains("Terrain:").is_none(), "the heightmaps load");
+    h.state_mut().scenery.open = true;
+    h.state_mut().scenery.target = WindowTarget::OpenScene;
+    frames(&mut h, 30);
+    let rect = h.state().ui.viewport_rect.expect("the viewport was drawn");
+    // The window covers the left of the viewport; the part to its right is compared.
+    let right = egui::Rect::from_min_max(egui::pos2(rect.min.x + rect.width() * 0.4, rect.min.y), rect.max);
+    let capture = std::env::var_os("ORR_SCENERY_CAPTURE").map(PathBuf::from);
+    let shot = |h: &mut Harness<'_, EditorApp>, name: &str| {
+        let picture = h.render().expect("kittest wgpu render");
+        if let Some(folder) = &capture {
+            std::fs::create_dir_all(folder).unwrap();
+            save_crop(&folder.join(format!("scene_more_{name}.png")), picture.width(), picture.as_raw(), rect);
+        }
+        picture
+    };
+    // Hold the picture still: no eye adaptation, clouds, wind or moving water.
+    let mut settings = scenery_scene::read(&h.state().editor, Settings::default());
+    settings.look.auto_exposure = false;
+    settings.sky.cloud_speed = 0.0;
+    settings.wind.strength = 0.0;
+    settings.water.flow_speed = 0.0;
+    settings.water.ripples = 0.0;
+    for (group, control) in [("Look", "Auto exposure"), ("Sky", "Cloud speed"), ("Wind", "Strength"), ("Water", "Flow speed"), ("Water", "Ripples")] {
+        apply(&mut h.state_mut().editor, group, control, &settings);
+    }
+    frames(&mut h, 30);
+    let before = shot(&mut h, "before");
+    // Two pictures of the same settings differ a little.
+    frames(&mut h, 6);
+    let again = h.render().expect("kittest wgpu render");
+    let noise = mean_difference(before.width(), before.as_raw(), again.as_raw(), right);
+
+    let change = |h: &mut Harness<'_, EditorApp>, settings: &mut Settings, name: &str, controls: &[(&str, &str)], set: &dyn Fn(&mut Settings)| {
+        set(settings);
+        for (group, control) in controls {
+            apply(&mut h.state_mut().editor, group, control, settings);
+        }
+        frames(h, 30);
+        let picture = shot(h, name);
+        mean_difference(before.width(), before.as_raw(), picture.as_raw(), right)
+    };
+    // The leaf tint colors the crowns and the grass. The grass distance cuts the meadow to a small circle.
+    let tint = change(&mut h, &mut settings, "vegetation_tint", &[("Vegetation", "Leaf tint")], &|s| s.vegetation.tint = [2.0, 0.3, 0.3]);
+    eprintln!("noise {noise:.3}, leaf tint {tint:.3}");
+    assert!(tint > noise * 3.0 + 1.0, "the leaf tint changes the picture: {tint} against noise {noise}");
+    settings.vegetation.tint = [1.0, 1.0, 1.0];
+    apply(&mut h.state_mut().editor, "Vegetation", "Leaf tint", &settings);
+    let grass = change(&mut h, &mut settings, "vegetation_grass_distance", &[("Vegetation", "Grass distance")], &|s| s.vegetation.grass_distance = 20.0);
+    eprintln!("grass distance {grass:.3}");
+    assert!(grass > noise * 2.0 + 0.2, "a short grass distance changes the picture: {grass} against noise {noise}");
+    settings.vegetation.grass_distance = 85.0;
+    apply(&mut h.state_mut().editor, "Vegetation", "Grass distance", &settings);
+    let ground = change(&mut h, &mut settings, "ground_bumps", &[("Ground", "Bumps")], &|s| s.ground.bumps = 3.0);
+    eprintln!("ground bumps {ground:.3}");
+    assert!(ground > noise * 2.0 + 0.1, "stronger bumps change the picture: {ground} against noise {noise}");
+    settings.ground.bumps = 0.9;
+    apply(&mut h.state_mut().editor, "Ground", "Bumps", &settings);
+    let caustics = change(&mut h, &mut settings, "ground_caustics", &[("Ground", "Caustics")], &|s| s.ground.caustics = 3.0);
+    eprintln!("ground caustics {caustics:.3}");
+    assert!(caustics > noise * 2.0 + 0.05, "caustics change the picture: {caustics} against noise {noise}");
+    assert!(h.query_by_label_contains("Terrain:").is_none());
+}
+
 /// A change in the open scene is not a change of the window's own valley.
 #[test]
 fn a_change_outside_the_window_shows_after_the_controls_read_the_scene_again() {
@@ -359,7 +554,7 @@ fn many_waters(extra: usize) -> (tempfile::TempDir, Editor) {
     let mut text = std::fs::read_to_string(forest_scene()).unwrap().replace("max_entities: 128", "max_entities: 1024");
     for i in 0..extra {
         text.push_str(&format!(
-            "  e_{:08x}:\n    name: extra_pool_{i}\n    orr_gfx::Transform3:\n      position: [{}, 60, -300]\n      rotation: [0, 0, 0]\n      scale: [1, 1, 1]\n    orr_gfx::Water:\n      size: [20, 20]\n      color: [0.012, 0.05, 0.04]\n      clarity: 1\n      ripples: 1\n      flow: [0.3, 0.4]\n      glint: 1\n      terrain: e_00000001\n",
+            "  e_{:08x}:\n    name: extra_pool_{i}\n    orr_gfx::Transform3:\n      position: [{}, 60, -300]\n      rotation: [0, 0, 0]\n      scale: [1, 1, 1]\n    orr_gfx::Water:\n      size: [20, 20]\n      color: [0.012, 0.05, 0.04]\n      clarity: 1\n      ripples: 1\n      flow: [0.3, 0.4]\n      glint: 1\n      foam: 1\n      caustics: 0\n      terrain: e_00000001\n",
             0x1_0000 + i,
             i * 25
         ));

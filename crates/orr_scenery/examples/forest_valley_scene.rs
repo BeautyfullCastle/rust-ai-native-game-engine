@@ -210,7 +210,7 @@ fn main() {
 
     entity(&mut text, "sun");
     writeln!(text, "    orr_gfx::Transform3:\n      position: [0, 200, 0]\n      rotation: {}\n      scale: [1, 1, 1]", v3(facing([-sun[0], -sun[1], -sun[2]]))).unwrap();
-    text.push_str("    orr_gfx::Light:\n      color: [1, 0.9, 0.76]\n      intensity: 8.5\n      range: 10\n      inner_angle: 20\n      outer_angle: 30\n      shadow_strength: 1\n      shadow_range: 260\n      kind: directional\n      enabled: true\n      cast_shadows: true\n      layers: [default, layer2, layer3, layer4, layer5, layer6, layer7, layer8]\n      shadow_cascades: 4\n");
+    text.push_str("    orr_gfx::Light:\n      color: [1, 0.9, 0.76]\n      intensity: 8.5\n      range: 10\n      inner_angle: 20\n      outer_angle: 30\n      shadow_strength: 1\n      shadow_range: 260\n      shadow_softness: 1\n      shadow_sharp_range: 0\n      kind: directional\n      enabled: true\n      cast_shadows: true\n      layers: [default, layer2, layer3, layer4, layer5, layer6, layer7, layer8]\n      shadow_cascades: 4\n");
 
     // The dragon starts ahead of the camera, above the valley, flying the way the camera looks.
     let flat = {
@@ -241,7 +241,7 @@ fn main() {
         let s = world.stream(z);
         entity(&mut text, &format!("pool_{k:02}"));
         writeln!(text, "    orr_gfx::Transform3:\n      position: [{:.2}, {:.3}, {:.2}]\n      rotation: [0, 0, 0]\n      scale: [1, 1, 1]", s.center, s.level, -HALF + 72.0 * (k as f32 + 0.5)).unwrap();
-        writeln!(text, "    orr_gfx::Water:\n      size: [260, 72]\n      color: [0.012, 0.05, 0.04]\n      clarity: 1\n      ripples: 1\n      flow: [0, 0.6]\n      glint: 1\n      terrain: {valley}").unwrap();
+        writeln!(text, "    orr_gfx::Water:\n      size: [260, 72]\n      color: [0.012, 0.05, 0.04]\n      clarity: 1\n      ripples: 1\n      flow: [0, 0.6]\n      glint: 1\n      foam: 1\n      caustics: 0\n      terrain: {valley}").unwrap();
     }
 
     let lowest = (0..18).map(|k| world.stream(-HALF + 72.0 * k as f32).level).fold(f32::MAX, f32::min);
@@ -250,7 +250,7 @@ fn main() {
         writeln!(text, "    orr_gfx::Transform3:\n      position: [{:.1}, 0, {:.1}]\n      rotation: [0, 0, 0]\n      scale: [1, 1, 1]", center[0], center[1]).unwrap();
         writeln!(
             text,
-            "    orr_gfx::Scatter:\n      terrain: {valley}\n      area: [{area}, {area}]\n      heights: [{:.1}, 400]\n      max_slope: {slope}\n      scale: [{}, {}]\n      kind: {kind}\n      count: {count}\n      seed: {seed}\n      cast_shadows: {shadows}",
+            "    orr_gfx::Scatter:\n      terrain: {valley}\n      area: [{area}, {area}]\n      heights: [{:.1}, 400]\n      max_slope: {slope}\n      scale: [{}, {}]\n      kind: {kind}\n      count: {count}\n      seed: {seed}\n      cast_shadows: {shadows}\n      tint: [1, 1, 1]\n      translucency: 1\n      leaf_detail: 1\n      autumn: 0.14\n      grass_distance: 85\n      detail_distance: 1",
             lowest - 1.0,
             scale[0],
             scale[1]

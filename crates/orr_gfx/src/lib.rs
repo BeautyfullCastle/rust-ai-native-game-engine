@@ -107,6 +107,16 @@ pub struct Light {
     /// view. Zero keeps the game's own shadow area. Only the sun uses it.
     #[reflect(range = "0..=5000")]
     pub shadow_range: FP,
+    /// Width of the soft edge of this light's sun shadows, in shadow map texels.
+    /// 1 is the engine's own filter. Only the sun uses it.
+    #[reflect(range = "0.25..=8")]
+    pub shadow_softness: FP,
+    /// Distance in meters from the eye where the nearest cascade of the sun's
+    /// shadows ends, while the shadow area follows the view. A smaller value
+    /// makes the shadows near the eye sharper. Zero keeps the engine's own
+    /// split. Only the sun uses it.
+    #[reflect(range = "0..=1000")]
+    pub shadow_sharp_range: FP,
     /// What the light is.
     #[reflect(enumeration = "directional=0,point=1,spot=2")]
     pub kind: u32,
@@ -144,6 +154,8 @@ impl Default for Light {
             cast_shadows: 0,
             layers: ALL_LAYERS,
             shadow_cascades: 4,
+            shadow_softness: FP::ONE,
+            shadow_sharp_range: FP::ZERO,
             reserved: 0,
         }
     }
@@ -643,6 +655,13 @@ pub struct Water {
     /// Strength of the sun's glints.
     #[reflect(range = "0..=4")]
     pub glint: FP,
+    /// Amount of whitewater at cascades and foam at the shore. 1 is the usual amount.
+    #[reflect(range = "0..=2")]
+    pub foam: FP,
+    /// Strength of the moving light lines that the sun makes on the bed under
+    /// shallow water. Zero draws none.
+    #[reflect(range = "0..=3")]
+    pub caustics: FP,
     /// The terrain under the water, for its depth. None gives deep water everywhere.
     pub terrain: orr_ecs::Entity,
 }
@@ -656,6 +675,8 @@ impl Default for Water {
             ripples: FP::ONE,
             flow: FPVec2::new(FP::ZERO, FP::from_ratio(3, 10)),
             glint: FP::ONE,
+            foam: FP::ONE,
+            caustics: FP::ZERO,
             terrain: orr_ecs::Entity::NONE,
         }
     }
@@ -705,6 +726,25 @@ pub struct Scatter {
     /// Whether trees and rocks cast sun shadows.
     #[reflect(bool)]
     pub cast_shadows: u32,
+    /// Linear red, green and blue that multiply the color of the leaves and
+    /// the grass of this scatter. White leaves them as they are.
+    #[reflect(range = "0..=2")]
+    pub tint: FPVec3,
+    /// Light that passes through the leaves when the sun is behind them.
+    #[reflect(range = "0..=3")]
+    pub translucency: FP,
+    /// Contrast of the leaf pattern on the crowns of trees.
+    #[reflect(range = "0..=2")]
+    pub leaf_detail: FP,
+    /// Share of the broadleaf trees in autumn colors. Other kinds ignore it.
+    #[reflect(range = "0..=1")]
+    pub autumn: FP,
+    /// Grass is drawn up to this distance from the eye, in meters. Other kinds ignore it.
+    #[reflect(range = "1..=2000")]
+    pub grass_distance: FP,
+    /// Factor on the distances where trees change to simpler meshes.
+    #[reflect(range = "0.3..=3")]
+    pub detail_distance: FP,
 }
 
 impl Default for Scatter {
@@ -719,6 +759,12 @@ impl Default for Scatter {
             count: 200,
             seed: 1,
             cast_shadows: 1,
+            tint: FPVec3::new(FP::ONE, FP::ONE, FP::ONE),
+            translucency: FP::ONE,
+            leaf_detail: FP::ONE,
+            autumn: FP::from_ratio(14, 100),
+            grass_distance: FP::from_int(85),
+            detail_distance: FP::ONE,
         }
     }
 }

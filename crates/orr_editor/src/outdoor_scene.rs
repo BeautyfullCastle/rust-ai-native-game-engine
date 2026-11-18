@@ -35,6 +35,8 @@ pub fn scene(frame: &YardFrame, heights: &[(Entity, Heights)]) -> OutdoorScene {
                 ripples: w.ripples,
                 flow: w.flow,
                 glint: w.glint,
+                foam: w.foam,
+                caustics: w.caustics,
                 ground: w.terrain.and_then(|t| field(frame, heights, t)),
             })
             .collect(),
@@ -58,6 +60,12 @@ pub fn scene(frame: &YardFrame, heights: &[(Entity, Heights)]) -> OutdoorScene {
                     count: s.count,
                     seed: s.seed,
                     cast_shadows: s.cast_shadows,
+                    tint: s.tint,
+                    translucency: s.translucency,
+                    leaf_detail: s.leaf_detail,
+                    autumn: s.autumn,
+                    grass_distance: s.grass_distance,
+                    detail_distance: s.detail_distance,
                     ground: field(frame, heights, s.terrain?)?,
                 })
             })

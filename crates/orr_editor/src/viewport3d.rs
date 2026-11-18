@@ -670,6 +670,13 @@ impl Viewport3dGpu {
     pub fn set_shadow_cascades(&mut self, cascades: u32) {
         self.imported.shadow_cascades = cascades.clamp(1, orr_render::MAX_SHADOW_CASCADES);
     }
+    /// Softness of the sun shadow edge (1 is the engine's own filter) and the
+    /// distance where the nearest cascade ends (0 keeps the engine's split), from the next frame on.
+    #[cfg(feature = "models")]
+    pub fn set_shadow_tuning(&mut self, softness: f32, sharp_range: f32) {
+        self.imported.shadow_softness = softness;
+        self.imported.shadow_sharp_range = sharp_range;
+    }
     /// The id of the magenta shader that marks a model with an unusable shader.
     #[cfg(feature = "models")]
     fn broken_model_surface(&mut self) -> orr_render::SurfaceId {
@@ -1251,6 +1258,11 @@ impl GpuViewport3d {
     #[cfg(feature = "models")]
     pub fn set_shadow_cascades(&mut self, cascades: u32) {
         self.gpu.set_shadow_cascades(cascades);
+    }
+    /// See [`Viewport3dGpu::set_shadow_tuning`].
+    #[cfg(feature = "models")]
+    pub fn set_shadow_tuning(&mut self, softness: f32, sharp_range: f32) {
+        self.gpu.set_shadow_tuning(softness, sharp_range);
     }
     #[cfg(feature = "models")]
     pub fn render_post_processed(

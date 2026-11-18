@@ -79,6 +79,12 @@ pub struct SceneLook {
     /// `orr_render::ImportedSceneRenderer::shadow_cascades`. More than one
     /// only while the shadow area follows the view.
     pub shadow_cascades: u32,
+    /// Width of the soft edge of the sun's shadows in shadow map texels, for
+    /// `orr_render::ImportedSceneRenderer::shadow_softness`. 1 is the engine's own filter.
+    pub shadow_softness: f32,
+    /// Distance where the nearest shadow cascade ends, for
+    /// `orr_render::ImportedSceneRenderer::shadow_sharp_range`. Zero keeps the engine's split.
+    pub shadow_sharp_range: f32,
     /// The enabled decals in entity order. The renderer draws the first `orr_render::MAX_DECALS`.
     pub decals: Vec<orr_render::Decal>,
     /// The physics joints whose two bodies exist, in entity order, for editor markers.
@@ -142,7 +148,7 @@ pub fn layers_of(frame: FrameView<'_>, entity: Entity) -> u32 {
 /// without any [`Light`] component, and its ambient light is kept while the
 /// scene's [`Environment`] has its default values. Its shadow area is always kept.
 pub fn scene_look(frame: FrameView<'_>, fallback: &Lighting) -> SceneLook {
-    let mut look = SceneLook { lighting: *fallback, scene_lights: SceneLights::default(), bloom: None, effects: Vec::new(), lights: Vec::new(), dropped_lights: 0, shadow_follows_view: false, shadow_cascades: 1, decals: Vec::new(), joints: Vec::new() };
+    let mut look = SceneLook { lighting: *fallback, scene_lights: SceneLights::default(), bloom: None, effects: Vec::new(), lights: Vec::new(), dropped_lights: 0, shadow_follows_view: false, shadow_cascades: 1, shadow_softness: 1.0, shadow_sharp_range: 0.0, decals: Vec::new(), joints: Vec::new() };
     // An environment left at its default values keeps the ambient light of the game.
     // Simulation systems can write any value, so every value is brought into
     // the range the inspector allows before the renderer sees it.
@@ -219,7 +225,9 @@ pub fn scene_look(frame: FrameView<'_>, fallback: &Lighting) -> SceneLook {
                 look.lighting.shadow_radius = range;
                 look.shadow_follows_view = true;
                 look.shadow_cascades = light.shadow_cascades.clamp(1, orr_render::MAX_SHADOW_CASCADES);
+                look.shadow_sharp_range = f(light.shadow_sharp_range).clamp(0.0, 1000.0);
             }
+            look.shadow_softness = f(light.shadow_softness).clamp(0.25, 8.0);
             look.scene_lights.sun_layers = scene_light.layers;
             look.scene_lights.sun_shadow_strength = f(light.shadow_strength);
         } else if look.scene_lights.push(scene_light).is_err() {
@@ -421,6 +429,8 @@ pub struct WaterRef {
     pub ripples: f32,
     pub flow: [f32; 2],
     pub glint: f32,
+    pub foam: f32,
+    pub caustics: f32,
     /// The terrain under the water, if any.
     pub terrain: Option<Entity>,
 }
@@ -441,6 +451,8 @@ pub fn waters(frame: FrameView<'_>) -> Vec<WaterRef> {
             ripples: f(w.ripples).clamp(0.0, 4.0),
             flow: [f(w.flow.x).clamp(-10.0, 10.0), f(w.flow.y).clamp(-10.0, 10.0)],
             glint: f(w.glint).clamp(0.0, 4.0),
+            foam: f(w.foam).clamp(0.0, 2.0),
+            caustics: f(w.caustics).clamp(0.0, 3.0),
             terrain: (w.terrain != Entity::NONE).then_some(w.terrain),
         })
         .collect()
@@ -465,6 +477,13 @@ pub struct ScatterRef {
     pub count: u32,
     pub seed: u32,
     pub cast_shadows: bool,
+    /// Multiplies the color of leaves and grass.
+    pub tint: [f32; 3],
+    pub translucency: f32,
+    pub leaf_detail: f32,
+    pub autumn: f32,
+    pub grass_distance: f32,
+    pub detail_distance: f32,
 }
 
 /// Every entity's scatter, in entity order.
@@ -488,6 +507,12 @@ pub fn scatters(frame: FrameView<'_>) -> Vec<ScatterRef> {
                 count: s.count.min(orr_gfx::MAX_SCATTER),
                 seed: s.seed,
                 cast_shadows: s.cast_shadows != 0,
+                tint: [f(s.tint.x).clamp(0.0, 2.0), f(s.tint.y).clamp(0.0, 2.0), f(s.tint.z).clamp(0.0, 2.0)],
+                translucency: f(s.translucency).clamp(0.0, 3.0),
+                leaf_detail: f(s.leaf_detail).clamp(0.0, 2.0),
+                autumn: f(s.autumn).clamp(0.0, 1.0),
+                grass_distance: f(s.grass_distance).clamp(1.0, 2000.0),
+                detail_distance: f(s.detail_distance).clamp(0.3, 3.0),
             }
         })
         .collect()
@@ -624,6 +649,16 @@ pub struct MaterialRef {
 }
 
 impl MaterialRef {
+    /// Bit i set: the material stores its own number i, and the shader's default is not used.
+    pub fn overrides(&self) -> u32 {
+        self.overrides
+    }
+
+    /// The stored number `index` (the shader's default applies where `overrides` has no bit for it).
+    pub fn stored(&self, index: usize) -> f32 {
+        self.values.get(index).copied().unwrap_or(0.0)
+    }
+
     /// The numbers the shader receives: the stored value where the material
     /// overrides it, the shader's default elsewhere, all inside the declared ranges.
     pub fn values_for(&self, shader: &orr_render::SurfaceShader) -> [f32; orr_render::MAX_SURFACE_FLOATS] {

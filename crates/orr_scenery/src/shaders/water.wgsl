@@ -33,6 +33,13 @@ fn ripple(p: vec2<f32>, flow: vec2<f32>, speed: f32) -> f32 {
     return noise2(a) * 0.55 + noise2(b) * 0.3 + noise2(c) * 0.15;
 }
 
+// Moving light lines that the sun makes on the bed under shallow water.
+fn bed_caustics(p: vec2<f32>, t: f32) -> f32 {
+    let a = noise2(p * 1.5 + vec2<f32>(t * 0.4, t * 0.23));
+    let b = noise2(p * 1.9 - vec2<f32>(t * 0.31, -t * 0.36) + 5.2);
+    return pow(saturate(1.0 - abs(a - b) * 5.0), 3.0);
+}
+
 @fragment
 fn fs_water(in: WaterOut) -> @location(0) vec4<f32> {
     let depth = in.data.x;
@@ -92,6 +99,11 @@ fn fs_water(in: WaterOut) -> @location(0) vec4<f32> {
     color = color + sun * shadow * glint * (1.0 - foam);
     color = mix(color, foam_color, foam);
     alpha = max(alpha, foam);
+    // Light lines on the bed, seen through water that is clear enough. `g.wind.z` is zero
+    // where the terrain draws them itself.
+    let bed_lines = bed_caustics(xz, t) * shadow * saturate(g.sun_dir.y * 3.0) * (1.0 - body_alpha) * near * g.wind.z;
+    color = color + sun * bed_lines * 0.4 * (1.0 - foam);
+    alpha = max(alpha, saturate(bed_lines * 0.5));
     // Fade the last few centimeters so the edge does not show the mesh.
     alpha = alpha * smoothstep(-0.05, 0.03, depth);
     alpha = max(alpha, saturate(glint * shadow) * smoothstep(-0.05, 0.03, depth));

@@ -192,6 +192,12 @@ pub struct ImportedSceneRenderer<B: Rhi> {
     /// camera: each covers a farther stretch of the view, up to 1.5 ×
     /// `shadow_radius`, so near shadows are sharp and far ones still show.
     pub shadow_cascades: u32,
+    /// Spacing of the filter taps of the sun shadow, in shadow map texels.
+    /// 1 is the engine's own filter; a larger value gives a softer edge.
+    pub shadow_softness: f32,
+    /// Distance in meters from the eye where the nearest of several cascades
+    /// ends. Zero keeps the engine's own split.
+    pub shadow_sharp_range: f32,
     /// Culling in the main pass of procedural shapes and of instanced static and
     /// skinned models (see [`crate::visibility`]). Both kinds are on by default.
     pub culling: crate::Culling,
@@ -260,6 +266,8 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
             post_process: crate::PostProcessSettings::default(),
             scene_lights: crate::SceneLights::default(),
             shadow_cascades: 1,
+            shadow_softness: 1.0,
+            shadow_sharp_range: 0.0,
             culling: crate::Culling::default(),
             culled_model_draws: 0,
             decals: Vec::new(),
@@ -444,7 +452,7 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
             grid.validate().map_err(ImportedSceneError::Irradiance)?;
         }
         self.validate_target(size, self.format, 1)?;
-        prepare_shared_globals(self.scene_format(), size, camera, lighting, self.shadow_cascades)
+        prepare_shared_globals(self.scene_format(), size, camera, lighting, self.shadow_cascades, self.shadow_softness, self.shadow_sharp_range)
             .map_err(ImportedSceneError::Model)?;
         point.validate().map_err(ImportedSceneError::PointLight)?;
         let model_batch_count = models
@@ -573,7 +581,7 @@ impl<B: Rhi> ImportedSceneRenderer<B> {
             return Err(ImportedSceneError::BatchLimit);
         }
         let (mut globals, mut shadow_ready) =
-            prepare_shared_globals(self.scene_format(), size, camera, lighting, self.shadow_cascades)
+            prepare_shared_globals(self.scene_format(), size, camera, lighting, self.shadow_cascades, self.shadow_softness, self.shadow_sharp_range)
                 .map_err(ImportedSceneError::Model)?;
         // Spot lights with shadows need the shared shadow path even without a sun shadow.
         let spot_draws = if self.scene_lights.shadow_tiles().is_empty() {
