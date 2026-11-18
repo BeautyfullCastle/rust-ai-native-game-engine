@@ -2,7 +2,7 @@ use crate::{editor::Editor, game::EditorGame};
 use orr_bridge::FrameView;
 use orr_remote::mesh_navigation::{mesh_doc_from_yaml, mesh_from_view, MeshScenePin};
 use std::{
-    fs::{self, File, Metadata, OpenOptions},
+    fs::{self, Metadata},
     io::Read,
     path::{Component, Path, PathBuf},
 };
@@ -12,8 +12,6 @@ const MAX_SCENE_COMPONENTS: usize = 64;
 const MAX_SCENE_BYTES: u64 = 1024 * 1024;
 const MAX_SCENE_LEAF_BYTES: usize = 180;
 const SIDECAR_SUFFIX: &str = ".mesh-art.json";
-#[cfg(windows)]
-const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 #[cfg(windows)]
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
 const BLANK_SCENE: &[u8] = b"schema: orr.scene/1\nsingletons: {}\nentities: {}\n";
@@ -203,12 +201,17 @@ pub(crate) fn refuse_existing_sidecar(scene: &Path) -> Result<(), String> {
 
 pub(crate) fn read_scene(path: &Path) -> Result<Vec<u8>, String> {
     recheck_parent(path)?;
-    let before =
-        fs::symlink_metadata(path).map_err(|error| format!("mesh scene metadata: {error}"))?;
+    // The first handle pins the identity of the inspected file. `open_file` refuses a
+    // link, a folder or a FIFO without waiting for a writer.
+    let inspected =
+        orr_fsid::open_file(path).map_err(|error| format!("mesh scene metadata: {error}"))?;
+    let before = inspected
+        .metadata()
+        .map_err(|error| format!("mesh scene metadata: {error}"))?;
     if !regular_non_reparse(&before) || before.len() > MAX_SCENE_BYTES {
         return Err("mesh scene must be a regular non-reparse file of at most 1 MiB".into());
     }
-    let mut file = open_without_following(path)
+    let mut file = orr_fsid::open_file(path)
         .map_err(|error| format!("open mesh scene without following reparse points: {error}"))?;
     let opened = file
         .metadata()
@@ -221,19 +224,18 @@ pub(crate) fn read_scene(path: &Path) -> Result<Vec<u8>, String> {
         .take(MAX_SCENE_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| format!("read mesh scene: {error}"))?;
-    let after =
-        fs::symlink_metadata(path).map_err(|error| format!("mesh scene recheck: {error}"))?;
+    let still_named = matches!(orr_fsid::same_file(path, &file), Ok(true));
     let handle_after = file
         .metadata()
         .map_err(|error| format!("mesh scene handle recheck: {error}"))?;
     recheck_parent(path)?;
     if bytes.len() as u64 > MAX_SCENE_BYTES
         || bytes.len() as u64 != opened.len()
-        || !regular_non_reparse(&after)
+        || !still_named
         || !regular_non_reparse(&handle_after)
+        || !matches!(orr_fsid::same_handle(&inspected, &file), Ok(true))
         || !same_observation(&before, &opened)
         || !same_observation(&opened, &handle_after)
-        || !same_observation(&before, &after)
     {
         return Err("mesh scene changed while being read".into());
     }
@@ -285,17 +287,6 @@ fn reserved_device_name(filename: &str) -> bool {
                 matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
             })
         })
-}
-
-fn open_without_following(path: &Path) -> std::io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    }
-    options.open(path)
 }
 
 fn regular_non_reparse(metadata: &Metadata) -> bool {

@@ -87,7 +87,7 @@ use orr_package::Manifest;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::{Read, Write},
     path::{Component, Path, PathBuf},
 };
@@ -96,8 +96,6 @@ const MAX_SOURCE_BYTES: u64 = orr_model::MAX_FILE_BYTES as u64;
 const MAX_LICENSE_BYTES: u64 = 1024 * 1024;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_PATH_COMPONENTS: usize = 64;
-#[cfg(windows)]
-const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 #[cfg(windows)]
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
 
@@ -732,14 +730,19 @@ fn checked_file_path(path: &Path, label: &str) -> Result<PathBuf, String> {
 }
 
 fn read_bounded_file(path: &Path, limit: u64, label: &str) -> Result<InputBytes, String> {
-    let metadata =
-        fs::symlink_metadata(path).map_err(|error| format!("{label} metadata: {error}"))?;
+    // The first handle pins the identity of the inspected file. `open_file` refuses a
+    // link, a folder or a FIFO without waiting for a writer.
+    let inspected =
+        orr_fsid::open_file(path).map_err(|error| format!("{label} metadata: {error}"))?;
+    let metadata = inspected
+        .metadata()
+        .map_err(|error| format!("{label} metadata: {error}"))?;
     if !regular_non_reparse(&metadata) || metadata.len() > limit {
         return Err(format!(
             "{label} must be a regular file within its byte limit"
         ));
     }
-    let mut file = open_without_following(path).map_err(|error| format!("{label}: {error}"))?;
+    let mut file = orr_fsid::open_file(path).map_err(|error| format!("{label}: {error}"))?;
     let opened = file
         .metadata()
         .map_err(|error| format!("{label} opened metadata: {error}"))?;
@@ -753,18 +756,17 @@ fn read_bounded_file(path: &Path, limit: u64, label: &str) -> Result<InputBytes,
         .take(limit + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| format!("{label} read: {error}"))?;
-    let after = fs::symlink_metadata(path).map_err(|error| format!("{label} recheck: {error}"))?;
+    let still_named = matches!(orr_fsid::same_file(path, &file), Ok(true));
     let handle_after = file
         .metadata()
         .map_err(|error| format!("{label} opened recheck: {error}"))?;
-    if !regular_non_reparse(&after)
+    if !still_named
         || !regular_non_reparse(&handle_after)
         || bytes.len() as u64 > limit
         || bytes.len() as u64 != opened.len()
+        || !matches!(orr_fsid::same_handle(&inspected, &file), Ok(true))
         || !same_file_observation(&metadata, &opened)
         || !same_file_observation(&opened, &handle_after)
-        || !same_file_observation(&metadata, &after)
-        || !same_file_observation(&after, &handle_after)
     {
         return Err(format!("{label} changed while it was read"));
     }
@@ -951,17 +953,6 @@ fn write_new_tracked(path: &Path, bytes: &[u8], created: &mut Vec<PathBuf>) -> R
     created.push(path.to_path_buf());
     file.write_all(bytes)
         .map_err(|error| format!("write {}: {error}", path.display()))
-}
-
-fn open_without_following(path: &Path) -> std::io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    }
-    options.open(path)
 }
 
 fn regular_non_reparse(metadata: &fs::Metadata) -> bool {

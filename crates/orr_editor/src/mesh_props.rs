@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, File, Metadata, OpenOptions},
+    fs::{self, Metadata},
     io::{Read, Write},
     path::{Component, Path, PathBuf},
 };
@@ -21,8 +21,6 @@ pub(crate) const MAX_SIDECAR_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_PATH_COMPONENTS: usize = 64;
 const SIDECAR_SUFFIX: &str = ".mesh-props.json";
-#[cfg(windows)]
-const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 #[cfg(windows)]
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
 
@@ -527,17 +525,6 @@ fn same_observation(first: &Metadata, second: &Metadata) -> bool {
         }
 }
 
-fn open_without_following(path: &Path) -> std::io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    }
-    options.open(path)
-}
-
 fn read_optional_bounded(path: &Path, label: &str) -> Result<Option<Vec<u8>>, String> {
     match fs::symlink_metadata(path) {
         Ok(_) => read_bounded(path, label).map(Some),
@@ -557,14 +544,19 @@ fn read_bounded(path: &Path, label: &str) -> Result<Vec<u8>, String> {
         .ok_or_else(|| format!("{label} filename must be Unicode"))?;
     validate_leaf(filename, label)?;
     let canonical = parent.join(filename);
-    let before =
-        fs::symlink_metadata(&canonical).map_err(|error| format!("inspect {label}: {error}"))?;
+    // The first handle pins the identity of the inspected file. `open_file` refuses a
+    // link, a folder or a FIFO without waiting for a writer.
+    let inspected =
+        orr_fsid::open_file(&canonical).map_err(|error| format!("inspect {label}: {error}"))?;
+    let before = inspected
+        .metadata()
+        .map_err(|error| format!("inspect {label}: {error}"))?;
     if !regular_non_reparse(&before) || before.len() as u64 > MAX_SIDECAR_BYTES {
         return Err(format!(
             "{label} must be a bounded regular non-reparse file"
         ));
     }
-    let mut file = open_without_following(&canonical)
+    let mut file = orr_fsid::open_file(&canonical)
         .map_err(|error| format!("open {label} without following links: {error}"))?;
     let opened = file
         .metadata()
@@ -580,15 +572,14 @@ fn read_bounded(path: &Path, label: &str) -> Result<Vec<u8>, String> {
     let opened_after = file
         .metadata()
         .map_err(|error| format!("recheck opened {label}: {error}"))?;
-    let current =
-        fs::symlink_metadata(&canonical).map_err(|error| format!("recheck {label}: {error}"))?;
+    let still_named = matches!(orr_fsid::same_file(&canonical, &file), Ok(true));
     if bytes.len() as u64 > MAX_SIDECAR_BYTES
         || bytes.len() as u64 != opened.len()
         || !regular_non_reparse(&opened_after)
-        || !regular_non_reparse(&current)
+        || !still_named
+        || !matches!(orr_fsid::same_handle(&inspected, &file), Ok(true))
         || !same_observation(&before, &opened)
         || !same_observation(&opened, &opened_after)
-        || !same_observation(&before, &current)
         || checked_directory(parent.as_path(), label)?.as_path() != parent
     {
         return Err(format!("{label} changed while it was read"));

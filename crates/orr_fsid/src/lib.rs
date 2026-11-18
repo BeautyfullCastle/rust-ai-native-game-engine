@@ -80,6 +80,11 @@ pub fn same_file(path: &Path, held: &File) -> io::Result<bool> {
     Ok(file_id(&open_file(path)?)? == file_id(held)?)
 }
 
+/// True when the two open handles name the same file or folder.
+pub fn same_handle(first: &File, second: &File) -> io::Result<bool> {
+    Ok(file_id(first)? == file_id(second)?)
+}
+
 /// A folder opened once and checked again later by path.
 ///
 /// The handle stays open while this value lives, so the identity cannot be reused by
@@ -419,6 +424,20 @@ mod tests {
             file_id(&open_directory(temp.path()).unwrap()).unwrap()
         );
         assert!(file_id_at(&temp.path().join("missing")).is_err());
+    }
+
+    #[test]
+    fn two_handles_to_one_file_match_and_a_replacement_does_not() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("file.txt");
+        fs::write(&path, b"x").unwrap();
+        let first = open_file(&path).unwrap();
+        let second = open_file(&path).unwrap();
+        assert!(same_handle(&first, &second).unwrap());
+        fs::remove_file(&path).unwrap();
+        fs::write(&path, b"x").unwrap();
+        let replacement = open_file(&path).unwrap();
+        assert!(!same_handle(&first, &replacement).unwrap());
     }
 
     #[test]

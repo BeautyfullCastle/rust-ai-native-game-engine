@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
-    fs::{self, File, Metadata, OpenOptions},
+    fs::{self, Metadata, OpenOptions},
     io::{Read, Write},
     path::{Component, Path, PathBuf},
 };
@@ -77,8 +77,6 @@ pub(crate) enum InputProfile {
 enum GameProfile {
     MeshMissionV1,
 }
-#[cfg(windows)]
-const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 #[cfg(windows)]
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
 
@@ -1334,11 +1332,19 @@ fn read_optional_bounded(
 
 fn read_bounded(path: &Path, limit: u64, context: &str) -> Result<Vec<u8>, String> {
     let canonical = checked_existing_file(path, limit, context)?;
-    let before = fs::symlink_metadata(&canonical).map_err(|error| error.to_string())?;
+    // The first handle pins the identity of the inspected file. `open_file` refuses a
+    // link, a folder or a FIFO without waiting for a writer.
+    let inspected =
+        orr_fsid::open_file(&canonical).map_err(|error| format!("open {context}: {error}"))?;
+    let before = inspected.metadata().map_err(|error| error.to_string())?;
     let mut file =
-        open_without_following(&canonical).map_err(|error| format!("open {context}: {error}"))?;
+        orr_fsid::open_file(&canonical).map_err(|error| format!("open {context}: {error}"))?;
     let opened = file.metadata().map_err(|error| error.to_string())?;
-    if !regular_file(&opened) || opened.len() > limit || !same_observation(&before, &opened) {
+    if !regular_file(&opened)
+        || opened.len() > limit
+        || !matches!(orr_fsid::same_handle(&inspected, &file), Ok(true))
+        || !same_observation(&before, &opened)
+    {
         return Err(format!("{context} changed before reading"));
     }
     let mut bytes = Vec::with_capacity(opened.len() as usize);
@@ -1347,13 +1353,12 @@ fn read_bounded(path: &Path, limit: u64, context: &str) -> Result<Vec<u8>, Strin
         .read_to_end(&mut bytes)
         .map_err(|error| format!("read {context}: {error}"))?;
     let after = file.metadata().map_err(|error| error.to_string())?;
-    let current = fs::symlink_metadata(&canonical).map_err(|error| error.to_string())?;
+    let still_named = matches!(orr_fsid::same_file(&canonical, &file), Ok(true));
     if bytes.len() as u64 > limit
         || bytes.len() as u64 != opened.len()
         || !regular_file(&after)
-        || !regular_file(&current)
+        || !still_named
         || !same_observation(&opened, &after)
-        || !same_observation(&before, &current)
     {
         return Err(format!("{context} changed while being read"));
     }
@@ -1363,17 +1368,6 @@ fn read_bounded(path: &Path, limit: u64, context: &str) -> Result<Vec<u8>, Strin
         return Err(format!("{context} parent changed while being read"));
     }
     Ok(bytes)
-}
-
-fn open_without_following(path: &Path) -> std::io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    }
-    options.open(path)
 }
 
 fn regular_file(metadata: &Metadata) -> bool {

@@ -6,7 +6,7 @@ use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    fs::{self, File, Metadata, OpenOptions},
+    fs::{self, Metadata},
     io::{Read, Write},
     path::{Component, Path, PathBuf},
     sync::Arc,
@@ -23,8 +23,6 @@ const MAX_WORK_VERTICES: usize = 100_000;
 const MAX_WORK_TRIANGLES: usize = 100_000;
 const MAX_WORK_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_DECODED_WORK_BYTES: usize = 32 * 1024 * 1024;
-#[cfg(windows)]
-const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 #[cfg(windows)]
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
 
@@ -1011,15 +1009,19 @@ pub(crate) fn read_optional_file(
 }
 
 fn read_regular_file(path: &Path, limit: u64, label: &str) -> Result<Vec<u8>, String> {
-    let before =
-        fs::symlink_metadata(path).map_err(|error| format!("{label} metadata: {error}"))?;
+    // The first handle pins the identity of the inspected file. `open_file` refuses a
+    // link, a folder or a FIFO without waiting for a writer.
+    let inspected =
+        orr_fsid::open_file(path).map_err(|error| format!("{label} metadata: {error}"))?;
+    let before = inspected
+        .metadata()
+        .map_err(|error| format!("{label} metadata: {error}"))?;
     if !regular_non_reparse(&before) || before.len() > limit {
         return Err(format!(
             "{label} must be a regular non-reparse file within its byte limit"
         ));
     }
-    let mut file =
-        open_without_following(path).map_err(|error| format!("open {label}: {error}"))?;
+    let mut file = orr_fsid::open_file(path).map_err(|error| format!("open {label}: {error}"))?;
     let opened = file
         .metadata()
         .map_err(|error| format!("{label} handle metadata: {error}"))?;
@@ -1033,17 +1035,17 @@ fn read_regular_file(path: &Path, limit: u64, label: &str) -> Result<Vec<u8>, St
         .take(limit.saturating_add(1))
         .read_to_end(&mut bytes)
         .map_err(|error| format!("read {label}: {error}"))?;
-    let after = fs::symlink_metadata(path).map_err(|error| format!("{label} recheck: {error}"))?;
+    let still_named = matches!(orr_fsid::same_file(path, &file), Ok(true));
     let handle_after = file
         .metadata()
         .map_err(|error| format!("{label} handle recheck: {error}"))?;
-    if !regular_non_reparse(&after)
+    if !still_named
         || !regular_non_reparse(&handle_after)
         || bytes.len() as u64 > limit
         || bytes.len() as u64 != opened.len()
+        || !matches!(orr_fsid::same_handle(&inspected, &file), Ok(true))
         || !same_observation(&before, &opened)
         || !same_observation(&opened, &handle_after)
-        || !same_observation(&before, &after)
     {
         return Err(format!("{label} changed while being read"));
     }
@@ -1120,17 +1122,6 @@ fn ensure_directory(path: &Path, label: &str) -> Result<(), String> {
         return Err(format!("{label} must contain only non-reparse directories"));
     }
     Ok(())
-}
-
-fn open_without_following(path: &Path) -> std::io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    }
-    options.open(path)
 }
 
 fn regular_non_reparse(metadata: &Metadata) -> bool {
