@@ -1,4 +1,4 @@
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", windows))]
 use orr_package::{Lock, Project, Runtime, SourceExportReport};
 use serde_json::json;
 use std::{
@@ -221,6 +221,7 @@ fn manifest_tamper_invalid_lock_and_missing_name_never_publish() {
     assert!(!output.exists());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn output_paths_and_preexisting_destinations_are_preserved() {
     let fixture = Fixture::new();
@@ -272,6 +273,7 @@ fn output_paths_and_preexisting_destinations_are_preserved() {
     assert!(!fixture.output("new").exists());
 }
 
+#[cfg(target_os = "linux")]
 #[expect(
     clippy::disallowed_types,
     reason = "bounded subprocess-only filesystem regression timeout"
@@ -312,6 +314,7 @@ fn assert_fifo_cli_rejected(project: &Path, output: &Path) {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn links_nonregular_files_and_size_bound_fail_without_output() {
     let fixture = Fixture::new();
@@ -407,4 +410,49 @@ fn concurrent_exporters_never_clobber_the_winner() {
             source.digest
         );
     }
+}
+
+/// The Windows counterpart of the output path checks: preexisting destinations,
+/// inside-project and unnormalized paths, and a directory junction as parent.
+#[cfg(windows)]
+#[test]
+fn windows_output_paths_and_preexisting_destinations_are_preserved() {
+    let fixture = Fixture::new();
+    fixture.install();
+    let output = fixture.output("directory");
+    fs::create_dir(&output).unwrap();
+    fs::write(output.join("marker"), b"preserve").unwrap();
+    assert!(fixture.project.export_sources("art", &output).is_err());
+    assert_eq!(fs::read(output.join("marker")).unwrap(), b"preserve");
+    let before = inventory(&fixture.root);
+    assert!(fixture
+        .project
+        .export_sources("art", fixture.root.join("inside"))
+        .is_err());
+    assert_eq!(inventory(&fixture.root), before);
+    for path in [
+        PathBuf::from("relative"),
+        PathBuf::from(r"\no-drive\share\x"),
+        fixture.output("missing-parent/child"),
+        // Built from text: joining onto a verbatim path would drop the dots.
+        PathBuf::from(format!(r"{}\..\escape", fixture.temp.path().display())),
+        fixture.temp.path().join("trailing."),
+        fixture.temp.path().join("bad:name"),
+        fixture.temp.path().join("bad?name"),
+    ] {
+        assert!(fixture.project.export_sources("art", &path).is_err(), "{path:?}");
+    }
+    let parent = fixture.output("junction-parent");
+    let made = Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&parent)
+        .arg(fixture.temp.path())
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));
+    assert!(fixture
+        .project
+        .export_sources("art", parent.join("new"))
+        .is_err());
+    assert!(!fixture.output("new").exists());
 }

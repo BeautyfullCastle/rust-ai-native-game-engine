@@ -3,7 +3,7 @@ use serde::Serialize;
 use std::{collections::BTreeMap, ffi::OsString, path::PathBuf};
 pub mod authoring;
 
-pub const USAGE: &str = "orr_pkg create-sprite --png FILE --license FILE --name NAME --version VERSION --out NEW_DIRECTORY (--json FILE | --sprite-gen MANIFEST | --atlas-size WIDTH HEIGHT [--region ID X Y WIDTH HEIGHT]... [--clip ID loop|once REGION:DURATION_MS,...]...)\nRequires Linux sprite-authoring build. Existing strict PNG/SpriteDocument admission; sprite-gen requires explicit durations_ms; no --packer, fps or pivot option, shell, install, rendering or rights verification. No overwrite. Publication is visible-partial, not crash-atomic; on write failure inspect the partial output manually, do not retry/remove blindly.";
+pub const USAGE: &str = "orr_pkg create-sprite --png FILE --license FILE --name NAME --version VERSION --out NEW_DIRECTORY (--json FILE | --sprite-gen MANIFEST | --atlas-size WIDTH HEIGHT [--region ID X Y WIDTH HEIGHT]... [--clip ID loop|once REGION:DURATION_MS,...]...)\nRequires a Linux or Windows sprite-authoring build. Existing strict PNG/SpriteDocument admission; sprite-gen requires explicit durations_ms; no --packer, fps or pivot option, shell, install, rendering or rights verification. No overwrite. Publication is visible-partial, not crash-atomic; on write failure inspect the partial output manually, do not retry/remove blindly.";
 const MAX_ARGS: usize = authoring::MAX_JSON_BYTES;
 pub struct Options {
     pub request: authoring::Request,
