@@ -4,9 +4,9 @@
 
 ## 목표
 
-키로 네모를 움직이고, 판 위에 생기는 별을 주워 점수를 얻습니다. 별을 주우면 효과가 나옵니다. 위쪽에는 점수 막대가 있고, 네모 뒤에는 꼬리가 남습니다.
+키로 네모를 움직이고, 판 위에 생기는 별을 주워 점수를 얻습니다. 별을 주우면 효과와 짧은 소리가 나옵니다. 왼쪽 위에는 점수 글자가 있고, 네모 뒤에는 꼬리가 남습니다.
 
-완성 코드는 `tutorial/star_pick/src/step2.rs`(315줄)입니다. 1단계 파일에서 달라진 부분만 설명합니다.
+완성 코드는 `tutorial/star_pick/src/step2.rs`(322줄)와 소리를 만드는 `sound.rs`(54줄)입니다. 1단계 파일에서 달라진 부분만 설명합니다.
 
 ## 새로 배우는 것
 
@@ -19,6 +19,8 @@
 | 예측과 확정 | 이벤트는 `Predicted`, `Verified`, `Canceled` 세 상태로 옵니다. |
 | `SceneView` | 화면 전체에 하나 있는 뷰. 이벤트와 점수를 다룹니다. |
 | `EntityView` | 엔티티마다 하나 있는 뷰. 생기고, 움직이고, 사라질 때 불립니다. |
+| `ctx.draw()` | 뷰가 화면에 글자와 선을 그리는 목록입니다. 매 프레임 비워집니다. |
+| `ctx.audio()`, `App::sound` | 뷰가 소리를 켜고 끕니다. 소리는 앱을 만들 때 한 번 등록합니다. |
 
 ## 시뮬레이션: 입력, 컴포넌트, 이벤트
 
@@ -176,9 +178,9 @@ sequenceDiagram
 
 | 상태 | 뜻 | 이 튜토리얼에서 하는 일 |
 |---|---|---|
-| `Predicted` | 확정되지 않은 틱에서 났습니다. 롤백으로 사라질 수 있습니다. | 고리 효과와 "딩" 소리(글자)를 바로 시작합니다. |
+| `Predicted` | 확정되지 않은 틱에서 났습니다. 롤백으로 사라질 수 있습니다. | 고리 효과와 "딩" 소리를 바로 시작합니다. |
 | `Verified` | 그 틱이 확정되었습니다. 한 이벤트에 한 번 옵니다. | 이미 시작하지 않았다면 효과를 시작합니다. |
-| `Canceled` | 롤백이 `Predicted` 이벤트를 없앴습니다. | 그 고리를 지웁니다. |
+| `Canceled` | 롤백이 `Predicted` 이벤트를 없앴습니다. | 그 고리를 지우고 그 소리를 멈춥니다. |
 
 점수는 `Verified` 프레임에서 읽습니다. 롤백이 나도 점수가 줄었다 늘지 않습니다. `ctx.predicted()`는 가장 앞선 프레임이고, `ctx.verified()`는 확정된 프레임입니다.
 
@@ -193,11 +195,17 @@ impl SceneView<StarPick> for Juice {
         match state {
             EventState::Predicted | EventState::Verified => {
                 if !fx.rings.iter().any(|ring| ring.picked == *event) {
-                    fx.rings.push(Ring { picked: *event, start: ctx.tick() });
-                    println!("Ding! Star picked, {} points", event.points);
+                    let sound = ctx.audio().play_named(sound::PICKUP); // 짧은 "딩"을 바로 냅니다
+                    fx.rings.push(Ring { picked: *event, start: ctx.tick(), sound });
                 }
             }
-            EventState::Canceled => fx.rings.retain(|ring| ring.picked != *event),
+            EventState::Canceled => {
+                // 롤백이 줍기를 되돌렸습니다. 고리를 지우고, 시작한 소리도 멈춥니다.
+                for sound in fx.rings.iter().filter(|ring| ring.picked == *event).filter_map(|ring| ring.sound) {
+                    ctx.audio().stop(sound);
+                }
+                fx.rings.retain(|ring| ring.picked != *event);
+            }
         }
     }
 
@@ -207,6 +215,8 @@ impl SceneView<StarPick> for Juice {
         if let Some(verified) = ctx.verified() {
             fx.score = verified.iter::<Score>().map(|(_, score)| score.points).sum();
         }
+        // 점수를 왼쪽 위에 글자로 그립니다 (화면 좌표: 픽셀, 왼쪽 위가 원점)
+        ctx.draw().text([16.0, 14.0], 21.0, STAR, &format!("SCORE {}", fx.score));
         // ... 오래된 고리를 지웁니다
     }
 }
@@ -214,7 +224,38 @@ impl SceneView<StarPick> for Juice {
 
 `on_event`는 이벤트마다, `on_update`는 프레임마다 불립니다. `Predicted`에서 고리를 만들었다면 같은 이벤트가 `Verified`로 다시 올 때 새 고리를 만들지 않습니다. 이벤트 값 자체(`Picked`)로 같은지 비교합니다.
 
-소리는 아직 없어서 "딩"은 글자로 찍습니다. 소리를 붙인다면 같은 자리에 넣습니다. 이 엔진의 뷰는 아직 글자를 그리지 못해서 점수는 작은 네모 막대로 보여 줍니다.
+`play_named`가 돌려주는 `SoundHandle`은 `Ring`에 담아 둡니다. `Canceled`가 오면 그 손잡이로 `stop`을 불러 소리를 줄이며 끕니다. 소리는 짧아서 대개 이미 끝났지만, 길게 이어지는 소리라면 이 한 줄이 중요합니다. 끝난 소리에 `stop`을 불러도 아무 일도 없습니다.
+
+### 글자와 소리
+
+`ctx.draw()`는 한 프레임 동안만 쓰는 그리기 목록입니다. 기본 렌더러가 그린 뒤에, 그림 맨 위에 그려집니다. 매 프레임 비워지므로 보이게 하고 싶은 동안은 매 프레임 부릅니다(여기서는 `on_update`).
+
+| 호출 | 뜻 |
+|---|---|
+| `text([x, y], 크기, 색, "글")` | 화면 좌표(픽셀, 왼쪽 위가 원점, y는 아래로)의 글자입니다. `크기`는 대문자 높이(픽셀)입니다. |
+| `line(a, b, 색)`, `rect(min, max, 색)` | 세계 좌표의 선과 채운 사각형입니다. 카메라를 따라 움직입니다. |
+| `line3(a, b, 색)`, `aabb3(min, max, 색)` | 3D 실행용 선과 상자 모서리입니다. 2D에서는 `x`와 `y`만 씁니다. |
+
+**글꼴은 5 x 7 점 글꼴이고 ASCII만 그립니다.** 숫자, 영어 대문자(소문자도 대문자로 보입니다), 몇 가지 기호만 있습니다. **한글은 아직 그리지 못합니다.** 한글 글자는 빈칸으로 나옵니다. 그래서 이 튜토리얼의 화면 글자는 영어입니다.
+
+`ctx.audio()`는 소리를 켜고 끕니다.
+
+| 호출 | 뜻 |
+|---|---|
+| `play(&clip)` | 소리 하나를 켜고 `Option<SoundHandle>`을 줍니다. 장치가 없거나 소리가 너무 많으면 `None`입니다. |
+| `play_named("pickup")` | `App::sound`로 등록한 소리를 켭니다. |
+| `play_at(&clip, 위치, near, far)` | 세계의 한 점에서 나는 소리입니다. `near` 안에서는 크고 `far`부터는 들리지 않으며, 그쪽 스피커로 치우칩니다. |
+| `stop(손잡이)` | 소리를 줄이며 끕니다. 이미 끝난 소리면 아무 일도 없습니다. |
+
+소리 데이터는 `Clip`입니다. 이 튜토리얼은 소리 파일을 쓰지 않고, `tutorial/star_pick/src/sound.rs`가 프로그램이 시작할 때 사인파 두 개(라, 미)를 숫자로 만들어 `Clip::from_stereo`에 줍니다. 그래서 저장소에 소리 파일도 저작권 걱정도 없습니다. 앱을 만들 때 한 번 등록합니다.
+
+```rust
+App::<StarPick>::new()
+    // ...
+    .sound(sound::PICKUP, sound::pickup())
+```
+
+오디오 장치는 첫 소리를 켤 때 앱이 엽니다. 장치가 없는 컴퓨터에서는 터미널에 한 번 알리고 소리 없이 계속 돕니다. `--screenshot`으로 실행하면 장치를 열지 않습니다. 소리는 화면 쪽 일이라서 게임 규칙이나 체크섬에는 닿지 않습니다.
 
 ### EntityView: 꼬리
 
@@ -243,6 +284,7 @@ pub fn app() -> App<StarPick> {
         .view(Look { fx: fx.clone() })
         .entity_view::<Score>(move || TrailView { fx: for_trails.clone() })
         .scene_view(Juice { fx })
+        .sound(sound::PICKUP, sound::pickup()) // 소리를 한 번 등록합니다
         .title("Star Pick 2")
 }
 ```
@@ -253,25 +295,25 @@ pub fn app() -> App<StarPick> {
 cargo run -p star_pick --release --bin step2
 ```
 
-W A S D 또는 방향키로 움직입니다. 별에 닿으면 터미널에 `Ding!`이 찍힙니다. Esc로 끝냅니다.
+W A S D 또는 방향키로 움직입니다. 별에 닿으면 짧은 "딩" 소리가 납니다. Esc로 끝냅니다.
 
 ## 보이는 것
 
 ![2단계 화면](img/step2.png)
 
-위에는 점수 막대가 있고, 판에는 별이 있습니다. 별은 마름모입니다. 새 별은 작게 시작해 10틱 동안 커집니다. 방금 주운 자리에는 노란 고리가 커지며 사라집니다. 네모를 움직이면 뒤에 점이 남습니다.
+왼쪽 위에는 점수 글자(`SCORE 12`)가 있고, 판에는 별이 있습니다. 별은 마름모입니다. 새 별은 작게 시작해 10틱 동안 커집니다. 방금 주운 자리에는 노란 고리가 커지며 사라집니다. 네모를 움직이면 뒤에 점이 남습니다.
 
 그림은 별을 향해 가는 자동 조종으로 590틱을 찍은 것입니다. 점수는 12점입니다.
 
 ## 창 없이 확인하기
 
-`tests/step2.rs`가 창 없이 세 가지를 확인합니다.
+`tests/step2.rs`가 창 없이 세 가지를 확인하고, `sound.rs`의 테스트가 소리를 확인합니다.
 
 | 테스트 | 확인하는 것 |
 |---|---|
 | `scoring_is_deterministic` | 가장 가까운 별로 가는 플레이어로 900틱을 두 번 돌려 같은 점수와 같은 체크섬을 얻는다. 이벤트 수가 점수와 같다 |
 | `a_replay_reproduces_the_run` | `save_replay`로 기록해 `open_replay`로 열고 `seek`로 끝 틱에 가면 같은 체크섬이 나온다 |
-| `the_views_follow_the_game` | 창 없는 브리지 위에서 뷰를 돌린다. 점수 막대는 확정 프레임의 점수와 같고, 고리가 시작되며, 엔티티 뷰가 만들어진다 |
+| `the_views_follow_the_game` | 창 없는 브리지 위에서 뷰를 돌린다. 점수 글자는 확정 프레임의 점수와 같고, 고리가 시작되며, 엔티티 뷰가 만들어진다. 별마다 소리가 한 번 켜진다(소리 장치 대신 창도 장치도 없는 오프라인 출력으로 센다) |
 
 ```powershell
 cargo test --release -p star_pick --test step2
