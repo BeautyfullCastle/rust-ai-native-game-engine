@@ -250,6 +250,67 @@ impl Bundle {
     }
 }
 
+/// Bytes of `v` as a varint.
+fn varint_len(v: u32) -> usize {
+    (32 - (v | 1).leading_zeros() as usize).div_ceil(7)
+}
+
+/// Magic, version, kind, input size, slot count, bundle count, checksum.
+const CONFIRMED_FIXED_LEN: usize = 4 + 4 + 1 + 4 + 1 + 4 + 8;
+/// Magic, version, kind, slot, input size, ack tick, checksum (and the entry count varint).
+const INPUT_FIXED_LEN: usize = 4 + 4 + 1 + 1 + 4 + 8 + 8;
+
+/// Exact byte length of `ServerMsg::Confirmed { input_size, bundles }` once
+/// encoded: header, bundles (each against its predecessor), the signal count
+/// trailer of a fenced message, and the checksum.
+pub fn confirmed_encoded_len<'a>(bundles: impl IntoIterator<Item = &'a Bundle>, input_size: u32) -> usize {
+    let mut n = CONFIRMED_FIXED_LEN;
+    let mut prev: Option<&Bundle> = None;
+    let mut fenced = false;
+    let mut first_signals = 0;
+    let (mut changes, mut change_bytes) = (0u32, 0usize);
+    for (i, b) in bundles.into_iter().enumerate() {
+        n += match prev {
+            None => {
+                first_signals = b.signals;
+                b.encoded_len(input_size)
+            }
+            Some(p) => {
+                if p.signals != b.signals {
+                    changes += 1;
+                    change_bytes += varint_len(i as u32) + varint_len(b.signals);
+                }
+                b.encoded_len_after(p, input_size)
+            }
+        };
+        fenced |= b.signals != 0;
+        prev = Some(b);
+    }
+    if fenced {
+        n += varint_len(first_signals) + varint_len(changes) + change_bytes;
+    }
+    n
+}
+
+/// Exact byte length of `ClientMsg::Input` with these entries once encoded.
+pub fn input_encoded_len<'a>(entries: impl IntoIterator<Item = &'a InputEntry>, input_size: u32) -> usize {
+    let mut n = INPUT_FIXED_LEN;
+    let mut count = 0u32;
+    let mut prev: Option<&InputEntry> = None;
+    for e in entries {
+        let tick = match prev {
+            None => 8,
+            Some(p) if p.tick < e.tick && e.tick - p.tick < u64::from(TICK_ESCAPE) => 1,
+            Some(_) => 9,
+        };
+        let same = prev.is_some_and(|p| p.input == e.input);
+        n += 1 + tick + if same { 0 } else { input_size as usize } + commands_len(&e.commands);
+        count += 1;
+        prev = Some(e);
+    }
+    n + varint_len(count)
+}
+
 /// Client request to join a room.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hello {
@@ -1189,6 +1250,108 @@ mod tests {
         // A single bundle and a message of version 4 without bundles.
         let one = ServerMsg::Confirmed { input_size: 4, bundles: vec![fenced_bundle(5, 1)] };
         assert_eq!(ServerMsg::decode(&one.encode()).unwrap(), one);
+    }
+
+    /// A small deterministic generator for the shape tests.
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self, below: u64) -> u64 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (self.0 >> 33) % below
+        }
+    }
+
+    #[test]
+    fn confirmed_encoded_len_is_exact_for_every_shape() {
+        // Signal counts and bundle positions around the varint boundaries.
+        let edges = [0u32, 1, 2, 126, 127, 128, 129, 16_382, 16_383, 16_384, 16_385, 2_097_151, 2_097_152, u32::MAX];
+        let mut rng = Lcg(7);
+        for round in 0..400 {
+            let input_size = [0u32, 1, 4, 9][rng.next(4) as usize];
+            let slots = 1 + rng.next(3) as usize;
+            let n = [0usize, 1, 2, 3, 127, 128, 129, 300][rng.next(8) as usize] + rng.next(4) as usize;
+            let mut tick = rng.next(1_000_000);
+            let mut signals = edges[rng.next(edges.len() as u64) as usize];
+            let mut prev_inputs: Vec<Vec<u8>> = vec![vec![0; input_size as usize]; slots];
+            let mut bundles = Vec::new();
+            for _ in 0..n {
+                tick = match rng.next(10) {
+                    0 => tick + 300,
+                    1 => tick.saturating_sub(5),
+                    _ => tick + 1 + rng.next(3),
+                };
+                // Mostly the same count, now and then a change to a boundary value or a small step.
+                match rng.next(4) {
+                    0 => signals = edges[rng.next(edges.len() as u64) as usize],
+                    1 => signals = signals.saturating_add(1),
+                    _ => {}
+                }
+                let slot_list = (0..slots)
+                    .map(|i| {
+                        if rng.next(3) == 0 {
+                            prev_inputs[i] = (0..input_size).map(|_| rng.next(256) as u8).collect();
+                        }
+                        let commands = (0..rng.next(3)).map(|_| vec![7u8; rng.next(300) as usize]).collect();
+                        SlotConfirmed { input: prev_inputs[i].clone(), commands, flags: rng.next(4) as u8 }
+                    })
+                    .collect();
+                bundles.push(Bundle { tick, signals, slots: slot_list });
+            }
+            let len = ServerMsg::Confirmed { input_size, bundles: bundles.clone() }.encode().len();
+            assert_eq!(confirmed_encoded_len(&bundles, input_size), len, "round {round}, {n} bundles");
+            // Every prefix too, as the server tries them.
+            if n > 0 {
+                let k = 1 + rng.next(n as u64) as usize;
+                let len = ServerMsg::Confirmed { input_size, bundles: bundles[..k].to_vec() }.encode().len();
+                assert_eq!(confirmed_encoded_len(&bundles[..k], input_size), len, "round {round}, prefix {k}");
+            }
+        }
+    }
+
+    #[test]
+    fn confirmed_encoded_len_counts_the_signal_trailer_at_varint_boundaries() {
+        // A change at index 127 and 128, to counts 127, 128 and 16384.
+        for (change_at, to) in [(127usize, 127u32), (128, 128), (129, 16_383), (128, 16_384)] {
+            let bundles: Vec<Bundle> =
+                (0..=change_at + 1).map(|i| fenced_bundle(10 + i as u64, if i < change_at { 1 } else { to })).collect();
+            let len = ServerMsg::Confirmed { input_size: 4, bundles: bundles.clone() }.encode().len();
+            assert_eq!(confirmed_encoded_len(&bundles, 4), len, "change at {change_at} to {to}");
+        }
+        // Many changes: the count of changes itself crosses 127 and 128.
+        for changes in [126usize, 127, 128, 129] {
+            let bundles: Vec<Bundle> = (0..=changes).map(|i| fenced_bundle(10 + i as u64, 1 + i as u32)).collect();
+            let len = ServerMsg::Confirmed { input_size: 4, bundles: bundles.clone() }.encode().len();
+            assert_eq!(confirmed_encoded_len(&bundles, 4), len, "{changes} changes");
+            let plain: Vec<Bundle> = bundles.iter().map(|b| Bundle { signals: 0, ..b.clone() }).collect();
+            assert!(len > confirmed_encoded_len(&plain, 4));
+        }
+        assert_eq!(confirmed_encoded_len(&[], 4), ServerMsg::Confirmed { input_size: 4, bundles: vec![] }.encode().len());
+    }
+
+    #[test]
+    fn input_encoded_len_is_exact_for_every_shape() {
+        let mut rng = Lcg(11);
+        for round in 0..400 {
+            let input_size = [0u32, 1, 4, 9][rng.next(4) as usize];
+            let n = [0usize, 1, 2, 3, 127, 128, 129, 256][rng.next(8) as usize];
+            let mut tick = rng.next(1_000_000);
+            let mut input = vec![0u8; input_size as usize];
+            let mut entries = Vec::new();
+            for _ in 0..n {
+                tick = match rng.next(10) {
+                    0 => tick + 300,
+                    1 => tick.saturating_sub(5),
+                    _ => tick + 1 + rng.next(3),
+                };
+                if rng.next(3) == 0 {
+                    input = (0..input_size).map(|_| rng.next(256) as u8).collect();
+                }
+                let commands = (0..rng.next(3)).map(|_| vec![9u8; rng.next(300) as usize]).collect();
+                entries.push(InputEntry { tick, input: input.clone(), commands });
+            }
+            let len = ClientMsg::Input { slot: 1, input_size, ack_tick: rng.next(1 << 40), entries: entries.clone() }.encode().len();
+            assert_eq!(input_encoded_len(&entries, input_size), len, "round {round}, {n} entries");
+        }
     }
 
     #[test]
