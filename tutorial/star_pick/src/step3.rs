@@ -296,6 +296,15 @@ impl SceneView<StarPick> for Juice {
         }
     }
 
+    /// A resync throws away the events that were predicted, and no `Canceled` comes for them.
+    /// Stop their sounds and forget their rings. The new frame brings the pick-ups again.
+    fn on_resync(&mut self, ctx: &mut ViewContext<'_, StarPick>) {
+        let mut fx = self.fx.borrow_mut();
+        for sound in fx.rings.drain(..).filter_map(|ring| ring.sound) {
+            ctx.audio().stop(sound);
+        }
+    }
+
     #[allow(clippy::float_arithmetic)]
     fn on_update(&mut self, ctx: &mut ViewContext<'_, StarPick>) {
         let mut fx = self.fx.borrow_mut();
