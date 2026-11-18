@@ -167,7 +167,16 @@ pub enum ServerNote {
     /// `finalized` is the server tick when the mismatch was found.
     Desync { room: u64, tick: u64, finalized: u64, reports: Vec<(u8, u64)> },
     SnapshotRequested { room: u64, donor: u8, joiner: u8 },
-    SnapshotRelayed { room: u64, donor: u8, joiner: u8, tick: u64, backlog_ticks: u32 },
+    /// A donor's snapshot went to the joiner. `verified`: its checksum matched
+    /// the majority of the checksums the other clients reported for `tick`.
+    /// `false` when no other client had a report to compare with (a two
+    /// player room, or the snapshot tick is no checksum tick).
+    SnapshotRelayed { room: u64, donor: u8, joiner: u8, tick: u64, backlog_ticks: u32, verified: bool },
+    /// A donor's snapshot was not forwarded: its checksum differed from the
+    /// majority of the other clients' reports for `tick` (`majority` is that
+    /// value, `None` when the other reports did not agree with each other).
+    /// The donor is skipped for this join and the next donor is asked.
+    SnapshotRejected { room: u64, donor: u8, joiner: u8, tick: u64, checksum: u64, majority: Option<u64> },
     JoinFailed { room: u64, joiner: u8, reason: RejectReason },
     BadMessage { conn: ConnId },
     RoomClosed { room: u64 },
@@ -203,6 +212,10 @@ pub struct RoomStats {
     pub slots: Vec<SlotStats>,
     pub desyncs: u64,
     pub snapshots_relayed: u64,
+    /// Relayed snapshots that no other client's checksum could confirm.
+    pub snapshots_unverified: u64,
+    /// Donor snapshots refused because the checksum was not the majority's.
+    pub snapshots_rejected: u64,
     /// Authoritative mode: corrections sent, kicks, violations, snapshots
     /// the server made itself, ticks the server simulated.
     pub corrections: u64,
@@ -338,6 +351,29 @@ struct PendingJoin {
     request_id: u32,
     started_tick: u64,
     tried: BTreeSet<u8>,
+    /// An upload that waits for the other clients' checksums of its tick.
+    held: Option<HeldSnapshot>,
+}
+
+/// A donor's snapshot that is not yet judged (see `Room::judge_snapshot`).
+struct HeldSnapshot {
+    tick: u64,
+    checksum: u64,
+    data: Vec<u8>,
+    /// Finalized tick after which it is forwarded as unverified if no
+    /// comparable report arrived.
+    until: u64,
+}
+
+/// What the other clients' checksums say about a donor snapshot.
+enum SnapCheck {
+    /// Matches the majority of the reports.
+    Match,
+    Mismatch { majority: Option<u64> },
+    /// Other clients can still report; wait.
+    Wait,
+    /// Nobody can confirm it.
+    Unverified,
 }
 
 pub(crate) struct Room {
@@ -357,6 +393,8 @@ pub(crate) struct Room {
     last_sync_tick: u64,
     desyncs: u64,
     snapshots_relayed: u64,
+    snapshots_unverified: u64,
+    snapshots_rejected: u64,
     auth: Option<Auth>,
     pending_violations: Vec<(u64, Violation)>,
     /// Every seat change announced, oldest first (pruned like `log`). A late
@@ -448,6 +486,8 @@ impl Room {
             last_sync_tick: 0,
             desyncs: 0,
             snapshots_relayed: 0,
+            snapshots_unverified: 0,
+            snapshots_rejected: 0,
             auth: None,
             pending_violations: Vec::new(),
             seat_log: Vec::new(),
@@ -495,6 +535,8 @@ impl Room {
             slots: self.slots.iter().map(|s| s.stats).collect(),
             desyncs: self.desyncs,
             snapshots_relayed: self.snapshots_relayed,
+            snapshots_unverified: self.snapshots_unverified,
+            snapshots_rejected: self.snapshots_rejected,
             corrections: self.auth.as_ref().map_or(0, |a| a.corrections),
             kicks: self.auth.as_ref().map_or(0, |a| a.kicks),
             violations: self.auth.as_ref().map_or(0, |a| a.violations),
@@ -854,6 +896,12 @@ impl Room {
     }
 
     pub fn checksum<E: Endpoint>(&mut self, out: &mut Out<'_, E>, slot: u8, tick: u64, checksum: u64) {
+        self.record_checksum(out, slot, tick, checksum);
+        // A new report may settle a donor snapshot that waits for it.
+        self.release_held(out);
+    }
+
+    fn record_checksum<E: Endpoint>(&mut self, out: &mut Out<'_, E>, slot: u8, tick: u64, checksum: u64) {
         if !self.running || tick > self.finalized {
             return;
         }
@@ -892,6 +940,7 @@ impl Room {
             self.send_time_sync(out);
             self.prune();
         }
+        self.release_held(out);
         if let Some(j) = &self.join {
             if self.finalized.saturating_sub(j.started_tick) > u64::from(self.cfg.join_timeout_ticks) {
                 self.donor_failed(out);
@@ -1187,7 +1236,7 @@ impl Room {
         let conn = self.slots[donor as usize].player.as_ref().unwrap().conn;
         out.send(conn, Channel::Reliable, &ServerMsg::SnapshotRequest { request_id });
         out.notes.push(ServerNote::SnapshotRequested { room: self.id, donor, joiner });
-        self.join = Some(PendingJoin { joiner, donor, request_id, started_tick: self.finalized, tried });
+        self.join = Some(PendingJoin { joiner, donor, request_id, started_tick: self.finalized, tried, held: None });
     }
 
     /// The donor failed (declined, left, too slow, bad snapshot): try the
@@ -1226,20 +1275,126 @@ impl Room {
         data: Vec<u8>,
     ) {
         let Some(j) = &self.join else { return };
-        if j.donor != slot || j.request_id != request_id {
+        if j.donor != slot || j.request_id != request_id || j.held.is_some() {
             return;
         }
-        let joiner = j.joiner;
         // The server must hold every confirmed tick after the snapshot.
-        let covered = tick <= self.finalized
+        if !self.covers(tick) {
+            self.donor_failed(out);
+            return;
+        }
+        // The donor's snapshot checksum counts like its `Checksum` message
+        // when it sent none for this tick: a snapshot that differs from the
+        // other clients is a desync, and goes the same way to the notes and
+        // to the players.
+        if !self.checksums.get(&tick).is_some_and(|r| r.contains_key(&slot)) {
+            self.record_checksum(out, slot, tick, checksum);
+        }
+        let until = self.finalized + u64::from(self.cfg.checksum_interval.max(1));
+        if let Some(j) = self.join.as_mut() {
+            j.held = Some(HeldSnapshot { tick, checksum, data, until });
+        }
+        self.release_held(out);
+    }
+
+    /// The server holds the confirmed bundles of every tick after `tick`.
+    fn covers(&self, tick: u64) -> bool {
+        tick <= self.finalized
             && (tick == self.finalized || self.log.contains_key(&(tick + 1)))
-            && (tick + 1..=self.finalized).all(|t| self.log.contains_key(&t));
-        if !covered {
+            && (tick + 1..=self.finalized).all(|t| self.log.contains_key(&t))
+    }
+
+    /// Compares a donor snapshot's checksum with what the other clients
+    /// reported for its tick. The server cannot recompute the checksum from
+    /// the data (it does not know the components of the game). The joiner
+    /// checks that the data has that checksum and tick.
+    fn judge_snapshot(&self, joiner: u8, donor: u8, tick: u64, checksum: u64, deadline_passed: bool) -> SnapCheck {
+        let interval = u64::from(self.cfg.checksum_interval.max(1));
+        // Clients report checksum ticks only.
+        if tick % interval != 0 {
+            return SnapCheck::Unverified;
+        }
+        let reports: Vec<u64> = self
+            .checksums
+            .get(&tick)
+            .map(|r| r.iter().filter(|(s, _)| **s != donor && **s != joiner).map(|(_, c)| *c).collect())
+            .unwrap_or_default();
+        let expected = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(i, s)| {
+                *i != usize::from(donor)
+                    && *i != usize::from(joiner)
+                    && !s.server_owned
+                    && s.player.as_ref().is_some_and(|p| p.phase == Phase::Playing)
+            })
+            .count();
+        if reports.is_empty() {
+            return if expected == 0 || deadline_passed { SnapCheck::Unverified } else { SnapCheck::Wait };
+        }
+        // The donor's checksum is one vote too. It is accepted when more
+        // than half of all votes (the donor's and the reports) equal it. So
+        // one wrong client among three does not cost an honest donor its
+        // place, and a donor that stands alone against the others is refused.
+        let agree = reports.iter().filter(|c| **c == checksum).count() + 1;
+        let voters = expected + 1;
+        let pass_now = agree * 2 > voters;
+        let fail_now = (agree + expected.saturating_sub(reports.len())) * 2 <= voters;
+        let all_in = reports.len() >= expected;
+        let pass = if pass_now {
+            true
+        } else if fail_now {
+            false
+        } else if all_in || deadline_passed {
+            agree * 2 > reports.len() + 1
+        } else {
+            return SnapCheck::Wait;
+        };
+        if pass {
+            return SnapCheck::Match;
+        }
+        let mut counts: BTreeMap<u64, usize> = BTreeMap::new();
+        for c in &reports {
+            *counts.entry(*c).or_default() += 1;
+        }
+        let majority = counts.iter().find(|(_, n)| **n * 2 > reports.len()).map(|(c, _)| *c);
+        SnapCheck::Mismatch { majority }
+    }
+
+    /// Judges the held donor snapshot and forwards it, refuses it, or keeps
+    /// waiting for reports.
+    fn release_held<E: Endpoint>(&mut self, out: &mut Out<'_, E>) {
+        let Some(j) = &self.join else { return };
+        let Some(h) = &j.held else { return };
+        let (joiner, donor, tick, checksum) = (j.joiner, j.donor, h.tick, h.checksum);
+        let deadline_passed = self.finalized > h.until;
+        match self.judge_snapshot(joiner, donor, tick, checksum, deadline_passed) {
+            SnapCheck::Wait => {}
+            SnapCheck::Match => self.forward_snapshot(out, true),
+            SnapCheck::Unverified => self.forward_snapshot(out, false),
+            SnapCheck::Mismatch { majority } => {
+                self.snapshots_rejected += 1;
+                out.notes.push(ServerNote::SnapshotRejected { room: self.id, donor, joiner, tick, checksum, majority });
+                self.donor_failed(out);
+            }
+        }
+    }
+
+    /// Sends the held snapshot and the confirmed bundles after it.
+    fn forward_snapshot<E: Endpoint>(&mut self, out: &mut Out<'_, E>, verified: bool) {
+        let Some(mut j) = self.join.take() else { return };
+        let Some(HeldSnapshot { tick, checksum, data, .. }) = j.held.take() else {
+            self.join = Some(j);
+            return;
+        };
+        let (joiner, slot) = (j.joiner, j.donor);
+        if !self.covers(tick) {
+            self.join = Some(j);
             self.donor_failed(out);
             return;
         }
         let Some(conn) = self.slots[joiner as usize].player.as_ref().map(|p| p.conn) else {
-            self.join = None;
             return;
         };
         let signals = self.signals_up_to(tick);
@@ -1273,9 +1428,11 @@ impl Room {
         }
         s.acked = finalized;
         s.sent.clear();
-        self.join = None;
         self.snapshots_relayed += 1;
-        out.notes.push(ServerNote::SnapshotRelayed { room: self.id, donor: slot, joiner, tick, backlog_ticks: backlog });
+        if !verified {
+            self.snapshots_unverified += 1;
+        }
+        out.notes.push(ServerNote::SnapshotRelayed { room: self.id, donor: slot, joiner, tick, backlog_ticks: backlog, verified });
         self.pump_join(out);
     }
 }
@@ -1306,7 +1463,7 @@ impl Room {
         s.sent.clear();
         out.send(conn, Channel::Reliable, &ServerMsg::JoinSnapshot { tick, checksum, data, signals: 0 });
         out.notes.push(ServerNote::ServerSnapshot { room: self.id, joiner, tick, bytes });
-        out.notes.push(ServerNote::SnapshotRelayed { room: self.id, donor: SERVER_SLOT, joiner, tick, backlog_ticks: 0 });
+        out.notes.push(ServerNote::SnapshotRelayed { room: self.id, donor: SERVER_SLOT, joiner, tick, backlog_ticks: 0, verified: true });
         self.snapshots_relayed += 1;
     }
 
