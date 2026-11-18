@@ -77,36 +77,18 @@ struct Stamp {
     sidecar: Vec<u8>,
     actors: Option<(PathBuf, Vec<u8>)>,
 }
-#[derive(PartialEq, Eq)]
-struct RootIdentity {
-    #[cfg(unix)]
-    device: u64,
-    #[cfg(unix)]
-    inode: u64,
-    #[cfg(not(unix))]
-    created: std::time::SystemTime,
-}
+/// Identity of the project root from an open handle: the volume plus the index in it.
+type RootIdentity = orr_fsid::FileId;
 fn root_identity(path: &Path) -> Result<RootIdentity, String> {
-    let metadata = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err("project root must remain a regular directory".into());
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        Ok(RootIdentity {
-            device: metadata.dev(),
-            inode: metadata.ino(),
-        })
-    }
-    #[cfg(not(unix))]
-    {
-        Ok(RootIdentity {
-            created: metadata
-                .created()
-                .map_err(|e| format!("root identity unavailable: {e}"))?,
-        })
-    }
+    // One open checks the type and refuses a link or reparse point.
+    let directory = orr_fsid::open_directory(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::InvalidInput {
+            "project root must remain a regular directory".to_string()
+        } else {
+            error.to_string()
+        }
+    })?;
+    orr_fsid::file_id(&directory).map_err(|error| format!("root identity unavailable: {error}"))
 }
 struct History {
     current: ValidatedDocument,

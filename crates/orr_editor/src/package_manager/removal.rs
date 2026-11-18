@@ -321,35 +321,15 @@ pub(super) fn read_room_files(project: &Project) -> Result<BTreeMap<PathBuf, Vec
     Ok(files)
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub(super) struct RootIdentity {
-    #[cfg(unix)]
-    device: u64,
-    #[cfg(unix)]
-    inode: u64,
-    #[cfg(not(unix))]
-    created: std::time::SystemTime,
-}
+/// Identity of the Room folder from an open handle: the volume plus the index in it.
+pub(super) type RootIdentity = orr_fsid::FileId;
 
 pub(super) fn root_identity(root: &Path) -> Result<RootIdentity, String> {
     let metadata = fs::symlink_metadata(root).map_err(|error| error.to_string())?;
     super::ensure_directory(&metadata, "Room project")?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        Ok(RootIdentity {
-            device: metadata.dev(),
-            inode: metadata.ino(),
-        })
-    }
-    #[cfg(not(unix))]
-    {
-        Ok(RootIdentity {
-            created: metadata
-                .created()
-                .map_err(|error| format!("Room directory identity unavailable: {error}"))?,
-        })
-    }
+    orr_fsid::open_directory(root)
+        .and_then(|directory| orr_fsid::file_id(&directory))
+        .map_err(|error| format!("Room directory identity unavailable: {error}"))
 }
 
 pub(super) fn read_regular(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
@@ -357,41 +337,31 @@ pub(super) fn read_regular(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
     if checked_directory(parent, "Room file parent")? != parent {
         return Err("Room file parent identity changed".into());
     }
-    let before = fs::symlink_metadata(path)
+    read_observed(path, limit)
+}
+
+fn read_observed(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
+    // The first handle pins the identity of the inspected file. `open_file` refuses a
+    // link, a folder or a FIFO without waiting for a writer.
+    let inspected = orr_fsid::open_file(path)
+        .map_err(|error| format!("Room file {}: {error}", path.display()))?;
+    let before = inspected
+        .metadata()
         .map_err(|error| format!("Room file {}: {error}", path.display()))?;
     ensure_regular(&before, "Room file")?;
     if before.len() > limit {
         return Err("Room file exceeds its admission byte limit".into());
     }
-    read_observed(path, limit, &before)
-}
-
-fn read_observed(path: &Path, limit: u64, before: &fs::Metadata) -> Result<Vec<u8>, String> {
-    let mut options = fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        options.custom_flags(0x0020_0000); // FILE_FLAG_OPEN_REPARSE_POINT
-    }
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(0x20000 | 0x800); // O_NOFOLLOW | O_NONBLOCK
-    }
-    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(0x100 | 0x4); // O_NOFOLLOW | O_NONBLOCK
-    }
-    let mut file = options
-        .open(path)
-        .map_err(|error| format!("Room file: {error}"))?;
+    let mut file =
+        orr_fsid::open_file(path).map_err(|error| format!("Room file: {error}"))?;
     let opened = file
         .metadata()
         .map_err(|error| format!("Room file: {error}"))?;
     ensure_regular(&opened, "opened Room file")?;
-    if opened.len() > limit || !same_file(before, &opened) {
+    let same_handle = orr_fsid::file_id(&file)
+        .and_then(|opened_id| orr_fsid::file_id(&inspected).map(|first| opened_id == first))
+        .map_err(|error| format!("Room file: {error}"))?;
+    if opened.len() > limit || !same_handle || !same_stamp(&before, &opened) {
         return Err("Room file changed before reading".into());
     }
     let mut bytes = Vec::new();
@@ -399,14 +369,12 @@ fn read_observed(path: &Path, limit: u64, before: &fs::Metadata) -> Result<Vec<u
         .take(limit + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| format!("Room file: {error}"))?;
-    let after = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
     let handle_after = file.metadata().map_err(|error| error.to_string())?;
-    ensure_regular(&after, "Room file after reading")?;
     ensure_regular(&handle_after, "opened Room file after reading")?;
     if bytes.len() as u64 > limit
         || bytes.len() as u64 != opened.len()
-        || !same_file(before, &after)
-        || !same_file(&opened, &handle_after)
+        || !same_stamp(&opened, &handle_after)
+        || !matches!(orr_fsid::same_file(path, &file), Ok(true))
     {
         return Err("Room file changed while being read".into());
     }
@@ -417,24 +385,19 @@ fn read_observed(path: &Path, limit: u64, before: &fs::Metadata) -> Result<Vec<u
     Ok(bytes)
 }
 
-fn same_file(first: &fs::Metadata, second: &fs::Metadata) -> bool {
+/// Size, attributes and times of one file. Identity is compared by handle, not here.
+fn same_stamp(first: &fs::Metadata, second: &fs::Metadata) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        if first.dev() != second.dev()
-            || first.ino() != second.ino()
-            || first.ctime() != second.ctime()
-            || first.ctime_nsec() != second.ctime_nsec()
-        {
+        if first.ctime() != second.ctime() || first.ctime_nsec() != second.ctime_nsec() {
             return false;
         }
     }
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
-        if first.creation_time() != second.creation_time()
-            || first.file_attributes() != second.file_attributes()
-        {
+        if first.file_attributes() != second.file_attributes() {
             return false;
         }
     }
@@ -875,7 +838,6 @@ mod tests {
             let fixture = Fixture::new();
             let plan = fixture.unused_plan();
             let path = fixture.root.join("room.models.json");
-            let before = fs::symlink_metadata(&path).unwrap();
             let lock = fs::read(fixture.root.join("orr.packages.lock.json")).unwrap();
             let error = fixture.project().remove_checked(
                 &plan.name,
@@ -893,7 +855,7 @@ mod tests {
                     } else {
                         symlink(&saved, &path).unwrap();
                     }
-                    read_observed(&path, 1024 * 1024, &before).map(|_| ())
+                    read_observed(&path, 1024 * 1024).map(|_| ())
                 },
             );
             assert!(error.is_err());
