@@ -197,7 +197,7 @@ fn step(sim: &mut Simulation<RoomEscapeV1>, input: RoomInput) {
     sim.step(&inputs);
 }
 pub fn run(options: Options) -> Result<(), String> {
-    let support = if cfg!(all(feature = "room-progress", target_os = "linux")) {
+    let support = if cfg!(all(feature = "room-progress", any(target_os = "linux", windows))) {
         crate::room_project::ProgressSupport::MetadataOnly
     } else {
         crate::room_project::ProgressSupport::Unsupported
@@ -472,7 +472,7 @@ struct Graphics {
     format: TextureFormat,
 }
 struct App {
-    #[cfg(all(feature = "room-progress", target_os = "linux"))]
+    #[cfg(all(feature = "room-progress", any(target_os = "linux", windows)))]
     progress: crate::room_progress::ProgressSession,
     project: PreparedProject,
     sim: Simulation<RoomEscapeV1>,
@@ -505,10 +505,10 @@ impl App {
             || OrbitCamera::new([0.0, 0.5, 0.0], 0.65, 1.02, 60.0),
             |camera| camera.document.orbit(),
         );
-        #[cfg(all(feature = "room-progress", target_os = "linux"))]
+        #[cfg(all(feature = "room-progress", any(target_os = "linux", windows)))]
         let progress = crate::room_progress::ProgressSession::open(&project);
         Ok(Self {
-            #[cfg(all(feature = "room-progress", target_os = "linux"))]
+            #[cfg(all(feature = "room-progress", any(target_os = "linux", windows)))]
             progress,
             project,
             sim,
@@ -531,10 +531,10 @@ impl App {
         event_loop.exit();
     }
     fn step_authoritative(&mut self, input: RoomInput) -> Result<(), String> {
-        #[cfg(all(feature = "room-progress", target_os = "linux"))]
+        #[cfg(all(feature = "room-progress", any(target_os = "linux", windows)))]
         let before = (self.sim.tick(), self.sim.frame().singleton::<RoomRun>().won);
         step(&mut self.sim, input);
-        #[cfg(all(feature = "room-progress", target_os = "linux"))]
+        #[cfg(all(feature = "room-progress", any(target_os = "linux", windows)))]
         self.progress.observe(
             before.0,
             before.1,
@@ -608,7 +608,7 @@ impl App {
             #[cfg(feature = "room-input-actions")]
             self.project.controls().map(|controls| &controls.map),
         );
-        #[cfg(all(feature = "room-progress", target_os = "linux"))]
+        #[cfg(all(feature = "room-progress", any(target_os = "linux", windows)))]
         let title = format!("{title} | {}", self.progress.status());
         g.window.set_title(&title);
         g.renderer.set_point_light_settings(self.project.point_light_settings_for_frame(FrameView::of(self.sim.frame()))?)?;

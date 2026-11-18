@@ -1,12 +1,12 @@
 //! Export a saved Arena project with an explicitly trusted, already-built runtime.
 
 const HELP: &str = "Usage: orr_export_arena --project DIR --runtime BINARY --runtime-sha256 SHA256 \\\n    --output NEW_DIR --trusted-runtime [--source-revision TOKEN]\n\n\
-Creates a relocatable Linux x86-64 Arena folder. NEW_DIR must not exist.\n\
+Creates a relocatable Linux x86-64 or Windows x86-64 Arena folder. NEW_DIR must not exist.\n\
 The runtime must already be built with the project feature. No build, download,\n\
 or package installation is performed. --trusted-runtime asserts that you know\n\
 and trust the supplied executable; its hash and smoke run do not establish trust.\n\
 --source-revision is optional declared provenance, not verified source identity.\n\
-Run the exported run-arena launcher from any working directory.";
+Run the exported run-arena launcher (run-arena.cmd on Windows, with a .exe runtime) from any working directory.";
 
 fn main() {
     if let Err((code, error)) = run() {
@@ -21,25 +21,34 @@ fn run() -> Result<(), (i32, String)> {
         println!("{HELP}");
         return Ok(());
     }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(windows, target_arch = "x86_64")))]
     {
         let options = parse(args).map_err(|error| (2, error))?;
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         let report = orr_sample::project_export::export(&options).map_err(|error| (1, error))?;
-        println!("export output: {}", report.output.display());
+        #[cfg(windows)]
+        let report = orr_sample::windows_export::export_arena(&options).map_err(|error| (1, error))?;
+        #[cfg(windows)]
+        let shown = orr_sample::windows_path::display(&report.output);
+        #[cfg(not(windows))]
+        let shown = report.output.display().to_string();
+        println!("export output: {shown}");
         println!("export project files: {}", report.project_files);
         println!("export content digest: {}", report.content_digest);
         Ok(())
     }
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
-    Err((1, "project-export supports only Linux x86-64 hosts".into()))
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64"), all(windows, target_arch = "x86_64"))))]
+    Err((1, "project-export supports only Linux x86-64 and Windows x86-64 hosts".into()))
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use orr_sample::project_export::ExportOptions;
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(all(windows, target_arch = "x86_64"))]
+use orr_sample::windows_export::ExportOptions;
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(windows, target_arch = "x86_64")))]
 use std::{collections::BTreeSet, ffi::OsString, path::PathBuf};
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(windows, target_arch = "x86_64")))]
 fn parse(args: Vec<OsString>) -> Result<ExportOptions, String> {
     let mut project = None;
     let mut runtime = None;

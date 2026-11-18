@@ -191,7 +191,7 @@ pub fn run(options: Options) -> Result<(), String> {
     // GPU or window. This also guards callers constructing Options directly.
     let bindings = load_input_bindings(&options)?;
     // All package verification and scene admission precede any GPU/window work.
-    let support = if cfg!(all(feature = "collect-progress", target_os = "linux")) {
+    let support = if cfg!(all(feature = "collect-progress", any(target_os = "linux", windows))) {
         crate::collect_project::ProgressSupport::MetadataOnly
     } else {
         crate::collect_project::ProgressSupport::Unsupported
@@ -341,13 +341,13 @@ impl Keys {
         }
     }
 }
-#[cfg(all(feature = "collect-progress", target_os = "linux"))]
+#[cfg(all(feature = "collect-progress", any(target_os = "linux", windows)))]
 type WindowBridge = InProc<CollectDodgeV1, crate::collect_progress_host::ProgressHost>;
-#[cfg(not(all(feature = "collect-progress", target_os = "linux")))]
+#[cfg(not(all(feature = "collect-progress", any(target_os = "linux", windows))))]
 type WindowBridge = LocalBridge;
 struct App {
     bridge: WindowBridge,
-    #[cfg(all(feature = "collect-progress", target_os = "linux"))]
+    #[cfg(all(feature = "collect-progress", any(target_os = "linux", windows)))]
     progress: crate::collect_progress::ProgressSession,
     gfx: Option<(Arc<Window>, ProjectWindow)>,
     presentation: crate::project_runtime::ProjectPresentation,
@@ -368,7 +368,7 @@ struct WindowUi {
     pending: crate::game_ui_gpu::PendingOverlay,
 }
 impl App {
-    #[cfg(all(feature = "collect-progress", target_os = "linux"))]
+    #[cfg(all(feature = "collect-progress", any(target_os = "linux", windows)))]
     fn persist_completed(&mut self) {
         self.progress
             .observe_completed(self.bridge.host().completed_best());
@@ -400,12 +400,12 @@ impl App {
                     (run.score, run.phase)
                 })
                 .unwrap_or((0, game::PLAYING));
-            #[cfg(all(feature = "collect-progress", target_os = "linux"))]
+            #[cfg(all(feature = "collect-progress", any(target_os = "linux", windows)))]
             let best = self
                 .progress
                 .best()
                 .map_or_else(|| "-".into(), |v| v.to_string());
-            #[cfg(not(all(feature = "collect-progress", target_os = "linux")))]
+            #[cfg(not(all(feature = "collect-progress", any(target_os = "linux", windows))))]
             let best = "-".into();
             let (mut output, action) = ui.show(
                 input,
@@ -436,7 +436,7 @@ impl App {
             return;
         }
         self.bridge.update(dt);
-        #[cfg(all(feature = "collect-progress", target_os = "linux"))]
+        #[cfg(all(feature = "collect-progress", any(target_os = "linux", windows)))]
         self.persist_completed();
         let update = self.bridge.poll_view(); // Drain events, including after terminal states.
         if let Some(snapshot) = &update.snapshot {
@@ -470,7 +470,7 @@ impl App {
             }
             let title =
                 collect_view::title_with_controls(frame, &self.keys.bindings.controls_hint());
-            #[cfg(all(feature = "collect-progress", target_os = "linux"))]
+            #[cfg(all(feature = "collect-progress", any(target_os = "linux", windows)))]
             let title = format!("{title} | {}", self.progress.status());
             window.set_title(&title);
             #[cfg(feature = "collect-ui")]
@@ -639,9 +639,9 @@ impl ApplicationHandler for App {
     }
 }
 fn window_app(project: &PreparedProject, bindings: CollectBindings) -> Result<App, String> {
-    #[cfg(not(all(feature = "collect-progress", target_os = "linux")))]
+    #[cfg(not(all(feature = "collect-progress", any(target_os = "linux", windows))))]
     let bridge = bridge(project)?;
-    #[cfg(all(feature = "collect-progress", target_os = "linux"))]
+    #[cfg(all(feature = "collect-progress", any(target_os = "linux", windows)))]
     let bridge = InProc::new(
         crate::collect_progress_host::ProgressHost::new(PlayHost::new(
             project.scene().session()?,
@@ -649,11 +649,11 @@ fn window_app(project: &PreparedProject, bindings: CollectBindings) -> Result<Ap
         )),
         BridgeConfig::default(),
     );
-    #[cfg(all(feature = "collect-progress", target_os = "linux"))]
+    #[cfg(all(feature = "collect-progress", any(target_os = "linux", windows)))]
     let progress = crate::collect_progress::ProgressSession::open(project);
     Ok(App {
         bridge,
-        #[cfg(all(feature = "collect-progress", target_os = "linux"))]
+        #[cfg(all(feature = "collect-progress", any(target_os = "linux", windows)))]
         progress,
         gfx: None,
         presentation: project.presentation(),
@@ -795,7 +795,7 @@ pub fn headless(
     Ok(())
 }
 
-#[cfg(all(test, feature = "collect-progress", target_os = "linux"))]
+#[cfg(all(test, feature = "collect-progress", any(target_os = "linux", windows)))]
 pub(crate) fn exercise_window_progress(project: &PreparedProject, mode: &str) {
     // Exact production App constructor and persistence dispatch; no OS window
     // is claimed by this source-hidden test harness.

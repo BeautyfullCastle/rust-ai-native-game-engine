@@ -78,12 +78,11 @@ impl ProgressPaths {
         Ok(Self { directory })
     }
     pub fn from_environment(key: &ProgressKey) -> Result<Self, String> {
-        Self::from_environment_values(
-            std::env::var_os("XDG_DATA_HOME").as_deref(),
-            std::env::var_os("HOME").as_deref(),
-            key,
-        )
+        let (data, home) = environment_roots();
+        Self::from_environment_values(data.as_deref(), home.as_deref(), key)
     }
+    /// `xdg` is `XDG_DATA_HOME` on Linux and `LOCALAPPDATA` on Windows;
+    /// `home` is `HOME` on Linux and `USERPROFILE` on Windows.
     pub fn from_environment_values(
         xdg: Option<&OsStr>,
         home: Option<&OsStr>,
@@ -96,6 +95,23 @@ impl ProgressPaths {
         &self.directory
     }
 }
+/// The data root and the home directory from the environment, by platform.
+pub(crate) fn environment_roots() -> (Option<std::ffi::OsString>, Option<std::ffi::OsString>) {
+    #[cfg(windows)]
+    {
+        (
+            std::env::var_os("LOCALAPPDATA"),
+            std::env::var_os("USERPROFILE"),
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        (
+            std::env::var_os("XDG_DATA_HOME"),
+            std::env::var_os("HOME"),
+        )
+    }
+}
 fn environment_paths(
     xdg: Option<&OsStr>,
     home: Option<&OsStr>,
@@ -106,12 +122,19 @@ fn environment_paths(
     let base = if let Some(path) = xdg.map(Path::new).filter(|p| p.is_absolute()) {
         path.to_path_buf()
     } else if let Some(path) = home.map(Path::new).filter(|p| p.is_absolute()) {
-        path.join(".local/share")
+        if cfg!(windows) {
+            path.join("AppData").join("Local")
+        } else {
+            path.join(".local/share")
+        }
+    } else if cfg!(windows) {
+        return Err("progress requires absolute LOCALAPPDATA or USERPROFILE".into());
     } else {
         return Err("progress requires absolute XDG_DATA_HOME or HOME".into());
     };
     ProgressPaths::from_directory(
-        base.join("orrery/games")
+        base.join("orrery")
+            .join("games")
             .join(game)
             .join(profile)
             .join(hex(challenge)),
@@ -129,6 +152,45 @@ pub(crate) fn require_external(directory: &Path, protected: &[&Path]) -> Result<
     Ok(())
 }
 
+#[cfg(windows)]
+fn validate_directory_path(path: &Path) -> Result<(), String> {
+    let mut components = path.components();
+    let disk = matches!(
+        components.next(),
+        Some(Component::Prefix(prefix))
+            if matches!(prefix.kind(), std::path::Prefix::Disk(_) | std::path::Prefix::VerbatimDisk(_))
+    ) && matches!(components.next(), Some(Component::RootDir));
+    if !disk || path.file_name().is_none() {
+        return Err("progress directory must be an absolute non-root disk path".into());
+    }
+    if path.components().count() > 128 || path.as_os_str().as_encoded_bytes().len() > 4096 {
+        return Err("progress directory path exceeds bounds".into());
+    }
+    let text = path
+        .to_str()
+        .ok_or("progress directory must be Unicode on Windows")?;
+    let text = text.strip_prefix(r"\\?\").unwrap_or(text);
+    let mut parts = text.split(['\\', '/']);
+    // The drive prefix is the first part and may contain the only colon.
+    let _drive = parts.next();
+    let unsafe_part = parts.any(|part| {
+        part == "."
+            || part == ".."
+            || part.len() > 255
+            || part.contains([':', '\0', '<', '>', '"', '|', '?', '*'])
+            || part.ends_with(['.', ' '])
+    });
+    if unsafe_part
+        || path
+            .components()
+            .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
+    {
+        return Err("progress directory contains an unsafe path component".into());
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
 fn validate_directory_path(path: &Path) -> Result<(), String> {
     if !path.is_absolute() || path.parent().is_none() {
         return Err("progress directory must be an absolute non-root path".into());
@@ -159,11 +221,11 @@ pub enum CommitOutcome {
 }
 #[derive(Clone, Debug)]
 enum WriteState {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     Ready,
     ReadOnly,
     /// No snapshot was admitted. A later commit must validate it under its lock.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     Deferred,
 }
 #[derive(Clone, Debug)]
@@ -180,7 +242,7 @@ impl Loaded {
             notice: Some(notice.into()),
         }
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     fn deferred(notice: impl Into<String>) -> Self {
         Self {
             best: 0,
@@ -289,10 +351,10 @@ pub struct ProgressStore {
 impl ProgressStore {
     pub fn open(paths: ProgressPaths, key: ProgressKey) -> Result<Self, String> {
         key.validate()?;
-        #[cfg(target_os = "linux")]
-        let loaded = linux::load(&paths, &key);
-        #[cfg(not(target_os = "linux"))]
-        let loaded = Loaded::readonly(0, "progress persistence is supported only on Linux");
+        #[cfg(any(target_os = "linux", windows))]
+        let loaded = platform::load(&paths, &key);
+        #[cfg(not(any(target_os = "linux", windows)))]
+        let loaded = Loaded::readonly(0, "progress persistence is supported only on Linux and Windows");
         Ok(Self { paths, key, loaded })
     }
     pub fn best(&self) -> u32 {
@@ -319,9 +381,9 @@ impl ProgressStore {
                 .clone()
                 .unwrap_or_else(|| "progress is read-only".into()));
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         {
-            let (best, outcome) = linux::commit(
+            let (best, outcome) = platform::commit(
                 &self.paths,
                 &self.key,
                 score.max(self.loaded.best),
@@ -338,35 +400,18 @@ impl ProgressStore {
             }
             Ok(outcome)
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", windows)))]
         {
             let _ = checkpoint;
-            Err("progress persistence is supported only on Linux".into())
+            Err("progress persistence is supported only on Linux and Windows".into())
         }
     }
 }
-#[cfg(target_os = "linux")]
-mod linux {
+#[cfg(any(target_os = "linux", windows))]
+mod shared {
     use super::*;
-    use rustix::fs::{self, AtFlags, FileType, FlockOperation, Mode, OFlags};
-    use std::{
-        fs::File,
-        io::{Read, Write},
-        os::unix::fs::MetadataExt,
-        sync::atomic::{AtomicU64, Ordering},
-    };
-
-    const DIRECTORY_FLAGS: OFlags = OFlags::RDONLY
-        .union(OFlags::DIRECTORY)
-        .union(OFlags::NOFOLLOW)
-        .union(OFlags::CLOEXEC);
-    const FILE_FLAGS: OFlags = OFlags::NOFOLLOW
-        .union(OFlags::NONBLOCK)
-        .union(OFlags::CLOEXEC);
-    static NEXT_STAGE: AtomicU64 = AtomicU64::new(0);
-
     #[derive(Debug, PartialEq, Eq)]
-    enum Snapshot {
+    pub(super) enum Snapshot {
         Missing,
         Valid { best: u32, bytes: Vec<u8> },
         Unsupported(String),
@@ -379,7 +424,7 @@ mod linux {
         profile: Option<serde_json::Value>,
         challenge: Option<serde_json::Value>,
     }
-    fn decode(bytes: Vec<u8>, codec: StoreCodec<'_>) -> Snapshot {
+    pub(super) fn decode(bytes: Vec<u8>, codec: StoreCodec<'_>) -> Snapshot {
         let envelope: Envelope = match serde_json::from_slice(&bytes) {
             Ok(value) => value,
             Err(e)
@@ -496,9 +541,76 @@ mod linux {
             },
         }
     }
-    fn error(error: impl std::fmt::Display) -> String {
+    pub(super) fn error(error: impl std::fmt::Display) -> String {
         error.to_string()
     }
+
+    pub(super) fn loaded(primary: &Snapshot, backup: &Snapshot) -> Loaded {
+        let best = match primary {
+            Snapshot::Valid { best, .. } => *best,
+            _ => 0,
+        };
+        for snapshot in [primary, backup] {
+            if let Snapshot::Unsupported(reason) = snapshot {
+                return Loaded::readonly(best, reason.clone());
+            }
+        }
+        if matches!(primary, Snapshot::Valid { .. }) {
+            return Loaded {
+                best,
+                write_state: WriteState::Ready,
+                notice: None,
+            };
+        }
+        if let Snapshot::Valid { best, .. } = backup {
+            return Loaded {
+                best: *best,
+                write_state: WriteState::Ready,
+                notice: Some(
+                    "Primary progress missing or corrupt; recovered matching backup".into(),
+                ),
+            };
+        }
+        if matches!((primary, backup), (Snapshot::Missing, Snapshot::Missing)) {
+            return Loaded {
+                best: 0,
+                write_state: WriteState::Ready,
+                notice: None,
+            };
+        }
+        Loaded::readonly(
+            0,
+            "no valid progress copy; existing bytes preserved read-only",
+        )
+    }
+}
+#[cfg(windows)]
+#[path = "game_progress_windows.rs"]
+mod windows;
+#[cfg(target_os = "linux")]
+use linux as platform;
+#[cfg(windows)]
+use windows as platform;
+#[cfg(target_os = "linux")]
+mod linux {
+    use super::shared::*;
+    use super::*;
+    use rustix::fs::{self, AtFlags, FileType, FlockOperation, Mode, OFlags};
+    use std::{
+        fs::File,
+        io::{Read, Write},
+        os::unix::fs::MetadataExt,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    const DIRECTORY_FLAGS: OFlags = OFlags::RDONLY
+        .union(OFlags::DIRECTORY)
+        .union(OFlags::NOFOLLOW)
+        .union(OFlags::CLOEXEC);
+    const FILE_FLAGS: OFlags = OFlags::NOFOLLOW
+        .union(OFlags::NONBLOCK)
+        .union(OFlags::CLOEXEC);
+    static NEXT_STAGE: AtomicU64 = AtomicU64::new(0);
 
     /// Every component is opened relative to its verified parent. Missing reads
     /// return None without creating even a lock file. mkdir is commit-only.
@@ -640,44 +752,6 @@ mod linux {
         Ok(decode(bytes, codec))
     }
 
-    fn loaded(primary: &Snapshot, backup: &Snapshot) -> Loaded {
-        let best = match primary {
-            Snapshot::Valid { best, .. } => *best,
-            _ => 0,
-        };
-        for snapshot in [primary, backup] {
-            if let Snapshot::Unsupported(reason) = snapshot {
-                return Loaded::readonly(best, reason.clone());
-            }
-        }
-        if matches!(primary, Snapshot::Valid { .. }) {
-            return Loaded {
-                best,
-                write_state: WriteState::Ready,
-                notice: None,
-            };
-        }
-        if let Snapshot::Valid { best, .. } = backup {
-            return Loaded {
-                best: *best,
-                write_state: WriteState::Ready,
-                notice: Some(
-                    "Primary progress missing or corrupt; recovered matching backup".into(),
-                ),
-            };
-        }
-        if matches!((primary, backup), (Snapshot::Missing, Snapshot::Missing)) {
-            return Loaded {
-                best: 0,
-                write_state: WriteState::Ready,
-                notice: None,
-            };
-        }
-        Loaded::readonly(
-            0,
-            "no valid progress copy; existing bytes preserved read-only",
-        )
-    }
     pub(super) fn load(paths: &ProgressPaths, key: &ProgressKey) -> Loaded {
         load_with_checkpoint(paths, key, || {})
     }
@@ -1000,3 +1074,6 @@ mod linux {
 #[cfg(all(test, target_os = "linux"))]
 #[path = "game_progress_store_tests.rs"]
 mod tests;
+#[cfg(all(test, windows))]
+#[path = "game_progress_windows_tests.rs"]
+mod windows_tests;
