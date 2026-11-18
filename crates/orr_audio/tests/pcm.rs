@@ -689,3 +689,53 @@ fn a_source_closing_in_plays_higher_and_moving_it_later_changes_the_pitch() {
     assert!((off - 330.0).abs() < 6.0, "with the effect off it stays at {off} Hz");
     assert!(OfflineAudio::new_offline(AudioConfig { doppler: 11.0, ..AudioConfig::default() }, RATE).is_err());
 }
+
+#[test]
+fn a_played_sound_is_audible_until_stopped_and_then_fades_to_silence() {
+    let mut audio = mixer();
+    let sound = clip();
+    let id = audio.play(&sound).expect("the sound starts");
+    assert!(audible(&render(&mut audio, 1000)));
+    assert!(audio.is_playing(id));
+    audio.stop(id);
+    assert!(!audio.is_playing(id));
+    let tail = render(&mut audio, 1600);
+    assert!(audible(&tail[..256]), "stopping is a fade, not an immediate cut");
+    assert!(silent(&tail[2048..]));
+    assert_eq!(audio.voice_count(), 0);
+    // Stopping again, or a sound that ended, changes nothing.
+    audio.stop(id);
+    assert!(silent(&render(&mut audio, 1000)));
+}
+
+#[test]
+fn a_played_sound_ends_by_itself_and_its_id_is_not_reused() {
+    let mut audio = mixer();
+    let sound = clip();
+    let first = audio.play(&sound).unwrap();
+    render(&mut audio, 6000);
+    assert!(!audio.is_playing(first));
+    let second = audio.play(&sound).unwrap();
+    assert_ne!(first, second);
+    assert!(audible(&render(&mut audio, 1000)));
+    // Stopping the first id does not touch the second sound.
+    audio.stop(first);
+    assert!(audio.is_playing(second));
+    assert_eq!(audio.stats().started, 2);
+}
+
+#[test]
+fn played_sounds_obey_the_voice_limit_and_reset_stops_them() {
+    let config = AudioConfig { max_voices: 2, ..AudioConfig::default() };
+    let mut audio = OfflineAudio::new_offline(config, RATE).unwrap();
+    let sound = clip();
+    assert!(audio.play(&sound).is_some());
+    assert!(audio.play(&sound).is_some());
+    assert!(audio.play(&sound).is_none());
+    assert_eq!(audio.stats().dropped, 1);
+    audio.reset();
+    let tail = render(&mut audio, 1600);
+    assert!(silent(&tail[2048..]));
+    audio.set_paused(true);
+    assert!(audio.play(&sound).is_none());
+}
