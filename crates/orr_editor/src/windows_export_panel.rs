@@ -89,7 +89,7 @@ impl Panel {
                     .payload
                     .files
                     .iter()
-                    .find(|file| file.path.ends_with(".cmd") && !file.path.contains(['/', '\']))
+                    .find(|file| file.path.ends_with(".cmd") && !file.path.contains(['/', '\\']))
                     .map(|file| report.output.join(&file.path));
                 self.last_output = Some(report.output);
                 self.last_digest = Some(report.content_digest);

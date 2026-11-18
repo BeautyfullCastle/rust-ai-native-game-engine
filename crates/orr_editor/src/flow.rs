@@ -18,6 +18,9 @@ pub const NEW_PROJECT_ROUTE: &str = "File > New Room project\u{2026}";
 #[cfg(not(all(windows, target_arch = "x86_64", feature = "windows-projects")))]
 pub const NEW_PROJECT_ROUTE: &str = "File > Open scene\u{2026}";
 
+/// The smallest window size, in points, where every main control stays inside the window.
+pub const MIN_WINDOW_SIZE: [f32; 2] = [1024.0, 640.0];
+
 /// What the window knows about the work at this moment.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Facts {

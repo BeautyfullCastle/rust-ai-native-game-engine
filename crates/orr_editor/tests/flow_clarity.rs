@@ -5,6 +5,7 @@
 //! example `C:\tmp\flow_after_`. The frame-time numbers are printed with
 //! `--nocapture` (lines that start with `FLOWTIME`).
 #![allow(clippy::disallowed_types)]
+#![allow(clippy::float_arithmetic)]
 
 mod common;
 
@@ -322,8 +323,9 @@ fn a_refused_edit_stays_in_the_inspector_until_it_no_longer_applies() {
 
 #[test]
 fn smallest_window_keeps_every_main_control_inside() {
-    let window = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1024.0, 640.0));
-    let mut h = build(demo_editor(), [1024.0, 640.0], 1.0, false);
+    let min = orr_editor::flow::MIN_WINDOW_SIZE;
+    let window = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(min[0], min[1]));
+    let mut h = build(demo_editor(), min, 1.0, false);
     h.run_steps(3);
     select_and_edit(&mut h);
     for label in [LBL_PLAY, LBL_PAUSE, LBL_STEP, LBL_STOP, "EDIT", "File", "Edit", "Hierarchy", "Inspector", "\u{25CF} Unsaved changes", "Timeline", "Physics body"] {
@@ -331,7 +333,6 @@ fn smallest_window_keeps_every_main_control_inside() {
     }
     let status = h.get_by_label_contains("Unsaved: ");
     inside(&status, window, "Unsaved: N");
-    drop(status);
     // The viewport keeps room to work in.
     let viewport = h.state().ui.viewport_rect.expect("viewport");
     assert!(viewport.width() >= 400.0 && viewport.height() >= 250.0, "viewport {viewport:?}");
@@ -387,6 +388,45 @@ fn next_step_follows_the_work_in_order() {
     assert!(next_step(Facts { selected: true, dirty: true, playing: true, ..base }).starts_with("Playing"));
     assert!(next_step(Facts { playing: true, viewer: true, ..base }).starts_with("Replay viewer"));
     assert!(next_step(Facts { playing: true, host_down: true, ..base }).starts_with("Host stopped"));
+}
+
+/// The route in the hints is a real menu item of this build.
+#[cfg(all(windows, target_arch = "x86_64", feature = "windows-projects"))]
+#[test]
+fn the_new_project_route_is_in_the_file_menu() {
+    let mut h = build(demo_editor(), [1500.0, 900.0], 1.0, false);
+    h.run_steps(3);
+    assert_eq!(NEW_PROJECT_ROUTE, "File > New Room project\u{2026}");
+    h.get_by_label("File").click();
+    h.run_steps(3);
+    assert_eq!(texts(&h, "New Room project\u{2026}"), 1);
+}
+
+/// A refused export names the problem in the error color, in the export window.
+#[cfg(all(windows, target_arch = "x86_64", feature = "windows-export"))]
+#[test]
+fn export_failure_is_marked_inside_the_export_window() {
+    let mut editor = demo_editor();
+    let mut panel = orr_editor::windows_export_panel::Panel::default();
+    panel.open = true;
+    assert!(!panel.export(&mut editor, false), "no trusted runtime: nothing starts");
+    let mut h: Harness<'_> = Harness::new_ui(move |ui| panel.show(ui.ctx(), &mut editor, false));
+    h.run();
+    assert!(h.query_all_by_label_contains("\u{26A0} Explicitly confirm that this runtime is known trusted code before exporting.").next().is_some());
+}
+
+/// A refused project action names the problem in the error color, in the project window.
+#[cfg(all(windows, target_arch = "x86_64", feature = "windows-projects"))]
+#[test]
+fn project_failure_is_marked_inside_the_project_window() {
+    let mut panel = orr_editor::windows_project_panel::Panel::default();
+    panel.open = true;
+    panel.output = "C:\\orr-flow-clarity-new-project".into();
+    let mut h: Harness<'_> = Harness::new_ui(move |ui| panel.show(ui.ctx(), None, || Err("another task is running".into())));
+    h.run();
+    h.get_by_label("Create Room project").click();
+    h.run();
+    assert!(h.query_all_by_label_contains("\u{26A0} Room project operation blocked: another task is running").next().is_some());
 }
 
 #[test]

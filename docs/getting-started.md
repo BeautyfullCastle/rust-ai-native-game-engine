@@ -179,6 +179,19 @@ target\release\orr_editor.exe
 | 왼쪽 아래 `Unsaved: N` | 저장하지 않은 작업 수. 누르면 목록이 열립니다. |
 | 오른쪽 아래 | 현재 상태의 체크섬과 그래픽 카드 이름 |
 
+지금 어떤 상태인지는 화면의 같은 자리에서 읽을 수 있습니다.
+
+| 알고 싶은 것 | 보이는 곳 |
+|---|---|
+| 무엇을 골랐나 | Hierarchy에서 강조된 줄, 그 아래 `N entities · M selected`, Inspector 맨 위의 이름과 종류(예: `Physics body · e_0000000e`) |
+| 편집 중인가 실행 중인가 | 위쪽의 `EDIT`·`PLAY` 표시. Play 중에는 표시가 주황으로 채워지고 위쪽 막대에 주황 테두리가 생기며, Inspector 제목줄에 `PLAY · temporary edits`가 나옵니다. |
+| Play 중에 값을 고치면 | Inspector 위의 `Play mode: edits here are temporary.` 안내대로 임시 디버그 편집입니다. 씬 파일은 바뀌지 않고 `Unsaved`도 늘지 않습니다. `Stop`을 누르면 씬을 고칠 수 있습니다. |
+| 저장하지 않은 변경이 있나 | 위쪽의 `● Unsaved changes`, 창 제목 앞의 `*`, 왼쪽 아래 `Unsaved: N` |
+| 값이 거부된 이유 | Inspector 맨 위의 빨간 테두리 `Not applied: …`. 필드는 이전 값을 유지하고, 다른 개체를 고르거나 올바른 값을 넣으면 사라집니다. 같은 문장이 왼쪽 아래 상태 줄에도 나옵니다. |
+| 다음에 할 일 | 왼쪽 아래 상태 줄의 한 문장(예: `Unsaved · Ctrl+S saves, Ctrl+Z undoes`). 성공 메시지는 8초 뒤 이 문장으로 바뀝니다. 아무것도 고르지 않았을 때 Inspector가 `File > New Room project…`까지 알려 줍니다. |
+
+창은 1024x640 아래로 줄어들지 않습니다. 한글 이름은 시스템 글꼴(윈도우는 맑은 고딕)로 그립니다. 글꼴을 찾지 못하면 빈 네모로 보일 수 있습니다.
+
 다른 샘플 게임은 `--game`으로 엽니다.
 
 ```powershell
