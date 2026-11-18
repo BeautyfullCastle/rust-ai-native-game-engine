@@ -220,8 +220,10 @@ pub(super) fn bake_prefabs(scene: &Scene, reg: &TypeRegistry, registry: &orr_ecs
                 return Err(BakeError::PrefabReference(at));
             }
             let id = orr_ecs::prefab::component_id_by_name(registry, name).ok_or_else(|| BakeError::NotInFrame(name.clone()))?;
+            // Only null references are left here, and they become `Entity::NONE`.
+            let resolved = resolve(value, &SceneIndex::default());
             let mut bytes = t.default_bytes();
-            t.desc().write(&mut bytes, value).map_err(|error| BakeError::Value { at: at.clone(), error })?;
+            t.desc().write(&mut bytes, &resolved).map_err(|error| BakeError::Value { at: at.clone(), error })?;
             prefab = prefab
                 .with_bytes(registry, id, &bytes)
                 .map_err(|e| BakeError::Value { at, error: ReflectError::Invalid(e.to_string()) })?;
