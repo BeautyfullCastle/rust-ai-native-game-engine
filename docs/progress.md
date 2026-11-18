@@ -61,7 +61,7 @@
 1. [#104](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/104) 흐름을 에디터 화면에서 사람 손으로 끝까지 진행한다: 새 프로젝트 → 개체 이동과 값 수정 → 실행 취소 → 저장 → Play → 내보내기 → 내보낸 게임 실행.
 2. 윈도우로 옮기고 남은 것을 옮긴다. 에디터의 Collect 프로젝트 메뉴와 Arena·Collect 내보내기 창(경로 검사가 `/` 기준이다), 그리고 `orr_pkg`의 나머지 명령이다. Arena·Collect 생성·내보내기·진행 저장·터레인 패치 불러오기는 2026-11-19에 옮겼다.
 3. 설계 v2의 고정 과제군(배달, 스위치 퍼즐, 액션)으로 무개입 완주율을 처음 측정한다.
-4. 장면 창의 설정이 닿지 않는 씬을 줄인다. 열린 씬 적용은 Yard3D와 ViewYard3D 씬에서만 된다. 터레인 문서(`TerrainYard3D`), 내비게이션, Room, 메시 게임은 `orr_gfx`를 등록하지 않아 그 모드가 꺼져 있다. 이 게임들에 `orr_gfx::register`와 `init`을 넣으려면 각 게임의 입장 검사와 뷰 스트림 스키마를 함께 손봐야 한다. 지형 문서는 지형을 `orr_gfx::Terrain`이 아니라 터레인 세션 모델로 그린다. 씬에 대응 필드가 없는 설정(식생 색, 지면 요철, 그림자 부드러움)을 컴포넌트로 만드는 일도 남았다. 뷰포트 전체를 `orr_scenery::Renderer`로 바꾸는 안은 하지 않았다([rendering-architecture.md](rendering-architecture.md) 1.21절).
+4. 장면 창의 설정이 닿지 않는 씬을 줄인다. 열린 씬 적용은 Yard3D, ViewYard3D, 터레인 문서(`TerrainYard3D`) 씬에서 된다. 내비게이션, Room, 메시 게임은 `orr_gfx`를 등록하지 않아 그 모드가 꺼져 있다. 이 게임들에 `orr_gfx::register`와 `init`을 넣으려면 각 게임의 입장 검사와 뷰 스트림 스키마를 함께 손봐야 한다. 터레인 문서는 지형을 `orr_gfx::Terrain`이 아니라 터레인 세션 모델로 그린다. 씬에 대응 필드가 없는 설정(식생 색, 지면 요철, 그림자 부드러움)을 컴포넌트로 만드는 일도 남았다. 뷰포트 전체를 `orr_scenery::Renderer`로 바꾸는 안은 하지 않았다([rendering-architecture.md](rendering-architecture.md) 1.21절).
 
 ## 작업 규칙
 

@@ -66,3 +66,22 @@ entities:
       friction: 0.6
       layer: 1
       mask: 4294967295
+  e_00000003:
+    name: sun
+    orr_gfx::Transform3:
+      position: [0, 20, 0]
+      rotation: [46.120, -142.620, 0.000]
+      scale: [1, 1, 1]
+    orr_gfx::Light:
+      color: [1, 0.94, 0.82]
+      intensity: 2.1
+      range: 10
+      inner_angle: 20
+      outer_angle: 30
+      shadow_strength: 1
+      shadow_range: 0
+      kind: directional
+      enabled: true
+      cast_shadows: true
+      layers: [default, layer2, layer3, layer4, layer5, layer6, layer7, layer8]
+      shadow_cascades: 1

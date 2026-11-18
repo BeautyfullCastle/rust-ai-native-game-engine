@@ -88,10 +88,10 @@ fn saved_scene_pins_full_asset_and_every_edit_undo_redo_proposal_readmits() {
     let initial = doc.frame().to_bytes();
     assert_eq!(
         doc.scene().entities.len(),
-        2,
-        "no authored floor or terrain proxy"
+        3,
+        "two spheres and the sun light, no authored floor or terrain proxy"
     );
-    assert_eq!(doc.frame().alive_count(), 3, "one derived terrain collider");
+    assert_eq!(doc.frame().alive_count(), 4, "one derived terrain collider");
     assert_eq!(doc.to_yaml(), YAML);
     assert_eq!(
         reconstruct_terrain(doc.frame()).unwrap().unwrap().cook(),
