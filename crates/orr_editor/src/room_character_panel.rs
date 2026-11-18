@@ -5,7 +5,7 @@ use orr_sample::{
     room_project::PreparedRoomCharacter,
 };
 use std::{
-    fs::{File, Metadata},
+    fs::File,
     io::{Read, Write},
     path::{Path, PathBuf},
 };
@@ -55,32 +55,20 @@ pub struct Panel {
 
 struct RootPin {
     path: PathBuf,
-    directory: File,
+    directory: orr_fsid::PinnedDirectory,
 }
 impl RootPin {
     fn new(parent: &Path) -> Result<Self, String> {
         let path = checked_directory(parent)?;
-        let directory = File::open(&path).map_err(|e| e.to_string())?;
+        let directory = orr_fsid::PinnedDirectory::open(&path).map_err(|e| e.to_string())?;
         Ok(Self { path, directory })
     }
     fn recheck(&self, path: &Path) -> Result<(), String> {
         let current = checked_directory(path.parent().unwrap_or(Path::new(".")))?;
-        let metadata = std::fs::symlink_metadata(&current).map_err(|e| e.to_string())?;
-        let pinned = self.directory.metadata().map_err(|e| e.to_string())?;
-        if current != self.path || !same_directory(&metadata, &pinned) {
-            return Err("Character project directory changed; reopen before saving".into());
-        }
-        Ok(())
+        self.directory
+            .verify_unchanged_at(&current)
+            .map_err(|_| "Character project directory changed; reopen before saving".to_string())
     }
-}
-#[cfg(unix)]
-fn same_directory(a: &Metadata, b: &Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    a.dev() == b.dev() && a.ino() == b.ino()
-}
-#[cfg(not(unix))]
-fn same_directory(a: &Metadata, b: &Metadata) -> bool {
-    matches!((a.created(), b.created()), (Ok(a), Ok(b)) if a == b)
 }
 fn checked_directory(path: &Path) -> Result<PathBuf, String> {
     orr_model_bindings::model_bindings::resolve_project(path, ".")
@@ -320,7 +308,7 @@ impl Panel {
         if let Err(error) = second {
             return match rollback.persist(&model_path) {
                 Ok(_) => {
-                    let _ = pin.directory.sync_all();
+                    let _ = pin.directory.file().sync_all();
                     Err(format!(
                         "Character save failed; model sidecar restored: {error}"
                     ))
@@ -334,7 +322,7 @@ impl Panel {
         self.saved = self.document.clone();
         self.saved_bytes = bytes;
         #[cfg(unix)]
-        check(SaveStage::DirectorySync).and_then(|()|pin.directory.sync_all()).map_err(|e|format!("Character and model sidecars replaced, but directory sync failed; durability is uncertain: {e}"))?;
+        check(SaveStage::DirectorySync).and_then(|()|pin.directory.file().sync_all()).map_err(|e|format!("Character and model sidecars replaced, but directory sync failed; durability is uncertain: {e}"))?;
         Ok(())
     }
     pub fn show(
@@ -521,6 +509,24 @@ impl Panel {
                 ui.colored_label(egui::Color32::LIGHT_RED, error);
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod root_pin_tests {
+    use super::*;
+
+    #[test]
+    fn pin_admits_a_project_folder_and_detects_a_replaced_one() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("project");
+        std::fs::create_dir(&root).unwrap();
+        let file = root.join("character.json");
+        let pin = RootPin::new(&root).unwrap();
+        pin.recheck(&file).unwrap();
+        std::fs::rename(&root, temp.path().join("moved")).unwrap();
+        std::fs::create_dir(&root).unwrap();
+        assert!(pin.recheck(&file).is_err());
     }
 }
 
