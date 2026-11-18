@@ -274,6 +274,14 @@ impl Scene {
         bake::bake(self, registry, frame)
     }
 
+    /// Bakes every entity of the scene into a [`orr_ecs::Prefab`], in GUID order, for a game to
+    /// install with [`orr_ecs::prefab::install`] before the simulation starts. The scene is a
+    /// prefab file: its entities are recipes, so they cannot refer to each other. `registry` is
+    /// the component registry of the game.
+    pub fn bake_prefabs(&self, types: &TypeRegistry, registry: &orr_ecs::ComponentRegistry) -> Result<Vec<orr_ecs::Prefab>, BakeError> {
+        bake::bake_prefabs(self, types, registry)
+    }
+
     /// Reads a `Frame` back into a scene document. See [`bake`](bake).
     pub fn unbake(registry: &TypeRegistry, frame: &orr_ecs::Frame, index: Option<&SceneIndex>) -> Result<Scene, BakeError> {
         bake::unbake(registry, frame, index)
