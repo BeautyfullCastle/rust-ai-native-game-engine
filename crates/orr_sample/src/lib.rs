@@ -115,7 +115,7 @@ pub mod player_settings;
 #[cfg(feature = "player-settings")]
 pub mod player_controls;
 
-#[cfg(all(feature = "project-create", target_os = "linux"))]
+#[cfg(all(feature = "project-create", any(target_os = "linux", windows)))]
 pub mod project_create;
 
 #[cfg(all(
@@ -138,16 +138,16 @@ pub mod authored_ui;
 #[cfg(feature = "collect-ui")]
 pub mod collect_ui;
 
-#[cfg(all(any(feature = "collect-progress", feature = "room-progress"), target_os = "linux"))]
+#[cfg(all(any(feature = "collect-progress", feature = "room-progress"), any(target_os = "linux", windows)))]
 pub mod game_progress;
-#[cfg(all(feature = "room-progress", target_os = "linux"))]
+#[cfg(all(feature = "room-progress", any(target_os = "linux", windows)))]
 mod room_progress;
-#[cfg(all(feature = "room-progress", target_os = "linux"))]
+#[cfg(all(feature = "room-progress", any(target_os = "linux", windows)))]
 mod room_progress_digest;
-#[cfg(all(feature = "collect-progress", target_os = "linux"))]
+#[cfg(all(feature = "collect-progress", any(target_os = "linux", windows)))]
 mod collect_progress;
 
-#[cfg(all(feature = "collect-progress", target_os = "linux"))]
+#[cfg(all(feature = "collect-progress", any(target_os = "linux", windows)))]
 mod collect_progress_host;
 
 #[cfg(all(feature = "image-reimport", target_os = "linux", target_arch = "x86_64"))]

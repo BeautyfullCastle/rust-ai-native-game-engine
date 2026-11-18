@@ -46,7 +46,7 @@ fn digest_for_rules(project: &PreparedProject, rules_revision: u32) -> [u8; 32] 
     hash.finalize().into()
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 mod storage {
     use super::*;
     use crate::game_progress::{CommitOutcome, ProgressKey, ProgressPaths, ProgressStore};
@@ -149,7 +149,7 @@ mod storage {
         Ok(())
     }
 }
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 pub(crate) use storage::ProgressSession;
 
 #[cfg(test)]
@@ -165,6 +165,14 @@ mod tests {
                 .unwrap();
         (root, project)
     }
+    #[cfg(windows)]
+    const DATA_ROOT: &str = "LOCALAPPDATA";
+    #[cfg(not(windows))]
+    const DATA_ROOT: &str = "XDG_DATA_HOME";
+    #[cfg(windows)]
+    const HOME_ROOT: &str = "USERPROFILE";
+    #[cfg(not(windows))]
+    const HOME_ROOT: &str = "HOME";
     const ID: &str = "12345678-1234-4234-8234-123456789abc";
     const SCENE: &str = include_str!("../../../scenes/collect_dodge_v1.scene.yaml");
     #[test]
@@ -239,8 +247,8 @@ mod tests {
                 ])
                 .env("ORR_PROGRESS_TEST_PROJECT", root.path())
                 .env("ORR_PROGRESS_TEST_MODE", mode)
-                .env("XDG_DATA_HOME", &data)
-                .env("HOME", sandbox.path().join("home"))
+                .env(DATA_ROOT, &data)
+                .env(HOME_ROOT, sandbox.path().join("home"))
                 .output()
                 .unwrap();
             assert!(

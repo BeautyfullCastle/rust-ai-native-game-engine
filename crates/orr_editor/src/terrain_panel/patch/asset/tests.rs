@@ -77,7 +77,7 @@ fn malformed_assets_are_rejected_before_rebinding() {
         assert!(Clipboard::decode_asset(&serde_json::to_vec(&bad).unwrap(), &terrain()).is_err());
     }
 }
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn bounded_reader_rejects_unsafe_paths_and_files() {
     let temp = tempfile::tempdir().unwrap();
@@ -108,6 +108,25 @@ fn bounded_reader_rejects_unsafe_paths_and_files() {
         )
         .unwrap();
         assert!(read_patch(&fifo).is_err());
+    }
+    #[cfg(windows)]
+    {
+        // A junction is a directory reparse point; a path through it is refused.
+        let target = temp.path().join("real");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("patch.json"), bytes()).unwrap();
+        assert_eq!(read_patch(&target.join("patch.json")).unwrap(), bytes());
+        let junction = temp.path().join("alias");
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&target)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));
+        assert!(read_patch(&junction.join("patch.json")).is_err());
+        assert!(read_patch(&temp.path().join("missing.json")).is_err());
+        assert!(read_patch(&temp.path().join("patch.txt")).is_err());
     }
 }
 

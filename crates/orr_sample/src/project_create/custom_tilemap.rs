@@ -111,26 +111,7 @@ fn create_custom_with(
 /// Freeze the complete flat source inventory and bounded payload bytes. Repeat at
 /// publication to detect ordinary concurrent edits, not adversarial filesystem races.
 fn capture(root: &Path) -> Result<BTreeMap<String, Vec<u8>>, String> {
-    let text = root.to_str().ok_or("tileset package path must be UTF-8")?;
-    if !root.is_absolute()
-        || text.len() > 4096
-        || text.chars().any(char::is_control)
-        || text.split('/').any(|part| matches!(part, "." | ".."))
-        || root.components().count() > 64
-    {
-        return Err("tileset package requires an absolute bounded path without traversal".into());
-    }
-    let mut current = PathBuf::new();
-    for component in root.components() {
-        if !matches!(component, Component::RootDir | Component::Normal(_)) {
-            return Err("invalid tileset package path".into());
-        }
-        current.push(component);
-        let metadata = fs::symlink_metadata(&current).map_err(error)?;
-        if !metadata.is_dir() || metadata.file_type().is_symlink() {
-            return Err("tileset package ancestors must be nonsymlink directories".into());
-        }
-    }
+    platform::package_directory(root, "tileset package")?;
     let mut files = BTreeMap::new();
     let mut total = 0usize;
     for entry in fs::read_dir(root).map_err(error)? {
@@ -144,13 +125,7 @@ fn capture(root: &Path) -> Result<BTreeMap<String, Vec<u8>>, String> {
                 "tileset package must contain exactly four regular nonsymlink files".into(),
             );
         }
-        let mut file = OpenOptions::new()
-            .read(true)
-            .custom_flags(
-                (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32,
-            )
-            .open(entry.path())
-            .map_err(error)?;
+        let mut file = open_nofollow(&entry.path(), true).map_err(error)?;
         let metadata = file.metadata().map_err(error)?;
         if !metadata.is_file() || metadata.len() > MAX_FILE_BYTES as u64 {
             return Err("tileset source must be a bounded regular file".into());
@@ -273,14 +248,11 @@ fn replace_owned(root: &Path, relative: &str, bytes: &[u8]) -> Result<(), String
     }
     let mut temporary = tempfile::NamedTempFile::new_in(root).map_err(error)?;
     temporary.write_all(bytes).map_err(error)?;
-    temporary
-        .as_file()
-        .set_permissions(fs::Permissions::from_mode(0o644))
-        .map_err(error)?;
+    finish_file(temporary.as_file()).map_err(error)?;
     temporary.as_file().sync_all().map_err(error)?;
     temporary.persist(&path).map_err(error)?;
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests;

@@ -188,7 +188,7 @@ target\release\orr_editor.exe --game yard3d
 
 ## 5. 내 프로젝트 만들고 실행하기
 
-윈도우에서 새로 만들 수 있는 프로젝트 종류는 Room(3D 방 탈출)입니다.
+윈도우에서 새로 만들 수 있는 프로젝트 종류는 Room(3D 방 탈출), Arena(2D 두 명 경기장), Collect(2D 모으기·피하기)입니다. Room은 아래 `orr_new_room`과 에디터 메뉴로 만들고, Arena와 Collect는 이 절 끝의 `orr_new_arena`로 만듭니다.
 
 ```powershell
 target\release\orr_new_room.exe --output C:\Games\MyRoom --seed room-01
@@ -210,6 +210,18 @@ target\release\room_escape.exe --project C:\Games\MyRoom --headless --ticks 120 
 
 두 번째 줄은 창 없이 120틱을 돌리고 마지막 화면을 PNG로 저장합니다.
 
+Arena와 Collect는 `orr_new_arena`로 만듭니다. `--output`은 Room과 같은 규칙이고, `--seed`는 영문자·숫자·`.`·`_`·`-` 128자까지입니다. Collect는 새 게임마다 소문자 UUIDv4 `--game-id`가 있어야 합니다. 이 값이 최고 기록의 저장 위치를 정합니다.
+
+```powershell
+target\release\orr_new_arena.exe --output C:\Games\MyArena --template arena-2d-v1 --seed arena-01
+target\release\arena.exe --project C:\Games\MyArena --headless --ticks 120 --capture out.png
+
+target\release\orr_new_arena.exe --output C:\Games\MyCollect --template collect-dodge-2d-v1 --seed collect-01 --game-id 7b0d0f4e-3c1a-4a52-9d51-0c1f2e3a4b5c
+target\release\collect_dodge.exe --project C:\Games\MyCollect --headless --ticks 120 --capture out.png
+```
+
+`collect-dodge-ui-2d-v1` 템플릿은 화면 UI와 한글 글꼴까지 넣습니다. 에디터의 `File > New Collect project…` 메뉴는 아직 리눅스에서만 나옵니다. 윈도우에서는 위 명령을 씁니다.
+
 ## 6. 내보내기
 
 에디터에서 `File > Export Windows game…`을 쓰거나 명령으로 내보냅니다.
@@ -220,6 +232,17 @@ $hash = (Get-FileHash $rt -Algorithm SHA256).Hash.ToLower()
 target\release\orr_export_windows.exe --project C:\Games\MyRoom --runtime (Resolve-Path $rt) --runtime-sha256 $hash --output C:\Games\MyRoomExport --trusted-runtime
 C:\Games\MyRoomExport\run-room-escape.cmd
 ```
+
+Arena와 Collect도 같은 방식으로 내보냅니다. `orr_export_arena.exe`와 `orr_export_collect.exe`는 같은 인자를 받습니다. 프로젝트의 게임 종류와 실행 파일이 맞아야 하고, 타일맵 프로젝트는 내보낼 수 없습니다.
+
+```powershell
+$rt = "target\release\arena.exe"
+$hash = (Get-FileHash $rt -Algorithm SHA256).Hash.ToLower()
+target\release\orr_export_arena.exe --project C:\Games\MyArena --runtime (Resolve-Path $rt) --runtime-sha256 $hash --output C:\Games\MyArenaExport --trusted-runtime
+C:\Games\MyArenaExport\bin\arena.exe --project C:\Games\MyArenaExport\project --headless --ticks 120 --capture out2.png
+```
+
+`run-arena.cmd`는 창을 띄우는 시작 파일이라 `--headless` 같은 인자를 넘기지 않습니다. 창 없이 확인할 때는 위처럼 `bin\arena.exe`를 직접 부릅니다.
 
 `--runtime-sha256`은 내보낼 실행 파일이 의도한 빌드인지 확인하는 값입니다. 내보낸 폴더는 엔진 소스 없이 단독으로 실행됩니다. 자세한 내용은 [windows-game-export.md](windows-game-export.md)에 있습니다.
 
@@ -239,7 +262,8 @@ target\release\orr.exe status
 | `link.exe not found` | Visual Studio Build Tools의 C++ 구성이 없습니다. 1절을 보세요. |
 | `orr_new_room requires Windows and --features ...` | `cargo build` 같은 최소 기능 빌드의 실행 파일입니다. `cargo build-all`을 다시 실행합니다. 바뀐 부분만 빌드합니다. |
 | 테스트를 돌린 뒤 에디터 메뉴가 줄었다 | `cargo test --release`가 `target\release\`의 실행 파일을 최소 기능 빌드로 바꿉니다. 위와 같이 `cargo build-all`을 다시 실행합니다. |
-| `orr_new_arena`, `orr_export_arena`가 지원하지 않는다고 나온다 | Arena·Collect 프로젝트 만들기와 내보내기는 아직 리눅스 전용입니다. [progress.md](progress.md)의 알려진 문제를 보세요. |
+| `orr_new_arena.exe`, `orr_export_arena.exe`, `orr_export_collect.exe`, `collect_dodge.exe`가 `target\release\`에 없다 | `cargo build` 같은 최소 기능 빌드는 이 파일들을 만들지 않습니다. `cargo build-all`을 실행합니다. |
+| `File > New Collect project…`가 메뉴에 없다 | 이 메뉴와 Arena·Collect 내보내기 창은 아직 리눅스에서만 나옵니다. 윈도우에서는 `orr_new_arena`와 `orr_export_arena`·`orr_export_collect`를 씁니다. [progress.md](progress.md)의 알려진 문제를 보세요. |
 | 첫 빌드가 오래 걸린다 | 의존성이 600개 넘게 있어서 처음에는 10분쯤 걸립니다. 그 뒤로는 바뀐 크레이트만 빌드합니다. 한 부분만 고쳤을 때는 `cargo test --release -p <크레이트>`로 좁혀서 확인합니다. |
 | 에디터 창이 뜨지 않거나 그래픽 오류 | `$env:WGPU_BACKEND = "vulkan"` 또는 `"dx12"`로 백엔드를 정해 다시 실행합니다. 에디터의 그래픽 초기화가 이 변수를 읽습니다. |
 

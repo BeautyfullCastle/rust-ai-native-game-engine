@@ -113,6 +113,27 @@ pub fn export(options: &ExportOptions) -> Result<ExportReport, String> {
     )
 }
 
+/// Export only an Arena project through the same guarded transaction pipeline.
+pub fn export_arena(options: &ExportOptions) -> Result<ExportReport, String> {
+    export_profile_with(
+        options,
+        Profile::Arena,
+        |_| Ok(()),
+        |command| io::run_bounded(command, SMOKE_TIMEOUT, MAX_SMOKE_OUTPUT),
+    )
+}
+
+/// Export only a CollectDodge project through the same guarded transaction pipeline.
+#[cfg(feature = "collect-dodge")]
+pub fn export_collect(options: &ExportOptions) -> Result<ExportReport, String> {
+    export_profile_with(
+        options,
+        Profile::Collect,
+        |_| Ok(()),
+        |command| io::run_bounded(command, SMOKE_TIMEOUT, MAX_SMOKE_OUTPUT),
+    )
+}
+
 /// Export only a Room project through the same guarded transaction pipeline.
 #[cfg(feature = "room-project")]
 pub fn export_room(options: &ExportOptions) -> Result<ExportReport, String> {
@@ -195,7 +216,6 @@ fn export_auto_profile_with(
     )
 }
 
-#[cfg(feature = "room-project")]
 fn export_profile_with(
     options: &ExportOptions,
     profile: Profile,

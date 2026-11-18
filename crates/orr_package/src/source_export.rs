@@ -22,7 +22,7 @@ pub struct SourceExportReport {
 impl Project {
     /// Export one active package and its exact dependency closure to a new directory.
     ///
-    /// Linux only. All payloads are snapshotted and compared with one admitted lock
+    /// Linux and Windows. All payloads are snapshotted and compared with one admitted lock
     /// before output creation. Only declared content is copied. The project is never
     /// modified, and a content-only handle gains no asset-loading authority.
     ///
@@ -35,22 +35,22 @@ impl Project {
         name: &str,
         destination: impl AsRef<Path>,
     ) -> Result<SourceExportReport> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         {
-            linux::export(self, name, destination.as_ref())
+            exporter::export(self, name, destination.as_ref())
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", windows)))]
         {
             let _ = (name, destination);
             Err(Error(
-                "package source export currently requires Linux".into(),
+                "package source export currently requires Linux or Windows".into(),
             ))
         }
     }
 }
 
-#[cfg(target_os = "linux")]
-mod linux {
+#[cfg(any(target_os = "linux", windows))]
+mod exporter {
     use super::*;
     use crate::{fail, no_links, snapshot, write_sync, Lock, MANIFEST, MAX_JSON, MAX_TOTAL};
     use std::{
@@ -158,18 +158,43 @@ mod linux {
         Ok(selected)
     }
 
+    /// Linux: `/` separators only, and no empty, `.` or `..` part.
+    #[cfg(not(windows))]
+    fn normalized_text(text: &str) -> bool {
+        !text.contains('\\')
+            && !text
+                .split('/')
+                .skip(1)
+                .any(|part| part.is_empty() || part == "." || part == "..")
+    }
+
+    /// Windows: a disk path with `\` or `/` separators. No part may be empty, `.` or
+    /// `..`, end in a dot or space, or hold a character that Windows refuses.
+    #[cfg(windows)]
+    fn normalized_text(text: &str) -> bool {
+        let rest = text.strip_prefix(r"\\?\").unwrap_or(text);
+        let mut parts = rest.split(['\\', '/']);
+        let drive = parts.next().unwrap_or("");
+        drive.len() == 2
+            && drive.as_bytes()[0].is_ascii_alphabetic()
+            && drive.as_bytes()[1] == b':'
+            && parts.all(|part| {
+                !(part.is_empty()
+                    || part == "."
+                    || part == ".."
+                    || part.ends_with(['.', ' '])
+                    || part.contains([':', '<', '>', '"', '|', '?', '*']))
+            })
+    }
+
     fn checked_destination(project: &Project, path: &Path) -> Result<PathBuf> {
         let text = path
             .to_str()
             .ok_or_else(|| Error("export path must be Unicode".into()))?;
         if !path.is_absolute()
             || text.len() > 4096
-            || text.contains('\\')
             || text.chars().any(char::is_control)
-            || text
-                .split('/')
-                .skip(1)
-                .any(|part| part.is_empty() || part == "." || part == "..")
+            || !normalized_text(text)
             || path.components().count() > 64
             || !matches!(path.components().next_back(), Some(Component::Normal(_)))
         {

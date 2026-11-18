@@ -1,4 +1,4 @@
-//! Offline creation of closed Arena, Collect and Room starters on Linux.
+//! Offline creation of closed Arena, Collect and Room starters on Linux and Windows.
 //!
 //! Package installation and runtime admission remain the existing authorities.
 //! Publication never replaces a destination. Ordinary errors clean only the owned
@@ -14,6 +14,7 @@ pub use room_layout::create_room_layout;
 #[cfg(feature = "room-character")]
 mod character_template;
 mod template;
+mod platform;
 mod custom_sprites;
 pub use custom_sprites::{create_custom_sprites, CustomSpriteOptions};
 pub const CUSTOM_SPRITE_TEMPLATE: &str = "arena-custom-sprites-2d-v1";
@@ -27,22 +28,21 @@ pub const CUSTOM_TILEMAP_TEMPLATE: &str = "arena-custom-tileset-2d-v1";
 #[cfg(feature = "tilemap")]
 pub use tilemap::create_tilemap;
 pub const TILEMAP_TEMPLATE: &str = "arena-tilemap-2d-v1";
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests;
+#[cfg(all(test, windows))]
+mod windows_tests;
 #[cfg(feature = "collect-ui")]
 mod ui_template;
 
-use crate::{
-    project_publish::publish_no_replace,
-    project_runtime::{compiled_runtime, PreparedRuntime},
-};
+use crate::project_runtime::{compiled_runtime, PreparedRuntime};
+use platform::{create_file, destination, finish_file, open_nofollow, publish_no_replace, stage_name};
 use orr_reflect::Guid;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, OpenOptions},
+    fs,
     io::{Read, Write},
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
 };
 
 pub const TEMPLATE: &str = template::ID;
@@ -425,55 +425,10 @@ fn write_profile_file(path: &Path, bytes: &[u8], with_ui: bool) -> Result<(), St
     if bytes.len() > file_limit(path, bytes, with_ui) {
         return Err("starter file exceeds byte limit".into());
     }
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(error)?;
+    let mut file = create_file(path).map_err(error)?;
     file.write_all(bytes).map_err(error)?;
-    file.set_permissions(fs::Permissions::from_mode(0o644))
-        .map_err(error)?;
+    finish_file(&file).map_err(error)?;
     file.sync_all().map_err(error)
-}
-
-fn destination(path: &Path) -> Result<PathBuf, String> {
-    let text = path.to_str().ok_or("output path must be UTF-8")?;
-    if !path.is_absolute()
-        || text.len() > 4096
-        || text.chars().any(char::is_control)
-        || text.split('/').any(|part| matches!(part, "." | ".."))
-        || path.components().count() > 64
-    {
-        return Err(
-            "output must be an absolute bounded path without dot or parent traversal".into(),
-        );
-    }
-    let leaf = path
-        .file_name()
-        .ok_or("output needs a new directory leaf")?;
-    if leaf.len() > 200 {
-        return Err("output leaf exceeds 200 bytes".into());
-    }
-    let parent = path.parent().ok_or("output requires an existing parent")?;
-    let mut current = PathBuf::new();
-    for component in parent.components() {
-        if !matches!(component, Component::RootDir | Component::Normal(_)) {
-            return Err("invalid output parent component".into());
-        }
-        current.push(component);
-        let meta = fs::symlink_metadata(&current)
-            .map_err(|e| format!("output parent {}: {e}", current.display()))?;
-        if meta.file_type().is_symlink() || !meta.is_dir() {
-            return Err("output parent must contain only existing nonsymlink directories".into());
-        }
-    }
-    let output = fs::canonicalize(parent).map_err(error)?.join(leaf);
-    match fs::symlink_metadata(&output) {
-        Ok(_) => Err("output destination already exists".into()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(output),
-        Err(e) => Err(error(e)),
-    }
 }
 
 fn verify_profile_stage(
@@ -514,8 +469,8 @@ fn verify_profile_stage(
                 }
                 pending.push(path);
             } else if kind.is_file() {
-                let name = relative.to_str().ok_or("stage path must be UTF-8")?;
-                let bytes = expected.get(name).ok_or("unexpected starter stage file")?;
+                let name = stage_name(relative).ok_or("stage path must be UTF-8")?;
+                let bytes = expected.get(&name).ok_or("unexpected starter stage file")?;
                 let metadata = fs::symlink_metadata(&path).map_err(error)?;
                 if metadata.len() != bytes.len() as u64
                     || bytes.len() > file_limit(&path, bytes, with_ui)
@@ -523,15 +478,12 @@ fn verify_profile_stage(
                     return Err("starter stage file size changed".into());
                 }
                 let mut actual = Vec::new();
-                OpenOptions::new()
-                    .read(true)
-                    .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-                    .open(&path)
+                open_nofollow(&path, false)
                     .map_err(error)?
                     .take(file_limit(&path, bytes, with_ui) as u64 + 1)
                     .read_to_end(&mut actual)
                     .map_err(error)?;
-                if actual != *bytes || !seen_files.insert(name.to_owned()) {
+                if actual != *bytes || !seen_files.insert(name) {
                     return Err("starter stage bytes changed".into());
                 }
             } else {

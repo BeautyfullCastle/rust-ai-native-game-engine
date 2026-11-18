@@ -14,11 +14,7 @@ pub fn create_room_layout(options: &CreateOptions, recipe: &Path) -> Result<Crea
     if options.template != ROOM_TEMPLATE {
         return Err("--room-layout requires room-escape-3d-v1".into());
     }
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
-        .open(recipe)
-        .map_err(error)?;
+    let file = open_nofollow(recipe, true).map_err(error)?;
     let metadata = file.metadata().map_err(error)?;
     if !metadata.is_file() || metadata.len() > LIMIT as u64 {
         return Err("Room layout requires a regular nonsymlink file at most 65536 bytes".into());
@@ -136,5 +132,5 @@ fn authored_scene(seed: &str, bytes: &[u8]) -> Result<Scene, String> {
     Ok(scene)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests;

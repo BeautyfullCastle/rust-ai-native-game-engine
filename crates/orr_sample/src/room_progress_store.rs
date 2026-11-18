@@ -27,10 +27,8 @@ impl RoomClearKey {
         )
     }
     pub fn paths_from_environment(&self) -> Result<ProgressPaths, String> {
-        self.paths_from_environment_values(
-            std::env::var_os("XDG_DATA_HOME").as_deref(),
-            std::env::var_os("HOME").as_deref(),
-        )
+        let (data, home) = environment_roots();
+        self.paths_from_environment_values(data.as_deref(), home.as_deref())
     }
     pub fn paths_from_environment_values(
         &self,
@@ -70,10 +68,10 @@ pub struct RoomClearStore {
 impl RoomClearStore {
     pub fn open(paths: ProgressPaths, key: RoomClearKey) -> Result<Self, String> {
         key.validate()?;
-        #[cfg(target_os = "linux")]
-        let loaded = linux::load_codec(&paths, StoreCodec::Room(&key));
-        #[cfg(not(target_os = "linux"))]
-        let loaded = Loaded::readonly(0, "progress persistence is supported only on Linux");
+        #[cfg(any(target_os = "linux", windows))]
+        let loaded = platform::load_codec(&paths, StoreCodec::Room(&key));
+        #[cfg(not(any(target_os = "linux", windows)))]
+        let loaded = Loaded::readonly(0, "progress persistence is supported only on Linux and Windows");
         if loaded.best > 1 {
             return Err("invalid internal Room completion value".into());
         }
@@ -99,10 +97,10 @@ impl RoomClearStore {
                 .clone()
                 .unwrap_or_else(|| "progress is read-only".into()));
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         {
             let (value, outcome) =
-                linux::commit_codec(&self.paths, StoreCodec::Room(&self.key), 1, checkpoint)?;
+                platform::commit_codec(&self.paths, StoreCodec::Room(&self.key), 1, checkpoint)?;
             if value > 1 {
                 return Err("invalid internal Room completion value".into());
             }
@@ -117,10 +115,10 @@ impl RoomClearStore {
             }
             Ok(outcome)
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", windows)))]
         {
             let _ = checkpoint;
-            Err("progress persistence is supported only on Linux".into())
+            Err("progress persistence is supported only on Linux and Windows".into())
         }
     }
 }
