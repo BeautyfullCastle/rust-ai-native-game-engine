@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/*", "examples/static-game-starter"]
+members = ["crates/*", "examples/static-game-starter", "tutorial/star_pick"]
 
 [workspace.package]
 version = "0.0.1"

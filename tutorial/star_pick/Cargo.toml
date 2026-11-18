@@ -1,0 +1,23 @@
+[package]
+name = "star_pick"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Tutorial game: step by step from an empty window to two players on a server (docs/tutorial)"
+
+[lints]
+workspace = true
+
+[dependencies]
+bytemuck = { version = "1", features = ["derive"] }
+orr_sim = { path = "../../crates/orr_sim" }
+orr_app = { path = "../../crates/orr_app" }
+
+[dev-dependencies]
+orr_bridge = { path = "../../crates/orr_bridge" }
+orr_session = { path = "../../crates/orr_session" }
+orr_proto = { path = "../../crates/orr_proto" }
+# The in-process relay server and clients on a simulated network (no sockets, no clock).
+orr_server = { path = "../../crates/orr_server", default-features = false, features = ["harness"] }
