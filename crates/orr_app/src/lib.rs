@@ -28,7 +28,7 @@ pub use input::{InputContext, KeyLayout, Stick};
 pub use orr_bridge::{FrameView, Lifecycle, PlayerSignal, PlayerSlot, Players, RawPlayerSignal, SignalKind};
 pub use orr_render::{Camera, Camera3D, Lighting, OrbitCamera};
 pub use orr_ecs::Entity;
-pub use orr_view::{fp_to_f32, fp_to_vec2, Extracted, Extracted3, Extractor, Extractor3, InterpMode, RenderItem, Shape3, Style3, Transform2, Transform3};
+pub use orr_view::{fp_to_f32, fp_to_vec2, Extracted, Extracted3, Extractor, Extractor3, InterpMode, RenderItem, Shape, Shape3, Style, Style3, Transform2, Transform3, Vec2};
 pub use view2d::{solid_quad, View2D};
 pub use orr_gfx_view::{ViewAsset, ViewAssetError, ViewAssets};
 pub use view3d::{default_lighting, default_orbit, extract_default, scene_camera, Look3D, ModelDraw, View3D};

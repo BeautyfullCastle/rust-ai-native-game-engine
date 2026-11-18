@@ -17,7 +17,7 @@
 - 입력 전송 규칙과 비용
 - 에디터에서 정하는 값(Authoring)과 프리팹
 
-이 프레임워크가 생기면 [getting-started.md](getting-started.md)에 빈 프로젝트부터 따라 하는 튜토리얼을 더한다(10장).
+이 프레임워크 위에서 빈 프로젝트부터 따라 하는 튜토리얼을 썼다([tutorial/README.md](tutorial/README.md), 12장 7단계).
 
 ## 2. 지금 있는 것
 
@@ -348,7 +348,7 @@ sequenceDiagram
 | 5 (완료) | 스냅숏 체크섬 다수 검증, 클라이언트 입력 "직전과 같음" 표시 | `netsim` 테스트로 조작된 스냅숏이 거부되고, 입력 바이트 감소량을 기록한다. 스냅숏 검증은 9.2, 입력 표시와 잰 바이트는 10.2에 쓴다. 코드는 `orr_server/src/room.rs`(`snapshot_tick`, `judge_snapshot`), `orr_proto/src/msg.rs`, `orr_session/src/relay.rs`(`serve_snapshot`, `SourceStats::input_bytes_sent`). 테스트는 `orr_server/tests/relay_scenarios.rs`(조작된 제공자, 2인 재접속, 프레임이 없는 제공자), `relay_input_same.rs`(손실·중복·재정렬, `Hello` 버전), `relay_input_bytes.rs`(바이트), `orr_proto`의 `msg` 단위 테스트. 이후 프로토콜 버전을 하나(6)로 합치고 `SnapshotRequest`에 서버가 고른 틱을 실었다(9.2). 남은 것: 서버가 데이터에서 체크섬을 다시 계산하지 않는다(입장하는 클라이언트가 확인한다). 두 틱 묶어 보내기는 하지 않았다. 입력 패킷 머리(약 31바이트)와 틱·확인 틱의 고정 8바이트는 줄이지 않았다. 위조된 데이터에 정직한 체크섬을 붙인 업로드는 서버가 아니라 입장하는 클라이언트가 거부한다(입장 실패) |
 | 6a (완료) | 기본 3D 렌더러: `App::view3d`, `View3D`, `Look3D` | `Transform3`과 `Material`(또는 `Body`와 `Collider`)이 있는 엔티티가 뷰 코드 없이 그려진다. Yard3D 예제가 17줄로 돈다. `--screenshot --ticks 300` 그림이 Yard3D 샘플의 그리기 경로와 픽셀까지 같다. 쓰는 법은 [crates/orr_app/README.md](../crates/orr_app/README.md)의 "3D", 코드는 `orr_app/src/view3d.rs`, `app.rs`(`Display`), `views.rs`(`on_update3`, `dispatch3`), 예제는 `orr_app/examples/yard3d.rs`. 테스트는 `view3d.rs`의 단위 테스트(추출, 그리기 목록, 카메라)와 `orr_app/tests/views.rs`(3D 포즈). 뺀 것: `Material` 표면 셰이더, 후처리·하늘·물·지형, 3D 마우스 입력, 렌더러 설정 옵션 |
 | 6b (완료) | `ViewRef`, 뷰 에셋, 프리팹 생성 | 인스펙터에서 뷰 에셋을 고르면 그 모델이 그려진다. `PlayerAdded`로 아바타 프리팹이 생긴다 → 인스펙터 선택기와 `Look3D`의 모델 그리기, `Lobby` 게임의 `PlayerAdded` 프리팹을 각각 확인했다(아래 "남은 것"에 에디터 뷰포트가 있다). 쓰는 법은 [crates/orr_app/README.md](../crates/orr_app/README.md)의 "ViewRef, 뷰 에셋, 프리팹", 예제는 `orr_app/examples/avatars.rs`(두 플레이어가 한 화면, `--host`/`--connect`도 된다). 코드는 `orr_gfx`(`ViewRef`), `orr_reflect`(`asset_id`, `Kind::Int.asset`, `Scene::bake_prefabs`), `orr_ecs/src/prefab.rs`, `orr_gfx_view/src/view_asset.rs`, `orr_app/src/view3d.rs`(`ModelDraw`)와 `models.rs`, `orr_editor/src/inspector.rs`, `orr_testgame/src/lobby.rs`. 테스트는 `orr_ecs`의 prefab 단위 테스트, `orr_gfx/tests/view_ref.rs`, `orr_testgame/tests/lobby.rs`, `orr_session/tests/prefab_spawn.rs`(리플레이, 늦게 온 신호의 롤백 재시뮬레이션), `orr_app/tests/avatars.rs`와 `view3d.rs`(창 없는 그리기 목록), `orr_editor/tests/inspector_view_asset_pick.rs`(선택기). 뺀 것: 에디터 뷰포트의 `ViewRef` 모델 그리기와 `ViewRef`를 등록한 에디터 게임, 뷰 에셋의 `tint`/`sound`/`entity_view`(읽기만 함)와 `App::entity_view_for("종류", ..)`, 모델 그림의 MSAA와 톤 매핑, 애니메이션 모델, `Added.data`(서버로 실행할 때 비어 있음) |
-| 7 | 튜토리얼 | 빈 프로젝트 → 혼자 하기 → 한 화면 2인 → 로컬 서버 2창 → 재접속까지, 단계별 예제가 모두 빌드되고 테스트로 확인된다 |
+| 7 (완료) | 튜토리얼 | 빈 프로젝트 → 혼자 하기 → 한 화면 2인 → 로컬 서버 2창 → 재접속까지, 단계별 예제가 모두 빌드되고 테스트로 확인된다. 문서는 [tutorial/README.md](tutorial/README.md)(목차와 단계별 문서 5개, 그림은 `tutorial/img/`)이고 코드는 `tutorial/star_pick`(워크스페이스 멤버, 단계마다 `src/stepN.rs`와 바이너리 `stepN`)다. 테스트는 `tutorial/star_pick/tests/step2.rs`~`step5.rs`: 점수가 결정론이고 리플레이가 같은 체크섬을 낸다(2), 두 슬롯이 따로 움직인다(3), `orr_server::harness`의 서버와 클라이언트 둘로 `Added`(4)와 `Disconnected`→`Reconnected`, `Removed`(5)가 게임에 닿고 스냅숏으로 들어온 클라이언트까지 체크섬이 같다. 이 작업에서 `orr_app`이 `Style`, `Shape`, `Vec2`를, `orr_sim`이 프리팹 이름(`prefab`, `spawn_prefab`, `Prefab`, `PrefabId`)을 다시 내보낸다. 뺀 것: 3D 단계(6), 소리와 글자(뷰에 그리기 API가 없어서 점수는 막대, 소리는 글자 출력), 시작 데이터가 있는 플레이어(`Added.data`가 서버에서 비어 있음) |
 
 각 단계는 짧은 브랜치 하나로 진행하고 끝나면 `main`에 합친다([AGENTS.md](../AGENTS.md)의 Delivery rules).
 
