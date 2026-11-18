@@ -262,17 +262,19 @@ enum SeatEvent {
 }
 
 impl SeatEvent {
-    fn message(self, slot: u8, from_tick: u64) -> ServerMsg {
+    fn message(self, slot: u8, from_tick: u64, seq: u32) -> ServerMsg {
         match self {
-            SeatEvent::Added => ServerMsg::Presence { slot, present: true, from_tick },
-            SeatEvent::Disconnected => ServerMsg::Presence { slot, present: false, from_tick },
-            SeatEvent::Reconnected => ServerMsg::SeatChange { slot, change: orr_proto::SEAT_RECONNECTED, from_tick },
-            SeatEvent::Removed => ServerMsg::SeatChange { slot, change: orr_proto::SEAT_REMOVED, from_tick },
+            SeatEvent::Added => ServerMsg::Presence { slot, present: true, from_tick, seq },
+            SeatEvent::Disconnected => ServerMsg::Presence { slot, present: false, from_tick, seq },
+            SeatEvent::Reconnected => ServerMsg::SeatChange { slot, change: orr_proto::SEAT_RECONNECTED, from_tick, seq },
+            SeatEvent::Removed => ServerMsg::SeatChange { slot, change: orr_proto::SEAT_REMOVED, from_tick, seq },
         }
     }
 }
 
 struct SeatRec {
+    /// Number of the signal, from 1 (see `Room::signal_seq`).
+    seq: u32,
     from_tick: u64,
     slot: u8,
     event: SeatEvent,
@@ -360,6 +362,10 @@ pub(crate) struct Room {
     /// Every seat change announced, oldest first (pruned like `log`). A late
     /// joiner gets the ones after its snapshot tick.
     seat_log: Vec<SeatRec>,
+    /// Signals announced so far. The signal of `seat_log` number `seq` is
+    /// the `seq`-th one; a bundle tells the clients how many signals have a
+    /// tick up to its own (the signal fence), see `Room::signals_up_to`.
+    signal_seq: u32,
 }
 
 struct AnchorRec {
@@ -445,6 +451,7 @@ impl Room {
             auth: None,
             pending_violations: Vec::new(),
             seat_log: Vec::new(),
+            signal_seq: 0,
         }
     }
 
@@ -696,11 +703,25 @@ impl Room {
                 SeatEvent::Disconnected => false,
                 SeatEvent::Removed => return,
             };
-            self.broadcast(out, &ServerMsg::Presence { slot, present, from_tick });
+            self.broadcast(out, &ServerMsg::Presence { slot, present, from_tick, seq: 0 });
             return;
         }
-        self.seat_log.push(SeatRec { from_tick, slot, event });
-        self.broadcast(out, &event.message(slot, from_tick));
+        // The count of `signals_up_to` needs the ticks to be in the order of the numbers.
+        debug_assert!(self.seat_log.last().is_none_or(|r| r.from_tick <= from_tick));
+        self.signal_seq += 1;
+        let seq = self.signal_seq;
+        self.seat_log.push(SeatRec { seq, from_tick, slot, event });
+        self.broadcast(out, &event.message(slot, from_tick, seq));
+    }
+
+    /// How many signals have a tick at or before `tick`: the clients must
+    /// have all of them before they verify `tick`. The signals after
+    /// `tick` are never pruned from `seat_log` (the log keeps every signal
+    /// after the oldest bundle it keeps). Signals are announced for ticks
+    /// after the finalized one, so the count of a finalized tick never grows.
+    fn signals_up_to(&self, tick: u64) -> u32 {
+        let later = self.seat_log.iter().filter(|r| r.from_tick > tick).count() as u32;
+        self.signal_seq - later
     }
 
     // ---- start ----------------------------------------------------------
@@ -950,7 +971,7 @@ impl Room {
             s.pending.retain(|&t, _| t > tick);
             slots.push(SlotConfirmed { input, commands, flags });
         }
-        let bundle = Bundle { tick, slots };
+        let bundle = Bundle { tick, signals: self.signals_up_to(tick), slots };
         if let Some(a) = self.auth.as_mut() {
             for v in a.sim.step(&bundle) {
                 self.pending_violations.push((tick, v));
@@ -1221,11 +1242,12 @@ impl Room {
             self.join = None;
             return;
         };
-        out.send(conn, Channel::Reliable, &ServerMsg::JoinSnapshot { tick, checksum, data });
-        // The snapshot holds the signals up to its tick. The later seat
-        // changes it does not know are sent again, in their order.
+        let signals = self.signals_up_to(tick);
+        out.send(conn, Channel::Reliable, &ServerMsg::JoinSnapshot { tick, checksum, data, signals });
+        // The snapshot holds the signals up to its tick (`signals` of them).
+        // The later seat changes it does not know are sent again, in their order.
         for rec in self.seat_log.iter().filter(|r| r.from_tick > tick) {
-            out.send(conn, Channel::Reliable, &rec.event.message(rec.slot, rec.from_tick));
+            out.send(conn, Channel::Reliable, &rec.event.message(rec.slot, rec.from_tick, rec.seq));
         }
         let input_size = self.cfg.input_size;
         let mut backlog = 0u32;
@@ -1282,7 +1304,7 @@ impl Room {
         let conn = p.conn;
         s.acked = finalized;
         s.sent.clear();
-        out.send(conn, Channel::Reliable, &ServerMsg::JoinSnapshot { tick, checksum, data });
+        out.send(conn, Channel::Reliable, &ServerMsg::JoinSnapshot { tick, checksum, data, signals: 0 });
         out.notes.push(ServerNote::ServerSnapshot { room: self.id, joiner, tick, bytes });
         out.notes.push(ServerNote::SnapshotRelayed { room: self.id, donor: SERVER_SLOT, joiner, tick, backlog_ticks: 0 });
         self.snapshots_relayed += 1;

@@ -438,9 +438,12 @@ fn nonsense_server_msgs(rng: &mut Rng) -> Vec<Vec<u8>> {
         ServerMsg::TimeSync(TimeSync { window_from: 0, finalized: 0, min_slack_us: i32::MAX, avg_slack_us: 0, samples: 1, late: 0 }).encode(),
         ServerMsg::Desync { tick: u64::MAX, reports: vec![(200, 1)] }.encode(),
         ServerMsg::Desync { tick: 0, reports: vec![] }.encode(),
-        ServerMsg::Presence { slot: 250, present: true, from_tick: u64::MAX }.encode(),
+        ServerMsg::Presence { slot: 250, present: true, from_tick: u64::MAX, seq: 0 }.encode(),
+        ServerMsg::Presence { slot: 250, present: true, from_tick: u64::MAX, seq: u32::MAX }.encode(),
+        ServerMsg::SeatChange { slot: 250, change: orr_proto::SEAT_REMOVED, from_tick: 0, seq: 1 }.encode(),
         ServerMsg::SnapshotRequest { request_id: 5 }.encode(),
-        ServerMsg::JoinSnapshot { tick: 1, checksum: 1, data: vec![1, 2, 3] }.encode(),
+        ServerMsg::JoinSnapshot { tick: 1, checksum: 1, data: vec![1, 2, 3], signals: 0 }.encode(),
+        ServerMsg::JoinSnapshot { tick: 1, checksum: 1, data: vec![1, 2, 3], signals: u32::MAX }.encode(),
         ServerMsg::Start { t0_us: 0, server_time_us: u64::MAX }.encode(),
         ServerMsg::Pong { seq: 1, client_time_us: 0, server_time_us: u64::MAX, t0_us: 0, finalized_tick: 0 }.encode(),
         ServerMsg::Confirmed { input_size: 24, bundles: vec![] }.encode(),
@@ -448,6 +451,7 @@ fn nonsense_server_msgs(rng: &mut Rng) -> Vec<Vec<u8>> {
             input_size: 24,
             bundles: vec![orr_proto::Bundle {
                 tick: u64::MAX,
+                signals: u32::MAX,
                 slots: (0..2)
                     .map(|_| orr_proto::SlotConfirmed { input: vec![9; 24], commands: vec![vec![1; 3]], flags: 0 })
                     .collect(),

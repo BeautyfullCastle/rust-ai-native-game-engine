@@ -105,7 +105,7 @@ fn server_sim_cost_per_tick_with_1000_bodies() {
                 SlotConfirmed { input, commands: Vec::new(), flags: 0 }
             })
             .collect();
-        let bundle = Bundle { tick, slots };
+        let bundle = Bundle { tick, signals: 0, slots };
         let t = Instant::now();
         let v = sim.step(&bundle);
         step.push(t.elapsed());

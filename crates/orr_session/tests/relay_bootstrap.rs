@@ -57,6 +57,7 @@ fn rejoin_bootstrap(split_after_welcome: bool) {
         tick: SNAPSHOT,
         checksum: sim.checksum(),
         data: lz4_flex::block::compress_prepend_size(&sim.frame().to_bytes()),
+        signals: 0,
     };
     link.receive(ServerMsg::Welcome(Welcome {
         room: 7, slot: 1, player_count: 2, tick_rate: 60, seed: 42,
@@ -74,6 +75,7 @@ fn rejoin_bootstrap(split_after_welcome: bool) {
         input_size: std::mem::size_of::<ArenaInput>() as u32,
         bundles: vec![Bundle {
             tick,
+            signals: 0,
             slots: vec![SlotConfirmed {
                 input: bytemuck::bytes_of(&ArenaInput::default()).to_vec(),
                 commands: Vec::new(), flags: 0,

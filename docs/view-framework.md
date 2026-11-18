@@ -194,7 +194,7 @@ pub trait SceneView<G: Game> {
 | `PlayerRemoved { slot }` | 자리 보관 시간이 지나 완전히 나감 | 아바타 삭제, 소유물 넘기기 |
 
 - 신호는 `TickInputs`에 틱 단위로 실린다. 모든 클라이언트가 같은 틱에 같은 신호를 받으므로 결정론이 유지된다.
-- 릴레이 서버의 입장·퇴장 알림 `Presence { slot, present, from_tick }`는 지금 확정 묶음과 따로 신뢰 채널로 간다. 클라이언트는 이 알림을 `from_tick`의 `TickInputs`에 신호로 넣는다. 그 틱을 이미 예측으로 지나갔다면 일반 입력 오예측과 같이 롤백한다. (4b) `Presence`만으로는 `Reconnected`와 `Removed`를 말할 수 없어서 프로토콜 v3에 `SeatChange { slot, change, from_tick }`(종류 13)를 더했다. `Presence`는 그대로다. 표는 [crates/orr_app/README.md](../crates/orr_app/README.md)의 "서버가 보내는 신호".
+- 릴레이 서버의 입장·퇴장 알림 `Presence { slot, present, from_tick }`는 지금 확정 묶음과 따로 신뢰 채널로 간다. 클라이언트는 이 알림을 `from_tick`의 `TickInputs`에 신호로 넣는다. 그 틱을 이미 예측으로 지나갔다면 일반 입력 오예측과 같이 롤백한다. (4b) `Presence`만으로는 `Reconnected`와 `Removed`를 말할 수 없어서 프로토콜 v3에 `SeatChange { slot, change, from_tick }`(종류 13)를 더했다. `Presence`는 그대로다. 표는 [crates/orr_app/README.md](../crates/orr_app/README.md)의 "서버가 보내는 신호". 신호는 신뢰 채널로, 확정 묶음은 비신뢰 채널로 와서 순서가 보장되지 않으므로 프로토콜 v4에 신호 울타리를 두었다. 서버가 신호에 방 안 순번(1부터)을 매겨 `Presence`/`SeatChange`에 싣고, 확정 묶음마다 "이 틱까지 적용되는 신호 개수"(`Bundle::signals`)를 싣는다. 클라이언트는 그 개수만큼 신호를 다 받기 전에는 그 묶음을 세션에 넘기지 않아(검증하지 않아) 신호가 늦으면 검증이 늦어질 뿐이다. 늦참가는 `JoinSnapshot`의 개수로 시작하고 스냅샷 이후 신호는 서버가 순번과 함께 다시 보낸다. 그래도 이미 검증한 틱의 신호가 오면 `ClientEvent::SignalLate`와 함께 클라이언트가 실패한다.
 - `Disconnected`와 `Removed`의 구분은 서버의 자리 보관 기능을 쓴다. 지금 서버는 나간 플레이어의 자리를 토큰과 함께 `reserve_ticks` 동안 보관한다. 보관 중이면 `Disconnected`, 보관이 끝나면 `Removed`다.
 - 서버 없이 실행하면 `App`이 첫 틱(틱 1)에 모든 플레이어 슬롯마다 `PlayerAdded`를 넣는다(구현: `PlayHost::with_announced_players`).
 - 구현 메모(4a): 신호는 `RawPlayerSignal`(종류, 슬롯, 시작 데이터 바이트)로 `TickInputs`에 실리고, 게임의 `systems()` 맨 앞에 `player_signals::<G>()`를 넣으면 `Players::on_player`가 불린다. 뷰는 `BridgeEvent::Player`로 `Predicted`/`Verified`/`Canceled`를 받는다.
