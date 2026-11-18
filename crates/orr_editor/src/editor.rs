@@ -2149,6 +2149,17 @@ impl Editor {
     /// field coalesce until sent. A host refusal rolls the gesture back and is
     /// reported when its reply arrives. Caches only show host-confirmed values.
     pub fn set_field(&mut self, owner: &Owner, path: &str, value: Value) -> bool {
+        let target = self.selection.clone();
+        self.set_field_of(target.as_ref(), owner, path, value)
+    }
+
+    /// Sets one field of a component of any entity, like [`Editor::set_field`]
+    /// does for the selected one. The entity need not be selected.
+    pub fn set_entity_field(&mut self, target: &Target, component: &str, path: &str, value: Value) -> bool {
+        self.set_field_of(Some(target), &Owner::Component(component.to_string()), path, value)
+    }
+
+    fn set_field_of(&mut self, entity: Option<&Target>, owner: &Owner, path: &str, value: Value) -> bool {
         if self.is_viewer() {
             self.error("replay Viewer is read-only");
             return false;
@@ -2161,7 +2172,7 @@ impl Editor {
         let (path, value) = (path.as_str(), value);
         let (what, method, params) = match owner {
             Owner::Component(c) => {
-                let Some(t) = &self.selection else {
+                let Some(t) = entity else {
                     self.error(format!("set {c}.{path}: nothing selected"));
                     return false;
                 };
@@ -2176,7 +2187,7 @@ impl Editor {
             self.error("an edit is still pending; wait before changing another field");
             return false;
         }
-        self.patch_cached(owner, path, &value);
+        self.patch_cached(entity, owner, path, &value);
         match self.call(method, params) {
             Ok(r) => {
                 let changed = r.get("changed").and_then(J::as_bool).unwrap_or(false);
@@ -2213,10 +2224,10 @@ impl Editor {
     }
 
     /// Changes the cached value the widgets show, ahead of the host's answer.
-    fn patch_cached(&mut self, owner: &Owner, path: &str, value: &Value) {
+    fn patch_cached(&mut self, entity: Option<&Target>, owner: &Owner, path: &str, value: &Value) {
         let (list, name): (&mut Vec<(String, Value)>, &str) = match owner {
             Owner::Component(c) => match self.inspect.as_mut() {
-                Some(i) if Some(&i.target) == self.selection.as_ref() => (&mut i.components, c.as_str()),
+                Some(i) if Some(&i.target) == entity => (&mut i.components, c.as_str()),
                 _ => return,
             },
             Owner::Singleton(s) => (&mut self.singletons, s.as_str()),
