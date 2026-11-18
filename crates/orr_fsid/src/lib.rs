@@ -218,9 +218,9 @@ mod imp {
 mod imp {
     use super::FileId;
     use std::{
-        fs::{File, Metadata},
+        fs::{File, Metadata, OpenOptions},
         io,
-        os::unix::fs::MetadataExt,
+        os::unix::fs::{MetadataExt, OpenOptionsExt},
         path::Path,
     };
 
@@ -233,21 +233,14 @@ mod imp {
     }
 
     pub fn open_directory(path: &Path) -> io::Result<File> {
-        // `File::open` follows a final symbolic link, so look at the path itself first
-        // and compare it with the opened handle to close the gap between the two calls.
-        let link = std::fs::symlink_metadata(path)?;
-        if link.file_type().is_symlink() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "path is a symbolic link",
-            ));
-        }
-        let file = File::open(path)?;
-        let opened = file.metadata()?;
-        if opened.dev() != link.dev() || opened.ino() != link.ino() {
-            return Err(io::Error::other("folder changed while it was opened"));
-        }
-        Ok(file)
+        // The kernel checks the type while it opens the path, so no other entry can be
+        // swapped in between a check and the open. `O_DIRECTORY` refuses a FIFO, a file
+        // or a device before the open can block. `O_NONBLOCK` keeps any other open from
+        // waiting. `O_NOFOLLOW` refuses a symbolic link at the end of the path.
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)
     }
 
     pub fn is_link(metadata: &Metadata) -> bool {
@@ -354,6 +347,71 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("a").join("..").join("b");
         assert!(ancestors_to_check(&path).is_err());
+    }
+
+    #[cfg(unix)]
+    mod unix {
+        use super::*;
+        use std::{sync::mpsc, time::Duration};
+
+        fn make_fifo(path: &Path) {
+            let status = std::process::Command::new("mkfifo")
+                .arg(path)
+                .status()
+                .unwrap();
+            assert!(status.success(), "{status:?}");
+        }
+
+        /// Run `check` on another thread. When it does not finish in time, open the FIFO
+        /// for writing so the blocked thread can end, then fail the test.
+        fn finishes_in_time(fifo: &Path, check: impl FnOnce() + Send + 'static) {
+            let (done, wait) = mpsc::channel();
+            std::thread::spawn(move || {
+                check();
+                let _ = done.send(());
+            });
+            if wait.recv_timeout(Duration::from_secs(5)).is_err() {
+                let _release = fs::OpenOptions::new().read(true).write(true).open(fifo);
+                panic!("opening a FIFO as a folder blocked");
+            }
+        }
+
+        #[test]
+        fn a_fifo_is_refused_without_blocking() {
+            let temp = tempfile::tempdir().unwrap();
+            let fifo = temp.path().join("fifo");
+            make_fifo(&fifo);
+            let path = fifo.clone();
+            finishes_in_time(&fifo, move || {
+                assert!(open_directory(&path).is_err());
+                assert!(PinnedDirectory::open(&path).is_err());
+            });
+        }
+
+        #[test]
+        fn a_pinned_folder_replaced_by_a_fifo_is_refused_without_blocking() {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("project");
+            fs::create_dir(&path).unwrap();
+            let pinned = PinnedDirectory::open(&path).unwrap();
+            fs::rename(&path, temp.path().join("moved")).unwrap();
+            make_fifo(&path);
+            let fifo = path.clone();
+            finishes_in_time(&fifo, move || {
+                assert!(pinned.verify_unchanged().is_err());
+                assert!(same_directory(&path, pinned.file()).is_err());
+            });
+        }
+
+        #[test]
+        fn a_symbolic_link_to_a_folder_is_refused() {
+            let temp = tempfile::tempdir().unwrap();
+            let target = temp.path().join("target");
+            let link = temp.path().join("link");
+            fs::create_dir(&target).unwrap();
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            assert!(open_directory(&link).is_err());
+        }
     }
 
     #[cfg(windows)]
