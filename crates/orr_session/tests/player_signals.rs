@@ -150,15 +150,17 @@ fn offline_play_announces_every_player_in_the_first_tick() {
 }
 
 #[test]
-fn a_recording_without_signals_keeps_its_old_format_version() {
+fn a_recording_with_or_without_signals_has_the_same_format_version() {
     let mut quiet = play(2);
     run(&mut quiet, 3, &[]);
     let bytes = quiet.save_replay();
-    assert_eq!(&bytes[4..8], &3u32.to_le_bytes(), "no signal: format version 3, as before");
+    assert_eq!(&bytes[4..8], &5u32.to_le_bytes(), "no signal: format version 5");
+    assert!(replay_verify::<Roster>(&bytes, ()).unwrap().ok());
+    assert!(ReplayReader::<Roster>::parse(&bytes).unwrap().signals(1).is_empty());
 
     let mut loud = play(2);
     run(&mut loud, 3, &plan()[..1]);
-    assert_eq!(&loud.save_replay()[4..8], &4u32.to_le_bytes(), "signals: format version 4");
+    assert_eq!(&loud.save_replay()[4..8], &5u32.to_le_bytes(), "signals: format version 5");
 }
 
 #[test]

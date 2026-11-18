@@ -36,7 +36,7 @@ raw bytes, and big-endian builds are rejected.
 | Boundary | Behavior after this change |
 | --- | --- |
 | ORRF frame snapshots | `Frame::from_bytes` accepts version 2 and explicitly rejects version 1 with `FrameDecodeError::UnsupportedVersion(1)` |
-| `.orrp` replay container | Writer remains version 3; parser still recognizes container versions 1–3. Container parsing alone does not establish frame/checksum compatibility |
+| `.orrp` replay container | The only container version is 5. The parser refuses every other version. Container parsing alone does not establish frame/checksum compatibility |
 | Old replay keyframes | Embedded ORRF v1 frames fail when restored, for example `ReplayError::BadKeyframe` from `ReplayReader::seek`, whose source is `UnsupportedVersion(1)` |
 | Old recorded checksums | Resimulating unchanged gameplay still produces the new Frame checksum. Old Frame-checksum expectations are incompatible and verification reports mismatches unless an earlier build-id check rejects the replay |
 | Late-join/correction/ERP full-frame payloads | They carry serialized Frames, so ORRF v1 payloads cannot be loaded by v2 frame readers. ERP's outer ORRS envelope remains version 1 |
@@ -44,7 +44,7 @@ raw bytes, and big-endian builds are rejected.
 | View stream and C ABI layouts | This checksum change does not change OVS1 view-stream layouts or the C ABI version. A returned simulation checksum, such as `orr_confirmed_checksum`, uses the new Frame checksum |
 | Strict YAML scenes | This change does not alter the scene text format; rebaking produces a new-format Frame |
 
-The same-named versions are independent: ORRF v2 is a simulation snapshot, `.orrp` v3 is a
+The same-named versions are independent: ORRF v2 is a simulation snapshot, `.orrp` v5 is a
 replay container, ORRS v1 is an ERP frame envelope, and view-stream v2 adds 3D view records.
 Do not infer compatibility of one from the version of another.
 

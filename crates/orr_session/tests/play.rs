@@ -544,10 +544,10 @@ fn keyframes_are_thinned_within_the_budget() {
 }
 
 #[test]
-fn replay_file_is_format_version_3() {
+fn replay_file_is_format_version_5() {
     let mut s = new_session();
     play(&mut s, 10, 1);
     let bytes = s.save_replay();
     assert_eq!(&bytes[..4], b"ORRP");
-    assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 3);
+    assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 5);
 }

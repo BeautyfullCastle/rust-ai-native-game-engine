@@ -264,7 +264,6 @@ impl<G: Game> PlaySession<G> {
 
     fn start(cfg: PlayConfig, sim: Simulation<G>) -> Self {
         let header = ReplayHeader {
-            format_version: 3,
             game_id: cfg.game_id.clone(),
             build_hash: sim.build_hash(),
             seed: cfg.seed,

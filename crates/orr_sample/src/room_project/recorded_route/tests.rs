@@ -15,7 +15,6 @@ fn recording(
 ) -> (ReplayWriter<game::RoomEscapeV1>, u64) {
     let mut sim = scene.simulation().unwrap();
     let mut writer = ReplayWriter::new(ReplayHeader {
-        format_version: 3,
         game_id: GAME.into(),
         build_hash: sim.build_hash(),
         seed: SEED,

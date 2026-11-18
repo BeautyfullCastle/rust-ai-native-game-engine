@@ -3,7 +3,7 @@
 //! Semantic identity belongs to the compiled game and this admitted scene. A raw
 //! ORRP recording is not an authenticated identity envelope and does not embed
 //! the full scene or input descriptors. This starter accepts canonical current
-//! engine-writer v3 ORRP only; other encodings may remain valid to the engine.
+//! engine-writer v5 ORRP only; other encodings may remain valid to the engine.
 use crate::{
     delivery::{Courier, Delivery, DeliveryGame, DeliveryInput},
     switchboard::{Board, Cursor, SwitchGame, SwitchInput},
@@ -363,7 +363,7 @@ impl<G: Starter> Admitted<G> {
         session_from_document::<G>(&self.document)
     }
 
-    /// Opens only bounded, canonical engine-writer v3 ORRP recordings of this
+    /// Opens only bounded, canonical engine-writer v5 ORRP recordings of this
     /// exact admitted scene. Full schema descriptors are local to this compiled
     /// admission, not embedded in or authenticated by the replay header.
     ///
@@ -454,7 +454,7 @@ impl<G: Starter> Admitted<G> {
             return Err("replay has keyframes outside its input timeline".into());
         }
         if canonical.finish() != bytes {
-            return Err("starter admission accepts only canonical engine-writer v3 ORRP without commands, debug edits, duplicate records, or trailing bytes; legacy and alternative encodings are not supported here".into());
+            return Err("starter admission accepts only canonical engine-writer v5 ORRP without commands, debug edits, duplicate records, or trailing bytes; alternative encodings are not supported here".into());
         }
         PlaySession::open_replay(bytes, (), G::BUILD).map_err(|e| e.to_string())
     }
@@ -471,8 +471,8 @@ fn preflight_replay<G: Starter>(bytes: &[u8]) -> Result<(), String> {
     if r.take(4)? != b"ORRP" {
         return Err("not an ORRP replay".into());
     }
-    if r.u32()? != 3 {
-        return Err("starter admission requires canonical engine-writer v3 ORRP; legacy encodings are not supported here".into());
+    if r.u32()? != 5 {
+        return Err("starter admission requires canonical engine-writer v5 ORRP".into());
     }
     let game_len = r.u32()? as usize;
     if r.take(game_len)? != G::ID.as_bytes() {

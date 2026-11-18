@@ -1,6 +1,7 @@
 //! `.orrp` replay file format: a header, a per-tick input/command stream
 //! (delta-compressed against the previous tick's inputs, then whole-body
-//! lz4 compressed), a checksum table, and (v2) optional keyframes.
+//! lz4 compressed), a checksum table, keyframes, debug commands and player
+//! signals.
 //!
 //! A keyframe is a full `orr_ecs::Frame` byte snapshot (`Frame::to_bytes`)
 //! taken every N ticks while recording. [`ReplayReader::seek`] restores the
@@ -8,17 +9,17 @@
 //! from there, instead of from tick 0. A file without keyframes still seeks
 //! (from tick 0).
 //!
-//! Versions: v1 has no keyframe table. v2 appends `count u32` and, per
-//! keyframe, `tick u64, len u32, bytes` after the checksum table inside the
-//! compressed body. v3 appends, after the keyframes, `count u32` and, per
-//! debug command, `tick u64, len u32, bytes` (`DebugCommand::encode`). A
-//! debug command of tick `t` is applied at the boundary before tick `t`
-//! runs, in file order. v4 appends, after the debug commands, `count u32`
-//! and, per player signal, `tick u64, kind u8, slot u8, len u32, bytes`
-//! (`RawPlayerSignal`); a signal of tick `t` is part of tick `t`'s input, in
-//! file order. The reader accepts all four. The writer writes v3 when the
-//! recording has no signal, so a recording of a game that never uses signals
-//! stays byte for byte what it was, and writes v4 otherwise.
+//! Body layout after the checksum table, inside the compressed body: keyframes
+//! (`count u32` and, per keyframe, `tick u64, len u32, bytes`), debug commands
+//! (`count u32` and, per command, `tick u64, len u32, bytes`, from
+//! `DebugCommand::encode`; a command of tick `t` is applied at the boundary
+//! before tick `t` runs, in file order), and player signals (`count u32` and,
+//! per signal, `tick u64, kind u8, slot u8, len u32, bytes`, from
+//! `RawPlayerSignal`; a signal of tick `t` is part of tick `t`'s input, in file
+//! order). Each table is always present, also when empty.
+//!
+//! There is one format version, 5. The reader refuses any
+//! other version with [`ReplayError::UnsupportedVersion`].
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -26,15 +27,12 @@ use orr_ecs::{Frame, FrameDecodeError};
 use orr_sim::{insert_signal, DebugCommand, Game, PlayerSlot, RawPlayerSignal, SignalKind, SimCommand, Simulation};
 
 const MAGIC: &[u8; 4] = b"ORRP";
-const FORMAT_VERSION: u32 = 4;
-/// The version written when a recording has no signal.
-const BASE_FORMAT_VERSION: u32 = 3;
-const MIN_FORMAT_VERSION: u32 = 1;
+/// The only `.orrp` format version. The writer writes it, the reader accepts it.
+const FORMAT_VERSION: u32 = 5;
 
 /// `.orrp` file header.
 #[derive(Clone, Debug)]
 pub struct ReplayHeader {
-    pub format_version: u32,
     pub game_id: String,
     pub build_hash: u64,
     pub seed: u64,
@@ -220,8 +218,6 @@ pub struct ReplayWriter<G: Game> {
 }
 
 impl<G: Game> ReplayWriter<G> {
-    /// The header's `format_version` is ignored: `finish` always writes the
-    /// current format version.
     pub fn new(header: ReplayHeader) -> Self {
         Self {
             header,
@@ -357,8 +353,7 @@ impl<G: Game> ReplayWriter<G> {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(MAGIC);
-        let has_signals = self.signals.values().any(|v| !v.is_empty());
-        write_u32(&mut out, if has_signals { FORMAT_VERSION } else { BASE_FORMAT_VERSION });
+        write_u32(&mut out, FORMAT_VERSION);
         write_str(&mut out, &self.header.game_id);
         write_u64(&mut out, self.header.build_hash);
         write_u64(&mut out, self.header.seed);
@@ -427,17 +422,15 @@ impl<G: Game> ReplayWriter<G> {
             }
         }
 
-        if has_signals {
-            let count: usize = self.signals.values().map(Vec::len).sum();
-            write_u32(&mut body, count as u32);
-            for (&tick, list) in &self.signals {
-                for signal in list {
-                    write_u64(&mut body, tick);
-                    body.push(signal.kind.to_byte());
-                    body.push(signal.slot.0);
-                    write_u32(&mut body, signal.data.len() as u32);
-                    body.extend_from_slice(&signal.data);
-                }
+        let signal_count: usize = self.signals.values().map(Vec::len).sum();
+        write_u32(&mut body, signal_count as u32);
+        for (&tick, list) in &self.signals {
+            for signal in list {
+                write_u64(&mut body, tick);
+                body.push(signal.kind.to_byte());
+                body.push(signal.slot.0);
+                write_u32(&mut body, signal.data.len() as u32);
+                body.extend_from_slice(&signal.data);
             }
         }
 
@@ -489,7 +482,7 @@ impl<G: Game> ReplayReader<G> {
         }
         let mut r = Reader::new(&bytes[4..]);
         let format_version = r.u32()?;
-        if !(MIN_FORMAT_VERSION..=FORMAT_VERSION).contains(&format_version) {
+        if format_version != FORMAT_VERSION {
             return Err(ReplayError::UnsupportedVersion(format_version).into());
         }
         let game_id = r.str()?;
@@ -501,7 +494,7 @@ impl<G: Game> ReplayReader<G> {
         if player_count > 32 {
             return Err(ReplayError::BadPlayerCount(player_count).into());
         }
-        let header = ReplayHeader { format_version, game_id, build_hash, seed, player_count, tick_rate, input_size };
+        let header = ReplayHeader { game_id, build_hash, seed, player_count, tick_rate, input_size };
 
         let compressed_len = r.u32()? as usize;
         let compressed = r.take(compressed_len)?;
@@ -555,45 +548,39 @@ impl<G: Game> ReplayReader<G> {
         }
 
         let mut keyframes = BTreeMap::new();
-        if format_version >= 2 {
-            let keyframe_count = br.u32()?;
-            for _ in 0..keyframe_count {
-                checkpoint(ParseCheckpoint::BeforeKeyframe)?;
-                let tick = br.u64()?;
-                let len = br.u32()? as usize;
-                keyframes.insert(tick, br.take(len)?.to_vec());
-                checkpoint(ParseCheckpoint::AfterKeyframe)?;
-            }
+        let keyframe_count = br.u32()?;
+        for _ in 0..keyframe_count {
+            checkpoint(ParseCheckpoint::BeforeKeyframe)?;
+            let tick = br.u64()?;
+            let len = br.u32()? as usize;
+            keyframes.insert(tick, br.take(len)?.to_vec());
+            checkpoint(ParseCheckpoint::AfterKeyframe)?;
         }
 
         let mut debug: BTreeMap<u64, Vec<DebugCommand>> = BTreeMap::new();
-        if format_version >= 3 {
-            let debug_count = br.u32()?;
-            for _ in 0..debug_count {
-                checkpoint(ParseCheckpoint::BeforeDebugCommand)?;
-                let tick = br.u64()?;
-                let len = br.u32()? as usize;
-                let cmd = DebugCommand::decode(br.take(len)?);
-                checkpoint(ParseCheckpoint::AfterDebugCommand)?;
-                let cmd = cmd.ok_or(ReplayError::BadCommand)?;
-                debug.entry(tick).or_default().push(cmd);
-            }
+        let debug_count = br.u32()?;
+        for _ in 0..debug_count {
+            checkpoint(ParseCheckpoint::BeforeDebugCommand)?;
+            let tick = br.u64()?;
+            let len = br.u32()? as usize;
+            let cmd = DebugCommand::decode(br.take(len)?);
+            checkpoint(ParseCheckpoint::AfterDebugCommand)?;
+            let cmd = cmd.ok_or(ReplayError::BadCommand)?;
+            debug.entry(tick).or_default().push(cmd);
         }
 
         let mut signals: BTreeMap<u64, Vec<RawPlayerSignal>> = BTreeMap::new();
-        if format_version >= 4 {
-            let signal_count = br.u32()?;
-            for _ in 0..signal_count {
-                checkpoint(ParseCheckpoint::BeforeSignal)?;
-                let tick = br.u64()?;
-                let kind = SignalKind::from_byte(br.u8()?).ok_or(ReplayError::BadSignal)?;
-                let slot = PlayerSlot(br.u8()?);
-                let len = br.u32()? as usize;
-                let data = br.take(len)?.to_vec();
-                checkpoint(ParseCheckpoint::AfterSignal)?;
-                // The file holds the canonical order already; inserting keeps it.
-                insert_signal(signals.entry(tick).or_default(), RawPlayerSignal { kind, slot, data });
-            }
+        let signal_count = br.u32()?;
+        for _ in 0..signal_count {
+            checkpoint(ParseCheckpoint::BeforeSignal)?;
+            let tick = br.u64()?;
+            let kind = SignalKind::from_byte(br.u8()?).ok_or(ReplayError::BadSignal)?;
+            let slot = PlayerSlot(br.u8()?);
+            let len = br.u32()? as usize;
+            let data = br.take(len)?.to_vec();
+            checkpoint(ParseCheckpoint::AfterSignal)?;
+            // The file holds the canonical order already; inserting keeps it.
+            insert_signal(signals.entry(tick).or_default(), RawPlayerSignal { kind, slot, data });
         }
 
         let first_tick = ticks.keys().next().copied().unwrap_or(1);
@@ -729,7 +716,7 @@ mod cancellation_tests {
     fn recording() -> Vec<u8> {
         let mut sim = Simulation::<Arena>::new(ArenaConfig { player_count: 2 }, 60, 9);
         let mut writer = ReplayWriter::<Arena>::new(ReplayHeader {
-            format_version: 3, game_id: "arena".into(), build_hash: sim.build_hash(), seed: 9,
+            game_id: "arena".into(), build_hash: sim.build_hash(), seed: 9,
             player_count: 2, tick_rate: 60, input_size: std::mem::size_of::<ArenaInput>() as u32,
         }).with_keyframe_interval(1);
         writer.record_checksum(0, sim.checksum());
@@ -764,7 +751,7 @@ mod cancellation_tests {
         let bytes = recording();
         let ordinary = ReplayReader::<Arena>::parse(&bytes).unwrap();
         let cancellable = ReplayReader::<Arena>::parse_cancellable(&bytes, &AtomicBool::new(false)).unwrap();
-        let header = |h: &ReplayHeader| (h.format_version, h.game_id.clone(), h.build_hash, h.seed, h.player_count, h.tick_rate, h.input_size);
+        let header = |h: &ReplayHeader| (h.game_id.clone(), h.build_hash, h.seed, h.player_count, h.tick_rate, h.input_size);
         assert_eq!(header(&ordinary.header), header(&cancellable.header));
         assert_eq!(ordinary.ticks, cancellable.ticks);
         assert_eq!(ordinary.checksums, cancellable.checksums);
@@ -928,7 +915,6 @@ mod debug_presence_tests {
     #[test]
     fn presence_includes_commands_outside_input_range() {
         let mut writer = ReplayWriter::<orr_testgame::Arena>::new(ReplayHeader {
-            format_version: 3,
             game_id: "test".into(),
             build_hash: 0,
             seed: 0,

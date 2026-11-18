@@ -624,7 +624,6 @@ fn nonzero_replay_contract_rejects_previous_host_identity() {
     let old_identities = [crate::default_build_id(GAME), 0x7b2a_3ab9_8f61_9dca, 0x04ee_32c4_873f_6941, 0xb2a3_336f_2969_7b0b, 0xe6f4_03d2_595b_d8cf, 0xbc11_fd6f_fd21_8902];
     for old in old_identities {
         let bytes = ReplayWriter::<DefenseGame>::new(ReplayHeader {
-            format_version: 3,
             game_id: GAME.into(),
             build_hash: orr_sim::build_hash_of(old, 0),
             seed: u64::from(DefenseConfig::default().seed),
@@ -645,7 +644,6 @@ fn nonzero_replay_contract_rejects_previous_host_identity() {
     // The replay contract deliberately treats an absent (zero) header identity
     // as a wildcard; it cannot reject legacy files that never recorded one.
     let wildcard = ReplayWriter::<DefenseGame>::new(ReplayHeader {
-        format_version: 3,
         game_id: GAME.into(),
         build_hash: 0,
         seed: u64::from(DefenseConfig::default().seed),
