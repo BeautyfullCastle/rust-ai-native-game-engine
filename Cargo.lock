@@ -3074,6 +3074,7 @@ dependencies = [
  "orr_games",
  "orr_gfx",
  "orr_gfx_view",
+ "orr_model",
  "orr_physics3d",
  "orr_reflect",
  "orr_relay_net",
@@ -3308,6 +3309,7 @@ dependencies = [
  "orr_reflect",
  "orr_render",
  "png 0.17.16",
+ "serde_json",
 ]
 
 [[package]]
@@ -3816,6 +3818,7 @@ dependencies = [
  "bytemuck",
  "orr_ecs",
  "orr_fp",
+ "orr_gfx",
  "orr_reflect",
  "orr_sim",
 ]

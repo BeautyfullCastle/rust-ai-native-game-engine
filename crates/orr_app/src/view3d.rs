@@ -4,12 +4,15 @@
 //! [`Look3D`] is a ready-made [`View3D`]. A game that needs nothing else calls
 //! `.view3d(Look3D::default())` and gets a picture.
 
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use orr_bridge::FrameView;
-use orr_gfx::{Material, Transform3 as PlacedTransform};
+use orr_ecs::Entity;
+use orr_gfx::{Material, Transform3 as PlacedTransform, ViewRef};
+use orr_gfx_view::{ViewAsset, ViewAssets};
 use orr_physics3d::{Body, Collider, BODY_DYNAMIC, SHAPE_BOX, SHAPE_CAPSULE, SLEEP_FLAG};
-use orr_render::{Camera3D, Lighting, Material as SurfaceMaterial, OrbitCamera, RenderList3D};
+use orr_render::{Camera3D, Lighting, Material as SurfaceMaterial, OrbitCamera, RenderList3D, StaticInstance};
 use orr_view::{fp_to_f32, fp_to_transform3, fp_to_vec3, Extracted3, Extractor3, InterpMode, Quat, RenderItem3, Shape3, Style3, Transform3, Vec3, ViewWorld3};
 
 const WALL_COLOR: [f32; 3] = [0.20, 0.24, 0.34];
@@ -40,6 +43,25 @@ pub trait View3D: Extractor3 {
         let _ = frame;
         default_lighting()
     }
+
+    /// The view assets that the `ViewRef` ids of the scene resolve to. An entity whose id is
+    /// here is drawn with the model of its asset. An entity whose id is not here (or a view
+    /// without assets, the default) keeps its stand-in box, so a missing asset can be seen.
+    fn view_assets(&self) -> Option<&ViewAssets> {
+        None
+    }
+}
+
+/// A model to draw this frame: where, and which file. The draw list of the 3D look holds these
+/// next to the shapes (see `fill_draw_list3`); the window turns them into draws of the model.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelDraw {
+    /// The view asset that asked for the model.
+    pub asset: u64,
+    /// Model file, relative to the asset folder.
+    pub model: String,
+    /// Position, rotation and scale in the world, smoothed like any other entity.
+    pub instance: StaticInstance,
 }
 
 /// The camera of the scene (`orr_gfx::Camera`), or `fallback` when the scene has none.
@@ -75,9 +97,12 @@ pub fn default_lighting() -> Lighting {
 ///
 /// - every entity with a physics `Body` and `Collider`: a sphere, box or capsule of the collider's
 ///   size, moving bodies brighter than resting ones, a large static box as a checkered ground;
-/// - every entity with an `orr_gfx::Transform3` and an `orr_gfx::Material` (and no body): a box of
-///   the transform's scale, as a stand-in for its model. The surface shader of the material is not
-///   applied yet.
+/// - every entity with an `orr_gfx::Transform3` and an `orr_gfx::Material` or `orr_gfx::ViewRef` (and
+///   no body): a box of the transform's scale, as a stand-in for its model. The surface shader of
+///   the material is not applied yet.
+/// - an entity with a `ViewRef` whose asset the look knows ([`Look3D::assets`]) is drawn with the
+///   model of the asset instead of its shape, at its (smoothed) place, scaled by its
+///   `Transform3` (a body keeps scale 1) and by the scale of the asset.
 ///
 /// The scene's lights, camera and environment (`orr_gfx` components) are used when the scene has
 /// them. Else the sun is [`default_lighting`] and the camera is [`default_orbit`]. Both can be replaced.
@@ -85,11 +110,12 @@ pub fn default_lighting() -> Lighting {
 pub struct Look3D {
     orbit: OrbitCamera,
     lighting: Lighting,
+    assets: Option<ViewAssets>,
 }
 
 impl Default for Look3D {
     fn default() -> Self {
-        Self { orbit: default_orbit(), lighting: default_lighting() }
+        Self { orbit: default_orbit(), lighting: default_lighting(), assets: None }
     }
 }
 
@@ -110,6 +136,13 @@ impl Look3D {
         self.lighting = lighting;
         self
     }
+
+    /// The view assets of the project: an entity with a `ViewRef` is drawn with the model of
+    /// its asset (see [`ViewAssets::load_dir`]).
+    pub fn assets(mut self, assets: ViewAssets) -> Self {
+        self.assets = Some(assets);
+        self
+    }
 }
 
 impl Extractor3 for Look3D {
@@ -127,6 +160,10 @@ impl View3D for Look3D {
         let _ = frame;
         self.lighting
     }
+
+    fn view_assets(&self) -> Option<&ViewAssets> {
+        self.assets.as_ref()
+    }
 }
 
 /// Bodies with a collider, then marked entities without a body. Dynamic bodies are predicted
@@ -142,6 +179,17 @@ pub fn extract_default(frame: FrameView<'_>, out: &mut Vec<Extracted3>) {
     if frame.registers::<Material>() && frame.registers::<PlacedTransform>() {
         for (entity, _) in frame.iter::<Material>() {
             if frame.registers::<Body>() && frame.has::<Body>(entity) {
+                continue;
+            }
+            let Some(placed) = frame.get::<PlacedTransform>(entity) else { continue };
+            out.push(extract_marked(entity, placed, orr_gfx_view::layers_of(frame, entity)));
+        }
+    }
+    if frame.registers::<ViewRef>() && frame.registers::<PlacedTransform>() {
+        for (entity, _) in frame.iter::<ViewRef>() {
+            let has_material = frame.registers::<Material>() && frame.has::<Material>(entity);
+            let has_body = frame.registers::<Body>() && frame.has::<Body>(entity);
+            if has_material || has_body {
                 continue;
             }
             let Some(placed) = frame.get::<PlacedTransform>(entity) else { continue };
@@ -215,9 +263,50 @@ impl Extractor3 for SharedView3 {
     }
 }
 
+/// The view assets that the entities of a frame ask for.
+struct ModelLookup<'a> {
+    assets: &'a ViewAssets,
+    refs: BTreeMap<Entity, u64>,
+}
+
+impl<'a> ModelLookup<'a> {
+    /// `None` when the view has no assets or the game has no `ViewRef`: nothing to look up.
+    fn new(assets: Option<&'a ViewAssets>, frame: FrameView<'_>) -> Option<Self> {
+        let assets = assets.filter(|a| !a.is_empty())?;
+        if !frame.registers::<ViewRef>() {
+            return None;
+        }
+        Some(Self { assets, refs: frame.iter::<ViewRef>().map(|(entity, view_ref)| (entity, view_ref.asset)).collect() })
+    }
+
+    fn asset_of(&self, entity: Entity) -> Option<&'a ViewAsset> {
+        self.assets.get(*self.refs.get(&entity)?)
+    }
+}
+
+/// The model draw of `item`: its smoothed place, the scale of its `Transform3` (1 for a body,
+/// which is sized by its collider) times the scale of the asset.
+fn model_draw(item: &RenderItem3, asset: &ViewAsset, frame: FrameView<'_>) -> Option<ModelDraw> {
+    let is_body = frame.registers::<Body>() && frame.has::<Body>(item.entity);
+    let placed = if is_body { None } else { frame.get::<PlacedTransform>(item.entity) };
+    let scale = placed.map_or([1.0; 3], |p| [fp_to_f32(p.scale.x), fp_to_f32(p.scale.y), fp_to_f32(p.scale.z)]).map(|s| s * asset.scale);
+    if !scale.iter().all(|s| s.is_finite() && *s > 0.0) {
+        return None;
+    }
+    let instance = StaticInstance { translation: item.transform.pos.to_array(), rotation: item.transform.rot.to_array(), scale };
+    Some(ModelDraw { asset: asset.id, model: asset.model.clone(), instance })
+}
+
 /// Moves the view items into a render list (instances are sorted by mesh kind by the list).
-fn fill_items(items: &[RenderItem3], list: &mut RenderList3D) {
+/// An item whose entity asks for a known view asset becomes a model draw instead of a shape.
+fn fill_items(items: &[RenderItem3], list: &mut RenderList3D, models: &mut Vec<ModelDraw>, lookup: Option<(&ModelLookup<'_>, FrameView<'_>)>) {
     for item in items {
+        if let Some((lookup, frame)) = lookup {
+            if let Some(draw) = lookup.asset_of(item.entity).and_then(|asset| model_draw(item, asset, frame)) {
+                models.push(draw);
+                continue;
+            }
+        }
         let (p, r) = (item.transform.pos.to_array(), item.transform.rot.to_array());
         let s = &item.style;
         let m = SurfaceMaterial { color: [s.color[0], s.color[1], s.color[2]], roughness: s.roughness, metallic: s.metallic, emissive: 0.0, checker: s.checker, layers: s.layers };
@@ -231,19 +320,23 @@ fn fill_items(items: &[RenderItem3], list: &mut RenderList3D) {
 }
 
 /// Fills `list` with the lights of the scene (or the view's sun when the scene has none),
-/// then every entity of `world`, and returns the camera.
+/// then every entity of `world`, and returns the camera. The entities with a known view asset
+/// go to `models` and not to `list`.
 pub(crate) fn fill_draw_list3(
     view: &SharedView3,
     world: &ViewWorld3<SharedView3>,
     frame: FrameView<'_>,
     items: &mut Vec<RenderItem3>,
     list: &mut RenderList3D,
+    models: &mut Vec<ModelDraw>,
 ) -> Camera3D {
     items.clear();
     world.render_items(items);
     list.clear();
+    models.clear();
     orr_gfx_view::scene_look(frame, &view.0.lighting(frame)).apply(list);
-    fill_items(items, list);
+    let lookup = ModelLookup::new(view.0.view_assets(), frame);
+    fill_items(items, list, models, lookup.as_ref().map(|l| (l, frame)));
     view.0.camera(frame)
 }
 
@@ -251,7 +344,7 @@ pub(crate) fn fill_draw_list3(
 mod tests {
     use super::*;
     use orr_ecs::{ComponentRegistryBuilder, Frame};
-    use orr_fp::{fp, FPVec3};
+    use orr_fp::{fp, FPVec3, FP};
     use orr_physics3d::Shape;
     use orr_render::MeshKind;
     use orr_view::ViewConfig;
@@ -260,7 +353,32 @@ mod tests {
         let mut registry = ComponentRegistryBuilder::new();
         orr_physics3d::register(&mut registry);
         orr_gfx::register(&mut registry);
+        orr_gfx::register_view_ref(&mut registry);
         Frame::new(registry.build())
+    }
+
+    fn asset(path: &str, model: &str, scale: f32) -> ViewAsset {
+        ViewAsset::parse(path, &format!(r#"{{"version":1,"model":"{model}","scale":{scale}}}"#)).unwrap()
+    }
+
+    /// The model draws and the shape list of `frame` as the 3D look makes them.
+    fn drawn(look: Look3D, frame: &Frame) -> (Vec<ModelDraw>, RenderList3D) {
+        let view = SharedView3(Rc::new(look));
+        let mut world = ViewWorld3::new(view.clone(), ViewConfig::default());
+        let mut now = Vec::new();
+        view.extract(FrameView::of(frame), &mut now);
+        world.push_predicted(1, &[], &now, false);
+        world.advance(0.0);
+        let (mut items, mut list, mut models) = (Vec::new(), RenderList3D::new(), Vec::new());
+        fill_draw_list3(&view, &world, FrameView::of(frame), &mut items, &mut list, &mut models);
+        (models, list)
+    }
+
+    fn avatar(frame: &mut Frame, path: &str, position: FPVec3, scale: FP) -> orr_ecs::Entity {
+        let entity = frame.spawn();
+        frame.add(entity, PlacedTransform { position, scale: FPVec3::new(scale, scale, scale), ..Default::default() });
+        frame.add(entity, ViewRef::at(path));
+        entity
     }
 
     fn dynamic(frame: &mut Frame, pos: FPVec3, shape: Shape) -> orr_ecs::Entity {
@@ -352,14 +470,101 @@ mod tests {
         world.advance(0.0);
         let (mut items, mut list) = (Vec::new(), RenderList3D::new());
 
-        let camera = fill_draw_list3(&view, &world, FrameView::of(&f), &mut items, &mut list);
+        let camera = fill_draw_list3(&view, &world, FrameView::of(&f), &mut items, &mut list, &mut Vec::new());
 
         assert_eq!(list.lighting.intensity, 7.0);
         assert_eq!((list.instances(MeshKind::Sphere).len(), list.instances(MeshKind::Box).len()), (1, 1));
         assert_eq!(camera, default_orbit().camera());
         // A second fill replaces the first.
-        fill_draw_list3(&view, &world, FrameView::of(&f), &mut items, &mut list);
+        fill_draw_list3(&view, &world, FrameView::of(&f), &mut items, &mut list, &mut Vec::new());
         assert_eq!(list.instance_count(), 2);
+    }
+
+    #[test]
+    fn an_entity_with_a_known_view_asset_is_drawn_as_its_model_and_not_as_a_box() {
+        let mut f = frame();
+        avatar(&mut f, "avatars/knight.orrview", FPVec3::new(fp!(4), fp!(0), fp!(-2)), fp!(2));
+        let assets = ViewAssets::from_assets(".", [asset("avatars/knight.orrview", "models/knight.glb", 1.5)]).unwrap();
+
+        let (models, list) = drawn(Look3D::default().assets(assets), &f);
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].asset, ViewRef::at("avatars/knight.orrview").asset);
+        assert_eq!(models[0].model, "models/knight.glb");
+        assert_eq!(models[0].instance.translation, [4.0, 0.0, -2.0]);
+        assert_eq!(models[0].instance.scale, [3.0, 3.0, 3.0], "the scale of the entity times the scale of the asset");
+        assert_eq!(list.instance_count(), 0, "no stand-in box next to the model");
+    }
+
+    #[test]
+    fn an_entity_whose_asset_is_unknown_keeps_its_stand_in_box_so_the_gap_can_be_seen() {
+        let mut f = frame();
+        avatar(&mut f, "avatars/missing.orrview", FPVec3::ZERO, fp!(1));
+        let assets = ViewAssets::from_assets(".", [asset("avatars/knight.orrview", "models/knight.glb", 1.0)]).unwrap();
+
+        let (models, list) = drawn(Look3D::default().assets(assets), &f);
+        assert!(models.is_empty());
+        assert_eq!(list.instances(MeshKind::Box).len(), 1);
+
+        // A look without assets draws the box too, for the same reason.
+        let (models, list) = drawn(Look3D::default(), &f);
+        assert!(models.is_empty());
+        assert_eq!(list.instances(MeshKind::Box).len(), 1);
+    }
+
+    #[test]
+    fn a_body_with_a_view_asset_is_drawn_as_the_model_at_scale_one_and_once() {
+        let mut f = frame();
+        let ball = dynamic(&mut f, FPVec3::new(fp!(1), fp!(2), fp!(3)), Shape::sphere(fp!(0.5)));
+        f.add(ball, PlacedTransform { scale: FPVec3::new(fp!(9), fp!(9), fp!(9)), ..Default::default() });
+        f.add(ball, ViewRef::at("ball.orrview"));
+        let both = avatar(&mut f, "ball.orrview", FPVec3::new(fp!(7), fp!(0), fp!(0)), fp!(1));
+        f.add(both, Material::new("lava"));
+        let assets = ViewAssets::from_assets(".", [asset("ball.orrview", "ball.glb", 2.0)]).unwrap();
+
+        let (models, list) = drawn(Look3D::default().assets(assets), &f);
+
+        assert_eq!(models.len(), 2, "one model per entity, also with a material");
+        let of_body = models.iter().find(|m| m.instance.translation == [1.0, 2.0, 3.0]).expect("the body is placed by its body");
+        assert_eq!(of_body.instance.scale, [2.0; 3], "a body is sized by the asset only");
+        assert_eq!(list.instance_count(), 0);
+    }
+
+    #[test]
+    fn the_avatars_of_an_offline_lobby_are_drawn_with_the_models_of_their_view_assets() {
+        use orr_session::{PlayConfig, PlaySession};
+        use orr_testgame::lobby::{Lobby, LobbyConfig};
+
+        let config = LobbyConfig::from_view_assets(&["blue.orrview", "red.orrview"]);
+        let mut session = PlaySession::<Lobby>::new(PlayConfig::new(2, 1, 60), config);
+        session.announce_players().unwrap();
+        session.step_now().unwrap();
+        let assets = ViewAssets::from_assets(".", [asset("blue.orrview", "blue.glb", 1.0), asset("red.orrview", "red.glb", 1.0)]).unwrap();
+
+        let (models, list) = drawn(Look3D::default().assets(assets), session.frame());
+
+        let mut files: Vec<&str> = models.iter().map(|m| m.model.as_str()).collect();
+        files.sort_unstable();
+        assert_eq!(files, ["blue.glb", "red.glb"], "one model per player");
+        let xs: Vec<f32> = models.iter().map(|m| m.instance.translation[0]).collect();
+        assert!(xs.contains(&-1.5) && xs.contains(&1.5), "each avatar stands where on_player put it: {xs:?}");
+        assert_eq!(list.instances(MeshKind::Box).len(), 1, "the floor stays a shape");
+    }
+
+    #[test]
+    fn a_game_without_view_refs_draws_as_before() {
+        let mut f = Frame::new({
+            let mut registry = ComponentRegistryBuilder::new();
+            orr_physics3d::register(&mut registry);
+            registry.build()
+        });
+        dynamic(&mut f, FPVec3::ZERO, Shape::sphere(fp!(1)));
+        let assets = ViewAssets::from_assets(".", [asset("a.orrview", "a.glb", 1.0)]).unwrap();
+
+        let (models, list) = drawn(Look3D::default().assets(assets), &f);
+
+        assert!(models.is_empty());
+        assert_eq!(list.instances(MeshKind::Sphere).len(), 1);
     }
 
     #[test]

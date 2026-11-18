@@ -20,6 +20,10 @@
 //! - `range = "0.05..=1000"`: allowed values, inclusive (either end may be empty).
 //! - `text`: a `[u8; N]` field that holds UTF-8 text of at most N bytes, padded
 //!   with zero bytes. Scene files and the inspector show it as a string.
+//! - `asset = "texture"`: a `[u8; N]` field that holds the path of an asset of that kind.
+//! - `asset_id = "view"`: a `u64` field that holds the id of an asset of that kind (the
+//!   `orr_reflect::asset_id` hash of its path, 0 for none). The inspector offers a picker of the
+//!   assets of that kind by name.
 //!
 //! Doc comments on the struct and its fields become descriptions in the
 //! schema and the inspector.
@@ -61,6 +65,7 @@ struct FieldAttrs {
     range: Option<String>,
     text: bool,
     asset: Option<String>,
+    asset_id: Option<String>,
 }
 
 fn field_attrs(attrs: &[syn::Attribute]) -> syn::Result<FieldAttrs> {
@@ -84,8 +89,10 @@ fn field_attrs(attrs: &[syn::Attribute]) -> syn::Result<FieldAttrs> {
                 out.text = true;
             } else if m.path.is_ident("asset") {
                 out.asset = Some(m.value()?.parse::<syn::LitStr>()?.value());
+            } else if m.path.is_ident("asset_id") {
+                out.asset_id = Some(m.value()?.parse::<syn::LitStr>()?.value());
             } else {
-                return Err(m.error("unknown reflect attribute (skip, bool, enumeration, flags, range, text, asset)"));
+                return Err(m.error("unknown reflect attribute (skip, bool, enumeration, flags, range, text, asset, asset_id)"));
             }
             Ok(())
         })?;
@@ -164,6 +171,8 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
             let names = vals.iter().map(|(n, _)| n);
             let nums = vals.iter().map(|(_, v)| v);
             quote! { ::orr_reflect::TypeDesc::flags(::core::mem::size_of::<#fty>(), &[#((#names, #nums)),*]) }
+        } else if let Some(kind) = &attrs.asset_id {
+            quote! { <#fty as ::orr_reflect::Reflect>::describe().with_asset_id(#kind) }
         } else {
             quote! { <#fty as ::orr_reflect::Reflect>::describe() }
         };

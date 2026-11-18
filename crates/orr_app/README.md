@@ -79,6 +79,37 @@ fn main() -> Result<(), orr_app::Error> {
 - **그림이 같다.** `--screenshot --ticks 300`의 Yard3D 그림은 Yard3D 샘플의 그리기 경로(`YardExtractor`, `fill_list`, `scene_look`, `yard_camera`)로 같은 틱을 그린 그림과 픽셀까지 같다(900x900, MSAA 4, 같은 GPU). `Look3D`의 색과 바닥 규칙은 `YardExtractor`와 같게 맞췄다.
 - **렌더러 설정은 `Settings3D::default()`다**(MSAA 4, 그림자 지도 2048). 바꾸는 옵션은 아직 없다.
 
+## ViewRef, 뷰 에셋, 프리팹 (6b단계)
+
+같은 컴포넌트 구성이어도 엔티티마다 다른 모델을 그리는 방법(`ViewRef`와 뷰 에셋)과, 시뮬레이션 시스템이 프리팹으로 엔티티를 만드는 방법이다.
+
+```rust
+// 게임: 등록 (Game::register)
+orr_gfx::register_view_ref(builder);          // ViewRef 컴포넌트 (orr_gfx::register에는 들어 있지 않다)
+orr_ecs::prefab::register(builder);           // 프리팹 보관소
+
+// 게임: 시작 (Game::setup). 프리팹은 시뮬레이션이 만들어지기 전에 구워 둔 값이다
+orr_ecs::prefab::install(frame, &config.avatars)?;
+
+// 게임: PlayerAdded를 받는 곳 (Players::on_player). 파일을 읽지 않는다
+let avatar = orr_ecs::spawn_prefab(frame, PrefabId(u32::from(slot.0) % orr_ecs::prefab::prefab_count(frame)));
+
+// 실행: 프로젝트의 뷰 에셋을 읽어 3D 룩에 준다
+let assets = ViewAssets::load_dir("assets")?;
+App::<Lobby>::with_config(config).view3d(Look3D::default().assets(assets)).run()
+```
+
+예제: [examples/avatars.rs](examples/avatars.rs). `cargo run -p orr_app --release --example avatars` (WASD와 방향키로 두 플레이어가 한 화면에서 움직인다). 서버로도 된다(`-- --host`, `-- --connect 127.0.0.1:7777`). 시작하면 각 플레이어마다 `PlayerAdded`로 아바타가 생기고, 아바타는 뷰 에셋이 가리키는 모델(`examples/avatars/*.glb`)로 그려진다. 그림은 `--screenshot out.png --ticks 120`.
+
+- **`ViewRef { asset: u64 }`** (`orr_gfx`). 시뮬레이션에 들어가는 `Pod` 컴포넌트다. 시뮬레이션은 번호를 읽기만 하고 뜻을 모른다. 번호는 뷰 에셋 파일 경로(에셋 폴더 기준, `/` 구분)의 64비트 FNV-1a 해시다(`orr_gfx::view_asset_id(path)`, `ViewRef::at(path)`). 0은 "없음"이라 해시가 0이면 1로 바꾼다. 경로가 번호를 정하므로 파일을 옮기면 번호가 달라진다(인스펙터는 이때 "missing asset"을 보여 준다).
+- **씬 파일과 인스펙터.** `ViewRef`는 `orr_gfx::ViewRef: { asset: 123 }`으로 저장된다(`u64` 전체 범위). 리플렉션에는 정수 필드의 `#[reflect(asset_id = "view")]` 속성을 더했다(`Kind::Int`의 `asset`, `ASSET_KINDS`의 `"view"` 종류, 확장자 `orrview`). 에디터 인스펙터는 이 필드를 숫자 대신 씬 폴더의 뷰 에셋 목록(파일 이름)에서 고르는 콤보 박스로 보여 준다.
+- **뷰 에셋 파일 `*.orrview`** (JSON, 버전 1). `{ "version": 1, "name": "Knight", "model": "models/knight.glb", "scale": 1.0, "tint": [1, 0.8, 0.6], "sound": "step", "entity_view": "knight" }`. `version`과 `model`만 있으면 된다. `model`은 에셋 폴더 기준 `.glb`/`.gltf` 경로다. 모르는 키는 오류다. `ViewAssets::load_dir(폴더)`가 폴더 안(4단계 깊이까지, 숨김 폴더 제외)의 모든 `.orrview`를 읽고, 모델 파일이 없거나 두 파일의 번호가 같으면 오류를 낸다. `scale`만 그리기에 쓴다. `tint`, `sound`, `entity_view`는 읽어서 보관만 한다(아래 "남은 것").
+- **그리기.** `Look3D`는 `Transform3`과 `ViewRef`가 있는 엔티티를 (`Material`과 마찬가지로) 자리 표시 상자로 뽑아 다른 엔티티와 같이 보간한다. 그릴 때 `Look3D::assets(..)`에 그 번호의 에셋이 있으면 상자 대신 에셋의 모델을, 보간된 자리에, `Transform3`의 크기(몸이 있으면 1) 곱하기 에셋의 `scale`로 그린다. 번호에 맞는 에셋이 없으면(또는 `assets`를 주지 않으면) 자리 표시 상자가 그대로 남아서 빈 곳이 눈에 보인다. `Body`가 있는 엔티티가 `ViewRef`를 가지면 몸이 자리를 정하고 모델이 모양을 대신한다. 창 없이 확인할 수 있는 결과는 `ModelDraw { asset, model, instance }` 목록이다(`fill_draw_list3`).
+- **모델이 있는 프레임은 합성 경로로 그린다.** 도형과 모델을 한 장에 같은 깊이, 해, 그림자로 그리려고 `ImportedSceneRenderer`(도형은 `ImportedBatch::Procedural`, 모델은 `StaticInstances`)를 쓴다. 이 경로는 1샘플이라서 **MSAA와 톤 매핑이 없다**. 모델이 없는 프레임은 예전 경로 그대로이고, 그림은 바뀌지 않는다. 모델 파일마다 렌더러 하나를 처음 쓸 때 만들고, 읽기에 실패하면 stderr에 한 번 알리고 그 모델은 빼고 그린다. 모델 하나는 프레임당 256개까지 그린다(`MAX_STATIC_INSTANCES`).
+- **프리팹 (`orr_ecs::prefab`).** `Prefab`은 컴포넌트 바이트의 목록이다. `Prefab::with(registry, 값)`으로 코드에서, 또는 `orr_reflect::Scene::bake_prefabs(types, registry)`로 씬 조각에서 굽는다(엔티티 하나가 프리팹 하나, GUID 순서가 `PrefabId`). 조각 안의 엔티티끼리 가리키는 참조는 오류다. `install`이 프리팹을 **프레임 안**(`PrefabLibrary` 싱글턴과 `PrefabPart` 리스트)에 복사한다. 시스템과 `on_player`가 게임의 `Config`를 볼 수 없어서(`Config`는 `setup`만 받는다)이고, 덕분에 스냅숏, 체크섬, 중간 입장 스냅숏에 프리팹이 같이 들어가 롤백 재시뮬레이션과 리플레이가 같은 엔티티를 만든다. `spawn_prefab`은 프레임만 읽는다(파일, 시계, 해시맵 없음). 없는 `PrefabId`는 아무것도 바꾸지 않고 `None`을 준다. 컴포넌트가 128바이트보다 크면 여러 부분으로 나누어 저장한다.
+- **기존 `scene linked` 프리팹은 쓰지 않았다.** 그것은 에디터가 원본 스냅숏과 다이제스트를 검증하는 편집용 메타데이터(`PrefabLink`)라서 실행 중 생성 경로가 아니다. 대신 같은 씬 파일 형식과 `Scene::parse`, 리플렉션의 `desc().write`로 값을 바이트로 만든다.
+- **테스트 게임 `orr_testgame::lobby::Lobby`.** `Added`가 오면 `slot % 프리팹 수`번 프리팹(시작 데이터 `Profile.choice`가 있으면 그것)으로 `Transform3`, `ViewRef`, `PlayerLink`가 있는 아바타를 만들고 `PlayerLink`와 자리를 맞춘다. `Removed`는 아바타를 지운다. 입력 `LobbyInput`으로 땅 위를 걷는다.
+
 ## 엔티티 뷰와 씬 뷰
 
 ```rust
@@ -206,5 +237,6 @@ cargo run -p orr_app --release --example roster -- --connect 127.0.0.1:7777
 - **2단계에서 뺀 것:** `ViewContext::query`(`FrameView::iter::<T>()`, `dense::<T>()`가 이미 있어서 조합 질의는 `orr_ecs` 쪽 일이다), `ViewContext::draw()`(기본 2D 그리기가 `Extractor` 항목과 `backdrop`만 받아서 선·글자를 더하려면 그리기 경로를 넓혀야 한다), `App::threaded()`(위). `SceneView::on_player`는 4a단계에서 더했다.
 - **3단계에서 뺀 것:** 패드 입력(키보드만), 서버 쪽 여러 슬롯 클라이언트(릴레이·네트워크는 슬롯 하나), `Threaded`를 쓰는 `App` 경로(위), 여러 슬롯의 `Step` 입력 캡처(`Threaded::try_step`은 첫 슬롯만 고정한다).
 - **4b단계에서 뺀 것:** 플레이어별 시작 데이터(`Added`의 `data`는 서버로 실행해도 비어 있다. `Hello`에 시작 데이터가 없다. 8.3), 서버 쪽 신호 기록은 방이 사는 동안만 있다(서버를 다시 띄우면 사라진다), 시작 때의 `Added`(틱 1)는 `signal_lead_ticks` 여유가 없다, 권한 있는 서버 방은 신호가 없다, `.scene(..)`과 `.bot(..)`은 서버로 실행할 때 쓰지 않는다, `ws://`만 지원한다(QUIC·인증서 옵션 없음), 원격 뷰 스트림(`orr_viewstream`)은 신호를 아직 내보내지 않는다. 신호를 취소하는 API가 없어서 `Canceled`는 합성 업데이트 테스트로만 확인했다.
-- **6a단계에서 뺀 것:** `Material`의 표면 셰이더(`Transform3`과 `Material`이 있는 엔티티는 단색 상자로 그린다), 모델 참조(`ViewRef`, 6b), `SceneLook`의 후처리(블룸 등)와 하늘, 물, 지형, 흩뿌리기 그리기(조명과 데칼만 쓴다), 3D 마우스 입력(`InputContext`는 키만 읽는다. 예제 `yard3d`는 화면 가운데로 쏜다), 3D 뷰의 `ViewConfig` 바꾸기(기본값), 화면 글자 겹치기(overlay).
+- **6a단계에서 뺀 것:** `Material`의 표면 셰이더(`Transform3`과 `Material`이 있는 엔티티는 단색 상자로 그린다), `SceneLook`의 후처리(블룸 등)와 하늘, 물, 지형, 흩뿌리기 그리기(조명과 데칼만 쓴다), 3D 마우스 입력(`InputContext`는 키만 읽는다. 예제 `yard3d`는 화면 가운데로 쏜다), 3D 뷰의 `ViewConfig` 바꾸기(기본값), 화면 글자 겹치기(overlay).
+- **6b단계에서 뺀 것:** 뷰 에셋의 `tint`(색 입히기), `sound`, `entity_view`는 읽기만 하고 쓰지 않는다. `App::entity_view_for("종류", factory)`(뷰 에셋의 `entity_view` 이름으로 엔티티 뷰를 붙이기)는 만들지 않았다. 지금은 `entity_view::<ViewRef>(..)`처럼 컴포넌트로 붙인다. 모델이 있는 그림은 MSAA와 톤 매핑이 없다(위). 에디터 뷰포트는 `ViewRef` 모델을 아직 그리지 않는다. 에디터의 어떤 게임도 `ViewRef`를 등록하지 않아서(등록하면 그 게임의 프레임 배치와 골든 체크섬이 바뀐다) 인스펙터 선택기는 `ViewRef`를 가진 게임을 에디터에 올려야 실제로 보인다. 서버로 실행할 때 `Added.data`는 아직 비어 있어서(4b) 아바타는 슬롯 번호로 정한다. 애니메이션 모델(`SkinnedModelRenderer`)은 쓰지 않는다.
 - **이후 단계:** 웹·모바일 루프.

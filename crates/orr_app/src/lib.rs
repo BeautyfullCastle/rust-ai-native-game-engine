@@ -15,6 +15,7 @@
 mod app;
 mod cli;
 mod input;
+mod models;
 mod net;
 mod pace;
 mod shot;
@@ -29,6 +30,7 @@ pub use orr_render::{Camera, Camera3D, Lighting, OrbitCamera};
 pub use orr_ecs::Entity;
 pub use orr_view::{fp_to_f32, fp_to_vec2, Extracted, Extracted3, Extractor, Extractor3, InterpMode, RenderItem, Shape3, Style3, Transform2, Transform3};
 pub use view2d::{solid_quad, View2D};
-pub use view3d::{default_lighting, default_orbit, extract_default, scene_camera, Look3D, View3D};
+pub use orr_gfx_view::{ViewAsset, ViewAssetError, ViewAssets};
+pub use view3d::{default_lighting, default_orbit, extract_default, scene_camera, Look3D, ModelDraw, View3D};
 pub use views::{EntityFactory, EntityView, EventState, SceneView, ViewContext, Views};
 pub use winit::keyboard::KeyCode;

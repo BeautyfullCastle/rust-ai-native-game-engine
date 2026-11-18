@@ -110,6 +110,8 @@ pub enum BakeError {
     },
     /// An entity reference names a GUID that is not in the scene.
     MissingEntity(String),
+    /// A prefab holds an entity reference. A prefab is a recipe: it cannot point at a scene entity.
+    PrefabReference(String),
     /// A value in the frame cannot be written to a file.
     Unsaveable {
         /// Where.
@@ -128,6 +130,7 @@ impl std::fmt::Display for BakeError {
             BakeError::UnknownType(n) => write!(f, "unknown type '{n}'"),
             BakeError::Value { at, error } => write!(f, "{at}: {error}"),
             BakeError::MissingEntity(g) => write!(f, "reference to missing entity '{g}'"),
+            BakeError::PrefabReference(at) => write!(f, "{at}: a prefab cannot refer to an entity"),
             BakeError::Unsaveable { at, error } => write!(f, "cannot save {at}: {error}"),
         }
     }
@@ -202,6 +205,30 @@ pub(super) fn bake(scene: &Scene, reg: &TypeRegistry, frame: &mut Frame) -> Resu
         }
     }
     Ok(index)
+}
+
+/// One prefab per entity of the scene, in GUID order (the first is `PrefabId(0)`). The bytes of
+/// each component are made like in a bake: the default bytes of the type, then the scene fields.
+pub(super) fn bake_prefabs(scene: &Scene, reg: &TypeRegistry, registry: &orr_ecs::ComponentRegistry) -> Result<Vec<orr_ecs::Prefab>, BakeError> {
+    let mut out = Vec::new();
+    for (guid, ent) in &scene.entities {
+        let mut prefab = orr_ecs::Prefab::new();
+        for (name, value) in &ent.components {
+            let t = reg.get(name).filter(|t| t.kind() == TypeKind::Component).ok_or_else(|| BakeError::UnknownType(name.clone()))?;
+            let at = format!("{guid}.{name}");
+            if !entity_refs(value).is_empty() {
+                return Err(BakeError::PrefabReference(at));
+            }
+            let id = orr_ecs::prefab::component_id_by_name(registry, name).ok_or_else(|| BakeError::NotInFrame(name.clone()))?;
+            let mut bytes = t.default_bytes();
+            t.desc().write(&mut bytes, value).map_err(|error| BakeError::Value { at: at.clone(), error })?;
+            prefab = prefab
+                .with_bytes(registry, id, &bytes)
+                .map_err(|e| BakeError::Value { at, error: ReflectError::Invalid(e.to_string()) })?;
+        }
+        out.push(prefab);
+    }
+    Ok(out)
 }
 
 fn resolve(v: &Value, index: &SceneIndex) -> Value {

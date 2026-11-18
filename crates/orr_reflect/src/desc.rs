@@ -198,6 +198,9 @@ pub enum Kind {
         int: IntKind,
         /// Allowed values.
         range: Range,
+        /// When set, the number is the id of an asset of this kind (see [`ASSET_KINDS`]),
+        /// made by [`asset_id`] from the asset's path. Zero means no asset.
+        asset: Option<String>,
     },
     /// `FP`.
     Fixed {
@@ -340,7 +343,7 @@ impl TypeDesc {
     }
     /// An integer.
     pub fn int(int: IntKind) -> Self {
-        Self::new(Kind::Int { int, range: Range::default() })
+        Self::new(Kind::Int { int, range: Range::default(), asset: None })
     }
     /// `FP`.
     pub fn fixed() -> Self {
@@ -410,6 +413,18 @@ impl TypeDesc {
             Kind::Tagged(t) => t.size,
             Kind::List { .. } => 0,
         }
+    }
+
+    /// Marks an integer as the id of an asset of kind `asset` (one of [`ASSET_KINDS`]).
+    /// The id is [`asset_id`] of the asset's path, and zero means no asset.
+    ///
+    /// Panics on a type that is not an integer: that is a bug in the type's descriptor.
+    pub fn with_asset_id(mut self, asset: &str) -> Self {
+        match &mut self.kind {
+            Kind::Int { asset: slot, .. } => *slot = Some(asset.to_string()),
+            _ => panic!("orr_reflect: an asset id must be an integer field"),
+        }
+        self
     }
 
     /// Restricts numeric leaves to `"min..=max"` in decimal text. Either bound
@@ -546,7 +561,7 @@ impl TypeDesc {
         let mismatch = |found: &Value| ReflectError::TypeMismatch { expected: self.expected_name(), found: found.kind_name().to_string() };
         match (&self.kind, v) {
             (Kind::Bool { .. }, Value::Bool(_)) | (Kind::Entity, Value::Entity(_) | Value::EntityGuid(_)) => Ok(()),
-            (Kind::Int { int, range }, Value::Int(n)) => {
+            (Kind::Int { int, range, .. }, Value::Int(n)) => {
                 if *n < int.min() || *n > int.max() {
                     return Err(ReflectError::OutOfRange(format!("{n} does not fit {}", int.name())));
                 }
@@ -974,7 +989,24 @@ pub const ASSET_KINDS: &[(&str, &[&str])] = &[
     ("texture", &["png"]),
     ("model", &["glb", "gltf"]),
     ("shader", &["wgsl"]),
+    ("view", &["orrview"]),
 ];
+
+/// The id of the asset at `path` (relative to the project's asset folder, with `/` between
+/// folders): the 64 bit FNV-1a hash of the path bytes, and never 0, which means "no asset".
+/// It needs no registry, so a scene file, the inspector and the loader of the game agree on it.
+pub fn asset_id(path: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in path.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    if hash == 0 {
+        1
+    } else {
+        hash
+    }
+}
 
 /// The file extensions of the asset kind `kind`, or none for a kind not in [`ASSET_KINDS`].
 pub fn asset_extensions(kind: &str) -> &'static [&'static str] {

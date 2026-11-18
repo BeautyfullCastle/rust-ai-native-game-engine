@@ -20,6 +20,8 @@
 //!   drag; typed values outside them are refused by the document with a message.
 //! - An asset path is a text field and a list of the matching files under the
 //!   scene's folder (see [`set_asset_root`]).
+//! - A number that is the id of an asset (a `ViewRef`) is a combo box of the matching files under
+//!   the same folder, shown by file name, with "(none)" first (see [`asset_id_choices`]).
 //! - An entity reference in a scene is a combo box of the scene's entities
 //!   (see [`set_entity_choices`]) with "none" first. During play it is read only.
 
@@ -198,6 +200,27 @@ fn scalar(ui: &mut Ui, id: Id, ty: &TypeDesc, value: &Value, path: &str, label: 
                 out.push(InspEvent::Set { path: path.to_string(), value: Value::Bool(v) });
             }
         }
+        (Kind::Int { asset: Some(kind), .. }, Value::Int(current)) => {
+            let files = asset_files(ui.ctx(), kind);
+            let choices = asset_id_choices(&files);
+            let shown = asset_id_label(&choices, *current);
+            egui::ComboBox::from_id_salt(id).selected_text(shown).width(200.0).show_ui(ui, |ui| {
+                if ui.selectable_label(*current == 0, "(none)").clicked() && *current != 0 {
+                    out.push(InspEvent::Set { path: path.to_string(), value: Value::Int(0) });
+                }
+                for (asset, name, file) in &choices {
+                    let selected = *current == i128::from(*asset);
+                    if ui.selectable_label(selected, name).on_hover_text(file).clicked() && !selected {
+                        out.push(InspEvent::Set { path: path.to_string(), value: Value::Int(i128::from(*asset)) });
+                    }
+                }
+                if choices.is_empty() {
+                    ui.weak(format!("No .{} files next to the scene", orr_reflect::asset_extensions(kind).join(", .")));
+                }
+            })
+            .response
+            .on_hover_text(hover);
+        }
         (Kind::Int { .. }, Value::Int(i)) => {
             let canonical = decimal::int_to_decimal(*i);
             if let Some(text) = number_field(ui, id, &canonical, hover, 120.0) {
@@ -295,6 +318,24 @@ fn scalar(ui: &mut Ui, id: Id, ty: &TypeDesc, value: &Value, path: &str, label: 
             ui.colored_label(ui.visuals().warn_fg_color, format!("cannot show a {}", value.kind_name()));
         }
     }
+}
+
+/// The assets a number field of an asset id offers: for each file its id (`orr_reflect::asset_id` of
+/// the path), its name (the path without the extension) and the path itself.
+pub fn asset_id_choices(files: &[String]) -> Vec<(u64, String, String)> {
+    files
+        .iter()
+        .map(|file| (orr_reflect::asset_id(file), file.rsplit_once('.').map_or(file.as_str(), |(name, _)| name).to_string(), file.clone()))
+        .collect()
+}
+
+/// What the combo box of an asset id shows: the name of the asset with this id, "(none)" for 0, and
+/// a warning with the number when no file has that id (the file was moved or deleted).
+pub fn asset_id_label(choices: &[(u64, String, String)], current: i128) -> String {
+    if current == 0 {
+        return "(none)".to_string();
+    }
+    choices.iter().find(|(asset, _, _)| i128::from(*asset) == current).map_or_else(|| format!("missing asset ({current})"), |(_, name, _)| name.clone())
 }
 
 /// Which fixed-point width a field has.

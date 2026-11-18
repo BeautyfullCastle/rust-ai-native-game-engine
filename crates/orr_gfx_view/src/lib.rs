@@ -12,6 +12,9 @@
 
 #[cfg(feature = "models")]
 pub mod terrain_mesh;
+mod view_asset;
+
+pub use view_asset::{ViewAsset, ViewAssetError, ViewAssets, VIEW_ASSET_EXTENSION, VIEW_ASSET_VERSION};
 
 use orr_bridge::FrameView;
 use orr_ecs::Entity;

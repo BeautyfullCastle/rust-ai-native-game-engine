@@ -23,7 +23,7 @@ fn wave_counts_are_a_forty_byte_reflected_singleton_with_literal_defaults() {
         panic!("pair_counts must be an exact-size array");
     };
     assert_eq!(*len, 10);
-    let Kind::Int { int, range } = &elem.kind else {
+    let Kind::Int { int, range, .. } = &elem.kind else {
         panic!("every pair count must be an integer");
     };
     assert_eq!(*int, orr_reflect::IntKind::U32);

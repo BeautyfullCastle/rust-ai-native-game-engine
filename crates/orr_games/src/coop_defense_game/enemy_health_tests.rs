@@ -14,7 +14,7 @@ fn enemy_health_layout_defaults_bounds_and_checked_multiplication() {
     };
     assert_eq!(fields.len(), 1);
     assert_eq!(fields[0].name, "multiplier");
-    let Kind::Int { int, range } = &fields[0].ty.kind else {
+    let Kind::Int { int, range, .. } = &fields[0].ty.kind else {
         panic!()
     };
     assert_eq!(*int, orr_reflect::IntKind::U32);

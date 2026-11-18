@@ -13,6 +13,9 @@
 //! - [`Environment`]: sky and ground ambient light of the scene.
 //! - [`PostProcess`]: exposure, tone mapping and the ordered list of post effects.
 //! - [`Camera`]: a camera on an entity; the active one with the highest priority is the main camera.
+//! - [`ViewRef`]: the view asset (model, tint, scale) that draws an entity. It is opt-in: a game
+//!   calls [`register_view_ref`] and [`register_view_ref_reflect`], so games that do not draw
+//!   from view assets keep their frame layout.
 //! - [`Terrain`]: ground from a heightmap image, given its look by a [`Material`].
 //! - [`Sky`]: the drawn sky, fog and wind of an outdoor scene.
 //! - [`Water`]: a water surface; [`Scatter`]: trees, rocks or grass spread over a terrain.
@@ -285,6 +288,33 @@ impl Material {
         let end = self.shader.iter().position(|b| *b == 0).unwrap_or(SHADER_NAME_BYTES);
         core::str::from_utf8(&self.shader[..end]).unwrap_or("")
     }
+}
+
+/// Which view asset draws an entity. The view layer looks the asset up by `asset` and draws its
+/// model at the entity's placement. The simulation never reads the asset: it only keeps the number,
+/// so a system can give two entities of the same kind different looks (a player's avatar).
+///
+/// `asset` is [`view_asset_id`] of the path of a `.orrview` file, relative to the project's asset
+/// folder. The inspector shows it as a list of the project's view assets by name. 0 means none.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable, Reflect)]
+pub struct ViewRef {
+    /// The id of the view asset (the hash of its path). 0 for none.
+    #[reflect(asset_id = "view")]
+    pub asset: u64,
+}
+
+impl ViewRef {
+    /// The reference to the view asset at `path`, like `"avatars/knight.orrview"`.
+    pub fn at(path: &str) -> Self {
+        Self { asset: view_asset_id(path) }
+    }
+}
+
+/// The id of the view asset at `path` (relative to the asset folder, `/` between folders):
+/// the hash that [`ViewRef::asset`] holds. Never 0.
+pub fn view_asset_id(path: &str) -> u64 {
+    orr_reflect::asset_id(path)
 }
 
 /// Ambient light of the scene: light from the sky above and from the ground below.
@@ -819,6 +849,19 @@ pub mod names {
     pub const SCATTER: &str = "orr_gfx::Scatter";
     /// [`super::Decal`].
     pub const DECAL: &str = "orr_gfx::Decal";
+    /// [`super::ViewRef`].
+    pub const VIEW_REF: &str = "orr_gfx::ViewRef";
+}
+
+/// Registers [`ViewRef`] as a component. Call it from `Game::register` of a game that draws from
+/// view assets. It is not part of [`register`]: it would change the frame layout of every game.
+pub fn register_view_ref(builder: &mut ComponentRegistryBuilder) {
+    builder.register_component::<ViewRef>(names::VIEW_REF);
+}
+
+/// Registers [`ViewRef`] for scene files and the inspector, with the same name as [`register_view_ref`].
+pub fn register_view_ref_reflect(types: &mut TypeRegistry) {
+    types.register_component::<ViewRef>(names::VIEW_REF);
 }
 
 /// Registers the components and singletons with a game's simulation.

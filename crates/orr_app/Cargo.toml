@@ -13,7 +13,9 @@ workspace = true
 [dependencies]
 orr_bridge = { path = "../orr_bridge" }
 orr_view = { path = "../orr_view" }
-orr_render = { path = "../orr_render" }
+# `imported-scene` draws models with the 3D shapes in one picture (view assets, `ViewRef`).
+orr_render = { path = "../orr_render", features = ["imported-scene"] }
+orr_model = { path = "../orr_model", features = ["import"] }
 orr_session = { path = "../orr_session" }
 orr_sim = { path = "../orr_sim" }
 orr_ecs = { path = "../orr_ecs" }

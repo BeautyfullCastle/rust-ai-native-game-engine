@@ -319,13 +319,35 @@ impl<B: Rhi> WindowRenderer3D<B> {
         overlay: &RenderList,
         capture: bool,
     ) -> (bool, Option<(u32, u32, Vec<u8>)>) {
+        self.present(capture, |renderer, overlay_renderer, view, size| {
+            renderer.draw(view, size, list, camera);
+            if !overlay.is_empty() {
+                overlay_renderer.draw(view, size, overlay, &crate::text::pixel_camera(size));
+            }
+        })
+    }
+
+    /// Presents a frame that `draw` fills: it gets the 3D renderer of this window, the frame's
+    /// view and the size of the frame, and must submit its work before it returns. For a picture
+    /// that a game composes itself (for example 3D shapes and models in one pass). With `capture`
+    /// the presented frame is read back like in [`render_capture`](Self::render_capture).
+    pub fn render_with(
+        &mut self,
+        capture: bool,
+        draw: impl FnOnce(&mut Renderer3D<B>, &B::TextureView, (u32, u32)),
+    ) -> (bool, Option<(u32, u32, Vec<u8>)>) {
+        self.present(capture, |renderer, _, view, size| draw(renderer, view, size))
+    }
+
+    fn present(
+        &mut self,
+        capture: bool,
+        draw: impl FnOnce(&mut Renderer3D<B>, &mut Renderer<B>, &B::TextureView, (u32, u32)),
+    ) -> (bool, Option<(u32, u32, Vec<u8>)>) {
         let rhi = self.renderer.rhi().clone();
         let Acquire::Frame(frame) = rhi.acquire_frame(&mut self.surface) else { return (false, None) };
         let view = rhi.frame_view(&frame);
-        self.renderer.draw(view, self.size, list, camera);
-        if !overlay.is_empty() {
-            self.overlay.draw(view, self.size, overlay, &crate::text::pixel_camera(self.size));
-        }
+        draw(&mut self.renderer, &mut self.overlay, view, self.size);
         let shot = if capture {
             rhi.read_frame(&frame).map(|mut bytes| {
                 if rhi.surface_format(&self.surface).is_bgra() {
