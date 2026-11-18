@@ -24,7 +24,7 @@ const CAPSULE_COLOR: [f32; 3] = [0.50, 0.12, 0.70];
 const MARKED_COLOR: [f32; 3] = [0.62, 0.64, 0.70];
 /// Speed (units per second) at which a moving body is shown at full brightness.
 const FULL_BRIGHT_SPEED: f32 = 6.0;
-/// A static box at least this wide and deep (half extents, in units) is the ground.
+/// An unturned static box at least this wide and deep (half extents, in units) is the ground.
 const GROUND_MIN_HALF: f32 = 20.0;
 
 /// The game's 3D look. The [`Extractor3`] part reads drawable entities out of a sim frame
@@ -215,6 +215,12 @@ fn extract_marked(entity: orr_ecs::Entity, placed: &PlacedTransform, layers: u32
     Extracted3 { entity, transform: Transform3::new(fp_to_vec3(placed.position), euler_degrees(degrees)), mode: InterpMode::Prediction, style }
 }
 
+/// True when the body has exactly the identity rotation. Only then is the top face of a box
+/// horizontal and aligned with the world axes, as a ground plane is.
+fn is_unturned(body: &Body) -> bool {
+    body.rot == Default::default()
+}
+
 /// `layers` are the entity's render layers (see `orr_gfx::RenderLayers`).
 fn extract_body(entity: orr_ecs::Entity, body: &Body, collider: &Collider, layers: u32) -> Extracted3 {
     let shape = &collider.shape;
@@ -223,7 +229,7 @@ fn extract_body(entity: orr_ecs::Entity, body: &Body, collider: &Collider, layer
     let (shape3, base, material) = match shape.kind {
         SHAPE_BOX => {
             let half = [fp_to_f32(shape.half.x), fp_to_f32(shape.half.y), fp_to_f32(shape.half.z)];
-            if !dynamic && half[0] > GROUND_MIN_HALF && half[2] > GROUND_MIN_HALF {
+            if !dynamic && half[0] > GROUND_MIN_HALF && half[2] > GROUND_MIN_HALF && is_unturned(body) {
                 // The floor slab: draw its top face as a checkered plane.
                 transform.pos.y += half[1];
                 let style = Style3 {
@@ -344,9 +350,10 @@ pub(crate) fn fill_draw_list3(
 mod tests {
     use super::*;
     use orr_ecs::{ComponentRegistryBuilder, Frame};
-    use orr_fp::{fp, FPVec3, FP};
+    use orr_fp::{fp, FPQuat, FPVec3, FP};
     use orr_physics3d::Shape;
     use orr_render::MeshKind;
+    use orr_view::fp_to_quat;
     use orr_view::ViewConfig;
 
     fn frame() -> Frame {
@@ -417,6 +424,45 @@ mod tests {
         assert!(of(ground).style.checker);
         assert_eq!(of(ground).transform.pos.y, 0.5);
         assert_eq!((of(wall).style.shape, of(wall).mode), (Shape3::Box { half: [1.0, 2.0, 3.0] }, InterpMode::None));
+    }
+
+    /// A static box of half extents 24 x 0.5 x 24 at the origin, turned about the x axis.
+    fn turned_slab(frame: &mut Frame, radians: FP) -> orr_ecs::Entity {
+        let slab = fixed(frame, Shape::cuboid(fp!(24), fp!(0.5), fp!(24)));
+        frame.get_mut::<Body>(slab).unwrap().rot = FPQuat::from_axis_angle(FPVec3::X, radians);
+        slab
+    }
+
+    #[test]
+    fn a_big_static_box_that_is_turned_keeps_its_shape_and_rotation_in_the_draw_list() {
+        for radians in [fp!(1.5707963), fp!(0.5235988)] {
+            let mut f = frame();
+            let slab = turned_slab(&mut f, radians);
+            let physics_rot = fp_to_quat(f.get::<Body>(slab).unwrap().rot).to_array();
+
+            let (_, list) = drawn(Look3D::new(), &f);
+
+            assert!(list.instances(MeshKind::Plane).is_empty(), "a turned slab is not the horizontal ground");
+            let boxes = list.instances(MeshKind::Box);
+            assert_eq!(boxes.len(), 1);
+            assert_eq!((boxes[0].pos, boxes[0].scale), ([0.0, 0.0, 0.0], [24.0, 0.5, 24.0]));
+            for i in 0..4 {
+                assert!((boxes[0].rot[i] - physics_rot[i]).abs() < 1e-4, "{:?} vs {physics_rot:?}", boxes[0].rot);
+            }
+        }
+    }
+
+    #[test]
+    fn an_axis_aligned_big_static_box_is_still_the_ground_in_the_draw_list() {
+        let mut f = frame();
+        fixed(&mut f, Shape::cuboid(fp!(24), fp!(0.5), fp!(24)));
+
+        let (_, list) = drawn(Look3D::new(), &f);
+
+        assert!(list.instances(MeshKind::Box).is_empty());
+        let planes = list.instances(MeshKind::Plane);
+        assert_eq!(planes.len(), 1);
+        assert_eq!((planes[0].pos, planes[0].scale), ([0.0, 0.5, 0.0], [24.0, 1.0, 24.0]));
     }
 
     #[test]
