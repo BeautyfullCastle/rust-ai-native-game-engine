@@ -17,6 +17,7 @@ pub fn registry() -> Registry {
         })
         .expect("unique Stormglass cadence inspector");
     super::counts_inspector::register(&mut registry);
+    super::health_inspector::register(&mut registry);
     registry
 }
 
