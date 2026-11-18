@@ -8,13 +8,15 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use bytemuck::{Pod, Zeroable};
-use orr_app::{EntityView, EventState, Extracted, Extractor, FrameView, InterpMode, Lifecycle, SceneView, Transform2, ViewContext, Views};
+use orr_app::{
+    EntityView, EventState, Extracted, Extracted3, Extractor, Extractor3, FrameView, InterpMode, Lifecycle, SceneView, Shape3, Style3, Transform2, Transform3, ViewContext, Views,
+};
 use orr_bridge::{
     Bridge, BridgeConfig, BridgeEvent, EventKey, EventStatus, InProc, LoopbackPair, PlayConfig, PlayHost, PlaySession, PlayerSlot, ViewUpdate,
 };
 use orr_session::SessionConfig;
 use orr_sim::{ComponentRegistryBuilder, Entity, Frame, Game, SimContext, System};
-use orr_view::{Shape, Style, Vec2, ViewConfig, ViewWorld};
+use orr_view::{Quat, Shape, Style, Vec2, Vec3, ViewConfig, ViewWorld, ViewWorld3};
 
 const ONE_TICK: Duration = Duration::from_nanos(16_666_667);
 
@@ -662,4 +664,59 @@ fn a_view_context_reports_every_local_slot_of_the_bridge() {
     let update = bridge.poll_view();
     views.dispatch(&mut bridge, &update, &[]);
     assert_eq!(*seen.borrow(), vec![(vec![PlayerSlot(0), PlayerSlot(1)], [true, true, false])]);
+}
+
+/// Draws every spark as a sphere at `(owner + 0.5, 1, 2)`.
+struct SparkLook3;
+
+impl Extractor3 for SparkLook3 {
+    fn extract(&self, frame: FrameView<'_>, out: &mut Vec<Extracted3>) {
+        for (entity, spark) in frame.iter::<Spark>() {
+            out.push(Extracted3 {
+                entity,
+                transform: Transform3::new(Vec3::new(spark.owner as f32 + 0.5, 1.0, 2.0), Quat::IDENTITY),
+                mode: InterpMode::Prediction,
+                style: Style3::new(Shape3::Sphere { radius: 1.0 }, [1.0; 3]),
+            });
+        }
+    }
+}
+
+#[test]
+fn in_a_3d_run_the_entity_views_get_the_3d_pose_and_not_the_flat_one() {
+    type Poses = Rc<RefCell<Vec<(Entity, Option<Transform3>)>>>;
+    struct Probe {
+        flat: Rc<Cell<u32>>,
+        poses: Poses,
+    }
+    impl EntityView<Burst> for Probe {
+        fn on_update(&mut self, _ctx: &mut ViewContext<'_, Burst>, _entity: Entity, _pose: Option<Transform2>) {
+            self.flat.set(self.flat.get() + 1);
+        }
+
+        fn on_update3(&mut self, _ctx: &mut ViewContext<'_, Burst>, entity: Entity, pose: Option<Transform3>) {
+            self.poses.borrow_mut().push((entity, pose));
+        }
+    }
+    let (flat, poses) = (Rc::new(Cell::new(0)), Rc::new(RefCell::new(Vec::new())));
+    let (for_view, for_poses) = (flat.clone(), poses.clone());
+    let mut views = Views::<Burst>::new();
+    views.entity_view::<Spark>(move || Probe { flat: for_view.clone(), poses: for_poses.clone() });
+    let session = PlaySession::<Burst>::new(PlayConfig::new(1, 42, 60), BurstConfig { players: 1, ttl: 100 });
+    let mut bridge = InProc::new(PlayHost::new(session, PlayerSlot(0)), BridgeConfig::default());
+    bridge.set_input(PlayerSlot(0), Trigger { held: 1, _pad: 0 }).unwrap();
+    bridge.step(1);
+    let mut world = ViewWorld3::new(SparkLook3, ViewConfig::default());
+
+    let update = bridge.poll_view();
+    world.update_from_bridge(1.0 / 60.0, &update);
+    let mut items = Vec::new();
+    world.render_items(&mut items);
+    views.dispatch3(&mut bridge, &update, &items);
+
+    assert_eq!(flat.get(), 0);
+    let poses = poses.borrow();
+    assert_eq!(poses.len(), 1);
+    let pose = poses[0].1.expect("the extractor lists the spark, so the view world has its pose");
+    assert_eq!(pose.pos.to_array(), [0.5, 1.0, 2.0]);
 }

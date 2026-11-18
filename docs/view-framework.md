@@ -339,7 +339,8 @@ sequenceDiagram
 | 4a (완료) | 신호·`Players`·오프라인: `PlayerSignal`을 입력(`TickInputs`)과 리플레이에 싣고, `Players` 트레이트, 서버 없이 첫 틱의 `Added`, `SceneView::on_player` | 신호가 `on_player`에 같은 틱으로 들어가고 리플레이에서도 같다. 이미 예측한 틱에 신호가 늦게 와도 롤백 후 체크섬이 같다(테스트). 쓰는 법은 [crates/orr_app/README.md](../crates/orr_app/README.md), 코드는 `orr_sim/src/signal.rs`, `orr_session`(`Session::schedule_signal`, `PlaySession::push_signal`, 리플레이 형식 4), `orr_bridge`(`BridgeEvent::Player`). 남은 것은 4b |
 | 4b (완료) | 서버의 자리 변경을 `Session::schedule_signal(from_tick, ..)`로 잇기, `--host`/`--connect`, 재접속 | 서버와 클라이언트 둘로 한 쪽이 끊겼다 토큰으로 돌아오면 두 쪽이 같은 틱에 `Disconnected` → `Reconnected`를 받고 체크섬이 같다. 보관 시간이 끝나면 `Removed`, 새로 들어온 플레이어는 모두에게 같은 틱의 `Added`(`orr_server/tests/player_signals.rs`, 손실·재정렬이 있는 시뮬레이션 네트워크). 진짜 소켓의 창 두 개는 `orr_app/src/net.rs` 테스트. 쓰는 법은 [crates/orr_app/README.md](../crates/orr_app/README.md)의 "서버로 실행", 예제는 `orr_app/examples/roster.rs`와 `physics2d_coop.rs`. 코드는 `orr_proto`(`SeatChange`), `orr_server/src/room.rs`(`announce_seat`, 자리 기록, `signal_lead_ticks`), `orr_session/src/relay.rs`(`RelayClient::take_signal_notes`), `orr_bridge`(`RelayHost`), `orr_app/src/net.rs`. 뺀 것: 플레이어별 시작 데이터(`Added.data`는 비어 있음), 권한 있는 서버 방의 신호, 원격 뷰 스트림의 신호 전달, `.scene(..)`과 `--connect`, QUIC |
 | 5 (완료) | 스냅숏 체크섬 다수 검증, 클라이언트 입력 "직전과 같음" 표시 | `netsim` 테스트로 조작된 스냅숏이 거부되고, 입력 바이트 감소량을 기록한다. 스냅숏 검증은 9.2, 입력 표시와 잰 바이트는 10.2에 쓴다. 코드는 `orr_server/src/room.rs`(`snapshot_tick`, `judge_snapshot`), `orr_proto/src/msg.rs`, `orr_session/src/relay.rs`(`serve_snapshot`, `SourceStats::input_bytes_sent`). 테스트는 `orr_server/tests/relay_scenarios.rs`(조작된 제공자, 2인 재접속, 프레임이 없는 제공자), `relay_input_same.rs`(손실·중복·재정렬, `Hello` 버전), `relay_input_bytes.rs`(바이트), `orr_proto`의 `msg` 단위 테스트. 이후 프로토콜 버전을 하나(6)로 합치고 `SnapshotRequest`에 서버가 고른 틱을 실었다(9.2). 남은 것: 서버가 데이터에서 체크섬을 다시 계산하지 않는다(입장하는 클라이언트가 확인한다). 두 틱 묶어 보내기는 하지 않았다. 입력 패킷 머리(약 31바이트)와 틱·확인 틱의 고정 8바이트는 줄이지 않았다. 위조된 데이터에 정직한 체크섬을 붙인 업로드는 서버가 아니라 입장하는 클라이언트가 거부한다(입장 실패) |
-| 6 | `ViewRef`, 뷰 에셋, 프리팹 생성 | 인스펙터에서 뷰 에셋을 고르면 그 모델이 그려진다. `PlayerAdded`로 아바타 프리팹이 생긴다 |
+| 6a (완료) | 기본 3D 렌더러: `App::view3d`, `View3D`, `Look3D` | `Transform3`과 `Material`(또는 `Body`와 `Collider`)이 있는 엔티티가 뷰 코드 없이 그려진다. Yard3D 예제가 17줄로 돈다. `--screenshot --ticks 300` 그림이 Yard3D 샘플의 그리기 경로와 픽셀까지 같다. 쓰는 법은 [crates/orr_app/README.md](../crates/orr_app/README.md)의 "3D", 코드는 `orr_app/src/view3d.rs`, `app.rs`(`Display`), `views.rs`(`on_update3`, `dispatch3`), 예제는 `orr_app/examples/yard3d.rs`. 테스트는 `view3d.rs`의 단위 테스트(추출, 그리기 목록, 카메라)와 `orr_app/tests/views.rs`(3D 포즈). 뺀 것: `Material` 표면 셰이더, 후처리·하늘·물·지형, 3D 마우스 입력, 렌더러 설정 옵션 |
+| 6b | `ViewRef`, 뷰 에셋, 프리팹 생성 | 인스펙터에서 뷰 에셋을 고르면 그 모델이 그려진다. `PlayerAdded`로 아바타 프리팹이 생긴다 |
 | 7 | 튜토리얼 | 빈 프로젝트 → 혼자 하기 → 한 화면 2인 → 로컬 서버 2창 → 재접속까지, 단계별 예제가 모두 빌드되고 테스트로 확인된다 |
 
 각 단계는 짧은 브랜치 하나로 진행하고 끝나면 `main`에 합친다([AGENTS.md](../AGENTS.md)의 Delivery rules).
@@ -347,7 +348,7 @@ sequenceDiagram
 ## 13. 아직 정하지 않은 것
 
 - **이름:** `orr_app`, `EntityView`, `SceneView`, `ViewRef`, `PlayerLink`, `Players`는 가칭이다. 단계 1에서 확정한다.
-- **2D와 3D 렌더러 묶기:** 기본 렌더러를 2D(지금의 2D 물리 화면)와 3D(`SceneLook`) 중 무엇부터 지원할지 정한다. 단계 1은 2D 데모로 시작한다.
+- ~~**2D와 3D 렌더러 묶기**~~ (정했다, 6a): 2D(단계 1)와 3D(6a) 기본 렌더러가 둘 다 있다. 한 실행은 `App::view`(2D)와 `App::view3d`(3D) 중 하나만 쓰고, 둘 다 주면 `run()`이 창을 열기 전에 오류를 낸다. 둘을 한 화면에 섞는 것(3D 위에 2D 겹치기)은 하지 않았다.
 - **웹과 모바일:** `orr_app`의 창 루프를 웹 워커와 안드로이드에서도 쓸지. 지금 `orr_web`, `orr_web_gpu`는 따로 루프를 가진다.
 - **서버가 직접 시뮬레이션하는 모드:** `orr_server`의 Authoritative 모드가 있으면 스냅숏 제공자를 서버로 바꿀 수 있다. 이 문서는 릴레이 모드만 다룬다.
 - **끊김 판정 시간:** 기본값(예: 2초)과 게임별 조정 범위.
