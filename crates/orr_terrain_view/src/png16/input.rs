@@ -1,12 +1,12 @@
 //! Bounded PNG snapshots from regular files with trusted, quiescent ancestry.
 //!
-//! Rejects symlinks at each observed path component, but std metadata/open is
-//! not an OS-level no-follow sandbox or a lock. Concurrent replacement may
-//! still substitute a FIFO before open; in-place edits may evade observations.
+//! Rejects symlinks at each observed path component. The file itself is opened
+//! without following a link or waiting on a FIFO, and its identity comes from the
+//! open handle. This is not a lock: in-place edits may evade observations.
 //! The caller must exclude concurrent mutation of the source and its ancestry.
 use super::{Error, Result, MAX_PNG_BYTES, SIGNATURE};
 use std::{
-    fs::{self, File, Metadata},
+    fs,
     io::Read,
     path::{Component, Path, PathBuf},
 };
@@ -48,48 +48,22 @@ fn checked_path(path: &Path) -> Result<PathBuf> {
     Ok(resolved)
 }
 
-fn same_file(a: &Metadata, b: &Metadata) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        a.dev() == b.dev() && a.ino() == b.ino()
-    }
-    #[cfg(not(unix))]
-    {
-        // Portable std has no stable file ID. Trusted quiescent ancestry is
-        // required; these observations do not establish handle identity.
-        a.len() == b.len() && a.modified().ok() == b.modified().ok()
-    }
-}
-
 /// Retain a bounded PNG snapshot without a generic arbitrary-byte read API.
 /// This checks the PNG signature; `import_png16` validates the complete format.
 pub fn read_png16(input: &Path) -> Result<Vec<u8>> {
     let path = checked_path(input)?;
-    let before =
-        fs::symlink_metadata(&path).map_err(|e| Error(format!("PNG16 input metadata: {e}")))?;
-    if !before.file_type().is_file()
-        || before.len() < SIGNATURE.len() as u64
-        || before.len() > MAX_PNG_BYTES as u64
-    {
+    // `open_file` refuses a link, a folder or a FIFO without waiting for a writer.
+    let file = orr_fsid::open_file(&path).map_err(|e| Error(format!("PNG16 input open: {e}")))?;
+    let opened = file
+        .metadata()
+        .map_err(|e| Error(format!("PNG16 opened metadata: {e}")))?;
+    if opened.len() < SIGNATURE.len() as u64 || opened.len() > MAX_PNG_BYTES as u64 {
         return Err(Error(format!(
             "PNG16 input must be a regular file of 8..={MAX_PNG_BYTES} bytes"
         )));
     }
-    let expected = before.len() as usize;
-    let file = File::open(&path).map_err(|e| Error(format!("PNG16 input open: {e}")))?;
-    let opened = file
-        .metadata()
-        .map_err(|e| Error(format!("PNG16 opened metadata: {e}")))?;
-    let current = fs::symlink_metadata(checked_path(&path)?)
-        .map_err(|e| Error(format!("PNG16 input recheck: {e}")))?;
-    if !opened.is_file()
-        || !current.file_type().is_file()
-        || opened.len() != before.len()
-        || current.len() != before.len()
-        || !same_file(&before, &opened)
-        || !same_file(&opened, &current)
-    {
+    let expected = opened.len() as usize;
+    if !matches!(orr_fsid::same_file(&checked_path(&path)?, &file), Ok(true)) {
         return Err(Error(
             "PNG16 input changed during open; use a trusted stable source directory".into(),
         ));
@@ -103,13 +77,13 @@ pub fn read_png16(input: &Path) -> Result<Vec<u8>> {
         .get_ref()
         .metadata()
         .map_err(|e| Error(format!("PNG16 final metadata: {e}")))?;
-    let current = fs::symlink_metadata(checked_path(&path)?)
-        .map_err(|e| Error(format!("PNG16 final path metadata: {e}")))?;
+    let still_named = matches!(
+        orr_fsid::same_file(&checked_path(&path)?, limited.get_ref()),
+        Ok(true)
+    );
     if bytes.len() != expected
         || after.len() != expected as u64
-        || current.len() != expected as u64
-        || !current.file_type().is_file()
-        || !same_file(&opened, &current)
+        || !still_named
         || opened.modified().ok() != after.modified().ok()
         || !bytes.starts_with(SIGNATURE)
     {

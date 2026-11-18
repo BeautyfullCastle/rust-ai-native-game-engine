@@ -487,3 +487,48 @@ fn input_rejects_socket_on_permitted_host() {
     let _listener = UnixListener::bind(&socket).unwrap();
     assert!(input::read_png16(&socket).is_err());
 }
+
+#[cfg(unix)]
+#[test]
+fn input_rejects_a_fifo_without_blocking() {
+    let directory = tempfile::tempdir().unwrap();
+    let fifo = directory.path().join("fifo.png");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let (done, wait) = std::sync::mpsc::channel();
+    let path = fifo.clone();
+    std::thread::spawn(move || {
+        let _ = done.send(input::read_png16(&path).is_err());
+    });
+    match wait.recv_timeout(std::time::Duration::from_secs(5)) {
+        Ok(refused) => assert!(refused),
+        Err(_) => {
+            // Release the blocked reader so the test process can end, then fail.
+            let _release = fs::OpenOptions::new().read(true).write(true).open(&fifo);
+            panic!("reading a FIFO as PNG16 input blocked");
+        }
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn input_rejects_a_junction_ancestry_and_a_folder_destination() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory.path().join("target");
+    fs::create_dir(&target).unwrap();
+    fs::write(target.join("height.png"), fixture()).unwrap();
+    let junction = directory.path().join("junction");
+    let made = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&junction)
+        .arg(&target)
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "{made:?}");
+    assert!(input::read_png16(&junction.join("height.png")).is_err());
+    assert!(input::read_png16(&target.join("height.png")).is_ok());
+    assert!(input::read_png16(&junction).is_err());
+}
