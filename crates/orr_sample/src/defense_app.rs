@@ -26,7 +26,7 @@ pub const PIXELFX_LICENSES: &str = include_str!("../assets/stormglass-pixelfx/hi
 /// Generated-art provenance and upstream tool notices, not an artwork license.
 #[cfg(feature = "coop-defense-pixel-motion")]
 pub const PIXEL_MOTION_LICENSES: &str = include_str!("../assets/stormglass-pixel-motion/LICENSE.txt");
-pub const HELP:&str="Stormglass Foundry\ncoop_defense [--scene PATH] [--run-directory ABSOLUTE_PRIVATE_DIRECTORY (Linux run-save feature)] [--headless --ticks N [--demo] [--capture NEW.png]]\nDefault keys: Space summon, click your unit then empty tile to move or identical role/tier to merge, U upgrade, I invest, P/Escape pause, Enter continue, R restart. AI partner is local, not online. Headless capture uses a software GPU. Optional coop-defense-audio: --audio-bank ABSOLUTE_BANK_DIRECTORY --audio off|auto|required; native output additionally needs audio-native. Starts muted; bank loading on Linux or fixed local Windows NTFS. Optional Linux/Windows coop-defense-audio-settings: --audio-settings-directory ABSOLUTE_PRIVATE_DIRECTORY; SAVE AUDIO remembers volume and mute. Optional Linux/Windows coop-defense-controls: KEYS edits gameplay bindings; --controls-directory ABSOLUTE_PRIVATE_DIRECTORY enables explicit Save and relaunch restore.";
+pub const HELP:&str="Stormglass Foundry\ncoop_defense [--scene PATH] [--run-directory ABSOLUTE_PRIVATE_DIRECTORY (run-save feature; Windows saves under %LOCALAPPDATA%\\orrery\\games without it)] [--headless --ticks N [--demo] [--capture NEW.png]]\nDefault keys: Space summon, click your unit then empty tile to move or identical role/tier to merge, U upgrade, I invest, P/Escape pause, Enter continue, R restart. AI partner is local, not online. Headless capture uses a software GPU. Optional coop-defense-audio: --audio-bank ABSOLUTE_BANK_DIRECTORY --audio off|auto|required; native output additionally needs audio-native. Starts muted; bank loading on Linux or fixed local Windows NTFS. Optional Linux/Windows coop-defense-audio-settings: --audio-settings-directory ABSOLUTE_PRIVATE_DIRECTORY; SAVE AUDIO remembers volume and mute. Optional Linux/Windows coop-defense-controls: KEYS edits gameplay bindings; --controls-directory ABSOLUTE_PRIVATE_DIRECTORY enables explicit Save and relaunch restore.";
 #[derive(Debug, Default)]
 pub struct Options {
     #[cfg(all(feature = "coop-defense-controls", any(target_os = "linux", windows)))]
@@ -37,7 +37,7 @@ pub struct Options {
     pub audio_bank: Option<PathBuf>,
     #[cfg(feature = "coop-defense-audio")]
     pub audio: crate::arena_audio::AudioMode,
-    #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+    #[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
     pub run_directory: Option<PathBuf>,
     pub headless: bool,
     pub ticks: u32,
@@ -74,7 +74,7 @@ impl Options {
                         .ok_or("--audio needs off|auto|required")?
                         .parse()?
                 }
-                #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+                #[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
                 "--run-directory" => {
                     out.run_directory =
                         Some(args.next().ok_or("--run-directory needs PATH")?.into())
@@ -95,7 +95,7 @@ impl Options {
                 _ => return Err(format!("unknown option {a}\n{HELP}")),
             }
         }
-        #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+        #[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
         if out.headless && out.run_directory.is_some() {
             return Err("--run-directory requires the native interactive player".into());
         }
@@ -285,8 +285,8 @@ fn run_prepared_scene(options: Options, scene: Option<String>) -> Result<(), Str
     if options.headless {
         return headless_prepared(options, config);
     }
-    #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
-    let saves = if let Some(path) = &options.run_directory {
+    #[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
+    let saves = if cfg!(windows) || options.run_directory.is_some() {
         let mut forbidden = Vec::new();
         if let Ok(root) = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
@@ -303,15 +303,33 @@ fn run_prepared_scene(options: Options, scene: Option<String>) -> Result<(), Str
                 forbidden.push(parent.to_owned());
             }
         }
-        Some(RunSaves {
-            store: crate::defense_run_save_store::RunStore::open(path, &forbidden)?,
+        let store = match &options.run_directory {
+            Some(path) => Some(crate::defense_run_save_store::RunStore::open(path, &forbidden)?),
+            // Windows keeps saves in the per-user data folder when no folder is chosen. A
+            // folder that cannot be used leaves the game playable and without saves.
+            #[cfg(windows)]
+            None => match crate::defense_run_save_store::RunStore::open_default(&forbidden) {
+                Ok(store) => Some(store),
+                Err(error) => {
+                    eprintln!("saves are off: {error}");
+                    None
+                }
+            },
+            #[cfg(not(windows))]
+            None => None,
+        };
+        match store {
+            None => None,
+            Some(store) => Some(RunSaves {
+            store,
             identity: crate::defense_run_save::executable_identity()?,
             journal: crate::defense_run_save::Journal::new(
                 crate::defense_run_save::Origin { scene },
                 &session(config),
             ),
             candidate: None,
-        })
+        }),
+        }
     } else {
         None
     };
@@ -322,7 +340,7 @@ fn run_prepared_scene(options: Options, scene: Option<String>) -> Result<(), Str
     let mut app = App {
         #[cfg(feature = "coop-defense-audio")]
         audio,
-        #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+        #[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
         saves,
         session: session(config),
         ui: DefenseUi::new(),
@@ -346,7 +364,7 @@ fn run_prepared_scene(options: Options, scene: Option<String>) -> Result<(), Str
     event_loop.run_app(&mut app).map_err(|e| e.to_string())?;
     app.error.map_or(Ok(()), Err)
 }
-#[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+#[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
 fn bounded_save_error(error: &str) -> String {
     let mut chars = error.chars();
     let mut message: String = chars
@@ -366,7 +384,7 @@ struct Graphics {
     overlay: GpuOverlay,
     pending: PendingOverlay,
 }
-#[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+#[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
 struct RunSaves {
     store: crate::defense_run_save_store::RunStore,
     identity: String,
@@ -376,7 +394,7 @@ struct RunSaves {
 struct App {
     #[cfg(feature = "coop-defense-audio")]
     audio: crate::defense_audio::DefenseAudio,
-    #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+    #[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
     saves: Option<RunSaves>,
     session: DefenseSession,
     ui: DefenseUi,
@@ -506,7 +524,7 @@ impl App {
         if focus_lost && self.should_pause_on_focus_loss() {
             self.ui.pause();
         }
-        #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+        #[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
         {
             self.ui.run_save.enabled = self.saves.is_some();
             let was_saveable = self.ui.run_save.can_save;
@@ -530,7 +548,7 @@ impl App {
         crate::defense_audio_settings::process_save(&mut self.ui);
         #[cfg(all(feature = "coop-defense-controls", any(target_os = "linux", windows)))]
         crate::defense_controls::process_save(&mut self.ui.controls);
-        #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+        #[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
         if self.process_saves() {
             #[cfg(feature = "coop-defense-audio")]
             self.sync_audio(true);
@@ -594,7 +612,7 @@ impl App {
             }
             #[cfg(not(any(feature = "coop-defense-audio", feature = "coop-defense-pixelfx")))]
             let _ = result;
-            #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+            #[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
             if let Some(saves) = &mut self.saves {
                 saves.journal.record(command);
             }
@@ -619,7 +637,7 @@ impl App {
             self.error = Some(error);
         }
     }
-    #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+    #[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
     fn process_saves(&mut self) -> bool {
         use crate::defense_ui::{RunSaveAction as A, RunSaveMode as M};
         let action = self.ui.run_save.action.take();
@@ -1146,7 +1164,7 @@ mod pause_tests {
         App {
             #[cfg(feature = "coop-defense-audio")]
             audio: Default::default(),
-            #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+            #[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
             saves: None,
             session: session(game::DefenseConfig::default()),
             ui,
@@ -1644,13 +1662,17 @@ mod pause_tests {
     }
 }
 
-#[cfg(all(test, feature = "coop-defense-run-save", target_os = "linux"))]
+#[cfg(all(test, feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
 mod run_save_tests {
     use super::*;
     fn private_dir() -> tempfile::TempDir {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        // Windows folders are private through the access list of the temp folder.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         dir
     }
 
@@ -1850,8 +1872,11 @@ mod run_save_tests {
         };
         let store = root.join("store");
         std::fs::create_dir(&store).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o700)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         for mode in ["produce", "consume"] {
             let result = std::process::Command::new(&exe)
                 .args([
@@ -1920,7 +1945,7 @@ mod run_save_tests {
     }
 }
 
-#[cfg(all(test, feature = "coop-defense-run-save", target_os = "linux"))]
+#[cfg(all(test, feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
 #[path = "defense_run_save_app_tests.rs"]
 mod run_save_acceptance_tests;
 

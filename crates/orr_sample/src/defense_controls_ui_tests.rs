@@ -379,7 +379,7 @@ fn controls_ui_ready_and_gameplay_hints_show_active_bindings() {
     }
 }
 
-#[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+#[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
 #[test]
 fn controls_ui_cannot_open_through_run_save_modal_or_mutate_its_selection() {
     let sim = sim();

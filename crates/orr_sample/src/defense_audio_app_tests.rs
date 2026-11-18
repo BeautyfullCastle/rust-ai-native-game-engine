@@ -10,7 +10,7 @@ use crate::{
 pub(super) fn app() -> App {
     App {
         audio: DefenseAudio::offline(&bank(), AudioMode::Required),
-        #[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+        #[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
         saves: None,
         session: session(Default::default()),
         ui: DefenseUi::new(),
@@ -218,11 +218,14 @@ fn cli_options_reject_unsupported_combinations_before_output() {
         "off still validates an explicitly supplied bank"
     );
 }
-#[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+#[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
 fn saved_app() -> (tempfile::TempDir, App) {
-    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
-    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let mut a = app();
     a.saves = Some(RunSaves {
         store: crate::defense_run_save_store::RunStore::open(dir.path(), &[]).unwrap(),
@@ -235,7 +238,7 @@ fn saved_app() -> (tempfile::TempDir, App) {
     });
     (dir, a)
 }
-#[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+#[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
 #[test]
 fn actual_save_load_success_cancel_failure_are_silent_and_binding_atomic() {
     use crate::defense_ui::RunSaveMode;
@@ -320,7 +323,7 @@ fn actual_save_load_success_cancel_failure_are_silent_and_binding_atomic() {
     assert_eq!(a.audio.offline_owner().bindings, binding + 2);
     silence(a.audio.offline_owner());
 }
-#[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+#[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
 #[test]
 fn audio_controls_leave_admission_journal_and_saved_identity_exact() {
     let (_one, mut with) = saved_app();
@@ -354,7 +357,7 @@ fn audio_controls_leave_admission_journal_and_saved_identity_exact() {
     };
     assert_eq!(encode(&mut with), encode(&mut without));
 }
-#[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+#[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
 #[test]
 fn failed_digest_and_detached_checksum_reconstruction_preserve_audio_binding() {
     for resign in [false, true] {
@@ -404,7 +407,7 @@ fn failed_digest_and_detached_checksum_reconstruction_preserve_audio_binding() {
         );
     }
 }
-#[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+#[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
 #[test]
 fn required_failure_during_save_modal_does_not_reconstruct_or_advance() {
     let (_dir, mut a) = saved_app();
@@ -493,7 +496,7 @@ pub(crate) fn authored_fixture_app_pcm(
     (mixed, started)
 }
 
-#[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+#[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
 #[test]
 fn replacement_output_failure_cannot_partially_commit_loaded_session() {
     for mode in [AudioMode::Auto, AudioMode::Required] {

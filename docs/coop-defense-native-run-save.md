@@ -1,6 +1,6 @@
 # Native Stormglass Run Save
 
-The optional `coop-defense-run-save` feature lets a Linux native player save a
+The optional `coop-defense-run-save` feature lets a Linux or Windows native player save a
 bounded defense run and resume it in a later process. It is a native input
 journal, not an engine checkpoint, a web Run Save file or a cross-build migration.
 
@@ -11,9 +11,21 @@ Build the `coop_defense` binary with `orr_sample/coop-defense-run-save`. Supply
 The owner-controlled directory must already exist with mode 0700. Create a new
 private folder with `mkdir -m 700 /absolute/private-save-folder`, outside the
 checkout, executable and scene directories. The game does not create it or
-change its permissions. There is no automatic write to the current
+change its permissions. On Linux there is no automatic write to the current
 directory or home folder. Keep saves
 outside the executable bundle and authored scene directory.
+
+On Windows `--run-directory` takes an absolute disk path whose parts are all
+real folders (a junction or symbolic link anywhere in the path is refused). The
+folder pins its identity (`orr_fsid`) and is checked again before every scan,
+read and write; a folder that was renamed or replaced is refused. Without the
+option the game saves under `%LOCALAPPDATA%\orrery\games\stormglass\runs`,
+creating the missing folders. If that folder cannot be used the game starts
+without saves and says so on the console. The store relies on the access list that
+the per-user folder inherits and does not read owners or access lists. A save is
+written to a staged file opened without delete or rename sharing, then published
+with `MoveFileExW` without replacement and with write-through, so an existing
+name is never replaced.
 
 Pause an active battle, then choose **Save Copy**. Each success creates a new
 immutable generation and reports its filename. Existing saves are not replaced.

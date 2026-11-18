@@ -95,7 +95,7 @@ impl DefenseVfx {
         Ok(())
     }
     /// A loaded/replaced session cannot replay historical effects.
-    #[cfg(any(test, all(feature = "coop-defense-run-save", target_os = "linux")))]
+    #[cfg(any(test, all(feature = "coop-defense-run-save", any(target_os = "linux", windows))))]
     pub(crate) fn replace(&mut self, tick: u64, generation: u32) {
         self.state = State {
             tick,

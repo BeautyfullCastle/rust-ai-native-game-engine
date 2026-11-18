@@ -350,7 +350,7 @@ fn focus_loss_and_explicit_repeat_still_block_plain_shortcuts() {
     }
 }
 
-#[cfg(all(feature = "coop-defense-run-save", target_os = "linux"))]
+#[cfg(all(feature = "coop-defense-run-save", any(target_os = "linux", windows)))]
 #[test]
 fn save_modal_escape_uses_event_modifiers_and_keeps_plain_cancel() {
     let modes = [
