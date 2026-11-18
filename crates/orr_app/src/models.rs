@@ -7,7 +7,8 @@
 use std::collections::BTreeMap;
 
 use orr_gfx_view::ViewAssets;
-use orr_render::model_renderer::MAX_STATIC_INSTANCES;
+use orr_render::imported_scene::{model_draw_budget, MAX_IMPORTED_BATCHES};
+use orr_render::model_renderer::{MAX_STATIC_INSTANCES, MAX_STATIC_INSTANCE_DRAWS};
 use orr_render::orr_rhi::{Rhi, TextureFormat, Wgpu};
 use orr_render::{Camera3D, OffscreenTarget, ImportedBatch, ImportedSceneRenderer, ImportedSceneTarget, ModelRenderer, PointLightSettings, RenderList3D, Renderer3D, Settings3D, StaticInstance};
 
@@ -23,13 +24,48 @@ pub(crate) struct ModelScene {
     /// One renderer per model file; `None` for a file that could not be loaded (reported once).
     renderers: BTreeMap<String, Option<ModelRenderer<Wgpu>>>,
     last_error: Option<String>,
+    /// Instances left out of frames because they did not fit the draw budget, since the start.
+    dropped_instances: u64,
+    /// Whether the previous frame left instances out (the next such frame is then not reported again).
+    was_dropping: bool,
+}
+
+/// What one model file asks of a frame: how many instances, and how many primitive draws each takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ModelRequest {
+    instances: usize,
+    primitives: usize,
+}
+
+/// How many instances of each request the renderer takes, so that the frame stays inside its limits:
+/// [`MAX_STATIC_INSTANCES`] and [`MAX_STATIC_INSTANCE_DRAWS`] per model, `draw_budget` primitive
+/// draws for all models together, and `max_models` models. The requests are served in order, and the
+/// first instances of a request are the ones kept, so the same input always gives the same result.
+fn fit_models(requests: &[ModelRequest], draw_budget: usize, max_models: usize) -> Vec<usize> {
+    let mut left = draw_budget;
+    let mut models = 0;
+    requests
+        .iter()
+        .map(|request| {
+            let mut keep = request.instances.min(MAX_STATIC_INSTANCES);
+            if let Some(fit) = MAX_STATIC_INSTANCE_DRAWS.min(left).checked_div(request.primitives) {
+                keep = keep.min(fit);
+            }
+            if keep == 0 || models >= max_models {
+                return 0;
+            }
+            models += 1;
+            left -= keep * request.primitives;
+            keep
+        })
+        .collect()
 }
 
 impl ModelScene {
     pub(crate) fn new(rhi: Wgpu, format: TextureFormat) -> Result<Self, String> {
         let composer = ImportedSceneRenderer::new(rhi.clone(), format).map_err(|e| e.to_string())?;
         let shapes = Renderer3D::with_settings(rhi.clone(), format, Settings3D { msaa: 1, ..Settings3D::default() });
-        Ok(Self { composer, shapes, rhi, format, renderers: BTreeMap::new(), last_error: None })
+        Ok(Self { composer, shapes, rhi, format, renderers: BTreeMap::new(), last_error: None, dropped_instances: 0, was_dropping: false })
     }
 
     /// Draws the shapes of `list` and the `draws` into `view`.
@@ -46,10 +82,7 @@ impl ModelScene {
     ) {
         let mut groups: BTreeMap<&str, Vec<StaticInstance>> = BTreeMap::new();
         for draw in draws {
-            let group = groups.entry(draw.model.as_str()).or_default();
-            if group.len() < MAX_STATIC_INSTANCES {
-                group.push(draw.instance);
-            }
+            groups.entry(draw.model.as_str()).or_default().push(draw.instance);
         }
         for path in groups.keys() {
             if !self.renderers.contains_key(*path) {
@@ -63,6 +96,7 @@ impl ModelScene {
                 self.renderers.insert((*path).to_string(), renderer);
             }
         }
+        self.limit_to_budget(&mut groups, list);
         self.composer.scene_lights = list.scene_lights;
         self.composer.decals.clone_from(&list.decals);
         let mut batches = vec![ImportedBatch::Procedural { renderer: &mut self.shapes, list }];
@@ -85,6 +119,32 @@ impl ModelScene {
         }
     }
 
+    /// Cuts `groups` down to what the renderer accepts next to the shapes of `list`, so that the
+    /// shapes and the models that fit are still drawn. The cut instances are counted, and the first
+    /// frame of a series of frames with cut instances is reported on stderr.
+    fn limit_to_budget(&mut self, groups: &mut BTreeMap<&str, Vec<StaticInstance>>, list: &RenderList3D) {
+        let mut paths = Vec::new();
+        let mut requests = Vec::new();
+        for (path, instances) in groups.iter() {
+            if let Some(Some(renderer)) = self.renderers.get(*path) {
+                paths.push(*path);
+                requests.push(ModelRequest { instances: instances.len(), primitives: renderer.model().source().primitives.len() });
+            }
+        }
+        let keep = fit_models(&requests, model_draw_budget(list), MAX_IMPORTED_BATCHES - 1);
+        let mut dropped = 0usize;
+        for (path, keep) in paths.into_iter().zip(keep) {
+            let instances = groups.get_mut(path).expect("grouped above");
+            dropped += instances.len() - keep;
+            instances.truncate(keep);
+        }
+        self.dropped_instances += dropped as u64;
+        if dropped > 0 && !self.was_dropping {
+            eprintln!("drawing models: {dropped} model instances do not fit the draw budget and are left out (the first ones of each model are kept; {} left out so far)", self.dropped_instances);
+        }
+        self.was_dropping = dropped > 0;
+    }
+
     /// Draws like [`ModelScene::draw`] into a picture of exactly `size` pixels and reads it back as
     /// RGBA8, top row first. It does not depend on the window.
     pub(crate) fn capture(
@@ -103,5 +163,86 @@ impl ModelScene {
     fn load(&self, assets: &ViewAssets, path: &str) -> Result<ModelRenderer<Wgpu>, String> {
         let model = orr_model::import::import_path(assets.root(), path).map_err(|e| e.to_string())?;
         ModelRenderer::new(self.rhi.clone(), self.format, model).map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orr_render::imported_scene::MAX_IMPORTED_DRAWS;
+    use orr_render::Material;
+
+    fn request(instances: usize, primitives: usize) -> ModelRequest {
+        ModelRequest { instances, primitives }
+    }
+
+    fn draws(requests: &[ModelRequest], kept: &[usize]) -> usize {
+        requests.iter().zip(kept).map(|(r, k)| r.primitives * k).sum()
+    }
+
+    #[test]
+    fn a_model_of_17_primitives_with_256_instances_is_cut_to_what_the_draw_limit_takes() {
+        let requests = [request(256, 17)];
+
+        let kept = fit_models(&requests, MAX_IMPORTED_DRAWS, MAX_IMPORTED_BATCHES - 1);
+
+        assert_eq!(kept, [240], "4096 / 17 draws, and the file limit of 256 instances is not what binds");
+        assert!(draws(&requests, &kept) <= MAX_IMPORTED_DRAWS);
+    }
+
+    #[test]
+    fn a_model_that_fits_is_kept_whole_at_the_boundary_and_cut_by_one_instance_beyond_it() {
+        assert_eq!(fit_models(&[request(256, 16)], MAX_IMPORTED_DRAWS, 255), [256]);
+        assert_eq!(fit_models(&[request(256, 16)], MAX_IMPORTED_DRAWS - 1, 255), [255]);
+        assert_eq!(fit_models(&[request(300, 1)], MAX_IMPORTED_DRAWS, 255), [MAX_STATIC_INSTANCES]);
+    }
+
+    #[test]
+    fn several_models_that_sum_past_the_limit_are_cut_in_order_and_the_first_ones_win() {
+        let requests = [request(100, 16), request(100, 16), request(100, 16), request(100, 16)];
+
+        let kept = fit_models(&requests, MAX_IMPORTED_DRAWS, 255);
+
+        assert_eq!(kept, [100, 100, 56, 0]);
+        assert!(draws(&requests, &kept) <= MAX_IMPORTED_DRAWS);
+        assert_eq!(kept, fit_models(&requests, MAX_IMPORTED_DRAWS, 255), "the same input gives the same cut");
+    }
+
+    #[test]
+    fn a_small_model_after_a_cut_one_still_takes_what_is_left() {
+        let requests = [request(256, 17), request(10, 2)];
+
+        let kept = fit_models(&requests, MAX_IMPORTED_DRAWS, 255);
+
+        assert_eq!(kept, [240, 8], "4096 - 240 * 17 = 16 draws are left for 2 primitives each");
+    }
+
+    #[test]
+    fn at_most_the_given_number_of_models_is_kept() {
+        let requests = vec![request(1, 1); 10];
+
+        let kept = fit_models(&requests, MAX_IMPORTED_DRAWS, 3);
+
+        assert_eq!(kept, [1, 1, 1, 0, 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn a_model_without_primitives_costs_no_draw() {
+        assert_eq!(fit_models(&[request(256, 0)], 0, 255), [256]);
+    }
+
+    #[test]
+    fn the_shapes_of_the_look_take_their_draws_out_of_the_budget_of_the_models() {
+        let mut list = RenderList3D::new();
+        assert_eq!(fit_models(&[request(256, 16)], model_draw_budget(&list), 255), [256]);
+
+        let m = Material::new([1.0; 3]);
+        list.sphere([0.0; 3], [0.0, 0.0, 0.0, 1.0], 0.5, &m);
+        list.plane([0.0; 3], 10.0, 10.0, &m);
+
+        let kept = fit_models(&[request(256, 16)], model_draw_budget(&list), 255);
+
+        assert_eq!(kept, [255], "the sphere kind and the plane kind take 2 of the 4096 draws");
+        assert_eq!(list.instance_count(), 2, "the shapes themselves are not cut");
     }
 }

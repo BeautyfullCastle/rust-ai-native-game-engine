@@ -54,7 +54,7 @@ pub(crate) use surfaces::surface_draws;
 #[cfg(feature = "imported-scene")]
 pub use composed::{ProceduralSceneError, MAX_PROCEDURAL_INSTANCES};
 #[cfg(feature = "imported-scene")]
-pub(crate) use composed::{validate_procedural_list, PreparedProcedural};
+pub(crate) use composed::{procedural_draw_count, validate_procedural_list, PreparedProcedural};
 
 #[cfg(feature = "irradiance-probes")]
 pub(crate) mod irradiance;
