@@ -6,14 +6,14 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use orr_bridge::{Bridge, BridgeConfig, BridgeError, BridgeEvent, InProc, PlayHost, PlayerSlot, Snapshot, Threaded, ViewUpdate};
+use orr_bridge::{Bridge, BridgeConfig, BridgeError, BridgeEvent, FrameView, InProc, PlayHost, PlayerSlot, Snapshot, Threaded, ViewUpdate};
 use orr_ecs::Component;
 use orr_reflect::{Scene, TypeRegistry};
 use orr_render::orr_rhi::Wgpu;
-use orr_render::{RenderList, WindowRenderer};
+use orr_render::{Camera, Camera3D, RenderList, RenderList3D, Settings3D, WindowRenderer, WindowRenderer3D};
 use orr_session::{PlayConfig, PlaySession};
 use orr_sim::{Game, Simulation};
-use orr_view::{RenderItem, ViewConfig, ViewWorld};
+use orr_view::{RenderItem, RenderItem3, ViewConfig, ViewWorld, ViewWorld3};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, WindowEvent};
@@ -25,8 +25,9 @@ use crate::cli::{Args, RunMode, USAGE};
 use crate::input::InputContext;
 use crate::net::{self, Hosted, Join};
 use crate::pace::{Advance, Outcome, Pacer};
-use crate::shot::{render_rgba, write_png};
+use crate::shot::{render_rgba, render_rgba3, write_png};
 use crate::view2d::{fill_draw_list, SharedView, View2D};
+use crate::view3d::{fill_draw_list3, SharedView3, View3D};
 use crate::views::{EntityFactory, SceneView, Views};
 
 /// Why a run could not start or ended badly.
@@ -132,6 +133,12 @@ struct SceneSource {
 ///     .view(MyLook)
 ///     .run()
 ///
+/// // The same game in 3D, with the default look (`Look3D`):
+/// App::<MyGame>::new()
+///     .input(|keys, _slot| MyInput::from(keys))
+///     .view3d(Look3D::default())
+///     .run()
+///
 /// // Two players on one keyboard (slot 0: WASD, slot 1: arrows):
 /// App::<MyGame>::new()
 ///     .local_players(2)
@@ -150,6 +157,7 @@ pub struct App<G: Game> {
     input: Option<InputFn<G>>,
     bot: Option<BotFn<G>>,
     view: Option<Rc<dyn View2D>>,
+    view3: Option<Rc<dyn View3D>>,
     views: Views<G>,
 }
 
@@ -186,6 +194,7 @@ impl<G: Game> App<G> {
             input: None,
             bot: None,
             view: None,
+            view3: None,
             views: Views::new(),
         }
     }
@@ -248,9 +257,17 @@ impl<G: Game> App<G> {
         self
     }
 
-    /// What to draw: see [`View2D`].
+    /// What to draw in 2D: see [`View2D`]. A run draws either in 2D or in 3D ([`App::view3d`]), not both.
     pub fn view(mut self, view: impl View2D + 'static) -> Self {
         self.view = Some(Rc::new(view));
+        self
+    }
+
+    /// What to draw in 3D: see [`View3D`] and the ready-made [`crate::Look3D`]. Entity views, scene
+    /// views, players, `--host`, `--connect` and `--screenshot` work as in 2D. Entity views get
+    /// [`crate::EntityView::on_update3`] instead of `on_update`.
+    pub fn view3d(mut self, view: impl View3D + 'static) -> Self {
+        self.view3 = Some(Rc::new(view));
         self
     }
 
@@ -329,7 +346,12 @@ impl<G: Game> App<G> {
     }
 
     fn run_window(mut self, args: Args) -> Result<(), Error> {
-        let view = self.view.take().ok_or_else(|| Error("no view: call .view(..) before .run()".to_string()))?;
+        let display = match (self.view.take(), self.view3.take()) {
+            (Some(view), None) => Display::D2(Display2::new(view)),
+            (None, Some(view)) => Display::D3(Display3::new(view)),
+            (None, None) => return Err(Error("no view: call .view(..) for 2D or .view3d(..) for 3D before .run()".to_string())),
+            (Some(_), Some(_)) => return Err(Error("both .view(..) and .view3d(..) are set: a run draws in 2D or in 3D, not both".to_string())),
+        };
         let input = self.input.take().ok_or_else(|| Error("no input: call .input(..) before .run()".to_string()))?;
         let mode = args.mode()?;
         let (bridge, server) = match &mode {
@@ -348,22 +370,17 @@ impl<G: Game> App<G> {
         } else {
             LocalInput::new(input, bridge.local_slots())
         };
-        let shared = SharedView(view);
         let mut runner = Runner {
             bridge,
-            world: ViewWorld::new(shared.clone(), ViewConfig::default()),
-            view: shared,
+            display,
             local,
             keys: InputContext::default(),
             pacer: if networked { Pacer::new(&args).following_clock() } else { Pacer::new(&args) },
             args,
             title: self.title,
-            gfx: None,
+            window: None,
             epoch: None,
             views: self.views,
-            poses: Vec::new(),
-            items: Vec::new(),
-            list: RenderList::new(),
             last_frame: Instant::now(),
             error: None,
             _server: server,
@@ -432,28 +449,158 @@ impl<G: Game> LocalInput<G> {
     }
 }
 
-struct Gfx {
-    window: Arc<Window>,
-    renderer: WindowRenderer<Wgpu>,
+/// What a run draws: the 2D look or the 3D look, each with its view world, draw list and renderer.
+enum Display {
+    D2(Display2),
+    D3(Display3),
+}
+
+struct Display2 {
+    view: SharedView,
+    world: ViewWorld<SharedView>,
+    /// The poses of the view world, read again each frame for the entity views.
+    poses: Vec<RenderItem>,
+    items: Vec<RenderItem>,
+    list: RenderList,
+    camera: Camera,
+    renderer: Option<WindowRenderer<Wgpu>>,
+}
+
+impl Display2 {
+    fn new(view: Rc<dyn View2D>) -> Self {
+        let view = SharedView(view);
+        Self {
+            world: ViewWorld::new(view.clone(), ViewConfig::default()),
+            view,
+            poses: Vec::new(),
+            items: Vec::new(),
+            list: RenderList::new(),
+            camera: Camera::new([0.0, 0.0], 1.0),
+            renderer: None,
+        }
+    }
+}
+
+struct Display3 {
+    view: SharedView3,
+    world: ViewWorld3<SharedView3>,
+    poses: Vec<RenderItem3>,
+    items: Vec<RenderItem3>,
+    list: RenderList3D,
+    camera: Option<Camera3D>,
+    renderer: Option<WindowRenderer3D<Wgpu>>,
+}
+
+impl Display3 {
+    fn new(view: Rc<dyn View3D>) -> Self {
+        let view = SharedView3(view);
+        Self {
+            world: ViewWorld3::new(view.clone(), ViewConfig::default()),
+            view,
+            poses: Vec::new(),
+            items: Vec::new(),
+            list: RenderList3D::new(),
+            camera: None,
+            renderer: None,
+        }
+    }
+}
+
+impl Display {
+    /// Creates the renderer of the look for `window`.
+    fn open(&mut self, window: Arc<Window>, size: (u32, u32), vsync: bool) -> Result<(), String> {
+        match self {
+            Display::D2(d) => d.renderer = Some(WindowRenderer::new(window, size, vsync)?),
+            Display::D3(d) => d.renderer = Some(WindowRenderer3D::new(window, size, vsync, Settings3D::default())?),
+        }
+        Ok(())
+    }
+
+    fn resize(&mut self, width: u32, height: u32) {
+        match self {
+            Display::D2(d) => d.renderer.iter_mut().for_each(|r| r.resize(width, height)),
+            Display::D3(d) => d.renderer.iter_mut().for_each(|r| r.resize(width, height)),
+        }
+    }
+
+    /// A jump of the timeline: the entities show their new place at once.
+    fn reset(&mut self) {
+        match self {
+            Display::D2(d) => d.world.reset(),
+            Display::D3(d) => d.world.reset(),
+        }
+    }
+
+    /// Moves the view world `dt` seconds forward with what the bridge delivered.
+    fn advance<E>(&mut self, dt: f32, update: &ViewUpdate<E>) {
+        // The entity views diff the poses themselves, so nobody reads the lifecycle queue: drop it every frame.
+        match self {
+            Display::D2(d) => {
+                d.world.update_from_bridge(dt, update);
+                drop(d.world.take_lifecycle());
+            }
+            Display::D3(d) => {
+                d.world.update_from_bridge(dt, update);
+                drop(d.world.take_lifecycle());
+            }
+        }
+    }
+
+    /// Calls the entity views and scene views with the poses of the view world.
+    fn dispatch<G: Game>(&mut self, views: &mut Views<G>, bridge: &mut dyn Bridge<G>, update: &ViewUpdate<G::Event>) {
+        match self {
+            Display::D2(d) => {
+                d.poses.clear();
+                d.world.render_items(&mut d.poses);
+                views.dispatch(bridge, update, &d.poses);
+            }
+            Display::D3(d) => {
+                d.poses.clear();
+                d.world.render_items(&mut d.poses);
+                views.dispatch3(bridge, update, &d.poses);
+            }
+        }
+    }
+
+    /// Builds the draw list of `frame` and draws it. `false` when there is no renderer yet.
+    fn draw(&mut self, frame: FrameView<'_>) -> bool {
+        match self {
+            Display::D2(d) => {
+                d.camera = fill_draw_list(&d.view, &d.world, frame, &mut d.items, &mut d.list);
+                d.renderer.as_mut().map(|r| r.render(&d.list, &d.camera)).is_some()
+            }
+            Display::D3(d) => {
+                let camera = fill_draw_list3(&d.view, &d.world, frame, &mut d.items, &mut d.list);
+                d.camera = Some(camera);
+                d.renderer.as_mut().map(|r| r.render(&d.list, &camera)).is_some()
+            }
+        }
+    }
+
+    /// The last drawn list, drawn again into a picture of exactly `size` pixels (RGBA8).
+    fn capture(&mut self, size: (u32, u32)) -> Option<Vec<u8>> {
+        match self {
+            Display::D2(d) => d.renderer.as_mut().map(|r| render_rgba(&mut r.renderer, &d.list, &d.camera, size)),
+            Display::D3(d) => {
+                let camera = d.camera?;
+                d.renderer.as_mut().map(|r| render_rgba3(&mut r.renderer, &d.list, &camera, size))
+            }
+        }
+    }
 }
 
 struct Runner<G: Game> {
     bridge: Driver<G>,
-    world: ViewWorld<SharedView>,
-    view: SharedView,
+    display: Display,
     local: LocalInput<G>,
     keys: InputContext,
     pacer: Pacer,
     args: Args,
     title: String,
-    gfx: Option<Gfx>,
+    window: Option<Arc<Window>>,
     /// The last timeline epoch shown (a change means a jump, not a movement).
     epoch: Option<u64>,
     views: Views<G>,
-    /// The poses of the view world, read again each frame for the entity views.
-    poses: Vec<RenderItem>,
-    items: Vec<RenderItem>,
-    list: RenderList,
     last_frame: Instant,
     error: Option<String>,
     /// The relay server of `--host`. Declared last so it stops after the bridge left the room.
@@ -480,27 +627,22 @@ impl<G: Game> Runner<G> {
         if let Some(epoch) = snapshot.as_ref().map(|s| s.timeline().map(|t| t.epoch)) {
             if epoch != self.epoch {
                 self.epoch = epoch;
-                self.world.reset();
+                self.display.reset();
             }
         }
-        self.world.update_from_bridge(self.pacer.view_dt(real.as_secs_f32(), self.bridge.tick_rate()), &update);
-        // The entity views diff the poses themselves, so nobody reads this queue: drop it every frame.
-        drop(self.world.take_lifecycle());
+        self.display.advance(self.pacer.view_dt(real.as_secs_f32(), self.bridge.tick_rate()), &update);
 
         if !self.views.is_empty() {
-            self.poses.clear();
-            self.world.render_items(&mut self.poses);
-            self.views.dispatch(&mut self.bridge, &update, &self.poses);
+            self.display.dispatch(&mut self.views, &mut self.bridge, &update);
         }
         let Some(snapshot) = snapshot else { return };
 
-        let camera = fill_draw_list(&self.view, &self.world, snapshot.predicted(), &mut self.items, &mut self.list);
-        let Some(gfx) = &mut self.gfx else { return };
-        gfx.renderer.render(&self.list, &camera);
+        if !self.display.draw(snapshot.predicted()) {
+            return;
+        }
 
         if self.pacer.frame_done(snapshot.tick()) == Outcome::Capture {
-            if let Some(path) = &self.args.screenshot {
-                let rgba = render_rgba(&mut gfx.renderer.renderer, &self.list, &camera, self.args.size);
+            if let (Some(path), Some(rgba)) = (&self.args.screenshot, self.display.capture(self.args.size)) {
                 if let Err(e) = write_png(path, self.args.size, &rgba) {
                     self.error = Some(e);
                 }
@@ -520,7 +662,7 @@ impl<G: Game> Runner<G> {
 
 impl<G: Game> ApplicationHandler for Runner<G> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.gfx.is_some() {
+        if self.window.is_some() {
             return;
         }
         let (w, h) = self.args.size;
@@ -534,9 +676,9 @@ impl<G: Game> ApplicationHandler for Runner<G> {
             }
         };
         let size = window.inner_size();
-        match WindowRenderer::new(window.clone(), (size.width, size.height), self.args.vsync) {
-            Ok(renderer) => {
-                self.gfx = Some(Gfx { window, renderer });
+        match self.display.open(window.clone(), (size.width, size.height), self.args.vsync) {
+            Ok(()) => {
+                self.window = Some(window);
                 self.last_frame = Instant::now();
             }
             Err(e) => {
@@ -550,9 +692,7 @@ impl<G: Game> ApplicationHandler for Runner<G> {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
-                if let Some(gfx) = &mut self.gfx {
-                    gfx.renderer.resize(size.width, size.height);
-                }
+                self.display.resize(size.width, size.height);
             }
             WindowEvent::Focused(false) => self.keys.release_all(),
             WindowEvent::KeyboardInput { event, .. } => {
@@ -566,8 +706,8 @@ impl<G: Game> ApplicationHandler for Runner<G> {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(gfx) = &self.gfx {
-            gfx.window.request_redraw();
+        if let Some(window) = &self.window {
+            window.request_redraw();
         }
     }
 }
@@ -693,6 +833,14 @@ mod tests {
         assert!(no_view.to_string().contains(".view("), "{no_view}");
         let no_input = physics().view(NoLook).run_window(Args::default()).unwrap_err();
         assert!(no_input.to_string().contains(".input("), "{no_input}");
+        let no_input_3d = physics().view3d(crate::Look3D::default()).run_window(Args::default()).unwrap_err();
+        assert!(no_input_3d.to_string().contains(".input("), "{no_input_3d}");
+    }
+
+    #[test]
+    fn a_run_cannot_draw_in_2d_and_in_3d_at_once() {
+        let both = physics().input(|_, _| PhysInput::default()).view(NoLook).view3d(crate::Look3D::default()).run_window(Args::default()).unwrap_err();
+        assert!(both.to_string().contains(".view3d("), "{both}");
     }
 
     struct NoLook;

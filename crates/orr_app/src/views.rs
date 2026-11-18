@@ -13,7 +13,7 @@ use orr_bridge::{
 };
 use orr_ecs::{Component, Entity};
 use orr_sim::Game;
-use orr_view::{RenderItem, Transform2};
+use orr_view::{RenderItem, RenderItem3, Transform2, Transform3};
 
 /// What happened to an event, as the scene view sees it. Same meaning as
 /// `orr_session::EventStatus`, without the payload (the payload is a separate argument).
@@ -93,6 +93,13 @@ pub trait EntityView<G: Game> {
         let _ = (ctx, entity, pose);
     }
 
+    /// The same as [`EntityView::on_update`] for a run with a 3D view ([`crate::App::view3d`]):
+    /// the app calls this method there, and `on_update` in a 2D run. `pose` is the position and
+    /// rotation that `ViewWorld3` shows.
+    fn on_update3(&mut self, ctx: &mut ViewContext<'_, G>, entity: Entity, pose: Option<Transform3>) {
+        let _ = (ctx, entity, pose);
+    }
+
     /// The entity is gone from the predicted frame: it was despawned, or a rollback
     /// removed an entity that only the prediction had. The frame in `ctx` no longer has it.
     fn on_destroy(&mut self, ctx: &mut ViewContext<'_, G>, entity: Entity) {
@@ -161,12 +168,31 @@ impl<G: Game, V: EntityView<G> + 'static, F: FnMut() -> V> EntityFactory<G> for 
     }
 }
 
-type Poses = BTreeMap<Entity, Transform2>;
+/// The poses the view world shows, by entity: flat (2D run) or in space (3D run).
+enum PoseMap {
+    D2(BTreeMap<Entity, Transform2>),
+    D3(BTreeMap<Entity, Transform3>),
+}
+
+/// The items of the view world, as the caller of [`Views::dispatch`] or [`Views::dispatch3`] has them.
+enum Poses<'a> {
+    D2(&'a [RenderItem]),
+    D3(&'a [RenderItem3]),
+}
+
+impl Poses<'_> {
+    fn by_entity(&self) -> PoseMap {
+        match self {
+            Poses::D2(items) => PoseMap::D2(items.iter().filter(|item| item.entity != Entity::NONE).map(|item| (item.entity, item.transform)).collect()),
+            Poses::D3(items) => PoseMap::D3(items.iter().filter(|item| item.entity != Entity::NONE).map(|item| (item.entity, item.transform)).collect()),
+        }
+    }
+}
 
 trait EntityLayer<G: Game> {
     /// Calls `on_destroy` for entities that left the predicted frame, then `on_create` for new ones.
     fn sync(&mut self, ctx: &mut ViewContext<'_, G>);
-    fn update(&mut self, ctx: &mut ViewContext<'_, G>, poses: &Poses);
+    fn update(&mut self, ctx: &mut ViewContext<'_, G>, poses: &PoseMap);
 }
 
 /// The live views of one component type, keyed by entity `(index, version)`.
@@ -195,9 +221,12 @@ impl<G: Game, C: Component, F: EntityFactory<G>> EntityLayer<G> for Layer<G, C, 
         }
     }
 
-    fn update(&mut self, ctx: &mut ViewContext<'_, G>, poses: &Poses) {
+    fn update(&mut self, ctx: &mut ViewContext<'_, G>, poses: &PoseMap) {
         for (entity, view) in &mut self.live {
-            view.on_update(ctx, *entity, poses.get(entity).copied());
+            match poses {
+                PoseMap::D2(poses) => view.on_update(ctx, *entity, poses.get(entity).copied()),
+                PoseMap::D3(poses) => view.on_update3(ctx, *entity, poses.get(entity).copied()),
+            }
         }
     }
 }
@@ -254,6 +283,16 @@ impl<G: Game> Views<G> {
     /// world after it took the same update (`ViewWorld::render_items`); entities are matched by key.
     /// Nothing is dropped: events that arrive before the first snapshot are kept until it comes.
     pub fn dispatch(&mut self, bridge: &mut dyn Bridge<G>, update: &ViewUpdate<G::Event>, poses: &[RenderItem]) {
+        self.dispatch_poses(bridge, update, Poses::D2(poses));
+    }
+
+    /// [`Views::dispatch`] for a 3D run: `poses` are the items of `ViewWorld3::render_items`, and
+    /// the entity views get them through [`EntityView::on_update3`].
+    pub fn dispatch3(&mut self, bridge: &mut dyn Bridge<G>, update: &ViewUpdate<G::Event>, poses: &[RenderItem3]) {
+        self.dispatch_poses(bridge, update, Poses::D3(poses));
+    }
+
+    fn dispatch_poses(&mut self, bridge: &mut dyn Bridge<G>, update: &ViewUpdate<G::Event>, poses: Poses<'_>) {
         if let Some(snapshot) = &update.snapshot {
             self.snapshot = Some(snapshot.clone());
         }
@@ -320,7 +359,7 @@ impl<G: Game> Views<G> {
             layer.sync(&mut ctx);
         }
         if !self.layers.is_empty() {
-            let by_entity: Poses = poses.iter().filter(|item| item.entity != Entity::NONE).map(|item| (item.entity, item.transform)).collect();
+            let by_entity = poses.by_entity();
             for layer in &mut self.layers {
                 layer.update(&mut ctx, &by_entity);
             }

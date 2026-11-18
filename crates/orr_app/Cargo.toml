@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish = false
-description = "Runs a Game in a window: fixed tick, input, bridge, interpolation, default 2D renderer, screenshots"
+description = "Runs a Game in a window: fixed tick, input, bridge, interpolation, default 2D and 3D renderers, screenshots"
 
 [lints]
 workspace = true
@@ -17,6 +17,9 @@ orr_render = { path = "../orr_render" }
 orr_session = { path = "../orr_session" }
 orr_sim = { path = "../orr_sim" }
 orr_ecs = { path = "../orr_ecs" }
+orr_gfx = { path = "../orr_gfx" }
+orr_gfx_view = { path = "../orr_gfx_view" }
+orr_physics3d = { path = "../orr_physics3d" }
 orr_reflect = { path = "../orr_reflect" }
 # `--host` and `--connect`: the relay server (without its binary's dependencies) and a socket link to it.
 orr_server = { path = "../orr_server", default-features = false }
@@ -28,6 +31,7 @@ png = "0.18"
 
 [dev-dependencies]
 bytemuck = { version = "1", features = ["derive"] }
+orr_fp = { path = "../orr_fp" }
 orr_games = { path = "../orr_games" }
 orr_sample = { path = "../orr_sample" }
 orr_testgame = { path = "../orr_testgame" }
