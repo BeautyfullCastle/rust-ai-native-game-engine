@@ -165,8 +165,8 @@ impl ModelScene {
         self.was_dropping = dropped > 0;
     }
 
-    /// Draws like [`ModelScene::draw`] into a picture of exactly `size` pixels and reads it back as
-    /// RGBA8, top row first. It does not depend on the window.
+    /// Draws like [`ModelScene::draw`] into a picture of exactly `size` pixels, then `on_top` over it
+    /// (the overlay text), and reads it back as RGBA8, top row first. It does not depend on the window.
     pub(crate) fn capture(
         &mut self,
         size: (u32, u32),
@@ -174,9 +174,13 @@ impl ModelScene {
         camera: &Camera3D,
         draws: &[ModelDraw],
         assets: &ViewAssets,
+        on_top: impl FnOnce(&<Wgpu as Rhi>::TextureView, (u32, u32)),
     ) -> Vec<u8> {
         let target = OffscreenTarget::new(&self.rhi.clone(), size.0, size.1, self.format);
-        target.render_into(|_, view, size| self.draw(view, size, list, camera, draws, assets));
+        target.render_into(|_, view, size| {
+            self.draw(view, size, list, camera, draws, assets);
+            on_top(view, size);
+        });
         target.read_rgba8()
     }
 

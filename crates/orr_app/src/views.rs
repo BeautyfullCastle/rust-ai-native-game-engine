@@ -13,7 +13,11 @@ use orr_bridge::{
 };
 use orr_ecs::{Component, Entity};
 use orr_sim::Game;
+use orr_audio::Clip;
 use orr_view::{RenderItem, RenderItem3, Transform2, Transform3};
+
+use crate::audio::{Audio, SoundOut};
+use crate::overlay::Overlay;
 
 /// What happened to an event, as the scene view sees it. Same meaning as
 /// `orr_session::EventStatus`, without the payload (the payload is a separate argument).
@@ -35,6 +39,8 @@ pub struct ViewContext<'a, G: Game> {
     snapshot: &'a Snapshot,
     local: Vec<PlayerSlot>,
     bridge: &'a mut dyn Bridge<G>,
+    overlay: &'a mut Overlay,
+    audio: &'a mut Audio,
 }
 
 impl<'a, G: Game> ViewContext<'a, G> {
@@ -67,6 +73,19 @@ impl<'a, G: Game> ViewContext<'a, G> {
     /// Whether `slot` is controlled by this client.
     pub fn is_local(&self, slot: PlayerSlot) -> bool {
         self.local.contains(&slot)
+    }
+
+    /// The overlay of this frame: text on the screen and lines and rectangles in the world, drawn
+    /// after the default renderer, on top of the picture. It is empty at the start of every frame,
+    /// so call it in every frame in which the things should be visible (for example in a scene
+    /// view's `on_update`). The text font is ASCII only (see [`crate::Overlay`]).
+    pub fn draw(&mut self) -> &mut Overlay {
+        self.overlay
+    }
+
+    /// Plays and stops sounds (see [`crate::Audio`]). Without an audio device the calls do nothing.
+    pub fn audio(&mut self) -> &mut Audio {
+        self.audio
     }
 
     /// Sends a one-off command to the simulation (same as [`Bridge::send_command`]).
@@ -247,6 +266,9 @@ pub struct Views<G: Game> {
     announced: BTreeMap<EventKey, G::Event>,
     /// The same for player signals.
     announced_signals: BTreeMap<EventKey, RawPlayerSignal>,
+    /// What the views drew in the last frame of view calls.
+    overlay: Overlay,
+    audio: Audio,
 }
 
 impl<G: Game> Default for Views<G> {
@@ -257,7 +279,7 @@ impl<G: Game> Default for Views<G> {
 
 impl<G: Game> Views<G> {
     pub fn new() -> Self {
-        Self { layers: Vec::new(), scenes: Vec::new(), started: false, snapshot: None, waiting: Vec::new(), announced: BTreeMap::new(), announced_signals: BTreeMap::new() }
+        Self { layers: Vec::new(), scenes: Vec::new(), started: false, snapshot: None, waiting: Vec::new(), announced: BTreeMap::new(), announced_signals: BTreeMap::new(), overlay: Overlay::default(), audio: Audio::default() }
     }
 
     /// One view (made by `factory`) for every entity that has component `C`.
@@ -268,6 +290,36 @@ impl<G: Game> Views<G> {
     /// A scene view. Called after the ones added before it.
     pub fn scene_view(&mut self, view: impl SceneView<G> + 'static) {
         self.scenes.push(Box::new(view));
+    }
+
+    /// What the views drew in the newest call of [`Views::dispatch`]: it is cleared at the start of every call.
+    pub fn overlay(&self) -> &Overlay {
+        &self.overlay
+    }
+
+    /// Registers a clip under `name` for `ctx.audio().play_named(name)`. Replaces a clip of the same name.
+    pub fn sound(&mut self, name: &str, clip: Clip) {
+        self.audio.add(name, clip);
+    }
+
+    /// The output that the sounds of the views play on. Without one (the default for a window-free
+    /// `Views`) the views play nothing. [`crate::App`] makes the run open the system device
+    /// when the first sound plays (and none for a screenshot).
+    pub fn set_sound_out(&mut self, out: impl SoundOut + 'static) {
+        self.audio.set_out(Box::new(out));
+    }
+
+    pub(crate) fn use_sound_device(&mut self) {
+        self.audio.use_device();
+    }
+
+    pub(crate) fn mute_sound(&mut self) {
+        self.audio.mute();
+    }
+
+    /// Once per frame: drops an audio output that failed.
+    pub(crate) fn poll_audio(&mut self) {
+        self.audio.poll();
     }
 
     /// `false` when no view is registered, so the caller can skip the work of building poses.
@@ -293,6 +345,7 @@ impl<G: Game> Views<G> {
     }
 
     fn dispatch_poses(&mut self, bridge: &mut dyn Bridge<G>, update: &ViewUpdate<G::Event>, poses: Poses<'_>) {
+        self.overlay.clear();
         if let Some(snapshot) = &update.snapshot {
             self.snapshot = Some(snapshot.clone());
         }
@@ -302,7 +355,10 @@ impl<G: Game> Views<G> {
             self.waiting = events;
             return;
         };
-        let mut ctx = ViewContext { snapshot: &snapshot, local: bridge.local_slots(), bridge };
+        // The context borrows the overlay and the audio while the view calls borrow `self`, so they are moved out for the frame.
+        let mut overlay = std::mem::take(&mut self.overlay);
+        let mut audio = std::mem::take(&mut self.audio);
+        let mut ctx = ViewContext { snapshot: &snapshot, local: bridge.local_slots(), bridge, overlay: &mut overlay, audio: &mut audio };
 
         if !self.started {
             self.started = true;
@@ -367,6 +423,9 @@ impl<G: Game> Views<G> {
         for scene in &mut self.scenes {
             scene.on_update(&mut ctx);
         }
+        drop(ctx);
+        self.overlay = overlay;
+        self.audio = audio;
     }
 
     fn event(&mut self, ctx: &mut ViewContext<'_, G>, payload: &G::Event, state: EventState) {

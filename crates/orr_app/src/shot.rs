@@ -7,20 +7,28 @@ use std::path::Path;
 use orr_render::orr_rhi::Wgpu;
 use orr_render::{Camera, Camera3D, OffscreenTarget, RenderList, RenderList3D, Renderer, Renderer3D};
 
-/// Draws `list` into an offscreen picture of exactly `size` pixels and reads it back
-/// as RGBA8 (sRGB encoded, top row first). It does not depend on the window size.
-pub(crate) fn render_rgba(renderer: &mut Renderer<Wgpu>, list: &RenderList, camera: &Camera, size: (u32, u32)) -> Vec<u8> {
+use crate::overlay::{Overlay, TextPass};
+
+/// Draws `list` and then the text of `overlay` into an offscreen picture of exactly `size` pixels
+/// and reads it back as RGBA8 (sRGB encoded, top row first). It does not depend on the window size.
+pub(crate) fn render_rgba(renderer: &mut Renderer<Wgpu>, text: &mut TextPass, overlay: &Overlay, list: &RenderList, camera: &Camera, size: (u32, u32)) -> Vec<u8> {
     let rhi = renderer.rhi().clone();
     let target = OffscreenTarget::new(&rhi, size.0, size.1, renderer.format());
-    target.render(renderer, list, camera);
+    target.render_into(|_, view, size| {
+        renderer.draw(view, size, list, camera);
+        text.draw(view, size, overlay);
+    });
     target.read_rgba8()
 }
 
 /// The same as [`render_rgba`] for a 3D `list`.
-pub(crate) fn render_rgba3(renderer: &mut Renderer3D<Wgpu>, list: &RenderList3D, camera: &Camera3D, size: (u32, u32)) -> Vec<u8> {
+pub(crate) fn render_rgba3(renderer: &mut Renderer3D<Wgpu>, text: &mut TextPass, overlay: &Overlay, list: &RenderList3D, camera: &Camera3D, size: (u32, u32)) -> Vec<u8> {
     let rhi = renderer.rhi().clone();
     let target = OffscreenTarget::new(&rhi, size.0, size.1, renderer.format());
-    target.render3d(renderer, list, camera);
+    target.render_into(|_, view, size| {
+        renderer.draw(view, size, list, camera);
+        text.draw(view, size, overlay);
+    });
     target.read_rgba8()
 }
 
