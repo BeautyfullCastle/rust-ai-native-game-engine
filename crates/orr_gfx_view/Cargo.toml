@@ -16,6 +16,7 @@ models = ["dep:orr_model", "dep:png"]
 [dependencies]
 orr_model = { path = "../orr_model", optional = true }
 png = { version = "0.17", optional = true }
+serde_json = "1"
 orr_gfx = { path = "../orr_gfx" }
 orr_bridge = { path = "../orr_bridge" }
 orr_ecs = { path = "../orr_ecs" }

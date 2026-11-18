@@ -25,9 +25,10 @@ use crate::cli::{Args, RunMode, USAGE};
 use crate::input::InputContext;
 use crate::net::{self, Hosted, Join};
 use crate::pace::{Advance, Outcome, Pacer};
+use crate::models::ModelScene;
 use crate::shot::{render_rgba, render_rgba3, write_png};
 use crate::view2d::{fill_draw_list, SharedView, View2D};
-use crate::view3d::{fill_draw_list3, SharedView3, View3D};
+use crate::view3d::{fill_draw_list3, ModelDraw, SharedView3, View3D};
 use crate::views::{EntityFactory, SceneView, Views};
 
 /// Why a run could not start or ended badly.
@@ -487,6 +488,11 @@ struct Display3 {
     poses: Vec<RenderItem3>,
     items: Vec<RenderItem3>,
     list: RenderList3D,
+    /// The models of the view assets that the entities of the last drawn frame ask for.
+    models: Vec<ModelDraw>,
+    /// Draws shapes and models together; made when the first model is drawn.
+    scene: Option<ModelScene>,
+    scene_failed: bool,
     camera: Option<Camera3D>,
     renderer: Option<WindowRenderer3D<Wgpu>>,
 }
@@ -500,9 +506,31 @@ impl Display3 {
             poses: Vec::new(),
             items: Vec::new(),
             list: RenderList3D::new(),
+            models: Vec::new(),
+            scene: None,
+            scene_failed: false,
             camera: None,
             renderer: None,
         }
+    }
+
+    /// The scene that draws models with the shapes, made on first use. `None` when the frame has
+    /// no models, or when the GPU state for them could not be made (said once on stderr).
+    fn model_scene(&mut self) -> Option<&mut ModelScene> {
+        if self.models.is_empty() || self.scene_failed {
+            return None;
+        }
+        if self.scene.is_none() {
+            let renderer = &self.renderer.as_ref()?.renderer;
+            match ModelScene::new(renderer.rhi().clone(), renderer.format()) {
+                Ok(scene) => self.scene = Some(scene),
+                Err(error) => {
+                    eprintln!("models are not drawn: {error}");
+                    self.scene_failed = true;
+                }
+            }
+        }
+        self.scene.as_mut()
     }
 }
 
@@ -570,9 +598,26 @@ impl Display {
                 d.renderer.as_mut().map(|r| r.render(&d.list, &d.camera)).is_some()
             }
             Display::D3(d) => {
-                let camera = fill_draw_list3(&d.view, &d.world, frame, &mut d.items, &mut d.list);
+                let camera = fill_draw_list3(&d.view, &d.world, frame, &mut d.items, &mut d.list, &mut d.models);
                 d.camera = Some(camera);
-                d.renderer.as_mut().map(|r| r.render(&d.list, &camera)).is_some()
+                if d.renderer.is_none() {
+                    return false;
+                }
+                // Models and shapes go through one composed pass; a frame without models keeps the plain pass.
+                let view = d.view.0.clone();
+                let composed = d.model_scene().is_some();
+                match view.view_assets().filter(|_| composed) {
+                    Some(assets) => {
+                        let d = &mut **d;
+                        let (scene, renderer) = (d.scene.as_mut().expect("made above"), d.renderer.as_mut().expect("checked above"));
+                        let (list, models) = (&d.list, &d.models);
+                        renderer.render_with(false, |shapes, target, size| scene.draw(shapes, target, size, list, &camera, models, assets));
+                    }
+                    None => {
+                        d.renderer.as_mut().expect("checked above").render(&d.list, &camera);
+                    }
+                }
+                true
             }
         }
     }
@@ -583,6 +628,14 @@ impl Display {
             Display::D2(d) => d.renderer.as_mut().map(|r| render_rgba(&mut r.renderer, &d.list, &d.camera, size)),
             Display::D3(d) => {
                 let camera = d.camera?;
+                d.renderer.as_ref()?;
+                let view = d.view.0.clone();
+                let composed = d.model_scene().is_some();
+                if let Some(assets) = view.view_assets().filter(|_| composed) {
+                    let d = &mut **d;
+                    let (scene, renderer) = (d.scene.as_mut().expect("made above"), d.renderer.as_mut().expect("checked above"));
+                    return Some(scene.capture(&mut renderer.renderer, size, &d.list, &camera, &d.models, assets));
+                }
                 d.renderer.as_mut().map(|r| render_rgba3(&mut r.renderer, &d.list, &camera, size))
             }
         }
