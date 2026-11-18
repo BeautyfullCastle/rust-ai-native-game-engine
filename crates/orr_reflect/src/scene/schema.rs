@@ -46,10 +46,14 @@ fn with_doc(j: Json, doc: &str) -> Json {
 fn desc_schema(desc: &TypeDesc) -> Json {
     let j = match &desc.kind {
         Kind::Bool { .. } => Json::obj(vec![("type", Json::str("boolean"))]),
-        Kind::Int { int, range } => {
+        Kind::Int { int, range, asset } => {
             let lo = range.min.map_or(int.min(), |m| m.max(int.min()));
             let hi = range.max.map_or(int.max(), |m| m.min(int.max()));
-            Json::obj(vec![("type", Json::str("integer")), ("minimum", Json::num(lo)), ("maximum", Json::num(hi))])
+            let j = Json::obj(vec![("type", Json::str("integer")), ("minimum", Json::num(lo)), ("maximum", Json::num(hi))]);
+            match asset {
+                Some(kind) => j.with("description", Json::str(&format!("Id of a {kind} asset (.{}): the 64 bit hash of its path; 0 for none", crate::desc::asset_extensions(kind).join(", .")))),
+                None => j,
+            }
         }
         Kind::Fixed { range } => fixed_schema(range, "#/$defs/orr.Fixed", FIXED_NOTE),
         Kind::Fixed32 { range } => fixed_schema(range, "#/$defs/orr.Fixed32", FIXED32_NOTE),
