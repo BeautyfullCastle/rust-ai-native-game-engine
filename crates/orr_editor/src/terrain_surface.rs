@@ -657,38 +657,31 @@ fn read_optional(path: &Path, limit: usize) -> Result<Option<Vec<u8>>, String> {
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or(Path::new(".")),
     )?;
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(m) => m,
+    // `open_file` refuses a link, a folder or a FIFO without waiting for a writer.
+    let file = match orr_fsid::open_file(path) {
+        Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e.to_string()),
+        Err(e) => {
+            return Err(format!(
+                "Appearance input must be a bounded regular file, not a symlink: {e}"
+            ))
+        }
     };
-    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > limit as u64 {
+    let opened = file.metadata().map_err(|e| e.to_string())?;
+    if opened.len() > limit as u64 {
         return Err("Appearance input must be a bounded regular file, not a symlink".into());
     }
     let mut bytes = Vec::new();
-    let file = fs::File::open(path).map_err(|e| e.to_string())?;
-    let opened = file.metadata().map_err(|e| e.to_string())?;
-    if !opened.is_file() || opened.len() > limit as u64 {
-        return Err("Appearance input changed while opening".into());
-    }
-    file.take(limit as u64 + 1)
+    (&file)
+        .take(limit as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
     if bytes.len() > limit {
         return Err("Appearance input byte limit".into());
     }
     checked_path(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let named = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
-        if metadata.dev() != opened.dev()
-            || metadata.ino() != opened.ino()
-            || named.dev() != opened.dev()
-            || named.ino() != opened.ino()
-        {
-            return Err("Appearance input replaced while reading".into());
-        }
+    if !matches!(orr_fsid::same_file(path, &file), Ok(true)) {
+        return Err("Appearance input replaced while reading".into());
     }
     Ok(Some(bytes))
 }
