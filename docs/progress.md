@@ -52,7 +52,8 @@
 - 윈도우에서 Collect 최고 기록 저장은 창 경로의 단위 테스트(`isolated_process_relaunch_uses_only_external_progress`)로 확인했다. 창을 띄워 사람이 직접 점수를 내 보는 확인은 하지 않았다.
 - 에디터 메뉴(`File > New Room project…`, `File > Export Windows game…`)는 사람이 직접 눌러 보는 확인을 아직 하지 않았다. 같은 기능을 명령 도구로 실행해 확인했다.
 - 리눅스, macOS, 안드로이드, 브라우저 빌드는 이번에 실행하지 않았다.
-- 2026-11-14 기준 main에서 원래부터 실패하는 테스트 2건: `crates/orr_editor/tests/measure.rs`의 `drag_to_viewport_latency`(두 번째 드래그 이동이 화면에 반영되지 않음), `crates/orr_wasm_bench/tests/checksums.rs`의 `physics3d_1000_tick` 골든 체크섬 불일치.
+- 2026-11-14에 실패하던 `drag_to_viewport_latency`와 `physics3d_1000_tick`은 2026-11-19 main에서 통과한다(앞의 것은 기본 기능 구성에서만 확인).
+- 폴더가 바뀌지 않았는지 확인하는 코드는 공용 크레이트 `orr_fsid`(윈도우는 볼륨 일련번호와 파일 인덱스, 유닉스는 장치·아이노드)로 옮기는 중이다. Room 캐릭터·카메라·조명, Collect UI, 연결 프리팹 패널은 옮겼다. 다른 `same_file`·`same_directory` 복사본(`json_output.rs`, `mesh_*` 저장소, `room_wall_stamp_store.rs`, `png16`·`raw16` 입력, `orr_model`)은 아직 메타데이터를 비교한다.
 - TAA와 `motion_blur`의 물체별 움직임 벡터는 절차 도형, 정적 모델 인스턴스, 스키닝 모델에만 있다. 표면 셰이더 인스턴스, 렌더 패스(지형, 식생, 수면), 입자는 카메라 움직임만 재투영한다. 자세한 한계는 [rendering-architecture.md](rendering-architecture.md) 1.14절에 있다.
 
 ## 다음 작업
