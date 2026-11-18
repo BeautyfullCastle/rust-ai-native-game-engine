@@ -41,6 +41,22 @@ pub fn open_directory(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
+/// Open a regular file without following a link at the end of the path.
+///
+/// The call fails when the path is a folder, a symbolic link, a reparse point, a FIFO or
+/// another special file. On Unix the open does not wait for a writer.
+pub fn open_file(path: &Path) -> io::Result<File> {
+    let file = imp::open_file(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || imp::is_link(&metadata) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "path must be a regular file, not a link or reparse point",
+        ));
+    }
+    Ok(file)
+}
+
 /// True when `metadata` describes a symbolic link or a Windows reparse point.
 pub fn is_link(metadata: &std::fs::Metadata) -> bool {
     imp::is_link(metadata)
@@ -49,6 +65,11 @@ pub fn is_link(metadata: &std::fs::Metadata) -> bool {
 /// True when `path` names the same folder as the open handle `pinned`.
 pub fn same_directory(path: &Path, pinned: &File) -> io::Result<bool> {
     Ok(file_id(&open_directory(path)?)? == file_id(pinned)?)
+}
+
+/// True when `path` names the same regular file as the open handle `held`.
+pub fn same_file(path: &Path, held: &File) -> io::Result<bool> {
+    Ok(file_id(&open_file(path)?)? == file_id(held)?)
 }
 
 /// A folder opened once and checked again later by path.
@@ -212,15 +233,22 @@ mod imp {
         metadata.file_type().is_symlink()
             || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
     }
+
+    pub fn open_file(path: &Path) -> io::Result<File> {
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+    }
 }
 
 #[cfg(unix)]
 mod imp {
     use super::FileId;
     use std::{
-        fs::{File, Metadata},
+        fs::{File, Metadata, OpenOptions},
         io,
-        os::unix::fs::MetadataExt,
+        os::unix::fs::{MetadataExt, OpenOptionsExt},
         path::Path,
     };
 
@@ -253,6 +281,15 @@ mod imp {
     pub fn is_link(metadata: &Metadata) -> bool {
         metadata.file_type().is_symlink()
     }
+
+    pub fn open_file(path: &Path) -> io::Result<File> {
+        // `O_NOFOLLOW` refuses a final symbolic link. `O_NONBLOCK` keeps the open from
+        // waiting on a FIFO that a path swap may have put in place of the file.
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(path)
+    }
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -274,6 +311,9 @@ mod imp {
         unsupported()
     }
     pub fn open_directory(_: &Path) -> io::Result<File> {
+        unsupported()
+    }
+    pub fn open_file(_: &Path) -> io::Result<File> {
         unsupported()
     }
     pub fn is_link(metadata: &Metadata) -> bool {
@@ -322,6 +362,26 @@ mod tests {
         assert!(pinned.verify_unchanged().is_err());
         assert!(!same_directory(&path, pinned.file()).unwrap());
         assert!(same_directory(&moved, pinned.file()).unwrap());
+    }
+
+    #[test]
+    fn a_file_keeps_its_identity_and_a_replacement_differs() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("file.txt");
+        let moved = temp.path().join("moved.txt");
+        fs::write(&path, b"x").unwrap();
+        let held = open_file(&path).unwrap();
+        assert!(same_file(&path, &held).unwrap());
+        fs::rename(&path, &moved).unwrap();
+        fs::write(&path, b"x").unwrap();
+        assert!(!same_file(&path, &held).unwrap());
+        assert!(same_file(&moved, &held).unwrap());
+    }
+
+    #[test]
+    fn a_folder_is_not_a_file() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(open_file(temp.path()).is_err());
     }
 
     #[test]
@@ -392,6 +452,7 @@ mod tests {
                 .unwrap();
             assert!(status.status.success(), "{status:?}");
             assert!(open_directory(&junction).is_err());
+            assert!(open_file(&junction).is_err());
             assert!(check_real_folders(&junction).is_err());
             assert!(check_real_folders(&junction.join("inner")).is_err());
         }
