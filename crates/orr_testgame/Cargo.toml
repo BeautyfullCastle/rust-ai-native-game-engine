@@ -13,5 +13,6 @@ workspace = true
 orr_fp = { path = "../orr_fp" }
 orr_ecs = { path = "../orr_ecs" }
 orr_sim = { path = "../orr_sim" }
+orr_gfx = { path = "../orr_gfx" }
 orr_reflect = { path = "../orr_reflect", default-features = false }
 bytemuck = { version = "1", features = ["derive"] }

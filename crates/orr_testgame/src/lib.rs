@@ -9,6 +9,7 @@
 #![deny(clippy::disallowed_types)]
 #![deny(clippy::float_arithmetic)]
 
+pub mod lobby;
 pub mod roster;
 
 use bytemuck::{Pod, Zeroable};
