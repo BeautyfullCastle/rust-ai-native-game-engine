@@ -89,6 +89,9 @@ pub mod coop_defense;
 #[cfg(feature = "sample-host")]
 pub mod yard3d;
 
+#[cfg(feature = "sample-host")]
+pub mod view_yard3d;
+
 pub use activity::{
     ActivityEntry, ActivityKind, ClientInfo, ValueChange, VerifyDetail, DEFAULT_ACTIVITY_CAPACITY,
 };

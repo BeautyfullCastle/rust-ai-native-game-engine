@@ -105,6 +105,8 @@ pub mod texture_library;
 pub mod theme;
 #[cfg(feature = "models")]
 pub mod terrain_models;
+#[cfg(feature = "models")]
+pub mod view_models;
 #[cfg(feature = "outdoor")]
 pub mod outdoor_scene;
 #[cfg(feature = "models")]

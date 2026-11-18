@@ -176,6 +176,8 @@ impl ParticlePool {
             BridgeEvent::Sim { key, status: EventStatus::Verified(e) } => { self.observe(*key, map(e), false)?; }
             BridgeEvent::Lifecycle(note) => self.lifecycle(*note),
             BridgeEvent::ViewResynced(note) => self.resync(note),
+            // A player joining or leaving makes no effect.
+            BridgeEvent::Player { .. } => {}
         }
         Ok(())
     }

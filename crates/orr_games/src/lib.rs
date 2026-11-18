@@ -13,6 +13,7 @@
 pub mod physics_game;
 pub mod dragon;
 pub mod yard3d_game;
+pub mod view_yard3d_game;
 
 #[cfg(feature = "terrain-physics")]
 pub mod terrain_yard3d_game;
