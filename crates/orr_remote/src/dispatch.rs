@@ -161,7 +161,7 @@ fn own_tx<G: Game>(t: &ErpTarget<'_, G>, ctx: &CallCtx<'_>) -> Result<(), RpcErr
 fn is_world_mutation(method: &str) -> bool {
     matches!(
         method,
-        "world.patch" | "world.patch_batch" | "world.insert" | "world.remove" | "world.spawn" | "world.despawn" | "world.singleton.patch" | "mesh.geometry.reproject"
+        "world.patch" | "world.patch_batch" | "world.patch_many" | "world.insert" | "world.remove" | "world.spawn" | "world.despawn" | "world.singleton.patch" | "mesh.geometry.reproject"
     )
 }
 
@@ -241,6 +241,7 @@ pub(crate) fn call<G: Game>(
         "world.singleton.get" => singleton_get(t, &p),
         "world.patch" => world_patch(t, ctx, &p, origin),
         "world.patch_batch" => world_patch_batch(t, lim, ctx, &p, origin),
+        "world.patch_many" => world_patch_many(t, ctx, &p, origin),
         #[cfg(feature = "mesh-mission")]
         "mesh.geometry.reproject" => geometry_mission::call(t, lim, ctx, &p, origin),
         "world.insert" => world_insert(t, ctx, &p, origin),
@@ -646,6 +647,71 @@ fn world_patch<G: Game>(t: &mut ErpTarget<'_, G>, ctx: &CallCtx<'_>, p: &P<'_>, 
         }
     };
     Ok(edited(t, changed))
+}
+
+const MAX_PATCH_MANY_ITEMS: usize = 4096;
+
+/// Sets one field of one component type on many entities as one undo step.
+/// Outside a transaction the batch is atomic. Inside the caller's open
+/// transaction every edit joins that transaction, so its commit is the one undo
+/// step; every target and value is checked first, and a later failure (an
+/// admission refusal) leaves the earlier edits in the open transaction for the
+/// caller to roll back.
+fn world_patch_many<G: Game>(t: &mut ErpTarget<'_, G>, ctx: &CallCtx<'_>, p: &P<'_>, origin: Origin) -> Result<J, RpcError> {
+    require_edit_mode(t, "world.patch_many")?;
+    own_tx(t, ctx)?;
+    let label = p.opt_str("label")?.unwrap_or("set field on many entities");
+    if label.trim().is_empty() {
+        return Err(RpcError::params("'label' must not be empty"));
+    }
+    let component = p.str("component")?;
+    let path = p.opt_str("path")?.unwrap_or("");
+    let ti = component_type(&view(t), component)?;
+    let raw_patches = p.req_raw("patches")?.as_array().ok_or_else(|| RpcError::params("'patches' must be an array"))?;
+    if raw_patches.is_empty() {
+        return Err(RpcError::params("'patches' must contain at least one entity"));
+    }
+    if raw_patches.len() > MAX_PATCH_MANY_ITEMS {
+        return Err(RpcError::new(
+            LIMIT_EXCEEDED,
+            "limit_exceeded",
+            format!("world.patch_many accepts at most {MAX_PATCH_MANY_ITEMS} entities"),
+        ));
+    }
+    let mut guids: Vec<Guid> = Vec::with_capacity(raw_patches.len());
+    let mut ops = Vec::with_capacity(raw_patches.len());
+    for (index, raw) in raw_patches.iter().enumerate() {
+        let item = raw.as_object().ok_or_else(|| RpcError::params(format!("patches[{index}] must be an object")))?;
+        if item.len() != 2 || !item.contains_key("entity") || !item.contains_key("value") {
+            return Err(RpcError::params(format!("patches[{index}] must contain only 'entity' and 'value'")));
+        }
+        let text = item["entity"].as_str().ok_or_else(|| RpcError::params(format!("patches[{index}].entity must be a string")))?;
+        let target = parse_target(text)?;
+        let guid = edit_guid(t, &target)?;
+        if guids.contains(&guid) {
+            return Err(RpcError::params(format!("patches[{index}] repeats entity '{guid}'")));
+        }
+        let mut value = decode_value(t, ti, path, &item["value"])?;
+        if path.is_empty() {
+            value = overlay(&view(t).component(&target, component)?, &value);
+        } else {
+            // The entity must have the component before any edit begins.
+            view(t).component(&target, component)?;
+        }
+        guids.push(guid.clone());
+        ops.push(Op::SetField { guid, component: component.to_string(), path: path.to_string(), value });
+    }
+    let count = ops.len();
+    let changed = if t.doc.in_tx() {
+        let mut changed = false;
+        for op in ops {
+            changed |= t.doc.apply(op, origin.clone())?.changed;
+        }
+        changed
+    } else {
+        t.doc.apply_batch(label, ops, origin)?.iter().any(|entry| entry.changed)
+    };
+    Ok(json!({"changed": changed, "count": count, "checksum": checksum_text(t.doc.checksum())}))
 }
 
 const MAX_PATCH_BATCH_ITEMS: usize = 128;

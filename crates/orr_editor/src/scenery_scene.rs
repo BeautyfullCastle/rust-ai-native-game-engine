@@ -360,18 +360,43 @@ pub fn read(editor: &Editor, mut settings: Settings) -> Settings {
 }
 
 /// Sets the fields in the open scene. Returns how many were accepted. The editor
-/// reports a refusal in its own message line.
+/// reports a refusal in its own message line. One field of many entities (the
+/// water surfaces) goes in one request and so is one edit of a drag, however many
+/// entities there are.
 pub fn apply(editor: &mut Editor, changes: &[Change]) -> usize {
     let mut accepted = 0;
-    for change in changes {
-        let ok = match &change.place {
-            Place::Singleton(name) => editor.set_field(&Owner::Singleton((*name).into()), &change.path, change.value.clone()),
-            Place::Entity(entity, component) => {
-                let target = editor.rows().iter().find(|row| row.entity == *entity).map_or(Target::Entity(*entity), |row| row.target());
-                editor.set_entity_field(&target, component, &change.path, change.value.clone())
+    let mut done = vec![false; changes.len()];
+    for first in 0..changes.len() {
+        if done[first] {
+            continue;
+        }
+        let change = &changes[first];
+        match &change.place {
+            Place::Singleton(name) => {
+                accepted += usize::from(editor.set_field(&Owner::Singleton((*name).into()), &change.path, change.value.clone()));
             }
-        };
-        accepted += usize::from(ok);
+            Place::Entity(_, component) => {
+                let same = |other: &Change| matches!(&other.place, Place::Entity(_, c) if c == component) && other.path == change.path;
+                let group: Vec<usize> = (first..changes.len()).filter(|&i| !done[i] && same(&changes[i])).collect();
+                let patches: Vec<(Target, Value)> = group
+                    .iter()
+                    .filter_map(|&i| {
+                        let Place::Entity(entity, _) = &changes[i].place else { return None };
+                        let target = editor.rows().iter().find(|row| row.entity == *entity).map_or(Target::Entity(*entity), |row| row.target());
+                        Some((target, changes[i].value.clone()))
+                    })
+                    .collect();
+                let ok = match patches.as_slice() {
+                    [(target, value)] => editor.set_entity_field(target, component, &change.path, value.clone()),
+                    _ => editor.set_entity_fields(&format!("scene window: {component}.{}", change.path), component, &change.path, &patches),
+                };
+                accepted += usize::from(ok) * patches.len();
+                for i in group {
+                    done[i] = true;
+                }
+            }
+        }
+        done[first] = true;
     }
     accepted
 }

@@ -2159,6 +2159,52 @@ impl Editor {
         self.set_field_of(Some(target), &Owner::Component(component.to_string()), path, value)
     }
 
+    /// Sets one field of one component type on many entities with one request
+    /// (`world.patch_many`): one undo step, however many entities. Inside a
+    /// gesture it is one queued edit, so it counts as one field of the drag.
+    /// Returns true if something changed (inside a gesture: queued).
+    pub fn set_entity_fields(&mut self, label: &str, component: &str, path: &str, patches: &[(Target, Value)]) -> bool {
+        if patches.is_empty() {
+            return false;
+        }
+        if self.is_viewer() {
+            self.error("replay Viewer is read-only");
+            return false;
+        }
+        if let Some(down) = &self.down {
+            self.error(down.reason.clone());
+            return false;
+        }
+        let what = format!("set {component}.{path} on {} entities", patches.len());
+        let params = json!({
+            "label": label,
+            "component": component,
+            "path": path,
+            "patches": patches.iter().map(|(target, value)| json!({"entity": target.param(), "value": value_to_json(value)})).collect::<Vec<_>>(),
+        });
+        if self.gesture.has_input() {
+            return self.queue_gesture_edit(what, "world.patch_many", params);
+        }
+        if self.gesture.busy() {
+            self.error("an edit is still pending; wait before changing another field");
+            return false;
+        }
+        match self.call("world.patch_many", params) {
+            Ok(r) => {
+                let changed = r.get("changed").and_then(J::as_bool).unwrap_or(false);
+                if changed {
+                    self.mark_acknowledged_edit(&r);
+                }
+                changed
+            }
+            Err(e) => {
+                self.error(format!("{what}: {e}"));
+                self.dirty.inspect = true;
+                false
+            }
+        }
+    }
+
     fn set_field_of(&mut self, entity: Option<&Target>, owner: &Owner, path: &str, value: Value) -> bool {
         if self.is_viewer() {
             self.error("replay Viewer is read-only");
