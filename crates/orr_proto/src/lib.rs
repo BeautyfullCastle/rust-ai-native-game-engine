@@ -19,7 +19,7 @@ pub mod net;
 pub mod netsim;
 
 pub use msg::{
-    Bundle, ClientMsg, Hello, InputEntry, ProtoError, RejectReason, ServerMsg, SlotConfirmed, TimeSync, Welcome,
+    confirmed_encoded_len, input_encoded_len, Bundle, ClientMsg, Hello, InputEntry, ProtoError, RejectReason, ServerMsg, SlotConfirmed, TimeSync, Welcome,
     BYE_BEHIND, BYE_KICKED_CHEAT, BYE_KICKED_DESYNC, FLAG_ABSENT, FLAG_REPEATED, MIN_PROTOCOL_VERSION, NO_SLOT,
     PROTOCOL_VERSION, SEAT_RECONNECTED, SEAT_REMOVED, SERVER_SLOT, WELCOME_AUTHORITATIVE,
 };

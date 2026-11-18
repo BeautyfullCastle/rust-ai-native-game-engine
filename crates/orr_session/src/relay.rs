@@ -29,7 +29,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 
 use orr_proto::{
-    Bundle, Channel, ClientMsg, Hello, InputEntry, Link, LinkEvent, RejectReason, ServerMsg, TimeSync, Welcome,
+    input_encoded_len, Bundle, Channel, ClientMsg, Hello, InputEntry, Link, LinkEvent, RejectReason, ServerMsg, TimeSync, Welcome,
     FLAG_ABSENT, FLAG_REPEATED, NO_SLOT,
 };
 use orr_sim::{Game, PlayerSlot, RawPlayerSignal, SimCommand};
@@ -38,6 +38,10 @@ use crate::dump::DesyncDump;
 use crate::events::EventBatch;
 use crate::input_source::{InputSource, RemoteInput};
 use crate::session::{AdvanceResult, Anchor, RollbackInfo, Session, SessionConfig};
+
+/// Most bytes of one `Input` message (the whole message, header and checksum
+/// included). It stays well under the datagram limit of the network.
+const MAX_INPUT_MESSAGE: usize = 1000;
 
 /// Where diagnostic dumps go. No paths are hardcoded: the caller decides
 /// (a directory, a crash reporter, memory).
@@ -339,17 +343,20 @@ impl<G: Game, L: Link> RelaySource<G, L> {
             return;
         }
         self.dirty = false;
-        let mut entries: Vec<InputEntry> = Vec::new();
-        let mut bytes = 0usize;
-        for (&tick, (input, commands)) in self.out.iter().rev().take(self.redundancy) {
-            let len = 12 + input.len() + commands.iter().map(|c| 4 + c.len()).sum::<usize>();
-            if bytes + len > 1000 && !entries.is_empty() {
-                break;
-            }
-            bytes += len;
-            entries.push(InputEntry { tick, input: input.clone(), commands: commands.clone() });
-        }
+        let mut entries: Vec<InputEntry> = self
+            .out
+            .iter()
+            .rev()
+            .take(self.redundancy)
+            .map(|(&tick, (input, commands))| InputEntry { tick, input: input.clone(), commands: commands.clone() })
+            .collect();
         entries.reverse();
+        // The oldest entries go first when the message is over the budget. The
+        // newest entry always stays.
+        let skip = (0..entries.len() - 1)
+            .find(|&k| input_encoded_len(&entries[k..], self.input_size) <= MAX_INPUT_MESSAGE)
+            .unwrap_or(entries.len() - 1);
+        entries.drain(..skip);
         let msg = ClientMsg::Input { slot: self.slot, input_size: self.input_size, ack_tick: self.ack, entries };
         let bytes = msg.encode();
         self.stats.packets_sent += 1;

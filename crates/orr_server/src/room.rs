@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::collections::VecDeque;
 
 use orr_proto::{
-    Bundle, Channel, ConnId, Endpoint, Hello, InputEntry, RejectReason, ServerMsg, SlotConfirmed, TimeSync, Welcome,
+    confirmed_encoded_len, Bundle, Channel, ConnId, Endpoint, Hello, InputEntry, RejectReason, ServerMsg, SlotConfirmed, TimeSync, Welcome,
     BYE_KICKED_CHEAT, BYE_KICKED_DESYNC, FLAG_ABSENT, FLAG_REPEATED, NO_SLOT, SERVER_SLOT, WELCOME_AUTHORITATIVE,
 };
 use orr_session::DesyncDump;
@@ -1087,7 +1087,9 @@ impl Room {
     fn send_confirmed<E: Endpoint>(&mut self, out: &mut Out<'_, E>) {
         let now = out.now_us;
         let input_size = self.cfg.input_size;
-        let budget = self.cfg.max_unreliable_payload as usize - 32;
+        let limit = self.cfg.max_unreliable_payload as usize;
+        // What is left for bundles once the header and the checksum are in.
+        let budget = limit.saturating_sub(confirmed_encoded_len([], input_size));
         let redundancy = self.cfg.bundle_redundancy;
         let repeat_gap_us = u64::from(self.cfg.repeat_gap_ticks) * 875_000 / u64::from(self.cfg.tick_rate);
         let floor = self.log.keys().next().copied().unwrap_or(self.finalized + 1);
@@ -1120,8 +1122,7 @@ impl Room {
                 if !is_due {
                     continue;
                 }
-                let len = b.encoded_len(input_size);
-                if len > budget {
+                if confirmed_encoded_len([b], input_size) > limit {
                     // Too big for a datagram: send it reliably, once.
                     if s.sent.get(&t).is_none_or(|r| r.last_us != u64::MAX) {
                         out.send(conn, Channel::Reliable, &ServerMsg::Confirmed { input_size, bundles: vec![b.clone()] });
@@ -1130,7 +1131,10 @@ impl Room {
                     }
                     continue;
                 }
-                let est = t.checked_sub(1).and_then(|p| self.log.get(&p)).map_or(len, |p| b.encoded_len_after(p, input_size));
+                let est = t
+                    .checked_sub(1)
+                    .and_then(|p| self.log.get(&p))
+                    .map_or_else(|| b.encoded_len(input_size), |p| b.encoded_len_after(p, input_size));
                 due.push((s.sent.get(&t).is_some_and(|r| r.count >= redundancy), t, est));
             }
             due.sort_unstable();
@@ -1142,16 +1146,16 @@ impl Room {
                     ticks.push(t);
                 }
             }
-            // The estimates assume each bundle follows its predecessor tick;
-            // check the exact size and drop the last-chosen until it fits.
+            // The estimates assume each bundle follows its predecessor tick and
+            // leave out the signal count trailer; check the exact size of the
+            // message and drop the last-chosen until it fits. One bundle always
+            // fits: a larger one went the reliable way above.
             let chosen: Vec<Bundle> = loop {
                 let mut sorted = ticks.clone();
                 sorted.sort_unstable();
-                let list: Vec<Bundle> = sorted.iter().map(|t| self.log[t].clone()).collect();
-                let exact = list.first().map_or(0, |f| f.encoded_len(input_size))
-                    + list.windows(2).map(|w| w[1].encoded_len_after(&w[0], input_size)).sum::<usize>();
-                if exact <= budget || list.len() <= 1 {
-                    break list;
+                let exact = confirmed_encoded_len(sorted.iter().map(|t| &self.log[t]), input_size);
+                if exact <= limit || sorted.len() <= 1 {
+                    break sorted.iter().map(|t| self.log[t].clone()).collect();
                 }
                 ticks.pop();
             };
