@@ -43,5 +43,5 @@ pub use system::{fn_systems, System};
 
 // Re-exported so games don't need a direct `orr_ecs`/`orr_fp` dependency
 // just to write systems.
-pub use orr_ecs::{Commands, Component, ComponentId, ComponentRegistryBuilder, Entity, Frame, SingletonId};
+pub use orr_ecs::{prefab, spawn_prefab, Commands, Component, ComponentId, ComponentRegistryBuilder, Entity, Frame, Prefab, PrefabId, SingletonId};
 pub use orr_fp::{fp, FPVec2, FPVec3, FrameRng, FP};
