@@ -3818,6 +3818,7 @@ dependencies = [
  "bytemuck",
  "orr_ecs",
  "orr_fp",
+ "orr_gfx",
  "orr_reflect",
  "orr_sim",
 ]
