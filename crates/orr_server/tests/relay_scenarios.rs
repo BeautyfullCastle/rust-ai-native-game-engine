@@ -54,6 +54,9 @@ struct Acc {
 thread_local! {
     /// `(client, tick)`: that client's simulation flips a bit at that tick.
     static CORRUPT: Cell<Option<(usize, u64)>> = const { Cell::new(None) };
+    /// `(clients, tick)`: all these clients' simulations flip the same bit at
+    /// that tick, so they end up in the same wrong state.
+    static CORRUPT_GROUP: std::cell::RefCell<(Vec<usize>, u64)> = const { std::cell::RefCell::new((Vec::new(), 0)) };
 }
 
 struct Counter;
@@ -67,7 +70,11 @@ impl System<Counter> for CountSystem {
             let add = u64::from(ctx.inputs.input(PlayerSlot(s)).add);
             ctx.frame.singleton_mut::<Acc>().sums[s as usize] += add;
         }
-        if CORRUPT.with(Cell::get) == Some((current_client(), ctx.tick)) {
+        let in_group = CORRUPT_GROUP.with(|g| {
+            let g = g.borrow();
+            g.1 == ctx.tick && g.0.contains(&current_client())
+        });
+        if in_group || CORRUPT.with(Cell::get) == Some((current_client(), ctx.tick)) {
             ctx.frame.singleton_mut::<Acc>().sums[0] ^= 0x8000;
         }
     }
@@ -419,6 +426,82 @@ fn a_tampered_donor_snapshot_is_refused_and_the_next_donor_serves_the_join() {
     }
     // The join did not stop the room from judging the donor's own reports.
     assert!(notes.iter().any(|n| matches!(n, ServerNote::Desync { .. })));
+}
+
+/// Runs a room whose clients split into two groups with different states
+/// (`wrong[slot]` marks the players of the second group). The players in
+/// slots `leavers` lose their connection right after the checksum tick that the
+/// server chooses for the snapshot, and a new client joins. Returns the notes.
+fn join_after_leavers(wrong: &[bool], leavers: &[usize]) -> Vec<ServerNote> {
+    let p = path(40, 5, 10_000);
+    let n = wrong.len();
+    let mut cfg = RoomConfig::new(n as u8 + 1, TICK_RATE, SEED, 8);
+    cfg.min_players_to_start = n as u8;
+    let mut h = Harness::<Counter>::new(3, cfg, counter_script(), |_| ());
+    for _ in 0..n {
+        h.add_client(&ClientSpec::new(p));
+    }
+    for _ in 0..10_000 {
+        if (0..n).all(|i| h.clients[i].client.welcome().is_some()) {
+            break;
+        }
+        h.step();
+    }
+    let client_of = |h: &Harness<Counter>, slot: usize| {
+        (0..n).find(|&i| h.clients[i].client.welcome().is_some_and(|w| w.slot as usize == slot)).expect("slot taken")
+    };
+    let group: Vec<usize> = (0..n).filter(|&s| wrong[s]).map(|s| client_of(&h, s)).collect();
+    let leavers: Vec<usize> = leavers.iter().map(|&s| client_of(&h, s)).collect();
+    CORRUPT_GROUP.with(|g| *g.borrow_mut() = (group, 100));
+    assert!(h.run_until_all_playing(10_000_000));
+    // Run to 15 ticks after a checksum tick: all reports of it have arrived,
+    // and the next checksum tick has not come yet.
+    assert!(h.run_until_tick(615, 60_000_000));
+    h.server.drain_notes();
+    for &i in &leavers {
+        h.cut(i);
+    }
+    h.add_client(&ClientSpec::new(p));
+    assert!(h.run_until_all_playing_except(&leavers, 30_000_000), "the join never finished");
+    h.run_for_us(500_000);
+    CORRUPT_GROUP.with(|g| *g.borrow_mut() = (Vec::new(), 0));
+    h.server.drain_notes()
+}
+
+/// Which donors the server refused and which one it relayed (with `verified`).
+fn rejected_donors(notes: &[ServerNote]) -> Vec<u8> {
+    notes
+        .iter()
+        .filter_map(|n| match n {
+            ServerNote::SnapshotRejected { donor, .. } => Some(*donor),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_snapshot_tied_among_the_remaining_players_is_refused_after_one_left() {
+    // Slot 0 (donor) and slot 3 hold state X, slots 1 and 2 state Y. Slot 3
+    // leaves. Of the players that remain, the donor is alone against two.
+    let notes = join_after_leavers(&[false, true, true, false], &[3]);
+    assert_eq!(rejected_donors(&notes), vec![0]);
+    let relayed = relayed_notes(&notes);
+    assert_eq!(relayed.len(), 1, "{relayed:?}");
+    assert_ne!(relayed[0].0, 0);
+    assert!(relayed[0].2, "the next donor has the majority of the remaining players");
+}
+
+#[test]
+fn votes_of_players_that_left_do_not_make_a_snapshot_verified() {
+    // Slots 0 (donor), 1 and 2 hold state X, slots 3 and 4 state Y. Slots 1
+    // and 2 leave after they reported. Counting their reports, X has 3 of 5.
+    // Of the players that remain, the donor is alone against two.
+    let notes = join_after_leavers(&[false, false, false, true, true], &[1, 2]);
+    assert_eq!(rejected_donors(&notes), vec![0]);
+    let relayed = relayed_notes(&notes);
+    assert_eq!(relayed.len(), 1, "{relayed:?}");
+    assert_ne!(relayed[0].0, 0);
+    assert!(relayed[0].2);
 }
 
 #[test]

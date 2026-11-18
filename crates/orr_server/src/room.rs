@@ -1261,35 +1261,38 @@ impl Room {
         }
     }
 
+    /// The players whose checksums judge a snapshot of `donor` for `joiner`:
+    /// the players that are in the game now, without the donor, the joiner
+    /// and the server's own slots. A player that left is not in the set, so
+    /// its old reports count for nothing.
+    fn snapshot_voters(&self, donor: u8, joiner: u8) -> Vec<u8> {
+        (0..self.slots.len() as u8)
+            .filter(|&i| {
+                let s = &self.slots[usize::from(i)];
+                i != donor && i != joiner && !s.server_owned && s.player.as_ref().is_some_and(|p| p.phase == Phase::Playing)
+            })
+            .collect()
+    }
+
     /// The tick the server asks `donor` for: the newest checksum tick that
     /// the donor reported (so it still keeps that frame), that the server
-    /// holds the bundles after, and that a majority of the other players
-    /// reported too (so their checksums can judge the snapshot). With no other
-    /// player the newest checksum tick of the donor counts. The donor's
-    /// session keeps the frames of its latest checksum ticks
+    /// holds the bundles after, and that a majority of the voters
+    /// (`snapshot_voters`) reported too (so their checksums can judge the
+    /// snapshot). With no voter the newest checksum tick of the donor counts.
+    /// The donor's session keeps the frames of its latest checksum ticks
     /// (`RelayConfig::keep_anchors`), and declines a tick it no longer has.
     fn snapshot_tick(&self, donor: u8, joiner: u8) -> Option<u64> {
         let interval = u64::from(self.cfg.checksum_interval.max(1));
-        let others = self
-            .slots
-            .iter()
-            .enumerate()
-            .filter(|(i, s)| {
-                *i != usize::from(donor)
-                    && *i != usize::from(joiner)
-                    && !s.server_owned
-                    && s.player.as_ref().is_some_and(|p| p.phase == Phase::Playing)
-            })
-            .count();
+        let voters = self.snapshot_voters(donor, joiner);
         self.checksums
             .iter()
             .rev()
             .find(|(tick, reports)| {
-                let reported = reports.keys().filter(|s| **s != donor && **s != joiner).count();
+                let reported = voters.iter().filter(|s| reports.contains_key(s)).count();
                 **tick != 0
                     && **tick % interval == 0
                     && reports.contains_key(&donor)
-                    && (others == 0 || reported * 2 > others)
+                    && (voters.is_empty() || reported * 2 > voters.len())
                     && self.covers(**tick)
             })
             .map(|(tick, _)| *tick)
@@ -1356,32 +1359,35 @@ impl Room {
             && (tick + 1..=self.finalized).all(|t| self.log.contains_key(&t))
     }
 
-    /// Compares a donor snapshot's checksum with what the other clients
-    /// reported for its tick. The server cannot recompute the checksum from
-    /// the data (it does not know the components of the game). The joiner
-    /// checks that the data has that checksum and tick. The donor's checksum
-    /// is one vote too. It is accepted when more than half of all votes (the
-    /// donor's and the reports) equal it. So one wrong client among three
-    /// does not cost an honest donor its place, and a donor that stands alone
-    /// against the others is refused. Without any report nobody can compare.
+    /// Compares a donor snapshot's checksum with what the voters
+    /// (`snapshot_voters`) reported for its tick. The server cannot recompute
+    /// the checksum from the data (it does not know the components of the
+    /// game). The joiner checks that the data has that checksum and tick. The
+    /// donor is one vote too. It is accepted when more than half of the
+    /// donor and all voters report its checksum. A voter that did not report
+    /// counts as not agreeing. So one wrong client among three does not cost
+    /// an honest donor its place, and a donor that stands alone against the
+    /// others is refused. Without any voter, or without any report from the
+    /// voters, nobody can compare.
     fn judge_snapshot(&self, joiner: u8, donor: u8, tick: u64, checksum: u64) -> SnapCheck {
+        let voters = self.snapshot_voters(donor, joiner);
         let reports: Vec<u64> = self
             .checksums
             .get(&tick)
-            .map(|r| r.iter().filter(|(s, _)| **s != donor && **s != joiner).map(|(_, c)| *c).collect())
+            .map(|r| voters.iter().filter_map(|s| r.get(s).copied()).collect())
             .unwrap_or_default();
         if reports.is_empty() {
             return SnapCheck::Unverified;
         }
         let agree = reports.iter().filter(|c| **c == checksum).count() + 1;
-        if agree * 2 > reports.len() + 1 {
+        if agree * 2 > voters.len() + 1 {
             return SnapCheck::Match;
         }
         let mut counts: BTreeMap<u64, usize> = BTreeMap::new();
         for c in &reports {
             *counts.entry(*c).or_default() += 1;
         }
-        let majority = counts.iter().find(|(_, n)| **n * 2 > reports.len()).map(|(c, _)| *c);
+        let majority = counts.iter().find(|(_, n)| **n * 2 > voters.len()).map(|(c, _)| *c);
         SnapCheck::Mismatch { majority }
     }
 
