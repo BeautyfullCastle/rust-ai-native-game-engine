@@ -4,7 +4,6 @@
 use crate::{game::EditorGame, Editor};
 use serde_json::{json, Value};
 use std::{
-    fs::Metadata,
     io::{Read, Write},
     path::{Component, Path, PathBuf},
 };
@@ -17,15 +16,6 @@ pub struct SourceFiles {
     root: PathBuf,
     ancestors: Vec<orr_fsid::PinnedDirectory>,
     protected_scene: Option<(String, PathBuf)>,
-}
-#[cfg(unix)]
-fn same(a: &Metadata, b: &Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    a.dev() == b.dev() && a.ino() == b.ino()
-}
-#[cfg(not(unix))]
-fn same(a: &Metadata, b: &Metadata) -> bool {
-    matches!((a.created(), b.created()), (Ok(a), Ok(b)) if a == b)
 }
 impl SourceFiles {
     pub fn new(root: &Path) -> Result<Self, String> {
@@ -117,18 +107,23 @@ impl SourceFiles {
             if name.eq_ignore_ascii_case(scene_name) {
                 return Err("The active scene cannot be used as a prefab source".into());
             }
-            let scene = std::fs::symlink_metadata(scene_path).map_err(|e| e.to_string())?;
-            if !scene.is_file() || scene.file_type().is_symlink() {
-                return Err("Active scene changed; reopen it before editing prefab sources".into());
-            }
-            match std::fs::symlink_metadata(&path) {
-                Ok(candidate) if same(&candidate, &scene) => {
+            let scene = orr_fsid::open_file(scene_path).map_err(|_| {
+                "Active scene changed; reopen it before editing prefab sources".to_string()
+            })?;
+            // Identity comes from open handles, so a hard link to the scene is an alias.
+            // A missing or non-regular candidate is not an alias; the read refuses it.
+            match orr_fsid::same_file(&path, &scene) {
+                Ok(true) => {
                     return Err(
                         "A file alias of the active scene cannot be used as a prefab source".into(),
                     );
                 }
-                Ok(_) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Ok(false) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput
+                    ) => {}
                 Err(error) => return Err(error.to_string()),
             }
         }
@@ -136,23 +131,17 @@ impl SourceFiles {
     }
     pub fn read(&self, name: &str) -> Result<String, String> {
         let path = self.path(name)?;
-        let before = std::fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
-        if !before.is_file() || before.file_type().is_symlink() || before.len() > MAX_BYTES as u64 {
-            return Err("Source must be a regular, non-symlink file of at most 32 KiB".into());
-        }
-        let mut options = std::fs::OpenOptions::new();
-        options.read(true);
-        // Avoid blocking on a FIFO swapped in after the metadata check, and do
-        // not follow a swapped symlink. Other platforms retain checked-path semantics.
-        #[cfg(target_os = "linux")]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.custom_flags(0x20000 | 0x800);
-        }
-        let mut file = options.open(&path).map_err(|e| e.to_string())?;
+        // `open_file` refuses a link, a folder or a FIFO without waiting for a writer.
+        let mut file = orr_fsid::open_file(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::InvalidInput {
+                "Source must be a regular, non-symlink file of at most 32 KiB".to_string()
+            } else {
+                error.to_string()
+            }
+        })?;
         let opened = file.metadata().map_err(|e| e.to_string())?;
-        if !opened.is_file() || !same(&before, &opened) {
-            return Err("Source file changed while opening".into());
+        if opened.len() > MAX_BYTES as u64 {
+            return Err("Source must be a regular, non-symlink file of at most 32 KiB".into());
         }
         let mut bytes = Vec::new();
         (&mut file)
@@ -160,9 +149,8 @@ impl SourceFiles {
             .read_to_end(&mut bytes)
             .map_err(|e| e.to_string())?;
         self.recheck()?;
-        let after = std::fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
-        if after.file_type().is_symlink()
-            || !same(&opened, &after)
+        let after = file.metadata().map_err(|e| e.to_string())?;
+        if !matches!(orr_fsid::same_file(&path, &file), Ok(true))
             || after.len() != bytes.len() as u64
             || opened.modified().ok() != after.modified().ok()
             || bytes.len() > MAX_BYTES
@@ -181,11 +169,12 @@ impl SourceFiles {
             return Err("Source exceeds 32 KiB".into());
         }
         let path = self.path(name)?;
-        let before = std::fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
-        if !before.is_file() || before.file_type().is_symlink() || before.permissions().readonly() {
-            return Err(
-                "Replacement requires an existing writable regular, non-symlink source".into(),
-            );
+        let refused =
+            || "Replacement requires an existing writable regular, non-symlink source".to_string();
+        let pinned = orr_fsid::open_file(&path).map_err(|_| refused())?;
+        let before = pinned.metadata().map_err(|e| e.to_string())?;
+        if before.permissions().readonly() {
+            return Err(refused());
         }
         if self.read(name)? != expected {
             return Err("Source changed on disk; replacement canceled".into());
@@ -201,14 +190,14 @@ impl SourceFiles {
         if self.read(name)? != expected {
             return Err("Source changed while preparing replacement; replacement canceled".into());
         }
-        let after = std::fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
-        if !after.is_file()
-            || after.file_type().is_symlink()
-            || after.permissions().readonly()
-            || !same(&before, &after)
+        let after = pinned.metadata().map_err(|e| e.to_string())?;
+        if after.permissions().readonly()
+            || !matches!(orr_fsid::same_file(&path, &pinned), Ok(true))
         {
             return Err("Source identity or permissions changed; replacement canceled".into());
         }
+        // Release the handle before the replacement so it cannot block the rename.
+        drop(pinned);
         self.path(name)?;
         // Same checked-path race limitations as reads; the actual replacement is atomic.
         temp.persist(path).map_err(|e| e.to_string())?;
