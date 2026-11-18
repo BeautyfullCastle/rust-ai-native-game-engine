@@ -41,7 +41,7 @@ fn placements(h: &mut Harness<'_, EditorApp>) -> Vec<(String, [f32; 3])> {
     let names: Vec<(orr_ecs::Entity, String)> = h.state().editor.rows().iter().map(|r| (r.entity, r.label())).collect();
     let mut found: Vec<(String, [f32; 3])> = h
         .state_mut()
-        .view_ref_placements(&[])
+        .view_ref_placements(&[], 0)
         .iter()
         .map(|p| (format!("{} -> {}", names.iter().find(|(e, _)| *e == p.entity).unwrap().1, p.model.source().asset_id), p.instance.translation))
         .collect();

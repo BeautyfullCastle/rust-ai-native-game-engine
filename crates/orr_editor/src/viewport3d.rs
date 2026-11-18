@@ -276,6 +276,11 @@ fn ray_box(o: [f32; 3], d: [f32; 3], half: [f32; 3]) -> Option<f32> {
     near.is_finite().then_some(near)
 }
 
+/// Model-bound entities one frame accepts, all kinds together: placements, scene models and
+/// animated placements. A frame with more is refused whole.
+#[cfg(feature = "models")]
+pub const MAX_MODEL_ENTITIES: usize = 256;
+
 #[cfg(feature = "models")]
 pub struct ModelPlacement {
     pub entity: Entity,
@@ -915,8 +920,8 @@ impl Viewport3dGpu {
         #[cfg(not(feature = "animated-models"))]
         let entity_count = placements.len();
         let entity_count = entity_count.checked_add(scene_models.len()).ok_or("Viewport static input limit exceeded")?;
-        if entity_count > 256 {
-            return Err("Viewport supports at most 256 model-bound entities".into());
+        if entity_count > MAX_MODEL_ENTITIES {
+            return Err(format!("Viewport supports at most {MAX_MODEL_ENTITIES} model-bound entities"));
         }
 
         // Immutable appearance identity includes both model Arc and shading.

@@ -532,12 +532,13 @@ pub struct EditorApp {
 impl EditorApp {
     /// The model placements of the entities with an `orr_gfx::ViewRef`, next to the `existing`
     /// ones: the viewport draws them in place of the marker boxes of these entities. They stay
-    /// inside the draw limits (see [`crate::view_models`]).
+    /// inside the draw and entity limits (see [`crate::view_models`]). `other_entities` counts the
+    /// other model-bound entities of the frame that are not in `existing`.
     #[cfg(feature="models")]
-    pub fn view_ref_placements(&mut self, existing: &[crate::viewport3d::ModelPlacement]) -> Vec<crate::viewport3d::ModelPlacement> {
+    pub fn view_ref_placements(&mut self, existing: &[crate::viewport3d::ModelPlacement], other_entities: usize) -> Vec<crate::viewport3d::ModelPlacement> {
         let budget = orr_render::imported_scene::model_draw_budget(&self.editor.yard_frame().list(&[], None));
         let scene = self.editor.path();
-        self.view_models.placements(scene.as_deref(), &self.editor.yard_frame().view_refs, existing, budget, std::time::Instant::now())
+        self.view_models.placements(scene.as_deref(), &self.editor.yard_frame().view_refs, existing, other_entities, budget, std::time::Instant::now())
     }
     #[cfg(feature="models")]
     fn point_light_settings_for_frame(&mut self) -> Result<orr_render::PointLightSettings, String> {
@@ -2929,10 +2930,70 @@ impl EditorApp {
             &mut animated_placements,
             model_draft,
         );
+        // Scene models and terrains are model-bound entities of the frame too: the ViewRef models
+        // keep inside what they leave of the entity limit.
+        #[cfg(feature="terrain")]
+        let scene_models: Vec<_> = {
+            #[cfg(feature="navigation")]
+            let model = if self.editor.game().is_navigation() {
+                if self.editor.mode() == Mode::Edit {
+                    self.terrain.viewport_model(&self.editor).or_else(|| self.editor.admitted_navigation().model())
+                } else { self.editor.admitted_navigation().model() }
+            } else { self.terrain.viewport_model(&self.editor) };
+            #[cfg(not(feature="navigation"))]
+            let model = self.terrain.viewport_model(&self.editor);
+            #[cfg(feature="terrain-surface")]
+            let model = self.terrain_surface.state.viewport(&self.editor, &self.terrain).unwrap_or(model);
+            #[allow(unused_mut)]
+            let mut models: Vec<_> = model.into_iter().map(|model| crate::viewport3d::SceneModel { #[cfg(feature = "mesh-prop-shading")] shading: None, model, instance: Default::default() }).collect();
+            #[cfg(feature="navigation")]
+            if self.editor.game().is_navigation() {
+                if let Some(model) = self.editor.admitted_navigation().overlay_model(self.navigation.route_stale(&self.editor, &self.terrain)) {
+                    models.push(crate::viewport3d::SceneModel { #[cfg(feature = "mesh-prop-shading")] shading: None, model, instance: Default::default() });
+                }
+            }
+            models
+        };
+        #[cfg(feature="mesh-navigation")]
+        let scene_models: Vec<_> = {
+            #[cfg(feature="terrain")]
+            let mut models = scene_models;
+            #[cfg(not(feature="terrain"))]
+            let mut models = Vec::new();
+            if self.editor.game().has_mesh_view() {
+                if let Some(model) = self.mesh_navigation.model() {
+                    models.push(crate::viewport3d::SceneModel { #[cfg(feature = "mesh-prop-shading")] shading: None, model, instance: Default::default() });
+                }
+                #[cfg(feature="mesh-animated-models")]
+                let show_static_art = !self.mesh_animation.active(&self.editor);
+                #[cfg(not(feature="mesh-animated-models"))]
+                let show_static_art = true;
+                if show_static_art && !self.mesh_navigation.geometry_preview_active() {
+                    if let Some(model) = self.mesh_navigation.art_model(&self.editor) {
+                        models.push(model);
+                    }
+                }
+                if !self.mesh_navigation.geometry_preview_active() {
+                    models.extend(self.mesh_navigation.prop_models(&self.editor));
+                }
+            }
+            models
+        };
+        #[cfg(feature="models")]
+        let (terrain_models, terrain_problem) = self.terrain_models.refresh(self.editor.path().as_deref(), &self.editor.yard_frame().terrains);
+        #[cfg(feature="models")]
+        let other_entities = {
+            let count = terrain_models.len();
+            #[cfg(any(feature="terrain", feature="mesh-navigation"))]
+            let count = count + scene_models.len();
+            #[cfg(feature="animated-models")]
+            let count = count + animated_placements.len();
+            count
+        };
         // Entities with a ViewRef are drawn from the model of their view asset.
         #[cfg(feature="models")]
         let view_model_problem = {
-            let drawn = self.view_ref_placements(&placements);
+            let drawn = self.view_ref_placements(&placements, other_entities);
             placements.extend(drawn);
             self.view_models.problem().map(str::to_owned)
         };
@@ -2944,13 +3005,12 @@ impl EditorApp {
         let hidden: Vec<orr_ecs::Entity> = Vec::new();
         // Terrains are models built from their heightmaps.
         #[cfg(feature="models")]
-        let (terrain_problem, terrain_heights) = {
-            let (models, problem) = self.terrain_models.refresh(self.editor.path().as_deref(), &self.editor.yard_frame().terrains);
-            let heights: Vec<(orr_ecs::Entity, crate::terrain_models::Heights)> = models.iter().map(|t| (t.entity, t.heights.clone())).collect();
-            for t in models {
+        let terrain_heights = {
+            let heights: Vec<(orr_ecs::Entity, crate::terrain_models::Heights)> = terrain_models.iter().map(|t| (t.entity, t.heights.clone())).collect();
+            for t in terrain_models {
                 placements.push(crate::viewport3d::ModelPlacement { entity: t.entity, model: t.model, instance: orr_render::StaticInstance { translation: t.center, ..Default::default() } });
             }
-            (problem, heights)
+            heights
         };
         #[cfg(all(feature="models", not(feature="outdoor")))]
         let _ = &terrain_heights;
@@ -3029,53 +3089,6 @@ impl EditorApp {
             let mut list = list;
             self.navigation.paint_patrol_route(&self.editor, &self.terrain, &mut list);
             list
-        };
-        #[cfg(feature="terrain")]
-        let scene_models: Vec<_> = {
-            #[cfg(feature="navigation")]
-            let model = if self.editor.game().is_navigation() {
-                if self.editor.mode() == Mode::Edit {
-                    self.terrain.viewport_model(&self.editor).or_else(|| self.editor.admitted_navigation().model())
-                } else { self.editor.admitted_navigation().model() }
-            } else { self.terrain.viewport_model(&self.editor) };
-            #[cfg(not(feature="navigation"))]
-            let model = self.terrain.viewport_model(&self.editor);
-            #[cfg(feature="terrain-surface")]
-            let model = self.terrain_surface.state.viewport(&self.editor, &self.terrain).unwrap_or(model);
-            #[allow(unused_mut)]
-            let mut models: Vec<_> = model.into_iter().map(|model| crate::viewport3d::SceneModel { #[cfg(feature = "mesh-prop-shading")] shading: None, model, instance: Default::default() }).collect();
-            #[cfg(feature="navigation")]
-            if self.editor.game().is_navigation() {
-                if let Some(model) = self.editor.admitted_navigation().overlay_model(self.navigation.route_stale(&self.editor, &self.terrain)) {
-                    models.push(crate::viewport3d::SceneModel { #[cfg(feature = "mesh-prop-shading")] shading: None, model, instance: Default::default() });
-                }
-            }
-            models
-        };
-        #[cfg(feature="mesh-navigation")]
-        let scene_models: Vec<_> = {
-            #[cfg(feature="terrain")]
-            let mut models = scene_models;
-            #[cfg(not(feature="terrain"))]
-            let mut models = Vec::new();
-            if self.editor.game().has_mesh_view() {
-                if let Some(model) = self.mesh_navigation.model() {
-                    models.push(crate::viewport3d::SceneModel { #[cfg(feature = "mesh-prop-shading")] shading: None, model, instance: Default::default() });
-                }
-                #[cfg(feature="mesh-animated-models")]
-                let show_static_art = !self.mesh_animation.active(&self.editor);
-                #[cfg(not(feature="mesh-animated-models"))]
-                let show_static_art = true;
-                if show_static_art && !self.mesh_navigation.geometry_preview_active() {
-                    if let Some(model) = self.mesh_navigation.art_model(&self.editor) {
-                        models.push(model);
-                    }
-                }
-                if !self.mesh_navigation.geometry_preview_active() {
-                    models.extend(self.mesh_navigation.prop_models(&self.editor));
-                }
-            }
-            models
         };
         #[cfg(feature="models")]
         let post_process = self.post_process_for_frame();
