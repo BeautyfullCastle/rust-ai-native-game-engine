@@ -1714,7 +1714,9 @@ mod run_save_tests {
                 ..Default::default()
             },
             delta,
-        );
+        )
+        .textures_delta
+        .clear();
     }
     fn key(key: egui::Key) -> Vec<egui::Event> {
         [true, false]

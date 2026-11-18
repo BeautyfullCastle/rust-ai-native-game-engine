@@ -162,7 +162,7 @@ fn snapshot_restore_and_both_skin_paths_are_readonly_and_share_the_cue() {
         let bytes = frame.to_bytes();
         let checksum = frame.checksum();
         for skinned in [false, true] {
-            let output = context.run_ui(egui::RawInput::default(), |ui| {
+            let mut output = context.run_ui(egui::RawInput::default(), |ui| {
                 paint_view_with_unit_skin(
                     &ui.painter().with_clip_rect(rect),
                     layout,
@@ -171,6 +171,7 @@ fn snapshot_restore_and_both_skin_paths_are_readonly_and_share_the_cue() {
                     |_, _, _, _| skinned,
                 );
             });
+            output.textures_delta.clear();
             let rings = output
                 .shapes
                 .iter()
