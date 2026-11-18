@@ -99,8 +99,11 @@ fn main() {
         editor.sync();
     }
 
+    // The window cannot shrink below the size where every main control still fits.
+    // A smaller size asked on the command line stays possible.
+    let min_size = [orr_editor::flow::MIN_WINDOW_SIZE[0].min(args.size.0), orr_editor::flow::MIN_WINDOW_SIZE[1].min(args.size.1)];
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([args.size.0, args.size.1]).with_title(editor.title()),
+        viewport: egui::ViewportBuilder::default().with_inner_size([args.size.0, args.size.1]).with_min_inner_size(min_size).with_title(editor.title()),
         ..Default::default()
     };
     let shot = args.screenshot.clone().map(|p| {

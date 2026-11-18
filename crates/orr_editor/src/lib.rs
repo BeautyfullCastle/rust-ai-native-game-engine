@@ -52,6 +52,7 @@ pub mod backend;
 pub mod cli;
 pub mod diagnostics;
 pub mod editor;
+pub mod flow;
 pub mod inspector;
 #[cfg(feature = "custom-inspector")]
 pub mod custom_inspector;

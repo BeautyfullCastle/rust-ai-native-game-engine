@@ -285,6 +285,8 @@ pub struct UiState {
     collect_controls: collect_controls::CollectControls,
     #[cfg(feature = "animated-models")]
     animated_window: bool,
+    /// Cues of the making flow (see [`crate::flow`]). Window state only.
+    pub flow: crate::flow::State,
 }
 
 /// A request to save the app's own framebuffer as a PNG and quit (see [`crate::cli`]).
@@ -1234,6 +1236,9 @@ impl EditorApp {
         let started = Instant::now();
         let ctx = ui.ctx().clone();
         self.frames += 1;
+        if self.frames == 1 {
+            self.ui.flow.observe_start(self.editor.path(), self.editor.message_serial());
+        }
 
         // Disarm before ingesting a late claim/update; focus returning is not intent.
         let keyboard_viewport = if self.editor.game().is_room() { "room_keyboard_viewport" }
@@ -1439,7 +1444,8 @@ impl EditorApp {
         }
         self.shortcuts(&ctx);
 
-        egui::Panel::top("top").frame(crate::theme::bar_frame()).show(ui, |ui| self.top_bar(ui));
+        let bar = if self.editor.is_playing_mode() { crate::theme::play_bar_frame() } else { crate::theme::bar_frame() };
+        egui::Panel::top("top").frame(bar).show(ui, |ui| self.top_bar(ui));
         #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "project-create", feature = "collect-ui"))]
         if self.collect_project_modal(&ctx) { return; }
         if self.editor.down().is_some() {
@@ -1460,7 +1466,10 @@ impl EditorApp {
             let inspector = if self.editor.game().has_mesh_view() { inspector.max_size(340.0) } else { inspector };
             inspector.show(ui, |ui| {
                 // The title stays put above the scrolling content.
-                crate::theme::panel_title(ui, "Inspector");
+                let playing = self.editor.is_playing_mode();
+                let badge = if playing { ("PLAY \u{B7} temporary edits", crate::theme::PLAY) } else { ("editing the scene", crate::theme::TEXT_WEAK) };
+                crate::theme::panel_title_with(ui, "Inspector", Some(badge));
+                if playing { crate::flow::play_cue(ui); }
                 // The mesh games scroll their own inspector.
                 if self.editor.game().has_mesh_view() {
                     self.inspector(ui);
@@ -1991,13 +2000,7 @@ impl EditorApp {
                     }
                 });
             });
-            let (mode, color) = match self.editor.mode() {
-                Mode::Edit => ("EDIT", crate::theme::TEXT_STRONG),
-                Mode::Play => ("PLAY", Color32::from_rgb(255, 150, 60)),
-            };
-            egui::Frame::new().fill(crate::theme::CARD_HEADER).stroke(egui::Stroke::new(1.0, color.gamma_multiply(0.5))).corner_radius(egui::CornerRadius::same(crate::theme::RADIUS)).inner_margin(egui::Margin::symmetric(6, 1)).show(ui, |ui| {
-                ui.label(RichText::new(mode).strong().size(11.5).color(color));
-            });
+            crate::theme::mode_badge(ui, self.editor.mode() == Mode::Play);
             ui.weak(self.editor.game().name());
             if self.editor.game().is_3d() {
                 let has_camera = self.editor.yard_frame().camera.is_some();
@@ -2031,7 +2034,8 @@ impl EditorApp {
             }
             if self.editor.is_viewer() { ui.label("REPLAY VIEWER · read-only"); }
             if self.editor.is_dirty() {
-                ui.label(RichText::new("\u{25CF} unsaved").color(Color32::from_rgb(240, 200, 80)));
+                ui.label(RichText::new("\u{25CF} Unsaved changes").color(crate::theme::WARN))
+                    .on_hover_text("The scene has changes that are not saved. Ctrl+S saves them. The window title shows * too.");
             }
         });
         #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "project-create", feature = "collect-ui"))]
@@ -2112,16 +2116,36 @@ impl EditorApp {
         });
     }
 
+    /// The one-sentence next action for the status bar (see [`crate::flow::next_step`]).
+    fn next_step_text(&self) -> String {
+        crate::flow::next_step(crate::flow::Facts {
+            host_down: self.editor.down().is_some(),
+            viewer: self.editor.is_viewer(),
+            playing: self.editor.is_playing_mode(),
+            dirty: self.editor.is_dirty(),
+            selected: self.editor.selection().is_some(),
+            sample: self.on_sample_scene(),
+        })
+    }
+
+    fn on_sample_scene(&self) -> bool {
+        self.ui.flow.on_sample(self.editor.path())
+    }
+
     fn status_bar(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
             self.close_review_status(ui);
-            let status = match self.editor.status() {
-                Some(Message { text, error: true }) => RichText::new(text).color(ui.visuals().error_fg_color),
-                Some(Message { text, error: false }) => RichText::new(text),
-                None => RichText::new("ready").weak(),
+            let step = self.next_step_text();
+            let now = ui.input(|input| input.time);
+            let error = self.editor.status().is_some_and(|message| message.error);
+            let fresh = self.ui.flow.status_fresh(self.editor.message_serial(), error, now);
+            let (status, full) = match self.editor.status() {
+                Some(Message { text, error: true }) if fresh => (RichText::new(text).color(crate::theme::ERROR), text.clone()),
+                Some(Message { text, error: false }) if fresh => (RichText::new(text), text.clone()),
+                _ => (RichText::new(step.as_str()).weak(), step),
             };
-            ui.add_sized([ui.available_width() * 0.4, ui.text_style_height(&egui::TextStyle::Body)], egui::Label::new(status).truncate());
+            ui.add_sized([ui.available_width() * 0.4, ui.text_style_height(&egui::TextStyle::Body)], egui::Label::new(status).truncate()).on_hover_text(full);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let gpu = self.gpu3d.as_ref().map(|g|g.gpu().adapter_name()).or_else(||self.gpu.as_ref().map(|g|g.gpu().adapter_name())).unwrap_or_else(||"no GPU".to_string());
                 ui.weak(gpu);
@@ -2131,7 +2155,7 @@ impl EditorApp {
                 }
                 if let Some(action) = self.editor.feed().last_action() {
                     let short: String = if action.chars().count() > 70 { action.chars().take(69).chain(std::iter::once('\u{2026}')).collect() } else { action.to_string() };
-                    ui.label(RichText::new(short).color(Color32::from_rgb(120, 200, 255)));
+                    ui.label(RichText::new(short).color(crate::theme::INFO));
                 }
             });
         });
@@ -2159,6 +2183,7 @@ impl EditorApp {
         });
         ui.add(egui::TextEdit::singleline(&mut self.ui.filter).hint_text("filter").desired_width(f32::INFINITY));
         ui.separator();
+        let selected_count = self.editor.selected_guids().len();
         let filter = self.ui.filter.to_lowercase();
         let rows: Vec<(String, Target, Vec<String>, String)> = self
             .editor
@@ -2176,6 +2201,15 @@ impl EditorApp {
                 Some((label, row.target(), row.components.clone(), tip))
             })
             .collect();
+        if rows.is_empty() {
+            if filter.is_empty() {
+                ui.weak("No entities in this scene.");
+            } else {
+                ui.weak(format!("No entity matches \"{}\". Clear the filter box to see all.", self.ui.filter));
+            }
+        } else {
+            ui.weak(format!("{} entities \u{B7} {selected_count} selected", rows.len()));
+        }
         let row_h = ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y;
         let mut clicked: Option<Target> = None;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, row_h, rows.len(), |ui, range| {
@@ -2348,6 +2382,10 @@ impl EditorApp {
         let mut remove: Option<String> = None;
         let selection = self.editor.selection().cloned();
         let inspect = self.editor.inspect().cloned();
+        let sample = self.on_sample_scene();
+        self.ui.flow.observe_selection(selection.as_ref());
+        let message_serial = self.editor.message_serial();
+        let notice = self.ui.flow.notice_for(selection.as_ref(), message_serial).map(str::to_owned);
         if inspect.as_ref().is_some_and(|ins| ins.components.iter().any(|(name, _)| name == orr_gfx::names::MATERIAL)) {
             // The material section lists the shader files and their compile results.
             self.surfaces.set_scene(self.editor.path().as_deref());
@@ -2382,9 +2420,18 @@ impl EditorApp {
                     ui.horizontal(|ui| {
                         let mark = row.map_or(("\u{25C6}", crate::theme::TEXT_WEAK), |r| crate::theme::entity_mark(&r.components));
                         ui.label(RichText::new(mark.0).size(15.0).color(mark.1));
-                        ui.label(RichText::new(row.map_or_else(|| key.clone(), EntityRow::label)).strong().size(15.0).color(crate::theme::TEXT_STRONG));
+                        let name = row.map_or_else(|| key.clone(), EntityRow::label);
+                        ui.add(egui::Label::new(RichText::new(&name).strong().size(15.0).color(crate::theme::TEXT_STRONG)).truncate()).on_hover_text(name);
                     });
-                    ui.weak(&key);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        if let Some(row) = row {
+                            ui.weak(crate::theme::entity_role(&row.components));
+                            ui.weak("\u{B7}");
+                        }
+                        ui.weak(&key);
+                    });
+                    if let Some(text) = &notice { crate::flow::refusal(ui, text); }
                     ui.add_space(2.0);
                     for (name, value) in &ins.components {
                         let Some(ty) = types.get(name) else { continue };
@@ -2444,7 +2491,8 @@ impl EditorApp {
                     }
                 }
                 (None, _) => {
-                    ui.weak("Select an entity in the hierarchy or click an entity in the viewport.");
+                    crate::flow::nothing_selected(ui, sample);
+                    if let Some(text) = &notice { crate::flow::refusal(ui, text); }
                 }
             }
             ui.add_space(6.0);
@@ -2496,7 +2544,9 @@ impl EditorApp {
             match ev {
                 InspEvent::Begin(label) => self.editor.begin_edit(&label),
                 InspEvent::Set { path, value } => {
-                    self.editor.set_field(&owner, &path, value);
+                    if self.editor.set_field(&owner, &path, value) {
+                        self.ui.flow.clear_notice();
+                    }
                 }
                 InspEvent::End => self.editor.end_edit(),
                 InspEvent::Error(m) => self.editor.error(m),
@@ -2507,6 +2557,16 @@ impl EditorApp {
         }
         if let Some(n) = remove {
             self.editor.remove_component(&n);
+        }
+        // A refusal during this frame stays visible in the Inspector, next to the fields.
+        if self.editor.message_serial() != message_serial {
+            let refused = match self.editor.status() {
+                Some(Message { text, error: true }) => Some(text.clone()),
+                _ => None,
+            };
+            if let Some(text) = refused {
+                self.ui.flow.refuse(selection.clone(), self.editor.message_serial(), text);
+            }
         }
     }
 

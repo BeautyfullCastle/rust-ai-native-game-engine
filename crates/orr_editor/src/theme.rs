@@ -32,6 +32,15 @@ pub const ACCENT: Color32 = Color32::from_rgb(0xE8, 0xA3, 0x3D);
 /// The accent behind selected text, 40 percent over the panel.
 pub const ACCENT_FILL: Color32 = Color32::from_rgba_premultiplied(0x5D, 0x41, 0x18, 0x66);
 
+/// Play mode: the badge, the top bar outline and the Inspector cue.
+pub const PLAY: Color32 = Color32::from_rgb(0xFF, 0x96, 0x3C);
+/// Unsaved work and other states that need a look.
+pub const WARN: Color32 = Color32::from_rgb(0xF0, 0xC8, 0x50);
+/// A refused action. Readable on the panel and bar colors (see the contrast test).
+pub const ERROR: Color32 = Color32::from_rgb(0xFF, 0x6B, 0x6B);
+/// The name of the last action in the status bar.
+pub const INFO: Color32 = Color32::from_rgb(0x78, 0xC8, 0xFF);
+
 /// Radius of widgets, and of windows and menus.
 pub const RADIUS: u8 = 2;
 pub const WINDOW_RADIUS: u8 = 4;
@@ -84,11 +93,66 @@ pub fn apply(ctx: &egui::Context) {
         s.interact_size.y = 20.0;
         s.window_margin = Margin::same(8);
     });
+    install_cjk_fallback(ctx);
+}
+
+/// The built-in fonts have no Hangul or other CJK glyphs, so such names would
+/// draw as empty boxes. A font of the system is added behind them when one is
+/// found. Nothing is bundled and a missing font changes nothing else.
+fn install_cjk_fallback(ctx: &egui::Context) {
+    const MAX_FONT_BYTES: u64 = 48 << 20;
+    let root = std::env::var_os("SystemRoot").map_or_else(|| std::path::PathBuf::from("C:\\Windows"), std::path::PathBuf::from);
+    let candidates = [
+        root.join("Fonts").join("malgun.ttf"),
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc".into(),
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc".into(),
+        "/usr/share/fonts/truetype/nanum/NanumGothic.ttf".into(),
+        "/System/Library/Fonts/AppleSDGothicNeo.ttc".into(),
+    ];
+    let Some(bytes) = candidates.iter().find_map(|path| {
+        let size = std::fs::metadata(path).ok()?.len();
+        if size == 0 || size > MAX_FONT_BYTES {
+            return None;
+        }
+        std::fs::read(path).ok()
+    }) else {
+        return;
+    };
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert("system-cjk".into(), egui::FontData::from_owned(bytes).into());
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        if let Some(list) = fonts.families.get_mut(&family) {
+            list.push("system-cjk".into());
+        }
+    }
+    ctx.set_fonts(fonts);
 }
 
 /// The frame of the top bar and the status bar.
 pub fn bar_frame() -> egui::Frame {
     egui::Frame::new().fill(BAR).inner_margin(Margin::symmetric(8, 4)).stroke(Stroke::new(1.0, LINE))
+}
+
+/// The top bar while the simulation plays: the same bar with a [`PLAY`] outline.
+pub fn play_bar_frame() -> egui::Frame {
+    bar_frame().stroke(Stroke::new(2.0, PLAY))
+}
+
+/// The edit or play state as a badge: quiet while editing, filled with [`PLAY`] while playing.
+pub fn mode_badge(ui: &mut Ui, playing: bool) -> egui::Response {
+    let (text, text_color, fill, line, hint) = if playing {
+        ("PLAY", BG, PLAY, PLAY, "Play mode: the simulation runs. Field edits are temporary and the scene file does not change. Press Stop to edit the scene.")
+    } else {
+        ("EDIT", TEXT_STRONG, CARD_HEADER, TEXT_STRONG.gamma_multiply(0.5), "Edit mode: changes go to the scene and can be undone and saved.")
+    };
+    egui::Frame::new()
+        .fill(fill)
+        .stroke(Stroke::new(1.0, line))
+        .corner_radius(CornerRadius::same(RADIUS))
+        .inner_margin(Margin::symmetric(6, 1))
+        .show(ui, |ui| ui.label(egui::RichText::new(text).strong().size(11.5).color(text_color)))
+        .response
+        .on_hover_text(hint)
 }
 
 /// The frame of a side or bottom panel.
@@ -99,6 +163,12 @@ pub fn panel_frame() -> egui::Frame {
 /// A panel title as a tab on a header strip across the top of the panel,
 /// with the accent along the tab's top edge.
 pub fn panel_title(ui: &mut Ui, title: &str) {
+    panel_title_with(ui, title, None);
+}
+
+/// [`panel_title`] with a small state badge at the right end of the strip.
+/// The badge is left out when the panel is too narrow for it.
+pub fn panel_title_with(ui: &mut Ui, title: &str, badge: Option<(&str, Color32)>) {
     let margin = 8.0;
     let full = ui.max_rect();
     let top = ui.cursor().top() - margin;
@@ -111,6 +181,18 @@ pub fn panel_title(ui: &mut Ui, title: &str) {
     ui.painter().line_segment([tab.left_top() + egui::vec2(1.0, 0.5), tab.right_top() + egui::vec2(-1.0, 0.5)], Stroke::new(2.0, ACCENT));
     let text = egui::Rect::from_min_size(egui::pos2(tab.left() + 12.0, tab.center().y - galley.size().y / 2.0), galley.size());
     ui.put(text, egui::Label::new(egui::RichText::new(title).size(13.0).strong().color(TEXT_STRONG)).selectable(false));
+    if let Some((label, color)) = badge {
+        let size = ui.painter().layout_no_wrap(label.to_string(), egui::FontId::proportional(11.0), color).size();
+        let pill = egui::Rect::from_min_size(
+            egui::pos2(strip.right() - 8.0 - size.x - 12.0, strip.center().y - size.y / 2.0 - 2.0),
+            size + egui::vec2(12.0, 4.0),
+        );
+        if pill.left() > tab.right() + 6.0 {
+            ui.painter().rect_stroke(pill, CornerRadius::same(RADIUS), Stroke::new(1.0, color), egui::StrokeKind::Inside);
+            let inner = egui::Rect::from_min_size(pill.min + egui::vec2(6.0, 2.0), size);
+            ui.put(inner, egui::Label::new(egui::RichText::new(label).size(11.0).color(color)).selectable(false));
+        }
+    }
     // The content starts under the strip.
     let below = strip.bottom() + 6.0 - ui.cursor().top();
     if below > 0.0 {
@@ -169,24 +251,35 @@ pub fn type_name(name: &str) -> egui::text::LayoutJob {
     job
 }
 
-/// A mark and its color for an entity with these components, for the hierarchy.
-pub fn entity_mark(components: &[String]) -> (&'static str, Color32) {
+/// What an entity is, for the Inspector header, and the mark and color the Hierarchy shows for it.
+fn entity_kind(components: &[String]) -> (&'static str, &'static str, Color32) {
     let has = |name: &str| components.iter().any(|c| c.ends_with(name));
     if has("Dragon") {
-        ("\u{1F409}", Color32::from_rgb(0x6F, 0xC2, 0x8E))
+        ("Dragon", "\u{1F409}", Color32::from_rgb(0x6F, 0xC2, 0x8E))
     } else if has("::Light") {
-        ("\u{1F4A1}", Color32::from_rgb(0xF2, 0xC9, 0x4C))
+        ("Light", "\u{1F4A1}", Color32::from_rgb(0xF2, 0xC9, 0x4C))
     } else if has("::Camera") {
-        ("\u{1F4F7}", Color32::from_rgb(0x9B, 0xB7, 0xE0))
+        ("Camera", "\u{1F4F7}", Color32::from_rgb(0x9B, 0xB7, 0xE0))
     } else if has("::Terrain") {
-        ("\u{26F0}", Color32::from_rgb(0xB0, 0x9A, 0x6E))
+        ("Terrain", "\u{26F0}", Color32::from_rgb(0xB0, 0x9A, 0x6E))
     } else if has("::Water") {
-        ("\u{1F4A7}", Color32::from_rgb(0x5D, 0xA9, 0xD6))
+        ("Water", "\u{1F4A7}", Color32::from_rgb(0x5D, 0xA9, 0xD6))
     } else if has("::Scatter") {
-        ("\u{1F332}", Color32::from_rgb(0x6F, 0xB0, 0x5F))
+        ("Scatter", "\u{1F332}", Color32::from_rgb(0x6F, 0xB0, 0x5F))
     } else if has("::Body") || has("::Collider") {
-        ("\u{25A3}", Color32::from_rgb(0xC8, 0xCA, 0xCF))
+        ("Physics body", "\u{25A3}", Color32::from_rgb(0xC8, 0xCA, 0xCF))
     } else {
-        ("\u{25C6}", TEXT_WEAK)
+        ("Entity", "\u{25C6}", TEXT_WEAK)
     }
+}
+
+/// A mark and its color for an entity with these components, for the hierarchy.
+pub fn entity_mark(components: &[String]) -> (&'static str, Color32) {
+    let (_, mark, color) = entity_kind(components);
+    (mark, color)
+}
+
+/// The kind of an entity with these components, as a word.
+pub fn entity_role(components: &[String]) -> &'static str {
+    entity_kind(components).0
 }

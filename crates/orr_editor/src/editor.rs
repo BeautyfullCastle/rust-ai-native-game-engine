@@ -273,6 +273,8 @@ pub struct Editor {
     tilemap_save_guard: Option<(PathBuf, Option<orr_sample::project_sprites::Document>)>,
     status: Option<Message>,
     log: Vec<Message>,
+    /// Counts every message pushed: a change tells the window that a new message arrived.
+    message_serial: u64,
     // caches of host answers
     sim: SimState,
     history: History,
@@ -437,6 +439,7 @@ impl Editor {
             tilemap_save_guard: None,
             status: None,
             log: Vec::new(),
+            message_serial: 0,
             sim: SimState::default(),
             history: History::default(),
             rows: Vec::new(),
@@ -919,6 +922,11 @@ impl Editor {
         self.status.as_ref()
     }
 
+    /// Changes with every new status message, also when the text repeats.
+    pub fn message_serial(&self) -> u64 {
+        self.message_serial
+    }
+
     /// Every message, oldest first (capped).
     pub fn log(&self) -> &[Message] {
         &self.log
@@ -942,6 +950,7 @@ impl Editor {
     }
 
     fn push_message(&mut self, m: Message) {
+        self.message_serial += 1;
         self.status = Some(m.clone());
         self.log.push(m);
         if self.log.len() > LOG_LIMIT {

@@ -15,6 +15,7 @@ pub struct Panel {
     pub output: String,
     pub seed: String,
     pub status: String,
+    failed: bool,
     pending: Option<Receiver<Result<PathBuf, String>>>,
     ready: Option<PathBuf>,
 }
@@ -27,6 +28,7 @@ impl Default for Panel {
             output: String::new(),
             seed: "room-starter".into(),
             status: String::new(),
+            failed: false,
             pending: None,
             ready: None,
         }
@@ -58,9 +60,13 @@ impl Panel {
             Ok(root) => {
                 self.root = root.display().to_string();
                 self.status = format!("Room project validated: {}", root.display());
+                self.failed = false;
                 self.ready = Some(root);
             }
-            Err(error) => self.status = format!("Room project operation failed: {error}"),
+            Err(error) => {
+                self.status = format!("Room project operation failed: {error}");
+                self.failed = true;
+            }
         }
     }
 
@@ -120,7 +126,8 @@ impl Panel {
                                 });
                             }
                             Err(error) => {
-                                self.status = format!("Room project operation blocked: {error}")
+                                self.status = format!("Room project operation blocked: {error}");
+                                self.failed = true;
                             }
                         }
                     }
@@ -135,7 +142,8 @@ impl Panel {
                                 });
                             }
                             Err(error) => {
-                                self.status = format!("Room project operation blocked: {error}")
+                                self.status = format!("Room project operation blocked: {error}");
+                                self.failed = true;
                             }
                         }
                     }
@@ -145,7 +153,11 @@ impl Panel {
                     context.request_repaint_after(std::time::Duration::from_millis(40));
                 }
                 if !self.status.is_empty() {
-                    ui.label(&self.status);
+                    if self.failed {
+                        ui.label(egui::RichText::new(format!("\u{26A0} {}", self.status)).color(crate::theme::ERROR));
+                    } else {
+                        ui.label(&self.status);
+                    }
                 }
             });
         self.open = window_open;
@@ -188,6 +200,7 @@ impl Panel {
             Ok(_) => {
                 self.pending = Some(receiver);
                 self.ready = None;
+                self.failed = false;
                 self.status = if creating {
                     "Creating and validating Room project in background…".into()
                 } else {
@@ -197,6 +210,7 @@ impl Panel {
             }
             Err(error) => {
                 self.status = format!("Cannot start Room project worker: {error}");
+                self.failed = true;
                 false
             }
         }

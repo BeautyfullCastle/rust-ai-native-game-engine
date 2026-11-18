@@ -273,6 +273,13 @@ fn production_windows_export_ui_measures_trusted_runtime_and_publishes_admitted_
     assert!(!harness.state().windows_export.busy());
     assert!(harness.state().windows_export.last_output.is_none());
     assert!(!harness.state().windows_export.trusted_runtime);
+    assert!(
+        harness
+            .query_all_by_label_contains("\u{26A0} Explicitly confirm")
+            .next()
+            .is_some(),
+        "the refusal is marked inside the export window"
+    );
     click_role(
         &mut harness,
         Role::CheckBox,
@@ -286,6 +293,22 @@ fn production_windows_export_ui_measures_trusted_runtime_and_publishes_admitted_
         harness.state().windows_export.last_output.is_some(),
         "export failed: {}",
         harness.state().windows_export.status
+    );
+
+    // The next action after the export: the start file of the exported game.
+    let launcher = harness
+        .state()
+        .windows_export
+        .last_launcher
+        .clone()
+        .expect("the export manifest names a start file");
+    assert!(launcher.is_file(), "start file {}", launcher.display());
+    assert!(
+        harness
+            .query_all_by_label_contains("Run the exported game: ")
+            .next()
+            .is_some(),
+        "the window says how to run the exported game"
     );
 
     assert_eq!(harness.state().editor.checksum(), initial_checksum);
