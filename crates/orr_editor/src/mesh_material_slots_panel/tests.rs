@@ -162,9 +162,9 @@ fn show_rejects_a_different_model_arc_even_when_used_indices_match() {
     panel.load(&loaded_model, &[]).unwrap();
     let original_fields = panel.fields.clone();
     let context = egui::Context::default();
-    let _ = context.run_ui(egui::RawInput::default(), |ui| {
+    context.run_ui(egui::RawInput::default(), |ui| {
         assert!(panel.show(ui, &replacement_model).is_none());
-    });
+    }).textures_delta.clear();
     assert_eq!(
         panel.error.as_deref(),
         Some("The admitted model changed; reload this panel")

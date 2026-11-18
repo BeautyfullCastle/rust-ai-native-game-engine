@@ -1270,7 +1270,7 @@ mod tests {
         let frame = frame(0);
         let before = frame.to_bytes();
         let ctx = egui::Context::default();
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        ctx.run_ui(egui::RawInput::default(), |ui| {
             for phase in [
                 GameplayViewPhase::Edit,
                 GameplayViewPhase::Paused,
@@ -1300,7 +1300,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert!(game.validate_intent(request).is_ok());
-        });
+        }).textures_delta.clear();
         view.reset();
         assert_eq!(frame.to_bytes(), before);
     }
