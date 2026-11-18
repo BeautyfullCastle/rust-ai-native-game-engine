@@ -145,7 +145,9 @@ impl Editor {
         }
         // Only an identical address may coalesce. Reappend to keep ordering
         // correct when a whole value and one of its children are both edited.
-        g.edits.retain(|e| !(e.method == method && ["entity", "component", "name", "path"].iter().all(|k| e.params.get(k) == params.get(k))));
+        // A many-entity edit replaces an older one only when it names the same entities.
+        let entities = |p: &J| p.get("patches").and_then(J::as_array).map(|list| list.iter().map(|item| item.get("entity").cloned()).collect::<Vec<_>>());
+        g.edits.retain(|e| !(e.method == method && ["entity", "component", "name", "path"].iter().all(|k| e.params.get(k) == params.get(k)) && entities(&e.params) == entities(&params)));
         if g.edits.len() == MAX_FIELDS {
             g.cancelled = true;
             g.ended = true;

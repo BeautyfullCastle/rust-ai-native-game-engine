@@ -305,3 +305,83 @@ fn a_change_outside_the_window_shows_after_the_controls_read_the_scene_again() {
     let read = scenery_scene::read(&editor, Settings::default());
     assert!((read.sky.cloud_cover - 0.5).abs() < 1.0e-3);
 }
+
+/// The forest scene with `extra` more water surfaces, in a temporary folder.
+fn many_waters(extra: usize) -> (tempfile::TempDir, Editor) {
+    let mut text = std::fs::read_to_string(forest_scene()).unwrap().replace("max_entities: 128", "max_entities: 1024");
+    for i in 0..extra {
+        text.push_str(&format!(
+            "  e_{:08x}:\n    name: extra_pool_{i}\n    orr_gfx::Transform3:\n      position: [{}, 60, -300]\n      rotation: [0, 0, 0]\n      scale: [1, 1, 1]\n    orr_gfx::Water:\n      size: [20, 20]\n      color: [0.012, 0.05, 0.04]\n      clarity: 1\n      ripples: 1\n      flow: [0.3, 0.4]\n      glint: 1\n      terrain: e_00000001\n",
+            0x1_0000 + i,
+            i * 25
+        ));
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("many_waters.scene.yaml");
+    std::fs::write(&path, text).unwrap();
+    let mut editor = Editor::open_game(&path, EditorGame::Yard3D).unwrap();
+    editor.sync();
+    (dir, editor)
+}
+
+fn water_values(editor: &Editor, f: impl Fn(&orr_gfx_view::WaterRef) -> f32) -> Vec<f32> {
+    editor.yard_frame().waters.iter().map(f).collect()
+}
+
+#[test]
+fn a_scene_with_a_hundred_waters_takes_a_water_control_as_one_undo_step() {
+    let (_dir, mut editor) = many_waters(100);
+    let count = editor.yard_frame().waters.len();
+    assert!(count > 100, "{count} water surfaces");
+    let mut settings = scenery_scene::read(&editor, Settings::default());
+    settings.water.clarity = 2.5;
+    settings.water.ripples = 0.4;
+    settings.water.flow_speed = 1.5;
+    let before_flow = water_values(&editor, |w| w.flow[0]);
+    let checksum = editor.checksum();
+    assert_eq!(apply(&mut editor, "Water", "Clarity", &settings), count, "every surface took the value");
+    assert_eq!(apply(&mut editor, "Water", "Ripples", &settings), count);
+    assert_eq!(apply(&mut editor, "Water", "Flow speed", &settings), count);
+    assert!(water_values(&editor, |w| w.clarity).iter().all(|c| (c - 2.5).abs() < 1.0e-3));
+    assert!(water_values(&editor, |w| w.ripples).iter().all(|r| (r - 0.4).abs() < 1.0e-3));
+    assert_ne!(water_values(&editor, |w| w.flow[0]), before_flow, "the flow keeps each surface's direction but takes the new speed");
+
+    // One control is one undo step for all the surfaces.
+    for _ in 0..3 {
+        assert!(editor.undo());
+        editor.sync();
+    }
+    assert!(!editor.undo(), "nothing else is in the history");
+    assert_eq!(editor.checksum(), checksum, "three undos restore every surface");
+}
+
+#[test]
+fn a_drag_on_a_water_control_with_a_hundred_waters_is_one_undo_step_and_is_not_cancelled() {
+    let (_dir, mut editor) = many_waters(100);
+    let count = editor.yard_frame().waters.len();
+    let checksum = editor.checksum();
+    let mut settings = scenery_scene::read(&editor, Settings::default());
+    // The window starts a drag, writes the control on every frame of it, and ends the drag.
+    editor.begin_edit("scene window: Water Clarity");
+    for step in 1..=5 {
+        settings.water.clarity = 1.0 + step as f32 * 0.3;
+        let changes = scenery_scene::changes(&editor, "Water", "Clarity", &settings);
+        assert_eq!(changes.len(), count);
+        scenery_scene::apply(&mut editor, &changes);
+        editor.sync();
+    }
+    editor.end_edit();
+    for _ in 0..40 {
+        editor.sync();
+        if !editor.in_gesture() {
+            break;
+        }
+    }
+    assert!(!editor.in_gesture());
+    assert!(editor.status().is_none_or(|m| m.text.is_empty() || !m.error), "the drag was refused: {:?}", editor.status().map(|m| m.text.clone()));
+    assert!(water_values(&editor, |w| w.clarity).iter().all(|c| (c - 2.5).abs() < 1.0e-3), "every surface has the last value of the drag");
+    assert!(editor.undo());
+    editor.sync();
+    assert_eq!(editor.checksum(), checksum, "one undo reverses the drag on every surface");
+    assert!(!editor.undo());
+}
