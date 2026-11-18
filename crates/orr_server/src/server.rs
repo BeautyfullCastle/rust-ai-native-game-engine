@@ -193,7 +193,7 @@ impl<E: Endpoint, V: InputValidator> RelayServer<E, V> {
                 self.bad_messages += 1;
                 self.notes.push(ServerNote::BadMessage { conn });
                 if matches!(e, ProtoError::UnsupportedVersion(_)) && self.conns.get(&conn).is_some_and(|c| c.room.is_none()) {
-                    self.reject(conn, RejectReason::BadVersion { server: PROTOCOL_VERSION }, now_us);
+                    self.reject(conn, RejectReason::BadVersion { server: PROTOCOL_VERSION, min_client: orr_proto::MIN_PROTOCOL_VERSION }, now_us);
                 }
                 return;
             }

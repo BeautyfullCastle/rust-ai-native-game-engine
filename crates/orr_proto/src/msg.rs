@@ -16,7 +16,7 @@
 //!
 //! | kind | message | channel |
 //! |---|---|---|
-//! | 1 | `Hello` | reliable |
+//! | 1 | `Hello` (with the client's protocol version; v5) | reliable |
 //! | 2 | `Input`: last K unacked inputs (tick, input, commands) + `ack_tick` | unreliable |
 //! | 3 | `Ping` | unreliable |
 //! | 4 | `Checksum` (tick, xxh3 of the verified frame) | reliable |
@@ -45,9 +45,11 @@
 //!
 //! # Versions
 //!
-//! A message carries the lowest protocol version that can express it, so
-//! relay-mode traffic is byte-identical to version 2 and old and new peers
-//! interoperate there. Version 3 adds the authoritative mode: `Welcome`
+//! A message carries the lowest protocol version that can express it, so the
+//! server messages of a relay room without signals are byte-identical to
+//! version 2 and old clients can read them. The client `Input` and the
+//! `Hello` of a version 5 client are the exception (see version 5 below).
+//! Version 3 adds the authoritative mode: `Welcome`
 //! with a trailing `flags` byte (only written when a flag is set) and
 //! `Correction`. It also adds `SeatChange` for the player signals: a slot's
 //! player came back (`SEAT_RECONNECTED`) or its reserved seat ran out
@@ -69,6 +71,23 @@
 //! the snapshot tick. A message whose counts are all zero (an authoritative
 //! room, or a room that never had a signal) is still written as version 2 or 3.
 //!
+//! Version 5 adds the client's side of the compact encoding. `Hello` ends with
+//! `client_version`, the newest protocol version the client speaks (a `Hello`
+//! without it, `client_version == 0`, is written as version 2: a client older
+//! than version 5, which can be version 2, 3 or 4). The server refuses a
+//! client below `RoomConfig::min_client_version` with `RejectReason::BadVersion`,
+//! which names the oldest version it accepts. A version 5 `Input` writes, per
+//! entry, a flags byte, then the tick (a full `u64` for the first entry, later
+//! a one-byte delta to the previous entry, 255 escapes to a full `u64`), then
+//! the input bytes, then the commands only if the flags say so. An entry whose
+//! input equals the input of the entry before it in the same message has the
+//! `INPUT_SAME` flag and leaves the input bytes out. The first entry is never
+//! "same". The rule looks at the same message only, never at an earlier
+//! packet or at what the server acked. Every `Input` packet is then decodable
+//! alone, so a lost or reordered packet cannot make the server read a wrong
+//! input. A client sends a version 5 `Input` always. A server decodes the
+//! version 2 form of old clients as before.
+//!
 //! `Confirmed` is compact, because the server repeats unacked bundles in
 //! every packet: the first bundle has a `u64` tick, later ones a one-byte
 //! delta (255 escapes to a full `u64`); a slot's flags byte tells whether
@@ -80,14 +99,17 @@
 //! varints). Counts that stay the same cost two bytes per message.
 use crate::codec::{Reader, Writer};
 
-/// Newest protocol version (adds the signal fence, see the module docs).
-pub const PROTOCOL_VERSION: u32 = 4;
+/// Newest protocol version (adds the compact client `Input` and the version
+/// in `Hello`, see the module docs).
+pub const PROTOCOL_VERSION: u32 = 5;
 /// Oldest version a decoder still accepts (the relay-only protocol).
 pub const MIN_PROTOCOL_VERSION: u32 = 2;
 /// First version that has `Welcome::flags` and `ServerMsg::Correction`.
 const V_AUTHORITATIVE: u32 = 3;
 /// First version with signal sequence numbers and counts (the signal fence).
 const V_SIGNAL_FENCE: u32 = 4;
+/// First version with the compact client `Input` and `Hello::client_version`.
+const V_CLIENT_COMPACT: u32 = 5;
 const MAGIC: &[u8; 4] = b"ORRN";
 
 /// `Hello::want_slot` value meaning "any free slot".
@@ -123,6 +145,10 @@ const WIRE_HAS_COMMANDS: u8 = 4;
 /// Wire only: the input equals this slot's input in the previous bundle of
 /// the same message (the input bytes are left out).
 const WIRE_SAME_INPUT: u8 = 8;
+/// Wire only, `Input` entry: the input equals the previous entry's input.
+const INPUT_SAME: u8 = 1;
+/// Wire only, `Input` entry: commands follow.
+const INPUT_HAS_COMMANDS: u8 = 2;
 /// Wire only: after a bundle tick delta of this value, a full `u64` tick.
 const TICK_ESCAPE: u8 = 255;
 
@@ -235,6 +261,9 @@ pub struct Hello {
     pub want_slot: u8,
     /// Token from an earlier `Welcome` to reclaim the same slot, or `0`.
     pub token: u64,
+    /// The newest protocol version the client speaks (`PROTOCOL_VERSION` of
+    /// its build), or `0` when it does not say (a client older than version 5).
+    pub client_version: u32,
 }
 
 /// Server answer to an accepted `Hello`.
@@ -274,7 +303,9 @@ impl Welcome {
 pub enum RejectReason {
     BuildHashMismatch { server: u64, client: u64 },
     InputSizeMismatch { server: u32, client: u32 },
-    BadVersion { server: u32 },
+    /// `server`: the newest protocol version the server speaks. `min_client`:
+    /// the oldest client version it accepts (`0`: not said).
+    BadVersion { server: u32, min_client: u32 },
     NoSuchRoom,
     RoomFull,
     SlotTaken,
@@ -289,7 +320,7 @@ impl RejectReason {
         let (code, a, b) = match *self {
             RejectReason::BuildHashMismatch { server, client } => (1, server, client),
             RejectReason::InputSizeMismatch { server, client } => (2, u64::from(server), u64::from(client)),
-            RejectReason::BadVersion { server } => (3, u64::from(server), 0),
+            RejectReason::BadVersion { server, min_client } => (3, u64::from(server), u64::from(min_client)),
             RejectReason::NoSuchRoom => (4, 0, 0),
             RejectReason::RoomFull => (5, 0, 0),
             RejectReason::SlotTaken => (6, 0, 0),
@@ -308,7 +339,7 @@ impl RejectReason {
         Ok(match code {
             1 => RejectReason::BuildHashMismatch { server: a, client: b },
             2 => RejectReason::InputSizeMismatch { server: a as u32, client: b as u32 },
-            3 => RejectReason::BadVersion { server: a as u32 },
+            3 => RejectReason::BadVersion { server: a as u32, min_client: b as u32 },
             4 => RejectReason::NoSuchRoom,
             5 => RejectReason::RoomFull,
             6 => RejectReason::SlotTaken,
@@ -451,25 +482,50 @@ impl ClientMsg {
     pub fn encode(&self) -> Vec<u8> {
         match self {
             ClientMsg::Hello(h) => {
-                let mut w = start(1);
+                let mut w = start_v(1, if h.client_version != 0 { V_CLIENT_COMPACT } else { MIN_PROTOCOL_VERSION });
                 w.u64(h.build_hash);
                 w.u64(h.room);
                 w.u32(h.input_size);
                 w.u8(h.want_slot);
                 w.u64(h.token);
+                if h.client_version != 0 {
+                    w.u32(h.client_version);
+                }
                 seal(w)
             }
             ClientMsg::Input { slot, input_size, ack_tick, entries } => {
-                let mut w = start(2);
+                let mut w = start_v(2, V_CLIENT_COMPACT);
                 w.u8(*slot);
                 w.u32(*input_size);
                 w.u64(*ack_tick);
-                w.u32(entries.len() as u32);
+                w.varint(entries.len() as u32);
+                let mut prev: Option<&InputEntry> = None;
                 for e in entries {
-                    w.u64(e.tick);
                     debug_assert_eq!(e.input.len() as u32, *input_size);
-                    w.raw(&e.input);
-                    write_commands(&mut w, &e.commands);
+                    let same = prev.is_some_and(|p| p.input == e.input);
+                    let mut flags = 0;
+                    if same {
+                        flags |= INPUT_SAME;
+                    }
+                    if !e.commands.is_empty() {
+                        flags |= INPUT_HAS_COMMANDS;
+                    }
+                    w.u8(flags);
+                    match prev {
+                        None => w.u64(e.tick),
+                        Some(p) if p.tick < e.tick && e.tick - p.tick < u64::from(TICK_ESCAPE) => w.u8((e.tick - p.tick) as u8),
+                        Some(_) => {
+                            w.u8(TICK_ESCAPE);
+                            w.u64(e.tick);
+                        }
+                    }
+                    if !same {
+                        w.raw(&e.input);
+                    }
+                    if !e.commands.is_empty() {
+                        write_commands(&mut w, &e.commands);
+                    }
+                    prev = Some(e);
                 }
                 seal(w)
             }
@@ -505,7 +561,7 @@ impl ClientMsg {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, ProtoError> {
-        let (kind, _version, mut r) = open(bytes)?;
+        let (kind, version, mut r) = open(bytes)?;
         let msg = match kind {
             1 => ClientMsg::Hello(Hello {
                 build_hash: r.u64()?,
@@ -513,8 +569,44 @@ impl ClientMsg {
                 input_size: r.u32()?,
                 want_slot: r.u8()?,
                 token: r.u64()?,
+                client_version: if version >= V_CLIENT_COMPACT { r.u32()? } else { 0 },
             }),
+            2 if version >= V_CLIENT_COMPACT => {
+                let slot = r.u8()?;
+                let input_size = r.u32()?;
+                check_input_size(input_size)?;
+                let ack_tick = r.u64()?;
+                let n = r.count_varint(2, MAX_ENTRIES)?;
+                let mut entries: Vec<InputEntry> = Vec::with_capacity(n as usize);
+                for k in 0..n as usize {
+                    let flags = r.u8()?;
+                    if flags & !(INPUT_SAME | INPUT_HAS_COMMANDS) != 0 {
+                        return Err(ProtoError::Corrupt("input flags"));
+                    }
+                    let tick = if k == 0 {
+                        r.u64()?
+                    } else {
+                        match r.u8()? {
+                            TICK_ESCAPE => r.u64()?,
+                            0 => return Err(ProtoError::Corrupt("tick delta 0")),
+                            d => entries[k - 1].tick.checked_add(u64::from(d)).ok_or(ProtoError::Corrupt("tick overflow"))?,
+                        }
+                    };
+                    let input = if flags & INPUT_SAME != 0 {
+                        if k == 0 {
+                            return Err(ProtoError::Corrupt("same input without a previous entry"));
+                        }
+                        entries[k - 1].input.clone()
+                    } else {
+                        read_input(&mut r, input_size)?
+                    };
+                    let commands = if flags & INPUT_HAS_COMMANDS != 0 { read_commands(&mut r)? } else { Vec::new() };
+                    entries.push(InputEntry { tick, input, commands });
+                }
+                ClientMsg::Input { slot, input_size, ack_tick, entries }
+            }
             2 => {
+                // Version 2 to 4 clients: a full entry each.
                 let slot = r.u8()?;
                 let input_size = r.u32()?;
                 check_input_size(input_size)?;
@@ -889,15 +981,41 @@ mod tests {
         Bundle { signals, ..sample_bundle(tick) }
     }
 
+    /// Same inputs next to each other and apart, a tick gap, an escaped tick,
+    /// commands on a "same" entry.
+    fn mixed_entries() -> Vec<InputEntry> {
+        let e = |tick: u64, byte: u8, commands: Vec<Vec<u8>>| InputEntry { tick, input: vec![byte; 4], commands };
+        vec![
+            e(100, 1, vec![]),
+            e(101, 1, vec![]),
+            e(102, 2, vec![vec![5]]),
+            e(103, 2, vec![vec![6, 7]]),
+            e(150, 2, vec![]),
+            e(500, 1, vec![]),
+            e(499, 1, vec![]),
+            e(u64::MAX, 3, vec![]),
+        ]
+    }
+
     fn all_client() -> Vec<ClientMsg> {
         vec![
-            ClientMsg::Hello(Hello { build_hash: 7, room: 3, input_size: 4, want_slot: NO_SLOT, token: 0 }),
+            ClientMsg::Hello(Hello { build_hash: 7, room: 3, input_size: 4, want_slot: NO_SLOT, token: 0, client_version: 0 }),
+            ClientMsg::Hello(Hello {
+                build_hash: 7,
+                room: 3,
+                input_size: 4,
+                want_slot: NO_SLOT,
+                token: 0,
+                client_version: PROTOCOL_VERSION,
+            }),
             ClientMsg::Input {
                 slot: 1,
                 input_size: 4,
                 ack_tick: 9,
                 entries: vec![InputEntry { tick: 10, input: vec![1, 2, 3, 4], commands: vec![vec![1], vec![2, 3]] }],
             },
+            ClientMsg::Input { slot: 1, input_size: 4, ack_tick: 9, entries: vec![] },
+            ClientMsg::Input { slot: 1, input_size: 4, ack_tick: 9, entries: mixed_entries() },
             ClientMsg::Ping { seq: 1, client_time_us: 99, rtt_hint_us: 5 },
             ClientMsg::Checksum { tick: 30, checksum: 0xDEAD },
             ClientMsg::SnapshotUpload { request_id: 4, tick: 60, checksum: 1, data: vec![7; 100] },
@@ -944,6 +1062,7 @@ mod tests {
                 flags: WELCOME_AUTHORITATIVE,
             }),
             ServerMsg::Reject(RejectReason::BuildHashMismatch { server: 1, client: 2 }),
+            ServerMsg::Reject(RejectReason::BadVersion { server: 5, min_client: 4 }),
             ServerMsg::Start { t0_us: 5, server_time_us: 6 },
             ServerMsg::Pong { seq: 1, client_time_us: 2, server_time_us: 3, t0_us: u64::MAX, finalized_tick: 0 },
             ServerMsg::Confirmed { input_size: 4, bundles: vec![sample_bundle(5), sample_bundle(6)] },
@@ -976,7 +1095,9 @@ mod tests {
     #[test]
     fn messages_without_signals_stay_version_2_and_authoritative_ones_are_version_3() {
         for m in all_client() {
-            assert_eq!(version_of(&m.encode()), 2, "{m:?}");
+            // An input and a Hello that states its version are version 5.
+            let v5 = matches!(&m, ClientMsg::Input { .. }) || matches!(&m, ClientMsg::Hello(h) if h.client_version != 0);
+            assert_eq!(version_of(&m.encode()), if v5 { 5 } else { 2 }, "{m:?}");
         }
         for m in all_server() {
             let v = version_of(&m.encode());
@@ -1154,6 +1275,133 @@ mod tests {
                 assert!(ServerMsg::decode(&b).is_err(), "flip at {i} accepted");
             }
         }
+    }
+
+    fn input_msg(entries: Vec<InputEntry>) -> ClientMsg {
+        ClientMsg::Input { slot: 1, input_size: 24, ack_tick: 9, entries }
+    }
+
+    fn entry(tick: u64, byte: u8) -> InputEntry {
+        InputEntry { tick, input: vec![byte; 24], commands: vec![] }
+    }
+
+    #[test]
+    fn an_input_equal_to_the_one_before_it_costs_two_bytes_and_round_trips() {
+        let one = input_msg(vec![entry(100, 7)]).encode().len();
+        let same: Vec<_> = (100..104).map(|t| entry(t, 7)).collect();
+        let four_same = input_msg(same).encode();
+        // Each repeat is a flags byte and a one-byte tick delta.
+        assert_eq!(four_same.len(), one + 3 * 2);
+        let differing: Vec<_> = (100..104).map(|t| entry(t, t as u8)).collect();
+        let four_different = input_msg(differing.clone()).encode();
+        assert_eq!(four_different.len(), one + 3 * (2 + 24));
+        // The old form: 12 bytes and the input for every entry, a 4-byte count.
+        let old_form = 4 * (12 + 24) + 34;
+        assert!(four_same.len() * 2 < old_form, "{} bytes against {old_form}", four_same.len());
+        for entries in [(100..104).map(|t| entry(t, 7)).collect::<Vec<_>>(), differing, mixed_entries_24()] {
+            let msg = input_msg(entries);
+            assert_eq!(ClientMsg::decode(&msg.encode()), Ok(msg));
+        }
+    }
+
+    fn mixed_entries_24() -> Vec<InputEntry> {
+        mixed_entries().into_iter().map(|e| InputEntry { input: e.input.repeat(6), ..e }).collect()
+    }
+
+    #[test]
+    fn a_same_flag_never_needs_another_packet() {
+        // Every packet of a stream decodes alone, whichever packets are lost:
+        // the "same" entries of a packet point at the entry before them in
+        // that packet.
+        let stream: Vec<InputEntry> = (1..=40).map(|t| entry(t, if t % 9 == 0 { 2 } else { 1 })).collect();
+        for end in 4..=stream.len() {
+            let window = stream[end - 4..end].to_vec();
+            let msg = input_msg(window);
+            assert_eq!(ClientMsg::decode(&msg.encode()), Ok(msg));
+        }
+    }
+
+    #[test]
+    fn a_version_2_input_still_decodes() {
+        let mut w = start(2);
+        w.u8(1);
+        w.u32(4);
+        w.u64(9);
+        w.u32(2);
+        for (tick, byte) in [(10u64, 1u8), (11, 1)] {
+            w.u64(tick);
+            w.raw(&[byte; 4]);
+            write_commands(&mut w, &[]);
+        }
+        let want = ClientMsg::Input {
+            slot: 1,
+            input_size: 4,
+            ack_tick: 9,
+            entries: vec![
+                InputEntry { tick: 10, input: vec![1; 4], commands: vec![] },
+                InputEntry { tick: 11, input: vec![1; 4], commands: vec![] },
+            ],
+        };
+        assert_eq!(ClientMsg::decode(&seal(w)), Ok(want));
+    }
+
+    #[test]
+    fn bad_compact_inputs_are_errors() {
+        let build = |entries: &dyn Fn(&mut Writer)| {
+            let mut w = start_v(2, V_CLIENT_COMPACT);
+            w.u8(1);
+            w.u32(4);
+            w.u64(9);
+            w.varint(2);
+            entries(&mut w);
+            seal(w)
+        };
+        // The first entry cannot repeat an earlier one.
+        let bytes = build(&|w| {
+            w.u8(INPUT_SAME);
+            w.u64(10);
+            w.u8(0);
+            w.u8(1);
+        });
+        assert!(matches!(ClientMsg::decode(&bytes), Err(ProtoError::Corrupt(_))));
+        // A tick delta of zero.
+        let bytes = build(&|w| {
+            w.u8(0);
+            w.u64(10);
+            w.raw(&[1; 4]);
+            w.u8(INPUT_SAME);
+            w.u8(0);
+        });
+        assert!(matches!(ClientMsg::decode(&bytes), Err(ProtoError::Corrupt(_))));
+        // An unknown flag.
+        let bytes = build(&|w| {
+            w.u8(0x80);
+            w.u64(10);
+        });
+        assert!(matches!(ClientMsg::decode(&bytes), Err(ProtoError::Corrupt(_))));
+        // More entries than the bytes can hold.
+        let mut w = start_v(2, V_CLIENT_COMPACT);
+        w.u8(1);
+        w.u32(4);
+        w.u64(9);
+        w.varint(200);
+        assert!(ClientMsg::decode(&seal(w)).is_err());
+    }
+
+    #[test]
+    fn a_hello_states_its_version_and_an_old_hello_states_none() {
+        let hello = Hello { build_hash: 1, room: 2, input_size: 4, want_slot: NO_SLOT, token: 3, client_version: PROTOCOL_VERSION };
+        let ClientMsg::Hello(back) = ClientMsg::decode(&ClientMsg::Hello(hello.clone()).encode()).unwrap() else { panic!() };
+        assert_eq!(back, hello);
+        // What a version 2 to 4 client sends: no version at the end.
+        let mut w = start(1);
+        w.u64(1);
+        w.u64(2);
+        w.u32(4);
+        w.u8(NO_SLOT);
+        w.u64(3);
+        let ClientMsg::Hello(old) = ClientMsg::decode(&seal(w)).unwrap() else { panic!() };
+        assert_eq!(old, Hello { client_version: 0, ..hello });
     }
 
     #[test]

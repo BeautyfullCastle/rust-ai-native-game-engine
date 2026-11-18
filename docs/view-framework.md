@@ -284,12 +284,41 @@ sequenceDiagram
 
 더할 것:
 
-1. **클라이언트 입력의 "직전과 같음" 표시.** 확정 묶음과 같은 방식으로 클라이언트 입력 항목에도 넣는다. 입력이 자주 바뀌지 않는 게임에서 입력 바이트가 거의 사라진다. 프로토콜 버전을 올린다.
-2. **두 틱 묶어 보내기(선택).** 패킷 수가 절반이 되고 입력 지연이 1틱 늘어난다. 게임이 고른다.
+1. **클라이언트 입력의 "직전과 같음" 표시.** 확정 묶음과 같은 방식으로 클라이언트 입력 항목에도 넣는다. 입력이 자주 바뀌지 않는 게임에서 입력 바이트가 거의 사라진다. 프로토콜 버전을 올린다. **(5단계에서 구현, 버전 5)**
+2. **두 틱 묶어 보내기(선택).** 패킷 수가 절반이 되고 입력 지연이 1틱 늘어난다. 게임이 고른다. **(5단계에서 하지 않았다. 아래 "남은 것")**
 
 하지 않을 것: "변화 없음"을 가끔만 보내는 방식. 입력이 바뀐 패킷을 잃으면 서버가 옛 입력으로 확정해 실제 조작이 무시된다.
 
-60틱 기준 예상치는 클라이언트당 올려 보내기 약 2~3 KB/s다. 대부분이 네트워크 헤더다. 구현 후 `orr_proto::netsim`으로 실제 바이트 수를 재서 이 절에 기록한다.
+#### 구현한 규칙
+
+입력 패킷(`ClientMsg::Input`, 버전 5)은 항목마다 이렇게 쓴다.
+
+| 부분 | 내용 |
+|---|---|
+| 플래그 1바이트 | `INPUT_SAME`(직전 항목과 입력이 같음), `INPUT_HAS_COMMANDS`(명령이 따라옴) |
+| 틱 | 첫 항목은 `u64`. 다음 항목은 직전 항목과의 차이 1바이트(255는 `u64` 탈출) |
+| 입력 바이트 | `INPUT_SAME`이 아닐 때만 |
+| 명령 | `INPUT_HAS_COMMANDS`일 때만 |
+
+**손실에 안전한 이유.** "직전"은 같은 패킷 안의 바로 앞 항목이다. 이전 패킷이나 서버가 확인한 상태를 보지 않는다. 그래서 패킷 하나는 혼자서 해석된다. 패킷을 잃거나 순서가 바뀌거나 두 번 와도 서버가 잘못된 입력을 만들 수 없다. 잃은 틱은 다음 패킷이 다시 싣는다(미확인 입력 K개). 패킷의 첫 항목은 항상 입력 바이트를 모두 싣는다. 그래서 입력이 변하지 않는 동안에도 패킷마다 입력 한 벌은 간다. 이 한 벌이 있어서 패킷 하나만 도착해도 그 패킷의 모든 틱을 알 수 있다.
+
+**`Hello`의 버전.** `Hello`는 끝에 `client_version`(클라이언트가 아는 가장 새 프로토콜 버전)을 싣는다. 버전을 적은 `Hello`는 헤더 버전 5다. 버전을 모르는 옛 클라이언트(2~4)의 `Hello`는 그대로 버전 2이고 `client_version`은 0으로 읽힌다. 서버는 `RoomConfig::min_client_version`(기본 2)보다 낮게 적은 클라이언트와 서버가 모르는 버전을 적은 클라이언트를 `Reject(BadVersion { server, min_client })`로 돌려보낸다. `min_client`가 서버가 받는 가장 오래된 버전이다. 버전 4 서버가 버전 5 `Hello`를 받으면 헤더 버전을 몰라서 같은 `BadVersion`으로 거절한다. 옛 클라이언트는 버전을 적지 않으므로 서버가 버전 3과 4를 구별하지 못한다. 서버를 5로 두면(`min_client_version = 5`) 버전을 적지 않은 클라이언트가 모두 거절된다.
+
+#### 잰 바이트
+
+`orr_server/tests/relay_input_bytes.rs`가 재고, `cargo test --release -p orr_server --test relay_input_bytes -- --nocapture`로 다시 볼 수 있다. 조건은 아래와 같다. 60틱/초, 입력 24바이트(`ArenaInput`), 명령 없음, K=4(`input_redundancy` 기본값), 손실 없는 네트워크, 틱 300~1500의 20초 평균. 입력 바이트는 클라이언트가 보낸 입력 패킷의 인코딩 길이다. 패킷은 틱마다 하나 나간다.
+
+| 장면 | 패킷 크기 (전 → 후) | 입력 바이트/초 (전 → 후) | 줄어든 비율 |
+|---|---|---|---|
+| 가만히 있음 | 178 → 70 B | 10,680 → 4,200 | 61% |
+| 매 틱 바뀜 | 178 → 142 B | 10,680 → 8,520 | 20% |
+| 보통(약 10틱마다 바뀜) | 178 → 77.2 B | 10,680 → 4,632 | 57% |
+
+- 인원 수(2명, 4명)는 올려 보내기 바이트를 바꾸지 않는다. 위 표는 둘 다 같은 값이었다. 인원에 따라 느는 쪽은 내려받기(확정 묶음)다. 2명과 4명일 때 클라이언트당 내려받기는 가만히 있음 6.6/10.1 KB/s, 매 틱 바뀜 18.1/33.1 KB/s, 보통 7.7/12.4 KB/s다.
+- 클라이언트당 올려 보내기 전체(핑·체크섬 포함)는 가만히 있음 10,878 → 4,398 B/s, 매 틱 바뀜 10,878 → 8,718 B/s, 보통 10,878 → 4,830 B/s다.
+- 매 틱 바뀔 때의 20%는 "직전과 같음"이 아니라 항목 형식이 작아진 덕이다(명령 개수 4바이트 제거, 틱을 차이 1바이트로). 입력이 다른 항목 하나가 36바이트에서 26바이트로 줄고(패킷의 첫 항목은 33바이트), 같은 항목은 2바이트다.
+- 앞 절의 예상치(2~3 KB/s)는 틀렸다. K=4개를 매 틱 다시 보내는 값이 빠져 있었다. 처음 값은 10.7 KB/s였다.
+- 남은 비용은 대부분 패킷 머리(약 30바이트: 매직·버전·종류·확인 틱·입력 크기·체크섬)와 첫 항목의 입력 한 벌이다. 가만히 있을 때 70바이트 중 이 둘이 64바이트다.
 
 ## 11. 에디터에서 정하는 값(Authoring)과 프리팹
 
@@ -307,7 +336,7 @@ sequenceDiagram
 | 3 (완료) | `PlayerSlot` Pod·리플렉션, `PlayerLink`, 로컬 플레이어 여러 명 | 한 화면 2인 예제가 돈다. 쓰는 법은 [crates/orr_app/README.md](../crates/orr_app/README.md), 예제는 `orr_app/examples/physics2d_coop.rs`(WASD와 방향키). 코드는 `orr_sim/src/input.rs`(`PlayerSlot::NONE`, `PlayerLink`), `orr_bridge`(`Bridge::local_slots`, `PlayHost::with_extra_local_slots`). 테스트는 `orr_sim/tests/player_link.rs`, `orr_bridge/tests/local_slots.rs`. 뺀 것: 패드 입력(키보드만), 서버 쪽 여러 슬롯 클라이언트(릴레이·네트워크 클라이언트는 슬롯 하나), `Threaded`로 여러 로컬 슬롯을 쓰는 `App` 경로, 여러 슬롯의 `Step` 입력 캡처(첫 슬롯만) |
 | 4a (완료) | 신호·`Players`·오프라인: `PlayerSignal`을 입력(`TickInputs`)과 리플레이에 싣고, `Players` 트레이트, 서버 없이 첫 틱의 `Added`, `SceneView::on_player` | 신호가 `on_player`에 같은 틱으로 들어가고 리플레이에서도 같다. 이미 예측한 틱에 신호가 늦게 와도 롤백 후 체크섬이 같다(테스트). 쓰는 법은 [crates/orr_app/README.md](../crates/orr_app/README.md), 코드는 `orr_sim/src/signal.rs`, `orr_session`(`Session::schedule_signal`, `PlaySession::push_signal`, 리플레이 형식 4), `orr_bridge`(`BridgeEvent::Player`). 남은 것은 4b |
 | 4b (완료) | 서버의 자리 변경을 `Session::schedule_signal(from_tick, ..)`로 잇기, `--host`/`--connect`, 재접속 | 서버와 클라이언트 둘로 한 쪽이 끊겼다 토큰으로 돌아오면 두 쪽이 같은 틱에 `Disconnected` → `Reconnected`를 받고 체크섬이 같다. 보관 시간이 끝나면 `Removed`, 새로 들어온 플레이어는 모두에게 같은 틱의 `Added`(`orr_server/tests/player_signals.rs`, 손실·재정렬이 있는 시뮬레이션 네트워크). 진짜 소켓의 창 두 개는 `orr_app/src/net.rs` 테스트. 쓰는 법은 [crates/orr_app/README.md](../crates/orr_app/README.md)의 "서버로 실행", 예제는 `orr_app/examples/roster.rs`와 `physics2d_coop.rs`. 코드는 `orr_proto`(`SeatChange`), `orr_server/src/room.rs`(`announce_seat`, 자리 기록, `signal_lead_ticks`), `orr_session/src/relay.rs`(`RelayClient::take_signal_notes`), `orr_bridge`(`RelayHost`), `orr_app/src/net.rs`. 뺀 것: 플레이어별 시작 데이터(`Added.data`는 비어 있음), 권한 있는 서버 방의 신호, 원격 뷰 스트림의 신호 전달, `.scene(..)`과 `--connect`, QUIC |
-| 5 | 스냅숏 체크섬 다수 검증, 클라이언트 입력 "직전과 같음" 표시 | `netsim` 테스트로 조작된 스냅숏이 거부되고, 입력 바이트 감소량을 기록한다 |
+| 5 (완료) | 스냅숏 체크섬 다수 검증, 클라이언트 입력 "직전과 같음" 표시 | `netsim` 테스트로 조작된 스냅숏이 거부되고, 입력 바이트 감소량을 기록한다. 스냅숏 검증은 9.2, 입력 표시와 잰 바이트는 10.2에 쓴다. 코드는 `orr_server/src/room.rs`(`judge_snapshot`, `min_client_version`), `orr_proto/src/msg.rs`(버전 5), `orr_session/src/relay.rs`(`serve_snapshot`, `SourceStats::input_bytes_sent`). 테스트는 `orr_server/tests/relay_scenarios.rs`(조작된 제공자, 2인 재접속), `relay_input_same.rs`(손실·중복·재정렬, `Hello` 버전), `relay_input_bytes.rs`(바이트), `orr_proto`의 `msg` 단위 테스트. 남은 것: `SnapshotRequest`에 틱을 싣지 않았다(제공자가 가장 새 체크섬 틱을 고른다, 9.2). 서버가 데이터에서 체크섬을 다시 계산하지 않는다(입장하는 클라이언트가 확인한다). 두 틱 묶어 보내기는 하지 않았다. 입력 패킷 머리(약 31바이트)와 틱·확인 틱의 고정 8바이트는 줄이지 않았다. 버전을 적지 않은 옛 클라이언트(2~4)는 서버가 구별하지 못한다. 위조된 데이터에 정직한 체크섬을 붙인 업로드는 서버가 아니라 입장하는 클라이언트가 거부한다(입장 실패) |
 | 6 | `ViewRef`, 뷰 에셋, 프리팹 생성 | 인스펙터에서 뷰 에셋을 고르면 그 모델이 그려진다. `PlayerAdded`로 아바타 프리팹이 생긴다 |
 | 7 | 튜토리얼 | 빈 프로젝트 → 혼자 하기 → 한 화면 2인 → 로컬 서버 2창 → 재접속까지, 단계별 예제가 모두 빌드되고 테스트로 확인된다 |
 

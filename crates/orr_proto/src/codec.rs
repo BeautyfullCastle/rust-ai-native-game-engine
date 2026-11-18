@@ -109,6 +109,17 @@ impl<'a> Reader<'a> {
         }
         Ok(n)
     }
+    /// Like [`Reader::count`], for a count written by [`Writer::varint`].
+    pub fn count_varint(&mut self, min_elem_size: u64, max: u32) -> Result<u32, ProtoError> {
+        let n = self.varint()?;
+        if n > max {
+            return Err(ProtoError::TooLarge);
+        }
+        if u64::from(n) * min_elem_size > self.remaining() {
+            return Err(ProtoError::Truncated);
+        }
+        Ok(n)
+    }
     pub fn finish(&self) -> Result<(), ProtoError> {
         if self.bytes.is_empty() {
             Ok(())

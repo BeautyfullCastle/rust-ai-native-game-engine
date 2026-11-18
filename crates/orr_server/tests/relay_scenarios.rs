@@ -526,7 +526,7 @@ impl Rng {
 fn random_and_mutated_messages_never_panic_the_codecs() {
     let mut rng = Rng(1);
     let seeds: Vec<Vec<u8>> = vec![
-        ClientMsg::Hello(Hello { build_hash: 1, room: 1, input_size: 4, want_slot: NO_SLOT, token: 0 }).encode(),
+        ClientMsg::Hello(Hello { build_hash: 1, room: 1, input_size: 4, want_slot: NO_SLOT, token: 0, client_version: orr_proto::PROTOCOL_VERSION }).encode(),
         ClientMsg::Input {
             slot: 0,
             input_size: 4,
@@ -561,8 +561,8 @@ fn random_and_mutated_messages_never_panic_the_codecs() {
 fn nonsense_client_msgs(rng: &mut Rng) -> Vec<Vec<u8>> {
     let big = rng.next();
     vec![
-        ClientMsg::Hello(Hello { build_hash: 0, room: 1, input_size: 24, want_slot: 200, token: big }).encode(),
-        ClientMsg::Hello(Hello { build_hash: 0, room: 99, input_size: 24, want_slot: NO_SLOT, token: 0 }).encode(),
+        ClientMsg::Hello(Hello { build_hash: 0, room: 1, input_size: 24, want_slot: 200, token: big, client_version: 0 }).encode(),
+        ClientMsg::Hello(Hello { build_hash: 0, room: 99, input_size: 24, want_slot: NO_SLOT, token: 0, client_version: orr_proto::PROTOCOL_VERSION }).encode(),
         ClientMsg::Input { slot: 250, input_size: 24, ack_tick: u64::MAX, entries: vec![] }.encode(),
         ClientMsg::Input {
             slot: 0,

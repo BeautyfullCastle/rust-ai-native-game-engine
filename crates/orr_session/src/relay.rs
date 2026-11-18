@@ -89,6 +89,8 @@ pub struct SourceStats {
     /// what it had sent for the tick (so the session rolled back).
     pub own_overridden: u64,
     pub packets_sent: u64,
+    /// Bytes of the input packets sent (the encoded messages).
+    pub input_bytes_sent: u64,
     /// Bundles that waited for a player signal before the session got them
     /// (the signal fence).
     pub bundles_fenced: u64,
@@ -349,8 +351,10 @@ impl<G: Game, L: Link> RelaySource<G, L> {
         }
         entries.reverse();
         let msg = ClientMsg::Input { slot: self.slot, input_size: self.input_size, ack_tick: self.ack, entries };
+        let bytes = msg.encode();
         self.stats.packets_sent += 1;
-        self.send(Channel::Unreliable, &msg);
+        self.stats.input_bytes_sent += bytes.len() as u64;
+        self.link.send(Channel::Unreliable, &bytes);
     }
 }
 
@@ -763,6 +767,7 @@ impl<G: Game, L: Link> RelayClient<G, L> {
                 input_size: std::mem::size_of::<G::Input>() as u32,
                 want_slot: self.cfg.want_slot.map_or(NO_SLOT, |s| s.0),
                 token: self.cfg.token,
+                client_version: orr_proto::PROTOCOL_VERSION,
             };
             self.src_mut().send(Channel::Reliable, &ClientMsg::Hello(hello));
             self.state = ClientState::Handshake;
