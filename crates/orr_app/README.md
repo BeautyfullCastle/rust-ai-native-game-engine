@@ -56,6 +56,7 @@ App::<PhysGame>::with_config(PhysConfig::new(600, SceneMode::Rain))
 | `.view3d(v)` | `v`는 `View3D`: `Extractor3` + `camera(frame)` + `lighting(frame)`. 기본은 `Look3D::default()`. `.view(v)`와 같이 쓸 수 없다 |
 | `.entity_view::<C>(factory)` | 예측 프레임에서 컴포넌트 `C`를 가진 엔티티마다 `factory()`로 만든 `EntityView` 하나 |
 | `.scene_view(v)` | `SceneView` 하나. 여러 개를 더하면 더한 순서로 불린다 |
+| `.sound(name, clip)` | 뷰의 `ctx.audio().play_named(name)`이 켜는 소리를 등록한다 (아래 "글자, 선, 소리") |
 
 ## 3D (6a단계)
 
@@ -136,8 +137,50 @@ impl SceneView<PhysGame> for EventCounter {
 - **엔티티 키는 `(번호, 버전)`이다.** 번호가 재사용되어 버전이 달라지면 옛 엔티티는 `on_destroy`, 새 엔티티는 `on_create`다. 롤백으로 예측에만 있던 엔티티가 사라져도 `on_destroy`가 불린다. 같은 프레임 안에서 사라졌다 같은 키로 다시 생기는 경우(롤백 재계산 안)는 화면이 프레임 단위로만 보므로 구별되지 않는다.
 - **`pose`는 `ViewWorld`가 계산한 `Transform2`이다.** `Extractor`가 그 엔티티를 내놓지 않으면 뷰 월드에 위치가 없어서 `None`이다. `on_update`는 그래도 불린다.
 - **`EventState`는 `orr_session::EventStatus`에서 페이로드를 뺀 얇은 열거형이다.** `Predicted`, `Verified`, `Canceled`. `Canceled` 호출에는 `Predicted` 때 받은 페이로드가 그대로 온다(세션이 취소에는 페이로드를 주지 않아서 `Views`가 기억한다). 소리·파티클은 `Predicted`에서 시작하고 `Canceled`에서 멈춘다. 업적·통계는 `Verified`에서만 한다.
-- **`ViewContext`:** `predicted()`, `verified()`(`Option`), `tick()`, `verified_tick()`, `local_players()`, `is_local(slot)`, `send_command(cmd)`. 오프라인에서 로컬 플레이어는 `.local_players(n)`의 슬롯 `0..n`이고, `local_players()`와 `is_local(slot)`이 모두 보고한다.
+- **`ViewContext`:** `predicted()`, `verified()`(`Option`), `tick()`, `verified_tick()`, `local_players()`, `is_local(slot)`, `send_command(cmd)`, `draw()`(글자와 선), `audio()`(소리). 마지막 둘은 아래 "글자, 선, 소리". 오프라인에서 로컬 플레이어는 `.local_players(n)`의 슬롯 `0..n`이고, `local_players()`와 `is_local(slot)`이 모두 보고한다.
 - **창 없이도 쓴다.** 호출 순서를 지키는 코드는 창과 렌더러가 없는 `Views::dispatch(bridge, update, poses)`에 있다. 창 루프는 이것을 부르기만 한다. 테스트는 `tests/views.rs`이고, 롤백이 나는 두 세션(`LoopbackPair`)에서 `on_create`/`on_destroy`와 `Canceled`/`Verified`를 확인한다.
+
+## 글자, 선, 소리
+
+뷰가 기본 렌더러 위에 글자와 선을 그리고 소리를 냅니다. 둘 다 `ViewContext`로 씁니다.
+
+```rust
+impl SceneView<StarPick> for Juice {
+    fn on_event(&mut self, ctx: &mut ViewContext<'_, StarPick>, event: &Picked, state: EventState) {
+        match state {
+            // 예측 틱에서 났다. 롤백이 지울 수 있으니 손잡이를 기억해 둔다.
+            EventState::Predicted | EventState::Verified => self.sound = ctx.audio().play_named("pickup"),
+            // 롤백이 이벤트를 되돌렸다. 소리를 끈다.
+            EventState::Canceled => {
+                if let Some(sound) = self.sound.take() {
+                    ctx.audio().stop(sound);
+                }
+            }
+        }
+    }
+
+    fn on_update(&mut self, ctx: &mut ViewContext<'_, StarPick>) {
+        let draw = ctx.draw();
+        draw.text([16.0, 14.0], 21.0, [1.0, 0.85, 0.25, 1.0], "SCORE 12"); // 화면 좌표: 픽셀, 왼쪽 위 원점
+        draw.line([0.0, 0.0], [2.0, 1.0], [1.0, 0.0, 0.0, 1.0]);          // 세계 좌표
+        draw.rect([-1.0, -1.0], [1.0, 1.0], [0.0, 1.0, 0.0, 0.3]);
+    }
+}
+
+App::<StarPick>::new()
+    // ...
+    .sound("pickup", clip)   // Clip::from_stereo(rate, 샘플)로 만든 소리. 앱을 만들 때 한 번 등록한다
+    .scene_view(Juice::default())
+```
+
+- **`ctx.draw()`는 `Overlay`를 준다.** 프레임마다 비워진다(`Views::dispatch`가 시작할 때). 그래서 보이게 하려면 매 프레임 부른다. 호출은 `text(pos, size, color, &str)`(화면 좌표. `size`는 대문자 높이 픽셀), `line(a, b, color)`, `rect(min, max, color)`(채운 사각형), 3D 실행용 `line3(a, b, color)`와 `aabb3(min, max, color)`다. 2D 실행은 `line3`의 `x`와 `y`만 그린다. 3D 실행에서 `rect`는 `z = 0` 평면의 윤곽선이다. 폭을 재려면 `text_size(text, size)`다.
+- **무엇이 그리는가.** 선과 사각형은 기본 렌더러의 그리기 목록 끝에 더해 같은 패스에서 그린다. 글자는 `orr_render::text`의 **5x7 점 글꼴**(`GLYPH_W`, `GLYPH_H`, `ADVANCE`)을 사각형으로 바꿔 렌더러가 그린 같은 그림 위에 한 번 더 그린다(`TextPass`). 그래서 글자는 항상 맨 위이고 `--screenshot` 그림에도 `--size` 크기로 나온다. 모델이 있는 3D 프레임에도 같다.
+- **글꼴은 ASCII만이다.** 숫자, 영문 대문자(소문자도 대문자로 보인다), `. : , / | - + = _ ( ) [ ] % ! ?`가 있다. **한글은 아직 그리지 못한다.** 없는 글자는 빈칸이다.
+- **`ctx.audio()`는 `Audio`를 준다.** `play(&clip) -> Option<SoundHandle>`, `play_named("이름")`(`App::sound`로 등록한 소리), `play_at(&clip, [x, y, z], near, far)`(그 점에서 난 것처럼. `near` 안에서 크고 `far`부터 들리지 않으며 그쪽 스피커로 치우친다. 귀의 자리는 `set_listener`, 기본은 원점), `stop(손잡이)`(짧게 줄이며 끈다), `is_playing(손잡이)`다. `Predicted`에서 켜고 손잡이를 기억했다가 `Canceled`에서 `stop`한다. 이미 끝난 소리를 `stop`하는 것은 아무 일도 아니다. `ViewResync`가 오면 그 전에 `Predicted`로 켠 소리의 `Canceled`는 오지 않으므로, `on_resync`에서 그 소리들을 끈다.
+- **장치는 앱이 연다.** 첫 `play`에서 시스템 오디오 장치(`orr_audio`의 `NativeAudio`, 기능 `audio-native`, 기본으로 켜져 있다)를 연다. 장치가 없거나 열지 못하면 소리 없이 계속 돌고 stderr에 한 번 알린다. 도중에 장치 오류가 나면 매 프레임 확인해서 출력을 버리고 한 번 알린다. `--screenshot` 실행은 장치를 열지 않는다. `audio-native`를 끄고 빌드하면 소리는 항상 조용하다.
+- **소리는 시뮬레이션에 닿지 않는다.** 게임 규칙, 체크섬, 리플레이와 상관없다. 소리 클립은 `Clip`(`orr_audio`, 다시 내보냄)이고 한 번 만든 것을 여러 번 켠다(데이터는 공유된다). 10초까지다.
+- **창 없이도 쓴다.** `Views::overlay()`로 마지막 `dispatch`가 그린 것을 읽는다. `Views::set_sound_out(출력)`에 `SoundOut`을 주면 그 출력으로 소리를 낸다. `Rc<RefCell<OfflineAudio>>`를 주면 소리가 PCM으로 렌더링되어 테스트가 들을 수 있다(`OfflineAudio::render`). 테스트는 `tests/draw_audio.rs`(그리기 목록이 채워지고 다음 프레임에 비워진다. 소리가 나고 `stop` 뒤에 조용하다. 롤백이 낸 `Canceled`가 소리를 멈춘다. 출력이 없으면 아무 일도 없다)와 `src/overlay.rs`의 단위 테스트(글꼴 폭, 글자 사각형, 상자 모서리)다.
+- **튜토리얼.** [2~5단계](../../docs/tutorial/step2-solo.md)가 점수를 글자로 그리고 생성한 "딩" 소리(`tutorial/star_pick/src/sound.rs`)를 낸다.
 
 ## 플레이어 신호 (4a단계)
 
@@ -236,9 +279,10 @@ cargo run -p orr_app --release --example roster -- --connect 127.0.0.1:7777
 
 ## 남은 것
 
-- **2단계에서 뺀 것:** `ViewContext::query`(`FrameView::iter::<T>()`, `dense::<T>()`가 이미 있어서 조합 질의는 `orr_ecs` 쪽 일이다), `ViewContext::draw()`(기본 2D 그리기가 `Extractor` 항목과 `backdrop`만 받아서 선·글자를 더하려면 그리기 경로를 넓혀야 한다), `App::threaded()`(위). `SceneView::on_player`는 4a단계에서 더했다.
+- **2단계에서 뺀 것:** `ViewContext::query`(`FrameView::iter::<T>()`, `dense::<T>()`가 이미 있어서 조합 질의는 `orr_ecs` 쪽 일이다), `ViewContext::draw()`(나중에 더했다. 아래 "글자, 선, 소리"), `App::threaded()`(위). `SceneView::on_player`는 4a단계에서 더했다.
 - **3단계에서 뺀 것:** 패드 입력(키보드만), 서버 쪽 여러 슬롯 클라이언트(릴레이·네트워크는 슬롯 하나), `Threaded`를 쓰는 `App` 경로(위), 여러 슬롯의 `Step` 입력 캡처(`Threaded::try_step`은 첫 슬롯만 고정한다).
 - **4b단계에서 뺀 것:** 플레이어별 시작 데이터(`Added`의 `data`는 서버로 실행해도 비어 있다. `Hello`에 시작 데이터가 없다. 8.3), 서버 쪽 신호 기록은 방이 사는 동안만 있다(서버를 다시 띄우면 사라진다), 시작 때의 `Added`(틱 1)는 `signal_lead_ticks` 여유가 없다, 권한 있는 서버 방은 신호가 없다, `.scene(..)`과 `.bot(..)`은 서버로 실행할 때 쓰지 않는다, `ws://`만 지원한다(QUIC·인증서 옵션 없음), 원격 뷰 스트림(`orr_viewstream`)은 신호를 아직 내보내지 않는다. 신호를 취소하는 API가 없어서 `Canceled`는 합성 업데이트 테스트로만 확인했다.
-- **6a단계에서 뺀 것:** `Material`의 표면 셰이더(`Transform3`과 `Material`이 있는 엔티티는 단색 상자로 그린다), `SceneLook`의 후처리(블룸 등)와 하늘, 물, 지형, 흩뿌리기 그리기(조명과 데칼만 쓴다), 3D 마우스 입력(`InputContext`는 키만 읽는다. 예제 `yard3d`는 화면 가운데로 쏜다), 3D 뷰의 `ViewConfig` 바꾸기(기본값), 화면 글자 겹치기(overlay).
+- **6a단계에서 뺀 것:** `Material`의 표면 셰이더(`Transform3`과 `Material`이 있는 엔티티는 단색 상자로 그린다), `SceneLook`의 후처리(블룸 등)와 하늘, 물, 지형, 흩뿌리기 그리기(조명과 데칼만 쓴다), 3D 마우스 입력(`InputContext`는 키만 읽는다. 예제 `yard3d`는 화면 가운데로 쏜다), 3D 뷰의 `ViewConfig` 바꾸기(기본값). 화면 글자 겹치기는 "글자, 선, 소리"에서 더했다.
 - **6b단계에서 뺀 것:** 뷰 에셋의 `tint`(색 입히기), `sound`, `entity_view`는 읽기만 하고 쓰지 않는다. `App::entity_view_for("종류", factory)`(뷰 에셋의 `entity_view` 이름으로 엔티티 뷰를 붙이기)는 만들지 않았다. 지금은 `entity_view::<ViewRef>(..)`처럼 컴포넌트로 붙인다. 모델이 있는 그림은 MSAA와 톤 매핑이 없다(위). 에디터 뷰포트는 `ViewRef` 모델을 그린다. 다만 `Yard3D` 같은 기존 에디터 게임은 `ViewRef`를 등록하지 않아서(등록하면 그 게임의 프레임 배치와 골든 체크섬이 바뀐다) 에디터 전용 게임 `ViewYard3D`로 연다(`orr_editor --game view-yard3d --scene scenes/view_yard3d/view_yard3d.scene.yaml`, `docs/editor-view-ref.md`). 서버로 실행할 때 `Added.data`는 아직 비어 있어서(4b) 아바타는 슬롯 번호로 정한다. 애니메이션 모델(`SkinnedModelRenderer`)은 쓰지 않는다.
+- **글자, 선, 소리에서 뺀 것:** 한글과 ASCII 밖의 글자(글꼴이 5x7 점 글꼴이라 빈칸으로 나온다), 글자 정렬(`text_size`로 폭을 재서 직접 맞춘다), 창 크기를 알려 주는 API(오른쪽과 아래에 붙이는 글자), WAV 같은 소리 파일 읽기(`Clip::from_stereo`로 샘플을 직접 만든다), 소리의 음량·반복·속도 조절, 서버로 실행하는 창끼리의 소리 맞춤(각 창이 자기 이벤트로 낸다), 웹과 모바일의 소리(`audio-native`는 CPAL 장치다).
 - **이후 단계:** 웹·모바일 루프.

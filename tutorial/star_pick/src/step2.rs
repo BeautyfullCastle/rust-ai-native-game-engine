@@ -1,7 +1,7 @@
 //! Step 2: playing alone. Move the square (W A S D or the arrow keys), pick up the stars.
 //!
 //! New in this step: input, systems that move and score, an event, an `EntityView` (a trail
-//! behind the player) and a `SceneView` (the score bar and the pick-up ring).
+//! behind the player) and a `SceneView` (the score text, the pick-up ring and its sound).
 //!
 //! `cargo run -p star_pick --release --bin step2`
 
@@ -12,9 +12,11 @@ use std::rc::Rc;
 use bytemuck::{Pod, Zeroable};
 use orr_app::{
     fp_to_f32, solid_quad, App, Camera, EntityView, EventState, Extracted, Extractor, FrameView, InterpMode, KeyCode, RenderItem, SceneView,
-    Shape, Style, Transform2, Vec2, View2D, ViewContext,
+    Shape, SoundHandle, Style, Transform2, Vec2, View2D, ViewContext,
 };
 use orr_sim::{fn_systems, fp, ComponentRegistryBuilder, Entity, Frame, Game, PlayerSlot, SimContext, System, FP};
+
+use crate::sound;
 
 // ---- simulation: FP only, no f32 ----
 
@@ -148,12 +150,13 @@ const STAR: [f32; 4] = [1.0, 0.85, 0.25, 1.0];
 const RING_TICKS: u64 = 40;
 const KEEP_TICKS: u64 = 240;
 const TRAIL_DOTS: usize = 12;
-const MAX_PIPS: u32 = 14;
 
 /// A ring that grows where a star was picked.
 pub struct Ring {
     pub picked: Picked,
     pub start: u64,
+    /// The pick-up sound. A rollback that takes the pick-up back stops it.
+    pub sound: Option<SoundHandle>,
 }
 
 pub struct Trail {
@@ -224,10 +227,6 @@ impl View2D for Look {
                 out.push(disc(center, 0.3 + 0.9 * t, [STAR[0], STAR[1], STAR[2], 0.6 * (1.0 - t)]));
             }
         }
-        // The score: one small square for each point, in a row above the field.
-        for i in 0..fx.score.min(MAX_PIPS) {
-            out.push(solid_quad([-4.3 + 0.3 * i as f32, 5.0], [0.12, 0.12], STAR));
-        }
     }
 }
 
@@ -274,12 +273,17 @@ impl SceneView<StarPick> for Juice {
             // (unless Predicted already did).
             EventState::Predicted | EventState::Verified => {
                 if !fx.rings.iter().any(|ring| ring.picked == *event) {
-                    fx.rings.push(Ring { picked: *event, start: ctx.tick() });
-                    println!("Ding! Star picked, {} points", event.points);
+                    let sound = ctx.audio().play_named(sound::PICKUP); // a short ding, at once
+                    fx.rings.push(Ring { picked: *event, start: ctx.tick(), sound });
                 }
             }
             // Canceled: a rollback took the pick-up back. Stop the effect.
-            EventState::Canceled => fx.rings.retain(|ring| ring.picked != *event),
+            EventState::Canceled => {
+                for sound in fx.rings.iter().filter(|ring| ring.picked == *event).filter_map(|ring| ring.sound) {
+                    ctx.audio().stop(sound);
+                }
+                fx.rings.retain(|ring| ring.picked != *event);
+            }
         }
     }
 
@@ -290,6 +294,8 @@ impl SceneView<StarPick> for Juice {
         if let Some(verified) = ctx.verified() {
             fx.score = verified.iter::<Score>().map(|(_, score)| score.points).sum();
         }
+        // The score as text in the top left corner (the font has capitals, digits and a few signs).
+        ctx.draw().text([16.0, 14.0], 21.0, STAR, &format!("SCORE {}", fx.score));
         let now = fx.now;
         fx.rings.retain(|ring| now < ring.start + KEEP_TICKS);
     }
@@ -311,5 +317,6 @@ pub fn app() -> App<StarPick> {
         .view(Look { fx: fx.clone() })
         .entity_view::<Score>(move || TrailView { fx: for_trails.clone() })
         .scene_view(Juice { fx })
+        .sound(sound::PICKUP, sound::pickup())
         .title("Star Pick 2")
 }

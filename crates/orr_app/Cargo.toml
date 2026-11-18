@@ -10,7 +10,13 @@ description = "Runs a Game in a window: fixed tick, input, bridge, interpolation
 [lints]
 workspace = true
 
+[features]
+default = ["audio-native"]
+# The system audio device (CPAL) for `ViewContext::audio()`. Without it the sounds of the views play nothing.
+audio-native = ["orr_audio/native"]
+
 [dependencies]
+orr_audio = { path = "../orr_audio" }
 orr_bridge = { path = "../orr_bridge" }
 orr_view = { path = "../orr_view" }
 # `imported-scene` draws models with the 3D shapes in one picture (view assets, `ViewRef`).

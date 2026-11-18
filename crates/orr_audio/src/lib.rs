@@ -241,9 +241,15 @@ enum Seen {
     Verified,
     Canceled,
 }
+/// A sound started by [`EventAudio::play`], for [`EventAudio::stop`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SoundId(u64);
+
 struct Voice {
     // A detached fading voice must not be confirmed/canceled as a replacement.
     key: Option<EventKey>,
+    /// Set for a sound of `EventAudio::play`, cleared when it is stopped or detached.
+    sound: Option<SoundId>,
     handle: StaticSoundHandle,
     emitter: Option<Emitter>,
     /// The voice's own mixer track, present only when it can be sent to the reverb bus.
@@ -272,6 +278,7 @@ pub struct EventAudio<B: Backend> {
     manager: AudioManager<B>,
     config: AudioConfig,
     voices: Vec<Voice>,
+    next_sound: u64,
     history: BTreeMap<EventKey, Seen>,
     retired_through: Option<u64>,
     source: Option<u64>,
@@ -403,6 +410,7 @@ impl<B: Backend> EventAudio<B> {
             manager,
             config,
             voices: Vec::new(),
+            next_sound: 0,
             listener: Listener::default(),
             zones: Vec::new(),
             next_zone: 0,
@@ -565,7 +573,8 @@ impl<B: Backend> EventAudio<B> {
     fn stop_voices(&mut self) {
         let tween = self.fade();
         for voice in &mut self.voices {
-            if voice.key.take().is_some() {
+            let sound = voice.sound.take();
+            if voice.key.take().is_some() || sound.is_some() {
                 voice.handle.stop(tween);
             }
         }
@@ -594,7 +603,7 @@ impl<B: Backend> EventAudio<B> {
         }
         self.listener = listener;
         let (listener, doppler) = (self.listener, self.config.doppler);
-        for voice in self.voices.iter_mut().filter(|v| v.key.is_some()) {
+        for voice in self.voices.iter_mut().filter(|v| v.key.is_some() || v.sound.is_some()) {
             if let Some(emitter) = voice.emitter {
                 follow(voice, &emitter, &listener, doppler);
             }
@@ -680,7 +689,7 @@ impl<B: Backend> EventAudio<B> {
         bus.shared.store(self.current);
         let tween = Tween { duration: Duration::from_millis(20), ..Tween::default() };
         let level = send_decibels(self.current.wet);
-        for voice in self.voices.iter_mut().filter(|v| v.key.is_some() && v.send.is_none() && v.emitter.is_some()) {
+        for voice in self.voices.iter_mut().filter(|v| (v.key.is_some() || v.sound.is_some()) && v.send.is_none() && v.emitter.is_some()) {
             if let Some(track) = &mut voice.track {
                 let _ = track.set_send(bus.id, level, tween);
             }
@@ -766,44 +775,77 @@ impl<B: Backend> EventAudio<B> {
                 let Some(clip) = clip(payload) else {
                     return;
                 };
-                if self.paused || self.voices.len() >= self.config.max_voices {
-                    self.stats.dropped = self.stats.dropped.saturating_add(1);
-                    return;
-                }
-                let wants_send = clip.send.map_or(clip.emitter.is_some() && self.reverb_in_use(), |send| send > 0.0);
-                let mut data = clip.data;
-                if let Some(emitter) = clip.emitter {
-                    let (volume, pan) = emitter.heard_by(&self.listener);
-                    let rate = emitter.doppler(&self.listener, self.config.doppler);
-                    data = data.volume(Decibels(volume)).panning(Panning(pan)).playback_rate(PlaybackRate(f64::from(rate)));
-                }
-                let send = clip.send;
-                let sub_track = wants_send.then(|| self.ensure_bus()).flatten().and_then(|bus| {
-                    let level = send_decibels(send.unwrap_or(self.current.wet));
-                    let builder = TrackBuilder::new()
-                        .sub_track_capacity(0)
-                        .sound_capacity(1)
-                        .persist_until_sounds_finish(true)
-                        .with_send(bus, level);
-                    self.manager.add_sub_track(builder).ok()
-                });
-                let played = match sub_track {
-                    Some(mut track) => track.play(data).map(|handle| (handle, Some(track))),
-                    None => self.manager.play(data).map(|handle| (handle, None)),
-                };
-                match played {
-                    Ok((handle, track)) => {
-                        self.voices.push(Voice {
-                            key: Some(key),
-                            handle,
-                            emitter: clip.emitter,
-                            track,
-                            send,
-                        });
-                        self.stats.started = self.stats.started.saturating_add(1);
-                    }
-                    Err(_) => self.stats.dropped = self.stats.dropped.saturating_add(1),
-                }
+                self.start(clip, Some(key), None);
+            }
+        }
+    }
+
+    /// Plays `clip` once from now on, outside the event flow, and gives the id that
+    /// [`EventAudio::stop`] takes. For a view that starts a sound on a `Predicted` event
+    /// and stops it on `Canceled`. `None` when the sound did not start: the output is
+    /// paused or full ([`AudioConfig::max_voices`]). A placed clip ([`Clip::at`]) is heard
+    /// from [`EventAudio::set_listener`], like the sounds of events.
+    pub fn play(&mut self, clip: &Clip) -> Option<SoundId> {
+        self.reap();
+        let id = SoundId(self.next_sound);
+        if self.start(clip.clone(), None, Some(id)) {
+            self.next_sound = self.next_sound.wrapping_add(1);
+            Some(id)
+        } else {
+            None
+        }
+    }
+
+    /// Fades out the sound that [`EventAudio::play`] started. Does nothing when it already ended or was stopped.
+    pub fn stop(&mut self, id: SoundId) {
+        let tween = self.fade();
+        for voice in self.voices.iter_mut().filter(|v| v.sound == Some(id)) {
+            voice.handle.stop(tween);
+            voice.sound = None;
+        }
+    }
+
+    /// Whether the sound that [`EventAudio::play`] started is still playing.
+    pub fn is_playing(&self, id: SoundId) -> bool {
+        self.voices.iter().any(|v| v.sound == Some(id) && v.handle.state() != PlaybackState::Stopped)
+    }
+
+    /// Starts a voice for `clip`, owned by event `key` or by sound `sound`. `false` when it was dropped.
+    fn start(&mut self, clip: Clip, key: Option<EventKey>, sound: Option<SoundId>) -> bool {
+        if self.paused || self.voices.len() >= self.config.max_voices {
+            self.stats.dropped = self.stats.dropped.saturating_add(1);
+            return false;
+        }
+        let wants_send = clip.send.map_or(clip.emitter.is_some() && self.reverb_in_use(), |send| send > 0.0);
+        let mut data = clip.data;
+        if let Some(emitter) = clip.emitter {
+            let (volume, pan) = emitter.heard_by(&self.listener);
+            let rate = emitter.doppler(&self.listener, self.config.doppler);
+            data = data.volume(Decibels(volume)).panning(Panning(pan)).playback_rate(PlaybackRate(f64::from(rate)));
+        }
+        let send = clip.send;
+        let sub_track = wants_send.then(|| self.ensure_bus()).flatten().and_then(|bus| {
+            let level = send_decibels(send.unwrap_or(self.current.wet));
+            let builder = TrackBuilder::new()
+                .sub_track_capacity(0)
+                .sound_capacity(1)
+                .persist_until_sounds_finish(true)
+                .with_send(bus, level);
+            self.manager.add_sub_track(builder).ok()
+        });
+        let played = match sub_track {
+            Some(mut track) => track.play(data).map(|handle| (handle, Some(track))),
+            None => self.manager.play(data).map(|handle| (handle, None)),
+        };
+        match played {
+            Ok((handle, track)) => {
+                self.voices.push(Voice { key, sound, handle, emitter: clip.emitter, track, send });
+                self.stats.started = self.stats.started.saturating_add(1);
+                true
+            }
+            Err(_) => {
+                self.stats.dropped = self.stats.dropped.saturating_add(1);
+                false
             }
         }
     }

@@ -6,6 +6,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use orr_audio::Clip;
 use orr_bridge::{Bridge, BridgeConfig, BridgeError, BridgeEvent, FrameView, InProc, PlayHost, PlayerSlot, Snapshot, Threaded, ViewUpdate};
 use orr_ecs::Component;
 use orr_reflect::{Scene, TypeRegistry};
@@ -22,6 +23,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use crate::cli::{Args, RunMode, USAGE};
+use crate::overlay::{Overlay, TextPass};
 use crate::input::InputContext;
 use crate::net::{self, Hosted, Join};
 use crate::pace::{Advance, Outcome, Pacer};
@@ -285,6 +287,15 @@ impl<G: Game> App<G> {
         self
     }
 
+    /// Registers a sound under `name` for `ctx.audio().play_named(name)` in the views. The clip is made
+    /// once, here (generate its samples with `Clip::from_stereo`). The run opens the system audio
+    /// device when the first sound plays; without a device the run is silent (said once on stderr),
+    /// and a `--screenshot` run never opens one.
+    pub fn sound(mut self, name: &str, clip: Clip) -> Self {
+        self.views.sound(name, clip);
+        self
+    }
+
     /// Reads the command line (see `--help`) and runs until the window closes,
     /// Escape is pressed, or the requested screenshot is saved.
     pub fn run(self) -> Result<(), Error> {
@@ -371,6 +382,11 @@ impl<G: Game> App<G> {
         } else {
             LocalInput::new(input, bridge.local_slots())
         };
+        if args.screenshot.is_some() {
+            self.views.mute_sound();
+        } else {
+            self.views.use_sound_device();
+        }
         let mut runner = Runner {
             bridge,
             display,
@@ -465,6 +481,8 @@ struct Display2 {
     list: RenderList,
     camera: Camera,
     renderer: Option<WindowRenderer<Wgpu>>,
+    /// Draws the text of the overlay over the picture; made with the renderer.
+    text: Option<TextPass>,
 }
 
 impl Display2 {
@@ -478,6 +496,7 @@ impl Display2 {
             list: RenderList::new(),
             camera: Camera::new([0.0, 0.0], 1.0),
             renderer: None,
+            text: None,
         }
     }
 }
@@ -495,6 +514,7 @@ struct Display3 {
     scene_failed: bool,
     camera: Option<Camera3D>,
     renderer: Option<WindowRenderer3D<Wgpu>>,
+    text: Option<TextPass>,
 }
 
 impl Display3 {
@@ -511,6 +531,7 @@ impl Display3 {
             scene_failed: false,
             camera: None,
             renderer: None,
+            text: None,
         }
     }
 
@@ -538,8 +559,16 @@ impl Display {
     /// Creates the renderer of the look for `window`.
     fn open(&mut self, window: Arc<Window>, size: (u32, u32), vsync: bool) -> Result<(), String> {
         match self {
-            Display::D2(d) => d.renderer = Some(WindowRenderer::new(window, size, vsync)?),
-            Display::D3(d) => d.renderer = Some(WindowRenderer3D::new(window, size, vsync, Settings3D::default())?),
+            Display::D2(d) => {
+                let renderer = WindowRenderer::new(window, size, vsync)?;
+                d.text = Some(TextPass::new(renderer.renderer.rhi().clone(), renderer.renderer.format()));
+                d.renderer = Some(renderer);
+            }
+            Display::D3(d) => {
+                let renderer = WindowRenderer3D::new(window, size, vsync, Settings3D::default())?;
+                d.text = Some(TextPass::new(renderer.renderer.rhi().clone(), renderer.renderer.format()));
+                d.renderer = Some(renderer);
+            }
         }
         Ok(())
     }
@@ -590,15 +619,21 @@ impl Display {
         }
     }
 
-    /// Builds the draw list of `frame` and draws it. `false` when there is no renderer yet.
-    fn draw(&mut self, frame: FrameView<'_>) -> bool {
+    /// Builds the draw list of `frame`, adds the world items of the views' `overlay` to it, draws
+    /// it and then the overlay text on top. `false` when there is no renderer yet.
+    fn draw(&mut self, frame: FrameView<'_>, overlay: &Overlay) -> bool {
         match self {
             Display::D2(d) => {
                 d.camera = fill_draw_list(&d.view, &d.world, frame, &mut d.items, &mut d.list);
-                d.renderer.as_mut().map(|r| r.render(&d.list, &d.camera)).is_some()
+                overlay.add_to_list(&mut d.list);
+                let d = &mut **d;
+                let (Some(renderer), Some(text)) = (d.renderer.as_mut(), d.text.as_mut()) else { return false };
+                renderer.render_with_overlay(&d.list, &d.camera, |_, view, size| text.draw(view, size, overlay));
+                true
             }
             Display::D3(d) => {
                 let camera = fill_draw_list3(&d.view, &d.world, frame, &mut d.items, &mut d.list, &mut d.models);
+                overlay.add_to_list3(&mut d.list);
                 d.camera = Some(camera);
                 if d.renderer.is_none() {
                     return false;
@@ -611,10 +646,20 @@ impl Display {
                         let d = &mut **d;
                         let (scene, renderer) = (d.scene.as_mut().expect("made above"), d.renderer.as_mut().expect("checked above"));
                         let (list, models) = (&d.list, &d.models);
-                        renderer.render_with(false, |_, target, size| scene.draw(target, size, list, &camera, models, assets));
+                        let text = d.text.as_mut().expect("made with the renderer");
+                        renderer.render_with(false, |_, target, size| {
+                            scene.draw(target, size, list, &camera, models, assets);
+                            text.draw(target, size, overlay);
+                        });
                     }
                     None => {
-                        d.renderer.as_mut().expect("checked above").render(&d.list, &camera);
+                        let d = &mut **d;
+                        let (renderer, text) = (d.renderer.as_mut().expect("checked above"), d.text.as_mut().expect("made with the renderer"));
+                        let list = &d.list;
+                        renderer.render_with(false, |renderer3, target, size| {
+                            renderer3.draw(target, size, list, &camera);
+                            text.draw(target, size, overlay);
+                        });
                     }
                 }
                 true
@@ -622,10 +667,14 @@ impl Display {
         }
     }
 
-    /// The last drawn list, drawn again into a picture of exactly `size` pixels (RGBA8).
-    fn capture(&mut self, size: (u32, u32)) -> Option<Vec<u8>> {
+    /// The last drawn list and overlay, drawn again into a picture of exactly `size` pixels (RGBA8).
+    fn capture(&mut self, size: (u32, u32), overlay: &Overlay) -> Option<Vec<u8>> {
         match self {
-            Display::D2(d) => d.renderer.as_mut().map(|r| render_rgba(&mut r.renderer, &d.list, &d.camera, size)),
+            Display::D2(d) => {
+                let d = &mut **d;
+                let (renderer, text) = (d.renderer.as_mut()?, d.text.as_mut()?);
+                Some(render_rgba(&mut renderer.renderer, text, overlay, &d.list, &d.camera, size))
+            }
             Display::D3(d) => {
                 let camera = d.camera?;
                 d.renderer.as_ref()?;
@@ -634,9 +683,12 @@ impl Display {
                 if let Some(assets) = view.view_assets().filter(|_| composed) {
                     let d = &mut **d;
                     let scene = d.scene.as_mut().expect("made above");
-                    return Some(scene.capture(size, &d.list, &camera, &d.models, assets));
+                    let text = d.text.as_mut()?;
+                    return Some(scene.capture(size, &d.list, &camera, &d.models, assets, |view, size| text.draw(view, size, overlay)));
                 }
-                d.renderer.as_mut().map(|r| render_rgba3(&mut r.renderer, &d.list, &camera, size))
+                let d = &mut **d;
+                let (renderer, text) = (d.renderer.as_mut()?, d.text.as_mut()?);
+                Some(render_rgba3(&mut renderer.renderer, text, overlay, &d.list, &camera, size))
             }
         }
     }
@@ -690,12 +742,13 @@ impl<G: Game> Runner<G> {
         }
         let Some(snapshot) = snapshot else { return };
 
-        if !self.display.draw(snapshot.predicted()) {
+        self.views.poll_audio();
+        if !self.display.draw(snapshot.predicted(), self.views.overlay()) {
             return;
         }
 
         if self.pacer.frame_done(snapshot.tick()) == Outcome::Capture {
-            if let (Some(path), Some(rgba)) = (&self.args.screenshot, self.display.capture(self.args.size)) {
+            if let (Some(path), Some(rgba)) = (&self.args.screenshot, self.display.capture(self.args.size, self.views.overlay())) {
                 if let Err(e) = write_png(path, self.args.size, &rgba) {
                     self.error = Some(e);
                 }

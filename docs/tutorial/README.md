@@ -9,7 +9,7 @@
 | 단계 | 하는 일 | 새로 배우는 것 |
 |---|---|---|
 | [1. 빈 프로젝트](step1-empty-project.md) | 창에 네모 하나를 띄웁니다 | `Game`, 컴포넌트, 시스템, `Frame`, `FP`, `App` |
-| [2. 혼자 하기](step2-solo.md) | 키로 움직이고 별을 주워 점수를 얻습니다 | 입력, 이벤트, 예측과 확정, `EntityView`, `SceneView` |
+| [2. 혼자 하기](step2-solo.md) | 키로 움직이고 별을 주워 점수를 얻습니다 | 입력, 이벤트, 예측과 확정, `EntityView`, `SceneView`, 글자(`ctx.draw()`), 소리(`ctx.audio()`) |
 | [3. 한 화면 2인](step3-two-players.md) | 키보드 하나로 두 명이 놉니다 | `.local_players`, `PlayerLink`, `ctx.is_local` |
 | [4. 로컬 서버 2창](step4-local-server.md) | 창 하나가 플레이어 한 명입니다 | `Players`, `player_signals`, 프리팹, `--host`, `--connect` |
 | [5. 재접속](step5-reconnect.md) | 창을 닫았다가 같은 자리로 돌아옵니다 | `Disconnected`, `Reconnected`, `Removed`, `--slot`, `--token`, 스냅숏 |
@@ -48,7 +48,7 @@ cargo run -p star_pick --release --bin step1
 cargo run -p star_pick --release --bin step1 -- --screenshot out.png --ticks 60 --size 640x360
 ```
 
-`--ticks 60`은 시뮬레이션을 60틱까지 돌리고 멈춥니다. 같은 틱의 그림은 어느 컴퓨터에서나 같습니다. 문서의 그림도 이 옵션으로 만들었습니다. 2단계와 3단계 그림은 사람이 조종한 모습이 아니라, 별을 향해 가는 자동 조종으로 찍은 것입니다.
+`--ticks 60`은 시뮬레이션을 60틱까지 돌리고 멈춥니다. 같은 틱의 그림은 어느 컴퓨터에서나 같습니다. 문서의 그림도 이 옵션으로 만들었습니다. 2단계부터 5단계 그림은 사람이 조종한 모습이 아니라, 별을 향해 가는 임시 자동 조종으로 찍은 것입니다. 자동 조종은 그림을 찍을 때만 게임 규칙에 임시로 넣었고 저장소 코드에는 없습니다.
 
 ## 테스트
 
@@ -60,7 +60,7 @@ cargo test --release -p star_pick
 
 | 테스트 | 확인하는 것 |
 |---|---|
-| `tests/step2.rs` | 같은 입력이면 점수와 체크섬이 같다. 리플레이가 같은 결과를 낸다. 뷰가 게임을 따라간다 |
+| `tests/step2.rs` | 같은 입력이면 점수와 체크섬이 같다. 리플레이가 같은 결과를 낸다. 뷰가 게임을 따라간다. 점수 글자가 그려지고, 별마다 소리가 한 번 난다 |
 | `tests/step3.rs` | 두 슬롯이 따로 움직이고 따로 점수를 얻는다 |
 | `tests/step4.rs` | 서버와 클라이언트 둘로 `Added`가 두 쪽 게임에 닿는다. 체크섬이 같다 |
 | `tests/step5.rs` | `Disconnected`, `Reconnected`, `Removed`가 게임에 닿는다. 스냅숏으로 들어온 클라이언트의 체크섬도 같다 |

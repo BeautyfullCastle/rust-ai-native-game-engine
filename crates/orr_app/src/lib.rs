@@ -13,10 +13,12 @@
 #![allow(clippy::disallowed_types)]
 
 mod app;
+mod audio;
 mod cli;
 mod input;
 mod models;
 mod net;
+mod overlay;
 mod pace;
 mod shot;
 mod view2d;
@@ -24,6 +26,9 @@ mod view3d;
 mod views;
 
 pub use app::{App, Error};
+pub use audio::{Audio, SoundHandle, SoundOut};
+pub use orr_audio::{AudioConfig, Clip, Listener, OfflineAudio};
+pub use overlay::{text_size, LineItem, Overlay, RectItem, TextItem};
 pub use input::{InputContext, KeyLayout, Stick};
 pub use orr_bridge::{FrameView, Lifecycle, PlayerSignal, PlayerSlot, Players, RawPlayerSignal, SignalKind};
 pub use orr_render::{Camera, Camera3D, Lighting, OrbitCamera};
