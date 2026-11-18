@@ -48,7 +48,7 @@ fn replace_owned(root: &Path, relative: &str, bytes: &[u8]) -> Result<(), String
     if !metadata.is_file() || metadata.file_type().is_symlink() { return Err("staged replacement must be a regular file".into()); }
     let mut temporary = tempfile::NamedTempFile::new_in(root).map_err(error)?;
     temporary.write_all(bytes).map_err(error)?;
-    temporary.as_file().set_permissions(fs::Permissions::from_mode(0o644)).map_err(error)?;
+    finish_file(temporary.as_file()).map_err(error)?;
     temporary.as_file().sync_all().map_err(error)?;
     temporary.persist(&path).map_err(error)?;
     Ok(())

@@ -115,7 +115,7 @@ pub mod player_settings;
 #[cfg(feature = "player-settings")]
 pub mod player_controls;
 
-#[cfg(all(feature = "project-create", target_os = "linux"))]
+#[cfg(all(feature = "project-create", any(target_os = "linux", windows)))]
 pub mod project_create;
 
 #[cfg(all(
