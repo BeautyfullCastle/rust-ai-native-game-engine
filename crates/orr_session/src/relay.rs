@@ -1296,11 +1296,38 @@ impl<G: Game, L: Link> RelayClient<G, L> {
         }
     }
 
+    /// Answers a snapshot request. The snapshot is the newest verified frame
+    /// at a checksum tick (a multiple of `checksum_interval`), because the
+    /// other clients report checksums at those ticks only and the server
+    /// compares this snapshot with their reports. The checksum tick frames
+    /// are the session's anchors (and the base anchor of a client that
+    /// joined itself). A session without any anchor yet offers its newest
+    /// verified frame, which the server forwards as unverified.
     fn serve_snapshot(&mut self, request_id: u32) {
-        let reply = match (&self.state, self.session.as_ref().and_then(|s| s.verified_frame().map(|f| (s.verified_tick(), f)))) {
-            (ClientState::Playing, Some((tick, frame))) => {
-                let data = lz4_flex::block::compress_prepend_size(&frame.to_bytes());
-                Some(ClientMsg::SnapshotUpload { request_id, tick, checksum: frame.checksum(), data })
+        let reply = match (&self.state, self.session.as_ref()) {
+            (ClientState::Playing, Some(session)) => {
+                let interval = u64::from(session.config().checksum_interval.max(1));
+                let anchor = session
+                    .anchors()
+                    .iter()
+                    .chain(self.base_anchor.iter())
+                    .filter(|a| a.tick % interval == 0 && a.tick <= session.verified_tick())
+                    .max_by_key(|a| a.tick);
+                match (anchor, session.verified_frame()) {
+                    (Some(a), _) => Some(ClientMsg::SnapshotUpload {
+                        request_id,
+                        tick: a.tick,
+                        checksum: a.checksum,
+                        data: lz4_flex::block::compress_prepend_size(&a.frame_bytes),
+                    }),
+                    (None, Some(frame)) => Some(ClientMsg::SnapshotUpload {
+                        request_id,
+                        tick: session.verified_tick(),
+                        checksum: frame.checksum(),
+                        data: lz4_flex::block::compress_prepend_size(&frame.to_bytes()),
+                    }),
+                    (None, None) => None,
+                }
             }
             _ => None,
         };

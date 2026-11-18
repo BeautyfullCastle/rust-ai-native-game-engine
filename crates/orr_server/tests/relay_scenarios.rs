@@ -3,6 +3,7 @@
 mod common;
 
 use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use bytemuck::{Pod, Zeroable};
@@ -280,6 +281,158 @@ fn late_join_and_rejoin_go_through_the_server() {
         assert_eq!(*h.clients[i].client.state(), ClientState::Playing, "client {i}");
         assert!(h.clients[i].dumps.is_empty());
     }
+}
+
+// ---- (e2) snapshot verification ---------------------------------------------------
+
+/// Counts the checkpoints two clients both verified, and fails if they differ.
+fn compare_checkpoints(h: &Harness<Counter>, a: usize, b: usize) -> usize {
+    let sums = |i: usize| -> BTreeMap<u64, u64> {
+        h.clients[i].client.session().map(|s| s.checksums().iter().copied().collect()).unwrap_or_default()
+    };
+    let (sa, sb) = (sums(a), sums(b));
+    let mut compared = 0;
+    for (t, c) in &sa {
+        if let Some(d) = sb.get(t) {
+            assert_eq!(c, d, "clients {a} and {b} disagree at tick {t}");
+            compared += 1;
+        }
+    }
+    compared
+}
+
+fn relayed_notes(notes: &[ServerNote]) -> Vec<(u8, u64, bool)> {
+    notes
+        .iter()
+        .filter_map(|n| match n {
+            ServerNote::SnapshotRelayed { donor, tick, verified, .. } => Some((*donor, *tick, *verified)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_late_join_snapshot_is_checked_against_the_other_clients() {
+    let p = path(40, 5, 10_000);
+    let mut cfg = RoomConfig::new(4, TICK_RATE, SEED, 8);
+    cfg.min_players_to_start = 3;
+    let mut h = Harness::<Counter>::new(3, cfg, counter_script(), |_| ());
+    for _ in 0..3 {
+        h.add_client(&ClientSpec::new(p));
+    }
+    assert!(h.run_until_all_playing(10_000_000));
+    assert!(h.run_until_tick(400, 60_000_000));
+    let joiner = h.add_client(&ClientSpec::new(p));
+    assert!(h.run_until_all_playing(20_000_000));
+    let start = h.server.finalized_tick(h.room).unwrap();
+    assert!(h.run_until_tick(start + 300, 60_000_000));
+    h.run_for_us(500_000);
+
+    let notes = h.server.drain_notes();
+    let relayed = relayed_notes(&notes);
+    assert_eq!(relayed.len(), 1, "{relayed:?}");
+    assert!(relayed[0].2, "two healthy clients confirm the snapshot");
+    assert_eq!(relayed[0].1 % 30, 0, "the snapshot is at a checksum tick");
+    let stats = h.server.room_stats(h.room).unwrap();
+    assert_eq!((stats.snapshots_relayed, stats.snapshots_unverified, stats.snapshots_rejected), (1, 0, 0));
+    assert!(!notes.iter().any(|n| matches!(n, ServerNote::SnapshotRejected { .. } | ServerNote::Desync { .. })));
+    assert!(compare_checkpoints(&h, joiner, 0) > 5);
+}
+
+#[test]
+fn a_tampered_donor_snapshot_is_refused_and_the_next_donor_serves_the_join() {
+    let p = path(40, 5, 10_000);
+    let mut cfg = RoomConfig::new(4, TICK_RATE, SEED, 8);
+    cfg.min_players_to_start = 3;
+    let mut h = Harness::<Counter>::new(3, cfg, counter_script(), |_| ());
+    for _ in 0..3 {
+        h.add_client(&ClientSpec::new(p));
+    }
+    // The client in slot 0 is the first donor (the lowest playing slot). Its
+    // state is wrong from tick 100 on, so is the snapshot it uploads.
+    for _ in 0..10_000 {
+        if (0..3).all(|i| h.clients[i].client.welcome().is_some()) {
+            break;
+        }
+        h.step();
+    }
+    let liar = (0..3).find(|&i| h.clients[i].client.welcome().is_some_and(|w| w.slot == 0)).expect("slot 0 taken");
+    let honest: Vec<usize> = (0..3).filter(|&i| i != liar).collect();
+    CORRUPT.with(|c| c.set(Some((liar, 100))));
+    assert!(h.run_until_all_playing(10_000_000));
+    assert!(h.run_until_tick(600, 60_000_000));
+    let joiner = h.add_client(&ClientSpec::new(p));
+    assert!(h.run_until_all_playing(30_000_000), "the join never finished");
+    let start = h.server.finalized_tick(h.room).unwrap();
+    assert!(h.run_until_tick(start + 300, 60_000_000));
+    h.run_for_us(500_000);
+
+    let notes = h.server.drain_notes();
+    let rejected: Vec<_> = notes
+        .iter()
+        .filter_map(|n| match n {
+            ServerNote::SnapshotRejected { donor, tick, checksum, majority, .. } => Some((*donor, *tick, *checksum, *majority)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rejected.len(), 1, "{rejected:?}");
+    let (donor, tick, checksum, majority) = rejected[0];
+    assert_eq!(donor, 0);
+    assert_eq!(tick % 30, 0);
+    assert!(majority.is_some_and(|m| m != checksum), "the majority differs from the donor");
+    // The next donor served it, and its snapshot was confirmed.
+    let relayed = relayed_notes(&notes);
+    assert_eq!(relayed.len(), 1, "{relayed:?}");
+    assert_eq!(relayed[0].0, 1);
+    assert!(relayed[0].2);
+    let asked: Vec<u8> = notes
+        .iter()
+        .filter_map(|n| match n {
+            ServerNote::SnapshotRequested { donor, .. } => Some(*donor),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(asked, vec![0, 1]);
+    let stats = h.server.room_stats(h.room).unwrap();
+    assert_eq!((stats.snapshots_relayed, stats.snapshots_rejected), (1, 1));
+    // The joiner plays on with the healthy clients, not with the donor that lied.
+    assert_eq!(*h.clients[joiner].client.state(), ClientState::Playing);
+    for &i in &honest {
+        assert!(compare_checkpoints(&h, joiner, i) > 5);
+    }
+    // The join did not stop the room from judging the donor's own reports.
+    assert!(notes.iter().any(|n| matches!(n, ServerNote::Desync { .. })));
+}
+
+#[test]
+fn a_two_player_rejoin_is_forwarded_as_unverified() {
+    let p = path(40, 5, 10_000);
+    let mut h = counter_harness(2);
+    for _ in 0..2 {
+        h.add_client(&ClientSpec::new(p));
+    }
+    assert!(h.run_until_all_playing(10_000_000));
+    assert!(h.run_until_tick(300, 60_000_000));
+    let token = h.clients[1].client.token().unwrap();
+    h.cut(1);
+    let cut_tick = h.server.finalized_tick(h.room).unwrap();
+    assert!(h.run_until_tick(cut_tick + 200, 60_000_000));
+    let back = h.add_client(&ClientSpec { want_slot: Some(PlayerSlot(1)), token, ..ClientSpec::new(p) });
+    assert!(h.run_until_all_playing_except(&[1], 20_000_000));
+    let t = h.server.finalized_tick(h.room).unwrap();
+    assert!(h.run_until_tick(t + 300, 60_000_000));
+    h.run_for_us(500_000);
+
+    let notes = h.server.drain_notes();
+    let relayed = relayed_notes(&notes);
+    assert_eq!(relayed.len(), 1, "{relayed:?}");
+    let back_slot = h.clients[back].client.welcome().unwrap().slot;
+    assert_ne!(relayed[0].0, back_slot, "the other player donates");
+    assert!(!relayed[0].2, "no other client can confirm the snapshot");
+    let stats = h.server.room_stats(h.room).unwrap();
+    assert_eq!((stats.snapshots_relayed, stats.snapshots_unverified, stats.snapshots_rejected), (1, 1, 0));
+    assert_eq!(*h.clients[back].client.state(), ClientState::Playing);
+    assert!(compare_checkpoints(&h, back, 0) > 5);
 }
 
 // ---- (f) build hash and other refusals -------------------------------------------
