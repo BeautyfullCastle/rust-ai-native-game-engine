@@ -125,6 +125,10 @@ pub struct OutdoorWater {
     pub ripples: f32,
     pub flow: [f32; 2],
     pub glint: f32,
+    /// Amount of whitewater and shore foam; 1 is the usual amount.
+    pub foam: f32,
+    /// Strength of the moving light lines on the bed under shallow water.
+    pub caustics: f32,
     /// The ground under the water, for its depth.
     pub ground: Option<HeightField>,
 }
@@ -150,6 +154,18 @@ pub struct OutdoorScatter {
     pub count: u32,
     pub seed: u32,
     pub cast_shadows: bool,
+    /// Multiplies the color of leaves and grass.
+    pub tint: V3,
+    /// Light that passes through leaves.
+    pub translucency: f32,
+    /// Contrast of the leaf pattern on tree crowns.
+    pub leaf_detail: f32,
+    /// Share of broadleaf trees in autumn colors.
+    pub autumn: f32,
+    /// Grass is drawn up to this distance in meters.
+    pub grass_distance: f32,
+    /// Factor on the distances where trees change to simpler meshes.
+    pub detail_distance: f32,
     pub ground: HeightField,
 }
 
@@ -204,6 +220,12 @@ struct Object {
     radius: f32,
     grass: bool,
     casts: bool,
+    /// Index of the scatter that placed it, for its look.
+    scatter: u32,
+    /// Farthest distance of a grass tuft.
+    grass_distance: f32,
+    /// Factor on the distances of the levels of detail.
+    detail: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -223,13 +245,16 @@ struct WaterMesh<B: Rhi> {
     clarity: f32,
     ripples: f32,
     glint: f32,
+    foam: f32,
+    caustics: f32,
     bind: Option<B::BindGroup>,
 }
 
 /// Bind groups of the props, the sky and the shadow casters, made for one shadow map.
 struct Binds<B: Rhi> {
     map_id: u64,
-    props: B::BindGroup,
+    /// One per scatter: each has its own look.
+    props: Vec<B::BindGroup>,
     sky: B::BindGroup,
     shadow: B::BindGroup,
 }
@@ -263,10 +288,13 @@ pub struct OutdoorPass<B: Rhi> {
     scene: OutdoorScene,
     objects: Vec<Object>,
     waters: Vec<WaterMesh<B>>,
+    /// The globals of each scatter: the frame's, with the scatter's look.
+    scatter_globals: Vec<B::Buffer>,
     instances: Option<(B::Buffer, u64)>,
-    /// Draw ranges of this frame: (mesh, first instance, count), main then one list per shadow cascade.
-    draws: Vec<(u32, u32, u32)>,
-    shadow_draws: Vec<Vec<(u32, u32, u32)>>,
+    /// Draw ranges of this frame: (scatter, mesh, first instance, count), main then one list per shadow cascade.
+    /// The shadow lists have scatter 0.
+    draws: Vec<(u32, u32, u32, u32)>,
+    shadow_draws: Vec<Vec<(u32, u32, u32, u32)>>,
     binds: Option<Binds<B>>,
     time: f32,
     /// True once objects and water were made for `scene`.
@@ -288,6 +316,10 @@ const WATER_ATTRS: [VertexAttr; 3] = [
 
 fn prop_layout() -> [VertexLayout<'static>; 2] {
     [VertexLayout { stride: 48, step: VertexStep::Vertex, attrs: &PROP_ATTRS }, VertexLayout { stride: 32, step: VertexStep::Instance, attrs: &INSTANCE_ATTRS }]
+}
+
+fn globals_buffer<B: Rhi>(rhi: &B, label: &'static str) -> B::Buffer {
+    rhi.create_buffer(&BufferDesc { label, size: std::mem::size_of::<Globals>() as u64, usage: BufferUsage::UNIFORM | BufferUsage::COPY_DST })
 }
 
 fn buffer_with<B: Rhi>(rhi: &B, label: &str, usage: BufferUsage, data: &[u8]) -> B::Buffer {
@@ -354,7 +386,6 @@ impl<B: Rhi> OutdoorPass<B> {
             vertices.extend_from_slice(&m.vertices);
             indices.extend_from_slice(&m.indices);
         }
-        let globals_desc = |label| BufferDesc { label, size: std::mem::size_of::<Globals>() as u64, usage: BufferUsage::UNIFORM | BufferUsage::COPY_DST };
         let no_shadow = rhi.create_texture(&TextureDesc {
             label: "outdoor no shadow",
             width: 1,
@@ -374,8 +405,8 @@ impl<B: Rhi> OutdoorPass<B> {
             meshes,
             prop_vertices: buffer_with(rhi, "outdoor prop vertices", BufferUsage::VERTEX, bytemuck::cast_slice(&vertices)),
             prop_indices: buffer_with(rhi, "outdoor prop indices", BufferUsage::INDEX, bytemuck::cast_slice(&indices)),
-            globals: rhi.create_buffer(&globals_desc("outdoor globals")),
-            shadow_globals: rhi.create_buffer(&globals_desc("outdoor shadow globals")),
+            globals: globals_buffer(rhi, "outdoor globals"),
+            shadow_globals: globals_buffer(rhi, "outdoor shadow globals"),
             no_shadow: (no_shadow, no_shadow_view),
             no_cascades: no_cascades(rhi),
             frame_globals: Globals::zeroed(),
@@ -383,6 +414,7 @@ impl<B: Rhi> OutdoorPass<B> {
             scene: OutdoorScene::default(),
             objects: Vec::new(),
             waters: Vec::new(),
+            scatter_globals: Vec::new(),
             instances: None,
             draws: Vec::new(),
             shadow_draws: Vec::new(),
@@ -402,6 +434,7 @@ impl<B: Rhi> OutdoorPass<B> {
         self.scene = scene.clone();
         self.objects = self.place_objects();
         self.waters = scene.waters.iter().map(|w| water_mesh(rhi, w)).collect();
+        self.scatter_globals = scene.scatters.iter().map(|_| globals_buffer(rhi, "outdoor scatter globals")).collect();
         self.binds = None;
     }
 
@@ -415,7 +448,7 @@ impl<B: Rhi> OutdoorPass<B> {
         let rock_base = broadleaf_base + (TREE_LEVELS * BROADLEAF_VARIANTS) as u32;
         let cover_base = rock_base + ROCK_VARIANTS as u32;
         let mut objects = Vec::new();
-        for scatter in &self.scene.scatters {
+        for (index, scatter) in self.scene.scatters.iter().enumerate() {
             let mut rng = Rng(u64::from(scatter.seed).wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ 0x5851_f42d_4c95_7f2d);
             let min_up = scatter.max_slope.to_radians().cos();
             for _ in 0..scatter.count {
@@ -445,10 +478,29 @@ impl<B: Rhi> OutdoorPass<B> {
                     radius: self.meshes[meshes[0] as usize].radius * size,
                     grass,
                     casts: scatter.cast_shadows && !grass,
+                    scatter: index as u32,
+                    grass_distance: scatter.grass_distance,
+                    detail: scatter.detail_distance,
                 });
             }
         }
         objects
+    }
+
+    /// The commands that draw `draws` of the props with `pipeline`. A draw uses the bind group of its scatter.
+    fn prop_commands<'a>(&'a self, pipeline: &'a B::Pipeline, binds: &'a [B::BindGroup], draws: &[(u32, u32, u32, u32)]) -> Vec<Command<'a, B>> {
+        let Some((instances, _)) = &self.instances else { return Vec::new() };
+        let mut commands = vec![Command::SetPipeline(pipeline), Command::SetVertexBuffer(0, &self.prop_vertices), Command::SetVertexBuffer(1, instances), Command::SetIndexBuffer(&self.prop_indices)];
+        let mut bound = None;
+        for (scatter, mesh, first, count) in draws {
+            if bound != Some(*scatter) {
+                commands.push(Command::SetBindGroup(0, &binds[*scatter as usize]));
+                bound = Some(*scatter);
+            }
+            let m = &self.meshes[*mesh as usize];
+            commands.push(Command::DrawIndexed { indices: m.first_index..m.first_index + m.index_count, base_vertex: m.base_vertex, instances: *first..*first + *count });
+        }
+        commands
     }
 
     fn pipelines(&mut self, rhi: &B, format: TextureFormat) {
@@ -487,27 +539,28 @@ impl<B: Rhi> OutdoorPass<B> {
         frame_globals(frame, self.scene.sky, self.time)
     }
 
-    /// Sorts the objects into draws by mesh: culled to `planes`, with the level of detail from the distance to `eye`.
-    fn sort(&self, planes: &[[f32; 4]; 6], eye: V3, shadow: bool, out: &mut Vec<(u32, InstanceRaw)>) {
+    /// Sorts the objects into draws by scatter and mesh: culled to `planes`, with the level of detail from the distance to `eye`.
+    /// A shadow list has scatter 0 everywhere.
+    fn sort(&self, planes: &[[f32; 4]; 6], eye: V3, shadow: bool, out: &mut Vec<(u32, u32, InstanceRaw)>) {
         for o in &self.objects {
             if shadow && !o.casts {
                 continue;
             }
             let p = [o.raw.place[0], o.raw.place[1], o.raw.place[2]];
             let distance = length(sub(p, eye));
-            if distance > if o.grass { GRASS_DISTANCE } else { FAR_DISTANCE } || !sphere_visible(planes, add(p, [0.0, o.radius * 0.5, 0.0]), o.radius) {
+            if distance > if o.grass { o.grass_distance } else { FAR_DISTANCE } || !sphere_visible(planes, add(p, [0.0, o.radius * 0.5, 0.0]), o.radius) {
                 continue;
             }
             let level = if shadow {
                 if distance > SHADOW_LOD_DISTANCE { 2 } else { 1 }
-            } else if distance < LOD_DISTANCE[0] {
+            } else if distance < LOD_DISTANCE[0] * o.detail {
                 0
-            } else if distance < LOD_DISTANCE[1] {
+            } else if distance < LOD_DISTANCE[1] * o.detail {
                 1
             } else {
                 2
             };
-            out.push((o.meshes[level], o.raw));
+            out.push((if shadow { 0 } else { o.scatter }, o.meshes[level], o.raw));
         }
     }
 }
@@ -581,11 +634,13 @@ fn water_mesh<B: Rhi>(rhi: &B, water: &OutdoorWater) -> WaterMesh<B> {
         vertices: buffer_with(rhi, "outdoor water vertices", BufferUsage::VERTEX, bytemuck::cast_slice(&vertices)),
         indices: buffer_with(rhi, "outdoor water indices", BufferUsage::INDEX, bytemuck::cast_slice(&indices)),
         count: indices.len() as u32,
-        globals: rhi.create_buffer(&BufferDesc { label: "outdoor water globals", size: std::mem::size_of::<Globals>() as u64, usage: BufferUsage::UNIFORM | BufferUsage::COPY_DST }),
+        globals: globals_buffer(rhi, "outdoor water globals"),
         color: water.color,
         clarity: water.clarity,
         ripples: water.ripples,
         glint: water.glint,
+        foam: water.foam,
+        caustics: water.caustics,
         bind: None,
     }
 }
@@ -607,8 +662,17 @@ impl<B: Rhi> RenderPass<B> for OutdoorPass<B> {
         for water in &self.waters {
             let mut g = globals;
             g.water_color = [water.color[0], water.color[1], water.color[2], water.clarity];
-            g.water = [water.ripples, 1.0, 1.0, water.glint];
+            g.water = [water.ripples, 1.0, water.foam, water.glint];
+            g.wind[2] = water.caustics;
             rhi.write_buffer(&water.globals, 0, bytemuck::bytes_of(&g));
+        }
+        for (scatter, buffer) in self.scene.scatters.iter().zip(&self.scatter_globals) {
+            let mut g = globals;
+            g.leaf_tint = [scatter.tint[0], scatter.tint[1], scatter.tint[2], scatter.translucency];
+            g.detail[0] = scatter.leaf_detail;
+            g.detail[1] = scatter.autumn;
+            g.viewport[3] = scatter.grass_distance;
+            rhi.write_buffer(buffer, 0, bytemuck::bytes_of(&g));
         }
 
         // Bind groups hold the shadow map; they are made again when it changes.
@@ -620,7 +684,7 @@ impl<B: Rhi> RenderPass<B> for OutdoorPass<B> {
             let lit = |pipeline: &B::Pipeline, globals: &B::Buffer| {
                 rhi.create_bind_group(pipeline, 0, &[Binding::Uniform { binding: 0, buffer: globals }, Binding::Texture { binding: 1, view: map }, Binding::Sampler { binding: 3, sampler: &self.shadow_sampler }, Binding::Uniform { binding: 4, buffer: cascades }])
             };
-            let props = lit(&pipelines.props, &self.globals);
+            let props: Vec<B::BindGroup> = self.scatter_globals.iter().map(|globals| lit(&pipelines.props, globals)).collect();
             let sky = rhi.create_bind_group(&pipelines.sky, 0, &[Binding::Uniform { binding: 0, buffer: &self.globals }]);
             let shadow = rhi.create_bind_group(&self.prop_shadow, 0, &[Binding::Uniform { binding: 0, buffer: &self.shadow_globals }]);
             let water_binds: Vec<B::BindGroup> = self.waters.iter().map(|w| lit(&pipelines.water, &w.globals)).collect();
@@ -634,22 +698,22 @@ impl<B: Rhi> RenderPass<B> for OutdoorPass<B> {
         let mut main = Vec::new();
         self.sort(&frustum_planes(&frame.view_proj), frame.camera.eye, false, &mut main);
         // One caster list per cascade, culled by that cascade's box.
-        let mut casts: Vec<Vec<(u32, InstanceRaw)>> = Vec::new();
+        let mut casts: Vec<Vec<(u32, u32, InstanceRaw)>> = Vec::new();
         if let Some(shadow) = &frame.shadow {
             for light_vp in shadow.cascade_light_vp.iter().take(shadow.cascade_count) {
                 let mut cast = Vec::new();
                 self.sort(&frustum_planes(light_vp), frame.camera.eye, true, &mut cast);
-                cast.sort_unstable_by_key(|(mesh, _)| *mesh);
+                cast.sort_unstable_by_key(|(scatter, mesh, _)| (*scatter, *mesh));
                 casts.push(cast);
             }
         }
-        main.sort_unstable_by_key(|(mesh, _)| *mesh);
-        let ranges = |list: &[(u32, InstanceRaw)], offset: u32| {
-            let mut out: Vec<(u32, u32, u32)> = Vec::new();
-            for (i, (mesh, _)) in list.iter().enumerate() {
+        main.sort_unstable_by_key(|(scatter, mesh, _)| (*scatter, *mesh));
+        let ranges = |list: &[(u32, u32, InstanceRaw)], offset: u32| {
+            let mut out: Vec<(u32, u32, u32, u32)> = Vec::new();
+            for (i, (scatter, mesh, _)) in list.iter().enumerate() {
                 match out.last_mut() {
-                    Some(last) if last.0 == *mesh => last.2 += 1,
-                    _ => out.push((*mesh, offset + i as u32, 1)),
+                    Some(last) if last.0 == *scatter && last.1 == *mesh => last.3 += 1,
+                    _ => out.push((*scatter, *mesh, offset + i as u32, 1)),
                 }
             }
             out
@@ -664,7 +728,7 @@ impl<B: Rhi> RenderPass<B> for OutdoorPass<B> {
                 draws
             })
             .collect();
-        let raw: Vec<InstanceRaw> = main.iter().chain(casts.iter().flatten()).map(|(_, r)| *r).collect();
+        let raw: Vec<InstanceRaw> = main.iter().chain(casts.iter().flatten()).map(|(_, _, r)| *r).collect();
         let bytes = (raw.len() * std::mem::size_of::<InstanceRaw>()) as u64;
         if self.instances.as_ref().is_none_or(|(_, size)| *size < bytes) {
             let size = bytes.next_power_of_two().max(1024);
@@ -676,16 +740,8 @@ impl<B: Rhi> RenderPass<B> for OutdoorPass<B> {
     }
 
     fn encode(&self, rhi: &B, stage: PassStage, frame: &PassFrame<'_, B>, encoder: &mut B::Encoder, color: Option<&ColorAttachment<'_, B>>, depth: &DepthAttachment<'_, B>) {
-        let (Some(pipelines), Some(Binds { props: props_bind, sky: sky_bind, shadow: shadow_bind, .. })) = (&self.pipelines, &self.binds) else { return };
-        let props = |pipeline, bind, draws: &[(u32, u32, u32)]| {
-            let Some((instances, _)) = &self.instances else { return Vec::new() };
-            let mut commands = vec![Command::SetPipeline(pipeline), Command::SetBindGroup(0, bind), Command::SetVertexBuffer(0, &self.prop_vertices), Command::SetVertexBuffer(1, instances), Command::SetIndexBuffer(&self.prop_indices)];
-            for (mesh, first, count) in draws {
-                let m = &self.meshes[*mesh as usize];
-                commands.push(Command::DrawIndexed { indices: m.first_index..m.first_index + m.index_count, base_vertex: m.base_vertex, instances: *first..*first + *count });
-            }
-            commands
-        };
+        let (Some(pipelines), Some(Binds { props: props_binds, sky: sky_bind, shadow: shadow_bind, .. })) = (&self.pipelines, &self.binds) else { return };
+        let props = |pipeline, binds, draws: &[(u32, u32, u32, u32)]| self.prop_commands(pipeline, binds, draws);
         match stage {
             PassStage::Shadow => {
                 let Some(shadow) = &frame.shadow else { return };
@@ -696,11 +752,11 @@ impl<B: Rhi> RenderPass<B> for OutdoorPass<B> {
                 rhi.write_buffer(&self.shadow_globals, 0, bytemuck::bytes_of(&globals));
                 let [x, y, width, height] = shadow.viewport;
                 let mut commands = vec![Command::SetViewport { x, y, width, height }];
-                commands.extend(props(&self.prop_shadow, shadow_bind, draws));
+                commands.extend(props(&self.prop_shadow, std::slice::from_ref(shadow_bind), draws));
                 rhi.encode_pass(encoder, "outdoor shadow casters", None, Some(depth), &commands);
             }
             PassStage::Opaque if !self.draws.is_empty() => {
-                rhi.encode_pass(encoder, "outdoor vegetation", color, Some(depth), &props(&pipelines.props, props_bind, &self.draws));
+                rhi.encode_pass(encoder, "outdoor vegetation", color, Some(depth), &props(&pipelines.props, props_binds, &self.draws));
             }
             PassStage::Sky if self.scene.sky.is_some() => {
                 rhi.encode_pass(encoder, "outdoor sky", color, Some(depth), &[Command::SetPipeline(&pipelines.sky), Command::SetBindGroup(0, sky_bind), Command::Draw { vertices: 0..3, instances: 0..1 }]);

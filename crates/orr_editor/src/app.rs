@@ -3109,6 +3109,11 @@ impl EditorApp {
             #[cfg(feature = "models")]
             gpu.set_shadow_cascades(self.editor.yard_frame().look.as_ref().map_or(1, |look| look.shadow_cascades));
             #[cfg(feature = "models")]
+            {
+                let look = self.editor.yard_frame().look.as_ref();
+                gpu.set_shadow_tuning(look.map_or(1.0, |look| look.shadow_softness), look.map_or(0.0, |look| look.shadow_sharp_range));
+            }
+            #[cfg(feature = "models")]
             if let Err(error) = point_light.and_then(|settings|gpu.set_point_light_settings(settings)) {
                 ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, error, egui::FontId::proportional(14.0), Color32::RED);
                 #[cfg(feature="terrain-patrol")]

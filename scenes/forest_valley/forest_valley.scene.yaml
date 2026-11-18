@@ -1114,6 +1114,8 @@ entities:
       outer_angle: 30
       shadow_strength: 1
       shadow_range: 260
+      shadow_softness: 1
+      shadow_sharp_range: 0
       kind: directional
       enabled: true
       cast_shadows: true
@@ -1217,6 +1219,8 @@ entities:
       ripples: 1
       flow: [0, 0.6]
       glint: 1
+      foam: 1
+      caustics: 0
       terrain: e_00000001
   e_00000007:
     name: pool_01
@@ -1231,6 +1235,8 @@ entities:
       ripples: 1
       flow: [0, 0.6]
       glint: 1
+      foam: 1
+      caustics: 0
       terrain: e_00000001
   e_00000008:
     name: pool_02
@@ -1245,6 +1251,8 @@ entities:
       ripples: 1
       flow: [0, 0.6]
       glint: 1
+      foam: 1
+      caustics: 0
       terrain: e_00000001
   e_00000009:
     name: pool_03
@@ -1259,6 +1267,8 @@ entities:
       ripples: 1
       flow: [0, 0.6]
       glint: 1
+      foam: 1
+      caustics: 0
       terrain: e_00000001
   e_0000000a:
     name: pool_04
@@ -1273,6 +1283,8 @@ entities:
       ripples: 1
       flow: [0, 0.6]
       glint: 1
+      foam: 1
+      caustics: 0
       terrain: e_00000001
   e_0000000b:
     name: pool_05
@@ -1287,6 +1299,8 @@ entities:
       ripples: 1
       flow: [0, 0.6]
       glint: 1
+      foam: 1
+      caustics: 0
       terrain: e_00000001
   e_0000000c:
     name: pool_06
@@ -1301,6 +1315,8 @@ entities:
       ripples: 1
       flow: [0, 0.6]
       glint: 1
+      foam: 1
+      caustics: 0
       terrain: e_00000001
   e_0000000d:
     name: pool_07
@@ -1315,6 +1331,8 @@ entities:
       ripples: 1
       flow: [0, 0.6]
       glint: 1
+      foam: 1
+      caustics: 0
       terrain: e_00000001
   e_0000000e:
     name: pool_08
@@ -1329,6 +1347,8 @@ entities:
       ripples: 1
       flow: [0, 0.6]
       glint: 1
+      foam: 1
+      caustics: 0
       terrain: e_00000001
   e_0000000f:
     name: pool_09
@@ -1343,6 +1363,8 @@ entities:
       ripples: 1
       flow: [0, 0.6]
       glint: 1
+      foam: 1
+      caustics: 0
       terrain: e_00000001
   e_00000010:
     name: pool_10
@@ -1357,6 +1379,8 @@ entities:
       ripples: 1
       flow: [0, 0.6]
       glint: 1
+      foam: 1
+      caustics: 0
       terrain: e_00000001
   e_00000011:
     name: pool_11
@@ -1371,6 +1395,8 @@ entities:
       ripples: 1
       flow: [0, 0.6]
       glint: 1
+      foam: 1
+      caustics: 0
       terrain: e_00000001
   e_00000012:
     name: pool_12
@@ -1385,6 +1411,8 @@ entities:
       ripples: 1
       flow: [0, 0.6]
       glint: 1
+      foam: 1
+      caustics: 0
       terrain: e_00000001
   e_00000013:
     name: pool_13
@@ -1399,6 +1427,8 @@ entities:
       ripples: 1
       flow: [0, 0.6]
       glint: 1
+      foam: 1
+      caustics: 0
       terrain: e_00000001
   e_00000014:
     name: pool_14
@@ -1413,6 +1443,8 @@ entities:
       ripples: 1
       flow: [0, 0.6]
       glint: 1
+      foam: 1
+      caustics: 0
       terrain: e_00000001
   e_00000015:
     name: pool_15
@@ -1427,6 +1459,8 @@ entities:
       ripples: 1
       flow: [0, 0.6]
       glint: 1
+      foam: 1
+      caustics: 0
       terrain: e_00000001
   e_00000016:
     name: pool_16
@@ -1441,6 +1475,8 @@ entities:
       ripples: 1
       flow: [0, 0.6]
       glint: 1
+      foam: 1
+      caustics: 0
       terrain: e_00000001
   e_00000017:
     name: pool_17
@@ -1455,6 +1491,8 @@ entities:
       ripples: 1
       flow: [0, 0.6]
       glint: 1
+      foam: 1
+      caustics: 0
       terrain: e_00000001
   e_00000018:
     name: firs
@@ -1472,6 +1510,12 @@ entities:
       count: 9000
       seed: 11
       cast_shadows: true
+      tint: [1, 1, 1]
+      translucency: 1
+      leaf_detail: 1
+      autumn: 0.14
+      grass_distance: 85
+      detail_distance: 1
   e_00000019:
     name: broadleaves
     orr_gfx::Transform3:
@@ -1488,6 +1532,12 @@ entities:
       count: 2600
       seed: 12
       cast_shadows: true
+      tint: [1, 1, 1]
+      translucency: 1
+      leaf_detail: 1
+      autumn: 0.14
+      grass_distance: 85
+      detail_distance: 1
   e_0000001a:
     name: boulders
     orr_gfx::Transform3:
@@ -1504,6 +1554,12 @@ entities:
       count: 1200
       seed: 13
       cast_shadows: true
+      tint: [1, 1, 1]
+      translucency: 1
+      leaf_detail: 1
+      autumn: 0.14
+      grass_distance: 85
+      detail_distance: 1
   e_0000001b:
     name: meadow
     orr_gfx::Transform3:
@@ -1520,3 +1576,9 @@ entities:
       count: 20000
       seed: 14
       cast_shadows: false
+      tint: [1, 1, 1]
+      translucency: 1
+      leaf_detail: 1
+      autumn: 0.14
+      grass_distance: 85
+      detail_distance: 1

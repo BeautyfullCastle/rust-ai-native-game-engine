@@ -75,8 +75,14 @@ fn sun() -> Lighting {
 }
 
 fn render(g: &Wgpu, cascades: u32) -> Vec<u8> {
+    render_tuned(g, cascades, 1.0, 0.0)
+}
+
+fn render_tuned(g: &Wgpu, cascades: u32, softness: f32, sharp_range: f32) -> Vec<u8> {
     let mut scene = ImportedSceneRenderer::new(g.clone(), FORMAT).unwrap();
     scene.shadow_cascades = cascades;
+    scene.shadow_softness = softness;
+    scene.shadow_sharp_range = sharp_range;
     let mut renderer = ModelRenderer::new(g.clone(), FORMAT, square()).unwrap();
     let instances = [ground([0.0, 0.0, -80.0], 240.0), panel([0.0, 1.5, -6.0], 2.0), panel([0.0, 6.0, -110.0], 16.0)];
     let texture = g.create_texture(&TextureDesc { label: "cascades", width: SIZE.0, height: SIZE.1, format: FORMAT, usage: TextureUsage::RENDER_ATTACHMENT | TextureUsage::COPY_SRC, sample_count: 1, view_formats: &[] });
@@ -119,4 +125,26 @@ fn four_cascades_show_a_sharp_near_shadow_and_still_a_far_one() {
     let single = render(&g, 1);
     let (sharp, soft) = (edge_width(&cascaded, [0.0, 0.0, -5.0]), edge_width(&single, [0.0, 0.0, -5.0]));
     assert!(sharp < soft, "near edge pixels: cascades {sharp}, one map {soft}");
+}
+
+#[test]
+fn a_softer_filter_widens_the_shadow_edge_and_the_default_is_the_plain_filter() {
+    let Some(g) = gpu() else { return };
+    let plain = render(&g, 4);
+    assert_eq!(plain, render_tuned(&g, 4, 1.0, 0.0), "softness 1 and no chosen split are the engine's own");
+    let soft = render_tuned(&g, 4, 4.0, 0.0);
+    let (narrow, wide) = (edge_width(&plain, [0.0, 0.0, -5.0]), edge_width(&soft, [0.0, 0.0, -5.0]));
+    assert!(narrow < wide, "near edge pixels: softness 1 {narrow}, softness 4 {wide}");
+}
+
+#[test]
+fn a_longer_first_cascade_blurs_the_near_shadow() {
+    let Some(g) = gpu() else { return };
+    let own = render_tuned(&g, 4, 1.0, 0.0);
+    let long = render_tuned(&g, 4, 1.0, 120.0);
+    let (sharp, blurred) = (edge_width(&own, [0.0, 0.0, -5.0]), edge_width(&long, [0.0, 0.0, -5.0]));
+    assert!(sharp < blurred, "near edge pixels: engine split {sharp}, first cascade to 120 m {blurred}");
+    // The far shadow is still there: the other cascades share the rest of the view.
+    let (far_shadow, far_lit) = (ground_at(&long, [0.0, 0.0, -105.0]), ground_at(&long, [14.0, 0.0, -105.0]));
+    assert!(u32::from(far_shadow) + 60 < u32::from(far_lit), "far shadow: {far_shadow} vs lit {far_lit}");
 }

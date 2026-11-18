@@ -181,8 +181,16 @@ impl PreparedShadow {
         draws
     }
 
-    pub fn prepare_cascaded(lighting: &Lighting, camera: &Camera3D, aspect: f32, count: u32) -> Result<Option<Self>, ModelRenderError> {
-        let Some(single) = Self::prepare(lighting)? else { return Ok(None) };
+    /// `softness` spaces the filter taps in texels (1 is the plain filter) and
+    /// `sharp_range` sets where the nearest cascade ends (0 keeps the split of
+    /// [`cascade_splits`]).
+    pub fn prepare_cascaded(lighting: &Lighting, camera: &Camera3D, aspect: f32, count: u32, softness: f32, sharp_range: f32) -> Result<Option<Self>, ModelRenderError> {
+        let Some(mut single) = Self::prepare(lighting)? else { return Ok(None) };
+        let softness = if softness.is_finite() { softness.clamp(0.25, 8.0) } else { 1.0 };
+        for range in &mut single.uniform.ranges {
+            range[2] *= softness;
+        }
+        single.params[0] *= softness;
         let count = count.clamp(1, MAX_SHADOW_CASCADES);
         if count == 1 {
             return Ok(Some(single));
@@ -192,7 +200,14 @@ impl PreparedShadow {
         };
         let near = near.max(0.05);
         let far = (1.5 * lighting.shadow_radius).max(near * 2.0);
-        let splits = cascade_splits(near, far, count);
+        let mut splits = cascade_splits(near, far, count);
+        // A chosen end of the nearest cascade: the others share the rest of the view.
+        if sharp_range.is_finite() && sharp_range > 0.0 {
+            let first = sharp_range.clamp(near * 2.0, far * 0.6);
+            let rest = cascade_splits(first, far, count - 1);
+            splits[0] = first;
+            splits[1..].copy_from_slice(&rest[..3]);
+        }
         let forward = camera.forward();
         let tile = SHARED_SHADOW_MAP_SIZE / 2;
         let mut uniform = single.uniform;
@@ -209,7 +224,7 @@ impl PreparedShadow {
             let (x, y) = ((k as u32 % 2) * tile, (k as u32 / 2) * tile);
             uniform.vp[k] = matrix.0;
             uniform.tiles[k] = [x as f32 / SHARED_SHADOW_MAP_SIZE as f32, y as f32 / SHARED_SHADOW_MAP_SIZE as f32, 0.5, 1.5 * texel_world / (2.0 * radius + back)];
-            uniform.ranges[k] = [1.5 * texel_world, end, 1.0 / SHARED_SHADOW_MAP_SIZE as f32, 0.0];
+            uniform.ranges[k] = [1.5 * texel_world, end, softness / SHARED_SHADOW_MAP_SIZE as f32, 0.0];
             cascades.push(ShadowCascade { light_vp: matrix.0, viewport: [x as f32, y as f32, tile as f32, tile as f32] });
             // The next cascade also covers this one's fade band, so the fade always has a partner.
             start = end * (1.0 - CASCADE_FADE);
@@ -228,12 +243,14 @@ pub(crate) fn prepare_shared_globals(
     camera: &Camera3D,
     lighting: &Lighting,
     cascades: u32,
+    softness: f32,
+    sharp_range: f32,
 ) -> Result<(Globals, Option<PreparedShadow>), ModelRenderError> {
     let mut unshadowed = *lighting;
     unshadowed.shadows = false;
     let mut globals = prepare_globals(format, size, camera, &unshadowed)?;
     let aspect = size.0.max(1) as f32 / size.1.max(1) as f32;
-    let shadow = PreparedShadow::prepare_cascaded(lighting, camera, aspect, cascades)?;
+    let shadow = PreparedShadow::prepare_cascaded(lighting, camera, aspect, cascades, softness, sharp_range)?;
     if let Some(ready) = &shadow {
         globals.light_vp = ready.matrix.0;
         globals.shadow = ready.params;

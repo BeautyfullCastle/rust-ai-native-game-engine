@@ -419,7 +419,18 @@ Forest Valley 위를 동양식 용이 난다. 비행은 시뮬에서 고정소�
 | Look: Exposure | `PostProcess.exposure` |
 | Look: Auto exposure, Adaptation speed, Bloom, Bloom threshold, Light shafts, Saturation, Contrast, Vignette, Grain | `PostProcess.effects`의 `auto_exposure`, `bloom`, `light_shafts`, `color_grade`, `vignette`, `film_grain`. 없는 효과는 빈 칸에 넣는다. Grain은 0.04배 |
 
-씬에 필드가 없는 컨트롤은 Open scene 모드에서 꺼진다: Shadows(Softness, Sharp range), Water(Foam), Vegetation 전부, Ground 전부. 이것들은 `Scatter`, `Material`에 대응하는 필드가 없다. 생성된 계곡 모드에서는 그대로 쓴다.
+창의 컨트롤 36개는 모두 씬 필드에 대응한다. 새로 생긴 필드는 다음과 같다. 기본값은 이전에 뷰포트가 쓰던 고정값과 같아서 기존 씬은 같은 모습으로 보인다.
+
+| 컨트롤 | 씬 필드 (기본값) |
+|---|---|
+| Shadows: Softness | 해 `Light.shadow_softness`(1). 그림자 필터 간격(텍셀)이다. 공유 그림자 경로(`ImportedSceneRenderer::shadow_softness`)에 들어가므로 해 그림자를 받는 모든 셰이더에 적용된다 |
+| Shadows: Sharp range | 해 `Light.shadow_sharp_range`(0). 가장 가까운 캐스케이드가 끝나는 거리(미터)다. 0은 엔진의 기본 분할이고 이때 컨트롤은 값을 바꾸지 않는다. 나머지 캐스케이드가 남은 구간을 나눈다 |
+| Water: Foam | 모든 `Water.foam`(1) |
+| Ground: Caustics | 모든 `Water.caustics`(0). 얕은 물 아래 바닥의 빛 무늬다. 에디터의 지형 셰이더는 물의 위치를 몰라서 물 패스가 그린다. 0이면 그리지 않는다 |
+| Vegetation: Translucency, Leaf detail, Autumn trees, Grass distance, Tree detail distance, Leaf tint | 모든 `Scatter`의 `translucency`(1), `leaf_detail`(1), `autumn`(0.14), `grass_distance`(85), `detail_distance`(1), `tint`(1,1,1). 패스는 스캐터마다 따로 uniform을 쓰므로 스캐터마다 값이 다를 수 있다. 컨트롤은 첫 스캐터(Autumn은 활엽수, Grass distance는 풀)의 값을 보여 준다 |
+| Ground: Bumps | 지형 `Material`의 표면 셰이더 숫자 `bumps`(`values[i]`와 `overrides` 비트). 셰이더 파일을 읽어 위치를 찾는다 |
+
+필드가 늘어서 프레임 배치가 바뀌었다. 이를 쓰는 게임의 체크섬은 의도적으로 바뀌었다: `golden_yard60` 0xa7da82e23e15b9ff → 0x47723039e9bdb0b4, `golden_yard150` 0x14d3d27b2c87519b → 0x9abbd0415c21b868, `orr_wasm_bench`의 `physics3d_1000_tick` 0x03ff3e4d279a3d61 → 0x3a512264fc1f80f0. 씬 파일은 새 필드를 모두 적어야 읽힌다. 아래 TerrainYard3D의 빈 시뮬 체크섬도 다시 바뀌었다.
 
 **적용 범위.** 컴포넌트를 등록한 게임(Yard3D, ViewYard3D, TerrainYard3D)의 씬에 적용된다. 내비게이션, Room, 메시 게임은 아직 `orr_gfx`를 등록하지 않아 이 모드가 꺼져 있다. 같은 이유로 1.14의 첫 항목이 남아 있다. 터레인 문서(`TerrainYard3D`)는 `orr_gfx::register`와 `init`을 넣어 `Light`, `Sky`, `Environment`, `PostProcess`, `Water`를 가진다. 입장 검사(`validate_scene_frame`)는 `Body`와 `Collider`만 보므로 바뀌지 않았다. 뷰포트는 문서의 프레임에서 `YardFrame`을 뽑는 같은 경로를 쓰므로 그림 코드도 그대로다. 터레인 문서는 지형을 여전히 `orr_gfx::Terrain`이 아니라 터레인 세션의 모델로 그린다. 기본 하늘은 꺼져 있고 기본 환경·후처리 값이 이전의 고정 조명과 같으므로, 해(`sun` 방향광)가 없는 이전 문서도 같은 모습으로 열린다. 다만 해가 없으면 Hour가 아무것도 바꾸지 못한다. 체크인된 `scenes/terrain_sphere.scene.yaml`에는 이전 조명과 같은 값의 해가 들어 있다. 이 게임의 상태에 싱글턴 세 개가 늘었으므로 TerrainYard3D의 프레임 체크섬은 전과 다르다. 빈 시뮬(`Simulation::<TerrainYard3D>::new((), 60, 42)`)의 `0x5ed3bc1521e4953e`가 `0x7b028584fdb00177`이 되었다. 이 게임에는 고정된 골든 값이 없고, 다른 게임의 골든(`orr_games --test golden`)은 그대로다.
 

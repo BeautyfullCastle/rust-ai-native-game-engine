@@ -41,6 +41,8 @@ entities:
       outer_angle: 25
       shadow_strength: 1
       shadow_range: 0
+      shadow_softness: 1
+      shadow_sharp_range: 0
       kind: spot
       enabled: true
       cast_shadows: false

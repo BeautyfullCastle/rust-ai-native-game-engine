@@ -24,7 +24,7 @@ const GOLDEN: &[(&str, u64, u64)] = &[
     ("physics2d_1000_tick", 20, 0x6ff1d3d40aaad9f9),
     // Yard3D registers the orr_gfx rendering components (Decal and Joint since 2026-11-15); the checksum
     // covers registered types, so it moved with them (see orr_games/tests/golden.rs).
-    ("physics3d_1000_tick", 10, 0x03ff3e4d279a3d61),
+    ("physics3d_1000_tick", 10, 0x3a512264fc1f80f0),
 ];
 
 #[test]

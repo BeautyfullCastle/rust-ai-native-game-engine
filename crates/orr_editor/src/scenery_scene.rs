@@ -10,12 +10,13 @@
 //! scene). It also reads those fields back, so the window shows the values of
 //! the open scene.
 //!
-//! A control with no component field, such as the leaf tint, is not part of an
-//! editor scene. [`applies`] says which.
+//! A control with no component field is not part of an editor scene.
+//! [`applies`] says which. Every control of the window has one now.
 #![allow(clippy::float_arithmetic)]
 
 use crate::editor::{Editor, Owner};
 use crate::model::Target;
+use crate::surface_library::SHADER_DIR;
 use orr_ecs::Entity;
 use orr_gfx::names;
 use orr_reflect::{decimal, Value};
@@ -65,6 +66,13 @@ enum Binding {
     Effect { kind: &'static str, param: usize, scale: f32, switch: bool },
     /// A post effect that a checkbox turns on and off.
     EffectSwitch { kind: &'static str },
+    /// A number of every `Scatter`. The window shows the value of the first scatter
+    /// of `kind`, or of the first one when the scene has none of that kind.
+    Scatter { field: &'static str, kind: Option<u32> },
+    /// The tint of every `Scatter`.
+    ScatterTint,
+    /// A number of the surface shader of every terrain, stored in the terrain's `Material`.
+    Ground { param: &'static str },
 }
 
 /// Speed of the current of a `Water` for the setting `Flow speed` 1, in meters per second.
@@ -74,6 +82,7 @@ fn binding(group: &str, name: &str) -> Option<Binding> {
     use Binding::*;
     let sky = |field, scale| Some(Sky { field, scale });
     let effect = |kind, param, scale, switch| Some(Effect { kind, param, scale, switch });
+    let scatter = |field, kind| Some(Scatter { field, kind });
     match (group, name) {
         ("Sun", "Hour") => Some(SunHour),
         ("Sun", "Intensity") => Some(Sun { field: "intensity" }),
@@ -87,6 +96,8 @@ fn binding(group: &str, name: &str) -> Option<Binding> {
         ("Fog", "Height falloff") => sky("fog_falloff", 1.0),
         ("Fog", "Haze") => sky("haze", 1.0),
         ("Shadows", "Sun shadows") => Some(SunShadows),
+        ("Shadows", "Softness") => Some(Sun { field: "shadow_softness" }),
+        ("Shadows", "Sharp range") => Some(Sun { field: "shadow_sharp_range" }),
         ("Shadows", "Wide range") => Some(Sun { field: "shadow_range" }),
         ("Wind", "Strength") => sky("wind_strength", 1.0),
         ("Wind", "Speed") => sky("wind_speed", 1.0),
@@ -94,7 +105,16 @@ fn binding(group: &str, name: &str) -> Option<Binding> {
         ("Water", "Clarity") => Some(Water { field: "clarity" }),
         ("Water", "Ripples") => Some(Water { field: "ripples" }),
         ("Water", "Flow speed") => Some(WaterFlow),
+        ("Water", "Foam") => Some(Water { field: "foam" }),
         ("Water", "Sun glint") => Some(Water { field: "glint" }),
+        ("Vegetation", "Translucency") => scatter("translucency", None),
+        ("Vegetation", "Leaf detail") => scatter("leaf_detail", None),
+        ("Vegetation", "Autumn trees") => scatter("autumn", Some(orr_gfx::SCATTER_BROADLEAF)),
+        ("Vegetation", "Grass distance") => scatter("grass_distance", Some(orr_gfx::SCATTER_GRASS)),
+        ("Vegetation", "Tree detail distance") => scatter("detail_distance", None),
+        ("Vegetation", "Leaf tint") => Some(ScatterTint),
+        ("Ground", "Bumps") => Some(Ground { param: "bumps" }),
+        ("Ground", "Caustics") => Some(Water { field: "caustics" }),
         ("Look", "Exposure") => Some(Exposure),
         ("Look", "Auto exposure") => Some(EffectSwitch { kind: "auto_exposure" }),
         ("Look", "Adaptation speed") => effect("auto_exposure", 2, 1.0, false),
@@ -110,9 +130,7 @@ fn binding(group: &str, name: &str) -> Option<Binding> {
     }
 }
 
-/// Whether the control `name` of `group` is stored in an editor scene. The
-/// others (softness of shadows, foam, vegetation, ground) belong to the
-/// generated valley only.
+/// Whether the control `name` of `group` is stored in an editor scene.
 pub fn applies(group: &str, name: &str) -> bool {
     binding(group, name).is_some()
 }
@@ -172,6 +190,28 @@ fn vec2(v: [f32; 2]) -> Value {
     let Value::Fixed(x) = fixed(v[0]) else { unreachable!("fixed makes a fixed value") };
     let Value::Fixed(y) = fixed(v[1]) else { unreachable!("fixed makes a fixed value") };
     Value::Vec2(orr_fp::FPVec2::new(x, y))
+}
+
+/// The terrains whose surface shader declares the number `param`, as (entity, place of the
+/// number in the material, the shader's default). The shader is the file of its name in the
+/// shader folder next to the scene file, as the viewport reads it.
+fn ground_params(editor: &Editor, param: &str) -> Vec<(Entity, usize, f32)> {
+    let Some(folder) = editor.path().and_then(|scene| scene.parent().map(std::path::Path::to_path_buf)) else { return Vec::new() };
+    let frame = editor.yard_frame();
+    let mut found = Vec::new();
+    for material in &frame.materials {
+        let name = material.shader.as_str();
+        let plain = !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+        if !plain || !frame.terrains.iter().any(|t| t.entity == material.entity) {
+            continue;
+        }
+        let Ok(source) = std::fs::read_to_string(folder.join(SHADER_DIR).join(format!("{name}.wgsl"))) else { continue };
+        let Ok(shader) = orr_render::SurfaceShader::compile(name, &source) else { continue };
+        if let Some(declared) = shader.params().iter().find(|p| p.name == param && p.kind == orr_render::ParamKind::Float) {
+            found.push((material.entity, declared.offset, declared.default[0]));
+        }
+    }
+    found
 }
 
 /// The post effects of the scene as (slot, kind name, enabled, numbers).
@@ -241,6 +281,9 @@ pub fn changes(editor: &Editor, group: &str, name: &str, settings: &Settings) ->
     let slider =|| SLIDERS.iter().find(|s| s.group == group && s.name == name).map(|s| (s.get)(settings));
     let toggle = || TOGGLES.iter().find(|t| t.group == group && t.name == name).map(|t| (t.get)(settings));
     let on_sun = |field: &'static str, component: &'static str, value: Value| sun(editor).map(|e| Change { place: Place::Entity(e, component), path: field.into(), value });
+    let on_scatters = |field: &'static str, value: Value| -> Vec<Change> {
+        editor.yard_frame().scatters.iter().map(|s| Change { place: Place::Entity(s.entity, names::SCATTER), path: field.into(), value: value.clone() }).collect()
+    };
     let on_waters = |f: &dyn Fn(Entity, [f32; 2]) -> (&'static str, Value)| -> Vec<Change> {
         waters(editor)
             .into_iter()
@@ -283,7 +326,29 @@ pub fn changes(editor: &Editor, group: &str, name: &str, settings: &Settings) ->
             None => Vec::new(),
         },
         Binding::EffectSwitch { kind } => toggle().map(|on| effect_changes(editor, kind, None, Some(on))).unwrap_or_default(),
+        Binding::Scatter { field, .. } => slider().map(|v| on_scatters(field, fixed(v))).unwrap_or_default(),
+        Binding::ScatterTint => COLORS
+            .iter()
+            .find(|c| c.group == group && c.name == name)
+            .map(|c| (c.get)(settings))
+            .map(|color| on_scatters("tint", vec3(color.map(|c| c.clamp(0.0, 2.0)))))
+            .unwrap_or_default(),
+        Binding::Ground { param } => slider().map(|v| ground_changes(editor, param, v)).unwrap_or_default(),
     }
+}
+
+/// The edits that set the shader number `param` of every terrain to `value`.
+fn ground_changes(editor: &Editor, param: &str, value: f32) -> Vec<Change> {
+    let mut out = Vec::new();
+    for (entity, offset, _) in ground_params(editor, param) {
+        let Some(material) = editor.yard_frame().materials.iter().find(|m| m.entity == entity) else { continue };
+        out.push(Change { place: Place::Entity(entity, names::MATERIAL), path: format!("values[{offset}]"), value: fixed(value) });
+        // The number counts only while its bit is set.
+        if material.overrides() & (1 << offset) == 0 {
+            out.push(Change { place: Place::Entity(entity, names::MATERIAL), path: "overrides".into(), value: Value::Int(i128::from(material.overrides() | (1 << offset))) });
+        }
+    }
+    out
 }
 
 /// The value of a numeric control as the open scene has it.
@@ -294,6 +359,12 @@ fn scene_number(editor: &Editor, binding: Binding) -> Option<f32> {
         Binding::Ambient => from(names::ENVIRONMENT, "ambient"),
         Binding::Exposure => from(names::POST_PROCESS, "exposure"),
         Binding::Sun { field: "intensity" } => editor.yard_frame().look.as_ref()?.lights.iter().find(|l| l.sun).map(|l| l.light.intensity),
+        Binding::Sun { field: "shadow_softness" } => {
+            let look = editor.yard_frame().look.as_ref()?;
+            look.lights.iter().any(|l| l.sun).then_some(look.shadow_softness)
+        }
+        // Zero is the engine's own split, which has no number to show.
+        Binding::Sun { field: "shadow_sharp_range" } => editor.yard_frame().look.as_ref().map(|look| look.shadow_sharp_range).filter(|v| *v > 0.0),
         Binding::Sun { .. } => {
             let look = editor.yard_frame().look.as_ref()?;
             look.shadow_follows_view.then_some(look.lighting.shadow_radius)
@@ -307,6 +378,8 @@ fn scene_number(editor: &Editor, binding: Binding) -> Option<f32> {
             Some(match field {
                 "clarity" => water.clarity,
                 "ripples" => water.ripples,
+                "foam" => water.foam,
+                "caustics" => water.caustics,
                 _ => water.glint,
             })
         }
@@ -321,7 +394,23 @@ fn scene_number(editor: &Editor, binding: Binding) -> Option<f32> {
                 None => switch.then_some(0.0),
             }
         }
-        Binding::SunShadows | Binding::WaterColor | Binding::EffectSwitch { .. } => None,
+        Binding::Scatter { field, kind } => {
+            let scatters = &editor.yard_frame().scatters;
+            let scatter = kind.and_then(|k| scatters.iter().find(|s| s.kind == k)).or_else(|| scatters.first())?;
+            Some(match field {
+                "translucency" => scatter.translucency,
+                "leaf_detail" => scatter.leaf_detail,
+                "autumn" => scatter.autumn,
+                "grass_distance" => scatter.grass_distance,
+                _ => scatter.detail_distance,
+            })
+        }
+        Binding::Ground { param } => {
+            let (entity, offset, default) = *ground_params(editor, param).first()?;
+            let material = editor.yard_frame().materials.iter().find(|m| m.entity == entity)?;
+            Some(if material.overrides() & (1 << offset) != 0 { material.stored(offset) } else { default })
+        }
+        Binding::SunShadows | Binding::WaterColor | Binding::EffectSwitch { .. } | Binding::ScatterTint => None,
     }
 }
 
@@ -350,10 +439,18 @@ pub fn read(editor: &Editor, mut settings: Settings) -> Settings {
         }
     }
     for color in COLORS {
-        if binding(color.group, color.name) == Some(Binding::WaterColor) {
-            if let Some(water) = editor.yard_frame().waters.first() {
-                (color.set)(&mut settings, water.color);
+        match binding(color.group, color.name) {
+            Some(Binding::WaterColor) => {
+                if let Some(water) = editor.yard_frame().waters.first() {
+                    (color.set)(&mut settings, water.color);
+                }
             }
+            Some(Binding::ScatterTint) => {
+                if let Some(scatter) = editor.yard_frame().scatters.first() {
+                    (color.set)(&mut settings, scatter.tint);
+                }
+            }
+            _ => {}
         }
     }
     settings.sanitized()
@@ -429,24 +526,10 @@ mod tests {
     }
 
     #[test]
-    fn every_control_is_bound_or_listed_as_valley_only() {
-        // The controls with no component in an editor scene.
-        const VALLEY_ONLY: &[(&str, &str)] = &[
-            ("Shadows", "Softness"),
-            ("Shadows", "Sharp range"),
-            ("Water", "Foam"),
-            ("Vegetation", "Translucency"),
-            ("Vegetation", "Leaf detail"),
-            ("Vegetation", "Autumn trees"),
-            ("Vegetation", "Grass distance"),
-            ("Vegetation", "Tree detail distance"),
-            ("Vegetation", "Leaf tint"),
-            ("Ground", "Bumps"),
-            ("Ground", "Caustics"),
-        ];
+    fn every_control_is_bound() {
         let controls = SLIDERS.iter().map(|s| (s.group, s.name)).chain(TOGGLES.iter().map(|t| (t.group, t.name))).chain(COLORS.iter().map(|c| (c.group, c.name)));
         for (group, name) in controls {
-            assert_eq!(applies(group, name), !VALLEY_ONLY.contains(&(group, name)), "{group} / {name}");
+            assert!(applies(group, name), "{group} / {name}");
         }
     }
 }
