@@ -375,40 +375,20 @@ fn clean_history(history: &J) -> Result<(), String> {
 
 fn read_saved_file(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
     let parents = checked_parents(path)?;
-    let before =
-        fs::symlink_metadata(path).map_err(|error| format!("Project source file: {error}"))?;
+    // The first handle pins the identity of the inspected file. `open_file` refuses a
+    // link, a folder or a FIFO without waiting for a writer.
+    let inspected =
+        orr_fsid::open_file(path).map_err(|error| format!("Project source file: {error}"))?;
+    let before = inspected.metadata().map_err(|error| error.to_string())?;
     regular_file(&before, limit)?;
-    let mut options = fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(0x20000 | 0x800); // O_NOFOLLOW | O_NONBLOCK
-    }
-    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(0x100 | 0x4); // O_NOFOLLOW | O_NONBLOCK
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        options.custom_flags(0x0020_0000); // FILE_FLAG_OPEN_REPARSE_POINT
-    }
-    if !cfg!(any(
-        target_os = "linux",
-        target_os = "macos",
-        target_os = "freebsd",
-        windows
-    )) {
-        return Err("Safe Project source file checks are unsupported on this platform".into());
-    }
-    let mut file = options
-        .open(path)
-        .map_err(|error| format!("Project source file: {error}"))?;
+    let mut file =
+        orr_fsid::open_file(path).map_err(|error| format!("Project source file: {error}"))?;
     let opened = file.metadata().map_err(|error| error.to_string())?;
     regular_file(&opened, limit)?;
-    if !same_file(&before, &opened) {
+    let same_handle = orr_fsid::file_id(&file)
+        .and_then(|opened_id| orr_fsid::file_id(&inspected).map(|first| opened_id == first))
+        .map_err(|error| error.to_string())?;
+    if !same_handle || !same_stamp(&before, &opened) {
         return Err("Project source file changed before reading; reopen the project".into());
     }
     let mut bytes = Vec::new();
@@ -416,20 +396,17 @@ fn read_saved_file(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
         .take(limit + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| error.to_string())?;
-    let after = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
     let handle_after = file.metadata().map_err(|error| error.to_string())?;
-    regular_file(&after, limit)?;
     regular_file(&handle_after, limit)?;
     if bytes.len() as u64 != opened.len()
         || bytes.len() as u64 > limit
-        || !same_file(&before, &after)
-        || !same_file(&opened, &handle_after)
+        || !same_stamp(&opened, &handle_after)
+        || !matches!(orr_fsid::same_file(path, &file), Ok(true))
     {
         return Err("Project source file changed while reading; reopen the project".into());
     }
-    for (parent, before) in parents {
-        let after = fs::symlink_metadata(parent).map_err(|error| error.to_string())?;
-        if !safe_directory(&after) || !same_identity(&before, &after) {
+    for parent in &parents {
+        if parent.verify_unchanged().is_err() {
             return Err(
                 "Project source directory changed while reading; reopen the project".into(),
             );
@@ -438,7 +415,7 @@ fn read_saved_file(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-fn checked_parents(path: &Path) -> Result<Vec<(PathBuf, fs::Metadata)>, String> {
+fn checked_parents(path: &Path) -> Result<Vec<orr_fsid::PinnedDirectory>, String> {
     if !path.is_absolute() {
         return Err("Project source path is not absolute".into());
     }
@@ -451,54 +428,30 @@ fn checked_parents(path: &Path) -> Result<Vec<(PathBuf, fs::Metadata)>, String> 
         if matches!(component, Component::Prefix(_)) {
             continue;
         }
-        let metadata = fs::symlink_metadata(&current).map_err(|error| error.to_string())?;
-        if !safe_directory(&metadata) {
-            return Err(
-                "Project source parents must be non-symlink, non-reparse directories".into(),
-            );
-        }
-        result.push((current.clone(), metadata));
+        // One open checks the type, refuses a link or reparse point and pins the identity.
+        let directory = orr_fsid::PinnedDirectory::open(&current).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::InvalidInput {
+                "Project source parents must be non-symlink, non-reparse directories".to_string()
+            } else {
+                error.to_string()
+            }
+        })?;
+        result.push(directory);
     }
     Ok(result)
 }
 
-fn is_link(metadata: &fs::Metadata) -> bool {
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        if metadata.file_attributes() & 0x0400 != 0 {
-            return true;
-        }
-    }
-    metadata.file_type().is_symlink()
-}
-
-fn safe_directory(metadata: &fs::Metadata) -> bool {
-    metadata.is_dir() && !is_link(metadata)
-}
-
 fn regular_file(metadata: &fs::Metadata, limit: u64) -> Result<(), String> {
-    if is_link(metadata) || !metadata.is_file() || metadata.len() > limit {
-        return Err(format!(
-            "Project source must remain a regular, non-symlink file within {limit} bytes"
-        ));
+    if !orr_fsid::is_link(metadata) && metadata.is_file() && metadata.len() <= limit {
+        return Ok(());
     }
-    Ok(())
+    Err(format!(
+        "Project source must remain a regular, non-symlink file within {limit} bytes"
+    ))
 }
 
-fn same_identity(first: &fs::Metadata, second: &fs::Metadata) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        first.dev() == second.dev() && first.ino() == second.ino()
-    }
-    #[cfg(not(unix))]
-    {
-        matches!((first.created(), second.created()), (Ok(first), Ok(second)) if first == second)
-    }
-}
-
-fn same_file(first: &fs::Metadata, second: &fs::Metadata) -> bool {
+/// Size and times of one file. Identity is compared by handle, not here.
+fn same_stamp(first: &fs::Metadata, second: &fs::Metadata) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -506,8 +459,7 @@ fn same_file(first: &fs::Metadata, second: &fs::Metadata) -> bool {
             return false;
         }
     }
-    same_identity(first, second)
-        && first.len() == second.len()
+    first.len() == second.len()
         && matches!((first.modified(), second.modified()), (Ok(first), Ok(second)) if first == second)
 }
 
