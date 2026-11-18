@@ -203,7 +203,8 @@ impl PreparedShadow {
         let mut splits = cascade_splits(near, far, count);
         // A chosen end of the nearest cascade: the others share the rest of the view.
         if sharp_range.is_finite() && sharp_range > 0.0 {
-            let first = sharp_range.clamp(near * 2.0, far * 0.6);
+            // A small shadow radius puts far * 0.6 under near * 2, so the upper bound wins.
+            let first = sharp_range.max(near * 2.0).min(far * 0.6);
             let rest = cascade_splits(first, far, count - 1);
             splits[0] = first;
             splits[1..].copy_from_slice(&rest[..3]);
@@ -462,5 +463,54 @@ impl<B: Rhi> ShadowPipelines<B> {
             .as_ref()
             .expect("validated shared map bound")
             .1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lighting(radius: f32) -> Lighting {
+        Lighting {
+            direction: [0.0, -1.0, 0.0],
+            color: [1.0; 3],
+            intensity: 1.0,
+            sky: [1.0; 3],
+            ground: [1.0; 3],
+            ambient: 0.15,
+            shadows: true,
+            shadow_center: [0.0, 0.0, 0.0],
+            shadow_radius: radius,
+            tonemap: false,
+            exposure: 1.0,
+        }
+    }
+
+    fn camera(near: f32) -> Camera3D {
+        let mut camera = Camera3D::perspective([0.0, 10.0, 10.0], [0.0, 0.0, 0.0], 60.0);
+        camera.projection = crate::Projection::Perspective { fov_y: 1.0, near, far: 1000.0 };
+        camera
+    }
+
+    fn split_ends(radius: f32, near: f32, count: u32, sharp_range: f32) -> Vec<f32> {
+        let shadow = PreparedShadow::prepare_cascaded(&lighting(radius), &camera(near), 1.6, count, 1.0, sharp_range).unwrap().unwrap();
+        shadow.uniform.ranges.iter().take(count as usize).map(|range| range[1]).collect()
+    }
+
+    #[test]
+    fn a_positive_sharp_range_keeps_the_splits_ordered_when_the_radius_is_small() {
+        for count in 2..=MAX_SHADOW_CASCADES {
+            let ends = split_ends(1.0, 1.0, count, 10.0);
+            assert_eq!(ends.len(), count as usize);
+            assert!(ends.iter().all(|end| end.is_finite()), "{count} cascades: {ends:?}");
+            assert!(ends[0] > 1.0, "{count} cascades: {ends:?}");
+            assert!(ends.windows(2).all(|pair| pair[0] < pair[1]), "{count} cascades: {ends:?}");
+        }
+    }
+
+    #[test]
+    fn a_sharp_range_inside_its_bounds_is_used_as_is() {
+        let ends = split_ends(120.0, 1.0, 3, 10.0);
+        assert_eq!(ends[0], 10.0);
     }
 }
