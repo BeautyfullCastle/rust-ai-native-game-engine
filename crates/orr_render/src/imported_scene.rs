@@ -1175,6 +1175,17 @@ fn caster_commands<'a, B: Rhi>(batches: &'a [ImportedBatch<'_, B>], prepared: &'
     commands
 }
 
+/// How many model primitive draws (primitives of a model times its instances, summed over the
+/// models) the frame can still take next to the procedural `list`, so that the composer accepts it:
+/// [`MAX_IMPORTED_DRAWS`] and [`MAX_IMPORTED_CASTERS`](crate::MAX_IMPORTED_CASTERS), less what the
+/// list uses. It is 0 when the list alone is over a limit.
+pub fn model_draw_budget(list: &RenderList3D) -> usize {
+    let Ok(procedural_draws) = crate::renderer3d::procedural_draw_count(list) else { return 0 };
+    MAX_IMPORTED_DRAWS
+        .saturating_sub(procedural_draws)
+        .min(MAX_IMPORTED_CASTERS.saturating_sub(procedural_casters(list)))
+}
+
 fn procedural_casters(list: &RenderList3D) -> usize {
     usize::from(!list.spheres.is_empty())
         + usize::from(!list.boxes.is_empty())

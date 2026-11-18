@@ -54,7 +54,7 @@ impl PreparedProcedural {
     }
 }
 
-fn procedural_draw_count(list: &RenderList3D) -> Result<usize, ProceduralSceneError> {
+pub(crate) fn procedural_draw_count(list: &RenderList3D) -> Result<usize, ProceduralSceneError> {
     let mut total = list.lines.len() + list.surfaces.len();
     for kind in MeshKind::ALL {
         total = total
