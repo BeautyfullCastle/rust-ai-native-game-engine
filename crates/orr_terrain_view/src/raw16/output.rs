@@ -48,7 +48,8 @@ impl Parent {
             .to_owned();
         let mut current = PathBuf::new();
         let mut ancestry = Vec::new();
-        for component in path.components() {
+        let last = path.components().count().saturating_sub(1);
+        for (index, component) in path.components().enumerate() {
             current.push(component.as_os_str());
             // A drive or verbatim prefix such as `\\?\C:` is not a filesystem object.
             if matches!(component, Component::Prefix(_)) {
@@ -64,8 +65,15 @@ impl Parent {
                 return Err(Error("output inside .orr ancestry is forbidden".into()));
             }
             // One open both checks the type and pins the identity, so a link or a
-            // replaced folder cannot slip in between a check and the open.
-            let directory = PinnedDirectory::open(&current).map_err(|e| {
+            // replaced folder cannot slip in between a check and the open. Search
+            // permission is enough for an ancestor. Only the output parent needs a
+            // handle that can sync, so it needs read permission.
+            let opened = if index == last {
+                PinnedDirectory::open_readable(&current)
+            } else {
+                PinnedDirectory::open(&current)
+            };
+            let directory = opened.map_err(|e| {
                 failure(
                     "output ancestry must contain only real directories, not symlinks",
                     e,
@@ -98,8 +106,8 @@ impl Parent {
     fn handle(&self) -> &File {
         self.ancestry
             .last()
-            .map(PinnedDirectory::file)
-            .expect("Parent::open keeps at least one ancestor")
+            .and_then(PinnedDirectory::file)
+            .expect("Parent::open pins the parent folder with a readable handle")
     }
 }
 
