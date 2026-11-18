@@ -128,6 +128,7 @@ pub fn register_reflect(types: &mut TypeRegistry) {
     orr_physics3d::register_reflect(types);
     types.register_singleton::<TerrainScenePin>(PIN_NAME);
     types.register_singleton::<TerrainStepStatus>("TerrainStepStatus");
+    orr_gfx::register_reflect(types);
 }
 
 impl Game for TerrainYard3D {
@@ -141,6 +142,7 @@ impl Game for TerrainYard3D {
         orr_terrain_physics3d::asset::register(builder);
         builder.register_singleton::<TerrainScenePin>(PIN_NAME);
         builder.register_singleton::<TerrainStepStatus>("TerrainStepStatus");
+        orr_gfx::register(builder);
     }
 
     fn setup(frame: &mut Frame, _: &()) {
@@ -148,6 +150,7 @@ impl Game for TerrainYard3D {
         // supplies no collision surface or mixed Yard3D fixture population.
         let config = orr_terrain_physics3d::terrain_config();
         orr_physics3d::init(frame, config);
+        orr_gfx::init(frame);
     }
 
     fn systems() -> Vec<Box<dyn System<Self>>> {

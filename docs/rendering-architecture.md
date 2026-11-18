@@ -421,7 +421,7 @@ Forest Valley 위를 동양식 용이 난다. 비행은 시뮬에서 고정소�
 
 씬에 필드가 없는 컨트롤은 Open scene 모드에서 꺼진다: Shadows(Softness, Sharp range), Water(Foam), Vegetation 전부, Ground 전부. 이것들은 `Scatter`, `Material`에 대응하는 필드가 없다. 생성된 계곡 모드에서는 그대로 쓴다.
 
-**적용 범위.** 컴포넌트를 등록한 게임(Yard3D, ViewYard3D)의 씬에 적용된다. 터레인 문서, 내비게이션, Room, 메시 게임은 아직 `orr_gfx`를 등록하지 않아 이 모드가 꺼져 있다. 같은 이유로 1.14의 첫 항목이 남아 있다. 터레인 문서는 지형을 `orr_gfx::Terrain`이 아니라 터레인 세션의 모델로 그리고, 게임의 입장 검사와 뷰 스트림 스키마가 `orr_gfx`를 모른다. 그래서 이 게임들에 컴포넌트를 넣는 일은 별도 작업이다.
+**적용 범위.** 컴포넌트를 등록한 게임(Yard3D, ViewYard3D, TerrainYard3D)의 씬에 적용된다. 내비게이션, Room, 메시 게임은 아직 `orr_gfx`를 등록하지 않아 이 모드가 꺼져 있다. 같은 이유로 1.14의 첫 항목이 남아 있다. 터레인 문서(`TerrainYard3D`)는 `orr_gfx::register`와 `init`을 넣어 `Light`, `Sky`, `Environment`, `PostProcess`, `Water`를 가진다. 입장 검사(`validate_scene_frame`)는 `Body`와 `Collider`만 보므로 바뀌지 않았다. 뷰포트는 문서의 프레임에서 `YardFrame`을 뽑는 같은 경로를 쓰므로 그림 코드도 그대로다. 터레인 문서는 지형을 여전히 `orr_gfx::Terrain`이 아니라 터레인 세션의 모델로 그린다. 기본 하늘은 꺼져 있고 기본 환경·후처리 값이 이전의 고정 조명과 같으므로, 해(`sun` 방향광)가 없는 이전 문서도 같은 모습으로 열린다. 다만 해가 없으면 Hour가 아무것도 바꾸지 못한다. 체크인된 `scenes/terrain_sphere.scene.yaml`에는 이전 조명과 같은 값의 해가 들어 있다. 이 게임의 상태에 싱글턴 세 개가 늘었으므로 TerrainYard3D의 프레임 체크섬은 전과 다르다. 빈 시뮬(`Simulation::<TerrainYard3D>::new((), 60, 42)`)의 `0x5ed3bc1521e4953e`가 `0x7b028584fdb00177`이 되었다. 이 게임에는 고정된 골든 값이 없고, 다른 게임의 골든(`orr_games --test golden`)은 그대로다.
 
 **편집 방식과 한계.**
 - 슬라이더를 끄는 동안은 하나의 실행 취소 항목이다. 한 번에 바뀌는 필드가 64개를 넘으면 에디터가 끌기를 취소한다. `Water` 컨트롤은 물 엔티티마다 필드 하나를 쓰므로, 물이 64개를 넘는 씬에서는 쓸 수 없다. Forest Valley는 18개다.
