@@ -130,3 +130,33 @@ fn observed_source_replacement_and_publication_collision_are_rejected() {
     .is_err());
     assert_eq!(fs::read(output).unwrap(), b"foreign");
 }
+#[cfg(windows)]
+#[test]
+fn a_junction_in_the_ancestry_is_refused_and_a_replaced_parent_is_detected() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().to_owned();
+    let bytes = Preset::from_document(&document())
+        .unwrap()
+        .encode()
+        .unwrap();
+    let target = root.join("target");
+    fs::create_dir(&target).unwrap();
+    let junction = root.join("junction");
+    let made = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&junction)
+        .arg(&target)
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "{made:?}");
+    let name = "x.room-environment-preset.json";
+    assert!(save_new(&junction.join(name), &bytes).is_err());
+    assert_eq!(fs::read_dir(&target).unwrap().count(), 0);
+
+    let parent = root.join("parent");
+    fs::create_dir(&parent).unwrap();
+    let checked = checked_path(&parent.join(name)).unwrap();
+    fs::rename(&parent, root.join("moved")).unwrap();
+    fs::create_dir(&parent).unwrap();
+    assert!(recheck_ancestors(&checked).is_err());
+}
