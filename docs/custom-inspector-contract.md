@@ -84,7 +84,9 @@ host to verify the edited velocity changes movement and Stop restores the scene.
 The example executable is build-checked; tests use actual EditorApp and local
 hosts with injected egui input, not physical input or native window/GPU proof.
 
-Health/inventory consumption, native Windows visual/physical-input acceptance,
+The Stormglass starter now consumes the contract for enemy health
+(`CoopDefense::EnemyHealth`) and opening bosses (`CoopDefense::WaveComposition`);
+see the Korean section below. Native Windows visual/physical-input acceptance,
 disconnect recovery, full required checks and development integration remain
 pending. Generic numeric edits now commit once on Enter, Tab, pointer or
 programmatic focus transfer. Escape, disabled UI and a hidden Inspector discard
@@ -92,3 +94,54 @@ drafts without document mutation. The original focus-transfer failure and initia
 compile failure are retained alongside the regression results.
 Publication is separately blocked by the Windows GitHub network policy;
 local validation does not waive that restriction or complete #562.
+
+## 한국어 요약: 정적 Custom Inspector 확장 (#562)
+
+### API와 등록
+
+- 기능 `orr_editor/custom-inspector`를 켜고, 앱을 만들 때 `EditorApp::with_custom_inspectors(registry)`로 `Registry`를 설치한다. 기능이 꺼져 있거나 등록이 없으면 기존 일반 Inspector만 쓴다.
+- 등록은 소스에 직접 쓴 정적 Rust 코드다. 앱마다 레지스트리를 하나씩 소유한다. 전역 레지스트리, 파일 탐색, 동적 DLL 로딩, 핫 리로드는 없다.
+- `Extension { id, schema, priority, api_version, draw }` 하나가 컴포넌트 타입 하나를 담당한다.
+- `draw`는 `fn(&mut Ui, Id, &Snapshot) -> Option<FieldEdit>`이다. 프레임마다 편집 의도를 하나까지만 돌려준다. host, 문서, 디스크 핸들은 받지 않는다.
+
+### 타입·필드 식별과 우선순위
+
+- 타입 식별은 `SchemaKey::for_type(&types, "이름")`으로 만든다. 반사 타입 이름과 정확한 JSON Schema 문자열이 모두 같아야 맞는다. 임의 숫자 버전이나 해시는 없다.
+- 필드 식별은 `FieldTarget::Field("이름")`(최상위 필드) 또는 `FieldTarget::ArrayElement { field, index }`(최상위 고정 배열의 원소 하나)다. 중첩 경로 문자열은 거절한다.
+- `priority`가 높은 확장이 등록 순서와 관계없이 이긴다.
+
+### 편집 경로와 검증
+
+- 유효한 의도는 일반 필드와 같은 `InspEvent::Set` → `Editor::set_field` 경로를 지난다. 그래서 검증, Undo/Redo, dirty, 저장/재열기, Play 중 편집 거절이 똑같이 적용된다.
+- 범위를 벗어난 값, 형식이 다른 값, 없는 필드, 배열 범위 밖 인덱스는 거절한다. 거절해도 문서, 체크섬, 이력은 바뀌지 않는다.
+- Play 중에는 사용자 정의 패널이 편집을 제공하지 않고, 호스트도 같은 편집을 거절한다.
+- 사용자 정의 패널의 **Use generic fields** 선택은 화면 상태일 뿐 저장되는 게임 데이터가 아니다. 같은 컴포넌트는 언제나 일반 Inspector로도 편집할 수 있다.
+
+### 스키마·버전·폴백 정책
+
+- `api_version`은 현재 1만 지원한다. 다른 값은 등록 시 거절한다.
+- 같은 `id`를 두 번 등록하거나, 같은 스키마에 같은 `priority`를 등록하면 거절하고 레지스트리를 바꾸지 않는다.
+- 컴파일된 게임의 현재 스키마와 다르거나(공백 한 칸도 다름), 알 수 없는 타입이면 사용자 정의 패널을 쓰지 않고 일반 Inspector로 돌아간다. 문서는 바뀌지 않는다.
+- 선언 API(`Extension`, `FieldEdit`, `FieldTarget` 등)가 바뀌면 이 문서의 호환성 메모에 이전 방법을 적는다. 이 API는 실험 단계이며 안정된 바이너리 ABI가 없다.
+
+### 안전 안내
+
+`draw`는 신뢰하는 네이티브 Rust 코드이며 샌드박스가 아니다. 이 API는 host/문서/디스크/네트워크 핸들을 주지 않지만, 네이티브 코드가 가진 기본 권한(블로킹, 재귀, 패닉 등)까지 막지는 못한다. 신뢰할 수 없는 코드를 등록하지 않는다.
+
+### 소비자 예제 (Stormglass 스타터)
+
+`examples/static-game-starter/src/stormglass/`가 같은 레지스트리에 확장을 등록한다. 에디터 코어, 앱 분기, 게임 enum은 건드리지 않는다.
+
+| 확장 | 컴포넌트 | 패널 |
+| --- | --- | --- |
+| `stormglass-enemy-health` (`health_inspector.rs`) | `CoopDefense::EnemyHealth` | 체력 배율 막대, "최대(x4)로 설정", "기본(x1)으로 되돌리기" |
+| `stormglass-opening-boss` (`boss_inspector.rs`) | `CoopDefense::WaveComposition` | 웨이브별 시작 보스 추가/제거 (`opening_boss[i]`) |
+| `stormglass-wave-cadence`, `stormglass-wave-counts` | `WavePacing`, `WaveCounts` | 기존 예제 |
+
+새 확장을 추가하려면 새 파일 하나와 `stormglass.rs`의 `mod` 한 줄, `cadence_inspector::registry()`의 `register` 호출 한 줄이 필요하다.
+
+검증 명령:
+
+```sh
+cargo test -j 8 -p orr_static_starter --features stormglass,api-acceptance --lib _inspector
+```
