@@ -21,6 +21,6 @@ pub mod netsim;
 pub use msg::{
     confirmed_encoded_len, input_encoded_len, Bundle, ClientMsg, Hello, InputEntry, ProtoError, RejectReason, ServerMsg, SlotConfirmed, TimeSync, Welcome,
     BYE_BEHIND, BYE_KICKED_CHEAT, BYE_KICKED_DESYNC, FLAG_ABSENT, FLAG_REPEATED, NO_SLOT,
-    PROTOCOL_VERSION, SEAT_RECONNECTED, SEAT_REMOVED, SERVER_SLOT, WELCOME_AUTHORITATIVE,
+    MAX_INPUT_ENTRIES, PROTOCOL_VERSION, SEAT_RECONNECTED, SEAT_REMOVED, SERVER_SLOT, WELCOME_AUTHORITATIVE,
 };
 pub use net::{Channel, ConnId, Endpoint, Link, LinkEvent, ServerEvent, UNRELIABLE_MTU};
