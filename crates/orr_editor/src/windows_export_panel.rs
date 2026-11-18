@@ -18,6 +18,9 @@ pub struct Panel {
     pub status: String,
     pub last_output: Option<PathBuf>,
     pub last_digest: Option<String>,
+    /// The start file of the last finished export, found in its manifest.
+    pub last_launcher: Option<PathBuf>,
+    failed: bool,
     pending: Option<mpsc::Receiver<Result<Completed, String>>>,
 }
 
@@ -29,6 +32,12 @@ impl Panel {
         }
         self.runtime = runtime;
         self.runtime_sha256 = sha256;
+    }
+
+    /// Sets the message of the panel. A failure is drawn in the error color.
+    fn say(&mut self, text: impl Into<String>, failed: bool) {
+        self.status = text.into();
+        self.failed = failed;
     }
 
     pub fn busy(&self) -> bool {
@@ -62,20 +71,30 @@ impl Panel {
         match result {
             Ok(Completed::Measured { path, sha256 }) if self.runtime == path => {
                 self.set_runtime_identity(path, sha256);
-                self.status = "Runtime measured. Its hash does not establish trust; confirm trusted code separately.".into();
+                self.say("Runtime measured. Its hash does not establish trust; confirm trusted code separately.", false);
             }
             Ok(Completed::Measured { .. }) => {
-                self.status = "Runtime path changed; measure the selected executable again.".into();
+                self.say("Runtime path changed; measure the selected executable again.", true);
             }
             Ok(Completed::Exported(report)) => {
-                self.status = format!(
-                    "Export complete: {} project files; initial checksum {}",
-                    report.project_files, report.manifest.payload.initial_checksum
+                self.say(
+                    format!(
+                        "Export complete: {} project files; initial checksum {}",
+                        report.project_files, report.manifest.payload.initial_checksum
+                    ),
+                    false,
                 );
+                self.last_launcher = report
+                    .manifest
+                    .payload
+                    .files
+                    .iter()
+                    .find(|file| file.path.ends_with(".cmd") && !file.path.contains(['/', '\']))
+                    .map(|file| report.output.join(&file.path));
                 self.last_output = Some(report.output);
                 self.last_digest = Some(report.content_digest);
             }
-            Err(error) => self.status = format!("Export failed: {error}"),
+            Err(error) => self.say(format!("Export failed: {error}"), true),
         }
     }
 
@@ -99,11 +118,11 @@ impl Panel {
         match worker {
             Ok(_) => {
                 self.pending = Some(receiver);
-                self.status = "Measuring the selected runtime…".into();
+                self.say("Measuring the selected runtime…", false);
                 true
             }
             Err(error) => {
-                self.status = format!("Cannot start runtime measurement: {error}");
+                self.say(format!("Cannot start runtime measurement: {error}"), true);
                 false
             }
         }
@@ -114,21 +133,20 @@ impl Panel {
             return false;
         }
         if presentation_dirty {
-            self.status =
-                "Apply or discard camera drafts and save camera/model sidecars before exporting; scene Save does not save those sidecars."
-                    .into();
+            self.say(
+                "Apply or discard camera drafts and save camera/model sidecars before exporting; scene Save does not save those sidecars.",
+                true,
+            );
             return false;
         }
         if !self.trusted_runtime {
-            self.status =
-                "Explicitly confirm that this runtime is known trusted code before exporting."
-                    .into();
+            self.say("Explicitly confirm that this runtime is known trusted code before exporting.", true);
             return false;
         }
         let (scene, checksum) = match editor.windows_export_scene() {
             Ok(stamp) => stamp,
             Err(error) => {
-                self.status = error;
+                self.say(error, true);
                 return false;
             }
         };
@@ -153,11 +171,12 @@ impl Panel {
                 self.pending = Some(receiver);
                 self.last_output = None;
                 self.last_digest = None;
-                self.status = "Exporting the saved Room project and checking its runtime…".into();
+                self.last_launcher = None;
+                self.say("Exporting the saved Room project and checking its runtime…", false);
                 true
             }
             Err(error) => {
-                self.status = format!("Cannot start export: {error}");
+                self.say(format!("Cannot start export: {error}"), true);
                 false
             }
         }
@@ -197,10 +216,17 @@ impl Panel {
                 context.request_repaint_after(std::time::Duration::from_millis(40));
             }
             if !self.status.is_empty() {
-                ui.label(&self.status);
+                if self.failed {
+                    ui.label(egui::RichText::new(format!("\u{26A0} {}", self.status)).color(crate::theme::ERROR));
+                } else {
+                    ui.label(&self.status);
+                }
             }
             if let Some(output) = &self.last_output {
                 ui.label(format!("Output: {}", output.display()));
+                // The next action after a finished export: start the game from its own folder.
+                let start = self.last_launcher.as_deref().unwrap_or(output);
+                ui.label(egui::RichText::new(format!("Run the exported game: {}", start.display())).strong().color(crate::theme::TEXT_STRONG));
             }
             if let Some(digest) = &self.last_digest {
                 ui.label(format!("Content digest: {digest}"));
