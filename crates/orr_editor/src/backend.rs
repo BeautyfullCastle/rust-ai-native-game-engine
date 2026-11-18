@@ -338,6 +338,7 @@ impl Backend {
             #[cfg(feature = "room-project")]
             EditorGame::RoomEscape => orr_remote::room_escape::spawn_host(text,Some(scene.to_path_buf()),cfg)?,
             EditorGame::Yard3D => orr_remote::yard3d::spawn_yard3d_scene_host(scene.to_path_buf(), cfg)?,
+            EditorGame::ViewYard3D => orr_remote::view_yard3d::spawn_view_yard3d_scene_host(scene.to_path_buf(), cfg)?,
             #[cfg(feature = "terrain-physics")]
             EditorGame::TerrainYard3D => orr_remote::terrain_yard3d::spawn_terrain_yard3d_scene_host(scene.to_path_buf(), cfg)?,
             #[cfg(feature = "navigation")]
@@ -527,7 +528,7 @@ fn discover(erp: &mut ErpClient) -> Result<(EditorGame, RemoteIdentity, String, 
         types.register_component::<orr_sample::room_game::RoomInput>("RoomInput");
         serde_json::from_str(&types.type_json_schema("RoomInput").expect("registered room input")).expect("reflected room JSON schema")
     } else { expected_input };
-    let expected_input = if game == EditorGame::Yard3D {
+    let expected_input = if game == EditorGame::Yard3D || game == EditorGame::ViewYard3D {
         let mut types = orr_reflect::TypeRegistry::new();
         types.register_component::<orr_sample::yard3d_game::YardInput>("YardInput");
         serde_json::from_str(&types.type_json_schema("YardInput").expect("registered Yard3D input")).expect("reflected Yard3D JSON schema")

@@ -29,6 +29,65 @@ pub struct YardFrame {
     pub scatters: Vec<orr_gfx_view::ScatterRef>,
     /// Each dragon (`orr_games::Dragon`) as its head's path, newest first, and its roll in degrees.
     pub dragons: Vec<(Vec<[f32; 3]>, f32)>,
+    /// The entities drawn from a view asset (`orr_gfx::ViewRef`), from the same frame.
+    pub view_refs: Vec<ViewRefPlace>,
+}
+
+/// An entity with an `orr_gfx::ViewRef`: the id of the view asset it names and where its
+/// `orr_gfx::Transform3` puts it. The frame also holds a marker box for it ([`YardFrame::items`]),
+/// which stands for it until its model is drawn.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ViewRefPlace {
+    pub entity: Entity,
+    /// The view asset id; 0 for none.
+    pub asset: u64,
+    pub translation: [f32; 3],
+    /// A unit quaternion, XYZW.
+    pub rotation: [f32; 4],
+    pub scale: [f32; 3],
+}
+
+/// The color of the marker box of an entity that has a `ViewRef` and no model drawn.
+const VIEW_REF_MARKER_COLOR: [f32; 3] = [0.62, 0.64, 0.70];
+
+/// The rotation of `orr_gfx::Transform3::rotation` (pitch, yaw, roll in degrees; all zero faces +z,
+/// positive pitch turns the entity downward) as a quaternion: roll, then pitch, then yaw.
+fn euler_degrees(degrees: [f32; 3]) -> orr_view::Quat {
+    let [pitch, yaw, roll] = degrees.map(f32::to_radians);
+    let about = |axis: [f32; 3], angle: f32| orr_view::Quat::from_axis_angle(orr_view::Vec3::new(axis[0], axis[1], axis[2]), angle);
+    about([0.0, 1.0, 0.0], yaw) * about([1.0, 0.0, 0.0], pitch) * about([0.0, 0.0, 1.0], roll)
+}
+
+/// The entities with a `ViewRef` and a `Transform3` that no other extractor draws. Each one is
+/// appended to `out` as a marker box of its scale, so it can be seen, picked and selected, and
+/// returned with its place. Empty when the game does not register `ViewRef`.
+fn view_refs(frame: FrameView<'_>, out: &mut Vec<orr_view::Extracted3>) -> Vec<ViewRefPlace> {
+    use orr_gfx::{Transform3 as Placed, ViewRef};
+    if !frame.registers::<ViewRef>() || !frame.registers::<Placed>() {
+        return Vec::new();
+    }
+    let drawn: std::collections::BTreeSet<Entity> = out.iter().map(|item| item.entity).collect();
+    let mut places = Vec::new();
+    for (entity, view_ref) in frame.iter::<ViewRef>() {
+        if drawn.contains(&entity) {
+            continue;
+        }
+        let Some(placed) = frame.get::<Placed>(entity) else { continue };
+        let v = |p: orr_fp::FPVec3| [orr_view::fp_to_f32(p.x), orr_view::fp_to_f32(p.y), orr_view::fp_to_f32(p.z)];
+        let (translation, degrees, scale) = (v(placed.position), v(placed.rotation), v(placed.scale));
+        let rotation = euler_degrees(degrees);
+        let half = scale.map(|s| (s * 0.5).abs().max(1e-3));
+        let mut style = orr_view::Style3::new(Shape3::Box { half }, VIEW_REF_MARKER_COLOR);
+        style.layers = orr_gfx_view::layers_of(frame, entity);
+        out.push(orr_view::Extracted3 {
+            entity,
+            transform: Transform3::new(orr_view::Vec3::new(translation[0], translation[1], translation[2]), rotation),
+            mode: orr_view::InterpMode::Prediction,
+            style,
+        });
+        places.push(ViewRefPlace { entity, asset: view_ref.asset, translation, rotation: rotation.to_array(), scale });
+    }
+    places
 }
 
 /// The dragons of `frame`: the head, then its trail from the newest point to the oldest.
@@ -80,6 +139,7 @@ impl YardFrame {
     pub fn extract(frame: FrameView<'_>) -> Self {
         let mut extracted = Vec::new();
         orr_sample::yard3d_view::YardExtractor.extract(frame, &mut extracted);
+        let view_refs = view_refs(frame, &mut extracted);
         let items: Vec<RenderItem3> = extracted
             .into_iter()
             .map(|item| RenderItem3 {
@@ -106,6 +166,7 @@ impl YardFrame {
             waters: orr_gfx_view::waters(frame),
             scatters: orr_gfx_view::scatters(frame),
             dragons: dragons(frame),
+            view_refs,
         }
     }
     /// The frame drawn with the built-in material for every entity.
