@@ -16,7 +16,6 @@ pub(crate) use camera::{bounded_size, PreviewBounds, PreviewCamera};
 use crate::model_bindings::{self, LoadedAsset, ModelKind};
 use orr_package::{Lock, Project};
 use std::{
-    fs,
     path::{Path, PathBuf},
     sync::{
         mpsc::{self, Receiver, TryRecvError},
