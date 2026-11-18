@@ -12,11 +12,13 @@ use std::rc::Rc;
 use bytemuck::{Pod, Zeroable};
 use orr_app::{
     fp_to_f32, solid_quad, App, Camera, EntityView, EventState, Extracted, Extractor, FrameView, InterpMode, RenderItem, SceneView, Shape,
-    Style, Transform2, Vec2, View2D, ViewContext,
+    SoundHandle, Style, Transform2, Vec2, View2D, ViewContext,
 };
 use orr_sim::{
     fn_systems, fp, register_player_link, ComponentRegistryBuilder, Entity, Frame, Game, PlayerLink, PlayerSlot, SimContext, System, FP,
 };
+
+use crate::sound;
 
 // ---- simulation: FP only, no f32 ----
 
@@ -151,7 +153,6 @@ const STAR: [f32; 4] = [1.0, 0.85, 0.25, 1.0];
 const RING_TICKS: u64 = 40;
 const KEEP_TICKS: u64 = 240;
 const TRAIL_DOTS: usize = 12;
-const MAX_PIPS: u32 = 14;
 
 fn color_of(slot: u32) -> [f32; 4] {
     COLORS[slot as usize % COLORS.len()]
@@ -160,6 +161,8 @@ fn color_of(slot: u32) -> [f32; 4] {
 pub struct Ring {
     pub picked: Picked,
     pub start: u64,
+    /// The pick-up sound. A rollback that takes the pick-up back stops it.
+    pub sound: Option<SoundHandle>,
 }
 
 pub struct Trail {
@@ -235,13 +238,6 @@ impl View2D for Look {
                 out.push(disc(center, 0.3 + 0.9 * t, [color[0], color[1], color[2], 0.6 * (1.0 - t)]));
             }
         }
-        // The score bars: player 1 fills from the left, player 2 from the right.
-        for (slot, score) in fx.scores.iter().enumerate() {
-            let side = if slot == 0 { 1.0 } else { -1.0 };
-            for i in 0..(*score).min(MAX_PIPS) {
-                out.push(solid_quad([side * (-4.3 + 0.3 * i as f32), 5.0], [0.12, 0.12], color_of(slot as u32)));
-            }
-        }
     }
 }
 
@@ -287,14 +283,20 @@ impl SceneView<StarPick> for Juice {
         match state {
             EventState::Predicted | EventState::Verified => {
                 if !fx.rings.iter().any(|ring| ring.picked == *event) {
-                    fx.rings.push(Ring { picked: *event, start: ctx.tick() });
-                    println!("Ding! Player {} has {} points", event.slot + 1, event.points);
+                    let sound = ctx.audio().play_named(sound::PICKUP); // a short ding, at once
+                    fx.rings.push(Ring { picked: *event, start: ctx.tick(), sound });
                 }
             }
-            EventState::Canceled => fx.rings.retain(|ring| ring.picked != *event),
+            EventState::Canceled => {
+                for sound in fx.rings.iter().filter(|ring| ring.picked == *event).filter_map(|ring| ring.sound) {
+                    ctx.audio().stop(sound);
+                }
+                fx.rings.retain(|ring| ring.picked != *event);
+            }
         }
     }
 
+    #[allow(clippy::float_arithmetic)]
     fn on_update(&mut self, ctx: &mut ViewContext<'_, StarPick>) {
         let mut fx = self.fx.borrow_mut();
         fx.now = ctx.tick();
@@ -307,6 +309,11 @@ impl SceneView<StarPick> for Juice {
                 }
             }
             fx.scores = scores;
+        }
+        // The score of each player as text in the top left corner: player 1 on the first line, player 2 on the second.
+        for (slot, score) in fx.scores.iter().enumerate() {
+            let line = 14.0 + 30.0 * slot as f32;
+            ctx.draw().text([16.0, line], 21.0, color_of(slot as u32), &format!("PLAYER {} SCORE {}", slot + 1, score));
         }
         let now = fx.now;
         fx.rings.retain(|ring| now < ring.start + KEEP_TICKS);
@@ -326,5 +333,6 @@ pub fn app() -> App<StarPick> {
         .view(Look { fx: fx.clone() })
         .entity_view::<Score>(move || TrailView { fx: for_trails.clone() })
         .scene_view(Juice { fx })
+        .sound(sound::PICKUP, sound::pickup())
         .title("Star Pick 3")
 }

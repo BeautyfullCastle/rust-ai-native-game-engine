@@ -7,6 +7,7 @@
 #![deny(clippy::disallowed_types)]
 #![deny(clippy::float_arithmetic)]
 
+pub mod sound;
 pub mod step1;
 pub mod step2;
 pub mod step3;

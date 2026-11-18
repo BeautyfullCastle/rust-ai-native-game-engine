@@ -3,13 +3,16 @@
 
 mod common;
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::time::Duration;
 
 use common::{chase, SEED, TICK_RATE};
-use orr_app::{FrameView, Views};
+use orr_app::{AudioConfig, FrameView, OfflineAudio, Views};
 use orr_bridge::{Bridge, BridgeConfig, InProc, PlayHost};
 use orr_session::{PlayConfig, PlaySession};
 use orr_sim::{Frame, PlayerSlot};
+use star_pick::sound;
 use star_pick::step2::{Juice, Move, Pos, Score, Shared, Star, StarPick, TrailView};
 
 const TICKS: u64 = 900;
@@ -79,6 +82,10 @@ fn the_views_follow_the_game() {
     // The same pieces the app uses offline: a play session in a bridge, and the views on top.
     let fx = Shared::default();
     let mut views = Views::<StarPick>::new();
+    // The sounds go to an offline output, so the test can count them.
+    let audio = Rc::new(RefCell::new(OfflineAudio::new_offline(AudioConfig::default(), 44_100).unwrap()));
+    views.set_sound_out(audio.clone());
+    views.sound(sound::PICKUP, sound::pickup());
     let for_trails = fx.clone();
     views.entity_view::<Score>(move || TrailView { fx: for_trails.clone() });
     views.scene_view(Juice { fx: fx.clone() });
@@ -86,6 +93,7 @@ fn the_views_follow_the_game() {
     let session = PlaySession::<StarPick>::new(PlayConfig::new(1, SEED, TICK_RATE), ());
     let mut bridge = InProc::new(PlayHost::new(session, PlayerSlot(0)), BridgeConfig::default());
     let mut saw_ring = false;
+    let mut block = [0.0f32; 1470]; // 735 stereo frames: a 60th of a second at 44.1 kHz
     for _ in 0..TICKS {
         if let Some(snapshot) = bridge.snapshot() {
             let input = steer_view(snapshot.predicted());
@@ -94,6 +102,7 @@ fn the_views_follow_the_game() {
         bridge.update(Duration::from_secs(1) / TICK_RATE);
         let update = bridge.poll_view();
         views.dispatch(&mut bridge, &update, &[]);
+        audio.borrow_mut().render(&mut block).unwrap(); // one tick of sound time passes
         saw_ring |= !fx.borrow().rings.is_empty();
     }
 
@@ -101,7 +110,10 @@ fn the_views_follow_the_game() {
     let verified = snapshot.verified().expect("a verified frame");
     let score = verified.iter::<Score>().next().expect("the player").1.points;
     assert!(score >= 5);
-    assert_eq!(fx.borrow().score, score, "the score bar shows the verified score");
+    assert_eq!(fx.borrow().score, score, "the score shows the verified score");
+    assert_eq!(views.overlay().texts().len(), 1, "the score is one piece of text");
+    assert_eq!(views.overlay().texts()[0].text, format!("SCORE {score}"));
+    assert_eq!(audio.borrow().stats().started, u64::from(score), "every pick-up played its sound once");
     assert!(saw_ring, "a pick-up started the ring");
     assert_eq!(fx.borrow().trails.len(), 1, "the entity view was created for the player");
 }
