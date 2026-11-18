@@ -7,7 +7,7 @@ use std::{
     fmt,
     path::{Component, Path},
 };
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::{fs, io::Read, path::PathBuf};
 
 const MAX_ASSET_BYTES: usize = 256 * 1024;
@@ -140,6 +140,36 @@ fn identity(metadata: &fs::Metadata) -> (u64, u64) {
     use std::os::unix::fs::MetadataExt;
     (metadata.dev(), metadata.ino())
 }
+/// Windows has no stable file index in std. The creation time stands in for it:
+/// a replaced directory or file gets a new one. The second field is never zero.
+#[cfg(windows)]
+fn identity(metadata: &fs::Metadata) -> (u64, u64) {
+    use std::os::windows::fs::MetadataExt;
+    (metadata.creation_time(), 1)
+}
+#[cfg(windows)]
+fn observation(metadata: &fs::Metadata) -> (u64, u64, u64, i64, i64, i64, i64) {
+    use std::os::windows::fs::MetadataExt;
+    (
+        metadata.creation_time(),
+        u64::from(metadata.file_attributes()),
+        metadata.len(),
+        metadata.last_write_time() as i64,
+        0,
+        0,
+        0,
+    )
+}
+/// A junction or any other reparse point, which `is_symlink` may not report.
+#[cfg(windows)]
+fn is_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    metadata.file_attributes() & 0x0400 != 0
+}
+#[cfg(unix)]
+fn is_reparse_point(_metadata: &fs::Metadata) -> bool {
+    false
+}
 #[cfg(unix)]
 fn observation(metadata: &fs::Metadata) -> (u64, u64, u64, i64, i64, i64, i64) {
     use std::os::unix::fs::MetadataExt;
@@ -153,9 +183,9 @@ fn observation(metadata: &fs::Metadata) -> (u64, u64, u64, i64, i64, i64, i64) {
         metadata.ctime_nsec(),
     )
 }
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 type Ancestors = Vec<(PathBuf, (u64, u64))>;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn ancestry(path: &Path) -> Result<Ancestors, String> {
     let mut result = Vec::new();
     for parent in path
@@ -165,7 +195,11 @@ fn ancestry(path: &Path) -> Result<Ancestors, String> {
     {
         let metadata = fs::symlink_metadata(parent)
             .map_err(|e| format!("inspect terrain patch parent: {e}"))?;
-        if !metadata.is_dir() || metadata.file_type().is_symlink() || identity(&metadata).1 == 0 {
+        if !metadata.is_dir()
+            || metadata.file_type().is_symlink()
+            || is_reparse_point(&metadata)
+            || identity(&metadata).1 == 0
+        {
             return Err(
                 "terrain patch ancestors must be real directories with stable identities".into(),
             );
@@ -175,17 +209,42 @@ fn ancestry(path: &Path) -> Result<Ancestors, String> {
     Ok(result)
 }
 
+#[cfg(unix)]
+fn open_no_follow(path: &Path) -> Result<fs::File, String> {
+    let descriptor = rustix::fs::open(
+        path,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::NONBLOCK
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(|e| format!("open terrain patch: {e}"))?;
+    Ok(fs::File::from(descriptor))
+}
+/// `FILE_FLAG_OPEN_REPARSE_POINT` opens a final link itself instead of its target.
+#[cfg(windows)]
+fn open_no_follow(path: &Path) -> Result<fs::File, String> {
+    use std::os::windows::fs::OpenOptionsExt;
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(0x0020_0000)
+        .open(path)
+        .map_err(|e| format!("open terrain patch: {e}"))
+}
+
 /// Requires trusted, quiescent directories. Observations detect ordinary
 /// replacement, not an adversarial ancestor swap-and-restore race.
 pub(super) fn read_patch(path: &Path) -> Result<Vec<u8>, String> {
     checked_path(path)?;
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         let parents = ancestry(path)?;
         let before =
             fs::symlink_metadata(path).map_err(|e| format!("inspect terrain patch: {e}"))?;
         if !before.is_file()
             || before.file_type().is_symlink()
+            || is_reparse_point(&before)
             || identity(&before).1 == 0
             || before.len() > MAX_ASSET_BYTES as u64
         {
@@ -193,16 +252,7 @@ pub(super) fn read_patch(path: &Path) -> Result<Vec<u8>, String> {
                 "terrain patch must be a regular, bounded file with a stable identity".into(),
             );
         }
-        let descriptor = rustix::fs::open(
-            path,
-            rustix::fs::OFlags::RDONLY
-                | rustix::fs::OFlags::NOFOLLOW
-                | rustix::fs::OFlags::NONBLOCK
-                | rustix::fs::OFlags::CLOEXEC,
-            rustix::fs::Mode::empty(),
-        )
-        .map_err(|e| format!("open terrain patch: {e}"))?;
-        let file = fs::File::from(descriptor);
+        let file = open_no_follow(path)?;
         let held = file.metadata().map_err(|e| e.to_string())?;
         if !held.is_file()
             || observation(&held) != observation(&before)
@@ -221,6 +271,7 @@ pub(super) fn read_patch(path: &Path) -> Result<Vec<u8>, String> {
             || bytes.len() as u64 != before.len()
             || !named.is_file()
             || named.file_type().is_symlink()
+            || is_reparse_point(&named)
             || observation(&after) != observation(&before)
             || observation(&named) != observation(&before)
             || ancestry(path)? != parents
@@ -229,7 +280,7 @@ pub(super) fn read_patch(path: &Path) -> Result<Vec<u8>, String> {
         }
         Ok(bytes)
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         Err("bounded no-follow terrain patch reads are unsupported on this platform".into())
     }
