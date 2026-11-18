@@ -1,6 +1,7 @@
 //! Linux filesystem contracts. No global hooks, sleeps, or timing-dependent races.
 use super::*;
 use serde_json::json;
+use std::fs;
 use std::os::unix::{fs::symlink, net::UnixListener};
 
 fn template(name: &str) -> Template {
@@ -300,14 +301,13 @@ fn replacement_final_check_to_persist_gap_is_not_compare_and_swap() {
 }
 
 #[test]
-fn directory_inode_substitution_rejected_by_opened_identity() {
+fn directory_symlink_substitution_is_rejected_by_the_parent_check() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("parent");
-    fs::create_dir(&path).unwrap();
-    let observed = fs::symlink_metadata(&path).unwrap();
-    fs::rename(&path, dir.path().join("old-parent")).unwrap();
-    fs::create_dir(&path).unwrap();
-    assert!(verify_directory(&path, &observed).is_err());
+    let real = dir.path().join("real");
+    let link = dir.path().join("link");
+    fs::create_dir(&real).unwrap();
+    symlink(&real, &link).unwrap();
+    assert!(validate_parent(&link).is_err());
 }
 
 #[test]

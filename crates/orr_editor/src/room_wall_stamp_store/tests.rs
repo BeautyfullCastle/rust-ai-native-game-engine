@@ -118,3 +118,36 @@ fn stamp_rejects_reparse_file_and_directory_paths() {
         assert!(checked_path(&directory_link.join("wall.room-stamp.json")).is_err());
     }
 }
+
+#[cfg(windows)]
+#[test]
+fn stamp_rejects_a_junction_directory_and_a_replaced_file_between_inspection_and_open() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory.path().join("target");
+    fs::create_dir(&target).unwrap();
+    let junction = directory.path().join("junction");
+    let made = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&junction)
+        .arg(&target)
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "{made:?}");
+    assert!(checked_path(&junction.join("wall.room-stamp.json")).is_err());
+
+    let path = path_in(directory.path());
+    fs::write(&path, b"first").unwrap();
+    let staged = directory.path().join("substitute");
+    fs::write(&staged, b"other").unwrap();
+    let checked = checked_path(&path).unwrap();
+    let error = read_optional_with_hooks(
+        &checked,
+        || {
+            fs::remove_file(&path).unwrap();
+            fs::rename(&staged, &path).unwrap();
+        },
+        || {},
+    )
+    .unwrap_err();
+    assert!(error.contains("changed while opening"), "{error}");
+}
