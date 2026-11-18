@@ -60,16 +60,16 @@ Demo: `presets::arena_ai` (moves toward the nearest player, fires every 12 ticks
 
 ## Messages and versioning
 
-`PROTOCOL_VERSION` is now 5; decoders accept 2 to 5. A message is encoded with the lowest version that can express it, so server messages of a room without signals stay version 2 or 3 (a test pins this). Version 4 added the player signal fence (`Bundle::signals`, `seq` of `Presence` and `SeatChange`). Version 5 added the compact client `Input` (a "same as the previous entry" flag) and `Hello::client_version`; see the `orr_proto::msg` module docs. A client sends version 5 `Input` always, so a room needs a version 5 server. Version 3 added:
+There is one protocol version (`PROTOCOL_VERSION`, now 6). Every message is encoded with it, and a decoder refuses any other version. A server answers a `Hello` of another version with `Reject(BadVersion { server, client })`. Every field is always written. See the `orr_proto::msg` module docs. The authoritative mode uses these messages and fields:
 
 | message | change |
 |---|---|
-| `ServerMsg::Welcome` | trailing `flags` byte, written (header version 3) only when a flag is set; `WELCOME_AUTHORITATIVE = 1`. Version 2 `Welcome` decodes with `flags = 0`. |
-| `ServerMsg::Correction` (kind 12) | `from_tick, tick, checksum, data` (lz4 frame); version 3 only |
+| `ServerMsg::Welcome` | trailing `flags` byte, always written; `WELCOME_AUTHORITATIVE = 1` |
+| `ServerMsg::Correction` (kind 12) | `from_tick, tick, checksum, data` (lz4 frame) |
 | `ServerMsg::Bye` | no format change; codes `BYE_BEHIND = 1`, `BYE_KICKED_DESYNC = 2`, `BYE_KICKED_CHEAT = 3` |
 | `Desync` reports | slot `SERVER_SLOT` (0xFF) carries the server's checksum |
 
-Version 3 left the client messages unchanged. A version-2 client cannot join an authoritative room (it fails to decode the version-3 `Welcome`); relay rooms accept old and new clients.
+The client messages are the same in both modes.
 
 Client side: `ClientEvent::Corrected { from_tick, tick }`, `ClientEvent::Kicked { code }`, `RelayClient::kicked()`, `ClientStats::{corrections, corrections_ignored}`. Server side: `ServerNote::{Correction, ServerSnapshot, Violation, Kicked}`, `RoomStats::{corrections, kicks, violations, server_snapshots, server_ticks}`, `RelayServer::{create_authoritative_room, set_dump_sink, server_checksums}`.
 
