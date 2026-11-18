@@ -209,6 +209,14 @@ impl SceneView<StarPick> for Juice {
         }
     }
 
+    fn on_resync(&mut self, ctx: &mut ViewContext<'_, StarPick>) {
+        // 예측이 통째로 버려졌습니다. 그 `Canceled`는 오지 않으므로 소리와 고리를 여기서 치웁니다.
+        let mut fx = self.fx.borrow_mut();
+        for sound in fx.rings.drain(..).filter_map(|ring| ring.sound) {
+            ctx.audio().stop(sound);
+        }
+    }
+
     fn on_update(&mut self, ctx: &mut ViewContext<'_, StarPick>) {
         let mut fx = self.fx.borrow_mut();
         fx.now = ctx.tick();
@@ -225,6 +233,8 @@ impl SceneView<StarPick> for Juice {
 `on_event`는 이벤트마다, `on_update`는 프레임마다 불립니다. `Predicted`에서 고리를 만들었다면 같은 이벤트가 `Verified`로 다시 올 때 새 고리를 만들지 않습니다. 이벤트 값 자체(`Picked`)로 같은지 비교합니다.
 
 `play_named`가 돌려주는 `SoundHandle`은 `Ring`에 담아 둡니다. `Canceled`가 오면 그 손잡이로 `stop`을 불러 소리를 줄이며 끕니다. 소리는 짧아서 대개 이미 끝났지만, 길게 이어지는 소리라면 이 한 줄이 중요합니다. 끝난 소리에 `stop`을 불러도 아무 일도 없습니다.
+
+`Canceled`가 오지 않는 경우가 하나 더 있습니다. 창이 서버와 어긋나서 예측을 통째로 버리고 다시 맞추면(`ViewResync`), 엔진은 `Predicted`로 받은 이벤트의 기억을 비웁니다. 그 이벤트들의 `Canceled`는 끝내 오지 않습니다. 그래서 `on_resync`에서 `Ring`에 담아 둔 손잡이로 소리를 모두 멈추고 고리도 비웁니다. 다시 맞춘 프레임의 이벤트가 오면 `on_event`가 필요한 효과를 새로 만듭니다. 이 경로는 `tutorial/star_pick/tests/resync_sound.rs`가 2~5단계에서 확인합니다.
 
 ### 글자와 소리
 
