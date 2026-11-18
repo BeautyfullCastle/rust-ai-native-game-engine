@@ -147,6 +147,54 @@ fn a_post_effect_the_scene_lacks_is_added_in_a_free_slot_and_switched_by_its_str
     assert!((back.look.vignette - 0.5).abs() < 1.0e-3);
 }
 
+/// The slot of the effect `kind` in the scene's post process, with its `enabled` flag.
+fn effect_slot(editor: &mut Editor, kind: &str) -> Option<(usize, bool)> {
+    (0..8).find_map(|slot| {
+        let Value::Enum(k) = editor.read_field(&Owner::Singleton("orr_gfx::PostProcess".into()), &format!("effects[{slot}].kind")).ok()? else { return None };
+        let enabled = flag(&editor.read_field(&Owner::Singleton("orr_gfx::PostProcess".into()), &format!("effects[{slot}].enabled")).ok()?);
+        (k == kind).then_some((slot, enabled))
+    })
+}
+
+fn color_grade_of_the_picture(editor: &Editor) -> Option<(f32, f32)> {
+    let look = editor.yard_frame().look.as_ref()?;
+    look.effects.iter().find_map(|e| match e {
+        orr_render::ScreenEffect::ColorGrade { saturation, contrast, .. } => Some((*saturation, *contrast)),
+        _ => None,
+    })
+}
+
+#[test]
+fn saturation_and_contrast_make_a_missing_color_grade_that_the_picture_uses() {
+    let mut editor = forest_editor();
+    let post = Owner::Singleton("orr_gfx::PostProcess".into());
+    // A scene with the default post process: the grade is not in any slot.
+    let (slot, _) = effect_slot(&mut editor, "color_grade").expect("the forest scene has a color grade");
+    assert!(editor.set_field(&post, &format!("effects[{slot}].kind"), Value::Enum("none".into())));
+    assert!(editor.set_field(&post, &format!("effects[{slot}].enabled"), Value::Bool(false)));
+    editor.sync();
+    assert!(effect_slot(&mut editor, "color_grade").is_none());
+    assert!(color_grade_of_the_picture(&editor).is_none());
+
+    let mut settings = scenery_scene::read(&editor, Settings::default());
+    settings.look.saturation = 0.4;
+    apply(&mut editor, "Look", "Saturation", &settings);
+    let (_, enabled) = effect_slot(&mut editor, "color_grade").expect("the saturation control adds the grade");
+    assert!(enabled, "a new color grade is switched on, as no control switches it");
+    let (saturation, _) = color_grade_of_the_picture(&editor).expect("the renderer gets the grade");
+    assert!((saturation - 0.4).abs() < 1.0e-3, "saturation in the picture: {saturation}");
+
+    // The contrast control does the same for a grade that the scene keeps switched off.
+    let (slot, _) = effect_slot(&mut editor, "color_grade").unwrap();
+    assert!(editor.set_field(&post, &format!("effects[{slot}].enabled"), Value::Bool(false)));
+    editor.sync();
+    assert!(color_grade_of_the_picture(&editor).is_none());
+    settings.look.contrast = 0.3;
+    apply(&mut editor, "Look", "Contrast", &settings);
+    let (saturation, contrast) = color_grade_of_the_picture(&editor).expect("a changed number switches the grade on");
+    assert!((contrast - 0.3).abs() < 1.0e-3 && (saturation - 0.4).abs() < 1.0e-3, "grade {saturation} {contrast}");
+}
+
 #[test]
 fn the_window_edits_the_open_scene_when_asked_and_dims_what_the_scene_lacks() {
     let mut h = Harness::builder().with_size([1500.0, 1000.0]).build_eframe(|_cc| EditorApp::new(forest_editor(), None));

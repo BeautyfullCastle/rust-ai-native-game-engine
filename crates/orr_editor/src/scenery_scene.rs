@@ -205,10 +205,20 @@ fn kind_id(kind: &str) -> u32 {
     }
 }
 
+/// The post effects that no control of the window switches on or off: they
+/// work as soon as a number of them is set, so an edit of a number turns them on.
+const ALWAYS_ON: &[&str] = &["color_grade"];
+
 /// The edits that set `param` of the effect `kind` to `value` and switch it on or off.
 /// The effect keeps its slot; a scene without it gets it in the first free slot,
-/// with the default numbers. With no free slot nothing changes.
+/// with the default numbers. With no free slot nothing changes. An effect that no
+/// control switches (`ALWAYS_ON`) is created enabled, and an edit of one of its
+/// numbers enables it when the scene has it disabled.
 fn effect_changes(editor: &Editor, kind: &'static str, param: Option<(usize, f32)>, enabled: Option<bool>) -> Vec<Change> {
+    let enabled = enabled.or_else(|| {
+        let was_on = effects(editor).iter().find(|(_, k, _, _)| k == kind).map(|(_, _, on, _)| *on);
+        (param.is_some() && ALWAYS_ON.contains(&kind) && was_on != Some(true)).then_some(true)
+    });
     let list = effects(editor);
     let set = |slot: usize, path: &str, value: Value| Change { place: Place::Singleton(names::POST_PROCESS), path: format!("effects[{slot}].{path}"), value };
     let mut out = Vec::new();
