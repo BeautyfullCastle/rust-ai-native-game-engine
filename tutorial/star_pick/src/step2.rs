@@ -1,7 +1,8 @@
 //! Step 2: playing alone. Move the square (W A S D or the arrow keys), pick up the stars.
 //!
 //! New in this step: input, systems that move and score, an event, an `EntityView` (a trail
-//! behind the player) and a `SceneView` (the score text, the pick-up ring and its sound).
+//! behind the player) and a `SceneView` (the score text, the pick-up ring and its sound), and
+//! the game screens: a title, a pause, a win after `WIN_STARS` stars, and a restart.
 //!
 //! `cargo run -p star_pick --release --bin step2`
 
@@ -14,7 +15,8 @@ use orr_app::{
     fp_to_f32, solid_quad, App, Camera, EntityView, EventState, Extracted, Extractor, FrameView, InterpMode, KeyCode, RenderItem, SceneView,
     Shape, SoundHandle, Style, Transform2, Vec2, View2D, ViewContext,
 };
-use orr_sim::{fn_systems, fp, ComponentRegistryBuilder, Entity, Frame, Game, PlayerSlot, SimContext, System, FP};
+use orr_app::{Labels, Screens};
+use orr_sim::{decode_pod, encode_pod, fn_systems, fp, ComponentRegistryBuilder, Entity, Frame, Game, PlayerSlot, SimCommand, SimContext, System, FP};
 
 use crate::sound;
 
@@ -29,6 +31,8 @@ const REACH: FP = fp!(0.75);
 /// A new star appears every 45 ticks (0.75 s), up to 6 at the same time.
 const SPAWN_EVERY: u64 = 45;
 const MAX_STARS: u32 = 6;
+/// The game is won with this many stars.
+pub const WIN_STARS: u32 = 5;
 
 /// The input of one player in one tick: -1, 0 or 1 on each axis.
 #[repr(C)]
@@ -43,6 +47,24 @@ pub struct Move {
 pub struct Pos {
     pub x: FP,
     pub y: FP,
+}
+
+/// The one command of the game: start a new round. The player goes back to the middle, the
+/// score to 0, and every star is gone. The restart screen sends it (see `Juice`).
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Pod, Zeroable)]
+pub struct Restart {
+    pub _pad: u32,
+}
+
+impl SimCommand for Restart {
+    fn encode(&self, out: &mut Vec<u8>) {
+        encode_pod(self, out);
+    }
+
+    fn decode(bytes: &[u8]) -> Option<Self> {
+        decode_pod(bytes)
+    }
 }
 
 /// On the entity of a player.
@@ -75,7 +97,7 @@ pub struct StarPick;
 
 impl Game for StarPick {
     type Input = Move;
-    type Command = ();
+    type Command = Restart;
     type Event = Picked;
     type Config = ();
 
@@ -92,8 +114,23 @@ impl Game for StarPick {
     }
 
     fn systems() -> Vec<Box<dyn System<Self>>> {
-        // The order matters: a star that appears is not picked in the same tick.
-        fn_systems([spawn_stars, move_player, pick_stars])
+        // The order matters: a restart comes first, and a star that appears is not picked in the same tick.
+        fn_systems([restart, spawn_stars, move_player, pick_stars])
+    }
+}
+
+/// A new round on command: the same in a replay and on a server, because it is part of the game.
+fn restart(ctx: &mut SimContext<StarPick>) {
+    if ctx.inputs.commands().is_empty() {
+        return;
+    }
+    let stars: Vec<Entity> = ctx.frame.query::<(&Star,)>().map(|(star, _)| star).collect();
+    for star in stars {
+        ctx.frame.despawn(star);
+    }
+    for (_, (pos, score)) in ctx.frame.query::<(&mut Pos, &mut Score)>() {
+        *pos = Pos { x: FP::ZERO, y: FP::ZERO };
+        score.points = 0;
     }
 }
 
@@ -172,6 +209,8 @@ pub struct Fx {
     pub score: u32,
     pub rings: Vec<Ring>,
     pub trails: Vec<Trail>,
+    /// The title, pause and win screens. `None`: no screens, the game just plays.
+    pub screens: Option<Screens>,
 }
 
 pub type Shared = Rc<RefCell<Fx>>;
@@ -272,6 +311,12 @@ impl SceneView<StarPick> for Juice {
             // Verified: it is certain. Offline, an event is always Verified at first, so start here too
             // (unless Predicted already did).
             EventState::Predicted | EventState::Verified => {
+                // The win comes from a verified pick-up, never from a guess that a rollback may undo.
+                if state == EventState::Verified && event.points >= WIN_STARS {
+                    if let Some(screens) = &fx.screens {
+                        screens.win();
+                    }
+                }
                 if !fx.rings.iter().any(|ring| ring.picked == *event) {
                     let sound = ctx.audio().play_named(sound::PICKUP); // a short ding, at once
                     fx.rings.push(Ring { picked: *event, start: ctx.tick(), sound });
@@ -305,6 +350,13 @@ impl SceneView<StarPick> for Juice {
         }
         // The score as text in the top left corner (the font has capitals, digits and a few signs).
         ctx.draw().text([16.0, 14.0], 21.0, STAR, &format!("SCORE {}", fx.score));
+        if let Some(screens) = &fx.screens {
+            // A new round (the start, a restart) is a command to the game.
+            if screens.take_restart() {
+                let _ = ctx.send_command(Restart::default());
+            }
+            screens.draw(ctx.draw());
+        }
         let now = fx.now;
         fx.rings.retain(|ring| now < ring.start + KEEP_TICKS);
     }
@@ -318,11 +370,19 @@ pub fn read_keys(keys: &orr_app::InputContext) -> Move {
     }
 }
 
+/// The screens of the game. Enter or Space starts, P pauses, R restarts. While a screen is
+/// shown the game gets the neutral input, so a menu key never moves the square.
+pub fn screens() -> Screens {
+    Screens::new(Labels { title: "STAR PICK".to_string(), title_hint: "ENTER: START".to_string(), ..Labels::default() })
+}
+
 pub fn app() -> App<StarPick> {
+    let screens = screens();
     let fx = Shared::default();
+    fx.borrow_mut().screens = Some(screens.clone());
     let for_trails = fx.clone();
     App::<StarPick>::new()
-        .input(|keys, _slot| read_keys(keys))
+        .input(move |keys, _slot| screens.input(keys, read_keys))
         .view(Look { fx: fx.clone() })
         .entity_view::<Score>(move || TrailView { fx: for_trails.clone() })
         .scene_view(Juice { fx })

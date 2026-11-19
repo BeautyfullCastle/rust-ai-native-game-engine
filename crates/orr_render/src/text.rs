@@ -79,6 +79,15 @@ fn glyph(c: char) -> [u8; GLYPH_H] {
     }
 }
 
+/// The box that [`draw_text_marked`] draws for a character without a glyph.
+const MISSING: [u8; GLYPH_H] = [0b11111, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11111];
+
+/// `true` when the font can draw `c`: a space or a character with a glyph (a lowercase
+/// letter counts through its capital).
+pub fn has_glyph(c: char) -> bool {
+    c == ' ' || glyph(c) != [0; GLYPH_H]
+}
+
 /// Width in pixels of `text` drawn with `scale` pixels per font pixel.
 pub fn text_width(text: &str, scale: f32) -> f32 {
     let n = text.chars().count();
@@ -98,8 +107,19 @@ pub fn text_height(scale: f32) -> f32 {
 /// the top of a target `viewport_h` pixels high). Each font pixel is a
 /// `scale` x `scale` quad. Use with [`pixel_camera`].
 pub fn draw_text(list: &mut RenderList, viewport_h: f32, x: f32, y_top: f32, scale: f32, text: &str, color: [f32; 4]) {
+    draw_chars(list, viewport_h, x, y_top, scale, text, color, false);
+}
+
+/// Like [`draw_text`], but a character without a glyph (see [`has_glyph`]) is drawn as a
+/// hollow box instead of a blank. Control characters stay blank.
+pub fn draw_text_marked(list: &mut RenderList, viewport_h: f32, x: f32, y_top: f32, scale: f32, text: &str, color: [f32; 4]) {
+    draw_chars(list, viewport_h, x, y_top, scale, text, color, true);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_chars(list: &mut RenderList, viewport_h: f32, x: f32, y_top: f32, scale: f32, text: &str, color: [f32; 4], mark_missing: bool) {
     for (i, c) in text.chars().enumerate() {
-        let g = glyph(c);
+        let g = if mark_missing && !has_glyph(c) && !c.is_control() { MISSING } else { glyph(c) };
         let gx = x + (i * ADVANCE) as f32 * scale;
         for (row, bits) in g.iter().enumerate() {
             for col in 0..GLYPH_W {
@@ -129,6 +149,19 @@ mod tests {
         }
         assert_eq!(glyph('~'), [0; GLYPH_H]);
         assert_eq!(glyph('a'), glyph('A'));
+    }
+
+    #[test]
+    fn a_missing_glyph_is_a_box_only_in_marked_text() {
+        assert!(has_glyph('A') && has_glyph('a') && has_glyph(' ') && !has_glyph('가') && !has_glyph('~'));
+        let (mut plain, mut marked) = (RenderList::new(), RenderList::new());
+        draw_text(&mut plain, 100.0, 0.0, 0.0, 1.0, "가", [1.0; 4]);
+        draw_text_marked(&mut marked, 100.0, 0.0, 0.0, 1.0, "가", [1.0; 4]);
+        assert!(plain.shapes.is_empty(), "the plain text keeps the blank");
+        assert_eq!(marked.shapes.len(), 2 * GLYPH_W + 2 * (GLYPH_H - 2), "a 5x7 outline");
+        let mut spaces = RenderList::new();
+        draw_text_marked(&mut spaces, 100.0, 0.0, 0.0, 1.0, " \n", [1.0; 4]);
+        assert!(spaces.shapes.is_empty(), "a space and a control character stay blank");
     }
 
     #[test]
