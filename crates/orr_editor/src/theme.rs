@@ -93,13 +93,27 @@ pub fn apply(ctx: &egui::Context) {
         s.interact_size.y = 20.0;
         s.window_margin = Margin::same(8);
     });
-    install_cjk_fallback(ctx);
+    set_fonts(ctx, egui::FontDefinitions::default());
 }
 
-/// The built-in fonts have no Hangul or other CJK glyphs, so such names would
-/// draw as empty boxes. A font of the system is added behind them when one is
-/// found. Nothing is bundled and a missing font changes nothing else.
-fn install_cjk_fallback(ctx: &egui::Context) {
+/// Installs `fonts` with a system font that has Hangul and other CJK glyphs
+/// added behind the fonts of every family. The built-in fonts have no such
+/// glyphs, so those names would draw as empty boxes. A project font stays first
+/// in its family. Every font change of the editor goes through this function.
+/// Nothing is bundled and a missing system font changes nothing else.
+pub fn set_fonts(ctx: &egui::Context, mut fonts: egui::FontDefinitions) {
+    if let Some(bytes) = system_cjk_font() {
+        fonts.font_data.insert("system-cjk".into(), egui::FontData::from_owned(bytes).into());
+        for list in fonts.families.values_mut() {
+            if !list.iter().any(|name| name == "system-cjk") {
+                list.push("system-cjk".into());
+            }
+        }
+    }
+    ctx.set_fonts(fonts);
+}
+
+fn system_cjk_font() -> Option<Vec<u8>> {
     const MAX_FONT_BYTES: u64 = 48 << 20;
     let root = std::env::var_os("SystemRoot").map_or_else(|| std::path::PathBuf::from("C:\\Windows"), std::path::PathBuf::from);
     let candidates = [
@@ -109,23 +123,13 @@ fn install_cjk_fallback(ctx: &egui::Context) {
         "/usr/share/fonts/truetype/nanum/NanumGothic.ttf".into(),
         "/System/Library/Fonts/AppleSDGothicNeo.ttc".into(),
     ];
-    let Some(bytes) = candidates.iter().find_map(|path| {
+    candidates.iter().find_map(|path| {
         let size = std::fs::metadata(path).ok()?.len();
         if size == 0 || size > MAX_FONT_BYTES {
             return None;
         }
         std::fs::read(path).ok()
-    }) else {
-        return;
-    };
-    let mut fonts = egui::FontDefinitions::default();
-    fonts.font_data.insert("system-cjk".into(), egui::FontData::from_owned(bytes).into());
-    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-        if let Some(list) = fonts.families.get_mut(&family) {
-            list.push("system-cjk".into());
-        }
-    }
-    ctx.set_fonts(fonts);
+    })
 }
 
 /// The frame of the top bar and the status bar.

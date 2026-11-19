@@ -378,6 +378,30 @@ fn korean_names_have_glyphs_and_fit_the_inspector_header() {
 }
 
 #[test]
+fn a_project_font_keeps_the_hangul_fallback() {
+    let name = "상자_05_아주_긴_한국어_이름_검사";
+    let font = egui::FontId::proportional(13.0);
+    // A font that has no Hangul stands for the font of a project.
+    let mut fonts = egui::FontDefinitions::default();
+    let base = fonts.families[&egui::FontFamily::Proportional][0].clone();
+    let bytes = fonts.font_data[&base].font.to_vec();
+    fonts.font_data.insert("project-font".into(), egui::FontData::from_owned(bytes).into());
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        fonts.families.entry(family).or_default().insert(0, "project-font".into());
+    }
+    let mut h = Harness::new_ui(|ui| {
+        ui.label("project font");
+    });
+    orr_editor::theme::set_fonts(&h.ctx, fonts);
+    h.run_steps(3);
+    let ctx = h.ctx.clone();
+    assert!(ctx.fonts_mut(|fonts| fonts.has_glyphs(&font, name)), "Korean glyphs must stay after a project font is loaded");
+    // The project font stays first in its family.
+    let first = ctx.fonts_mut(|fonts| fonts.definitions().families[&egui::FontFamily::Proportional][0].clone());
+    assert_eq!(first, "project-font");
+}
+
+#[test]
 fn next_step_follows_the_work_in_order() {
     let base = Facts::default();
     let sample = Facts { sample: true, ..base };
