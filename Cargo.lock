@@ -3167,6 +3167,7 @@ dependencies = [
  "orr_bridge",
  "orr_ecs",
  "orr_fp",
+ "orr_fsid",
  "orr_games",
  "orr_gfx",
  "orr_gfx_view",
@@ -3184,6 +3185,7 @@ dependencies = [
  "orr_view",
  "png 0.18.1",
  "winit",
+ "xxhash-rust",
 ]
 
 [[package]]

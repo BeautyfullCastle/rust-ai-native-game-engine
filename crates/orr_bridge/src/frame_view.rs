@@ -97,6 +97,12 @@ impl<'a> FrameView<'a> {
     pub fn checksum(&self) -> u64 {
         self.frame.checksum()
     }
+
+    /// The frame as bytes (`Frame::to_bytes`: tick, components, singletons, lists and the frame
+    /// checksum), for a save file. Reading it changes nothing.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.frame.to_bytes()
+    }
 }
 
 #[cfg(test)]
