@@ -331,10 +331,10 @@ fn windows_room_project_ui_create_guard_reopen_and_play_gpu_acceptance() {
     settle(&mut harness);
     assert!(harness.state().editor.is_dirty());
     let dirty_checksum = harness.state().editor.checksum();
-    menu_click(&mut harness, "Edit", "Undo Ctrl+Z");
+    menu_click(&mut harness, "Edit", "Undo");
     assert_eq!(harness.state().editor.checksum(), initial_checksum);
     assert!(!harness.state().editor.is_dirty());
-    menu_click(&mut harness, "Edit", "Redo Ctrl+Y");
+    menu_click(&mut harness, "Edit", "Redo");
     assert_eq!(harness.state().editor.checksum(), dirty_checksum);
     assert!(harness.state().editor.is_dirty());
     set_field(
@@ -351,7 +351,7 @@ fn windows_room_project_ui_create_guard_reopen_and_play_gpu_acceptance() {
     );
     assert_eq!(harness.state().editor.checksum(), dirty_checksum);
     assert_eq!(harness.state().editor.path().unwrap(), before_blocked_open);
-    menu_click(&mut harness, "File", "Save Ctrl+S");
+    menu_click(&mut harness, "File", "Save");
     wait_for(&mut harness, "saving the authored scene", |app| {
         !app.editor.is_dirty()
     });

@@ -315,7 +315,7 @@ fn advance_until_won(harness: &mut Harness<'_, EditorApp>) -> (u64, u64) {
         .timeline()
         .is_some_and(|timeline| timeline.tick != 0)
     {
-        click(harness, "⏮");
+        click(harness, "Rewind to the first tick");
     }
     assert!(harness
         .state()
@@ -576,7 +576,7 @@ fn mission_geometry_reprojects_and_preserves_playable_mission() {
         applied_pixel_diff > 20,
         "reprojected mission was not visible: {applied_pixel_diff}"
     );
-    menu_click(&mut harness, "Edit", "Undo Ctrl+Z");
+    menu_click(&mut harness, "Edit", "Undo");
     wait_for(&mut harness, "mission geometry undo", |app| {
         app.editor.checksum() == initial_checksum
     });
@@ -588,13 +588,13 @@ fn mission_geometry_reprojects_and_preserves_playable_mission() {
         initial_mesh.graph.revision()
     );
     assert_eq!(mission_view(harness.state()).config, initial_mission.config);
-    menu_click(&mut harness, "Edit", "Redo Ctrl+Y");
+    menu_click(&mut harness, "Edit", "Redo");
     wait_for(&mut harness, "mission geometry redo", |app| {
         app.editor.checksum() == applied_checksum
     });
     assert_eq!(mission_view(harness.state()).config, applied_mission.config);
 
-    menu_click(&mut harness, "File", "Save Ctrl+S");
+    menu_click(&mut harness, "File", "Save");
     let saved_bytes = fs::read(&fixture.scene).unwrap();
     let saved_checksum = harness.state().editor.checksum();
     assert_ne!(saved_bytes, initial_bytes);

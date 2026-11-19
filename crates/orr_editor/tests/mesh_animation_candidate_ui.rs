@@ -192,7 +192,7 @@ fn loaded_candidate_named_clip_previews_without_applying_and_preserves_authoring
     click(&mut h, "Static-mesh navigation");
     click_button(&mut h, "Create ramp and bridge");
     click_button(&mut h, "Place mesh agent");
-    menu_click(&mut h, "File", "Save Ctrl+S");
+    menu_click(&mut h, "File", "Save");
     let scene_bytes = fs::read(&scene).unwrap();
     let checksum = h.state().editor.checksum();
     let frame_tick = h.state().editor.snapshot().unwrap().predicted().tick();
@@ -374,7 +374,7 @@ fn live_candidate_audition_advances_pauses_and_preserves_authoring() {
     click(&mut h, "Static-mesh navigation");
     click_button(&mut h, "Create ramp and bridge");
     click_button(&mut h, "Place mesh agent");
-    menu_click(&mut h, "File", "Save Ctrl+S");
+    menu_click(&mut h, "File", "Save");
     let scene_bytes = fs::read(&scene).unwrap();
     let checksum = h.state().editor.checksum();
     let frame_tick = h.state().editor.snapshot().unwrap().predicted().tick();

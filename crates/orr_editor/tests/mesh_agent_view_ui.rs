@@ -1029,12 +1029,12 @@ fn viewport_agent_endpoint_picking_is_staged_then_placed_saved_reopened_and_play
         "cosmetic sidecars do not mutate the saved mesh scene"
     );
 
-    menu_click(&mut harness, "Edit", "Undo Ctrl+Z");
+    menu_click(&mut harness, "Edit", "Undo");
     assert_eq!(mesh_view(&harness).pin, original_pin);
-    menu_click(&mut harness, "Edit", "Redo Ctrl+Y");
+    menu_click(&mut harness, "Edit", "Redo");
     assert_eq!(mesh_view(&harness).pin, placed_view.pin);
     assert_eq!(harness.state().editor.checksum(), placed_checksum);
-    menu_click(&mut harness, "File", "Save Ctrl+S");
+    menu_click(&mut harness, "File", "Save");
     let saved_scene = fs::read(&fixture.scene).unwrap();
     let saved_scene_sha256 = sha256_hex(&saved_scene);
     assert!(!saved_scene.is_empty());

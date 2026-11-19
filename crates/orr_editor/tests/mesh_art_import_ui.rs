@@ -618,7 +618,7 @@ fn raw_agent_glb_import_is_applied_saved_reopened_and_exported_in_the_editor() {
     }
     click(&mut harness, "Create ramp and bridge");
     click(&mut harness, "Place mesh agent");
-    menu_click(&mut harness, "File", "Save Ctrl+S");
+    menu_click(&mut harness, "File", "Save");
     let scene_bytes = fs::read(&fixture.scene).unwrap();
     let scene_checksum = harness.state().editor.checksum();
     let initial_view = mesh_view(&harness);

@@ -955,12 +955,12 @@ fn duplicate_mesh_workspace_preserves_all_saved_presentations_source_free() {
         before_checkpoint_history + 1
     );
     let applied_checkpoint_checksum = harness.state().editor.checksum();
-    menu_click(&mut harness, "Edit", "Undo Ctrl+Z");
+    menu_click(&mut harness, "Edit", "Undo");
     wait_for(&mut harness, "checkpoint mission undo", |app| {
         app.editor.checksum() == before_checkpoint_checksum
     });
     assert_eq!(mission_view(&harness).config, initial_mission_config);
-    menu_click(&mut harness, "Edit", "Redo Ctrl+Y");
+    menu_click(&mut harness, "Edit", "Redo");
     wait_for(&mut harness, "checkpoint mission redo", |app| {
         app.editor.checksum() == applied_checkpoint_checksum
     });
@@ -969,7 +969,7 @@ fn duplicate_mesh_workspace_preserves_all_saved_presentations_source_free() {
     assert_eq!(authored_mission.config.count, 1);
     assert_eq!(authored_mission.run.collected, 0);
     assert_eq!(authored_mission.run.won, 0);
-    menu_click(&mut harness, "File", "Save Ctrl+S");
+    menu_click(&mut harness, "File", "Save");
     let scene_bytes = fs::read(&fixture.scene).unwrap();
     let scene_checksum = harness.state().editor.checksum();
     let graph_revision = mesh_view(&harness).graph.revision();
@@ -1517,7 +1517,7 @@ fn duplicate_mesh_workspace_preserves_all_saved_presentations_source_free() {
     click_button(&mut reopened, LBL_PLAY);
     wait_for_playing(&mut reopened);
     click_button(&mut reopened, LBL_PAUSE);
-    click_button(&mut reopened, "⏮");
+    click_button(&mut reopened, "Rewind to the first tick");
     wait_for(&mut reopened, "tick-zero paused frame", |app| {
         app.editor
             .timeline()

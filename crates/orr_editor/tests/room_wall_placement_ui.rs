@@ -283,7 +283,7 @@ fn selected_wall_ground_move_preserves_staging_and_blocks_player() {
         .unwrap();
     h.state_mut().room_authoring.open = false;
     settle(&mut h);
-    menu_click(&mut h, "File", "Save Ctrl+S");
+    menu_click(&mut h, "File", "Save");
     let scene_before = fs::read(root.join("room.scene.yaml")).unwrap();
     h.state_mut().room_authoring.open = true;
     settle(&mut h);
@@ -371,11 +371,11 @@ fn selected_wall_ground_move_preserves_staging_and_blocks_player() {
     shot(&mut h, &evidence, "02-applied-wall.png");
     h.state_mut().room_authoring.open = false;
     settle(&mut h);
-    menu_click(&mut h, "Edit", "Undo Ctrl+Z");
+    menu_click(&mut h, "Edit", "Undo");
     assert_eq!(h.state().editor.checksum(), original);
-    menu_click(&mut h, "Edit", "Redo Ctrl+Y");
+    menu_click(&mut h, "Edit", "Redo");
     assert_eq!(h.state().editor.checksum(), changed);
-    menu_click(&mut h, "File", "Save Ctrl+S");
+    menu_click(&mut h, "File", "Save");
     drop(h);
     let mut h = harness(&root);
     settle(&mut h);

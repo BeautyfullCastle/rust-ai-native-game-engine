@@ -395,7 +395,7 @@ fn advance_until_won(harness: &mut Harness<'_, EditorApp>) -> (u64, u64) {
         .timeline()
         .is_some_and(|timeline| timeline.tick != 0)
     {
-        click(harness, "⏮");
+        click(harness, "Rewind to the first tick");
     }
     for _ in 0..1024 {
         if mission_view(harness.state()).run.won == 1 {
@@ -579,9 +579,9 @@ fn imported_model_becomes_saved_playable_mesh_geometry_without_source_dependency
         .graph;
     assert_eq!(placed_graph.triangles().len(), 4);
     assert_eq!(placed_history, initial_history + 1);
-    menu_click(&mut harness, "Edit", "Undo Ctrl+Z");
+    menu_click(&mut harness, "Edit", "Undo");
     assert_eq!(harness.state().editor.checksum(), initial_checksum);
-    menu_click(&mut harness, "Edit", "Redo Ctrl+Y");
+    menu_click(&mut harness, "Edit", "Redo");
     assert_eq!(harness.state().editor.checksum(), placed_checksum);
 
     if harness.query_by_label("Enable mesh mission").is_none() {

@@ -318,7 +318,7 @@ fn installed_animated_transform_matches_literal_uv_oracle_and_reopens_without_so
     click(&mut h, "Static-mesh navigation");
     click_button(&mut h, "Create ramp and bridge");
     click_button(&mut h, "Place mesh agent");
-    menu_click(&mut h, "File", "Save Ctrl+S");
+    menu_click(&mut h, "File", "Save");
     let scene_bytes = fs::read(&scene).unwrap();
     let checksum = h.state().editor.checksum();
     let history = h.state().editor.history().clone();

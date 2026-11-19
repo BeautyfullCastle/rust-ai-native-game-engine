@@ -321,7 +321,7 @@ fn collider_framing_button_and_viewport_f_preserve_authoring() {
     click(&mut h, "Apply wall height");
     h.state_mut().room_authoring.open = false;
     settle(&mut h);
-    menu_click(&mut h, "File", "Save Ctrl+S");
+    menu_click(&mut h, "File", "Save");
     h.state_mut().editor.select(None);
     settle(&mut h);
     h.state_mut().editor.camera3d.target = [-30.0, 0.0, -30.0];

@@ -413,7 +413,7 @@ fn mesh_agent_art_is_authored_saved_and_reopened_without_its_source_package() {
     click(&mut harness, "Static-mesh navigation");
     click(&mut harness, "Create ramp and bridge");
     click(&mut harness, "Place mesh agent");
-    menu_click(&mut harness, "File", "Save Ctrl+S");
+    menu_click(&mut harness, "File", "Save");
 
     let saved_scene_bytes = fs::read(&fixture.scene).unwrap();
     let scene_checksum = harness.state().editor.checksum();

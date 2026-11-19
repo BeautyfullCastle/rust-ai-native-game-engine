@@ -134,7 +134,7 @@ fn the_viewport_draws_the_shape_with_its_shader_and_magenta_when_the_shader_is_b
     let scene = project(dir.path());
     let setup = egui_wgpu::WgpuSetup::CreateNew(egui_wgpu::WgpuSetupCreateNew::without_display_handle());
     let mut h = Harness::builder()
-        .with_size([1400.0, 900.0])
+        .with_size([1400.0, 1400.0])
         .wgpu_setup(setup)
         .build_eframe(|cc| EditorApp::new(editor(&scene), cc.wgpu_render_state.clone()));
     settle(&mut h);
@@ -181,7 +181,7 @@ fn a_model_entity_with_a_material_is_drawn_by_its_shader() {
         .unwrap();
     let setup = egui_wgpu::WgpuSetup::CreateNew(egui_wgpu::WgpuSetupCreateNew::without_display_handle());
     let mut h = Harness::builder()
-        .with_size([1400.0, 900.0])
+        .with_size([1400.0, 1400.0])
         .wgpu_setup(setup)
         .build_eframe(|cc| EditorApp::new(editor(&scene), cc.wgpu_render_state.clone()));
     settle(&mut h);

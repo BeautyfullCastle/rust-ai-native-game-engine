@@ -341,6 +341,12 @@ fn production_editor_irradiance_import_author_save_reopen_and_toggles_preserve_h
             app
         });
     settle(&mut h);
+    // The dock sizes its panels from the first frame, and its layout file keeps whole shares.
+    // The windows of this test use the layout as a file would keep it, so that all captures
+    // have the same viewport size, also after a narrow window made the dock widen a panel.
+    let dock_layout = h.state().ui.dock.layout().expect("the dock layout");
+    h.state_mut().ui.dock.apply(&dock_layout);
+    settle(&mut h);
     configure(h.state_mut());
     h.get_by_label("Irradiance probes").click();
     h.run_steps(2);
@@ -541,6 +547,7 @@ fn production_editor_irradiance_import_author_save_reopen_and_toggles_preserve_h
         assert_eq!(actual.pipeline_generation(), pipeline_generation);
         assert_eq!(actual.post_process_size(), Some(h.state().ui.viewport_px));
     }
+    h.state_mut().ui.dock.apply(&dock_layout);
     assert_eq!(
         capture(&mut h, &mut reference, "probe-hdr-resize-restored"),
         resized_pixels
@@ -575,6 +582,8 @@ fn production_editor_irradiance_import_author_save_reopen_and_toggles_preserve_h
             app.ui.bottom_tab = BottomTab::History;
             app
         });
+    settle(&mut h);
+    h.state_mut().ui.dock.apply(&dock_layout);
     settle(&mut h);
     {
         let app = h.state_mut();

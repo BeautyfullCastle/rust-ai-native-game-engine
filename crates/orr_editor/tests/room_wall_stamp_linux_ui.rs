@@ -354,7 +354,7 @@ fn linux_room_wall_groups_ui_geometry_history_reopen_and_collision() {
     // The authoring panel is outside this test's group workflow; close it to expose File.
     h.state_mut().room_authoring.open = false;
     settle(&mut h);
-    menu_click(&mut h, "File", "Save Ctrl+S");
+    menu_click(&mut h, "File", "Save");
     assert!(!h.state().editor.is_dirty());
     let source_scene = fs::read(root.join("room.scene.yaml")).unwrap();
     let source_checksum = h.state().editor.checksum();
@@ -383,9 +383,9 @@ fn linux_room_wall_groups_ui_geometry_history_reopen_and_collision() {
     select_sources(&mut h, &sources);
     assert!(!disabled(&h, "Capture selected walls"));
     // Any document edit invalidates the capture selection, including undo/redo.
-    menu_click(&mut h, "Edit", "Undo Ctrl+Z");
+    menu_click(&mut h, "Edit", "Undo");
     assert!(disabled(&h, "Capture selected walls"));
-    menu_click(&mut h, "Edit", "Redo Ctrl+Y");
+    menu_click(&mut h, "Edit", "Redo");
     assert_eq!(h.state().editor.checksum(), source_checksum);
     assert!(disabled(&h, "Capture selected walls"));
     select_sources(&mut h, &sources);
@@ -459,10 +459,10 @@ fn linux_room_wall_groups_ui_geometry_history_reopen_and_collision() {
         assert_geometry(&mut h, guid, geometry, [-3, -5]);
         assert!(first_guids.insert(guid.clone()));
     }
-    menu_click(&mut h, "Edit", "Undo Ctrl+Z");
+    menu_click(&mut h, "Edit", "Undo");
     assert_eq!(h.state().editor.checksum(), source_checksum);
     assert_eq!(h.state().editor.rows().len(), initial_rows + 2);
-    menu_click(&mut h, "Edit", "Redo Ctrl+Y");
+    menu_click(&mut h, "Edit", "Redo");
     assert_eq!(h.state().editor.checksum(), first_checksum);
     for ((name, source), geometry) in sources.iter().zip(&original) {
         for guid in named(&h, name).iter().filter(|guid| *guid != source) {
@@ -496,7 +496,7 @@ fn linux_room_wall_groups_ui_geometry_history_reopen_and_collision() {
     }
     assert_eq!(all_guids.len(), 6);
     let final_checksum = h.state().editor.checksum();
-    menu_click(&mut h, "File", "Save Ctrl+S");
+    menu_click(&mut h, "File", "Save");
     assert!(!h.state().editor.is_dirty());
     let saved_scene = fs::read(root.join("room.scene.yaml")).unwrap();
     h.state_mut().editor.select(None);

@@ -17,6 +17,7 @@ use egui_kittest::Harness;
 use orr_editor::agent_ui::{LBL_PREVIEW, TXT_NO_AGENT, TXT_PASSED};
 use orr_editor::app::BottomTab;
 use orr_editor::editor::Editor;
+use orr_editor::layout::{Child, Dir, Layout, Node, Panel};
 use orr_editor::model::format_json;
 use orr_editor::{EditorApp, HostSpec, Target};
 use orr_remote::{Auth, ErpClient, ServerConfig};
@@ -95,7 +96,37 @@ fn body_guid(h: &Harness<'_, EditorApp>, name: &str) -> String {
     guid_named(&h.state().editor, name).to_string()
 }
 
+/// The default dock leaves the bottom panel 160 points high, too low for the open proposals and
+/// the expanded diff of the Agent tab. Gives that panel half of the window, as dragging its
+/// splitter up does.
+fn enlarge_bottom_panel(h: &mut Harness<'_, EditorApp>) {
+    let pane = |panel| Node::Pane { panel, visible: true };
+    let layout = Layout {
+        root: Node::Split {
+            dir: Dir::Vertical,
+            children: vec![
+                Child {
+                    share: 500,
+                    node: Node::Split {
+                        dir: Dir::Horizontal,
+                        children: vec![
+                            Child { share: 180, node: pane(Panel::Hierarchy) },
+                            Child { share: 554, node: pane(Panel::Viewport) },
+                            Child { share: 266, node: pane(Panel::Inspector) },
+                        ],
+                    },
+                },
+                Child { share: 500, node: pane(Panel::Timeline) },
+            ],
+        },
+    };
+    layout.validate().expect("a valid layout");
+    h.state_mut().ui.dock.apply(&layout);
+    h.run_steps(5);
+}
+
 fn open_agent_tab(h: &mut Harness<'_, EditorApp>) {
+    enlarge_bottom_panel(h);
     h.get_by_label("Agent").click();
     h.run_steps(3);
     assert_eq!(h.state().ui.bottom_tab, BottomTab::Agent);

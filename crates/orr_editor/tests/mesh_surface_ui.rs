@@ -597,7 +597,7 @@ fn mesh_surface_uv_and_pivot_render_persist_and_reopen_source_free() {
             .abs()
             < 1.0e-6
     );
-    menu(&mut app, "Save Ctrl+S");
+    menu(&mut app, "Save");
     let scene_bytes = fs::read(&fixture.scene).unwrap();
     let scene_sha256 = sha256(&scene_bytes);
     let source_glb = fs::read(fixture.package.join("foreground.glb")).unwrap();

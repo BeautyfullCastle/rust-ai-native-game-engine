@@ -376,11 +376,11 @@ fn actor_ground_placement_preserves_staging_and_completes_room() {
     );
     h.state_mut().room_authoring.open = false;
     settle(&mut h);
-    menu_click(&mut h, "Edit", "Undo Ctrl+Z");
+    menu_click(&mut h, "Edit", "Undo");
     assert_eq!(h.state().editor.checksum(), checksum);
-    menu_click(&mut h, "Edit", "Redo Ctrl+Y");
+    menu_click(&mut h, "Edit", "Redo");
     assert_eq!(h.state().editor.checksum(), applied);
-    menu_click(&mut h, "File", "Save Ctrl+S");
+    menu_click(&mut h, "File", "Save");
     assert!(!h.state().editor.is_dirty());
     shot(&mut h, &evidence, "03-applied-saved.png");
     drop(h);

@@ -246,7 +246,7 @@ fn prepare(h: &mut Harness<'_, EditorApp>) {
     click(h, "Static-mesh navigation");
     click_button(h, "Create ramp and bridge");
     click_button(h, "Place mesh agent");
-    menu_click(h, "File", "Save Ctrl+S");
+    menu_click(h, "File", "Save");
 }
 #[test]
 #[ignore = "requires actual GPU and ORR_NONINDEXED_CAPTURE_DIR; no window claim"]
