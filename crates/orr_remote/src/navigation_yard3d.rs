@@ -95,9 +95,10 @@ impl BakeAdmission for LocalNavigationAdmission {
             return Err(EditError::Invalid("TerrainNavigation patrol feature profile differs between game and host".into()));
         }
         let fail = |message: String| EditError::Invalid(format!("navigation admission: {message}"));
-        if !scene.entities.is_empty() || frame.alive_count() != 0 {
+        // The authored entities are render entities (the sun and other `orr_gfx` lights). Admission derives the agent.
+        if !orr_games::navigation_yard3d_game::is_render_only_authoring(frame) {
             return Err(fail(
-                "NavigationYard3D rejects every authored entity, body and collider".into(),
+                "NavigationYard3D rejects every authored body, collider and entity without an orr_gfx::Transform3".into(),
             ));
         }
         if bytemuck::bytes_of(frame.singleton::<NavigationStepStatus>())

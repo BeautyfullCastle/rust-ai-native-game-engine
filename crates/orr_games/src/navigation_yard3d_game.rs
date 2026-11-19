@@ -128,8 +128,23 @@ impl NavigationStepStatus {
     }
 }
 
-/// There are no authored entities in this game. The only live entity is the
-/// derived runtime agent, created transactionally by the bake admission hook.
+/// Whether every entity other than `agent` is a render entity: one with an `orr_gfx::Transform3`,
+/// such as the sun. The game has no other authored entities.
+pub fn only_render_entities_besides(frame: &Frame, agent: Option<orr_ecs::Entity>) -> bool {
+    frame.entities().all(|entity| Some(entity) == agent || frame.has::<orr_gfx::Transform3>(entity))
+}
+
+/// Whether an authored frame, before admission, holds render entities only: no body, no collider and no agent.
+pub fn is_render_only_authoring(frame: &Frame) -> bool {
+    frame.count::<orr_physics3d::Body>() == 0
+        && frame.count::<orr_physics3d::Collider>() == 0
+        && frame.count::<orr_navigation_runtime::RuntimeAgent>() == 0
+        && only_render_entities_besides(frame, None)
+}
+
+/// The only authored entities in this game are render entities (lights and other `orr_gfx`
+/// components). The one other live entity is the derived runtime agent, created
+/// transactionally by the bake admission hook.
 pub fn validate_scene_frame(frame: &Frame) -> Result<(), String> {
     if frame.count::<orr_physics3d::Body>() != 0 || frame.count::<orr_physics3d::Collider>() != 0 {
         return Err("NavigationYard3D rejects all physics bodies and colliders".into());
@@ -137,8 +152,11 @@ pub fn validate_scene_frame(frame: &Frame) -> Result<(), String> {
     NavigationRuntime::validate(frame).map_err(|e| e.to_string())?;
     #[cfg(feature="terrain-patrol")]
     patrol::validate_frame(frame,*frame.singleton::<NavigationScenePin>())?;
-    if frame.alive_count() != 1 {
-        return Err("NavigationYard3D admits exactly one derived agent".into());
+    let state = *frame.singleton::<RuntimeState>();
+    if frame.count::<orr_navigation_runtime::RuntimeAgent>() != 1
+        || !only_render_entities_besides(frame, Some(state.agent))
+    {
+        return Err("NavigationYard3D admits one derived agent and render entities only".into());
     }
     Ok(())
 }
@@ -150,6 +168,7 @@ pub fn register_reflect(types: &mut TypeRegistry) {
     types.register_singleton::<NavigationStepStatus>("NavigationStepStatus");
     #[cfg(feature="terrain-patrol")]
     patrol::register_reflect(types);
+    orr_gfx::register_reflect(types);
 }
 impl Game for NavigationYard3D {
     type Input = YardInput;
@@ -164,9 +183,11 @@ impl Game for NavigationYard3D {
         builder.register_singleton::<NavigationStepStatus>("NavigationStepStatus");
         #[cfg(feature="terrain-patrol")]
         patrol::register(builder);
+        orr_gfx::register(builder);
     }
-    fn setup(_: &mut Frame, _: &()) {
+    fn setup(frame: &mut Frame, _: &()) {
         // Empty means authoring only. Admission owns the sole agent and full route.
+        orr_gfx::init(frame);
     }
     fn systems() -> Vec<Box<dyn System<Self>>> {
         vec![Box::new(NavigationStep)]

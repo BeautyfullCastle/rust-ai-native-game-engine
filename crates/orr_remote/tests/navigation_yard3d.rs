@@ -18,6 +18,13 @@ use std::{
 
 const YAML: &str = include_str!("../../../scenes/navigation_point.scene.yaml");
 const BLANK: &str = include_str!("../../../scenes/navigation_blank.scene.yaml");
+/// The checked-in point scene before its sun light: no authored entity at all.
+fn point_without_sun() -> String {
+    let at = YAML.find("entities:
+").expect("the scene has an entities map");
+    format!("{}entities: {{}}
+", &YAML[..at])
+}
 const ASSET: &[u8] = include_bytes!("../../../scenes/navigation/point_demo.orrt");
 
 struct Fixture {
@@ -64,7 +71,7 @@ fn snapshot(doc: &EditorDoc) -> (String, Vec<u8>, u64, bool, bool, bool) {
 
 #[test]
 fn fixture_has_one_derived_agent_complete_route_and_reopens_identically() {
-    let fixture = Fixture::new(YAML);
+    let fixture = Fixture::new(&point_without_sun());
     let mut doc = fixture.doc();
     assert!(doc.scene().entities.is_empty());
     assert_eq!(doc.frame().alive_count(), 1);
@@ -87,7 +94,7 @@ fn fixture_has_one_derived_agent_complete_route_and_reopens_identically() {
 
 #[test]
 fn stale_pin_unsafe_path_and_authored_entities_are_atomic() {
-    let fixture = Fixture::new(YAML);
+    let fixture = Fixture::new(&point_without_sun());
     let mut doc = fixture.doc();
     let before = snapshot(&doc);
     for (field, value) in [
@@ -138,7 +145,7 @@ fn stale_pin_unsafe_path_and_authored_entities_are_atomic() {
             .is_err());
         assert_eq!(snapshot(&doc), before);
     }
-    let authored = YAML.replace(
+    let authored = point_without_sun().replace(
         "entities: {}",
         r#"entities:
   e_00000001:
@@ -185,6 +192,34 @@ fn stale_pin_unsafe_path_and_authored_entities_are_atomic() {
     assert_eq!(snapshot(&doc), before);
     fs::remove_file(&fixture.asset).unwrap();
     assert!(doc.rebake().is_err());
+    assert_eq!(snapshot(&doc), before);
+}
+
+#[test]
+fn the_sun_light_is_the_only_authored_entity_and_the_agent_stays_derived() {
+    let fixture = Fixture::new(YAML);
+    let mut doc = fixture.doc();
+    assert_eq!(doc.scene().entities.len(), 1, "the sun");
+    assert_eq!(doc.frame().alive_count(), 2, "the sun and the derived agent");
+    navigation_from_view(FrameView::of(doc.frame())).unwrap();
+    assert_eq!(doc.to_yaml(), YAML, "the document saves what the file holds");
+    let saved = doc.save_yaml();
+    let reopened = navigation_yard3d_doc_from_yaml(&saved, LocalNavigationAdmission::for_scene(&fixture.scene).unwrap()).unwrap();
+    assert_eq!(doc.frame().to_bytes(), reopened.frame().to_bytes());
+    // An entity without a render transform is still refused.
+    let mut doc = fixture.doc();
+    let before = snapshot(&doc);
+    let without_transform = point_without_sun().replace(
+        "entities: {}",
+        "entities:
+  e_00000001:
+    name: lamp
+    orr_gfx::RenderLayers:
+      layers: [default]
+",
+    );
+    orr_reflect::Scene::parse(&without_transform, doc.types()).unwrap();
+    assert!(doc.load_yaml(&without_transform).is_err());
     assert_eq!(snapshot(&doc), before);
 }
 
