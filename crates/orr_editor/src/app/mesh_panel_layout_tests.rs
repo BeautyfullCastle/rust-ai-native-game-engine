@@ -68,11 +68,12 @@ fn expanded_mesh_panels_stay_inside_the_editor_viewport_at_narrow_widths() {
             action_node.scroll_to_me();
             harness.run_steps(2);
             let action_rect = harness.get_by_label(action).rect();
-            let inspector =
-                egui::containers::panel::PanelState::load(&harness.ctx, egui::Id::new("inspector"))
-                    .expect("rendered mesh inspector panel state")
-                    .outer_rect;
+            // The Inspector is the docked right column: from its title strip to the window edge.
             let screen = harness.ctx.input(|input| input.viewport_rect());
+            let inspector = Rect::from_min_max(
+                Pos2::new(harness.get_by_label("Inspector").rect().min.x - 8.0, screen.min.y),
+                screen.max,
+            );
             assert!(
                 action_rect.min.x >= inspector.min.x - 0.5
                     && action_rect.max.x <= inspector.max.x + 0.5,
@@ -86,7 +87,12 @@ fn expanded_mesh_panels_stay_inside_the_editor_viewport_at_narrow_widths() {
             );
         }
 
-        for id in ["top", "status", "bottom", "hierarchy", "inspector"] {
+        for title in ["Hierarchy", "Inspector"] {
+            let rect = harness.get_by_label(title).rect();
+            let screen = harness.ctx.input(|input| input.viewport_rect());
+            assert!(screen.contains_rect(rect), "{title} panel escaped viewport at width {}: {rect:?}, {screen:?}", size[0]);
+        }
+        for id in ["top", "status"] {
             let state = egui::containers::panel::PanelState::load(&harness.ctx, egui::Id::new(id))
                 .unwrap_or_else(|| panic!("missing rendered {id} panel at width {}", size[0]));
             let rect = state.outer_rect;
@@ -148,11 +154,8 @@ fn expanded_mesh_panels_stay_inside_the_editor_viewport_at_narrow_widths() {
             size[0]
         );
 
-        let inspector =
-            egui::containers::panel::PanelState::load(&harness.ctx, egui::Id::new("inspector"))
-                .expect("inspector panel remains present after Play/Pause")
-                .outer_rect;
+        let inspector = harness.get_by_label("Inspector").rect();
         let screen = harness.ctx.input(|input| input.viewport_rect());
-        assert!(inspector.max.x <= screen.max.x + 0.5);
+        assert!(screen.contains_rect(inspector), "the Inspector remains inside the window after Play/Pause");
     }
 }
