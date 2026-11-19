@@ -135,9 +135,9 @@ pub struct Panel {
     scene: Option<PathBuf>,
     files: Option<Result<PrefabFiles, String>>,
     /// File name for the next "Create prefab".
-    pub new_name: String,
+    new_name: String,
     /// Link the selection to the prefab it is saved as.
-    pub link_selection: bool,
+    link_selection: bool,
     choice: String,
     entity: Option<J>,
     instance_count: usize,
@@ -181,23 +181,8 @@ impl Default for Panel {
 
 impl Panel {
     /// Overridden field paths of the selected entity for one component.
-    pub fn marks(&self, component: &str) -> Arc<Vec<String>> {
+    pub(crate) fn marks(&self, component: &str) -> Arc<Vec<String>> {
         self.marks.get(component).cloned().unwrap_or_default()
-    }
-
-    /// Conflicts reported by the last update, if any.
-    pub fn conflicts(&self) -> &[String] {
-        &self.conflicts
-    }
-
-    /// The last non-modal notice.
-    pub fn notice(&self) -> Option<&str> {
-        self.notice.as_deref()
-    }
-
-    /// The last error text.
-    pub fn error(&self) -> Option<&str> {
-        self.error.as_deref()
     }
 
     fn files(&self) -> Result<&PrefabFiles, String> {
@@ -330,7 +315,7 @@ impl Panel {
     }
 
     /// Restores the prefab value of one overridden field of the selected entity.
-    pub fn revert_field(&mut self, editor: &mut Editor, component: &str, path: &str) {
+    pub(crate) fn revert_field(&mut self, editor: &mut Editor, component: &str, path: &str) {
         let Some(entity) = editor.selected_guid() else { return };
         match self.call(editor, "prefab_instance.revert", json!({"entity": entity.to_string(), "component": component, "path": path})) {
             Ok(_) => self.error = None,
@@ -384,7 +369,7 @@ impl Panel {
     }
 
     /// Draws the panel.
-    pub fn show(&mut self, ui: &mut egui::Ui, editor: &mut Editor) {
+    pub(crate) fn show(&mut self, ui: &mut egui::Ui, editor: &mut Editor) {
         if !self.available(editor) {
             self.marks.clear();
             return;

@@ -532,7 +532,7 @@ pub struct EditorApp {
     pub linked_prefabs: crate::linked_prefab_panel::Panel,
     /// Generic prefab instances: create, instantiate, overrides, apply, update.
     #[cfg(feature = "scene-prefabs")]
-    pub prefabs: crate::prefab_panel::Panel,
+    prefabs: crate::prefab_panel::Panel,
     #[cfg(feature = "animated-models")]
     pub animated_models: crate::animated_panel::AnimatedPanel,
 }

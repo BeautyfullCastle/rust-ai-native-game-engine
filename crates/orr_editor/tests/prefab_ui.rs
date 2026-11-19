@@ -65,9 +65,26 @@ fn wait(h: &mut App, what: &str, mut ready: impl FnMut(&mut App) -> bool) {
         if ready(h) {
             return;
         }
-        assert!(Instant::now() < end, "timed out waiting for {what}: error {:?}", h.state().prefabs.error());
+        assert!(Instant::now() < end, "timed out waiting for {what}");
         sleep(Duration::from_millis(30));
     }
+}
+
+/// Number of override marks (Revert buttons) the inspector shows.
+fn marks(h: &App) -> usize {
+    h.query_all_by_label("Revert").count()
+}
+
+/// Types the file name of the next prefab into the panel's text field.
+fn name_prefab(h: &mut App, name: &str) {
+    use egui::accesskit::Role;
+    h.get_by(|n| n.role() == Role::TextInput && n.value().is_some_and(|v| v.ends_with(".prefab.yaml"))).focus();
+    h.run_steps(2);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.run_steps(2);
+    h.get_by(|n| n.role() == Role::TextInput && n.value().is_some_and(|v| v.ends_with(".prefab.yaml"))).type_text(name);
+    h.run_steps(2);
+    settle(h);
 }
 
 fn target(guid: &str) -> Target {
@@ -115,10 +132,9 @@ fn create_motor(h: &mut App, root: &std::path::Path) {
     }
     settle(h);
     assert_eq!(h.state().editor.selected_guids().len(), 3);
-    h.state_mut().prefabs.new_name = "motor.prefab.yaml".into();
-    h.state_mut().prefabs.link_selection = false;
+    name_prefab(h, "motor.prefab.yaml");
+    click(h, "Link the selection to the new prefab"); // off: the originals stay plain entities
     click(h, "Create prefab from selection");
-    assert_eq!(h.state().prefabs.error(), None);
     assert!(root.join("motor.prefab.yaml").is_file());
 }
 
@@ -148,10 +164,10 @@ fn create_refuses_outside_references_and_instances_get_fresh_remapped_ids() {
     // The joint alone refers to two bodies outside the selection: refused, no file.
     assert!(h.state_mut().editor.select_named("motor_pin"));
     settle(&mut h);
-    h.state_mut().prefabs.new_name = "pin.prefab.yaml".into();
+    name_prefab(&mut h, "pin.prefab.yaml");
     click(&mut h, "Create prefab from selection");
-    let error = h.state().prefabs.error().expect("a refusal").to_string();
-    assert!(error.contains("outside") && error.contains("cannot create a prefab"), "{error}");
+    assert_eq!(h.query_all_by_label_contains("cannot create a prefab").count(), 1, "the refusal is shown in the panel");
+    assert_eq!(h.query_all_by_label_contains("is outside the fragment selection").count(), 1);
     assert!(!path.join("pin.prefab.yaml").exists());
 
     create_motor(&mut h, &path);
@@ -185,18 +201,16 @@ fn overrides_are_marked_revert_and_apply_updates_followers() {
     let (prop_a, prop_b) = (a["e_00000002"].clone(), b["e_00000002"].clone());
     let original = read(&mut h, &prop_a, COLLIDER, "friction");
     select(&mut h, &prop_a);
-    assert!(h.state().prefabs.marks(COLLIDER).is_empty());
-    assert_eq!(h.query_all_by_label("Revert").count(), 0, "no override, no mark");
+    assert_eq!(marks(&h), 0, "no override, no mark");
 
     set(&mut h, &prop_a, COLLIDER, "friction", fixed(3));
-    wait(&mut h, "the override mark", |h| h.state().prefabs.marks(COLLIDER).iter().any(|p| p == "friction"));
-    assert_eq!(h.get_all_by_label("Revert").count(), 1, "one marked field");
+    wait(&mut h, "the override mark", |h| marks(h) == 1);
     assert_eq!(override_count(&mut h, &prop_a), 1);
 
     // Revert field: one undo step, the prefab value is back and the mark is gone.
     let history = h.state().editor.history().entries.len();
     click(&mut h, "Revert");
-    wait(&mut h, "the mark to clear", |h| h.state().prefabs.marks(COLLIDER).is_empty());
+    wait(&mut h, "the mark to clear", |h| marks(h) == 0);
     assert_eq!(read(&mut h, &prop_a, COLLIDER, "friction"), original);
     assert_eq!(h.state().editor.history().entries.len(), history + 1);
     assert!(h.state_mut().editor.undo());
@@ -220,7 +234,6 @@ fn overrides_are_marked_revert_and_apply_updates_followers() {
     // Apply to prefab: the file takes A's values; B follows, except its own override.
     set(&mut h, &prop_b, BODY, "angle", fixed(2));
     click(&mut h, "Apply to prefab");
-    assert_eq!(h.state().prefabs.error(), None);
     let file = std::fs::read_to_string(path.join("motor.prefab.yaml")).unwrap();
     assert!(file.contains("friction: 3"), "the file now holds A's value:\n{file}");
     assert_eq!(read(&mut h, &prop_b, COLLIDER, "friction"), fixed(3), "B follows");
@@ -248,16 +261,14 @@ fn a_changed_prefab_file_updates_instances_and_reports_conflicts_without_a_dialo
     assert_ne!(changed, text);
     changed = changed.replace("e_00000003:", "e_00000004:\n    name: extra\n    orr_physics::Body:\n      pos: [1, 1]\n      angle: 0\n      vel: [0, 0]\n      omega: 0\n      inv_mass: 1\n      inv_inertia: 1\n      linear_damping: 0\n      angular_damping: 0\n      kind: dynamic\n  e_00000003:");
     std::fs::write(&file, &changed).unwrap();
-    wait(&mut h, "the instances to update", |h| !h.state().prefabs.conflicts().is_empty() || h.state().prefabs.error().is_some());
-    assert_eq!(h.state().prefabs.error(), None);
+    wait(&mut h, "the instances to update", |h| h.query_all_by_label_contains("both changed it").count() == 1);
     assert_eq!(h.state().editor.history().entries.len(), history + 1, "one undo step for all instances");
     // A (no overrides) follows; B keeps its two overrides.
     assert_eq!(read(&mut h, &prop_a, COLLIDER, "friction"), Value::Fixed("7.5".parse().unwrap()));
     assert_eq!(read(&mut h, &prop_b, COLLIDER, "friction"), fixed(9));
     assert_eq!(read(&mut h, &hub_b, BODY, "angle"), fixed(1));
-    assert_eq!(h.state().prefabs.conflicts().len(), 1, "{:?}", h.state().prefabs.conflicts());
-    assert!(h.state().prefabs.conflicts()[0].contains("friction"));
-    assert!(h.state().prefabs.notice().unwrap().contains("changed on disk"));
+    assert_eq!(h.query_all_by_label_contains("friction: the prefab and the instance both changed it").count(), 1, "one conflict, in the panel");
+    assert!(h.query_by_label_contains("changed on disk").is_some(), "the notice names the cause");
     let instances = list(&mut h);
     assert!(instances.iter().all(|i| i["members"].as_array().unwrap().len() == 4), "the new entity joined both instances");
     assert!(h.state().editor.rows().iter().filter(|r| r.name.as_deref() == Some("extra")).count() == 2);
@@ -308,7 +319,7 @@ fn links_and_overrides_survive_save_and_reopen_and_detach_undoes() {
     assert_eq!(override_count(&mut h, &prop_b), 1);
     assert_eq!(read(&mut h, &prop_b, COLLIDER, "friction"), fixed(5));
     select(&mut h, &prop_b);
-    wait(&mut h, "the reopened override mark", |h| h.state().prefabs.marks(COLLIDER).iter().any(|p| p == "friction"));
+    wait(&mut h, "the reopened override mark", |h| marks(h) == 1);
 }
 
 #[test]
@@ -318,10 +329,10 @@ fn yard3d_prefab_workflow_with_overrides_apply_update_and_reopen() {
     // 3D selection is one entity; a multi-entity prefab is created through the host method.
     assert!(h.state_mut().editor.select_named("box_left"));
     settle(&mut h);
-    h.state_mut().prefabs.new_name = "box.prefab.yaml".into();
-    h.state_mut().prefabs.link_selection = false;
+    name_prefab(&mut h, "box.prefab.yaml");
+    click(&mut h, "Link the selection to the new prefab");
     click(&mut h, "Create prefab from selection");
-    assert_eq!(h.state().prefabs.error(), None);
+    assert!(root.path().join("box.prefab.yaml").is_file());
     let pair = h.state_mut().editor.host_call("prefab_instance.create", json!({"selected": ["e_00000002", "e_00000003"]})).unwrap();
     assert_eq!(pair["guids"].as_object().unwrap().len(), 2);
     click(&mut h, "Instantiate prefab");
@@ -335,13 +346,11 @@ fn yard3d_prefab_workflow_with_overrides_apply_update_and_reopen() {
     let friction = |h: &mut App, g: &str| read(h, g, "orr_physics3d::Collider", "friction");
     let original = friction(&mut h, &a);
     set(&mut h, &a, "orr_physics3d::Collider", "friction", fixed(2));
-    wait(&mut h, "the 3D override mark", |h| h.state().prefabs.marks("orr_physics3d::Collider").iter().any(|p| p == "friction"));
-    assert_eq!(h.get_all_by_label("Revert").count(), 1);
+    wait(&mut h, "the 3D override mark", |h| marks(h) == 1);
     click(&mut h, "Revert");
     assert_eq!(friction(&mut h, &a), original);
     set(&mut h, &a, "orr_physics3d::Collider", "friction", fixed(2));
     click(&mut h, "Apply to prefab");
-    assert_eq!(h.state().prefabs.error(), None);
     assert!(std::fs::read_to_string(root.path().join("box.prefab.yaml")).unwrap().contains("friction: 2"));
     assert_eq!(friction(&mut h, &b), fixed(2));
     assert_eq!(override_count(&mut h, &a), 0);
@@ -379,13 +388,13 @@ fn screenshot_of_the_inspector_with_override_marks() {
     set(&mut h, &a["e_00000002"], BODY, "angle", fixed(1));
     set(&mut h, &b["e_00000002"], COLLIDER, "friction", fixed(8));
     select(&mut h, &a["e_00000002"]);
-    wait(&mut h, "marks", |h| h.state().prefabs.marks(BODY).len() == 2);
+    wait(&mut h, "marks", |h| marks(h) == 2);
     h.run_steps(4);
     let image = h.render().expect("GPU readback");
     image.save(dest.join("prefab_inspector_override_marks.png")).unwrap();
     // After "Apply to prefab" the marks are gone and the other instance followed.
     click(&mut h, "Apply to prefab");
-    wait(&mut h, "marks to clear", |h| h.state().prefabs.marks(BODY).is_empty());
+    wait(&mut h, "marks to clear", |h| marks(h) == 0);
     h.run_steps(4);
     h.render().expect("GPU readback").save(dest.join("prefab_inspector_after_apply.png")).unwrap();
 }

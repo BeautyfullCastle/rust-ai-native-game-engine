@@ -296,7 +296,7 @@ pub mod collect_ui_reparent;
 #[cfg(feature = "linked-prefabs")]
 pub mod linked_prefab_panel;
 #[cfg(feature = "scene-prefabs")]
-pub mod prefab_panel;
+mod prefab_panel;
 
 #[cfg(feature="room-project")]
 pub mod room_camera_panel;
