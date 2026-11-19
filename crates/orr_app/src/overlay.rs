@@ -2,16 +2,22 @@
 //!
 //! A view fills it through `ViewContext::draw()`. The app clears it before every frame of
 //! view calls and draws it after the default renderer, so it is always on top of the picture.
-//! The text is the 5x7 bitmap font of `orr_render::text` (ASCII only: digits, letters, a few
-//! signs; lowercase letters show as capitals). A character the font cannot draw (Korean, other
-//! letters, `~`) shows as a hollow box and is reported once on stderr, so it never vanishes
-//! without a trace; see [`Overlay::missing_glyphs`].
+//! The text is drawn with a real font when the run has one (the system Korean font by default,
+//! or the one of `App::font`): glyphs are rasterized on demand into an atlas and drawn as
+//! textured quads (see `glyphs.rs`). Without a font the text is the 5x7 bitmap font of
+//! `orr_render::text` (ASCII only: digits, letters, a few signs; lowercase letters show as
+//! capitals). A character the font cannot draw shows as a hollow box and is reported once on
+//! stderr, so it never vanishes without a trace; see [`Overlay::missing_glyphs`].
 
 use std::collections::BTreeSet;
 
 use orr_render::orr_rhi::{Rhi, TextureFormat, Wgpu};
 use orr_render::text::{draw_text_marked, has_glyph, pixel_camera, text_width, GLYPH_H};
 use orr_render::{RenderList, RenderList3D, Renderer};
+
+use crate::font::FontHandle;
+use crate::glyphs::GlyphPass;
+use crate::typeset::{wrap, Align, Anchor, Face, ScreenRect};
 
 /// Pixel width of the lines of the overlay.
 const LINE_WIDTH: f32 = 2.0;
@@ -53,13 +59,19 @@ pub struct Overlay {
     rects: Vec<RectItem>,
     /// The characters without a glyph that were drawn so far (kept when the frame is cleared).
     missing: BTreeSet<char>,
+    /// The font of the run, or `None` for the 5x7 bitmap font. Kept when the frame is cleared.
+    font: Option<FontHandle>,
+    /// Window size in pixels (0 before the run knows it). Kept when the frame is cleared.
+    screen: [f32; 2],
 }
 
-/// The characters of `text` that have no glyph, are not in `known` yet, and are not control
-/// characters, in order of first use. They are added to `known`.
-fn new_missing(text: &str, known: &mut BTreeSet<char>) -> Vec<char> {
+/// The characters of `text` that have no glyph (in `font`, or in the bitmap font when there is
+/// none), are not in `known` yet, and are not control characters, in order of first use.
+/// They are added to `known`.
+fn new_missing(text: &str, font: Option<&FontHandle>, known: &mut BTreeSet<char>) -> Vec<char> {
     let mut found = Vec::new();
-    for c in text.chars().filter(|c| !has_glyph(*c) && !c.is_control()) {
+    let has = |c: char| font.map_or_else(|| has_glyph(c), |font| font.has_glyph(c));
+    for c in text.chars().filter(|c| !has(*c) && !c.is_control()) {
         if known.insert(c) {
             found.push(c);
         }
@@ -67,23 +79,88 @@ fn new_missing(text: &str, known: &mut BTreeSet<char>) -> Vec<char> {
     found
 }
 
-/// Width and height in pixels of `text` drawn with capitals `size` pixels high.
-/// Use it to place text by its right edge or its middle.
+/// Width and height in pixels of `text` drawn with capitals `size` pixels high in the 5x7
+/// bitmap font. With a font use [`Overlay::measure`].
 pub fn text_size(text: &str, size: f32) -> [f32; 2] {
     let scale = size / GLYPH_H as f32;
     [text_width(text, scale), size]
 }
 
 impl Overlay {
-    /// Text with its top left corner at screen position `pos` (pixels, y down). `size` is the
-    /// height of a capital letter in pixels (7 pixels is the font's own size).
+    /// Text with the top of its capital letters at screen position `pos` (pixels, y down) and its
+    /// left edge at `pos[0]`. `size` is the height of a capital letter in pixels (7 pixels is the
+    /// bitmap font's own size). One line: use [`Overlay::text_box`] for wrapping.
     pub fn text(&mut self, pos: [f32; 2], size: f32, color: [f32; 4], text: &str) {
         if size > 0.0 && size.is_finite() && !text.is_empty() {
-            for c in new_missing(text, &mut self.missing) {
+            for c in new_missing(text, self.font.as_ref(), &mut self.missing) {
                 eprintln!("overlay text: the font has no glyph for {c:?} (U+{:04X}); it is drawn as a box", u32::from(c));
             }
             self.texts.push(TextItem { pos, size, color, text: text.to_string() });
         }
+    }
+
+    /// Text in `rect`, broken into lines that fit its width (at spaces, and between two
+    /// characters inside a word that is wider than the box, as Korean without spaces needs).
+    /// A newline character starts a new line. Each line is placed by `align` between the left
+    /// and right edge of `rect`; the first line starts at the top edge, and lines below the
+    /// bottom edge are still drawn. A `rect` without width does not wrap. Returns the width of
+    /// the widest line and the height of all lines, to place something below the text.
+    pub fn text_box(&mut self, rect: ScreenRect, size: f32, color: [f32; 4], text: &str, align: Align) -> [f32; 2] {
+        if !(size > 0.0 && size.is_finite()) || text.is_empty() {
+            return [0.0, 0.0];
+        }
+        let font = self.font.clone();
+        let face = Face::new(font.as_deref(), size);
+        let lines = wrap(text, Some(rect.w), &mut |c| face.advance(c));
+        let line_height = face.line_height();
+        let mut widest = 0.0f32;
+        for (i, line) in lines.iter().enumerate() {
+            widest = widest.max(line.width);
+            let top = rect.y + i as f32 * line_height;
+            let x = rect.x + align.offset(rect.w, line.width);
+            // `text` places the top of the capitals; the baseline is `ascent` below the top of the line.
+            self.text([x, top + face.ascent() - size], size, color, &line.text);
+        }
+        [widest, lines.len() as f32 * line_height]
+    }
+
+    /// One line of text placed at `anchor` of the window, moved by `shift` pixels (x to the right,
+    /// y down; use a negative shift to keep a margin from the right or bottom edge). Needs the
+    /// window size: without it (a window-free run) the text starts at the top left corner.
+    pub fn text_anchored(&mut self, anchor: Anchor, shift: [f32; 2], size: f32, color: [f32; 4], text: &str) {
+        let [w, h] = self.measure(text, size);
+        let placed = self.screen_rect().anchored(anchor, w, h, shift);
+        self.text([placed.x.max(0.0), placed.y.max(0.0)], size, color, text);
+    }
+
+    /// Width and height in pixels of one line of `text` with capitals `size` pixels high, drawn
+    /// with the font of this run. The height is `size`: the capital letters, without descenders.
+    pub fn measure(&self, text: &str, size: f32) -> [f32; 2] {
+        [Face::new(self.font.as_deref(), size).width(text), size]
+    }
+
+    /// The window size in pixels, `[0, 0]` while the run does not know it (a window-free run
+    /// until [`Overlay::set_screen_size`]). With `--screenshot` it is the size of the picture.
+    pub fn screen_size(&self) -> [f32; 2] {
+        self.screen
+    }
+
+    /// The whole window as a rectangle, to place text and boxes relative to its edges.
+    pub fn screen_rect(&self) -> ScreenRect {
+        ScreenRect::new(0.0, 0.0, self.screen[0], self.screen[1])
+    }
+
+    pub fn set_screen_size(&mut self, size: [f32; 2]) {
+        self.screen = size;
+    }
+
+    /// The font of this run, `None` for the 5x7 bitmap font.
+    pub fn font(&self) -> Option<&FontHandle> {
+        self.font.as_ref()
+    }
+
+    pub fn set_font(&mut self, font: Option<FontHandle>) {
+        self.font = font;
     }
 
     /// A line between two world points, 2 pixels wide.
@@ -180,15 +257,21 @@ impl Overlay {
 pub(crate) struct TextPass {
     renderer: Renderer<Wgpu>,
     list: RenderList,
+    glyphs: GlyphPass,
 }
 
 impl TextPass {
     pub(crate) fn new(rhi: Wgpu, format: TextureFormat) -> Self {
-        Self { renderer: Renderer::new(rhi, format), list: RenderList::new() }
+        Self { glyphs: GlyphPass::new(rhi.clone(), format), renderer: Renderer::new(rhi, format), list: RenderList::new() }
     }
 
-    /// Draws the text of `overlay` into `view` (`size` pixels) and keeps what is there.
+    /// Draws the text of `overlay` into `view` (`size` pixels) and keeps what is there: textured
+    /// glyphs when the overlay has a font, else the quads of the 5x7 bitmap font.
     pub(crate) fn draw(&mut self, view: &<Wgpu as Rhi>::TextureView, size: (u32, u32), overlay: &Overlay) {
+        if let Some(font) = overlay.font() {
+            self.glyphs.draw(view, size, overlay, font);
+            return;
+        }
         self.list.clear();
         overlay.fill_text_list(&mut self.list, size);
         if self.list.is_empty() {
@@ -209,9 +292,8 @@ mod tests {
     #[test]
     fn a_character_without_a_glyph_is_recorded_once_and_the_text_is_kept() {
         let mut known = BTreeSet::new();
-        assert_eq!(new_missing("SCORE 가가 ~", &mut known), vec!['가', '~']);
-        assert!(new_missing("가 ~ A
-", &mut known).is_empty(), "reported once");
+        assert_eq!(new_missing("SCORE 가가 ~", None, &mut known), vec!['가', '~']);
+        assert!(new_missing("가 ~ A", None, &mut known).is_empty(), "reported once");
         let mut overlay = Overlay::default();
         overlay.text([0.0, 0.0], 14.0, WHITE, "OK 가");
         overlay.text([0.0, 20.0], 14.0, WHITE, "가가");
@@ -279,5 +361,92 @@ mod tests {
         let mut list3 = RenderList3D::new();
         overlay.add_to_list3(&mut list3);
         assert_eq!(list3.lines.len(), 5);
+    }
+
+    fn lines_of(overlay: &Overlay) -> Vec<&str> {
+        overlay.texts().iter().map(|t| t.text.as_str()).collect()
+    }
+
+    #[test]
+    fn a_korean_text_box_wraps_at_its_width_and_keeps_every_glyph() {
+        // The bitmap metrics: capitals 14 pixels high, 12 pixels per character, 21 per line.
+        let mut overlay = Overlay::default();
+        let used = overlay.text_box(ScreenRect::new(10.0, 20.0, 60.0, 0.0), 14.0, WHITE, "가나다라마바사", Align::Left);
+
+        assert_eq!(lines_of(&overlay), ["가나다라마", "바사"], "five syllables fit 60 pixels, with no space to break at");
+        assert_eq!(overlay.texts().iter().map(|t| t.text.chars().count()).sum::<usize>(), 7);
+        assert_eq!(overlay.texts()[0].pos, [10.0, 20.0]);
+        assert_eq!(overlay.texts()[1].pos, [10.0, 41.0]);
+        assert_eq!(used, [60.0, 42.0], "the widest line and the height of two lines");
+    }
+
+    #[test]
+    fn a_text_box_breaks_a_korean_sentence_at_its_spaces() {
+        let mut overlay = Overlay::default();
+        overlay.text_box(ScreenRect::new(0.0, 0.0, 84.0, 0.0), 14.0, WHITE, "별 5개를 모으세요", Align::Left);
+        assert_eq!(lines_of(&overlay), ["별 5개를", "모으세요"]);
+    }
+
+    #[test]
+    fn text_box_lines_are_aligned_inside_the_box() {
+        let place = |align| {
+            let mut overlay = Overlay::default();
+            overlay.text_box(ScreenRect::new(10.0, 0.0, 60.0, 0.0), 14.0, WHITE, "가나다라마바사", align);
+            overlay.texts().iter().map(|t| t.pos[0]).collect::<Vec<_>>()
+        };
+        // The second line is two characters (24 pixels) in a box 60 pixels wide.
+        assert_eq!(place(Align::Left), [10.0, 10.0]);
+        assert_eq!(place(Align::Center), [10.0, 28.0]);
+        assert_eq!(place(Align::Right), [10.0, 46.0]);
+    }
+
+    #[test]
+    fn text_anchored_uses_the_window_size_and_keeps_to_the_corner_without_one() {
+        let mut overlay = Overlay::default();
+        overlay.text_anchored(Anchor::Center, [0.0, 0.0], 14.0, WHITE, "ABCD");
+        assert_eq!(overlay.texts()[0].pos, [0.0, 0.0], "no window size: the corner");
+
+        overlay.clear();
+        overlay.set_screen_size([800.0, 600.0]);
+        assert_eq!(overlay.screen_size(), [800.0, 600.0]);
+        overlay.text_anchored(Anchor::Center, [0.0, 0.0], 14.0, WHITE, "ABCD");
+        overlay.text_anchored(Anchor::BottomRight, [-10.0, -10.0], 14.0, WHITE, "ABCD");
+        // "ABCD" is 4 * 12 = 48 pixels wide and 14 high.
+        assert_eq!(overlay.texts()[0].pos, [376.0, 293.0]);
+        assert_eq!(overlay.texts()[1].pos, [742.0, 576.0]);
+        assert_eq!(overlay.screen_rect(), ScreenRect::new(0.0, 0.0, 800.0, 600.0));
+    }
+
+    #[test]
+    fn the_window_size_survives_a_new_frame() {
+        let mut overlay = Overlay::default();
+        overlay.set_screen_size([320.0, 200.0]);
+        overlay.text([0.0; 2], 14.0, WHITE, "A");
+        overlay.clear();
+        assert_eq!(overlay.screen_size(), [320.0, 200.0]);
+    }
+
+    #[test]
+    fn with_a_font_korean_is_drawable_and_only_a_character_the_font_lacks_is_reported() {
+        let Some(font) = crate::font::system_font() else {
+            eprintln!("no system font with Hangul on this machine: the font checks are skipped");
+            return;
+        };
+        let mut overlay = Overlay::default();
+        overlay.set_font(Some(font));
+
+        overlay.text([0.0; 2], 14.0, WHITE, "별 5개를 모으세요 일시정지 승리!");
+        assert!(overlay.missing_glyphs().is_empty(), "{:?}", overlay.missing_glyphs());
+        overlay.text([0.0; 2], 14.0, WHITE, "\u{FFFF}");
+        assert_eq!(overlay.missing_glyphs().iter().collect::<Vec<_>>(), vec![&'\u{FFFF}']);
+
+        let [syllable, letter] = ["가", "i"].map(|t| overlay.measure(t, 14.0)[0]);
+        assert!(syllable > letter, "a proportional font: a Hangul syllable is wider than an i");
+        let mut boxed = Overlay::default();
+        boxed.set_font(overlay.font().cloned());
+        let rect = ScreenRect::new(0.0, 0.0, 100.0, 0.0);
+        boxed.text_box(rect, 14.0, WHITE, "별 5개를 모으세요 별 5개를 모으세요", Align::Left);
+        assert!(boxed.texts().len() >= 2, "the sentence is wider than the box");
+        assert!(boxed.texts().iter().all(|t| boxed.measure(&t.text, 14.0)[0] <= 100.0));
     }
 }

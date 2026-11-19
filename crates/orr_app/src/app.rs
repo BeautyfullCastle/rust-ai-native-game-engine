@@ -23,6 +23,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use crate::cli::{Args, RunMode, USAGE};
+use crate::font::{system_font, system_font_candidates, Font, FontHandle};
 use crate::overlay::{Overlay, TextPass};
 use crate::input::{Device, InputContext};
 use crate::net::{self, Hosted, Join};
@@ -121,6 +122,16 @@ impl<G: Game> Bridge<G> for Driver<G> {
     }
 }
 
+/// Which font draws the overlay text.
+enum FontChoice {
+    /// The first system font with Hangul, else the 5x7 bitmap font.
+    System,
+    /// Always the 5x7 bitmap font.
+    Bitmap,
+    Bytes(String, Vec<u8>),
+    File(PathBuf),
+}
+
 struct SceneSource {
     path: PathBuf,
     register: fn(&mut TypeRegistry),
@@ -166,6 +177,7 @@ pub struct App<G: Game> {
     player_data: Vec<u8>,
     /// Devices given to slots by hand (see [`App::assign_device`]).
     devices: Vec<(PlayerSlot, Device)>,
+    font: FontChoice,
 }
 
 impl<G: Game> App<G>
@@ -205,6 +217,7 @@ impl<G: Game> App<G> {
             views: Views::new(),
             player_data: Vec::new(),
             devices: Vec::new(),
+            font: FontChoice::System,
         }
     }
 
@@ -260,6 +273,29 @@ impl<G: Game> App<G> {
     /// (slot 0 keyboard, slot 1 first pad, slot 2 second pad).
     pub fn assign_device(mut self, slot: PlayerSlot, device: Device) -> Self {
         self.devices.push((slot, device));
+        self
+    }
+
+    /// The font of the overlay text (`ctx.draw().text(..)`, `text_box(..)`, the [`crate::Screens`]):
+    /// the bytes of a `.ttf`, `.otf` or `.ttc` file, which the game embeds with `include_bytes!`.
+    /// `name` appears in messages. Without this call or [`App::font_file`] the run uses the system
+    /// font with Hangul (on Windows `malgun.ttf`), and the 5x7 bitmap font (ASCII only) when
+    /// there is none. A font that cannot be read stops the run with an error.
+    pub fn font(mut self, name: &str, bytes: impl Into<Vec<u8>>) -> Self {
+        self.font = FontChoice::Bytes(name.to_string(), bytes.into());
+        self
+    }
+
+    /// The same with a font file that is read when the run starts.
+    pub fn font_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.font = FontChoice::File(path.into());
+        self
+    }
+
+    /// Draws the overlay text with the 5x7 bitmap font (ASCII capitals, digits, a few signs)
+    /// even when a system font exists: the same picture on every machine.
+    pub fn bitmap_font(mut self) -> Self {
+        self.font = FontChoice::Bitmap;
         self
     }
 
@@ -337,6 +373,23 @@ impl<G: Game> App<G> {
         self.run_window(args)
     }
 
+    /// The font of the run (see [`App::font`]); `None` for the bitmap font.
+    fn resolve_font(&mut self) -> Result<Option<FontHandle>, Error> {
+        match std::mem::replace(&mut self.font, FontChoice::System) {
+            FontChoice::Bitmap => Ok(None),
+            FontChoice::Bytes(name, bytes) => Font::from_bytes(&name, bytes).map(|f| Some(FontHandle::new(f))).map_err(|e| Error(e.to_string())),
+            FontChoice::File(path) => Font::from_file(&path).map(|f| Some(FontHandle::new(f))).map_err(|e| Error(e.to_string())),
+            FontChoice::System => {
+                let font = system_font();
+                if font.is_none() {
+                    let tried: Vec<String> = system_font_candidates().iter().map(|p| p.display().to_string()).collect();
+                    eprintln!("overlay text: no system font was found ({}); drawing with the 5x7 bitmap font (ASCII only). Give a font with App::font or App::font_file", tried.join(", "));
+                }
+                Ok(font)
+            }
+        }
+    }
+
     fn build_bridge(&mut self) -> Result<Offline<G>, Error> {
         self.check_player_data()?;
         let players = self.players.max(self.local_players);
@@ -408,6 +461,8 @@ impl<G: Game> App<G> {
             (Some(_), Some(_)) => return Err(Error("both .view(..) and .view3d(..) are set: a run draws in 2D or in 3D, not both".to_string())),
         };
         let input = self.input.take().ok_or_else(|| Error("no input: call .input(..) before .run()".to_string()))?;
+        let font = self.resolve_font()?;
+        self.views.set_font(font);
         let mode = args.mode()?;
         let (bridge, server) = match &mode {
             RunMode::Offline => (Driver::Offline(Box::new(self.build_bridge()?)), None),
@@ -797,6 +852,8 @@ impl<G: Game> Runner<G> {
         }
         self.display.advance(self.pacer.view_dt(real.as_secs_f32(), self.bridge.tick_rate()), &update);
 
+        let screen = self.screen_size();
+        self.views.set_screen_size(screen);
         if !self.views.is_empty() {
             self.display.dispatch(&mut self.views, &mut self.bridge, &update);
         }
@@ -815,6 +872,19 @@ impl<G: Game> Runner<G> {
             }
             event_loop.exit();
         }
+    }
+
+    /// The size in pixels that the overlay lays its text out for: the picture of `--screenshot`,
+    /// else the window.
+    fn screen_size(&self) -> [f32; 2] {
+        let (w, h) = match (&self.args.screenshot, &self.window) {
+            (None, Some(window)) => {
+                let size = window.inner_size();
+                (size.width, size.height)
+            }
+            _ => self.args.size,
+        };
+        [w as f32, h as f32]
     }
 
     fn key(&mut self, code: KeyCode, down: bool, event_loop: &ActiveEventLoop) {
@@ -1079,6 +1149,22 @@ mod tests {
     impl View2D for NoLook {
         fn camera(&self, _frame: orr_bridge::FrameView<'_>) -> orr_render::Camera {
             orr_render::Camera::new([0.0, 0.0], 1.0)
+        }
+    }
+
+    #[test]
+    fn the_font_choices_resolve_to_a_font_or_the_bitmap_font_and_a_bad_font_is_an_error() {
+        assert!(physics().bitmap_font().resolve_font().unwrap().is_none(), "the bitmap font is a choice, not a failure");
+        assert!(physics().font("junk", vec![1, 2, 3]).resolve_font().unwrap_err().to_string().contains("junk"));
+        let missing = std::env::temp_dir().join("orr_app_no_such_font.ttf");
+        assert!(physics().font_file(&missing).resolve_font().unwrap_err().to_string().contains("orr_app_no_such_font.ttf"));
+        // The default is the system font when there is one, and still a run when there is none.
+        assert_eq!(physics().resolve_font().unwrap().is_some(), crate::font::system_font().is_some());
+        if let Some(path) = crate::font::system_font_candidates().into_iter().find(|p| p.exists()) {
+            let font = physics().font_file(&path).resolve_font().unwrap().expect("a font file gives a font");
+            let bytes = std::fs::read(&path).unwrap();
+            let from_bytes = physics().font("copy", bytes).resolve_font().unwrap().unwrap();
+            assert_eq!(font.advance('가', 20.0), from_bytes.advance('가', 20.0));
         }
     }
 }

@@ -3160,6 +3160,7 @@ dependencies = [
 name = "orr_app"
 version = "0.0.1"
 dependencies = [
+ "ab_glyph",
  "bytemuck",
  "gilrs",
  "orr_audio",
