@@ -5,7 +5,7 @@ use crate::game::EditorGame;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Settings {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
+    #[cfg(all(any(target_os = "linux", windows), target_arch = "x86_64", feature = "arena-project-export"))]
     Arena,
     #[cfg(feature = "mesh-export")]
     Mesh,
@@ -76,19 +76,19 @@ pub(super) fn route(game: EditorGame) -> Route {
 }
 
 fn arena_route() -> Route {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
+    #[cfg(all(any(target_os = "linux", windows), target_arch = "x86_64", feature = "arena-project-export"))]
     { Route {
-        title: "Arena export", target: "Editor route: Linux x86-64 host and player only.",
+        title: "Arena export", target: if cfg!(windows) { "Editor route: Windows x86-64 host and player only." } else { "Editor route: Linux x86-64 host and player only." },
         instructions: "Open the inline Arena export tab to export the explicitly saved project.",
         limits: "Scenes and sprites only. Verification executes that runtime; its hash does not establish trust. No automatic save, launch, focus or popup.",
         settings: Some(Settings::Arena),
     } }
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export")))]
+    #[cfg(not(all(any(target_os = "linux", windows), target_arch = "x86_64", feature = "arena-project-export")))]
     { cli_route("orr_export_arena") }
 }
 
 // These are separate CLI tools, not features inferred to be linked into this editor.
-#[cfg(any(not(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export")), feature = "collect-dodge", feature = "room-project"))]
+#[cfg(any(not(all(any(target_os = "linux", windows), target_arch = "x86_64", feature = "arena-project-export")), feature = "collect-dodge", feature = "room-project"))]
 fn cli_route(binary: &'static str) -> Route {
     Route {
         title: binary,
@@ -137,7 +137,7 @@ impl EditorApp {
                 let can_open = can_open && (settings != Settings::Room || !self.package_work_pending());
                 if ui.add_enabled(can_open, egui::Button::new("Open export settings")).clicked() {
                     match settings {
-                        #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
+                        #[cfg(all(any(target_os = "linux", windows), target_arch = "x86_64", feature = "arena-project-export"))]
                         Settings::Arena => self.ui.bottom_tab = super::BottomTab::ArenaExport,
                         #[cfg(feature = "mesh-export")]
                         Settings::Mesh => self.mesh_export.open = true,

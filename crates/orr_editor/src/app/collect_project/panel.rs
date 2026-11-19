@@ -59,7 +59,10 @@ impl Panel {
             || self.path.len() > 4096
             || !path.is_absolute()
             || self.path.chars().any(char::is_control)
-            || self.path.split('/').any(|part| matches!(part, "." | ".."))
+            || self
+                .path
+                .split(std::path::is_separator)
+                .any(|part| matches!(part, "." | ".."))
             || path.components().count() > 64
         {
             return Err("Choose an absolute project directory (at most 4096 bytes and 64 components), without control characters or dot segments.".into());
@@ -163,10 +166,18 @@ fn field(ui: &mut egui::Ui, label: &str, id: &str, text: &mut String, limit: usi
 mod tests {
     use super::*;
 
+    fn base() -> String {
+        std::env::temp_dir().to_str().unwrap().to_owned()
+    }
+
+    fn project_path() -> String {
+        format!("{}{}collect-project", base(), std::path::MAIN_SEPARATOR)
+    }
+
     fn valid() -> Panel {
         Panel {
             kind: Some(Kind::New),
-            path: "/tmp/collect-project".into(),
+            path: project_path(),
             seed: "project-1".into(),
             game_id: "bf3b65a7-752c-4c56-91bb-d76c5de01ce3".into(),
             ..Default::default()
@@ -176,15 +187,19 @@ mod tests {
     #[test]
     fn validates_explicit_seed_path_and_canonical_identity_without_repair() {
         assert!(valid().request().is_ok());
+        let sep = std::path::MAIN_SEPARATOR;
+        let base = base();
         for path in [
-            "",
-            "relative/project",
-            "/tmp/../project",
-            "/tmp/./project",
-            "/tmp/line\nname",
+            String::new(),
+            "relative/project".into(),
+            format!("{base}{sep}..{sep}project"),
+            format!("{base}{sep}.{sep}project"),
+            format!("{base}{sep}line\nname"),
+            // Both separators are checked on every host.
+            format!("{base}/../project"),
         ] {
             let mut panel = valid();
-            panel.path = path.into();
+            panel.path = path;
             assert!(panel.request().is_err());
         }
         for seed in ["", "with spaces", "한글"] {
@@ -207,18 +222,19 @@ mod tests {
         panel.seed = "a".repeat(129);
         assert!(panel.request().is_err());
         panel = valid();
-        panel.path = format!("/{}", "a".repeat(4096));
+        panel.path = format!("{}{}", project_path(), "a".repeat(4096));
         assert!(panel.request().is_err());
     }
 
     #[test]
     fn repeated_open_preserves_pending_request_and_created_recovery() {
         let mut panel = valid();
-        panel.created(PathBuf::from("/tmp/already-created"));
+        let created = PathBuf::from(base()).join("already-created");
+        panel.created(created.clone());
         panel.open(Kind::Open);
         assert_eq!(panel.kind, Some(Kind::New));
         let request = panel.request().unwrap();
-        assert_eq!(request.path, PathBuf::from("/tmp/already-created"));
+        assert_eq!(request.path, created);
         assert!(request.create.is_none());
     }
 
@@ -230,6 +246,6 @@ mod tests {
         panel.game_id.clear();
         let request = panel.request().unwrap();
         assert!(request.create.is_none());
-        assert_eq!(request.path, PathBuf::from("/tmp/collect-project"));
+        assert_eq!(request.path, PathBuf::from(project_path()));
     }
 }

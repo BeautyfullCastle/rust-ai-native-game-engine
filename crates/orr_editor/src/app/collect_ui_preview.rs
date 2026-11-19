@@ -173,7 +173,7 @@ impl Drop for PreviewGpu {
 #[derive(Default)]
 pub(super) struct PreviewWindow {
     state: State,
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "project-create"))]
+    #[cfg(all(any(target_os = "linux", windows), target_arch = "x86_64", feature = "project-create"))]
     source: Option<(PathBuf, u64)>,
     gpu: Option<PreviewGpu>,
     error: Option<String>,
@@ -641,7 +641,7 @@ impl EditorApp {
 
     /// A project switch must not discard accepted unsaved UI or staged gestures.
     /// This is read-only: cancellation and failure retain the document and undo.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "project-create"))]
+    #[cfg(all(any(target_os = "linux", windows), target_arch = "x86_64", feature = "project-create"))]
     pub(super) fn collect_ui_project_switch_guard(&self) -> Result<(), String> {
         if self.collect_ui_staged_authoring() {
             return Err("Apply or cancel the staged Collect UI gesture before changing projects".into());
@@ -676,7 +676,7 @@ impl EditorApp {
                 .err(),
             None => Some("Open a saved Collect project to preview its authored screens".into()),
         };
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "project-create"))]
+        #[cfg(all(any(target_os = "linux", windows), target_arch = "x86_64", feature = "project-create"))]
         {
             self.collect_ui_preview.source = if self.collect_ui_preview.error.is_none() {
                 self.editor.path().map(|path| (path, self.editor.scene_load_epoch()))

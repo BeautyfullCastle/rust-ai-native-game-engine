@@ -1,7 +1,7 @@
 //! Popup-free, explicitly dispatched Arena export. Each job owns its worker
 //! until terminal AND joined, even when the tab is hidden or drawing returns early.
 use super::EditorApp;
-use orr_sample::project_export::{ArenaExportSource, ExportOptions, ExportReport};
+use crate::arena_exporter::{ArenaExportSource, ExportOptions, ExportReport};
 use std::{
     path::PathBuf,
     sync::mpsc::{self, Receiver, TryRecvError},
@@ -177,7 +177,7 @@ impl EditorApp {
         let handle = spawn(
             format!("arena-export-{id}"),
             Box::new(move || {
-                let result = orr_sample::project_export::export_arena_for_source(
+                let result = crate::arena_exporter::export_arena_for_source(
                     &worker_options,
                     &worker_source,
                 );
@@ -204,7 +204,11 @@ impl EditorApp {
         Ok(())
     }
     pub(super) fn show_arena_export(&mut self, ui: &mut egui::Ui) {
-        ui.label("Linux x86-64 · saved Arena scene + sprites; matching saved Korean preset requires project-ui. Tilemaps and Collect UI are refused.");
+        ui.label(if cfg!(windows) {
+            "Windows x86-64 · saved Arena scene + sprites; matching saved Korean preset requires project-ui. Tilemaps and Collect UI are refused."
+        } else {
+            "Linux x86-64 · saved Arena scene + sprites; matching saved Korean preset requires project-ui. Tilemaps and Collect UI are refused."
+        });
         ui.label("Verification executes supplied code. SHA256 checks identity, not trust. Supply a matching, known trusted, already-built Arena player.");
         egui::Grid::new("arena_export_form").show(ui, |ui| {
             for (label, value) in [
@@ -275,10 +279,10 @@ impl EditorApp {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 #[path = "arena_export_tests.rs"]
 mod tests;
 
-#[cfg(all(test, feature = "tilemap", feature = "project-create"))]
+#[cfg(all(test, target_os = "linux", feature = "tilemap", feature = "project-create"))]
 #[path = "arena_export_tilemap_tests.rs"]
 mod tilemap_tests;

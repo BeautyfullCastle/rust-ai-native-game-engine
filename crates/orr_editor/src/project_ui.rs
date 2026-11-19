@@ -8,10 +8,10 @@ pub struct Preview {
     // Attests installation input, not later arbitrary egui context mutations.
     #[cfg(all(
         feature = "arena-project-export",
-        target_os = "linux",
+        any(target_os = "linux", windows),
         target_arch = "x86_64"
     ))]
-    installed: Option<orr_sample::project_export::ArenaUiSource>,
+    installed: Option<crate::arena_exporter::ArenaUiSource>,
 }
 
 impl Preview {
@@ -19,12 +19,12 @@ impl Preview {
         let font_bytes = prepared.font.len();
         #[cfg(all(
             feature = "arena-project-export",
-            target_os = "linux",
+            any(target_os = "linux", windows),
             target_arch = "x86_64"
         ))]
         let installed = {
             use sha2::{Digest, Sha256};
-            orr_sample::project_export::ArenaUiSource::new(
+            crate::arena_exporter::ArenaUiSource::new(
                 prepared.descriptor.clone(),
                 font_bytes as u64,
                 Sha256::digest(&prepared.font)
@@ -49,7 +49,7 @@ impl Preview {
             font_bytes,
             #[cfg(all(
                 feature = "arena-project-export",
-                target_os = "linux",
+                any(target_os = "linux", windows),
                 target_arch = "x86_64"
             ))]
             installed,
@@ -58,12 +58,12 @@ impl Preview {
 
     #[cfg(all(
         feature = "arena-project-export",
-        target_os = "linux",
+        any(target_os = "linux", windows),
         target_arch = "x86_64"
     ))]
     pub(crate) fn arena_export_identity(
         &self,
-    ) -> Result<&orr_sample::project_export::ArenaUiSource, String> {
+    ) -> Result<&crate::arena_exporter::ArenaUiSource, String> {
         let installed = self
             .installed
             .as_ref()
@@ -99,7 +99,7 @@ impl Preview {
 #[cfg(all(
     test,
     feature = "arena-project-export",
-    target_os = "linux",
+    any(target_os = "linux", windows),
     target_arch = "x86_64"
 ))]
 mod tests {

@@ -7,7 +7,12 @@ use std::{
 const GAME_ID: &str = "bf3b65a7-752c-4c56-91bb-d76c5de01ce3";
 
 fn current() -> (tempfile::TempDir, EditorApp) {
-    let directory = tempfile::tempdir_in(fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
+    // A Windows canonical path has a `\\?\` prefix, which project creation refuses.
+    let directory = if cfg!(windows) {
+        tempfile::tempdir().unwrap()
+    } else {
+        tempfile::tempdir_in(fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap()
+    };
     let scene = directory.path().join("current.scene.yaml");
     fs::write(
         &scene,
@@ -72,7 +77,7 @@ fn host_failure_retains_created_project_and_explicit_open_recovery() {
     assert!(app.collect_ui.is_none());
     let before = files(&target);
     let recovery = app.ui.collect_project.request().unwrap();
-    assert_eq!(recovery.path, target);
+    assert_eq!(recovery.path, fs::canonicalize(&target).unwrap());
     assert!(
         recovery.create.is_none(),
         "recovery must never repeat creation"

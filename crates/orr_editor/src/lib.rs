@@ -271,6 +271,12 @@ pub mod package_manager_panel;
 #[cfg(feature = "package-manager")]
 mod package_model_preview;
 
+/// The saved-Arena exporter of this host: the Linux ELF exporter or the Windows PE exporter.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
+pub(crate) use orr_sample::project_export as arena_exporter;
+#[cfg(all(windows, target_arch = "x86_64", feature = "arena-project-export"))]
+pub(crate) use orr_sample::windows_export as arena_exporter;
+
 #[cfg(feature = "project-ui")]
 pub mod project_ui;
 

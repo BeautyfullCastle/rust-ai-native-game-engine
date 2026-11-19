@@ -112,7 +112,7 @@ impl Default for SpritePanel {
 impl SpritePanel {
     /// Compare only referenced cached assets; never reload or mutate the renderer cache.
     #[cfg(all(
-        target_os = "linux",
+        any(target_os = "linux", windows),
         target_arch = "x86_64",
         feature = "arena-project-export"
     ))]
