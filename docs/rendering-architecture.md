@@ -432,7 +432,11 @@ Forest Valley 위를 동양식 용이 난다. 비행은 시뮬에서 고정소�
 
 필드가 늘어서 프레임 배치가 바뀌었다. 이를 쓰는 게임의 체크섬은 의도적으로 바뀌었다: `golden_yard60` 0xa7da82e23e15b9ff → 0x47723039e9bdb0b4, `golden_yard150` 0x14d3d27b2c87519b → 0x9abbd0415c21b868, `orr_wasm_bench`의 `physics3d_1000_tick` 0x03ff3e4d279a3d61 → 0x3a512264fc1f80f0. 씬 파일은 새 필드를 모두 적어야 읽힌다. 아래 TerrainYard3D의 빈 시뮬 체크섬도 다시 바뀌었다.
 
-**적용 범위.** 컴포넌트를 등록한 게임(Yard3D, ViewYard3D, TerrainYard3D)의 씬에 적용된다. 내비게이션, Room, 메시 게임은 아직 `orr_gfx`를 등록하지 않아 이 모드가 꺼져 있다. 같은 이유로 1.14의 첫 항목이 남아 있다. 터레인 문서(`TerrainYard3D`)는 `orr_gfx::register`와 `init`을 넣어 `Light`, `Sky`, `Environment`, `PostProcess`, `Water`를 가진다. 입장 검사(`validate_scene_frame`)는 `Body`와 `Collider`만 보므로 바뀌지 않았다. 뷰포트는 문서의 프레임에서 `YardFrame`을 뽑는 같은 경로를 쓰므로 그림 코드도 그대로다. 터레인 문서는 지형을 여전히 `orr_gfx::Terrain`이 아니라 터레인 세션의 모델로 그린다. 기본 하늘은 꺼져 있고 기본 환경·후처리 값이 이전의 고정 조명과 같으므로, 해(`sun` 방향광)가 없는 이전 문서도 같은 모습으로 열린다. 다만 해가 없으면 Hour가 아무것도 바꾸지 못한다. 체크인된 `scenes/terrain_sphere.scene.yaml`에는 이전 조명과 같은 값의 해가 들어 있다. 이 게임의 상태에 싱글턴 세 개가 늘었으므로 TerrainYard3D의 프레임 체크섬은 전과 다르다. 빈 시뮬(`Simulation::<TerrainYard3D>::new((), 60, 42)`)의 `0x5ed3bc1521e4953e`가 `0x7b028584fdb00177`이 되었다. 이 게임에는 고정된 골든 값이 없고, 다른 게임의 골든(`orr_games --test golden`)은 그대로다.
+**적용 범위.** 컴포넌트를 등록한 게임(Yard3D, ViewYard3D, TerrainYard3D, NavigationYard3D)의 씬에 적용된다. Room과 메시 게임(`MeshNavigation`, `MeshHazardsV1`)은 아직 `orr_gfx`를 등록하지 않아 이 모드가 꺼져 있다. 이유는 이 절 끝의 "Room과 메시 게임" 항목에 있다. 같은 이유로 1.14의 첫 항목이 남아 있다. 터레인 문서(`TerrainYard3D`)는 `orr_gfx::register`와 `init`을 넣어 `Light`, `Sky`, `Environment`, `PostProcess`, `Water`를 가진다. 입장 검사(`validate_scene_frame`)는 `Body`와 `Collider`만 보므로 바뀌지 않았다. 뷰포트는 문서의 프레임에서 `YardFrame`을 뽑는 같은 경로를 쓰므로 그림 코드도 그대로다. 터레인 문서는 지형을 여전히 `orr_gfx::Terrain`이 아니라 터레인 세션의 모델로 그린다. 기본 하늘은 꺼져 있고 기본 환경·후처리 값이 이전의 고정 조명과 같으므로, 해(`sun` 방향광)가 없는 이전 문서도 같은 모습으로 열린다. 다만 해가 없으면 Hour가 아무것도 바꾸지 못한다. 체크인된 `scenes/terrain_sphere.scene.yaml`에는 이전 조명과 같은 값의 해가 들어 있다. 이 게임의 상태에 싱글턴 세 개가 늘었으므로 TerrainYard3D의 프레임 체크섬은 전과 다르다. 빈 시뮬(`Simulation::<TerrainYard3D>::new((), 60, 42)`)의 `0x5ed3bc1521e4953e`가 `0x7b028584fdb00177`이 되었다. 이 게임에는 고정된 골든 값이 없고, 다른 게임의 골든(`orr_games --test golden`)은 그대로다.
+
+**내비게이션 문서(`NavigationYard3D`).** 같은 방식으로 `orr_gfx::register`, `register_reflect`, `init`을 넣었다. 이 게임의 입장 검사는 엔티티를 하나도 허용하지 않았다(`scene.entities`는 비어야 하고 살아 있는 엔티티는 파생 에이전트 하나여야 했다). 이제 저작된 엔티티는 `orr_gfx::Transform3`을 가진 렌더 엔티티(해와 다른 조명)만 허용한다. `Body`, `Collider`, `RuntimeAgent`는 여전히 저작할 수 없고, 입장 뒤 프레임은 파생 에이전트 하나와 렌더 엔티티만 가질 수 있다(`orr_games::navigation_yard3d_game::is_render_only_authoring`, `validate_scene_frame`, 순찰 입장 검사의 영 핀 경로). 뷰 스트림 스키마(`yard3d_view_schema`)는 위치 자세만 싣고 `orr_gfx` 컴포넌트를 싣지 않으므로 바뀌지 않는다. 뷰포트는 내비게이션도 `YardFrame::extract`를 쓰므로 그림 코드는 그대로이고, 지형과 경로 겹침 모델은 이전처럼 내비게이션 입장 결과에서 온다. 체크인된 `scenes/navigation_point.scene.yaml`에는 이전 조명과 같은 값의 해가 들어 있다. 빈 판인 `navigation_blank.scene.yaml`은 그대로 비어 있다. 해가 없는 이전 파일은 같은 모습으로 열린다(테스트가 두 그림의 평균 색 차이가 4 미만임을 확인한다). 이 게임의 상태에 싱글턴이 늘었으므로 빈 시뮬(`Simulation::<NavigationYard3D>::new((), 60, 42)`)의 프레임 체크섬은 `0x181f3230aec72d20`에서 `0x5b95f2ffe824a594`로 바뀌었다. 이 게임에는 고정된 골든 값이 없다. 테스트는 `crates/orr_editor/tests/scenery_scene_navigation.rs`와 `crates/orr_remote/tests/navigation_yard3d.rs`다.
+
+**Room과 메시 게임이 남은 이유.** 두 게임은 조명과 후처리를 씬 컴포넌트가 아니라 씬 옆의 별도 파일이 정한다. Room은 조명 문서(`room_lighting`)가 환경을 덮어쓰고, 메시 게임은 조명 프로필(`mesh_lighting_panel`)이 조명과 후처리 설정을 모두 정한다. 컴포넌트만 등록하면 창의 컨트롤이 씬 값을 고쳐도 별도 파일이 있는 씬에서는 뷰포트가 바뀌지 않는다. 내보낸 플레이어도 별도 파일을 따른다. 어느 쪽이 이기는지(예: 별도 파일이 없을 때만 컴포넌트를 쓴다) 정하고 내보내기까지 같은 규칙을 적용해야 한다. 그 밖에 Room은 입장 검사 `validate_initial_frame`이 컴포넌트 3개, 싱글턴 2개, 리스트 1개와 "모든 엔티티는 방 역할을 가진다"는 닫힌 스키마를 요구한다. 메시 게임은 뷰포트가 프레임에서 `YardFrame`을 뽑지 않아 `look`이 없고, 후처리는 `mesh_post_process_runtime`이 정한다.
 
 **편집 방식과 한계.**
 - 슬라이더를 끄는 동안은 하나의 실행 취소 항목이다. 한 번에 바뀌는 서로 다른 필드가 64개를 넘으면 에디터가 끌기를 취소한다. `Water` 컨트롤은 모든 물 엔티티의 같은 필드를 쓰므로 `world.patch_many` 요청 하나(끌기에서는 필드 하나)로 보낸다. 그래서 물이 몇 개든 실행 취소 항목은 하나이고 끌기가 취소되지 않는다. 요청 하나는 엔티티 4096개까지 받는다. Forest Valley는 18개이고, 테스트는 118개로 확인한다.
@@ -443,7 +447,7 @@ Forest Valley 위를 동양식 용이 난다. 비행은 시뮬에서 고정소�
 
 ### 1.14 지금의 한계
 
-- Yard3D만 `orr_gfx`를 등록했다. Room, 지형, 내비게이션, 메시 게임은 아직 각자의 조명 별도 파일을 쓴다.
+- Yard3D, ViewYard3D, 지형 문서, 내비게이션 문서가 `orr_gfx`를 등록했다. Room과 메시 게임은 아직 각자의 조명 별도 파일을 쓴다.
 - 조명 프로브 굽기(`Bake`)는 씬 조명을 읽지 않고 게임 기본 조명으로 굽는다.
 - 웹, 안드로이드, FFI 클라이언트와 데스크톱 실행 파일은 이 컴포넌트들을 그리지 않는다. 에디터만 그린다.
 - 에디터 뷰포트에서 조명 표지를 클릭해 선택할 수는 없다. 계층 창에서 선택한다.

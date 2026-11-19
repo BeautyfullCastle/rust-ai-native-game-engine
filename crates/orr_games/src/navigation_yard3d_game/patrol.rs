@@ -259,7 +259,7 @@ pub fn admit(f: &mut Frame, pin: NavigationScenePin) -> Result<(), String> {
         if c.disabled()
             && *f.singleton::<RuntimeState>() == RuntimeState::zeroed()
             && f.count::<RuntimeAgent>() == 0
-            && f.alive_count() == 0
+            && super::only_render_entities_besides(f, None)
         {
             return Ok(());
         }
