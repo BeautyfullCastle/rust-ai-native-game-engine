@@ -68,7 +68,7 @@
 1. [#104](https://github.com/BeautyfullCastle/rust-ai-native-game-engine/issues/104) 흐름을 에디터 화면에서 사람 손으로 끝까지 진행한다: 새 프로젝트 → 개체 이동과 값 수정 → 실행 취소 → 저장 → Play → 내보내기 → 내보낸 게임 실행.
 2. 윈도우로 옮기고 남은 것을 옮긴다. `orr_pkg`의 나머지 명령이다. Arena·Collect 생성·내보내기·진행 저장·터레인 패치 불러오기는 2026-11-19에 옮겼다.
 3. 설계 v2의 고정 과제군(배달, 스위치 퍼즐, 액션)으로 무개입 완주율을 처음 측정한다.
-4. 장면 창의 설정이 닿지 않는 씬을 줄인다. 열린 씬 적용은 Yard3D, ViewYard3D, 터레인 문서(`TerrainYard3D`) 씬에서 된다. 내비게이션, Room, 메시 게임은 `orr_gfx`를 등록하지 않아 그 모드가 꺼져 있다. 이 게임들에 `orr_gfx::register`와 `init`을 넣으려면 각 게임의 입장 검사와 뷰 스트림 스키마를 함께 손봐야 한다. 터레인 문서는 지형을 `orr_gfx::Terrain`이 아니라 터레인 세션 모델로 그린다. 씬에 대응 필드가 없는 설정(식생 색, 지면 요철, 그림자 부드러움)을 컴포넌트로 만드는 일도 남았다. 뷰포트 전체를 `orr_scenery::Renderer`로 바꾸는 안은 하지 않았다([rendering-architecture.md](rendering-architecture.md) 1.21절).
+4. 장면 창의 설정이 닿지 않는 씬을 줄인다. 열린 씬 적용은 `orr_gfx`를 등록한 게임(Yard3D, ViewYard3D, TerrainYard3D, NavigationYard3D)의 씬에서 된다. 남은 것은 Room과 메시 게임(`MeshNavigation`, `MeshHazardsV1`)이다. 이 게임들은 씬 컴포넌트와 별개로 조명 별도 파일(Room 조명 문서, 메시 조명 프로필)이 조명과 후처리를 정한다. 두 쪽이 모두 값을 가질 때 어느 쪽이 이기는지, 내보낸 플레이어가 같은 규칙을 따르는지를 먼저 정해야 한다. Room은 입장 검사(`validate_initial_frame`)가 닫힌 스키마(컴포넌트 3개, 엔티티마다 방 역할)를 요구하므로 해 엔티티와 `orr_gfx` 컴포넌트를 받도록 함께 고쳐야 한다. 메시 게임은 뷰포트가 프레임에서 `YardFrame`을 뽑지 않아 `look`이 없다. 터레인 문서와 내비게이션 문서는 지형을 `orr_gfx::Terrain`이 아니라 각자의 세션 모델로 그린다. 내비게이션 씬을 쓰는 `orr_navigation_view`의 번들 테스트 일부는 유닉스 전용이라 윈도우에서 돌리지 못했다(리눅스에서 확인 필요). 뷰포트 전체를 `orr_scenery::Renderer`로 바꾸는 안은 하지 않았다([rendering-architecture.md](rendering-architecture.md) 1.21절).
 
 ## 작업 규칙
 
