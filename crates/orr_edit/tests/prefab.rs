@@ -346,3 +346,92 @@ fn detached_and_unknown_instances_are_refused_without_changing_the_document() {
     assert!(doc.revert_prefab_instance(&guid_named(&doc, "motor_hub"), Origin::User).is_err());
     assert_eq!(state(&doc), before);
 }
+
+/// The motor prefab text without the given source members.
+fn motor_prefab_without(text: &str, gone: &[u32]) -> String {
+    let mut prefab = Scene::parse(text, &types()).unwrap();
+    for id in gone {
+        prefab.entities.remove(&Guid::from_u32(*id)).expect("source member");
+    }
+    prefab.to_yaml()
+}
+
+#[test]
+fn a_member_removed_from_the_prefab_leaves_every_instance_in_one_undo_step() {
+    let mut doc = doc();
+    let text = motor_prefab(&doc);
+    let (a, map_a) = doc.instantiate_prefab("motor.prefab.yaml", &text, Origin::User).unwrap();
+    let (b, map_b) = doc.instantiate_prefab("motor.prefab.yaml", &text, Origin::User).unwrap();
+    let prop_a = map_a[&Guid::from_u32(2)].clone();
+    let pin_a = map_a[&Guid::from_u32(3)].clone();
+    let pin_b = map_b[&Guid::from_u32(3)].clone();
+    set(&mut doc, &prop_a, BODY, "angle", fixed(1)); // an override on a surviving member
+    let changed = motor_prefab_without(&text, &[3]);
+
+    let entities = doc.scene().entities.len();
+    let history = doc.history().len();
+    let report = doc.update_prefab_instances("motor.prefab.yaml", &changed, Origin::User).unwrap();
+    assert_eq!(report.updated.len(), 2);
+    assert_eq!(report.removed, 2);
+    assert!(report.conflicts.is_empty(), "{:?}", report.conflicts);
+    assert_eq!(doc.history().len(), history + 1, "one undo step");
+    assert_eq!(doc.scene().entities.len(), entities - 2);
+    assert!(!doc.scene().entities.contains_key(&pin_a) && !doc.scene().entities.contains_key(&pin_b));
+    assert_eq!(members_of(&doc, &a).len(), 2);
+    assert_eq!(members_of(&doc, &b).len(), 2);
+    assert_eq!(field(&doc, &prop_a, BODY, "angle"), fixed(1), "the override of a surviving member stays");
+    assert_eq!(doc.prefab_overrides(&a).unwrap().len(), 1);
+    assert_synced(&doc);
+
+    let reopened = reopen(&mut doc);
+    assert_eq!(reopened.prefab_instances().unwrap(), doc.prefab_instances().unwrap());
+    assert_eq!(reopened.checksum(), doc.checksum());
+
+    doc.undo().unwrap();
+    assert_eq!(doc.scene().entities.len(), entities);
+    assert_eq!(members_of(&doc, &a).len(), 3);
+    assert_synced(&doc);
+    doc.redo().unwrap();
+    assert_eq!(doc.scene().entities.len(), entities - 2);
+    assert_eq!(members_of(&doc, &b).len(), 2);
+}
+
+#[test]
+fn removing_the_root_member_from_the_prefab_re_keys_the_instances() {
+    let mut doc = doc();
+    let text = motor_prefab(&doc);
+    let (a, map_a) = doc.instantiate_prefab("motor.prefab.yaml", &text, Origin::User).unwrap();
+    let (b, map_b) = doc.instantiate_prefab("motor.prefab.yaml", &text, Origin::User).unwrap();
+    assert_eq!(a, map_a[&Guid::from_u32(1)], "the hub is the root");
+    let prop_a = map_a[&Guid::from_u32(2)].clone();
+    let prop_b = map_b[&Guid::from_u32(2)].clone();
+    set(&mut doc, &prop_a, BODY, "angle", fixed(1));
+    // The pin refers to the hub, so both leave the prefab together.
+    let changed = motor_prefab_without(&text, &[1, 3]);
+
+    let entities = doc.scene().entities.len();
+    let report = doc.update_prefab_instances("motor.prefab.yaml", &changed, Origin::User).unwrap();
+    assert_eq!(report.updated.len(), 2);
+    assert_eq!(report.removed, 4);
+    assert!(report.conflicts.is_empty(), "{:?}", report.conflicts);
+    assert_eq!(doc.scene().entities.len(), entities - 4);
+    let instances = doc.prefab_instances().unwrap();
+    assert_eq!(instances.len(), 2);
+    assert!(instances.iter().all(|i| i.root != a && i.root != b), "the old root keys are gone");
+    assert_eq!(members_of(&doc, &prop_a), vec![(Guid::from_u32(2).to_string(), prop_a.clone())]);
+    assert_eq!(members_of(&doc, &prop_b), vec![(Guid::from_u32(2).to_string(), prop_b.clone())]);
+    assert_eq!(field(&doc, &prop_a, BODY, "angle"), fixed(1));
+    assert_eq!(doc.prefab_overrides(&prop_a).unwrap().len(), 1);
+    assert_synced(&doc);
+
+    let reopened = reopen(&mut doc);
+    assert_eq!(reopened.prefab_instances().unwrap(), doc.prefab_instances().unwrap());
+    assert_eq!(reopened.checksum(), doc.checksum());
+
+    doc.undo().unwrap();
+    assert_eq!(doc.scene().entities.len(), entities);
+    assert_eq!(members_of(&doc, &a).len(), 3);
+    assert_synced(&doc);
+    doc.redo().unwrap();
+    assert_eq!(members_of(&doc, &prop_b).len(), 1);
+}

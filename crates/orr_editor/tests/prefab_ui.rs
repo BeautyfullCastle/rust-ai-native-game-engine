@@ -287,6 +287,50 @@ fn a_changed_prefab_file_updates_instances_and_reports_conflicts_without_a_dialo
 }
 
 #[test]
+fn a_member_deleted_from_the_prefab_file_leaves_both_instances_in_one_undo_step() {
+    let (_root, path) = physics_project();
+    let (mut h, a, b) = two_motors(&path);
+    let (prop_a, prop_b) = (a["e_00000002"].clone(), b["e_00000002"].clone());
+    set(&mut h, &prop_b, BODY, "angle", fixed(1)); // an override on a surviving member
+    let history = h.state().editor.history().entries.len();
+    let pins = |h: &App| h.state().editor.rows().iter().filter(|r| r.name.as_deref() == Some("motor_pin")).count();
+    assert_eq!(pins(&h), 3, "the original and two instances");
+
+    // Delete the pin from the prefab file: its lines are the block under `e_00000003:`.
+    let file = path.join("motor.prefab.yaml");
+    let text = std::fs::read_to_string(&file).unwrap();
+    let mut kept = Vec::new();
+    let mut inside = false;
+    for line in text.lines() {
+        if line.trim_end() == "  e_00000003:" {
+            inside = true;
+        } else if inside && !line.starts_with("    ") {
+            inside = false;
+        }
+        if !inside {
+            kept.push(line);
+        }
+    }
+    assert!(kept.len() < text.lines().count());
+    std::fs::write(&file, kept.join("\n") + "\n").unwrap();
+    wait(&mut h, "the instances to update", |h| pins(h) == 1);
+    assert_eq!(h.state().editor.history().entries.len(), history + 1, "one undo step for all instances");
+    let instances = list(&mut h);
+    assert_eq!(instances.len(), 2);
+    assert!(instances.iter().all(|i| i["members"].as_array().unwrap().len() == 2));
+    assert_eq!(read(&mut h, &prop_b, BODY, "angle"), fixed(1), "the override stays");
+    assert_eq!(override_count(&mut h, &prop_b), 1);
+    assert_eq!(override_count(&mut h, &prop_a), 0);
+
+    assert!(h.state_mut().editor.undo());
+    settle(&mut h);
+    assert_eq!(pins(&h), 3);
+    assert!(h.state_mut().editor.redo());
+    settle(&mut h);
+    assert_eq!(pins(&h), 1);
+}
+
+#[test]
 fn nesting_is_refused_and_a_member_offers_no_create_button() {
     let (_root, path) = physics_project();
     let (mut h, a, _b) = two_motors(&path);
