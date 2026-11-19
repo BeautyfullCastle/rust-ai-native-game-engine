@@ -40,7 +40,7 @@ App::<PhysGame>::with_config(PhysConfig::new(600, SceneMode::Rain))
 
 - **장치 배정:** `KeyLayout::for_slot(slot)`이 슬롯 0에 `KeyLayout::WASD`(Space), 슬롯 1에 `KeyLayout::ARROWS`(Enter)를 준다. `stick_for_slot`은 그 키를 `Stick { x, y, action }`(`x`, `y`는 -1, 0, 1)으로 읽는다. 세 번째 슬롯부터는 기본 키가 없어서 항상 쉬는 입력이다. 직접 배정하려면 `KeyLayout { .. }`을 만들어 `stick(&layout)`에 준다. `stick_for_slot`은 키보드만 읽는다. 패드까지 따르려면 `stick_of(slot)`을 쓴다. 슬롯 0은 키보드(WASD), 슬롯 1은 첫 번째 패드(패드가 없으면 방향키), 슬롯 2는 두 번째 패드이고, `App::assign_device(slot, Device)` 또는 `InputContext::assign`으로 바꾼다. 패드는 `gilrs`(기능 `gamepad`, 기본 켜짐)가 읽고, `pad_stick(번호)`(왼쪽 스틱 또는 십자키, 남쪽 버튼이 `action`), `pad_axis`, `pad_button`으로 읽는다. 창 없이 쓰려면 `InputContext::apply_pad(PadEvent)`로 사건을 직접 넣는다.
 - **게임 화면 (`Screens`):** 제목, 일시정지, 승리, 패배, 다시 시작 화면과 상태 전환(제목 → 플레이 ⇄ 일시정지 → 승리/패배 → 새 판)입니다. 확인(Enter, Space, 패드 A), 일시정지(P, Start), 다시 시작(R, Select)이 기본 동작이고 `ActionMap`으로 바꿉니다. 입력 함수는 `screens.input(keys, 읽는_함수)`를 부릅니다. 플레이 화면이 아니면 `Input::default()`(중립)를 돌려주고 읽는 함수는 부르지 않으며, 화면을 닫은 키는 뗄 때까지 게임에 보이지 않습니다. 시뮬레이션은 `Input` 값만 보므로 결정론이 유지되고, 시계는 화면이 떠 있어도 멈추지 않습니다. 결과는 뷰가 `win()`/`lose()`로 알립니다. **다시 시작은 새 세션이 아니라 게임이 정의한 리셋 `Command`입니다.** 뷰가 `take_restart()`가 `true`일 때 그 명령을 보냅니다(리플레이와 서버 대전에서도 같음, 프레임 난수는 이어짐). 사용 예: `tutorial/star_pick/src/step2.rs`, 설명: `docs/tutorial/step2-solo.md`.
-- **글자 진단:** 오버레이 글꼴에 없는 글자는 속이 빈 네모로 그려지고 `Overlay::missing_glyphs()`에 쌓이며, 새 글자마다 stderr에 한 번 알립니다.
+- **글자 진단:** 오버레이 글꼴에 없는 글자는 속이 빈 네모로 그려지고 `Overlay::missing_glyphs()`에 쌓이며, 새 글자마다 stderr에 한 번 알립니다. 제목과 안내는 창 가운데에 놓이고 창 너비에 맞춰 줄바꿈합니다. 글꼴은 아래 "글꼴과 글자 상자"를 보세요.
 - **로컬 슬롯 밖은 거부한다:** `Bridge::set_input(slot, ..)`은 `Bridge::local_slots()`에 있는 슬롯만 받는다. 다른 슬롯은 `BridgeError::NotLocalPlayer`이고 아무것도 바뀌지 않는다. 릴레이·네트워크 클라이언트는 슬롯 하나를 가지므로 `local_slots()`가 `[local_slot()]`이다.
 - **`PlayerLink { player }`:** "이 엔티티는 플레이어 N의 것"이라는 표준 컴포넌트(`orr_sim`). 게임이 `register_player_link(builder)`와 `register_player_link_reflect(types)`로 켠다. 뷰는 `ctx.is_local(link.player)`로 내 것인지 본다. `PlayerSlot`은 `Pod`이고 씬 파일과 인스펙터에서 숫자(0..255)로 보인다. `PlayerSlot::NONE`(0xFF)은 "플레이어 없음"이며 릴레이 프로토콜의 `NO_SLOT`과 같다.
 - **서로 다른 슬롯의 입력 시점:** 첫 로컬 슬롯의 입력은 `step(n)`을 부른 순간 고정되지만, 나머지 로컬 슬롯의 입력은 틱이 돌 때 마지막으로 받은 값을 읽는다. `App`은 매 프레임 입력을 보내고 `InProc`을 쓰므로 차이가 없다.
@@ -59,6 +59,7 @@ App::<PhysGame>::with_config(PhysConfig::new(600, SceneMode::Rain))
 | `.entity_view::<C>(factory)` | 예측 프레임에서 컴포넌트 `C`를 가진 엔티티마다 `factory()`로 만든 `EntityView` 하나 |
 | `.scene_view(v)` | `SceneView` 하나. 여러 개를 더하면 더한 순서로 불린다 |
 | `.sound(name, clip)` | 뷰의 `ctx.audio().play_named(name)`이 켜는 소리를 등록한다 (아래 "글자, 선, 소리") |
+| `.font(name, bytes)`, `.font_file(path)`, `.bitmap_font()` | 화면 글자의 글꼴. 바이트(`include_bytes!`)나 파일을 주거나, 5x7 점 글꼴로 고정한다. 안 주면 시스템 한글 글꼴 (아래 "글꼴과 글자 상자") |
 
 ## 3D (6a단계)
 
@@ -163,7 +164,7 @@ impl SceneView<StarPick> for Juice {
 
     fn on_update(&mut self, ctx: &mut ViewContext<'_, StarPick>) {
         let draw = ctx.draw();
-        draw.text([16.0, 14.0], 21.0, [1.0, 0.85, 0.25, 1.0], "SCORE 12"); // 화면 좌표: 픽셀, 왼쪽 위 원점
+        draw.text([16.0, 14.0], 21.0, [1.0, 0.85, 0.25, 1.0], "점수 12"); // 화면 좌표: 픽셀, 왼쪽 위 원점
         draw.line([0.0, 0.0], [2.0, 1.0], [1.0, 0.0, 0.0, 1.0]);          // 세계 좌표
         draw.rect([-1.0, -1.0], [1.0, 1.0], [0.0, 1.0, 0.0, 0.3]);
     }
@@ -175,14 +176,42 @@ App::<StarPick>::new()
     .scene_view(Juice::default())
 ```
 
-- **`ctx.draw()`는 `Overlay`를 준다.** 프레임마다 비워진다(`Views::dispatch`가 시작할 때). 그래서 보이게 하려면 매 프레임 부른다. 호출은 `text(pos, size, color, &str)`(화면 좌표. `size`는 대문자 높이 픽셀), `line(a, b, color)`, `rect(min, max, color)`(채운 사각형), 3D 실행용 `line3(a, b, color)`와 `aabb3(min, max, color)`다. 2D 실행은 `line3`의 `x`와 `y`만 그린다. 3D 실행에서 `rect`는 `z = 0` 평면의 윤곽선이다. 폭을 재려면 `text_size(text, size)`다.
-- **무엇이 그리는가.** 선과 사각형은 기본 렌더러의 그리기 목록 끝에 더해 같은 패스에서 그린다. 글자는 `orr_render::text`의 **5x7 점 글꼴**(`GLYPH_W`, `GLYPH_H`, `ADVANCE`)을 사각형으로 바꿔 렌더러가 그린 같은 그림 위에 한 번 더 그린다(`TextPass`). 그래서 글자는 항상 맨 위이고 `--screenshot` 그림에도 `--size` 크기로 나온다. 모델이 있는 3D 프레임에도 같다.
-- **글꼴은 ASCII만이다.** 숫자, 영문 대문자(소문자도 대문자로 보인다), `. : , / | - + = _ ( ) [ ] % ! ?`가 있다. **한글은 아직 그리지 못한다.** 없는 글자는 빈칸이다.
+- **`ctx.draw()`는 `Overlay`를 준다.** 프레임마다 비워진다(`Views::dispatch`가 시작할 때). 그래서 보이게 하려면 매 프레임 부른다. 호출은 `text(pos, size, color, &str)`(화면 좌표. `pos`는 대문자 윗선의 왼쪽 위, `size`는 대문자 높이 픽셀), `text_box(rect, size, color, &str, align)`(줄바꿈과 정렬, 아래 "글꼴과 글자 상자"), `text_anchored(앵커, 이동, size, color, &str)`, `line(a, b, color)`, `rect(min, max, color)`(채운 사각형), 3D 실행용 `line3(a, b, color)`와 `aabb3(min, max, color)`다. 2D 실행은 `line3`의 `x`와 `y`만 그린다. 3D 실행에서 `rect`는 `z = 0` 평면의 윤곽선이다. 폭을 재려면 `ctx.draw().measure(text, size)`다(5x7 점 글꼴만의 `text_size(text, size)`도 있다).
+- **무엇이 그리는가.** 선과 사각형은 기본 렌더러의 그리기 목록 끝에 더해 같은 패스에서 그린다. 글자는 렌더러가 그린 같은 그림 위에 한 번 더 그린다(`TextPass`). 그래서 글자는 항상 맨 위이고 `--screenshot` 그림에도 `--size` 크기로 나온다. 모델이 있는 3D 프레임에도 같다. 글꼴이 있으면 글리프 아틀라스의 텍스처 사각형이고, 없으면 `orr_render::text`의 5x7 점 글꼴을 색 사각형으로 바꿔 그린다.
+- **글꼴이 없을 때(대체).** 5x7 점 글꼴은 ASCII만이다. 숫자, 영문 대문자(소문자도 대문자로 보인다), `. : , / | - + = _ ( ) [ ] % ! ?`가 있고, 한글은 그리지 못한다.
+- **글자 진단.** 선택한 글꼴에 없는 글자(점 글꼴이면 한글도 포함)는 속이 빈 네모로 그려지고 `Overlay::missing_glyphs()`에 쌓이며, 새 글자마다 stderr에 한 번 알린다.
 - **`ctx.audio()`는 `Audio`를 준다.** `play(&clip) -> Option<SoundHandle>`, `play_named("이름")`(`App::sound`로 등록한 소리), `play_at(&clip, [x, y, z], near, far)`(그 점에서 난 것처럼. `near` 안에서 크고 `far`부터 들리지 않으며 그쪽 스피커로 치우친다. 귀의 자리는 `set_listener`, 기본은 원점), `stop(손잡이)`(짧게 줄이며 끈다), `is_playing(손잡이)`다. `Predicted`에서 켜고 손잡이를 기억했다가 `Canceled`에서 `stop`한다. 이미 끝난 소리를 `stop`하는 것은 아무 일도 아니다. `ViewResync`가 오면 그 전에 `Predicted`로 켠 소리의 `Canceled`는 오지 않으므로, `on_resync`에서 그 소리들을 끈다.
 - **장치는 앱이 연다.** 첫 `play`에서 시스템 오디오 장치(`orr_audio`의 `NativeAudio`, 기능 `audio-native`, 기본으로 켜져 있다)를 연다. 장치가 없거나 열지 못하면 소리 없이 계속 돌고 stderr에 한 번 알린다. 도중에 장치 오류가 나면 매 프레임 확인해서 출력을 버리고 한 번 알린다. `--screenshot` 실행은 장치를 열지 않는다. `audio-native`를 끄고 빌드하면 소리는 항상 조용하다.
 - **소리는 시뮬레이션에 닿지 않는다.** 게임 규칙, 체크섬, 리플레이와 상관없다. 소리 클립은 `Clip`(`orr_audio`, 다시 내보냄)이고 한 번 만든 것을 여러 번 켠다(데이터는 공유된다). 10초까지다.
 - **창 없이도 쓴다.** `Views::overlay()`로 마지막 `dispatch`가 그린 것을 읽는다. `Views::set_sound_out(출력)`에 `SoundOut`을 주면 그 출력으로 소리를 낸다. `Rc<RefCell<OfflineAudio>>`를 주면 소리가 PCM으로 렌더링되어 테스트가 들을 수 있다(`OfflineAudio::render`). 테스트는 `tests/draw_audio.rs`(그리기 목록이 채워지고 다음 프레임에 비워진다. 소리가 나고 `stop` 뒤에 조용하다. 롤백이 낸 `Canceled`가 소리를 멈춘다. 출력이 없으면 아무 일도 없다)와 `src/overlay.rs`의 단위 테스트(글꼴 폭, 글자 사각형, 상자 모서리)다.
-- **튜토리얼.** [2~5단계](../../docs/tutorial/step2-solo.md)가 점수를 글자로 그리고 생성한 "딩" 소리(`tutorial/star_pick/src/sound.rs`)를 낸다.
+- **튜토리얼.** [2~5단계](../../docs/tutorial/step2-solo.md)가 점수와 안내를 한글로 그리고 생성한 "딩" 소리(`tutorial/star_pick/src/sound.rs`)를 낸다.
+
+## 글꼴과 글자 상자
+
+글자는 진짜 글꼴(TrueType/OpenType)로 그립니다. 글리프 래스터라이저는 이미 `Cargo.lock`에 있던 `ab_glyph`(MIT OR Apache-2.0)입니다. **글꼴 파일은 저장소에 넣지 않습니다.**
+
+```rust
+App::<StarPick>::new()
+    .font_file("C:/Windows/Fonts/malgun.ttf")   // 파일 경로
+    // .font("내 글꼴", include_bytes!("font.ttf")) // 또는 바이트 (게임이 글꼴을 함께 배포할 때)
+    // .bitmap_font()                              // 5x7 점 글꼴로 고정 (어느 컴퓨터에서나 같은 그림)
+```
+
+- **기본 글꼴.** `.font`/`.font_file`/`.bitmap_font`을 안 부르면 시스템 글꼴을 찾습니다. 후보는 Windows의 `malgun.ttf`(에디터의 `crates/orr_editor/src/theme.rs`와 같은 생각), Linux의 Noto Sans CJK와 NanumGothic, macOS의 Apple SD Gothic Neo 순이고 `system_font_candidates()`로 읽습니다. 하나도 없으면 한 번 알리고 5x7 점 글꼴(ASCII만)로 돌아갑니다. 준 글꼴이 읽히지 않으면(`.font`, `.font_file`) 실행이 오류로 멈춥니다.
+- **글리프 아틀라스.** 글자는 처음 필요할 때 한 번만 래스터라이즈해 1024x1024 텍스처에 쌓고(글자와 크기가 한 키), 다음 프레임부터는 그대로 씁니다. 가득 차면 아틀라스를 한 번 비우고 그 프레임의 글자를 다시 넣습니다. 한 프레임 글자가 아틀라스보다 많으면 못 들어간 글자는 그리지 않고 한 번 알립니다. 2D, 3D, 모델이 있는 3D, `--screenshot`이 모두 같은 경로입니다.
+- **크기.** `size`는 대문자 높이(픽셀)입니다. 글꼴의 em은 `size / 0.7`로 정수 픽셀에 맞추고 4에서 400 사이로 자릅니다. 그래서 점 글꼴로 맞춘 기존 배치가 거의 그대로 맞습니다. 한글은 대문자보다 조금 위아래로 나옵니다.
+- **`text_box(rect, size, color, &str, align) -> [폭, 높이]`.** `rect`는 `ScreenRect { x, y, w, h }`(픽셀, 왼쪽 위 원점)입니다. 공백에서 줄을 나누고, 한 단어가 줄보다 길면(띄어쓰기 없는 한글) 글자(음절) 사이에서 나눕니다. `
+`은 새 줄입니다. `align`은 `Align::Left`, `Center`, `Right`입니다. `rect.h`는 자르지 않습니다(줄이 아래로 이어집니다). `rect.w`가 0이면 줄바꿈 없이 한 줄입니다. 돌려주는 값은 가장 긴 줄의 폭과 전체 높이라서, 그 아래에 다른 글자를 놓을 수 있습니다.
+- **화면에 붙이기.** `ctx.screen_size()`(`Views::set_screen_size`)가 창 크기를 줍니다. `--screenshot`이면 그림 크기입니다. 창 없는 `Views`는 `set_screen_size`를 부르기 전까지 `[0, 0]`입니다. `ctx.draw().screen_rect()`가 창 전체 `ScreenRect`이고, `rect.inset(여백)`과 `rect.anchored(Anchor::Center, w, h, 이동)`으로 가운데나 모서리에 놓습니다. 한 줄은 `text_anchored(Anchor::TopRight, [-16.0, 14.0], 21.0, 색, "글")`처럼 쓰고, 이동은 오른쪽 아래가 양수입니다. 창 크기를 모르면 글자가 왼쪽 위 모서리에서 시작합니다.
+- **`Screens`.** 제목, 일시정지, 승리, 패배 글자를 창 가운데에 놓고 창 너비에 맞춰 줄바꿈합니다. 글자는 `Labels`에 한글로 줍니다.
+- **비용(대략).** 글자 310개, 1280x720 화면 밖 그림, **디버그 빌드**에서 아틀라스가 식은 첫 프레임이 3.7 ms, 아틀라스가 데워진 뒤 프레임이 1.8 ms입니다(따로 잰 값: `text_box` 10번의 줄바꿈과 배치 1.2 ms, 글자 사각형 만들기 1.1 ms. 두 값은 따로 쟀으므로 더해도 프레임 시간과 같지 않습니다). 릴리스 빌드는 재지 않았습니다. 한 프레임의 일은 글자 수에 비례하고, GPU는 텍스처 사각형 인스턴스 그리기 한 번입니다.
+
+### 뺀 것
+
+- **글자 모양 잡기(shaping).** 글자 하나가 글리프 하나입니다. 한글 음절, 가나, 한자, 라틴은 맞지만 합자, 아랍어와 인도 문자의 모양 바꾸기, 조합형 자모(`ㅎ` + `ㅏ` + `ㄴ`을 이어 쓰기)는 못 그립니다. 자간 조정(kerning)도 없습니다.
+- **IME 입력.** 글자를 입력하는 쪽(텍스트 상자, 조합 중인 글자)은 없습니다. 그리기만 합니다.
+- **글꼴 대체 사슬.** 글꼴은 하나입니다. 그 글꼴에 없는 글자(이모지 등)는 다른 글꼴로 넘어가지 않고 빈 네모로 그리고 진단합니다.
+- **줄 머리·끝 금칙**(문장부호가 줄 맨 앞에 오지 않게 하기)과 양쪽 정렬, 글자 굵기와 기울임, 외곽선과 그림자, 서브픽셀 위치(글리프는 정수 픽셀에 놓입니다)와 DPI 크기 조절.
 
 ## 플레이어 신호 (4a단계)
 
@@ -286,5 +315,5 @@ cargo run -p orr_app --release --example roster -- --connect 127.0.0.1:7777
 - **4b단계에서 뺀 것:** 플레이어별 시작 데이터(`Added`의 `data`는 서버로 실행해도 비어 있다. `Hello`에 시작 데이터가 없다. 8.3), 서버 쪽 신호 기록은 방이 사는 동안만 있다(서버를 다시 띄우면 사라진다), 시작 때의 `Added`(틱 1)는 `signal_lead_ticks` 여유가 없다, 권한 있는 서버 방은 신호가 없다, `.scene(..)`과 `.bot(..)`은 서버로 실행할 때 쓰지 않는다, `ws://`만 지원한다(QUIC·인증서 옵션 없음), 원격 뷰 스트림(`orr_viewstream`)은 신호를 아직 내보내지 않는다. 신호를 취소하는 API가 없어서 `Canceled`는 합성 업데이트 테스트로만 확인했다.
 - **6a단계에서 뺀 것:** `Material`의 표면 셰이더(`Transform3`과 `Material`이 있는 엔티티는 단색 상자로 그린다), `SceneLook`의 후처리(블룸 등)와 하늘, 물, 지형, 흩뿌리기 그리기(조명과 데칼만 쓴다), 3D 마우스 입력(`InputContext`는 키만 읽는다. 예제 `yard3d`는 화면 가운데로 쏜다), 3D 뷰의 `ViewConfig` 바꾸기(기본값). 화면 글자 겹치기는 "글자, 선, 소리"에서 더했다.
 - **6b단계에서 뺀 것:** 뷰 에셋의 `tint`(색 입히기), `sound`, `entity_view`는 읽기만 하고 쓰지 않는다. `App::entity_view_for("종류", factory)`(뷰 에셋의 `entity_view` 이름으로 엔티티 뷰를 붙이기)는 만들지 않았다. 지금은 `entity_view::<ViewRef>(..)`처럼 컴포넌트로 붙인다. 모델이 있는 그림은 MSAA와 톤 매핑이 없다(위). 에디터 뷰포트는 `ViewRef` 모델을 그린다. 다만 `Yard3D` 같은 기존 에디터 게임은 `ViewRef`를 등록하지 않아서(등록하면 그 게임의 프레임 배치와 골든 체크섬이 바뀐다) 에디터 전용 게임 `ViewYard3D`로 연다(`orr_editor --game view-yard3d --scene scenes/view_yard3d/view_yard3d.scene.yaml`, `docs/editor-view-ref.md`). 서버로 실행할 때 `Added.data`는 아직 비어 있어서(4b) 아바타는 슬롯 번호로 정한다. 애니메이션 모델(`SkinnedModelRenderer`)은 쓰지 않는다.
-- **글자, 선, 소리에서 뺀 것:** 한글과 ASCII 밖의 글자(글꼴이 5x7 점 글꼴이라 속이 빈 네모 상자로 나오고 처음 한 번 터미널에 알린다. `Overlay::missing_glyphs()`), IME 입력, 글자 모양 잡기와 줄바꿈, 글꼴·아틀라스 파이프라인, 글자 정렬(`text_size`로 폭을 재서 직접 맞춘다), 창 크기를 알려 주는 API(오른쪽과 아래에 붙이는 글자), WAV 같은 소리 파일 읽기(`Clip::from_stereo`로 샘플을 직접 만든다), 소리의 음량·반복·속도 조절, 서버로 실행하는 창끼리의 소리 맞춤(각 창이 자기 이벤트로 낸다), 웹과 모바일의 소리(`audio-native`는 CPAL 장치다).
+- **글자, 선, 소리에서 뺀 것:** 복합 문자 모양 잡기와 IME 입력(위 "글꼴과 글자 상자"의 "뺀 것"), WAV 같은 소리 파일 읽기(`Clip::from_stereo`로 샘플을 직접 만든다), 소리의 음량·반복·속도 조절, 서버로 실행하는 창끼리의 소리 맞춤(각 창이 자기 이벤트로 낸다), 웹과 모바일의 소리(`audio-native`는 CPAL 장치다).
 - **이후 단계:** 웹·모바일 루프.
