@@ -1347,6 +1347,10 @@ fn lock_table(ui: &mut egui::Ui, id: &str, lock: &Lock) {
     });
 }
 
+const MAX_REJECTED_SHOWN: usize = 8;
+
+use crate::package_model_preview::discovery;
+
 struct ModelBrowser<'a> {
     lock: &'a Lock,
     filter: &'a mut String,
@@ -1403,8 +1407,42 @@ fn model_asset_buttons(
     ui.label("Search package names and asset paths; all words must match (case-insensitive).");
     let mut total = 0;
     let mut shown = 0;
+    let mut rejected: Vec<(String, String)> = Vec::new();
+    let mut unchecked = 0usize;
+    let mut budget = discovery::PROBES_PER_FRAME;
+    let catalog = ui.ctx().data_mut(|data| {
+        data.get_temp_mut_or_insert_with(egui::Id::new("package-model-discovery"), || {
+            std::sync::Arc::new(std::sync::Mutex::new(discovery::Catalog::default()))
+        })
+        .clone()
+    });
+    let mut catalog = catalog.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     for (package_name, package) in &browser.lock.packages {
         for asset in &package.manifest.files {
+            if discovery::is_cooked_json(asset) {
+                // Cooked JSON is listed only after its content header checks out.
+                let verdict = match root {
+                    None => Some(Err("no project folder is open".to_owned())),
+                    Some(root) => {
+                        if catalog.verdict(root, &package.digest, asset).is_none() && budget > 0 {
+                            budget -= 1;
+                            catalog.probe(root, &package.digest, asset);
+                        }
+                        catalog.verdict(root, &package.digest, asset).cloned()
+                    }
+                };
+                match verdict {
+                    Some(Ok(_)) => {}
+                    Some(Err(reason)) => {
+                        rejected.push((format!("{package_name}/{asset}"), reason));
+                        continue;
+                    }
+                    None => {
+                        unchecked += 1;
+                        continue;
+                    }
+                }
+            }
             let supported = crate::package_model_preview::supports_asset(ModelKind::Static, asset);
             let supported = supported
                 || preview_kind_allowed(ModelKind::Animated, &package.manifest.capabilities, asset);
@@ -1475,7 +1513,27 @@ fn model_asset_buttons(
             }
         }
     }
+    drop(catalog);
     ui.label(format!("Showing {shown} of {total} verified model assets"));
+    if unchecked > 0 {
+        ui.label(format!("Checking {unchecked} cooked JSON files…"));
+        ui.ctx().request_repaint();
+    }
+    if !rejected.is_empty() {
+        ui.label(format!(
+            "Not offered: {} cooked JSON files are not valid models.",
+            rejected.len()
+        ));
+        for (identity, reason) in rejected.iter().take(MAX_REJECTED_SHOWN) {
+            ui.label(format!("Not offered {identity}: {reason}"));
+        }
+        if rejected.len() > MAX_REJECTED_SHOWN {
+            ui.label(format!(
+                "and {} more not offered.",
+                rejected.len() - MAX_REJECTED_SHOWN
+            ));
+        }
+    }
     if total == 0 {
         ui.label("No verified GLB, glTF or Orrmodel assets are available.");
     } else if shown == 0 {
@@ -2569,6 +2627,10 @@ mod update_tests {
     }
 }
 
+
+#[cfg(test)]
+#[path = "package_manager_panel/cooked_discovery_tests.rs"]
+mod cooked_discovery_tests;
 
 #[cfg(test)]
 #[path = "package_manager_panel/cooked_model_tests.rs"]

@@ -414,6 +414,61 @@ pub struct AssetInfo {
     pub kind: ModelKind,
 }
 
+/// Bytes inspected by `cooked_json_kind` when a caller only wants to classify a
+/// cooked JSON file without reading all of it.
+pub const COOKED_HEADER_PROBE_BYTES: usize = 16 * 1024;
+
+/// Classify cooked model JSON from its leading `format` and `version` members.
+/// The scan stops once both members are known, so a prefix of the file is
+/// enough. Only version 1 of the two cooked formats is accepted. This does not
+/// validate the model body: the full loader stays authoritative.
+pub fn cooked_json_kind(prefix: &[u8]) -> Result<ModelKind, String> {
+    use serde::de::{self, Deserializer as _, IgnoredAny, MapAccess, Visitor};
+    struct Scan<'a>(&'a mut (Option<String>, Option<u64>));
+    impl<'de> Visitor<'de> for Scan<'_> {
+        type Value = ();
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a JSON object")
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+            while let Some(key) = map.next_key::<String>()? {
+                match key.as_str() {
+                    "format" => self.0 .0 = Some(map.next_value()?),
+                    "version" => self.0 .1 = Some(map.next_value()?),
+                    _ => {
+                        map.next_value::<IgnoredAny>()?;
+                    }
+                }
+                if self.0 .0.is_some() && self.0 .1.is_some() {
+                    // The caller reads the captured members. This error only
+                    // stops the scan before the rest of the document.
+                    return Err(de::Error::custom("header found"));
+                }
+            }
+            Ok(())
+        }
+    }
+    let mut found = (None, None);
+    let result = serde_json::Deserializer::from_slice(prefix).deserialize_map(Scan(&mut found));
+    match found {
+        (Some(format), Some(version)) => match (format.as_str(), version) {
+            ("orr_static_model", 1) => Ok(ModelKind::Static),
+            ("orr_animated_model", 1) => Ok(ModelKind::Animated),
+            ("orr_static_model" | "orr_animated_model", _) => {
+                Err(format!("unsupported cooked model version {version}"))
+            }
+            _ => Err("JSON is not a cooked model (unknown format)".into()),
+        },
+        _ => Err(match result {
+            Err(error) if error.is_eof() => {
+                "cooked model header (format, version) not found at the file start".into()
+            }
+            Err(_) => "file is not valid JSON with a cooked model header".into(),
+            Ok(()) => "JSON has no cooked model format and version".into(),
+        }),
+    }
+}
+
 pub fn list_assets(project_root: &Path) -> Result<Vec<AssetInfo>, String> {
     let project = open_project(project_root)?;
     let before = project
@@ -453,21 +508,10 @@ pub fn list_assets(project_root: &Path) -> Result<Vec<AssetInfo>, String> {
                     .read_asset(package, asset)
                     .map_err(|e| format!("model catalog {asset}: {e}"))?;
                 verify_expected_asset(locked, asset, &bytes)?;
-                #[derive(Deserialize)]
-                struct FormatHeader {
-                    format: String,
-                }
-                match serde_json::from_slice::<FormatHeader>(&bytes)
-                    .ok()
-                    .map(|h| h.format)
-                {
-                    Some(format) if format == "orr_static_model" && supports_static => {
-                        vec![ModelKind::Static]
-                    }
+                match cooked_json_kind(&bytes) {
+                    Ok(ModelKind::Static) if supports_static => vec![ModelKind::Static],
                     #[cfg(feature = "animated-models")]
-                    Some(format) if format == "orr_animated_model" && supports_animated => {
-                        vec![ModelKind::Animated]
-                    }
+                    Ok(ModelKind::Animated) if supports_animated => vec![ModelKind::Animated],
                     _ => Vec::new(),
                 }
             } else {
