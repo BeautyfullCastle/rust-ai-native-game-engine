@@ -107,6 +107,7 @@ pub mod surface_library;
 pub mod material_panel;
 pub mod post_panel;
 pub mod texture_library;
+pub mod icons;
 pub mod theme;
 #[cfg(feature = "models")]
 pub mod terrain_models;

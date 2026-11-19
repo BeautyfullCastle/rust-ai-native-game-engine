@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 use egui::{RichText, Ui};
 
+use crate::icons::Icon;
 use crate::model::Target;
 use crate::theme;
 
@@ -149,11 +150,15 @@ pub fn refusal(ui: &mut Ui, text: &str) {
     egui::Frame::new()
         .stroke(egui::Stroke::new(1.0, theme::ERROR))
         .corner_radius(egui::CornerRadius::same(theme::RADIUS))
-        .inner_margin(egui::Margin::symmetric(6, 4))
+        .inner_margin(egui::Margin::symmetric(theme::space::MD as i8, theme::space::SM as i8))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new(format!("Not applied: {text}")).color(theme::ERROR));
-            ui.label(RichText::new("The field keeps its old value. Type a new value or press Ctrl+Z.").size(11.5).color(theme::TEXT_WEAK));
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = theme::space::SM;
+                crate::icons::icon(ui, Icon::Error, theme::ERROR, crate::icons::ICON_SIZE).on_hover_text(Icon::Error.name());
+                ui.add(egui::Label::new(RichText::new(format!("Not applied: {text}")).color(theme::ERROR)).wrap());
+            });
+            ui.label(RichText::new("The field keeps its old value. Type a new value or press Ctrl+Z.").size(theme::text::CAPTION).color(theme::TEXT_WEAK));
         });
 }
 
@@ -162,11 +167,15 @@ pub fn play_cue(ui: &mut Ui) {
     egui::Frame::new()
         .stroke(egui::Stroke::new(1.0, theme::PLAY))
         .corner_radius(egui::CornerRadius::same(theme::RADIUS))
-        .inner_margin(egui::Margin::symmetric(6, 4))
+        .inner_margin(egui::Margin::symmetric(theme::space::MD as i8, theme::space::SM as i8))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new("Play mode: edits here are temporary.").color(theme::PLAY));
-            ui.label(RichText::new("The scene file does not change. Press Stop to edit the scene.").size(11.5).color(theme::TEXT_WEAK));
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = theme::space::SM;
+                crate::icons::icon(ui, Icon::Play, theme::PLAY, crate::icons::ICON_SIZE).on_hover_text("Play mode");
+                ui.label(RichText::new("Play mode: edits here are temporary.").color(theme::PLAY));
+            });
+            ui.label(RichText::new("The scene file does not change. Press Stop to edit the scene.").size(theme::text::CAPTION).color(theme::TEXT_WEAK));
         });
 }
 

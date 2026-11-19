@@ -22,7 +22,7 @@ use orr_fp::{FPVec3, FP};
 const MIN: [f32; 2] = orr_editor::flow::MIN_WINDOW_SIZE;
 
 /// Every main control that must stay visible, with a scene that has unsaved changes.
-const CONTROLS: [&str; 8] = [LBL_PLAY, LBL_PAUSE, LBL_STEP, LBL_STOP, "EDIT", "\u{25CF} Unsaved changes", "Inspector", "File"];
+const CONTROLS: [&str; 8] = [LBL_PLAY, LBL_PAUSE, LBL_STEP, LBL_STOP, "EDIT", "Unsaved changes", "Inspector", "File"];
 
 fn shots() -> Option<std::ffi::OsString> {
     std::env::var_os("ORR_FLOW_SHOTS").filter(|_| common::gpu().is_some())

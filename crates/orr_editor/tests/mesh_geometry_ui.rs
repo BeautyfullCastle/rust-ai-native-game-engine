@@ -693,7 +693,7 @@ fn ui_authors_walkable_geometry_then_reopens_and_plays() {
     click(&mut reopened, LBL_PLAY);
     wait_for_playing(&mut reopened);
     click(&mut reopened, LBL_PAUSE);
-    click_button(&mut reopened, "\u{23EE}");
+    click_button(&mut reopened, "Rewind to the first tick");
     wait_for(&mut reopened, "paused first simulation tick", |app| {
         app.editor
             .timeline()

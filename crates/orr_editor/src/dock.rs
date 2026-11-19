@@ -12,6 +12,7 @@
 use egui::{Color32, Context, Event, Key, Rect, Sense, Stroke, Ui, Vec2, WidgetText};
 use egui_tiles::{Behavior, Container, ContainerKind, EditAction, Linear, LinearDir, Tabs, Tile, TileId, Tiles, Tree, UiResponse};
 
+use crate::icons::{Icon, IconButton};
 use crate::layout::{self, Child, Dir, Edge, Layout, LayoutError, LayoutStore, Node, Panel};
 
 const TREE_ID: &str = "orr_editor_dock";
@@ -340,11 +341,13 @@ impl Dock {
     /// The content of the `Window` menu.
     pub fn window_menu(&mut self, ui: &mut Ui) {
         for panel in Panel::ALL {
-            let mut visible = self.is_visible(panel);
-            let response = ui.add_enabled(panel.can_hide(), egui::Checkbox::new(&mut visible, panel.title()));
+            // The eye at the right end shows whether the panel is shown or hidden.
+            let visible = self.is_visible(panel);
+            let icon = if visible { Icon::Eye } else { Icon::EyeOff };
+            let response = ui.add_enabled(panel.can_hide(), IconButton::new(icon, panel.title()).menu().icon_trailing().toggled(visible));
             let response = if panel.can_hide() { response } else { response.on_disabled_hover_text("The viewport always stays visible.") };
-            if response.changed() {
-                self.set_visible(panel, visible);
+            if response.clicked() {
+                self.set_visible(panel, !visible);
             }
         }
         ui.separator();
@@ -357,7 +360,7 @@ impl Dock {
                 ui.separator();
             }
             for name in self.presets.clone() {
-                if ui.button(&name).on_hover_text("Show this saved arrangement.").clicked() {
+                if ui.add(IconButton::new(Icon::Layout, &name).menu().icon_trailing()).on_hover_text("Show this saved arrangement.").clicked() {
                     self.apply_preset(&name);
                     ui.close();
                 }
@@ -411,7 +414,7 @@ impl Dock {
             }
             let valid = layout::clean_name(&text).is_some();
             if !valid && !text.is_empty() {
-                ui.colored_label(crate::theme::ERROR, "Use 1 to 40 characters without control characters.");
+                crate::icons::notice_line(ui, Icon::Error, crate::theme::ERROR, "Use 1 to 40 characters without control characters.");
             }
             ui.horizontal(|ui| {
                 if ui.add_enabled(valid, egui::Button::new("Save")).clicked() || (valid && field.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter))) {
@@ -434,6 +437,7 @@ impl Dock {
         let Some(text) = self.notice.clone() else { return };
         ui.horizontal(|ui| {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+            crate::icons::icon(ui, Icon::Warning, crate::theme::WARN, crate::icons::ICON_SIZE);
             ui.colored_label(crate::theme::WARN, "Layout");
             ui.label(&text).on_hover_text(&text);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -536,6 +540,28 @@ impl Behavior<Panel> for Panes<'_> {
 
     fn tab_bar_color(&self, _visuals: &egui::Visuals) -> Color32 {
         crate::theme::BAR
+    }
+
+    /// The same height as the title strip of a panel that is not tabbed.
+    fn tab_bar_height(&self, _style: &egui::Style) -> f32 {
+        TITLE_GRAB
+    }
+
+    fn tab_bg_color(&self, _visuals: &egui::Visuals, _tiles: &Tiles<Panel>, _tile_id: TileId, state: &egui_tiles::TabState) -> Color32 {
+        if state.active { crate::theme::PANEL } else { Color32::TRANSPARENT }
+    }
+
+    /// The active tab has the accent edge of a panel title.
+    fn tab_outline_stroke(&self, _visuals: &egui::Visuals, _tiles: &Tiles<Panel>, _tile_id: TileId, state: &egui_tiles::TabState) -> Stroke {
+        if state.active { Stroke::new(1.0, crate::theme::ACCENT) } else { Stroke::NONE }
+    }
+
+    fn tab_bar_hline_stroke(&self, _visuals: &egui::Visuals) -> Stroke {
+        Stroke::new(1.0, crate::theme::LINE)
+    }
+
+    fn tab_text_color(&self, _visuals: &egui::Visuals, _tiles: &Tiles<Panel>, _tile_id: TileId, state: &egui_tiles::TabState) -> Color32 {
+        if state.active { crate::theme::TEXT_STRONG } else { crate::theme::TEXT_WEAK }
     }
 
     fn drag_preview_stroke(&self, _visuals: &egui::Visuals) -> Stroke {

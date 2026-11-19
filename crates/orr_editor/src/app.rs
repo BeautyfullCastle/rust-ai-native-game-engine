@@ -15,6 +15,7 @@ use orr_reflect::Value;
 use orr_remote::{CaptureError, CaptureRequest, CapturedImage, ViewState};
 
 use crate::editor::{fp_of_f64, Editor, Message, Mode, Owner};
+use crate::icons::{Icon, IconButton};
 use crate::inspector::{show_component, InspEvent};
 use crate::model::{EntityRow, Target};
 use crate::viewport::{self, GpuViewport};
@@ -160,13 +161,13 @@ mod static_actions;
 mod collect_project;
 
 /// Button labels (tests click them by these texts).
-pub const LBL_PLAY: &str = "\u{25B6} Play";
+pub const LBL_PLAY: &str = "Play";
 /// See [`LBL_PLAY`].
-pub const LBL_PAUSE: &str = "\u{23F8} Pause";
+pub const LBL_PAUSE: &str = "Pause";
 /// See [`LBL_PLAY`].
-pub const LBL_STEP: &str = "\u{23ED} Step";
+pub const LBL_STEP: &str = "Step";
 /// See [`LBL_PLAY`].
-pub const LBL_STOP: &str = "\u{25A0} Stop";
+pub const LBL_STOP: &str = "Stop";
 
 /// The button that starts a stopped local host again (tests click it by this text).
 pub const LBL_RESTART: &str = "Restart simulation host";
@@ -1637,7 +1638,7 @@ impl EditorApp {
                     ui.label(if self.mesh_recorded_playback.running() { "Replaying recorded timeline" } else { "Recorded timeline paused" });
                 }
                 if let Some(error) = self.editor.down() {
-                    ui.colored_label(Color32::RED, &error.reason);
+                    ui.colored_label(crate::theme::ERROR, &error.reason);
                 }
             });
             ui.horizontal(|ui| {
@@ -1671,7 +1672,7 @@ impl EditorApp {
                 }
             });
             if let Some(error) = self.mesh_recorded_playback.error() {
-                ui.colored_label(Color32::RED, error);
+                ui.colored_label(crate::theme::ERROR, error);
             }
             if self.mesh_player_input_allowed {
                 ui.add_enabled_ui(!self.mesh_player_session.dialog_open() && !self.mesh_recorded_playback.active(), |ui| self.mesh_play_controls.show(ui, &mut self.editor));
@@ -1824,7 +1825,7 @@ impl EditorApp {
         // No shortcut: Escape already belongs to gesture/input cancellation.
         ui.horizontal_wrapped(|ui| {
             let label = if self.ui.viewport_focus { "Restore panels" } else { "Focus viewport" };
-            if ui.button(label).on_hover_text("Hide or restore authoring panels; playback and input safety are unchanged").clicked() {
+            if ui.add(IconButton::new(Icon::Layout, label)).on_hover_text("Hide or restore authoring panels; playback and input safety are unchanged").clicked() {
                 self.ui.viewport_focus = !self.ui.viewport_focus;
             }
         });
@@ -1834,50 +1835,57 @@ impl EditorApp {
         #[cfg(feature="mesh-navigation")]
         let mutable = mutable && !self.mesh_navigation.art_import_busy() && !self.mesh_navigation.prop_gesture_busy() && !self.mesh_navigation.agent_pick_busy() && !self.mesh_navigation.geometry_vertex_busy() && !self.mesh_mission_pick_busy() && !self.hazard_pick_busy();
         let live = self.editor.down().is_none();
-        egui::MenuBar::new().ui(ui, |ui| {
+        // The Play buttons drop their labels (the label stays as the tooltip and the accessible
+        // name) when the bar with labels was wider than the window. The overflow width is
+        // measured only while the labels show, so the bar does not flip back and forth.
+        let full_width_id = egui::Id::new("top_bar_full_width");
+        let full_width = ui.data(|data| data.get_temp::<f32>(full_width_id)).unwrap_or(0.0);
+        let available_width = ui.available_width();
+        let compact = full_width > available_width;
+        let bar = egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
                 if !(mutable) { ui.disable(); }
                 #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "project-create", feature = "collect-ui"))]
                 { self.collect_project_menu(ui); if self.collect_project_dialog_open() { ui.disable(); } }
                 #[cfg(feature="mesh-mission")]
                 if matches!(self.editor.game(), crate::game::EditorGame::PhysGame | crate::game::EditorGame::MeshNavigation)
-                    && ui.add_enabled(self.mesh_workspace_blocker().is_none(), egui::Button::new("New mesh game\u{2026}")).clicked() {
+                    && ui.add_enabled(self.mesh_workspace_blocker().is_none(), IconButton::plain("New mesh game\u{2026}")).clicked() {
                     self.mesh_game_creator.open();
                     self.editor.release_control();
                     ui.close();
                 }
                 #[cfg(feature="mesh-hazards")]
                 if (self.editor.game() == crate::game::EditorGame::PhysGame || self.editor.game().has_mesh_view())
-                    && ui.add_enabled(self.mesh_creation_base_blocker().is_none(), egui::Button::new("New hazard game\u{2026}")).clicked() {
+                    && ui.add_enabled(self.mesh_creation_base_blocker().is_none(), IconButton::plain("New hazard game\u{2026}")).clicked() {
                     self.mesh_game_creator.open_hazards();
                     self.editor.release_control();
                     ui.close();
                 }
                 #[cfg(feature="mesh-navigation")]
                 if matches!(self.editor.game(), crate::game::EditorGame::PhysGame | crate::game::EditorGame::MeshNavigation)
-                    && ui.add_enabled(self.editor.mode() == Mode::Edit && self.editor.spec().is_local(), egui::Button::new("New mesh scene\u{2026}")).clicked() {
+                    && ui.add_enabled(self.editor.mode() == Mode::Edit && self.editor.spec().is_local(), IconButton::plain("New mesh scene\u{2026}")).clicked() {
                     self.ui.dialog = Some(Dialog { kind: DialogKind::NewMesh, text: String::new() });
                     ui.close();
                 }
                 #[cfg(feature="mesh-navigation")]
                 if matches!(self.editor.game(), crate::game::EditorGame::PhysGame | crate::game::EditorGame::MeshNavigation)
-                    && ui.add_enabled(self.editor.mode() == Mode::Edit && self.editor.spec().is_local(), egui::Button::new("Open mesh scene\u{2026}")).clicked() {
+                    && ui.add_enabled(self.editor.mode() == Mode::Edit && self.editor.spec().is_local(), IconButton::plain("Open mesh scene\u{2026}")).clicked() {
                     self.ui.dialog = Some(Dialog { kind: DialogKind::OpenMesh, text: String::new() });
                     ui.close();
                 }
-                if ui.add_enabled(!self.package_work_pending() && !self.hazard_export_busy(), egui::Button::new("Open scene\u{2026}")).clicked() {
+                if ui.add_enabled(!self.package_work_pending() && !self.hazard_export_busy(), IconButton::new(Icon::Folder, "Open scene\u{2026}").menu()).clicked() {
                     let text = self.editor.path().map(|p| p.display().to_string()).unwrap_or_default();
                     self.ui.dialog = Some(Dialog { kind: DialogKind::Open, text });
                     ui.close();
                 }
-                if ui.add(egui::Button::new("Save").shortcut_text("Ctrl+S")).clicked() {
+                if ui.add(IconButton::new(Icon::Save, "Save").menu().shortcut("Ctrl+S")).clicked() {
                     self.save();
                     ui.close();
                 }
                 #[cfg(feature="mesh-navigation")]
                 if self.editor.game().is_mesh_navigation() {
                     let blocker = self.mesh_workspace_save_blocker();
-                    if ui.add_enabled(blocker.is_none(), egui::Button::new("Save mesh workspace"))
+                    if ui.add_enabled(blocker.is_none(), IconButton::plain("Save mesh workspace"))
                         .on_disabled_hover_text(blocker.as_deref().unwrap_or("Save the scene and all applied mesh presentation changes; unapplied forms are not applied"))
                         .clicked() {
                         self.save_mesh_workspace();
@@ -1888,43 +1896,43 @@ impl EditorApp {
                 if self.editor.game().is_mesh_hazards() {
                     ui.weak("MeshHazardsV1 uses scene Save; legacy workspace copy/save and legacy export are not supported.");
                 }
-                if ui.add_enabled(!self.package_work_pending() && !self.hazard_export_busy(), egui::Button::new("Save As\u{2026}")).clicked() {
+                if ui.add_enabled(!self.package_work_pending() && !self.hazard_export_busy(), IconButton::plain("Save As\u{2026}")).clicked() {
                     let text = self.editor.path().map(|p| p.display().to_string()).unwrap_or_default();
                     self.ui.dialog = Some(Dialog { kind: DialogKind::SaveAs, text });
                     ui.close();
                 }
                 #[cfg(feature="room-authoring")]
-                if self.editor.game().is_room() && ui.add_enabled(self.editor.mode() == Mode::Edit && self.editor.spec().is_local(), egui::Button::new("Room level authoring\u{2026}")).clicked() {
+                if self.editor.game().is_room() && ui.add_enabled(self.editor.mode() == Mode::Edit && self.editor.spec().is_local(), IconButton::plain("Room level authoring\u{2026}")).clicked() {
                     self.room_authoring.open = true;
                     ui.close();
                 }
                 #[cfg(all(any(windows,target_os="linux"),target_arch="x86_64",feature="room-authoring"))]
-                if self.editor.game().is_room() && ui.add_enabled(self.editor.mode() == Mode::Edit && self.editor.spec().is_local(), egui::Button::new("Room wall groups\u{2026}")).clicked() {
+                if self.editor.game().is_room() && ui.add_enabled(self.editor.mode() == Mode::Edit && self.editor.spec().is_local(), IconButton::plain("Room wall groups\u{2026}")).clicked() {
                     self.room_wall_stamps.open = true;
                     ui.close();
                 }
                 #[cfg(feature="package-manager")]
-                if self.editor.game().is_room() && ui.add_enabled(self.editor.mode() == Mode::Edit && self.editor.spec().is_local(), egui::Button::new("Content packages\u{2026}")).clicked() {
+                if self.editor.game().is_room() && ui.add_enabled(self.editor.mode() == Mode::Edit && self.editor.spec().is_local(), IconButton::plain("Content packages\u{2026}")).clicked() {
                     self.package_manager.open = true;
                     ui.close();
                 }
                 #[cfg(feature="mesh-hazards-export")]
-                if self.editor.game().is_mesh_hazards() && ui.add_enabled(self.editor.mode() == Mode::Edit && self.editor.spec().is_local(), egui::Button::new("Export hazard game\u{2026}")).clicked() {
+                if self.editor.game().is_mesh_hazards() && ui.add_enabled(self.editor.mode() == Mode::Edit && self.editor.spec().is_local(), IconButton::plain("Export hazard game\u{2026}")).clicked() {
                     self.mesh_hazards_export.open = true;
                     ui.close();
                 }
                 #[cfg(feature="mesh-export")]
-                if self.editor.game().is_mesh_navigation() && ui.add_enabled(self.editor.mode() == Mode::Edit && self.editor.spec().is_local(), egui::Button::new("Export mesh game\u{2026}")).clicked() {
+                if self.editor.game().is_mesh_navigation() && ui.add_enabled(self.editor.mode() == Mode::Edit && self.editor.spec().is_local(), IconButton::plain("Export mesh game\u{2026}")).clicked() {
                     self.mesh_export.open = true;
                     ui.close();
                 }
                 #[cfg(all(windows,target_arch="x86_64",feature="mesh-navigation"))]
-                if self.editor.game().is_mesh_navigation() && ui.add_enabled(!self.mesh_copy.busy() && self.mesh_copy_blocker().is_none(), egui::Button::new("Duplicate mesh workspace\u{2026}")).clicked() {
+                if self.editor.game().is_mesh_navigation() && ui.add_enabled(!self.mesh_copy.busy() && self.mesh_copy_blocker().is_none(), IconButton::plain("Duplicate mesh workspace\u{2026}")).clicked() {
                     self.mesh_copy.open();
                     ui.close();
                 }
                 #[cfg(all(windows, target_arch="x86_64", feature="windows-export"))]
-                if self.editor.game().is_room() && ui.add_enabled(self.editor.mode() == Mode::Edit && self.editor.spec().is_local() && !self.package_work_pending(), egui::Button::new("Export Windows game\u{2026}")).clicked() {
+                if self.editor.game().is_room() && ui.add_enabled(self.editor.mode() == Mode::Edit && self.editor.spec().is_local() && !self.package_work_pending(), IconButton::plain("Export Windows game\u{2026}")).clicked() {
                     self.windows_export.use_current_scene(self.editor.path().as_deref());
                     self.windows_export.open = true;
                     ui.close();
@@ -1932,7 +1940,7 @@ impl EditorApp {
                 #[cfg(all(windows, target_arch="x86_64", feature="windows-projects"))]
                 if self.editor.game().is_room() || self.editor.game() == crate::game::EditorGame::PhysGame {
                     for label in ["New Room project\u{2026}", "Open Room project\u{2026}"] {
-                        if ui.add_enabled(self.editor.mode() == Mode::Edit && self.editor.spec().is_local(), egui::Button::new(label)).clicked() {
+                        if ui.add_enabled(self.editor.mode() == Mode::Edit && self.editor.spec().is_local(), IconButton::plain(label)).clicked() {
                             self.windows_projects.open = true;
                             ui.close();
                         }
@@ -1943,18 +1951,18 @@ impl EditorApp {
             if self.collect_project_dialog_open() { ui.disable(); }
             ui.menu_button("Edit", |ui| {
                 let editing = mutable && self.editor.mode() == Mode::Edit;
-                if ui.add_enabled(editing && self.editor.history().can_undo, egui::Button::new("Undo").shortcut_text("Ctrl+Z")).clicked() {
+                if ui.add_enabled(editing && self.editor.history().can_undo, IconButton::new(Icon::Undo, "Undo").menu().shortcut("Ctrl+Z")).clicked() {
                     self.editor.undo();
                     ui.close();
                 }
-                if ui.add_enabled(editing && self.editor.history().can_redo, egui::Button::new("Redo").shortcut_text("Ctrl+Y")).clicked() {
+                if ui.add_enabled(editing && self.editor.history().can_redo, IconButton::new(Icon::Redo, "Redo").menu().shortcut("Ctrl+Y")).clicked() {
                     self.editor.redo();
                     ui.close();
                 }
                 #[cfg(feature="scenery")]
                 {
                     ui.separator();
-                    if ui.button("Forest Valley scene\u{2026}").clicked() {
+                    if ui.add(IconButton::plain("Forest Valley scene\u{2026}")).clicked() {
                         self.scenery.open = true;
                         ui.close();
                     }
@@ -1967,20 +1975,25 @@ impl EditorApp {
             let start_blocker = self.playback_start_blocker();
             egui::Frame::new().fill(crate::theme::INPUT).corner_radius(egui::CornerRadius::same(crate::theme::RADIUS)).inner_margin(egui::Margin::same(2)).show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 2.0;
+                    ui.spacing_mut().item_spacing.x = crate::theme::space::XS;
                     let can_play = live && !playing && start_blocker.is_none();
+                    let button = |icon: Icon, label: &'static str, hint: &'static str| {
+                        let button = IconButton::new(icon, label).disabled_hint(hint);
+                        if compact { button.icon_only() } else { button }
+                    };
                     // Play is the main action of the bar: it takes the accent while it is available.
-                    let play = if can_play { egui::Button::new(RichText::new(LBL_PLAY).strong().color(crate::theme::BG)).fill(crate::theme::ACCENT) } else { egui::Button::new(LBL_PLAY) };
-                    if ui.add_enabled(can_play, play).on_disabled_hover_text(start_blocker.as_deref().unwrap_or("Playback is already running or the host is unavailable")).clicked() {
+                    let play_hint = start_blocker.as_deref().unwrap_or("Playback is already running or the host is unavailable");
+                    if ui.add_enabled(can_play, button(Icon::Play, LBL_PLAY, "").primary(true).disabled_hint(play_hint)).clicked() {
                         self.play_from_ui();
                     }
-                    if ui.add_enabled(live && playing, egui::Button::new(LBL_PAUSE)).clicked() {
+                    if ui.add_enabled(live && playing, button(Icon::Pause, LBL_PAUSE, "Pause works while the simulation plays")).clicked() {
                         self.editor.pause();
                     }
-                    if ui.add_enabled(live && !playing && start_blocker.is_none(), egui::Button::new(LBL_STEP)).on_disabled_hover_text(start_blocker.as_deref().unwrap_or("Pause playback or reconnect the host before stepping")).clicked() {
+                    let step_hint = start_blocker.as_deref().unwrap_or("Pause playback or reconnect the host before stepping");
+                    if ui.add_enabled(live && !playing && start_blocker.is_none(), button(Icon::Step, LBL_STEP, "").disabled_hint(step_hint)).clicked() {
                         self.step_from_ui();
                     }
-                    if ui.add_enabled(live && self.editor.is_playing_mode(), egui::Button::new(LBL_STOP)).clicked() {
+                    if ui.add_enabled(live && self.editor.is_playing_mode(), button(Icon::Stop, LBL_STOP, "Stop works while the scene plays")).clicked() {
                         self.editor.stop();
                     }
                 });
@@ -1997,7 +2010,7 @@ impl EditorApp {
                     #[cfg(feature="mesh-navigation")]
                     if crate::mesh_lighting_panel::supports_lighting_profile(self.editor.game()) {
                         ui.label("Use Mesh game lighting → Saved HDR post-processing, then Apply and Save.");
-                        if let Some(error) = self.mesh_post_process_runtime.warning() { ui.colored_label(Color32::RED, format!("HDR disabled for this scene request: {error}")); }
+                        if let Some(error) = self.mesh_post_process_runtime.warning() { ui.colored_label(crate::theme::ERROR, format!("HDR disabled for this scene request: {error}")); }
                         return;
                     }
                     ui.checkbox(&mut self.ui.yard_post_process.enabled, "HDR post-processing");
@@ -2010,19 +2023,38 @@ impl EditorApp {
                     });
                     ui.weak("View only · scene Lighting controls exposure and tone mapping");
                     if let Some(error) = &self.ui.yard_post_process_error {
-                        ui.colored_label(Color32::RED, format!("Last rejected request: {error}"));
+                        ui.colored_label(crate::theme::ERROR, format!("Last rejected request: {error}"));
                     }
                 });
                 #[cfg(not(feature = "models"))]
                 ui.add_enabled(false, egui::Button::new("Viewport effects"))
                     .on_disabled_hover_text("HDR/bloom requires an editor built with the models or animated-models feature");
             }
-            if self.editor.is_viewer() { ui.label("REPLAY VIEWER · read-only"); }
+            if self.editor.is_viewer() {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = crate::theme::space::SM;
+                    crate::icons::icon(ui, Icon::Lock, crate::theme::TEXT, crate::icons::ICON_SIZE);
+                    ui.label("REPLAY VIEWER · read-only");
+                });
+            }
             if self.editor.is_dirty() {
-                ui.label(RichText::new("\u{25CF} Unsaved changes").color(crate::theme::WARN))
-                    .on_hover_text("The scene has changes that are not saved. Ctrl+S saves them. The window title shows * too.");
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = crate::theme::space::SM;
+                    crate::icons::icon(ui, Icon::Warning, crate::theme::WARN, crate::icons::ICON_SIZE);
+                    ui.label(RichText::new("Unsaved changes").color(crate::theme::WARN))
+                        .on_hover_text("The scene has changes that are not saved. Ctrl+S saves them. The window title shows * too.");
+                });
             }
         });
+        if !compact {
+            // The bar is never narrower than the window, so it is wider only when the content overflows.
+            let overflow = bar.response.rect.width() > available_width + 0.5;
+            ui.data_mut(|data| data.insert_temp(full_width_id, if overflow { bar.response.rect.width() } else { 0.0 }));
+            if overflow {
+                // The next frame shows the compact bar.
+                ui.ctx().request_repaint();
+            }
+        }
         #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "project-create", feature = "collect-ui"))]
         if self.collect_project_dialog_open() { return; }
         #[cfg(all(feature = "collect-ui", feature = "collect-input-map-editor"))]
@@ -2088,6 +2120,7 @@ impl EditorApp {
     fn down_banner(&mut self, ui: &mut Ui) {
         let Some(down) = self.editor.down().cloned() else { return };
         ui.horizontal_wrapped(|ui| {
+            crate::icons::icon(ui, Icon::Error, crate::theme::ERROR, crate::icons::ICON_SIZE).on_hover_text(Icon::Error.name());
             ui.colored_label(ui.visuals().error_fg_color, RichText::new(&down.reason).strong());
             let label = if down.local { LBL_RESTART } else { LBL_RECONNECT };
             if ui.button(label).clicked() {
@@ -2125,12 +2158,18 @@ impl EditorApp {
             let now = ui.input(|input| input.time);
             let error = self.editor.status().is_some_and(|message| message.error);
             let fresh = self.ui.flow.status_fresh(self.editor.message_serial(), error, now);
-            let (status, full) = match self.editor.status() {
-                Some(Message { text, error: true }) if fresh => (RichText::new(text).color(crate::theme::ERROR), text.clone()),
-                Some(Message { text, error: false }) if fresh => (RichText::new(text), text.clone()),
-                _ => (RichText::new(step.as_str()).weak(), step),
+            let (status, full, mark) = match self.editor.status() {
+                Some(Message { text, error: true }) if fresh => (RichText::new(text).color(crate::theme::ERROR), text.clone(), Some((Icon::Error, crate::theme::ERROR))),
+                Some(Message { text, error: false }) if fresh => (RichText::new(text), text.clone(), Some((Icon::Info, crate::theme::INFO))),
+                _ => (RichText::new(step.as_str()).color(crate::theme::TEXT_WEAK), step, None),
             };
-            ui.add_sized([ui.available_width() * 0.4, ui.text_style_height(&egui::TextStyle::Body)], egui::Label::new(status).truncate()).on_hover_text(full);
+            let status_width = ui.available_width() * 0.4;
+            if let Some((kind, color)) = mark {
+                crate::icons::icon(ui, kind, color, crate::icons::ICON_SIZE).on_hover_text(kind.name());
+            }
+            ui.allocate_ui_with_layout(egui::vec2(status_width, ui.text_style_height(&egui::TextStyle::Body)), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.add(egui::Label::new(status).truncate()).on_hover_text(full);
+            });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let gpu = self.gpu3d.as_ref().map(|g|g.gpu().adapter_name()).or_else(||self.gpu.as_ref().map(|g|g.gpu().adapter_name())).unwrap_or_else(||"no GPU".to_string());
                 ui.weak(gpu);
@@ -2140,7 +2179,9 @@ impl EditorApp {
                 }
                 if let Some(action) = self.editor.feed().last_action() {
                     let short: String = if action.chars().count() > 70 { action.chars().take(69).chain(std::iter::once('\u{2026}')).collect() } else { action.to_string() };
+                    // Right to left: the text first, then the icon at its left.
                     ui.label(RichText::new(short).color(crate::theme::INFO));
+                    crate::icons::icon(ui, Icon::Info, crate::theme::INFO, crate::icons::ICON_SIZE).on_hover_text("Last agent action");
                 }
             });
         });
@@ -2234,8 +2275,8 @@ impl EditorApp {
                 let selected = self.editor.is_selected(target);
                 let (mark, color) = crate::theme::entity_mark(components);
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    ui.add_sized([16.0, row_h - 2.0], egui::Label::new(RichText::new(mark).size(12.0).color(color)).selectable(false));
+                    ui.spacing_mut().item_spacing.x = crate::theme::space::SM;
+                    crate::icons::icon(ui, mark, color, crate::icons::ICON_SIZE).on_hover_text(crate::theme::entity_role(components));
                     if ui.selectable_label(selected, label).on_hover_text(tip).clicked() {
                         clicked = Some(target.clone());
                     }
@@ -2290,7 +2331,7 @@ impl EditorApp {
                 #[cfg(feature="mesh-animated-models")]
                 ui.add_enabled_ui(authoring_enabled, |ui| self.mesh_animation.show(ui, &self.editor));
                 #[cfg(not(feature="mesh-animated-models"))]
-                if let Some(blocker) = self.mesh_animation_blocker() { ui.colored_label(Color32::RED, blocker); }
+                if let Some(blocker) = self.mesh_animation_blocker() { ui.colored_label(crate::theme::ERROR, blocker); }
             });
             return;
         }
@@ -2386,7 +2427,7 @@ impl EditorApp {
                 }
             });
             if self.editor.batch_outcome_uncertain() {
-                ui.colored_label(Color32::YELLOW, "Move result unconfirmed. Reconnect to read document and history.");
+                ui.colored_label(crate::theme::WARN, "Move result unconfirmed. Reconnect to read document and history.");
             }
         }
         if self.editor.previewing().is_some() {
@@ -2435,13 +2476,13 @@ impl EditorApp {
                     let row = ins.row.as_ref();
                     let key = ins.target.param();
                     ui.horizontal(|ui| {
-                        let mark = row.map_or(("\u{25C6}", crate::theme::TEXT_WEAK), |r| crate::theme::entity_mark(&r.components));
-                        ui.label(RichText::new(mark.0).size(15.0).color(mark.1));
+                        let mark = row.map_or(crate::theme::UNKNOWN_ENTITY_MARK, |r| crate::theme::entity_mark(&r.components));
+                        crate::icons::icon(ui, mark.0, mark.1, crate::icons::ICON_SIZE + 2.0).on_hover_text(row.map_or("Entity", |r| crate::theme::entity_role(&r.components)));
                         let name = row.map_or_else(|| key.clone(), EntityRow::label);
-                        ui.add(egui::Label::new(RichText::new(&name).strong().size(15.0).color(crate::theme::TEXT_STRONG)).truncate()).on_hover_text(name);
+                        ui.add(egui::Label::new(RichText::new(&name).strong().size(crate::theme::text::TITLE).color(crate::theme::TEXT_STRONG)).truncate()).on_hover_text(name);
                     });
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
+                        ui.spacing_mut().item_spacing.x = crate::theme::space::SM;
                         if let Some(row) = row {
                             ui.weak(crate::theme::entity_role(&row.components));
                             ui.weak("\u{B7}");
@@ -2449,7 +2490,7 @@ impl EditorApp {
                         ui.weak(&key);
                     });
                     if let Some(text) = &notice { crate::flow::refusal(ui, text); }
-                    ui.add_space(2.0);
+                    ui.add_space(crate::theme::space::XS);
                     for (name, value) in &ins.components {
                         let Some(ty) = types.get(name) else { continue };
                         let base = egui::Id::new(("inspector", &key, name));
@@ -2481,7 +2522,7 @@ impl EditorApp {
                             events.extend(evs.into_iter().map(|e| (Owner::Component(name.clone()), e)));
                             // One row, right-aligned: the action is there when wanted and quiet otherwise.
                             ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 18.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.add(egui::Button::new(RichText::new("Remove component").size(11.5).color(crate::theme::TEXT_WEAK)).frame(false)).clicked() {
+                                if ui.add(egui::Button::new(RichText::new("Remove component").size(crate::theme::text::CAPTION).color(crate::theme::TEXT_WEAK)).frame(false)).clicked() {
                                     remove = Some(name.clone());
                                 }
                             });
@@ -2512,7 +2553,7 @@ impl EditorApp {
                     if let Some(text) = &notice { crate::flow::refusal(ui, text); }
                 }
             }
-            ui.add_space(6.0);
+            ui.add_space(crate::theme::space::MD);
             crate::theme::section_title(ui, "Singletons");
             for (name, value) in editor.singletons() {
                 let Some(ty) = types.get(name) else { continue };
@@ -2792,7 +2833,7 @@ impl EditorApp {
                 #[cfg(feature="room-lighting")]
                 self.cancel_room_light_pick();
                 if let Some(tex)=self.gpu3d.as_ref().and_then(|gpu|gpu.last_texture()) { ui.painter().image(tex,rect,Rect::from_min_max(Pos2::ZERO,Pos2::new(1.0,1.0)),Color32::WHITE); }
-                ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,error,egui::FontId::proportional(14.0),Color32::RED); #[cfg(feature="terrain-patrol")]
+                ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,error,egui::FontId::proportional(14.0),crate::theme::ERROR); #[cfg(feature="terrain-patrol")]
                 self.navigation_patrol_frame_drawn(false);
                 #[cfg(feature="mesh-navigation")]
                 self.cancel_mesh_light_pick();
@@ -2966,7 +3007,7 @@ impl EditorApp {
                 if let Some(texture) = self.gpu3d.as_ref().and_then(|gpu| gpu.last_texture()) {
                     ui.painter().image(texture,rect,Rect::from_min_max(Pos2::ZERO,Pos2::new(1.0,1.0)),Color32::WHITE);
                 }
-                ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,error,egui::FontId::proportional(14.0),Color32::RED);
+                ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,error,egui::FontId::proportional(14.0),crate::theme::ERROR);
                 #[cfg(feature="terrain-patrol")]
                 self.navigation_patrol_frame_drawn(false);
                 #[cfg(feature="mesh-navigation")]
@@ -2984,7 +3025,7 @@ impl EditorApp {
                 Ok(Some(placement)) => placements.push(placement),
                 Ok(None) => {}
                 Err(error) => {
-                    ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,error,egui::FontId::proportional(14.0),Color32::RED);
+                    ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,error,egui::FontId::proportional(14.0),crate::theme::ERROR);
                     #[cfg(feature="terrain-patrol")]
                 self.navigation_patrol_frame_drawn(false);
                 #[cfg(feature="mesh-navigation")]
@@ -3116,7 +3157,7 @@ impl EditorApp {
         }
         #[cfg(feature="room-lighting")]
         if let Err(error) = self.editor.apply_room_environment_for_presentation(&mut list.lighting) {
-            ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,error,egui::FontId::proportional(14.0),Color32::RED);
+            ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,error,egui::FontId::proportional(14.0),crate::theme::ERROR);
             #[cfg(feature="terrain-patrol")]
                 self.navigation_patrol_frame_drawn(false);
                 #[cfg(feature="mesh-navigation")]
@@ -3130,7 +3171,7 @@ impl EditorApp {
         }
         #[cfg(feature="models")]
         if let Some(problem) = &view_model_problem {
-            ui.painter().text(rect.left_bottom() + egui::vec2(8.0, -8.0), egui::Align2::LEFT_BOTTOM, problem, egui::FontId::proportional(13.0), Color32::from_rgb(255, 190, 80));
+            ui.painter().text(rect.left_bottom() + egui::vec2(8.0, -8.0), egui::Align2::LEFT_BOTTOM, problem, egui::FontId::proportional(13.0), crate::theme::WARN);
         }
         // Lights have no body to draw: a marker shows where each one is and where it points.
         if let Some(look) = &self.editor.yard_frame().look {
@@ -3141,7 +3182,7 @@ impl EditorApp {
                     egui::Align2::LEFT_TOP,
                     format!("{} lights give no light: a frame holds the sun and {} more lights", look.dropped_lights, orr_render::MAX_SCENE_LIGHTS),
                     egui::FontId::proportional(13.0),
-                    Color32::from_rgb(255, 190, 80),
+                    crate::theme::WARN,
                 );
             }
         }
@@ -3192,7 +3233,7 @@ impl EditorApp {
             }
             #[cfg(feature = "models")]
             if let Err(error) = point_light.and_then(|settings|gpu.set_point_light_settings(settings)) {
-                ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, error, egui::FontId::proportional(14.0), Color32::RED);
+                ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, error, egui::FontId::proportional(14.0), crate::theme::ERROR);
                 #[cfg(feature="terrain-patrol")]
                 self.navigation_patrol_frame_drawn(false);
                 #[cfg(feature="mesh-navigation")]
@@ -3229,10 +3270,10 @@ impl EditorApp {
                 Ok(tex)=>{frame_drawn = true; ui.painter().image(tex,rect,Rect::from_min_max(Pos2::ZERO,Pos2::new(1.0,1.0)),Color32::WHITE);
                     #[cfg(feature="models")]
                     if let Some(problem) = &terrain_problem {
-                        ui.painter().text(rect.left_bottom() + egui::vec2(8.0, -8.0), egui::Align2::LEFT_BOTTOM, format!("Terrain: {problem}"), egui::FontId::proportional(13.0), Color32::from_rgb(255, 110, 110));
+                        ui.painter().text(rect.left_bottom() + egui::vec2(8.0, -8.0), egui::Align2::LEFT_BOTTOM, format!("Terrain: {problem}"), egui::FontId::proportional(13.0), crate::theme::ERROR);
                     }
                 }
-                Err(error)=>{if let Some(tex)=gpu.last_texture(){ui.painter().image(tex,rect,Rect::from_min_max(Pos2::ZERO,Pos2::new(1.0,1.0)),Color32::WHITE);}ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,error,egui::FontId::proportional(14.0),Color32::RED);}
+                Err(error)=>{if let Some(tex)=gpu.last_texture(){ui.painter().image(tex,rect,Rect::from_min_max(Pos2::ZERO,Pos2::new(1.0,1.0)),Color32::WHITE);}ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,error,egui::FontId::proportional(14.0),crate::theme::ERROR);}
             }
             #[cfg(feature="mesh-navigation")]
             if crate::mesh_lighting_panel::supports_lighting_profile(self.editor.game()) {
@@ -3241,7 +3282,7 @@ impl EditorApp {
                     // Keep fallback visible without overlapping the top-left controls legend.
                     let galley = ui.painter().layout(
                         format!("Saved HDR unavailable; rendering without HDR: {warning}"),
-                        egui::FontId::proportional(14.0), Color32::YELLOW,
+                        egui::FontId::proportional(14.0), crate::theme::WARN,
                         (rect.width() - 24.0).max(1.0));
                     let position = egui::pos2(rect.left() + 8.0,
                         (rect.bottom() - 8.0 - galley.size().y).max(rect.top() + 56.0));
@@ -3249,12 +3290,12 @@ impl EditorApp {
                     ui.painter().rect_filled(
                         Rect::from_min_size(position - egui::vec2(4.0, 4.0), galley.size() + egui::vec2(8.0, 8.0)),
                         4.0, Color32::from_black_alpha(224));
-                    ui.painter().galley(position, galley, Color32::YELLOW);
+                    ui.painter().galley(position, galley, crate::theme::WARN);
                 }
             }
         } else {
             ui.painter().rect_filled(rect,0.0,Color32::from_rgb(10,10,16));
-            ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,"Yard3D viewport needs a GPU",egui::FontId::proportional(14.0),Color32::GRAY);
+            ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,"Yard3D viewport needs a GPU",egui::FontId::proportional(14.0),crate::theme::TEXT_WEAK);
         }
         #[cfg(feature="mesh-navigation")]
         let light_frame_available=frame_drawn;
@@ -3369,7 +3410,7 @@ impl EditorApp {
         if !mesh_hud_visible {
         ui.painter().text(rect.left_top()+egui::vec2(10.0,10.0),egui::Align2::LEFT_TOP,viewport_hint,egui::FontId::proportional(12.0),Color32::WHITE);
         }
-        if self.editor.previewing().is_some(){ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,"3D proposal preview unavailable; displaying live host snapshot",egui::FontId::proportional(14.0),Color32::YELLOW);}
+        if self.editor.previewing().is_some(){ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,"3D proposal preview unavailable; displaying live host snapshot",egui::FontId::proportional(14.0),crate::theme::WARN);}
     }
 
     // ---- viewport ----
@@ -3609,7 +3650,7 @@ impl EditorApp {
             }
             None => {
                 ui.painter().rect_filled(rect, 0.0, Color32::from_rgb(10, 10, 16));
-                ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "viewport needs a GPU (wgpu adapter)", egui::FontId::proportional(14.0), Color32::GRAY);
+                ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "viewport needs a GPU (wgpu adapter)", egui::FontId::proportional(14.0), crate::theme::TEXT_WEAK);
             }
         }
         #[cfg(feature = "sprites")]
@@ -3688,16 +3729,18 @@ impl EditorApp {
         let start_allowed = self.playback_start_blocker().is_none();
         ui.horizontal(|ui| {
             if self.editor.down().is_some() { ui.disable(); }
-            if ui.button("\u{23EE}").on_hover_text("Rewind to the first tick").clicked() {
+            // Icon only: the label is the tooltip and the accessible name.
+            if ui.add(IconButton::new(Icon::Rewind, "Rewind to the first tick").icon_only()).clicked() {
                 self.editor.seek(tl.first_tick);
             }
-            if ui.add_enabled(start_allowed && !tl.playing, egui::Button::new("\u{25B6}")).on_hover_text(if self.editor.is_viewer() { "Play recorded ticks only" } else { "Play by the clock (from a rewound tick this branches)" }).clicked() {
+            let play_label = if self.editor.is_viewer() { "Play recorded ticks only" } else { "Play by the clock (from a rewound tick this branches)" };
+            if ui.add_enabled(start_allowed && !tl.playing, IconButton::new(Icon::Play, play_label).icon_only()).clicked() {
                 self.play_from_ui();
             }
-            if ui.add_enabled(tl.playing, egui::Button::new("\u{23F8}")).on_hover_text("Pause").clicked() {
+            if ui.add_enabled(tl.playing, IconButton::new(Icon::Pause, "Pause the ticks").icon_only()).clicked() {
                 self.editor.pause();
             }
-            if ui.add_enabled(start_allowed && !tl.playing, egui::Button::new("\u{23ED}")).on_hover_text("Step one tick").clicked() {
+            if ui.add_enabled(start_allowed && !tl.playing, IconButton::new(Icon::Step, "Step one tick").icon_only()).clicked() {
                 self.step_from_ui();
             }
             ui.separator();
