@@ -50,6 +50,8 @@ mod error;
 mod fragment;
 #[cfg(feature = "linked-prefabs")]
 mod linked_prefab;
+#[cfg(feature = "linked-prefabs")]
+mod prefab;
 mod op;
 mod play;
 mod proposal;
@@ -70,6 +72,8 @@ pub use fragment::{
     FRAGMENT_MAX_VALUES,
 };
 pub use op::{Applied, HistoryEntry, Op, Origin};
+#[cfg(feature = "linked-prefabs")]
+pub use prefab::{OverrideKind, PrefabInstanceInfo, PrefabOverride, PrefabSource, PrefabUpdate, PREFAB_MAX_INSTANCES};
 pub use play::{PlayController, StoppedPlay};
 pub use proposal::{Accepted, ProposalDiff, ProposalId, ProposalInfo, ProposalState};
 pub use query::{EntityInfo, Target, View};

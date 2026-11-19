@@ -71,6 +71,7 @@ mod enabled {
         live.prefab_links.insert(
             target.clone(),
             PrefabLink {
+                profile: orr_reflect::LinkProfile::CollectActorsV1,
                 source: "prefabs/coin.scene.yaml".into(),
                 digest: PrefabLink::canonical_digest(&baseline),
                 baseline,

@@ -138,6 +138,7 @@ impl EditorDoc {
             .expect("nonempty source")
             .clone();
         let link = PrefabLink {
+            profile: orr_reflect::LinkProfile::CollectActorsV1,
             source: identity.into(),
             digest: PrefabLink::canonical_digest(&baseline),
             baseline,

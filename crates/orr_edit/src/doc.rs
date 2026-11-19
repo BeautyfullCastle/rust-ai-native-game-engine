@@ -752,7 +752,7 @@ impl EditorDoc {
             return self.rebake();
         }
         #[cfg(feature = "linked-prefabs")]
-        if !self.scene.prefab_links.is_empty() { return self.rebake(); }
+        if self.scene.prefab_links.values().any(|l| l.profile == orr_reflect::LinkProfile::CollectActorsV1) { return self.rebake(); }
         self.revision += 1;
         if effects.iter().any(|e| matches!(e, Effect::Structural)) {
             return self.rebake();
