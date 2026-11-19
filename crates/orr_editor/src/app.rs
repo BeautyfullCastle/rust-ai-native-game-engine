@@ -248,6 +248,8 @@ pub struct UiState {
     close_review: close_review::State,
     /// Window-only layout preference. Does not change simulation or input ownership.
     pub viewport_focus: bool,
+    /// Where the panels are, and the user's saved layouts (see [`crate::dock`]).
+    pub dock: crate::dock::Dock,
     /// Bottom panel tab.
     pub bottom_tab: BottomTab,
     /// Hierarchy filter text.
@@ -1235,6 +1237,8 @@ impl EditorApp {
     fn editor_ui(&mut self, ui: &mut Ui) {
         let started = Instant::now();
         let ctx = ui.ctx().clone();
+        // Escape that stops a panel drag must not also clear the selection or cancel a gesture.
+        self.ui.dock.cancel_drag_on_escape(&ctx);
         self.frames += 1;
         if self.frames == 1 {
             self.ui.flow.observe_start(self.editor.path(), self.editor.message_serial());
@@ -1392,6 +1396,7 @@ impl EditorApp {
         self.start_pulses(ctx.input(|i| i.time));
         if self.editor.agent_mut().take_tab_request() {
             self.ui.viewport_focus = false;
+            self.ui.dock.set_visible(crate::layout::Panel::Timeline, true);
             self.ui.bottom_tab = BottomTab::Agent;
         }
         // Notifications and frames arrive any time: look again soon, and at once while playing.
@@ -1452,38 +1457,15 @@ impl EditorApp {
             egui::Panel::top("down").show(ui, |ui| self.down_banner(ui));
         }
         egui::Panel::bottom("status").frame(crate::theme::bar_frame()).show(ui, |ui| self.status_bar(ui));
-        // Keep panel IDs and their persisted sizes intact while hidden.
-        if !self.ui.viewport_focus {
-            // The Agent tab needs more room than the timeline; each has its own remembered height.
-            let (bottom_id, bottom_h) = if self.ui.bottom_tab == BottomTab::Agent { ("bottom_agent", 470.0) } else { ("bottom", 120.0) };
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
-            let (bottom_id, bottom_h) = if self.ui.bottom_tab == BottomTab::ArenaExport { ("bottom_arena_export", 350.0) } else { (bottom_id, bottom_h) };
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "navigation-export"))]
-            let (bottom_id, bottom_h) = if self.ui.bottom_tab == BottomTab::NavigationExport { ("bottom_navigation_export", 350.0) } else { (bottom_id, bottom_h) };
-            egui::Panel::bottom(bottom_id).resizable(true).default_size(bottom_h).frame(crate::theme::panel_frame()).show(ui, |ui| self.bottom(ui));
-            egui::Panel::left("hierarchy").resizable(true).default_size(230.0).frame(crate::theme::panel_frame()).show(ui, |ui| self.hierarchy(ui));
-            let inspector = egui::Panel::right("inspector").resizable(true).default_size(340.0).frame(crate::theme::panel_frame());
-            let inspector = if self.editor.game().has_mesh_view() { inspector.max_size(340.0) } else { inspector };
-            inspector.show(ui, |ui| {
-                // The title stays put above the scrolling content.
-                let playing = self.editor.is_playing_mode();
-                let badge = if playing { ("PLAY \u{B7} temporary edits", crate::theme::PLAY) } else { ("editing the scene", crate::theme::TEXT_WEAK) };
-                crate::theme::panel_title_with(ui, "Inspector", Some(badge));
-                if playing { crate::flow::play_cue(ui); }
-                // The mesh games scroll their own inspector.
-                if self.editor.game().has_mesh_view() {
-                    self.inspector(ui);
-                    return;
-                }
-                // Feature panels stack above the component list. Keep all of them reachable
-                // when they are taller than the window.
-                egui::ScrollArea::vertical()
-                    .id_salt("terrain_authoring_inspector")
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| self.inspector(ui));
-            });
+        if self.ui.dock.notice().is_some() {
+            egui::Panel::top("layout_notice").frame(crate::theme::bar_frame()).show(ui, |ui| self.ui.dock.notice_bar(ui));
         }
-        egui::CentralPanel::default().frame(egui::Frame::NONE.fill(crate::theme::BG)).show(ui, |ui| self.viewport(ui));
+        if self.ui.viewport_focus {
+            // Focus mode shows the viewport alone. The panel arrangement is kept for the way back.
+            egui::CentralPanel::default().frame(egui::Frame::NONE.fill(crate::theme::BG)).show(ui, |ui| self.viewport(ui));
+        } else {
+            egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.docked_panels(ui));
+        }
 
         // A scrub widget can disappear after selection/navigation changes.
         // Release still closes its gesture even if that widget saw no End.
@@ -1493,6 +1475,7 @@ impl EditorApp {
             self.ui.anchor_drag = None;
         }
         self.dialogs(&ctx);
+        self.ui.dock.prompts(&ctx);
         #[cfg(feature="mesh-mission")]
         {
             let blocked = self.mesh_game_creation_blocker();
@@ -1977,6 +1960,8 @@ impl EditorApp {
                     }
                 }
             });
+            // Layout changes never touch the scene, history, Play or input ownership.
+            ui.menu_button("Window", |ui| self.ui.dock.window_menu(ui));
             ui.separator();
             let playing = self.editor.timeline().is_some_and(|t| t.playing);
             let start_blocker = self.playback_start_blocker();
@@ -2162,6 +2147,38 @@ impl EditorApp {
     }
 
     // ---- hierarchy ----
+
+    /// Draws the docked panels. Each panel keeps the content it had as a fixed side panel.
+    fn docked_panels(&mut self, ui: &mut Ui) {
+        // The dock leaves the state while it draws, because the panels borrow the whole app.
+        let mut dock = std::mem::replace(&mut self.ui.dock, crate::dock::Dock::placeholder());
+        dock.show(ui, &mut |ui, panel| match panel {
+            crate::layout::Panel::Hierarchy => self.hierarchy(ui),
+            crate::layout::Panel::Viewport => self.viewport(ui),
+            crate::layout::Panel::Inspector => self.inspector_panel(ui),
+            crate::layout::Panel::Timeline => self.bottom(ui),
+        });
+        self.ui.dock = dock;
+    }
+
+    fn inspector_panel(&mut self, ui: &mut Ui) {
+        // The title stays put above the scrolling content.
+        let playing = self.editor.is_playing_mode();
+        let badge = if playing { ("PLAY \u{B7} temporary edits", crate::theme::PLAY) } else { ("editing the scene", crate::theme::TEXT_WEAK) };
+        crate::theme::panel_title_with(ui, "Inspector", Some(badge));
+        if playing { crate::flow::play_cue(ui); }
+        // The mesh games scroll their own inspector.
+        if self.editor.game().has_mesh_view() {
+            self.inspector(ui);
+            return;
+        }
+        // Feature panels stack above the component list. Keep all of them reachable
+        // when they are taller than the window.
+        egui::ScrollArea::vertical()
+            .id_salt("terrain_authoring_inspector")
+            .auto_shrink([false, false])
+            .show(ui, |ui| self.inspector(ui));
+    }
 
     fn hierarchy(&mut self, ui: &mut Ui) {
         crate::theme::panel_title(ui, "Hierarchy");

@@ -148,6 +148,12 @@ fn main() {
                 app.models.install_room(models).unwrap_or_else(|error|fail(&format!("room presentation: {error}")));
             }
             app.ui.camera_view = args.camera_view;
+            // Screenshot runs stay reproducible: they neither read nor change the user's layout.
+            if shot.is_none() {
+                if let Some(store) = orr_editor::layout::LayoutStore::user_default() {
+                    app.ui.dock.attach(store);
+                }
+            }
             if let Some(job) = shot {
                 app = app.with_screenshot(job);
             }
