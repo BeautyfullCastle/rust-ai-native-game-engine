@@ -37,7 +37,7 @@ impl TilemapPanel {
     }
 }
 
-#[cfg(all(test, feature = "project-create"))]
+#[cfg(all(test, feature = "project-create", target_os = "linux"))]
 mod tests {
     use super::*;
     use orr_sample::project::{PreparedProject, TilemapSupport, UiSupport};

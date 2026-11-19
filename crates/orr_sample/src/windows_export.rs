@@ -6,11 +6,17 @@
 //! are detected; hostile filesystem races are not prevented.
 #[path = "project_export/admission.rs"]
 pub(crate) mod admission;
+#[path = "project_export/editor_arena.rs"]
+mod editor_arena;
 mod io;
 #[path = "project_export/profile.rs"]
 pub(crate) mod profile;
 
+pub use editor_arena::{
+    export_arena_for_source, ArenaExportSource, ArenaSourceDigest, ArenaSourceFile, ArenaUiSource,
+};
 use admission::{hash, ProjectSnapshot, SnapshotFile, MAX_BINARY_BYTES};
+use io::run_bounded;
 use profile::{Prepared, Profile};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -211,6 +217,27 @@ fn export_auto_profile_with(
         profile,
         Some(expected_game),
         None,
+        None,
+        checkpoint,
+        smoke,
+    )
+}
+
+/// Transaction used by the editor's saved-Arena export: the admitted project must
+/// match the exact source the editor captured.
+fn export_profile_for_source_with(
+    options: &ExportOptions,
+    profile: Profile,
+    expected_source: Option<&ArenaExportSource>,
+    checkpoint: impl FnMut(&str) -> Result<(), String>,
+    smoke: impl FnOnce(&mut Command) -> Result<Vec<u8>, String>,
+) -> Result<ExportReport, String> {
+    export_profile_with_expected(
+        options,
+        profile,
+        None,
+        None,
+        expected_source,
         checkpoint,
         smoke,
     )
@@ -222,7 +249,7 @@ fn export_profile_with(
     checkpoint: impl FnMut(&str) -> Result<(), String>,
     smoke: impl FnOnce(&mut Command) -> Result<Vec<u8>, String>,
 ) -> Result<ExportReport, String> {
-    export_profile_with_expected(options, profile, None, None, checkpoint, smoke)
+    export_profile_with_expected(options, profile, None, None, None, checkpoint, smoke)
 }
 
 #[cfg(feature = "room-project")]
@@ -239,6 +266,7 @@ fn export_profile_with_scene(
         profile,
         None,
         Some((scene, checksum)),
+        None,
         checkpoint,
         smoke,
     )
@@ -249,6 +277,7 @@ fn export_profile_with_expected(
     profile: Profile,
     expected_game: Option<orr_package::ProjectGame>,
     expected_scene: Option<(&Path, u64)>,
+    expected_source: Option<&ArenaExportSource>,
     mut checkpoint: impl FnMut(&str) -> Result<(), String>,
     smoke: impl FnOnce(&mut Command) -> Result<Vec<u8>, String>,
 ) -> Result<ExportReport, String> {
@@ -280,6 +309,9 @@ fn export_profile_with_expected(
         if requested_scene != admitted_scene || project.initial_checksum != checksum {
             return Err("current editor scene no longer matches the admitted Room project".into());
         }
+    }
+    if let Some(expected) = expected_source {
+        expected.check_snapshot(&project)?;
     }
     let target = windows_profile(profile)?;
     let runtime_path = io::checked_path(&options.runtime, false)?;

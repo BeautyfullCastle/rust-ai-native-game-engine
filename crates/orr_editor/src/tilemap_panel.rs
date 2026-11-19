@@ -18,7 +18,7 @@ mod copy;
 mod pattern_asset;
 mod pattern_files;
 #[cfg(all(
-    target_os = "linux",
+    any(target_os = "linux", windows),
     target_arch = "x86_64",
     feature = "arena-project-export"
 ))]

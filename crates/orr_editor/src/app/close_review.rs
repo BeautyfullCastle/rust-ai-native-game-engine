@@ -26,7 +26,7 @@ impl EditorApp {
         let root_close = ctx.input(|input| {
             input.raw.viewport_id == ViewportId::ROOT && input.viewport().close_requested()
         });
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
+        #[cfg(all(any(target_os = "linux", windows), target_arch = "x86_64", feature = "arena-project-export"))]
         self.poll_arena_export(&ctx);
         #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "navigation-export"))]
         self.poll_navigation_export(&ctx);
@@ -35,7 +35,7 @@ impl EditorApp {
         draw(self, ui);
         #[cfg(feature = "mesh-animated-models")]
         self.mesh_animation.sync(&self.editor);
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
+        #[cfg(all(any(target_os = "linux", windows), target_arch = "x86_64", feature = "arena-project-export"))]
         self.poll_arena_export(&ctx);
         #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "navigation-export"))]
         self.poll_navigation_export(&ctx);
@@ -58,7 +58,7 @@ impl EditorApp {
             self.ui.close_review.blocked = (self.editor.spec().is_local()
                 && self.editor.is_dirty())
                 || closing.iter().any(|row| row.is_blocker());
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
+            #[cfg(all(any(target_os = "linux", windows), target_arch = "x86_64", feature = "arena-project-export"))]
             if self.arena_export.busy() { self.ui.close_review.blocked = true; }
             #[cfg(feature = "terrain-surface")]
             if self.terrain_surface.state.busy() { self.ui.close_review.blocked = true; }
@@ -105,7 +105,7 @@ impl EditorApp {
         if self.navigation_export_busy() {
             items.push(Item { name: "Navigation export · worker owned", action: "Wait for terminal and joined completion, then explicitly close again. Editing remains available.", last_close: false });
         }
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
+        #[cfg(all(any(target_os = "linux", windows), target_arch = "x86_64", feature = "arena-project-export"))]
         if self.arena_export.busy() {
             items.push(Item { name: "Arena export · worker owned", action: "Wait for export worker completion and join, then explicitly close again. Editing remains available.", last_close: false });
         }

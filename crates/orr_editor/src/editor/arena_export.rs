@@ -1,6 +1,6 @@
 //! Explicit read-only Arena source receipt. This is not a lock or trust token.
 use super::*;
-use orr_sample::project_export::{
+use crate::arena_exporter::{
     ArenaExportSource, ArenaSourceDigest, ArenaSourceFile, ArenaUiSource,
 };
 use sha2::{Digest, Sha256};
@@ -35,7 +35,7 @@ impl Editor {
         Ok(())
     }
 
-    #[cfg(any(not(feature = "tilemap"), test))]
+    #[cfg(any(not(feature = "tilemap"), all(test, target_os = "linux")))]
     pub(crate) fn arena_export_source(
         &mut self,
         root: &Path,
@@ -463,6 +463,6 @@ fn same_stamp(first: &fs::Metadata, second: &fs::Metadata) -> bool {
         && matches!((first.modified(), second.modified()), (Ok(first), Ok(second)) if first == second)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 #[path = "arena_export_tests.rs"]
 mod tests;

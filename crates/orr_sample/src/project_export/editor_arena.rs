@@ -239,9 +239,12 @@ impl ArenaExportSource {
             || scene
                 .to_str()
                 .is_none_or(|text| text.chars().any(char::is_control))
-            || scene
-                .components()
-                .any(|part| !matches!(part, Component::RootDir | Component::Normal(_)))
+            || scene.components().any(|part| match part {
+                Component::RootDir | Component::Normal(_) => false,
+                // A Windows canonical path starts with its disk prefix.
+                Component::Prefix(_) => !cfg!(windows),
+                _ => true,
+            })
             || scene.components().collect::<PathBuf>().as_os_str() != scene.as_os_str()
         {
             return Err("Arena export scene path must be bounded, absolute and canonical".into());
@@ -401,7 +404,7 @@ pub fn export_arena_for_source(
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use crate::project_export::{admission::hash, expected_smoke, MANIFEST_NAME};
@@ -1618,5 +1621,5 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "tilemap"))]
+#[cfg(all(test, target_os = "linux", feature = "tilemap"))]
 mod tilemap_tests;

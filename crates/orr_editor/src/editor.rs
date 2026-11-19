@@ -53,11 +53,11 @@ use crate::backend::{Backend, HostSpec};
 use crate::diagnostics::{EditorDiagnostics, Telemetry};
 use crate::model::{ClientInfo, EntityRow, GuidSelection, History, ProposalDetail, ProposalInfo, SimState, Stopped, Target};
 pub use crate::model::Mode;
-#[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "arena-project-export"))]
+#[cfg(all(any(target_os = "linux", windows), target_arch = "x86_64", feature = "arena-project-export"))]
 pub(crate) mod arena_export;
 #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "navigation-export"))]
 mod navigation_export;
-#[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "collect-ui", feature = "project-create"))]
+#[cfg(all(any(target_os = "linux", windows), target_arch = "x86_64", feature = "collect-ui", feature = "project-create"))]
 pub(crate) mod collect_project;
 #[cfg(feature="room-authoring")]
 #[path="room_authoring.rs"]
