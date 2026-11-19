@@ -201,8 +201,10 @@ pub fn bar_frame() -> egui::Frame {
 }
 
 /// The top bar while the simulation plays: the same bar with a [`PLAY`] outline.
+/// The outline is one point wider on each side, so the margin is one point smaller.
+/// The bar then keeps its size, and the panels below it do not move when Play starts.
 pub fn play_bar_frame() -> egui::Frame {
-    bar_frame().stroke(Stroke::new(2.0, PLAY))
+    bar_frame().inner_margin(Margin::symmetric(space::LG as i8 - 1, space::SM as i8 - 1)).stroke(Stroke::new(2.0, PLAY))
 }
 
 /// The edit or play state as a badge: quiet while editing, filled with [`PLAY`] while playing.
