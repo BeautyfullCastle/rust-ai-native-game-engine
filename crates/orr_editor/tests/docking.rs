@@ -345,7 +345,7 @@ fn unusable_layout_files_give_the_default_layout_and_a_notice() {
 }
 
 #[test]
-fn a_failed_write_keeps_the_old_layout_file() {
+fn a_failed_write_keeps_the_old_entry_and_removes_its_temporary_file() {
     let dir = tempfile::tempdir().unwrap();
     let settings = dir.path().join("layouts");
     let mut h = app(Some(&settings));
@@ -353,21 +353,20 @@ fn a_failed_write_keeps_the_old_layout_file() {
     open_window_menu(&mut h);
     click_role(&mut h, Role::CheckBox, "Timeline & tools");
     settle(&mut h);
-    let written = std::fs::read(settings.join(LAST)).expect("the first change was written");
-    // A folder in the place of the temporary file makes the next write fail.
-    std::fs::create_dir(settings.join("last.json.tmp")).unwrap();
+    assert!(settings.join(LAST).is_file(), "the first change was written");
+    // A folder in the place of the last layout file makes the replace step of the next write fail.
+    std::fs::remove_file(settings.join(LAST)).unwrap();
+    std::fs::create_dir(settings.join(LAST)).unwrap();
     open_window_menu(&mut h);
     click_role(&mut h, Role::CheckBox, "Inspector");
     settle(&mut h);
-    assert_eq!(std::fs::read(settings.join(LAST)).unwrap(), written, "the old file is unchanged");
+    assert!(settings.join(LAST).is_dir(), "the old entry is unchanged");
     let notice = h.state().ui.dock.notice().expect("a notice");
     assert!(notice.contains("not saved"), "{notice}");
+    let left: Vec<_> = std::fs::read_dir(&settings).unwrap().map(|entry| entry.unwrap().file_name()).collect();
+    assert_eq!(left, [std::ffi::OsString::from(LAST)], "the failed write removed its temporary file");
     // The window works on in memory.
     assert!(!h.state().ui.dock.is_visible(Panel::Inspector));
-    // A restart reads the old file and gives the layout of the last good write.
-    let again = app(Some(&settings));
-    assert!(again.state().ui.dock.is_visible(Panel::Inspector));
-    assert!(!again.state().ui.dock.is_visible(Panel::Timeline));
 }
 
 #[test]

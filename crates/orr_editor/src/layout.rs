@@ -12,6 +12,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{json, Value};
 
@@ -34,6 +35,8 @@ pub const MAX_SHARE: u32 = 1000;
 
 const FORMAT: &str = "orrery-editor-layout";
 const LAST_FILE: &str = "last.json";
+/// How often a save tries again when the replace is refused for a moment.
+const RENAME_RETRIES: u32 = 8;
 const PRESET_PREFIX: &str = "preset-";
 
 /// One panel of the editor window.
@@ -665,13 +668,26 @@ impl LayoutStore {
         std::fs::create_dir_all(&self.dir).map_err(io("create the layout folder"))?;
         orr_fsid::check_real_folders(&self.dir).map_err(io("use the layout folder"))?;
         let target = self.dir.join(file);
-        let temp = self.dir.join(format!("{file}.tmp"));
+        // Each write has its own temporary name, so windows that save at the same time never share one.
+        static WRITES: AtomicU64 = AtomicU64::new(0);
+        let temp = self.dir.join(format!("{file}.{}-{}.tmp", std::process::id(), WRITES.fetch_add(1, Ordering::Relaxed)));
         let result = (|| {
-            let mut handle = std::fs::File::create(&temp).map_err(io("create the temporary layout file"))?;
+            let mut handle = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp).map_err(io("create the temporary layout file"))?;
             handle.write_all(&text).map_err(io("write the temporary layout file"))?;
             handle.sync_all().map_err(io("flush the temporary layout file"))?;
             drop(handle);
-            std::fs::rename(&temp, &target).map_err(io("replace the layout file"))
+            // On Windows, a replace is refused while another window opens or replaces the same file.
+            // That state ends soon, so try again a few times. The last writer then wins with a whole file.
+            let mut attempt = 0_u32;
+            loop {
+                match std::fs::rename(&temp, &target) {
+                    Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied && attempt < RENAME_RETRIES => {
+                        attempt += 1;
+                        std::thread::sleep(std::time::Duration::from_millis(u64::from(attempt) * 5));
+                    }
+                    other => break other.map_err(io("replace the layout file")),
+                }
+            }
         })();
         if result.is_err() {
             let _ = std::fs::remove_file(&temp);
