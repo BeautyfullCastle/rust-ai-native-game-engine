@@ -173,6 +173,10 @@ pub fn panel_title(ui: &mut Ui, title: &str) {
 /// [`panel_title`] with a small state badge at the right end of the strip.
 /// The badge is left out when the panel is too narrow for it.
 pub fn panel_title_with(ui: &mut Ui, title: &str, badge: Option<(&str, Color32)>) {
+    // A panel that shares a tab group already has its name on the tab.
+    if ui.data(|data| data.get_temp::<bool>(crate::dock::tabbed_id())).unwrap_or(false) {
+        return;
+    }
     let margin = 8.0;
     let full = ui.max_rect();
     let top = ui.cursor().top() - margin;

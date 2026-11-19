@@ -15,6 +15,11 @@ use egui_tiles::{Behavior, Container, ContainerKind, EditAction, Linear, LinearD
 use crate::layout::{self, Child, Dir, Edge, Layout, LayoutError, LayoutStore, Node, Panel};
 
 const TREE_ID: &str = "orr_editor_dock";
+
+/// Memory key that tells a panel's title code that the panel sits in a tab group.
+pub(crate) fn tabbed_id() -> egui::Id {
+    egui::Id::new("orr_dock_tabbed")
+}
 /// No panel is dragged smaller than this, in points, along either axis.
 pub const MIN_PANE: f32 = 100.0;
 /// Width of the grab strip between two panels.
@@ -243,10 +248,41 @@ impl Dock {
         }
         {
             let Dock { tree, changed, .. } = self;
-            tree.ui(&mut Panes { render, changed }, ui);
+            let tabbed = tabbed_panels(&tree.tiles);
+            let mut panes = Panes { render, changed, tabbed, wider: Vec::new() };
+            tree.ui(&mut panes, ui);
+            let wider = panes.wider;
+            self.widen(&wider, available.x);
         }
         self.check_viewport(available);
         self.autosave(&ctx);
+    }
+
+    /// Gives a panel more width when its content cannot fit, as a side panel used to grow.
+    /// The panel takes at most 60 percent of the window, and the viewport gives the room.
+    fn widen(&mut self, wider: &[(Panel, f32)], window_width: f32) {
+        for (panel, needed) in wider {
+            let Some(pane) = self.tree.tiles.find_pane(panel) else { continue };
+            // The panel, or its tab group, is a child of a horizontal split.
+            let mut child = pane;
+            let row = loop {
+                let Some(parent) = self.tree.tiles.parent_of(child) else { break None };
+                if matches!(self.tree.tiles.get(parent), Some(Tile::Container(Container::Linear(linear))) if linear.dir == LinearDir::Horizontal) {
+                    break Some(parent);
+                }
+                child = parent;
+            };
+            let (Some(row), Some(current)) = (row, self.tree.tiles.rect(child).map(|rect| rect.width())) else { continue };
+            let target = needed.min(window_width * 0.6);
+            if current <= 0.0 || target <= current + 1.0 {
+                continue;
+            }
+            if let Some(Tile::Container(Container::Linear(linear))) = self.tree.tiles.get_mut(row) {
+                let share = linear.shares[child];
+                linear.shares.set_share(child, share * target / current);
+                self.changed = true;
+            }
+        }
     }
 
     fn size_default(&mut self, available: Vec2) {
@@ -417,6 +453,25 @@ impl Dock {
 struct Panes<'a> {
     render: &'a mut dyn FnMut(&mut Ui, Panel),
     changed: &'a mut bool,
+    /// The panels that share a tab group with another panel.
+    tabbed: Vec<Panel>,
+    /// Panels whose content needed more width than they had, with the width needed.
+    wider: Vec<(Panel, f32)>,
+}
+
+fn tabbed_panels(tiles: &Tiles<Panel>) -> Vec<Panel> {
+    let mut found = Vec::new();
+    for tile in tiles.tiles() {
+        if let Tile::Container(Container::Tabs(tabs)) = tile {
+            if tabs.children.len() > 1 {
+                found.extend(tabs.children.iter().filter_map(|child| match tiles.get(*child) {
+                    Some(Tile::Pane(panel)) => Some(*panel),
+                    _ => None,
+                }));
+            }
+        }
+    }
+    found
 }
 
 impl Behavior<Panel> for Panes<'_> {
@@ -424,10 +479,20 @@ impl Behavior<Panel> for Panes<'_> {
         let rect = ui.max_rect();
         ui.shrink_clip_rect(rect);
         let frame = if *pane == Panel::Viewport { egui::Frame::NONE.fill(crate::theme::BG) } else { crate::theme::panel_frame() };
-        frame.show(ui, |ui| {
+        let tabbed = self.tabbed.contains(pane);
+        let shown = frame.show(ui, |ui| {
             ui.set_min_size(ui.available_size());
+            ui.data_mut(|data| data.insert_temp(tabbed_id(), tabbed));
             (self.render)(ui, *pane);
+            ui.data_mut(|data| data.insert_temp(tabbed_id(), false));
         });
+        if *pane != Panel::Viewport && shown.response.rect.width() > rect.width() + 1.0 {
+            self.wider.push((*pane, shown.response.rect.width()));
+        }
+        if tabbed {
+            // The tab bar is the handle of a tabbed panel.
+            return UiResponse::None;
+        }
         // The title strip (or the top margin of a panel without one) is the grab handle.
         let grab = match *pane {
             Panel::Viewport => return UiResponse::None,
