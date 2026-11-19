@@ -598,6 +598,7 @@ impl EditorDoc {
                     (Some(b), None, Some(l)) => {
                         if *l == remap_entity(b, &map)? {
                             doomed.push(live_id.clone());
+                            dropped.push(src.clone());
                             merged.insert(live_id.clone(), None);
                         } else {
                             report.conflicts.push(at("the prefab removed this entity, but the instance changed it; it stays as a normal entity"));
@@ -688,9 +689,17 @@ impl EditorDoc {
                             }
                         }
                     }
-                    (None, Some(_)) => removals.push(Op::DespawnEntity { guid: live_id.clone() }),
+                    (None, Some(_)) => {} // despawned below, referrers first
                     (None, None) => {}
                 }
+            }
+            // A despawn is refused while another entity refers to the target, so
+            // members that refer to other doomed members go first.
+            let mut pending: Vec<&Guid> = merged.iter().filter(|(id, e)| e.is_none() && self.scene.entities.contains_key(*id)).map(|(id, _)| id).collect();
+            while !pending.is_empty() {
+                let referred = |g: &Guid| pending.iter().any(|o| *o != g && self.scene.entities[*o].components.iter().any(|(_, v)| refers_to(v, g.as_str())));
+                let at = pending.iter().position(|g| !referred(g)).unwrap_or(0);
+                removals.push(Op::DespawnEntity { guid: pending.remove(at).clone() });
             }
             report.removed += doomed.len();
             for src in dropped {
