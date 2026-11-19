@@ -77,7 +77,7 @@ component schemas in an isolated staged document before live replacement.
 
 ## Explicitly deferred
 
-No linked-prefab source updates, tracked source-relative overrides, reimport
+Linked prefab instances, derived overrides, and source updates are built on this fragment core in [prefabs.md](prefabs.md). Not covered by fragments themselves: tracked source-relative overrides, reimport
 conflict resolution, package ownership/versioning, editor panel, asset
 registry changes, hierarchy/root transforms, rotation, scaling or 3D
 placement. Ordinary `Op::SetField` edits provide independent per-copy changes

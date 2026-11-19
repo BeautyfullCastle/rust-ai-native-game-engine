@@ -549,8 +549,7 @@ impl EditorDoc {
         if base.is_empty() {
             return Err(invalid("the instance has no members left; a prefab needs at least one entity"));
         }
-        let mut scene = Scene::default();
-        scene.entities = base;
+        let scene = Scene { entities: base, ..Scene::default() };
         let (text, _) = self.parse_prefab_text(&scene.to_yaml()).map_err(|e| invalid(format!("the changed prefab is not valid: {e}")))?;
         Ok((link.source.clone(), text))
     }

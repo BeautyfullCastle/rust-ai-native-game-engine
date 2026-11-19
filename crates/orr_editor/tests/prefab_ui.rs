@@ -168,7 +168,7 @@ fn create_refuses_outside_references_and_instances_get_fresh_remapped_ids() {
     assert_eq!(read(&mut h, &m["e_00000003"], JOINT, "b"), Value::EntityGuid(Some(m["e_00000002"].clone())));
     assert!(m.values().all(|g| !["e_00000007", "e_00000008", "e_00000009"].contains(&g.as_str())));
     // The new instance is selected, and undo removes it in one step.
-    assert!(h.state().editor.is_selected(&target(&instances[0]["instance"].as_str().unwrap().to_string())));
+    assert!(h.state().editor.is_selected(&target(instances[0]["instance"].as_str().unwrap())));
     assert!(h.state_mut().editor.undo());
     settle(&mut h);
     assert_eq!(h.state().editor.rows().len(), entities_before);
@@ -353,4 +353,39 @@ fn yard3d_prefab_workflow_with_overrides_apply_update_and_reopen() {
     assert_eq!(list(&mut h).len(), 2);
     assert_eq!(override_count(&mut h, &b), 1);
     assert_eq!(friction(&mut h, &b), fixed(4));
+}
+
+/// Renders the real editor on a software GPU and saves the inspector with its
+/// override marks. Needs `ORR_PREFAB_SHOTS` (an output folder).
+#[test]
+#[ignore = "needs a GPU adapter and ORR_PREFAB_SHOTS=<folder>"]
+fn screenshot_of_the_inspector_with_override_marks() {
+    let dest = PathBuf::from(std::env::var_os("ORR_PREFAB_SHOTS").expect("ORR_PREFAB_SHOTS"));
+    std::fs::create_dir_all(&dest).unwrap();
+    let (_root, path) = physics_project();
+    let editor = open(&path, EditorGame::PhysGame);
+    let mut h: App = Harness::builder()
+        .with_size([1500.0, 1100.0])
+        .wgpu()
+        .build_eframe(move |cc| EditorApp::new(editor, cc.wgpu_render_state.clone()));
+    settle(&mut h);
+    assert!(h.state().has_gpu(), "a GPU adapter is required");
+    create_motor(&mut h, &path);
+    click(&mut h, "Instantiate prefab");
+    click(&mut h, "Instantiate prefab");
+    let instances = list(&mut h);
+    let (a, b) = (members(&instances[0]), members(&instances[1]));
+    set(&mut h, &a["e_00000002"], BODY, "omega", fixed(2));
+    set(&mut h, &a["e_00000002"], BODY, "angle", fixed(1));
+    set(&mut h, &b["e_00000002"], COLLIDER, "friction", fixed(8));
+    select(&mut h, &a["e_00000002"]);
+    wait(&mut h, "marks", |h| h.state().prefabs.marks(BODY).len() == 2);
+    h.run_steps(4);
+    let image = h.render().expect("GPU readback");
+    image.save(dest.join("prefab_inspector_override_marks.png")).unwrap();
+    // After "Apply to prefab" the marks are gone and the other instance followed.
+    click(&mut h, "Apply to prefab");
+    wait(&mut h, "marks to clear", |h| h.state().prefabs.marks(BODY).is_empty());
+    h.run_steps(4);
+    h.render().expect("GPU readback").save(dest.join("prefab_inspector_after_apply.png")).unwrap();
 }
