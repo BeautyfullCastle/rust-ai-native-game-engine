@@ -4,9 +4,9 @@
 
 ## 목표
 
-키로 네모를 움직이고, 판 위에 생기는 별을 주워 점수를 얻습니다. 별을 주우면 효과와 짧은 소리가 나옵니다. 왼쪽 위에는 점수 글자가 있고, 네모 뒤에는 꼬리가 남습니다. 게임은 제목 화면에서 시작하고, `P`로 일시정지하며, 별 5개를 모으면 승리 화면이 나옵니다. 승리 화면이나 일시정지 화면에서 다시 시작할 수 있습니다.
+키로 네모를 움직이고, 판 위에 생기는 별을 주워 점수를 얻습니다. 별을 주우면 효과와 짧은 소리가 나옵니다. 왼쪽 위에는 점수 글자가 있고, 네모 뒤에는 꼬리가 남습니다. 게임은 제목 화면에서 시작하고, `P`로 일시정지하며, 별 5개를 모으면 승리 화면이 나옵니다. 승리 화면이나 일시정지 화면에서 다시 시작할 수 있습니다. `F5`로 저장하고 `F9`로 불러옵니다.
 
-완성 코드는 `tutorial/star_pick/src/step2.rs`(391줄)와 소리를 만드는 `sound.rs`(54줄)입니다. 1단계 파일에서 달라진 부분만 설명합니다.
+완성 코드는 `tutorial/star_pick/src/step2.rs`(426줄)입니다. 별을 줍는 소리는 소리 파일 `assets/pickup.wav`와 그것을 만드는 스크립트 `assets/make_pickup_wav.py`(44줄)입니다. 3~5단계가 쓰는, 코드로 소리를 만드는 `sound.rs`(54줄)는 2단계에서는 소리 이름 `PICKUP`만 빌려 씁니다. 1단계 파일에서 달라진 부분만 설명합니다.
 
 ## 새로 배우는 것
 
@@ -20,7 +20,9 @@
 | `SceneView` | 화면 전체에 하나 있는 뷰. 이벤트와 점수를 다룹니다. |
 | `EntityView` | 엔티티마다 하나 있는 뷰. 생기고, 움직이고, 사라질 때 불립니다. |
 | `ctx.draw()` | 뷰가 화면에 글자와 선을 그리는 목록입니다. 매 프레임 비워집니다. |
-| `ctx.audio()`, `App::sound` | 뷰가 소리를 켜고 끕니다. 소리는 앱을 만들 때 한 번 등록합니다. |
+| `ctx.audio()`, `App::sound_wav` | 뷰가 소리를 켜고 끕니다. 소리는 앱을 만들 때 한 번 등록합니다. 2단계는 WAV 파일을 씁니다. |
+| `App::on_event_sound` | 이벤트가 소리를 내게 합니다. `Predicted`에서 켜고 `Canceled`에서 끄는 일을 앱이 한 곳에서 합니다. |
+| `App::saves`, `save_key`, `load_key` | 저장 슬롯입니다. 검증된 프레임을 파일로 저장하고, 불러오면 그 상태에서 새 세션을 시작합니다. |
 | `Screens` | 제목, 일시정지, 승리, 패배, 다시 시작 화면과 그 상태 전환입니다. 화면이 떠 있는 동안 게임은 중립 입력만 받습니다. |
 | `Command` | 시뮬레이션에 한 번 보내는 명령입니다. 여기서는 새 판을 시작하는 `Restart`입니다. |
 
@@ -181,9 +183,9 @@ sequenceDiagram
 
 | 상태 | 뜻 | 이 튜토리얼에서 하는 일 |
 |---|---|---|
-| `Predicted` | 확정되지 않은 틱에서 났습니다. 롤백으로 사라질 수 있습니다. | 고리 효과와 "딩" 소리를 바로 시작합니다. |
-| `Verified` | 그 틱이 확정되었습니다. 한 이벤트에 한 번 옵니다. | 이미 시작하지 않았다면 효과를 시작합니다. |
-| `Canceled` | 롤백이 `Predicted` 이벤트를 없앴습니다. | 그 고리를 지우고 그 소리를 멈춥니다. |
+| `Predicted` | 확정되지 않은 틱에서 났습니다. 롤백으로 사라질 수 있습니다. | 고리 효과를 바로 시작합니다. 앱이 "딩" 소리를 시작합니다. |
+| `Verified` | 그 틱이 확정되었습니다. 한 이벤트에 한 번 옵니다. | 이미 시작하지 않았다면 효과를 시작합니다. 앱은 `Predicted`의 소리를 그대로 두고 새 소리를 켜지 않습니다. |
+| `Canceled` | 롤백이 `Predicted` 이벤트를 없앴습니다. | 그 고리를 지웁니다. 앱이 그 소리를 멈춥니다. |
 
 점수는 `Verified` 프레임에서 읽습니다. 롤백이 나도 점수가 줄었다 늘지 않습니다. `ctx.predicted()`는 가장 앞선 프레임이고, `ctx.verified()`는 확정된 프레임입니다.
 
@@ -197,27 +199,19 @@ impl SceneView<StarPick> for Juice {
         let mut fx = self.fx.borrow_mut();
         match state {
             EventState::Predicted | EventState::Verified => {
+                // 소리는 여기서 내지 않습니다. `App::on_event_sound(pickup_sound)`가 켜고 끕니다.
                 if !fx.rings.iter().any(|ring| ring.picked == *event) {
-                    let sound = ctx.audio().play_named(sound::PICKUP); // 짧은 "딩"을 바로 냅니다
-                    fx.rings.push(Ring { picked: *event, start: ctx.tick(), sound });
+                    fx.rings.push(Ring { picked: *event, start: ctx.tick() });
                 }
             }
-            EventState::Canceled => {
-                // 롤백이 줍기를 되돌렸습니다. 고리를 지우고, 시작한 소리도 멈춥니다.
-                for sound in fx.rings.iter().filter(|ring| ring.picked == *event).filter_map(|ring| ring.sound) {
-                    ctx.audio().stop(sound);
-                }
-                fx.rings.retain(|ring| ring.picked != *event);
-            }
+            // 롤백이 줍기를 되돌렸습니다. 고리를 지웁니다.
+            EventState::Canceled => fx.rings.retain(|ring| ring.picked != *event),
         }
     }
 
-    fn on_resync(&mut self, ctx: &mut ViewContext<'_, StarPick>) {
-        // 예측이 통째로 버려졌습니다. 그 `Canceled`는 오지 않으므로 소리와 고리를 여기서 치웁니다.
-        let mut fx = self.fx.borrow_mut();
-        for sound in fx.rings.drain(..).filter_map(|ring| ring.sound) {
-            ctx.audio().stop(sound);
-        }
+    fn on_resync(&mut self, _ctx: &mut ViewContext<'_, StarPick>) {
+        // 예측이 통째로 버려졌습니다. 그 `Canceled`는 오지 않으므로 고리를 여기서 치웁니다.
+        self.fx.borrow_mut().rings.clear();
     }
 
     fn on_update(&mut self, ctx: &mut ViewContext<'_, StarPick>) {
@@ -232,6 +226,7 @@ impl SceneView<StarPick> for Juice {
             ctx.draw().text([16.0, 14.0], 21.0, STAR, &format!("점수 {}", fx.score));
             ctx.draw().text_anchored(Anchor::Top, [0.0, 14.0], 21.0, [1.0, 1.0, 1.0, 0.85], &format!("별 {WIN_STARS}개를 모으세요"));
         }
+        // F5와 F9가 한 일을 아래쪽에 2.5초 보여 줍니다 ("저장" 절)
         // ... 오래된 고리를 지웁니다
     }
 }
@@ -239,9 +234,7 @@ impl SceneView<StarPick> for Juice {
 
 `on_event`는 이벤트마다, `on_update`는 프레임마다 불립니다. `Predicted`에서 고리를 만들었다면 같은 이벤트가 `Verified`로 다시 올 때 새 고리를 만들지 않습니다. 이벤트 값 자체(`Picked`)로 같은지 비교합니다.
 
-`play_named`가 돌려주는 `SoundHandle`은 `Ring`에 담아 둡니다. `Canceled`가 오면 그 손잡이로 `stop`을 불러 소리를 줄이며 끕니다. 소리는 짧아서 대개 이미 끝났지만, 길게 이어지는 소리라면 이 한 줄이 중요합니다. 끝난 소리에 `stop`을 불러도 아무 일도 없습니다.
-
-`Canceled`가 오지 않는 경우가 하나 더 있습니다. 창이 서버와 어긋나서 예측을 통째로 버리고 다시 맞추면(`ViewResync`), 엔진은 `Predicted`로 받은 이벤트의 기억을 비웁니다. 그 이벤트들의 `Canceled`는 끝내 오지 않습니다. 그래서 `on_resync`에서 `Ring`에 담아 둔 손잡이로 소리를 모두 멈추고 고리도 비웁니다. 다시 맞춘 프레임의 이벤트가 오면 `on_event`가 필요한 효과를 새로 만듭니다. 이 경로는 `tutorial/star_pick/tests/resync_sound.rs`가 2~5단계에서 확인합니다.
+`Canceled`가 오지 않는 경우가 하나 더 있습니다. 창이 서버와 어긋나서 예측을 통째로 버리고 다시 맞추면(`ViewResync`), 엔진은 `Predicted`로 받은 이벤트의 기억을 비웁니다. 그 이벤트들의 `Canceled`는 끝내 오지 않습니다. 그래서 `on_resync`에서 고리를 모두 비웁니다. 다시 맞춘 프레임의 이벤트가 오면 `on_event`가 필요한 효과를 새로 만듭니다. 소리는 앱이 같은 때에 멈춥니다. 이 경로는 `tutorial/star_pick/tests/step2.rs`가 소리까지 확인하고, 3~5단계는 `tests/resync_sound.rs`가 확인합니다.
 
 ### 글자와 소리
 
@@ -262,19 +255,58 @@ impl SceneView<StarPick> for Juice {
 | 호출 | 뜻 |
 |---|---|
 | `play(&clip)` | 소리 하나를 켜고 `Option<SoundHandle>`을 줍니다. 장치가 없거나 소리가 너무 많으면 `None`입니다. |
-| `play_named("pickup")` | `App::sound`로 등록한 소리를 켭니다. |
+| `play_named("pickup")` | 등록한 소리를 켭니다. |
+| `play_named_with("pickup", 음량, 반복)` | 음량(0~1)으로, 되풀이하며 켭니다. `play_looped(&clip)`은 멈출 때까지 되풀이합니다. |
+| `set_volume(손잡이, 음량)`, `set_master_volume(음량)` | 재생 중인 소리 하나와 모든 소리의 음량입니다. |
 | `play_at(&clip, 위치, near, far)` | 세계의 한 점에서 나는 소리입니다. `near` 안에서는 크고 `far`부터는 들리지 않으며, 그쪽 스피커로 치우칩니다. |
 | `stop(손잡이)` | 소리를 줄이며 끕니다. 이미 끝난 소리면 아무 일도 없습니다. |
 
-소리 데이터는 `Clip`입니다. 이 튜토리얼은 소리 파일을 쓰지 않고, `tutorial/star_pick/src/sound.rs`가 프로그램이 시작할 때 사인파 두 개(라, 미)를 숫자로 만들어 `Clip::from_stereo`에 줍니다. 그래서 저장소에 소리 파일도 저작권 걱정도 없습니다. 앱을 만들 때 한 번 등록합니다.
+소리 데이터는 `Clip`입니다. 2단계는 소리 **파일**을 씁니다. `tutorial/star_pick/assets/pickup.wav`는 사인파 두 개(라, 미)를 `assets/make_pickup_wav.py`가 숫자로 만든 0.18초, 15,920바이트의 16비트 모노 WAV이고 CC0입니다(`assets/LICENSE.txt`). 녹음이나 남의 소리 라이브러리가 아니라서 저작권 걱정이 없고, 스크립트를 다시 돌리면 같은 바이트가 나옵니다. 파일은 `include_bytes!`로 프로그램 안에 넣어서 어디서 실행해도 찾습니다. 소리 파일을 따로 두고 싶으면 `.sound_file("pickup", "assets/pickup.wav")`입니다(실행이 시작될 때 읽고, 없거나 형식이 틀리면 소리 이름과 파일 이름을 말하며 멈춥니다). 16비트 PCM과 32비트 실수, 모노와 스테레오, 8000~192000 Hz, 10초까지 읽고, 출력 장치의 속도로 맞추는 일은 믹서가 합니다.
 
 ```rust
 App::<StarPick>::new()
     // ...
-    .sound(sound::PICKUP, sound::pickup())
+    .sound_wav(sound::PICKUP, PICKUP_WAV)   // PICKUP_WAV = include_bytes!("../assets/pickup.wav")
+    .on_event_sound(pickup_sound)           // 별을 주울 때마다 소리를 켜고, 롤백이 되돌리면 끈다
 ```
 
+```rust
+/// `Picked` 이벤트가 내는 소리의 이름입니다. 없으면 `None`을 돌려줍니다.
+pub fn pickup_sound(_event: &Picked) -> Option<&'static str> {
+    Some(sound::PICKUP)
+}
+```
+
+`on_event_sound`는 뷰에 손으로 쓰던 규칙을 앱 한 곳으로 옮긴 것입니다. `Predicted`에서 켜고 손잡이를 기억했다가 `Canceled`에서 끄고, `Verified`는 새 소리를 켜지 않으며, 서버 없이 실행하면 처음부터 `Verified`로 오는 이벤트에서 켭니다. 같은 이벤트 키는 롤백이 몇 번 지나가도 소리를 한 번만 냅니다. `ViewResync`가 오면 아직 확정되지 않은 소리를 끕니다. 자세한 표는 [orr_app 저장·소리 문서](../app-saves-audio.md)에 있습니다.
+
 오디오 장치는 첫 소리를 켤 때 앱이 엽니다. 장치가 없는 컴퓨터에서는 터미널에 한 번 알리고 소리 없이 계속 돕니다. `--screenshot`으로 실행하면 장치를 열지 않습니다. 소리는 화면 쪽 일이라서 게임 규칙이나 체크섬에는 닿지 않습니다.
+
+### 저장과 불러오기
+
+```rust
+App::<StarPick>::new()
+    // ...
+    .saves(GAME_ID, SAVE_VERSION)        // "star_pick", 1
+    .save_key(KeyCode::F5, QUICK_SLOT)   // F5: 슬롯 "quick"에 저장
+    .load_key(KeyCode::F9, QUICK_SLOT)   // F9: 슬롯 "quick"에서 불러오기
+```
+
+`F5`는 **확정된 프레임**을 `%LOCALAPPDATA%\orrery\games\star_pick\saves\slot-quick.orrsave`에 씁니다(Linux와 macOS는 [저장 문서](../app-saves-audio.md)). 틱, 모든 컴포넌트, 점수, 난수 상태가 들어 있고, 파일은 임시 파일에 쓴 뒤 이름을 바꿔서 덮어쓰므로 쓰다 실패해도 옛 저장이 남습니다. `F9`는 파일을 끝까지 검사한 뒤에야 현재 판을 버리고 그 프레임에서 **새 세션**을 시작합니다. 불러온 직후의 체크섬은 저장한 체크섬이고, 같은 입력이면 저장하지 않고 계속 달린 게임과 같은 길을 걷습니다. 점수와 별과 꼬리가 저장한 때로 돌아가고, 고리 효과는 새 세션에서 다시 시작합니다(`on_resync`).
+
+파일이 없거나 깨졌거나 다른 게임, 다른 버전의 것이면 불러오지 않고 판은 그대로 이어집니다. 이유는 화면 아래에 2.5초 보입니다. 이 글자는 `Juice::on_update`가 `ctx.save_notice()`를 읽어 한글로 그립니다(`저장했습니다`, `불러왔습니다`, 실패는 이유와 함께).
+
+```rust
+if let Some(notice) = ctx.save_notice() {
+    let (text, color) = match notice {
+        SaveNotice::Saved { .. } => ("저장했습니다".to_string(), [0.6, 1.0, 0.6, 1.0]),
+        SaveNotice::Loaded { .. } => ("불러왔습니다".to_string(), [0.6, 1.0, 0.6, 1.0]),
+        SaveNotice::Failed(why) => (format!("저장이나 불러오기에 실패했습니다: {why}"), [1.0, 0.55, 0.45, 1.0]),
+    };
+    ctx.draw().text_anchored(Anchor::Bottom, [0.0, -18.0], 19.0, color, &text);
+}
+```
+
+게임이 저장하는 모양(컴포넌트)을 바꾸면 옛 저장은 맞지 않으므로 `SAVE_VERSION`을 올립니다. 개발 단계라서 옛 저장을 옮기지 않고 "다른 버전"이라며 거절합니다. 체크포인트(게임이 이벤트를 내면 자동 저장)는 `.checkpoint_on("checkpoint", |event| Some("라벨".to_string()))`입니다. 서버로 실행(`--host`, `--connect`)하면 저장 슬롯이 없습니다. 네트워크 게임은 저장을 불러오지 않습니다.
 
 ### EntityView: 꼬리
 
@@ -335,7 +367,11 @@ pub fn app() -> App<StarPick> {
         .view(Look { fx: fx.clone() })
         .entity_view::<Score>(move || TrailView { fx: for_trails.clone() })
         .scene_view(Juice { fx })
-        .sound(sound::PICKUP, sound::pickup()) // 소리를 한 번 등록합니다
+        .sound_wav(sound::PICKUP, PICKUP_WAV) // WAV 소리를 한 번 등록합니다
+        .on_event_sound(pickup_sound)         // 별마다 소리를 켜고 끕니다
+        .saves(GAME_ID, SAVE_VERSION)         // 저장 슬롯
+        .save_key(KeyCode::F5, QUICK_SLOT)
+        .load_key(KeyCode::F9, QUICK_SLOT)
         .title("Star Pick 2")
 }
 ```
@@ -346,7 +382,7 @@ pub fn app() -> App<StarPick> {
 cargo run -p star_pick --release --bin step2
 ```
 
-Enter로 시작하고, W A S D 또는 방향키로 움직입니다. 별에 닿으면 짧은 "딩" 소리가 납니다. P는 일시정지, R은 일시정지 화면에서 다시 시작, 별 5개를 모으면 승리 화면이 나옵니다. Esc로 끝냅니다.
+Enter로 시작하고, W A S D 또는 방향키로 움직입니다. 별에 닿으면 짧은 "딩" 소리가 납니다. P는 일시정지, R은 일시정지 화면에서 다시 시작, 별 5개를 모으면 승리 화면이 나옵니다. F5는 저장, F9는 불러오기입니다. Esc로 끝냅니다.
 
 ## 보이는 것
 
@@ -358,7 +394,7 @@ Enter로 시작하고, W A S D 또는 방향키로 움직입니다. 별에 닿�
 
 ## 창 없이 확인하기
 
-`tests/step2.rs`가 창 없이 다음을 확인하고, `sound.rs`의 테스트가 소리를 확인합니다.
+`tests/step2.rs`가 창 없이 다음을 확인합니다. 소리 파일(`pickup.wav`)은 `the_views_follow_the_game`이 읽어서 확인하고, 3~5단계가 쓰는 `sound.rs`는 자기 단위 테스트가 확인합니다.
 
 | 테스트 | 확인하는 것 |
 |---|---|
@@ -366,6 +402,8 @@ Enter로 시작하고, W A S D 또는 방향키로 움직입니다. 별에 닿�
 | `a_replay_reproduces_the_run` | `save_replay`로 기록해 `open_replay`로 열고 `seek`로 끝 틱에 가면 같은 체크섬이 나온다 |
 | `the_views_follow_the_game` | 창 없는 브리지 위에서 뷰를 돌린다. 점수 글자는 확정 프레임의 점수와 같고, 고리가 시작되며, 엔티티 뷰가 만들어진다. 별마다 소리가 한 번 켜진다(소리 장치 대신 창도 장치도 없는 오프라인 출력으로 센다) |
 | `a_restart_command_empties_the_round_and_a_replay_reproduces_it` | 한참 뒤에 `Restart` 명령을 넣으면 점수가 0이 되고 별이 사라지며, 리플레이가 같은 체크섬을 만든다 |
+| `the_app_stops_the_sound_of_a_pickup_that_a_rollback_or_a_resync_took_back` | 예측된 줍기의 소리가 켜지고, `Canceled`가 오면 소리가 자연히 끝나기 전에 멈추며 고리도 지워진다. `ViewResync`가 와도 `Canceled` 없이 소리와 고리가 지워진다 |
+| `a_saved_game_comes_back_with_its_score_and_goes_on_like_the_game_that_was_never_saved` | 300틱에 저장하고 400틱을 더 달린 뒤 불러온다. 불러온 직후의 체크섬은 저장한 체크섬이고 화면 점수도 저장한 점수다. 400틱을 더 달리면 쭉 700틱을 달린 게임과 체크섬이 같다 |
 | `the_screens_start_pause_win_and_restart_a_game_that_only_sees_neutral_input` | 제목에서는 네모가 가운데에 서 있고, 시작하면 화면 글자가 사라지며, 일시정지 중에는 시계가 가지만 네모가 서 있다. 확정된 5번째 별에서 승리 화면이 뜨고, 다시 시작하면 점수가 0이 된다 |
 
 ```powershell
@@ -379,6 +417,8 @@ cargo test --release -p star_pick --test step2
 3. 별마다 점수가 다르게 해 보세요. `Star { born: u64, worth: u64 }`로 바꾸고 `pick_stars`가 `worth`만큼 더하게 합니다. `worth: u32`를 쓰면 구조체에 패딩이 생겨 `Pod`를 쓸 수 없다는 컴파일 오류가 납니다. 이유를 생각해 보세요.
 4. `Juice::on_event`에서 `EventState::Predicted | EventState::Verified =>`를 `EventState::Predicted =>`로 바꾸고 `EventState::Verified => {}`를 더하세요. 서버 없이 실행하면 고리가 나오지 않습니다. 위 표에서 이유를 찾으세요.
 5. 꼬리 점 수 `TRAIL_DOTS`를 30으로 늘려 보세요. 뷰 코드만 바뀌므로 게임 규칙과 체크섬은 그대로입니다.
+6. 게임을 하다 `F5`를 누르고 몇 걸음 더 간 뒤 `F9`를 눌러 보세요. 점수와 별이 저장한 때로 돌아갑니다. `%LOCALAPPDATA%\orrery\games\star_pick\saves`의 `slot-quick.orrsave`를 메모장으로 한 글자만 고치고 `F9`를 누르면 어떻게 되나요?
+7. `.on_event_sound(pickup_sound)`를 지우고 `Juice::on_event`에서 `ctx.audio().play_named(sound::PICKUP)`를 직접 불러 보세요. 서버 없이는 똑같이 들립니다. 4단계에서 롤백이 나면 어떤 코드가 더 필요한지 생각해 보세요.
 
 완성 코드: [tutorial/star_pick/src/step2.rs](../../tutorial/star_pick/src/step2.rs)
 

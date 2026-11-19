@@ -9,7 +9,7 @@
 | 단계 | 하는 일 | 새로 배우는 것 |
 |---|---|---|
 | [1. 빈 프로젝트](step1-empty-project.md) | 창에 네모 하나를 띄웁니다 | `Game`, 컴포넌트, 시스템, `Frame`, `FP`, `App` |
-| [2. 혼자 하기](step2-solo.md) | 키로 움직이고 별을 주워 점수를 얻습니다 | 입력, 이벤트, 예측과 확정, `EntityView`, `SceneView`, 글자(`ctx.draw()`), 소리(`ctx.audio()`) |
+| [2. 혼자 하기](step2-solo.md) | 키로 움직이고 별을 주워 점수를 얻습니다 | 입력, 이벤트, 예측과 확정, `EntityView`, `SceneView`, 글자(`ctx.draw()`), 소리(`ctx.audio()`, WAV 파일, `on_event_sound`), 저장 슬롯(`App::saves`, F5·F9) |
 | [3. 한 화면 2인](step3-two-players.md) | 키보드 하나로 두 명이 놉니다 | `.local_players`, `PlayerLink`, `ctx.is_local` |
 | [4. 로컬 서버 2창](step4-local-server.md) | 창 하나가 플레이어 한 명입니다 | `Players`, `player_signals`, 프리팹, `--host`, `--connect` |
 | [5. 재접속](step5-reconnect.md) | 창을 닫았다가 같은 자리로 돌아옵니다 | `Disconnected`, `Reconnected`, `Removed`, `--slot`, `--token`, 스냅숏 |
@@ -60,7 +60,7 @@ cargo test --release -p star_pick
 
 | 테스트 | 확인하는 것 |
 |---|---|
-| `tests/step2.rs` | 같은 입력이면 점수와 체크섬이 같다. 리플레이가 같은 결과를 낸다. 뷰가 게임을 따라간다. 점수 글자가 그려지고, 별마다 소리가 한 번 난다 |
+| `tests/step2.rs` | 같은 입력이면 점수와 체크섬이 같다. 리플레이가 같은 결과를 낸다. 뷰가 게임을 따라간다. 점수 글자가 그려지고, 별마다 소리가 한 번 난다. 롤백이 되돌린 줍기의 소리는 앱이 멈춘다. 저장하고 불러온 게임이 같은 점수와 같은 미래를 가진다 |
 | `tests/step3.rs` | 두 슬롯이 따로 움직이고 따로 점수를 얻는다 |
 | `tests/step4.rs` | 서버와 클라이언트 둘로 `Added`가 두 쪽 게임에 닿는다. 체크섬이 같다 |
 | `tests/step5.rs` | `Disconnected`, `Reconnected`, `Removed`가 게임에 닿는다. 스냅숏으로 들어온 클라이언트의 체크섬도 같다 |
