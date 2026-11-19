@@ -1397,7 +1397,7 @@ impl EditorApp {
         self.start_pulses(ctx.input(|i| i.time));
         if self.editor.agent_mut().take_tab_request() {
             self.ui.viewport_focus = false;
-            self.ui.dock.set_visible(crate::layout::Panel::Timeline, true);
+            self.ui.dock.reveal(crate::layout::Panel::Timeline);
             self.ui.bottom_tab = BottomTab::Agent;
         }
         // Notifications and frames arrive any time: look again soon, and at once while playing.
