@@ -3,6 +3,9 @@
 
 //! Opt-in production EditorApp acceptance using synthetic egui input and software Vulkan.
 //! This is not hardware-GPU, physical operating-system-input, or runtime/export evidence.
+#[path = "common/dock_panels.rs"]
+mod dock_panels;
+
 use egui::{Key, Modifiers, accesskit::Role};
 use egui_kittest::{
     Harness,
@@ -182,9 +185,9 @@ fn capture_preset_controls(h: &mut Harness<'_, EditorApp>, root: &Path) -> serde
     h.get_by_label_contains("Lighting preset staged;")
         .scroll_to_me();
     h.run_steps(20);
-    let inspector = egui::containers::panel::PanelState::load(&h.ctx, egui::Id::new("inspector"))
-        .expect("production inspector bounds")
-        .outer_rect;
+    dock_panels::set_panel_widths(h, 340.0, 230.0);
+    h.run_steps(10);
+    let inspector = dock_panels::inspector_rect(h);
     let screen = h.ctx.viewport_rect();
     assert!(
         (inspector.width() - 340.0).abs() < 1.0,

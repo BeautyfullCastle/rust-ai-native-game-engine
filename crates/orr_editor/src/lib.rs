@@ -51,9 +51,11 @@ pub mod app;
 pub mod backend;
 pub mod cli;
 pub mod diagnostics;
+pub mod dock;
 pub mod editor;
 pub mod flow;
 pub mod inspector;
+pub mod layout;
 #[cfg(feature = "custom-inspector")]
 pub mod custom_inspector;
 pub mod game;

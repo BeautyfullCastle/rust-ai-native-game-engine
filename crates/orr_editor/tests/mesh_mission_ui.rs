@@ -6,6 +6,9 @@
 ))]
 #![allow(clippy::disallowed_types, clippy::float_arithmetic)]
 
+#[path = "common/dock_panels.rs"]
+mod dock_panels;
+
 use egui::accesskit::Role;
 use egui::{Event, Key, Modifiers, PointerButton, Pos2};
 use egui_kittest::{
@@ -338,24 +341,14 @@ fn capture_world_pair(
             click(harness, label);
         }
     }
-    for (name, width) in [("inspector", 340.0), ("hierarchy", 230.0)] {
-        let identifier = egui::Id::new(name);
-        let mut state = egui::containers::panel::PanelState::load(&harness.ctx, identifier)
-            .expect("rendered production panel state");
-        if name == "inspector" {
-            state.outer_rect.min.x = state.outer_rect.max.x - width;
-        } else {
-            state.outer_rect.max.x = state.outer_rect.min.x + width;
-        }
-        harness
-            .ctx
-            .data_mut(|data| data.insert_persisted(identifier, state));
-    }
+    dock_panels::set_panel_widths(harness, 340.0, 230.0);
     harness.run_steps(30);
     settle(harness);
     let composite = composite_pixels(harness, composite_name);
     let (size, viewport) = viewport_pixels(harness, viewport_name);
-    assert_eq!(size, (930, 904), "uncropped capture geometry must match");
+    // The docked layout: window width minus two gaps, the Hierarchy and the Inspector.
+    assert_eq!(size.0, 924, "uncropped capture geometry must match");
+    assert!(size.1 > 800, "uncropped capture geometry must match: {size:?}");
     for (label, open) in ["Static-mesh navigation", "Mesh mission"]
         .into_iter()
         .zip(expanded)

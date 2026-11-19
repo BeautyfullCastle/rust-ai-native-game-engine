@@ -6,6 +6,9 @@
 ))]
 #![allow(clippy::disallowed_types, clippy::float_arithmetic)]
 
+#[path = "common/dock_panels.rs"]
+mod dock_panels;
+
 use egui::accesskit::Role;
 use egui::{Key, Modifiers};
 use egui_kittest::{kittest::Queryable, Harness};
@@ -256,19 +259,7 @@ fn viewport_pixels(harness: &Harness<'_, EditorApp>) -> ((u32, u32), Vec<u8>) {
 }
 
 fn normalize_viewport_panels(harness: &mut Harness<'_, EditorApp>) {
-    for (panel_name, width) in [("inspector", 340.0), ("hierarchy", 230.0)] {
-        let identifier = egui::Id::new(panel_name);
-        let mut state = egui::containers::panel::PanelState::load(&harness.ctx, identifier)
-            .expect("rendered production panel state");
-        if panel_name == "inspector" {
-            state.outer_rect.min.x = state.outer_rect.max.x - width;
-        } else {
-            state.outer_rect.max.x = state.outer_rect.min.x + width;
-        }
-        harness
-            .ctx
-            .data_mut(|data| data.insert_persisted(identifier, state));
-    }
+    dock_panels::set_panel_widths(harness, 340.0, 230.0);
     harness.run_steps(30);
     settle(harness);
 }

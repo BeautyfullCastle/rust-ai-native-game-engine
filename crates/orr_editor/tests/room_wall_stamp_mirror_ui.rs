@@ -7,6 +7,9 @@
     feature = "room-authoring"
 ))]
 #![allow(clippy::disallowed_types, clippy::float_arithmetic)]
+#[path = "common/dock_panels.rs"]
+mod dock_panels;
+
 use egui::{accesskit::Role, Event, Modifiers};
 use egui_kittest::{
     kittest::{NodeT, Queryable},
@@ -165,17 +168,7 @@ fn pixels(
     // otherwise history text can widen the inspector before save only.
     h.set_size(egui::vec2(1730.0, 1009.0));
     settle(h);
-    for (name, width) in [("inspector", 600.0), ("hierarchy", 230.0)] {
-        let id = egui::Id::new(name);
-        let mut panel = egui::containers::panel::PanelState::load(&h.ctx, id)
-            .expect("production panel has rendered");
-        if name == "inspector" {
-            panel.outer_rect.min.x = panel.outer_rect.max.x - width;
-        } else {
-            panel.outer_rect.max.x = panel.outer_rect.min.x + width;
-        }
-        h.ctx.data_mut(|data| data.insert_persisted(id, panel));
-    }
+    dock_panels::set_panel_widths(h, 600.0, 230.0);
     h.run_steps(20);
     let target = (900, 850);
     for _ in 0..6 {
@@ -190,6 +183,8 @@ fn pixels(
             window.x + (target.0 as f32 - actual.0 as f32) / ratio,
             window.y + (target.1 as f32 - actual.1 as f32) / ratio,
         ));
+        // The dock keeps shares, not widths: size the panels again for the new window.
+        dock_panels::set_panel_widths(h, 600.0, 230.0);
     }
     settle(h);
     assert_eq!(h.ctx.pixels_per_point(), 1.0);
@@ -206,16 +201,7 @@ fn pixels(
         h.query_by_label("Instantiate Room wall stamp").is_none(),
         "close the authoring window before measuring displayed scene pixels"
     );
-    for (name, width) in [("inspector", 600.0), ("hierarchy", 230.0)] {
-        assert_eq!(
-            egui::containers::panel::PanelState::load(&h.ctx, egui::Id::new(name))
-                .unwrap()
-                .outer_rect
-                .width(),
-            width,
-            "fixed {name} panel geometry"
-        );
-    }
+    dock_panels::set_panel_widths(h, 600.0, 230.0);
     let image = h
         .render()
         .expect("actual composed main EditorApp framebuffer");

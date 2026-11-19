@@ -4,6 +4,9 @@
 #![cfg(all(feature = "room-project", target_os = "linux", target_arch = "x86_64"))]
 #![allow(clippy::disallowed_types, clippy::float_arithmetic)]
 
+#[path = "common/dock_panels.rs"]
+mod dock_panels;
+
 use egui::{accesskit::Role, Key, Modifiers};
 use egui_kittest::{kittest::{NodeT, Queryable}, Harness};
 use orr_bridge::PlayerSlot;
@@ -143,22 +146,14 @@ fn capture_layout(h:&mut Harness<'_,EditorApp>, evidence:&Path)->[bool;2] {
     for (label,was_open) in ["Box blockout","Static model binding"].into_iter().zip(open) {if was_open {click(h,label);}}
     h.run_steps(20);settle(h);
     assert!(h.query_by_label("New box recipe").is_none()&&h.query_by_label("Load model asset").is_none());
-    // Collapsing preserves the panels' previous resized widths. Seed the same
-    // public egui remembered geometry on both apps before comparing readbacks.
-    for (name,width) in [("inspector",478.0),("hierarchy",230.0)] {
-        let id=egui::Id::new(name);
-        let mut state=egui::containers::panel::PanelState::load(&h.ctx,id).expect("rendered panel state");
-        if name=="inspector" {state.outer_rect.min.x=state.outer_rect.max.x-width;}
-        else {state.outer_rect.max.x=state.outer_rect.min.x+width;}
-        h.ctx.data_mut(|data|data.insert_persisted(id,state));
-    }
+    // Collapsing preserves the panels' previous resized widths. Apply the same
+    // docked layout on both apps before comparing readbacks.
+    dock_panels::set_panel_widths(h,478.0,230.0);
     h.run_steps(20);settle(h);
     // Retain actual geometry before the fixed-size assertions, even on failure.
     let rect = |r: egui::Rect| [r.min.x, r.min.y, r.max.x, r.max.y];
     let toolbar = h.get_by_label("Frame selected collider").rect();
-    let panels = ["top", "status", "bottom", "inspector", "hierarchy"].map(|name| {
-        (name, egui::containers::panel::PanelState::load(&h.ctx,egui::Id::new(name)).map(|state| rect(state.outer_rect)))
-    });
+    let panels = [("inspector", rect(dock_panels::inspector_rect(h))), ("hierarchy", rect(dock_panels::hierarchy_rect(h)))];
     let diagnostic = serde_json::json!({
         "outer_rect": rect(h.ctx.viewport_rect()), "pixels_per_point": h.ctx.pixels_per_point(),
         "toolbar_rect": rect(toolbar), "panels": panels,
@@ -168,8 +163,8 @@ fn capture_layout(h:&mut Harness<'_,EditorApp>, evidence:&Path)->[bool;2] {
     let mut log = fs::OpenOptions::new().create(true).append(true).open(evidence.join("capture-layout.jsonl")).unwrap();
     writeln!(log,"{diagnostic}").unwrap();
     assert_eq!(h.ctx.viewport_rect().size(),egui::vec2(WINDOW_SIZE[0],WINDOW_SIZE[1]));
-    for (name,width) in [("inspector",478.0),("hierarchy",230.0)] {
-        assert_eq!(egui::containers::panel::PanelState::load(&h.ctx,egui::Id::new(name)).unwrap().outer_rect.width(),width,"canonical {name} width must remain fixed");
+    for (name,rect,width) in [("inspector",dock_panels::inspector_rect(h),478.0),("hierarchy",dock_panels::hierarchy_rect(h),230.0)] {
+        assert!((rect.width()-width).abs()<1.0,"canonical {name} width must remain fixed: {rect:?}");
     }
     assert_eq!(h.state().ui.viewport_px,CAPTURE_SIZE,"identical collapsed inspector/window geometry is a required capture precondition");
     open

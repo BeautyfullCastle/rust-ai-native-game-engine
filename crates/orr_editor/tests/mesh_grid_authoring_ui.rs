@@ -7,6 +7,9 @@
 #![allow(clippy::disallowed_types, clippy::float_arithmetic)]
 #![recursion_limit = "256"]
 
+#[path = "common/dock_panels.rs"]
+mod dock_panels;
+
 use egui::accesskit::{Role, Toggled};
 use egui::{Key, Modifiers};
 use egui_kittest::{
@@ -276,44 +279,14 @@ fn viewport_pixels(harness: &mut Harness<'_, EditorApp>) -> ((u32, u32), Vec<u8>
 }
 
 fn normalize_viewport_panels(harness: &mut Harness<'_, EditorApp>) {
-    for (panel_name, width) in [("inspector", 340.0), ("hierarchy", 230.0)] {
-        let identifier = egui::Id::new(panel_name);
-        let mut state = egui::containers::panel::PanelState::load(&harness.ctx, identifier)
-            .expect("rendered production panel state");
-        if panel_name == "inspector" {
-            state.outer_rect.min.x = state.outer_rect.max.x - width;
-        } else {
-            state.outer_rect.max.x = state.outer_rect.min.x + width;
-        }
-        harness
-            .ctx
-            .data_mut(|data| data.insert_persisted(identifier, state));
-    }
+    dock_panels::set_panel_widths(harness, 340.0, 230.0);
     harness.run_steps(30);
     settle(harness);
-    let inspector =
-        egui::containers::panel::PanelState::load(&harness.ctx, egui::Id::new("inspector"))
-            .expect("normalized inspector panel state");
-    let hierarchy =
-        egui::containers::panel::PanelState::load(&harness.ctx, egui::Id::new("hierarchy"))
-            .expect("normalized hierarchy panel state");
+    let inspector = dock_panels::inspector_rect(harness);
+    let hierarchy = dock_panels::hierarchy_rect(harness);
     let (viewport_size, _) = viewport_pixels(harness);
     let screen_rect = harness.ctx.input(|input| input.viewport_rect());
-    let panel_rects = [
-        "top",
-        "status",
-        "bottom",
-        "bottom_agent",
-        "hierarchy",
-        "inspector",
-    ]
-    .map(|panel_name| {
-        (
-            panel_name,
-            egui::containers::panel::PanelState::load(&harness.ctx, egui::Id::new(panel_name))
-                .map(|state| state.outer_rect),
-        )
-    });
+    let panel_rects = [("hierarchy", hierarchy), ("inspector", inspector)];
     let editor_status = harness
         .state()
         .editor
@@ -327,7 +300,7 @@ fn normalize_viewport_panels(harness: &mut Harness<'_, EditorApp>) {
         .map(str::to_owned);
     eprintln!(
         "mesh-grid viewport layout: screen={screen_rect:?}, inspector={:?}, hierarchy={:?}, panels={panel_rects:?}, gpu={viewport_size:?}, status={editor_status:?}, last_action={last_action:?}",
-        inspector.outer_rect, hierarchy.outer_rect
+        inspector, hierarchy
     );
 }
 

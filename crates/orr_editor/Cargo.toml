@@ -129,6 +129,8 @@ orr_remote = { path = "../orr_remote" }
 serde_json = { version = "1", features = ["arbitrary_precision", "preserve_order"] }
 eframe = { version = "0.36", default-features = false, features = ["wgpu", "x11", "wayland", "default_fonts"] }
 egui = "0.36"
+# Single-window docking: split, tab and drag layout of the editor panels (MIT OR Apache-2.0).
+egui_tiles = { version = "0.17.1", default-features = false }
 egui-wgpu = "0.36"
 png = "0.17"
 

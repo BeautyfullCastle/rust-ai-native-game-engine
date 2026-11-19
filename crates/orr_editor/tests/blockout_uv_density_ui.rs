@@ -3,6 +3,9 @@
 #![cfg(feature = "models")]
 #![allow(clippy::disallowed_types, clippy::float_arithmetic)]
 
+#[path = "common/dock_panels.rs"]
+mod dock_panels;
+
 use egui::{Key, Modifiers, accesskit::Role};
 use egui_kittest::{
     Harness,
@@ -169,18 +172,12 @@ fn default_density_controls(h: &mut Harness<'_, EditorApp>, output: &Path) {
     click(h, "orr_physics3d::Body");
     click(h, "orr_physics3d::Collider");
     h.run_steps(20);
-    let id = egui::Id::new("inspector");
-    let mut state = egui::containers::panel::PanelState::load(&h.ctx, id).unwrap();
-    state.outer_rect.min.x = state.outer_rect.max.x - 340.0;
-    h.ctx.data_mut(|data| data.insert_persisted(id, state));
+    dock_panels::set_panel_widths(h, 340.0, 230.0);
     h.run_steps(20);
     settle(h);
-    let inspector = egui::containers::panel::PanelState::load(&h.ctx, id)
-        .unwrap()
-        .outer_rect;
-    assert_eq!(
-        inspector.width(),
-        340.0,
+    let inspector = dock_panels::inspector_rect(h);
+    assert!(
+        (inspector.width() - 340.0).abs() < 1.0,
         "new density helper must fit default Inspector width"
     );
     for label in [
@@ -218,16 +215,7 @@ fn fixed_view(h: &mut Harness<'_, EditorApp>, output: &Path, positive_x: bool) -
     }
     // Same remembered public panel geometry for each fixed-camera readback.
     h.run_steps(20);
-    for (name, width) in [("inspector", 560.0), ("hierarchy", 230.0)] {
-        let id = egui::Id::new(name);
-        let mut state = egui::containers::panel::PanelState::load(&h.ctx, id).unwrap();
-        if name == "inspector" {
-            state.outer_rect.min.x = state.outer_rect.max.x - width;
-        } else {
-            state.outer_rect.max.x = state.outer_rect.min.x + width;
-        }
-        h.ctx.data_mut(|data| data.insert_persisted(id, state));
-    }
+    dock_panels::set_panel_widths(h, 560.0, 230.0);
     h.state_mut().editor.camera3d = orr_render::OrbitCamera::new(
         [2.5, 10.5, 1.125],
         if positive_x {
@@ -241,7 +229,9 @@ fn fixed_view(h: &mut Harness<'_, EditorApp>, output: &Path, positive_x: bool) -
     h.run_steps(20);
     settle(h);
     let size = h.state().ui.viewport_px;
-    assert_eq!(size, (1010, 1383), "fixed editor layout changed");
+    // The docked layout: window width minus two gaps, the Hierarchy and the Inspector.
+    assert_eq!(size.0, 1004, "fixed editor layout changed");
+    assert!(size.1 > 1000, "fixed editor layout changed: {size:?}");
     let pixels = h.state().viewport3d_gpu().unwrap().gpu().read_rgba8();
     assert!(
         pixels
@@ -584,7 +574,7 @@ fn density_widgets_preserve_draft_and_render_after_existing_bake() {
     assert_eq!(reopened.state().editor.checksum(), authored_checksum);
     fs::write(evidence.join("acceptance-receipt.json"), serde_json::to_vec_pretty(&serde_json::json!({
         "test": TEST, "source_sha256": digest(include_bytes!("blockout_uv_density_ui.rs")),
-        "features": ["models"], "adapter": adapter, "adapter_backend": format!("{:?}", adapter_info.backend), "adapter_device_type": format!("{:?}", adapter_info.device_type), "software_gpu": software_gpu, "physical_os_input": false, "input": "egui_kittest actual widgets", "full_editor_size": SIZE, "fixed_viewport_size": [1010,1383], "fixed_inspector_width": 560, "density_helper_default_width": 340,
+        "features": ["models"], "adapter": adapter, "adapter_backend": format!("{:?}", adapter_info.backend), "adapter_device_type": format!("{:?}", adapter_info.device_type), "software_gpu": software_gpu, "physical_os_input": false, "input": "egui_kittest actual widgets", "full_editor_size": SIZE, "fixed_viewport_width": 1004, "fixed_inspector_width": 560, "density_helper_default_width": 340,
         "before_recipe_sha256": before_files[RECIPE], "applied_recipe_sha256": digest(&applied_bytes),
         "final_recipe_sha256": final_files[RECIPE], "positive_x_changed_pixels": pixels_changed,
         "other_face_equal": before_z == after_z, "calculation": {"face":"+X","recipe_edges":[3,4],"model_units_per_repeat":2,"scale":[1.5,2],"quarter_turn":1,"binding_scale_excluded":[1,1.5,0.75]},

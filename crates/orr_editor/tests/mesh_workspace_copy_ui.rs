@@ -9,6 +9,9 @@
 #![recursion_limit = "256"]
 #![allow(clippy::disallowed_types, clippy::float_arithmetic)]
 
+#[path = "common/dock_panels.rs"]
+mod dock_panels;
+
 use egui::{accesskit::Role, Key, Modifiers};
 use egui_kittest::{
     kittest::{NodeT, Queryable},
@@ -589,16 +592,8 @@ fn assert_mesh_inspector_bounds(
         .render()
         .expect("render the settled full App before checking inspector bounds");
     let screen = harness.ctx.input(|input| input.viewport_rect());
-    let inspector =
-        egui::containers::panel::PanelState::load(&harness.ctx, egui::Id::new("inspector"))
-            .expect("production inspector panel state");
-    let panels = ["top", "status", "bottom", "hierarchy", "inspector"].map(|label| {
-        (
-            label,
-            egui::containers::panel::PanelState::load(&harness.ctx, egui::Id::new(label))
-                .map(|panel| panel.outer_rect),
-        )
-    });
+    let inspector = dock_panels::inspector_rect(harness);
+    let panels = [("hierarchy", dock_panels::hierarchy_rect(harness)), ("inspector", inspector)];
     let controls = [
         "Capture viewport as game camera",
         "Apply game camera",
@@ -617,9 +612,9 @@ fn assert_mesh_inspector_bounds(
     ]
     .map(|label| (label, harness.query_by_label(label).map(|node| node.rect())));
     assert!(
-        rect_within(inspector.outer_rect, screen),
+        rect_within(inspector, screen),
         "Mesh inspector extends beyond the App viewport at {stage}: inspector={:?}, screen={screen:?}, panels={panels:?}, controls={controls:?}",
-        inspector.outer_rect
+        inspector
     );
 
     let mut fields = serde_json::Map::new();
@@ -630,10 +625,10 @@ fn assert_mesh_inspector_bounds(
                 assert!(
                     field.min.x >= screen.min.x
                         && field.max.x <= screen.max.x
-                        && field.min.x >= inspector.outer_rect.min.x
-                        && field.max.x <= inspector.outer_rect.max.x,
+                        && field.min.x >= inspector.min.x
+                        && field.max.x <= inspector.max.x,
                     "Visible {label} field escapes the inspector or App viewport at {stage}: field={field:?}, inspector={:?}, screen={screen:?}",
-                    inspector.outer_rect
+                    inspector
                 );
                 fields.insert(
                     label.to_owned(),
@@ -646,7 +641,7 @@ fn assert_mesh_inspector_bounds(
     serde_json::json!({
         "stage": stage,
         "screen_bounds": [screen.min.x, screen.min.y, screen.max.x, screen.max.y],
-        "inspector_bounds": [inspector.outer_rect.min.x, inspector.outer_rect.min.y, inspector.outer_rect.max.x, inspector.outer_rect.max.y],
+        "inspector_bounds": [inspector.min.x, inspector.min.y, inspector.max.x, inspector.max.y],
         "visible_fields": fields,
     })
 }
