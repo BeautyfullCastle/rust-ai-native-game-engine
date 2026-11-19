@@ -3,10 +3,14 @@
 //! A view fills it through `ViewContext::draw()`. The app clears it before every frame of
 //! view calls and draws it after the default renderer, so it is always on top of the picture.
 //! The text is the 5x7 bitmap font of `orr_render::text` (ASCII only: digits, letters, a few
-//! signs; lowercase letters show as capitals; Korean and other letters show as blanks).
+//! signs; lowercase letters show as capitals). A character the font cannot draw (Korean, other
+//! letters, `~`) shows as a hollow box and is reported once on stderr, so it never vanishes
+//! without a trace; see [`Overlay::missing_glyphs`].
+
+use std::collections::BTreeSet;
 
 use orr_render::orr_rhi::{Rhi, TextureFormat, Wgpu};
-use orr_render::text::{draw_text, pixel_camera, text_width, GLYPH_H};
+use orr_render::text::{draw_text_marked, has_glyph, pixel_camera, text_width, GLYPH_H};
 use orr_render::{RenderList, RenderList3D, Renderer};
 
 /// Pixel width of the lines of the overlay.
@@ -47,6 +51,20 @@ pub struct Overlay {
     texts: Vec<TextItem>,
     lines: Vec<LineItem>,
     rects: Vec<RectItem>,
+    /// The characters without a glyph that were drawn so far (kept when the frame is cleared).
+    missing: BTreeSet<char>,
+}
+
+/// The characters of `text` that have no glyph, are not in `known` yet, and are not control
+/// characters, in order of first use. They are added to `known`.
+fn new_missing(text: &str, known: &mut BTreeSet<char>) -> Vec<char> {
+    let mut found = Vec::new();
+    for c in text.chars().filter(|c| !has_glyph(*c) && !c.is_control()) {
+        if known.insert(c) {
+            found.push(c);
+        }
+    }
+    found
 }
 
 /// Width and height in pixels of `text` drawn with capitals `size` pixels high.
@@ -61,6 +79,9 @@ impl Overlay {
     /// height of a capital letter in pixels (7 pixels is the font's own size).
     pub fn text(&mut self, pos: [f32; 2], size: f32, color: [f32; 4], text: &str) {
         if size > 0.0 && size.is_finite() && !text.is_empty() {
+            for c in new_missing(text, &mut self.missing) {
+                eprintln!("overlay text: the font has no glyph for {c:?} (U+{:04X}); it is drawn as a box", u32::from(c));
+            }
             self.texts.push(TextItem { pos, size, color, text: text.to_string() });
         }
     }
@@ -91,6 +112,12 @@ impl Overlay {
                 }
             }
         }
+    }
+
+    /// The characters drawn so far that the font has no glyph for. Each one was reported once
+    /// on stderr and is drawn as a box.
+    pub fn missing_glyphs(&self) -> &BTreeSet<char> {
+        &self.missing
     }
 
     pub fn texts(&self) -> &[TextItem] {
@@ -144,7 +171,7 @@ impl Overlay {
     /// `orr_render::text::pixel_camera(size)`.
     pub(crate) fn fill_text_list(&self, list: &mut RenderList, size: (u32, u32)) {
         for item in &self.texts {
-            draw_text(list, size.1 as f32, item.pos[0], item.pos[1], item.size / GLYPH_H as f32, &item.text, item.color);
+            draw_text_marked(list, size.1 as f32, item.pos[0], item.pos[1], item.size / GLYPH_H as f32, &item.text, item.color);
         }
     }
 }
@@ -178,6 +205,30 @@ mod tests {
     use super::*;
 
     const WHITE: [f32; 4] = [1.0; 4];
+
+    #[test]
+    fn a_character_without_a_glyph_is_recorded_once_and_the_text_is_kept() {
+        let mut known = BTreeSet::new();
+        assert_eq!(new_missing("SCORE 가가 ~", &mut known), vec!['가', '~']);
+        assert!(new_missing("가 ~ A
+", &mut known).is_empty(), "reported once");
+        let mut overlay = Overlay::default();
+        overlay.text([0.0, 0.0], 14.0, WHITE, "OK 가");
+        overlay.text([0.0, 20.0], 14.0, WHITE, "가가");
+        assert_eq!(overlay.missing_glyphs().iter().collect::<Vec<_>>(), vec![&'가']);
+        assert_eq!(overlay.texts().len(), 2, "the text is still drawn");
+        overlay.clear();
+        assert_eq!(overlay.missing_glyphs().len(), 1, "a new frame keeps what was reported");
+    }
+
+    #[test]
+    fn missing_glyphs_become_boxes_in_the_text_quads() {
+        let mut overlay = Overlay::default();
+        overlay.text([0.0, 0.0], 7.0, WHITE, "가");
+        let mut list = RenderList::new();
+        overlay.fill_text_list(&mut list, (100, 100));
+        assert!(!list.is_empty(), "the box is visible");
+    }
 
     #[test]
     fn text_size_follows_the_advance_of_the_font() {
