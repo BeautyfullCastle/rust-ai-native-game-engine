@@ -42,6 +42,8 @@ winit = "0.30"
 gilrs = { version = "0.11", optional = true }
 # Screenshot files.
 png = "0.18"
+# Overlay text: reads TrueType and OpenType files and rasterizes glyphs (MIT OR Apache-2.0; already in the lock file through egui).
+ab_glyph = "0.2"
 
 [dev-dependencies]
 bytemuck = { version = "1", features = ["derive"] }

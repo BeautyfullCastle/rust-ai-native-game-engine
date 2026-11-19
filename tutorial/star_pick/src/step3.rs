@@ -321,8 +321,8 @@ impl SceneView<StarPick> for Juice {
         }
         // The score of each player as text in the top left corner: player 1 on the first line, player 2 on the second.
         for (slot, score) in fx.scores.iter().enumerate() {
-            let line = 14.0 + 30.0 * slot as f32;
-            ctx.draw().text([16.0, line], 21.0, color_of(slot as u32), &format!("PLAYER {} SCORE {}", slot + 1, score));
+            let line = 14.0 + 36.0 * slot as f32;
+            ctx.draw().text([16.0, line], 21.0, color_of(slot as u32), &format!("플레이어 {} 점수 {}", slot + 1, score));
         }
         let now = fx.now;
         fx.rings.retain(|ring| now < ring.start + KEEP_TICKS);

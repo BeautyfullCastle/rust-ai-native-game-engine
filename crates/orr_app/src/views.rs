@@ -17,6 +17,7 @@ use orr_audio::Clip;
 use orr_view::{RenderItem, RenderItem3, Transform2, Transform3};
 
 use crate::audio::{Audio, SoundOut};
+use crate::font::FontHandle;
 use crate::overlay::Overlay;
 
 /// What happened to an event, as the scene view sees it. Same meaning as
@@ -78,9 +79,17 @@ impl<'a, G: Game> ViewContext<'a, G> {
     /// The overlay of this frame: text on the screen and lines and rectangles in the world, drawn
     /// after the default renderer, on top of the picture. It is empty at the start of every frame,
     /// so call it in every frame in which the things should be visible (for example in a scene
-    /// view's `on_update`). The text font is ASCII only (see [`crate::Overlay`]).
+    /// view's `on_update`). The text uses the font of the run, or the ASCII bitmap font when there is
+    /// none (see [`crate::Overlay`]).
     pub fn draw(&mut self) -> &mut Overlay {
         self.overlay
+    }
+
+    /// The size of the window in pixels (the size of the picture with `--screenshot`), to place
+    /// text relative to its edges. `[0, 0]` for a window-free `Views` until
+    /// [`Views::set_screen_size`] is called.
+    pub fn screen_size(&self) -> [f32; 2] {
+        self.overlay.screen_size()
     }
 
     /// Plays and stops sounds (see [`crate::Audio`]). Without an audio device the calls do nothing.
@@ -295,6 +304,17 @@ impl<G: Game> Views<G> {
     /// What the views drew in the newest call of [`Views::dispatch`]: it is cleared at the start of every call.
     pub fn overlay(&self) -> &Overlay {
         &self.overlay
+    }
+
+    /// The font of the overlay text (`None`: the 5x7 bitmap font, ASCII only). [`crate::App`] sets it
+    /// when the run starts; a window-free `Views` has none until this call.
+    pub fn set_font(&mut self, font: Option<FontHandle>) {
+        self.overlay.set_font(font);
+    }
+
+    /// The window size in pixels that `ctx.screen_size()` reports. [`crate::App`] sets it every frame.
+    pub fn set_screen_size(&mut self, size: [f32; 2]) {
+        self.overlay.set_screen_size(size);
     }
 
     /// Registers a clip under `name` for `ctx.audio().play_named(name)`. Replaces a clip of the same name.

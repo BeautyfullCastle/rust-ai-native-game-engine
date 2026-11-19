@@ -29,7 +29,9 @@
 //!    A new `PlaySession` with the same seed would replay round one exactly; the app does not
 //!    build one while it runs.
 //!
-//! The text is drawn with the overlay font (ASCII capitals, digits, a few signs).
+//! The words are centered on the window and wrap to its width. They are drawn with the overlay
+//! font: any text the font has glyphs for (Korean with the default system font). Without a font
+//! the 5x7 bitmap font draws ASCII capitals, digits and a few signs.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -39,6 +41,7 @@ use winit::keyboard::KeyCode;
 use crate::gamepad::PadButton;
 use crate::input::InputContext;
 use crate::overlay::Overlay;
+use crate::typeset::{Align, ScreenRect};
 
 /// Which screen is shown.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,7 +120,8 @@ impl ActionMap {
     }
 }
 
-/// The words of the screens: ASCII capitals, digits and a few signs (see the overlay font).
+/// The words of the screens. The defaults are ASCII capitals, so they also work with the 5x7
+/// bitmap font; with a font any text works (see the overlay font).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Labels {
     pub title: String,
@@ -267,8 +271,10 @@ impl Screens {
         read(&keys.without(&state.masked_keys, &state.masked_buttons))
     }
 
-    /// Draws the words of the screen that is shown (nothing while playing). The text starts at
-    /// the left edge: the overlay does not know the size of the window.
+    /// Draws the words of the screen that is shown (nothing while playing): the heading centered
+    /// in the upper middle of the window, the hint below it. Both wrap to the window width. A
+    /// window-free overlay (see [`Overlay::screen_size`]) has no size, so the text starts at
+    /// the left edge there.
     pub fn draw(&self, overlay: &mut Overlay) {
         let state = self.0.borrow();
         let labels = &state.labels;
@@ -282,8 +288,14 @@ impl Screens {
             Screen::Win => (&labels.win, &labels.end_hint, GOLD),
             Screen::Lose => (&labels.lose, &labels.end_hint, [0.95, 0.4, 0.35, 1.0]),
         };
-        overlay.text([48.0, 150.0], 56.0, color, head);
-        overlay.text([48.0, 230.0], 21.0, SOFT, hint);
+        const MARGIN: f32 = 48.0;
+        const HEAD: f32 = 56.0;
+        const HINT: f32 = 21.0;
+        let screen = overlay.screen_rect();
+        let top = if screen.h > 0.0 { screen.h * 0.38 - HEAD } else { 150.0 };
+        let area = ScreenRect::new(MARGIN, top, (screen.w - 2.0 * MARGIN).max(0.0), 0.0);
+        let [_, used] = overlay.text_box(area, HEAD, color, head, Align::Center);
+        overlay.text_box(ScreenRect { y: top + used + HEAD * 0.4, ..area }, HINT, SOFT, hint, Align::Center);
     }
 }
 
@@ -468,5 +480,34 @@ mod tests {
             overlay.text([0.0, 0.0], 14.0, [1.0; 4], word);
         }
         assert!(overlay.missing_glyphs().is_empty(), "{:?}", overlay.missing_glyphs());
+    }
+
+    #[test]
+    fn the_words_are_centered_on_the_window_and_the_hint_sits_below_the_heading() {
+        let screens = Screens::new(Labels { title: "ABCD".to_string(), title_hint: "AB".to_string(), ..Labels::default() });
+        let mut overlay = Overlay::default();
+        overlay.set_screen_size([800.0, 600.0]);
+        screens.draw(&mut overlay);
+
+        let [head, hint] = [&overlay.texts()[0], &overlay.texts()[1]];
+        // The bitmap font: 6 pixels per font pixel, so "ABCD" at 56 is 4 * 48 = 192 pixels wide, "AB" at 21 is 2 * 18 = 36.
+        assert_eq!(head.pos[0], (800.0 - 192.0) / 2.0);
+        assert_eq!(hint.pos[0], (800.0 - 36.0) / 2.0);
+        assert!(hint.pos[1] > head.pos[1] + 56.0, "the hint is below the heading");
+        assert!(head.pos[1] > 100.0 && head.pos[1] < 300.0, "in the upper middle: {}", head.pos[1]);
+    }
+
+    #[test]
+    fn a_heading_wider_than_the_window_wraps_and_the_hint_follows_the_last_line() {
+        let screens = Screens::new(Labels { title: "가나다라마바사아자차".to_string(), title_hint: "AB".to_string(), ..Labels::default() });
+        let mut overlay = Overlay::default();
+        overlay.set_screen_size([400.0, 300.0]);
+        screens.draw(&mut overlay);
+
+        // 400 - 2 * 48 = 304 pixels of text width, 48 per character at size 56: six per line.
+        let lines: Vec<&str> = overlay.texts().iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(lines, ["가나다라마바", "사아자차", "AB"]);
+        let ys: Vec<f32> = overlay.texts().iter().map(|t| t.pos[1]).collect();
+        assert!(ys[0] < ys[1] && ys[1] < ys[2]);
     }
 }
