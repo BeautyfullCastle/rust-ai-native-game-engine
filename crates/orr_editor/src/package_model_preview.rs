@@ -11,6 +11,7 @@
 #[cfg(feature = "room-animated-models")]
 mod animation;
 mod camera;
+pub(crate) mod discovery;
 pub(crate) use camera::{bounded_size, PreviewBounds, PreviewCamera};
 
 use crate::model_bindings::{self, LoadedAsset, ModelKind};

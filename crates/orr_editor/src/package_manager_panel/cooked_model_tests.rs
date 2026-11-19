@@ -72,8 +72,22 @@ fn production_browser_shows_cooked_static_actions_and_preserves_request_guards()
             digest: "b".repeat(64),
         },
     );
+    let project = tempfile::tempdir().unwrap();
+    let digest = "b".repeat(64);
+    super::cooked_discovery_tests::stage(
+        project.path(),
+        &digest,
+        "model.model.json",
+        super::cooked_discovery_tests::STATIC_HEADER,
+    );
+    super::cooked_discovery_tests::stage(
+        project.path(),
+        &digest,
+        "walk.animated.json",
+        super::cooked_discovery_tests::ANIMATED_HEADER,
+    );
     let panel = Panel {
-        root: Some(PathBuf::from("/project")),
+        root: Some(project.path().to_owned()),
         source: "/source".into(),
         source_identity: "/source".into(),
         verified: Some(lock.clone()),

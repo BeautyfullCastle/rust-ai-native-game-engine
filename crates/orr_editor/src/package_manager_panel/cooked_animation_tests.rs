@@ -58,8 +58,22 @@ fn production_browser_exposes_only_explicit_compiled_cooked_animation_actions() 
         direct: BTreeMap::new(),
         packages: BTreeMap::from([("clips".into(), package)]),
     };
+    let project = tempfile::tempdir().unwrap();
+    let digest = "b".repeat(64);
+    super::cooked_discovery_tests::stage(
+        project.path(),
+        &digest,
+        "model.animated.json",
+        super::cooked_discovery_tests::ANIMATED_HEADER,
+    );
+    super::cooked_discovery_tests::stage(
+        project.path(),
+        &digest,
+        "prop.model.json",
+        super::cooked_discovery_tests::STATIC_HEADER,
+    );
     let panel = Panel {
-        root: Some(PathBuf::from("/project")),
+        root: Some(project.path().to_owned()),
         source: "/source".into(),
         source_identity: "/source".into(),
         verified: Some(lock.clone()),
