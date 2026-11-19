@@ -1,6 +1,8 @@
 //! The builder and the window loop.
 
+use std::cell::RefCell;
 use std::fmt;
+use std::io::Read;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -29,6 +31,8 @@ use crate::input::{Device, InputContext};
 use crate::net::{self, Hosted, Join};
 use crate::pace::{Advance, Outcome, Pacer};
 use crate::models::ModelScene;
+use crate::save::{LoadedSave, SaveError, SaveStore};
+use crate::wav::{clip_from_wav, MAX_WAV_BYTES};
 use crate::shot::{render_rgba, render_rgba3, write_png};
 use crate::view2d::{fill_draw_list, SharedView, View2D};
 use crate::view3d::{fill_draw_list3, ModelDraw, SharedView3, View3D};
@@ -137,6 +141,60 @@ struct SceneSource {
     register: fn(&mut TypeRegistry),
 }
 
+/// Where the bytes of a WAV sound come from (see [`App::sound_file`] and [`App::sound_wav`]).
+enum WavSource {
+    File(PathBuf),
+    Bytes(Vec<u8>),
+}
+
+/// What [`App::saves`] asked for.
+struct SaveSetup {
+    game: String,
+    version: u32,
+    folder: Option<PathBuf>,
+}
+
+/// What a key does for the saves of an offline run (see [`App::save_key`], [`App::load_key`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Hot {
+    Save(String),
+    Load(String),
+}
+
+/// A bot that the host of every offline session (also one that a load starts) calls.
+type SharedBot<G> = Rc<RefCell<BotFn<G>>>;
+
+/// What an offline run needs to start a session again, from a save.
+struct Parts<G: Game> {
+    players: u8,
+    local_players: u8,
+    seed: u64,
+    tick_rate: u32,
+    bot: Option<SharedBot<G>>,
+}
+
+impl<G: Game> Parts<G> {
+    /// The offline bridge of `session`. `announce` is the start data of the local players when the
+    /// session is new and must announce its players; a session that comes from a save has them in its frame.
+    fn bridge(&self, session: PlaySession<G>, announce: Option<Vec<u8>>) -> Offline<G> {
+        let mut host = PlayHost::new(session, LOCAL_SLOT).with_extra_local_slots((1..self.local_players).map(PlayerSlot));
+        if let Some(data) = announce {
+            let local_players = self.local_players;
+            host = host.with_announced_players_data(move |slot| if slot.0 < local_players { data.clone() } else { Vec::new() });
+        }
+        if let Some(bot) = &self.bot {
+            let bot = bot.clone();
+            host = host.with_bot(move |slot, tick| (bot.borrow_mut())(slot, tick));
+        }
+        InProc::new(host, BridgeConfig::default())
+    }
+
+    /// A new offline bridge that continues from `save`.
+    fn bridge_from_save(&self, save: &LoadedSave) -> Result<Offline<G>, SaveError> {
+        Ok(self.bridge(save.into_session::<G>(self.seed)?, None))
+    }
+}
+
 /// Runs game `G` in a window. By default it runs offline: one or more local players on one
 /// screen, no server. `--host` and `--connect` (see `--help`) play the same game on a relay
 /// server instead, with one player per window; the builder code does not change.
@@ -178,6 +236,12 @@ pub struct App<G: Game> {
     /// Devices given to slots by hand (see [`App::assign_device`]).
     devices: Vec<(PlayerSlot, Device)>,
     font: FontChoice,
+    /// WAV sounds that are read when the run starts.
+    wavs: Vec<(String, WavSource)>,
+    saves: Option<SaveSetup>,
+    hotkeys: Vec<(KeyCode, Hot)>,
+    /// What the offline bridge was built from (set by `build_bridge`).
+    parts: Option<Parts<G>>,
 }
 
 impl<G: Game> App<G>
@@ -218,6 +282,10 @@ impl<G: Game> App<G> {
             player_data: Vec::new(),
             devices: Vec::new(),
             font: FontChoice::System,
+            wavs: Vec::new(),
+            saves: None,
+            hotkeys: Vec::new(),
+            parts: None,
         }
     }
 
@@ -362,6 +430,73 @@ impl<G: Game> App<G> {
         self
     }
 
+    /// Registers the WAV file `path` under `name` for `ctx.audio().play_named(name)` and for
+    /// [`App::on_event_sound`]. 16-bit PCM or 32-bit float, mono or stereo, 8000 to 192000 Hz,
+    /// at most 10 seconds (see [`crate::clip_from_wav`]); the mixer resamples it to the output rate.
+    /// The file is read when the run starts (a relative path is relative to the working directory).
+    /// A file that is missing or refused stops the run with an error that names the sound and the file.
+    pub fn sound_file(mut self, name: &str, path: impl Into<PathBuf>) -> Self {
+        self.wavs.push((name.to_string(), WavSource::File(path.into())));
+        self
+    }
+
+    /// Like [`App::sound_file`] with the bytes of a WAV file, which the game embeds with
+    /// `include_bytes!`: the run needs no file next to the program.
+    pub fn sound_wav(mut self, name: &str, bytes: impl Into<Vec<u8>>) -> Self {
+        self.wavs.push((name.to_string(), WavSource::Bytes(bytes.into())));
+        self
+    }
+
+    /// Plays the sound that `name_of` names (a sound of [`App::sound`], [`App::sound_file`] or
+    /// [`App::sound_wav`]) for each event of the game: `|event| Some("pickup")`. One place does it all:
+    /// a `Predicted` event starts its sound, a `Canceled` event stops it, an event that a rollback keeps
+    /// sounds once, and a resync stops the sounds that were not confirmed (see [`Views::on_event_sound`]).
+    /// A view then needs no sound code of its own.
+    pub fn on_event_sound<S: Into<String>>(mut self, name_of: impl Fn(&G::Event) -> Option<S> + 'static) -> Self {
+        self.views.on_event_sound(name_of);
+        self
+    }
+
+    /// Gives an offline run save slots for `game`, a stable id of 1 to 64 letters, digits, `-` or `_`
+    /// (it names the folder: `%LOCALAPPDATA%\orrery\games\<game>\saves` on Windows, see
+    /// [`SaveStore::default_dir`]), and `version`, a number of yours that you raise when old saves no longer fit
+    /// the game. Views save and load through `ctx.save_game(slot, label)` and `ctx.load_game(slot)`;
+    /// [`App::save_key`], [`App::load_key`] and [`App::checkpoint_on`] do it without view code. A save is the
+    /// verified frame of the simulation; a load starts a new offline session from it (the checksum is the saved one).
+    /// A `--host` or `--connect` run has no slots: networked games do not load saves.
+    pub fn saves(mut self, game: &str, version: u32) -> Self {
+        self.saves = Some(SaveSetup { game: game.to_string(), version, folder: None });
+        self
+    }
+
+    /// The same save slots in `folder` instead of the per-user data folder. Call it after [`App::saves`].
+    pub fn save_folder(mut self, folder: impl Into<PathBuf>) -> Self {
+        if let Some(setup) = &mut self.saves {
+            setup.folder = Some(folder.into());
+        }
+        self
+    }
+
+    /// Pressing `key` saves the verified frame into `slot` (needs [`App::saves`]; the result is
+    /// `ctx.save_notice()`). A key that is held does not repeat the save.
+    pub fn save_key(mut self, key: KeyCode, slot: &str) -> Self {
+        self.hotkeys.push((key, Hot::Save(slot.to_string())));
+        self
+    }
+
+    /// Pressing `key` continues from the save in `slot` (needs [`App::saves`]).
+    pub fn load_key(mut self, key: KeyCode, slot: &str) -> Self {
+        self.hotkeys.push((key, Hot::Load(slot.to_string())));
+        self
+    }
+
+    /// A checkpoint: whenever a verified event gets `Some(label)` from `label_of`, the run saves into
+    /// `slot` (needs [`App::saves`]). A game that wants a checkpoint emits an event and names it here.
+    pub fn checkpoint_on(mut self, slot: &str, label_of: impl Fn(&G::Event) -> Option<String> + 'static) -> Self {
+        self.views.checkpoint_on(slot, label_of);
+        self
+    }
+
     /// Reads the command line (see `--help`) and runs until the window closes,
     /// Escape is pressed, or the requested screenshot is saved.
     pub fn run(self) -> Result<(), Error> {
@@ -390,6 +525,37 @@ impl<G: Game> App<G> {
         }
     }
 
+    /// Reads the WAV sounds and registers their clips. The first file that fails stops the run.
+    fn resolve_sounds(&mut self) -> Result<(), Error> {
+        for (name, source) in std::mem::take(&mut self.wavs) {
+            let (bytes, origin) = match source {
+                WavSource::Bytes(bytes) => (bytes, "embedded bytes".to_string()),
+                WavSource::File(path) => {
+                    let origin = path.display().to_string();
+                    let file = std::fs::File::open(&path).map_err(|e| Error(format!("sound {name:?}: cannot open {origin}: {e}")))?;
+                    let mut bytes = Vec::new();
+                    file.take(MAX_WAV_BYTES as u64 + 1).read_to_end(&mut bytes).map_err(|e| Error(format!("sound {name:?}: cannot read {origin}: {e}")))?;
+                    (bytes, origin)
+                }
+            };
+            let clip = clip_from_wav(&bytes).map_err(|e| Error(format!("sound {name:?} ({origin}): {e}")))?;
+            self.views.sound(&name, clip);
+        }
+        Ok(())
+    }
+
+    /// The save slots of an offline run (see [`App::saves`]). Errors name what is wrong.
+    fn resolve_saves(&mut self, parts: &Parts<G>) -> Result<(), Error> {
+        let Some(setup) = self.saves.take() else { return Ok(()) };
+        let store = match setup.folder {
+            Some(folder) => SaveStore::at(folder, &setup.game, setup.version),
+            None => SaveStore::new(&setup.game, setup.version),
+        }
+        .map_err(|e| Error(format!("save slots: {e}")))?;
+        self.views.enable_saves(store, parts.players, parts.tick_rate);
+        Ok(())
+    }
+
     fn build_bridge(&mut self) -> Result<Offline<G>, Error> {
         self.check_player_data()?;
         let players = self.players.max(self.local_players);
@@ -399,14 +565,17 @@ impl<G: Game> App<G> {
             None => PlaySession::<G>::new(cfg, self.config.take().ok_or_else(|| Error("the app was already run".to_string()))?),
         };
         // Offline, the app is the "server": it announces every player in tick 1.
-        let (local_players, data) = (self.local_players, std::mem::take(&mut self.player_data));
-        let mut host = PlayHost::new(session, LOCAL_SLOT)
-            .with_extra_local_slots((1..self.local_players).map(PlayerSlot))
-            .with_announced_players_data(|slot| if slot.0 < local_players { data.clone() } else { Vec::new() });
-        if let Some(bot) = self.bot.take() {
-            host = host.with_bot(bot);
-        }
-        Ok(InProc::new(host, BridgeConfig::default()))
+        let data = std::mem::take(&mut self.player_data);
+        let parts = Parts {
+            players,
+            local_players: self.local_players,
+            seed: self.seed,
+            tick_rate: self.tick_rate,
+            bot: self.bot.take().map(|bot| Rc::new(RefCell::new(bot))),
+        };
+        let bridge = parts.bridge(session, Some(data));
+        self.parts = Some(parts);
+        Ok(bridge)
     }
 
     /// The start data must fit a `Hello`, also offline, so that a game runs the same way in both modes.
@@ -463,6 +632,7 @@ impl<G: Game> App<G> {
         let input = self.input.take().ok_or_else(|| Error("no input: call .input(..) before .run()".to_string()))?;
         let font = self.resolve_font()?;
         self.views.set_font(font);
+        self.resolve_sounds()?;
         let mode = args.mode()?;
         let (bridge, server) = match &mode {
             RunMode::Offline => (Driver::Offline(Box::new(self.build_bridge()?)), None),
@@ -472,6 +642,12 @@ impl<G: Game> App<G> {
             }
             RunMode::Connect { addr } => (self.build_joined(addr.clone(), &args)?, None),
         };
+        let parts = self.parts.take();
+        match &parts {
+            Some(parts) => self.resolve_saves(parts)?,
+            None if self.saves.is_some() => eprintln!("save slots: a networked run has none (networked games do not load saves)"),
+            None => {}
+        }
         let event_loop = EventLoop::new().map_err(|e| Error(format!("event loop: {e}")))?;
         event_loop.set_control_flow(ControlFlow::Poll);
         let networked = mode != RunMode::Offline;
@@ -502,6 +678,9 @@ impl<G: Game> App<G> {
             window: None,
             epoch: None,
             views: self.views,
+            parts,
+            hotkeys: if networked { Vec::new() } else { std::mem::take(&mut self.hotkeys) },
+            hot: Vec::new(),
             last_frame: Instant::now(),
             error: None,
             _server: server,
@@ -556,6 +735,11 @@ impl<G: Game> LocalInput<G> {
         let polled = (0..slots.len()).map(|i| PlayerSlot(i as u8)).collect();
         let sent = vec![None; slots.len()];
         Self { poll, slots, polled, sent }
+    }
+
+    /// The new bridge knows no input yet: send every input again.
+    fn forget(&mut self) {
+        self.sent.iter_mut().for_each(|sent| *sent = None);
     }
 
     /// Polls every local slot and sends the inputs that changed.
@@ -813,6 +997,11 @@ struct Runner<G: Game> {
     /// The last timeline epoch shown (a change means a jump, not a movement).
     epoch: Option<u64>,
     views: Views<G>,
+    /// What a load needs to start a session again; `None` in a networked run.
+    parts: Option<Parts<G>>,
+    hotkeys: Vec<(KeyCode, Hot)>,
+    /// The hotkeys pressed since the last frame.
+    hot: Vec<Hot>,
     last_frame: Instant,
     error: Option<String>,
     /// The relay server of `--host`. Declared last so it stops after the bridge left the room.
@@ -857,6 +1046,8 @@ impl<G: Game> Runner<G> {
         if !self.views.is_empty() {
             self.display.dispatch(&mut self.views, &mut self.bridge, &update);
         }
+        self.run_hotkeys();
+        self.apply_load();
         let Some(snapshot) = snapshot else { return };
 
         self.views.poll_audio();
@@ -874,6 +1065,33 @@ impl<G: Game> Runner<G> {
         }
     }
 
+    /// Does the saves and loads that keys asked for since the last frame.
+    fn run_hotkeys(&mut self) {
+        for hot in std::mem::take(&mut self.hot) {
+            // The result is the notice that the views can show; a failed one changes nothing else.
+            let _ = match hot {
+                Hot::Save(slot) => self.views.save_game(&slot, "").map(drop),
+                Hot::Load(slot) => self.views.load_game(&slot).map(drop),
+            };
+        }
+    }
+
+    /// A load that was accepted this frame: a new offline session replaces the old one.
+    fn apply_load(&mut self) {
+        let Some(save) = self.views.take_load() else { return };
+        let Some(parts) = &self.parts else { return };
+        match parts.bridge_from_save(&save) {
+            Ok(bridge) => {
+                self.bridge = Driver::Offline(Box::new(bridge));
+                self.epoch = None;
+                self.display.reset();
+                self.local.forget();
+                self.views.session_replaced();
+            }
+            Err(error) => self.views.report_save_failure(error),
+        }
+    }
+
     /// The size in pixels that the overlay lays its text out for: the picture of `--screenshot`,
     /// else the window.
     fn screen_size(&self) -> [f32; 2] {
@@ -887,10 +1105,13 @@ impl<G: Game> Runner<G> {
         [w as f32, h as f32]
     }
 
-    fn key(&mut self, code: KeyCode, down: bool, event_loop: &ActiveEventLoop) {
+    fn key(&mut self, code: KeyCode, down: bool, repeat: bool, event_loop: &ActiveEventLoop) {
         if code == KeyCode::Escape && down {
             event_loop.exit();
         } else {
+            if down && !repeat {
+                self.hot.extend(self.hotkeys.iter().filter(|(key, _)| *key == code).map(|(_, hot)| hot.clone()));
+            }
             self.keys.set(code, down);
         }
     }
@@ -933,7 +1154,7 @@ impl<G: Game> ApplicationHandler for Runner<G> {
             WindowEvent::Focused(false) => self.keys.release_all(),
             WindowEvent::KeyboardInput { event, .. } => {
                 if let PhysicalKey::Code(code) = event.physical_key {
-                    self.key(code, event.state == ElementState::Pressed, event_loop);
+                    self.key(code, event.state == ElementState::Pressed, event.repeat, event_loop);
                 }
             }
             WindowEvent::RedrawRequested => self.frame(event_loop),
@@ -1166,5 +1387,126 @@ mod tests {
             let from_bytes = physics().font("copy", bytes).resolve_font().unwrap().unwrap();
             assert_eq!(font.advance('가', 20.0), from_bytes.advance('가', 20.0));
         }
+    }
+
+    /// A 16-bit mono WAV file of `samples` at 22050 Hz.
+    fn wav_bytes(samples: &[i16]) -> Vec<u8> {
+        let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+        let mut out = b"RIFF".to_vec();
+        out.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"WAVEfmt ");
+        out.extend_from_slice(&16u32.to_le_bytes());
+        for field in [1u16, 1] {
+            out.extend_from_slice(&field.to_le_bytes());
+        }
+        out.extend_from_slice(&22_050u32.to_le_bytes());
+        out.extend_from_slice(&44_100u32.to_le_bytes());
+        for field in [2u16, 16] {
+            out.extend_from_slice(&field.to_le_bytes());
+        }
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&data);
+        out
+    }
+
+    #[test]
+    fn wav_sounds_are_read_when_the_run_starts_and_a_bad_one_stops_it_with_its_name() {
+        let dir = std::env::temp_dir().join(format!("orr_app_wav_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let good = dir.join("pickup.wav");
+        std::fs::write(&good, wav_bytes(&[0, 8000, -8000, 0])).unwrap();
+        let bad = dir.join("bad.wav");
+        std::fs::write(&bad, b"RIFF....nope").unwrap();
+
+        // A view asks the audio of its context which sounds exist.
+        struct Ask(Rc<Cell<[bool; 3]>>);
+        impl crate::SceneView<PhysGame> for Ask {
+            fn on_update(&mut self, ctx: &mut crate::ViewContext<'_, PhysGame>) {
+                self.0.set([ctx.audio().has_sound("pickup"), ctx.audio().has_sound("embedded"), ctx.audio().has_sound("other")]);
+            }
+        }
+        let mut app = physics().sound_file("pickup", &good).sound_wav("embedded", wav_bytes(&[1, 2, 3, 4]));
+        let heard = Rc::new(Cell::new([true; 3]));
+        app.views.scene_view(Ask(heard.clone()));
+        let mut bridge = app.build_bridge().unwrap();
+        bridge.step(1);
+        let update = bridge.poll_view();
+        app.views.dispatch(&mut bridge, &update, &[]);
+        assert_eq!(heard.get(), [false; 3], "nothing is read before the run");
+        app.resolve_sounds().unwrap();
+        let update = bridge.poll_view();
+        app.views.dispatch(&mut bridge, &update, &[]);
+        assert_eq!(heard.get(), [true, true, false], "both sounds are registered after the run reads them");
+
+        let missing = physics().sound_file("gone", dir.join("missing.wav")).resolve_sounds().unwrap_err().to_string();
+        assert!(missing.contains("gone") && missing.contains("missing.wav"), "{missing}");
+        let refused = physics().sound_file("broken", &bad).resolve_sounds().unwrap_err().to_string();
+        assert!(refused.contains("broken") && refused.contains("bad.wav") && refused.contains("WAV"), "{refused}");
+        let embedded = physics().sound_wav("junk", vec![1, 2, 3]).resolve_sounds().unwrap_err().to_string();
+        assert!(embedded.contains("junk") && embedded.contains("embedded bytes"), "{embedded}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_load_starts_a_new_offline_bridge_that_has_the_saved_checksum_and_the_same_future() {
+        let dir = std::env::temp_dir().join(format!("orr_app_load_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let bot = |slot: PlayerSlot, tick: u64| {
+            assert_eq!(slot, PlayerSlot(1));
+            PhysInput::new(1, 0, 0, tick % 2 == 0)
+        };
+
+        // The straight run: 60 ticks.
+        let mut straight = physics().bot(bot).build_bridge().unwrap();
+        straight.step(60);
+        let straight_sum = straight.snapshot().unwrap().predicted().checksum();
+
+        // The run that saves at tick 30 and goes on from the load. The new bridge must not announce the players again.
+        let mut app = physics().bot(bot);
+        let mut bridge = app.build_bridge().unwrap();
+        let parts = app.parts.take().expect("an offline bridge leaves its parts");
+        bridge.step(30);
+        let mut views = Views::<PhysGame>::new();
+        views.enable_saves(SaveStore::at(&dir, "physics", 1).unwrap(), parts.players, parts.tick_rate);
+        let update = bridge.poll_view();
+        views.dispatch(&mut bridge, &update, &[]);
+        let saved = views.save_game("quick", "tick 30").unwrap();
+        assert_eq!(saved.tick, 30);
+        bridge.step(10); // the old run moves on; the load must not see it
+
+        let loaded = views.load_game("quick").unwrap();
+        assert_eq!(loaded.checksum, saved.checksum);
+        let save = views.take_load().expect("an accepted load");
+        let mut restarted = parts.bridge_from_save(&save).unwrap();
+        let first = restarted.poll_view().snapshot.expect("a snapshot at once");
+        assert_eq!((first.tick(), first.predicted().checksum()), (30, saved.checksum), "the checksum after the load is the saved one");
+        restarted.step(30);
+        assert_eq!(restarted.snapshot().unwrap().tick(), 60);
+        assert_eq!(restarted.snapshot().unwrap().predicted().checksum(), straight_sum, "30 ticks, a save, a load and 30 ticks are 60 ticks");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_load_of_a_game_with_players_does_not_announce_them_again() {
+        let dir = std::env::temp_dir().join(format!("orr_app_load_players_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut app = App::<Roster>::new().players(3).local_players(2).player_data(Profile { color: 5, _pad: 0 });
+        let mut bridge = app.build_bridge().unwrap();
+        let parts = app.parts.take().unwrap();
+        bridge.step(5);
+        let mut views = Views::<Roster>::new();
+        views.enable_saves(SaveStore::at(&dir, "roster", 1).unwrap(), parts.players, parts.tick_rate);
+        let update = bridge.poll_view();
+        views.dispatch(&mut bridge, &update, &[]);
+        views.save_game("p", "").unwrap();
+        views.load_game("p").unwrap();
+        let mut restarted = parts.bridge_from_save(&views.take_load().unwrap()).unwrap();
+        restarted.step(5);
+        let snapshot = restarted.snapshot().unwrap();
+        let mut avatars: Vec<(u32, u32)> = snapshot.predicted().dense::<Avatar>().1.iter().map(|a| (a.slot, a.color)).collect();
+        avatars.sort_unstable();
+        assert_eq!(avatars, [(0, 5), (1, 5), (2, 0)], "three avatars, not six");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

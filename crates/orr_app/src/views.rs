@@ -16,9 +16,10 @@ use orr_sim::Game;
 use orr_audio::Clip;
 use orr_view::{RenderItem, RenderItem3, Transform2, Transform3};
 
-use crate::audio::{Audio, SoundOut};
+use crate::audio::{Audio, SoundHandle, SoundOut};
 use crate::font::FontHandle;
 use crate::overlay::Overlay;
+use crate::save::{LoadedSave, SaveDesk, SaveEntry, SaveError, SaveInfo, SaveNotice, SaveStore};
 
 /// What happened to an event, as the scene view sees it. Same meaning as
 /// `orr_session::EventStatus`, without the payload (the payload is a separate argument).
@@ -42,6 +43,7 @@ pub struct ViewContext<'a, G: Game> {
     bridge: &'a mut dyn Bridge<G>,
     overlay: &'a mut Overlay,
     audio: &'a mut Audio,
+    saves: &'a mut SaveDesk,
 }
 
 impl<'a, G: Game> ViewContext<'a, G> {
@@ -100,6 +102,41 @@ impl<'a, G: Game> ViewContext<'a, G> {
     /// Sends a one-off command to the simulation (same as [`Bridge::send_command`]).
     pub fn send_command(&mut self, command: G::Command) -> Result<(), BridgeError> {
         self.bridge.send_command(command)
+    }
+
+    /// Saves the newest verified frame into the slot `slot` (1 to 32 letters, digits, `-`, `_`), with
+    /// a short `label` for a slot list. An older save of the slot is replaced as a whole or not at all.
+    /// Needs [`crate::App::saves`] and an offline run. The result also becomes [`ViewContext::save_notice`].
+    pub fn save_game(&mut self, slot: &str, label: &str) -> Result<SaveInfo, SaveError> {
+        self.saves.save(self.snapshot.verified(), slot, label)
+    }
+
+    /// Asks to continue from the save in `slot`. The file is read and checked completely first: when
+    /// it is damaged, of another game or version, or does not fit this run, this returns the error and
+    /// the run goes on untouched. Otherwise the run starts a new offline session from the saved frame
+    /// when the current frame ends: the scene views get `on_resync` and the events of the old session
+    /// are forgotten.
+    pub fn load_game(&mut self, slot: &str) -> Result<SaveInfo, SaveError> {
+        self.saves.load::<G>(slot)
+    }
+
+    /// The slots of the save folder in name order.
+    pub fn list_saves(&self) -> Result<Vec<SaveEntry>, SaveError> {
+        self.saves.list()
+    }
+
+    pub fn delete_save(&mut self, slot: &str) -> Result<(), SaveError> {
+        self.saves.delete(slot)
+    }
+
+    /// Whether this run can save: [`crate::App::saves`] was called and the run is offline.
+    pub fn saves_enabled(&self) -> bool {
+        self.saves.enabled()
+    }
+
+    /// What the last save, load or checkpoint did, for 2.5 seconds. Show it in the words of your game.
+    pub fn save_notice(&self) -> Option<&SaveNotice> {
+        self.saves.notice()
     }
 }
 
@@ -278,6 +315,106 @@ pub struct Views<G: Game> {
     /// What the views drew in the last frame of view calls.
     overlay: Overlay,
     audio: Audio,
+    saves: SaveDesk,
+    /// `session_replaced` was called: the next frame of view calls starts with a resync.
+    replaced: bool,
+    sounds: EventSounds<G>,
+    checkpoints: Vec<Checkpoint<G>>,
+}
+
+type EventName<G> = Box<dyn Fn(&<G as Game>::Event) -> Option<String>>;
+
+/// The most events whose sound is remembered (so that a late `Verified` does not play it again).
+const SOUND_HISTORY: usize = 512;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Heard {
+    Predicted,
+    Verified,
+    Canceled,
+}
+
+/// The sounds that events start (see [`Views::on_event_sound`]).
+struct EventSounds<G: Game> {
+    names: Vec<EventName<G>>,
+    /// What the sound of each event key did: starts once, stops when canceled.
+    heard: BTreeMap<EventKey, Heard>,
+    /// The sounds of predicted events that are not verified yet, to stop them when a rollback cancels them.
+    live: BTreeMap<EventKey, Vec<SoundHandle>>,
+}
+
+impl<G: Game> EventSounds<G> {
+    fn new() -> Self {
+        Self { names: Vec::new(), heard: BTreeMap::new(), live: BTreeMap::new() }
+    }
+
+    fn remember(&mut self, key: EventKey, state: Heard) {
+        self.heard.insert(key, state);
+        while self.heard.len() > SOUND_HISTORY {
+            if let Some((oldest, _)) = self.heard.pop_first() {
+                self.live.remove(&oldest);
+            }
+        }
+    }
+
+    /// One event notice of the bridge. `Predicted` starts the sound, `Verified` keeps it (and starts it when
+    /// there was no `Predicted`, as offline), `Canceled` stops it. A key never starts two sounds, except
+    /// that a canceled event may be replaced by a new one with the same key.
+    fn status(&mut self, audio: &mut Audio, key: EventKey, status: &EventStatus<G::Event>) {
+        if self.names.is_empty() {
+            return;
+        }
+        let seen = self.heard.get(&key).copied();
+        match status {
+            EventStatus::Canceled => {
+                if matches!(seen, Some(Heard::Verified | Heard::Canceled)) {
+                    return;
+                }
+                for handle in self.live.remove(&key).unwrap_or_default() {
+                    audio.stop(handle);
+                }
+                self.remember(key, Heard::Canceled);
+            }
+            EventStatus::Predicted(payload) | EventStatus::Verified(payload) => {
+                let verified = matches!(status, EventStatus::Verified(_));
+                match (seen, verified) {
+                    (Some(Heard::Predicted), true) => {
+                        // The guess came true: its sound goes on, a second one does not start.
+                        self.heard.insert(key, Heard::Verified);
+                        self.live.remove(&key);
+                        return;
+                    }
+                    (Some(Heard::Predicted | Heard::Verified), _) | (Some(Heard::Canceled), true) => return,
+                    _ => {}
+                }
+                self.remember(key, if verified { Heard::Verified } else { Heard::Predicted });
+                let handles: Vec<SoundHandle> = self.names.iter().filter_map(|name| name(payload)).filter_map(|name| audio.play_named(&name)).collect();
+                if !verified && !handles.is_empty() {
+                    self.live.insert(key, handles);
+                }
+            }
+        }
+    }
+
+    /// The events before a resync are lost: their sounds stop, and their keys may start sounds again.
+    fn resynced(&mut self, audio: &mut Audio) {
+        for handle in std::mem::take(&mut self.live).into_values().flatten() {
+            audio.stop(handle);
+        }
+        self.heard.retain(|_, state| *state != Heard::Predicted);
+    }
+
+    /// A new session starts: all sounds of the old one stop and nothing is remembered.
+    fn cleared(&mut self, audio: &mut Audio) {
+        self.resynced(audio);
+        self.heard.clear();
+    }
+}
+
+/// A save that a verified event asks for (see [`Views::checkpoint_on`]).
+struct Checkpoint<G: Game> {
+    slot: String,
+    label: EventName<G>,
 }
 
 impl<G: Game> Default for Views<G> {
@@ -288,7 +425,7 @@ impl<G: Game> Default for Views<G> {
 
 impl<G: Game> Views<G> {
     pub fn new() -> Self {
-        Self { layers: Vec::new(), scenes: Vec::new(), started: false, snapshot: None, waiting: Vec::new(), announced: BTreeMap::new(), announced_signals: BTreeMap::new(), overlay: Overlay::default(), audio: Audio::default() }
+        Self { layers: Vec::new(), scenes: Vec::new(), started: false, snapshot: None, waiting: Vec::new(), announced: BTreeMap::new(), announced_signals: BTreeMap::new(), overlay: Overlay::default(), audio: Audio::default(), saves: SaveDesk::default(), replaced: false, sounds: EventSounds::new(), checkpoints: Vec::new() }
     }
 
     /// One view (made by `factory`) for every entity that has component `C`.
@@ -329,6 +466,62 @@ impl<G: Game> Views<G> {
         self.audio.set_out(Box::new(out));
     }
 
+    /// Plays the sound `name` (see [`Views::sound`]) for every event of which `name_of` says a name,
+    /// from the one place that knows rollbacks. A `Predicted` event starts it at once. A `Canceled`
+    /// event stops it. A `Verified` event keeps the sound of its `Predicted` notice and starts none
+    /// of its own, and one that was never predicted (offline) starts it. An event key never starts
+    /// two sounds, so a rollback that keeps an event does not repeat its sound. A resync stops the sounds
+    /// that were still unconfirmed. Several bindings may exist: each can start a sound.
+    pub fn on_event_sound<S: Into<String>>(&mut self, name_of: impl Fn(&G::Event) -> Option<S> + 'static) {
+        self.sounds.names.push(Box::new(move |event| name_of(event).map(Into::into)));
+    }
+
+    /// Saves to `slot` with the label `label_of` says, whenever a verified event gets `Some`. Needs
+    /// [`Views::enable_saves`]. The save holds the newest verified frame at that moment, a few ticks
+    /// after the event at most.
+    pub fn checkpoint_on(&mut self, slot: &str, label_of: impl Fn(&G::Event) -> Option<String> + 'static) {
+        self.checkpoints.push(Checkpoint { slot: slot.to_string(), label: Box::new(label_of) });
+    }
+
+    /// Gives the run save slots in `store`. A load must match `players` and `tick_rate`. [`crate::App`]
+    /// does this for offline runs only: a networked run does not save or load.
+    pub fn enable_saves(&mut self, store: SaveStore, players: u8, tick_rate: u32) {
+        self.saves.enable(store, players, tick_rate);
+    }
+
+    /// Saves the newest verified frame that [`Views::dispatch`] saw (see [`ViewContext::save_game`]).
+    pub fn save_game(&mut self, slot: &str, label: &str) -> Result<SaveInfo, SaveError> {
+        let frame = self.snapshot.as_ref().and_then(Snapshot::verified);
+        self.saves.save(frame, slot, label)
+    }
+
+    /// Reads and checks the save in `slot` (see [`ViewContext::load_game`]).
+    pub fn load_game(&mut self, slot: &str) -> Result<SaveInfo, SaveError> {
+        self.saves.load::<G>(slot)
+    }
+
+    /// The load that was accepted and waits for the end of the frame. The window loop (or a test) takes it
+    /// and starts a new session from it ([`LoadedSave::into_session`]), then calls [`Views::session_replaced`].
+    pub fn take_load(&mut self) -> Option<LoadedSave> {
+        self.saves.take_pending()
+    }
+
+    /// A load that was accepted could not start its session: the run goes on, and the notice says why.
+    pub fn report_save_failure(&mut self, error: SaveError) {
+        self.saves.fail(&error);
+    }
+
+    /// The session of the run was replaced (a load): the next frame of view calls starts with a resync, the
+    /// remembered events and their sounds are dropped, and the views see the new snapshot first.
+    pub fn session_replaced(&mut self) {
+        self.snapshot = None;
+        self.waiting.clear();
+        self.announced.clear();
+        self.announced_signals.clear();
+        self.replaced = true;
+        self.sounds.cleared(&mut self.audio);
+    }
+
     pub(crate) fn use_sound_device(&mut self) {
         self.audio.use_device();
     }
@@ -344,7 +537,7 @@ impl<G: Game> Views<G> {
 
     /// `false` when no view is registered, so the caller can skip the work of building poses.
     pub fn is_empty(&self) -> bool {
-        self.layers.is_empty() && self.scenes.is_empty()
+        self.layers.is_empty() && self.scenes.is_empty() && self.sounds.names.is_empty() && self.checkpoints.is_empty() && !self.saves.enabled()
     }
 
     /// One frame of view callbacks, in this order:
@@ -366,6 +559,7 @@ impl<G: Game> Views<G> {
 
     fn dispatch_poses(&mut self, bridge: &mut dyn Bridge<G>, update: &ViewUpdate<G::Event>, poses: Poses<'_>) {
         self.overlay.clear();
+        self.saves.tick_notice();
         if let Some(snapshot) = &update.snapshot {
             self.snapshot = Some(snapshot.clone());
         }
@@ -378,7 +572,13 @@ impl<G: Game> Views<G> {
         // The context borrows the overlay and the audio while the view calls borrow `self`, so they are moved out for the frame.
         let mut overlay = std::mem::take(&mut self.overlay);
         let mut audio = std::mem::take(&mut self.audio);
-        let mut ctx = ViewContext { snapshot: &snapshot, local: bridge.local_slots(), bridge, overlay: &mut overlay, audio: &mut audio };
+        let mut saves = std::mem::take(&mut self.saves);
+        let mut ctx = ViewContext { snapshot: &snapshot, local: bridge.local_slots(), bridge, overlay: &mut overlay, audio: &mut audio, saves: &mut saves };
+
+        if std::mem::take(&mut self.replaced) {
+            // A new session: what the views remember of the old one is void, as after a resync.
+            self.resynced(&mut ctx);
+        }
 
         if !self.started {
             self.started = true;
@@ -414,14 +614,18 @@ impl<G: Game> Views<G> {
                 },
                 BridgeEvent::Sim { key, status } => match status {
                     EventStatus::Predicted(payload) => {
+                        self.sounds.status(ctx.audio, key, &EventStatus::Predicted(payload));
                         self.announced.insert(key, payload);
                         self.event(&mut ctx, &payload, EventState::Predicted);
                     }
                     EventStatus::Verified(payload) => {
+                        self.sounds.status(ctx.audio, key, &EventStatus::Verified(payload));
                         self.announced.remove(&key);
                         self.event(&mut ctx, &payload, EventState::Verified);
+                        self.checkpoint(&mut ctx, &payload);
                     }
                     EventStatus::Canceled => {
+                        self.sounds.status(ctx.audio, key, &EventStatus::Canceled);
                         // Nothing to cancel when the view never saw the event (it was forgotten at a resync).
                         if let Some(payload) = self.announced.remove(&key) {
                             self.event(&mut ctx, &payload, EventState::Canceled);
@@ -446,6 +650,15 @@ impl<G: Game> Views<G> {
         drop(ctx);
         self.overlay = overlay;
         self.audio = audio;
+        self.saves = saves;
+    }
+
+    fn checkpoint(&mut self, ctx: &mut ViewContext<'_, G>, payload: &G::Event) {
+        for checkpoint in &self.checkpoints {
+            if let Some(label) = (checkpoint.label)(payload) {
+                let _ = ctx.save_game(&checkpoint.slot, &label);
+            }
+        }
     }
 
     fn event(&mut self, ctx: &mut ViewContext<'_, G>, payload: &G::Event, state: EventState) {
@@ -464,6 +677,7 @@ impl<G: Game> Views<G> {
     fn resynced(&mut self, ctx: &mut ViewContext<'_, G>) {
         self.announced.clear();
         self.announced_signals.clear();
+        self.sounds.resynced(ctx.audio);
         for scene in &mut self.scenes {
             scene.on_resync(ctx);
         }

@@ -120,6 +120,9 @@ pub struct Clip {
     data: StaticSoundData,
     emitter: Option<Emitter>,
     send: Option<f32>,
+    /// Linear amplitude of this clip, 0..=1 (1: as recorded).
+    gain: f32,
+    looped: bool,
 }
 impl Clip {
     /// This clip played from `position`, heard through [`EventAudio::set_listener`]:
@@ -143,6 +146,20 @@ impl Clip {
     /// zone at the listener says, and any other clip not at all.
     pub fn reverb(mut self, send: f32) -> Self {
         self.send = Some(if send.is_finite() { send.clamp(0.0, 1.0) } else { 0.0 });
+        self
+    }
+
+    /// This clip played at the linear amplitude `gain` (1 as recorded, 0 silent). A value
+    /// outside 0..=1 is clamped and a value that is not a number is read as 0.
+    pub fn volume(mut self, gain: f32) -> Self {
+        self.gain = if gain.is_finite() { gain.clamp(0.0, 1.0) } else { 0.0 };
+        self
+    }
+
+    /// This clip played in a loop, from the first frame to the last and again, until it is
+    /// stopped ([`EventAudio::stop`]). A looped sound never ends by itself.
+    pub fn looped(mut self) -> Self {
+        self.looped = true;
         self
     }
 
@@ -183,6 +200,8 @@ impl Clip {
             },
             emitter: None,
             send: None,
+            gain: 1.0,
+            looped: false,
         })
     }
 }
@@ -256,6 +275,8 @@ struct Voice {
     track: Option<TrackHandle>,
     /// The send the clip asked for. Without one a placed voice follows the zones.
     send: Option<f32>,
+    /// The amplitude of the clip (and of [`EventAudio::set_volume`]) in decibels, added to what a placed voice hears.
+    gain_db: f32,
 }
 
 /// The reverb send track and the parameters its effect reads.
@@ -302,7 +323,7 @@ pub type NativeAudio = EventAudio<kira::backend::cpal::CpalBackend>;
 fn follow(voice: &mut Voice, emitter: &Emitter, listener: &Listener, doppler: f32) {
     let tween = Tween { duration: Duration::from_millis(20), ..Tween::default() };
     let (volume, pan) = emitter.heard_by(listener);
-    voice.handle.set_volume(Decibels(volume), tween);
+    voice.handle.set_volume(Decibels(volume + voice.gain_db), tween);
     voice.handle.set_panning(Panning(pan), tween);
     voice.handle.set_playback_rate(PlaybackRate(f64::from(emitter.doppler(listener, doppler))), tween);
 }
@@ -337,6 +358,15 @@ fn send_decibels(send: f32) -> Decibels {
         Decibels::SILENCE
     } else {
         Decibels((20.0 * send.min(1.0).log10()).max(Decibels::SILENCE.0))
+    }
+}
+
+/// Decibels of the linear amplitude `gain` (0..=1), silent at 0.
+fn gain_decibels(gain: f32) -> f32 {
+    if gain <= 0.0 {
+        kira::Decibels::SILENCE.0
+    } else {
+        (20.0 * gain.min(1.0).log10()).max(kira::Decibels::SILENCE.0)
     }
 }
 
@@ -805,6 +835,20 @@ impl<B: Backend> EventAudio<B> {
         }
     }
 
+    /// Sets the linear amplitude (0..=1, 1 as the clip says) of the sound that [`EventAudio::play`]
+    /// started, over 20 ms. A value outside 0..=1 is clamped and one that is not a number is read as 0.
+    /// Does nothing when the sound ended or was stopped.
+    pub fn set_volume(&mut self, id: SoundId, gain: f32) {
+        let gain = if gain.is_finite() { gain.clamp(0.0, 1.0) } else { 0.0 };
+        let (listener, gain_db) = (self.listener, gain_decibels(gain));
+        let tween = Tween { duration: Duration::from_millis(20), ..Tween::default() };
+        for voice in self.voices.iter_mut().filter(|v| v.sound == Some(id)) {
+            voice.gain_db = gain_db;
+            let heard = voice.emitter.map_or(0.0, |emitter| emitter.heard_by(&listener).0);
+            voice.handle.set_volume(Decibels(heard + gain_db), tween);
+        }
+    }
+
     /// Whether the sound that [`EventAudio::play`] started is still playing.
     pub fn is_playing(&self, id: SoundId) -> bool {
         self.voices.iter().any(|v| v.sound == Some(id) && v.handle.state() != PlaybackState::Stopped)
@@ -818,10 +862,17 @@ impl<B: Backend> EventAudio<B> {
         }
         let wants_send = clip.send.map_or(clip.emitter.is_some() && self.reverb_in_use(), |send| send > 0.0);
         let mut data = clip.data;
+        let gain_db = gain_decibels(clip.gain);
+        if clip.gain < 1.0 {
+            data = data.volume(Decibels(gain_db));
+        }
+        if clip.looped {
+            data = data.loop_region(..);
+        }
         if let Some(emitter) = clip.emitter {
             let (volume, pan) = emitter.heard_by(&self.listener);
             let rate = emitter.doppler(&self.listener, self.config.doppler);
-            data = data.volume(Decibels(volume)).panning(Panning(pan)).playback_rate(PlaybackRate(f64::from(rate)));
+            data = data.volume(Decibels(volume + gain_db)).panning(Panning(pan)).playback_rate(PlaybackRate(f64::from(rate)));
         }
         let send = clip.send;
         let sub_track = wants_send.then(|| self.ensure_bus()).flatten().and_then(|bus| {
@@ -839,7 +890,7 @@ impl<B: Backend> EventAudio<B> {
         };
         match played {
             Ok((handle, track)) => {
-                self.voices.push(Voice { key, sound, handle, emitter: clip.emitter, track, send });
+                self.voices.push(Voice { key, sound, handle, emitter: clip.emitter, track, send, gain_db });
                 self.stats.started = self.stats.started.saturating_add(1);
                 true
             }

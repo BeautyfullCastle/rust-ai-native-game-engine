@@ -1,8 +1,9 @@
-//! The one sound of the tutorial: a short "ding" for a picked star.
+//! The "ding" of a picked star, made in code, for steps 3 to 5.
 //!
-//! It is made from numbers when the program starts, so the repository has no sound file and no
-//! license to keep. A real game loads recorded sound data and makes the `Clip` from its samples
-//! the same way (`Clip::from_stereo`).
+//! It is made from numbers when the program starts, so these steps need no sound file. Step 2 plays
+//! the same ding from a WAV file instead (`assets/pickup.wav`, made by `assets/make_pickup_wav.py`)
+//! and only borrows the name `PICKUP` from here. A real game loads recorded sound data from a file
+//! (`App::sound_file`) or makes the `Clip` from samples (`Clip::from_stereo`).
 
 use orr_app::Clip;
 

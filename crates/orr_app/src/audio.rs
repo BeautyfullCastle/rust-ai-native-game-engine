@@ -24,6 +24,14 @@ pub trait SoundOut {
     /// Fades the sound out. Does nothing when it already ended.
     fn stop(&mut self, handle: SoundHandle);
     fn is_playing(&self, handle: SoundHandle) -> bool;
+    /// Sets the linear volume (0..=1) of a playing sound. Does nothing by default.
+    fn set_volume(&mut self, handle: SoundHandle, volume: f32) {
+        let _ = (handle, volume);
+    }
+    /// Sets the linear volume (0..=1) of everything this output plays. Does nothing by default.
+    fn set_master_volume(&mut self, volume: f32) {
+        let _ = volume;
+    }
     /// Where placed clips ([`Clip::at`]) are heard from.
     fn set_listener(&mut self, listener: Listener);
     /// A device error since the last call, as text. After it the app drops this output.
@@ -42,6 +50,12 @@ impl SoundOut for OfflineAudio {
     fn is_playing(&self, handle: SoundHandle) -> bool {
         OfflineAudio::is_playing(self, handle)
     }
+    fn set_volume(&mut self, handle: SoundHandle, volume: f32) {
+        OfflineAudio::set_volume(self, handle, volume);
+    }
+    fn set_master_volume(&mut self, volume: f32) {
+        let _ = OfflineAudio::set_gain(self, volume.clamp(0.0, 1.0));
+    }
     fn set_listener(&mut self, listener: Listener) {
         OfflineAudio::set_listener(self, listener);
     }
@@ -57,6 +71,12 @@ impl SoundOut for orr_audio::NativeAudio {
     }
     fn is_playing(&self, handle: SoundHandle) -> bool {
         orr_audio::NativeAudio::is_playing(self, handle)
+    }
+    fn set_volume(&mut self, handle: SoundHandle, volume: f32) {
+        orr_audio::NativeAudio::set_volume(self, handle, volume);
+    }
+    fn set_master_volume(&mut self, volume: f32) {
+        let _ = orr_audio::NativeAudio::set_gain(self, volume.clamp(0.0, 1.0));
     }
     fn set_listener(&mut self, listener: Listener) {
         orr_audio::NativeAudio::set_listener(self, listener);
@@ -76,6 +96,12 @@ impl<S: SoundOut> SoundOut for Rc<RefCell<S>> {
     }
     fn is_playing(&self, handle: SoundHandle) -> bool {
         self.borrow().is_playing(handle)
+    }
+    fn set_volume(&mut self, handle: SoundHandle, volume: f32) {
+        self.borrow_mut().set_volume(handle, volume);
+    }
+    fn set_master_volume(&mut self, volume: f32) {
+        self.borrow_mut().set_master_volume(volume);
     }
     fn set_listener(&mut self, listener: Listener) {
         self.borrow_mut().set_listener(listener);
@@ -102,11 +128,13 @@ pub struct Audio {
     clips: BTreeMap<String, Clip>,
     /// The listener position that 2D and 3D runs hear placed clips from.
     listener: Listener,
+    /// The master volume (0..=1): applied to an output when it opens and when it changes.
+    master: f32,
 }
 
 impl Default for Audio {
     fn default() -> Self {
-        Self { port: Port::Silent, clips: BTreeMap::new(), listener: Listener::default() }
+        Self { port: Port::Silent, clips: BTreeMap::new(), listener: Listener::default(), master: 1.0 }
     }
 }
 
@@ -121,7 +149,10 @@ impl Audio {
         self.port = Port::Silent;
     }
 
-    pub(crate) fn set_out(&mut self, out: Box<dyn SoundOut>) {
+    pub(crate) fn set_out(&mut self, mut out: Box<dyn SoundOut>) {
+        if self.master < 1.0 {
+            out.set_master_volume(self.master);
+        }
         self.port = Port::Out(out);
     }
 
@@ -141,6 +172,9 @@ impl Audio {
             };
             if let Port::Out(out) = &mut self.port {
                 out.set_listener(self.listener);
+                if self.master < 1.0 {
+                    out.set_master_volume(self.master);
+                }
             }
         }
         match &mut self.port {
@@ -177,6 +211,42 @@ impl Audio {
     /// (listener: [`Audio::set_listener`], by default at the origin with its right side toward `+x`).
     pub fn play_at(&mut self, clip: &Clip, position: [f32; 3], near: f32, far: f32) -> Option<SoundHandle> {
         self.play(&clip.clone().at(position, near, far))
+    }
+
+    /// Plays `clip` again and again until [`Audio::stop`] (music, an engine hum).
+    pub fn play_looped(&mut self, clip: &Clip) -> Option<SoundHandle> {
+        self.play(&clip.clone().looped())
+    }
+
+    /// Plays the clip registered under `name` at the linear `volume` (0..=1, 1 as recorded), in a
+    /// loop when `looped`. `None` when there is no such clip or nothing was played.
+    pub fn play_named_with(&mut self, name: &str, volume: f32, looped: bool) -> Option<SoundHandle> {
+        let mut clip = self.clips.get(name)?.clone().volume(volume);
+        if looped {
+            clip = clip.looped();
+        }
+        self.play(&clip)
+    }
+
+    /// Sets the linear volume (0..=1) of a playing sound, over 20 ms. Does nothing when it ended.
+    pub fn set_volume(&mut self, handle: SoundHandle, volume: f32) {
+        if let Some(out) = self.out() {
+            out.set_volume(handle, volume);
+        }
+    }
+
+    /// Sets the linear volume (0..=1, default 1) of everything the run plays. It also applies to
+    /// the output that opens later. A value outside 0..=1 is clamped.
+    pub fn set_master_volume(&mut self, volume: f32) {
+        self.master = if volume.is_finite() { volume.clamp(0.0, 1.0) } else { 0.0 };
+        if let Port::Out(out) = &mut self.port {
+            out.set_master_volume(self.master);
+        }
+    }
+
+    /// The master volume that [`Audio::set_master_volume`] set.
+    pub fn master_volume(&self) -> f32 {
+        self.master
     }
 
     /// Fades the sound out. Use it when a rollback canceled the event that started it.

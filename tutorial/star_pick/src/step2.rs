@@ -1,8 +1,9 @@
 //! Step 2: playing alone. Move the square (W A S D or the arrow keys), pick up the stars.
 //!
 //! New in this step: input, systems that move and score, an event, an `EntityView` (a trail
-//! behind the player) and a `SceneView` (the score text, the pick-up ring and its sound), and
-//! the game screens: a title, a pause, a win after `WIN_STARS` stars, and a restart.
+//! behind the player) and a `SceneView` (the score text and the pick-up ring), the game screens
+//! (a title, a pause, a win after `WIN_STARS` stars, and a restart), a sound from a WAV file that
+//! the app plays for every pick-up (`on_event_sound`), and a save slot (F5 saves, F9 loads).
 //!
 //! `cargo run -p star_pick --release --bin step2`
 
@@ -13,9 +14,9 @@ use std::rc::Rc;
 use bytemuck::{Pod, Zeroable};
 use orr_app::{
     fp_to_f32, solid_quad, App, Camera, EntityView, EventState, Extracted, Extractor, FrameView, InterpMode, KeyCode, RenderItem, SceneView,
-    Shape, SoundHandle, Style, Transform2, Vec2, View2D, ViewContext,
+    Shape, Style, Transform2, Vec2, View2D, ViewContext,
 };
-use orr_app::{Anchor, Labels, Screen, Screens};
+use orr_app::{Anchor, Labels, SaveNotice, Screen, Screens};
 use orr_sim::{decode_pod, encode_pod, fn_systems, fp, ComponentRegistryBuilder, Entity, Frame, Game, PlayerSlot, SimCommand, SimContext, System, FP};
 
 use crate::sound;
@@ -178,6 +179,24 @@ fn pick_stars(ctx: &mut SimContext<StarPick>) {
     }
 }
 
+// ---- sound and saves: the app does them from these few lines ----
+
+/// The sound of a picked star: a WAV file (`assets/pickup.wav`, made by `assets/make_pickup_wav.py`) that the
+/// program carries inside itself, so the game needs no file next to it.
+pub const PICKUP_WAV: &[u8] = include_bytes!("../assets/pickup.wav");
+/// The id of the game for its save folder, and the version of its save data. Raise the version when an old
+/// save would no longer fit the game (new components, other rules): the old saves are then refused.
+pub const GAME_ID: &str = "star_pick";
+pub const SAVE_VERSION: u32 = 1;
+/// The slot that F5 writes and F9 reads.
+pub const QUICK_SLOT: &str = "quick";
+
+/// Which sound a `Picked` event makes. `App::on_event_sound` calls it for every event: it starts the sound
+/// on `Predicted` (or `Verified` offline) and stops it when a rollback cancels the event.
+pub fn pickup_sound(_event: &Picked) -> Option<&'static str> {
+    Some(sound::PICKUP)
+}
+
 // ---- view: the window reads the simulation, it never changes it ----
 
 const FIELD: [f32; 4] = [0.09, 0.10, 0.15, 1.0];
@@ -192,8 +211,6 @@ const TRAIL_DOTS: usize = 12;
 pub struct Ring {
     pub picked: Picked,
     pub start: u64,
-    /// The pick-up sound. A rollback that takes the pick-up back stops it.
-    pub sound: Option<SoundHandle>,
 }
 
 pub struct Trail {
@@ -317,28 +334,21 @@ impl SceneView<StarPick> for Juice {
                         screens.win();
                     }
                 }
+                // The sound is not made here: `App::on_event_sound(pickup_sound)` plays and stops it.
                 if !fx.rings.iter().any(|ring| ring.picked == *event) {
-                    let sound = ctx.audio().play_named(sound::PICKUP); // a short ding, at once
-                    fx.rings.push(Ring { picked: *event, start: ctx.tick(), sound });
+                    fx.rings.push(Ring { picked: *event, start: ctx.tick() });
                 }
             }
-            // Canceled: a rollback took the pick-up back. Stop the effect.
-            EventState::Canceled => {
-                for sound in fx.rings.iter().filter(|ring| ring.picked == *event).filter_map(|ring| ring.sound) {
-                    ctx.audio().stop(sound);
-                }
-                fx.rings.retain(|ring| ring.picked != *event);
-            }
+            // Canceled: a rollback took the pick-up back. Remove the ring (the app stopped the sound).
+            EventState::Canceled => fx.rings.retain(|ring| ring.picked != *event),
         }
     }
 
     /// A resync throws away the events that were predicted, and no `Canceled` comes for them.
-    /// Stop their sounds and forget their rings. The new frame brings the pick-ups again.
-    fn on_resync(&mut self, ctx: &mut ViewContext<'_, StarPick>) {
-        let mut fx = self.fx.borrow_mut();
-        for sound in fx.rings.drain(..).filter_map(|ring| ring.sound) {
-            ctx.audio().stop(sound);
-        }
+    /// Forget their rings (the app stopped their sounds). The new frame brings the pick-ups again.
+    /// A load of a save replaces the session and calls this too.
+    fn on_resync(&mut self, _ctx: &mut ViewContext<'_, StarPick>) {
+        self.fx.borrow_mut().rings.clear();
     }
 
     fn on_update(&mut self, ctx: &mut ViewContext<'_, StarPick>) {
@@ -353,6 +363,15 @@ impl SceneView<StarPick> for Juice {
         if fx.screens.as_ref().is_none_or(|screens| screens.screen() != Screen::Title) {
             ctx.draw().text([16.0, 14.0], 21.0, STAR, &format!("점수 {}", fx.score));
             ctx.draw().text_anchored(Anchor::Top, [0.0, 14.0], 21.0, [1.0, 1.0, 1.0, 0.85], &format!("별 {WIN_STARS}개를 모으세요"));
+        }
+        // What F5 and F9 did, for 2.5 seconds, at the bottom of the window.
+        if let Some(notice) = ctx.save_notice() {
+            let (text, color) = match notice {
+                SaveNotice::Saved { .. } => ("저장했습니다".to_string(), [0.6, 1.0, 0.6, 1.0]),
+                SaveNotice::Loaded { .. } => ("불러왔습니다".to_string(), [0.6, 1.0, 0.6, 1.0]),
+                SaveNotice::Failed(why) => (format!("저장이나 불러오기에 실패했습니다: {why}"), [1.0, 0.55, 0.45, 1.0]),
+            };
+            ctx.draw().text_anchored(Anchor::Bottom, [0.0, -18.0], 19.0, color, &text);
         }
         if let Some(screens) = &fx.screens {
             // A new round (the start, a restart) is a command to the game.
@@ -398,6 +417,10 @@ pub fn app() -> App<StarPick> {
         .view(Look { fx: fx.clone() })
         .entity_view::<Score>(move || TrailView { fx: for_trails.clone() })
         .scene_view(Juice { fx })
-        .sound(sound::PICKUP, sound::pickup())
+        .sound_wav(sound::PICKUP, PICKUP_WAV)
+        .on_event_sound(pickup_sound)
+        .saves(GAME_ID, SAVE_VERSION)
+        .save_key(KeyCode::F5, QUICK_SLOT)
+        .load_key(KeyCode::F9, QUICK_SLOT)
         .title("Star Pick 2")
 }

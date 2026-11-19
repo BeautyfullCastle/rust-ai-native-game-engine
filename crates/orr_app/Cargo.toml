@@ -29,6 +29,9 @@ orr_session = { path = "../orr_session" }
 orr_proto = { path = "../orr_proto" }
 orr_sim = { path = "../orr_sim" }
 orr_ecs = { path = "../orr_ecs" }
+# Save slots: the folder checks of the authoring tools and the checksum of a save file.
+orr_fsid = { path = "../orr_fsid" }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 orr_gfx = { path = "../orr_gfx" }
 orr_gfx_view = { path = "../orr_gfx_view" }
 orr_physics3d = { path = "../orr_physics3d" }

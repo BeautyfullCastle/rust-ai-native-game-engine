@@ -1,0 +1,7 @@
+pickup.wav
+
+Made by make_pickup_wav.py in this folder from sine waves and arithmetic only. No recording, sample
+library or third-party material is in it.
+
+License: CC0 1.0 Universal (public domain dedication), https://creativecommons.org/publicdomain/zero/1.0/
+You may copy, change and ship it in any game without credit.
