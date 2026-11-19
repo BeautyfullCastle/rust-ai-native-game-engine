@@ -324,7 +324,7 @@ fn a_failed_write_keeps_the_old_save_loadable() {
 }
 
 #[test]
-fn a_run_without_save_slots_says_so_and_a_game_without_events_still_can_ask() {
+fn a_run_without_save_slots_refuses_with_a_reason_that_names_the_networked_case() {
     let mut views = Views::<Counter>::new();
     let mut bridge = new_run();
     play(&mut bridge, &mut views, 3);

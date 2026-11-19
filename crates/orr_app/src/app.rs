@@ -1419,10 +1419,25 @@ mod tests {
         let bad = dir.join("bad.wav");
         std::fs::write(&bad, b"RIFF....nope").unwrap();
 
+        // A view asks the audio of its context which sounds exist.
+        struct Ask(Rc<Cell<[bool; 3]>>);
+        impl crate::SceneView<PhysGame> for Ask {
+            fn on_update(&mut self, ctx: &mut crate::ViewContext<'_, PhysGame>) {
+                self.0.set([ctx.audio().has_sound("pickup"), ctx.audio().has_sound("embedded"), ctx.audio().has_sound("other")]);
+            }
+        }
         let mut app = physics().sound_file("pickup", &good).sound_wav("embedded", wav_bytes(&[1, 2, 3, 4]));
-        assert!(!app.views.has_sound("pickup"), "nothing is read before the run");
+        let heard = Rc::new(Cell::new([true; 3]));
+        app.views.scene_view(Ask(heard.clone()));
+        let mut bridge = app.build_bridge().unwrap();
+        bridge.step(1);
+        let update = bridge.poll_view();
+        app.views.dispatch(&mut bridge, &update, &[]);
+        assert_eq!(heard.get(), [false; 3], "nothing is read before the run");
         app.resolve_sounds().unwrap();
-        assert!(app.views.has_sound("pickup") && app.views.has_sound("embedded"));
+        let update = bridge.poll_view();
+        app.views.dispatch(&mut bridge, &update, &[]);
+        assert_eq!(heard.get(), [true, true, false], "both sounds are registered after the run reads them");
 
         let missing = physics().sound_file("gone", dir.join("missing.wav")).resolve_sounds().unwrap_err().to_string();
         assert!(missing.contains("gone") && missing.contains("missing.wav"), "{missing}");

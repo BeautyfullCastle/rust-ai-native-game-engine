@@ -336,8 +336,10 @@ fn a_binding_that_names_no_sound_or_an_unknown_one_plays_nothing_and_a_run_witho
 
 // ---- the controls of ctx.audio() ----
 
+type ProbeFn = Box<dyn FnMut(&mut ViewContext<'_, Burst>)>;
+
 struct Probe {
-    run: Box<dyn FnMut(&mut ViewContext<'_, Burst>)>,
+    run: ProbeFn,
 }
 
 impl SceneView<Burst> for Probe {

@@ -459,12 +459,6 @@ impl<G: Game> Views<G> {
         self.audio.add(name, clip);
     }
 
-    /// Whether a clip is registered under `name` (by [`Views::sound`], [`crate::App::sound`],
-    /// [`crate::App::sound_file`] or [`crate::App::sound_wav`]).
-    pub fn has_sound(&self, name: &str) -> bool {
-        self.audio.has_sound(name)
-    }
-
     /// The output that the sounds of the views play on. Without one (the default for a window-free
     /// `Views`) the views play nothing. [`crate::App`] makes the run open the system device
     /// when the first sound plays (and none for a screenshot).

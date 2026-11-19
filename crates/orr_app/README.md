@@ -184,7 +184,8 @@ App::<StarPick>::new()
 - **장치는 앱이 연다.** 첫 `play`에서 시스템 오디오 장치(`orr_audio`의 `NativeAudio`, 기능 `audio-native`, 기본으로 켜져 있다)를 연다. 장치가 없거나 열지 못하면 소리 없이 계속 돌고 stderr에 한 번 알린다. 도중에 장치 오류가 나면 매 프레임 확인해서 출력을 버리고 한 번 알린다. `--screenshot` 실행은 장치를 열지 않는다. `audio-native`를 끄고 빌드하면 소리는 항상 조용하다.
 - **소리는 시뮬레이션에 닿지 않는다.** 게임 규칙, 체크섬, 리플레이와 상관없다. 소리 클립은 `Clip`(`orr_audio`, 다시 내보냄)이고 한 번 만든 것을 여러 번 켠다(데이터는 공유된다). 10초까지다.
 - **창 없이도 쓴다.** `Views::overlay()`로 마지막 `dispatch`가 그린 것을 읽는다. `Views::set_sound_out(출력)`에 `SoundOut`을 주면 그 출력으로 소리를 낸다. `Rc<RefCell<OfflineAudio>>`를 주면 소리가 PCM으로 렌더링되어 테스트가 들을 수 있다(`OfflineAudio::render`). 테스트는 `tests/draw_audio.rs`(그리기 목록이 채워지고 다음 프레임에 비워진다. 소리가 나고 `stop` 뒤에 조용하다. 롤백이 낸 `Canceled`가 소리를 멈춘다. 출력이 없으면 아무 일도 없다)와 `src/overlay.rs`의 단위 테스트(글꼴 폭, 글자 사각형, 상자 모서리)다.
-- **튜토리얼.** [2~5단계](../../docs/tutorial/step2-solo.md)가 점수와 안내를 한글로 그리고 생성한 "딩" 소리(`tutorial/star_pick/src/sound.rs`)를 낸다.
+- **음량, 반복, WAV, 이벤트 소리, 저장.** `Audio`의 `play_named_with`, `play_looped`, `set_volume`, `set_master_volume`, `App::sound_file`/`sound_wav`(WAV 읽기), `App::on_event_sound`(롤백과 리싱크를 한 곳에서 처리하는 이벤트 소리), 저장 슬롯과 체크포인트(`App::saves`, `save_key`, `load_key`, `checkpoint_on`, `ctx.save_game`/`load_game`)는 [docs/app-saves-audio.md](../../docs/app-saves-audio.md)에 있다.
+- **튜토리얼.** [2~5단계](../../docs/tutorial/step2-solo.md)가 점수와 안내를 한글로 그린다. 2단계는 WAV 파일 소리와 이벤트 소리와 저장(F5, F9)을 쓰고, 3~5단계는 생성한 "딩" 소리(`tutorial/star_pick/src/sound.rs`)를 뷰 안에서 켜고 끈다.
 
 ## 글꼴과 글자 상자
 
@@ -315,5 +316,5 @@ cargo run -p orr_app --release --example roster -- --connect 127.0.0.1:7777
 - **4b단계에서 뺀 것:** 플레이어별 시작 데이터(`Added`의 `data`는 서버로 실행해도 비어 있다. `Hello`에 시작 데이터가 없다. 8.3), 서버 쪽 신호 기록은 방이 사는 동안만 있다(서버를 다시 띄우면 사라진다), 시작 때의 `Added`(틱 1)는 `signal_lead_ticks` 여유가 없다, 권한 있는 서버 방은 신호가 없다, `.scene(..)`과 `.bot(..)`은 서버로 실행할 때 쓰지 않는다, `ws://`만 지원한다(QUIC·인증서 옵션 없음), 원격 뷰 스트림(`orr_viewstream`)은 신호를 아직 내보내지 않는다. 신호를 취소하는 API가 없어서 `Canceled`는 합성 업데이트 테스트로만 확인했다.
 - **6a단계에서 뺀 것:** `Material`의 표면 셰이더(`Transform3`과 `Material`이 있는 엔티티는 단색 상자로 그린다), `SceneLook`의 후처리(블룸 등)와 하늘, 물, 지형, 흩뿌리기 그리기(조명과 데칼만 쓴다), 3D 마우스 입력(`InputContext`는 키만 읽는다. 예제 `yard3d`는 화면 가운데로 쏜다), 3D 뷰의 `ViewConfig` 바꾸기(기본값). 화면 글자 겹치기는 "글자, 선, 소리"에서 더했다.
 - **6b단계에서 뺀 것:** 뷰 에셋의 `tint`(색 입히기), `sound`, `entity_view`는 읽기만 하고 쓰지 않는다. `App::entity_view_for("종류", factory)`(뷰 에셋의 `entity_view` 이름으로 엔티티 뷰를 붙이기)는 만들지 않았다. 지금은 `entity_view::<ViewRef>(..)`처럼 컴포넌트로 붙인다. 모델이 있는 그림은 MSAA와 톤 매핑이 없다(위). 에디터 뷰포트는 `ViewRef` 모델을 그린다. 다만 `Yard3D` 같은 기존 에디터 게임은 `ViewRef`를 등록하지 않아서(등록하면 그 게임의 프레임 배치와 골든 체크섬이 바뀐다) 에디터 전용 게임 `ViewYard3D`로 연다(`orr_editor --game view-yard3d --scene scenes/view_yard3d/view_yard3d.scene.yaml`, `docs/editor-view-ref.md`). 서버로 실행할 때 `Added.data`는 아직 비어 있어서(4b) 아바타는 슬롯 번호로 정한다. 애니메이션 모델(`SkinnedModelRenderer`)은 쓰지 않는다.
-- **글자, 선, 소리에서 뺀 것:** 복합 문자 모양 잡기와 IME 입력(위 "글꼴과 글자 상자"의 "뺀 것"), WAV 같은 소리 파일 읽기(`Clip::from_stereo`로 샘플을 직접 만든다), 소리의 음량·반복·속도 조절, 서버로 실행하는 창끼리의 소리 맞춤(각 창이 자기 이벤트로 낸다), 웹과 모바일의 소리(`audio-native`는 CPAL 장치다).
+- **글자, 선, 소리에서 뺀 것:** 복합 문자 모양 잡기와 IME 입력(위 "글꼴과 글자 상자"의 "뺀 것"), 소리의 속도(재생 속도) 조절, WAV 말고 다른 소리 파일 형식(ogg, mp3), 서버로 실행하는 창끼리의 소리 맞춤(각 창이 자기 이벤트로 낸다), 웹과 모바일의 소리(`audio-native`는 CPAL 장치다).
 - **이후 단계:** 웹·모바일 루프.
