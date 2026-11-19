@@ -157,6 +157,12 @@ impl Dock {
         }
     }
 
+    /// Shows `panel` and brings its tab to the front. Other panels keep their place.
+    pub fn reveal(&mut self, panel: Panel) {
+        self.set_visible(panel, true);
+        self.tree.make_active(|_, tile| matches!(tile, egui_tiles::Tile::Pane(shown) if *shown == panel));
+    }
+
     /// Moves `panel` to a window edge.
     pub fn dock(&mut self, panel: Panel, edge: Edge) {
         self.edit(|layout| layout.dock(panel, edge));

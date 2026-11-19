@@ -417,3 +417,37 @@ fn the_move_panel_menu_docks_and_tabs_without_the_mouse() {
     assert_eq!(h.query_all_by_label("Timeline & tools").count(), 1);
     assert_eq!(h.query_all_by_label("Hierarchy").count(), 1);
 }
+
+/// A line that only the unsaved work details show.
+const DETAILS: &str = "This list never saves, applies, discards or closes anything. Scene Save does not save independent documents.";
+
+#[test]
+fn the_unsaved_button_shows_the_details_when_the_timeline_is_hidden() {
+    let mut h = app(None);
+    open_window_menu(&mut h);
+    click_role(&mut h, Role::CheckBox, "Timeline & tools");
+    settle(&mut h);
+    assert!(!h.state().ui.dock.is_visible(Panel::Timeline));
+    assert!(!present(&h, DETAILS));
+    let inspector = h.state().ui.dock.is_visible(Panel::Inspector);
+    click(&mut h, "Unsaved: 0");
+    settle(&mut h);
+    assert!(h.state().ui.dock.is_visible(Panel::Timeline), "the Timeline is shown again");
+    assert!(present(&h, DETAILS), "the details are on the screen");
+    assert_eq!(h.state().ui.dock.is_visible(Panel::Inspector), inspector, "the other panels stay as they were");
+}
+
+#[test]
+fn the_unsaved_button_brings_a_tabbed_timeline_to_the_front() {
+    let mut h = app(None);
+    h.state_mut().ui.dock.tab_with(Panel::Timeline, Panel::Hierarchy);
+    settle(&mut h);
+    // Put the Hierarchy in front, so the Timeline tab is behind it.
+    click(&mut h, "Hierarchy");
+    settle(&mut h);
+    assert!(h.state().ui.dock.is_visible(Panel::Timeline), "the Timeline is only behind another tab");
+    assert!(!present(&h, DETAILS), "the Timeline is not on the screen");
+    click(&mut h, "Unsaved: 0");
+    settle(&mut h);
+    assert!(present(&h, DETAILS), "the details are on the screen");
+}

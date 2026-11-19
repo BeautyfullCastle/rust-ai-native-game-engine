@@ -88,6 +88,7 @@ impl EditorApp {
         {
             // Explicit navigation reveals its destination; passive close checks do not.
             self.ui.viewport_focus = false;
+            self.ui.dock.reveal(crate::layout::Panel::Timeline);
             self.ui.bottom_tab = BottomTab::UnsavedWork;
         }
     }
