@@ -15,7 +15,7 @@ use orr_app::{
     fp_to_f32, solid_quad, App, Camera, EntityView, EventState, Extracted, Extractor, FrameView, InterpMode, KeyCode, RenderItem, SceneView,
     Shape, SoundHandle, Style, Transform2, Vec2, View2D, ViewContext,
 };
-use orr_app::{Labels, Screens};
+use orr_app::{Anchor, Labels, Screen, Screens};
 use orr_sim::{decode_pod, encode_pod, fn_systems, fp, ComponentRegistryBuilder, Entity, Frame, Game, PlayerSlot, SimCommand, SimContext, System, FP};
 
 use crate::sound;
@@ -348,8 +348,12 @@ impl SceneView<StarPick> for Juice {
         if let Some(verified) = ctx.verified() {
             fx.score = verified.iter::<Score>().map(|(_, score)| score.points).sum();
         }
-        // The score as text in the top left corner (the font has capitals, digits and a few signs).
-        ctx.draw().text([16.0, 14.0], 21.0, STAR, &format!("SCORE {}", fx.score));
+        // The score in the top left corner and the goal at the top middle, but not behind the title.
+        // The overlay text is drawn with the system Korean font (or the font of `App::font`), so Hangul works.
+        if fx.screens.as_ref().is_none_or(|screens| screens.screen() != Screen::Title) {
+            ctx.draw().text([16.0, 14.0], 21.0, STAR, &format!("점수 {}", fx.score));
+            ctx.draw().text_anchored(Anchor::Top, [0.0, 14.0], 21.0, [1.0, 1.0, 1.0, 0.85], &format!("별 {WIN_STARS}개를 모으세요"));
+        }
         if let Some(screens) = &fx.screens {
             // A new round (the start, a restart) is a command to the game.
             if screens.take_restart() {
@@ -373,7 +377,15 @@ pub fn read_keys(keys: &orr_app::InputContext) -> Move {
 /// The screens of the game. Enter or Space starts, P pauses, R restarts. While a screen is
 /// shown the game gets the neutral input, so a menu key never moves the square.
 pub fn screens() -> Screens {
-    Screens::new(Labels { title: "STAR PICK".to_string(), title_hint: "ENTER: START".to_string(), ..Labels::default() })
+    Screens::new(Labels {
+        title: "별 줍기".to_string(),
+        title_hint: "Enter: 시작".to_string(),
+        paused: "일시정지".to_string(),
+        paused_hint: "P: 계속   R: 다시 시작".to_string(),
+        win: "승리!".to_string(),
+        lose: "패배".to_string(),
+        end_hint: "Enter 또는 R: 다시 하기".to_string(),
+    })
 }
 
 pub fn app() -> App<StarPick> {

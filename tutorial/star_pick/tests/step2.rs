@@ -111,8 +111,9 @@ fn the_views_follow_the_game() {
     let score = verified.iter::<Score>().next().expect("the player").1.points;
     assert!(score >= 5);
     assert_eq!(fx.borrow().score, score, "the score shows the verified score");
-    assert_eq!(views.overlay().texts().len(), 1, "the score is one piece of text");
-    assert_eq!(views.overlay().texts()[0].text, format!("SCORE {score}"));
+    assert_eq!(views.overlay().texts().len(), 2, "the score and the goal");
+    assert_eq!(views.overlay().texts()[0].text, format!("점수 {score}"));
+    assert_eq!(views.overlay().texts()[1].text, format!("별 {WIN_STARS}개를 모으세요"));
     assert_eq!(audio.borrow().stats().started, u64::from(score), "every pick-up played its sound once");
     assert!(saw_ring, "a pick-up started the ring");
     assert_eq!(fx.borrow().trails.len(), 1, "the entity view was created for the player");
@@ -171,19 +172,19 @@ fn the_screens_start_pause_win_and_restart_a_game_that_only_sees_neutral_input()
     // Title: the words are up and the square stays in the middle.
     let (at, texts) = frames(&mut bridge, 60);
     assert_eq!(screens.screen(), Screen::Title);
-    assert!(texts.contains(&"STAR PICK".to_string()), "{texts:?}");
+    assert!(texts.contains(&"별 줍기".to_string()), "{texts:?}");
     assert_eq!(at, (orr_sim::FP::ZERO, orr_sim::FP::ZERO));
 
     // Start: the first round begins with the reset command, and the screen words are gone.
     assert!(screens.act(Action::Confirm));
     let (_, texts) = frames(&mut bridge, 5);
-    assert_eq!(texts.len(), 1, "only the score: {texts:?}");
+    assert_eq!(texts.len(), 2, "only the score and the goal: {texts:?}");
 
     // Pause: the square holds still while the sim keeps ticking.
     frames(&mut bridge, 100);
     assert!(screens.act(Action::Pause));
     let (held, texts) = frames(&mut bridge, 1);
-    assert!(texts.contains(&"PAUSED".to_string()));
+    assert!(texts.contains(&"일시정지".to_string()));
     let tick = bridge.snapshot().unwrap().tick();
     let (still, _) = frames(&mut bridge, 30);
     assert_eq!(still, held, "paused: neutral input");
@@ -199,7 +200,7 @@ fn the_screens_start_pause_win_and_restart_a_game_that_only_sees_neutral_input()
     }
     assert_eq!(screens.screen(), Screen::Win);
     let (won_at, texts) = frames(&mut bridge, 1);
-    assert!(texts.contains(&"YOU WIN".to_string()), "{texts:?}");
+    assert!(texts.contains(&"승리!".to_string()), "{texts:?}");
     assert!(fx.borrow().score >= WIN_STARS, "the win came from a verified score of {}", fx.borrow().score);
     assert_eq!(frames(&mut bridge, 40).0, won_at, "the square holds still on the win screen");
 
