@@ -4,9 +4,9 @@
 
 ## 목표
 
-키로 네모를 움직이고, 판 위에 생기는 별을 주워 점수를 얻습니다. 별을 주우면 효과와 짧은 소리가 나옵니다. 왼쪽 위에는 점수 글자가 있고, 네모 뒤에는 꼬리가 남습니다.
+키로 네모를 움직이고, 판 위에 생기는 별을 주워 점수를 얻습니다. 별을 주우면 효과와 짧은 소리가 나옵니다. 왼쪽 위에는 점수 글자가 있고, 네모 뒤에는 꼬리가 남습니다. 게임은 제목 화면에서 시작하고, `P`로 일시정지하며, 별 5개를 모으면 승리 화면이 나옵니다. 승리 화면이나 일시정지 화면에서 다시 시작할 수 있습니다.
 
-완성 코드는 `tutorial/star_pick/src/step2.rs`(322줄)와 소리를 만드는 `sound.rs`(54줄)입니다. 1단계 파일에서 달라진 부분만 설명합니다.
+완성 코드는 `tutorial/star_pick/src/step2.rs`(391줄)와 소리를 만드는 `sound.rs`(54줄)입니다. 1단계 파일에서 달라진 부분만 설명합니다.
 
 ## 새로 배우는 것
 
@@ -21,6 +21,8 @@
 | `EntityView` | 엔티티마다 하나 있는 뷰. 생기고, 움직이고, 사라질 때 불립니다. |
 | `ctx.draw()` | 뷰가 화면에 글자와 선을 그리는 목록입니다. 매 프레임 비워집니다. |
 | `ctx.audio()`, `App::sound` | 뷰가 소리를 켜고 끕니다. 소리는 앱을 만들 때 한 번 등록합니다. |
+| `Screens` | 제목, 일시정지, 승리, 패배, 다시 시작 화면과 그 상태 전환입니다. 화면이 떠 있는 동안 게임은 중립 입력만 받습니다. |
+| `Command` | 시뮬레이션에 한 번 보내는 명령입니다. 여기서는 새 판을 시작하는 `Restart`입니다. |
 
 ## 시뮬레이션: 입력, 컴포넌트, 이벤트
 
@@ -50,6 +52,7 @@ pub struct Picked { pub x: FP, pub y: FP, pub slot: u32, pub points: u32 }
 
 ```rust
 type Input = Move;
+type Command = Restart;   // 새 판을 시작하는 명령 (아래 "게임 화면")
 type Event = Picked;
 ```
 
@@ -246,7 +249,7 @@ impl SceneView<StarPick> for Juice {
 | `line(a, b, 색)`, `rect(min, max, 색)` | 세계 좌표의 선과 채운 사각형입니다. 카메라를 따라 움직입니다. |
 | `line3(a, b, 색)`, `aabb3(min, max, 색)` | 3D 실행용 선과 상자 모서리입니다. 2D에서는 `x`와 `y`만 씁니다. |
 
-**글꼴은 5 x 7 점 글꼴이고 ASCII만 그립니다.** 숫자, 영어 대문자(소문자도 대문자로 보입니다), 몇 가지 기호만 있습니다. **한글은 아직 그리지 못합니다.** 한글 글자는 빈칸으로 나옵니다. 그래서 이 튜토리얼의 화면 글자는 영어입니다.
+**글꼴은 5 x 7 점 글꼴이고 ASCII만 그립니다.** 숫자, 영어 대문자(소문자도 대문자로 보입니다), 몇 가지 기호만 있습니다. **한글은 아직 그리지 못합니다.** 글꼴에 없는 글자는 빈칸이 아니라 속이 빈 네모 상자로 그려지고, 그 글자가 처음 나올 때 터미널에 한 번 알립니다(`Overlay::missing_glyphs()`로도 읽습니다). 그래서 이 튜토리얼의 화면 글자는 영어입니다.
 
 `ctx.audio()`는 소리를 켜고 끕니다.
 
@@ -283,14 +286,46 @@ impl EntityView<StarPick> for TrailView {
 
 `.entity_view::<Score>(factory)`는 "`Score`가 있는 엔티티마다 뷰 하나"라는 뜻입니다. `factory`는 새 엔티티마다 뷰를 만드는 함수입니다. `on_update`가 받는 `pose`는 두 틱 사이를 보간한 위치입니다.
 
+### 게임 화면: 제목, 일시정지, 승리, 다시 시작
+
+`orr_app::Screens`는 화면 상태와 화면마다의 글자를 가진 작은 도우미입니다. `ctx.draw()` 위에 글자를 그리고, 키와 패드 버튼을 읽어 상태를 바꿉니다.
+
+```text
+제목 --Enter--> 플레이 <--P--> 일시정지 --R--> 새 판
+                  |
+                  +-- 별 5개 --> 승리 --Enter/R--> 새 판
+```
+
+| 동작 | 키 | 패드 |
+|---|---|---|
+| 확인 (시작, 이어하기, 다시 하기) | Enter, Space | 남쪽 버튼(A) |
+| 일시정지 | P | Start |
+| 다시 시작 | R | Select |
+
+게임이 연결할 곳은 세 군데입니다.
+
+1. **입력.** `.input(..)` 함수가 `screens.input(keys, read_keys)`를 부릅니다. 플레이 화면이 아니면 `Move::default()`(중립 입력)를 돌려주고 `read_keys`는 부르지 않습니다. 화면을 닫은 키는 뗄 때까지 게임에 보이지 않습니다. 그래서 Space가 "시작"이면서 게임의 동작 키여도 시작 키가 게임에 새지 않습니다. 시뮬레이션은 `Input` 값만 보므로 화면이 어떻게 떠 있었는지와 상관없이 같은 입력은 같은 체크섬을 만듭니다. 일시정지 중에도 시뮬레이션 시계는 멈추지 않습니다. 멈추는 것은 이 창의 조작입니다.
+2. **결과.** `Juice::on_event`가 확정(`Verified`)된 `Picked`의 `points`가 `WIN_STARS`(5) 이상이면 `screens.win()`을 부릅니다. 예측(`Predicted`) 이벤트로는 승리를 정하지 않습니다. 롤백이 되돌릴 수 있기 때문입니다.
+3. **다시 시작.** 다시 시작은 새 세션이 아니라 **리셋 명령**입니다. `Juice::on_update`가 `screens.take_restart()`가 `true`일 때 `ctx.send_command(Restart::default())`를 보내고, 시뮬레이션의 `restart` 시스템이 별을 모두 지우고 플레이어를 가운데로, 점수를 0으로 되돌립니다. 명령은 기록되는 게임의 일부라서 리플레이와 서버 대전에서도 같은 판이 같게 다시 시작합니다. 프레임의 난수는 이어서 쓰므로 같은 시드에서도 새 판은 새 별 자리를 받습니다. 같은 시드의 새 `PlaySession`이 필요하면 앱 밖에서 만들어야 합니다. 앱은 실행 중에 세션을 새로 만들지 않습니다. 제목에서 시작할 때도 같은 명령을 보내서 첫 판이 0점에서 시작하게 합니다.
+
+화면 글자는 왼쪽 위에서 시작합니다. 오버레이는 창 크기를 모르기 때문입니다.
+
+![제목 화면](img/step2-title.png)
+![일시정지 화면](img/step2-pause.png)
+![승리 화면](img/step2-win.png)
+
+패드는 `gilrs`(MIT 또는 Apache-2.0)로 읽습니다. `InputContext`는 `pad_stick(번호)`, `pad_axis`, `pad_button`을 주고, `stick_of(슬롯)`은 슬롯 0에 키보드(W A S D), 슬롯 1에 첫 번째 패드, 슬롯 2에 두 번째 패드를 줍니다. 패드가 없으면 슬롯 1은 방향키를 씁니다. 이 단계는 한 명이 하므로 `read_keys`는 키보드만 읽습니다.
+
 ### 조립
 
 ```rust
 pub fn app() -> App<StarPick> {
+    let screens = screens();            // 제목 "STAR PICK"
     let fx = Shared::default();
+    fx.borrow_mut().screens = Some(screens.clone());
     let for_trails = fx.clone();
     App::<StarPick>::new()
-        .input(|keys, _slot| read_keys(keys))
+        .input(move |keys, _slot| screens.input(keys, read_keys))
         .view(Look { fx: fx.clone() })
         .entity_view::<Score>(move || TrailView { fx: for_trails.clone() })
         .scene_view(Juice { fx })
@@ -305,25 +340,27 @@ pub fn app() -> App<StarPick> {
 cargo run -p star_pick --release --bin step2
 ```
 
-W A S D 또는 방향키로 움직입니다. 별에 닿으면 짧은 "딩" 소리가 납니다. Esc로 끝냅니다.
+Enter로 시작하고, W A S D 또는 방향키로 움직입니다. 별에 닿으면 짧은 "딩" 소리가 납니다. P는 일시정지, R은 일시정지 화면에서 다시 시작, 별 5개를 모으면 승리 화면이 나옵니다. Esc로 끝냅니다.
 
 ## 보이는 것
 
 ![2단계 화면](img/step2.png)
 
-왼쪽 위에는 점수 글자(`SCORE 12`)가 있고, 판에는 별이 있습니다. 별은 마름모입니다. 새 별은 작게 시작해 10틱 동안 커집니다. 방금 주운 자리에는 노란 고리가 커지며 사라집니다. 네모를 움직이면 뒤에 점이 남습니다.
+왼쪽 위에는 점수 글자(`SCORE 3`)가 있고, 판에는 별이 있습니다. 별은 마름모입니다. 새 별은 작게 시작해 10틱 동안 커집니다. 방금 주운 자리에는 노란 고리가 커지며 사라집니다. 네모를 움직이면 뒤에 점이 남습니다.
 
-그림은 별을 향해 가는 자동 조종으로 590틱을 찍은 것입니다. 점수는 12점입니다.
+그림은 별을 향해 가는 자동 조종으로 160틱을 찍은 것입니다. 점수는 3점입니다. 제목, 일시정지, 승리 그림은 같은 자동 조종에 시작 키와 `P`를 눌러 준 것으로, 각각 30틱(제목), 160틱(일시정지, 130틱에서 `P`), 400틱(승리)에서 찍었습니다. 자동 조종은 그림을 찍을 때만 임시로 붙였고 저장소 코드에는 없습니다.
 
 ## 창 없이 확인하기
 
-`tests/step2.rs`가 창 없이 세 가지를 확인하고, `sound.rs`의 테스트가 소리를 확인합니다.
+`tests/step2.rs`가 창 없이 다음을 확인하고, `sound.rs`의 테스트가 소리를 확인합니다.
 
 | 테스트 | 확인하는 것 |
 |---|---|
 | `scoring_is_deterministic` | 가장 가까운 별로 가는 플레이어로 900틱을 두 번 돌려 같은 점수와 같은 체크섬을 얻는다. 이벤트 수가 점수와 같다 |
 | `a_replay_reproduces_the_run` | `save_replay`로 기록해 `open_replay`로 열고 `seek`로 끝 틱에 가면 같은 체크섬이 나온다 |
 | `the_views_follow_the_game` | 창 없는 브리지 위에서 뷰를 돌린다. 점수 글자는 확정 프레임의 점수와 같고, 고리가 시작되며, 엔티티 뷰가 만들어진다. 별마다 소리가 한 번 켜진다(소리 장치 대신 창도 장치도 없는 오프라인 출력으로 센다) |
+| `a_restart_command_empties_the_round_and_a_replay_reproduces_it` | 한참 뒤에 `Restart` 명령을 넣으면 점수가 0이 되고 별이 사라지며, 리플레이가 같은 체크섬을 만든다 |
+| `the_screens_start_pause_win_and_restart_a_game_that_only_sees_neutral_input` | 제목에서는 네모가 가운데에 서 있고, 시작하면 화면 글자가 사라지며, 일시정지 중에는 시계가 가지만 네모가 서 있다. 확정된 5번째 별에서 승리 화면이 뜨고, 다시 시작하면 점수가 0이 된다 |
 
 ```powershell
 cargo test --release -p star_pick --test step2
@@ -332,7 +369,7 @@ cargo test --release -p star_pick --test step2
 ## 더 해보기
 
 1. `STEP`을 `fp!(0.2)`로 바꾸면 네모가 두 배 빨라집니다. 한 틱에 0.2칸입니다. 판 끝까지 몇 틱 걸리는지 세어 보세요.
-2. `MAX_STARS`를 10으로 바꾸고 `--screenshot out.png --ticks 600`으로 그림을 찍어 보세요. 별이 더 많이 쌓입니다.
+2. `MAX_STARS`를 10으로 바꾸고 `--screenshot out.png --ticks 600`으로 그림을 찍어 보세요. 별이 더 많이 쌓입니다. 이제 `--screenshot`은 제목 화면을 찍습니다. 게임 화면은 시작 키를 눌러야 나오므로, 그림에는 임시 자동 조종이 필요합니다.
 3. 별마다 점수가 다르게 해 보세요. `Star { born: u64, worth: u64 }`로 바꾸고 `pick_stars`가 `worth`만큼 더하게 합니다. `worth: u32`를 쓰면 구조체에 패딩이 생겨 `Pod`를 쓸 수 없다는 컴파일 오류가 납니다. 이유를 생각해 보세요.
 4. `Juice::on_event`에서 `EventState::Predicted | EventState::Verified =>`를 `EventState::Predicted =>`로 바꾸고 `EventState::Verified => {}`를 더하세요. 서버 없이 실행하면 고리가 나오지 않습니다. 위 표에서 이유를 찾으세요.
 5. 꼬리 점 수 `TRAIL_DOTS`를 30으로 늘려 보세요. 뷰 코드만 바뀌므로 게임 규칙과 체크섬은 그대로입니다.
