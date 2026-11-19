@@ -8,12 +8,12 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use common::{chase, SEED, TICK_RATE};
-use orr_app::{AudioConfig, FrameView, OfflineAudio, Views};
+use orr_app::{Action, AudioConfig, FrameView, OfflineAudio, Screen, Views};
 use orr_bridge::{Bridge, BridgeConfig, InProc, PlayHost};
 use orr_session::{PlayConfig, PlaySession};
 use orr_sim::{Frame, PlayerSlot};
 use star_pick::sound;
-use star_pick::step2::{Juice, Move, Pos, Score, Shared, Star, StarPick, TrailView};
+use star_pick::step2::{screens, Juice, Move, Pos, Restart, Score, Shared, Star, StarPick, TrailView, WIN_STARS};
 
 const TICKS: u64 = 900;
 
@@ -116,4 +116,96 @@ fn the_views_follow_the_game() {
     assert_eq!(audio.borrow().stats().started, u64::from(score), "every pick-up played its sound once");
     assert!(saw_ring, "a pick-up started the ring");
     assert_eq!(fx.borrow().trails.len(), 1, "the entity view was created for the player");
+}
+
+#[test]
+fn a_restart_command_empties_the_round_and_a_replay_reproduces_it() {
+    const RESTART_AT: u64 = 400;
+    let mut session = PlaySession::<StarPick>::new(PlayConfig::new(1, SEED, TICK_RATE), ());
+    for tick in 0..TICKS {
+        if tick == RESTART_AT {
+            assert!(points(&session) >= 1, "a round to throw away");
+            session.push_command(PlayerSlot(0), Restart::default()).unwrap();
+        }
+        let input = steer_frame(session.frame());
+        session.set_input(PlayerSlot(0), input);
+        session.step_now().expect("a recording session runs");
+        if tick == RESTART_AT {
+            assert_eq!(points(&session), 0, "the score starts again");
+            assert!(session.frame().dense::<Star>().0.len() <= 1, "the stars are gone (one may appear in the same tick)");
+        }
+    }
+    let mut replay = PlaySession::<StarPick>::open_replay(&session.save_replay(), (), 0).expect("the replay opens");
+    replay.seek(TICKS).expect("seek to the last tick");
+    assert_eq!(replay.simulation().checksum(), session.simulation().checksum(), "the restart is part of the recorded game");
+}
+
+/// The player of this frame (the entity that is not a star).
+fn player_at(view: FrameView<'_>) -> (orr_sim::FP, orr_sim::FP) {
+    view.iter::<Pos>().find(|(entity, _)| !view.has::<Star>(*entity)).map(|(_, pos)| (pos.x, pos.y)).expect("the player")
+}
+
+#[test]
+fn the_screens_start_pause_win_and_restart_a_game_that_only_sees_neutral_input() {
+    let (fx, screens) = (Shared::default(), screens());
+    fx.borrow_mut().screens = Some(screens.clone());
+    let mut views = Views::<StarPick>::new();
+    views.scene_view(Juice { fx: fx.clone() });
+    let session = PlaySession::<StarPick>::new(PlayConfig::new(1, SEED, TICK_RATE), ());
+    let mut bridge = InProc::new(PlayHost::new(session, PlayerSlot(0)), BridgeConfig::default());
+    // One frame of the window: the input (the chasing player, neutral on a screen), the tick, the views.
+    let mut frames = |bridge: &mut InProc<StarPick, PlayHost<StarPick>>, n: u32| {
+        for _ in 0..n {
+            if let Some(snapshot) = bridge.snapshot() {
+                let input = if screens.is_playing() { steer_view(snapshot.predicted()) } else { Move::default() };
+                bridge.set_input(PlayerSlot(0), input).unwrap();
+            }
+            bridge.update(Duration::from_secs(1) / TICK_RATE);
+            let update = bridge.poll_view();
+            views.dispatch(bridge, &update, &[]);
+        }
+        let snapshot = bridge.snapshot().expect("a snapshot");
+        (player_at(snapshot.predicted()), views.overlay().texts().iter().map(|t| t.text.clone()).collect::<Vec<_>>())
+    };
+
+    // Title: the words are up and the square stays in the middle.
+    let (at, texts) = frames(&mut bridge, 60);
+    assert_eq!(screens.screen(), Screen::Title);
+    assert!(texts.contains(&"STAR PICK".to_string()), "{texts:?}");
+    assert_eq!(at, (orr_sim::FP::ZERO, orr_sim::FP::ZERO));
+
+    // Start: the first round begins with the reset command, and the screen words are gone.
+    assert!(screens.act(Action::Confirm));
+    let (_, texts) = frames(&mut bridge, 5);
+    assert_eq!(texts.len(), 1, "only the score: {texts:?}");
+
+    // Pause: the square holds still while the sim keeps ticking.
+    frames(&mut bridge, 100);
+    assert!(screens.act(Action::Pause));
+    let (held, texts) = frames(&mut bridge, 1);
+    assert!(texts.contains(&"PAUSED".to_string()));
+    let tick = bridge.snapshot().unwrap().tick();
+    let (still, _) = frames(&mut bridge, 30);
+    assert_eq!(still, held, "paused: neutral input");
+    assert_eq!(bridge.snapshot().unwrap().tick(), tick + 30, "the clock does not stop");
+    assert!(screens.act(Action::Pause));
+
+    // Win: the fifth star stops the game on the win screen.
+    let mut waited = 0;
+    while screens.screen() == Screen::Playing {
+        frames(&mut bridge, 10);
+        waited += 10;
+        assert!(waited < 6000, "the chasing player wins");
+    }
+    assert_eq!(screens.screen(), Screen::Win);
+    let (won_at, texts) = frames(&mut bridge, 1);
+    assert!(texts.contains(&"YOU WIN".to_string()), "{texts:?}");
+    assert!(fx.borrow().score >= WIN_STARS, "the win came from a verified score of {}", fx.borrow().score);
+    assert_eq!(frames(&mut bridge, 40).0, won_at, "the square holds still on the win screen");
+
+    // Restart: a new round, the score is back to 0, and the game takes input again.
+    assert!(screens.act(Action::Restart));
+    frames(&mut bridge, 10);
+    assert_eq!(screens.screen(), Screen::Playing);
+    assert_eq!(fx.borrow().score, 0, "the reset command reached the game");
 }
