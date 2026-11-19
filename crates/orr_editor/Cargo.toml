@@ -49,7 +49,9 @@ scenery = ["dep:orr_scenery", "dep:tempfile"]
 outdoor = ["models", "dep:orr_scenery", "orr_scenery/passes"]
 windows-projects = ["windows-export", "room-authoring", "package-manager", "orr_sample/project-create"]
 image-reimport = ["sprites", "orr_sample/image-reimport"]
-linked-prefabs = ["collect-dodge", "dep:tempfile", "orr_remote/linked-prefabs", "orr_sample/linked-prefabs", "orr_reflect/linked-prefabs"]
+linked-prefabs = ["scene-prefabs", "collect-dodge", "dep:tempfile", "orr_sample/linked-prefabs"]
+# Generic prefab instances for every registered game (scene/2 `generic-v1` links).
+scene-prefabs = ["orr_remote/linked-prefabs", "orr_reflect/linked-prefabs"]
 collect-dodge = ["orr_remote/collect-dodge", "orr_sample/collect-dodge"]
 # Explicit saved-project UI admission and read-only preset/font preview.
 collect-ui = ["collect-dodge", "project-ui", "orr_sample/collect-ui"]

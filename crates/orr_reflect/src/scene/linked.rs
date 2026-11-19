@@ -8,13 +8,31 @@ use super::{decode, Guid, Scene, SceneEntity, SCENE_SCHEMA};
 use crate::{TypeRegistry, Value};
 
 const PROFILE: &str = "collect-actors-v1";
+const GENERIC: &str = "generic-v1";
+/// Generic prefab limits. Collect links keep their own, smaller, bounds.
+const MAX_GENERIC_SCENE: usize = 4 * 1024 * 1024;
+const MAX_GENERIC_BASELINES: usize = 2 * 1024 * 1024;
+const MAX_GENERIC_LINKS: usize = 1024;
+const MAX_GENERIC_ENTITIES: usize = 256;
 const ACTOR: &str = "CollectDodgeV1::Actor";
 const MAX_SCENE: usize = 64 * 1024;
 const MAX_BASELINES: usize = 32 * 1024;
 
+/// How a link relates its flattened instance entities to the source snapshot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkProfile {
+    /// Fixed-topology CollectDodge actors with ordinals and a position override.
+    CollectActorsV1,
+    /// Any registered components. Overrides are not stored: they are the leaf
+    /// differences between the live entities and the baseline snapshot.
+    GenericV1,
+}
+
 /// A bounded source snapshot and its explicit instance allocation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrefabLink {
+    /// Which validation and update rules this link follows.
+    pub profile: LinkProfile,
     /// Normalized, portable, relative source label; never used for filesystem access.
     pub source: String,
     /// Lowercase SHA-256 of the exact canonical baseline bytes.
@@ -23,9 +41,10 @@ pub struct PrefabLink {
     pub baseline: String,
     /// Source GUID to live scene GUID; complete and injective.
     pub guids: BTreeMap<Guid, Guid>,
-    /// Source GUID to allocated actor ordinal.
+    /// Source GUID to allocated actor ordinal (empty for generic links).
     pub ordinals: BTreeMap<Guid, u32>,
-    /// Source GUIDs whose live positions intentionally override the baseline.
+    /// Source GUIDs whose live positions intentionally override the baseline
+    /// (empty for generic links).
     pub position_overrides: BTreeSet<Guid>,
 }
 
@@ -64,25 +83,43 @@ pub(super) fn decode_scene(
     // Schema 2 is admitted only for the closed Actor profile, matching the
     // optional JSON Schema export. Unrelated registries retain legacy version
     // diagnostics (including their positions and full diagnostic list).
-    if !version2 || !supports_profile(reg) {
+    if !version2 || !(supports_profile(reg) || declares_only_generic(root)) {
         return decode::decode_scene(root, reg);
     }
     decode_linked(root, text_len, reg).map_err(|d| vec![d])
 }
 
+fn profile_of(n: &Node) -> Option<LinkProfile> {
+    let NodeKind::Map(fields) = &n.kind else { return None };
+    fields.iter().find(|(k, _)| k.key_text() == Some("profile")).and_then(|(_, v)| match v.key_text() {
+        Some(PROFILE) => Some(LinkProfile::CollectActorsV1),
+        Some(GENERIC) => Some(LinkProfile::GenericV1),
+        _ => None,
+    })
+}
+
+/// True if the document has links and every one declares the generic profile.
+fn declares_only_generic(root: &Node) -> bool {
+    let NodeKind::Map(entries) = &root.kind else { return false };
+    let Some((_, prefabs)) = entries.iter().find(|(k, _)| k.key_text() == Some("prefabs")) else { return false };
+    let NodeKind::Map(links) = &prefabs.kind else { return false };
+    !links.is_empty() && links.iter().all(|(_, v)| profile_of(v) == Some(LinkProfile::GenericV1))
+}
+
 fn decode_linked(root: &Node, text_len: usize, reg: &TypeRegistry) -> Result<Scene, Diag> {
     let entries = map(root)?;
-    if text_len > MAX_SCENE {
-        return Err(Diag::new(root.pos, "orr.scene/2 exceeds 64 KiB"));
-    }
     let metadata = entries
         .iter()
         .find(|(k, _)| k.key_text() == Some("prefabs"))
         .map(|(_, v)| v)
         .ok_or_else(|| Diag::new(root.pos, "orr.scene/2 requires nonempty prefabs"))?;
     let links = map(metadata)?;
-    if links.is_empty() || links.len() > 8 {
-        return Err(Diag::new(metadata.pos, "prefabs requires 1 to 8 links"));
+    let generic = declares_only_generic(root);
+    if text_len > if generic { MAX_GENERIC_SCENE } else { MAX_SCENE } {
+        return Err(Diag::new(root.pos, if generic { "orr.scene/2 exceeds 4 MiB" } else { "orr.scene/2 exceeds 64 KiB" }));
+    }
+    if links.is_empty() || links.len() > if generic { MAX_GENERIC_LINKS } else { 8 } {
+        return Err(Diag::new(metadata.pos, "prefabs requires 1 to 8 links (1 to 1024 for generic-v1)"));
     }
     // Bound all embedded text before parsing any baseline or decoding entities.
     let mut baseline_bytes = 0usize;
@@ -93,7 +130,7 @@ fn decode_linked(root: &Node, text_len: usize, reg: &TypeRegistry) -> Result<Sce
             }
         }
     }
-    if baseline_bytes > MAX_BASELINES {
+    if baseline_bytes > if generic { MAX_GENERIC_BASELINES } else { MAX_BASELINES } {
         return Err(Diag::new(
             metadata.pos,
             "aggregate prefab baselines exceed 32 KiB",
@@ -136,11 +173,11 @@ fn decode_linked(root: &Node, text_len: usize, reg: &TypeRegistry) -> Result<Sce
                 .copied()
                 .ok_or_else(|| Diag::new(n.pos, format!("missing prefab field '{key}'")))
         };
-        if scalar(get("profile")?)? != PROFILE {
-            return Err(Diag::new(
-                n.pos,
-                "unsupported prefab profile (expected collect-actors-v1)",
-            ));
+        let profile = profile_of(n).ok_or_else(|| {
+            Diag::new(n.pos, "unsupported prefab profile (expected collect-actors-v1 or generic-v1)")
+        })?;
+        if (profile == LinkProfile::GenericV1) != generic {
+            return Err(Diag::new(n.pos, "a scene cannot mix prefab link profiles"));
         }
         let baseline = get("baseline")?;
         if !matches!(&baseline.kind, NodeKind::Scalar { quoted: true, .. }) {
@@ -150,6 +187,7 @@ fn decode_linked(root: &Node, text_len: usize, reg: &TypeRegistry) -> Result<Sce
             ));
         }
         let mut link = PrefabLink {
+            profile,
             source: scalar(get("source")?)?.into(),
             digest: scalar(get("digest")?)?.into(),
             baseline: scalar(baseline)?.into(),
@@ -158,11 +196,19 @@ fn decode_linked(root: &Node, text_len: usize, reg: &TypeRegistry) -> Result<Sce
             position_overrides: BTreeSet::new(),
         };
         let mappings = map(get("guids")?)?;
-        if mappings.is_empty() || mappings.len() > 8 {
-            return Err(Diag::new(n.pos, "prefab guids requires 1 to 8 entities"));
+        let max_entities = if generic { MAX_GENERIC_ENTITIES } else { 8 };
+        if mappings.is_empty() || mappings.len() > max_entities {
+            return Err(Diag::new(n.pos, "prefab guids exceeds its entity limit"));
         }
         for (k, v) in mappings {
             link.guids.insert(guid(k)?, guid(v)?);
+        }
+        if generic {
+            if fields.contains_key("ordinals") || fields.contains_key("position_overrides") {
+                return Err(Diag::new(n.pos, "generic-v1 links have no ordinals or position_overrides"));
+            }
+            scene.prefab_links.insert(guid(key)?, link);
+            continue;
         }
         for (k, v) in map(get("ordinals")?)? {
             let text = scalar(v)?;
@@ -288,6 +334,13 @@ impl Scene {
         if self.prefab_links.is_empty() {
             return Ok(());
         }
+        let generic = self.prefab_links.values().filter(|l| l.profile == LinkProfile::GenericV1).count();
+        if generic != 0 {
+            if generic != self.prefab_links.len() {
+                return Err("a scene cannot mix prefab link profiles".into());
+            }
+            return self.validate_generic_links(reg);
+        }
         if self.prefab_links.len() > 8 {
             return Err("prefabs exceeds 8 links".into());
         }
@@ -412,6 +465,13 @@ pub(super) fn write_links(scene: &Scene, out: &mut String) {
     }
     out.push_str("prefabs:\n");
     for (root, link) in &scene.prefab_links {
+        if link.profile == LinkProfile::GenericV1 {
+            out.push_str(&format!("  {root}:\n    profile: {GENERIC}\n    source: {}\n    digest: {}\n    baseline: {}\n    guids:\n", quote(&link.source), quote(&link.digest), quote(&link.baseline)));
+            for (source, target) in &link.guids {
+                out.push_str(&format!("      {source}: {target}\n"));
+            }
+            continue;
+        }
         out.push_str(&format!("  {root}:\n    profile: {PROFILE}\n    source: {}\n    digest: {}\n    baseline: {}\n    guids:\n", quote(&link.source), quote(&link.digest), quote(&link.baseline)));
         for (source, target) in &link.guids {
             out.push_str(&format!("      {source}: {target}\n"));
@@ -428,5 +488,66 @@ pub(super) fn write_links(scene: &Scene, out: &mut String) {
             out.push_str(source.as_str());
         }
         out.push_str("]\n");
+    }
+}
+
+impl Scene {
+    /// Structural validation of generic links. The live entities are not
+    /// compared with the baseline: their differences are the instance overrides.
+    /// A mapped live entity may be missing (the instance deleted that member).
+    fn validate_generic_links(&self, reg: &TypeRegistry) -> Result<(), String> {
+        if self.prefab_links.len() > MAX_GENERIC_LINKS {
+            return Err("prefabs exceeds 1024 generic links".into());
+        }
+        let baseline_bytes = self.prefab_links.values().fold(0usize, |n, l| n.saturating_add(l.baseline.len()));
+        if baseline_bytes > MAX_GENERIC_BASELINES {
+            return Err("aggregate prefab baselines exceed 2 MiB".into());
+        }
+        let mut owned = BTreeSet::new();
+        let mut checked: BTreeMap<String, Scene> = BTreeMap::new();
+        for (root, link) in &self.prefab_links {
+            validate_source(&link.source)?;
+            if link.guids.is_empty() || link.guids.len() > MAX_GENERIC_ENTITIES {
+                return Err("generic prefab requires 1 to 256 entities".into());
+            }
+            if !link.ordinals.is_empty() || !link.position_overrides.is_empty() {
+                return Err("generic prefab links have no ordinals or position overrides".into());
+            }
+            if !link.guids.values().any(|g| g == root) {
+                return Err("prefab root must be one of its mapped live targets".into());
+            }
+            if link.digest != PrefabLink::canonical_digest(&link.baseline) {
+                return Err("prefab baseline SHA-256 digest mismatch".into());
+            }
+            // Equal baselines are checked once: many instances share one source.
+            if !checked.contains_key(&link.digest) {
+                let node = super::node::parse(&link.baseline)
+                    .map_err(|e| format!("invalid prefab baseline: {}", e.message))?;
+                let mut baseline = decode::decode_scene(&node, reg)
+                    .map_err(|e| format!("invalid prefab baseline: {}", e[0].message))?;
+                baseline.read_comments(&link.baseline, &node);
+                if !baseline.singletons.is_empty()
+                    || baseline.entities.is_empty()
+                    || baseline.entities.len() > MAX_GENERIC_ENTITIES
+                    || !baseline.header_comments.is_empty()
+                    || !baseline.comments.is_empty()
+                {
+                    return Err("prefab baseline must be a comment-free entity-only fragment of 1 to 256 entities".into());
+                }
+                if baseline.to_yaml() != link.baseline {
+                    return Err("prefab baseline is not canonical scene/1 text".into());
+                }
+                checked.insert(link.digest.clone(), baseline);
+            }
+            if !checked[&link.digest].entities.keys().eq(link.guids.keys()) {
+                return Err("prefab mapping must cover exactly the baseline entities".into());
+            }
+            for target in link.guids.values() {
+                if !owned.insert(target.clone()) {
+                    return Err("prefab live targets must be injective and disjoint across links".into());
+                }
+            }
+        }
+        Ok(())
     }
 }

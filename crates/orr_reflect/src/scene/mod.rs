@@ -54,7 +54,7 @@ use std::fmt;
 
 pub use bake::{BakeError, SceneIndex};
 #[cfg(feature = "linked-prefabs")]
-pub use linked::PrefabLink;
+pub use linked::{LinkProfile, PrefabLink};
 pub use node::{Diag as SceneDiagnostic, Pos as ScenePos};
 
 use crate::registry::TypeRegistry;

@@ -113,11 +113,16 @@ fn reject_oversized_linked(src: &str) -> Result<(), Diag> {
     if src.len() <= 64 * 1024 { return Ok(()); }
     let mut depth = 0usize;
     let mut key: Option<String> = None;
+    let mut schema2: Option<Pos> = None;
+    let mut generic = false;
     for result in Parser::new_from_str(src) {
         let (event, span) = result.map_err(|e| {
             let m = e.marker();
             Diag::new(Pos { line: m.line(), col: m.col() + 1 }, format!("YAML syntax error: {}", e.info()))
         })?;
+        if let Event::Scalar(text, ..) = &event {
+            if text == "generic-v1" { generic = true; }
+        }
         match event {
             Event::MappingStart(..) | Event::SequenceStart(..) => {
                 if depth >= MAX_DEPTH {
@@ -130,7 +135,7 @@ fn reject_oversized_linked(src: &str) -> Result<(), Diag> {
             Event::Scalar(text, ..) if depth == 1 => {
                 if let Some(k) = key.take() {
                     if k == "schema" && text == "orr.scene/2" {
-                        return Err(Diag::new(Pos::of(&span), "orr.scene/2 exceeds 64 KiB"));
+                        schema2.get_or_insert(Pos::of(&span));
                     }
                     // Continue through the entire event stream: a malformed
                     // duplicate schema/2 later in the input must not trigger
@@ -140,7 +145,12 @@ fn reject_oversized_linked(src: &str) -> Result<(), Diag> {
             _ => {}
         }
     }
-    Ok(())
+    // Generic prefab scenes may be larger; the loader enforces their own limit
+    // and rejects a scene that mixes profiles.
+    match schema2 {
+        Some(pos) if !(generic && src.len() <= 4 * 1024 * 1024) => Err(Diag::new(pos, "orr.scene/2 exceeds 64 KiB")),
+        _ => Ok(()),
+    }
 }
 
 /// Parses `src` into one node tree, or fails with the first problem.

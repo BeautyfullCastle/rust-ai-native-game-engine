@@ -48,6 +48,8 @@ pub enum InspEvent {
     End,
     /// Typed text that is not a valid number; nothing was changed.
     Error(String),
+    /// Restore the prefab value of an overridden field (see [`set_override_marks`]).
+    Revert(String),
 }
 
 fn join(prefix: &str, name: &str) -> String {
@@ -77,6 +79,11 @@ pub fn show_component(ui: &mut Ui, base: Id, desc: &TypeDesc, value: &Value, out
     }
 }
 
+/// A container label with a trailing dot when something below it is overridden.
+fn mark_label(ui: &Ui, label: &str, path: &str) -> String {
+    if marked(&override_marks(ui.ctx()), path) { format!("{label} \u{25CF}") } else { label.to_string() }
+}
+
 fn hover_text(doc: &str, ty: &TypeDesc) -> String {
     let range = match &ty.kind {
         Kind::Int { range, .. } => Some((range, false)),
@@ -101,6 +108,7 @@ fn show_field(ui: &mut Ui, base: Id, label: &str, ty: &TypeDesc, value: &Value, 
     let hover = hover_text(doc, ty);
     match (&ty.kind, value) {
         (Kind::Struct { fields, .. }, Value::Struct(vals)) => {
+            let label = &mark_label(ui, label, path);
             crate::theme::header(label).id_salt(id).default_open(true).show(ui, |ui| {
                 for f in fields {
                     if let Some((_, v)) = vals.iter().find(|(n, _)| n == &f.name) {
@@ -110,6 +118,7 @@ fn show_field(ui: &mut Ui, base: Id, label: &str, ty: &TypeDesc, value: &Value, 
             });
         }
         (Kind::Tagged(t), Value::Variant(kind, vals)) => {
+            let label = &mark_label(ui, label, path);
             crate::theme::header(label).id_salt(id).default_open(true).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("kind");
@@ -131,7 +140,7 @@ fn show_field(ui: &mut Ui, base: Id, label: &str, ty: &TypeDesc, value: &Value, 
             });
         }
         (Kind::Array { elem, .. }, Value::Array(items)) => {
-            crate::theme::header(format!("{label} [{}]", items.len())).id_salt(id).default_open(true).show(ui, |ui| {
+            crate::theme::header(format!("{} [{}]", mark_label(ui, label, path), items.len())).id_salt(id).default_open(true).show(ui, |ui| {
                 for (i, item) in items.iter().enumerate() {
                     let name = format!("[{i}]");
                     show_field(ui, base, &name, elem, item, &join(path, &name), "", out);
@@ -139,7 +148,7 @@ fn show_field(ui: &mut Ui, base: Id, label: &str, ty: &TypeDesc, value: &Value, 
             }).header_response.on_hover_text(&hover);
         }
         (Kind::List { elem, min, max }, Value::Array(items)) => {
-            crate::theme::header(format!("{label} [{}]", items.len())).id_salt(id).default_open(true).show(ui, |ui| {
+            crate::theme::header(format!("{} [{}]", mark_label(ui, label, path), items.len())).id_salt(id).default_open(true).show(ui, |ui| {
                 for (i, item) in items.iter().enumerate() {
                     let name = format!("[{i}]");
                     show_field(ui, base, &name, elem, item, &join(path, &name), "", out);
@@ -163,6 +172,12 @@ fn show_field(ui: &mut Ui, base: Id, label: &str, ty: &TypeDesc, value: &Value, 
             ui.horizontal_wrapped(|ui| {
                 ui.label(label).on_hover_text(&hover);
                 scalar(ui, id, ty, value, path, label, &hover, out);
+                if marked(&override_marks(ui.ctx()), path) {
+                    ui.label(egui::RichText::new("\u{25CF}").color(crate::theme::ACCENT)).on_hover_text("Overridden: differs from the prefab");
+                    if ui.small_button("Revert").on_hover_text("Restore the prefab value (one undo step)").clicked() {
+                        out.push(InspEvent::Revert(path.to_string()));
+                    }
+                }
             });
         }
     }
@@ -385,6 +400,30 @@ struct AssetListing(std::sync::Arc<Vec<String>>, f64);
 /// it every frame with the open scene's folder; `None` lists no files.
 #[derive(Clone, Default)]
 struct EntityChoices(std::sync::Arc<Vec<(String, String)>>);
+
+/// Paths of the shown component that differ from its prefab.
+#[derive(Clone, Default)]
+struct OverrideMarks(std::sync::Arc<Vec<String>>);
+
+/// Tells the inspector which fields of the component it draws next are
+/// overridden on a prefab instance. Such a field shows a mark and a Revert
+/// button. Call it before each component; pass an empty list for none.
+pub fn set_override_marks(ctx: &egui::Context, paths: std::sync::Arc<Vec<String>>) {
+    ctx.data_mut(|d| d.insert_temp(Id::new("orr_override_marks"), OverrideMarks(paths)));
+}
+
+fn override_marks(ctx: &egui::Context) -> std::sync::Arc<Vec<String>> {
+    ctx.data(|d| d.get_temp::<OverrideMarks>(Id::new("orr_override_marks"))).unwrap_or_default().0
+}
+
+fn is_below(path: &str, parent: &str) -> bool {
+    path.strip_prefix(parent).is_some_and(|rest| rest.starts_with('.') || rest.starts_with('['))
+}
+
+/// A mark on this path, on a field below it, or on a field it lies below.
+fn marked(marks: &[String], path: &str) -> bool {
+    marks.iter().any(|m| m == path || m.is_empty() || is_below(m, path) || is_below(path, m))
+}
 
 /// Sets the entities that entity fields offer: each one's scene GUID and the
 /// label shown for it, in the order of the list.

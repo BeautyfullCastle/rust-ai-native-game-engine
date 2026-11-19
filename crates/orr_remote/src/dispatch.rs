@@ -30,6 +30,10 @@ use crate::wire::{checksum_text, debug_error_name, debug_from_json};
 #[path = "dispatch/geometry_mission.rs"]
 mod geometry_mission;
 
+#[cfg(feature = "linked-prefabs")]
+#[path = "dispatch/prefab_instance.rs"]
+mod prefab_instance;
+
 /// The host's model an ERP request runs against. It borrows the host's
 /// state, so any host loop (`Host`, or a test) can embed the server. A
 /// person's edits (client `user`) made on the same `doc` share its undo
@@ -236,6 +240,9 @@ pub(crate) fn call<G: Game>(
         "registry.types" => Ok(registry_types(t)),
         #[cfg(feature = "linked-prefabs")]
         "prefab.list" | "prefab.capture" | "prefab.instantiate" | "prefab.position" | "prefab.revert" | "prefab.update" | "prefab.detach" => linked_prefab_call(t, &p, method, origin),
+        #[cfg(feature = "linked-prefabs")]
+        "prefab_instance.list" | "prefab_instance.entity" | "prefab_instance.create" | "prefab_instance.apply_text" | "prefab_instance.link" | "prefab_instance.instantiate"
+        | "prefab_instance.revert" | "prefab_instance.update" | "prefab_instance.detach" => prefab_instance::call(t, &p, method, origin),
         "world.query" => world_query(t, &p),
         "world.get" => world_get(t, &p),
         "world.singleton.get" => singleton_get(t, &p),

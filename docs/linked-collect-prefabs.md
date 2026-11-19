@@ -1,6 +1,8 @@
 # Linked Collect groups (first bounded authoring profile)
 
 This is a partial #105/#94 feature, not generic prefabs or asset reimport.
+Generic prefabs for every game (a separate `generic-v1` link profile) are described in
+[prefabs.md](prefabs.md); the two profiles cannot be mixed in one scene.
 The optional `linked-prefabs` feature adds source-linked CollectDodge authoring.
 Default builds keep the previous scene format and dependencies. The simulation
 continues to consume a fully baked initial frame, never a source file.
