@@ -524,7 +524,7 @@ fn headless_main_app_box_hierarchy_viewport_and_timeline_widgets_use_the_real_ho
     harness.get_by_label(LBL_PAUSE).click();
     settle(&mut harness);
     assert!(!harness.state().editor.timeline().unwrap().playing);
-    harness.get_by_label("\u{23EE}").click();
+    harness.get_by_label("Rewind to the first tick").click();
     settle(&mut harness);
     assert_eq!(harness.state().editor.timeline().unwrap().tick, 0);
     harness.get_by_label(LBL_STOP).click();

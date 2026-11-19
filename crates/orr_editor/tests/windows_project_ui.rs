@@ -399,18 +399,18 @@ fn windows_room_project_ui_create_guard_reopen_and_play_gpu_acceptance() {
     });
     assert_eq!(harness.state().editor.checksum(), saved_checksum);
 
-    click(&mut harness, "▶ Play");
+    click(&mut harness, "Play");
     assert_eq!(harness.state().editor.mode(), Mode::Play);
-    click(&mut harness, "⏸ Pause");
+    click(&mut harness, "Pause");
     assert!(!harness.state().editor.sim().playing);
     let tick_before_step = harness.state().editor.timeline().unwrap().tick;
-    click(&mut harness, "⏭ Step");
+    click(&mut harness, "Step");
     assert!(!harness.state().editor.sim().playing);
     assert_eq!(
         harness.state().editor.timeline().unwrap().tick,
         tick_before_step + 1
     );
-    click(&mut harness, "■ Stop");
+    click(&mut harness, "Stop");
     assert_eq!(harness.state().editor.mode(), Mode::Edit);
 
     if let Some(runtime) = std::env::var_os("ORR_WINDOWS_EXPORT_RUNTIME").map(PathBuf::from) {

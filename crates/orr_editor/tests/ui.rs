@@ -207,7 +207,7 @@ fn play_pause_rewind_with_the_buttons() {
     settle(&mut h);
     assert_eq!(h.state().editor.timeline().unwrap().tick, paused_at, "paused means no more ticks");
     // Rewind button.
-    h.get_by_label("\u{23EE}").click();
+    h.get_by_label("Rewind to the first tick").click();
     settle(&mut h);
     assert_eq!(h.state().editor.timeline().unwrap().tick, 0);
     // Stop returns to edit mode.

@@ -245,7 +245,7 @@ fn an_edit_shows_unsaved_in_the_bar_status_and_title() {
     h.run_steps(3);
     select_and_edit(&mut h);
     assert!(h.state().editor.is_dirty());
-    assert_eq!(texts(&h, "\u{25CF} Unsaved changes"), 1);
+    assert_eq!(texts(&h, "Unsaved changes"), 1);
     assert_eq!(texts(&h, "Unsaved: 1"), 1);
     // The status bar shows the message of the edit at first. Then the next step takes its place.
     h.run_steps(500);
@@ -255,7 +255,7 @@ fn an_edit_shows_unsaved_in_the_bar_status_and_title() {
     h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
     settle(&mut h);
     assert!(!h.state().editor.is_dirty());
-    assert_eq!(texts(&h, "\u{25CF} Unsaved changes"), 0);
+    assert_eq!(texts(&h, "Unsaved changes"), 0);
     assert!(!h.state().editor.title().starts_with('*'));
 }
 
@@ -280,7 +280,7 @@ fn play_mode_is_marked_and_the_inspector_says_edits_are_temporary() {
     let shown = pos_x_text(&mut h, "body_05");
     type_into(&mut h, &shown, "4.5");
     assert!(!h.state().editor.is_dirty());
-    assert_eq!(texts(&h, "\u{25CF} Unsaved changes"), 0);
+    assert_eq!(texts(&h, "Unsaved changes"), 0);
     // Stop brings the edit state back.
     h.get_by_label(LBL_STOP).click();
     wait_for(&mut h, "edit mode", |a| a.editor.mode() == Mode::Edit);
@@ -328,7 +328,7 @@ fn smallest_window_keeps_every_main_control_inside() {
     let mut h = build(demo_editor(), min, 1.0, false);
     h.run_steps(3);
     select_and_edit(&mut h);
-    for label in [LBL_PLAY, LBL_PAUSE, LBL_STEP, LBL_STOP, "EDIT", "File", "Edit", "Hierarchy", "Inspector", "\u{25CF} Unsaved changes", "Timeline", "Physics body"] {
+    for label in [LBL_PLAY, LBL_PAUSE, LBL_STEP, LBL_STOP, "EDIT", "File", "Edit", "Hierarchy", "Inspector", "Unsaved changes", "Timeline", "Physics body"] {
         inside(&h.get_by_label(label), window, label);
     }
     let status = h.get_by_label_contains("Unsaved: ");
@@ -352,7 +352,7 @@ fn display_scales_keep_every_main_control_inside() {
         let mut h = build(demo_editor(), size, ppp, false);
         h.run_steps(3);
         select_and_edit(&mut h);
-        for label in [LBL_PLAY, LBL_STOP, "EDIT", "\u{25CF} Unsaved changes", "Inspector", "Physics body"] {
+        for label in [LBL_PLAY, LBL_STOP, "EDIT", "Unsaved changes", "Inspector", "Physics body"] {
             inside(&h.get_by_label(label), window, &format!("{label} at scale {ppp}"));
         }
     }

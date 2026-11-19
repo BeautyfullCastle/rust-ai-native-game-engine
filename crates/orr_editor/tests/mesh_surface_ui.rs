@@ -639,12 +639,12 @@ fn mesh_surface_uv_and_pivot_render_persist_and_reopen_source_free() {
     assert_eq!(app.state().editor.mode(), orr_editor::Mode::Play);
     click_button(&mut app, LBL_PAUSE);
     if app
-        .query_by_role_and_label(Role::Button, "\u{23EE}")
+        .query_by_role_and_label(Role::Button, "Rewind to the first tick")
         .is_none()
     {
         click(&mut app, "Timeline");
     }
-    click_button(&mut app, "\u{23EE}");
+    click_button(&mut app, "Rewind to the first tick");
     wait_for(&mut app, "paused playback rewound to tick zero", |app| {
         app.editor
             .timeline()
