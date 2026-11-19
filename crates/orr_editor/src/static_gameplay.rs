@@ -409,7 +409,7 @@ impl GameplayContracts {
 }
 
 fn scene_schema(types: &TypeRegistry) -> Result<J, String> {
-    let text = if cfg!(feature = "linked-prefabs") {
+    let text = if cfg!(feature = "scene-prefabs") {
         types.json_schema()
     } else {
         types.legacy_json_schema()

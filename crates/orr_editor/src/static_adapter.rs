@@ -179,7 +179,7 @@ impl StaticGameRegistry {
         let mut entries = Vec::with_capacity(descriptors.len());
         for descriptor in descriptors {
             let types = (descriptor.types)();
-            let schema_text = if cfg!(feature = "linked-prefabs") {
+            let schema_text = if cfg!(feature = "scene-prefabs") {
                 types.json_schema()
             } else {
                 types.legacy_json_schema()

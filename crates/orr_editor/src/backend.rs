@@ -504,7 +504,7 @@ fn discover(erp: &mut ErpClient) -> Result<(EditorGame, RemoteIdentity, String, 
     let game = EditorGame::from_name(name)?;
     let build_id = d.pointer("/engine/build_id").and_then(J::as_str).filter(|s| !s.is_empty()).ok_or("host discovery is missing engine.build_id")?.to_string();
     let types = game.types();
-    let schema_text = if cfg!(feature = "linked-prefabs") { types.json_schema() } else { types.legacy_json_schema() };
+    let schema_text = if cfg!(feature = "scene-prefabs") { types.json_schema() } else { types.legacy_json_schema() };
     let schema: J = serde_json::from_str(&schema_text).map_err(|e| format!("compiled schema: {e}"))?;
     let actual = erp.call("registry.schema", J::Null).map_err(|e| format!("registry.schema: {e}"))?;
     if actual.get("schema") != Some(&schema) {
