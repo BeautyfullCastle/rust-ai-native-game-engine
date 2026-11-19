@@ -1,5 +1,6 @@
 //! A `ViewResync` throws away the predicted events and no `Canceled` comes for them. The pick-up
-//! sound that `Predicted` started must still be stopped, in steps 2 to 5.
+//! sound that `Predicted` started must still be stopped, in steps 3 to 5 (their views start and stop
+//! it themselves). Step 2 gets this from `App::on_event_sound`: see `tests/step2.rs`.
 
 mod common;
 
@@ -64,7 +65,6 @@ macro_rules! resync_stops_the_predicted_sound {
     };
 }
 
-resync_stops_the_predicted_sound!(step2_resync_stops_the_predicted_sound, step2, 1, ());
 resync_stops_the_predicted_sound!(step3_resync_stops_the_predicted_sound, step3, 2, ());
 resync_stops_the_predicted_sound!(step4_resync_stops_the_predicted_sound, step4, 2, star_pick::step4::Setup::default());
 resync_stops_the_predicted_sound!(step5_resync_stops_the_predicted_sound, step5, 2, star_pick::step5::Setup::default());
