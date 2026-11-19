@@ -565,16 +565,25 @@ mod tests {
         }
 
         /// Run `check` on another thread. When it does not finish in time, open the FIFO
-        /// for writing so the blocked thread can end, then fail the test.
+        /// for writing so the blocked thread can end, then fail the test. A failed
+        /// assertion inside `check` is reported as itself, not as a block.
         fn finishes_in_time(fifo: &Path, check: impl FnOnce() + Send + 'static) {
             let (done, wait) = mpsc::channel();
-            std::thread::spawn(move || {
+            let worker = std::thread::spawn(move || {
                 check();
                 let _ = done.send(());
             });
-            if wait.recv_timeout(Duration::from_secs(5)).is_err() {
-                let _release = fs::OpenOptions::new().read(true).write(true).open(fifo);
-                panic!("opening a FIFO as a folder blocked");
+            match wait.recv_timeout(Duration::from_secs(5)) {
+                Ok(()) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    if let Err(panic) = worker.join() {
+                        std::panic::resume_unwind(panic);
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    let _release = fs::OpenOptions::new().read(true).write(true).open(fifo);
+                    panic!("opening a FIFO as a folder blocked");
+                }
             }
         }
 
@@ -595,13 +604,17 @@ mod tests {
             let temp = tempfile::tempdir().unwrap();
             let path = temp.path().join("project");
             fs::create_dir(&path).unwrap();
-            let pinned = PinnedDirectory::open(&path).unwrap();
+            let identity = PinnedDirectory::open(&path).unwrap();
+            let readable = PinnedDirectory::open_readable(&path).unwrap();
             fs::rename(&path, temp.path().join("moved")).unwrap();
             make_fifo(&path);
             let fifo = path.clone();
             finishes_in_time(&fifo, move || {
-                assert!(pinned.verify_unchanged().is_err());
-                assert!(same_directory(&path, pinned.file().unwrap()).is_err());
+                assert!(identity.file().is_none(), "an identity pin holds no readable handle");
+                assert!(identity.verify_unchanged().is_err());
+                assert!(readable.verify_unchanged().is_err());
+                let handle = readable.file().expect("a readable pin holds its folder handle");
+                assert!(same_directory(&path, handle).is_err());
             });
         }
 
