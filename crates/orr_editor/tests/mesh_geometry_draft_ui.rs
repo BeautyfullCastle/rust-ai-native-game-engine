@@ -659,12 +659,12 @@ fn ui_previews_staged_geometry_with_local_history_then_commits() {
     let placed_checksum = harness.state().editor.checksum();
     let authored_pixels = viewport_pixels(&mut harness, "committed-geometry");
 
-    menu_click(&mut harness, "Edit", "Undo Ctrl+Z");
+    menu_click(&mut harness, "Edit", "Undo");
     assert_eq!(harness.state().editor.checksum(), initial_checksum);
-    menu_click(&mut harness, "Edit", "Redo Ctrl+Y");
+    menu_click(&mut harness, "Edit", "Redo");
     assert_eq!(harness.state().editor.checksum(), placed_checksum);
     assert_mesh_geometry(&mesh_view(&harness).graph);
-    menu_click(&mut harness, "File", "Save Ctrl+S");
+    menu_click(&mut harness, "File", "Save");
     let saved_scene = fs::read(&fixture.scene).unwrap();
     let saved_scene_sha256 = sha256_hex(&saved_scene);
     let view_revision = placed_view.graph.revision();

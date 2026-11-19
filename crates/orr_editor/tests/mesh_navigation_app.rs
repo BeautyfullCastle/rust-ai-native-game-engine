@@ -226,8 +226,7 @@ fn viewport_pixels(harness: &mut Harness<'_, EditorApp>, name: &str) -> Vec<u8> 
         "MeshNavigation EditorApp viewport GPU: {}",
         viewport.gpu().adapter_name()
     );
-    let size = viewport.gpu().target().size();
-    let pixels = viewport.gpu().read_rgba8();
+    let size = viewport.gpu().target().size();    let pixels = viewport.gpu().read_rgba8();
     assert_eq!(pixels.len(), (size.0 * size.1 * 4) as usize);
     assert!(pixels.as_chunks::<4>().0.iter().any(|pixel| pixel[3] > 0));
     if let Some(directory) = std::env::var_os("ORR_MESH_EDITOR_CAPTURE_DIR") {
@@ -247,6 +246,33 @@ fn viewport_pixels(harness: &mut Harness<'_, EditorApp>, name: &str) -> Vec<u8> 
             .unwrap();
     }
     pixels
+}
+
+/// Resizes the window, as a user can, until the viewport has `target` pixels. The docked panels
+/// share the window in fixed ratios, so the viewport follows the window by a fraction.
+fn match_viewport(harness: &mut Harness<'_, EditorApp>, target: (u32, u32)) {
+    for _ in 0..12 {
+        let actual = harness.state().ui.viewport_px;
+        if actual == target {
+            return;
+        }
+        let window = harness.ctx.viewport_rect().size();
+        let ppp = harness.ctx.pixels_per_point();
+        let step = |window: f32, actual: u32, target: u32| {
+            if actual == target {
+                return window;
+            }
+            let wanted = window * target as f32 / actual as f32;
+            if (wanted - window).abs() * ppp < 1.0 {
+                window + (target as f32 - actual as f32).signum() / ppp
+            } else {
+                wanted
+            }
+        };
+        harness.set_size(egui::vec2(step(window.x, actual.0, target.0), step(window.y, actual.1, target.1)));
+        settle(harness);
+    }
+    assert_eq!(harness.state().ui.viewport_px, target, "the viewport did not reach the first window's size");
 }
 
 fn changed_pixel_count(left: &[u8], right: &[u8]) -> usize {
@@ -381,16 +407,16 @@ fn production_editor_authors_saves_reopens_and_runs_a_self_contained_mesh_scene(
     let placed_pixels = viewport_pixels(&mut harness, "placed");
     assert!(changed_pixel_count(&baseline, &placed_pixels) > 100);
 
-    menu_click(&mut harness, "Edit", "Undo Ctrl+Z");
+    menu_click(&mut harness, "Edit", "Undo");
     assert!(harness.state().mesh_navigation.model().is_none());
-    menu_click(&mut harness, "Edit", "Redo Ctrl+Y");
+    menu_click(&mut harness, "Edit", "Redo");
     assert!(harness.state().mesh_navigation.model().is_some());
     assert_eq!(mesh_view(&harness).graph.revision(), saved_graph.revision());
 
-    menu_click(&mut harness, "File", "Save Ctrl+S");
+    menu_click(&mut harness, "File", "Save");
     menu_click(&mut harness, "File", "Save As…");
     type_dialog_path(&mut harness, &copied_scene, "OK");
-    menu_click(&mut harness, "File", "Save Ctrl+S");
+    menu_click(&mut harness, "File", "Save");
     let saved_checksum = harness.state().editor.checksum();
     let saved_scene = std::fs::read(&copied_scene).unwrap();
     assert!(!saved_scene.is_empty());
@@ -408,6 +434,9 @@ fn production_editor_authors_saves_reopens_and_runs_a_self_contained_mesh_scene(
     assert_eq!(mesh_view(&harness).graph.revision(), saved_graph.revision());
     let ui_reopened_pixels = viewport_pixels(&mut harness, "ui-reopened-source-hidden");
     assert!(changed_pixel_count(&placed_pixels, &ui_reopened_pixels) < 20);
+    // The dock sizes its panels from the window of the first frame, so a new window of the
+    // same size can show a viewport one pixel off. The pixel comparison needs the same viewport.
+    let viewport_target = harness.state().ui.viewport_px;
     drop(harness);
 
     let mut editor = Editor::open_game(&copied_scene, EditorGame::MeshNavigation).unwrap();
@@ -422,6 +451,7 @@ fn production_editor_authors_saves_reopens_and_runs_a_self_contained_mesh_scene(
         });
     harness.run_steps(4);
     settle(&mut harness);
+    match_viewport(&mut harness, viewport_target);
     assert!(harness.state().has_gpu());
     assert_eq!(harness.state().editor.checksum(), saved_checksum);
     let reopened_view = mesh_view(&harness);

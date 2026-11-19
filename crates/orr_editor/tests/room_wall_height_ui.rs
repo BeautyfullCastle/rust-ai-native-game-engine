@@ -341,13 +341,13 @@ fn selected_wall_height_preserves_identity_and_blocks_player() {
     assert_eq!(h.state().editor.history(), &stale_history);
     h.state_mut().room_authoring.open = false;
     settle(&mut h);
-    menu_click(&mut h, "Edit", "Redo Ctrl+Y");
+    menu_click(&mut h, "Edit", "Redo");
     assert_eq!(h.state().editor.checksum(), changed);
-    menu_click(&mut h, "Edit", "Undo Ctrl+Z");
+    menu_click(&mut h, "Edit", "Undo");
     assert_eq!(h.state().editor.checksum(), original);
-    menu_click(&mut h, "Edit", "Redo Ctrl+Y");
+    menu_click(&mut h, "Edit", "Redo");
     assert_eq!(h.state().editor.checksum(), changed);
-    menu_click(&mut h, "File", "Save Ctrl+S");
+    menu_click(&mut h, "File", "Save");
     drop(h);
     let mut h = harness(&root);
     settle(&mut h);

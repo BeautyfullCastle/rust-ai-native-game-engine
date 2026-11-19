@@ -545,10 +545,10 @@ fn room_wall_iteration_ui_lifecycle_and_collision_acceptance() {
             FP::from_ratio(7, 10)
         ))
     );
-    menu_click(&mut harness, "Edit", "Undo Ctrl+Z");
+    menu_click(&mut harness, "Edit", "Undo");
     assert_eq!(harness.state().editor.checksum(), create_checksum);
     assert_eq!(wall_guid(harness.state(), "iteration_wall"), original_wall);
-    menu_click(&mut harness, "Edit", "Redo Ctrl+Y");
+    menu_click(&mut harness, "Edit", "Redo");
     assert_eq!(harness.state().editor.checksum(), edited_checksum);
     assert_eq!(
         wall_guid(harness.state(), "iteration_wall_edited"),
@@ -614,7 +614,7 @@ fn room_wall_iteration_ui_lifecycle_and_collision_acceptance() {
         before_duplicate_history + 1
     );
     let duplicated_checksum = harness.state().editor.checksum();
-    menu_click(&mut harness, "Edit", "Undo Ctrl+Z");
+    menu_click(&mut harness, "Edit", "Undo");
     assert_eq!(harness.state().editor.checksum(), before_duplicate_checksum);
     assert_eq!(harness.state().editor.rows().len(), 8);
     assert!(!harness
@@ -623,7 +623,7 @@ fn room_wall_iteration_ui_lifecycle_and_collision_acceptance() {
         .rows()
         .iter()
         .any(|row| row.guid.as_ref() == Some(&duplicate_wall)));
-    menu_click(&mut harness, "Edit", "Redo Ctrl+Y");
+    menu_click(&mut harness, "Edit", "Redo");
     assert_eq!(harness.state().editor.checksum(), duplicated_checksum);
     assert_eq!(
         wall_guid(harness.state(), "collision_barrier"),
@@ -634,7 +634,7 @@ fn room_wall_iteration_ui_lifecycle_and_collision_acceptance() {
         original_wall
     );
 
-    menu_click(&mut harness, "File", "Save Ctrl+S");
+    menu_click(&mut harness, "File", "Save");
     wait_for(&mut harness, "saving the wall edit and duplicate", |app| {
         !app.editor.is_dirty()
     });
@@ -731,14 +731,14 @@ fn room_wall_iteration_ui_lifecycle_and_collision_acceptance() {
         .iter()
         .any(|row| row.guid.as_ref() == Some(&duplicate_wall)));
     assert_no_open_transaction(&mut harness);
-    menu_click(&mut harness, "Edit", "Undo Ctrl+Z");
+    menu_click(&mut harness, "Edit", "Undo");
     assert_eq!(harness.state().editor.checksum(), saved_duplicate_checksum);
     assert_eq!(harness.state().editor.rows().len(), 9);
-    menu_click(&mut harness, "Edit", "Redo Ctrl+Y");
+    menu_click(&mut harness, "Edit", "Redo");
     assert_eq!(harness.state().editor.checksum(), without_original_wall);
     assert_eq!(harness.state().editor.rows().len(), 8);
     assert_no_open_transaction(&mut harness);
-    menu_click(&mut harness, "File", "Save Ctrl+S");
+    menu_click(&mut harness, "File", "Save");
     wait_for(&mut harness, "saving explicit wall removal", |app| {
         !app.editor.is_dirty()
     });

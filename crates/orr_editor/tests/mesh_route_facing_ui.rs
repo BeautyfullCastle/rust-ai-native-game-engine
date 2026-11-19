@@ -551,7 +551,7 @@ fn route_facing_is_saved_reopened_and_rendered_for_static_and_animated_art() {
     click(&mut harness, "Static-mesh navigation");
     click_button(&mut harness, "Create ramp and bridge");
     click_button(&mut harness, "Place mesh agent");
-    menu_click(&mut harness, "File", "Save Ctrl+S");
+    menu_click(&mut harness, "File", "Save");
     let scene_bytes = fs::read(&fixture.scene).unwrap();
     let scene_checksum = harness.state().editor.checksum();
     let graph_revision = mesh_view(&harness).graph.revision();

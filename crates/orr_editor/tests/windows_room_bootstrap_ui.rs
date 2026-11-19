@@ -312,7 +312,7 @@ fn windows_room_project_bootstraps_from_clean_physics_editor() {
         fs::read(&fixture.physics_scene).unwrap(),
         fixture.physics_bytes
     );
-    menu_click(&mut harness, "Edit", "Undo Ctrl+Z");
+    menu_click(&mut harness, "Edit", "Undo");
     wait_for(&mut harness, "undoing the Physics edit", |app| {
         !app.editor.is_dirty()
     });
@@ -354,7 +354,7 @@ fn windows_room_project_bootstraps_from_clean_physics_editor() {
     assert!(harness.state().editor.is_dirty());
     let authored_checksum = harness.state().editor.checksum();
     assert_ne!(authored_checksum, initial_room_checksum);
-    menu_click(&mut harness, "File", "Save Ctrl+S");
+    menu_click(&mut harness, "File", "Save");
     wait_for(&mut harness, "saving authored Room layout", |app| {
         !app.editor.is_dirty()
     });

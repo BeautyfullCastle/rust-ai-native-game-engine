@@ -220,13 +220,13 @@ fn hazards_widgets_apply_undo_save_reopen_swept_loss_and_stop_reset() {
     assert_eq!(config.spheres[0].center, [fp!(1), FP::ZERO, fp!(2.5)]);
     assert_eq!(config.spheres[0].radius, fp!(0.1));
     assert_eq!(view(&h).unwrap().run.lost, 0);
-    menu(&mut h, "Edit", "Undo Ctrl+Z");
+    menu(&mut h, "Edit", "Undo");
     assert_eq!(h.state().editor.checksum(), initial);
     assert!(view(&h).is_none());
-    menu(&mut h, "Edit", "Redo Ctrl+Y");
+    menu(&mut h, "Edit", "Redo");
     assert_eq!(h.state().editor.checksum(), applied);
     assert_eq!(view(&h).unwrap().config, config);
-    menu(&mut h, "File", "Save Ctrl+S");
+    menu(&mut h, "File", "Save");
     let saved = fs::read(&scene).unwrap();
     assert_ne!(saved, original);
     capture(&mut h, &root, "authored-hazard.png");
@@ -487,7 +487,7 @@ fn hazard_creator_widgets_validate_create_preserve_and_reopen() {
         .config;
     assert_eq!(authored_mission.points[0].radius, fp!(0.25));
     assert_eq!(authored_mission.exit.radius, fp!(0.75));
-    menu(&mut h, "Edit", "Undo Ctrl+Z");
+    menu(&mut h, "Edit", "Undo");
     assert_eq!(
         mission::from_view(h.state().editor.snapshot().unwrap().predicted())
             .unwrap()
@@ -495,7 +495,7 @@ fn hazard_creator_widgets_validate_create_preserve_and_reopen() {
             .config,
         original_mission
     );
-    menu(&mut h, "Edit", "Redo Ctrl+Y");
+    menu(&mut h, "Edit", "Redo");
     assert_eq!(
         mission::from_view(h.state().editor.snapshot().unwrap().predicted())
             .unwrap()
@@ -505,7 +505,7 @@ fn hazard_creator_widgets_validate_create_preserve_and_reopen() {
     );
     assert_eq!(view(&h).unwrap().config, authored);
     capture(&mut h, &root, "creator-mission-numeric-edited.png");
-    menu(&mut h, "File", "Save Ctrl+S");
+    menu(&mut h, "File", "Save");
     let authored_checksum = h.state().editor.checksum();
     let authored_bytes = fs::read(&destination).unwrap();
     menu(&mut h, "File", "Open scene…");
@@ -614,7 +614,7 @@ fn hazard_center_viewport_pick_stages_only_selected_sphere_and_apply_undo_save_r
         field(&mut h, label, value);
     }
     click(&mut h, "Apply mesh hazards");
-    menu(&mut h, "File", "Save Ctrl+S");
+    menu(&mut h, "File", "Save");
     let baseline = view(&h).unwrap().config;
     let checksum = h.state().editor.checksum();
     let saved = fs::read(&scene).unwrap();
@@ -637,7 +637,7 @@ fn hazard_center_viewport_pick_stages_only_selected_sphere_and_apply_undo_save_r
     assert_disabled(&h, LBL_PLAY);
     h.get_by_label("File").click_accesskit();
     h.run_steps(2);
-    assert_disabled(&h, "Save Ctrl+S");
+    assert_disabled(&h, "Save");
     assert_disabled(&h, "Open scene…");
     #[cfg(feature = "mesh-hazards-export")]
     assert_disabled(&h, "Export hazard game…");
@@ -724,11 +724,11 @@ fn hazard_center_viewport_pick_stages_only_selected_sphere_and_apply_undo_save_r
     );
     let applied_checksum = h.state().editor.checksum();
     assert_ne!(applied_checksum, checksum);
-    menu(&mut h, "Edit", "Undo Ctrl+Z");
+    menu(&mut h, "Edit", "Undo");
     assert_eq!(view(&h).unwrap().config, baseline);
-    menu(&mut h, "Edit", "Redo Ctrl+Y");
+    menu(&mut h, "Edit", "Redo");
     assert_eq!(view(&h).unwrap().config, applied);
-    menu(&mut h, "File", "Save Ctrl+S");
+    menu(&mut h, "File", "Save");
     capture(&mut h, &root, "03-picked-applied.png");
     drop(h);
     let mut h = harness(&scene);

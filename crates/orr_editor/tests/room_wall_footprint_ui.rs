@@ -395,21 +395,21 @@ fn run_wall_case(snapped: bool, environment: &str) {
     h.state_mut().room_authoring.open = false;
     settle(&mut h);
     shot(&mut h, &evidence, "03-created-wall.png");
-    menu_click(&mut h, "Edit", "Undo Ctrl+Z");
+    menu_click(&mut h, "Edit", "Undo");
     assert!(!h
         .state()
         .editor
         .rows()
         .iter()
         .any(|r| r.guid.as_ref() == Some(&wall)));
-    menu_click(&mut h, "Edit", "Redo Ctrl+Y");
+    menu_click(&mut h, "Edit", "Redo");
     assert!(h
         .state()
         .editor
         .rows()
         .iter()
         .any(|r| r.guid.as_ref() == Some(&wall)));
-    menu_click(&mut h, "File", "Save Ctrl+S");
+    menu_click(&mut h, "File", "Save");
     assert!(!h.state().editor.is_dirty());
     for guid in &actors {
         assert!(h

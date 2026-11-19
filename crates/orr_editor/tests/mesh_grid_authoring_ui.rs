@@ -367,7 +367,7 @@ fn advance_until_won(harness: &mut Harness<'_, EditorApp>) -> MissionWin {
         .timeline()
         .is_some_and(|timeline| timeline.tick != 0)
     {
-        click(harness, "⏮");
+        click(harness, "Rewind to the first tick");
     }
     assert!(harness
         .state()
@@ -737,7 +737,7 @@ fn mesh_grid_authoring_builds_hole_and_preserves_a_playable_mission() {
         "applied grid was not visible: {grid_applied_pixel_diff}"
     );
 
-    menu_click(&mut harness, "Edit", "Undo Ctrl+Z");
+    menu_click(&mut harness, "Edit", "Undo");
     wait_for(&mut harness, "grid geometry undo", |app| {
         app.editor.checksum() == initial_checksum
     });
@@ -748,7 +748,7 @@ fn mesh_grid_authoring_builds_hole_and_preserves_a_playable_mission() {
             .revision(),
         initial_graph.revision()
     );
-    menu_click(&mut harness, "Edit", "Redo Ctrl+Y");
+    menu_click(&mut harness, "Edit", "Redo");
     wait_for(&mut harness, "grid geometry redo", |app| {
         app.editor.checksum() == applied_checksum
     });
@@ -865,7 +865,7 @@ fn mesh_grid_authoring_builds_hole_and_preserves_a_playable_mission() {
             pre_checkpoint_mission.config.points[index].radius
         );
     }
-    menu_click(&mut harness, "Edit", "Undo Ctrl+Z");
+    menu_click(&mut harness, "Edit", "Undo");
     wait_for(&mut harness, "route checkpoint undo", |app| {
         app.editor.checksum() == pre_checkpoint_checksum
     });
@@ -873,7 +873,7 @@ fn mesh_grid_authoring_builds_hole_and_preserves_a_playable_mission() {
         mission_view(harness.state()).config,
         pre_checkpoint_mission.config
     );
-    menu_click(&mut harness, "Edit", "Redo Ctrl+Y");
+    menu_click(&mut harness, "Edit", "Redo");
     wait_for(&mut harness, "route checkpoint redo", |app| {
         app.editor.checksum() == route_checkpoint_checksum
     });
@@ -900,7 +900,7 @@ fn mesh_grid_authoring_builds_hole_and_preserves_a_playable_mission() {
         applied_pixel_diff > 20,
         "applied grid and route checkpoints were not visible: {applied_pixel_diff}"
     );
-    menu_click(&mut harness, "File", "Save Ctrl+S");
+    menu_click(&mut harness, "File", "Save");
     let saved_bytes = fs::read(&fixture.scene).unwrap();
     let saved_checksum = harness.state().editor.checksum();
     let saved_mission = mission_view(harness.state());

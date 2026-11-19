@@ -437,7 +437,7 @@ fn animated_kind_clip_loop_assignment_uses_real_inspector_widgets() {
     fn click(h: &mut Harness<'_, EditorApp>, label: &str) {
         h.get_by_label(label).scroll_to_me();
         h.run_steps(2);
-        h.get_by_label(label).click();
+        h.get_by_label(label).click_accesskit();
         settle(h);
     }
     click(&mut h, "Static model binding");

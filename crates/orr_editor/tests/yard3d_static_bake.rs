@@ -242,7 +242,7 @@ fn matching_pixels(h: &mut Harness<'_, EditorApp>, name: &str, target: (u32, u32
     // the *actual native viewport* at the baseline dimensions by resizing the
     // surrounding test window, as a user can, before exact pixel comparison.
     // This changes neither camera nor lighting, and does not resize readbacks.
-    for _ in 0..4 {
+    for _ in 0..12 {
         settle(h);
         let actual = h.state().ui.viewport_px;
         if actual == target {
@@ -256,10 +256,17 @@ fn matching_pixels(h: &mut Harness<'_, EditorApp>, name: &str, target: (u32, u32
         }
         let window = h.ctx.viewport_rect().size();
         let ppp = h.ctx.pixels_per_point();
-        h.set_size(egui::vec2(
-            window.x + (target.0 as f32 - actual.0 as f32) / ppp,
-            window.y + (target.1 as f32 - actual.1 as f32) / ppp,
-        ));
+        // The docked panels share the window in fixed ratios, so the viewport follows the
+        // window size by a fraction. Scale by that fraction, and move one pixel at least.
+        let step = |window: f32, actual: u32, target: u32| {
+            if actual == target {
+                return window;
+            }
+            let wanted = window * target as f32 / actual as f32;
+            let min_step = (target as f32 - actual as f32).signum() / ppp;
+            if (wanted - window).abs() * ppp < 1.0 { window + min_step } else { wanted }
+        };
+        h.set_size(egui::vec2(step(window.x, actual.0, target.0), step(window.y, actual.1, target.1)));
     }
     panic!(
         "{name}: viewport did not stabilize at {target:?}; actual={:?}",

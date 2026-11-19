@@ -674,7 +674,7 @@ fn production_mesh_prop_view_drag_is_local_reversible_and_persisted() {
     click_button(&mut harness, "Place mesh agent");
     let initial_view = mesh_view(&harness);
     assert_eq!(initial_view.agent.status, NavigationStatus::Moving);
-    menu_click(&mut harness, "File", "Save Ctrl+S");
+    menu_click(&mut harness, "File", "Save");
     fixture.scene_bytes = Some(fs::read(&fixture.scene).expect("scene saved by Editor"));
     fixture.scene_checksum = Some(harness.state().editor.checksum());
     fixture.graph_revision = Some(initial_view.graph.revision());
@@ -1178,7 +1178,7 @@ fn production_mesh_prop_view_drag_is_local_reversible_and_persisted() {
         fixture.scene_bytes.as_deref().unwrap()
     );
     let placement_saved_pixels = viewport_pixels(&mut harness, "prop-placement-saved.png");
-    menu_click(&mut harness, "File", "Save Ctrl+S");
+    menu_click(&mut harness, "File", "Save");
     let placement_scene_bytes = fs::read(&fixture.scene).unwrap();
     let placement_scene_checksum = harness.state().editor.checksum();
     drop(harness);

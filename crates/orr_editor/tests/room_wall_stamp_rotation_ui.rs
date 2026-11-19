@@ -395,7 +395,7 @@ fn linux_room_wall_quarterturns_exact_geometry_history_reopen_and_collision() {
     }
     h.state_mut().room_authoring.open = false;
     settle(&mut h);
-    menu_click(&mut h, "File", "Save Ctrl+S");
+    menu_click(&mut h, "File", "Save");
     let source_checksum = h.state().editor.checksum();
     let source_scene = fs::read(root.join("room.scene.yaml")).unwrap();
     let original: Vec<_> = sources
@@ -488,7 +488,7 @@ fn linux_room_wall_quarterturns_exact_geometry_history_reopen_and_collision() {
         );
         click(&mut h, LBL_STOP);
         assert_eq!(h.state().editor.checksum(), checksum);
-        menu_click(&mut h, "Edit", "Undo Ctrl+Z");
+        menu_click(&mut h, "Edit", "Undo");
         assert_eq!(h.state().editor.checksum(), source_checksum);
         assert_eq!(h.state().editor.rows().len(), initial_rows + 3);
         // Invalid staging and a validly parsed but out-of-bounds transform must
@@ -507,7 +507,7 @@ fn linux_room_wall_quarterturns_exact_geometry_history_reopen_and_collision() {
             source_scene
         );
         field(&mut h, "Stamp offset X", "6");
-        menu_click(&mut h, "Edit", "Redo Ctrl+Y");
+        menu_click(&mut h, "Edit", "Redo");
         assert_eq!(h.state().editor.checksum(), checksum);
         for (wall, ((name, source), geometry)) in sources.iter().zip(&original).enumerate() {
             let group = named(&h, name);
@@ -519,13 +519,13 @@ fn linux_room_wall_quarterturns_exact_geometry_history_reopen_and_collision() {
         if turns == 1 {
             final_guids = instance_guids;
         } else {
-            menu_click(&mut h, "Edit", "Undo Ctrl+Z");
+            menu_click(&mut h, "Edit", "Undo");
             assert_eq!(h.state().editor.checksum(), source_checksum);
         }
     }
     fs::rename(&stamp, &hidden).unwrap();
     assert_eq!(fs::read(&hidden).unwrap(), stamp_bytes);
-    menu_click(&mut h, "File", "Save Ctrl+S");
+    menu_click(&mut h, "File", "Save");
     assert!(!h.state().editor.is_dirty());
     let final_checksum = h.state().editor.checksum();
     let saved_scene = fs::read(root.join("room.scene.yaml")).unwrap();

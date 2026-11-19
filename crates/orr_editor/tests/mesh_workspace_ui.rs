@@ -457,7 +457,7 @@ fn default_physics_editor_creates_and_opens_mesh_scenes_without_losing_work() {
     assert!(harness.state().editor.is_dirty());
     assert!(harness.state().ui.dialog.is_some());
     click(&mut harness, "Cancel");
-    menu_click(&mut harness, "Edit", "Undo Ctrl+Z");
+    menu_click(&mut harness, "Edit", "Undo");
     assert!(!harness.state().editor.is_dirty());
     assert_eq!(harness.state().editor.checksum(), physics_checksum);
     assert_eq!(
@@ -478,7 +478,7 @@ fn default_physics_editor_creates_and_opens_mesh_scenes_without_losing_work() {
     }
     click(&mut harness, "Create ramp and bridge");
     click(&mut harness, "Place mesh agent");
-    menu_click(&mut harness, "File", "Save Ctrl+S");
+    menu_click(&mut harness, "File", "Save");
     let saved_scene_bytes = fs::read(&fixture.scene).unwrap();
     let saved_checksum = harness.state().editor.checksum();
     let baseline_view = mesh_view(&harness);
@@ -587,7 +587,7 @@ fn default_physics_editor_creates_and_opens_mesh_scenes_without_losing_work() {
     }
     click(&mut harness, "Create ramp and bridge");
     click(&mut harness, "Place mesh agent");
-    menu_click(&mut harness, "File", "Save Ctrl+S");
+    menu_click(&mut harness, "File", "Save");
     assert!(fixture.other_scene.is_file());
     menu_click(&mut harness, "File", "Open mesh scene…");
     type_scene_path(&mut harness, &fixture.scene, "OK");

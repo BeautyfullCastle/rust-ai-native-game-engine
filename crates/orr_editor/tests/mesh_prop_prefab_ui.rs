@@ -809,7 +809,7 @@ fn prop_prefab_rebinds_across_mesh_graphs_and_exports_source_free() {
     );
     let target_pixels = viewport_pixels(&mut harness, "02-target-rebound-prop.png");
     assert!(changed_pixel_count(&source_pixels, &target_pixels) > 20);
-    menu_click(&mut harness, "File", "Save Ctrl+S");
+    menu_click(&mut harness, "File", "Save");
     let scene_bytes = fs::read(&fixture.target_scene).unwrap();
     let scene_checksum = harness.state().editor.checksum();
     drop(harness);
@@ -876,7 +876,7 @@ fn prop_prefab_rebinds_across_mesh_graphs_and_exports_source_free() {
     });
     click_button(&mut reopened, LBL_PAUSE);
     if reopened.state().editor.timeline().unwrap().tick != 0 {
-        click_button(&mut reopened, "⏮");
+        click_button(&mut reopened, "Rewind to the first tick");
     }
     let mut win_tick = None;
     for _ in 0..2048 {

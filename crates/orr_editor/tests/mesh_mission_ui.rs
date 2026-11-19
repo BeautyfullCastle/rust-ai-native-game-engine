@@ -431,7 +431,7 @@ fn mesh_mission_collects_then_wins_after_reopen_and_exports() {
     type_field(&mut harness, "Distance per tick", "0.25");
     click_button(&mut harness, "Create ramp and bridge");
     click_button(&mut harness, "Place mesh agent");
-    menu_click(&mut harness, "File", "Save Ctrl+S");
+    menu_click(&mut harness, "File", "Save");
     let scene_bytes = fs::read(&fixture.scene).unwrap();
     let scene_checksum = harness.state().editor.checksum();
     let graph_revision = mesh_from_view(harness.state().editor.snapshot().unwrap().predicted())
@@ -575,10 +575,10 @@ fn mesh_mission_collects_then_wins_after_reopen_and_exports() {
     type_field(&mut harness, "Collectible 2 X", "2");
     click_button(&mut harness, "Apply mesh mission");
     assert_ne!(harness.state().editor.checksum(), scene_checksum);
-    menu_click(&mut harness, "Edit", "Undo Ctrl+Z");
+    menu_click(&mut harness, "Edit", "Undo");
     assert_eq!(harness.state().editor.checksum(), scene_checksum);
     assert!(mission_view(harness.state()).is_none());
-    menu_click(&mut harness, "Edit", "Redo Ctrl+Y");
+    menu_click(&mut harness, "Edit", "Redo");
     let authored_view = mission_view(harness.state()).unwrap();
     assert_eq!(authored_view.config.enabled, 1);
     assert_eq!(authored_view.config.count, 2);
@@ -609,7 +609,7 @@ fn mesh_mission_collects_then_wins_after_reopen_and_exports() {
         configured_pixel_diff > 20,
         "mission markers/UI did not change the App frame: {configured_pixel_diff}"
     );
-    menu_click(&mut harness, "File", "Save Ctrl+S");
+    menu_click(&mut harness, "File", "Save");
     let saved_scene_bytes = fs::read(&fixture.scene).unwrap();
     let saved_checksum = harness.state().editor.checksum();
     assert_eq!(saved_checksum, mission_checksum);
@@ -826,7 +826,7 @@ fn mesh_mission_collects_then_wins_after_reopen_and_exports() {
     click(&mut reopened, "I confirm removing the mesh mission");
     click_button(&mut reopened, "Remove mesh mission");
     assert!(mission_view(reopened.state()).is_none());
-    menu_click(&mut reopened, "Edit", "Undo Ctrl+Z");
+    menu_click(&mut reopened, "Edit", "Undo");
     assert_eq!(mission_view(reopened.state()).unwrap().run.won, 0);
     assert_eq!(mission_view(reopened.state()).unwrap().config.enabled, 1);
     drop(reopened);

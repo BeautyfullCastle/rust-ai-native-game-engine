@@ -274,7 +274,7 @@ fn advance_until_won(harness: &mut Harness<'_, EditorApp>) -> (u64, u64) {
         .timeline()
         .is_some_and(|timeline| timeline.tick != 0)
     {
-        click(harness, "⏮");
+        click(harness, "Rewind to the first tick");
     }
     assert!(harness
         .state()
@@ -545,7 +545,7 @@ fn new_mesh_game_wizard_creates_playable_mission_and_exports() {
     click_transport(&mut harness, LBL_STOP);
     assert_eq!(harness.state().editor.mode(), Mode::Edit);
     assert_eq!(harness.state().editor.checksum(), created_checksum);
-    menu_click(&mut harness, "File", "Save Ctrl+S");
+    menu_click(&mut harness, "File", "Save");
     let saved_bytes = fs::read(&fixture.scene).unwrap();
     let saved_checksum = harness.state().editor.checksum();
     assert_eq!(saved_bytes, created_bytes);

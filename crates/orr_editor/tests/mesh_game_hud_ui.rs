@@ -339,7 +339,7 @@ fn mesh_game_hud_applies_renders_saves_reopens_and_exports() {
     click(&mut harness, "Static-mesh navigation");
     click_button(&mut harness, "Create ramp and bridge");
     click_button(&mut harness, "Place mesh agent");
-    menu_click(&mut harness, "File", "Save Ctrl+S");
+    menu_click(&mut harness, "File", "Save");
     let scene_bytes = fs::read(&fixture.scene).unwrap();
     let scene_checksum = harness.state().editor.checksum();
     let graph_revision = mesh_view(harness.state()).graph.revision();
@@ -414,7 +414,7 @@ fn mesh_game_hud_applies_renders_saves_reopens_and_exports() {
     assert_eq!(hud_document["hud"]["font_size"].as_f64(), Some(27.0));
     assert_eq!(harness.state().editor.checksum(), scene_checksum);
 
-    menu_click(&mut harness, "File", "Save Ctrl+S");
+    menu_click(&mut harness, "File", "Save");
     drop(harness);
     let mut reopened = fixture.harness(&fixture.physics_scene, EditorGame::PhysGame);
     reopened.run_steps(4);

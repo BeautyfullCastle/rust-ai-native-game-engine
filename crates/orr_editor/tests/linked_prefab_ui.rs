@@ -275,12 +275,12 @@ fn detach_widget_workflow(h: &mut Harness<'_, EditorApp>, root: &Path, gpu: bool
     // Actual Edit-menu Undo and Redo restore the entire provenance, including
     // overridden positions. Refresh explicitly fences the next panel mutation.
     click(h, "Edit");
-    click(h, "Undo Ctrl+Z");
+    click(h, "Undo");
     click(h, "Refresh linked prefabs");
     assert_eq!(editor_scene(h), linked);
     assert_eq!(h.state().linked_prefabs.state().unwrap()["instances"], state["instances"]);
     click(h, "Edit");
-    click(h, "Redo Ctrl+Y");
+    click(h, "Redo");
     click(h, "Refresh linked prefabs");
     assert_eq!(editor_scene(h), detached);
     assert!(h.state().linked_prefabs.state().unwrap()["instances"].as_array().unwrap().iter().all(|v| v["instance"] != first));
@@ -337,7 +337,7 @@ fn detach_widget_workflow(h: &mut Harness<'_, EditorApp>, root: &Path, gpu: bool
     assert_eq!(reopened.checksum(), h.state().editor.checksum());
     drop(reopened);
     click(h, "Edit");
-    click(h, "Undo Ctrl+Z");
+    click(h, "Undo");
     click(h, "Refresh linked prefabs");
     assert_eq!(editor_scene(h), before_last);
     assert_eq!(h.state().linked_prefabs.state().unwrap()["instances"].as_array().unwrap().len(), 1);

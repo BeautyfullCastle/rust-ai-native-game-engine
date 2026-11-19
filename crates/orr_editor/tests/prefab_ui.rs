@@ -53,6 +53,9 @@ fn settle(h: &mut App) {
 }
 
 fn click(h: &mut App, label: &str) {
+    // A person scrolls the Inspector to the control first.
+    h.get_all_by_label(label).next().unwrap_or_else(|| panic!("no widget labeled {label}")).scroll_to_me();
+    h.run_steps(3);
     h.get_all_by_label(label).next().unwrap_or_else(|| panic!("no widget labeled {label}")).click();
     h.run_steps(3);
     settle(h);
@@ -348,6 +351,7 @@ fn yard3d_prefab_workflow_with_overrides_apply_update_and_reopen() {
     set(&mut h, &a, "orr_physics3d::Collider", "friction", fixed(2));
     wait(&mut h, "the 3D override mark", |h| marks(h) == 1);
     click(&mut h, "Revert");
+    wait(&mut h, "the 3D mark to clear", |h| marks(h) == 0);
     assert_eq!(friction(&mut h, &a), original);
     set(&mut h, &a, "orr_physics3d::Collider", "friction", fixed(2));
     click(&mut h, "Apply to prefab");

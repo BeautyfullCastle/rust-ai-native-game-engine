@@ -428,14 +428,14 @@ fn room_wall_groups_capture_instantiate_save_reopen_and_play() {
         assert_eq!(without_body_position(&body), original_body_without_position);
         assert_eq!(collider, original_collider);
     }
-    let undo_label = "Undo Ctrl+Z";
+    let undo_label = "Undo";
     menu_click(&mut harness, "Edit", undo_label);
     assert_eq!(harness.state().editor.checksum(), before_first_instance);
     assert_eq!(
         named_wall_guids(harness.state(), "stamp_source_a"),
         source_a
     );
-    menu_click(&mut harness, "Edit", "Redo Ctrl+Y");
+    menu_click(&mut harness, "Edit", "Redo");
     assert_eq!(harness.state().editor.checksum(), after_first_instance);
 
     let (first_width, first_height, first_pixels) = viewport_pixels(harness.state());
@@ -481,7 +481,7 @@ fn room_wall_groups_capture_instantiate_save_reopen_and_play() {
         assert_eq!(collider, original_collider);
         assert_ne!(body, original_body);
     }
-    menu_click(&mut harness, "File", "Save Ctrl+S");
+    menu_click(&mut harness, "File", "Save");
     wait_for(&mut harness, "saving the expanded Room scene", |app| {
         !app.editor.is_dirty()
     });

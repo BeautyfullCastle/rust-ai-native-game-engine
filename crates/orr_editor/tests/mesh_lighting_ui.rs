@@ -503,7 +503,7 @@ fn mesh_lighting_applies_undoes_persists_and_reopens_source_free() {
         field(&mut app, label, value);
     }
     click_button(&mut app, "Place mesh agent");
-    menu(&mut app, "Save Ctrl+S");
+    menu(&mut app, "Save");
     let initial_scene_checksum = app.state().editor.checksum();
     let initial_graph = mesh_view(&app).graph.revision();
     let scene_bytes = fs::read(&fixture.scene).expect("placed MeshNavigation scene is saved");
@@ -645,7 +645,7 @@ fn mesh_lighting_applies_undoes_persists_and_reopens_source_free() {
     }
     assert_eq!(reopened.state().editor.mode(), Mode::Play);
     click_button(&mut reopened, LBL_PAUSE);
-    click_button(&mut reopened, "⏮");
+    click_button(&mut reopened, "Rewind to the first tick");
     wait_for(&mut reopened, "tick zero", |app| {
         app.editor
             .timeline()

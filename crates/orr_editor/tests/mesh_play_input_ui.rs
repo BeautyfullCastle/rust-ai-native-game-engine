@@ -351,7 +351,7 @@ fn mesh_play_goal_input_retargets_only_through_managed_gameplay() {
     click(&mut harness, "Static-mesh navigation");
     click(&mut harness, "Create ramp and bridge");
     click(&mut harness, "Place mesh agent");
-    menu_click(&mut harness, "File", "Save Ctrl+S");
+    menu_click(&mut harness, "File", "Save");
     wait_for(&mut harness, "saving the created mesh scene", |app| {
         !app.editor.is_dirty()
     });

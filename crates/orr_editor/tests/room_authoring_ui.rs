@@ -334,9 +334,9 @@ fn room_authoring_ui_layout_wall_save_reopen_and_play_acceptance() {
         assert_eq!(position, expected_position);
         assert_eq!(body_field(app, guid, "rot"), *original_rotation);
     }
-    menu_click(&mut harness, "Edit", "Undo Ctrl+Z");
+    menu_click(&mut harness, "Edit", "Undo");
     assert_eq!(harness.state().editor.checksum(), initial_checksum);
-    menu_click(&mut harness, "Edit", "Redo Ctrl+Y");
+    menu_click(&mut harness, "Edit", "Redo");
     assert_eq!(harness.state().editor.checksum(), layout_checksum);
 
     set_field(&mut harness, "Room wall name", "ui_authoring_wall");
@@ -376,7 +376,7 @@ fn room_authoring_ui_layout_wall_save_reopen_and_play_acceptance() {
         .find(|row| row.name.as_deref() == Some("ui_authoring_wall"))
         .and_then(|row| row.guid.clone())
         .expect("created wall has a persistent GUID");
-    menu_click(&mut harness, "Edit", "Undo Ctrl+Z");
+    menu_click(&mut harness, "Edit", "Undo");
     assert_eq!(harness.state().editor.checksum(), layout_checksum);
     assert_eq!(harness.state().editor.rows().len(), 7);
     assert!(!harness
@@ -385,7 +385,7 @@ fn room_authoring_ui_layout_wall_save_reopen_and_play_acceptance() {
         .rows()
         .iter()
         .any(|row| row.guid.as_ref() == Some(&wall_guid)));
-    menu_click(&mut harness, "Edit", "Redo Ctrl+Y");
+    menu_click(&mut harness, "Edit", "Redo");
     assert_eq!(harness.state().editor.checksum(), wall_checksum);
     assert_eq!(harness.state().editor.rows().len(), 8);
     assert!(harness
@@ -394,7 +394,7 @@ fn room_authoring_ui_layout_wall_save_reopen_and_play_acceptance() {
         .rows()
         .iter()
         .any(|row| row.guid.as_ref() == Some(&wall_guid)));
-    menu_click(&mut harness, "File", "Save Ctrl+S");
+    menu_click(&mut harness, "File", "Save");
     wait_for(&mut harness, "saving the authored Room scene", |app| {
         !app.editor.is_dirty()
     });

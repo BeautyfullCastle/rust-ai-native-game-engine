@@ -242,7 +242,7 @@ fn trajectory(h: &mut Harness<'_, EditorApp>) -> Vec<Vec<u8>> {
     h.state_mut().editor.step(30);
     wait_tick(h, 30);
     frames.push(frame_bytes(h));
-    click(h, "⏮");
+    click(h, "Rewind to the first tick");
     wait_tick(h, 0);
     assert_eq!(frame_bytes(h), frames[1]);
     click(h, LBL_STOP);
@@ -437,7 +437,7 @@ fn production_main_viewport_matches_baked_uv_oracle_through_play_seek_stop() {
     assert_eq!(pixels(&h, "reopened"), transformed);
     click(&mut h, LBL_PLAY);
     click(&mut h, LBL_PAUSE);
-    click(&mut h, "⏮");
+    click(&mut h, "Rewind to the first tick");
     wait_tick(&mut h, 0);
     assert_eq!(h.state().editor.mode(), Mode::Play);
     assert!(
@@ -450,7 +450,7 @@ fn production_main_viewport_matches_baked_uv_oracle_through_play_seek_stop() {
     h.state_mut().editor.step(30);
     wait_tick(&mut h, 30);
     assert!(changed(&play0, &pixels(&h, "step-30")) > 100);
-    click(&mut h, "⏮");
+    click(&mut h, "Rewind to the first tick");
     wait_tick(&mut h, 0);
     assert_eq!(pixels(&h, "seek-zero"), play0);
     assert_eq!(frame_bytes(&mut h), play0_bytes);

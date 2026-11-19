@@ -453,7 +453,7 @@ fn default_physics_to_mesh_scene_exports_a_verified_bundle_without_overwrites() 
     click(&mut harness, "Static-mesh navigation");
     click(&mut harness, "Create ramp and bridge");
     click(&mut harness, "Place mesh agent");
-    menu_click(&mut harness, "File", "Save Ctrl+S");
+    menu_click(&mut harness, "File", "Save");
     fixture.source_scene_bytes = fs::read(&fixture.scene).unwrap();
     let initial_checksum = harness.state().editor.checksum();
     let initial_view = orr_remote::mesh_navigation::mesh_from_view(
@@ -571,7 +571,7 @@ fn default_physics_to_mesh_scene_exports_a_verified_bundle_without_overwrites() 
     );
     assert_eq!(fs::read(&sidecar).unwrap(), source_sidecar_bytes);
     click(&mut harness, "Close window");
-    menu_click(&mut harness, "Edit", "Undo Ctrl+Z");
+    menu_click(&mut harness, "Edit", "Undo");
     assert!(!harness.state().editor.is_dirty());
     assert_eq!(harness.state().editor.checksum(), initial_checksum);
 

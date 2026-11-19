@@ -220,12 +220,12 @@ fn type_scene_path(harness: &mut Harness<'_, EditorApp>, path: &Path, action: &s
 fn assert_global_save_and_history_disabled(harness: &mut Harness<'_, EditorApp>) {
     click(harness, "File");
     assert!(harness
-        .get_by_label("Save Ctrl+S")
+        .get_by_label("Save")
         .accesskit_node()
         .is_disabled());
     click(harness, "File");
     click(harness, "Edit");
-    for label in ["Undo Ctrl+Z", "Redo Ctrl+Y"] {
+    for label in ["Undo", "Redo"] {
         assert!(harness.get_by_label(label).accesskit_node().is_disabled());
     }
     click(harness, "Edit");
@@ -737,15 +737,15 @@ fn viewport_vertex_drag_is_transient_cancelable_snapped_and_persisted() {
     assert!(placed_view.graph.triangles().len() >= 4);
     let placed_checksum = harness.state().editor.checksum();
     let committed_pixels = capture_png(&mut harness, &fixture, "committed-geometry");
-    menu_click(&mut harness, "Edit", "Undo Ctrl+Z");
+    menu_click(&mut harness, "Edit", "Undo");
     assert_eq!(harness.state().editor.checksum(), initial_checksum);
-    menu_click(&mut harness, "Edit", "Redo Ctrl+Y");
+    menu_click(&mut harness, "Edit", "Redo");
     assert_eq!(harness.state().editor.checksum(), placed_checksum);
     assert_eq!(
         mesh_view(&harness).graph.vertices()[0].map(FP::to_f32),
         moved_vertex
     );
-    menu_click(&mut harness, "File", "Save Ctrl+S");
+    menu_click(&mut harness, "File", "Save");
     let saved_scene = fs::read(&fixture.scene).unwrap();
     let scene_sha256 = sha256_hex(&saved_scene);
     let graph_revision = revision_hex(placed_view.graph.revision());

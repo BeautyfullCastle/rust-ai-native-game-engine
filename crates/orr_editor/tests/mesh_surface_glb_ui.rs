@@ -745,7 +745,7 @@ fn advance_until_won(harness: &mut Harness<'_, EditorApp>) -> u64 {
         .timeline()
         .is_some_and(|timeline| timeline.tick != 0)
     {
-        click(harness, "⏮");
+        click(harness, "Rewind to the first tick");
     }
     for _ in 0..1024 {
         let view = mesh_from_view(harness.state().editor.snapshot().unwrap().predicted()).unwrap();

@@ -606,7 +606,7 @@ fn mesh_keyboard_controls_drive_mission_in_editor_and_source_free_player() {
         "placing a stationary initial agent goal",
         |app| editor_mesh_view(app).pin.goal == initial_view.pin.start,
     );
-    menu_click(&mut editor, "File", "Save Ctrl+S");
+    menu_click(&mut editor, "File", "Save");
     wait_for_editor(&mut editor, "saving the stationary mission start", |app| {
         !app.editor.is_dirty()
     });
@@ -723,7 +723,7 @@ fn mesh_keyboard_controls_drive_mission_in_editor_and_source_free_player() {
         authored_history
     );
     click(&mut editor, "File");
-    click(&mut editor, "Save Ctrl+S");
+    click(&mut editor, "Save");
     settle(&mut editor);
     let saved_scene = fs::read(&fixture.scene).unwrap();
     assert!(!editor.state().editor.is_dirty());
