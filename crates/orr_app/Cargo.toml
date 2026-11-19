@@ -11,9 +11,11 @@ description = "Runs a Game in a window: fixed tick, input, bridge, interpolation
 workspace = true
 
 [features]
-default = ["audio-native"]
+default = ["audio-native", "gamepad"]
 # The system audio device (CPAL) for `ViewContext::audio()`. Without it the sounds of the views play nothing.
 audio-native = ["orr_audio/native"]
+# Game controllers through `gilrs` (MIT OR Apache-2.0): the `InputContext` pad helpers read them. Without it the pads stay unconnected.
+gamepad = ["dep:gilrs"]
 
 [dependencies]
 bytemuck = "1"
@@ -36,6 +38,8 @@ orr_server = { path = "../orr_server", default-features = false }
 orr_relay_net = { path = "../orr_relay_net" }
 # Window (view layer only): winit 0.30 (raw-window-handle 0.6, same as wgpu 30).
 winit = "0.30"
+# Game controllers (feature `gamepad`). Default features are the Windows Gaming Input backend; Linux uses udev, macOS IOKit.
+gilrs = { version = "0.11", optional = true }
 # Screenshot files.
 png = "0.18"
 

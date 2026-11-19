@@ -24,7 +24,7 @@ use winit::window::{Window, WindowId};
 
 use crate::cli::{Args, RunMode, USAGE};
 use crate::overlay::{Overlay, TextPass};
-use crate::input::InputContext;
+use crate::input::{Device, InputContext};
 use crate::net::{self, Hosted, Join};
 use crate::pace::{Advance, Outcome, Pacer};
 use crate::models::ModelScene;
@@ -164,6 +164,8 @@ pub struct App<G: Game> {
     views: Views<G>,
     /// The start data of the local players, as bytes (see [`App::player_data`]); empty: the default.
     player_data: Vec<u8>,
+    /// Devices given to slots by hand (see [`App::assign_device`]).
+    devices: Vec<(PlayerSlot, Device)>,
 }
 
 impl<G: Game> App<G>
@@ -202,6 +204,7 @@ impl<G: Game> App<G> {
             view3: None,
             views: Views::new(),
             player_data: Vec::new(),
+            devices: Vec::new(),
         }
     }
 
@@ -253,6 +256,13 @@ impl<G: Game> App<G> {
         self
     }
 
+    /// Plays `slot` with `device` for `InputContext::stick_of`, instead of the default
+    /// (slot 0 keyboard, slot 1 first pad, slot 2 second pad).
+    pub fn assign_device(mut self, slot: PlayerSlot, device: Device) -> Self {
+        self.devices.push((slot, device));
+        self
+    }
+
     /// Seed of the simulation random numbers (default 42).
     pub fn seed(mut self, seed: u64) -> Self {
         self.seed = seed;
@@ -267,7 +277,8 @@ impl<G: Game> App<G> {
 
     /// Turns the held keys into the input of a local player. Called every frame, once for
     /// each local slot, with that slot. `InputContext::stick_for_slot` maps slot 0 to
-    /// WASD and slot 1 to the arrow keys.
+    /// WASD and slot 1 to the arrow keys. `InputContext::stick_of` follows the controllers too:
+    /// slot 0 the keyboard, slot 1 the first pad, slot 2 the second pad, and so on.
     pub fn input(mut self, poll: impl FnMut(&InputContext, PlayerSlot) -> G::Input + 'static) -> Self {
         self.input = Some(Box::new(poll));
         self
@@ -419,11 +430,17 @@ impl<G: Game> App<G> {
         } else {
             self.views.use_sound_device();
         }
+        let mut keys = InputContext::default();
+        for (slot, device) in &self.devices {
+            keys.assign(*slot, *device);
+        }
         let mut runner = Runner {
             bridge,
             display,
             local,
-            keys: InputContext::default(),
+            keys,
+            #[cfg(feature = "gamepad")]
+            pads: crate::gamepad::Pads::open(),
             pacer: if networked { Pacer::new(&args).following_clock() } else { Pacer::new(&args) },
             args,
             title: self.title,
@@ -731,6 +748,9 @@ struct Runner<G: Game> {
     display: Display,
     local: LocalInput<G>,
     keys: InputContext,
+    /// The controllers; their events go to `keys` before every frame.
+    #[cfg(feature = "gamepad")]
+    pads: crate::gamepad::Pads,
     pacer: Pacer,
     args: Args,
     title: String,
@@ -750,6 +770,14 @@ impl<G: Game> Runner<G> {
         let real = now - self.last_frame;
         self.last_frame = now;
 
+        #[cfg(feature = "gamepad")]
+        {
+            let mut events = Vec::new();
+            self.pads.poll(&mut events);
+            for event in events {
+                self.keys.apply_pad(event);
+            }
+        }
         self.local.send(&self.keys, &mut self.bridge);
 
         let head = self.bridge.snapshot().map_or(0, |s| s.tick());
@@ -858,6 +886,7 @@ mod tests {
     use orr_testgame::roster::{Avatar, Profile, Roster};
 
     use super::*;
+    use crate::screens::{Action, Labels, Screens};
 
     const DEMO_SCENE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scenes/physics_demo.scene.yaml");
 
@@ -933,6 +962,55 @@ mod tests {
 
         bridge.step(5);
         assert_eq!(*asked.borrow(), vec![PlayerSlot(2); 5]);
+    }
+
+    /// Runs 60 frames with W and D held. The input function is `poll`; `before` runs first in
+    /// each frame with the frame number.
+    fn held_run(mut poll: impl FnMut(&InputContext, PlayerSlot) -> PhysInput + 'static, mut before: impl FnMut(u32)) -> u64 {
+        let mut bridge = physics().players(1).build_bridge().unwrap();
+        let mut local = LocalInput::<PhysGame>::new(Box::new(move |keys, slot| poll(keys, slot)), bridge.local_slots());
+        let mut keys = InputContext::default();
+        keys.set(KeyCode::KeyD, true);
+        keys.set(KeyCode::KeyW, true);
+        for frame in 0..60 {
+            before(frame);
+            local.send(&keys, &mut bridge);
+            bridge.step(1);
+        }
+        bridge.snapshot().unwrap().predicted().checksum()
+    }
+
+    fn walk(keys: &InputContext) -> PhysInput {
+        let stick = keys.stick_for_slot(PlayerSlot(0));
+        PhysInput::new(stick.x, stick.y, 0, stick.action)
+    }
+
+    #[test]
+    fn a_screen_sends_the_neutral_input_to_the_simulation_and_the_checksum_proves_it() {
+        // Frames 20..40 show the pause screen while the keys stay held.
+        let screens = Screens::playing(Labels::default());
+        let (for_input, for_frames) = (screens.clone(), screens.clone());
+        let paused_run = held_run(
+            move |keys, _| for_input.input(keys, walk),
+            move |frame| {
+                if frame == 20 || frame == 40 {
+                    assert!(for_frames.act(Action::Pause));
+                }
+            },
+        );
+
+        // The same frames with the neutral input written by hand, and no screens.
+        let frame = Rc::new(Cell::new(0u32));
+        let counted = frame.clone();
+        let neutral_run = held_run(
+            move |keys, _| if (20..40).contains(&counted.get()) { PhysInput::default() } else { walk(keys) },
+            move |n| frame.set(n),
+        );
+        assert_eq!(paused_run, neutral_run, "the simulation saw neutral input while the screen was shown");
+
+        // The same frames with live input all the way: the keys do move the player.
+        let live_run = held_run(|keys, _| walk(keys), |_| {});
+        assert_ne!(paused_run, live_run, "the held keys would have changed the run");
     }
 
     #[test]
