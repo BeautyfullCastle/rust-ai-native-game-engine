@@ -1835,7 +1835,14 @@ impl EditorApp {
         #[cfg(feature="mesh-navigation")]
         let mutable = mutable && !self.mesh_navigation.art_import_busy() && !self.mesh_navigation.prop_gesture_busy() && !self.mesh_navigation.agent_pick_busy() && !self.mesh_navigation.geometry_vertex_busy() && !self.mesh_mission_pick_busy() && !self.hazard_pick_busy();
         let live = self.editor.down().is_none();
-        egui::MenuBar::new().ui(ui, |ui| {
+        // The Play buttons drop their labels (the label stays as the tooltip and the accessible
+        // name) when the bar with labels was wider than the window. The overflow width is
+        // measured only while the labels show, so the bar does not flip back and forth.
+        let full_width_id = egui::Id::new("top_bar_full_width");
+        let full_width = ui.data(|data| data.get_temp::<f32>(full_width_id)).unwrap_or(0.0);
+        let available_width = ui.available_width();
+        let compact = full_width > available_width;
+        let bar = egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
                 if !(mutable) { ui.disable(); }
                 #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "project-create", feature = "collect-ui"))]
@@ -1970,17 +1977,23 @@ impl EditorApp {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = crate::theme::space::XS;
                     let can_play = live && !playing && start_blocker.is_none();
+                    let button = |icon: Icon, label: &'static str, hint: &'static str| {
+                        let button = IconButton::new(icon, label).disabled_hint(hint);
+                        if compact { button.icon_only() } else { button }
+                    };
                     // Play is the main action of the bar: it takes the accent while it is available.
-                    if ui.add_enabled(can_play, IconButton::new(Icon::Play, LBL_PLAY).primary(true)).on_disabled_hover_text(start_blocker.as_deref().unwrap_or("Playback is already running or the host is unavailable")).clicked() {
+                    let play_hint = start_blocker.as_deref().unwrap_or("Playback is already running or the host is unavailable");
+                    if ui.add_enabled(can_play, button(Icon::Play, LBL_PLAY, "").primary(true).disabled_hint(play_hint)).clicked() {
                         self.play_from_ui();
                     }
-                    if ui.add_enabled(live && playing, IconButton::new(Icon::Pause, LBL_PAUSE)).on_disabled_hover_text("Pause works while the simulation plays").clicked() {
+                    if ui.add_enabled(live && playing, button(Icon::Pause, LBL_PAUSE, "Pause works while the simulation plays")).clicked() {
                         self.editor.pause();
                     }
-                    if ui.add_enabled(live && !playing && start_blocker.is_none(), IconButton::new(Icon::Step, LBL_STEP)).on_disabled_hover_text(start_blocker.as_deref().unwrap_or("Pause playback or reconnect the host before stepping")).clicked() {
+                    let step_hint = start_blocker.as_deref().unwrap_or("Pause playback or reconnect the host before stepping");
+                    if ui.add_enabled(live && !playing && start_blocker.is_none(), button(Icon::Step, LBL_STEP, "").disabled_hint(step_hint)).clicked() {
                         self.step_from_ui();
                     }
-                    if ui.add_enabled(live && self.editor.is_playing_mode(), IconButton::new(Icon::Stop, LBL_STOP)).on_disabled_hover_text("Stop works while the scene plays").clicked() {
+                    if ui.add_enabled(live && self.editor.is_playing_mode(), button(Icon::Stop, LBL_STOP, "Stop works while the scene plays")).clicked() {
                         self.editor.stop();
                     }
                 });
@@ -2033,6 +2046,15 @@ impl EditorApp {
                 });
             }
         });
+        if !compact {
+            // The bar is never narrower than the window, so it is wider only when the content overflows.
+            let overflow = bar.response.rect.width() > available_width + 0.5;
+            ui.data_mut(|data| data.insert_temp(full_width_id, if overflow { bar.response.rect.width() } else { 0.0 }));
+            if overflow {
+                // The next frame shows the compact bar.
+                ui.ctx().request_repaint();
+            }
+        }
         #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "project-create", feature = "collect-ui"))]
         if self.collect_project_dialog_open() { return; }
         #[cfg(all(feature = "collect-ui", feature = "collect-input-map-editor"))]

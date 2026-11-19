@@ -282,16 +282,23 @@ pub struct IconButton<'a> {
     show_label: bool,
     shortcut: Option<&'a str>,
     selected: Option<bool>,
+    disabled_hint: Option<&'a str>,
 }
 
 impl<'a> IconButton<'a> {
     pub fn new(icon: Icon, label: &'a str) -> Self {
-        Self { slot: Slot::Leading(icon), label, primary: false, menu: false, show_label: true, shortcut: None, selected: None }
+        Self { slot: Slot::Leading(icon), label, primary: false, menu: false, show_label: true, shortcut: None, selected: None, disabled_hint: None }
     }
 
     /// A menu row without an icon that lines up with the rows that have one.
     pub fn plain(label: &'a str) -> Self {
-        Self { slot: Slot::Blank, label, primary: false, menu: true, show_label: true, shortcut: None, selected: None }
+        Self { slot: Slot::Blank, label, primary: false, menu: true, show_label: true, shortcut: None, selected: None, disabled_hint: None }
+    }
+
+    /// The tooltip while the button is disabled: why it does not work now.
+    pub fn disabled_hint(mut self, text: &'a str) -> Self {
+        self.disabled_hint = Some(text);
+        self
     }
 
     /// The main action of its bar: filled with the accent while it is enabled.
@@ -336,7 +343,9 @@ impl<'a> IconButton<'a> {
 impl Widget for IconButton<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
         let font = TextStyle::Button.resolve(ui.style());
-        let pad = ui.spacing().button_padding;
+        // A menu row keeps the padding of the other menu rows so the texts line up.
+        // A bar button is a little tighter: the top bar must fit narrow windows.
+        let pad = if self.menu { ui.spacing().button_padding } else { Vec2::new(theme::space::SM, ui.spacing().button_padding.y) };
         let gap = theme::space::SM;
         let galley = self.show_label.then(|| ui.painter().layout_no_wrap(self.label.to_owned(), font.clone(), Color32::PLACEHOLDER));
         let shortcut = self.shortcut.map(|text| ui.painter().layout_no_wrap(text.to_owned(), font.clone(), Color32::PLACEHOLDER));
@@ -410,12 +419,13 @@ impl Widget for IconButton<'_> {
                 painter.galley(at, shortcut, text_color);
             }
         }
-        if self.show_label {
-            response
-        } else if enabled {
-            response.on_hover_text(self.label)
-        } else {
-            response.on_disabled_hover_text(self.label)
+        match (enabled, self.show_label, self.disabled_hint) {
+            // A button with a label needs no tooltip while it works.
+            (true, true, _) => response,
+            // An icon alone names itself.
+            (true, false, _) => response.on_hover_text(self.label),
+            (false, true, None) => response,
+            (false, _, hint) => response.on_disabled_hover_text(hint.unwrap_or(self.label)),
         }
     }
 }
