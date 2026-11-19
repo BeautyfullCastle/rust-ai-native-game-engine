@@ -43,7 +43,7 @@ impl Preview {
             egui::FontFamily::Name("project-ui-preview".into()),
             vec!["project-ui-preview".into()],
         );
-        ctx.set_fonts(fonts);
+        crate::theme::set_fonts(ctx, fonts);
         Self {
             descriptor: prepared.descriptor,
             font_bytes,

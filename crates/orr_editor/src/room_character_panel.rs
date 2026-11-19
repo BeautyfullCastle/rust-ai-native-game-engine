@@ -60,6 +60,10 @@ struct RootPin {
 impl RootPin {
     fn new(parent: &Path) -> Result<Self, String> {
         let path = checked_directory(parent)?;
+        // Only Unix syncs the folder after a save, so only Unix needs a readable handle.
+        #[cfg(unix)]
+        let directory = orr_fsid::PinnedDirectory::open_readable(&path).map_err(|e| e.to_string())?;
+        #[cfg(not(unix))]
         let directory = orr_fsid::PinnedDirectory::open(&path).map_err(|e| e.to_string())?;
         Ok(Self { path, directory })
     }
@@ -308,7 +312,9 @@ impl Panel {
         if let Err(error) = second {
             return match rollback.persist(&model_path) {
                 Ok(_) => {
-                    let _ = pin.directory.file().sync_all();
+                    if let Some(directory) = pin.directory.file() {
+                        let _ = directory.sync_all();
+                    }
                     Err(format!(
                         "Character save failed; model sidecar restored: {error}"
                     ))
@@ -322,7 +328,7 @@ impl Panel {
         self.saved = self.document.clone();
         self.saved_bytes = bytes;
         #[cfg(unix)]
-        check(SaveStage::DirectorySync).and_then(|()|pin.directory.file().sync_all()).map_err(|e|format!("Character and model sidecars replaced, but directory sync failed; durability is uncertain: {e}"))?;
+        check(SaveStage::DirectorySync).and_then(|()|pin.directory.file().map_or(Ok(()), std::fs::File::sync_all)).map_err(|e|format!("Character and model sidecars replaced, but directory sync failed; durability is uncertain: {e}"))?;
         Ok(())
     }
     pub fn show(
