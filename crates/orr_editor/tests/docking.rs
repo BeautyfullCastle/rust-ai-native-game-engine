@@ -414,6 +414,7 @@ fn the_move_panel_menu_docks_and_tabs_without_the_mouse() {
     assert!(layout.to_value().to_string().contains("\"tabs\""));
     layout.validate().unwrap();
     // Both titles are tabs of one group now.
-    assert!(present(&h, "Timeline & tools"));
-    assert!(present(&h, "Hierarchy"));
+    // Each name shows once, on its tab, not again as a panel title.
+    assert_eq!(h.query_all_by_label("Timeline & tools").count(), 1);
+    assert_eq!(h.query_all_by_label("Hierarchy").count(), 1);
 }

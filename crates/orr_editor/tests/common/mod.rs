@@ -143,3 +143,4 @@ pub fn doc_checksum(ed: &mut Editor) -> u64 {
 }
 
 pub mod arena;
+pub mod dock_panels;
