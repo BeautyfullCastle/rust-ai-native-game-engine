@@ -413,31 +413,35 @@ fn a_checkpoint_event_saves_into_its_slot_with_the_label_of_the_game() {
 fn views_see_a_replaced_session_as_a_resync_and_forget_the_old_events() {
     struct Count {
         resyncs: Rc<RefCell<u32>>,
+        loads: Rc<RefCell<u32>>,
         events: Rc<RefCell<Vec<EventState>>>,
     }
     impl SceneView<Counter> for Count {
         fn on_resync(&mut self, _ctx: &mut ViewContext<'_, Counter>) {
             *self.resyncs.borrow_mut() += 1;
         }
+        fn on_load(&mut self, _ctx: &mut ViewContext<'_, Counter>) {
+            *self.loads.borrow_mut() += 1;
+        }
         fn on_event(&mut self, _ctx: &mut ViewContext<'_, Counter>, _event: &Mark, state: EventState) {
             self.events.borrow_mut().push(state);
         }
     }
     let dir = temp_dir("replaced");
-    let (resyncs, events) = (Rc::new(RefCell::new(0)), Rc::new(RefCell::new(Vec::new())));
+    let (resyncs, loads, events) = (Rc::new(RefCell::new(0)), Rc::new(RefCell::new(0)), Rc::new(RefCell::new(Vec::new())));
     let (mut bridge, mut views) = (new_run(), views_in(&dir, "counter", 1));
-    views.scene_view(Count { resyncs: resyncs.clone(), events: events.clone() });
+    views.scene_view(Count { resyncs: resyncs.clone(), loads: loads.clone(), events: events.clone() });
     play(&mut bridge, &mut views, 30);
     views.save_game("s", "").unwrap();
     play(&mut bridge, &mut views, 30);
-    assert_eq!((*resyncs.borrow(), events.borrow().len()), (0, 2), "two marks so far (ticks 25 and 50)");
+    assert_eq!((*resyncs.borrow(), *loads.borrow(), events.borrow().len()), (0, 0, 2), "two marks so far (ticks 25 and 50)");
 
     let mut bridge = load_into_new_bridge(&mut views, "s");
     views.session_replaced();
     play(&mut bridge, &mut views, 1);
-    assert_eq!(*resyncs.borrow(), 1, "the scene views were told once, with the first frame of the new session");
+    assert_eq!((*resyncs.borrow(), *loads.borrow()), (1, 1), "the scene views were told once, with the first frame of the new session");
     play(&mut bridge, &mut views, 30);
-    assert_eq!(*resyncs.borrow(), 1);
+    assert_eq!((*resyncs.borrow(), *loads.borrow()), (1, 1));
     assert_eq!(events.borrow().len(), 3, "the mark at tick 50 comes again in the new timeline");
     let _ = fs::remove_dir_all(dir);
 }
