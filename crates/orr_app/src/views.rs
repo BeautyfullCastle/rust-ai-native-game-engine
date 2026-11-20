@@ -324,7 +324,8 @@ pub struct Views<G: Game> {
 
 type EventName<G> = Box<dyn Fn(&<G as Game>::Event) -> Option<String>>;
 
-/// The most events whose sound is remembered (so that a late `Verified` does not play it again).
+/// The most events whose sound is remembered (so that a late `Verified` does not play it again). Keys of
+/// unconfirmed sounds are kept past this count as long as other keys can go instead.
 const SOUND_HISTORY: usize = 512;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -341,18 +342,38 @@ struct EventSounds<G: Game> {
     heard: BTreeMap<EventKey, Heard>,
     /// The sounds of predicted events that are not verified yet, to stop them when a rollback cancels them.
     live: BTreeMap<EventKey, Vec<SoundHandle>>,
+    /// The sounds of verified events that may still play, to stop them when a new session replaces the old one.
+    settled: Vec<SoundHandle>,
 }
 
 impl<G: Game> EventSounds<G> {
     fn new() -> Self {
-        Self { names: Vec::new(), heard: BTreeMap::new(), live: BTreeMap::new() }
+        Self { names: Vec::new(), heard: BTreeMap::new(), live: BTreeMap::new(), settled: Vec::new() }
     }
 
-    fn remember(&mut self, key: EventKey, state: Heard) {
+    /// Keeps the handles of confirmed sounds. Finished ones are dropped, and at most `SOUND_HISTORY` stay.
+    fn settle(&mut self, audio: &mut Audio, handles: impl IntoIterator<Item = SoundHandle>) {
+        self.settled.extend(handles);
+        if self.settled.len() > SOUND_HISTORY {
+            self.settled.retain(|handle| audio.is_playing(*handle));
+            let extra = self.settled.len().saturating_sub(SOUND_HISTORY);
+            for handle in self.settled.drain(..extra) {
+                audio.stop(handle);
+            }
+        }
+    }
+
+    /// Records what happened to `key`. Past `SOUND_HISTORY` keys, the oldest key without an unconfirmed sound
+    /// goes first, so a guess that is still waiting for its `Verified` or `Canceled` keeps its handle and its
+    /// record. Only when every key holds an unconfirmed sound does the oldest go, and its sound stops.
+    fn remember(&mut self, audio: &mut Audio, key: EventKey, state: Heard) {
         self.heard.insert(key, state);
         while self.heard.len() > SOUND_HISTORY {
-            if let Some((oldest, _)) = self.heard.pop_first() {
-                self.live.remove(&oldest);
+            let silent = self.heard.keys().copied().find(|old| *old != key && !self.live.contains_key(old));
+            let Some(evicted) = silent.or_else(|| self.heard.keys().copied().find(|old| *old != key)) else { break };
+            self.heard.remove(&evicted);
+            for handle in self.live.remove(&evicted).unwrap_or_default() {
+                audio.stop(handle);
             }
         }
     }
@@ -373,7 +394,7 @@ impl<G: Game> EventSounds<G> {
                 for handle in self.live.remove(&key).unwrap_or_default() {
                     audio.stop(handle);
                 }
-                self.remember(key, Heard::Canceled);
+                self.remember(audio, key, Heard::Canceled);
             }
             EventStatus::Predicted(payload) | EventStatus::Verified(payload) => {
                 let verified = matches!(status, EventStatus::Verified(_));
@@ -381,15 +402,18 @@ impl<G: Game> EventSounds<G> {
                     (Some(Heard::Predicted), true) => {
                         // The guess came true: its sound goes on, a second one does not start.
                         self.heard.insert(key, Heard::Verified);
-                        self.live.remove(&key);
+                        let handles = self.live.remove(&key).unwrap_or_default();
+                        self.settle(audio, handles);
                         return;
                     }
                     (Some(Heard::Predicted | Heard::Verified), _) | (Some(Heard::Canceled), true) => return,
                     _ => {}
                 }
-                self.remember(key, if verified { Heard::Verified } else { Heard::Predicted });
+                self.remember(audio, key, if verified { Heard::Verified } else { Heard::Predicted });
                 let handles: Vec<SoundHandle> = self.names.iter().filter_map(|name| name(payload)).filter_map(|name| audio.play_named(&name)).collect();
-                if !verified && !handles.is_empty() {
+                if verified {
+                    self.settle(audio, handles);
+                } else if !handles.is_empty() {
                     self.live.insert(key, handles);
                 }
             }
@@ -404,9 +428,12 @@ impl<G: Game> EventSounds<G> {
         self.heard.retain(|_, state| *state != Heard::Predicted);
     }
 
-    /// A new session starts: all sounds of the old one stop and nothing is remembered.
+    /// A new session starts: all sounds of the old one stop, confirmed or not, and nothing is remembered.
     fn cleared(&mut self, audio: &mut Audio) {
         self.resynced(audio);
+        for handle in std::mem::take(&mut self.settled) {
+            audio.stop(handle);
+        }
         self.heard.clear();
     }
 }
