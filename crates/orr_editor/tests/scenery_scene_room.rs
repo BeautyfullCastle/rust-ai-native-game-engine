@@ -28,15 +28,20 @@ use std::path::Path;
 
 /// A new Room project whose scene text is `edit` of the template's, opened as the editor opens it.
 fn room_editor(root: &Path, edit: impl FnOnce(&str) -> String) -> Editor {
+    room_project(root, edit).0
+}
+
+/// The editor and the prepared models of the project, as the editor starts with a Room project.
+fn room_project(root: &Path, edit: impl FnOnce(&str) -> String) -> (Editor, orr_sample::room_project::PreparedModels) {
     let project = root.join("room");
     create(&CreateOptions { output: project.clone(), template: "room-escape-3d-v1".into(), seed: "scene-window".into() }).unwrap();
     let scene = project.join("room.scene.yaml");
     std::fs::write(&scene, edit(&std::fs::read_to_string(&scene).unwrap())).unwrap();
-    let (_, path, scene, _) = PreparedProject::open(&project).unwrap().into_parts();
+    let (_, path, scene, models) = PreparedProject::open(&project).unwrap().into_parts();
     let mut editor = Editor::start(&HostSpec::PreparedRoom { scene: path, text: scene.text().into(), listen: None, debug_hooks: false }).unwrap();
     editor.sync();
     assert_eq!(editor.game(), EditorGame::RoomEscape);
-    editor
+    (editor, models)
 }
 
 fn number(value: &Value) -> f32 {
@@ -210,4 +215,76 @@ fn the_window_edits_the_open_room_when_asked() {
     // The snapshot the player reads is the frame the window edits.
     let frame: FrameView<'_> = h.state().editor.snapshot().unwrap().predicted();
     assert_eq!(frame.count::<orr_gfx::Light>(), 2);
+}
+
+fn frames(h: &mut Harness<'_, EditorApp>, n: usize) {
+    for _ in 0..n {
+        h.state_mut().editor.sync();
+        h.run_steps(2);
+    }
+}
+
+/// Mean of the color channels over the part of the viewport inside the window `rect`.
+fn viewport_brightness(width: u32, rgba: &[u8], rect: egui::Rect) -> f32 {
+    let (x0, x1) = ((rect.min.x + rect.width() * 0.3) as u32, (rect.min.x + rect.width() * 0.9) as u32);
+    let (y0, y1) = ((rect.min.y + rect.height() * 0.2) as u32, (rect.min.y + rect.height() * 0.8) as u32);
+    let (mut sum, mut n) = (0.0f32, 0.0f32);
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let i = ((y * width + x) * 4) as usize;
+            sum += f32::from(rgba[i]) + f32::from(rgba[i + 1]) + f32::from(rgba[i + 2]);
+            n += 3.0;
+        }
+    }
+    sum / n
+}
+
+fn save_png(path: &Path, width: u32, rgba: &[u8]) {
+    let height = rgba.len() as u32 / 4 / width;
+    let file = std::io::BufWriter::new(std::fs::File::create(path).unwrap());
+    let mut encoder = png::Encoder::new(file, width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.write_header().unwrap().write_image_data(rgba).unwrap();
+}
+
+/// The editor window with the scene window open on a lit Room, before and after the window
+/// darkens the scene. With `ORR_SCENERY_CAPTURE` set to a folder, the two windows are saved there.
+#[test]
+fn the_scene_window_changes_the_picture_of_a_lit_room() {
+    let Some((_guard, probe)) = gpu() else { return };
+    if probe.is_software() {
+        eprintln!("SKIP: this picture check needs a hardware adapter");
+        return;
+    }
+    let capture = std::env::var_os("ORR_SCENERY_CAPTURE").map(std::path::PathBuf::from);
+    let root = tempfile::tempdir().unwrap();
+    let (editor, models) = room_project(root.path(), room_lit_scene::with_lights);
+    let setup = egui_wgpu::WgpuSetup::CreateNew(egui_wgpu::WgpuSetupCreateNew::without_display_handle());
+    let mut h = Harness::builder().with_size([1600.0, 1000.0]).wgpu_setup(setup).build_eframe(move |cc| {
+        let mut app = EditorApp::new(editor, cc.wgpu_render_state.clone());
+        app.models.install_room(models).unwrap();
+        app
+    });
+    frames(&mut h, 30);
+    h.state_mut().scenery.open = true;
+    h.state_mut().scenery.target = WindowTarget::OpenScene;
+    frames(&mut h, 4);
+    let rect = h.state().ui.viewport_rect.expect("the viewport was drawn");
+    let before = h.render().expect("kittest wgpu render");
+    let mut settings = scenery_scene::read(&h.state().editor, Settings::default());
+    settings.sun.hour = 7.0;
+    settings.look.exposure = 0.5;
+    for (group, name) in [("Sun", "Hour"), ("Look", "Exposure")] {
+        apply(&mut h.state_mut().editor, group, name, &settings);
+    }
+    frames(&mut h, 30);
+    let after = h.render().expect("kittest wgpu render");
+    if let Some(folder) = &capture {
+        std::fs::create_dir_all(folder).unwrap();
+        save_png(&folder.join("lighting_after_editor_room_window.png"), before.width(), before.as_raw());
+        save_png(&folder.join("lighting_after_editor_room_window_dark.png"), after.width(), after.as_raw());
+    }
+    let (a, b) = (viewport_brightness(before.width(), before.as_raw(), rect), viewport_brightness(after.width(), after.as_raw(), rect));
+    assert!(b < a * 0.95, "the darker settings darken the Room: {a:.1} -> {b:.1}");
 }
