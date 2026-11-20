@@ -300,8 +300,6 @@ mod prefab_panel;
 
 #[cfg(feature="room-project")]
 pub mod room_camera_panel;
-#[cfg(feature = "room-lighting")]
-pub mod room_lighting_panel;
 
 #[cfg(feature = "mesh-hazards-export")]
 pub mod mesh_hazards_player;

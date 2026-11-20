@@ -6,7 +6,7 @@ use crate::{
 };
 use orr_bridge::FrameView;
 use orr_ecs::Entity;
-use orr_games::room_escape_game::{RoomActor, RoomRun, EXIT, FLOOR, KEY, PLAYER, WALL};
+use orr_games::room_escape_game::{self as game, RoomActor, RoomRun, EXIT, FLOOR, KEY, PLAYER, WALL};
 #[cfg(feature = "room-animated-models")]
 use orr_model::animation::{AnimatedModel, Pose, Trs};
 #[cfg(feature = "room-animated-models")]
@@ -27,18 +27,68 @@ use std::{collections::BTreeSet, sync::Arc};
 
 pub const TARGET_FORMAT: TextureFormat = TextureFormat::Rgba8Unorm;
 
-/// Shared Room procedural/imported base lighting. Environment authoring never
-/// changes shadow policy or the independent point-light settings.
-pub fn presentation_lighting(
-    #[cfg(feature = "room-lighting")] environment: Option<&crate::room_lighting::Environment>,
-) -> Result<orr_render::Lighting, String> {
+/// The lighting of a Room that has no lights: the yard's sun and sky, without shadows.
+/// The scene's own lights and environment replace it (see [`lighting_for_frame`]).
+pub fn presentation_lighting() -> orr_render::Lighting {
     let mut lighting = yard3d_view::yard_lighting();
     lighting.shadows = false;
-    #[cfg(feature = "room-lighting")]
-    if let Some(environment) = environment {
-        environment.apply_to(&mut lighting)?;
+    lighting
+}
+
+/// The sun, ambient light, exposure and tone mapping of the frame's scene: the
+/// `orr_gfx` lights and singletons it holds, over [`presentation_lighting`].
+/// A Room draws without shadows whatever its sun says.
+pub fn lighting_for_frame(frame: FrameView<'_>) -> orr_render::Lighting {
+    let mut lighting = orr_gfx_view::scene_look(frame, &presentation_lighting()).lighting;
+    lighting.shadows = false;
+    lighting
+}
+
+/// The room's point light as the imported-model renderer takes it, from the
+/// frame's first point `Light`. `None` while the light is off: switched off,
+/// without intensity, or held back by its `RoomLightRule` in the run state.
+/// A light that follows the player is at the player's position plus its offset.
+pub fn point_light_settings(frame: FrameView<'_>) -> PointLightSettings {
+    use orr_gfx::{Light, LIGHT_POINT};
+    if !frame.registers::<Light>() {
+        return PointLightSettings::default();
     }
-    Ok(lighting)
+    let Some((entity, light)) = frame.iter::<Light>().find(|(_, light)| light.kind == LIGHT_POINT) else {
+        return PointLightSettings::default();
+    };
+    if light.enabled == 0 || light.intensity <= orr_fp::FP::ZERO {
+        return PointLightSettings::default();
+    }
+    let mut position = orr_gfx_view::placement(frame, entity).0;
+    if let Some(rule) = frame.get::<game::RoomLightRule>(entity) {
+        if let Some(run) = frame.try_singleton::<RoomRun>() {
+            if !rule.is_on(run) {
+                return PointLightSettings::default();
+            }
+        }
+        if rule.follow != 0 {
+            let player = frame
+                .iter::<RoomActor>()
+                .find(|(_, actor)| actor.kind == PLAYER)
+                .and_then(|(entity, _)| frame.get::<Body>(entity));
+            if let Some(body) = player {
+                position = [
+                    (body.pos.x + rule.offset.x).to_f32(),
+                    (body.pos.y + rule.offset.y).to_f32(),
+                    (body.pos.z + rule.offset.z).to_f32(),
+                ];
+            }
+        }
+    }
+    let channel = |v: orr_fp::FP| v.to_f32().clamp(0.0, 1.0);
+    PointLightSettings {
+        point_light: Some(orr_render::PointLight {
+            position,
+            color: [channel(light.color.x), channel(light.color.y), channel(light.color.z)],
+            intensity: light.intensity.to_f32().clamp(0.0, 100.0),
+            range: light.range.to_f32().clamp(0.01, 1000.0),
+        }),
+    }
 }
 
 
@@ -337,6 +387,38 @@ pub fn admit_presentation(
     Ok(())
 }
 
+/// The frame is closed over its GUID index: every live entity is a room actor with its
+/// body and collider, or a light of the scene (at most `MAX_LIGHTS`), and each has
+/// exactly one GUID. Stale generations, extra entities and duplicate reverse mappings fail.
+fn validate_closure(frame: FrameView<'_>, index: &SceneIndex) -> Result<(), String> {
+    let alive = frame.alive_count() as usize;
+    let actors = frame.count::<RoomActor>() as usize;
+    if !(3..=MAX_MODEL_BINDINGS).contains(&actors)
+        || alive - actors.min(alive) > game::MAX_LIGHTS
+        || index.len() != alive
+        || frame.count::<Body>() as usize != actors
+        || frame.count::<Collider>() as usize != actors
+    {
+        return Err("room presentation frame/GUID closure mismatch".into());
+    }
+    for (guid, entity) in index.iter() {
+        let is_actor = frame.get::<RoomActor>(entity).is_some();
+        if !frame.exists(entity)
+            || index.guid(entity) != Some(guid)
+            || (is_actor && (frame.get::<Body>(entity).is_none() || frame.get::<Collider>(entity).is_none()))
+            || (!is_actor && frame.get::<orr_gfx::Light>(entity).is_none())
+        {
+            return Err("room presentation stale generation or GUID mapping".into());
+        }
+    }
+    for (entity, _) in frame.iter::<RoomActor>() {
+        if index.guid(entity).and_then(|guid| index.entity(guid)) != Some(entity) {
+            return Err("room presentation actor has no exact GUID".into());
+        }
+    }
+    Ok(())
+}
+
 /// Validates closure before resolving GUID bindings. Stale generations, missing
 /// actors, extra actors and duplicate reverse mappings fail instead of hiding errors.
 pub fn placements(
@@ -358,30 +440,7 @@ pub fn placements(
     #[cfg(not(feature = "room-animated-models"))]
     {
         validate_models(models)?;
-        let count = frame.alive_count() as usize;
-        if !(3..=MAX_MODEL_BINDINGS).contains(&count)
-            || index.len() != count
-            || frame.count::<RoomActor>() as usize != count
-            || frame.count::<Body>() as usize != count
-            || frame.count::<Collider>() as usize != count
-        {
-            return Err("room presentation frame/GUID closure mismatch".into());
-        }
-        for (guid, entity) in index.iter() {
-            if !frame.exists(entity)
-                || index.guid(entity) != Some(guid)
-                || frame.get::<RoomActor>(entity).is_none()
-                || frame.get::<Body>(entity).is_none()
-                || frame.get::<Collider>(entity).is_none()
-            {
-                return Err("room presentation stale generation or GUID mapping".into());
-            }
-        }
-        for (entity, _) in frame.iter::<RoomActor>() {
-            if index.guid(entity).and_then(|guid| index.entity(guid)) != Some(entity) {
-                return Err("room presentation actor has no exact GUID".into());
-            }
-        }
+        validate_closure(frame, index)?;
         let collected = frame.singleton::<RoomRun>().key_collected != 0;
         let mut result = Vec::new();
         for (guid, binding) in &models.document.bindings {
@@ -442,30 +501,7 @@ fn frame_placements_with_playback(
     if let Some(character) = &models.character {
         character.validate_current_bindings(frame, index, &models.document, &models.assets)?;
     }
-    let count = frame.alive_count() as usize;
-    if !(3..=MAX_MODEL_BINDINGS).contains(&count)
-        || index.len() != count
-        || frame.count::<RoomActor>() as usize != count
-        || frame.count::<Body>() as usize != count
-        || frame.count::<Collider>() as usize != count
-    {
-        return Err("room presentation frame/GUID closure mismatch".into());
-    }
-    for (guid, entity) in index.iter() {
-        if !frame.exists(entity)
-            || index.guid(entity) != Some(guid)
-            || frame.get::<RoomActor>(entity).is_none()
-            || frame.get::<Body>(entity).is_none()
-            || frame.get::<Collider>(entity).is_none()
-        {
-            return Err("room presentation stale generation or GUID mapping".into());
-        }
-    }
-    for (entity, _) in frame.iter::<RoomActor>() {
-        if index.guid(entity).and_then(|guid| index.entity(guid)) != Some(entity) {
-            return Err("room presentation actor has no exact GUID".into());
-        }
-    }
+    validate_closure(frame, index)?;
     let collected = frame.singleton::<RoomRun>().key_collected != 0;
     let mut result = FramePlacements {
         static_models: Vec::new(),
@@ -642,8 +678,6 @@ pub struct RoomRenderer {
 }
 
 struct RoomRenderCore {
-    lighting: orr_render::Lighting,
-    point_light: PointLightSettings,
     format: TextureFormat,
     procedural: Renderer3D<Wgpu>,
     imported: ImportedSceneRenderer<Wgpu>,
@@ -728,10 +762,7 @@ impl RoomRenderer {
             .map(|(model, instances)| (model.as_ref(), instances.as_slice()))
             .collect();
         let mut empty = RenderList3D::new();
-        empty.lighting = presentation_lighting(
-            #[cfg(feature = "room-lighting")]
-            None,
-        )?;
+        empty.lighting = presentation_lighting();
         #[cfg(feature = "room-animated-models")]
         {
             let animated_prepared: Vec<_> = animated_admission
@@ -804,8 +835,6 @@ impl RoomRenderer {
         Ok(Self {
             target: OffscreenTarget::new(rhi, size.0, size.1, format),
             core: RoomRenderCore {
-                lighting: empty.lighting,
-                point_light: PointLightSettings::default(),
                 format,
                 procedural: Renderer3D::with_settings(rhi.clone(), format, Settings3D::LOW),
                 imported,
@@ -814,19 +843,6 @@ impl RoomRenderer {
                 animated_models: animated_cache,
             },
         })
-    }
-    /// Validate an authored environment before replacing the active base light.
-    /// None restores the exact legacy Room lighting; no assets are reread.
-    #[cfg(feature = "room-lighting")]
-    pub fn set_environment(&mut self, environment: Option<crate::room_lighting::Environment>) -> Result<(), String> {
-        let lighting = presentation_lighting(environment.as_ref())?;
-        self.core.lighting = lighting;
-        Ok(())
-    }
-    pub fn set_point_light_settings(&mut self, settings: PointLightSettings) -> Result<(), String> {
-        settings.validate().map_err(|e| e.to_string())?;
-        self.core.point_light = settings;
-        Ok(())
     }
     pub fn target(&self) -> &OffscreenTarget<Wgpu> {
         &self.target
@@ -1037,7 +1053,9 @@ impl RoomRenderCore {
             .filter(|item| !bound.contains(&item.entity))
             .collect();
         let mut list = RenderList3D::new();
-        list.lighting = self.lighting;
+        // The scene's own lights and environment light the room, read from this frame.
+        list.lighting = lighting_for_frame(frame);
+        let point_light = point_light_settings(frame);
         yard3d_view::fill_list(&visible, &mut list);
         let prepared: Vec<_> = self
             .models
@@ -1060,7 +1078,7 @@ impl RoomRenderCore {
                     target.size,
                     camera,
                     &list.lighting,
-                    &self.point_light,
+                    &point_light,
                     &list,
                     &prepared,
                     &animated_prepared,
@@ -1073,7 +1091,7 @@ impl RoomRenderCore {
                 target.size,
                 camera,
                 &list.lighting,
-                &self.point_light,
+                &point_light,
                 &list,
                 &prepared,
             )
@@ -1107,7 +1125,7 @@ impl RoomRenderCore {
                 target,
                 camera,
                 &list.lighting,
-                &self.point_light,
+                &point_light,
                 &mut batches,
             )
             .map_err(|e| e.to_string())
@@ -1340,28 +1358,106 @@ pub fn character_placement(
     }))
 }
 
-#[cfg(all(test, feature = "room-lighting"))]
-mod environment_consumer_tests {
+#[cfg(test)]
+mod scene_lighting_tests {
     use super::*;
+    use orr_fp::{fp, FPVec3, FP};
+    use orr_games::room_escape_game::{RoomConfig, RoomLightRule, ACTIVATION_KEY_MISSING, TICK_RATE};
+    use orr_gfx::{Environment, Light, LIGHT_DIRECTIONAL, LIGHT_POINT};
+
+    fn room() -> orr_ecs::Frame {
+        orr_sim::Simulation::<game::RoomEscapeV1>::new(RoomConfig, TICK_RATE, 42).frame().clone()
+    }
+    fn add_light(frame: &mut orr_ecs::Frame, light: Light, position: FPVec3, rotation: FPVec3) -> Entity {
+        let entity = frame.spawn();
+        frame.add(entity, orr_gfx::Transform3 { position, rotation, ..Default::default() });
+        frame.add(entity, light);
+        entity
+    }
+    fn assert_close(a: [f32; 3], b: [f32; 3]) {
+        assert!(a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-3), "{a:?} vs {b:?}");
+    }
+
     #[test]
-    fn absent_environment_keeps_exact_legacy_room_light_and_shadow_policy() {
+    fn a_room_without_lights_keeps_the_legacy_lighting_and_has_no_point_light() {
+        let frame = room();
         let mut legacy = yard3d_view::yard_lighting();
         legacy.shadows = false;
-        assert_eq!(presentation_lighting(None).unwrap(), legacy);
+        assert_eq!(lighting_for_frame(FrameView::of(&frame)), legacy);
+        assert_eq!(point_light_settings(FrameView::of(&frame)), PointLightSettings::default());
     }
+
     #[test]
-    fn environment_reaches_shared_base_without_changing_shadow_output_or_point_settings() {
-        let environment = crate::room_lighting::Environment {
-            direction: [-0.25, -0.75, 0.5], color: [0.2, 0.4, 0.7], intensity: 0.8,
-            sky: [0.1, 0.2, 0.3], ground: [0.04, 0.08, 0.12], ambient: 0.3,
+    fn the_sun_and_the_environment_reach_the_lighting_without_shadows() {
+        let mut frame = room();
+        // Faces along (-0.3, -0.8, -0.5) normalized: pitch 'down' is positive.
+        let d: [f64; 3] = [-0.3, -0.8, -0.5];
+        let n = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        let pitch = (-d[1] / n).asin().to_degrees();
+        let yaw = d[0].atan2(d[2]).to_degrees();
+        add_light(
+            &mut frame,
+            Light {
+                kind: LIGHT_DIRECTIONAL,
+                color: FPVec3::new(fp!(1), fp!(0.85), fp!(0.6)),
+                intensity: fp!(2.4),
+                cast_shadows: 1,
+                ..Light::default()
+            },
+            FPVec3::ZERO,
+            FPVec3::new(FP::from_f64(pitch), FP::from_f64(yaw), FP::ZERO),
+        );
+        frame.set_singleton(Environment {
+            sky_color: FPVec3::new(fp!(0.4), fp!(0.55), fp!(0.9)),
+            ground_color: FPVec3::new(fp!(0.2), fp!(0.18), fp!(0.16)),
+            ambient: fp!(0.4),
+        });
+        let lighting = lighting_for_frame(FrameView::of(&frame));
+        let direction = lighting.direction;
+        assert_close(direction, [(d[0] / n) as f32, (d[1] / n) as f32, (d[2] / n) as f32]);
+        assert_close(lighting.color, [1.0, 0.85, 0.6]);
+        assert!((lighting.intensity - 2.4).abs() < 1e-3);
+        assert_close(lighting.sky, [0.4, 0.55, 0.9]);
+        assert_close(lighting.ground, [0.2, 0.18, 0.16]);
+        assert!((lighting.ambient - 0.4).abs() < 1e-3);
+        assert!(!lighting.shadows, "a room draws without shadows, even when its sun casts them");
+        assert_eq!(point_light_settings(FrameView::of(&frame)), PointLightSettings::default());
+    }
+
+    #[test]
+    fn a_point_light_follows_the_player_and_goes_out_by_its_rule() {
+        let mut frame = room();
+        let light = Light {
+            kind: LIGHT_POINT,
+            color: FPVec3::new(fp!(1), fp!(0.9), fp!(0.7)),
+            intensity: fp!(3),
+            range: fp!(12),
+            ..Light::default()
         };
-        let mut expected = presentation_lighting(None).unwrap();
-        environment.apply_to(&mut expected).unwrap();
-        assert_eq!(presentation_lighting(Some(&environment)).unwrap(), expected);
-        let mut invalid = environment;
-        invalid.intensity = f32::NAN;
-        assert!(presentation_lighting(Some(&invalid)).is_err());
-        assert!(!presentation_lighting(None).unwrap().shadows);
+        let entity = add_light(&mut frame, light, FPVec3::new(FP::ZERO, fp!(4), FP::ZERO), FPVec3::ZERO);
+        let fixed = point_light_settings(FrameView::of(&frame)).point_light.unwrap();
+        assert_eq!(fixed.position, [0.0, 4.0, 0.0]);
+        assert_close(fixed.color, [1.0, 0.9, 0.7]);
+        assert_eq!((fixed.intensity, fixed.range), (3.0, 12.0));
+        // Following the player at (0, 0.5, 0) with the offset (0, 2, 0).
+        frame.add(
+            entity,
+            RoomLightRule { follow: 1, activation: ACTIVATION_KEY_MISSING, offset: FPVec3::new(FP::ZERO, fp!(2), FP::ZERO) },
+        );
+        let carried = point_light_settings(FrameView::of(&frame)).point_light.unwrap();
+        assert_eq!(carried.position, [0.0, 2.5, 0.0]);
+        // Once the key is collected, KeyMissing puts the light out.
+        let mut run = *frame.singleton::<RoomRun>();
+        run.key_collected = 1;
+        frame.set_singleton(run);
+        assert_eq!(point_light_settings(FrameView::of(&frame)), PointLightSettings::default());
+        // A light that is switched off gives nothing.
+        let mut off = frame.clone();
+        let mut run = *off.singleton::<RoomRun>();
+        run.key_collected = 0;
+        off.set_singleton(run);
+        off.get_mut::<Light>(entity).unwrap().enabled = 0;
+        assert_eq!(point_light_settings(FrameView::of(&off)), PointLightSettings::default());
     }
 }
 

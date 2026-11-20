@@ -48,7 +48,7 @@ fn wait(panel: &mut Panel) {
     assert!(!panel.busy(), "worker timeout: {}", panel.status);
 }
 fn imported_player(linear: bool) -> (crate::package_manager::presentation_tests::Fixture, Vec<u8>) {
-    let f = crate::package_manager::presentation_tests::fixture(true, true);
+    let f = crate::package_manager::presentation_tests::fixture(true);
     let source = f.temp.path().join("author.model.animated.json");
     fs::write(&source, source_bytes()).unwrap();
     let license = f.temp.path().join("author-LICENSE.txt");
@@ -119,7 +119,6 @@ fn imported_player(linear: bool) -> (crate::package_manager::presentation_tests:
     assert_eq!(report.asset, "model.animated.json");
     let prepared = open(&f.root);
     let character = prepared.character().unwrap().document.clone();
-    let light = prepared.lighting().unwrap().document.clone();
     let player = prepared
         .scene()
         .frame()
@@ -224,7 +223,6 @@ fn imported_player(linear: bool) -> (crate::package_manager::presentation_tests:
     assert_eq!(saved.package, "imported-courier");
     assert_eq!(saved.asset, "model.animated.json");
     assert_eq!(reopened.character().unwrap().document, character);
-    assert_eq!(reopened.lighting().unwrap().document, light);
     assert!(reopened.models().assets.contains_key(&(package, asset)));
     assert_eq!(fs::read(&source).unwrap(), source_bytes());
     assert_eq!(fs::read(&license).unwrap(), license_bytes);
@@ -235,7 +233,6 @@ fn open(root: &Path) -> orr_sample::room_project::PreparedProject {
         root,
         orr_sample::room_project::RoomProjectCapabilities {
             character: true,
-            lighting: true,
         },
     )
     .unwrap()
@@ -432,7 +429,7 @@ fn actual_sampler_widgets_preview_import_install_assign_save_reopen_nearest_and_
         assert_eq!(placed.entity, player);
         assert_payload(&placed.model, linear);
         assert!(!placed.model.deform(&placed.pose).unwrap().is_empty());
-        let baseline = crate::package_manager::presentation_tests::fixture(true, true);
+        let baseline = crate::package_manager::presentation_tests::fixture(true);
         assert_eq!(
             prepared.scene().frame().to_bytes(),
             open(&baseline.root).scene().frame().to_bytes(),

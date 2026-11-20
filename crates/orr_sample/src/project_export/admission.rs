@@ -234,7 +234,6 @@ impl ProjectSnapshot {
             plan.add(sidecar, orr_tilemap::MAX_BYTES as u64)?;
         }
         if let Some(sidecar) = &entry.models { plan.add(sidecar,MAX_JSON_BYTES)?; }
-        if let Some(sidecar) = &entry.lighting { plan.add(sidecar,4096)?; }
         if let Some(sidecar) = &entry.character { plan.add(sidecar,4096)?; }
         if let Some(sidecar) = &entry.camera { plan.add(sidecar,4096)?; }
         #[cfg(all(feature = "room-project", not(feature = "room-input-actions")))]
@@ -321,18 +320,6 @@ impl ProjectSnapshot {
                 return Err("character changed after runtime admission".into());
             }
             file.role = "character_sidecar";
-            files.push(file);
-        }
-        #[cfg(feature = "room-lighting")]
-        if let Some(path) = &entry.lighting {
-            let super::Prepared::Room(room) = &prepared else { return Err("lighting requires Room consumer".into()); };
-            let admitted = room.lighting().ok_or("missing admitted Room lighting")?;
-            let mut file = SnapshotFile::read(&root.join(path), path, crate::room_lighting::MAX_BYTES as u64)?;
-            if file.source != admitted.path || file.bytes != admitted.bytes
-                || files[0].bytes != admitted.manifest_bytes {
-                return Err("lighting changed after runtime admission".into());
-            }
-            file.role = "lighting_sidecar";
             files.push(file);
         }
         #[cfg(feature = "room-project")]

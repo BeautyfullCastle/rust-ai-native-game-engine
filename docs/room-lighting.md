@@ -1,45 +1,70 @@
-# Saved Room fixed and carried point lighting
+# Room lighting in the scene
 
-The optional `room-lighting` feature adds one presentation-only, unshadowed point light for schema-2 `room-escape-v1` projects. It is default-off in `orr_sample` and `orr_editor`; simulation, input, replay, Frame bytes and checksums are unchanged. The native light illuminates imported model receivers through the existing renderer; procedural proxies retain their existing shading. This adds no additional lights or new shader.
+A `room-escape-v1` project keeps its lighting in its scene file. The scene holds an environment, a sun and one point light as `orr_gfx` components, and the editor, the native player, captures and exported games all read them from the same Frame. There is no lighting document, no lighting panel and no `room-lighting` feature any more. The manifest entry has no `lighting` field, and a manifest that still names one is refused.
 
-## Declare and author
+Lights and singletons are presentation data. No system reads them, so they change no simulation result. They are part of the Frame, so they are part of the Frame checksum, the snapshot and the replay start.
 
-Add `"lighting":"room.lighting.json"` to the manifest entry and create that distinct root-level regular file:
+## What the scene holds
 
-```json
-{"version":1,"point_light":{"position":[0,4,0],"color":[1,0.9,0.7],"intensity":3,"range":12}}
-```
+| Scene data | Role |
+|---|---|
+| `orr_gfx::Environment` (singleton) | Sky color, ground color and ambient strength. |
+| `orr_gfx::PostProcess` (singleton) | The player draws its `exposure` and its tone mapping. The effect list is stored but the player does not draw it. |
+| `orr_gfx::Sky` (singleton) | Stored for the scene window. The player does not draw sky, fog, clouds or wind. |
+| one directional `orr_gfx::Light` with `orr_gfx::Transform3` | The sun: direction, color and intensity. |
+| one point `orr_gfx::Light` with `orr_gfx::Transform3` | The point light: position, color, intensity and range. |
+| `RoomEscapeV1::LightRule` on the point light | Whether the light follows the player and when it is on. |
 
-Open the complete project in an editor built with `room-lighting`. Enable **Point light enabled**, edit its position/linear RGB/intensity/range and choose **Apply lighting**, then **Save lighting**. Undo/Redo retain32 applied changes. Reopen restores saved settings.
+The templates carry the three singletons with their default values. A scene file saved before these components existed still opens: a missing singleton gets its default value, and a Room without any light draws with the lighting every Room had before (the yard's low sun, the sky and ground ambient, no shadows).
 
-For a carried light enable **Carry light with player** and edit **Carried offset X/Y/Z** before Apply/Save. The document becomes version2:
+A Room that has a light entity is lit only by its lights, as in every scene with `orr_gfx` lights. A scene with a point light and no sun has no sun. The conversion of the old documents therefore always adds the sun that was in force.
 
-```json
-{"version":2,"point_light":{"position":[0,4,0],"color":[1,0.9,0.7],"intensity":3,"range":12},"follow_player":[0,2,0]}
-```
+## Fields of the former lighting document
 
-In Play, editor presentation, native drawing and captures resolve the sole current PLAYER/body from the same immutable rendering Frame. Light position is current world PLAYER position plus saved offset; color, intensity and range remain authored. Offset is in world axes, independent of player rotation/model-local transforms. **Position X/Y/Z** remains the fixed Edit fallback; Edit/Stop shows it. Seek uses the sought Frame directly without motion history. Runtime restart resumes the saved policy at the restarted player position. Disabling carry returns version1 while retaining fallback/appearance; disabling the point light clears the carry policy.
+| Document field | Scene field |
+|---|---|
+| `point_light.position` | point `Light` entity, `Transform3.position` |
+| `point_light.color` | `Light.color` |
+| `point_light.intensity` | `Light.intensity` (scene range 0..100, the document allowed 0..1e4) |
+| `point_light.range` | `Light.range` (scene range 0.01..1000, the document allowed up to 1e9) |
+| `point_light: null` | no point light entity, or `Light.enabled` off |
+| `follow_player` | `LightRule.follow` on, `LightRule.offset` (within 32 on each axis) |
+| `activation` | `LightRule.activation`: `always`, `key_collected`, `escaped`, `key_missing`, `before_escape` |
+| `environment.direction` | sun `Transform3.rotation` (pitch and yaw, degrees) |
+| `environment.color` | sun `Light.color` |
+| `environment.intensity` | sun `Light.intensity` |
+| `environment.sky` | `Environment.sky_color` |
+| `environment.ground` | `Environment.ground_color` |
+| `environment.ambient` | `Environment.ambient` |
+| environment preset file (`.room-environment-preset.json`) | the same six environment fields. The scene window's own presets and the saved scene replace the preset file. |
 
-**Discard lighting draft** restores the currently applied settings, including unsaved applied values, without applying, changing history or writing. Invalid drafts can be discarded. Editing requires coherent local Edit mode; Play, remote editing, stale/replaced sources or changed manifest/sidecar bytes refuse authoring. Replacement/restart retires old source tokens. Save As requires reopening the complete project.
+The sun direction `d` becomes pitch `asin(-d.y / |d|)` and yaw `atan2(d.x, d.z)`. A Room draws its sun without shadows, whatever the sun's shadow fields say. Fixed-point storage rounds colors and angles to about 0.00002. A converted Room differs from its former picture in a few hundred pixels by one level of one color channel.
 
-## Activate from actual gameplay
+## Editing
 
-With the light enabled, **Light activation** selects **Always**, **Key collected**, **Escaped**, **Before key pickup** or **Before escape**. Apply and Save the choice. Conditional documents use version3 with required `"activation":"key_collected"` or `"activation":"escaped"` (the Before choices use `"key_missing"` and `"before_escape"`); the existing optional `follow_player` array combines with any condition. **Always** removes the condition and returns to version1 (fixed) or2 (carried).
+Open the Room in the editor and use the scene window with **Edit the open scene**. Its sun, ambient and exposure controls set the fields above. Each control is one undo step, and an undo restores the Frame checksum. The inspector edits every field of a light and of the rule.
 
-Edit/Stop previews the authored light. Play reads actual `RoomRun` from the same rendering Frame: Key collected enables once `key_collected != 0` and remains enabled after escape; Escaped requires `won != 0`. Before key pickup stays active while `key_collected == 0`; Before escape stays active while `won == 0`, including after pickup. Seeking/restarting before the outcome restores these lights. No interaction key or elapsed tick substitutes for those outcomes. Seek/restart to before pickup/victory disables Key collected/Escaped again, without an event journal. Invalid settings and carried body data still reject while inactive. Disabling the light clears both carry and activation.
+To add a light, spawn one entity with `Transform3` and `Light` in one step, for example with `world.spawn`. A Room accepts at most one directional and one point light. An entity that is neither a room actor nor such a light is refused, and so is a light with any other component.
 
-## Admission and persistence
+The former panel's viewport pick of a light's X/Z position is gone. Select the light in the hierarchy and edit its `Transform3`.
 
-The limit is4096 bytes. Version1 requires `point_light` (null disables it) and forbids follow data; its original renderer-compatible bytes are preserved. Version2 requires an enabled point light and `follow_player`, exactly three finite offsets within -32..32. Missing/null/duplicate/unknown fields, positional objects, unsupported versions and invalid numeric values reject. The followed PLAYER position must also be within -32..32 per axis; missing/duplicate roles or missing current Body generation fail closed. Canonical Room scene admission still owns gameplay's narrower spatial contract. Frame APIs require registered Room component types.
+## Admission
 
-Light fallback position is finite within ±1e9; linear RGB/intensity0..1e4; range1e-6..1e9. Paths must be distinct contained regular files, with existing symlink/alias restrictions. Undeclared sidecars are ignored. Feature compilation is not consumer consent: callers use explicit Room lighting capabilities; ordinary `PreparedProject::open` rejects declared lighting.
+The Room scene admission accepts exactly these entities: room actors with `Actor`, `Body` and `Collider`, and at most two light entities. A light entity holds `Transform3`, `Light` and, on a point light, optionally `LightRule`. It holds no other component. `Transform3.scale` is 1, positions and rotations are within the inspector ranges, light fields are within their inspector ranges, and `LightRule.offset` is zero unless `follow` is on. Environment and exposure values are range checked. The Room refuses everything it refused before.
 
-A failed pre-replacement write preserves bytes/baseline/history. Replacement followed by directory-sync failure reports uncertain durability and advances the saved baseline. This detects ordinary external edits, not hostile filesystem races.
+## Player, capture and export
 
-## Use and verification
+The native player and `room_escape --headless --capture` build their lighting from the frame they draw: the sun, ambient, exposure and tone mapping from `orr_gfx_view::scene_look`, and the point light from the first enabled point `Light`. With a rule, the light is on while its activation holds in `RoomRun`, and a following light is at the player's body position plus the offset, in world axes. The headless option `--check-model-poses` prints `room lighting active: 0/1` for a conditional light and `room carried light position: [...]` for a following light.
 
-Run `room_escape` with `room-lighting` or export through `orr_export_room` with `room-lighting,project-export` and a trusted lighting-capable runtime. Export retains exact document bytes and verified package closure. Headless execution validates resolved lighting; explicit `--check-model-poses` additionally prints the carried light position. Conditional lights also print `room lighting active: 0/1` under that explicit option; inactive carried lights print no position. Normal stdout retains the exact export smoke protocol.
+The export copies the scene, so the exported game has the lights. The export has no lighting document to check.
 
-Focused CPU acceptance covers strict/legacy documents, real movement, immutable failures, limits, editor controls/history/Save/reopen/Seek/Stop, source retirement and source-hidden exported native headless position parity against deployed model placement. Existing GPU acceptance is separate and requires its explicit adapter/isolation flags. CPU checks do not establish native-window, GPU pixels, audio-device or Windows positive-publication success. Existing Windows publication access failures remain unresolved and are not retried. This adds no shadows, light occlusion, flashlight cone, probes or general light attachment graph.
+## Checksums
 
-Fixed lights can also [stage X/Z from the viewport](room-light-viewport-pick.md), preserving the authored height before explicit Apply and Save.
+Registering `orr_gfx` adds components and singletons to the Room Frame, so every Room Frame checksum changed. The Room template's initial checksum is now `0xc6b08f4b43d8b9c9` (it was `0x0d36cae60075d641`). The `orr_games` golden checksums of other games did not change.
+
+## Limits
+
+A light with a rule is evaluated from the frame that is shown, also in Edit. In Edit the key is not collected, so a `key_collected` light is off while editing. The former document previewed the authored light in Edit whatever its activation said.
+
+
+This adds no shadows, light occlusion, flashlight cone or probes. The Room draws one sun and one point light. The imported-model renderer lights model receivers with the point light, and procedural proxies keep their existing shading. The native player and captures do not draw fog, sky, clouds, bloom or other post effects. The editor viewport draws the scene as it draws any `orr_gfx` scene. It was not compared with the player for these effects.

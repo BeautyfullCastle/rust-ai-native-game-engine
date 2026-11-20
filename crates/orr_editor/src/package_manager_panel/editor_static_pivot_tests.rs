@@ -156,7 +156,7 @@ fn wait_packages(h: &mut Harness<'_, (Panel, PathBuf)>) {
 // Establish a nonidentity ordinary binding before the tested authoring flow.
 // Bindings::save is synchronous; no asynchronous Editor::save is used here.
 fn fixture() -> crate::package_manager::presentation_tests::Fixture {
-    let f = crate::package_manager::presentation_tests::fixture(false, false);
+    let f = crate::package_manager::presentation_tests::fixture(false);
     let prepared = orr_sample::room_project::PreparedProject::open(&f.root).unwrap();
     let frame = prepared.scene().frame().to_bytes();
     let (guid, mut binding) = prepared

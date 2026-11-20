@@ -15,6 +15,9 @@ use crate::windows_project::authoring as room_authoring;
 #[path = "../windows_room/authoring.rs"]
 mod room_authoring;
 
+#[path = "../../tests/support/room_lit_scene.rs"]
+mod room_lit_scene;
+
 fn fake_pe() -> Vec<u8> {
     fn write_u16(bytes: &mut [u8], offset: usize, value: u16) {
         bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
@@ -299,6 +302,41 @@ fn room_export_copies_only_admitted_closure_and_validates_staged_project() {
     for (path, bytes) in published_bytes {
         assert_eq!(fs::read(report.output.join(path)).unwrap(), bytes);
     }
+}
+
+#[test]
+fn room_export_carries_the_lights_of_the_scene_and_refuses_a_lighting_document() {
+    let fixture = Fixture::new();
+    let scene_path = fixture.options.project.join("room.scene.yaml");
+    let lit = room_lit_scene::with_lights(&fs::read_to_string(&scene_path).unwrap());
+    fs::write(&scene_path, &lit).unwrap();
+    let source = Prepared::open(&fixture.options.project, Profile::Room).unwrap();
+    let expected_checksum = source.checksum();
+    let expected_smoke = source.smoke().unwrap();
+    let report = export_with(
+        &fixture.options,
+        |_| Ok(()),
+        |command| {
+            let staged = Prepared::open(&smoke_command_project(command), Profile::Room).unwrap();
+            assert_eq!(staged.checksum(), expected_checksum);
+            Ok(expected_smoke.clone())
+        },
+    )
+    .unwrap();
+    // The player reads its lighting from the copied scene: the exported scene is the lit scene.
+    assert_eq!(fs::read_to_string(report.output.join("project/room.scene.yaml")).unwrap(), lit);
+    assert_eq!(report.manifest.payload.initial_checksum, format!("0x{expected_checksum:016x}"));
+    assert!(report.manifest.payload.files.iter().all(|file| !file.path.contains("lighting")));
+    let copied = Prepared::open(&report.output.join("project"), Profile::Room).unwrap();
+    assert_eq!(copied.checksum(), expected_checksum);
+
+    // A manifest that still names a lighting document is refused: the lighting is in the scene.
+    let manifest = fixture.options.project.join("orr.project.json");
+    let mut json: serde_json::Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    json["entry"]["lighting"] = "room.lighting.json".into();
+    fs::write(&manifest, serde_json::to_vec_pretty(&json).unwrap()).unwrap();
+    fs::write(fixture.options.project.join("room.lighting.json"), br#"{"version":1,"point_light":null}"#).unwrap();
+    assert!(Prepared::open(&fixture.options.project, Profile::Room).is_err());
 }
 
 #[test]

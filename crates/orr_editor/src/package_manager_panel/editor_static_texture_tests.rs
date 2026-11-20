@@ -356,7 +356,7 @@ fn assert_variant(actual: &StaticModel, png: &[u8]) {
 
 #[test]
 fn actual_static_texture_widgets_import_install_binding_history_save_reopen_and_cpu_materials() {
-    let fixture = crate::package_manager::presentation_tests::fixture(false, false);
+    let fixture = crate::package_manager::presentation_tests::fixture(false);
     let png = png_bytes();
     let mut import_ui = form(&fixture, &png);
     let before_import = snapshot(&fixture.root);
@@ -578,7 +578,7 @@ fn actual_static_texture_widgets_import_install_binding_history_save_reopen_and_
 
 #[test]
 fn invalid_static_texture_png_worker_rejects_without_publishing_or_editing_project() {
-    let fixture = crate::package_manager::presentation_tests::fixture(false, false);
+    let fixture = crate::package_manager::presentation_tests::fixture(false);
     let malformed = b"not a PNG image";
     let mut h = form(&fixture, malformed);
     let before = snapshot(fixture.temp.path());

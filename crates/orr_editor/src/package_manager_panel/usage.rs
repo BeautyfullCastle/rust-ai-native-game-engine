@@ -186,7 +186,7 @@ fn inspect(identity: &Identity) -> Result<UsageReport, String> {
         project: identity.root.clone(),
         package: identity.package.clone(),
         digest: identity.digest.clone(),
-    },orr_sample::room_project::RoomProjectCapabilities {lighting:cfg!(feature="room-lighting"),character:cfg!(feature="room-character")})?;
+    },orr_sample::room_project::RoomProjectCapabilities {character:cfg!(feature="room-character")})?;
     if report.package.name != identity.package
         || report.package.digest != identity.digest
         || report.bindings.iter().any(|binding| {

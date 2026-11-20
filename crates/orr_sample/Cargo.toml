@@ -30,7 +30,6 @@ coop-defense-run-save = ["coop-defense", "dep:sha2", "dep:orr_fsid", "dep:window
 coop-defense-presentation = ["dep:egui", "orr_games/coop-defense"]
 coop-defense = ["coop-defense-presentation", "project", "game-ui", "orr_games/coop-defense-scene", "dep:rustix"]
 room-character = ["room-animated-models", "dep:sha2"]
-room-lighting = ["room-project"]
 # Optional finite visual-only Arena background authoring.
 tilemap = ["project", "dep:orr_tilemap"]
 # Bounded CPU-only authored particle documents; no optional renderer integration.
@@ -56,7 +55,7 @@ collect-progress = ["collect-dodge", "dep:sha2", "dep:tempfile", "dep:rustix", "
 collect-dodge = ["project", "orr_games/collect-dodge"]
 default = []
 # Every feature that builds on a Windows desktop.
-full = ["audio", "audio-native", "collect-dodge", "collect-progress", "collect-sprites", "collect-ui", "coop-defense", "coop-defense-attack-clip", "coop-defense-audio", "coop-defense-audio-settings", "coop-defense-controls", "coop-defense-embedded-prototype", "coop-defense-pixel-motion", "coop-defense-pixelfx", "coop-defense-presentation", "coop-defense-run-save", "game-ui", "image-reimport", "input-actions", "linked-prefabs", "material-demo", "particle-demo", "particle-preset", "player-settings", "project", "project-create", "project-export", "room-animated-models", "room-character", "room-controls-attach", "room-input-actions", "room-lighting", "room-playtest", "room-progress", "room-project", "runtime-export-support", "sprites", "tilemap"]
+full = ["audio", "audio-native", "collect-dodge", "collect-progress", "collect-sprites", "collect-ui", "coop-defense", "coop-defense-attack-clip", "coop-defense-audio", "coop-defense-audio-settings", "coop-defense-controls", "coop-defense-embedded-prototype", "coop-defense-pixel-motion", "coop-defense-pixelfx", "coop-defense-presentation", "coop-defense-run-save", "game-ui", "image-reimport", "input-actions", "linked-prefabs", "material-demo", "particle-demo", "particle-preset", "player-settings", "project", "project-create", "project-export", "room-animated-models", "room-character", "room-controls-attach", "room-input-actions", "room-playtest", "room-progress", "room-project", "runtime-export-support", "sprites", "tilemap"]
 # Optional Linux player preferences; no simulation or default dependencies.
 player-settings = ["project", "game-ui", "dep:tempfile", "dep:rustix"]
 # Offline bounded Arena starter creation; no default/runtime dependency changes.
@@ -92,6 +91,7 @@ orr_package = { path = "../orr_package", optional = true }
 orr_audio = { path = "../orr_audio", optional = true }
 orr_bridge = { path = "../orr_bridge" }
 orr_view = { path = "../orr_view" }
+orr_gfx = { path = "../orr_gfx" }
 orr_gfx_view = { path = "../orr_gfx_view" }
 orr_viewstream = { path = "../orr_viewstream" }
 orr_render = { path = "../orr_render" }
@@ -216,12 +216,6 @@ test = false
 name = "orr_prepare_stormglass_settings"
 path = "src/bin/orr_prepare_stormglass_settings.rs"
 required-features = ["coop-defense-controls"]
-
-[[bin]]
-name = "orr_new_lit_room"
-path = "src/bin/orr_new_lit_room.rs"
-required-features = ["project-create", "room-lighting"]
-test = false
 
 [[bin]]
 name = "orr_attach_room_controls"

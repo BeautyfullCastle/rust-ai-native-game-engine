@@ -8,6 +8,10 @@
 use bytemuck::{Pod, Zeroable};
 use orr_ecs::{ComponentRegistryBuilder, Entity, Frame};
 use orr_fp::{fp, FPVec3, FrameRng, FP};
+use orr_gfx::{
+    Camera, Decal, Environment, Light, Material, PostProcess, RenderLayers, Scatter, Sky, Terrain,
+    Transform3, Water, ALL_LAYERS, LIGHT_DIRECTIONAL, LIGHT_POINT, TONE_ACES,
+};
 use orr_physics3d::{
     Body, Collider, ContactCache, PhysicsConfig, PhysicsState, QueryFilter, Shape,
 };
@@ -65,6 +69,47 @@ pub struct RoomActor {
     pub ordinal: u32,
 }
 
+/// How a point light of the room follows the player and when it is on. It sits
+/// on the light entity next to its `orr_gfx::Light` and `orr_gfx::Transform3`.
+/// Presentation only: no system reads it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable, Reflect)]
+pub struct RoomLightRule {
+    /// With 1 the light is at the player's position plus `offset`, in world axes.
+    /// The light's own position is then only the place it has while no player exists.
+    #[reflect(bool)]
+    pub follow: u32,
+    /// When the light is on: 0 always, 1 after the key is collected, 2 after the escape,
+    /// 3 until the key is collected, 4 until the escape.
+    #[reflect(enumeration = "always=0,key_collected=1,escaped=2,key_missing=3,before_escape=4")]
+    pub activation: u32,
+    /// Offset from the player in world axes. Zero unless `follow` is 1.
+    #[reflect(range = "-32..=32")]
+    pub offset: FPVec3,
+}
+
+pub const ACTIVATION_ALWAYS: u32 = 0;
+pub const ACTIVATION_KEY_COLLECTED: u32 = 1;
+pub const ACTIVATION_ESCAPED: u32 = 2;
+pub const ACTIVATION_KEY_MISSING: u32 = 3;
+pub const ACTIVATION_BEFORE_ESCAPE: u32 = 4;
+/// A room has at most one sun and one point light.
+pub const MAX_LIGHTS: usize = 2;
+const FOLLOW_BOUND: FP = fp!(32);
+
+impl RoomLightRule {
+    /// Whether a light with this rule is on in the run state `run`.
+    pub fn is_on(&self, run: &RoomRun) -> bool {
+        match self.activation {
+            ACTIVATION_KEY_COLLECTED => run.key_collected != 0,
+            ACTIVATION_ESCAPED => run.won != 0,
+            ACTIVATION_KEY_MISSING => run.key_collected == 0,
+            ACTIVATION_BEFORE_ESCAPE => run.won == 0,
+            _ => true,
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable, Reflect)]
 pub struct RoomRun {
@@ -109,6 +154,8 @@ pub fn register_reflect(types: &mut TypeRegistry) {
     orr_physics3d::register_reflect(types);
     types.register_component::<RoomActor>("RoomEscapeV1::Actor");
     types.register_singleton::<RoomRun>("RoomEscapeV1::Run");
+    types.register_component::<RoomLightRule>("RoomEscapeV1::LightRule");
+    orr_gfx::register_reflect(types);
 }
 impl Game for RoomEscapeV1 {
     type Input = RoomInput;
@@ -119,9 +166,12 @@ impl Game for RoomEscapeV1 {
         orr_physics3d::register(builder);
         builder.register_component::<RoomActor>("RoomEscapeV1::Actor");
         builder.register_singleton::<RoomRun>("RoomEscapeV1::Run");
+        builder.register_component::<RoomLightRule>("RoomEscapeV1::LightRule");
+        orr_gfx::register(builder);
     }
     fn setup(frame: &mut Frame, _: &RoomConfig) {
         orr_physics3d::init(frame, PhysicsConfig::default());
+        orr_gfx::init(frame);
         frame.set_singleton(RoomRun::default());
         add_actor(
             frame,
@@ -192,14 +242,22 @@ fn bounded(value: FP, min: FP, max: FP) -> bool {
 pub fn validate_initial_frame(frame: &Frame) -> Result<(), String> {
     let registry = frame.registry();
     let rng = usize::from(registry.singleton_id::<FrameRng>().is_some());
-    if registry.component_count() != 3
-        || registry.singleton_count() as usize != 2 + rng
+    // The room's own 4 components and 2 singletons, the 9 components and 3
+    // singletons of `orr_gfx`, and the contact list of the physics.
+    if registry.component_count() != 13
+        || registry.singleton_count() as usize != 5 + rng
         || registry.list_count() != 1
         || registry.component_id::<RoomActor>().is_none()
+        || registry.component_id::<RoomLightRule>().is_none()
         || registry.component_id::<Body>().is_none()
         || registry.component_id::<Collider>().is_none()
+        || registry.component_id::<Transform3>().is_none()
+        || registry.component_id::<Light>().is_none()
         || registry.singleton_id::<RoomRun>().is_none()
         || registry.singleton_id::<PhysicsState>().is_none()
+        || registry.singleton_id::<Environment>().is_none()
+        || registry.singleton_id::<Sky>().is_none()
+        || registry.singleton_id::<PostProcess>().is_none()
         || registry.list_id::<ContactCache>().is_none()
     {
         return Err(
@@ -220,16 +278,26 @@ pub fn validate_initial_frame(frame: &Frame) -> Result<(), String> {
             "room physics storage must be canonically initialized with an empty cache".into(),
         );
     }
-    if !(3..=(3 + MAX_WALLS as u32 + 1)).contains(&frame.alive_count()) {
-        return Err("room requires three unique roles, at most 64 walls and one floor".into());
+    if !(3..=(3 + MAX_WALLS as u32 + 1 + MAX_LIGHTS as u32)).contains(&frame.alive_count()) {
+        return Err("room requires three unique roles, at most 64 walls, one floor and two lights".into());
     }
+    validate_presentation_singletons(frame)?;
     let mut counts = [0usize; 6];
+    let mut lights = [0usize; 2];
     let mut player = FPVec3::ZERO;
     let mut walls = Vec::new();
     for entity in frame.entities() {
-        let actor = frame
-            .get::<RoomActor>(entity)
-            .ok_or("every entity needs a room role")?;
+        let Some(actor) = frame.get::<RoomActor>(entity) else {
+            // An entity without a room role is a light: it has no body and no collider.
+            match validate_light_entity(frame, entity)? {
+                LIGHT_DIRECTIONAL => lights[0] += 1,
+                _ => lights[1] += 1,
+            }
+            continue;
+        };
+        if frame.has::<RoomLightRule>(entity) || frame.has::<Transform3>(entity) || frame.has::<Light>(entity) {
+            return Err("a room role entity cannot also be a light".into());
+        }
         if !(PLAYER..=FLOOR).contains(&actor.kind) || actor.ordinal != 0 {
             return Err("room role kind or ordinal is invalid".into());
         }
@@ -310,6 +378,9 @@ pub fn validate_initial_frame(frame: &Frame) -> Result<(), String> {
             "room requires exactly one player/key/exit, at most 64 walls and one floor".into(),
         );
     }
+    if lights[0] > 1 || lights[1] > 1 {
+        return Err("room allows at most one directional light and one point light".into());
+    }
     for (p, h) in walls {
         // All inputs were bounded above; closest-point sphere/AABB distance.
         let delta = FPVec3::new(
@@ -327,6 +398,98 @@ pub fn validate_initial_frame(frame: &Frame) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn in_range(value: FP, min: FP, max: FP) -> bool {
+    bounded(value, min, max)
+}
+fn unit_vector(value: FPVec3, max: FP) -> bool {
+    [value.x, value.y, value.z]
+        .iter()
+        .all(|&v| bounded(v, FP::ZERO, max))
+}
+
+/// The lighting singletons are presentation data: the renderer reads them
+/// clamped, and no system reads them. Only values it cannot clamp are refused.
+fn validate_presentation_singletons(frame: &Frame) -> Result<(), String> {
+    let environment = frame.singleton::<Environment>();
+    if !unit_vector(environment.sky_color, FP::ONE)
+        || !unit_vector(environment.ground_color, FP::ONE)
+        || !in_range(environment.ambient, FP::ZERO, fp!(10))
+    {
+        return Err("room environment colors must be in 0..=1 and ambient in 0..=10".into());
+    }
+    let post = frame.singleton::<PostProcess>();
+    if !in_range(post.exposure, fp!(0.01), fp!(16)) || post.tone_mapping > TONE_ACES {
+        return Err("room exposure must be in 0.01..=16 and tone mapping clamp or aces".into());
+    }
+    Ok(())
+}
+
+/// A light entity holds exactly `Transform3`, `Light` and, for a point light,
+/// optionally `RoomLightRule`. Returns the light's kind.
+fn validate_light_entity(frame: &Frame, entity: Entity) -> Result<u32, String> {
+    let (Some(transform), Some(light)) = (frame.get::<Transform3>(entity), frame.get::<Light>(entity))
+    else {
+        return Err("every entity needs a room role or must be a light with Transform3".into());
+    };
+    if frame.has::<Body>(entity)
+        || frame.has::<Collider>(entity)
+        || frame.has::<RenderLayers>(entity)
+        || frame.has::<Material>(entity)
+        || frame.has::<Camera>(entity)
+        || frame.has::<Terrain>(entity)
+        || frame.has::<Water>(entity)
+        || frame.has::<Scatter>(entity)
+        || frame.has::<Decal>(entity)
+    {
+        return Err("a room light entity holds only Transform3, Light and LightRule".into());
+    }
+    let p = transform.position;
+    let r = transform.rotation;
+    if !([p.x, p.y, p.z].iter().all(|&v| bounded(v, fp!(-30000), fp!(30000))))
+        || !([r.x, r.y, r.z].iter().all(|&v| bounded(v, fp!(-360), fp!(360))))
+        || transform.scale != FPVec3::new(FP::ONE, FP::ONE, FP::ONE)
+    {
+        return Err("room light placement is out of range or scaled".into());
+    }
+    if light.kind != LIGHT_DIRECTIONAL && light.kind != LIGHT_POINT {
+        return Err("room lights are directional or point lights".into());
+    }
+    if light.enabled > 1
+        || light.cast_shadows > 1
+        || light.reserved != 0
+        || light.layers & !ALL_LAYERS != 0
+        || !unit_vector(light.color, FP::ONE)
+        || !in_range(light.intensity, FP::ZERO, fp!(100))
+        || !in_range(light.range, fp!(0.01), fp!(1000))
+        || !in_range(light.inner_angle, FP::ZERO, fp!(88))
+        || !in_range(light.outer_angle, fp!(0.1), fp!(89))
+        || light.outer_angle < light.inner_angle
+        || !in_range(light.shadow_strength, FP::ZERO, FP::ONE)
+        || !in_range(light.shadow_range, FP::ZERO, fp!(5000))
+        || !in_range(light.shadow_softness, fp!(0.25), fp!(8))
+        || !in_range(light.shadow_sharp_range, FP::ZERO, fp!(1000))
+        || !(1..=4).contains(&light.shadow_cascades)
+    {
+        return Err("room light fields are out of range".into());
+    }
+    if let Some(rule) = frame.get::<RoomLightRule>(entity) {
+        let offset = rule.offset;
+        if light.kind != LIGHT_POINT
+            || rule.follow > 1
+            || rule.activation > ACTIVATION_BEFORE_ESCAPE
+            || ![offset.x, offset.y, offset.z]
+                .iter()
+                .all(|&v| bounded(v, -FOLLOW_BOUND, FOLLOW_BOUND))
+            || (rule.follow == 0 && offset != FPVec3::ZERO)
+        {
+            return Err(
+                "a light rule belongs to a point light and needs follow 0..=1, a known activation and an offset within 32".into(),
+            );
+        }
+    }
+    Ok(light.kind)
 }
 
 struct RoomSystem;
@@ -717,5 +880,109 @@ mod tests {
         sim.step(&inputs);
         assert_eq!(position(&sim), p);
         assert_eq!(*sim.frame().singleton::<RoomRun>(), RoomRun::default());
+    }
+
+    fn add_light(frame: &mut Frame, kind: u32) -> Entity {
+        let entity = frame.spawn();
+        frame.add(entity, Transform3::default());
+        frame.add(entity, Light { kind, ..Light::default() });
+        entity
+    }
+
+    #[test]
+    fn admission_accepts_one_sun_and_one_point_light_with_a_rule() {
+        let mut frame = simulation().frame().clone();
+        add_light(&mut frame, LIGHT_DIRECTIONAL);
+        let point = add_light(&mut frame, LIGHT_POINT);
+        frame.add(
+            point,
+            RoomLightRule {
+                follow: 1,
+                activation: ACTIVATION_KEY_MISSING,
+                offset: FPVec3::new(FP::ZERO, fp!(2), FP::ZERO),
+            },
+        );
+        validate_initial_frame(&frame).unwrap();
+    }
+
+    #[test]
+    fn admission_refuses_everything_else_next_to_the_lights() {
+        let initial = simulation().frame().clone();
+        for alter in 0..13 {
+            let mut frame = initial.clone();
+            let light = add_light(&mut frame, LIGHT_POINT);
+            match alter {
+                0 => {
+                    // A second point light.
+                    add_light(&mut frame, LIGHT_POINT);
+                }
+                1 => {
+                    add_light(&mut frame, LIGHT_DIRECTIONAL);
+                    add_light(&mut frame, LIGHT_DIRECTIONAL);
+                }
+                2 => {
+                    frame.add(light, Body::new_static(FPVec3::ZERO));
+                }
+                3 => {
+                    frame.add(light, orr_gfx::Material::new("x"));
+                }
+                4 => {
+                    frame.add(light, RenderLayers::default());
+                }
+                5 => {
+                    frame.add(light, RoomActor { kind: WALL, ordinal: 0 });
+                }
+                6 => {
+                    frame.get_mut::<Light>(light).unwrap().kind = orr_gfx::LIGHT_SPOT;
+                }
+                7 => {
+                    frame.get_mut::<Light>(light).unwrap().intensity = fp!(101);
+                }
+                8 => {
+                    frame.get_mut::<Transform3>(light).unwrap().scale = FPVec3::ZERO;
+                }
+                9 => {
+                    // A rule with a follow flag of 2.
+                    frame.add(light, RoomLightRule { follow: 2, ..RoomLightRule::default() });
+                }
+                10 => {
+                    // An offset without a follow flag.
+                    frame.add(light, RoomLightRule { offset: FPVec3::new(FP::ONE, FP::ZERO, FP::ZERO), ..RoomLightRule::default() });
+                }
+                11 => {
+                    // A rule on a sun.
+                    frame.get_mut::<Light>(light).unwrap().kind = LIGHT_DIRECTIONAL;
+                    frame.add(light, RoomLightRule::default());
+                }
+                _ => {
+                    // An entity with nothing on it.
+                    frame.spawn();
+                }
+            }
+            assert!(validate_initial_frame(&frame).is_err(), "alteration {alter} was admitted");
+        }
+        // A placed entity that is not a light is refused.
+        let mut frame = initial;
+        let wall = frame.spawn();
+        frame.add(wall, Transform3::default());
+        assert!(validate_initial_frame(&frame).is_err());
+    }
+
+    #[test]
+    fn the_rule_follows_the_run_state() {
+        let mut run = RoomRun::default();
+        let rule = |activation| RoomLightRule { activation, ..RoomLightRule::default() };
+        assert!(rule(ACTIVATION_ALWAYS).is_on(&run));
+        assert!(!rule(ACTIVATION_KEY_COLLECTED).is_on(&run));
+        assert!(!rule(ACTIVATION_ESCAPED).is_on(&run));
+        assert!(rule(ACTIVATION_KEY_MISSING).is_on(&run));
+        assert!(rule(ACTIVATION_BEFORE_ESCAPE).is_on(&run));
+        run.key_collected = 1;
+        assert!(rule(ACTIVATION_KEY_COLLECTED).is_on(&run));
+        assert!(!rule(ACTIVATION_KEY_MISSING).is_on(&run));
+        assert!(rule(ACTIVATION_BEFORE_ESCAPE).is_on(&run));
+        run.won = 1;
+        assert!(rule(ACTIVATION_ESCAPED).is_on(&run));
+        assert!(!rule(ACTIVATION_BEFORE_ESCAPE).is_on(&run));
     }
 }

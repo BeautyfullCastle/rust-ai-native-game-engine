@@ -51,12 +51,11 @@ fn png() -> Vec<u8> {
 #[test]
 fn actual_color_and_png_preview_workers_preserve_project_files_frame_and_consent() {
     for texture in [false, true] {
-        let f = crate::package_manager::presentation_tests::fixture(true, true);
+        let f = crate::package_manager::presentation_tests::fixture(true);
         let prepared = orr_sample::room_project::PreparedProject::open_with_capabilities(
             &f.root,
             orr_sample::room_project::RoomProjectCapabilities {
                 character: true,
-                lighting: true,
             },
         )
         .unwrap();
@@ -210,7 +209,6 @@ fn actual_color_and_png_preview_workers_preserve_project_files_frame_and_consent
             &f.root,
             orr_sample::room_project::RoomProjectCapabilities {
                 character: true,
-                lighting: true,
             },
         )
         .unwrap();

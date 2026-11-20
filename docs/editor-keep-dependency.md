@@ -1,6 +1,6 @@
 # Keep an installed model dependency in the editor
 
-Build with `package-manager` and open a saved local Room project. Add `room-character,room-lighting` when its saved presentation declares those routes. Save authoring edits and close conflicting operations first.
+Build with `package-manager` and open a saved local Room project. Add `room-character` when its saved presentation declares that route. Save authoring edits and close conflicting operations first.
 
 In **Content packages**:
 

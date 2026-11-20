@@ -8,7 +8,6 @@ fn open(root: &Path) -> orr_sample::room_project::PreparedProject {
         root,
         orr_sample::room_project::RoomProjectCapabilities {
             character: true,
-            lighting: true,
         },
     )
     .unwrap()
@@ -17,7 +16,7 @@ fn switched_project() -> (
     crate::package_manager::presentation_tests::Fixture,
     Document,
 ) {
-    let f = crate::package_manager::presentation_tests::fixture(true, true);
+    let f = crate::package_manager::presentation_tests::fixture(true);
     let mut source = Document::readable_default();
     source.schema = 3;
     source.follow_player = Some([0.0, 1.0, -0.0]);
@@ -29,7 +28,6 @@ fn switched_project() -> (
     let mut prepared = open(&f.root);
     let frame = prepared.scene().frame().to_bytes();
     let character = prepared.character().unwrap().document.clone();
-    let lighting = prepared.lighting().unwrap().document.clone();
     let camera = prepared.take_camera().unwrap();
     let original = fs::read(&camera.path).unwrap();
     let manifest = fs::read(&camera.manifest_path).unwrap();
@@ -115,7 +113,6 @@ fn switched_project() -> (
     assert_eq!(reopened.camera().unwrap().document, expected);
     assert_eq!(reopened.scene().frame().to_bytes(), frame);
     assert_eq!(reopened.character().unwrap().document, character);
-    assert_eq!(reopened.lighting().unwrap().document, lighting);
     assert_eq!(fs::read(f.root.join("orr.project.json")).unwrap(), manifest);
     assert_eq!(
         fs::read(f.root.join("room.scene.yaml")).unwrap(),

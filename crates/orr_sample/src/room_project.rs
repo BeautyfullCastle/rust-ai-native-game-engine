@@ -15,6 +15,7 @@ use std::{
 pub const GAME: &str = "RoomEscapeV1";
 pub const ACTOR: &str = "RoomEscapeV1::Actor";
 pub const RUN: &str = "RoomEscapeV1::Run";
+pub const LIGHT_RULE: &str = "RoomEscapeV1::LightRule";
 pub const SEED: u64 = 42;
 pub const MAX_SCENE_BYTES: u64 = 256 * 1024;
 pub const MAX_MODEL_ASSETS: usize = 8;
@@ -85,19 +86,30 @@ pub fn validate_document(scene: &Scene) -> Result<(), String> {
     if scene.has_prefab_links() {
         return Err("room projects do not yet support linked prefabs".into());
     }
-    if !(3..=68).contains(&scene.entities.len()) {
-        return Err("room requires 3..=68 actors".into());
+    if !(3..=68 + game::MAX_LIGHTS).contains(&scene.entities.len()) {
+        return Err("room requires 3..=68 actors and at most two lights".into());
     }
+    // The lighting singletons may be left out: a scene that does not mention one gets its default.
     let singleton_names: BTreeSet<_> = scene
         .singletons
         .iter()
         .map(|(name, _)| name.as_str())
         .collect();
-    if scene.singletons.len() != 2
-        || singleton_names != BTreeSet::from([RUN, "orr_physics3d::PhysicsState"])
+    let allowed_singletons = [
+        RUN,
+        "orr_physics3d::PhysicsState",
+        orr_gfx::names::ENVIRONMENT,
+        orr_gfx::names::SKY,
+        orr_gfx::names::POST_PROCESS,
+    ];
+    if scene.singletons.len() != singleton_names.len()
+        || !singleton_names.contains(RUN)
+        || !singleton_names.contains("orr_physics3d::PhysicsState")
+        || !singleton_names.iter().all(|name| allowed_singletons.contains(name))
     {
-        return Err("room requires exactly RoomEscapeV1::Run and PhysicsState singletons".into());
+        return Err("room requires RoomEscapeV1::Run and PhysicsState singletons, and allows only the lighting singletons besides".into());
     }
+    let mut lights = 0;
     for entity in scene.entities.values() {
         if entity.name.as_ref().is_some_and(|name| name.len() > 128) {
             return Err("room actor name exceeds128 bytes".into());
@@ -107,11 +119,23 @@ pub fn validate_document(scene: &Scene) -> Result<(), String> {
             .iter()
             .map(|(name, _)| name.as_str())
             .collect();
-        if entity.components.len() != 3
-            || names != BTreeSet::from([ACTOR, "orr_physics3d::Body", "orr_physics3d::Collider"])
+        if names.len() == 3
+            && entity.components.len() == 3
+            && names == BTreeSet::from([ACTOR, "orr_physics3d::Body", "orr_physics3d::Collider"])
         {
-            return Err("room actors require exactly Actor, Body and Collider".into());
+            continue;
         }
+        let light = names.len() == entity.components.len()
+            && names.contains(orr_gfx::names::TRANSFORM)
+            && names.contains(orr_gfx::names::LIGHT)
+            && (names.len() == 2 || (names.len() == 3 && names.contains(LIGHT_RULE)));
+        if !light {
+            return Err("room entities are actors with exactly Actor, Body and Collider, or lights with Transform3, Light and optionally LightRule".into());
+        }
+        lights += 1;
+    }
+    if scene.entities.len() - lights > 68 {
+        return Err("room requires 3..=68 actors".into());
     }
     Ok(())
 }
@@ -128,7 +152,6 @@ pub fn compiled_runtime() -> orr_package::Runtime {
 }
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RoomProjectCapabilities {
-    pub lighting: bool,
     pub character: bool,
 }
 #[cfg(feature = "room-character")]
@@ -155,15 +178,6 @@ impl PreparedModels {
         { false }
     }
 }
-#[cfg(feature = "room-lighting")]
-pub struct PreparedRoomLighting {
-    pub scene_path: PathBuf,
-    pub path: PathBuf,
-    pub document: crate::room_lighting::Document,
-    pub bytes: Vec<u8>,
-    pub manifest_bytes: Vec<u8>,
-    pub manifest_path: PathBuf,
-}
 pub struct PreparedRoomCamera {
     pub path: PathBuf,
     pub document: crate::room_camera::Document,
@@ -178,8 +192,6 @@ pub struct PreparedProject {
     progress: Option<orr_package::ProjectProgress>,
     #[cfg(feature = "room-character")]
     character: Option<PreparedRoomCharacter>,
-    #[cfg(feature = "room-lighting")]
-    lighting: Option<PreparedRoomLighting>,
     camera: Option<PreparedRoomCamera>,
     #[cfg(feature = "room-input-actions")]
     controls: Option<PreparedRoomControls>,
@@ -196,11 +208,7 @@ pub struct PreparedRoomControls {
 }
 impl PreparedProject {
     pub fn open(root: impl AsRef<Path>) -> Result<Self, String> {
-        Self::open_with_lighting(root, false)
-    }
-    /// Lighting requires explicit support from the consuming route, not feature unification.
-    pub fn open_with_lighting(root: impl AsRef<Path>, lighting_supported: bool) -> Result<Self, String> {
-        Self::open_with_capabilities(root, RoomProjectCapabilities { lighting: lighting_supported, character: false })
+        Self::open_with_capabilities(root, RoomProjectCapabilities { character: false })
     }
     /// Optional consumers opt in independently, regardless of Cargo feature unification.
     pub fn open_with_capabilities(root: impl AsRef<Path>, capabilities: RoomProjectCapabilities) -> Result<Self, String> {
@@ -228,9 +236,6 @@ impl PreparedProject {
         let pinned: orr_package::ProjectManifest = serde_json::from_slice(&manifest_bytes)
             .map_err(|e| format!("room manifest: {e}"))?;
         if pinned != *manifest { return Err("room manifest changed during admission".into()); }
-        if entry.lighting.is_some() && !(capabilities.lighting && cfg!(feature = "room-lighting")) {
-            return Err("room lighting requires explicit lighting consumer support".into());
-        }
         if entry.character.is_some() && !(capabilities.character && cfg!(feature = "room-character")) {
             return Err("room character requires explicit character consumer support".into());
         }
@@ -252,16 +257,6 @@ impl PreparedProject {
             let document = crate::room_character::Document::parse(&bytes)?;
             Ok::<_, String>(PreparedRoomCharacter { scene_path: crate::project::entry_file(project.root(), &entry.scene)?, path, document, bytes,
                 manifest_bytes: manifest_bytes.clone(), manifest_path: manifest_path.clone() })
-        }).transpose()?;
-        #[cfg(feature = "room-lighting")]
-        let lighting = entry.lighting.as_ref().map(|relative| {
-            let path = crate::project::entry_file(project.root(), relative)?;
-            let bytes = crate::project::read_regular(&path, crate::room_lighting::MAX_BYTES as u64)?;
-            let document = crate::room_lighting::Document::parse(&bytes)?;
-            Ok::<_, String>(PreparedRoomLighting {
-                scene_path: crate::project::entry_file(project.root(), &entry.scene)?,
-                path, document, bytes, manifest_bytes: manifest_bytes.clone(), manifest_path: manifest_path.clone(),
-            })
         }).transpose()?;
         let camera = entry.camera.as_ref().map(|relative| {
             let path = crate::project::entry_file(project.root(), relative)?;
@@ -362,8 +357,6 @@ impl PreparedProject {
             progress: manifest.progress.clone(),
             #[cfg(feature = "room-character")]
             character,
-            #[cfg(feature = "room-lighting")]
-            lighting,
             camera,
             #[cfg(feature = "room-input-actions")]
             controls,
@@ -372,20 +365,6 @@ impl PreparedProject {
             scene,
             models,
         })
-    }
-    #[cfg(feature = "room-lighting")]
-    pub fn lighting(&self) -> Option<&PreparedRoomLighting> { self.lighting.as_ref() }
-    #[cfg(feature = "room-lighting")]
-    pub fn take_lighting(&mut self) -> Option<PreparedRoomLighting> { self.lighting.take() }
-    pub fn point_light_settings_for_frame(&self, _frame:orr_bridge::FrameView<'_>) -> Result<orr_render::PointLightSettings,String> {
-        #[cfg(feature = "room-lighting")]
-        if let Some(lighting)=&self.lighting {return lighting.document.settings_for_frame(_frame);}
-        Ok(orr_render::PointLightSettings::default())
-    }
-    pub fn point_light_settings(&self) -> orr_render::PointLightSettings {
-        #[cfg(feature = "room-lighting")]
-        if let Some(lighting) = &self.lighting { return lighting.document.settings(); }
-        orr_render::PointLightSettings::default()
     }
     #[cfg(feature = "room-character")]
     pub fn character(&self) -> Option<&PreparedRoomCharacter> { self.character.as_ref() }

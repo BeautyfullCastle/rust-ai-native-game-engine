@@ -63,7 +63,6 @@ impl Fixture {
         let mut prepared = PreparedProject::open_with_capabilities(
             &root,
             orr_sample::room_project::RoomProjectCapabilities {
-                lighting: false,
                 character: true,
             },
         )
@@ -252,7 +251,6 @@ fn once_policy_source_hidden_export_reaches_real_escape_and_holds_endpoint() {
     let prepared = PreparedProject::open_with_capabilities(
         bundle.join("project"),
         orr_sample::room_project::RoomProjectCapabilities {
-            lighting: false,
             character: true,
         },
     )
@@ -442,7 +440,6 @@ mod motion_tests {
         let prepared = PreparedProject::open_with_capabilities(
             bundle.join("project"),
             orr_sample::room_project::RoomProjectCapabilities {
-                lighting: false,
                 character: true,
             },
         )

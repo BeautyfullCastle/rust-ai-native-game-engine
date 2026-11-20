@@ -105,8 +105,6 @@ impl EditorApp {
         let blocked = blocked
             || self.mesh_patrol_frame_owns_input()
             || self.mesh_patrol_frame_blocks_scroll();
-        #[cfg(feature = "room-lighting")]
-        let blocked = blocked || self.room_light_pick_owns_input();
         #[cfg(feature = "room-authoring")]
         let blocked = blocked
             || self.room_authoring.wall_footprint_busy()

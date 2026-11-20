@@ -401,7 +401,7 @@ fn assert_baked(model: &StaticModel, clip: u32, time: f64) {
 #[test]
 fn actual_pose_bake_widgets_install_static_prop_history_save_reopen_and_literal_cpu_geometry() {
     for (clip, time) in [(0, 0.5), (1, 1.0)] {
-        let fixture = crate::package_manager::presentation_tests::fixture(false, false);
+        let fixture = crate::package_manager::presentation_tests::fixture(false);
         let mut import_ui = form(&fixture, clip, time);
         let before_import = snapshot(&fixture.root);
         click(&mut import_ui, IMPORT);
@@ -655,7 +655,7 @@ fn actual_pose_bake_widgets_install_static_prop_history_save_reopen_and_literal_
 
 #[test]
 fn changed_inspected_pose_source_rejects_without_publishing_or_editing_room() {
-    let fixture = crate::package_manager::presentation_tests::fixture(false, false);
+    let fixture = crate::package_manager::presentation_tests::fixture(false);
     let mut h = form(&fixture, 1, 1.0);
     let source = fixture.temp.path().join("author.animated.json");
     let mut changed = fs::read(&source).unwrap();

@@ -235,9 +235,6 @@ pub struct ProjectEntry {
         deserialize_with = "present_ui"
     )]
     pub ui: Option<ProjectUi>,
-    /// Optional bounded Room-only point-light presentation document.
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present_sprites")]
-    pub lighting: Option<String>,
     /// Optional Room state-selected character clips.
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present_sprites")]
     pub character: Option<String>,
@@ -332,7 +329,7 @@ impl ProjectManifest {
                 if let Some(character) = &entry.character {
                     portable(character)?;
                     let aliases = [Some("orr.project.json"), Some("orr.packages.lock.json"), Some(entry.scene.as_str()),
-                        entry.models.as_deref(), entry.camera.as_deref(), entry.tilemap.as_deref(), entry.lighting.as_deref(),
+                        entry.models.as_deref(), entry.camera.as_deref(), entry.tilemap.as_deref(),
                         entry.sprites.as_deref(),
                         entry.ui.as_ref().and_then(|ui| ui.document.as_deref()), entry.controls.as_deref()];
                     if entry.game != ProjectGame::RoomEscapeV1 || !matches!(self.schema, 2 | 3)
@@ -340,21 +337,10 @@ impl ProjectManifest {
                         || aliases.into_iter().flatten().any(|path| path.eq_ignore_ascii_case(character))
                     { return fail("character requires a distinct root-level Room presentation document"); }
                 }
-                if let Some(lighting) = &entry.lighting {
-                    portable(lighting)?;
-                    let aliases = [Some("orr.project.json"), Some("orr.packages.lock.json"), Some(entry.scene.as_str()),
-                        entry.models.as_deref(), entry.camera.as_deref(), entry.tilemap.as_deref(),
-                        entry.sprites.as_deref(),
-                        entry.ui.as_ref().and_then(|ui| ui.document.as_deref()), entry.controls.as_deref()];
-                    if entry.game != ProjectGame::RoomEscapeV1 || !matches!(self.schema, 2 | 3)
-                        || lighting.contains('/') || lighting.starts_with('.')
-                        || aliases.into_iter().flatten().any(|path| path.eq_ignore_ascii_case(lighting))
-                    { return fail("lighting requires a distinct root-level Room presentation document"); }
-                }
                 if let Some(controls) = &entry.controls {
                     portable(controls)?;
                     let aliases = [Some("orr.project.json"), Some("orr.packages.lock.json"), Some(entry.scene.as_str()),
-                        entry.models.as_deref(), entry.camera.as_deref(), entry.tilemap.as_deref(), entry.lighting.as_deref(),
+                        entry.models.as_deref(), entry.camera.as_deref(), entry.tilemap.as_deref(),
                         entry.character.as_deref(), entry.sprites.as_deref(),
                         entry.ui.as_ref().and_then(|ui| ui.document.as_deref())];
                     if entry.game != ProjectGame::RoomEscapeV1 || !matches!(self.schema, 2 | 3)
@@ -1145,19 +1131,22 @@ mod tests {
     #[test]
     fn project_metadata_is_an_object_not_a_positional_array() {
         let entry = serde_json::json!({"game":"room-escape-v1", "scene":"room.yaml",
-            "lighting":"room.lighting.json"});
+            "camera":"room.camera.json"});
         for schema in [1, 2, 3] {
             let root_sequence = serde_json::json!([schema, "*", entry]);
             assert!(serde_json::from_value::<ProjectManifest>(root_sequence).is_err());
             let entry_sequence = serde_json::json!({"schema":schema,"engine":"*","entry":["room-escape-v1", "room.yaml"]});
             assert!(serde_json::from_value::<ProjectManifest>(entry_sequence).is_err());
         }
-        for lighting in ["null", "[1]", "42"] {
-            let encoded = format!(r#"{{"schema":2,"engine":"*","entry":{{"game":"room-escape-v1","scene":"room.yaml","lighting":{lighting}}}}}"#);
+        for camera in ["null", "[1]", "42"] {
+            let encoded = format!(r#"{{"schema":2,"engine":"*","entry":{{"game":"room-escape-v1","scene":"room.yaml","camera":{camera}}}}}"#);
             assert!(serde_json::from_str::<ProjectManifest>(&encoded).is_err());
         }
+        // A manifest that still names a lighting document is refused: Room lighting lives in the scene now.
+        let removed = r#"{"schema":2,"engine":"*","entry":{"game":"room-escape-v1","scene":"room.yaml","lighting":"room.lighting.json"}}"#;
+        assert!(serde_json::from_str::<ProjectManifest>(removed).is_err());
         for encoded in [
-            r#"{"schema":2,"engine":"*","entry":{"game":"room-escape-v1","scene":"room.yaml","lighting":"a.json","lighting":"b.json"}}"#,
+            r#"{"schema":2,"engine":"*","entry":{"game":"room-escape-v1","scene":"room.yaml","camera":"a.json","camera":"b.json"}}"#,
             r#"{"schema":2,"schema":2,"engine":"*"}"#,
             r#"{"schema":2,"engine":"*","unknown":0}"#,
             r#"{"schema":2,"engine":"*","entry":null}"#,
@@ -1947,7 +1936,7 @@ mod tests {
     }
     #[test]
     fn room_progress_closed_pair_preserves_presentation_and_collect_contract() {
-        let room = serde_json::json!({"schema":3,"engine":"*","entry":{"game":"room-escape-v1","scene":"room.yaml","models":"models.json","camera":"camera.json","lighting":"lighting.json","character":"character.json"},"progress":{"schema":1,"game_id":"12345678-1234-4234-8234-123456789abc","profile":"room-escape-clear-v1"}});
+        let room = serde_json::json!({"schema":3,"engine":"*","entry":{"game":"room-escape-v1","scene":"room.yaml","models":"models.json","camera":"camera.json","character":"character.json"},"progress":{"schema":1,"game_id":"12345678-1234-4234-8234-123456789abc","profile":"room-escape-clear-v1"}});
         let validate = |v: serde_json::Value| serde_json::from_value::<ProjectManifest>(v).unwrap().validate(&Runtime::content_only());
         validate(room.clone()).unwrap();
         let mut legacy = room.clone();

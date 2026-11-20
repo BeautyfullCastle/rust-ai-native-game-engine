@@ -54,7 +54,6 @@ fn character_crossfade_app_observes_steps_interruption_completion_and_restart() 
     let project = PreparedProject::open_with_capabilities(
         &root,
         crate::room_project::RoomProjectCapabilities {
-            lighting: cfg!(feature = "room-lighting"),
             character: true,
         },
     )
@@ -164,7 +163,6 @@ fn exported_character_app_child() {
     let project = PreparedProject::open_with_capabilities(
         &root,
         crate::room_project::RoomProjectCapabilities {
-            lighting: cfg!(feature = "room-lighting"),
             character: true,
         },
     )
@@ -253,7 +251,6 @@ fn character_app_three_states_restart_and_lighting() {
     let project = PreparedProject::open_with_capabilities(
         &root,
         crate::room_project::RoomProjectCapabilities {
-            lighting: cfg!(feature = "room-lighting"),
             character: true,
         },
     )
@@ -317,16 +314,26 @@ fn character_app_three_states_restart_and_lighting() {
         )
         .unwrap();
     assert_ne!(carrying, renderer.read_rgba8());
-    #[cfg(feature = "room-lighting")]
     {
+        // The same state with a point light entity in the scene gives another picture.
+        use orr_fp::{fp, FPVec3};
+        let mut lit_frame = app.sim.frame().clone();
+        let light = lit_frame.spawn();
+        lit_frame.add(
+            light,
+            orr_gfx::Transform3 { position: FPVec3::new(fp!(0), fp!(4), fp!(0)), ..Default::default() },
+        );
+        lit_frame.add(light, orr_gfx::Light { intensity: fp!(3), range: fp!(12), ..Default::default() });
         renderer
-            .set_point_light_settings(crate::room_lighting::Document::enabled_default().settings())
+            .render_with_playback(
+                FrameView::of(&lit_frame),
+                app.project.scene().index(),
+                app.project.models(),
+                &room_view::camera(size),
+                &app.character_playback,
+            )
             .unwrap();
-        let lit = capture(&app, &mut renderer, State::Carrying);
-        assert_ne!(lit, carrying);
-        renderer
-            .set_point_light_settings(Default::default())
-            .unwrap();
+        assert_ne!(renderer.read_rgba8(), carrying);
         assert_eq!(capture(&app, &mut renderer, State::Carrying), carrying);
     }
     for _ in 0..40 {
@@ -371,7 +378,6 @@ fn exported_character_crossfade_app_child() {
     let project = PreparedProject::open_with_capabilities(
         &root,
         crate::room_project::RoomProjectCapabilities {
-            lighting: cfg!(feature = "room-lighting"),
             character: true,
         },
     )

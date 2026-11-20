@@ -205,7 +205,6 @@ pub fn run(options: Options) -> Result<(), String> {
     let project = PreparedProject::open_with_progress(
         &options.project,
         crate::room_project::RoomProjectCapabilities {
-            lighting: cfg!(feature = "room-lighting"),
             character: cfg!(feature = "room-character"),
         },
         support,
@@ -317,17 +316,18 @@ fn headless_checked(
         // Emit extra tracking diagnostics only under the explicit pose check.
         if check_model_poses { println!("room follow camera target: {:?}",resolved.target); }
     }
-    let lighting=project.point_light_settings_for_frame(FrameView::of(sim.frame()))?;
-    #[cfg(feature = "room-lighting")]
     if check_model_poses {
-        if project.lighting().is_some_and(|light|light.document.activation.is_some()) {
-            println!("room lighting active: {}",u8::from(lighting.point_light.is_some()));
+        // Diagnostics of the point light's rule, read from the scene's light entity.
+        let frame = FrameView::of(sim.frame());
+        let rule = frame.iter::<orr_games::room_escape_game::RoomLightRule>().next().map(|(_, rule)| *rule);
+        let light = room_view::point_light_settings(frame).point_light;
+        if rule.is_some_and(|rule| rule.activation != orr_games::room_escape_game::ACTIVATION_ALWAYS) {
+            println!("room lighting active: {}",u8::from(light.is_some()));
         }
-        if project.lighting().is_some_and(|light|light.document.follow_player.is_some()) {
-            if let Some(light)=lighting.point_light {println!("room carried light position: {:?}",light.position);}
+        if rule.is_some_and(|rule| rule.follow != 0) {
+            if let Some(light)=light {println!("room carried light position: {:?}",light.position);}
         }
     }
-    let _=lighting;
     let run = sim.frame().singleton::<RoomRun>();
     println!(
         "room tick: {} checksum: 0x{:016x}\nroom key: {} won: {}",
@@ -347,9 +347,6 @@ fn headless_checked(
         let gpu = Wgpu::headless(WgpuOptions::default())?;
         let size = (1024, 768);
         let mut renderer = RoomRenderer::new(&gpu, size, project.models())?;
-        renderer.set_point_light_settings(project.point_light_settings_for_frame(FrameView::of(sim.frame()))?)?;
-        #[cfg(feature = "room-lighting")]
-        renderer.set_environment(project.lighting().and_then(|light| light.document.environment.clone()))?;
         #[cfg(feature = "room-character")]
         let render = RoomRenderer::render_with_playback;
         #[cfg(not(feature = "room-character"))]
@@ -611,9 +608,6 @@ impl App {
         #[cfg(all(feature = "room-progress", any(target_os = "linux", windows)))]
         let title = format!("{title} | {}", self.progress.status());
         g.window.set_title(&title);
-        g.renderer.set_point_light_settings(self.project.point_light_settings_for_frame(FrameView::of(self.sim.frame()))?)?;
-        #[cfg(feature = "room-lighting")]
-        g.renderer.set_environment(self.project.lighting().and_then(|light| light.document.environment.clone()))?;
         // The backend reconfigures lost/outdated surfaces and returns Skip.
         if let Acquire::Frame(surface_frame) = g.rhi.acquire_frame(&mut g.surface) {
             let view = g.rhi.frame_view(&surface_frame);
@@ -672,11 +666,8 @@ impl ApplicationHandler for App {
                 },
             )?;
             let format = rhi.surface_format(&surface);
-            let mut renderer =
+            let renderer =
                 RoomRenderer::new_with_format(&rhi, size, self.project.models(), format)?;
-            renderer.set_point_light_settings(self.project.point_light_settings_for_frame(FrameView::of(self.sim.frame()))?)?;
-            #[cfg(feature = "room-lighting")]
-            renderer.set_environment(self.project.lighting().and_then(|light| light.document.environment.clone()))?;
             Ok::<_, String>(Graphics {
                 window,
                 rhi,

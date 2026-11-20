@@ -74,7 +74,6 @@ fn open(root: &Path) -> orr_sample::room_project::PreparedProject {
         root,
         orr_sample::room_project::RoomProjectCapabilities {
             character: true,
-            lighting: true,
         },
     )
     .unwrap()
@@ -143,7 +142,7 @@ fn checksum_after_pickup(prepared: &orr_sample::room_project::PreparedProject) -
 #[test]
 fn authored_animated_material_survives_real_package_selection_assignment_and_saved_room() {
     let bytes = produced().to_bytes().unwrap();
-    let baseline = crate::package_manager::presentation_tests::fixture(true, true);
+    let baseline = crate::package_manager::presentation_tests::fixture(true);
     let original = open(&baseline.root);
     let f = super::cooked_animated_import_tests::imported_player_with_source(&bytes);
     let prepared = open(&f.root);
@@ -194,7 +193,6 @@ fn authored_animated_material_survives_source_hidden_native_export() {
         "room.models.json",
         "room.camera.json",
         "room.character.json",
-        "room.lighting.json",
     ] {
         assert_eq!(
             fs::read(f.root.join(name)).unwrap(),
@@ -236,5 +234,4 @@ fn authored_animated_material_survives_source_hidden_native_export() {
         text.contains("room model poses: 9 frames checked;"),
         "{text}"
     );
-    assert!(text.contains("room lighting active: 1"), "{text}");
 }

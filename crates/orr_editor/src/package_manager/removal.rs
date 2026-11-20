@@ -242,10 +242,6 @@ pub(super) fn admit_candidate(
             return Err("Room camera changed during removal admission".into());
         }
     }
-    #[cfg(feature="room-lighting")]
-    if let Some(lighting)=prepared.lighting() {
-        if files.get(&lighting.path)!=Some(&lighting.bytes) || files.get(&lighting.manifest_path)!=Some(&lighting.manifest_bytes) {return Err("Room lighting changed during package admission".into());}
-    }
     #[cfg(feature="room-character")]
     if let Some(character)=prepared.character() {
         if files.get(&character.path)!=Some(&character.bytes) || files.get(&character.manifest_path)!=Some(&character.manifest_bytes) {return Err("Room character changed during package admission".into());}
@@ -315,7 +311,7 @@ pub(super) fn read_room_files(project: &Project) -> Result<BTreeMap<PathBuf, Vec
             read_regular(&path, orr_sample::room_camera::MAX_BYTES as u64)?,
         );
     }
-    for relative in [entry.lighting.as_ref(),entry.character.as_ref()].into_iter().flatten() {
+    for relative in [entry.character.as_ref()].into_iter().flatten() {
         let path=project.root().join(relative);files.insert(path.clone(),read_regular(&path,4096)?);
     }
     Ok(files)

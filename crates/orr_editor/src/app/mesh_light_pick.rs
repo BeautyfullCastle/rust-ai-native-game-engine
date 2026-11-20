@@ -55,10 +55,6 @@ impl EditorApp {
         {
             return true;
         }
-        #[cfg(feature = "room-lighting")]
-        if self.room_light_pick_owns_input() {
-            return true;
-        }
         #[cfg(feature = "mesh-mission")]
         if self.mesh_game_creator.busy() {
             return true;

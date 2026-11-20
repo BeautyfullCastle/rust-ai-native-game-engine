@@ -32,7 +32,7 @@ script need not end in victory unless it explicitly expects victory.
 This is a repeatable CPU gameplay check, not an automatic solver or a recording
 format. Schema 1 does not test physical keys, authored key bindings, presentation,
 audio, exported launchers or native windows. Schema-1 scripts admit plain Room
-projects only; optional controls, animated models, lighting, character and progress declarations remain
+projects only; optional controls, animated models, character and progress declarations remain
 unsupported even when dependencies have those features enabled. Validated camera and static model metadata are admitted but not rendered or exercised.
 Output includes SHA-256 of the captured script bytes and admitted scene text, plus
 the engine package version. These identify gameplay inputs, not the full project

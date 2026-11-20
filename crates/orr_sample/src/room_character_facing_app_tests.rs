@@ -45,7 +45,6 @@ fn fixture(root: &Path, axis: ForwardAxis) -> PreparedProject {
     PreparedProject::open_with_capabilities(
         root,
         crate::room_project::RoomProjectCapabilities {
-            lighting: false,
             character: true,
         },
     )
@@ -224,7 +223,6 @@ fn facing_saved_axes_source_hidden_native_matrices_match_frame_oracle_and_restar
         let prepared = PreparedProject::open_with_capabilities(
             &output.join("project"),
             crate::room_project::RoomProjectCapabilities {
-                lighting: false,
                 character: true,
             },
         )

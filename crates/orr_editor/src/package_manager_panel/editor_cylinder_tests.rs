@@ -339,7 +339,7 @@ fn assert_cylinder(model: &StaticModel, segments: u32) {
 #[test]
 fn actual_cylinder_widgets_two_segment_choices_install_key_history_save_reopen_and_cpu_geometry() {
     for segments in [8, 32] {
-        let fixture = crate::package_manager::presentation_tests::fixture(false, false);
+        let fixture = crate::package_manager::presentation_tests::fixture(false);
         let mut import_ui = form(&fixture, segments);
         let before_import = snapshot(&fixture.root);
         click(&mut import_ui, IMPORT);
@@ -568,7 +568,7 @@ fn actual_cylinder_widgets_two_segment_choices_install_key_history_save_reopen_a
 
 #[test]
 fn invalid_cylinder_dimensions_and_existing_destination_never_publish_or_overwrite() {
-    let fixture = crate::package_manager::presentation_tests::fixture(false, false);
+    let fixture = crate::package_manager::presentation_tests::fixture(false);
     let mut h = form(&fixture, 16);
     let before = snapshot(fixture.temp.path());
     text(&mut h, "Cylinder radius", "0");

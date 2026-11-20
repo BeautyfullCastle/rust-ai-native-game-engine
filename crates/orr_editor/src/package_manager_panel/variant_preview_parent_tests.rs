@@ -6,7 +6,7 @@ use egui_kittest::{
 };
 #[test]
 fn parent_busy_gate_keeps_preview_cancel_enabled_and_start_disabled() {
-    let f = crate::package_manager::presentation_tests::fixture(true, true);
+    let f = crate::package_manager::presentation_tests::fixture(true);
     let mut h = Harness::builder()
         .with_size([1600.0, 2000.0])
         .build_ui_state(
