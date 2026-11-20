@@ -302,7 +302,7 @@ fn a_resync_stops_the_unconfirmed_sounds_and_keeps_the_confirmed_ones() {
 }
 
 #[test]
-fn a_replaced_session_stops_every_sound_and_forgets_the_keys() {
+fn a_replaced_session_stops_every_sound_verified_or_not_and_forgets_the_keys() {
     let recorder = Recorder::new();
     let mut views = views_with_sound(&recorder);
     let mut bridge = offline_bridge();
@@ -311,7 +311,7 @@ fn a_replaced_session_stops_every_sound_and_forgets_the_keys() {
     let mut bridge = offline_bridge();
     send(&mut views, &mut bridge, vec![]);
     render(&recorder, 4410);
-    assert_eq!(recorder.borrow().mixer.as_ref().unwrap().voice_count(), 1, "the unconfirmed sound stopped; a verified one is not stopped by a new session");
+    assert_eq!(recorder.borrow().mixer.as_ref().unwrap().voice_count(), 0, "a new session stops the verified sound of the old one too, not only the unconfirmed one");
     send(&mut views, &mut bridge, vec![(key(0), EventStatus::Verified(flash(0)))]);
     assert_eq!(recorder.borrow().plays.len(), 3, "the key of the old session sounds again in the new one");
 }
