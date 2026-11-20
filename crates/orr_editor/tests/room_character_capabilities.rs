@@ -27,7 +27,6 @@ fn editor_rejects_character_even_when_sample_dependency_support_is_unified() {
     let project = orr_sample::room_project::PreparedProject::open_with_capabilities(
         &root,
         orr_sample::room_project::RoomProjectCapabilities {
-            lighting: false,
             character: true,
         },
     )

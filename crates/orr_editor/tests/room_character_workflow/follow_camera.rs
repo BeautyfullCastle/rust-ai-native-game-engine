@@ -179,7 +179,6 @@ fn follow_camera_source_hidden_export_and_native_headless_consume_saved_offset_a
     let prepared = PreparedProject::open_with_capabilities(
         &bundle.join("project"),
         orr_sample::room_project::RoomProjectCapabilities {
-            lighting: false,
             character: true,
         },
     )

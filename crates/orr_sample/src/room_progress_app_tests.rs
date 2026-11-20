@@ -248,7 +248,6 @@ fn isolated_authored_identity_child() {
     let project = PreparedProject::open_with_progress(
         root,
         crate::room_project::RoomProjectCapabilities {
-            lighting: cfg!(feature = "room-lighting"),
             character: cfg!(feature = "room-character"),
         },
         crate::room_project::ProgressSupport::MetadataOnly,

@@ -360,7 +360,7 @@ fn assert_planar(model: &StaticModel, plane: &str) {
 #[test]
 fn actual_static_planar_widgets_all_planes_install_key_history_save_reopen_and_room_cpu_uv() {
     for plane in ["xy", "xz", "yz"] {
-        let fixture = crate::package_manager::presentation_tests::fixture(false, false);
+        let fixture = crate::package_manager::presentation_tests::fixture(false);
         let mut import_ui = form(&fixture, plane);
         let before = snapshot(&fixture.root);
         click(&mut import_ui, "Import cooked static package");
@@ -593,7 +593,7 @@ fn actual_static_planar_widgets_all_planes_install_key_history_save_reopen_and_r
 
 #[test]
 fn changed_inspected_planar_source_rejects_without_publication_or_room_changes() {
-    let fixture = crate::package_manager::presentation_tests::fixture(false, false);
+    let fixture = crate::package_manager::presentation_tests::fixture(false);
     let mut h = form(&fixture, "yz");
     let source = fixture.temp.path().join("author.model.json");
     let mut changed = fs::read(&source).unwrap();

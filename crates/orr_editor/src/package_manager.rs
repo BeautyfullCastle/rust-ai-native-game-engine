@@ -151,8 +151,7 @@ fn room_runtime() -> Runtime {
 fn open_room_project(root:&Path)->Result<orr_sample::room_project::PreparedProject,String> {
     // Validate the entire lock's editor-local inventory before decoding content.
     Project::open(root,room_runtime()).and_then(|project|project.list()).map_err(|e|e.to_string())?;
-    let prepared=orr_sample::room_project::PreparedProject::open_with_capabilities(root,orr_sample::room_project::RoomProjectCapabilities {
-        lighting:cfg!(feature="room-lighting"),character:cfg!(feature="room-character"),
+    let prepared=orr_sample::room_project::PreparedProject::open_with_capabilities(root,orr_sample::room_project::RoomProjectCapabilities {character:cfg!(feature="room-character"),
     })?;
     #[cfg(not(feature="room-animated-models"))]
     if prepared.models().document.bindings.values().any(|binding|binding.kind==orr_model_bindings::model_bindings::ModelKind::Animated) {return Err("animated bindings require this editor's room-animated-models route".into());}

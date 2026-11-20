@@ -500,7 +500,7 @@ fn assert_renderer_defaults(model: &StaticModel, linear: bool) {
 #[test]
 fn actual_static_sampler_widgets_import_install_history_save_reopen_and_renderer_cpu_defaults() {
     for linear in [false, true] {
-        let fixture = crate::package_manager::presentation_tests::fixture(false, false);
+        let fixture = crate::package_manager::presentation_tests::fixture(false);
         let mut import_ui = form(&fixture, linear);
         let before_import = snapshot(&fixture.root);
         click(&mut import_ui, "Import cooked static package");
@@ -730,7 +730,7 @@ fn actual_static_sampler_widgets_import_install_history_save_reopen_and_renderer
 
 #[test]
 fn changed_inspected_sampler_source_rejects_without_publication_or_room_changes() {
-    let fixture = crate::package_manager::presentation_tests::fixture(false, false);
+    let fixture = crate::package_manager::presentation_tests::fixture(false);
     let mut h = form(&fixture, true);
     let source = fixture.temp.path().join("author.model.json");
     let mut changed = fs::read(&source).unwrap();

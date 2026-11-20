@@ -64,7 +64,7 @@ fn wait(panel: &mut Panel) {
 fn imported_player(
     variant: bool,
 ) -> (crate::package_manager::presentation_tests::Fixture, Vec<u8>) {
-    let f = crate::package_manager::presentation_tests::fixture(true, true);
+    let f = crate::package_manager::presentation_tests::fixture(true);
     let source = f.temp.path().join("author.model.animated.json");
     fs::write(&source, source_bytes()).unwrap();
     let license = f.temp.path().join("author-LICENSE.txt");
@@ -169,7 +169,6 @@ fn imported_player(
     }
     let prepared = open(&f.root);
     let character = prepared.character().unwrap().document.clone();
-    let light = prepared.lighting().unwrap().document.clone();
     let player = prepared
         .scene()
         .frame()
@@ -274,7 +273,6 @@ fn imported_player(
     assert_eq!(saved.package, "imported-courier");
     assert_eq!(saved.asset, "model.animated.json");
     assert_eq!(reopened.character().unwrap().document, character);
-    assert_eq!(reopened.lighting().unwrap().document, light);
     assert!(reopened.models().assets.contains_key(&(package, asset)));
     assert_eq!(fs::read(&source).unwrap(), source_bytes());
     assert_eq!(fs::read(&license).unwrap(), license_bytes);
@@ -286,7 +284,6 @@ fn open(root: &Path) -> orr_sample::room_project::PreparedProject {
         root,
         orr_sample::room_project::RoomProjectCapabilities {
             character: true,
-            lighting: true,
         },
     )
     .unwrap()
@@ -376,7 +373,7 @@ fn actual_editor_texture_widgets_import_install_assign_save_and_reopen() {
     let (f, bytes) = imported_player(true);
     let prepared = open(&f.root);
     assert_variant(&prepared, &bytes);
-    let baseline = crate::package_manager::presentation_tests::fixture(true, true);
+    let baseline = crate::package_manager::presentation_tests::fixture(true);
     let original = open(&baseline.root);
     assert_eq!(
         prepared.scene().frame().to_bytes(),
@@ -479,7 +476,6 @@ fn editor_authored_texture_survives_source_hidden_native_export() {
         "room.models.json",
         "room.camera.json",
         "room.character.json",
-        "room.lighting.json",
     ] {
         assert_eq!(
             fs::read(f.root.join(name)).unwrap(),
@@ -522,5 +518,4 @@ fn editor_authored_texture_survives_source_hidden_native_export() {
         text.contains("room model poses: 9 frames checked;"),
         "{text}"
     );
-    assert!(text.contains("room lighting active: 1"), "{text}");
 }

@@ -144,7 +144,7 @@ fn import_static(
     crate::model_package_import::Report,
     Vec<u8>,
 ) {
-    let fixture = crate::package_manager::presentation_tests::fixture(false, false);
+    let fixture = crate::package_manager::presentation_tests::fixture(false);
     let source = fixture.temp.path().join("author.model.json");
     let original = source_model().to_bytes().unwrap();
     fs::write(&source, &original).unwrap();
@@ -523,7 +523,7 @@ fn unchecked_static_uv_preserves_exact_cooked_import_and_original_project() {
         .unwrap()
         .packages
         .contains_key(PACKAGE));
-    let baseline = crate::package_manager::presentation_tests::fixture(false, false);
+    let baseline = crate::package_manager::presentation_tests::fixture(false);
     let opened = orr_sample::room_project::PreparedProject::open(&fixture.root).unwrap();
     let original = orr_sample::room_project::PreparedProject::open(&baseline.root).unwrap();
     assert_eq!(

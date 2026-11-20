@@ -78,7 +78,7 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Option<Req
 }
 
 pub fn inspect_usage(request: &Request) -> Result<UsageReport, String> {
-    inspect_usage_with_capabilities(request,orr_sample::room_project::RoomProjectCapabilities {lighting:false,character:false})
+    inspect_usage_with_capabilities(request,orr_sample::room_project::RoomProjectCapabilities {character:false})
 }
 /// Explicit consuming-route consent; dependency features alone grant nothing.
 pub fn inspect_usage_with_capabilities(request:&Request,capabilities:orr_sample::room_project::RoomProjectCapabilities)->Result<UsageReport,String> {

@@ -462,7 +462,7 @@ fn assert_assembly(actual: &StaticModel) {
 }
 #[test]
 fn actual_static_assembly_widgets_import_install_binding_history_save_reopen_and_cpu_geometry() {
-    let fixture = crate::package_manager::presentation_tests::fixture(false, false);
+    let fixture = crate::package_manager::presentation_tests::fixture(false);
     let mut import_ui = form(&fixture);
     let before_import = snapshot(&fixture.root);
     click(&mut import_ui, "Import cooked static package");
@@ -692,7 +692,7 @@ fn actual_static_assembly_widgets_import_install_binding_history_save_reopen_and
 
 #[test]
 fn changed_inspected_assembly_source_worker_rejects_without_publication() {
-    let fixture = crate::package_manager::presentation_tests::fixture(false, false);
+    let fixture = crate::package_manager::presentation_tests::fixture(false);
     let mut h = form(&fixture);
     // Keep the source valid and geometry identical while changing its exact hash.
     let path = fixture.temp.path().join("author.model.json");

@@ -704,7 +704,7 @@ mod projection_match_panel_tests;
 #[path = "room_camera_panel/projection_match.rs"]
 mod projection_match;
 
-#[cfg(all(test,target_os="linux",feature="package-manager",feature="project-create",feature="room-character",feature="room-lighting",feature="windows-export"))]
+#[cfg(all(test,target_os="linux",feature="package-manager",feature="project-create",feature="room-character",feature="windows-export"))]
 #[path="room_camera_panel/projection_match_integration_tests.rs"]
 mod projection_match_integration_tests;
 

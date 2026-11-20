@@ -845,7 +845,7 @@ impl ModelPanel {
         if let Some(character) = editor.room_character() {
             let identity=self.room_identity.as_ref().ok_or("Room identity missing")?;
             let root=identity.0.parent().ok_or("Room root missing")?;
-            let prepared=orr_sample::room_project::PreparedProject::open_with_capabilities(root, orr_sample::room_project::RoomProjectCapabilities { lighting: cfg!(feature="room-lighting"), character: true })?;
+            let prepared=orr_sample::room_project::PreparedProject::open_with_capabilities(root, orr_sample::room_project::RoomProjectCapabilities { character: true })?;
             if prepared.character().map(|c| &c.document) != Some(character) {
                 return Err("Use Save character and model bindings for changed character clips".into());
             }

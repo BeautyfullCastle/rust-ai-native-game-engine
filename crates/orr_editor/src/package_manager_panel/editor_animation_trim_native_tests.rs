@@ -18,7 +18,6 @@ fn actual_trimmed_package_room_export_native_pose_and_fresh_restart() {
         &f.root,
         RoomProjectCapabilities {
             character: true,
-            lighting: true,
         },
     )
     .unwrap();
@@ -90,7 +89,6 @@ fn actual_trimmed_package_room_export_native_pose_and_fresh_restart() {
     let prepared = PreparedProject::open_with_capabilities(
         &deployed,
         RoomProjectCapabilities {
-            lighting: true,
             character: true,
         },
     )

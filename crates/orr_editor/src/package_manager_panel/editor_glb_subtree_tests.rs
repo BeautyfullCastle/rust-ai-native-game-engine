@@ -326,7 +326,7 @@ fn assert_subtree(actual: &StaticModel, node: u32) {
 #[test]
 fn actual_glb_subtree_widgets_import_install_binding_history_save_reopen_and_cpu_geometry() {
     for node in [1, 3] {
-        let fixture = crate::package_manager::presentation_tests::fixture(false, false);
+        let fixture = crate::package_manager::presentation_tests::fixture(false);
         let mut import_ui = form(&fixture, node);
         let before_import = snapshot(&fixture.root);
         click(&mut import_ui, IMPORT);
@@ -556,7 +556,7 @@ fn actual_glb_subtree_widgets_import_install_binding_history_save_reopen_and_cpu
 
 #[test]
 fn changed_inspected_glb_source_rejects_import_without_publishing_or_editing_room() {
-    let fixture = crate::package_manager::presentation_tests::fixture(false, false);
+    let fixture = crate::package_manager::presentation_tests::fixture(false);
     let mut h = form(&fixture, 1);
     let (mut doc, bin) = fixture_parts();
     doc["nodes"][1]["name"] = json!("source renamed after inspection");

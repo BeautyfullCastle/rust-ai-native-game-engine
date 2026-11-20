@@ -300,7 +300,6 @@ impl Work {
         PreparedProject::open_with_capabilities(
             &project,
             room_project::RoomProjectCapabilities {
-                lighting: false,
                 character: true,
             },
         )
@@ -476,7 +475,6 @@ fn room_character_real_export_source_hidden_gpu_workflow() {
     let initial = PreparedProject::open_with_capabilities(
         &w.project,
         room_project::RoomProjectCapabilities {
-            lighting: false,
             character: true,
         },
     )

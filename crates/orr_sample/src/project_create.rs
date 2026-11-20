@@ -363,7 +363,7 @@ fn create_transaction_finalized(
     } else if with_room {
         #[cfg(feature = "room-project")]
         {
-            crate::room_project::PreparedProject::open_with_capabilities(&project_root, crate::room_project::RoomProjectCapabilities { lighting: false, character: with_character })?
+            crate::room_project::PreparedProject::open_with_capabilities(&project_root, crate::room_project::RoomProjectCapabilities { character: with_character })?
                 .scene()
                 .frame()
                 .checksum()

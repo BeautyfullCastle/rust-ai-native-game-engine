@@ -2640,35 +2640,35 @@ mod cooked_model_tests;
 #[path = "package_manager_panel/cooked_animation_tests.rs"]
 mod cooked_animation_tests;
 
-#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="room-lighting",feature="windows-export"))]
+#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="windows-export"))]
 #[path="package_manager_panel/cooked_animated_import_tests.rs"]
 mod cooked_animated_import_tests;
 
-#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="room-lighting",feature="windows-export"))]
+#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="windows-export"))]
 #[path="package_manager_panel/animated_recolor_import_tests.rs"]
 mod animated_recolor_import_tests;
 
-#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="room-lighting",feature="windows-export"))]
+#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="windows-export"))]
 #[path="package_manager_panel/animated_retexture_import_tests.rs"]
 mod animated_retexture_import_tests;
 
-#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="room-lighting",feature="windows-export"))]
+#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="windows-export"))]
 #[path="package_manager_panel/animated_sampler_import_tests.rs"]
 mod animated_sampler_import_tests;
 
-#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="room-lighting",feature="windows-export"))]
+#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="windows-export"))]
 #[path="package_manager_panel/animated_uv_import_tests.rs"]
 mod animated_uv_import_tests;
 
-#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="room-lighting",feature="windows-export"))]
+#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="windows-export"))]
 #[path="package_manager_panel/editor_animated_color_tests.rs"]
 mod editor_animated_color_tests;
 
-#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="room-lighting",feature="windows-export"))]
+#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="windows-export"))]
 #[path="package_manager_panel/editor_animated_texture_tests.rs"]
 mod editor_animated_texture_tests;
 
-#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="room-lighting",feature="windows-export"))]
+#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="windows-export"))]
 #[path="package_manager_panel/editor_material_catalog_tests.rs"]
 mod editor_material_catalog_tests;
 
@@ -2681,68 +2681,68 @@ impl Panel {
         self.model_import.close_variant_preview();
     }
 }
-#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="room-lighting",feature="windows-export"))]
+#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="windows-export"))]
 #[path="package_manager_panel/variant_preview_integration_tests.rs"]
 mod variant_preview_integration_tests;
-#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="room-lighting",feature="windows-export"))]
+#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="windows-export"))]
 #[path="package_manager_panel/variant_preview_parent_tests.rs"]
 mod variant_preview_parent_tests;
 
-#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "room-lighting", feature = "windows-export"))]
+#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "windows-export"))]
 #[path = "package_manager_panel/editor_animation_trim_tests.rs"]
 mod editor_animation_trim_tests;
-#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "room-lighting", feature = "windows-export"))]
+#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "windows-export"))]
 #[path = "package_manager_panel/editor_animation_trim_native_tests.rs"]
 mod editor_animation_trim_native_tests;
 
-#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "room-lighting", feature = "windows-export"))]
+#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "windows-export"))]
 #[path = "package_manager_panel/editor_animated_sampler_tests.rs"]
 mod editor_animated_sampler_tests;
 
-#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "room-lighting", feature = "windows-export"))]
+#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "windows-export"))]
 #[path = "package_manager_panel/editor_animation_sequence_tests.rs"]
 mod editor_animation_sequence_tests;
 
-#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "room-lighting", feature = "windows-export"))]
+#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "windows-export"))]
 #[path = "package_manager_panel/editor_animated_uv_tests.rs"]
 mod editor_animated_uv_tests;
 
-#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "room-lighting", feature = "windows-export"))]
+#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "windows-export"))]
 #[path = "package_manager_panel/editor_static_uv_tests.rs"]
 mod editor_static_uv_tests;
 
-#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "room-lighting", feature = "windows-export"))]
+#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "windows-export"))]
 #[path = "package_manager_panel/editor_static_texture_tests.rs"]
 mod editor_static_texture_tests;
 
-#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "room-lighting", feature = "windows-export"))]
+#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "windows-export"))]
 #[path = "package_manager_panel/editor_static_assembly_tests.rs"]
 mod editor_static_assembly_tests;
 
-#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "room-lighting", feature = "windows-export"))]
+#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "windows-export"))]
 #[path = "package_manager_panel/editor_glb_subtree_tests.rs"]
 mod editor_glb_subtree_tests;
 
-#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "room-lighting", feature = "windows-export"))]
+#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "windows-export"))]
 #[path = "package_manager_panel/editor_static_pivot_tests.rs"]
 mod editor_static_pivot_tests;
 
-#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "room-lighting", feature = "windows-export"))]
+#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "windows-export"))]
 #[path = "package_manager_panel/editor_static_sampler_tests.rs"]
 mod editor_static_sampler_tests;
 
-#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "room-lighting", feature = "windows-export"))]
+#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "windows-export"))]
 #[path = "package_manager_panel/editor_static_recolor_tests.rs"]
 mod editor_static_recolor_tests;
 
-#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "room-lighting", feature = "windows-export"))]
+#[cfg(all(test, target_os = "linux", feature = "project-create", feature = "room-character", feature = "windows-export"))]
 #[path = "package_manager_panel/editor_pose_bake_tests.rs"]
 mod editor_pose_bake_tests;
 
-#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="room-lighting",feature="windows-export"))]
+#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="windows-export"))]
 #[path="package_manager_panel/editor_static_planar_tests.rs"]
 mod editor_static_planar_tests;
 
-#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="room-lighting",feature="windows-export"))]
+#[cfg(all(test,target_os="linux",feature="project-create",feature="room-character",feature="windows-export"))]
 #[path="package_manager_panel/editor_cylinder_tests.rs"]
 mod editor_cylinder_tests;

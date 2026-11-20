@@ -86,11 +86,10 @@ fn prepare_change(
         serde_json::from_slice(&manifest.bytes).map_err(err)?;
     if typed.schema != 2
         || typed.progress.is_some()
-        || original.entry.lighting.is_some()
         || original.entry.character.is_some()
     {
         return Err(
-            "attachment/revision requires plain schema-2 Room, no lighting/character/progress"
+            "attachment/revision requires plain schema-2 Room, no character/progress"
                 .into(),
         );
     }

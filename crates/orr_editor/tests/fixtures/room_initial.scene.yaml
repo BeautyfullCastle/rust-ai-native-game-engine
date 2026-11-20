@@ -1,6 +1,34 @@
 schema: orr.scene/1
 singletons:
   RoomEscapeV1::Run: {}
+  orr_gfx::Environment:
+    sky_color: [0.5, 0.66, 1]
+    ground_color: [0.26, 0.24, 0.22]
+    ambient: 0.3
+  orr_gfx::PostProcess:
+    exposure: 1
+    tone_mapping: aces
+    effects:
+      - { kind: bloom, enabled: false, params: [1, 0.15, 4, 2] }
+      - { kind: none, enabled: false, params: [0, 0, 0, 0] }
+      - { kind: none, enabled: false, params: [0, 0, 0, 0] }
+      - { kind: none, enabled: false, params: [0, 0, 0, 0] }
+      - { kind: none, enabled: false, params: [0, 0, 0, 0] }
+      - { kind: none, enabled: false, params: [0, 0, 0, 0] }
+      - { kind: none, enabled: false, params: [0, 0, 0, 0] }
+      - { kind: none, enabled: false, params: [0, 0, 0, 0] }
+  orr_gfx::Sky:
+    brightness: 1.5
+    sun_glow: 1
+    cloud_cover: 0.34
+    cloud_speed: 1
+    fog_density: 1
+    fog_falloff: 0.03
+    fog_height: 0
+    haze: 0.08
+    wind_strength: 1
+    wind_speed: 1
+    enabled: false
   orr_physics3d::PhysicsState:
     config:
       gravity: [0, -10, 0]

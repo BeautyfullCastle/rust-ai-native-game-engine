@@ -132,7 +132,6 @@ fn pickup_once_source_hidden_export_native_pose_and_restart() {
     let prepared = PreparedProject::open_with_capabilities(
         &bundle.join("project"),
         orr_sample::room_project::RoomProjectCapabilities {
-            lighting: false,
             character: true,
         },
     )

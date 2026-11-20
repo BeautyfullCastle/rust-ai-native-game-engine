@@ -67,7 +67,6 @@ impl Fixture {
         let mut prepared = PreparedProject::open_with_capabilities(
             &self.root,
             orr_sample::room_project::RoomProjectCapabilities {
-                lighting: false,
                 character: true,
             },
         )
@@ -1060,7 +1059,7 @@ fn character_crossfade_committed_replacement_and_close_release_retired_assets() 
     let replacement = || {
         PreparedProject::open_with_capabilities(
             &fixture.root,
-            orr_sample::room_project::RoomProjectCapabilities { lighting: false, character: true },
+            orr_sample::room_project::RoomProjectCapabilities { character: true },
         )
         .unwrap()
         .into_parts()

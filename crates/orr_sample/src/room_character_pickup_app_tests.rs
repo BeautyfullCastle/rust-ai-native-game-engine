@@ -31,7 +31,6 @@ fn pickup_app_observes_event_resumes_carrying_and_restarts_without_source() {
     let project = PreparedProject::open_with_capabilities(
         &root,
         crate::room_project::RoomProjectCapabilities {
-            lighting: false,
             character: true,
         },
     )

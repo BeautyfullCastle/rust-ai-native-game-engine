@@ -22,7 +22,6 @@ fn progress(root: &Path) {
 }
 fn caps() -> RoomProjectCapabilities {
     RoomProjectCapabilities {
-        lighting: false,
         character: false,
     }
 }
@@ -70,9 +69,9 @@ fn room_rejects_collect_profile_and_invalid_identity_without_repair() {
         assert_eq!(fs::read(&path).unwrap(), bytes);
     }
 }
-#[cfg(all(feature = "room-lighting", feature = "room-character"))]
+#[cfg(feature = "room-character")]
 #[test]
-fn schema_three_combines_camera_lighting_character_with_independent_capabilities() {
+fn schema_three_combines_camera_character_with_independent_capabilities() {
     let (_temp, root) = fixture(crate::project_create::ROOM_CHARACTER_TEMPLATE);
     progress(&root);
     fs::write(
@@ -82,41 +81,22 @@ fn schema_three_combines_camera_lighting_character_with_independent_capabilities
             .unwrap(),
     )
     .unwrap();
-    fs::write(
-        root.join("room.lighting.json"),
-        crate::room_lighting::Document::enabled_default()
-            .to_bytes()
-            .unwrap(),
-    )
-    .unwrap();
     let path = root.join("orr.project.json");
     let mut manifest: serde_json::Value =
         serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     manifest["entry"]["camera"] = "room.camera.json".into();
-    manifest["entry"]["lighting"] = "room.lighting.json".into();
     fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
-    for capabilities in [
-        caps(),
+    assert!(PreparedProject::open_with_progress(
+        &root,
         RoomProjectCapabilities {
-            lighting: true,
             character: false,
         },
-        RoomProjectCapabilities {
-            lighting: false,
-            character: true,
-        },
-    ] {
-        assert!(PreparedProject::open_with_progress(
-            &root,
-            capabilities,
-            ProgressSupport::MetadataOnly
-        )
-        .is_err());
-    }
+        ProgressSupport::MetadataOnly
+    )
+    .is_err());
     let admitted = PreparedProject::open_with_progress(
         &root,
         RoomProjectCapabilities {
-            lighting: true,
             character: true,
         },
         ProgressSupport::MetadataOnly,
@@ -125,7 +105,6 @@ fn schema_three_combines_camera_lighting_character_with_independent_capabilities
     assert!(
         admitted.progress().is_some()
             && admitted.camera().is_some()
-            && admitted.lighting().is_some()
             && admitted.character().is_some()
     );
 }

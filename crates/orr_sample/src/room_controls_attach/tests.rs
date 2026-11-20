@@ -291,7 +291,6 @@ fn revision_rejects_missing_null_unsupported_and_corrupt_projects() {
         "missing",
         "null",
         "schema",
-        "lighting",
         "character",
         "progress",
         "old",
@@ -310,7 +309,7 @@ fn revision_rejects_missing_null_unsupported_and_corrupt_projects() {
             }
             "null" => manifest["entry"]["controls"] = serde_json::Value::Null,
             "schema" => manifest["schema"] = 3.into(),
-            "lighting" | "character" => manifest["entry"][mutation] = "invalid.json".into(),
+            "character" => manifest["entry"][mutation] = "invalid.json".into(),
             "progress" => manifest["progress"] = serde_json::json!({"unsupported": true}),
             "old" => fs::write(root.join("custom.json"), b"{}").unwrap(),
             "new" => fs::write(root.join("v2.json"), b"{}").unwrap(),

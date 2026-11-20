@@ -20,7 +20,6 @@ fn open(root: &std::path::Path) -> Result<PreparedProject, String> {
     PreparedProject::open_with_capabilities(
         root,
         RoomProjectCapabilities {
-            lighting: false,
             character: true,
         },
     )
@@ -41,7 +40,6 @@ fn creator_is_owned_explicit_and_deterministic_without_simulation_changes() {
     })
     .unwrap();
     assert!(PreparedProject::open(&a).is_err());
-    assert!(PreparedProject::open_with_lighting(&a, true).is_err());
     let a_project = open(&a).unwrap();
     let b_project = open(&b).unwrap();
     let plain_project = PreparedProject::open(&plain).unwrap();

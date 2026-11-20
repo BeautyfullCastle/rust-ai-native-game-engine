@@ -26,7 +26,7 @@ pub(super) fn imported_player_with_source(
     bytes: &[u8],
 ) -> crate::package_manager::presentation_tests::Fixture {
     use crate::model_package_import::{import_package, Request, SourceFormat};
-    let f = crate::package_manager::presentation_tests::fixture(true, true);
+    let f = crate::package_manager::presentation_tests::fixture(true);
     let source = f.temp.path().join("author.model.animated.json");
     fs::write(&source, bytes).unwrap();
     let license = f.temp.path().join("author-LICENSE.txt");
@@ -47,7 +47,6 @@ pub(super) fn imported_player_with_source(
     assert_eq!(fs::read(report.root.join(&report.asset)).unwrap(), bytes);
     let prepared = open(&f.root);
     let character = prepared.character().unwrap().document.clone();
-    let light = prepared.lighting().unwrap().document.clone();
     let player = prepared
         .scene()
         .frame()
@@ -152,7 +151,6 @@ pub(super) fn imported_player_with_source(
     assert_eq!(saved.package, "imported-courier");
     assert_eq!(saved.asset, "model.animated.json");
     assert_eq!(reopened.character().unwrap().document, character);
-    assert_eq!(reopened.lighting().unwrap().document, light);
     assert!(reopened.models().assets.contains_key(&(package, asset)));
     f
 }
@@ -162,7 +160,6 @@ fn open(root: &Path) -> orr_sample::room_project::PreparedProject {
         root,
         orr_sample::room_project::RoomProjectCapabilities {
             character: true,
-            lighting: true,
         },
     )
     .unwrap()
@@ -244,7 +241,6 @@ fn imported_cooked_animation_survives_source_hidden_native_export() {
         "room.models.json",
         "room.camera.json",
         "room.character.json",
-        "room.lighting.json",
     ] {
         assert_eq!(
             fs::read(f.root.join(name)).unwrap(),
@@ -294,5 +290,4 @@ fn imported_cooked_animation_survives_source_hidden_native_export() {
         text.contains("room model poses: 9 frames checked;"),
         "{text}"
     );
-    assert!(text.contains("room lighting active: 1"), "{text}");
 }

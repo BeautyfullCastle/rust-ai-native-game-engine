@@ -586,7 +586,6 @@ mod tests {
             let mut prepared = PreparedProject::open_with_capabilities(
                 &root,
                 orr_sample::room_project::RoomProjectCapabilities {
-                    lighting: false,
                     character: true,
                 },
             )
@@ -648,7 +647,6 @@ mod tests {
             let reopened = PreparedProject::open_with_capabilities(
                 &self.root,
                 orr_sample::room_project::RoomProjectCapabilities {
-                    lighting: false,
                     character: true,
                 },
             )
@@ -784,7 +782,7 @@ mod tests {
         assert_eq!(fs::read(bundle.join("project/room.models.json")).unwrap(), model_bytes);
         fs::rename(&f.root, f.root.with_extension("hidden")).unwrap(); fs::rename(&runtime, runtime.with_extension("hidden")).unwrap();
         let prepared = PreparedProject::open_with_capabilities(&bundle.join("project"),
-            orr_sample::room_project::RoomProjectCapabilities { lighting: false, character: true }).unwrap();
+            orr_sample::room_project::RoomProjectCapabilities { character: true }).unwrap();
         assert_eq!(prepared.character().unwrap().document, document);
         assert_eq!(prepared.models().document.bindings[&document.player].animation.unwrap().clip_index, document.searching);
         let output = std::process::Command::new(bundle.join("run-room-escape")).current_dir(f._temp.path())

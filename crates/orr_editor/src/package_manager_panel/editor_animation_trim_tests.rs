@@ -30,7 +30,6 @@ fn open(root: &Path) -> orr_sample::room_project::PreparedProject {
         root,
         orr_sample::room_project::RoomProjectCapabilities {
             character: true,
-            lighting: true,
         },
     )
     .unwrap()
@@ -44,7 +43,7 @@ fn wait(panel: &mut Panel) {
     assert!(!panel.busy(), "{}", panel.status);
 }
 pub(super) fn authored_room() -> crate::package_manager::presentation_tests::Fixture {
-    let f = crate::package_manager::presentation_tests::fixture(true, true);
+    let f = crate::package_manager::presentation_tests::fixture(true);
     let initial = open(&f.root);
     let before = initial.scene().frame().to_bytes();
     let before_checksum = initial.scene().frame().checksum();

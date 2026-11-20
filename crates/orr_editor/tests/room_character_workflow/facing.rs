@@ -107,7 +107,6 @@ fn facing_widgets_save_reopen_and_editor_native_placements_preserve_nonidentity_
     let prepared = PreparedProject::open_with_capabilities(
         &f.root,
         orr_sample::room_project::RoomProjectCapabilities {
-            lighting: false,
             character: true,
         },
     )
