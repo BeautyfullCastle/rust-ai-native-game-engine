@@ -215,6 +215,13 @@ pub trait SceneView<G: Game> {
     fn on_resync(&mut self, ctx: &mut ViewContext<'_, G>) {
         let _ = ctx;
     }
+
+    /// A load of a save replaced the session. Called once with the first frame of the new session,
+    /// right after `on_resync` (which a load also calls). A plain resync does not call it. Use it
+    /// to put the screens of the game in line with the loaded state, for example to leave the title.
+    fn on_load(&mut self, ctx: &mut ViewContext<'_, G>) {
+        let _ = ctx;
+    }
 }
 
 /// Makes one [`EntityView`] for each new entity. Any `FnMut() -> V` is a factory,
@@ -578,6 +585,9 @@ impl<G: Game> Views<G> {
         if std::mem::take(&mut self.replaced) {
             // A new session: what the views remember of the old one is void, as after a resync.
             self.resynced(&mut ctx);
+            for scene in &mut self.scenes {
+                scene.on_load(&mut ctx);
+            }
         }
 
         if !self.started {

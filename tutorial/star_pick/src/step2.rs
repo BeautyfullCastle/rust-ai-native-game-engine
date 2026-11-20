@@ -351,6 +351,14 @@ impl SceneView<StarPick> for Juice {
         self.fx.borrow_mut().rings.clear();
     }
 
+    /// A loaded save is a game in progress: leave the title or the win screen and play on from the saved
+    /// state, without the new-round `Restart` that Enter would send.
+    fn on_load(&mut self, _ctx: &mut ViewContext<'_, StarPick>) {
+        if let Some(screens) = &self.fx.borrow().screens {
+            screens.resume();
+        }
+    }
+
     fn on_update(&mut self, ctx: &mut ViewContext<'_, StarPick>) {
         let mut fx = self.fx.borrow_mut();
         fx.now = ctx.tick();

@@ -314,3 +314,50 @@ fn a_saved_game_comes_back_with_its_score_and_goes_on_like_the_game_that_was_nev
     assert_eq!(bridge.snapshot().unwrap().verified().unwrap().checksum(), straight.snapshot().unwrap().verified().unwrap().checksum());
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn loading_a_slot_from_the_title_or_the_win_screen_plays_on_without_a_new_round() {
+    for start in [Screen::Title, Screen::Win] {
+        let dir = std::env::temp_dir().join(format!("star_pick_resume_{start:?}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (fx, screens) = (Shared::default(), screens());
+        fx.borrow_mut().screens = Some(screens.clone());
+        let (mut views, _audio) = sound_views(&fx);
+        views.enable_saves(SaveStore::at(&dir, GAME_ID, SAVE_VERSION).unwrap(), 1, TICK_RATE);
+        let new_bridge = |session: PlaySession<StarPick>| InProc::new(PlayHost::new(session, PlayerSlot(0)), BridgeConfig::default());
+        let run = |bridge: &mut InProc<StarPick, PlayHost<StarPick>>, views: &mut Views<StarPick>, ticks: u32| {
+            for _ in 0..ticks {
+                let input = steer_view(bridge.snapshot().expect("a snapshot").predicted());
+                bridge.set_input(PlayerSlot(0), input).unwrap();
+                bridge.step(1);
+                let update = bridge.poll_view();
+                views.dispatch(bridge, &update, &[]);
+            }
+        };
+        let mut bridge = new_bridge(PlaySession::<StarPick>::new(PlayConfig::new(1, SEED, TICK_RATE), ()));
+        bridge.step(1);
+        run(&mut bridge, &mut views, 300);
+        let saved_score = fx.borrow().score;
+        assert!(saved_score >= 1, "something to save");
+        views.save_game(QUICK_SLOT, "").expect("F5");
+
+        // The app was started again: the title is up (or a round was just won), and F9 loads the slot.
+        if start == Screen::Win {
+            assert!(screens.act(Action::Confirm) && screens.win());
+        }
+        assert_eq!(screens.screen(), start);
+        views.load_game(QUICK_SLOT).expect("F9");
+        let loaded = views.take_load().expect("an accepted load");
+        let mut bridge = new_bridge(loaded.into_session::<StarPick>(SEED).unwrap());
+        views.session_replaced();
+        run(&mut bridge, &mut views, 1);
+        assert_eq!(screens.screen(), Screen::Playing, "{start:?}: a loaded game in progress is played, not a screen");
+
+        // The key that the title or the end screen asks for does nothing now, and nothing resets the round.
+        assert!(!screens.act(Action::Confirm), "{start:?}: Enter has no screen to close");
+        run(&mut bridge, &mut views, 10);
+        assert!(fx.borrow().score >= saved_score && fx.borrow().score >= 1, "{start:?}: the saved score stays: no Restart was sent");
+        assert_ne!(screens.screen(), Screen::Title, "{start:?}: the title does not come back (the chase may win in these ticks)");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}

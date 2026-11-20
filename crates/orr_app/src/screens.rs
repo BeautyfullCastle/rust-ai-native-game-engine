@@ -29,6 +29,9 @@
 //!    A new `PlaySession` with the same seed would replay round one exactly; the app does not
 //!    build one while it runs.
 //!
+//! A load of a save is not a new round: from any screen, [`Screens::resume`] goes to `Playing` and
+//! drops a pending new round. A game calls it from `SceneView::on_load`.
+//!
 //! The words are centered on the window and wrap to its width. They are drawn with the overlay
 //! font: any text the font has glyphs for (Korean with the default system font). Without a font
 //! the 5x7 bitmap font draws ASCII capitals, digits and a few signs.
@@ -170,6 +173,12 @@ impl Machine {
         true
     }
 
+    /// Plays on from the state the game is in: no screen, and no new round.
+    fn resume(&mut self) {
+        self.screen = Screen::Playing;
+        self.restart = false;
+    }
+
     fn end(&mut self, screen: Screen) -> bool {
         let playing = self.screen == Screen::Playing;
         if playing {
@@ -247,6 +256,12 @@ impl Screens {
     /// The game was lost: shows the lose screen. Only from `Playing`; `true` when it did.
     pub fn lose(&self) -> bool {
         self.0.borrow_mut().machine.end(Screen::Lose)
+    }
+
+    /// The game goes on from a loaded state (see `SceneView::on_load`): from any screen to `Playing`,
+    /// and a new round that was asked for but not taken yet is dropped, so no reset command follows.
+    pub fn resume(&self) {
+        self.0.borrow_mut().machine.resume();
     }
 
     /// `true` once for each new round (the start from the title, a restart): the view then
@@ -380,6 +395,21 @@ mod tests {
         assert!(screens.lose());
         assert_eq!(screens.screen(), Screen::Lose);
         assert!(screens.act(Action::Confirm) && screens.is_playing() && screens.take_restart());
+    }
+
+    #[test]
+    fn a_resume_plays_on_from_any_screen_without_a_new_round() {
+        for start in [Screen::Title, Screen::Paused, Screen::Win, Screen::Lose] {
+            let screens = Screens::from_screen(start, Labels::default());
+            screens.resume();
+            assert!(screens.is_playing() && !screens.take_restart(), "{start:?}: a loaded game is not a new round");
+            assert!(!screens.act(Action::Confirm) && !screens.take_restart(), "{start:?}: Enter does nothing in play");
+        }
+        // A round that was asked for and not taken yet is dropped too.
+        let screens = Screens::default();
+        screens.act(Action::Confirm);
+        screens.resume();
+        assert!(!screens.take_restart());
     }
 
     #[test]
