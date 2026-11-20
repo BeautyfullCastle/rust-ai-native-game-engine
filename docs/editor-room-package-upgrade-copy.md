@@ -24,13 +24,13 @@ Only schema-2 Room projects without progress identity are supported. Selected
 animated bindings, missing or undecodable replacement assets, changed dependency
 closures, and unsupported consumer capabilities are rejected. Other packages may
 contain animated bindings only when the editor is built with their existing
-`room-animated-models` support. Optional Room lighting/character documents likewise
-require their normal explicit build features. Candidate assets are decoded and
+`room-animated-models` support. The optional Room character document likewise
+requires its normal explicit build feature. Candidate assets are decoded and
 the complete copied Room is admitted before publication; a read-only copy plan
 alone does not establish replacement compatibility.
 
-The copy includes the declared Room scene, model sidecar, optional camera,
-lighting and character documents, and a freshly reconstructed cache containing
+The copy includes the declared Room scene, model sidecar, optional camera
+and character documents, and a freshly reconstructed cache containing
 exactly the candidate active package closure. It does **not** clone arbitrary
 unlisted project files, screenshots, inactive cached revisions, user save data,
 or authoring directories. Those remain in the original project. Progress-enabled

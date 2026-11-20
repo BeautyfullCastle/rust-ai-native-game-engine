@@ -11,7 +11,7 @@ orr_attach_room_controls --project '/path/to/Room project' --controls custom.jso
 This first attachment tool supports Linux x86_64, plain schema-2 Room projects,
 and a validated existing root-local ASCII `.json` filename of at most 100 bytes. The project must omit
 `entry.controls`; null, an existing mapping (even the same mapping), progress,
-lighting, and character profiles are rejected. It does not create/copy sidecars,
+and character profiles are rejected. It does not create/copy sidecars,
 implicitly replace a prior mapping, change packages, or enable runtime capabilities.
 Reopen with a runtime/editor supporting `room-input-actions` (main editor Play
 also needs `room-input-map-play`).
