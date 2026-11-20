@@ -324,7 +324,8 @@ pub struct Views<G: Game> {
 
 type EventName<G> = Box<dyn Fn(&<G as Game>::Event) -> Option<String>>;
 
-/// The most events whose sound is remembered (so that a late `Verified` does not play it again).
+/// The most events whose sound is remembered (so that a late `Verified` does not play it again). Keys of
+/// unconfirmed sounds are kept past this count as long as other keys can go instead.
 const SOUND_HISTORY: usize = 512;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -362,11 +363,17 @@ impl<G: Game> EventSounds<G> {
         }
     }
 
-    fn remember(&mut self, key: EventKey, state: Heard) {
+    /// Records what happened to `key`. Past `SOUND_HISTORY` keys, the oldest key without an unconfirmed sound
+    /// goes first, so a guess that is still waiting for its `Verified` or `Canceled` keeps its handle and its
+    /// record. Only when every key holds an unconfirmed sound does the oldest go, and its sound stops.
+    fn remember(&mut self, audio: &mut Audio, key: EventKey, state: Heard) {
         self.heard.insert(key, state);
         while self.heard.len() > SOUND_HISTORY {
-            if let Some((oldest, _)) = self.heard.pop_first() {
-                self.live.remove(&oldest);
+            let silent = self.heard.keys().copied().find(|old| *old != key && !self.live.contains_key(old));
+            let Some(evicted) = silent.or_else(|| self.heard.keys().copied().find(|old| *old != key)) else { break };
+            self.heard.remove(&evicted);
+            for handle in self.live.remove(&evicted).unwrap_or_default() {
+                audio.stop(handle);
             }
         }
     }
@@ -387,7 +394,7 @@ impl<G: Game> EventSounds<G> {
                 for handle in self.live.remove(&key).unwrap_or_default() {
                     audio.stop(handle);
                 }
-                self.remember(key, Heard::Canceled);
+                self.remember(audio, key, Heard::Canceled);
             }
             EventStatus::Predicted(payload) | EventStatus::Verified(payload) => {
                 let verified = matches!(status, EventStatus::Verified(_));
@@ -402,7 +409,7 @@ impl<G: Game> EventSounds<G> {
                     (Some(Heard::Predicted | Heard::Verified), _) | (Some(Heard::Canceled), true) => return,
                     _ => {}
                 }
-                self.remember(key, if verified { Heard::Verified } else { Heard::Predicted });
+                self.remember(audio, key, if verified { Heard::Verified } else { Heard::Predicted });
                 let handles: Vec<SoundHandle> = self.names.iter().filter_map(|name| name(payload)).filter_map(|name| audio.play_named(&name)).collect();
                 if verified {
                     self.settle(audio, handles);

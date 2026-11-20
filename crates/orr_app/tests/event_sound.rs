@@ -316,6 +316,40 @@ fn a_replaced_session_stops_every_sound_verified_or_not_and_forgets_the_keys() {
     assert_eq!(recorder.borrow().plays.len(), 3, "the key of the old session sounds again in the new one");
 }
 
+type Run = (Rc<RefCell<Recorder>>, Views<Burst>, InProc<Burst, PlayHost<Burst>>);
+
+/// One event with a sound (owner 1, key 0), then more silent events (owner 0) than the record holds.
+fn sound_then_silent_events_past_the_record() -> Run {
+    let recorder = Recorder::new();
+    let mut views = Views::<Burst>::new();
+    views.set_sound_out(recorder.clone());
+    views.sound("flash", long_clip());
+    views.on_event_sound(|flash: &Flash| (flash.owner == 1).then_some("flash"));
+    let mut bridge = offline_bridge();
+    send(&mut views, &mut bridge, vec![(key(0), EventStatus::Predicted(flash(1)))]);
+    let silent = (1..=600).map(|seq| (key(seq), EventStatus::Predicted(flash(0)))).collect();
+    send(&mut views, &mut bridge, silent);
+    assert_eq!((recorder.borrow().plays.len(), recorder.borrow().stops.len()), (1, 0));
+    (recorder, views, bridge)
+}
+
+#[test]
+fn a_predicted_sound_still_stops_on_cancel_after_silent_events_filled_the_record() {
+    let (recorder, mut views, mut bridge) = sound_then_silent_events_past_the_record();
+    send(&mut views, &mut bridge, vec![(key(0), EventStatus::Canceled)]);
+    assert_eq!((recorder.borrow().plays.len(), recorder.borrow().stops.len()), (1, 1), "the cancel finds the handle of its sound");
+    assert_eq!(recorder.borrow().stops[0], recorder.borrow().plays[0], "and stops that sound only");
+}
+
+#[test]
+fn a_predicted_sound_is_not_played_again_on_verify_after_silent_events_filled_the_record() {
+    let (recorder, mut views, mut bridge) = sound_then_silent_events_past_the_record();
+    send(&mut views, &mut bridge, vec![(key(0), EventStatus::Verified(flash(1)))]);
+    assert_eq!((recorder.borrow().plays.len(), recorder.borrow().stops.len()), (1, 0), "the guess came true: its sound goes on, no second one");
+    render(&recorder, 4410);
+    assert_eq!(recorder.borrow().mixer.as_ref().unwrap().voice_count(), 1);
+}
+
 #[test]
 fn a_binding_that_names_no_sound_or_an_unknown_one_plays_nothing_and_a_run_without_output_is_silent() {
     let recorder = Recorder::new();
