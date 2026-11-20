@@ -64,4 +64,7 @@ Registering `orr_gfx` adds components and singletons to the Room Frame, so every
 
 ## Limits
 
+A light with a rule is evaluated from the frame that is shown, also in Edit. In Edit the key is not collected, so a `key_collected` light is off while editing. The former document previewed the authored light in Edit whatever its activation said.
+
+
 This adds no shadows, light occlusion, flashlight cone or probes. The Room draws one sun and one point light. The imported-model renderer lights model receivers with the point light, and procedural proxies keep their existing shading. The native player and captures do not draw fog, sky, clouds, bloom or other post effects. The editor viewport draws the scene as it draws any `orr_gfx` scene. It was not compared with the player for these effects.
